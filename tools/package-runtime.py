@@ -211,7 +211,10 @@ def main():
             files.append({'path': file.relative_to(package).as_posix(),
                           'bytes': file.stat().st_size, 'sha256': digest(file)})
     manifest = {
-        'name': package_name, 'chromium_revision': subprocess.check_output(
+        'name': package_name,
+        'remotekit_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+        'remotekit_source_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()),
+        'chromium_revision': subprocess.check_output(
             ['git', 'rev-parse', 'HEAD'], cwd=chromium, text=True).strip(),
         'args_gn_sha256': digest(output / 'args.gn'), 'architecture': 'x64',
         'presentation_backend': backend, 'shared_fence_output_implemented': streaming or args.presentation == 'fence',

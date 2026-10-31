@@ -6,6 +6,8 @@ nlohmann::json EncoderStats::Snapshot() {
  std::lock_guard lock(mutex);
  return {{"senderRtcStats",sender_rtc_stats},{"encoder",backend},{"encodeSubmitted",submitted.load()},{"encodeCompleted",completed.load()},
          {"encodedBytes",bytes.load()},{"encodeDropped",dropped.load()},
+         {"rateUpdates",rate_updates.load()},{"keyframeRequests",keyframe_requests.load()},
+         {"keyframesSubmitted",keyframes_submitted.load()},{"keyframesEncoded",keyframes_encoded.load()},
          {"lastEncodeMs",completed.load()?nlohmann::json(last_encode_ms.load()):nlohmann::json(nullptr)},
          {"lastRequestedBitrate",requested_bitrate},{"lastRequestedFps",requested_fps},
          {"appliedBitrate",applied_bitrate? nlohmann::json(applied_bitrate):nlohmann::json(nullptr)},
@@ -32,13 +34,19 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
   settings_.max_bitrate=std::min(settings_.max_bitrate,level_budget.bitrate_bps);
   settings_.bitrate=std::min(settings_.bitrate,settings_.max_bitrate);
  }
+ const auto requested_usage=settings_.target_usage;const bool requested_vbr=settings_.vbr;
+ auto defaults=[&](bool qsv) {
+  settings_.target_usage=settings_.target_usage_explicit?requested_usage:(qsv?1u:4u);
+  settings_.vbr=settings_.rate_control_explicit?requested_vbr:qsv;
+ };
+ defaults(mode_!="nvenc");
  std::string error;
  hardware_=mode_=="nvenc"?CreateNvencEncoder():CreateQsvEncoder();
  if(!hardware_->Configure(device_.Get(),settings_,error)) {
   hardware_.reset();
   if(mode_!="auto"){Error(error);return false;}
   const std::string qsv_error=error;
-  hardware_=CreateNvencEncoder();
+  defaults(false);hardware_=CreateNvencEncoder();
   if(!hardware_->Configure(device_.Get(),settings_,error)){Error("QSV: "+qsv_error+"; NVENC: "+error);hardware_.reset();return false;}
  }
  if(!converter_.Open(device_.Get(),settings_.width,settings_.height,settings_.fps,error)){Error(error);return false;}
@@ -50,6 +58,7 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  {std::lock_guard lock(stats_->mutex);stats_->backend=hardware_->Name();stats_->error.clear();
   auto actual=hardware_->ActualSettings();stats_->applied_bitrate=actual.bitrate;stats_->applied_fps=actual.fps;
   stats_->actual_level=actual.level_idc;stats_->requested_bitrate=settings_.bitrate;stats_->requested_fps=settings_.fps;}
+ nominal_fps_=settings_.fps;fixed_rate_fps_=std::string(hardware_->Name())=="qsv";
  applied_bitrate_=settings_.bitrate;applied_fps_=settings_.fps;bitrate_=0;fps_=0;paused_=false;
  stopping_=false;failed_=false;configured_=true;
  thread_=std::thread([this]{Run();});return true;
@@ -79,11 +88,11 @@ void EncoderWorker::Rates(uint32_t bitrate,uint32_t fps){
  paused_=false;
  // oneVPL consumes integer kbps; identical effective rates need no reset.
  bitrate=std::max(1000u,std::min(settings_.max_bitrate,bitrate)/1000*1000);
- fps=std::max(1u,fps);
+ fps=fixed_rate_fps_?nominal_fps_:std::max(1u,fps);
  if(bitrate==applied_bitrate_.load()/1000*1000 && fps==applied_fps_.load())return;
  bitrate_=bitrate;fps_=fps;wake_.notify_one();
 }
-void EncoderWorker::Keyframe(){keyframe_=true;wake_.notify_one();}
+void EncoderWorker::Keyframe(){++stats_->keyframe_requests;keyframe_=true;wake_.notify_one();}
 void EncoderWorker::Complete(AccessUnit& unit) {
  auto found=inflight_.find(unit.frame_cookie);
  if(found==inflight_.end()){Error("unknown hardware frame completion cookie");return;}
@@ -96,7 +105,7 @@ void EncoderWorker::Complete(AccessUnit& unit) {
  auto status=sdk_.remotekit_rtc_encoded(encoder_,&result,&wire_timestamp);
  if(status==0 && completed_)completed_(wire_timestamp,job.frame.layout_epoch,unit.bytes.size(),unit.keyframe);
  if(status!=0 && status!=REMOTEKIT_SDK_INVALID_STATE)Error("RTC encoded completion failed "+std::to_string(status));
- ++stats_->completed;stats_->bytes+=unit.bytes.size();
+ ++stats_->completed;stats_->bytes+=unit.bytes.size();if(unit.keyframe)++stats_->keyframes_encoded;
  stats_->last_encode_ms=1000.0*(QpcNow()-job.submitted_qpc)/QpcFrequency();
  job.frame.release(job.frame.release_context,job.frame.frame_id);
  static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
@@ -113,6 +122,7 @@ void EncoderWorker::Run() {
   if(rate && inflight_.empty()) {
    std::string error;
    if(!hardware_->SetRates(rate,fps?fps:settings_.fps,error)){Error(error);break;}
+   ++stats_->rate_updates;
    if(hardware_->TakeKeyframeRequest())keyframe_=true;
    settings_.bitrate=rate;if(fps)settings_.fps=fps;
    applied_bitrate_=rate;applied_fps_=settings_.fps;
@@ -140,7 +150,8 @@ void EncoderWorker::Run() {
     }
     Error(error);break;
    }
-   job.submitted_qpc=QpcNow();bool key=job.key||keyframe_.exchange(false);
+   job.submitted_qpc=QpcNow();const bool requested_key=keyframe_.exchange(false);
+   const bool key=job.key||requested_key;
    auto status=hardware_->Submit(surfaces_[job.surface].Get(),key,job.cookie,error);
    if(status==CodecResult::busy) {
     if(key)keyframe_=true;
@@ -161,7 +172,7 @@ void EncoderWorker::Run() {
     job.frame.release(job.frame.release_context,job.frame.frame_id);
     static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();Error(error);break;
    }
-   free_.pop_front();inflight_.emplace(job.cookie,job);++stats_->submitted;
+   free_.pop_front();inflight_.emplace(job.cookie,job);++stats_->submitted;if(key)++stats_->keyframes_submitted;
   }
   if(failed_)break;
   if(!inflight_.empty()) {

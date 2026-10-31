@@ -3,6 +3,7 @@
 #include <limits>
 #include "remotekit/core.hpp"
 #include "remotekit/sampling.hpp"
+#include "remotekit/idle_idr.hpp"
 using namespace remotekit;
 #define CHECK(x)                                                       \
   do {                                                                 \
@@ -15,6 +16,18 @@ static bool Overlap(const PixelRect& a, const PixelRect& b) {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 int main() {
+  IdleIdrPolicy tail(150);
+  CHECK(tail.Observe(1,1,100,0) && tail.delay_ms()==150);
+  CHECK(tail.Observe(1,2,200,125) && tail.delay_ms()==375);
+  CHECK(!tail.Observe(1,3,200,200) && tail.delay_ms()==375);
+  CHECK(tail.Observe(1,4,300,250) && tail.delay_ms()==375);
+  CHECK(tail.Observe(1,5,400,3000) && tail.delay_ms()==150);
+  CHECK(tail.Observe(2,1,500,4000) && tail.delay_ms()==150);
+  CHECK(tail.Observe(2,2,600,5000) && tail.delay_ms()==1000);
+  IdleIdrPolicy normal(150);normal.Observe(1,1,1,0);normal.Observe(1,2,2,40);
+  CHECK(normal.delay_ms()==150);
+  IdleIdrPolicy disabled(0);disabled.Observe(1,1,1,0);disabled.Observe(1,2,2,500);
+  CHECK(disabled.delay_ms()==0);
   CHECK(H264RateLimits(31).bitrate_bps == 14000000 && H264RateLimits(31).cpb_kb == 1750);
   auto full = FitH264Sampling(1928, 1088, 60, 42);
   CHECK(full.width == 1928 && full.height == 1088 && full.scale == 1);

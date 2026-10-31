@@ -32,7 +32,7 @@ Browser capture → Fence atlas → Endpoint 自有纹理 → GPU 色彩转换 N
 | WebRTC C ABI与NVENC | media_probe | ABI2、真实双Peer/ICE/DTLS-SCTP/lease/stats关闭屏障通过，NVENC编译通过 |
 | 无窗口GPU消费、QSV、多租户endpoint_service | endpoint_probe | Release与model检查通过；真实QSV连续码率/fps阶跃通过；最终包待功能/矩阵收口 |
 | Control/React/marker/网络模拟 | control_server | build、24 tests、生产smoke通过；新paint、触控/IME marker、自动重连/主动断连、真实关闭确认/取消通过；功能冻结 |
-| 独立QSV/端到端矩阵 | media_probe | 可见video/timer policy两项有界对照后直接筛选depth/TU/CBR-VBR，最佳2组跑720/1080×1/4租户×24/48Mbps；计时阶段60分钟预算 |
+| 独立QSV/端到端矩阵 | media_probe | 已完成16组/40租户段、画质/输入/尾IDR对照；选定VBR/TU1/d1，目标未达。第二轮45分钟定位源吞吐和客户端节拍，先GPU/逐进程负载证据，待稳定包完成后运行 |
 | 正式文档、评估、commit/push | 主Agent | 持续维护；完整结果验证后按范围提交推送 |
 
 试验评估：暖机3–5秒，有效采样至少20秒；延迟p50/p95/p99、每秒FPS分布，优先p95<100ms+平均动态FPS>50；720p/1080p、DPR、可见平面数明确记录。网络模拟额外Node单核开销要一起报告。

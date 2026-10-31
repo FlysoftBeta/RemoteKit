@@ -9,6 +9,7 @@ struct EncoderSettings {
   uint32_t width=0,height=0,fps=60,bitrate=24000000,max_bitrate=48000000;
   uint32_t level_idc=51,async_depth=1,gop=120,target_usage=4,buffer_ms=1000;
   bool vbr=false;
+  bool target_usage_explicit=false,rate_control_explicit=false;
 };
 struct AccessUnit {
   uint64_t frame_cookie=0;

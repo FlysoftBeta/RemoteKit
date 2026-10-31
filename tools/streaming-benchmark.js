@@ -16,7 +16,7 @@ async (hostPage) => {
       await page.evaluate(async ({ config, index }) => {
         const action = async body => { const response = await fetch('/api/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (!response.ok) throw new Error(JSON.stringify(data)); return data; };
         await action({ type: 'device.set', device: { mode: 'desktop', width: config.width, height: config.height, deviceScaleFactor: config.dpr } });
-        await action({ type: 'tab.create', title: `Benchmark ${config.id}/${index}`, url: `${config.fixtureOrigin || config.origin}/test-pattern.html?mode=${encodeURIComponent(config.mode)}&fps=60&probeRun=${encodeURIComponent(config.id + '-' + index)}` });
+        await action({ type: 'tab.create', title: `Benchmark ${config.id}/${index}`, url: `${config.fixtureOrigin || config.origin}/test-pattern.html?mode=${encodeURIComponent(config.mode)}&fps=60&probeRun=${encodeURIComponent(config.id + '-' + index)}${config.captureQuality ? '&quality=1&stopAfter=8000' : ''}` });
         const transport = window.remotekitDiagnostics.transport;
         if (config.visibleVideoPreview) {
           Object.assign(transport.video.style, { position: 'fixed', top: '70px', right: '12px', width: '160px', height: '90px', opacity: '1', zIndex: '2147483647', pointerEvents: 'none', display: 'block', visibility: 'visible' });
@@ -166,6 +166,23 @@ async (hostPage) => {
       for (let part = 0; part < chunks; ++part) {
         const saved = await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'presentation-raw-chunk', runId: config.id, tenantIndex: index, part, chunks, text: raw.slice(part * 200000, (part + 1) * 200000) }) });
         if (!saved.ok) throw new Error(`Presentation raw upload failed ${saved.status}`);
+      }
+      if (config.markerHz !== 0 && ['animation', 'text'].includes(config.mode) && !samples.length) {
+        throw new Error(`No CRC-valid marker samples: invalid=${invalid}, missingSnapshot=${missingPaintSnapshot}; raw metrics saved`);
+      }
+      if (config.captureQuality) {
+        const view = transport.layout.views[0], frame = transport.presentedFrame;
+        const atlas = transport.getPaintedFrame(view.id, frame.rtpTimestamp);
+        if (!atlas) throw new Error('Quality snapshot no longer matches current painted RTP');
+        const scale = view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1);
+        const image = document.createElement('canvas');
+        image.width = Math.round(view.width * scale); image.height = Math.round(view.height * scale);
+        image.getContext('2d').drawImage(atlas, view.x, view.y, image.width, image.height, 0, 0, image.width, image.height);
+        context.drawImage(image, 0, 0, 256 * scale, 112 * scale, 0, 0, 256, 112);
+        const marker = decodeMarker(context.getImageData(0, 0, 256, 112));
+        const artifact = { kind: 'decoded-reference', run: config.id + '-' + index, marker, rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch, width: image.width, height: image.height, capturedAfterMeasurement: true, image: image.toDataURL('image/png') };
+        const saved = await fetch(`${config.fixtureOrigin}/decoded-artifact?probeRun=${encodeURIComponent(artifact.run)}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-RK-Artifact': config.artifactToken }, body: JSON.stringify(artifact) });
+        if (!saved.ok) throw new Error(`Decoded quality artifact upload failed ${saved.status}`);
       }
       return { tenantIndex: index, observedFps: report.observedFps, authorizedFrameFps: report.authorizedFrameFps, displayFps: report.displayFps, markerSamplesPerSecond: report.markerSamplesPerSecond, renderToObservedMs: report.renderToObservedMs, inputToObservedMs: report.inputToObservedMs, perSecondFrames: buckets, authorizedPerSecondFrames: displayBuckets, invalid, samples: samples.length, visibility, actualLayout: transport.layout, presentation, lastCounters: rtcSamples[rtcSamples.length - 1] };
     }, { config, index, flags })));

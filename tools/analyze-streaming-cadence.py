@@ -52,7 +52,7 @@ def analyze(case):
                       "rawVideoCallbacks": series([frame["now"] for frame in client.get("rawVideoFrames", [])]),
                       "presentation": client.get("presentation"),
                       "visibility": client["visibility"], "invalidMarkers": client["invalid"]}}
-        source = next((document for document in source_documents if document.get("run") == client["config"]["id"]+f"-{index}"), None)
+        source = next((document for document in source_documents if "timeOrigin" in document and document.get("run") == client["config"]["id"]+f"-{index}"), None)
         if source:
             source_start, source_end = start-source["timeOrigin"], end-source["timeOrigin"]
             result["sourceClientWindowMs"] = [source_start, source_end]

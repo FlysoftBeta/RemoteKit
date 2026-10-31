@@ -24,7 +24,11 @@
 
 Chrome89.0.4389.90 headed双Peer真实WebRTC验证使用独立临时profile，工具tools/streaming-experiment-webrtc.mjs，独立3012端口，记录develop/tmp/network-sim-webrtc.json。客户端selected remote为127.0.0.1:59296，第二个Chrome发送端peer selected remote为127.0.0.1:59297，分别匹配relay的client/server socket。实际视频640×360，66帧解码，30fps；relay下行148285bytes，对应client pair147677bytes、video123032bytes；上行6124bytes，sendErrors=0。DataChannel20次echo大多数10.5–11.0ms，首包21.75ms。该低码率VP8通路实验Node约0.276核。3个启动时ICE请求在answer目标登记前被拒绝，后续ICE重试成功。
 
-这是网络通路验证，不是RemoteKit H264编码或性能目标达成证据。后续真实Endpoint实验仍需记录其selected候选、relay字节/时间变化、客户端实际解码与marker、各进程CPU；不得以JS动画或CDP Network.emulateNetworkConditions代替真实WebRTC网络整形。
+真实Native Endpoint H264通路也已验证，case为develop/tmp/select-1080-d1-tu4-cbr-48-loopback。原始answer含真正127.0.0.1:59863候选，SDK selected remote host127.0.0.1:59856与serverRelay一致，Chrome selected remote127.0.0.1:59855与clientRelay一致。SDK selected local prflx127.0.0.1:59855是STUN观测到的代理外侧映射，并非底层绑定端口。下行实际转发103217418bytes、上行142423bytes，双方向sendErrors=0、socketErrors=0；sender真实availableOutgoingBitrate为40Mbps。完整候选、计数和真实接收视频样本在该case的metrics中。
+
+Native最初逐接口bound socket向loopback发STUN时Windows返回10049。SDK诊断ENV启用官方factory.Options.network_ignore_mask=0后提供真实loopback候选；普通模式沿用原设置。新增仅保留127候选的真实ICE/DataChannel/Stats/close SDK smoke通过，随后上述实际编码视频通路成功。Node仍只绑定127，没有改成LAN代理或直连回退。
+
+以上证明实际网络通路。编码性能矩阵另行记录；不得用JS动画或CDP Network.emulateNetworkConditions代替WebRTC网络整形。
 
 ## 检查
 

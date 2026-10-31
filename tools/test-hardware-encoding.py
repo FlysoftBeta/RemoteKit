@@ -12,6 +12,7 @@ def main():
  p.add_argument('--width',type=int,default=1928)
  p.add_argument('--height',type=int,default=1088)
  p.add_argument('--level',type=int,default=42)
+ p.add_argument('--require-no-hrd',action='store_true')
  p.add_argument('--output',type=Path,default=ROOT/'develop/tmp/encoding-smoke')
  a=p.parse_args();destination=a.output/str(time.time_ns());destination.mkdir(parents=True)
  command=[str(a.executable.resolve()),a.codec,str(a.depth),'steps',str(a.width),str(a.height),str(a.level)]
@@ -42,6 +43,7 @@ def main():
    result['measurement']=json.loads(completed.stdout.strip().splitlines()[-1])
    result['sps']=inspect_sps(destination/'hardware-smoke.h264');check_bt709_limited(result['sps'])
    for record in result['sps']['unique']:
+    if a.require_no_hrd and (record.get('nalHrdPresent') or record.get('vclHrdPresent')):raise ValueError('SPS declares HRD: '+json.dumps(record))
     if record['profileIdc']!=66 or record['levelIdc']>a.level or (record['width'],record['height'])!=(a.width,a.height):
      raise ValueError('SPS exceeds requested profile/level or changes visible dimensions: '+json.dumps(record))
   except Exception as error:

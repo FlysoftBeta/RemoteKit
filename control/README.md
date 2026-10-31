@@ -77,3 +77,22 @@ node tools/streaming-experiment-webrtc.mjs --port 3012 --downlink 24
 ```
 
 第二条启动180秒有界双Peer实验页，用专用Chrome89打开输出的127.0.0.1地址。报告检查两端selected remote candidate为relay端口、真实解码帧与relay字节对应。`/api/rtc/network` 在Control中返回当前租户当前connectionId的relay计数；诊断样本包含该计数、候选和进程CPU。Windows为达到5ms调度，活跃队列使用单调deadline轮询，饱和流会消耗约一个Node CPU核心；无队列不轮询。CDP网络节流不用于证明WebRTC带宽或RTT。
+
+## 网页合成滚动对照
+
+`control/public/compositor-pattern.html` 是独立的 `dom-compositor-scroll-v1` 场景：文字、卡片和SVG图形一次生成，以CSS transform持续平移已有内容；JS每帧只更新256×112的原协议Marker。原test-pattern.html继续作为完整Canvas重绘负载，两种结果分别标注，不能合并。
+
+现有benchmark和source-probe无需改代码：将新场景复制为一个独立fixture目录内的test-pattern.html，再传给prepare工具。以下命令从仓库根执行，只创建新目录，不修改冻结dist或旧实验：
+
+```powershell
+$fixtureDirectory='develop/tmp/compositor-fixture-v1'
+if(Test-Path -LiteralPath $fixtureDirectory){throw '请选择新的fixture目录名'}
+New-Item -ItemType Directory -Path $fixtureDirectory | Out-Null
+Copy-Item -LiteralPath control/public/compositor-pattern.html -Destination "$fixtureDirectory/test-pattern.html"
+Copy-Item -LiteralPath control/public/marker-codec.js -Destination "$fixtureDirectory/marker-codec.js"
+tools/prepare-streaming-case.ps1 -Name compositor-1080-example -FixtureDirectory $fixtureDirectory -Width 1920 -Height 1080 -FixtureMode animation -DownlinkMbps 48
+```
+
+准备命令不代表实际执行测量。实验名称应带compositor，并保留fixture快照/hash；只在既定矩阵后有预算时做少量对照。以后构建会提供直接路由 `/compositor-pattern.html`，当前新增源文件不会自动进入既有冻结dist。
+
+兼容参数为mode=animation/text/static/change-stop、fps、stopAfter、title；额外duration控制CSS滚动周期（秒，默认12）。保留RK:序号;输入、touch回应32768+次数、frame/time/stimulus/CRC Marker协议，以及source-probe所需的精确render(now)插桩入口。在此场景，source RAF计数仍是实际RAF，render计数指小Marker更新，CSS合成独立进行；另可读取window.rkCompositorFixture的场景标识/计数。static与change-stop停止后均冻结合成动画和Marker，输入仍可产生一次回应。

@@ -18,6 +18,12 @@ class Bits:
   return (1<<zeros)-1+self.read(zeros)
  def se(self):
   value=self.ue();return (value+1)//2 if value&1 else -(value//2)
+def skip_hrd(bits):
+ count=bits.ue()+1
+ if count>32:raise ValueError('Invalid HRD CPB count')
+ bits.read(4);bits.read(4)
+ for _ in range(count):bits.ue();bits.ue();bits.read(1)
+ for _ in range(4):bits.read(5)
 def parse_sps(nal):
  rbsp=bytearray();zeros=0
  for value in nal[1:]:
@@ -62,6 +68,12 @@ def parse_sps(nal):
    result['colourDescriptionPresent']=bool(bits.read(1))
    if result['colourDescriptionPresent']:
     result['colourPrimaries']=bits.read(8);result['transferCharacteristics']=bits.read(8);result['matrixCoefficients']=bits.read(8)
+  if bits.read(1):bits.ue();bits.ue() # chroma sample location
+  if bits.read(1):bits.read(32);bits.read(32);bits.read(1) # timing info
+  result['nalHrdPresent']=bool(bits.read(1))
+  if result['nalHrdPresent']:skip_hrd(bits)
+  result['vclHrdPresent']=bool(bits.read(1))
+  if result['vclHrdPresent']:skip_hrd(bits)
  return result
 def inspect_sps(path):
  units=re.split(b'\x00\x00(?:\x00)?\x01',Path(path).read_bytes())
@@ -76,7 +88,9 @@ def check_bt709_limited(inspection):
    raise ValueError('SPS does not declare BT.709 limited-range: '+json.dumps(record))
 if __name__=='__main__':
  parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('file',type=Path)
- parser.add_argument('--check-bt709-limited',action='store_true');args=parser.parse_args()
+ parser.add_argument('--check-bt709-limited',action='store_true')
+ parser.add_argument('--check-no-hrd',action='store_true');args=parser.parse_args()
  result=inspect_sps(args.file)
  if args.check_bt709_limited:check_bt709_limited(result)
+ if args.check_no_hrd and any(record.get('nalHrdPresent') or record.get('vclHrdPresent') for record in result['unique']):raise ValueError('SPS declares HRD')
  print(json.dumps(result))

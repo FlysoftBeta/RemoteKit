@@ -3,6 +3,7 @@
 #include "media/sdk_loader.hpp"
 #include "remotekit/core.hpp"
 #include "remotekit/sampling.hpp"
+#include "remotekit/idle_idr.hpp"
 #include <json.hpp>
 #include <windows.h>
 #include <mmsystem.h>
@@ -86,9 +87,9 @@ struct Options {
    else if(key=="--max-bitrate")encoding.max_bitrate=std::stoul(value);
    else if(key=="--async-depth")encoding.async_depth=std::stoul(value);
    else if(key=="--gop")encoding.gop=std::stoul(value);
-   else if(key=="--target-usage")encoding.target_usage=std::stoul(value);
+   else if(key=="--target-usage"){encoding.target_usage=std::stoul(value);encoding.target_usage_explicit=true;}
    else if(key=="--buffer-ms")encoding.buffer_ms=std::stoul(value);
-   else if(key=="--rate-control")encoding.vbr=value=="vbr";
+   else if(key=="--rate-control"){if(value!="cbr"&&value!="vbr")throw std::runtime_error("rate-control must be cbr or vbr");encoding.vbr=value=="vbr";encoding.rate_control_explicit=true;}
    else if(key=="--idle-idr-ms")idle_idr_ms=std::stoul(value);
    else if(key=="--max-encode-width")max_encode_width=std::stoul(value);
    else if(key=="--max-encode-height")max_encode_height=std::stoul(value);
@@ -128,10 +129,14 @@ struct Session {
  std::atomic<uint64_t> layout_epoch{0};
  std::atomic<uint32_t> receive_level{0};
  std::atomic<bool> refresh_connected{false};
+ std::atomic<uint32_t> effective_idle_ms{150};
+ std::atomic<double> source_interval_ms{0},last_tail_age_ms{0};
+ std::atomic<uint64_t> tail_submissions{0};
  remotekit::MediaSampling sampling;
  std::map<std::string,std::string> recovery_documents;
  Session(Sdk& api,const Options& opts,std::string tenant_id,std::string session_id):sdk(api),options(opts),
    tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id) {
+  effective_idle_ms=std::min(1000u,options.idle_idr_ms);
   fs::create_directories(directory);
   auto saved=LoadJson(directory/"views.json",Json::array());
   for(auto& view:saved)desired[ViewId(view)]=view;
@@ -333,6 +338,13 @@ struct Session {
    recovery_documents[view]=document;
   }catch(const std::exception& error){fprintf(stderr,"navigation save: %s\n",error.what());}
  }
+ Json Stats() {
+  auto value=stats->Snapshot();value["configuredIdleIdrMs"]=options.idle_idr_ms;
+  value["effectiveIdleIdrMs"]=effective_idle_ms.load();value["tailIdrSubmissions"]=tail_submissions.load();
+  const auto interval=source_interval_ms.load(),age=last_tail_age_ms.load();
+  value["sourceFrameIntervalMs"]=interval>0?Json(interval):Json(nullptr);
+  value["lastTailAfterSourceMs"]=age>0?Json(age):Json(nullptr);return value;
+ }
  Json Snapshot() {
   Start();auto snapshot=BrowserSnapshot();Json views=Json::array();bool removed=false;
   for(auto& session:snapshot.at("sessions"))for(auto& view:session.at("views")) {
@@ -347,7 +359,7 @@ struct Session {
    CaptureNavigation(view);views.push_back(std::move(item));
   }
   if(removed)RefitOutput();
-  return {{"sessionId",id},{"browserPid",process?GetProcessId(process):0},{"views",views},{"running",Alive()},{"stats",stats->Snapshot()}};
+  return {{"sessionId",id},{"browserPid",process?GetProcessId(process):0},{"views",views},{"running",Alive()},{"stats",Stats()}};
  }
  static void AddCloseRequest(Json& output,const Json& requests) {
   // page.requests wraps its snapshot in "requests". Handle its documented
@@ -530,7 +542,8 @@ struct Session {
  void MediaLoop() {
   remotekit_rtc_frame latest{};int64_t last_update=QpcNow(),last_stats=last_update;
   uint64_t previous_encoded=stats->completed.load(),previous_bytes=stats->bytes.load(),previous_copies=pool.copied_frames();
-  bool idle_sent=false,stream_started=false;
+  bool idle_sent=false,stream_started=false;remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
+  effective_idle_ms=idle.delay_ms();source_interval_ms=0;
   while(!stop_media) {
    std::deque<Event> incoming;
    {std::lock_guard lock(event_mutex);incoming.swap(events);}
@@ -583,10 +596,16 @@ struct Session {
      std::lock_guard lock(encoder_mutex);for(auto& [encoder,worker]:encoders)worker->Keyframe();
     }
     if(!handle || !receive_level.load() || sdk.remotekit_rtc_submit_texture(handle,&frame)!=0)frame.release(frame.release_context,frame.frame_id);
-    stream_started=receive_level.load()!=0;last_update=now;idle_sent=false;
+    stream_started=receive_level.load()!=0;
+    if(idle.Observe(metadata.generation,metadata.frame_id,metadata.capture_time_us,
+                    1000.0*now/QpcFrequency())) {
+     last_update=now;idle_sent=false;effective_idle_ms=idle.delay_ms();source_interval_ms=idle.interval_ms();
+    }
    } else if(handle && receive_level.load() && latest.release &&
-             (!stream_started || refresh_connected.load() || (!idle_sent && options.idle_idr_ms &&
-              now-last_update>=QpcFrequency()*options.idle_idr_ms/1000))) {
+             (!stream_started || refresh_connected.load() || (!idle_sent && idle.delay_ms() &&
+              now-last_update>=QpcFrequency()*idle.delay_ms()/1000))) {
+    const bool tail=stream_started&&!refresh_connected.load()&&!idle_sent&&idle.delay_ms()&&
+        now-last_update>=QpcFrequency()*idle.delay_ms()/1000;
     refresh_connected=false;
     {std::lock_guard lock(encoder_mutex);for(auto& [encoder,worker]:encoders)worker->Keyframe();}
     auto repeat=latest;
@@ -598,11 +617,12 @@ struct Session {
     // Tail IDR retains content epoch and capture time. SDK assigns a fresh
     // submit/RTP timestamp independently.
     if(sdk.remotekit_rtc_submit_texture(handle,&repeat)!=0)repeat.release(repeat.release_context,repeat.frame_id);
+    else if(tail){++tail_submissions;last_tail_age_ms=1000.0*(now-last_update)/QpcFrequency();}
     stream_started=true;idle_sent=true;
    }
    if(now-last_stats>=QpcFrequency()) {
     if(handle && sdk.request_stats)sdk.request_stats(handle);
-    auto report=stats->Snapshot();report["type"]="stats";
+    auto report=Stats();report["type"]="stats";
     const double seconds=static_cast<double>(now-last_stats)/QpcFrequency();
     const auto encoded=stats->completed.load(),bytes=stats->bytes.load(),copies=pool.copied_frames();
     report["encodedFps"]=(encoded-previous_encoded)/seconds;

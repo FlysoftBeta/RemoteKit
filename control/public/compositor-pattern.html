@@ -1,0 +1,40 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="remotekit-fixture" content="dom-compositor-scroll-v1"><title>RemoteKit · DOM compositor scrolling</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#eaf0f5;color:#24384c;font:18px/1.55 "Segoe UI",sans-serif}
+#marker{position:fixed;top:0;left:0;width:256px;height:112px;z-index:5;image-rendering:pixelated}#input{position:fixed;left:280px;top:16px;width:260px;height:40px;z-index:6;font:16px sans-serif}#label{position:fixed;left:280px;top:68px;z-index:5;font-size:14px;color:#476078}
+header{position:fixed;inset:0 0 auto;height:128px;background:#fbfdff;border-bottom:1px solid #ccd7e2;z-index:3}#viewport{position:absolute;inset:128px 0 0;overflow:hidden;contain:layout paint style}
+#sheet{will-change:transform;backface-visibility:hidden;animation:scroll-sheet var(--duration,12s) linear infinite}
+@keyframes scroll-sheet{from{transform:translate3d(0,0,0)}to{transform:translate3d(0,-50%,0)}}
+.page{padding:32px 36px 40px;min-height:calc(100vh - 128px)}.eyebrow{font-size:13px;letter-spacing:2px;color:#53808c}h1{font-size:36px;line-height:1.25;margin:8px 0 12px}p{margin:0 0 18px}.summary{max-width:1000px;color:#526b80}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:22px}.card{background:white;padding:24px;border:1px solid #d3dfe9;border-radius:12px;box-shadow:0 3px 9px #24384c0b}.card h2{font-size:22px;line-height:1.3;margin:0 0 12px}.card p{font-size:17px}.tag{display:inline-block;padding:3px 10px;margin:2px 5px 8px 0;border-radius:5px;background:#e2f2ee;color:#1c7268;font-size:13px}.number{font-size:38px;font-weight:600;color:#297f90}.chart{width:100%;height:140px;display:block;margin:10px 0}.fine{font-size:13px;color:#708698}.article{margin-top:24px;border-left:5px solid #3e9e98;padding:18px 24px;background:#f9fcff}.article p{margin:8px 0;font-size:20px}#status{position:fixed;bottom:6px;left:10px;z-index:6;margin:0;padding:5px 8px;border-radius:4px;background:#173449e8;color:#e0f4f4;font:10px/1.4 monospace;pointer-events:none;white-space:pre-wrap;max-width:calc(100vw - 20px)}
+@media(max-width:1000px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.page{padding:24px}.card{padding:20px}}
+</style></head><body>
+<header></header><canvas id="marker" width="256" height="112"></canvas><textarea id="input" autofocus aria-label="Marker stimulus input" placeholder="RK:123;"></textarea><span id="label"></span><main id="viewport"><div id="sheet"></div></main><pre id="status"></pre>
+<script type="module">
+import {drawMarker} from './marker-codec.js';
+const params=new URLSearchParams(location.search),mode=params.get('mode')||'animation',fps=Math.max(1,Math.min(60,Number(params.get('fps')||60))),stopAfter=Number(params.get('stopAfter')||3000);
+document.title=params.get('title')||'RemoteKit · DOM compositor scrolling';
+document.documentElement.style.setProperty('--duration',Math.max(2,Math.min(60,Number(params.get('duration')||12)))+'s');
+const marker=document.querySelector('#marker').getContext('2d'),input=document.querySelector('#input'),sheet=document.querySelector('#sheet');
+const chart='<svg class="chart" viewBox="0 0 320 140" role="img" aria-label="Static chart"><path d="M0 28H320M0 70H320M0 112H320" stroke="#dce6ed" fill="none"/><path d="M5 110L42 92L80 103L118 58L157 74L195 38L235 46L276 19L315 31" fill="none" stroke="#2e9691" stroke-width="4"/><path d="M5 123L42 113L80 117L118 101L157 107L195 82L235 92L276 61L315 69" fill="none" stroke="#6e99d5" stroke-width="3"/></svg>';
+const page=document.createElement('section');page.className='page';
+page.innerHTML='<div class="eyebrow">REMOTEKIT · COMPOSITOR WORKLOAD</div><h1>Clear text, cards and moving pages</h1><p class="summary">Static document content moves through the viewport using a CSS transform. Text, charts and cards are constructed once; the small pixel marker remains an independent timestamp and input-response channel.</p><div class="cards"></div><section class="article"><strong>Reading sample · 静态文字清晰度</strong><p>The quick brown fox jumps over the lazy dog. 0123456789</p><p>浏览器合成滚动保留清晰文字、图形和卡片；本页不逐帧重绘整张 Canvas。</p><p>ABCDEFGHIJKLMNOPQRSTUVWXYZ · abcdefghijklmnopqrstuvwxyz</p></section>';
+const cards=page.querySelector('.cards');
+for(let i=0;i<12;i++){const card=document.createElement('article');card.className='card';card.innerHTML=`<span class="tag">Section ${String(i+1).padStart(2,'0')}</span><h2>${['Overview and activity','Traffic and observations','Projects and progress'][i%3]}</h2><div class="number">${[1280,60,24000,1080][i%4].toLocaleString('en-US')}</div>${chart}<p>Readable document text stays unchanged while the compositor translates this layer.</p><p class="fine">Fixed content · cards / text / vector graphics · ${i+1}</p>`;cards.appendChild(card);}
+sheet.appendChild(page);sheet.appendChild(page.cloneNode(true));
+if(mode==='static')sheet.style.animationPlayState='paused';
+let frame=0,stimulus=0,last=0,start=performance.now(),stopped=false,lastInput='',composition='',touches=0,pointer='';
+window.rkCompositorFixture={kind:'dom-compositor-scroll-v1',mode,fps,sceneBuilds:1,sourceRafCount:0,markerRenders:0,startedAt:start};
+document.querySelector('#label').textContent='DOM compositor scroll · '+mode+' · marker target '+fps+' Hz';
+function capabilities(){document.querySelector('#status').textContent=JSON.stringify({fixture:'dom-compositor-scroll-v1',viewport:[innerWidth,innerHeight],DPR:devicePixelRatio,stimulus,lastInput,composition,touches,pointer});}
+for(const type of ['compositionstart','compositionupdate','compositionend'])input.addEventListener(type,event=>{composition=type+':'+event.data;capabilities();});
+addEventListener('touchstart',()=>{touches++;stimulus=(32768+touches)&65535;render(performance.now());capabilities();});
+addEventListener('pointerdown',event=>{pointer=event.pointerType+' '+Math.round(event.clientX)+','+Math.round(event.clientY);capabilities();});
+addEventListener('resize',capabilities);
+input.addEventListener('input',()=>{lastInput=input.value;const matches=[...input.value.matchAll(/RK:(\d+);/g)];if(matches.length){stimulus=Number(matches[matches.length-1][1])&65535;input.value='';render(performance.now());}capabilities();});
+// Keep this exact anchor for tools/streaming-source-probe.mjs instrumentation.
+// Here "renders" means marker updates; CSS composition runs independently.
+function render(now){frame=(frame+1)>>>0;window.rkCompositorFixture.markerRenders++;drawMarker(marker,frame,Date.now(),stimulus);}
+function tick(now){window.rkCompositorFixture.sourceRafCount++;if(now-last>=1000/fps-1){last=now;if(mode==='static'){if(!stopped){render(now);stopped=true;}}else if(mode==='change-stop'&&now-start>stopAfter){if(!stopped){sheet.style.animationPlayState='paused';render(now);stopped=true;}}else render(now);}requestAnimationFrame(tick);}
+capabilities();requestAnimationFrame(tick);
+</script></body></html>

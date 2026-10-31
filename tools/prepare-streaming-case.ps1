@@ -16,9 +16,11 @@ param(
   [ValidateSet(0,24,48)][int]$DownlinkMbps = 0,
   [ValidateSet('animation','text','static','change-stop')][string]$FixtureMode = 'animation',
   [int]$InputIntervalMs = 0,
+  [int]$IdleIdrMs = 150,
   [switch]$HonorClientTimerResolution,
   [int]$PlayoutDelayHintMs = -1,
-  [string]$FixtureDirectory = 'control/dist/client'
+  [string]$FixtureDirectory = 'control/dist/client',
+  [switch]$CaptureQuality
 )
 $ErrorActionPreference = 'Stop'
 $rkRoot = Split-Path -Parent $PSScriptRoot
@@ -42,7 +44,8 @@ $configuration = @{
   inputIntervalMs=$InputIntervalMs;
   honorClientTimerResolution=[bool]$HonorClientTimerResolution;
   timerPolicyTool=(Join-Path $rkRoot 'tools/probe-chrome-timer-policy.ps1'); timerPolicyOutput=(Join-Path $caseRoot 'timer-policy.json');
-  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs};
+  captureQuality=[bool]$CaptureQuality; artifactToken=[guid]::NewGuid().ToString('N');
+  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
 if ($DownlinkMbps) {
@@ -75,7 +78,7 @@ $env:REMOTEKIT_ENDPOINT = Join-Path $caseRoot 'bin/endpoint_service.exe'
 $env:REMOTEKIT_ENDPOINT_ARGS = ConvertTo-Json -Compress -InputObject @(
   '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe', "--data-path=$caseRoot/sessions",
   '--encoder=qsv','--fps=60','--bitrate=18000000','--max-bitrate=40000000',
-  "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl"
+  "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )
 $env:REMOTEKIT_CONTROL_DB = Join-Path $caseRoot 'control.db'
 $env:REMOTEKIT_METRICS_DIR = Join-Path $caseRoot 'metrics'
@@ -86,7 +89,7 @@ $env:REMOTEKIT_GPU_POLL = if ($PreciseBrowserPoll) { 'precise' } else { 'default
 $env:PORT = '3001'
 $nodeExe = (Get-Command node.exe).Source
 $controlProcess = Start-Process -FilePath $nodeExe -ArgumentList 'dist/server.mjs' -WorkingDirectory (Join-Path $rkRoot 'control') -WindowStyle Hidden -RedirectStandardOutput (Join-Path $caseRoot 'control.log') -RedirectStandardError (Join-Path $caseRoot 'control.err') -PassThru
-$sourceArguments = '"' + (Join-Path $rkRoot 'tools/streaming-source-probe.mjs') + '" --output "' + (Join-Path $caseRoot 'source-trace') + '" --fixture-root "' + (Join-Path $caseRoot 'fixture') + '"'
+$sourceArguments = '"' + (Join-Path $rkRoot 'tools/streaming-source-probe.mjs') + '" --output "' + (Join-Path $caseRoot 'source-trace') + '" --fixture-root "' + (Join-Path $caseRoot 'fixture') + '" --artifact-token ' + $configuration.artifactToken
 $sourceProcess = Start-Process -FilePath $nodeExe -ArgumentList $sourceArguments -WorkingDirectory $rkRoot -WindowStyle Hidden -RedirectStandardOutput (Join-Path $caseRoot 'source.log') -RedirectStandardError (Join-Path $caseRoot 'source.err') -PassThru
 $casePids = @{control_pid=$controlProcess.Id;source_pid=$sourceProcess.Id}
 if ($HonorClientTimerResolution) {
