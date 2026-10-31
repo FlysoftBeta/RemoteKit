@@ -63,4 +63,6 @@ RTC支持显式RTP播放延迟请求，默认未设置。0/0与0/10ms对照降�
 
 ## 入口
 
+最终运行包对应`58cb326`，manifest为clean。已从ZIP全新解压验证包内Node/SQLite/Endpoint/SDK/browser独立运行；Chrome89收到1928×1088 H.264，首次hover不抢焦点，真实点击与IME的Pixel marker回应通过，截图无错误横幅。测试数据与Profile均在包外，验收进程已关闭。
+
 构建与运行：[README](../README.md)；[系统设计](architecture.zh-CN.md)；[GPU 输出](gpu-output.zh-CN.md)；[架构取舍](design-review.zh-CN.md)；[打包](packaging.zh-CN.md)；[控制协议](control-protocol.md)；[SDK](sdk.md)。本机调试输出为 `C:\src\chromium\src\out\dev\remotekit_browser.exe`。
