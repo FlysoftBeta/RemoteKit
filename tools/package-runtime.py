@@ -123,7 +123,7 @@ def main():
             if not source.exists(): raise FileNotFoundError('Run npm run build in control first: ' + str(source))
         (control / 'dist').mkdir()
         shutil.copy2(dist / 'server.mjs', control / 'dist/server.mjs')
-        shutil.copytree(dist / 'client', control / 'dist/client')
+        shutil.copytree(dist / 'client', control / 'dist/client', ignore=shutil.ignore_patterns('*.ts', '*.tsx'))
         shutil.copytree(dist / 'runtime/node_modules', control / 'node_modules')
         shutil.copy2(dist / 'runtime/manifest.json', control / 'runtime-manifest.json')
         licenses = package / 'licenses'
