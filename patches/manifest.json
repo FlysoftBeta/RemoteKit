@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "base_revision": "1aa07b638799e59656559ae6c6649d4b197f555e",
+  "patches": [
+    {
+      "id": "sdk-timeutils-visibility",
+      "path": "sdk-visibility.patch",
+      "sha256": "60e94b8e4b84167cf65a566dce8b8a36c891343b2687b278b6a11bc67cde4e39"
+    }
+  ]
+}

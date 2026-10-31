@@ -1,0 +1,126 @@
+import("//tools/grit/repack.gni")
+
+source_set("endpoint_model") {
+  # This portable library also builds with MSVC outside Chromium.
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
+  sources = [ "//remotekit/endpoint/src/core.cpp" ]
+  include_dirs = [ "//remotekit/endpoint/include" ]
+}
+
+executable("remotekit_browser") {
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
+  configs -= [ "//build/config/win:console" ]
+  configs += [ "//build/config/win:windowed" ]
+  sources = [
+    "//chrome/renderer/loadtimes_bindings.cc",
+    "//chrome/renderer/loadtimes_bindings.h",
+    "browser_context.cc",
+    "browser_context.h",
+    "compat.cc",
+    "compat.h",
+    "compat_renderer.cc",
+    "compat_renderer.h",
+    "control_server.cc",
+    "control_server.h",
+    "devtools.cc",
+    "devtools.h",
+    "gpu_atlas.cc",
+    "gpu_atlas.h",
+    "harness.cc",
+    "harness.h",
+    "main.cc",
+    "main_delegate.cc",
+    "main_delegate.h",
+    "navigation_state.cc",
+    "navigation_state.h",
+    "page_requests.cc",
+    "page_requests.h",
+    "profile_services.cc",
+    "profile_services.h",
+    "webview.cc",
+    "webview.h",
+  ]
+  include_dirs = [
+    "//remotekit",
+    "//remotekit/endpoint/include",
+  ]
+  deps = [
+    ":endpoint_model",
+    ":pak",
+    "//base",
+    "//build/win:default_exe_manifest",
+    "//components/download/public/common:public",
+    "//components/embedder_support:user_agent",
+    "//components/input",
+    "//components/services/quarantine",
+    "//components/services/quarantine/public/mojom",
+    "//components/sessions",
+    "//components/version_info",
+    "//components/viz/common",
+    "//components/viz/host",
+    "//content:sandbox_helper_win",
+    "//content/public/app",
+    "//content/public/browser",
+    "//content/public/common",
+    "//content/public/renderer",
+    "//gin",
+    "//media",
+    "//media/capture/mojom:video_capture_buffer",
+    "//media/capture/mojom:video_capture_types",
+    "//mojo/public/cpp/bindings",
+    "//mojo/public/cpp/platform",
+    "//mojo/public/cpp/system",
+    "//net",
+    "//sandbox",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//services/viz/privileged/mojom/compositing",
+    "//third_party/blink/public:blink",
+    "//ui/aura",
+    "//ui/base",
+    "//ui/display",
+    "//ui/gfx",
+    "//ui/views",
+    "//ui/views/controls/webview",
+    "//ui/wm",
+    "//url",
+    "//v8",
+  ]
+  data_deps = [ "//tools/v8_context_snapshot" ]
+  libs = [
+    "d3d11.lib",
+    "dxgi.lib",
+  ]
+}
+
+repack("pak") {
+  sources = [
+    "$root_gen_dir/content/content_resources.pak",
+    "$root_gen_dir/content/gpu_resources.pak",
+    "$root_gen_dir/content/process_resources.pak",
+    "$root_gen_dir/net/net_resources.pak",
+    "$root_gen_dir/third_party/blink/public/resources/blink_resources.pak",
+    "$root_gen_dir/third_party/blink/public/resources/blink_scaled_resources_100_percent.pak",
+    "$root_gen_dir/third_party/blink/public/resources/inspector_overlay_resources.pak",
+    "$root_gen_dir/third_party/blink/public/strings/blink_strings_en-US.pak",
+    "$root_gen_dir/ui/resources/ui_resources_100_percent.pak",
+    "$root_gen_dir/ui/strings/app_locale_settings_en-US.pak",
+    "$root_gen_dir/ui/strings/ax_strings_en-US.pak",
+    "$root_gen_dir/ui/strings/ui_strings_en-US.pak",
+    "$root_gen_dir/ui/views/resources/views_resources_100_percent.pak",
+  ]
+  deps = [
+    "//content:content_resources",
+    "//content/browser/resources/gpu:resources",
+    "//content/browser/resources/process:resources",
+    "//net:net_resources",
+    "//third_party/blink/public:devtools_inspector_resources",
+    "//third_party/blink/public:resources",
+    "//third_party/blink/public:scaled_resources_100_percent",
+    "//third_party/blink/public/strings",
+    "//ui/resources",
+    "//ui/strings",
+    "//ui/views/resources",
+  ]
+  output = "$root_out_dir/remotekit.pak"
+}

@@ -1,0 +1,27 @@
+import("//third_party/webrtc/webrtc.gni")
+
+shared_library("remotekit_sdk") {
+  output_name = "remotekit_sdk"
+  sources = [
+    "../../sdk/include/remotekit_sdk.h",
+    "remotekit_sdk.cc",
+  ]
+  defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
+
+  # timeutils is linked into this DLL, rather than imported from the full
+  # webrtc_component. Its declarations must have the same export ownership.
+  configs += [ "//third_party/webrtc:library_impl_config" ]
+  deps = [
+    "//base",
+    "//mojo/core/embedder",
+    "//mojo/public/cpp/platform",
+    "//mojo/public/cpp/system",
+    "//third_party/webrtc/rtc_base:timeutils",
+    "//ui/events",
+    "//ui/events:dom_keycode_converter",
+  ]
+  if (rtc_exclude_system_time) {
+    deps += [ "//third_party/webrtc_overrides:system_time" ]
+  }
+  write_runtime_deps = "$root_out_dir/remotekit_sdk.runtime_deps"
+}

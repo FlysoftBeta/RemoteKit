@@ -1,0 +1,5 @@
+# Chromium patch series
+
+`patches/manifest.json` lists patches in application order. Each entry has a unique `id`, a `path` relative to `patches/`, and a lowercase hexadecimal SHA-256 digest of the patch file. Set optional `base_revision` to document the intended Chromium revision; the tool does not enforce it. An empty series is valid.
+
+Run `python tools/patchset.py --chromium-root PATH status`, `apply`, or `revert` from any working directory. The root must be a Git worktree root. Status reports each patch as pending, applied, or conflict; conflicts return a nonzero exit status. Apply and revert skip patches already in the requested state, check the entire operation before changing files, and attempt to undo their own changes if an operation fails. Patches must each pass their checks against the current worktree, so patches that depend on earlier changes to the same lines cannot be applied as one batch. Unrelated local modifications are allowed. Keep a backup of important work: concurrent worktree changes can prevent rollback.
