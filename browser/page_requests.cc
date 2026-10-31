@@ -119,6 +119,28 @@ void PageRequests::Bind(content::WebContents* contents) {
   if (target)
     target->SetDelegate(this);
 }
+void PageRequests::RequestClose() {
+  if (close_state_ == "closing" || close_state_ == "closed")
+    return;
+  close_state_ = "closing";
+  if (!web_contents()) {
+    close_state_ = "closed";
+    return;
+  }
+  if (web_contents()->NeedToFireBeforeUnloadOrUnloadEvents())
+    web_contents()->DispatchBeforeUnload(false);
+  else
+    web_contents()->ClosePage();
+}
+void PageRequests::BeforeUnloadFired(content::WebContents*, bool proceed,
+                                    bool* proceed_to_fire_unload) {
+  *proceed_to_fire_unload = proceed;
+  if (close_state_ == "closing" && !proceed)
+    close_state_ = "cancelled";
+}
+void PageRequests::CloseContents(content::WebContents*) {
+  close_state_ = "closed";
+}
 void PageRequests::Event(base::DictValue event) {
   if (events_.size() == kLimit)
     events_.pop_front();

@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -52,11 +53,22 @@ def main():
     output = source / 'out' / args.out
     gn_args = output / 'args.gn'
     old = gn_args.read_text(encoding='utf-8')
-    addition = '\n# RemoteKit targets, retaining existing build configuration.\nroot_extra_deps = [ "//remotekit/browser:remotekit_browser", "//remotekit/browser/sdk:remotekit_sdk" ]\n'
-    if '//remotekit/browser:remotekit_browser' not in old:
+    root_targets = ['//remotekit/browser:remotekit_browser',
+                    '//remotekit/browser:remotekit_browser_demo',
+                    '//remotekit/browser/sdk:remotekit_sdk']
+    match = re.search(r'root_extra_deps\s*=\s*\[([^\]]*)\]', old, re.DOTALL)
+    existing = match.group(1) if match else ''
+    missing = [target for target in root_targets if '"' + target + '"' not in existing]
+    if missing:
         backup = output / 'args.before-remotekit.gn'
         if not backup.exists(): backup.write_text(old, encoding='utf-8')
-        gn_args.write_text(old + addition, encoding='utf-8')
+        body = existing.rstrip()
+        if body and not body.endswith(','): body += ','
+        body += '\n' + ''.join(f'  "{target}",\n' for target in missing)
+        addition = 'root_extra_deps = [' + body + ']'
+        updated = (old[:match.start()] + addition + old[match.end():] if match else
+                   old + '\n# RemoteKit targets.\n' + addition + '\n')
+        gn_args.write_text(updated, encoding='utf-8')
         gn_changed = True
     env = os.environ
     env.setdefault('DEPOT_TOOLS_WIN_TOOLCHAIN', '0')

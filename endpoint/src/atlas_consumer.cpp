@@ -379,6 +379,14 @@ AtlasPollResult AtlasConsumer::Impl::Poll() {
     Fail(L"Invalid atlas publication");
     return AtlasPollResult::error;
   }
+  for (std::uint32_t i = 0; i < frame.view_count; ++i) {
+    const auto& view = frame.views[i];
+    if (!std::isfinite(view.atlas_pixels_per_dip) || view.atlas_pixels_per_dip <= 0 ||
+        !std::isfinite(view.page_device_scale_factor) || view.page_device_scale_factor <= 0) {
+      Fail(L"Invalid atlas view scale");
+      return AtlasPollResult::error;
+    }
+  }
   if (frame.frame_id < last_frame ||
       (frame.frame_id == last_frame &&
        (frame.ready_fence_value != last_read || frame.slot != last_snapshot.slot))) {

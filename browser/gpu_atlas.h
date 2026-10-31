@@ -19,6 +19,7 @@ namespace remotekit::browser {
 class GpuAtlas final {
  public:
   struct View {
+    // Both output pixels/DIP and the independent page DPR are published unchanged.
     SharedAtlasView metadata{};
     raw_ptr<content::WebContents> contents = nullptr;
     bool capture_enabled = false;

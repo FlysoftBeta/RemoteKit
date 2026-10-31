@@ -1,12 +1,13 @@
-# RemoteKit C ABI SDK bootstrap
+# RemoteKit C ABI SDK
 
 The SDK is built by Chromium GN; its consumer is a separate CMake project.
-Consumers include only `remotekit_sdk.h` and link the DLL import library. No
+Consumers include `remotekit_sdk.h` and, for streaming, `remotekit_rtc.h`, and link the DLL import library. No
 Chromium, libc++, Abseil, or WebRTC C++ types cross the boundary.
 
 The SDK provides a local binary Mojo message-pipe roundtrip, isolated named-channel
-JSON control of the browser process, and a linked call to WebRTC's clock. It does
-not create a peer connection, media pipeline, or codec.
+JSON control of the browser process, and WebRTC PeerConnection/SDP/ICE/DataChannel
+through `remotekit_rtc.h`. A custom H.264 encoder factory calls endpoint-owned
+hardware encoders through C callbacks. Audio capture and playback are not enabled.
 
 The Windows client also uses worker-thread `control_open_atlas` and
 `control_command_token` helpers. Atlas setup returns caller-owned mapping,
@@ -33,8 +34,8 @@ assume the main DLL is self-contained. A non-component GN build may reduce that
 runtime set while retaining the same C ABI.
 
 `manifest.json` records Chromium HEAD, the SHA-256 of `args.gn`, actual PE
-architecture, compiler identity, component/runtime layout, and the limited
-timeutils scope. The exporter requires Git and the Chromium clang-cl binary
+architecture, compiler identity, component/runtime layout, and the exported API
+scope. The exporter requires Git and the Chromium clang-cl binary
 from the build source tree.
 
 From a Visual Studio developer shell, compile and run the standalone consumer:
@@ -83,3 +84,34 @@ Verified on official Chromium `157.0.8103.15`, x64 component build: GN shared
 library linked successfully, exporter copied the full runtime manifest, and an
 independent MSVC 19.51 CMake consumer linked and passed CTest (1/1). Only the pure
 C SDK header was included by the consumer.
+
+## Streaming ownership
+
+The RTC interface uses ABI version 2; the original control SDK remains version 1.
+RTC creation rejects a mismatched ABI. Shared atlas metadata is also version 2
+(`SharedAtlasView` 112 bytes, mapping 7296 bytes), separating page DPR from atlas
+pixels per DIP. Rebuild browser, SDK and endpoint together when updating these interfaces.
+
+The endpoint submits an immutable D3D11 texture with a frame lease. Successful
+submission transfers one release obligation to the SDK; failure leaves it with
+the caller. An asynchronous encoder must retain the lease before returning from
+its encode callback and release it only after hardware completion. A COM reference
+alone does not prevent a texture pool from overwriting its contents.
+
+Encoded completions carry Annex B H.264 and the original RTP timestamp. Encoder
+IDs are never reused; late completions are rejected after destruction. Peer close
+is a callback barrier, and every peer must close before SDK shutdown or DLL unload.
+The endpoint drains hardware jobs before freeing callback context.
+
+`remotekit_rtc_encoded` returns the actual outgoing RTP timestamp through its
+optional third argument. Use this value for receiver correlation: WebRTC adds a
+random sender offset to the input timestamp.
+
+`remotekit_rtc_request_stats` asynchronously delivers sender statistics, with at
+most one request in flight; request at 1 Hz. Missing fields remain absent.
+Sender `availableOutgoingBitrate` describes the video sending path; the same
+field on the receiving client's peer describes its outgoing direction instead.
+
+The reliable ordered DataChannel is named `remotekit`. Client messages and
+authorization boundaries are described in [streaming protocol](streaming-protocol.md).
+Runtime and hardware validation results are maintained in [current state](current-state.zh-CN.md).

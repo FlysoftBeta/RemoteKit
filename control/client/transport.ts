@@ -1,0 +1,315 @@
+import { request, type Diagnostics, type Layout, type Surface, type CanvasPresentation } from './types';
+import { FrameEpochGate } from './frame-epoch';
+import { configureReceiveOffer, originalGatheredOffer, probeReceiveCapabilities, loadReceiveProfile, type ReceiveProfile } from './receive-profile';
+import { ReconnectPolicy } from './reconnect';
+import { PresentationDiagnostics } from './presentation-diagnostics';
+
+/** All endpoint wire adaptation lives here; the UI never owns recovery state. */
+export class RemoteTransport {
+  receiveProfile: ReceiveProfile = loadReceiveProfile();
+  signaling: Record<string, unknown> | undefined;
+  probeReceiveCapabilities = probeReceiveCapabilities;
+  readonly video = document.createElement('video');
+  private authorizedFrame = document.createElement('canvas');
+  get displayFrame() { return this.authorizedFrame; }
+  private pendingFrame = document.createElement('canvas');
+  private frameGate = new FrameEpochGate();
+  private displayedRtp: number | undefined;
+  private displayedEpoch: string | undefined;
+  private frameCallback: number | undefined;
+  private frameIssue: string | undefined;
+  private presentation = new PresentationDiagnostics();
+  readonly encodedFrameSamples: { at: number; rtpTimestamp: number; layoutEpoch: string; encodedBytes?: number; keyframe?: boolean }[] = [];
+  frameCallbackRegistration: 'after-work' | 'before-work' = 'after-work';
+  get presentationDiagnostics() { return this.getPresentationDiagnostics(); }
+  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { paintVersion: 'event-driven-v2', selectedViewId: this.selectedViewId, callbackRegistration: this.frameCallbackRegistration, encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples } : {}) }; }
+  resetPresentationDiagnostics() { this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; }
+  recordClientRaf(at: number) { this.presentation.clientRaf(at); }
+  recordPresentationCost(name: string, at: number, durationMs: number, view: string | null = null) { this.presentation.cost(name, at, durationMs, view); }
+  get displayReady() { return this.frameGate.ready && this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout?.epoch; }
+  get presentedFrame() { return this.displayReady ? { rtpTimestamp: this.displayedRtp, layoutEpoch: this.displayedEpoch } : null; }
+  layout: Layout | null = null;
+  diagnostics: Diagnostics = { connection: '未连接', channel: '未连接' };
+  private peer: RTCPeerConnection | null = null;
+  private channel: RTCDataChannel | null = null;
+  private listeners = new Set<() => void>();
+  private frameListeners = new Set<() => void>();
+  private paintListeners = new Set<() => void>();
+  private presentedListeners = new Set<(frame: CanvasPresentation) => void>();
+  private viewPresentations = new Map<string, CanvasPresentation>();
+  private pendingPresentations: CanvasPresentation[] = [];
+  private dispatchingPaint = false;
+  private authorizedAt = 0;
+  selectedViewId: string | undefined;
+  private lastInboundSample: { timestamp: number; bytes: number; frames?: number } | undefined;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private sequence = 0n;
+  readonly inputTrace: Record<string, unknown>[] = [];
+  readonly inputResults: Record<string, unknown>[] = [];
+  private traceInput(phase: string, surface: Surface, event: Record<string, unknown>, reason?: string) { this.inputTrace.push({ at: performance.now(), phase, view: surface.id, eventType: event.type, action: event.action, reason, epoch: this.layout?.epoch }); if (this.inputTrace.length > 128) this.inputTrace.shift(); }
+  private focusSequence = 0n;
+  private pendingFocus: { requestId: string; acknowledged: boolean; focused: boolean; view: string; session: string; token: string; instance: string; document: string; generation: string; epoch: string; events: Record<string, unknown>[] } | null = null;
+  private attempt = 0;
+  private connectionId: string | undefined;
+  private endpointGeneration: number | undefined;
+  private reconnect = new ReconnectPolicy();
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  private connectingPromise: Promise<void> | undefined;
+  private pendingFailure: string | undefined;
+  private manualRestart = false;
+  constructor() { this.video.autoplay = true; this.video.muted = true; this.video.playsInline = true; }
+  subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+  subscribeFrames = (listener: () => void) => { this.frameListeners.add(listener); return () => { this.frameListeners.delete(listener); }; };
+  subscribePaint = (listener: () => void) => { this.paintListeners.add(listener); return () => { this.paintListeners.delete(listener); }; };
+  subscribePresentedFrames = (listener: (frame: CanvasPresentation) => void) => { this.presentedListeners.add(listener); return () => { this.presentedListeners.delete(listener); }; };
+  getLastPresentation(viewId: string) { const frame = this.viewPresentations.get(viewId); return frame?.layoutEpoch === this.layout?.epoch ? frame : undefined; }
+  getPaintedFrame(viewId: string, rtpTimestamp: number) { const frame = this.getLastPresentation(viewId); return frame?.rtpTimestamp === rtpTimestamp && this.displayedRtp === rtpTimestamp && this.displayReady ? this.displayFrame : undefined; }
+  reportPresented(viewId: string, rtpTimestamp: number, paintedAt: number, paintedWallTime = Date.now()) {
+    if (!this.layout || !this.displayReady || this.displayedRtp !== rtpTimestamp || !this.layout.views.some(view => view.id === viewId)) return;
+    const old = this.viewPresentations.get(viewId), isNewFrame = old?.rtpTimestamp !== rtpTimestamp || old.layoutEpoch !== this.layout.epoch;
+    const frame = { viewId, rtpTimestamp, layoutEpoch: this.layout.epoch, paintedAt, paintedWallTime, authorizedAt: this.authorizedAt };
+    this.viewPresentations.set(viewId, frame); this.presentation.paint(paintedAt, viewId, rtpTimestamp, frame.layoutEpoch, this.authorizedAt, isNewFrame);
+    this.flushFocusedInput();
+    if (isNewFrame) { if (this.dispatchingPaint) this.pendingPresentations.push(frame); else this.presentedListeners.forEach(listener => listener(frame)); }
+  }
+  private canInput(viewId: string) { return this.displayReady && !!this.getLastPresentation(viewId); }
+  private notify() { this.listeners.forEach(listener => listener()); }
+  private update(change: Partial<Diagnostics>) { this.diagnostics = { ...this.diagnostics, ...change }; this.notify(); }
+  setMarkerStats(report: { inputToObservedMs: { p50: number | null; p95: number | null }; renderToObservedMs: { p50: number | null; p95: number | null }; samples: unknown[]; markerSampleHz?: number | null }) {
+    const input = report.inputToObservedMs; const render = report.renderToObservedMs;
+    const measured = input.p50 !== null ? input : render; const kind = input.p50 !== null ? 'input' : 'render';
+    this.update({ markerSampleHz: typeof report.markerSampleHz === 'number' ? report.markerSampleHz : undefined, marker: measured.p50 === null || measured.p95 === null ? undefined : { kind, p50: measured.p50, p95: measured.p95, samples: report.samples.length } });
+  }
+  async connect() {
+    this.reconnect.start(); clearTimeout(this.retryTimer); this.retryTimer = undefined; this.pendingFailure = undefined;
+    if (this.connectingPromise) {
+      this.manualRestart = true; this.closeLocal(); await this.connectingPromise;
+      if (!this.reconnect.wanted || !this.manualRestart) return;
+      this.manualRestart = false;
+    }
+    await this.beginConnection();
+  }
+  private beginConnection(): Promise<void> {
+    if (this.connectingPromise) return this.connectingPromise;
+    const job = this.establish().finally(() => {
+      if (this.connectingPromise === job) this.connectingPromise = undefined;
+      if (this.pendingFailure && !this.manualRestart) { const reason = this.pendingFailure; this.pendingFailure = undefined; this.scheduleReconnect(reason); }
+    });
+    this.connectingPromise = job; return job;
+  }
+  private scheduleReconnect(reason: string) {
+    if (!this.reconnect.wanted || this.retryTimer) return;
+    if (this.connectingPromise) { this.pendingFailure = reason; return; }
+    const retry = this.reconnect.schedule();
+    if (!retry) { if (this.reconnect.attempt >= 3) this.update({ connection: '连接失败', error: `${reason}；自动重连已尝试 3 次，请点击重新连接。` }); return; }
+    this.update({ connection: `${retry.delayMs / 1000} 秒后重连（${retry.attempt}/3）`, error: reason });
+    this.retryTimer = setTimeout(() => { this.retryTimer = undefined; if (this.reconnect.beginRetry()) void this.beginConnection(); }, retry.delayMs);
+  }
+  private connectionFailed(reason: string) { this.closeLocal(); this.update({ connection: '连接失败', error: reason }); this.scheduleReconnect(reason); }
+  observeEndpointGeneration(generation: number | undefined) {
+    if (generation !== undefined && this.endpointGeneration !== undefined && this.endpointGeneration !== generation && this.reconnect.wanted && this.peer) this.connectionFailed('Endpoint 已重启，正在恢复原工作台');
+  }
+  private async establish() {
+    this.closeLocal(); this.signaling = undefined;
+    const attempt = ++this.attempt;
+    this.update({ connection: '正在连接', error: undefined });
+    try {
+      const peer = new RTCPeerConnection({ bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
+      this.peer = peer;
+      const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
+      const codecs = RTCRtpReceiver.getCapabilities?.('video')?.codecs;
+      if (codecs && typeof transceiver.setCodecPreferences === 'function') transceiver.setCodecPreferences([...codecs.filter(codec => codec.mimeType.toLowerCase() === 'video/h264'), ...codecs.filter(codec => codec.mimeType.toLowerCase() !== 'video/h264')]);
+      peer.onconnectionstatechange = () => {
+        if (this.peer !== peer) return;
+        if (peer.connectionState === 'connected') { clearTimeout(this.retryTimer); this.retryTimer = undefined; this.pendingFailure = undefined; }
+        if (peer.connectionState === 'failed' || peer.connectionState === 'closed' || peer.connectionState === 'disconnected') { this.connectionFailed('媒体连接已中断'); return; }
+        const labels: Record<string, string> = { new: '正在连接', connecting: '正在连接', connected: '已连接', disconnected: '连接中断', failed: '连接失败', closed: '未连接' };
+        this.update({ connection: labels[peer.connectionState] ?? peer.connectionState });
+      };
+      peer.ontrack = event => {
+        if (this.peer !== peer) return;
+        this.video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+        this.startFramePump(peer);
+        void this.video.play().catch(() => this.update({ error: '视频播放被浏览器阻止，请重新连接。' }));
+      };
+      this.bindChannel(peer.createDataChannel('remotekit', { ordered: true }));
+      peer.ondatachannel = event => this.bindChannel(event.channel);
+      const originalOffer = await peer.createOffer();
+      const effectiveOffer = configureReceiveOffer(originalOffer.sdp ?? '', this.receiveProfile, navigator.userAgent);
+      await peer.setLocalDescription({ type: 'offer', sdp: effectiveOffer.sdp });
+      await new Promise<void>((resolve, reject) => {
+        if (peer.iceGatheringState === 'complete') { resolve(); return; }
+        const timeout = setTimeout(() => { cleanup(); reject(new Error('ICE 收集超时，请检查网络后重试。')); }, 12000);
+        const changed = () => { if (peer.iceGatheringState === 'complete' || peer.signalingState === 'closed') { cleanup(); resolve(); } };
+        const cleanup = () => { clearTimeout(timeout); peer.removeEventListener('icegatheringstatechange', changed); peer.removeEventListener('signalingstatechange', changed); };
+        peer.addEventListener('icegatheringstatechange', changed);
+        peer.addEventListener('signalingstatechange', changed);
+      });
+      if (attempt !== this.attempt) return;
+      this.signaling = { receiveProfile: this.receiveProfile, originalOfferSdp: originalOffer.sdp, originalGatheredSdp: originalGatheredOffer(peer.localDescription?.sdp ?? '', originalOffer.sdp ?? ''), effectiveOfferSdp: peer.localDescription?.sdp, changes: effectiveOffer.changes };
+      const answer = await request<RTCSessionDescriptionInit & { connectionId: string; endpointGeneration?: number; networkSimulation?: Record<string, unknown> }>('/api/rtc/offer', { type: 'offer', sdp: peer.localDescription?.sdp });
+      if (attempt !== this.attempt) { void request('/api/rtc/close', { connectionId: answer.connectionId }).catch(() => {}); return; }
+      this.connectionId = answer.connectionId;
+      this.endpointGeneration = answer.endpointGeneration;
+      this.signaling.answerSdp = answer.sdp;
+      this.update({ connectionId: answer.connectionId, networkSimulation: answer.networkSimulation });
+      await peer.setRemoteDescription(answer);
+      if (attempt !== this.attempt) return;
+      this.timer = setInterval(() => { void this.readStats(peer); }, 1500);
+    } catch (error) {
+      if (attempt !== this.attempt) return;
+      this.connectionFailed(error instanceof Error ? error.message : String(error));
+    }
+  }
+  private startFramePump(peer: RTCPeerConnection) {
+    const attempt = this.attempt;
+    if (this.frameCallback !== undefined) this.video.cancelVideoFrameCallback?.(this.frameCallback);
+    if (typeof this.video.requestVideoFrameCallback !== 'function') { this.update({ error: '浏览器缺少视频帧时间戳回调，无法安全匹配布局；画面与输入已暂停。' }); return; }
+    const receive = (_now: number, metadata: VideoFrameCallbackMetadata) => {
+      if (this.peer !== peer || attempt !== this.attempt) return;
+      const callbackStarted = performance.now();
+      const beforeWork = this.frameCallbackRegistration === 'before-work';
+      if (beforeWork) this.frameCallback = this.video.requestVideoFrameCallback(receive);
+      try {
+      const rtp = (metadata as VideoFrameCallbackMetadata & { rtpTimestamp?: number }).rtpTimestamp;
+      this.frameGate.observe(rtp);
+      const at = performance.now();
+      this.presentation.video(at, this.frameGate.rtpTimestamp, this.layout?.epoch, this.frameGate.epochFor(this.frameGate.rtpTimestamp), { ...metadata, decoded: (this.video as HTMLVideoElement & { webkitDecodedFrameCount?: number }).webkitDecodedFrameCount });
+      if (this.frameGate.rtpTimestamp === undefined) {
+        if (this.frameIssue !== 'missing-rtp') { this.frameIssue = 'missing-rtp'; this.update({ error: '视频帧缺少 rtpTimestamp，无法安全匹配布局；画面与输入已暂停。' }); }
+      } else {
+        const width = this.video.videoWidth, height = this.video.videoHeight;
+        if (width > 0 && height > 0) {
+          if (this.pendingFrame.width !== width || this.pendingFrame.height !== height) { this.pendingFrame.width = width; this.pendingFrame.height = height; }
+          const start = performance.now(); this.pendingFrame.getContext('2d', { alpha: false })?.drawImage(this.video, 0, 0); this.presentation.cost('videoSnapshot', start, performance.now() - start);
+          this.authorizeFrame();
+        }
+      }
+      } finally {
+        if (!beforeWork && this.peer === peer && attempt === this.attempt) this.frameCallback = this.video.requestVideoFrameCallback(receive);
+        this.presentation.cost('videoCallbackTotal', callbackStarted, performance.now() - callbackStarted);
+      }
+    };
+    this.frameCallback = this.video.requestVideoFrameCallback(receive);
+  }
+  private authorizeFrame() {
+    if (!this.frameGate.ready || !this.layout || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
+    if (this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout.epoch) return;
+    // Swap the authorized snapshot rather than copying the atlas a second time.
+    [this.authorizedFrame, this.pendingFrame] = [this.pendingFrame, this.authorizedFrame];
+    this.displayedRtp = this.frameGate.rtpTimestamp; this.displayedEpoch = this.layout.epoch;
+    this.authorizedAt = performance.now(); this.presentation.authorize(this.authorizedAt, this.displayedRtp!, this.displayedEpoch);
+    this.reconnect.connected();
+    if (this.frameIssue === 'missing-rtp') { this.frameIssue = undefined; this.update({ error: undefined }); }
+    this.dispatchingPaint = true;
+    try { this.paintListeners.forEach(listener => listener()); }
+    finally { this.dispatchingPaint = false; const frames = this.pendingPresentations.splice(0); for (const frame of frames) this.presentedListeners.forEach(listener => listener(frame)); }
+    this.flushFocusedInput();
+    this.frameListeners.forEach(listener => listener());
+  }
+  private flushFocusedInput() {
+    const pending = this.pendingFocus;
+    if (!pending || !this.canInput(pending.view)) return;
+    const surface = this.layout?.views.find(view => view.id === pending.view);
+    if (pending.acknowledged && surface && surface.session === pending.session && surface.instance === pending.instance && surface.document === pending.document && this.layout?.generation === pending.generation && this.layout.epoch === pending.epoch) { this.pendingFocus = null; if (pending.focused) for (const event of pending.events) this.sendInput(surface, event); }
+  }
+  private bindChannel(channel: RTCDataChannel) {
+    this.channel = channel;
+    channel.onopen = () => { if (this.channel === channel) this.update({ channel: '已连接' }); };
+    channel.onclose = () => { if (this.channel === channel) this.connectionFailed('输入通道已关闭'); };
+    channel.onerror = () => { if (this.channel === channel) this.connectionFailed('输入通道出现错误'); };
+    channel.onmessage = event => {
+      if (this.channel !== channel) return;
+      try {
+        const message = JSON.parse(String(event.data));
+        if (message.type === 'layout' && Array.isArray(message.views)) {
+          this.layout = message;
+          this.frameGate.setEpoch(message.epoch);
+          this.authorizeFrame();
+          const pending = this.pendingFocus;
+          const surface = this.layout?.views.find(view => view.id === pending?.view);
+          if (pending && (!surface || surface.session !== pending.session || surface.instance !== pending.instance || surface.document !== pending.document || this.layout?.generation !== pending.generation || this.layout?.epoch !== pending.epoch)) this.pendingFocus = null;
+          this.flushFocusedInput();
+          this.notify();
+        }
+        if (message.type === 'frame') { const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); this.authorizeFrame(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
+        if (message.type === 'stats') this.update({ endpoint: message });
+        if (message.type === 'input.result' || message.type === 'focus') {
+          this.inputResults.push({ at: performance.now(), ...message }); if (this.inputResults.length > 128) this.inputResults.shift();
+          if (message.type === 'input.result' && message.ok === false) this.update({ error: String(message.error ?? '远程输入被拒绝') });
+          if (message.type === 'focus' && this.layout) {
+            const pending = this.pendingFocus, token = message.token;
+            const view = pending && this.layout.views.find(view => view.id === pending.view && view.session === pending.session && view.instance === pending.instance && view.document === pending.document);
+            const matches = pending && view && message.focusRequestId === pending.requestId && message.layoutEpoch === pending.epoch && this.layout.epoch === pending.epoch && this.layout.generation === pending.generation;
+            if (matches && message.ok === false) { this.pendingFocus = null; this.update({ error: String(message.error ?? '远程焦点请求被拒绝') }); }
+            if (matches && message.ok && token && token.view === pending.view && token.session === pending.session && token.instance === pending.instance && token.document === pending.document && typeof token.focus === 'string') { view.focus = token.focus; pending.acknowledged = true; this.flushFocusedInput(); }
+          }
+        }
+        if (message.type === 'error') this.update({ error: String(message.message ?? 'Endpoint 返回错误') });
+      } catch { this.update({ error: '收到无法识别的 Endpoint 消息。' }); }
+    };
+  }
+  sendInput(surface: Surface, event: Record<string, unknown>) {
+    if (this.channel?.readyState !== 'open' || !this.layout || !this.canInput(surface.id)) { this.traceInput('blocked', surface, event, this.channel?.readyState !== 'open' ? 'channel' : 'unmatched-or-unpainted-frame'); return false; }
+    if (this.pendingFocus?.view === surface.id) { if (!this.pendingFocus.focused) { this.traceInput('blocked', surface, event, 'blur-pending'); return false; } if (this.pendingFocus.events.length < 64) { this.pendingFocus.events.push(event); this.traceInput('queued-focus', surface, event); return true; } this.traceInput('blocked', surface, event, 'focus-queue-full'); return false; }
+    if (this.channel.bufferedAmount > 256 * 1024) { this.update({ error: '输入通道拥塞，请稍后重试。' }); return; }
+    const current = this.layout.views.find(view => view.id === surface.id);
+    if (!current || current.instance !== surface.instance || current.document !== surface.document) { this.traceInput('blocked', surface, event, 'stale-surface'); return false; }
+    this.channel.send(JSON.stringify({ type: 'input', view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, outputGeneration: this.layout.generation, layoutEpoch: this.layout.epoch, sequence: String(++this.sequence), event }));
+    this.traceInput('sent', surface, event); return true;
+  }
+  focus(surface: Surface, focused: boolean) {
+    if (this.channel?.readyState !== 'open' || !this.layout || !this.canInput(surface.id)) return;
+    const current = this.layout.views.find(view => view.id === surface.id);
+    if (!current || current.instance !== surface.instance || current.document !== surface.document) return;
+    const pending = this.pendingFocus;
+    if (pending && pending.view === current.id && pending.session === current.session && pending.instance === current.instance && pending.document === current.document && pending.epoch === this.layout.epoch && pending.generation === this.layout.generation && pending.focused === focused) return;
+    const requestId = `${this.attempt}:${++this.focusSequence}`;
+    this.pendingFocus = { requestId, acknowledged: false, focused, view: current.id, session: current.session, token: current.focus, instance: current.instance, document: current.document, generation: this.layout.generation, epoch: this.layout.epoch, events: [] };
+    this.channel.send(JSON.stringify({ type: 'focus', focusRequestId: requestId, view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, layoutEpoch: this.layout.epoch, focused }));
+  }
+  private async readStats(peer: RTCPeerConnection) {
+    try {
+      const stats = await peer.getStats();
+      if (peer !== this.peer) return;
+      const update: Partial<Diagnostics> = {};
+      stats.forEach(report => {
+        if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) {
+          update.framesDecoded = report.framesDecoded; update.framesPerSecond = report.framesPerSecond; update.bytesReceived = report.bytesReceived;
+          if (typeof report.timestamp === 'number' && typeof report.bytesReceived === 'number') {
+            const previous = this.lastInboundSample;
+            if (previous && report.timestamp > previous.timestamp && report.bytesReceived >= previous.bytes) update.receiveBitrateBps = (report.bytesReceived - previous.bytes) * 8000 / (report.timestamp - previous.timestamp);
+            if (previous?.frames !== undefined && typeof report.framesDecoded === 'number' && report.timestamp > previous.timestamp && report.framesDecoded >= previous.frames) update.decodedFramesPerSecond = (report.framesDecoded - previous.frames) * 1000 / (report.timestamp - previous.timestamp);
+            else if (typeof report.framesPerSecond === 'number') update.decodedFramesPerSecond = report.framesPerSecond;
+            this.lastInboundSample = { timestamp: report.timestamp, bytes: report.bytesReceived, frames: report.framesDecoded };
+          }
+          update.videoWidth = report.frameWidth; update.videoHeight = report.frameHeight;
+          if (report.codecId) update.codec = stats.get(report.codecId)?.mimeType;
+        }
+        if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) { update.roundTripTime = report.currentRoundTripTime; update.selectedCandidates = { pair: report, local: stats.get(report.localCandidateId), remote: stats.get(report.remoteCandidateId) }; }
+      });
+      if (this.diagnostics.networkSimulation && this.connectionId) update.networkSimulation = await request('/api/rtc/network', { connectionId: this.connectionId });
+      const paints = this.presentation.paintStatistics(); update.paintFpsByView = Object.fromEntries(Object.entries(paints).map(([id, value]) => [id, value.fps]));
+      update.displayFramesPerSecond = this.selectedViewId ? paints[this.selectedViewId]?.fps : undefined;
+      this.update(update);
+    } catch { /* A closed peer no longer has stats. */ }
+  }
+  disconnect() {
+    this.reconnect.stop(); clearTimeout(this.retryTimer); this.retryTimer = undefined; this.pendingFailure = undefined; this.manualRestart = false;
+    this.closeLocal();
+  }
+  private closeLocal() {
+    this.attempt++;
+    if (this.frameCallback !== undefined) this.video.cancelVideoFrameCallback?.(this.frameCallback);
+    this.frameCallback = undefined; this.frameGate.clear(); this.displayedRtp = undefined; this.displayedEpoch = undefined; this.frameIssue = undefined;
+    this.lastInboundSample = undefined;
+    this.viewPresentations.clear(); this.pendingPresentations = []; this.dispatchingPaint = false;
+    this.endpointGeneration = undefined;
+    if (this.connectionId) { void request('/api/rtc/close', { connectionId: this.connectionId }).catch(() => {}); this.connectionId = undefined; }
+    clearInterval(this.timer);
+    const peer = this.peer; this.peer = null; this.channel = null; peer?.close();
+    this.video.pause(); this.video.srcObject = null; this.layout = null;
+    this.pendingFocus = null;
+    this.diagnostics = { connection: '未连接', channel: '未连接' }; this.notify();
+  }
+}

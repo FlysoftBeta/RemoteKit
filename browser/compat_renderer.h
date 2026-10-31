@@ -6,6 +6,7 @@
 namespace remotekit::browser {
 class CompatRendererClient : public content::ContentRendererClient {
  public:
+  void WebViewCreated(blink::WebView*, bool, const url::Origin*) override;
   void RenderFrameCreated(content::RenderFrame* render_frame) override;
 };
 }  // namespace remotekit::browser

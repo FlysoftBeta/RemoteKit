@@ -6,8 +6,27 @@
 
 - **browser**：独立 ContentMain/ContentBrowserClient/ContentRendererClient、BrowserContext 和 WebView adapter，不链接 Chrome 的 Browser/TabStripModel/BrowserView。当前呈现 backend 使用官方 Views/Aura。
 - **endpoint**：独立 C++20 + CMake/Ninja。Tenant → Session → Profile → WebView；当前每 Session 一个 Profile。MaxRects、不旋转、有 padding、显式排布失败；输入用 viewport DIP。
-- **SDK**：GN 构建 C ABI DLL，外部 CMake 只消费 C 头与 import lib。Mojo 本地 pipe 与跨进程 isolated 控制连接；libwebrtc 接入目前是 timeutils 链接探针。
-- **harness/client**：默认 Fence atlas 呈现；native HWND 为显式对照入口。测试管理器目前在 browser harness 中，原生 endpoint client 管理进程、输入与 GPU 消费。启动参数分配多个 Session，每 Session 独立 BrowserContext/存储目录；同 Session 页面共享 Profile。
+- **SDK**：GN 构建 C ABI DLL，外部 CMake 只消费 C 头与 import lib。Mojo 本地 pipe 与跨进程 isolated 控制连接；新增真实 libwebrtc PeerConnection、SDP/ICE、DataChannel 与外部 H.264 编码 C ABI。
+- **Control/串流服务**：Control是产品状态source of truth；Endpoint托管Session/browser与恢复数据，每租户一条H.264 atlas视频。
+- **原生demo**：显式构建browser_demo与endpoint_client，保留原测试管理器；Fence默认，native HWND为对照入口。
+
+## 串流接入状态
+
+| 项目 | 当前证据 |
+|---|---|
+| Control与客户端 | SQLite产品状态、会话鉴权、Tab/分屏/导航/设备配置、周期对账、生产bundle；25项测试与独立部署启动检查通过；真实beforeunload取消/确认通过；可配置LAN监听和HTTPS，本地TLS/secure-cookie检查通过 |
+| Chrome89 | 现有89.0.4389.90 headed真实运行；Sol检查桌面/平板UI与实际视频HUD；Pixel marker、IME composition、触摸响应、重复focus输入及endpoint退出自动恢复通过；主动断连后不自动重连 |
+| browser服务 | 单Session进程、动态页面、后台页不占atlas、独立Profile与恢复信息；1/4租户管理和尺寸重建实测通过 |
+| WebRTC SDK | 真正PeerConnection、SDP/ICE、DTLS/SCTP、native纹理租约、实际wire RTP、时钟校准、发送端stats；ABI2与共享atlas v2统一编译，4项RTC检查（含旧ABI拒绝、真实127候选ICE/DC与stats关闭屏障）及旧SDK检查通过 |
+| oneVPL | UHD630 legacy1.35真实异步编码；多inflight有效；连续升降码率/帧率240帧测试通过，Reset失败有界重建 |
+| NVENC | 独立硬件backend编译通过；本机没有NVIDIA GPU/编码驱动DLL，初始化明确不可用 |
+| 显示与输入同步 | 按rVFC的实际RTP时间戳匹配显示代次；真实视频/marker验证通过；在途关闭约52ms完成 |
+| 网络实验设施 | 真实UDP 10ms/24/48Mbps整形与Chrome89候选/转发通路验证通过 |
+| 性能 | 正在测20秒源/编码/显示节拍及参数矩阵，短功能片段不作为FPS或p95达标结论 |
+
+网页viewport/DPR与媒体采样分离已运行验证，用于高DPR和分屏超出接收level时等比缩小视频；输入按mediaScale映射，统计显示源/编码尺寸。同一atlas内desktop@1与tablet@2保持独立网页DPR。平板真实页面检查已通过：Android Chrome UA不带Mobile、CH Android/mobile=false、platform Linux armv81、DPR≈2、viewport/screen820×1180、coarse/no-hover/touch10；使用公开原生设置，无JS伪装或CDP附加。WorkerNavigator另行核对。
+
+实验条件、已测数值与最终性能表见 [串流实验](streaming-experiments.zh-CN.md)。
 
 ## 已实现
 
@@ -15,7 +34,7 @@
 |---|---|
 | 独立 content embedder、多页呈现 | 已构建运行；使用 Views/Aura |
 | 原生窗口 DPI | endpoint/browser 统一 PMv2；嵌入窗口从创建时即为无边框；父窗口响应 DPI 变化，以物理客户区像素调整子窗口 |
-| GPU atlas | 官方 GPU capture → browser staging/三槽共享纹理 → endpoint 自有 cache；ready/consumed shared fence；共享内存发布帧与布局；已编译，未运行验证 |
+| GPU atlas | 官方 GPU capture → browser staging/三槽共享纹理 → endpoint 自有 cache；ready/consumed shared fence；共享内存发布帧与布局；已通过真实视频链路运行 |
 | 输出节拍/重建 | 全 atlas 帧率上限、damage 合并、槽满保留最新；DPI 新代资源导入、GPU 失败最多3次重建；稳态无 browser↔endpoint 逐帧 Mojo |
 | Session 存储隔离 | 独立 BrowserContext/路径，localStorage 隔离测试通过 |
 | UA/Client Hints | 官方 embedder_support 算法、Chrome 品牌、GREASE、平台与完整版本；运行验证通过 |
@@ -27,16 +46,16 @@
 | unload/restore adapter | 完整 history/PageState，同进程 sessionStorage namespace；真实提交后完成；opaque chunk 导入导出校验 Session/Profile/版本，POST 自动恢复明确拒绝 |
 | 页面请求 | dialog/beforeunload、普通文件选择、context menu、pseudo fullscreen、find/zoom/edit/navigation；once 回复、文档失效取消，控制端轮询 pending/events |
 | Profile 服务 | 默认 deny 的 origin/embedding 权限配置；HTTPS-only 会话目录下载、进度/取消和 Windows quarantine；不包含 SafeBrowsing |
-| patchset | SHA-256 清单、检查/应用/逆序撤回、失败回滚；当前只需 WebRTC target visibility patch |
+| patchset | SHA-256 清单、检查/应用/逆序撤回、失败回滚；已改用官方 WebRTC component 边界，旧 visibility patch 精确撤回，当前清单为空；4项工具测试通过 |
 | 独立 SDK 消费 | GN build、完整 runtime 导出、MSVC CMake/Ninja link 和 smoke 通过 |
 
 ## 验证与限制
 
 此前 native 路径的 endpoint 核心测试、4 项 patchset 测试、SDK smoke 和隐藏窗口集成测试已通过，涵盖 identity、Session 存储隔离、输入 token、生命周期与 URL restore。SDK 50ms 无响应请求在63ms结束并使旧 handle 失效。这些结果不覆盖本轮新增 GPU、完整导航恢复及页面请求。
 
-本轮 browser/SDK 与独立 CMake Release endpoint 已编译链接；按用户要求不启动额外运行验证。新 GPU 链路、真实 Windows IME、触控手势、下载和资源重建尚需目标机器测试。测试包记录 backend、构建指纹和文件校验和。
+此前 DPI/GPU 阶段只做编译；本轮串流任务已授权并运行实验。GPU共享纹理、硬件编码、视频传输及正常尺寸重建已通过实际链路检查。原生 Windows IME、完整触控手势、下载和GPU故障恢复仍需目标机器测试。测试包记录 backend、构建指纹和文件校验和。
 
-保留 Aura，不称为无窗口 embedder。固定 WebView 集合，window.open 明确阻止；原生 popup 在 GPU 输出中的合成/命中尚未验证。pointer/keyboard lock 明确拒绝。目录上传、tooltip 原生 hook、HTTP/代理认证、客户端证书、PDF/打印及生产重连/认证未接通。跨 browser 的 sessionStorage 不随导航 blob 恢复。CDP 附加期间远程触控明确拒绝，以免争用同一个 emulator；native 与 injected touch 也遵循官方互斥规则。没有接编码器、音频或 WebRTC 传输；SDK 的 WebRTC 范围仍是 timeutils，不能称为完整 libwebrtc API 包。
+保留 Aura，不称为无窗口 embedder。旧 demo 为固定 WebView 集合；动态管理的接入状态见上节。window.open 仍明确阻止；原生 popup 在 GPU 输出中的合成/命中尚未验证。pointer/keyboard lock 明确拒绝。目录上传、tooltip 原生 hook、HTTP/代理认证、客户端证书、PDF/打印及生产重连/认证未接通。跨 browser 的 sessionStorage 不随导航 blob 恢复。CDP 附加期间远程触控明确拒绝，以免争用同一个 emulator；native 与 injected touch 也遵循官方互斥规则。音频未接。真实编码视频、延迟和FPS结果以上述串流接入状态为准；SDK暴露项目所需C ABI，不是完整libwebrtc C++ API包。
 
 ## 入口
 

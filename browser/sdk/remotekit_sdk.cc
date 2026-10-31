@@ -20,11 +20,14 @@
 #include "base/at_exit.h"
 #include "base/compiler_specific.h"
 #include "base/containers/span.h"
+#include "base/functional/bind.h"
 #include "base/json/json_reader.h"
 #include "base/json/json_writer.h"
 #include "base/no_destructor.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_view_util.h"
+#include "base/task/thread_pool/thread_pool_instance.h"
+#include "base/synchronization/waitable_event.h"
 #include "base/threading/platform_thread.h"
 #include "base/threading/thread.h"
 #include "base/time/time.h"
@@ -53,6 +56,8 @@ struct SDKState {
   std::map<uint64_t, std::unique_ptr<ControlChannel>> channels;
   uint64_t next_handle = 1;
   bool stopped = false;
+  bool owns_thread_pool = false;
+  size_t rtc_peers = 0;
 };
 
 SDKState& State() {
@@ -60,7 +65,38 @@ SDKState& State() {
   return *state;
 }
 constexpr size_t kMaxMessageSize = 1024 * 1024;
+void RunPoolLifecycle(SDKState& state, bool start) {
+  base::WaitableEvent done;
+  state.io_thread->task_runner()->PostTask(FROM_HERE, base::BindOnce(
+      [](bool start_pool, base::WaitableEvent* completed) {
+        if (start_pool) {
+          base::ThreadPoolInstance::CreateAndStartWithDefaultParams("RemoteKitSDK");
+        } else {
+          base::ThreadPoolInstance::Get()->Shutdown();
+          // Shutdown leaves Chromium workers alive; a loadable SDK requires
+          // the complete join barrier before DLL unload.
+          base::ThreadPoolInstance::Get()->JoinForTesting();
+          base::ThreadPoolInstance::Set(nullptr);
+        }
+        completed->Signal();
+      }, start, base::Unretained(&done)));
+  done.Wait();
+}
 }  // namespace
+
+// Internal lifetime handshake serializes peer creation/teardown with shutdown.
+int RemoteKitSdkBeginRtc() {
+  auto& state = State();
+  std::lock_guard lock(state.lock);
+  if (!state.at_exit || state.stopped) return REMOTEKIT_SDK_INVALID_STATE;
+  ++state.rtc_peers;
+  return REMOTEKIT_SDK_OK;
+}
+void RemoteKitSdkEndRtc() {
+  auto& state = State();
+  std::lock_guard lock(state.lock);
+  --state.rtc_peers;
+}
 
 uint32_t remotekit_sdk_abi_version(void) {
   return 1;
@@ -87,6 +123,10 @@ int remotekit_sdk_initialize(void) {
     state.stopped = true;
     return REMOTEKIT_SDK_INVALID_STATE;
   }
+  if (!base::ThreadPoolInstance::Get()) {
+    RunPoolLifecycle(state, true);
+    state.owns_thread_pool = true;
+  }
   state.ipc_support = std::make_unique<mojo::core::ScopedIPCSupport>(
       state.io_thread->task_runner(), mojo::core::ScopedIPCSupport::ShutdownPolicy::CLEAN);
   return REMOTEKIT_SDK_OK;
@@ -97,8 +137,14 @@ int remotekit_sdk_shutdown(void) {
   std::lock_guard<std::mutex> lock(state.lock);
   if (!state.at_exit)
     return REMOTEKIT_SDK_INVALID_STATE;
+  if (state.rtc_peers)
+    return REMOTEKIT_SDK_INVALID_STATE;
   state.channels.clear();
   state.ipc_support.reset();
+  if (state.owns_thread_pool) {
+    RunPoolLifecycle(state, false);
+    state.owns_thread_pool = false;
+  }
   state.io_thread->Stop();
   state.io_thread.reset();
   mojo::core::ShutDown();

@@ -174,12 +174,12 @@ struct AtlasClient::Impl {
         static_cast<double>(y - rect.top) * frame.height_pixels / (rect.bottom - rect.top);
     for (std::uint32_t i = 0; i < frame.view_count; ++i) {
       const auto& view = frame.views[i];
-      if ((view.reserved & kSharedAtlasViewStale) || view.device_scale_factor <= 0)
+      if ((view.reserved & kSharedAtlasViewStale) || view.atlas_pixels_per_dip <= 0)
         continue;
       if (ax >= view.x_pixels && ay >= view.y_pixels && ax < view.x_pixels + view.width_pixels &&
           ay < view.y_pixels + view.height_pixels)
-        return {view, (ax - view.x_pixels) / view.device_scale_factor,
-                (ay - view.y_pixels) / view.device_scale_factor, frame.generation};
+        return {view, (ax - view.x_pixels) / view.atlas_pixels_per_dip,
+                (ay - view.y_pixels) / view.atlas_pixels_per_dip, frame.generation};
     }
     return {};
   }
@@ -189,15 +189,15 @@ struct AtlasClient::Impl {
     if (!attached || frame.generation != target.output_generation)
       return {};
     Target result = target;
-    if (rect.right > rect.left && rect.bottom > rect.top && target.view.device_scale_factor > 0) {
+    if (rect.right > rect.left && rect.bottom > rect.top && target.view.atlas_pixels_per_dip > 0) {
       result.x =
           (static_cast<double>(x - rect.left) * frame.width_pixels / (rect.right - rect.left) -
            target.view.x_pixels) /
-          target.view.device_scale_factor;
+          target.view.atlas_pixels_per_dip;
       result.y =
           (static_cast<double>(y - rect.top) * frame.height_pixels / (rect.bottom - rect.top) -
            target.view.y_pixels) /
-          target.view.device_scale_factor;
+          target.view.atlas_pixels_per_dip;
     }
     return result;
   }
@@ -374,11 +374,11 @@ struct AtlasClient::Impl {
               (kAtlasTextInputActive | kAtlasTextInputCaretValid))
         continue;
       auto map_x = [&](float x) {
-        return rect.left + static_cast<LONG>((view.x_pixels + x * view.device_scale_factor) *
+        return rect.left + static_cast<LONG>((view.x_pixels + x * view.atlas_pixels_per_dip) *
                                              (rect.right - rect.left) / frame.width_pixels);
       };
       auto map_y = [&](float y) {
-        return rect.top + static_cast<LONG>((view.y_pixels + y * view.device_scale_factor) *
+        return rect.top + static_cast<LONG>((view.y_pixels + y * view.atlas_pixels_per_dip) *
                                             (rect.bottom - rect.top) / frame.height_pixels);
       };
       HIMC context = ImmGetContext(window);

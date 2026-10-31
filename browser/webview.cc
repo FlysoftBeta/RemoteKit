@@ -1,5 +1,6 @@
 #include "browser/webview.h"
 #include "browser/navigation_state.h"
+#include "browser/compat.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,10 +13,16 @@
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
+#include "base/no_destructor.h"
 #include "base/pickle.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "components/input/native_web_keyboard_event.h"
+#include "components/embedder_support/user_agent_utils.h"
+#include "components/version_info/version_info.h"
+#include "third_party/blink/public/common/web_preferences/web_preferences.h"
+#include "third_party/blink/public/common/widget/device_emulation_params.h"
+#include "third_party/blink/public/mojom/page/widget.mojom.h"
 #include "components/input/render_widget_host_input_event_router.h"
 #include "content/browser/renderer_host/frame_tree.h"                    // nogncheck
 #include "content/browser/renderer_host/frame_tree_node.h"               // nogncheck
@@ -31,6 +38,7 @@
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_handle.h"
+#include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/site_instance.h"
@@ -51,6 +59,10 @@
 
 namespace remotekit::browser {
 namespace {
+std::vector<WebView*>& DeviceAdapters() {
+  static base::NoDestructor<std::vector<WebView*>> adapters;
+  return *adapters;
+}
 Status Fail(Error error, const char* message) {
   return {error, message};
 }
@@ -139,6 +151,7 @@ WebView::WebView(content::BrowserContext* context,
                  SessionId session,
                  WebViewId view)
     : context_(context), endpoint_(endpoint), session_(session), view_(view) {
+  DeviceAdapters().push_back(this);
   CHECK(context_);
   CHECK(endpoint_);
   content::DevToolsAgentHost::AddObserver(this);
@@ -148,6 +161,7 @@ WebView::WebView(content::BrowserContext* context,
     CreateContents();
 }
 WebView::~WebView() {
+  std::erase(DeviceAdapters(), this);
   content::DevToolsAgentHost::RemoveObserver(this);
   weak_factory_.InvalidateWeakPtrs();
   lifecycle_timer_.Stop();
@@ -176,7 +190,88 @@ void WebView::CreateContents() {
   // Track native sequence starts from the beginning, even while disabled.
   // Creating an emulator only when injecting into an already active native
   // sequence would miss its start and defeat the official mutual exclusion.
-  static_cast<content::WebContentsImpl*>(contents_.get())->GetTouchEmulator(true);
+  auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
+  implementation->GetInputEventRouter();
+  implementation->GetTouchEmulator(true);
+}
+void WebView::OverridePreferences(content::WebContents* contents,
+                                   blink::web_pref::WebPreferences* prefs) {
+  for (auto* adapter : DeviceAdapters()) {
+    if (adapter->contents() != contents || !adapter->tablet_) continue;
+    prefs->touch_event_feature_detection_enabled = true;
+    prefs->pointer_events_max_touch_points = 10;
+    prefs->available_pointer_types = static_cast<int>(blink::mojom::PointerType::kPointerCoarseType);
+    prefs->primary_pointer_type = blink::mojom::PointerType::kPointerCoarseType;
+    prefs->available_hover_types = static_cast<int>(blink::mojom::HoverType::kHoverNone);
+    prefs->primary_hover_type = blink::mojom::HoverType::kHoverNone;
+    prefs->viewport_enabled = true;
+    prefs->viewport_meta_enabled = true;
+    prefs->shrinks_viewport_contents_to_fit = true;
+  }
+}
+void WebView::InvalidateLayoutInput() {
+  ReleaseKeyboard(true, true);
+  ReleasePointer(true);
+  endpoint_->InvalidateInput(session_, view_);
+}
+void WebView::ConfigureDevice(int width, int height, bool tablet, float scale) {
+  const bool mode_changed = tablet_ != tablet;
+  const bool initializing = viewport_width_ == 0;
+  const bool changed = viewport_width_ != width || viewport_height_ != height ||
+                       mode_changed || device_scale_ != scale;
+  viewport_width_ = width;
+  viewport_height_ = height;
+  tablet_ = tablet;
+  device_scale_ = scale;
+  if (!contents_ || !changed) return;
+  blink::UserAgentOverride ua;
+  if (tablet_) {
+    ua.ua_string_override = embedder_support::BuildUserAgentFromOSAndProduct(
+        "Linux; Android 10; K", "Chrome/" + version_info::GetMajorVersionNumber() + ".0.0.0");
+    auto metadata = ChromeUserAgentMetadata();
+    metadata.platform = "Android";
+    metadata.platform_version = "13.0.0";
+    metadata.architecture = "arm";
+    metadata.bitness = "64";
+    metadata.model.clear();
+    metadata.mobile = false;
+    metadata.wow64 = false;
+    metadata.form_factors = {"Tablet"};
+    ua.ua_metadata_override = std::move(metadata);
+  }
+  if (mode_changed || initializing) {
+    // Reload/back/forward inherit the NavigationEntry flag, not the new-tab
+    // default. Device mode belongs to this logical view's whole history.
+    auto& controller = contents_->GetController();
+    for (int i = 0; i < controller.GetEntryCount(); ++i)
+      controller.GetEntryAtIndex(i)->SetIsOverridingUserAgent(tablet_);
+    if (auto* pending = controller.GetPendingEntry())
+      pending->SetIsOverridingUserAgent(tablet_);
+  }
+  contents_->SetUserAgentOverride(ua, true);
+  contents_->OnWebPreferencesChanged();
+  ApplyDevice();
+}
+void WebView::ApplyDevice(content::RenderFrameHost* frame) {
+  if (!contents_ || !viewport_width_ || !viewport_height_) return;
+  if (!frame) frame = contents_->GetPrimaryMainFrame();
+  if (!frame || frame->GetParentOrOuterDocument()) return;
+  auto* host = static_cast<content::RenderFrameHostImpl*>(frame)->GetRenderWidgetHost();
+  auto& widget = host->GetAssociatedFrameWidget();
+  if (!widget) return;
+  blink::DeviceEmulationParams params;
+  params.screen_type = tablet_ ? blink::mojom::EmulatedScreenType::kMobile :
+                                blink::mojom::EmulatedScreenType::kDesktop;
+  params.screen_size = gfx::Size(viewport_width_, viewport_height_);
+  params.view_size = params.screen_size;
+  params.device_scale_factor = device_scale_;
+  params.screen_orientation_type = viewport_width_ > viewport_height_ ?
+      display::mojom::ScreenOrientation::kLandscapePrimary : display::mojom::ScreenOrientation::kPortraitPrimary;
+  params.screen_orientation_angle = viewport_width_ > viewport_height_ ? 90 : 0;
+  params.force_viewport_meta = tablet_;
+  params.force_text_size_adjust = tablet_;
+  params.force_android_overlay_scrollbar = tablet_;
+  widget->EnableDeviceEmulation(params, blink::mojom::DeviceEmulationCacheBehavior::kKeepCache);
 }
 Result<std::string> WebView::ExportNavigation() const {
   if (lifecycle_request_ || lifecycle_uncertain_)
@@ -242,6 +337,8 @@ Status WebView::Navigate(const GURL& url) {
       model->pending)
     return Fail(Error::unavailable, "WebView cannot navigate in this state");
   content::NavigationController::LoadURLParams params(url);
+  params.override_user_agent = tablet_ ? content::NavigationController::UA_OVERRIDE_TRUE :
+                                       content::NavigationController::UA_OVERRIDE_FALSE;
   if (!contents_->GetController().LoadURLWithParams(params))
     return Fail(Error::unavailable, "Navigation was not started");
   return {};
@@ -481,7 +578,8 @@ void WebView::RenderFrameDeleted(content::RenderFrameHost* frame) {
     ReleasePointer(false);
 }
 void WebView::RenderFrameHostChanged(content::RenderFrameHost* old_frame,
-                                     content::RenderFrameHost*) {
+                                     content::RenderFrameHost* new_frame) {
+  ApplyDevice(new_frame);
   // This notification is a document/RFH replacement, not an ordinary iframe
   // focus move. The old target may already have gone away: never use the new.
   if (input_frame_.get() == old_frame)
@@ -1202,9 +1300,15 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
     return {};
   }
   contents_ = std::move(restored.value);
+  const int configured_width = viewport_width_;
+  const int configured_height = viewport_height_;
+  viewport_width_ = 0;
+  ConfigureDevice(configured_width, configured_height, tablet_, device_scale_);
   visible_ = false;
   Observe(contents_.get());
-  static_cast<content::WebContentsImpl*>(contents_.get())->GetTouchEmulator(true);
+  auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
+  implementation->GetInputEventRouter();
+  implementation->GetTouchEmulator(true);
   // DidStartNavigation identifies this controller's selected history restore;
   // actual becomes live only after its non-error main-frame commit.
   contents_->GetController().LoadIfNecessary();
@@ -1313,6 +1417,8 @@ void WebView::DidStartNavigation(content::NavigationHandle* navigation) {
 }
 
 void WebView::ReadyToCommitNavigation(content::NavigationHandle* navigation) {
+  if (navigation->IsInPrimaryMainFrame())
+    ApplyDevice(navigation->GetRenderFrameHost());
   if (navigation->IsSameDocument())
     return;
   bool in_primary_page = navigation->IsInPrimaryMainFrame();

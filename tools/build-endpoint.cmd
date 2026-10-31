@@ -16,8 +16,27 @@ set "RK_TARGET="
 if "%~1"=="package" (
   set "RK_BUILD=%RK_ROOT%\build\endpoint-package"
   set "RK_PACKAGE_ARGS=-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF"
+  set "RK_TARGET=--target endpoint_service"
+)
+if "%~1"=="package-demo" (
+  set "RK_BUILD=%RK_ROOT%\build\endpoint-package"
+  set "RK_PACKAGE_ARGS=-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF"
   set "RK_TARGET=--target endpoint_client"
 )
+if "%~1"=="encoder-smoke" (
+  set "RK_BUILD=%RK_ROOT%\build\endpoint-package"
+  set "RK_PACKAGE_ARGS=-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF"
+  set "RK_TARGET=--target endpoint_encoder_smoke"
+)
+if "%~1"=="verify-media" (
+  set "RK_BUILD=%RK_ROOT%\build\endpoint-package"
+  set "RK_PACKAGE_ARGS=-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON"
+  set "RK_TARGET=--target endpoint_service endpoint_client endpoint_encoder_smoke endpoint_tests"
+)
+set "RK_PYTHON=C:\src\depot_tools\python3.bat"
+if defined REMOTEKIT_PYTHON set "RK_PYTHON=%REMOTEKIT_PYTHON%"
+call "%RK_PYTHON%" "%RK_ROOT%\tools\fetch-media-deps.py"
+if errorlevel 1 exit /b %errorlevel%
 set "RK_FRESH="
 if "%~1"=="fresh" set "RK_FRESH=--fresh"
 "%RK_CMAKE%\cmake.exe" %RK_FRESH% -S "%RK_ROOT%" -B "%RK_BUILD%" -G Ninja -DCMAKE_MAKE_PROGRAM="%RK_NINJA%" %RK_PACKAGE_ARGS%
@@ -28,5 +47,7 @@ if "%~1"=="fresh" set "RK_CLEAN=--clean-first"
 if errorlevel 1 exit /b %errorlevel%
 if "%~1"=="build-only" exit /b 0
 if "%~1"=="package" exit /b 0
-"%RK_CMAKE%\ctest.exe" --test-dir "%RK_ROOT%\build\endpoint" --output-on-failure
+if "%~1"=="package-demo" exit /b 0
+if "%~1"=="encoder-smoke" exit /b 0
+"%RK_CMAKE%\ctest.exe" --test-dir "%RK_BUILD%" --output-on-failure
 exit /b %errorlevel%

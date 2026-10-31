@@ -12,7 +12,7 @@ assert(port > 0 && port < 65536);
 const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const pages = targets.filter(t => t.type === 'page' && t.url === fixtureURL);
 pages.sort((a,b)=>a.id.localeCompare(b.id));
-assert.equal(pages.length, 2, 'Launch two fixture pages with --sessions=2');
+assert.equal(pages.length, 2, 'Launch remotekit_browser_demo with two fixture pages and --sessions=2');
 
 class CDP {
   constructor(socket) {

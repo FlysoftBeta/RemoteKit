@@ -64,12 +64,18 @@ Status ValidateInput(const InputPayload& p) {
       p);
   return ok ? Status{} : Fail(Error::invalid, "Invalid input payload or UTF-16 selection");
 }
-Result<SessionId> Endpoint::CreateSession(std::string tenant) {
+Result<SessionId> Endpoint::CreateSession(std::string tenant, SessionId requested_id) {
   if (tenant.empty())
     return {{}, Fail(Error::invalid, "Tenant cannot be empty")};
   if (tenants_.contains(tenant))
     return {{}, Fail(Error::already_exists, "Tenant already has a session")};
-  auto id = next_session_++;
+  if (!requested_id && next_session_ == UINT64_MAX)
+    return {{}, Fail(Error::unavailable, "Session ID space exhausted")};
+  auto id = requested_id ? requested_id : next_session_++;
+  if (sessions_.contains(id))
+    return {{}, Fail(Error::already_exists, "Session ID already exists")};
+  if (requested_id && requested_id >= next_session_)
+    next_session_ = requested_id == UINT64_MAX ? UINT64_MAX : requested_id + 1;
   sessions_.emplace(id, Session{id, tenant, {}, {}});
   tenants_.emplace(std::move(tenant), id);
   return {id, {}};
@@ -84,18 +90,39 @@ Result<ProfileId> Endpoint::AddProfile(SessionId s, std::string name) {
   it->second.profiles.emplace(id, Profile{id, std::move(name)});
   return {id, {}};
 }
-Result<WebViewId> Endpoint::CreateWebView(SessionId s, ProfileId p) {
+Result<WebViewId> Endpoint::CreateWebView(SessionId s, ProfileId p, WebViewId requested_id) {
   auto it = sessions_.find(s);
   if (it == sessions_.end())
     return {{}, Fail(Error::not_found, "Session not found")};
   if (!it->second.profiles.contains(p))
     return {{}, Fail(Error::wrong_session, "Profile does not belong to session")};
-  auto id = next_view_++;
+  if (!requested_id && next_view_ == UINT64_MAX)
+    return {{}, Fail(Error::unavailable, "WebView ID space exhausted")};
+  auto id = requested_id ? requested_id : next_view_++;
+  for (const auto& [session_id, session] : sessions_)
+    if (session.views.contains(id))
+      return {{}, Fail(Error::already_exists, "WebView ID already exists")};
+  if (requested_id && requested_id >= next_view_)
+    next_view_ = requested_id == UINT64_MAX ? UINT64_MAX : requested_id + 1;
   WebView v;
   v.id = id;
   v.profile = p;
   it->second.views.emplace(id, v);
   return {id, {}};
+}
+Status Endpoint::ResetWebView(SessionId session, WebViewId view) {
+  auto* model = MutableView(session, view);
+  if (!model) return Fail(Error::not_found, "WebView not found in session");
+  InvalidateInstance(session, view);
+  model->actual = model->desired = Residency::live;
+  model->last_lifecycle.reset();
+  return {};
+}
+Status Endpoint::RemoveWebView(SessionId session, WebViewId view) {
+  auto it = sessions_.find(session);
+  if (it == sessions_.end() || !it->second.views.erase(view))
+    return Fail(Error::not_found, "WebView not found in session");
+  return {};
 }
 const Session* Endpoint::FindSession(SessionId s) const {
   auto i = sessions_.find(s);
@@ -131,6 +158,12 @@ Status Endpoint::SetFocus(SessionId s, WebViewId id, bool focused) {
     v->focused = focused;
     ++v->focus_generation;
   }
+  return {};
+}
+Status Endpoint::InvalidateInput(SessionId session, WebViewId view) {
+  auto* model = MutableView(session, view);
+  if (!model) return Fail(Error::not_found, "WebView not found in session");
+  ++model->focus_generation;
   return {};
 }
 Status Endpoint::CommitDocument(SessionId s, WebViewId id) {

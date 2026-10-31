@@ -31,9 +31,11 @@ class QuietHandler(SimpleHTTPRequestHandler):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--browser', type=Path, default=Path(r'C:\src\chromium\src\out\dev\remotekit_browser.exe'))
+    parser.add_argument('--browser', type=Path, default=Path(r'C:\src\chromium\src\out\dev\remotekit_browser_demo.exe'))
     parser.add_argument('--client', type=Path, default=ROOT / 'build/sdk-smoke/remotekit_control_client.exe')
     args = parser.parse_args()
+    if not args.browser.is_file():
+        parser.error("Build explicit GN target remotekit_browser_demo before harness verification")
     run = ROOT / 'develop/tmp' / ('acceptance-' + secrets.token_hex(4))
     run.mkdir(parents=True)
     server = ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(QuietHandler, directory=str(ROOT / 'browser/testdata')))

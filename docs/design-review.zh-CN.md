@@ -5,7 +5,7 @@
 | 主题 | 当前选择与理由 | 实现差距／边界 |
 | --- | --- | --- |
 | 进程和 ABI | GN content embedder、独立 CMake endpoint、C ABI SDK，避开跨工具链 C++ ABI | 单个测试管理连接；生产认证、重连和多客户端未接 |
-| 管理与身份 | Tenant → Session → Profile → WebView；逻辑身份不依赖 Contents | 管理器暂在 browser harness；一个 Profile；固定 WebView 集合，无重启自动承接 |
+| 管理与身份 | Control 保存产品 Tab 与配置；Endpoint Session 持有恢复信息，每租户独立 browser/atlas，避免跨租户像素泄露 | 每 Session 当前一个 Profile；动态页面与对账的接入状态见当前状态 |
 | 内容视图 | 保留 Views/Aura，复用平台输入、OOPIF、合成与 widget；不装配 Chrome 窗口产品层 | 不是无 Aura/无 HWND；原生 popup 的 GPU 合成和命中未验证 |
 | 生命周期 | 用 renderer ack、原地 discard、独立 unload/restore，保留代次和超时结果 | 提供 primitive，尚无自动淘汰或完整期望状态 reconciliation |
 | 导航 | 完整 history/PageState，同进程保持 sessionStorage namespace；opaque 状态绑定 owner | 无跨 browser sessionStorage；无外部持久保存确认；POST 自动恢复拒绝 |
@@ -14,7 +14,7 @@
 | 节拍 | 保留 Chromium 合成节拍，限制 damage capture 和全 atlas 发布频率；合并背压 | 未实施自有 external BeginFrame 时钟；帧率参数是上限 |
 | 输入 | browser 逻辑焦点、实际 focused widget、OOPIF 和官方 touch ACK/gesture；DIP/像素分开 | CDP touch 互斥；完整 IME replacement range/span、逐字符几何和真实输入法验证未完成 |
 | 页面功能 | 文档绑定的异步请求及一次回复；权限、下载归 Profile | 普通文件/dialog/menu/find/zoom/edit 已接；动态 popup、目录上传、认证/证书、PDF/打印等尚缺接线 |
-| 媒体边界 | 当前只做 GPU 输出与输入，后续媒体保持独立 endpoint 资源所有权 | 编码/音频/WebRTC 管线不实施；timeutils 不代表完整 libwebrtc 接入 |
+| 媒体边界 | Endpoint 持有 oneVPL/NVENC 编码器和纹理池，GN SDK 提供 WebRTC C ABI；保留异步纹理租约 | 音频不接；本机只有 UHD630，NVENC 实测需 NVIDIA 硬件；性能目标待实验 |
 
 GPU 的两个完成域分别保护 Viz capture 池和跨进程输出池：capture lease 只能在桥接 GPU 读完后归还，输出槽只能在 endpoint GPU 读完后复用。窗口重绘使用 endpoint cache，设备错误不伪装为完成。这是资源正确性的约束，与元数据选择共享内存还是其他机制无关。
 

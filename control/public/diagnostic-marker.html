@@ -1,0 +1,7 @@
+<!doctype html><html><head><meta charset="utf-8"><title>RemoteKit Pixel Marker Fixture</title><style>body{margin:0;background:#142b3a;color:white;font:24px sans-serif}canvas{display:block;image-rendering:pixelated}p{padding:20px}</style></head><body><canvas width="640" height="120"></canvas><p>RemoteKit 远端 Pixel marker · 按任意键更新序号</p><script>
+// A remote stimulus fixture. The measuring client must detect these pixels in RECEIVED VIDEO.
+const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d'); let sequence=0;
+function draw(){ctx.fillStyle='#ff00ff';ctx.fillRect(0,0,640,120);for(let i=0;i<32;i++){ctx.fillStyle=(sequence>>>i)&1?'#fff':'#000';ctx.fillRect(i*20,20,20,80)}document.querySelector('p').textContent='RemoteKit Pixel marker · '+sequence;}
+addEventListener('keydown',()=>{sequence=(sequence+1)>>>0;draw()});
+addEventListener('message',e=>{if(e.origin===location.origin&&e.data&&e.data.type==='marker'){sequence=Number(e.data.sequence)>>>0;draw()}});draw();
+</script></body></html>

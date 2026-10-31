@@ -2,6 +2,7 @@
 #include <iostream>
 #include <limits>
 #include "remotekit/core.hpp"
+#include "remotekit/sampling.hpp"
 using namespace remotekit;
 #define CHECK(x)                                                       \
   do {                                                                 \
@@ -14,6 +15,32 @@ static bool Overlap(const PixelRect& a, const PixelRect& b) {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 int main() {
+  CHECK(H264RateLimits(31).bitrate_bps == 14000000 && H264RateLimits(31).cpb_kb == 1750);
+  auto full = FitH264Sampling(1928, 1088, 60, 42);
+  CHECK(full.width == 1928 && full.height == 1088 && full.scale == 1);
+  auto explicit_size = FitH264Sampling(3840, 2160, 60, 51, 1920, 1080);
+  CHECK(explicit_size.width == 1920 && explicit_size.height == 1080 && explicit_size.scale == .5);
+  auto tablet = FitH264Sampling(1656, 2376, 60, 42);
+  CHECK(tablet.scale > .5 && tablet.scale < 1 && tablet.width % 2 == 0 && tablet.height % 2 == 0);
+  CHECK(((tablet.width + 15) / 16) * ((tablet.height + 15) / 16) <= 8704);
+  auto legacy = FitH264Sampling(1928, 1088, 60, 31);
+  CHECK(((legacy.width + 15) / 16) * ((legacy.height + 15) / 16) * 60 <= 108000);
+  CHECK(FitH264Sampling(1920, 1080, 60, 0).width == 0);
+  Endpoint stable;
+  auto persisted = stable.CreateSession("stable-tenant", 987654321);
+  CHECK(persisted && persisted.value == 987654321);
+  auto stable_profile = stable.AddProfile(persisted.value, "default");
+  auto stable_view = stable.CreateWebView(persisted.value, stable_profile.value, 876543210);
+  CHECK(stable_view && stable_view.value == 876543210);
+  CHECK(stable.SetFocus(persisted.value, stable_view.value, true));
+  auto old_layout = stable.Token(persisted.value, stable_view.value).value;
+  CHECK(stable.InvalidateInput(persisted.value, stable_view.value));
+  CHECK(stable.Token(persisted.value, stable_view.value).value.instance == old_layout.instance);
+  CHECK(stable.AcceptInput(persisted.value, {old_layout, 1, MouseInput{}}).error == Error::stale);
+  CHECK(stable.ResetWebView(persisted.value, stable_view.value));
+  CHECK(stable.Token(persisted.value, stable_view.value).value.instance > old_layout.instance);
+  CHECK(stable.RemoveWebView(persisted.value, stable_view.value));
+  CHECK(!stable.FindWebView(persisted.value, stable_view.value));
   Endpoint e;
   auto s = e.CreateSession("tenant-a");
   auto b = e.CreateSession("tenant-b");

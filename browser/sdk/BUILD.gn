@@ -1,27 +1,27 @@
 import("//third_party/webrtc/webrtc.gni")
 
 shared_library("remotekit_sdk") {
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
   output_name = "remotekit_sdk"
   sources = [
     "../../sdk/include/remotekit_sdk.h",
+    "../../sdk/include/remotekit_rtc.h",
+    "remotekit_rtc.cc",
     "remotekit_sdk.cc",
+    "rtc_silent_audio.h",
   ]
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
+  libs = [ "ws2_32.lib" ]
 
-  # timeutils is linked into this DLL, rather than imported from the full
-  # webrtc_component. Its declarations must have the same export ownership.
-  configs += [ "//third_party/webrtc:library_impl_config" ]
+  # Consume Chromium's exported WebRTC component. This DLL only exports C ABI.
   deps = [
     "//base",
     "//mojo/core/embedder",
     "//mojo/public/cpp/platform",
     "//mojo/public/cpp/system",
-    "//third_party/webrtc/rtc_base:timeutils",
+    "//third_party/webrtc_overrides:webrtc_component",
     "//ui/events",
     "//ui/events:dom_keycode_converter",
   ]
-  if (rtc_exclude_system_time) {
-    deps += [ "//third_party/webrtc_overrides:system_time" ]
-  }
   write_runtime_deps = "$root_out_dir/remotekit_sdk.runtime_deps"
 }

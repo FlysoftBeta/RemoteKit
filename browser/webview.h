@@ -27,6 +27,7 @@ class RenderWidgetHostImpl;
 class RenderFrameHostImpl;
 class RenderWidgetHostViewBase;
 }  // namespace content
+namespace blink::web_pref { struct WebPreferences; }
 namespace input {
 class TouchEmulator;
 }
@@ -59,6 +60,9 @@ class WebView final : public content::WebContentsObserver,
   Status SetVisible(bool);
   Status Focus(bool);
   void SetNativeFocusEnabled(bool enabled);
+  void ConfigureDevice(int width, int height, bool tablet, float scale = 1);
+  void InvalidateLayoutInput();
+  static void OverridePreferences(content::WebContents*, blink::web_pref::WebPreferences*);
   SharedAtlasTextInput TextInputState() const;
   Status DispatchInput(const InputEvent&);
   // Acceptance/processing status, never a renderer/JavaScript execution ACK.
@@ -87,6 +91,7 @@ class WebView final : public content::WebContentsObserver,
   void RenderFrameDeleted(content::RenderFrameHost*) override;
   void RenderFrameHostChanged(content::RenderFrameHost*, content::RenderFrameHost*) override;
   void CreateContents();
+  void ApplyDevice(content::RenderFrameHost* frame = nullptr);
   content::RenderWidgetHostImpl* FocusedWidget() const;
   void CancelTouches(bool deliver);
   bool HasTouchEmulatorConflict() const;
@@ -122,6 +127,9 @@ class WebView final : public content::WebContentsObserver,
   SessionId session_;
   WebViewId view_;
   std::unique_ptr<content::WebContents> contents_;
+  int viewport_width_ = 0, viewport_height_ = 0;
+  bool tablet_ = false;
+  float device_scale_ = 1;
   bool visible_{false};
   bool native_focus_enabled_{true};
   std::unique_ptr<NavigationState> navigation_state_;

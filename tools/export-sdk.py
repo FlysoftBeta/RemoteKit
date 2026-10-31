@@ -84,12 +84,17 @@ def main():
     shutil.copy2(import_lib, destination / "lib" / "remotekit_sdk.lib")
     header = Path(__file__).resolve().parents[1] / "sdk/include/remotekit_sdk.h"
     shutil.copy2(header, destination / "include" / header.name)
+    rtc_header = header.with_name("remotekit_rtc.h")
+    shutil.copy2(rtc_header, destination / "include" / rtc_header.name)
     shared_header = header.parents[2] / "endpoint/include/remotekit/shared_atlas.h"
     (destination / "include/remotekit").mkdir(exist_ok=True)
     shutil.copy2(shared_header, destination / "include/remotekit/shared_atlas.h")
     (destination / "manifest.json").write_text(json.dumps({
         **metadata,
         "abi_version": 1,
+        "rtc_abi_version": 2,
+        "public_headers": ["remotekit_sdk.h", "remotekit_rtc.h",
+                           "remotekit/shared_atlas.h"],
         "gn_target": "//remotekit/browser/sdk:remotekit_sdk",
         "component_build": component_build,
         "runtime": {
@@ -99,8 +104,9 @@ def main():
             "c_abi_only": True,
         },
         "runtime_dependencies": [str(relative) for _, relative in entries],
-        "scope": "local Mojo pipe, isolated named-channel JSON control, and "
-                 "WebRTC timeutils probe; not a complete libwebrtc SDK",
+        "scope": "local Mojo pipe, isolated named-channel JSON control, "
+                 "WebRTC PeerConnection SDP/ICE/DTLS-SRTP, DataChannel, "
+                 "and external asynchronous H264 encoder over D3D11 textures",
     }, indent=2) + "\n", encoding="utf-8")
     print(destination)
 

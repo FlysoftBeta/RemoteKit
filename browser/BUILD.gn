@@ -7,7 +7,11 @@ source_set("endpoint_model") {
   include_dirs = [ "//remotekit/endpoint/include" ]
 }
 
-executable("remotekit_browser") {
+template("browser_executable") {
+ executable(target_name) {
+  if (invoker.demo) {
+    defines = [ "REMOTEKIT_DEMO_HARNESS=1" ]
+  }
   configs -= [ "//build/config/clang:find_bad_constructs" ]
   configs -= [ "//build/config/win:console" ]
   configs += [ "//build/config/win:windowed" ]
@@ -91,6 +95,15 @@ executable("remotekit_browser") {
     "d3d11.lib",
     "dxgi.lib",
   ]
+}
+
+}
+
+browser_executable("remotekit_browser") {
+  demo = false
+}
+browser_executable("remotekit_browser_demo") {
+  demo = true
 }
 
 repack("pak") {

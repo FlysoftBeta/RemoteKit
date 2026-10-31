@@ -1,0 +1,38 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { RemoteTransport } from '../client/transport';
+import type { Surface } from '../client/types';
+
+function setup() {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => ({}) } });
+  let transport: RemoteTransport;
+  try { transport = new RemoteTransport(); } finally { if (previous) Object.defineProperty(globalThis, 'document', previous); else Reflect.deleteProperty(globalThis, 'document'); }
+  const surface = (id: string): Surface => ({ id, session: 's', instance: `i${id}`, document: `d${id}`, focus: '7', x: 0, y: 0, width: 640, height: 480, deviceScaleFactor: 1 });
+  const a = surface('1'), b = surface('2'), sent: Record<string, any>[] = [];
+  const channel: any = { readyState: 'open', bufferedAmount: 0, send: (data: string) => sent.push(JSON.parse(data)) };
+  transport.layout = { type: 'layout', generation: '1', epoch: '2', width: 1280, height: 480, views: [a, b] };
+  Object.defineProperty(transport, 'displayReady', { get: () => true });
+  (transport as any).viewPresentations.set('1', { layoutEpoch: '2' }); (transport as any).viewPresentations.set('2', { layoutEpoch: '2' });
+  (transport as any).bindChannel(channel);
+  const ack = (request: Record<string, any>, extras: Record<string, unknown> = {}) => channel.onmessage({ data: JSON.stringify({ type: 'focus', ok: true, focusRequestId: request.focusRequestId, layoutEpoch: request.layoutEpoch, token: { view: request.view, session: request.session, instance: request.instance, document: request.document, focus: request.focus }, ...extras }) });
+  return { transport, a, b, sent, ack };
+}
+
+test('already-focused ACK releases input even when the focus token remains unchanged', () => {
+  const { transport, a, sent, ack } = setup(); transport.focus(a, true); const request = sent[0];
+  transport.sendInput(a, { type: 'ime_commit', text: 'first' }); assert.equal(sent.length, 1);
+  transport.focus(a, true); assert.equal(sent.length, 1, 'duplicate pending focus preserves its queue');
+  ack(request); assert.equal(sent[1].event.text, 'first'); assert.equal(sent[1].focus, '7');
+  transport.focus(a, true); transport.sendInput(a, { type: 'ime_commit', text: 'second' }); ack(sent[2]); assert.equal(sent[3].event.text, 'second');
+});
+
+test('rapid A to B to A ignores old ACK and rejects mismatched epoch or identity', () => {
+  const { transport, a, b, sent, ack } = setup(); transport.focus(a, true); const old = sent[0]; transport.focus(b, true); transport.focus(a, true); const current = sent[2]; transport.sendInput(a, { type: 'ime_commit', text: 'current' });
+  ack(old); ack(current, { layoutEpoch: '1' }); ack(current, { token: { view: '1', session: 'other', instance: a.instance, document: a.document, focus: '8' } }); assert.equal(sent.length, 3);
+  ack(current); assert.equal(sent.length, 4); assert.equal(sent[3].event.text, 'current'); assert.equal(sent[3].view, '1');
+});
+
+test('matched rejected focus drops queued input and reports the rejection', () => {
+  const { transport, a, sent, ack } = setup(); transport.focus(a, true); transport.sendInput(a, { type: 'ime_commit', text: 'reject' }); ack(sent[0], { ok: false, error: 'stale_focus' }); assert.equal(sent.length, 1); assert.equal(transport.diagnostics.error, 'stale_focus');
+});

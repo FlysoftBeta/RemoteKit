@@ -1,0 +1,6 @@
+{
+  "name": "remotekit-control", "private": true, "type": "module",
+  "scripts": { "dev": "tsx server/main.ts", "client": "vite", "build": "tsc --noEmit && vite build && node ../tools/verify-control-build-server.mjs && node test/production-smoke.mjs", "start": "node dist/server.mjs", "test": "tsx --test test/*.test.ts" },
+  "dependencies": { "better-sqlite3": "^12.4.1", "react": "^19.2.0", "react-dom": "^19.2.0" },
+  "devDependencies": { "@types/better-sqlite3": "^7.6.13", "@types/node": "^24.10.0", "@types/react": "^19.2.0", "@types/react-dom": "^19.2.0", "@vitejs/plugin-react": "^5.1.0", "esbuild": "^0.28.2", "tsx": "^4.20.6", "typescript": "^5.9.3", "vite": "^7.2.2" }
+}

@@ -29,11 +29,12 @@
 ### endpoint、示例控制面与 Client
 
 - endpoint 管理多个 Tenant。一个 Tenant 对应一个 Session，一个 Session 对应一个或多个 Profile；**Session 是多租户数据隔离边界**。当前仅实现单 Profile，不应把这一实现限制当成最终层级设计。
-- 控制面是 demo/testing harness，之后不会直接完全复用，不要按生产控制服务过度建设。现阶段为了避开媒体管线复杂度，将测试管理与 endpoint 放在一起；真正控制面负责多 Tenant 管理。
+- 控制面是 demo/testing harness，之后不会直接完全复用，不要按生产控制服务过度建设。新 `/control` 承担产品状态和多 Tenant 管理；原内置 demo 仅由显式构建目标包含。
 - 示例将所有 WebView 通过 **Rectangle Packing** 排入一个 Windows 窗口，为未来用一个视频通道传输多个 WebView 做准备。
-- 支持文字、IME composition、触控、鼠标和键盘。将来通过 DataChannel 传输入，输入协议不能依赖本地 demo UI。
+- 支持文字、IME composition、触控、鼠标和键盘。本轮通过 DataChannel 传输入，输入协议不能依赖本地 demo UI。
 - endpoint 使用 **CMake + Ninja**，不希望其构建绑定 Chromium 自身的构建。Mojo 与 **libwebrtc 即使目前不用，也要接入构建/SDK 边界**；可按实际情况采用静态库或其他方案。当前 timeutils 探针不等于完成整个 libwebrtc 接入目标。
-- **暂不接编码器和 WebRTC 媒体/网络管线。** 当前也不接音频管线。库接入与媒体/网络管线接线是两件事。
+- **2026-11-01 新任务开启编码器和 WebRTC 媒体/网络管线**：oneVPL 异步 H.264、NVENC、libwebrtc；音频仍不在本轮范围。目标客户端 Chrome 89 Desktop，1/4 租户、RTT 10ms、下行 24–48Mbps，动态内容目标 FPS>50、Pixel marker 端到端延迟<100ms；目标需要实验测定，不能写作已达成。
+- 新增 `/control`，使用 TypeScript、Better-sqlite3、Vite、React；产品状态由 Control 持有，浏览器恢复数据由 Endpoint Session 与 Browser 托管。Client 直连 Endpoint WebRTC，Control 鉴权与管理。支持多 tab、split、桌面/平板布局和受 Control 管理的平板设备配置；原生 demo 保留为显式构建目标。
 - 用户要求实际使用 Fence 方案，正常运行不产生逐帧呈现通信。这里的边界是 browser ↔ endpoint；不要承诺 Chromium 内部 renderer/Viz/GPU 没有帧 IPC。
 - 必须正确处理 HiDPI、窗口 DPI 变化与点击坐标，区分客户区物理像素、atlas 像素、viewport DIP、letterbox 和 screen 坐标。
 
@@ -95,9 +96,9 @@ python3 tools/package-runtime.py
 
 `chromium.py` 将本仓库拥有的源码复制到 Chromium `//remotekit`，保留现有输出配置。endpoint 可以独立编译；运行时 SDK DLL 从 browser 所在目录加载。
 
-用户要求测试包放在 `develop/tmp`，从开发机复制到本机测试，避免 RDP 影响观感。默认包为 Fence atlas，完整解压运行 `run.cmd`；`run-native.cmd` 是显式 HWND 对照入口，不允许 Fence 失败后静默切换 native。包内收集 runtime DLL/Release CRT，不带开发机 Profile、PDB 和构建输入。
+用户要求测试包放在 `develop/tmp`，从开发机复制到本机测试，避免 RDP 影响观感。默认包为串流包（含Node/Control生产runtime），完整解压运行 `run.cmd`；原生对照包通过 `--kind demo` 生成，保留Fence/native显式选择，不允许Fence失败后静默切换native。包内收集 runtime DLL/Release CRT，不带开发机 Profile、PDB 和构建输入。
 
-按改动选择必要构建与检查，避免为可逆低影响修改添加镜像测试。**本轮用户明确说“不需要补验证”**：DPI 修复及后续新 GPU 路径只完成编译，没有额外启动窗口或运行验收。不要为了补齐报告擅自追加 UI 验证；新任务是否需要测试以当次指示为准。
+按改动选择必要构建与检查，避免为可逆低影响修改添加镜像测试。此前 DPI 修复及新 GPU 路径按当时要求只完成编译；2026-11-01 串流任务明确要求大量运行实验、逐环节与 Pixel marker 延迟测量，允许 headed Chrome 89 和 metrics 上传。视觉验证使用 GPT-6.1 Sol，UI 设计使用 GPT-6 Astra / Medium；不抢占用户鼠标键盘。
 
 区分源码实现、编译链接、协议/model 测试、Chromium 集成测试、真实硬件/IME 人工测试。旧 native 路径的测试结果不能覆盖新 GPU backend。未验证项写入当前状态，不写成“已通过”。
 
@@ -106,7 +107,7 @@ python3 tools/package-runtime.py
 下面记录的是 **当前实现选择，不是不可更改的用户需求**。详细能力及缺口以 `docs/current-state.zh-CN.md` 为准，取舍见 `docs/design-review.zh-CN.md`。
 
 - 保留 Views/Aura 平台适配，不链接 Chrome Browser/TabStripModel/BrowserView；不能称为无 Aura、无 HWND embedder。
-- 测试管理器目前运行在 browser harness 中，原生 endpoint client 管进程、输入和 GPU 消费。这是当前布置，与用户最初的职责目标需分开描述。
+- 默认路径为 `/control` 产品状态 + 独立 endpoint_service + 每 Session 一个 browser 进程/atlas。原 browser harness 与原生 endpoint client 仅由显式 demo 构建目标保留。此进程布置是本轮架构选择，不是用户不可更改的限制。
 - WebView 身份不依赖 WebContents。操作接受、执行中、实际完成分别报告；输入验证 Session、实例、文档、焦点、序号及可用的输出代次。
 - 当前每 Session 一个 Profile，第二个明确 unsupported；多 Profile 是尚未实现的目标。
 - 输出是官方 GPU capture → browser staging atlas → 三槽共享纹理 → endpoint 自有 cache。ready fence 表示真实 GPU 写完，consumed fence 表示真实 GPU 读完；capture 源 lease 也必须等桥接 GPU 读取完成后才归还。CPU 发布位、提交返回或保留 HANDLE 都不能代替 GPU 完成。
@@ -114,4 +115,5 @@ python3 tools/package-runtime.py
 - **共享内存是 Agent 选用的元数据方案，用户已追问其必要性，尚未最终要求保留或移除。** 当前只存帧信息、布局和输入状态，不传像素、不替代 Fence；不能把当前机制说成用户硬性要求。固定槽池用 Fence value 编码槽位/序号的替代方案尚未实施。
 - 共享映射定义为 `endpoint/include/remotekit/shared_atlas.h`；布局变化须更新版本和尺寸断言，并同时重建 browser、SDK、endpoint。
 - 完整导航恢复已接 history/PageState 和同进程 sessionStorage namespace；跨 browser 的 sessionStorage 仍未恢复。导入校验 Session/Profile/版本，POST 不自动重放。
-- 新 GPU、IME、触控、下载和资源重建的硬件运行结果尚未获得。动态 popup、认证/证书、PDF/打印、生产控制面等未接通内容，要保留为能力差距，不应把它们写成用户已放弃的目标。
+- GPU/QSV/WebRTC 已有真实Chrome89视频与输入响应证据；正式FPS/p95、真实IME/触控、下载与资源重建的完成情况以当前状态和串流实验文档为准。动态popup、认证/证书、PDF/打印等缺口仍保留，不能视为用户放弃。
+- 网页设备DPR/viewport与媒体采样分辨率分开；Endpoint GPU转换按协商接收上限等比下采样，stats记录原始/编码尺寸。客户端用实际wire RTP匹配显示代次，防止新布局命中旧帧。

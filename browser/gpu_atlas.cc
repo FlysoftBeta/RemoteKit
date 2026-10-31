@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <string>
@@ -16,9 +17,15 @@
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/functional/callback_helpers.h"
+#include "base/environment.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/json/json_writer.h"
+#include "base/process/process_handle.h"
 #include "base/sequence_checker.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "base/win/scoped_handle.h"
@@ -104,6 +111,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     gfx::GpuMemoryBufferHandle handle;
     mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> callbacks;
     base::TimeTicks submitted;
+    uint64_t capture_serial = 0;
   };
   struct Consumer {
     uint32_t pid = 0;
@@ -114,6 +122,12 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   State(uint32_t width, uint32_t height, uint64_t generation)
       : width_(width), height_(height), generation_(generation) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
+    precise_poll_ = base::Environment::Create()->GetVar("REMOTEKIT_GPU_POLL").value_or("") == "precise";
+    if (auto directory = base::Environment::Create()->GetVar("REMOTEKIT_MEDIA_TRACE")) {
+      trace_directory_ = base::FilePath::FromUTF8Unsafe(*directory);
+      trace_events_.reserve(64000);
+      trace_start_high_resolution_ = base::Time::IsHighResolutionTimerInUse();
+    }
     if (!width || !height || width > 16384 || height > 16384 || !generation) {
       error_ = "invalid atlas dimensions/generation";
       status_ = SharedAtlasStatus::kFailed;
@@ -149,8 +163,22 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       UnmapViewOfFile(mapping_.get());
   }
   void StartTimer() {
+    if (precise_poll_) {
+      ArmPrecisePoll();
+      return;
+    }
     timer_.Start(FROM_HERE, base::Milliseconds(2),
                  base::BindRepeating(&State::Poll, base::Unretained(this)));
+  }
+  void ArmPrecisePoll() {
+    precise_timer_.Start(FROM_HERE, base::TimeTicks::Now() + base::Milliseconds(2),
+                         this, &State::PrecisePoll, base::subtle::DelayPolicy::kPrecise);
+  }
+  void PrecisePoll() {
+    auto protect = shared_from_this();
+    Poll();
+    if (!stopping_ || !leases_.empty())
+      ArmPrecisePoll();
   }
   void StopCaptures() {
     for (auto& [id, capture] : captures_)
@@ -169,6 +197,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     if (!leases_.empty())
       keepalive_ = shared_from_this();
     Poll();
+    SaveTrace();
   }
   void Lost(std::string message) {
     error_ = std::move(message);
@@ -194,7 +223,9 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   bool Valid(const SharedAtlasView& v) const {
     return v.webview_id && v.width_pixels && v.height_pixels && v.x_pixels >= 0 &&
            v.y_pixels >= 0 && uint64_t(v.x_pixels) + v.width_pixels <= width_ &&
-           uint64_t(v.y_pixels) + v.height_pixels <= height_;
+           uint64_t(v.y_pixels) + v.height_pixels <= height_ &&
+           std::isfinite(v.atlas_pixels_per_dip) && v.atlas_pixels_per_dip > 0 &&
+           std::isfinite(v.page_device_scale_factor) && v.page_device_scale_factor > 0;
   }
   void SetViews(std::vector<View> views) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
@@ -227,7 +258,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
                          c.metadata.instance_generation != v.metadata.instance_generation ||
                          c.metadata.document_generation != v.metadata.document_generation ||
                          c.metadata.focus_generation != v.metadata.focus_generation ||
-                         c.metadata.device_scale_factor != v.metadata.device_scale_factor ||
+                         c.metadata.atlas_pixels_per_dip != v.metadata.atlas_pixels_per_dip ||
+                         c.metadata.page_device_scale_factor != v.metadata.page_device_scale_factor ||
                          c.metadata.reserved != v.metadata.reserved ||
                          !SameTextInput(c.metadata.text_input, v.metadata.text_input) ||
                          c.enabled != v.capture_enabled;
@@ -435,6 +467,15 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
                     const gfx::Rect& content_rect,
                     mojo::PendingRemote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> remote) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
+    ++capture_callbacks_;
+    Trace("capture_callback", capture_callbacks_,
+          info && info->metadata.capture_end_time
+              ? info->metadata.capture_end_time->since_origin().InMicroseconds() : 0,
+          capture.metadata.webview_id,
+          info ? info->metadata.capture_counter.value_or(-1) : -1,
+          info ? info->metadata.frame_rate.value_or(0) : 0,
+          info && info->metadata.capture_begin_time
+              ? info->metadata.capture_begin_time->since_origin().InMicroseconds() : 0);
     mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> callbacks(std::move(remote));
     auto drop = [&] {
       ++dropped_;
@@ -520,6 +561,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     lease.handle = std::move(handle);
     lease.callbacks = std::move(callbacks);
     lease.submitted = base::TimeTicks::Now();
+    lease.capture_serial = capture_callbacks_;
     // The source remains leased even if Signal/Release fails after the copy.
     lease.fence_value = Signal();
     leases_.push_back(std::move(lease));
@@ -566,6 +608,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     SharedAtlasFrame frame{};
     frame.generation = generation_;
     frame.frame_id = ++frame_id_;
+    Trace("atlas_publish", frame_id_, capture_time_us_, captured_);
     frame.ready_fence_value = value;
     frame.capture_time_us = capture_time_us_;
     frame.slot = static_cast<uint32_t>(slot);
@@ -589,6 +632,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     last_publication_ = now;
   }
   void Poll() {
+    Trace("poll", frame_id_, capture_time_us_, captured_);
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
     auto protect = shared_from_this();
     bool removed = device_ && FAILED(device_->GetDeviceRemovedReason());
@@ -599,6 +643,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       Lost("D3D device removed");
     for (auto it = leases_.begin(); it != leases_.end();) {
       if (removed || (completed != kRemoved && it->fence_value && completed >= it->fence_value)) {
+        Trace("source_read_done", it->capture_serial, it->submitted.since_origin().InMicroseconds(), completed);
         if (it->callbacks)
           it->callbacks->Done();
         it = leases_.erase(it);
@@ -623,6 +668,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
           !leases_.empty() && base::TimeTicks::Now() - stop_time_ >= base::Milliseconds(250);
       if (leases_.empty()) {
         timer_.Stop();
+        precise_timer_.Stop();
         keepalive_.reset();
       }
     }
@@ -697,6 +743,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         .Set("error", error_)
         .Set("frame_id", Number(frame_id_))
         .Set("captured", Number(captured_))
+        .Set("capture_callbacks", Number(capture_callbacks_))
         .Set("dropped", Number(dropped_))
         .Set("mutex_drops", Number(mutex_drops_))
         .Set("backpressure_polls", Number(backpressure_))
@@ -706,6 +753,59 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   }
 
  private:
+  struct TraceEvent {
+    const char* stage;
+    int64_t at_us;
+    uint64_t serial;
+    int64_t source_us;
+    uint64_t detail;
+    int source_counter;
+    double frame_rate;
+    int64_t capture_begin_us;
+    bool high_resolution_timer;
+  };
+  void Trace(const char* stage, uint64_t serial, int64_t source_us, uint64_t detail,
+             int source_counter = -1, double frame_rate = 0, int64_t capture_begin_us = 0) {
+    if (trace_directory_.empty() || trace_events_.size() >= 64000) return;
+    trace_events_.push_back({stage, base::TimeTicks::Now().since_origin().InMicroseconds(),
+                             serial, source_us, detail, source_counter, frame_rate, capture_begin_us,
+                             base::Time::IsHighResolutionTimerInUse()});
+  }
+  void SaveTrace() {
+    if (trace_directory_.empty() || trace_saved_) return;
+    trace_saved_ = true;
+    base::ListValue events;
+    for (const auto& event : trace_events_) {
+      auto row = base::DictValue().Set("stage", event.stage)
+          .Set("at_us", static_cast<double>(event.at_us)).Set("serial", Number(event.serial))
+          .Set("source_us", static_cast<double>(event.source_us)).Set("detail", Number(event.detail));
+      if (event.source_counter >= 0) row.Set("source_counter", event.source_counter);
+      if (event.frame_rate > 0) row.Set("source_frame_rate", event.frame_rate);
+      if (event.capture_begin_us) row.Set("capture_begin_us", static_cast<double>(event.capture_begin_us));
+      row.Set("high_resolution_timer", event.high_resolution_timer);
+      events.Append(std::move(row));
+    }
+    auto report = base::DictValue().Set("kind", "browser-gpu-cadence")
+        .Set("pid", static_cast<int>(base::GetCurrentProcId()))
+        .Set("generation", Number(generation_)).Set("width", static_cast<int>(width_))
+        .Set("height", static_cast<int>(height_)).Set("fps_limit", static_cast<int>(fps_))
+        .Set("poll_timer_mode", precise_poll_ ? "precise" : "default")
+        .Set("timer_high_resolution_start", trace_start_high_resolution_)
+        .Set("timer_high_resolution_stop", base::Time::IsHighResolutionTimerInUse())
+        .Set("capture_callbacks", Number(capture_callbacks_)).Set("captured", Number(captured_))
+        .Set("published", Number(frame_id_)).Set("dropped", Number(dropped_))
+        .Set("mutex_drops", Number(mutex_drops_)).Set("backpressure_polls", Number(backpressure_))
+        .Set("trace_full", trace_events_.size() == 64000).Set("events", std::move(events));
+    auto json = base::WriteJson(report);
+    if (!json) return;
+    auto path = trace_directory_.AppendASCII("browser-" + Number(base::GetCurrentProcId()) +
+        "-atlas-" + Number(generation_) + ".json");
+    base::ThreadPool::PostTask(FROM_HERE, {base::MayBlock(), base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
+        base::BindOnce([](base::FilePath path, std::string bytes) {
+          base::CreateDirectory(path.DirName());
+          base::WriteFile(path, bytes);
+        }, std::move(path), std::move(*json)));
+  }
   SEQUENCE_CHECKER(sequence_);
   const uint32_t width_, height_;
   const uint64_t generation_;
@@ -717,6 +817,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   base::TimeTicks stop_time_;
   base::TimeTicks last_publication_;
   base::RepeatingTimer timer_;
+  base::DeadlineTimer precise_timer_;
+  bool precise_poll_ = false;
   std::shared_ptr<State> keepalive_;
   std::map<uint64_t, std::unique_ptr<Capture>> captures_;
   std::vector<uint64_t> order_;
@@ -736,6 +838,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   SharedAtlasFrame last_frame_{};
   uint64_t next_fence_ = 1, frame_id_ = 0, captured_ = 0, dropped_ = 0;
   uint64_t mutex_drops_ = 0, backpressure_ = 0;
+  uint64_t capture_callbacks_ = 0;
+  base::FilePath trace_directory_;
+  std::vector<TraceEvent> trace_events_;
+  bool trace_saved_ = false, trace_start_high_resolution_ = false;
   int64_t capture_time_us_ = 0;
 };
 

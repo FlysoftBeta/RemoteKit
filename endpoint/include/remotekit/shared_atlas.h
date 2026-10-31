@@ -9,7 +9,7 @@ namespace remotekit {
 // Windows cross-process mapping ABI. Neither STL objects nor pointers occur in
 // the mapping. Interlocked operations, not C++ process-local atomics, publish it.
 inline constexpr std::uint32_t kSharedAtlasMagic = 0x524B4154;  // RKAT
-inline constexpr std::uint32_t kSharedAtlasVersion = 1;
+inline constexpr std::uint32_t kSharedAtlasVersion = 2;
 inline constexpr std::uint32_t kSharedAtlasSlotCount = 3;
 inline constexpr std::uint32_t kSharedAtlasMaxViews = 64;
 inline constexpr std::uint32_t kSharedAtlasViewStale = 1;
@@ -44,7 +44,10 @@ struct SharedAtlasView {
   std::int32_t y_pixels;
   std::uint32_t width_pixels;
   std::uint32_t height_pixels;
-  float device_scale_factor;
+  // Atlas physical pixels per viewport DIP; used for input/caret conversion.
+  float atlas_pixels_per_dip;
+  // Actual per-WebView emulated window.devicePixelRatio, independent of atlas.
+  float page_device_scale_factor;
   std::uint32_t reserved;
   SharedAtlasTextInput text_input;
 };
@@ -77,10 +80,13 @@ struct alignas(64) SharedAtlasMapping {
 
 static_assert(std::is_trivially_copyable_v<SharedAtlasMapping>);
 static_assert(sizeof(SharedAtlasTextInput) == 40);
-static_assert(sizeof(SharedAtlasView) == 104);
+static_assert(sizeof(SharedAtlasView) == 112);
+static_assert(offsetof(SharedAtlasView, atlas_pixels_per_dip) == 56);
+static_assert(offsetof(SharedAtlasView, page_device_scale_factor) == 60);
+static_assert(offsetof(SharedAtlasView, text_input) == 68);
 static_assert(offsetof(SharedAtlasFrame, views) == 56);
 static_assert(offsetof(SharedAtlasMapping, frame) == 24);
-static_assert(sizeof(SharedAtlasMapping) == 6784);
+static_assert(sizeof(SharedAtlasMapping) == 7296);
 static_assert(offsetof(SharedAtlasMapping, publication_sequence) % 8 == 0);
 static_assert(sizeof(SharedAtlasMapping) < 8192);
 

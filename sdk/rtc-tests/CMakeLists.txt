@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.24)
+project(remotekit_rtc_tests LANGUAGES CXX)
+set(SDK_ROOT "" CACHE PATH "Exported RemoteKit SDK directory")
+if(NOT WIN32 OR NOT EXISTS "${SDK_ROOT}/include/remotekit_rtc.h" OR
+   NOT EXISTS "${SDK_ROOT}/lib/remotekit_sdk.lib")
+  message(FATAL_ERROR "Export the Windows RTC SDK and set SDK_ROOT")
+endif()
+add_executable(remotekit_rtc_smoke ../rtc-smoke.cc)
+target_include_directories(remotekit_rtc_smoke PRIVATE "${SDK_ROOT}/include")
+target_link_libraries(remotekit_rtc_smoke PRIVATE "${SDK_ROOT}/lib/remotekit_sdk.lib" d3d11)
+target_compile_features(remotekit_rtc_smoke PRIVATE cxx_std_17)
+add_custom_command(TARGET remotekit_rtc_smoke POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${SDK_ROOT}/bin"
+          "$<TARGET_FILE_DIR:remotekit_rtc_smoke>")
+enable_testing()
+add_test(NAME remotekit_rtc_smoke COMMAND remotekit_rtc_smoke)
+add_test(NAME remotekit_rtc_trickle_smoke COMMAND remotekit_rtc_smoke --trickle)
+add_test(NAME remotekit_rtc_cross_thread_smoke COMMAND remotekit_rtc_smoke --cross-thread)
+add_test(NAME remotekit_rtc_loopback_smoke COMMAND remotekit_rtc_smoke --loopback)
+set_tests_properties(remotekit_rtc_loopback_smoke PROPERTIES
+  ENVIRONMENT "REMOTEKIT_RTC_LOOPBACK_TEST=1" TIMEOUT 30)
+set_tests_properties(remotekit_rtc_smoke remotekit_rtc_trickle_smoke
+                    remotekit_rtc_cross_thread_smoke PROPERTIES TIMEOUT 30)

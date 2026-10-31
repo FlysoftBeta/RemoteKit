@@ -12,6 +12,11 @@
 #include "content/public/renderer/render_frame_observer.h"
 #include "gin/converter.h"
 #include "third_party/blink/public/platform/task_type.h"
+#include "third_party/blink/public/platform/web_string.h"
+#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+#include "third_party/blink/public/web/web_settings.h"
+#include "third_party/blink/public/web/web_view.h"
+#include "third_party/blink/public/web/web_view_observer.h"
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "v8/include/v8-context.h"
 #include "v8/include/v8-exception.h"
@@ -159,6 +164,23 @@ void InstallApp(v8::Local<v8::Context> context) {
       .Check();
 }
 
+// Public Blink settings API, the same native setting used by official device
+// emulation. RendererPreferences are per WebView and reach OOPIF pages too.
+class CompatViewObserver final : public blink::WebViewObserver {
+ public:
+  explicit CompatViewObserver(blink::WebView* view) : blink::WebViewObserver(view) {
+    OnRendererPreferencesUpdated(view->GetRendererPreferences());
+  }
+  void OnRendererPreferencesUpdated(const blink::RendererPreferences& prefs) override {
+    const auto& metadata = prefs.user_agent_override.ua_metadata_override;
+    const bool tablet = metadata && metadata->platform == "Android";
+    if (GetWebView())
+      GetWebView()->GetSettings()->SetFromStrings(
+          blink::WebString::FromAscii("navigatorPlatformOverride"),
+          tablet ? blink::WebString::FromAscii("Linux armv81") : blink::WebString());
+  }
+  void OnDestruct() override { delete this; }
+};
 class CompatFrameObserver final : public content::RenderFrameObserver {
  public:
   explicit CompatFrameObserver(content::RenderFrame* frame) : content::RenderFrameObserver(frame) {}
@@ -176,6 +198,9 @@ class CompatFrameObserver final : public content::RenderFrameObserver {
 };
 }  // namespace
 
+void CompatRendererClient::WebViewCreated(blink::WebView* view, bool, const url::Origin*) {
+  new CompatViewObserver(view);
+}
 void CompatRendererClient::RenderFrameCreated(content::RenderFrame* render_frame) {
   new CompatFrameObserver(render_frame);
 }

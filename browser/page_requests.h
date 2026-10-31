@@ -35,6 +35,11 @@ class PageRequests final : public content::WebContentsDelegate,
   size_t pending_count() const { return pending_.size(); }
   // Public delegate/observer APIs do not expose widget tooltip updates. A native
   // view/widget hook must forward them here; this method creates no native UI.
+  void RequestClose();
+  const std::string& close_state() const { return close_state_; }
+  void CloseContents(content::WebContents*) override;
+  using content::WebContentsObserver::BeforeUnloadFired;
+  void BeforeUnloadFired(content::WebContents*, bool, bool*) override;
   void ReportTooltip(const std::u16string& text);
 
   content::JavaScriptDialogManager* GetJavaScriptDialogManager(content::WebContents*) override;
@@ -92,6 +97,7 @@ class PageRequests final : public content::WebContentsDelegate,
                            int active_match_ordinal,
                            bool final_update) override;
 
+  std::string close_state_ = "open";
   std::uint64_t next_id_ = 1;
   std::map<std::uint64_t, std::unique_ptr<Pending>> pending_;
   std::deque<base::DictValue> events_;

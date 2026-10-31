@@ -1,17 +1,36 @@
 # Windows 本机测试包
 
-在开发机运行：
+## 串流包
 
-```
+在开发机完成构建：
+
+```powershell
 python3 tools/chromium.py build --target remotekit_browser --target remotekit_sdk
+python3 tools/export-sdk.py --out C:/src/chromium/src/out/dev --destination sdk/dist/dev
 tools\build-endpoint.cmd package
+Push-Location control
+npm ci
+npm run build
+Pop-Location
 python3 tools/package-runtime.py
 ```
 
-默认包输出到 `develop/tmp/RemoteKit-win-x64-fence-atlas-<时间>` 及同名 ZIP。复制 ZIP 到另一台 Windows x64 机器，完整解压，再运行 `run.cmd`。默认打开两份离线输入页面，不需要 Python、Node、Visual Studio 或开发机路径。`run-web.cmd` 打开示例网页，也可传入用 `|` 分隔的一组 URL。`run-native.cmd` 显式使用 HWND 对照路径；Fence 失败不会自动切换。
+默认输出到 `develop/tmp/RemoteKit-win-x64-streaming-qsv-nvenc-<时间>` 与同名 ZIP。复制到目标Windows x64机器并完整解压，运行 `run.cmd`，在客户端打开 `http://127.0.0.1:3001`。包中包含Node、Control生产bundle、React客户端和最小SQLite运行依赖，不需要开发工具。硬件编码运行时由目标机器Intel/NVIDIA驱动提供。
 
-脚本合并 browser 与 SDK 的 GN runtime_deps，补入 RemoteKit 资源、MSVC Release CRT 和独立 endpoint；排除 PDB、构建输入和开发机用户数据。`manifest.json` 记录 backend、源码基线、构建参数指纹和逐文件 SHA-256。ZIP 校验和另存为 `.zip.sha256`。
+`run.cmd` 设置Endpoint/browser路径、SQLite和Session数据位置。初次运行在包内创建 `data/`，诊断结果写入 `metrics/`。不同浏览器会话对应独立Tenant。接收档、设备配置和网络模拟见 [Control说明](../control/README.md)，实际性能结果见 [串流实验](streaming-experiments.zh-CN.md)。
 
-使用 `--presentation=native` 也可单独打 native-host 包。此前已生成的 native ZIP 不随源码变化。新 Fence 包已编译，尚未做硬件运行验证；需要能够共享 D3D11 texture/fence 的 Windows 硬件 adapter。Chromium 内部 frame IPC 保留，browser↔endpoint 的稳定输出不发送逐帧 Mojo 消息。
+## 原生对照包
 
-窗口标题显示 backend 或错误；浏览器日志在包内 `data/browser.log`，CDP 地址记录在 `data/DevToolsActivePort`。DevTools 只监听本机，不自动打开窗口。新状态和边界见 [实现速查](current-state.zh-CN.md)。
+```powershell
+python3 tools/chromium.py build --target remotekit_browser_demo --target remotekit_sdk
+tools\build-endpoint.cmd package-demo
+python3 tools/package-runtime.py --kind demo
+```
+
+此包使用显式编译的 `remotekit_browser_demo` 和原生Endpoint client，默认打开离线输入页面。`run-web.cmd` 可打开指定网页，`run-native.cmd` 明确选择HWND路径；Fence失败不会自动切换。`--kind demo --presentation native` 可单独生成native包。
+
+## 内容与可追踪性
+
+脚本收集browser/SDK的GN运行依赖、Release Endpoint与CRT、Control生产运行文件和许可证；排除PDB、编译输入、凭据及开发Profile。`manifest.json` 记录源码基线、构建参数指纹、backend和逐文件SHA-256，ZIP另有 `.sha256` 文件。
+
+browser↔endpoint稳态没有逐帧Mojo；endpoint↔client会发送视频对应的RTP/显示代次元数据。Chromium内部frame IPC保留。打包本身不代表该ZIP已启动验收；交付记录应说明是否对最终包另行运行，以及当前硬件与性能结果。

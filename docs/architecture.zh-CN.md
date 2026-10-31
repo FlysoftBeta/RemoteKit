@@ -4,13 +4,13 @@
 
 ## 组件与构建边界
 
-RemoteKit 在 Windows/D3D11 上提供独立 Chromium content embedder，由 endpoint 接入控制和输入，最终将多个 WebView 的画面排入一个视频通道。编码、音频和 WebRTC 传输目前不接线；库接入与媒体管线接线分别推进。
+RemoteKit 在 Windows/D3D11 上提供独立 Chromium content embedder，由 endpoint 接入控制和输入，最终将多个 WebView 的画面排入一个视频通道。本轮开始接入 oneVPL/NVENC H.264 编码和 WebRTC 传输，音频不在本轮范围。实现与实验结果见当前状态。
 
 | 组件 | 归属与职责 |
 | --- | --- |
-| 测试管理器／未来控制服务 | 保存 Tenant、Session、Profile、WebView 的逻辑清单、配置和期望状态；保存 browser 导出的恢复信息，决定持久化时机 |
+| Control | 保存 Tenant、Tab、地址意图、分屏及设备配置，是产品状态的 source of truth；持有 Endpoint Session/WebView 的有限引用，负责鉴权、信令与对账 |
 | browser | 承接逻辑页面，管理 BrowserContext、WebContents、输入焦点、生命周期、页面请求和采集，报告实际状态 |
-| endpoint | 导入 GPU 资源、等待与归还 Fence、合成呈现、接入输入；未来承担格式转换、编码及传输 |
+| endpoint | 管理 Session 与 browser 子进程，托管浏览器恢复信息；导入 GPU 资源、等待与归还 Fence、接入输入、格式转换、编码及 WebRTC 传输 |
 | Chromium 子进程与服务 | 继续承担网页执行、网络、合成、GPU 和浏览器自身音频；不由 endpoint 重写 |
 
 当前测试管理器运行在 browser harness 内，复用独立 endpoint 模型库；原生 endpoint client 管理进程、输入与 GPU 消费。这个 demo 布置不等于最终控制服务的部署方式。
@@ -19,7 +19,7 @@ browser 在固定官方 Chromium Release 上用 GN 构建，不链接 Chrome Bro
 
 Mojo 当前使用 NamedPlatformChannel + IsolatedConnection，两个进程保留独立 broker 图。测试协议为版本化 UTF-8 JSON，64位值用十进制字符串，一次消息最多1MiB。同步 SDK 调用在工作线程执行；超时或传输失败使连接失效，避免回复错配。当前一个管理连接可访问启动时配置的全部 Session，Session ID 本身不是认证凭据。
 
-Mojo、libwebrtc 的库接入需要可复现的 SDK/runtime 导出。当前 WebRTC 仅接 timeutils，完整库边界仍待完成；不为补库接入而启动 peer connection、codec 或传输管线。
+Mojo、libwebrtc 的库接入需要可复现的 SDK/runtime 导出。此前 WebRTC 仅接 timeutils；本轮以真正 PeerConnection 与自定义 H.264 编码接口替代探针范围。
 
 ## 隔离、身份与逻辑配置
 
@@ -50,13 +50,13 @@ WebView 是稳定的逻辑页面，WebContents 是按需存在的执行实例。
 
 原地 discard 的流程是检查活动与导航、停采集、失焦并清理输入/请求，再调用现有 WebContents 的 Discard。content 完成专用空文档提交、子 frame/BFCache 清理和 reload 标记；宿主不另建替代 Contents，也不直接 kill renderer。WasDiscarded 通知不足以证明完成，更不证明内存已回收。内部空文档不能覆盖用户导航历史或恢复记录。
 
-卸载不要求先 discard。逻辑 viewport、订阅和其他配置继续保留。要求持久保证的恢复信息，应先交由管理方可靠保存再确认卸载完成；当前 demo 仅在 browser 内保存快照并提供导出，尚无外部持久化确认协议。
+卸载不要求先 discard。逻辑 viewport、订阅和其他配置继续保留。要求持久保证的恢复信息，应先由 Endpoint Session 可靠保存再确认卸载完成；Control 不托管 Chromium 专用恢复数据。当前 demo 在 browser 内保存快照并提供导出，Endpoint 持久化接线状态以当前状态为准。
 
 当前操作都有代次与有界收尾；snapshot 区分 pending、最后结果和状态不确定。超时不能假装成功；状态不确定时，现有实现只允许用 unload 清理。它还没有自动重试、期望状态 reconciliation 或完整的 browser 崩溃恢复管理器。
 
 ## 导航持久化与统一恢复
 
-管理方保存逻辑页面清单及期望配置，browser 提供实际提交、重定向、历史变化与 Chromium 专用恢复数据。管理方无需解释 PageState。无需复制 Chrome SessionService、启动页或 tab 选择策略。
+Control 保存产品页面清单及期望配置，Endpoint Session 与 browser 托管实际提交、重定向、历史变化和 Chromium 专用恢复数据。Control 不需要解释或保存 PageState；Endpoint/Browser 丢失对象后，Control 用有限产品信息重建 WebView，并清理 orphan。无需复制 Chrome SessionService、启动页或 tab 选择策略。
 
 恢复按现有实例状态分流：frozen 解冻；discarded 在原 controller 上 LoadIfNecessary；已卸载或 browser 重启则重新关联正确 Profile，创建 Contents，Restore 导航栈，再按执行需求加载。只有初始地址时走普通导航。之后重新取得实际 widget，应用 viewport、可见性、静音和订阅，并请求首帧。页面恢复与输出恢复分别报告，没有输出订阅时不应等首帧才确认执行恢复。
 

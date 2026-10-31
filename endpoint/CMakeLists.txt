@@ -1,4 +1,4 @@
-add_library(remotekit_endpoint src/core.cpp)
+add_library(remotekit_endpoint STATIC src/core.cpp)
 target_include_directories(remotekit_endpoint PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(remotekit_endpoint PUBLIC cxx_std_20)
 if(MSVC)
@@ -12,10 +12,10 @@ if(MSVC)
   target_compile_options(endpoint_tests PRIVATE /utf-8)
 endif()
 add_test(NAME endpoint_core COMMAND endpoint_tests)
-add_executable(endpoint_demo src/demo.cpp)
+add_executable(endpoint_demo EXCLUDE_FROM_ALL src/demo.cpp)
 target_link_libraries(endpoint_demo PRIVATE remotekit_endpoint)
 if(WIN32)
-  add_executable(endpoint_client WIN32 src/client_win.cpp src/client_win.manifest
+  add_executable(endpoint_client WIN32 EXCLUDE_FROM_ALL src/client_win.cpp src/client_win.manifest
     src/atlas_client.cpp src/atlas_consumer.cpp)
   target_include_directories(endpoint_client PRIVATE ${PROJECT_SOURCE_DIR}/sdk/include)
   target_compile_definitions(endpoint_client PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
@@ -24,4 +24,24 @@ if(WIN32)
   if(MSVC)
     target_compile_options(endpoint_client PRIVATE /W4 /utf-8)
   endif()
+endif()
+
+if(WIN32)
+  add_library(remotekit_media STATIC src/media/gpu_device.cpp src/media/qsv_encoder.cpp
+    src/media/nvenc_encoder.cpp src/media/atlas_pool.cpp src/media/encoder_worker.cpp)
+  target_include_directories(remotekit_media PUBLIC src include ${PROJECT_SOURCE_DIR}/sdk/include
+    ${RK_DEPS} ${RK_DEPS}/libvpl-2.17.0/api)
+  target_compile_definitions(remotekit_media PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN
+    _WIN32_WINNT=0x0A00 WINVER=0x0A00 MFX_DEPRECATED_OFF)
+  target_compile_options(remotekit_media PRIVATE /W4 /utf-8)
+  target_link_libraries(remotekit_media PUBLIC VPL d3d11 dxgi)
+  add_executable(endpoint_service src/service.cpp)
+  target_link_libraries(endpoint_service PRIVATE remotekit_media remotekit_endpoint winmm crypt32)
+  target_compile_options(endpoint_service PRIVATE /W4 /utf-8)
+  add_custom_command(TARGET endpoint_service POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_service>)
+  add_executable(endpoint_encoder_smoke EXCLUDE_FROM_ALL src/encoder_smoke.cpp)
+  target_link_libraries(endpoint_encoder_smoke PRIVATE remotekit_media)
+  add_custom_command(TARGET endpoint_encoder_smoke POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_encoder_smoke>)
 endif()

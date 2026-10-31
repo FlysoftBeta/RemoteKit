@@ -128,9 +128,11 @@ Status ValidateInput(const InputPayload&);
 // The host authenticates tenant before selecting a session and serializes all access.
 class Endpoint {
  public:
-  Result<SessionId> CreateSession(TenantId tenant);
+  Result<SessionId> CreateSession(TenantId tenant, SessionId requested_id = 0);
   Result<ProfileId> AddProfile(SessionId, std::string name);
-  Result<WebViewId> CreateWebView(SessionId, ProfileId);
+  Result<WebViewId> CreateWebView(SessionId, ProfileId, WebViewId requested_id = 0);
+  Status RemoveWebView(SessionId, WebViewId);
+  Status ResetWebView(SessionId, WebViewId);
   const Session* FindSession(SessionId) const;
   const WebView* FindWebView(SessionId, WebViewId) const;
   Status SetFocus(SessionId, WebViewId, bool);
@@ -138,6 +140,7 @@ class Endpoint {
   // External instance loss (e.g. crash): invalidates all queued work without
   // requiring a live state. Does not claim a browser lifecycle operation ran.
   Status InvalidateInstance(SessionId, WebViewId);
+  Status InvalidateInput(SessionId, WebViewId);
   Result<InputToken> Token(SessionId, WebViewId) const;
   Status AcceptInput(SessionId authenticated_session, const InputEvent&);
   Result<LifecycleRequest> RequestLifecycle(SessionId, WebViewId, Lifecycle);

@@ -1,6 +1,6 @@
-# 本地 testing control 协议 v1
+# Browser 本地控制协议 v1
 
-这是 demo 管理接口，不是生产多租户控制服务。一个控制连接有权访问这个 browser 启动时配置的所有 Session。Session ID 用于归属验证，不是认证凭据。
+这是 Endpoint 到 browser 的本地管理接口。普通remotekit_browser只承接启动时指定的一个Session；显式构建的remotekit_browser_demo保留旧多Session测试入口。连接由Endpoint持有，Session ID用于归属验证，不是网络认证凭据。客户端鉴权由Control负责，见[串流协议](streaming-protocol.md)。
 
 browser 参数 `--control-channel=remotekit-<随机值>` 启动 Windows NamedPlatformChannel。endpoint C ABI SDK 通过 `remotekit_sdk_control_connect/request/close` 连接；两端用 IsolatedConnection 保持各自的 Mojo 进程图。控制端每次只保留一个请求在途，一次消息最多 1 MiB。JSON 严格使用 UTF-8。
 
@@ -18,8 +18,11 @@ SDK 的同步 request 应从工作线程调用；超时、输出缓冲不足和�
 
 | method | 参数 | 结果 |
 |---|---|---|
-| snapshot | 无 | Session、WebView、Profile、URL、desired/actual/pending、input token |
-| focus | session、view、focused | 聚焦或失焦，返回新 token |
+| snapshot | 无 | Session、WebView、Profile、URL/title/loading、导航可用状态、desired/actual/pending、input token及关闭状态 |
+| view.create | session、view、url、width、height、device、visible | 调用方稳定ID，创建幂等；冲突配置显式拒绝 |
+| view.configure | session、view及viewport/device/visible | 更新设备特征和可见平面排布 |
+| view.close | session、view、force | 区分accepted/completed，普通关闭经beforeunload，force用于orphan清理 |
+| focus | session、view、focused，服务模式另带instance/document/focus | 聚焦或失焦，返回新 token |
 | visible | session、view、visible | 显隐意图 |
 | navigate | session、view、url | 导航已发起，不等于提交成功 |
 | input | 完整 token、sequence、event | 校验并投递到当前 widget |
@@ -27,7 +30,7 @@ SDK 的同步 request 应从工作线程调用；超时、输出缓冲不足和�
 | page.requests / page.reply / page.command | session、view，加 request/accept 或 action | 页面 pending/events、回复与编辑/导航/find/zoom 命令 |
 | profile.permissions / profile.downloads | session、view、command 对象 | Profile 权限规则或下载状态/操作 |
 | output.open / output.describe | consumer_pid，open 加 fps | accepted 后 describe 取得本代六个共享句柄 |
-| output.configure / output.status / output.close | device_scale、enabled、fps，可选 | 配置、状态或关闭；scale 需先关闭旧输出 |
+| output.configure / output.status / output.close | width、height（DIP）、device_scale、enabled、fps，可选 | 配置、状态或关闭；尺寸/scale变化需关闭并重建输出 |
 | navigation.export.begin / navigation.import.begin | session、view；import 加 size | 创建导航状态分块传输 |
 | navigation.export.chunk / navigation.import.chunk / navigation.import.commit / navigation.transfer.cancel | session、view、transfer，加 offset/length/data | 导航 opaque 状态分块传输 |
 | shutdown | 无 | 受理正常退出 |
@@ -67,3 +70,5 @@ Profile 命令放在 command 对象内，避免与 envelope.id 冲突。例如�
 输出资源与完成点见 [GPU 输出](gpu-output.zh-CN.md)。describe 的 pending 使用 error=output_pending；不是逐帧状态轮询接口。稳态无 browser↔endpoint 的 ready/present/release 消息。
 
 device_scale 支持0.5..4，fps 为1..120的发布上限，不保证内容每周期产生 damage。新 scale 需新资源代次；最大 atlas 纹理边长16384。
+
+服务模式只将visible页面排入atlas，后台逻辑页面保留。重排提升focus token，旧坐标输入失效；Endpoint另以RTP/显示代次保护客户端的视频与布局匹配。逻辑关闭保留墓碑，正常关闭前后的page.requests/page.reply和完成状态由Endpoint适配给Control。

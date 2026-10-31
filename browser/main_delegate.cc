@@ -17,6 +17,7 @@
 #include "remotekit/browser/compat.h"
 #include "remotekit/browser/compat_renderer.h"
 #include "remotekit/browser/harness.h"
+#include "remotekit/browser/webview.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -47,6 +48,11 @@ class BrowserClient final : public content::ContentBrowserClient {
   std::unique_ptr<content::BrowserMainParts> CreateBrowserMainParts(bool) override {
     return std::make_unique<HarnessMainParts>();
   }
+  void OverrideWebPreferences(content::WebContents* contents,
+                              content::SiteInstance&,
+                              blink::web_pref::WebPreferences* prefs) override {
+    WebView::OverridePreferences(contents, prefs);
+  }
   std::string GetUserAgent() override { return ChromeUserAgent(); }
   std::string GetProduct() override { return embedder_support::GetProductAndVersion(); }
   blink::UserAgentMetadata GetUserAgentMetadata() override { return ChromeUserAgentMetadata(); }
@@ -67,6 +73,14 @@ MainDelegate::MainDelegate() = default;
 MainDelegate::~MainDelegate() = default;
 std::optional<int> MainDelegate::BasicStartupComplete() {
   auto& command = *base::CommandLine::ForCurrentProcess();
+#if defined(REMOTEKIT_DEMO_HARNESS)
+  command.AppendSwitch("demo-harness");
+#else
+  if (command.HasSwitch("demo-harness") || command.HasSwitch("sessions") ||
+      command.HasSwitch("urls") || command.HasSwitch("parent-window"))
+    return 2;
+  command.AppendSwitch("gpu-output");
+#endif
   if (command.HasSwitch("gpu-output")) {
     // This shown, nonzero Aura host is clipped out of the endpoint window.
     // Output demand, rather than native HWND occlusion, controls its capture.
