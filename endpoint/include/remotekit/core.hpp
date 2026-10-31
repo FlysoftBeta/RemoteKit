@@ -86,7 +86,7 @@ struct KeyInput {
   std::u16string text, unmodified_text;
 };
 struct MouseInput {
-  enum class Action { move, down, up };
+  enum class Action { move, down, up, leave };
   Action action{};
   double x{}, y{};
   std::uint8_t button{};
@@ -123,6 +123,10 @@ struct InputEvent {
   InputPayload payload;
 };
 Status ValidateInput(const InputPayload&);
+// Wire modifiers use Blink WebInputEvent bit positions, including back/forward.
+inline constexpr std::uint32_t kMouseButtonModifiers =
+    (1u << 6) | (1u << 7) | (1u << 8) | (1u << 20) | (1u << 21);
+bool IsHoverInput(const InputPayload&);
 
 // A deterministic bookkeeping model. Request/complete calls do not execute browser work.
 // The host authenticates tenant before selecting a session and serializes all access.

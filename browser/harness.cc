@@ -886,7 +886,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       const auto button = event->FindInt("button");
       const auto clicks = event->FindInt("click_count").value_or(1);
       if (!action || !x || !y || !button || *button < 0 || *button > 5 || clicks < 0 ||
-          clicks > 3 || (*action != "move" && clicks == 0))
+          clicks > 3 || (*action != "move" && *action != "leave" && clicks == 0))
         return error("invalid_mouse");
       MouseInput::Action kind;
       if (*action == "move")
@@ -895,6 +895,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         kind = MouseInput::Action::down;
       else if (*action == "up")
         kind = MouseInput::Action::up;
+      else if (*action == "leave")
+        kind = MouseInput::Action::leave;
       else
         return error("invalid_mouse_action");
       input.payload = MouseInput{kind,

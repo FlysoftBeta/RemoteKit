@@ -18,6 +18,7 @@ struct Sdk {
  RK_SDK_FUNCTION(remotekit_sdk_control_request)
  RK_SDK_FUNCTION(remotekit_sdk_control_open_atlas)
  RK_SDK_FUNCTION(remotekit_rtc_get_receive_level)
+ RK_SDK_FUNCTION(remotekit_rtc_set_playout_delay)
  RK_SDK_FUNCTION(remotekit_rtc_create)
  RK_SDK_FUNCTION(remotekit_rtc_close)
  RK_SDK_FUNCTION(remotekit_rtc_set_remote_description)
@@ -37,6 +38,7 @@ struct Sdk {
  RK_LOAD(remotekit_rtc_set_remote_description) RK_LOAD(remotekit_rtc_add_ice)
  RK_LOAD(remotekit_rtc_open_data_channel) RK_LOAD(remotekit_rtc_send_data)
  RK_LOAD(remotekit_rtc_get_receive_level)
+ RK_LOAD(remotekit_rtc_set_playout_delay)
  RK_LOAD(remotekit_rtc_submit_texture) RK_LOAD(remotekit_rtc_encoded)
 #undef RK_LOAD
   sample_clock=reinterpret_cast<decltype(sample_clock)>(GetProcAddress(module,"remotekit_rtc_sample_clock"));

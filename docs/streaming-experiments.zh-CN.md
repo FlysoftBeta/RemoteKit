@@ -8,6 +8,8 @@
 
 Pixel marker 从实际接收视频像素识别，包含源帧号、时间、输入刺激号和CRC。输入到画面响应使用同一客户端performance.now；本机loopback可显式开启Date.now画面时间比较，跨机器不直接相减。采集到Endpoint就绪使用经一致性检查的Chromium TimeTicks/QPC校准，编码提交/完成使用QPC。RTP时间戳采用WebRTC实际发送值，客户端rVFC回调匹配显示代次后才显示/命中输入。
 
+本文的paint是Viewport调用drawImage返回后的JS时间，FPS按独立RTP的绘制提交计数，不是GPU完成或物理屏幕刷新。marker另外读取同帧授权atlas，并记录读回完成时间与成本；它也不等同于Viewport的物理显示完成。
+
 ## 网络模拟
 
 使用只绑定loopback的双UDP socket整形器，两端SDP候选指向整形器；确认selected candidate与实际转发字节，失败不回退直连。每方向基础延迟5ms，下行24或48Mbps；按UDP/IP28字节开销计量。无额外随机丢包，过载时按有界队列丢包。它模拟链路延迟和容量，不代表实地无线干扰或重传。
@@ -63,9 +65,23 @@ Control保留原生offer档和明确的Chrome89接收档，保存original/effect
 
 四1080的同条件marker0对照中，源FPS约8→20，paint约6.5–6.9→9.2–9.3。GPU 3D引擎仍约99%忙，新的损失发生在copy→encode及接收呈现。逐进程采样器约占0.05–0.12核，已计入结果；没有把GPU busy直接解释为硬件固有吞吐上限。
 
+四1080/1Hz的76个同RTP marker中，render→paint-submit平均932ms；render→最后视频包接收约661ms，接收→paint约271ms（其中解码约34ms、video presentationTime→JS提交约10ms）。同步marker读回另加平均168ms、p95 283ms，未计入paint延迟。现有逐环节统计缺少每RTP的server capture/VPP/编码时间关联，不能把661ms具体分配给某个服务器队列。
+
 修复后d4/TU7四1080编码升至15.8–16.1 FPS，paint仍8.7–9.2；显式LowPower ON也未明显改善最终呈现，因此不改默认。本机auto的Query/初始化实际值均为OFF(32)，显式ON为16，已确认发生模式切换。`--qsv-low-power=auto|on|off`可复算，stats记录请求、Query和初始化实际值及返回状态，显式值不支持时明确失败。ON的240帧码率阶跃、BT709 limited和HRD关闭检查通过。
 
 同静态帧/ROI的PSNR从23.50提升至25.87dB，MAE从8.48降至7.86；文字轮廓改善，细线仍有损失。完整过程和逐进程证据见[GPU吞吐定位](../develop/docs/gpu-throughput-probe.md)。
+
+### RTP播放延迟上限对照
+
+`playoutDelayHint=0`只设置接收缓冲下限。新增`--rtc-playout-max-ms=N`通过已协商的RTP扩展请求min=0/max=N，默认-1不设置；数值为0–40950内的10ms整数倍。720p单租户使用同一特殊客户端flag、1Hz marker，各20个有效样本：
+
+| RTP请求 | 绘制提交FPS | render→提交p95 | 同RTP接收→提交均值 |
+|---|---:|---:|---:|
+| 未设置（默认） | 53.03 | 103ms | 37.85ms |
+| 0/0ms | 46.13 | 82ms | 9.74ms |
+| 0/10ms | 45.43 | 92ms | 11.33ms |
+
+接收等待减少，但JS/canvas消费节拍下降；不能把不同组的53 FPS和82ms合成一个结果。四1080的max0也降低了部分延迟，却使绘制提交由8.5–8.7降至7.2–7.5 FPS。因此默认保持未设置，保留显式选项。分段、丢包和读回成本见[播放延迟对照](../develop/docs/playout-delay-probe.md)。
 
 ### 修复前的参数矩阵
 

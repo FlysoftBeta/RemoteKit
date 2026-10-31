@@ -40,7 +40,7 @@ Status ValidateInput(const InputPayload& p) {
           return Utf16(v.text);
         else if constexpr (std::is_same_v<T, MouseInput>)
           return Finite(v.x, v.y) && v.button <= 5 && v.action >= MouseInput::Action::move &&
-                 v.action <= MouseInput::Action::up && v.click_count <= 3;
+                 v.action <= MouseInput::Action::leave && v.click_count <= 3;
         else if constexpr (std::is_same_v<T, WheelInput>)
           return Finite(v.x, v.y) && Finite(v.delta_x, v.delta_y);
         else if constexpr (std::is_same_v<T, TouchInput>) {
@@ -193,6 +193,12 @@ Result<InputToken> Endpoint::Token(SessionId s, WebViewId id) const {
     return {{}, Fail(Error::not_found, "WebView not found in session")};
   return {{s, id, v->instance, v->document, v->focus_generation}, {}};
 }
+bool IsHoverInput(const InputPayload& payload) {
+  const auto* mouse = std::get_if<MouseInput>(&payload);
+  return mouse && (mouse->action == MouseInput::Action::move ||
+                   mouse->action == MouseInput::Action::leave) &&
+         mouse->button == 0 && !(mouse->modifiers & kMouseButtonModifiers);
+}
 Status Endpoint::AcceptInput(SessionId s, const InputEvent& e) {
   if (s != e.token.session)
     return Fail(Error::wrong_session, "Input token session mismatch");
@@ -201,7 +207,7 @@ Status Endpoint::AcceptInput(SessionId s, const InputEvent& e) {
     return Fail(Error::not_found, "WebView not found in session");
   if (e.token != Token(s, v->id).value || e.sequence <= v->last_sequence)
     return Fail(Error::stale, "Stale token or sequence");
-  if (v->actual != Residency::live || v->pending || !v->focused)
+  if (v->actual != Residency::live || v->pending || (!v->focused && !IsHoverInput(e.payload)))
     return Fail(Error::unavailable, "WebView cannot receive input");
   auto result = ValidateInput(e.payload);
   if (!result)

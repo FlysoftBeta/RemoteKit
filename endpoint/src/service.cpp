@@ -70,6 +70,7 @@ struct Options {
  fs::path browser,data;
  std::string encoder="auto";EncoderSettings encoding;
  uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096;
+ int32_t rtc_playout_max_ms=-1;
  Options() {
   wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
   browser=Utf8Path(Env("REMOTEKIT_BROWSER",Utf8(fs::path(executable).parent_path()/"remotekit_browser.exe")));
@@ -95,6 +96,10 @@ struct Options {
    else if(key=="--buffer-ms")encoding.buffer_ms=std::stoul(value);
    else if(key=="--rate-control"){if(value!="cbr"&&value!="vbr")throw std::runtime_error("rate-control must be cbr or vbr");encoding.vbr=value=="vbr";encoding.rate_control_explicit=true;}
    else if(key=="--idle-idr-ms")idle_idr_ms=std::stoul(value);
+   else if(key=="--rtc-playout-max-ms"){
+    size_t parsed=0;rtc_playout_max_ms=std::stoi(value,&parsed);
+    if(parsed!=value.size())throw std::runtime_error("rtc-playout-max-ms must be an integer");
+   }
    else if(key=="--max-encode-width")max_encode_width=std::stoul(value);
    else if(key=="--max-encode-height")max_encode_height=std::stoul(value);
    else throw std::runtime_error("unknown endpoint argument: "+key);
@@ -107,6 +112,8 @@ struct Options {
    throw std::runtime_error("invalid encoder settings");
   browser=fs::absolute(browser);data=fs::absolute(data);
   if(encoder=="nvenc"&&encoding.qsv_low_power)throw std::runtime_error("qsv-low-power requires qsv or auto encoder");
+  if(rtc_playout_max_ms!=-1&&(rtc_playout_max_ms<0||rtc_playout_max_ms>40950||rtc_playout_max_ms%10))
+   throw std::runtime_error("rtc-playout-max-ms must be -1 or a multiple of 10 in 0..40950");
  }
 };
 struct Session {
@@ -345,6 +352,8 @@ struct Session {
  }
  Json Stats() {
   auto value=stats->Snapshot();value["configuredIdleIdrMs"]=options.idle_idr_ms;
+  value["rtcPlayoutDelayRequested"]={{"minMs",options.rtc_playout_max_ms<0?-1:0},
+                                     {"maxMs",options.rtc_playout_max_ms}};
   value["effectiveIdleIdrMs"]=effective_idle_ms.load();value["tailIdrSubmissions"]=tail_submissions.load();
   const auto interval=source_interval_ms.load(),age=last_tail_age_ms.load();
   value["sourceFrameIntervalMs"]=interval>0?Json(interval):Json(nullptr);
@@ -663,6 +672,10 @@ struct Session {
   uint64_t handle=0;
   if(sdk.remotekit_rtc_create(&config,&handle)!=0)throw std::runtime_error("RTC create failed");
   receive_level=0;refresh_connected=false;peer=handle;stop_media=false;data_open=false;layout=Json();
+  if(options.rtc_playout_max_ms>=0) {
+   const int status=sdk.remotekit_rtc_set_playout_delay(handle,0,options.rtc_playout_max_ms);
+   if(status!=0){ClosePeer();throw std::runtime_error("RTC playout delay rejected (SDK "+std::to_string(status)+")");}
+  }
   auto sdp=Required(request,"sdp");
   if(sdk.remotekit_rtc_set_remote_description(handle,1,sdp.data(),sdp.size())!=0) {
    ClosePeer();throw std::runtime_error("RTC remote offer rejected");

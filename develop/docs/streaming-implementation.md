@@ -30,9 +30,9 @@ Browser capture → Fence atlas → Endpoint 自有纹理 → GPU 色彩转换 N
 |---|---|---|
 | browser单Session服务、动态页面、tablet、demo编译隔离 | endpoint_probe | v2统一编译；混合DPR、设备模式reload、browser kill历史恢复实测通过 |
 | WebRTC C ABI与NVENC | media_probe | ABI2、真实双Peer/ICE/DTLS-SCTP/lease/stats关闭屏障通过，NVENC编译通过 |
-| 无窗口GPU消费、QSV、多租户endpoint_service | endpoint_probe | Release与model检查通过；真实QSV连续码率/fps阶跃通过；最终包待功能/矩阵收口 |
-| Control/React/marker/网络模拟 | control_server | build、25 tests、生产smoke通过；新paint、触控/IME marker、自动重连/主动断连、真实关闭确认/取消通过；等待最终ZIP的真实RTC首帧/输入验收窗口 |
-| 独立QSV/端到端矩阵 | media_probe | 已完成16组/40租户段、画质/输入/尾IDR对照；选定VBR/TU1/d1，目标未达。第二轮45分钟正在定位源吞吐和客户端节拍（UTC 21:24–22:09），独占GPU测试与Chromium构建 |
+| 无窗口GPU消费、QSV、多租户endpoint_service | endpoint_probe | Release与model检查通过；真实QSV码率阶跃、LowPower ON/OFF观测通过；hover权限与playout CLI已编译验收，待重产最终包 |
+| Control/React/marker/网络模拟 | control_server | build、26 tests、生产smoke通过；正式first-stream工具覆盖实际paint、无焦点hover不抢焦点、click/IME回应；mixed回归通过；待新ZIP复验 |
+| 独立QSV/端到端矩阵 | media_probe | 16组/40租户段及第二轮45分钟定位完成，修复DPI放大；补3组RTP播放延迟对照，低延迟与FPS有权衡，默认保持unset；无更多实验在运行 |
 | 正式文档、评估、commit/push | 主Agent | 持续维护；完整结果验证后按范围提交推送 |
 
 试验评估：暖机3–5秒，有效采样至少20秒；延迟p50/p95/p99、每秒FPS分布，优先p95<100ms+平均动态FPS>50；720p/1080p、DPR、可见平面数明确记录。网络模拟额外Node单核开销要一起报告。
@@ -58,6 +58,9 @@ Browser capture → Fence atlas → Endpoint 自有纹理 → GPU 色彩转换 N
 - 已测得宿主1.5让desktop1920×1080实际提交2880×1620，修复为service每WebView通过官方capture scale override匹配页面DPR，保留native demo。四1080源约8→20；混合desktop1/tablet2及touch/中文输入通过。逐PID资源、flag与画质对照见gpu-throughput-probe.md。
 - QSV LowPower加入auto/on/off及实际模式观测；默认auto不变。显式ON和240帧码率阶跃通过，唯一四1080对照没有最终呈现收益。不会据请求值猜测驱动内部路径。
 - 新的非阻塞问题：client平面尺寸标签用编码矩形反推，混合缩采样可相差约1 DIP；应将明确的原始viewport尺寸与输出epoch一起传递，不能拿tenant全局配置冒充每view实际值。本轮不扩协议。
+- db8ca75独立ZIP实播通过，但发现首次hover错误横幅；已修为无按钮move/leave可悬停未聚焦可见live页面，仍验全部token/序号，其他输入需focus。Control五按钮modifier位同步修正，实际首次hover不抢焦点、click/IME与mixed均通过。
+- 已补RTP playout-delay显式API/CLI，默认unset。720单租户特殊flag下：unset 53.03FPS/p95 103ms，max0 46.13FPS/82ms，max10 45.43FPS/92ms；不混合不同配置宣称达标。
+- 后续性能诊断优先项：按同一RTP补齐server capture/VPP/encode阶段时间及GPU执行/等待计时。当前四1080的render→收包约661ms，只有聚合统计不足以确定具体队列；接收后的等待已用RTP界限对照验证，但没有消除JS/canvas消费损失。
 - 干净checkpoint为56f1495，已推送并生成20261101-052354 ZIP；包内Node/SQLite/UI/browser管理smoke通过。最终ZIP还需一次真实RTC首帧、marker和输入验收，不能用管理smoke替代。
 
 ## 输出采样决策

@@ -128,11 +128,16 @@ class TextureSource : public webrtc::AdaptedVideoTrackSource {
   std::function<void()> refresh_;
 };
 
+struct RequestedPlayoutDelay {
+  // One atomic preserves min/max as a coherent pair across setter/encode.
+  std::atomic<uint64_t> packed{UINT64_MAX};
+};
 struct EncoderState {
   std::mutex mutex;
   webrtc::EncodedImageCallback* callback = nullptr;
   bool active = true;
   bool logged_sps = false;
+  std::shared_ptr<RequestedPlayoutDelay> playout_delay;
 };
 struct RemoteReceiveLimits {
   std::atomic<uint32_t> h264_level{51};
@@ -154,9 +159,10 @@ uint64_t NewID() {
 class ExternalEncoder : public webrtc::VideoEncoder {
  public:
   ExternalEncoder(uint64_t peer, const remotekit_rtc_options& options,
-                  uint32_t level)
+                  uint32_t level, std::shared_ptr<RequestedPlayoutDelay> playout)
       : peer_(peer), id_(NewID()), options_(options), level_(level),
         state_(std::make_shared<EncoderState>()) {
+    state_->playout_delay = std::move(playout);
     auto& r = GetRegistry();
     std::lock_guard lock(r.mutex);
     r.encoders.emplace(id_, state_);
@@ -291,8 +297,9 @@ class SendOnlyDecoderCapabilities : public webrtc::VideoDecoderFactory {
 class ExternalEncoderFactory : public webrtc::VideoEncoderFactory {
  public:
   ExternalEncoderFactory(uint64_t peer, const remotekit_rtc_options& o,
-                         std::shared_ptr<RemoteReceiveLimits> remote)
-      : peer_(peer), options_(o), remote_(std::move(remote)) {}
+                         std::shared_ptr<RemoteReceiveLimits> remote,
+                         std::shared_ptr<RequestedPlayoutDelay> playout)
+      : peer_(peer), options_(o), remote_(std::move(remote)), playout_(std::move(playout)) {}
   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
     return {H264Format()};
   }
@@ -306,12 +313,13 @@ class ExternalEncoderFactory : public webrtc::VideoEncoderFactory {
     const uint32_t receive_level = remote_->h264_level.load();
     if (!receive_level) return nullptr;
     return std::make_unique<ExternalEncoder>(peer_, options_,
-        std::min(static_cast<uint32_t>(profile->level), receive_level));
+        std::min(static_cast<uint32_t>(profile->level), receive_level), playout_);
   }
  private:
   uint64_t peer_;
   remotekit_rtc_options options_;
   std::shared_ptr<RemoteReceiveLimits> remote_;
+  std::shared_ptr<RequestedPlayoutDelay> playout_;
 };
 
 class LocalDescriptionObserver;
@@ -406,6 +414,7 @@ class Peer : public webrtc::PeerConnectionObserver,
   scoped_refptr<webrtc::DataChannelInterface> data;
   std::shared_ptr<LeaseTracker> leases = std::make_shared<LeaseTracker>();
   std::shared_ptr<RemoteReceiveLimits> remote_limits = std::make_shared<RemoteReceiveLimits>();
+  std::shared_ptr<RequestedPlayoutDelay> playout_delay = std::make_shared<RequestedPlayoutDelay>();
 };
 
 template <typename T>
@@ -438,6 +447,10 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
     auto result = base::DictValue().Set("type", "sender-rtc-stats")
         .Set("sampleTimeUs", static_cast<double>(report->timestamp().us()))
         .Set("callbackMonotonicUs", static_cast<double>(base::TimeTicks::Now().since_origin().InMicroseconds()));
+    const uint64_t requested = peer->playout_delay->packed.load();
+    result.Set("requestedPlayoutDelay", base::DictValue()
+        .Set("minMs", requested == UINT64_MAX ? -1 : static_cast<int>(requested >> 32))
+        .Set("maxMs", requested == UINT64_MAX ? -1 : static_cast<int>(requested & UINT32_MAX)));
     base::ListValue outbound;
     std::string transport_id;
     for (const auto* stream : report->GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>()) {
@@ -578,7 +591,8 @@ int Peer::Start() {
     deps.adm = webrtc::make_ref_counted<SilentAudioDevice>();
     deps.audio_encoder_factory = webrtc::make_ref_counted<EmptyAudioEncoders>();
     deps.audio_decoder_factory = webrtc::make_ref_counted<EmptyAudioDecoders>();
-    deps.video_encoder_factory = std::make_unique<ExternalEncoderFactory>(id, options, remote_limits);
+    deps.video_encoder_factory = std::make_unique<ExternalEncoderFactory>(
+        id, options, remote_limits, playout_delay);
     deps.video_decoder_factory = std::make_unique<SendOnlyDecoderCapabilities>();
     const bool loopback_test = base::Environment::Create()->GetVar("REMOTEKIT_RTC_LOOPBACK_TEST").value_or("") == "1";
     webrtc::EnableMedia(deps);
@@ -760,6 +774,23 @@ int remotekit_rtc_get_receive_level(uint64_t id, uint32_t* level_idc) {
     return REMOTEKIT_SDK_OK;
   });
 }
+int remotekit_rtc_set_playout_delay(uint64_t id, int32_t min_ms, int32_t max_ms) {
+  const bool clear = min_ms == -1 && max_ms == -1;
+  if (!clear && (min_ms < 0 || max_ms < min_ms || max_ms > 40950 ||
+                 min_ms % 10 != 0 || max_ms % 10 != 0))
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  const uint64_t packed = clear ? UINT64_MAX :
+      (static_cast<uint64_t>(min_ms) << 32) | static_cast<uint32_t>(max_ms);
+  return WithPeer(id, [&](Peer& peer) {
+    // WithPeer's API lock serializes valid updates and cancellation checks.
+    // RTP sender/receiver retain an earlier header limit when later images
+    // omit it, so never report a successful clear after an explicit request.
+    if (clear) return peer.playout_delay->packed.load() == UINT64_MAX ?
+        REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+    peer.playout_delay->packed.store(packed);
+    return REMOTEKIT_SDK_OK;
+  });
+}
 int remotekit_rtc_request_stats(uint64_t id) {
   return WithPeer(id, [](Peer& peer) {
     if (peer.stats_pending.exchange(true)) return REMOTEKIT_SDK_BUSY;
@@ -864,6 +895,12 @@ int remotekit_rtc_encoded(uint64_t id, const remotekit_rtc_encoded_frame* frame,
                                      webrtc::VideoFrameType::kVideoFrameDelta;
   image.qp_ = frame->qp;
   image.content_type_ = webrtc::VideoContentType::SCREENSHARE;
+  const uint64_t requested_playout = s->playout_delay->packed.load();
+  if (requested_playout != UINT64_MAX) {
+    image.SetPlayoutDelay(webrtc::VideoPlayoutDelay(
+        webrtc::TimeDelta::Millis(static_cast<int32_t>(requested_playout >> 32)),
+        webrtc::TimeDelta::Millis(static_cast<int32_t>(requested_playout & UINT32_MAX))));
+  }
   webrtc::CodecSpecificInfo codec{};
   codec.codecType = webrtc::kVideoCodecH264;
   codec.codecSpecific.H264.packetization_mode = webrtc::H264PacketizationMode::NonInterleaved;

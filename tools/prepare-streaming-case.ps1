@@ -24,7 +24,8 @@ param(
   [switch]$ResourceProfile,
   [switch]$DisableClientRafProbe,
   [ValidateSet('default','software','unlimited')][string]$ClientMode='default',
-  [ValidateSet('','auto','on','off')][string]$QsvLowPower=''
+  [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
+  [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
 $ErrorActionPreference = 'Stop'
 $rkRoot = Split-Path -Parent $PSScriptRoot
@@ -50,7 +51,7 @@ $configuration = @{
   timerPolicyTool=(Join-Path $rkRoot 'tools/probe-chrome-timer-policy.ps1'); timerPolicyOutput=(Join-Path $caseRoot 'timer-policy.json');
   captureQuality=[bool]$CaptureQuality; artifactToken=[guid]::NewGuid().ToString('N');
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
-  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs};
+  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
 if ($DownlinkMbps) {
@@ -87,9 +88,11 @@ $env:REMOTEKIT_ENDPOINT_ARGS = ConvertTo-Json -Compress -InputObject @(
   '--encoder=qsv','--fps=60','--bitrate=18000000','--max-bitrate=40000000',
   "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )
-if ($QsvLowPower) {
-  $configuration.endpoint.qsvLowPower=$QsvLowPower
-  $env:REMOTEKIT_ENDPOINT_ARGS=ConvertTo-Json -Compress -InputObject (@(ConvertFrom-Json $env:REMOTEKIT_ENDPOINT_ARGS)+@("--qsv-low-power=$QsvLowPower"))
+if ($QsvLowPower -or $RtcPlayoutMaxMs -ge 0) {
+  $extraArgs=@()
+  if($QsvLowPower){$configuration.endpoint.qsvLowPower=$QsvLowPower;$extraArgs+="--qsv-low-power=$QsvLowPower"}
+  if($RtcPlayoutMaxMs -ge 0){$extraArgs+="--rtc-playout-max-ms=$RtcPlayoutMaxMs"}
+  $env:REMOTEKIT_ENDPOINT_ARGS=ConvertTo-Json -Compress -InputObject (@(ConvertFrom-Json $env:REMOTEKIT_ENDPOINT_ARGS)+$extraArgs)
   $configurationJson=ConvertTo-Json -InputObject $configuration -Depth 12 -Compress
   [IO.File]::WriteAllText((Join-Path $caseRoot 'config.json'),$configurationJson)
   $driver=[regex]::Replace($driver,'const config = /\* CONFIG \*/ .*?;',{'const config = '+$configurationJson+';'})

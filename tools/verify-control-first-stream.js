@@ -1,47 +1,72 @@
-// Host Playwright browser_run_code_unsafe filename entry; no OS mouse/keyboard use.
+// Host Playwright browser_run_code_unsafe entry; dedicated Chrome89, no OS input.
+// Override only CONFIG in a temporary copy for a package test or another port.
 async (hostPage) => {
-  const browser = await hostPage.context().browser().browserType().launch({ executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: false, args: ['--no-first-run', '--no-default-browser-check', '--disable-features=WebRtcHideLocalIpsWithMdns', '--autoplay-policy=no-user-gesture-required'] });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  const page = await context.newPage(); const pageErrors = []; const exchanges = [];
+  const config = /* CONFIG */ { origin: 'http://127.0.0.1:3001', screenshotPath: 'C:/Users/Flysoft/Desktop/remotekit2/develop/tmp/first-stream/chrome89.png', profileDirectory: null };
+  const browserType = hostPage.context().browser().browserType();
+  const options = { executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: false, args: ['--no-first-run', '--no-default-browser-check', '--disable-features=WebRtcHideLocalIpsWithMdns', '--autoplay-policy=no-user-gesture-required'] };
+  const context = config.profileDirectory ? await browserType.launchPersistentContext(config.profileDirectory, { ...options, viewport: { width: 1440, height: 1000 } }) : await (await browserType.launch(options)).newContext({ viewport: { width: 1440, height: 1000 } });
+  const browser = context.browser(), page = context.pages()[0] ?? await context.newPage();
+  const pageErrors = [], exchanges = []; let failure;
   page.on('pageerror', error => pageErrors.push(error.message));
   page.on('response', response => { if (response.url().endsWith('/api/rtc/offer')) exchanges.push(response.json().then(answer => ({ offer: response.request().postDataJSON(), answer, status: response.status() })).catch(error => ({ error: String(error) }))); });
-  let failure;
+  const readMarker = async expected => page.evaluate(async expected => {
+    const { decodeMarker } = await import('/marker-codec.js'), t = window.remotekitDiagnostics.transport;
+    const c = document.createElement('canvas'); c.width = 256; c.height = 112; const ctx = c.getContext('2d'), deadline = performance.now() + 4000;
+    while (performance.now() < deadline) {
+      const view = t.layout?.views[0], frame = view && t.getLastPresentation(view.id), source = frame && t.getPaintedFrame(view.id, frame.rtpTimestamp);
+      if (source) { const scale = view.deviceScaleFactor * (view.mediaScale ?? 1); ctx.drawImage(source, view.x, view.y, 256 * scale, 112 * scale, 0, 0, 256, 112); const marker = decodeMarker(ctx.getImageData(0, 0, 256, 112)); if (marker && (expected === null || marker.stimulus === expected)) return marker; }
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    return null;
+  }, expected);
   try {
-    await page.goto('http://127.0.0.1:3001');
+    await page.goto(config.origin);
     await page.waitForFunction(() => document.querySelector('button[aria-label="新建标签页"]')?.disabled === false);
-    await page.evaluate(async () => {
-      const action = async body => { const res = await fetch('/api/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const value = await res.json(); if (!res.ok) throw new Error(JSON.stringify(value)); return value; };
+    await page.evaluate(async origin => {
+      const action = async body => { const r = await fetch('/api/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); if (!r.ok) throw new Error(JSON.stringify(data)); return data; };
       await action({ type: 'device.set', device: { mode: 'desktop', width: 1920, height: 1080, deviceScaleFactor: 1 } });
-      await action({ type: 'tab.create', url: 'http://127.0.0.1:3001/test-pattern.html?mode=animation&fps=60', title: 'Pixel marker first stream' });
-      window.remotekitDiagnostics.transport.receiveProfile = 'chrome89-h264-42';
-      window.rkReceiveCapabilities = await window.remotekitDiagnostics.transport.probeReceiveCapabilities();
-      await window.remotekitDiagnostics.transport.connect();
-    });
-    await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport; return t.video.videoWidth > 0 && t.layout?.views.length > 0 && t.diagnostics.channel === '已连接' && t.displayReady; }, null, { timeout: 15000 });
+      await action({ type: 'tab.create', url: origin + '/test-pattern.html?mode=animation&fps=60&activationMarker=1', title: 'Pixel marker first stream' });
+      const t = window.remotekitDiagnostics.transport; t.receiveProfile = 'chrome89-h264-42';
+      window.rkReceiveCapabilities = await t.probeReceiveCapabilities(); await t.connect();
+    }, config.origin);
+    // An authorized atlas can arrive before React mounts the product Tab.
+    // Wait for the real plane paint required by input, not displayReady alone.
+    await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport, view = t.layout?.views[0]; return t.video.videoWidth > 0 && view && t.diagnostics.channel === '已连接' && t.displayReady && t.getLastPresentation(view.id) && document.querySelector('.view-pane canvas:not(.no-frame)'); }, null, { timeout: 20000 });
+    const before = await page.evaluate(() => { const t = window.remotekitDiagnostics.transport, s = t.layout.views[0], r = document.querySelector('.view-pane canvas').getBoundingClientRect(), scale = s.deviceScaleFactor * (s.mediaScale ?? 1); return { focus: s.focus, epoch: t.layout.epoch, activeLabel: document.activeElement?.getAttribute('aria-label'), resultCount: t.inputResults.length, point: { x: r.left + 350 / (s.width / scale) * r.width, y: r.top + 30 / (s.height / scale) * r.height } }; });
+    await page.mouse.move(before.point.x, before.point.y);
+    await page.waitForFunction(count => window.remotekitDiagnostics.transport.inputResults.slice(count).some(result => result.type === 'input.result'), before.resultCount, { timeout: 5000 });
+    const hover = await page.evaluate(before => { const t = window.remotekitDiagnostics.transport; return { before, after: { focus: t.layout.views[0].focus, epoch: t.layout.epoch, activeLabel: document.activeElement?.getAttribute('aria-label') }, replies: t.inputResults.slice(before.resultCount), error: t.diagnostics.error }; }, before);
+    await page.evaluate(hover => { window.rkHover = hover; }, hover);
+    if (hover.replies.some(reply => reply.ok === false) || hover.error) throw new Error('Initial no-button hover was rejected: ' + JSON.stringify(hover));
+    if (hover.after.focus !== before.focus || hover.after.epoch !== before.epoch || hover.after.activeLabel !== before.activeLabel) throw new Error('Hover changed focus or layout: ' + JSON.stringify(hover));
+    const first = await readMarker(null); await page.evaluate(marker => { window.rkFirstMarker = marker; }, first);
+    if (!first) throw new Error('No CRC-valid marker from the actually painted video plane');
+    await page.mouse.click(before.point.x, before.point.y);
+    const clicked = await readMarker(60001); await page.evaluate(marker => { window.rkClickMarker = marker; }, clicked);
+    if (!clicked) throw new Error('No received-video activation marker after the real input-field click');
+    await page.evaluate(() => { const t = window.remotekitDiagnostics.transport, view = t.layout.views[0]; t.focus(view, true); if (!t.sendInput(view, { type: 'ime_commit', text: 'RK:42;' })) throw new Error('IME input was not accepted by client transport'); });
+    const response = await readMarker(42); await page.evaluate(marker => { window.rkStimulusMarker = marker; }, response);
+    if (!response) throw new Error('No CRC-valid IME stimulus 42 response from received video');
     await page.evaluate(async () => {
-      const transport = window.remotekitDiagnostics.transport, video = transport.video;
-      const callbacks = []; window.rkVideoFrameMetadata = { supported: typeof video.requestVideoFrameCallback === 'function', callbacks };
-      if (video.requestVideoFrameCallback) await new Promise(resolve => { let finished = false; const finish = () => { if (!finished) { finished = true; resolve(); } }; setTimeout(finish, 2000); const callback = (now, metadata) => { callbacks.push({ now, keys: Object.keys(metadata), metadata: { ...metadata }, rtpTimestamp: metadata.rtpTimestamp ?? null }); if (callbacks.length < 5 && !finished) video.requestVideoFrameCallback(callback); else finish(); }; video.requestVideoFrameCallback(callback); });
-      const { decodeMarker } = await import('/marker-codec.js'); const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 112; const ctx = canvas.getContext('2d');
-      const read = () => { const view = transport.layout?.views[0]; if (!view || !transport.displayReady) return null; ctx.drawImage(transport.displayFrame, view.x, view.y, 256 * view.deviceScaleFactor * (view.mediaScale ?? 1), 112 * view.deviceScaleFactor * (view.mediaScale ?? 1), 0, 0, 256, 112); return decodeMarker(ctx.getImageData(0, 0, 256, 112)); };
-      window.rkFirstMarker = read(); const view = transport.layout.views[0]; transport.focus(view, true); transport.sendInput(view, { type: 'ime_commit', text: 'RK:42;' });
-      const deadline = performance.now() + 4000; while (performance.now() < deadline) { const marker = read(); if (marker?.stimulus === 42) { window.rkStimulusMarker = marker; break; } await new Promise(resolve => setTimeout(resolve, 20)); }
+      const video = window.remotekitDiagnostics.transport.video, callbacks = []; window.rkVideoFrameMetadata = { supported: typeof video.requestVideoFrameCallback === 'function', callbacks };
+      if (video.requestVideoFrameCallback) await new Promise(resolve => { let finished = false; const finish = () => { if (!finished) { finished = true; resolve(); } }; setTimeout(finish, 1000); const callback = (now, metadata) => { callbacks.push({ now, keys: Object.keys(metadata), metadata: { ...metadata } }); if (callbacks.length < 3 && !finished) video.requestVideoFrameCallback(callback); else finish(); }; video.requestVideoFrameCallback(callback); });
     });
+    if (pageErrors.length) throw new Error('Client page errors: ' + pageErrors.join('; '));
   } catch (error) { failure = String(error); }
   try {
-    const observed = await page.evaluate(async () => { const transport = window.remotekitDiagnostics?.transport; const reports = transport?.peer ? Array.from((await transport.peer.getStats()).values()) : []; return { diagnostics: transport?.diagnostics, layout: transport?.layout, displayReady: transport?.displayReady, presentedFrame: transport?.presentedFrame, receiveCapabilities: window.rkReceiveCapabilities, signaling: transport?.signaling, state: await (await fetch('/api/state')).json(), video: { width: transport?.video.videoWidth, height: transport?.video.videoHeight, decodedFrames: transport?.video.webkitDecodedFrameCount }, reports, requestVideoFrameCallback: window.rkVideoFrameMetadata, markerBefore: window.rkFirstMarker, markerAfterStimulus: window.rkStimulusMarker }; });
-    const report = { kind: 'first-stream-functional-debug', browserVersion: browser.version(), failure, pageErrors, exchanges: await Promise.all(exchanges), ...observed };
+    const observed = await page.evaluate(async () => { const t = window.remotekitDiagnostics?.transport; return { diagnostics: t?.diagnostics, layout: t?.layout, displayReady: t?.displayReady, presentedFrame: t?.presentedFrame, presentation: t?.presentationDiagnostics, inputTrace: t?.inputTrace, inputResults: t?.inputResults, hover: window.rkHover, receiveCapabilities: window.rkReceiveCapabilities, signaling: t?.signaling, state: await (await fetch('/api/state')).json(), video: { width: t?.video.videoWidth, height: t?.video.videoHeight, decodedFrames: t?.video.webkitDecodedFrameCount }, reports: t?.peer ? Array.from((await t.peer.getStats()).values()) : [], requestVideoFrameCallback: window.rkVideoFrameMetadata, markerBefore: window.rkFirstMarker, markerAfterClick: window.rkClickMarker, markerAfterStimulus: window.rkStimulusMarker }; });
+    if (!failure && (observed.diagnostics?.error || observed.state.endpointError || observed.inputResults?.some(reply => reply.ok === false))) failure = 'Remote input or endpoint reported an error: ' + JSON.stringify({ error: observed.diagnostics?.error, endpointError: observed.state.endpointError, rejected: observed.inputResults?.filter(reply => reply.ok === false) });
+    const report = { kind: 'first-stream-functional-debug', passed: !failure, config, browserVersion: browser.version(), failure, pageErrors, exchanges: await Promise.all(exchanges), ...observed };
     await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === '诊断')?.click());
     await page.waitForFunction(() => document.querySelector('.overlay-toggle input'));
-    await page.evaluate(() => document.querySelector('.overlay-toggle input').click());
+    await page.evaluate(() => { const checkbox = document.querySelector('.overlay-toggle input'); if (!checkbox.checked) checkbox.click(); });
     await page.evaluate(() => document.querySelector('[aria-label="关闭侧栏"]').click());
-    await page.screenshot({ path: 'C:/Users/Flysoft/Desktop/remotekit2/develop/tmp/first-stream/chrome89.png', fullPage: true });
-    report.rtcClose = await page.evaluate(async () => { const transport = window.remotekitDiagnostics.transport; if (!transport.diagnostics.connectionId) return null; const start = performance.now(); const response = await fetch('/api/rtc/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: transport.diagnostics.connectionId }) }); return { elapsedMs: performance.now() - start, status: response.status }; });
+    await page.screenshot({ path: config.screenshotPath, fullPage: true });
+    report.rtcClose = await page.evaluate(async () => { const t = window.remotekitDiagnostics.transport; if (!t.diagnostics.connectionId) return null; const start = performance.now(), r = await fetch('/api/rtc/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: t.diagnostics.connectionId }) }); return { elapsedMs: performance.now() - start, status: r.status }; });
     await page.evaluate(() => window.remotekitDiagnostics.transport.disconnect());
-    await page.evaluate(async report => { await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report) }); }, report);
-    return { browserVersion: report.browserVersion, failure, pageErrors, diagnostics: observed.diagnostics, video: observed.video, markerBefore: observed.markerBefore, markerAfterStimulus: observed.markerAfterStimulus, requestVideoFrameCallback: observed.requestVideoFrameCallback, codec: observed.reports.filter(item => item.type === 'codec' && item.mimeType?.includes('H264')), stateError: observed.state.endpointError, layout: observed.layout, receiveCapabilities: observed.receiveCapabilities, displayReady: observed.displayReady, presentedFrame: observed.presentedFrame, rtcClose: report.rtcClose };
-  } finally {
-    await page.evaluate(() => window.remotekitDiagnostics?.transport.disconnect()).catch(() => {});
-    await browser.close();
-  }
+    if (!report.rtcClose || report.rtcClose.status !== 200) { failure ??= 'RTC close did not return 200'; report.failure = failure; report.passed = false; }
+    await page.evaluate(async report => { const r = await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report) }); if (!r.ok) throw new Error('Metrics upload ' + r.status); }, report);
+    if (failure) throw new Error('First-stream validation failed: ' + failure);
+    return { passed: true, browserVersion: report.browserVersion, pageErrors, hover: observed.hover, video: observed.video, markerBefore: observed.markerBefore, markerAfterClick: observed.markerAfterClick, markerAfterStimulus: observed.markerAfterStimulus, displayReady: observed.displayReady, layout: observed.layout, rtcClose: report.rtcClose };
+  } finally { await page.evaluate(() => window.remotekitDiagnostics?.transport.disconnect()).catch(() => {}); await browser.close(); }
 }

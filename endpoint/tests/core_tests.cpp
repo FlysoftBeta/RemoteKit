@@ -39,6 +39,62 @@ int main() {
   auto legacy = FitH264Sampling(1928, 1088, 60, 31);
   CHECK(((legacy.width + 15) / 16) * ((legacy.height + 15) / 16) * 60 <= 108000);
   CHECK(FitH264Sampling(1920, 1080, 60, 0).width == 0);
+  // Hover is permitted before focus, with the same token/sequence authority.
+  Endpoint hover_endpoint;
+  const auto hover_session = hover_endpoint.CreateSession("hover").value;
+  const auto hover_profile = hover_endpoint.AddProfile(hover_session, "default").value;
+  const auto hover_view = hover_endpoint.CreateWebView(hover_session, hover_profile).value;
+  auto hover_token = hover_endpoint.Token(hover_session, hover_view).value;
+  MouseInput hover_move;
+  hover_move.modifiers = 15; // Keyboard modifier state does not mean mouse drag.
+  MouseInput hover_leave; hover_leave.action = MouseInput::Action::leave;
+  CHECK(IsHoverInput(hover_move) && IsHoverInput(hover_leave));
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 1, hover_move}));
+  hover_move.modifiers = 0;
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 2, hover_leave}));
+  CHECK(!hover_endpoint.FindWebView(hover_session, hover_view)->focused);
+  CHECK(hover_endpoint.Token(hover_session, hover_view).value == hover_token);
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 2, hover_move}).error == Error::stale);
+  CHECK(hover_endpoint.AcceptInput(hover_session + 1, {hover_token, 3, hover_move}).error == Error::wrong_session);
+  auto invalid_hover = hover_move;
+  invalid_hover.x = std::numeric_limits<double>::quiet_NaN();
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 3, invalid_hover}).error == Error::invalid);
+  auto reject_without_focus = [&](const InputPayload& payload) {
+    CHECK(!IsHoverInput(payload));
+    CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 3, payload}).error == Error::unavailable);
+  };
+  MouseInput button_event; button_event.action = MouseInput::Action::down; button_event.button = 1;
+  reject_without_focus(button_event);
+  button_event.action = MouseInput::Action::up; reject_without_focus(button_event);
+  button_event.action = MouseInput::Action::move; reject_without_focus(button_event);
+  for (const auto held : {64u, 128u, 256u, 1u << 20, 1u << 21}) {
+    CHECK(kMouseButtonModifiers & held);
+    button_event.button = 0; button_event.modifiers = held;
+    reject_without_focus(button_event);
+    button_event.action = MouseInput::Action::leave; reject_without_focus(button_event);
+    button_event.action = MouseInput::Action::move;
+  }
+  reject_without_focus(KeyInput{}); reject_without_focus(WheelInput{});
+  reject_without_focus(TouchInput{TouchInput::Action::start, {{1, 10, 10, .5}}});
+  reject_without_focus(ImeSet{u"x", 0, 1}); reject_without_focus(ImeCommit{u"x"});
+  reject_without_focus(ImeCancel{}); reject_without_focus(ImeFinish{});
+  CHECK(hover_endpoint.FindWebView(hover_session, hover_view)->last_sequence == 2);
+  CHECK(hover_endpoint.SetFocus(hover_session, hover_view, true));
+  CHECK(hover_endpoint.SetFocus(hover_session, hover_view, false));
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 3, hover_move}).error == Error::stale);
+  hover_token = hover_endpoint.Token(hover_session, hover_view).value;
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 3, hover_move}));
+  CHECK(hover_endpoint.CommitDocument(hover_session, hover_view));
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 4, hover_leave}).error == Error::stale);
+  hover_token = hover_endpoint.Token(hover_session, hover_view).value;
+  const auto hover_freeze = hover_endpoint.RequestLifecycle(hover_session, hover_view, Lifecycle::freeze).value;
+  hover_token = hover_endpoint.Token(hover_session, hover_view).value;
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 4, hover_move}).error == Error::unavailable);
+  CHECK(hover_endpoint.CompleteLifecycle(hover_session, hover_freeze, true));
+  hover_token = hover_endpoint.Token(hover_session, hover_view).value;
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 4, hover_move}).error == Error::unavailable);
+  CHECK(hover_endpoint.ResetWebView(hover_session, hover_view));
+  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 4, hover_move}).error == Error::stale);
   Endpoint stable;
   auto persisted = stable.CreateSession("stable-tenant", 987654321);
   CHECK(persisted && persisted.value == 987654321);

@@ -3,6 +3,7 @@
 #include <wrl/client.h>
 
 #include <chrono>
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdio>
@@ -92,6 +93,35 @@ int main(int argc, char** argv) {
   if (status != REMOTEKIT_SDK_OK) {
     std::fprintf(stderr, "create A failed %d\n", status); return 3;
   }
+  if (remotekit_rtc_set_playout_delay(a, -1, -1) != REMOTEKIT_SDK_OK ||
+      remotekit_rtc_set_playout_delay(a, -1, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_set_playout_delay(a, 10, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_set_playout_delay(a, 0, 40960) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_set_playout_delay(a, 0, 11) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_set_playout_delay(a, 0, 40950) != REMOTEKIT_SDK_OK)
+    return 29;
+  int playout_status = REMOTEKIT_SDK_INVALID_STATE;
+  std::thread playout_setter([&] {
+    playout_status = remotekit_rtc_set_playout_delay(a, 0, 0);
+  });
+  playout_setter.join();
+  if (playout_status != REMOTEKIT_SDK_OK ||
+      remotekit_rtc_set_playout_delay(a, -1, -1) != REMOTEKIT_SDK_INVALID_STATE)
+    return 30;
+  if (remotekit_rtc_request_stats(a) != REMOTEKIT_SDK_OK) return 31;
+  {
+    std::unique_lock lock(events.mutex);
+    auto requested = [&] { return std::find_if(events.pending.begin(), events.pending.end(),
+        [&](const Event& event) { return event.peer == a && event.type == REMOTEKIT_RTC_STATS; }); };
+    if (!events.cv.wait_for(lock, std::chrono::seconds(5),
+            [&] { return requested() != events.pending.end(); })) return 31;
+    const auto it = requested();
+    if (it->text.find("\"requestedPlayoutDelay\"") == std::string::npos ||
+        it->text.find("\"minMs\":0") == std::string::npos ||
+        it->text.find("\"maxMs\":0") == std::string::npos) return 31;
+    events.pending.erase(it);
+  }
+  if (remotekit_rtc_set_playout_delay(a, 20, 100) != REMOTEKIT_SDK_OK) return 30;
   if (remotekit_sdk_shutdown() != REMOTEKIT_SDK_INVALID_STATE) return 4;
   if (remotekit_rtc_create(&options, &b) != REMOTEKIT_SDK_OK || b == a)
     return 5;
@@ -259,7 +289,8 @@ int main(int argc, char** argv) {
       remotekit_rtc_close(answerer) != REMOTEKIT_SDK_OK ||
       remotekit_rtc_close(a) != REMOTEKIT_SDK_INVALID_STATE ||
       remotekit_rtc_create_offer(a) != REMOTEKIT_SDK_INVALID_STATE ||
-      remotekit_rtc_request_stats(a) != REMOTEKIT_SDK_INVALID_STATE) return 12;
+      remotekit_rtc_request_stats(a) != REMOTEKIT_SDK_INVALID_STATE ||
+      remotekit_rtc_set_playout_delay(a, 0, 0) != REMOTEKIT_SDK_INVALID_STATE) return 12;
   if (leases.load() != 0) return 19;
   remotekit_rtc_encoded_frame late{};
   const unsigned char access_unit[] = {0, 0, 0, 1, 0x65};

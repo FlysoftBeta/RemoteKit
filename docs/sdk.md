@@ -112,6 +112,15 @@ most one request in flight; request at 1 Hz. Missing fields remain absent.
 Sender `availableOutgoingBitrate` describes the video sending path; the same
 field on the receiving client's peer describes its outgoing direction instead.
 
+`remotekit_rtc_set_playout_delay(peer, min_ms, max_ms)` requests the negotiated
+RTP playout-delay extension. Both limits must be multiples of 10 ms, with
+`0 <= min <= max <= 40950`. The default is unset. `-1,-1` is a no-op only before
+an explicit configuration; cancelling afterwards returns `INVALID_STATE` and
+keeps the request. Recreate the peer to restore default receiver behavior.
+Updating an explicit pair remains supported. This additive export keeps ABI 2;
+the updated endpoint requires an SDK containing it. Statistics report the
+requested limits, not a measured end-to-end delay guarantee.
+
 The reliable ordered DataChannel is named `remotekit`. Client messages and
 authorization boundaries are described in [streaming protocol](streaming-protocol.md).
 Runtime and hardware validation results are maintained in [current state](current-state.zh-CN.md).

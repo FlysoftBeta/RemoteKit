@@ -1046,6 +1046,10 @@ Status WebView::InjectTouches(const TouchInput& touch) {
   return {};
 }
 Status WebView::DispatchInput(const InputEvent& input) {
+  static_assert(kMouseButtonModifiers ==
+      (blink::WebInputEvent::kLeftButtonDown | blink::WebInputEvent::kMiddleButtonDown |
+       blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
+       blink::WebInputEvent::kForwardButtonDown));
   if (touch_hit_test_pending_ || touch_cleanup_pending_)
     return Fail(Error::busy, "Resolving/draining touch; retry this input with the same sequence");
   if (!input_commit_navigations_.empty())
@@ -1054,14 +1058,22 @@ Status WebView::DispatchInput(const InputEvent& input) {
     return Fail(Error::unavailable, "Browser lifecycle state uncertain; unload required");
   if (input.token.view != view_ || input.token.session != session_)
     return Fail(Error::wrong_session, "Input targets another WebView/session");
-  auto* host = FocusedWidget();
+  const bool hover = IsHoverInput(input.payload);
   auto* root = RootWidget(contents_.get());
+  auto* host = hover ? root : FocusedWidget();
   auto* root_view = RootView(contents_.get());
   if (!host || !root || !root_view)
-    return Fail(Error::unavailable, "Focused renderer widget required");
+    return Fail(Error::unavailable, "Renderer widget required");
   auto valid = ValidateInput(input.payload);
   if (!valid)
     return valid;
+  if (hover && (!visible_ || !InputFrameReady(contents_->GetPrimaryMainFrame())))
+    return Fail(Error::unavailable, "Hover requires a visible live WebView");
+  if (hover && !pressed_mouse_buttons_.empty()) {
+    const auto* model = endpoint_->FindWebView(session_, view_);
+    if (!model || !model->focused)
+      return Fail(Error::unavailable, "Mouse drag requires focus");
+  }
   const bool routed = std::holds_alternative<MouseInput>(input.payload) ||
                       std::holds_alternative<WheelInput>(input.payload) ||
                       std::holds_alternative<TouchInput>(input.payload);
@@ -1154,12 +1166,14 @@ Status WebView::DispatchInput(const InputEvent& input) {
         } else if constexpr (std::is_same_v<T, MouseInput>) {
           Type type = value.action == MouseInput::Action::move   ? Type::kMouseMove
                       : value.action == MouseInput::Action::down ? Type::kMouseDown
+                      : value.action == MouseInput::Action::leave ? Type::kMouseLeave
                                                                  : Type::kMouseUp;
           blink::WebMouseEvent event(type, static_cast<int>(value.modifiers), now);
           event.SetPositionInWidget(static_cast<float>(value.x), static_cast<float>(value.y));
           event.SetPositionInScreen(ViewportToScreen(root_view, event.PositionInWidget()));
           event.button = Button(value.button);
-          event.click_count = value.action == MouseInput::Action::move ? 0 : value.click_count;
+          event.click_count = (value.action == MouseInput::Action::move ||
+                               value.action == MouseInput::Action::leave) ? 0 : value.click_count;
           last_mouse_ = value;
           if (value.button && value.action == MouseInput::Action::down)
             pressed_mouse_buttons_.insert(value.button);

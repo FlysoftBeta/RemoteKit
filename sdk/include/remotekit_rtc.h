@@ -123,6 +123,17 @@ REMOTEKIT_SDK_API int remotekit_rtc_add_ice(uint64_t peer, const char* mid,
  * format is present. Read after ICE_COMPLETE for this offer. */
 REMOTEKIT_SDK_API int remotekit_rtc_get_receive_level(uint64_t peer,
                                                     uint32_t* level_idc);
+/* Thread-safe request applied to subsequent encoded completions, including
+ * after encoder recreation. -1,-1 is a no-op while still unset (the default).
+ * Once explicitly configured, cancellation returns INVALID_STATE and retains
+ * the request: close/recreate the peer to return to default receiver behavior.
+ * Updating to another valid explicit pair remains supported. Otherwise
+ * require 0<=min_ms<=max_ms<=40950 and both values in multiples of 10ms.
+ * Uses the negotiated RTP playout-delay extension when available; success
+ * records a sender request, not a measured receiver buffering guarantee. */
+REMOTEKIT_SDK_API int remotekit_rtc_set_playout_delay(uint64_t peer,
+                                                    int32_t min_ms,
+                                                    int32_t max_ms);
 /* Asynchronous compact GetStats; at most one request per peer in flight.
  * Returns BUSY until completion; request at 1Hz. Close discards late reports. */
 REMOTEKIT_SDK_API int remotekit_rtc_request_stats(uint64_t peer);
