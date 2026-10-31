@@ -16,6 +16,18 @@ int main(int argc,char** argv) {
  if(argc>4)settings.width=std::stoul(argv[4]);
  if(argc>5)settings.height=std::stoul(argv[5]);
  if(argc>6)settings.level_idc=std::stoul(argv[6]);
+ // Optional trailing QSV mode, retaining all previous positional arguments.
+ if(argc>7){const std::string low_power=argv[7];
+  if(low_power!="auto"&&low_power!="on"&&low_power!="off"){fprintf(stderr,"QSV LowPower must be auto, on or off\n");return 1;}
+  settings.qsv_low_power=low_power=="on"?0x10u:(low_power=="off"?0x20u:0u);
+  if(argc>1&&std::string(argv[1])=="nvenc"&&settings.qsv_low_power){fprintf(stderr,"LowPower is QSV-only\n");return 1;}
+ }
+ if(argc>8){settings.target_usage=std::stoul(argv[8]);
+  if(settings.target_usage<1||settings.target_usage>7){fprintf(stderr,"Target usage must be 1..7\n");return 1;}}
+ if(argc>9){const std::string rate_control=argv[9];
+  if(rate_control!="cbr"&&rate_control!="vbr"){fprintf(stderr,"Rate control must be cbr or vbr\n");return 1;}
+  settings.vbr=rate_control=="vbr";
+ }
  if(argc>2)settings.async_depth=static_cast<uint32_t>(std::stoul(argv[2]));
  auto encoder=(argc>1&&std::string(argv[1])=="nvenc")?CreateNvencEncoder():CreateQsvEncoder();
  if(!encoder->Configure(device.Get(),settings,error)){fprintf(stderr,"%s\n",error.c_str());return 2;}

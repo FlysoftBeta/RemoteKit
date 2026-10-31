@@ -17,6 +17,7 @@ struct EncoderStats {
  std::atomic<uint64_t> rate_updates{0},keyframe_requests{0},keyframes_submitted{0},keyframes_encoded{0};
  std::mutex mutex;std::string backend,error;
  nlohmann::json sender_rtc_stats;
+ std::optional<QsvLowPowerInfo> qsv_low_power;
  uint32_t requested_bitrate=0,requested_fps=0,applied_bitrate=0,applied_fps=0,actual_level=0;
  nlohmann::json Snapshot();
 };

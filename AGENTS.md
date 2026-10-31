@@ -114,6 +114,7 @@ python3 tools/package-runtime.py
 - browser ↔ endpoint 的稳定输出不得添加逐帧 ready/present/release Mojo 消息。Mojo 用于建立、配置、输入及资源重建。
 - **共享内存是 Agent 选用的元数据方案，用户已追问其必要性，尚未最终要求保留或移除。** 当前只存帧信息、布局和输入状态，不传像素、不替代 Fence；不能把当前机制说成用户硬性要求。固定槽池用 Fence value 编码槽位/序号的替代方案尚未实施。
 - 共享映射定义为 `endpoint/include/remotekit/shared_atlas.h`；布局变化须更新版本和尺寸断言，并同时重建 browser、SDK、endpoint。
+- 串流service每WebView通过官方capture scale override使实际backing跟随页面DPR；不能只看JS的DPR就推断渲染像素数。native demo仍跟随宿主DPI。混合页面共用atlas采样比例，网页DPR、实际backing、atlas与编码尺寸分别报告。
 - 完整导航恢复已接 history/PageState 和同进程 sessionStorage namespace；跨 browser 的 sessionStorage 仍未恢复。导入校验 Session/Profile/版本，POST 不自动重放。
 - GPU/QSV/WebRTC 已有真实Chrome89视频与输入响应证据；正式FPS/p95、真实IME/触控、下载与资源重建的完成情况以当前状态和串流实验文档为准。动态popup、认证/证书、PDF/打印等缺口仍保留，不能视为用户放弃。
 - 网页设备DPR/viewport与媒体采样分辨率分开；Endpoint GPU转换按协商接收上限等比下采样，stats记录原始/编码尺寸。客户端用实际wire RTP匹配显示代次，防止新布局命中旧帧。

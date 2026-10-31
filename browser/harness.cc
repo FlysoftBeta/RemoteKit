@@ -108,7 +108,7 @@ struct HarnessMainParts::State {
       native_views[i]->SetVisible(visible);
       contents[i]->SetVisible(visible);
       placements.emplace_back(rect.x, rect.y, rect.width, rect.height);
-      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]));
+      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
     }
     UpdateOutput();
   }
@@ -173,6 +173,8 @@ struct HarnessMainParts::State {
 
   base::DictValue HandleControl(const base::DictValue& request);
   void UpdateOutput() {
+    for (const auto& adapter : contents)
+      adapter->RefreshBackingScale();
     if (!output)
       return;
     std::vector<GpuAtlas::View> views;
@@ -304,7 +306,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     logical_width = next_width; logical_height = next_height;
     output_scale = next_scale;
     for (size_t i = 0; i < contents.size(); ++i)
-      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]));
+      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
     output_enabled = next_enabled;
     output_fps = next_fps;
     output_width = (static_cast<uint32_t>(std::ceil(logical_width * output_scale)) + 1u) & ~1u;
@@ -393,6 +395,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           value.Set("height", specs[i].height);
           value.Set("device", specs[i].tablet ? "tablet" : "desktop");
           value.Set("deviceScaleFactor", PageScale(specs[i]));
+          value.Set("compositor", adapter->CompositorDiagnostics());
           value.Set("visible", specs[i].visible);
           value.Set("lifecycle_uncertain", adapter->lifecycle_uncertain());
           auto touch = adapter->TouchInjectionStatus();
@@ -485,7 +488,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     auto adapter = std::make_unique<WebView>(contexts[owner].get(), &endpoint, session, view);
     adapter->SetNativeFocusEnabled(demo &&
         !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
-    adapter->ConfigureDevice(spec.width, spec.height, spec.tablet, PageScale(spec));
+    adapter->ConfigureDevice(spec.width, spec.height, spec.tablet, PageScale(spec), !demo);
     auto requests = std::make_unique<PageRequests>();
     requests->Bind(adapter->contents());
     auto* native = root->AddChildView(std::make_unique<views::WebView>(contexts[owner].get()));
@@ -558,7 +561,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     endpoint.ResetWebView(session, view);
     contents[index] = std::make_unique<WebView>(contexts[owner - profiles.begin()].get(), &endpoint, session, view);
     contents[index]->SetNativeFocusEnabled(demo && !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
-    contents[index]->ConfigureDevice(specs[index].width, specs[index].height, specs[index].tablet, PageScale(specs[index]));
+    contents[index]->ConfigureDevice(specs[index].width, specs[index].height, specs[index].tablet, PageScale(specs[index]), !demo);
     page_requests[index] = std::make_unique<PageRequests>();
     page_requests[index]->Bind(contents[index]->contents());
     native_views[index]->SetWebContents(contents[index]->contents());

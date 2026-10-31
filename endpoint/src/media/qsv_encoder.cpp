@@ -37,6 +37,7 @@ class Qsv final : public HardwareEncoder {
   std::deque<std::unique_ptr<Task>> tasks_;
   std::deque<std::unique_ptr<Task>> held_;
   EncoderSettings settings_;
+  QsvLowPowerInfo low_power_;
   bool initialized_=false;
   mfxU16 allocated_buffer_kb_=0;
   static bool Status(mfxStatus status,const char* operation,std::string& error) {
@@ -89,6 +90,7 @@ class Qsv final : public HardwareEncoder {
     return MFX_ERR_NONE;
   }
  public:
+  std::optional<QsvLowPowerInfo> LowPowerInfo() const override {return low_power_;}
   ~Qsv() override {
     if(session_) {
       // Close is the hardware cancellation/drain boundary even on device error.
@@ -104,7 +106,8 @@ class Qsv final : public HardwareEncoder {
     value.fps=params_.mfx.FrameInfo.FrameRateExtD ? params_.mfx.FrameInfo.FrameRateExtN/params_.mfx.FrameInfo.FrameRateExtD : 0;
     value.bitrate=params_.mfx.TargetKbps*1000u;value.max_bitrate=params_.mfx.MaxKbps*1000u;
     value.async_depth=params_.AsyncDepth;value.gop=params_.mfx.GopPicSize;value.target_usage=params_.mfx.TargetUsage;
-    value.level_idc=params_.mfx.CodecLevel;return value;
+    value.level_idc=params_.mfx.CodecLevel;
+    value.qsv_low_power=static_cast<uint32_t>(low_power_.initialized.value_or(0));return value;
   }
   bool Configure(ID3D11Device* device,const EncoderSettings& requested,std::string& error) override {
     EncoderSettings settings=requested;
@@ -114,7 +117,7 @@ class Qsv final : public HardwareEncoder {
       settings.bitrate=std::min(settings.bitrate,settings.max_bitrate);
     }
     if(session_) {error="QSV already configured";return false;}
-    device_=device;settings_=settings;
+    device_=device;settings_=settings;low_power_.requested=static_cast<int>(settings.qsv_low_power);
     ComPtr<ID3D10Multithread> multithread;
     if(SUCCEEDED(device_.As(&multithread))) multithread->SetMultithreadProtected(TRUE);
     loader_=MFXLoad();
@@ -139,6 +142,7 @@ class Qsv final : public HardwareEncoder {
     params_.AsyncDepth=static_cast<mfxU16>(settings.async_depth);
     params_.IOPattern=MFX_IOPATTERN_IN_VIDEO_MEMORY;
     auto& info=params_.mfx;
+    info.LowPower=static_cast<mfxU16>(settings.qsv_low_power);
     info.CodecId=MFX_CODEC_AVC;info.CodecProfile=MFX_PROFILE_AVC_CONSTRAINED_BASELINE;
     info.CodecLevel=static_cast<mfxU16>(settings.level_idc);
     info.TargetUsage=static_cast<mfxU16>(settings.target_usage);
@@ -169,11 +173,30 @@ class Qsv final : public HardwareEncoder {
     hrd_options_.VuiVclHrdParameters=MFX_CODINGOPTION_OFF;
     extensions_[2]=reinterpret_cast<mfxExtBuffer*>(&hrd_options_);
     params_.ExtParam=extensions_.data();params_.NumExtParam=static_cast<mfxU16>(extensions_.size());
-    if(!Status(MFXVideoENCODE_Query(session_,&params_,&params_),"MFX H264 Query",error)) return false;
+    const auto query_status=MFXVideoENCODE_Query(session_,&params_,&params_);
+    low_power_.query_status=query_status;
+    if(query_status>=0)low_power_.queried=params_.mfx.LowPower;
+    fprintf(stderr,"QSV LowPower: requested=%u queried=%d queryStatus=%d\n",
+      settings.qsv_low_power,low_power_.queried.value_or(-1),query_status);
+    if(!Status(query_status,"MFX H264 Query",error)) return false;
+    if(settings.qsv_low_power&&params_.mfx.LowPower!=settings.qsv_low_power) {
+      error="QSV Query changed explicit LowPower request to "+std::to_string(params_.mfx.LowPower);return false;
+    }
     if(params_.mfx.GopRefDist!=1) {error="QSV unexpectedly enabled B frames";return false;}
-    if(!Status(MFXVideoENCODE_Init(session_,&params_),"MFX H264 Init",error)) return false;
+    const auto init_status=MFXVideoENCODE_Init(session_,&params_);
+    low_power_.init_status=init_status;
+    fprintf(stderr,"QSV LowPower: initStatus=%d\n",init_status);
+    if(!Status(init_status,"MFX H264 Init",error)) return false;
     initialized_=true;
-    if(!Status(MFXVideoENCODE_GetVideoParam(session_,&params_),"MFX GetVideoParam",error))return false;
+    const auto get_status=MFXVideoENCODE_GetVideoParam(session_,&params_);
+    low_power_.get_video_param_status=get_status;
+    if(get_status>=0)low_power_.initialized=params_.mfx.LowPower;
+    fprintf(stderr,"QSV LowPower: initialized=%d getVideoParamStatus=%d\n",
+      low_power_.initialized.value_or(-1),get_status);
+    if(!Status(get_status,"MFX GetVideoParam",error))return false;
+    if(settings.qsv_low_power&&params_.mfx.LowPower!=settings.qsv_low_power) {
+      error="QSV initialized with a different LowPower value: "+std::to_string(params_.mfx.LowPower);return false;
+    }
     if(!CheckSignal(error))return false;
     fprintf(stderr,"QSV actual VUI: fullRange=%u description=%u primaries=%u transfer=%u matrix=%u\n",
       signal_.VideoFullRange,signal_.ColourDescriptionPresent,signal_.ColourPrimaries,
@@ -287,7 +310,13 @@ class Qsv final : public HardwareEncoder {
     if(!Status(status,"MFX bitrate-only Reset StartNewSequence=OFF",error))return false;
     next.ExtParam=extensions_.data();next.NumExtParam=static_cast<mfxU16>(extensions_.size());
     params_=next;settings_.bitrate=bitrate;
-    if(!Status(MFXVideoENCODE_GetVideoParam(session_,&params_),"MFX GetVideoParam after rate update",error))return false;
+    const auto get_status=MFXVideoENCODE_GetVideoParam(session_,&params_);
+    low_power_.get_video_param_status=get_status;low_power_.initialized.reset();
+    if(get_status>=0)low_power_.initialized=params_.mfx.LowPower;
+    if(!Status(get_status,"MFX GetVideoParam after rate update",error))return false;
+    if(settings_.qsv_low_power&&params_.mfx.LowPower!=settings_.qsv_low_power) {
+      error="QSV rate update changed explicit LowPower value";return false;
+    }
     if(!CheckSignal(error))return false;
     if(params_.mfx.CodecLevel>settings_.level_idc) {
       error="QSV rate update exceeded negotiated H264 level";return false;

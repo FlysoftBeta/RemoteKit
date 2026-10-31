@@ -12,6 +12,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
+#include "base/values.h"
 #include "content/public/browser/devtools_agent_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "remotekit/core.hpp"
@@ -60,7 +61,11 @@ class WebView final : public content::WebContentsObserver,
   Status SetVisible(bool);
   Status Focus(bool);
   void SetNativeFocusEnabled(bool enabled);
-  void ConfigureDevice(int width, int height, bool tablet, float scale = 1);
+  void ConfigureDevice(int width, int height, bool tablet, float scale = 1,
+                       bool match_page_backing = false);
+  // Service rendering follows page DPR; demo rendering follows native DPI.
+  // Also called from the existing output timer to notice host-DPI changes.
+  void RefreshBackingScale();
   void InvalidateLayoutInput();
   static void OverridePreferences(content::WebContents*, blink::web_pref::WebPreferences*);
   SharedAtlasTextInput TextInputState() const;
@@ -69,6 +74,9 @@ class WebView final : public content::WebContentsObserver,
   // A first touch start resolves its OOPIF target asynchronously. All remote
   // input is busy during that resolution; callers must retry rejected input.
   Status TouchInjectionStatus() const;
+  // UI-sequence diagnostic snapshot; absent fields mean no current native view
+  // or submitted frame. Reads cached state without requesting frame reports.
+  base::DictValue CompositorDiagnostics() const;
   bool lifecycle_uncertain() const { return lifecycle_uncertain_; }
   // Opaque navigation-only persistence, no external file I/O. Import requires
   // an unloaded adapter and carries no cross-process sessionStorage contents.
@@ -85,6 +93,7 @@ class WebView final : public content::WebContentsObserver,
   void DidFinishNavigation(content::NavigationHandle*) override;
   void DidStartNavigation(content::NavigationHandle*) override;
   void ReadyToCommitNavigation(content::NavigationHandle*) override;
+  void RenderViewReady() override;
   void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
   void OnWebContentsFocused(content::RenderWidgetHost*) override;
   void OnWebContentsLostFocus(content::RenderWidgetHost*) override;
@@ -92,6 +101,7 @@ class WebView final : public content::WebContentsObserver,
   void RenderFrameHostChanged(content::RenderFrameHost*, content::RenderFrameHost*) override;
   void CreateContents();
   void ApplyDevice(content::RenderFrameHost* frame = nullptr);
+  void ApplyBackingScale(content::RenderWidgetHostViewBase*);
   content::RenderWidgetHostImpl* FocusedWidget() const;
   void CancelTouches(bool deliver);
   bool HasTouchEmulatorConflict() const;
@@ -130,6 +140,9 @@ class WebView final : public content::WebContentsObserver,
   int viewport_width_ = 0, viewport_height_ = 0;
   bool tablet_ = false;
   float device_scale_ = 1;
+  bool match_page_backing_ = false;
+  float backing_host_scale_ = 0;
+  base::WeakPtr<content::RenderWidgetHostViewBase> backing_view_;
   bool visible_{false};
   bool native_focus_enabled_{true};
   std::unique_ptr<NavigationState> navigation_state_;

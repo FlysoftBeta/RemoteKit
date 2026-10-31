@@ -56,6 +56,17 @@ async (hostPage) => {
       await cdp.detach();
       if (!timerPolicy?.allSucceeded) throw new Error(`Timer policy not applied to all selected test PIDs: ${JSON.stringify(timerPolicy)}`);
     }
+    if (config.resourceProfile) {
+      const cdp = await browser.newBrowserCDPSession();
+      const info = await cdp.send('SystemInfo.getProcessInfo');
+      const root = info.processInfo.find(process => process.type === 'browser');
+      if (!root) throw new Error('Cannot identify receiver process for resource attribution');
+      await pages[0].evaluate(async ({ receiverRootPid, runId }) => {
+        const saved = await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'resource-process-root', receiverRootPid, runId }) });
+        if (!saved.ok) throw new Error(`Resource root handoff failed ${saved.status}`);
+      }, { receiverRootPid: root.id, runId: config.id });
+      await cdp.detach();
+    }
     // All peers stay alive together. No parameter groups overlap.
     await Promise.all(pages.map(page => page.waitForTimeout(config.warmupMs)));
     const results = await Promise.all(pages.map((page, index) => page.evaluate(async ({ config, index, flags }) => {
@@ -69,7 +80,7 @@ async (hostPage) => {
       if (config.requirePaint && !hasPaint) throw new Error('This case requires Viewport paint instrumentation');
       let observing = true, rafId, videoCallbackId;
       const raf = now => { if (!observing) return; clientRaf.push(now); rafId = requestAnimationFrame(raf); };
-      rafId = requestAnimationFrame(raf);
+      if (config.observeClientRaf !== false) rafId = requestAnimationFrame(raf);
       if (transport.video.requestVideoFrameCallback) {
         const videoFrame = (now, metadata) => { if (!observing) return; rawVideoFrames.push({ now, ...metadata }); videoCallbackId = transport.video.requestVideoFrameCallback(videoFrame); };
         videoCallbackId = transport.video.requestVideoFrameCallback(videoFrame);

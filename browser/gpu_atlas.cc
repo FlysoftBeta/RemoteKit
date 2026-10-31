@@ -508,6 +508,30 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     }
     D3D11_TEXTURE2D_DESC desc{};
     source->GetDesc(&desc);
+    if (!trace_directory_.empty()) {
+      TraceGeometry geometry{gfx::Size(capture.metadata.width_pixels, capture.metadata.height_pixels),
+          info->coded_size, info->natural_size, info->visible_rect, content_rect,
+          desc.Width, desc.Height, static_cast<uint32_t>(desc.Format)};
+      const uint64_t view_id = capture.metadata.webview_id;
+      auto previous = trace_geometry_.find(view_id);
+      if (previous == trace_geometry_.end() || previous->second != geometry) {
+        trace_geometry_[view_id] = geometry;
+        if (trace_geometry_samples_.size() < 256) {
+          trace_geometry_samples_.Append(base::DictValue()
+              .Set("at_us", static_cast<double>(base::TimeTicks::Now().since_origin().InMicroseconds()))
+              .Set("webview_id", Number(view_id))
+              .Set("requested_width", geometry.requested.width()).Set("requested_height", geometry.requested.height())
+              .Set("coded_width", geometry.coded.width()).Set("coded_height", geometry.coded.height())
+              .Set("natural_width", geometry.natural.width()).Set("natural_height", geometry.natural.height())
+              .Set("visible_x", geometry.visible.x()).Set("visible_y", geometry.visible.y())
+              .Set("visible_width", geometry.visible.width()).Set("visible_height", geometry.visible.height())
+              .Set("content_width", geometry.content.width()).Set("content_height", geometry.content.height())
+              .Set("texture_width", static_cast<int>(geometry.texture_width))
+              .Set("texture_height", static_cast<int>(geometry.texture_height))
+              .Set("texture_format", static_cast<int>(geometry.texture_format)));
+        }
+      }
+    }
     if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.Width != capture.metadata.width_pixels ||
         desc.Height != capture.metadata.height_pixels || desc.ArraySize != 1 ||
         desc.SampleDesc.Count != 1 || !(desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)) {
@@ -753,6 +777,12 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   }
 
  private:
+  struct TraceGeometry {
+    gfx::Size requested, coded, natural;
+    gfx::Rect visible, content;
+    uint32_t texture_width, texture_height, texture_format;
+    bool operator==(const TraceGeometry&) const = default;
+  };
   struct TraceEvent {
     const char* stage;
     int64_t at_us;
@@ -795,7 +825,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         .Set("capture_callbacks", Number(capture_callbacks_)).Set("captured", Number(captured_))
         .Set("published", Number(frame_id_)).Set("dropped", Number(dropped_))
         .Set("mutex_drops", Number(mutex_drops_)).Set("backpressure_polls", Number(backpressure_))
-        .Set("trace_full", trace_events_.size() == 64000).Set("events", std::move(events));
+        .Set("trace_full", trace_events_.size() == 64000).Set("events", std::move(events))
+        .Set("capture_geometry", std::move(trace_geometry_samples_));
     auto json = base::WriteJson(report);
     if (!json) return;
     auto path = trace_directory_.AppendASCII("browser-" + Number(base::GetCurrentProcId()) +
@@ -841,6 +872,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   uint64_t capture_callbacks_ = 0;
   base::FilePath trace_directory_;
   std::vector<TraceEvent> trace_events_;
+  std::map<uint64_t, TraceGeometry> trace_geometry_;
+  base::ListValue trace_geometry_samples_;
   bool trace_saved_ = false, trace_start_high_resolution_ = false;
   int64_t capture_time_us_ = 0;
 };

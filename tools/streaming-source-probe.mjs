@@ -2,7 +2,7 @@
 // timestamps without changing the marker payload or forcing extra damage.
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cpus } from 'node:os';
@@ -52,6 +52,8 @@ const server = createServer(async (request, response) => {
     }
     if (request.method === 'GET' && url.pathname === '/test-pattern.html') {
       let html = await readFile(resolve(fixtureRoot, 'test-pattern.html'), 'utf8');
+      const sourceSha256 = createHash('sha256').update(html).digest('hex');
+      const fixtureKind = html.includes('dom-compositor-scroll-v1') ? 'dom-compositor-scroll-v1' : 'canvas-test-pattern';
       if (url.searchParams.get('quality') === '1') {
         const anchor = 'drawMarker(marker,frame,Date.now(),stimulus);';
         if (!html.includes(anchor)) throw new Error('Quality marker anchor changed');
@@ -63,6 +65,8 @@ const server = createServer(async (request, response) => {
       html = html.replace('function render(now){', 'function render(now){window.rkSourceProbe.renders.push(now);');
       const setup = `<script>window.rkSourceProbe={run:${JSON.stringify(run)},timeOrigin:performance.timeOrigin,raf:[],renders:[],visibility:[{at:performance.now(),state:document.visibilityState}],userAgent:navigator.userAgent};document.addEventListener('visibilitychange',()=>window.rkSourceProbe.visibility.push({at:performance.now(),state:document.visibilityState}));requestAnimationFrame(function tick(now){if(window.rkSourceProbe.raf.length<12000)window.rkSourceProbe.raf.push(now);requestAnimationFrame(tick)});setInterval(()=>{fetch('/probe?probeRun='+encodeURIComponent(window.rkSourceProbe.run),{method:'POST',headers:{'Content-Type':'application/json','X-RK-Probe':${JSON.stringify(token)}},body:JSON.stringify({...window.rkSourceProbe,at:performance.now(),wall:Date.now(),viewport:[innerWidth,innerHeight],dpr:devicePixelRatio})}).catch(()=>{})},1000);</script>`;
       html = html.replace('<script type="module">', setup + '<script type="module">');
+      await writeFile(resolve(output, `${run}-served.html`), html);
+      await writeFile(resolve(output, `${run}-served.json`), JSON.stringify({run,fixtureRoot,sourceSha256,servedSha256:createHash('sha256').update(html).digest('hex'),fixtureKind,servedAt:Date.now()}));
       response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(html); return;
     }
     if (request.method === 'POST' && url.pathname === '/probe' && request.headers['x-rk-probe'] === token && request.headers.origin === `http://127.0.0.1:${port}`) {

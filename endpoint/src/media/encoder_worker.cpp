@@ -4,7 +4,15 @@
 namespace remotekit::media {
 nlohmann::json EncoderStats::Snapshot() {
  std::lock_guard lock(mutex);
- return {{"senderRtcStats",sender_rtc_stats},{"encoder",backend},{"encodeSubmitted",submitted.load()},{"encodeCompleted",completed.load()},
+ nlohmann::json low_power=nullptr;
+ if(qsv_low_power) {
+  low_power={{"requested",qsv_low_power->requested}};
+  auto add=[&](const char* name,const std::optional<int>& value){low_power[name]=value?nlohmann::json(*value):nlohmann::json(nullptr);};
+  add("queried",qsv_low_power->queried);add("initialized",qsv_low_power->initialized);
+  add("queryStatus",qsv_low_power->query_status);add("initStatus",qsv_low_power->init_status);
+  add("getVideoParamStatus",qsv_low_power->get_video_param_status);
+ }
+ return {{"qsvLowPower",low_power},{"senderRtcStats",sender_rtc_stats},{"encoder",backend},{"encodeSubmitted",submitted.load()},{"encodeCompleted",completed.load()},
          {"encodedBytes",bytes.load()},{"encodeDropped",dropped.load()},
          {"rateUpdates",rate_updates.load()},{"keyframeRequests",keyframe_requests.load()},
          {"keyframesSubmitted",keyframes_submitted.load()},{"keyframesEncoded",keyframes_encoded.load()},
@@ -43,8 +51,9 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  std::string error;
  hardware_=mode_=="nvenc"?CreateNvencEncoder():CreateQsvEncoder();
  if(!hardware_->Configure(device_.Get(),settings_,error)) {
+  {std::lock_guard lock(stats_->mutex);stats_->qsv_low_power=hardware_->LowPowerInfo();}
   hardware_.reset();
-  if(mode_!="auto"){Error(error);return false;}
+  if(mode_!="auto"||settings_.qsv_low_power){Error(error);return false;}
   const std::string qsv_error=error;
   defaults(false);hardware_=CreateNvencEncoder();
   if(!hardware_->Configure(device_.Get(),settings_,error)){Error("QSV: "+qsv_error+"; NVENC: "+error);hardware_.reset();return false;}
@@ -56,6 +65,7 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
   surfaces_.push_back(std::move(surface));free_.push_back(i);
  }
  {std::lock_guard lock(stats_->mutex);stats_->backend=hardware_->Name();stats_->error.clear();
+  if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;
   auto actual=hardware_->ActualSettings();stats_->applied_bitrate=actual.bitrate;stats_->applied_fps=actual.fps;
   stats_->actual_level=actual.level_idc;stats_->requested_bitrate=settings_.bitrate;stats_->requested_fps=settings_.fps;}
  nominal_fps_=settings_.fps;fixed_rate_fps_=std::string(hardware_->Name())=="qsv";
@@ -121,13 +131,17 @@ void EncoderWorker::Run() {
   const auto fps=rate?fps_.exchange(0):0;
   if(rate && inflight_.empty()) {
    std::string error;
-   if(!hardware_->SetRates(rate,fps?fps:settings_.fps,error)){Error(error);break;}
+   if(!hardware_->SetRates(rate,fps?fps:settings_.fps,error)){
+    {std::lock_guard lock(stats_->mutex);if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
+    Error(error);break;
+   }
    ++stats_->rate_updates;
    if(hardware_->TakeKeyframeRequest())keyframe_=true;
    settings_.bitrate=rate;if(fps)settings_.fps=fps;
    applied_bitrate_=rate;applied_fps_=settings_.fps;
    {std::lock_guard lock(stats_->mutex);auto actual=hardware_->ActualSettings();
-    stats_->applied_bitrate=actual.bitrate;stats_->applied_fps=actual.fps;stats_->actual_level=actual.level_idc;}
+    stats_->applied_bitrate=actual.bitrate;stats_->applied_fps=actual.fps;stats_->actual_level=actual.level_idc;
+    if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
   }
   // Fill the hardware queue before waiting for completion, preserving real
   // async_depth 2/4 behavior. A bounded host queue drops rather than growing.

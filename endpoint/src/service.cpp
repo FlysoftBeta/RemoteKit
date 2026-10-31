@@ -88,6 +88,10 @@ struct Options {
    else if(key=="--async-depth")encoding.async_depth=std::stoul(value);
    else if(key=="--gop")encoding.gop=std::stoul(value);
    else if(key=="--target-usage"){encoding.target_usage=std::stoul(value);encoding.target_usage_explicit=true;}
+   else if(key=="--qsv-low-power"){
+    if(value!="auto"&&value!="on"&&value!="off")throw std::runtime_error("qsv-low-power must be auto, on or off");
+    encoding.qsv_low_power=value=="on"?0x10u:(value=="off"?0x20u:0u);
+   }
    else if(key=="--buffer-ms")encoding.buffer_ms=std::stoul(value);
    else if(key=="--rate-control"){if(value!="cbr"&&value!="vbr")throw std::runtime_error("rate-control must be cbr or vbr");encoding.vbr=value=="vbr";encoding.rate_control_explicit=true;}
    else if(key=="--idle-idr-ms")idle_idr_ms=std::stoul(value);
@@ -102,6 +106,7 @@ struct Options {
      max_encode_width<16||max_encode_height<16||max_encode_width>4096||max_encode_height>4096)
    throw std::runtime_error("invalid encoder settings");
   browser=fs::absolute(browser);data=fs::absolute(data);
+  if(encoder=="nvenc"&&encoding.qsv_low_power)throw std::runtime_error("qsv-low-power requires qsv or auto encoder");
  }
 };
 struct Session {

@@ -29,6 +29,7 @@
 #include "content/browser/renderer_host/input/touch_emulator_impl.h"     // nogncheck
 #include "content/browser/renderer_host/page_lifecycle_state_manager.h"  // nogncheck
 #include "content/browser/renderer_host/render_frame_host_impl.h"        // nogncheck
+#include "content/browser/renderer_host/render_frame_metadata_provider_impl.h"  // nogncheck
 #include "content/browser/renderer_host/render_view_host_impl.h"         // nogncheck
 #include "content/browser/renderer_host/render_widget_host_delegate.h"   // nogncheck
 #include "content/browser/renderer_host/render_widget_host_impl.h"       // nogncheck
@@ -50,7 +51,10 @@
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
 #include "third_party/blink/public/common/input/web_touch_event.h"
+#include "ui/aura/window.h"
+#include "ui/aura/window_tree_host.h"
 #include "ui/base/ime/text_input_type.h"
+#include "ui/display/screen.h"
 #include "ui/events/keycodes/dom/dom_key.h"
 #include "ui/gfx/geometry/rect_f.h"
 #include "ui/gfx/range/range.h"
@@ -214,11 +218,19 @@ void WebView::InvalidateLayoutInput() {
   ReleasePointer(true);
   endpoint_->InvalidateInput(session_, view_);
 }
-void WebView::ConfigureDevice(int width, int height, bool tablet, float scale) {
+void WebView::ConfigureDevice(int width, int height, bool tablet, float scale,
+                             bool match_page_backing) {
   const bool mode_changed = tablet_ != tablet;
   const bool initializing = viewport_width_ == 0;
   const bool changed = viewport_width_ != width || viewport_height_ != height ||
-                       mode_changed || device_scale_ != scale;
+                       mode_changed || device_scale_ != scale ||
+                       match_page_backing_ != match_page_backing;
+  if (match_page_backing_ && !match_page_backing) {
+    if (auto* native_view = RootView(contents_.get()))
+      native_view->SetScaleOverrideForCapture(1.0f);
+    backing_view_.reset();
+  }
+  match_page_backing_ = match_page_backing;
   viewport_width_ = width;
   viewport_height_ = height;
   tablet_ = tablet;
@@ -252,11 +264,41 @@ void WebView::ConfigureDevice(int width, int height, bool tablet, float scale) {
   contents_->OnWebPreferencesChanged();
   ApplyDevice();
 }
+void WebView::RefreshBackingScale() {
+  ApplyBackingScale(RootView(contents_.get()));
+}
+void WebView::ApplyBackingScale(content::RenderWidgetHostViewBase* native_view) {
+  if (!match_page_backing_ || !native_view)
+    return;
+  auto* window = native_view->GetNativeView();
+  const auto* host = window ? window->GetHost() : nullptr;
+  const float host_scale = host ? host->device_scale_factor() : 0;
+  if (backing_view_.get() == native_view && backing_host_scale_ == host_scale &&
+      std::abs(native_view->GetDeviceScaleFactor() - device_scale_) < 0.0001f)
+    return;
+  auto* screen = display::Screen::Get();
+  if (!screen)
+    return;
+  // Match GetNewScreenInfosForUpdate's original display selection. Never use
+  // GetDeviceScaleFactor as the denominator: it already includes our override.
+  const auto display = window ? screen->GetDisplayNearestView(window)
+                              : screen->GetPrimaryDisplay();
+  const float native_scale = display.device_scale_factor();
+  if (!std::isfinite(native_scale) || native_scale <= 0)
+    return;
+  const float multiplier = device_scale_ / native_scale;
+  backing_view_ = native_view->GetWeakPtr();
+  backing_host_scale_ = host_scale;
+  if (std::abs(native_view->GetScaleOverrideForCapture() - multiplier) > 0.0001f ||
+      std::abs(native_view->GetDeviceScaleFactor() - device_scale_) > 0.0001f)
+    native_view->SetScaleOverrideForCapture(multiplier);
+}
 void WebView::ApplyDevice(content::RenderFrameHost* frame) {
   if (!contents_ || !viewport_width_ || !viewport_height_) return;
   if (!frame) frame = contents_->GetPrimaryMainFrame();
   if (!frame || frame->GetParentOrOuterDocument()) return;
   auto* host = static_cast<content::RenderFrameHostImpl*>(frame)->GetRenderWidgetHost();
+  ApplyBackingScale(host->GetView());
   auto& widget = host->GetAssociatedFrameWidget();
   if (!widget) return;
   blink::DeviceEmulationParams params;
@@ -607,6 +649,51 @@ Status WebView::BuildTouchState(const TouchInput& input,
     return Fail(Error::invalid, "No touch sequence to cancel");
   return {};
 }
+base::DictValue WebView::CompositorDiagnostics() const {
+  base::DictValue result;
+  auto* native_view = RootView(contents_.get());
+  if (!native_view)
+    return result;
+  const auto size_value = [](const gfx::Size& size) {
+    base::DictValue value;
+    value.Set("width", size.width());
+    value.Set("height", size.height());
+    return value;
+  };
+  const float native_scale = native_view->GetDeviceScaleFactor();
+  if (std::isfinite(native_scale) && native_scale > 0)
+    result.Set("nativeDeviceScaleFactor", native_scale);
+  result.Set("captureScaleOverride", native_view->GetScaleOverrideForCapture());
+  if (auto* screen = display::Screen::Get()) {
+    auto* window = native_view->GetNativeView();
+    const auto display = window ? screen->GetDisplayNearestView(window)
+                                : screen->GetPrimaryDisplay();
+    result.Set("hostDisplayDeviceScaleFactor", display.device_scale_factor());
+  }
+  const auto requested = native_view->GetRequestedRendererSizeDevicePx();
+  if (!requested.IsEmpty())
+    result.Set("requestedRendererDevicePixels", size_value(requested));
+  const auto viewport = native_view->GetCompositorViewportPixelSize();
+  if (!viewport.IsEmpty())
+    result.Set("compositorViewportPixels", size_value(viewport));
+  if (auto* host = content::RenderWidgetHostImpl::From(
+          native_view->GetRenderWidgetHost())) {
+    // This is the last metadata already delivered to the browser; do not turn
+    // on ReportAllFrameSubmissionsForTesting or introduce per-frame IPC.
+    const auto& metadata =
+        host->render_frame_metadata_provider()->LastRenderFrameMetadata();
+    if (!metadata.viewport_size_in_pixels.IsEmpty()) {
+      base::DictValue submitted;
+      if (std::isfinite(metadata.device_scale_factor) &&
+          metadata.device_scale_factor > 0)
+        submitted.Set("deviceScaleFactor", metadata.device_scale_factor);
+      submitted.Set("viewportPixels", size_value(metadata.viewport_size_in_pixels));
+      result.Set("lastSubmittedFrame", std::move(submitted));
+    }
+  }
+  return result;
+}
+
 Status WebView::TouchInjectionStatus() const {
   if (touch_cleanup_pending_)
     return Fail(Error::busy, "Draining remote touch before releasing its emulator");
@@ -1303,7 +1390,8 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
   const int configured_width = viewport_width_;
   const int configured_height = viewport_height_;
   viewport_width_ = 0;
-  ConfigureDevice(configured_width, configured_height, tablet_, device_scale_);
+  ConfigureDevice(configured_width, configured_height, tablet_, device_scale_,
+                  match_page_backing_);
   visible_ = false;
   Observe(contents_.get());
   auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
@@ -1416,6 +1504,9 @@ void WebView::DidStartNavigation(content::NavigationHandle* navigation) {
     restore_navigation_ = navigation->GetNavigationId();
 }
 
+void WebView::RenderViewReady() {
+  ApplyDevice();
+}
 void WebView::ReadyToCommitNavigation(content::NavigationHandle* navigation) {
   if (navigation->IsInPrimaryMainFrame())
     ApplyDevice(navigation->GetRenderFrameHost());
