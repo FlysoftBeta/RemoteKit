@@ -61,16 +61,17 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  if(!hardware_->Configure(device_.Get(),settings_,error)) {
   {std::lock_guard lock(stats_->mutex);stats_->qsv_low_power=hardware_->LowPowerInfo();}
   hardware_.reset();
-  if(mode_!="auto"||settings_.qsv_low_power){Error(error);return false;}
+  if(mode_!="auto"||settings_.qsv_low_power||settings_.qsv_async_vpp){Error(error);return false;}
   const std::string qsv_error=error;
   defaults(false);hardware_=CreateNvencEncoder();
   hardware_->SetTrace(trace_,encoder_);
   if(!hardware_->Configure(device_.Get(),settings_,error)){Error("QSV: "+qsv_error+"; NVENC: "+error);hardware_.reset();return false;}
  }
- if(!converter_.Open(device_.Get(),settings_.width,settings_.height,settings_.fps,error)){Error(error);return false;}
+ bgra_input_=hardware_->InputFormat()==EncoderInput::bgra;
+ if(!bgra_input_ && !converter_.Open(device_.Get(),settings_.width,settings_.height,settings_.fps,error)){Error(error);return false;}
  for(uint32_t i=0;i<settings_.async_depth;++i) {
   ComPtr<ID3D11Texture2D> surface;
-  if(!converter_.CreateSurface(surface,error)){Error(error);return false;}
+  if(!bgra_input_ && !converter_.CreateSurface(surface,error)){Error(error);return false;}
   surfaces_.push_back(std::move(surface));free_.push_back(i);
  }
  {std::lock_guard lock(stats_->mutex);stats_->backend=hardware_->Name();stats_->error.clear();
@@ -177,7 +178,7 @@ void EncoderWorker::Run() {
    RK_SERVER_TRACE(trace_,"worker_dequeue",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.inflight=static_cast<int>(inflight_.size()););
    job.surface=free_.front();std::string error;
    if(trace_)converter_.SetTraceFrame(TraceIds::Frame(job.frame,true));
-   if(!converter_.Convert(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture),surfaces_[job.surface].Get(),error)) {
+   if(!bgra_input_ && !converter_.Convert(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture),surfaces_[job.surface].Get(),error)) {
     ++stats_->error_drops;
     remotekit::TailRefreshLease::Finish(job.frame,false);
     if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
@@ -196,7 +197,8 @@ void EncoderWorker::Run() {
    }
    job.submitted_qpc=QpcNow();const bool requested_key=keyframe_.exchange(false);
    const bool key=job.key||requested_key;
-   auto status=hardware_->Submit(surfaces_[job.surface].Get(),key,job.cookie,error);
+   auto* input=bgra_input_?static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture):surfaces_[job.surface].Get();
+   auto status=hardware_->Submit(input,key,job.cookie,error);
    RK_SERVER_TRACE(trace_,"hardware_submit",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.status=static_cast<int>(status););
    if(status==CodecResult::busy) {
     ++stats_->hardware_busy;
@@ -216,6 +218,9 @@ void EncoderWorker::Run() {
     break;
    }
    if(status!=CodecResult::accepted) {
+    // Submit errors may follow partial driver submission. Close the backend
+    // before releasing this job, just as Run's inflight cancellation does.
+    hardware_.reset();
     ++stats_->error_drops;
     remotekit::TailRefreshLease::Finish(job.frame,false);
     RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="hardware_submit_error";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
@@ -234,8 +239,11 @@ void EncoderWorker::Run() {
   }
  }
  std::vector<AccessUnit> completed;std::string error;
- if(hardware_->Drain(completed,error))for(auto& unit:completed)Complete(unit);
- else if(!error.empty())Error(error);
+ if(hardware_) {
+  const bool drained=hardware_->Drain(completed,error);
+  for(auto& unit:completed)Complete(unit);
+  if(!drained && !error.empty())Error(error);
+ }
  // Destroy is the hardware cancellation boundary before returning every held
  // lease, including error paths and queued jobs never submitted to hardware.
  hardware_.reset();

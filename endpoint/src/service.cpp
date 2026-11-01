@@ -6,6 +6,7 @@
 #include "remotekit/idle_idr.hpp"
 #include "remotekit/tail_refresh.hpp"
 #include "remotekit/media_feedback.hpp"
+#include "remotekit/atlas_dimensions.hpp"
 #include "remotekit/coordinate_readiness.hpp"
 #include <json.hpp>
 #include <windows.h>
@@ -73,6 +74,7 @@ struct Options {
  fs::path browser,data,browser_trace_directory;
  std::string encoder="auto",browser_enable_features,browser_direct_composition="auto",browser_host_scale="auto",browser_render_host="offscreen";EncoderSettings encoding;
  uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096,browser_render_fps=0;
+ uint32_t atlas_allocation_alignment=1;bool atlas_alignment_explicit=false;
  int32_t rtc_playout_max_ms=-1;
  Options() {
   wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
@@ -105,6 +107,14 @@ struct Options {
    }
    else if(key=="--browser-trace-dir")browser_trace_directory=Utf8Path(value);
    else if(key=="--encoder")encoder=value;
+   else if(key=="--qsv-vpp"){
+    if(value!="external"&&value!="async")throw std::runtime_error("qsv-vpp must be external or async");
+    encoding.qsv_async_vpp=value=="async";
+   }
+   else if(key=="--atlas-alignment"){
+    if(value!="1"&&value!="16")throw std::runtime_error("atlas-alignment must be 1 or 16");
+    atlas_allocation_alignment=value=="16"?16:1;atlas_alignment_explicit=true;
+   }
    else if(key=="--fps")encoding.fps=std::stoul(value);
    else if(key=="--bitrate")encoding.bitrate=std::stoul(value);
    else if(key=="--max-bitrate")encoding.max_bitrate=std::stoul(value);
@@ -133,6 +143,9 @@ struct Options {
      max_encode_width<16||max_encode_height<16||max_encode_width>4096||max_encode_height>4096)
    throw std::runtime_error("invalid encoder settings");
   browser=fs::absolute(browser);data=fs::absolute(data);
+  if(!atlas_alignment_explicit)atlas_allocation_alignment=encoding.qsv_async_vpp?16:1;
+  if(encoding.qsv_async_vpp && (encoder!="qsv" || atlas_allocation_alignment!=16))
+   throw std::runtime_error("qsv-vpp=async requires encoder=qsv and atlas-alignment=16");
   if(encoder=="nvenc"&&encoding.qsv_low_power)throw std::runtime_error("qsv-low-power requires qsv or auto encoder");
   if(rtc_playout_max_ms!=-1&&(rtc_playout_max_ms<0||rtc_playout_max_ms>40950||rtc_playout_max_ms%10))
    throw std::runtime_error("rtc-playout-max-ms must be -1 or a multiple of 10 in 0..40950");
@@ -263,9 +276,8 @@ struct Session {
    value.scale=std::max(value.scale,device.value("deviceScaleFactor",1.0f));
   }
   value.width=std::max(16,width);value.height=std::max(16,height);
-  const uint64_t pixels=uint64_t(std::ceil(value.width*value.scale))*uint64_t(std::ceil(value.height*value.scale));
-  if(value.scale<0.5||value.scale>4 || value.width>8192 || value.height>8192 || value.width*value.scale>8192 || value.height*value.scale>8192 ||
-     pixels>16777216)throw std::runtime_error("visible source atlas exceeds the 16-megapixel/8192-pixel resource budget");
+  if(!remotekit::AtlasAllocationDimensions(value.width,value.height,value.scale,options.atlas_allocation_alignment))
+   throw std::runtime_error("visible source atlas exceeds the aligned 16-megapixel/8192-pixel resource budget");
   return value;
  }
  bool PauseOutput() {
@@ -277,8 +289,11 @@ struct Session {
   return active;
  }
  void GeometryConfig(const Geometry& value) {
+  if(!remotekit::AtlasAllocationDimensions(value.width,value.height,value.scale,options.atlas_allocation_alignment))
+   throw std::runtime_error("source atlas exceeds the aligned 16-megapixel/8192-pixel resource budget");
   Rpc({{"method","output.configure"},{"width",value.width},{"height",value.height},
-       {"device_scale",value.scale},{"fps",options.encoding.fps},{"render_fps",options.browser_render_fps}});
+       {"device_scale",value.scale},{"allocation_alignment",options.atlas_allocation_alignment},
+       {"fps",options.encoding.fps},{"render_fps",options.browser_render_fps}});
   atlas_width=value.width;atlas_height=value.height;atlas_scale=value.scale;
  }
  void RefitOutput() {
@@ -299,6 +314,8 @@ struct Session {
   Json previous=old==desired.end()?Json():old->second;
   auto normalized=[](Json value){value.erase("id");value.erase("method");return value;};
   if(!previous.is_null() && normalized(previous)==normalized(config))return {{"accepted",true},{"completed",true}};
+  const Geometry previous_geometry{atlas_width,atlas_height,atlas_scale};
+  bool source_applied=false;
   desired[view]=config;Geometry geometry;
   try{geometry=DesiredGeometry();}catch(...){if(previous.is_null())desired.erase(view);else desired[view]=previous;throw;}
   const bool active=PauseOutput();
@@ -317,10 +334,23 @@ struct Session {
     if(device.contains("deviceScaleFactor"))request["device_scale_factor"]=device["deviceScaleFactor"];
     result=Rpc(request);
    }
+   source_applied=true;
    GeometryConfig(geometry);Save();ResumeOutput(active);return result;
-  } catch(...) {
+  } catch(const std::exception& failure) {
+   const std::string original=failure.what();
    if(previous.is_null())desired.erase(view);else desired[view]=previous;
-   try{ResumeOutput(active);}catch(const std::exception& error){fprintf(stderr,"output resume: %s\n",error.what());}
+   try {
+    // Resume may itself have failed after opening output. Roll back only while
+    // it is closed, and preserve the old physical scale as well as DIP size.
+    PauseOutput();GeometryConfig(previous_geometry);
+    if(source_applied)throw std::runtime_error("source view already changed; output stopped for reconciliation");
+    ResumeOutput(active);
+   } catch(const std::exception& rollback) {
+    PauseOutput();output_suspended=true;
+    const auto message=original+"; output rollback failed: "+rollback.what();
+    {std::lock_guard lock(stats->mutex);stats->error=message;}
+    throw std::runtime_error(message);
+   }
    throw;
   }
  }
@@ -395,6 +425,8 @@ struct Session {
  }
  Json Stats() {
   auto value=stats->Snapshot();value["configuredIdleIdrMs"]=options.idle_idr_ms;
+  value["qsvVpp"]=options.encoding.qsv_async_vpp?"async":"external";
+  value["atlasAllocationAlignment"]=options.atlas_allocation_alignment;
   value.update(media_feedback.Snapshot(QpcNow(),QpcFrequency()));
   value["rtcPlayoutDelayRequested"]={{"minMs",options.rtc_playout_max_ms<0?-1:0},
                                      {"maxMs",options.rtc_playout_max_ms}};

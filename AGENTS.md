@@ -88,6 +88,8 @@
 
 ## 构建、打包与验证
 
+2026-11-01 用户补充：服务器无法安装实体显示器，允许以新版或修改版 Chromium 模拟屏幕刷新并作为验收客户端，不再强制 Chrome89。优先使用本地 Release 源码和 `out/rel` 增量产物，禁止为此全量构建。先验证官方有节拍的模拟刷新能力，必要时再维护补丁；结果注明客户端版本、刷新模式，继续测真实 canvas 呈现与 Pixel marker。原 Chrome89 结果保留，模拟刷新不代表物理扫描输出。
+
 ```
 tools\build-endpoint.cmd
 python3 tools/patchset.py --chromium-root C:/src/chromium/src status

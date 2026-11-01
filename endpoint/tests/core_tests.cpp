@@ -5,6 +5,7 @@
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
 #include "remotekit/tail_refresh.hpp"
+#include "remotekit/atlas_dimensions.hpp"
 #include "remotekit/capture_geometry.hpp"
 #include "remotekit/coordinate_readiness.hpp"
 using namespace remotekit;
@@ -63,6 +64,26 @@ static void TailAttemptTests() {
 }
 int main() {
   TailAttemptTests();
+  auto legacy_atlas=AtlasAllocationDimensions(1928,1088,1,1);
+  auto aligned_atlas=AtlasAllocationDimensions(1928,1088,1,16);
+  CHECK(legacy_atlas && legacy_atlas->width==1928 && legacy_atlas->height==1088);
+  CHECK(aligned_atlas && aligned_atlas->width==1936 && aligned_atlas->height==1088);
+  auto legacy_odd=AtlasAllocationDimensions(129,127,1.25f,1);
+  auto aligned_odd=AtlasAllocationDimensions(129,127,1.25f,16);
+  CHECK(legacy_odd && legacy_odd->width==162 && legacy_odd->height==160);
+  CHECK(aligned_odd && aligned_odd->width==176 && aligned_odd->height==160);
+  auto tablet_atlas=AtlasAllocationDimensions(828,1188,2,16);
+  CHECK(tablet_atlas && tablet_atlas->width==1664 && tablet_atlas->height==2384);
+  auto split_atlas=AtlasAllocationDimensions(2756,1188,2,16);
+  CHECK(split_atlas && split_atlas->width==5520 && split_atlas->height==2384);
+  CHECK(AtlasAllocationDimensions(4096,4096,1,16)); // Exactly 16Mi pixels.
+  CHECK(AtlasAllocationDimensions(4097,4090,1,1));
+  CHECK(!AtlasAllocationDimensions(4097,4090,1,16)); // Padding itself exceeds the budget.
+  auto edge_atlas=AtlasAllocationDimensions(8191,16,1,16);
+  CHECK(edge_atlas && edge_atlas->width==8192);
+  CHECK(!AtlasAllocationDimensions(8192,16,1.25f,16));
+  CHECK(!AtlasAllocationDimensions(16,16,std::numeric_limits<float>::quiet_NaN(),16));
+  CHECK(!AtlasAllocationDimensions(16,16,1,8));
   CaptureGeometryWait geometry;
   geometry.Bind(1);
   CHECK(geometry.Defer(100));

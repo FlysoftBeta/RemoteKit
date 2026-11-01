@@ -27,7 +27,9 @@
 
 未解决问题：
 
-- P1：Chrome89在断开的RDP会话无DXGI output，VSync Sleep17实际31ms，空页面约32Hz；默认客户端最终50FPS验收需正常显示输出环境。已询问用户现成可用客户端，不因此停止服务端优化，也不自行切用户会话。
+- P1：Chrome89在断开的RDP会话无DXGI output，VSync Sleep17实际31ms，空页面约32Hz。用户已明确无法安装显示器，并允许新版/修改版Chromium模拟刷新验收；优先验证157官方 `--fake-vsync-rate=60`，复用out/rel，禁止全量构建。无需等待用户提供客户端，不切换用户会话。
+- P1：单租户10秒归因已确认render/capture54.87→publication42.38FPS，Poll约60Hz，无Endpoint drops；publication_cadence_fresh已获授权实现绝对deadline与dirty精准唤醒，保持Fence/lease，fixture暂不改。报告publication-cadence-next.md及qsv-async-runtime.md。
+- P2：ApplyView源配置成功后若持久化或输出恢复失败，当前会保留停止状态并报告；Control对账不一定自动修复该状态，后续补恢复机制。
 - 已解决P1：双页手动重连复用旧video时解码/时间轴前进但所有rVFC停止；每连接新video修复已通过两次split重连，旧callback/stream/DOM清理。报告receiver-video-lifecycle.md。
 - P2：既有右边缘偏绿，direct off/on右16列逐字节相同；probe编码前NV12白边正确、coded padding为黑，但正式H264解码后根因尚未闭合。
 - P2：反馈观测接通不等于帧率策略已实现；下一步仍需算法、changed-only限频控制及稳定性实验。

@@ -28,6 +28,7 @@
 #include "remotekit/browser/offscreen_host.h"
 #include "remotekit/browser/webview.h"
 #include "remotekit/endpoint/include/remotekit/core.hpp"
+#include "remotekit/endpoint/include/remotekit/atlas_dimensions.hpp"
 #include "remotekit/protocol/control.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
@@ -159,6 +160,7 @@ struct HarnessMainParts::State {
   std::vector<gfx::Rect> placements;
   std::set<WebViewId> paused_output;
   float output_scale = 1;
+  uint32_t allocation_alignment = 1;
   bool output_enabled = true;
   uint32_t output_fps = 30;
   uint32_t render_fps = 0;  // Zero follows output fps; never changes capture/encode.
@@ -297,6 +299,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     auto next_layout = Layout(specs, 0, next_width, next_height);
     if (!next_layout) return error("atlas_no_space");
     auto next_scale = output_scale;
+    auto next_alignment = allocation_alignment;
     auto next_enabled = output_enabled;
     auto next_fps = output_fps;
     auto next_render_fps = render_fps;
@@ -306,6 +309,13 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       if (output)
         return error("close_output_before_scale_change");
       next_scale = static_cast<float>(*scale);
+    }
+    if (const auto* value = request.Find("allocation_alignment")) {
+      if (!value->is_int() || (value->GetInt() != 1 && value->GetInt() != 16))
+        return error("invalid_allocation_alignment");
+      next_alignment = value->GetInt();
+      if (output && next_alignment != allocation_alignment)
+        return error("close_output_before_alignment_change");
     }
     if (const auto* value = request.Find("enabled")) {
       if (!value->is_bool())
@@ -322,17 +332,20 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         return error("invalid_render_fps");
       next_render_fps = value->GetInt();
     }
+    const auto dimensions = AtlasAllocationDimensions(next_width, next_height, next_scale, next_alignment);
+    if (!dimensions) return error("atlas_resource_budget_exceeded");
     const bool layout_changed = logical_width != next_width || logical_height != next_height ||
                                 output_scale != next_scale;
     logical_width = next_width; logical_height = next_height;
     output_scale = next_scale;
+    allocation_alignment = next_alignment;
     for (size_t i = 0; i < contents.size(); ++i)
       contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
     output_enabled = next_enabled;
     output_fps = next_fps;
     render_fps = next_render_fps;
-    output_width = (static_cast<uint32_t>(std::ceil(logical_width * output_scale)) + 1u) & ~1u;
-    output_height = (static_cast<uint32_t>(std::ceil(logical_height * output_scale)) + 1u) & ~1u;
+    output_width = dimensions->width;
+    output_height = dimensions->height;
     if (output)
       output->SetFps(output_fps);
     if (layout_changed) {
@@ -342,6 +355,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     }
     UpdateOutput();
     reply.Set("ok", true);
+    reply.Set("allocation_alignment", static_cast<int>(allocation_alignment));
+    reply.Set("width_pixels", static_cast<int>(output_width));
+    reply.Set("height_pixels", static_cast<int>(output_height));
     return reply;
   }
   if (*method == "output.open" || *method == "output.describe") {
@@ -377,7 +393,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (!output)
       return error("output_not_open");
     reply.Set("ok", true);
-    reply.Set("output", output->Status());
+    auto status = output->Status();
+    status.Set("allocation_alignment", static_cast<int>(allocation_alignment));
+    reply.Set("output", std::move(status));
     return reply;
   }
   if (*method == "output.close") {
@@ -1123,8 +1141,10 @@ int HarnessMainParts::PreMainMessageLoopRun() {
   }
   state_->logical_width = width;
   state_->logical_height = height;
-  state_->output_width = (static_cast<uint32_t>(std::ceil(width * state_->output_scale)) + 1u) & ~1u;
-  state_->output_height = (static_cast<uint32_t>(std::ceil(height * state_->output_scale)) + 1u) & ~1u;
+  const auto dimensions = AtlasAllocationDimensions(width, height, state_->output_scale, state_->allocation_alignment);
+  if (!dimensions) return 1;
+  state_->output_width = dimensions->width;
+  state_->output_height = dimensions->height;
   state_->output_timer.Start(
       FROM_HERE, base::Milliseconds(8),
       base::BindRepeating([](State* state) { state->DrainClosed(); state->UpdateOutput(); },

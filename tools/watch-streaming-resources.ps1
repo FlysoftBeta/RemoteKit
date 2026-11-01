@@ -10,6 +10,7 @@ $output=Join-Path $caseRoot 'resource-samples.jsonl'
 $stopFile=Join-Path $caseRoot 'resource.stop'
 $logicalCpus=[Environment]::ProcessorCount
 $known=@{}; $previousCpu=@{}; $previousGpu=@{}; $receiverRootId=$null
+$metricsReadErrors=0; $metricsLastReadError=$null
 $inventoryAt=-10000; $clock=[Diagnostics.Stopwatch]::StartNew()
 $receiverPath='C:\src\tmp\chrome89-google\app\chrome.exe'
 $receiverFilter=$receiverPath.Replace('\','\\')
@@ -27,8 +28,21 @@ try {
    if(!$receiverRootId) {
     $metrics=Join-Path $caseRoot 'metrics/client-metrics.jsonl'
     if(Test-Path -LiteralPath $metrics) {
-     $reader=[IO.StreamReader]::new($metrics)
-     try { for($i=0;$i -lt 8 -and !$reader.EndOfStream;$i++){try{$entry=$reader.ReadLine()|ConvertFrom-Json;if($entry.metrics.kind -eq 'resource-process-root'){$receiverRootId=[int]$entry.metrics.receiverRootPid;break}}catch{}} } finally{$reader.Dispose()}
+     $stream=$null; $reader=$null
+     try {
+      # Control appends concurrently; allow writes and replacement of the file.
+      $stream=[IO.FileStream]::new($metrics,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+      $reader=[IO.StreamReader]::new($stream)
+      for($i=0;$i -lt 8 -and !$reader.EndOfStream;$i++) {
+       $line=$reader.ReadLine()
+       try{$entry=$line|ConvertFrom-Json;if($entry.metrics.kind -eq 'resource-process-root'){$receiverRootId=[int]$entry.metrics.receiverRootPid;break}}catch{}
+      }
+     } catch {
+      $readError=$_.Exception.GetBaseException()
+      if($readError -isnot [IO.IOException]){throw}
+      $metricsReadErrors++; $metricsLastReadError=$readError.Message
+      Write-Warning "Metrics read failed; retrying on next inventory: $metricsLastReadError"
+     } finally {if($reader){$reader.Dispose()}elseif($stream){$stream.Dispose()}}
     }
    }
    $inventory=@(Get-CimInstance Win32_Process -Filter $filter)
@@ -95,7 +109,7 @@ try {
   $self.Refresh();$selfCpu=$self.TotalProcessorTime.TotalSeconds;$selfAt=$clock.Elapsed.TotalSeconds
   $selfCores=if($selfAt -gt $previousSelfAt){($selfCpu-$previousSelfCpu)/($selfAt-$previousSelfAt)}else{$null}
   $previousSelfCpu=$selfCpu;$previousSelfAt=$selfAt
-  $writer.WriteLine((@{kind='resource-sample';gpuProvider=$GpuProvider;wallTimeMs=$wall;elapsedMs=$clock.ElapsedMilliseconds;collectionMs=$cycle.Elapsed.TotalMilliseconds;cpuCollectionMs=$cpuMs;gpuCollectionMs=($cycle.Elapsed.TotalMilliseconds-$gpuStarted);logicalCpus=$logicalCpus;collectorCpuCores=$selfCores;cpu=@($cpu);gpu=@($ownedGpu);engines=@($engines.Values);gpuError=$gpuError}|ConvertTo-Json -Depth 6 -Compress))
+  $writer.WriteLine((@{kind='resource-sample';gpuProvider=$GpuProvider;wallTimeMs=$wall;elapsedMs=$clock.ElapsedMilliseconds;collectionMs=$cycle.Elapsed.TotalMilliseconds;cpuCollectionMs=$cpuMs;gpuCollectionMs=($cycle.Elapsed.TotalMilliseconds-$gpuStarted);logicalCpus=$logicalCpus;collectorCpuCores=$selfCores;cpu=@($cpu);gpu=@($ownedGpu);engines=@($engines.Values);gpuError=$gpuError;metricsReadErrors=$metricsReadErrors;metricsLastReadError=$metricsLastReadError}|ConvertTo-Json -Depth 6 -Compress))
   $delay=$IntervalMs-$cycle.ElapsedMilliseconds;if($delay -gt 0){Start-Sleep -Milliseconds $delay}
  }
 }finally{$writer.Dispose();if($pdh){$pdh.Dispose()}}

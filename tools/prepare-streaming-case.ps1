@@ -40,12 +40,17 @@ param(
   [switch]$DisableClientRafProbe,
   [ValidateSet('default','software','unlimited')][string]$ClientMode='default',
   [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
+  [ValidateSet('external','async')][string]$QsvVpp='external',
+  [ValidateSet(1,16)][int]$AtlasAlignment=1,
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
 $ErrorActionPreference = 'Stop'
 $BrowserDirectComposition=$BrowserDirectComposition.ToLowerInvariant()
 $BrowserHostScale=$BrowserHostScale.ToLowerInvariant()
 $BrowserRenderHost=$BrowserRenderHost.ToLowerInvariant()
+$QsvVpp=$QsvVpp.ToLowerInvariant()
+if(-not $PSBoundParameters.ContainsKey('AtlasAlignment')){$AtlasAlignment=if($QsvVpp -eq 'async'){16}else{1}}
+if($QsvVpp -eq 'async' -and $AtlasAlignment -ne 16){throw 'QsvVpp async requires AtlasAlignment 16'}
 if($ServerTrace -and $DisableMediaTrace){throw 'ServerTrace also enables browser trace; use DisableMediaTrace without ServerTrace for the off baseline'}
 if($CopyOutputProfile -and -not $OfficialTrace){throw 'CopyOutputProfile requires OfficialTrace to collect its opt-in events'}
 $rkBrowserFeatures=@()
@@ -84,7 +89,7 @@ $configuration = @{
   singlePlaneDirect=[bool]$SinglePlaneDirect;
   captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
   officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;offscreenRoot=[bool]$OffscreenRoot;
-  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
+  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;atlasAllocationAlignment=$AtlasAlignment;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
 if ($DownlinkMbps) {
@@ -124,6 +129,7 @@ $rkEndpointArguments = @(
   '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe', "--data-path=$caseRoot/sessions", "--browser-direct-composition=$BrowserDirectComposition", "--browser-host-scale=$BrowserHostScale", "--browser-render-host=$BrowserRenderHost",
   "--browser-render-fps=$BrowserRenderFps",
   '--encoder=qsv','--fps=60','--bitrate=18000000','--max-bitrate=40000000',
+  "--qsv-vpp=$QsvVpp", "--atlas-alignment=$AtlasAlignment",
   "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )
 if($rkBrowserFeaturesText){
