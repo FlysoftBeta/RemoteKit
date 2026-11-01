@@ -153,6 +153,22 @@ P2输入修复：OOPIF实播已有双renderer及iframe中文预编辑/提交、�
 
 下一步由主Agent固定独立browser-render-fps（0沿用输出上限），只影响新OffscreenHost本地pacer，不改capture/atlas上限、QSV名义fps、码率和客户端。以同新binary/最终bundle做四1080的60基线、30、20各一次有界对照，依据最终呈现/marker结果决定背压方案；不采用0004，不先实现自适应算法。delivery只读盘点真实资源和capture时序信号，防止把ACK或不存在的静态capture当作GPU完成。
 
+## 用户新增建议与当前继续范围
+
+用户澄清：暂不展开下面五项新增建议，当前任务继续；之前将其理解为暂停全部工作有误。自建上一轮实验进程及managed浏览器已清理，代码checkpoint a1b88cf已推送。继续修复已经定位的pacer定时量化问题、验证渲染预算/背压效果，不另扩展新的建议任务。
+
+用户指定后续方向：
+
+1. 停止出帧后至少补一次forced IDR，但只补一次；先核对现有自适应尾IDR实现，不重复叠加。
+2. 目标帧率随客户端显示器和网络条件自适应。
+3. 支持背压，避免无效源工作挤占编码/呈现资源。
+4. 尝试更高码率并测量画质、延迟与拥塞。
+5. 使用高精度计时器。
+
+最新三档同binary对照：pacer配置60/30/20，canvas分别4.85–6.03/6.72–8.22/15.24–15.89FPS，marker p95分别1657–2112/875–1014/184–317ms。20档实际pacer约16/s，不能写成真实20FPS。详见source-render-pacer.md。
+
+已定位的定时机制：RepeatingTimer默认FlexibleNoSooner且按实际回调时刻重排，Windows存在约16ms leeway；官方precise deadline机制可避免该延迟，但默认MaxPreciseDelay=36ms，20fps的50ms任务会被降级。高精度manager已经由Content初始化。主Agent选定DeadlineTimer绝对phase，远deadline先coarse预唤醒，进入阈值内再precise；预唤醒不发BF，跳过过期phase，不忙等或手动全机timeBeginPeriod。先验证实际60/30/20 tick，再比较四租户实际16/20，最多补一个60对照。策略尚在实施。
+
 ## 输出采样决策
 
 平板高DPR/分屏可能超过接收端level的MaxFS/MaxMBPS。保留网页viewport/DPR及browser源atlas，由endpoint GPU NV12转换等比下采样到协商限制；NativeBuffer逻辑尺寸是编码尺寸，真实D3D texture尺寸保持源尺寸。layout坐标转编码像素，mediaScale独立于deviceScaleFactor，输入按两者乘积转DIP。stats/HUD明确源/编码尺寸与比例。该选择用于功能与编码约束，不把缩小后的FPS报告成原分辨率性能。
