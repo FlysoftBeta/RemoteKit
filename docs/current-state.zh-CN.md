@@ -26,7 +26,7 @@ TrackProcessor现已让全部plane直接读取同一个不可变VideoFrame，省
 
 断开RDP后DXGI无显示输出，Chrome89 VSync回退实测约31ms，空页面RAF约32Hz。用户允许新版Chromium模拟刷新验收：已复用out/rel完成Chromium157局部增量构建，官方 `--fake-vsync-rate=60` 已用于真实H.264串流。新增显式 `h264-level42-experimental` 接收档，校验H.264能力后按Level4.2协商，保持原1936×1088媒体尺寸；45项Control测试、类型检查、构建与启动smoke通过。重连使用每连接独立video，旧回调、stream、DOM和marker测量正确结束。
 
-Endpoint直接租用共享BGRA槽已实播验证，保持真实lease、有序GPU退役与三槽协议，默认copy不变。相同source52下，两租户从copy的40.20/40.51FPS、p95 128/126ms提升至shared的46.86/48.26FPS、p95 83/94ms；GPU97.78%降到84.92%，私有复制和编码替换丢帧为0。source56反而GPU95.91%、canvas约45FPS，仍未达到目标。6项CPU测试、首帧/静态恢复/输入/重连/尺寸与generation重建通过；启动跳过旧帧的三槽互等已修复。下一项检查接收端视频canvas的不必要透明合成。详见[共享槽实验](../develop/docs/shared-atlas-input.md)。
+Endpoint直接租用共享BGRA槽已实播验证，保持真实lease、有序GPU退役与三槽协议，默认copy不变。相同source52下，两租户从copy的40.20/40.51FPS、p95 128/126ms提升至shared的46.86/48.26FPS、p95 83/94ms；GPU97.78%降到84.92%，私有复制和编码替换丢帧为0。source56反而GPU95.91%、canvas约45FPS，仍未达到目标。6项CPU测试、首帧/静态恢复/输入/重连/尺寸与generation重建通过；启动跳过旧帧的三槽互等已修复。实际视频canvas已明确设为不透明，65项测试与Chrome89共享路径首帧/IME/重连通过；该对照45.67/46.88FPS、p95 104/97ms，没有性能收益。下一项调查捕获能否直接写入共享目标，以省源端复制。详见[共享槽实验](../develop/docs/shared-atlas-input.md)。
 
 ## 结构
 

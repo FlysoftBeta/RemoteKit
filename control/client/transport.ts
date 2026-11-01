@@ -426,7 +426,7 @@ export class RemoteTransport {
     if (!this.rendererCurrent(renderer)) { this.countReason(this.routing.skippedRenderer, 'identity-epoch-geometry'); renderer.ready(false); return false; }
     if (!this.displayReady || this.displayedRtp === undefined || !this.layout) { renderer.ready(false); return false; }
     if (renderer.view.stale) { this.countReason(this.routing.skippedRenderer, 'source-not-ready'); renderer.ready(false); return false; }
-    const view = renderer.view, node = renderer.canvas, context = node.getContext('2d');
+    const view = renderer.view, node = renderer.canvas, context = node.getContext('2d', { alpha: false });
     const imageWidth = 'displayWidth' in image ? image.displayWidth : 'videoWidth' in image ? image.videoWidth : image.width, imageHeight = 'displayHeight' in image ? image.displayHeight : 'videoHeight' in image ? image.videoHeight : image.height;
     if (!context || rect.x < 0 || rect.y < 0 || rect.width !== view.width || rect.height !== view.height || rect.x + rect.width > imageWidth || rect.y + rect.height > imageHeight) { this.countReason(this.routing.skippedRenderer, 'source-dimensions'); renderer.ready(false); return false; }
     const start = performance.now();
