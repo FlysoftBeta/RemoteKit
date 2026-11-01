@@ -3,7 +3,7 @@ import argparse
 import json
 import statistics
 from pathlib import Path
-from streaming_metrics import load_metrics
+from streaming_metrics import load_metrics, measured_paint_fields
 
 
 def distribution(values):
@@ -37,13 +37,15 @@ def analyze(case):
                 raise ValueError("Missing raw presentation chunks")
             raw = json.loads("".join(chunk["text"] for chunk in chunks))
             (case/f"presentation-raw-{index}.json").write_text(json.dumps(raw), encoding="utf-8")
+        paint_fps, paint_buckets, paint_error = measured_paint_fields(client)
         result = {"config": client["config"], "tenantIndex": index,
                   "source": {}, "browser": [], "receiver": {
                       "markerFps": client.get("observedFps"),
                       "markerSamplesPerSecond": client.get("markerSamplesPerSecond"),
                       "authorizedRtpFps": client.get("authorizedFrameFps", client.get("displayFps")),
-                      "displayPaintFps": client.get("displayFps") if client.get("frameCountStage") == "viewport-paint-v2" else None,
-                      "displayPerSecondFrames": client.get("displayPerSecondFrames") if client.get("frameCountStage") == "viewport-paint-v2" else None,
+                      "displayPaintFps": paint_fps,
+                      "displayPerSecondFrames": paint_buckets,
+                      "paintMeasurementError": paint_error,
                       "frameCountStage": client.get("frameCountStage", "authorized-snapshot; not Viewport paint"),
                       "authorizedPerSecondFrames": client.get("authorizedPerSecondFrames", client.get("displayPerSecondFrames")),
                       "markerPerSecondSamples": client["perSecondFrames"],

@@ -2,7 +2,7 @@
 """Read existing streaming cases into tenant-level JSON and a compact layer table."""
 import argparse,json,re
 from pathlib import Path
-from streaming_metrics import load_metrics
+from streaming_metrics import load_metrics, measured_paint_fields
 ROOT=Path(__file__).resolve().parents[1]
 def load(path):
  try:return json.loads(path.read_text(encoding='utf-8'))
@@ -32,6 +32,7 @@ def summarize(folder,summaries,metrics):
  pids=dict(re.findall(r'^session (\d+) browser pid (\d+)$',log,re.MULTILINE));rows=[]
  for record in summaries:
   index=record['tenantIndex'];m=metrics.get(index,{});receiver=record.get('receiver',{})
+  paint_fps,paint_buckets,paint_error=measured_paint_fields(m)
   endpoint=receiver.get('lastEndpoint',{});samples=m.get('rtcSamples',[]);last=samples[-1] if samples else {}
   views=m.get('actualLayout',{}).get('views',[]);session=str(views[0].get('session','')) if views else ''
   pid=pids.get(session);trace=next((b for b in record.get('browser',[]) if b.get('file','').startswith('browser-'+str(pid)+'-atlas-')),None)
@@ -55,7 +56,7 @@ def summarize(folder,summaries,metrics):
    'captureCallbackFps':trace.get('capture_callback',{}).get('fps') if trace else None,
    'atlasPublishFps':trace.get('atlas_publish',{}).get('fps') if trace else None,
    'atlasCopyFps':receiver.get('atlasCopiesPerSecond'),'encodeFps':receiver.get('encodeCompletedPerSecond'),
-   'decodeFps':receiver.get('framesDecodedPerSecond'),'paintFps':receiver.get('displayPaintFps'),
+   'decodeFps':receiver.get('framesDecodedPerSecond'),'paintFps':paint_fps,'paintMeasurementError':paint_error,
    'renderP50Ms':latency.get('p50'),'renderP95Ms':latency.get('p95'),'renderP99Ms':latency.get('p99'),
    'renderSampleCount':m.get('markerSampleCount'),'invalidMarkers':receiver.get('invalidMarkers'),
    'inputSampleCount':m.get('inputSampleCount'),'inputTimeoutCount':len(m.get('inputTimeouts',[])),
@@ -81,7 +82,7 @@ def summarize(folder,summaries,metrics):
    'jitterFieldsAvailable':last.get('jitterBufferFieldAvailability',{}),
    'markerReadbackP50Ms':costs.get('markerReadback',{}).get('p50'),'markerReadbackP95Ms':costs.get('markerReadback',{}).get('p95'),
    'videoCallbackP50Ms':costs.get('videoCallbackTotal',{}).get('p50'),'videoCallbackP95Ms':costs.get('videoCallbackTotal',{}).get('p95'),
-   'fpsSecondDistribution':{'displayPaint':receiver.get('displayPerSecondFrames'),'authorized':receiver.get('authorizedPerSecondFrames'),
+   'fpsSecondDistribution':{'displayPaint':paint_buckets,'authorized':receiver.get('authorizedPerSecondFrames'),
     'atlasCopy':[s.get('endpoint',{}).get('atlasCopyFps') for s in samples],
     'encode':[s.get('endpoint',{}).get('encodedFps') for s in samples],
     'decode':rtc_rate_samples(samples,'framesDecoded'),'source':record.get('source',{}).get('raf',{}).get('perSecondFrames'),

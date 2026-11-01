@@ -233,7 +233,7 @@ export class RemoteTransport {
   private scheduleProcessorPresentation() {
     const source = this.processorSource;
     if (!source || !this.processorCurrent(source) || this.processorRaf !== undefined) return;
-    const matchingSnapshot = this.pendingSnapshotRtp !== undefined && this.pendingSnapshotRtp === this.frameGate.rtpTimestamp && this.frameGate.ready && this.layout && this.pendingFrame.width === this.layout.width && this.pendingFrame.height === this.layout.height;
+    const matchingSnapshot = this.pendingSnapshotRtp !== undefined && this.frameGate.epochFor(this.pendingSnapshotRtp) === this.layout?.epoch && this.layout && this.pendingFrame.width === this.layout.width && this.pendingFrame.height === this.layout.height;
     if (!this.pendingProcessorFrame && !matchingSnapshot) return;
     const id = requestAnimationFrame(() => {
       if (this.processorRaf !== id) return;
@@ -308,7 +308,7 @@ export class RemoteTransport {
               if (!frame) throw new Error('track-processor 未返回 VideoFrame。');
               if (this.presentationMode !== 'snapshot') throw new Error('track-processor 接收路径只支持 snapshot 呈现。');
               const rtp = processorRtpTimestamp(frame);
-              this.frameGate.observe(rtp);
+              // Pending receive does not revoke the last successfully painted plane.
               const width = frame.displayWidth, height = frame.displayHeight;
               if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw new Error('track-processor 返回无效的视频尺寸。');
               this.processorCounts.width = width; this.processorCounts.height = height;
@@ -371,6 +371,12 @@ export class RemoteTransport {
   }
   private authorizeFrame(fromProcessorRaf = false) {
     if (this.activeFrameSource === 'track-processor' && !fromProcessorRaf) { this.scheduleProcessorPresentation(); return; }
+    if (this.activeFrameSource === 'track-processor') {
+      // Inspect a candidate without changing the currently displayed authorization.
+      // Late metadata, wrong epoch and wrong geometry must leave that plane intact.
+      if (this.pendingSnapshotRtp === undefined || !this.layout || this.frameGate.epochFor(this.pendingSnapshotRtp) !== this.layout.epoch || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
+      this.frameGate.observe(this.pendingSnapshotRtp);
+    }
     if (!this.frameGate.ready || !this.layout || this.pendingSnapshotRtp !== this.frameGate.rtpTimestamp || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
     if (this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout.epoch) return;
     // Swap the authorized snapshot rather than copying the atlas a second time.

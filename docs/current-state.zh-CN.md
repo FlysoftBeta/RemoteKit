@@ -10,13 +10,15 @@
 
 接收回调trace确认：约600个新video frame只有450次rVFC，后续canvas没有再丢帧；跨线程通知和呈现相位是实测损失来源。默认关闭的连续rVFC候选已增量编译并验证静止/恢复/重连，尚无稳定性能收益，保持关闭。精准模拟刷新与该候选分别保存为0005/0006补丁。大metrics报告改为带SHA-256校验的分块上传，正式分析工具可完整重组，不再因413丢失长记录。
 
-每Session独立QSV模式已实现：显式pattern按持久化Session id分配，stats包含选择和实际TU/LowPower；实验工具可配置目标/上限码率。默认关闭的自适应源帧率worker、TrackProcessor接收路径也已实现，原Chrome89/video默认保留。Endpoint Release构建及5项CPU测试、Control 60项测试/类型检查/生产构建/smoke通过；混跑及自适应已实播，TrackProcessor仍待实际GPU验证。
+每Session独立QSV模式已实现：显式pattern按持久化Session id分配，stats包含选择和实际TU/LowPower；实验工具可配置目标/上限码率。默认关闭的自适应源帧率worker、TrackProcessor接收路径也已实现，原Chrome89/video默认保留。Endpoint Release构建及5项CPU测试通过；Control最新61项测试/类型检查/生产构建/smoke通过；混跑、自适应及TrackProcessor均已有实播证据。
 
 三租户TU7/36–44Mbps矩阵已完成：全OFF为10.53–11.36FPS/p95 1054–1200ms，全ON为12.46–12.68FPS/p95 852–921ms，两个混跑均约11.7–12.5FPS/p95 843–947ms。实际TU7、ON/OFF及混跑比例全部正确，原分辨率/CRC保留。3D约99.8%，source GPU约60%；全ON JS提交57–59FPS，但实际atlas17–20FPS。混跑未突破主要瓶颈，详见[完整实验](../develop/docs/three-tenant-fast-mixed-runtime.md)。
 
 自适应源准入已实播：3租户提升到21.17–23.74FPS/p95 152–156ms；按授权转2租户后，关闭策略为22.99/23.42FPS、p95 444/401ms，开启为35.11/31.33FPS、p95 91/99ms。实际render配置与target/applied一致，几何、epoch、CRC保持，控制无错误。两租户延迟达标，FPS尚差15–19；正在拆分源GPU中的绘制、合成、捕获与复制成本，不能把进程占用全部算为网页绘制。详见[源准入实验](../develop/docs/source-budget-runtime.md)。
 
 源GPU细分已落实到真实flush：页面child批次约1.49ms、最终offscreen root约1.04ms，目标尺寸和sample count正常；请求/完成观察的百毫秒间隔不等于绘制执行。默认关闭的RemoteKitCaptureRoot改为捕获独立WebView root，实际将两pass合为一个六quad pass。原像素、CRC、resize、DPR2回退child再回root、点击与IME均通过；两租户profile-off为37.50/34.89FPS、p95 104/108ms，固定55反而饱和，仍未达标。下一对照减少客户端snapshot复制。详见[GPU计时](../develop/docs/viz-gpu-timing.md)和[root捕获](../develop/docs/root-capture-runtime.md)。
+
+客户端single-plane-direct真实跳过snapshot后为37.16/33.85FPS、p95 116/132ms，无收益；Chrome89首帧、输入、重连通过。TrackProcessor实播发现并修复read提前使已呈现画面不可输入的问题，保留真正epoch变化的输入拒绝；read→RAF空隙输入、静止/恢复、重连、owner释放及Chrome89默认video回归均通过。两租户MSTP+Canvas snapshot为39.07/41.47FPS、p95 103/107ms，CRC全部有效，未达标；背景GPU变化使跨组差值不能全归因该路径。下一候选直接用immutable VideoFrame绘制各plane，省掉整atlas中间Canvas复制。详见[直接video对照](../develop/docs/client-direct-runtime.md)和[MSTP验证](../develop/docs/processor-runtime.md)。
 
 当前marker延迟统计终点为客户端canvas绘制提交，CRC同步读回耗时另记；不表示物理屏幕点亮。四接收端同机满载时，读回p95达331–408ms，会干扰后续工作；同时已存在服务端供给下降与解码排队，不能将全部瓶颈归于测量。后续将同时记录GPU/读回完成端点，并保持CRC验证。
 

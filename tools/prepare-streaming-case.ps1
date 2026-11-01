@@ -41,6 +41,7 @@ param(
   [ValidateSet('off','on')][string]$AdaptiveFps='off',
   [ValidateSet('canvas','compositor')][string]$FixtureKind='canvas',
   [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
+  [ValidateSet('video','track-processor')][string]$FrameSource='video',
   [switch]$DisableClientRafProbe,
   [ValidateSet('default','software','unlimited')][string]$ClientMode='default',
   [string]$ClientExecutablePath='C:/src/tmp/chrome89-google/app/chrome.exe',
@@ -53,6 +54,7 @@ param(
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
 $ErrorActionPreference = 'Stop'
+if($FrameSource -eq 'track-processor' -and $PresentationMode -ne 'snapshot'){throw 'track-processor requires snapshot presentation'}
 if($BitrateMbps -gt $MaxBitrateMbps){throw 'BitrateMbps must not exceed MaxBitrateMbps'}
 if($QsvLowPowerPattern -cnotmatch '^(?:(?:on|off)(?:,(?:on|off)){0,15})?$') {
   throw 'QsvLowPowerPattern requires 1..16 comma-separated on/off entries, or an empty string'
@@ -110,7 +112,7 @@ $configuration = @{
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
   clientExecutablePath=$ClientExecutablePath;clientRefreshHz=$ClientRefreshHz;
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
-  atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;
+  atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;frameSource=$FrameSource;
   singlePlaneDirect=[bool]$SinglePlaneDirect;
   captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
   officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;adaptiveFps=$AdaptiveFps;offscreenRoot=[bool]$OffscreenRoot;

@@ -27,6 +27,7 @@ async (hostPage) => {
           if (!transport.registerPlane) throw new Error('This client does not support the requested presentation experiment');
           transport.presentationMode = config.presentationMode;
         }
+        transport.frameSource = config.frameSource ?? 'video';
         transport.receiveProfile = config.receiveProfile;
         await transport.connect();
         if (config.visibleVideoPreview) {
@@ -44,7 +45,7 @@ async (hostPage) => {
           return result;
         });
       }, { config, index: i });
-      await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport; return t.displayReady && t.layout?.views.length && t.video.videoWidth > 0; }, null, { timeout: 20000 });
+      await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport; return t.displayReady && t.layout?.views.length && t.diagnostics.videoWidth > 0 && t.diagnostics.videoHeight > 0 && t.getLastPresentation?.(t.layout.views[0].id); }, null, { timeout: 20000 });
     }
     if (config.honorClientTimerResolution) {
       const cdp = await browser.newBrowserCDPSession();
@@ -89,7 +90,7 @@ async (hostPage) => {
       let observing = true, rafId, videoCallbackId;
       const raf = now => { if (!observing) return; clientRaf.push(now); rafId = requestAnimationFrame(raf); };
       if (config.observeClientRaf !== false) rafId = requestAnimationFrame(raf);
-      if (transport.video.requestVideoFrameCallback) {
+      if ((config.frameSource ?? 'video') === 'video' && transport.video.requestVideoFrameCallback) {
         const videoFrame = (now, metadata) => { if (!observing) return; rawVideoFrames.push({ now, ...metadata }); videoCallbackId = transport.video.requestVideoFrameCallback(videoFrame); };
         videoCallbackId = transport.video.requestVideoFrameCallback(videoFrame);
       }
@@ -174,7 +175,7 @@ async (hostPage) => {
       const render = samples.flatMap(sample => sample.renderToObservedMs === null ? [] : [sample.renderToObservedMs]);
       const presentation = transport.presentationDiagnostics ?? null;
       const raw = JSON.stringify(transport.getPresentationDiagnostics?.(true) ?? null);
-      const report = { kind: 'streaming-benchmark', config, clientVersion, tenantIndex: index, flags, timeOrigin: performance.timeOrigin, startedAt: started, startedWall, clockSample, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility, clock: 'same-machine-wall-clock', frameCountStage: hasPaint ? 'viewport-canvas-paint' : 'authorized-snapshot; Viewport paint not measured', observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null, markerSamplesPerSecond: samples.length * 1000 / elapsedMs, markerTimestampMeaning: hasPaint ? 'canvas draw submission time; synchronous same-RTP plane source; CRC completion separate' : 'authorized snapshot; not Viewport paint', authorizedFrameFps: presentations.length * 1000 / elapsedMs, authorizedPerSecondFrames: displayBuckets, displayFps: hasPaint ? paintedFrames.length * 1000 / elapsedMs : null, displayPerSecondFrames: hasPaint ? paintBuckets : null, perSecondFrames: buckets, perSecondFps: percentiles(buckets), renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)), invalid, missingPaintSnapshot, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped, pendingInputs: inputs.size, samples, presentations, paintedFrames, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation };
+      const report = { kind: 'streaming-benchmark', config, clientVersion, tenantIndex: index, flags, timeOrigin: performance.timeOrigin, startedAt: started, startedWall, clockSample, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility, clock: 'same-machine-wall-clock', frameSource: config.frameSource ?? 'video', frameCountStage: hasPaint ? 'viewport-canvas-paint' : 'authorized-snapshot; Viewport paint not measured', observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null, markerSamplesPerSecond: samples.length * 1000 / elapsedMs, markerTimestampMeaning: hasPaint ? 'canvas draw submission time; synchronous same-RTP plane source; CRC completion separate' : 'authorized snapshot; not Viewport paint', authorizedFrameFps: presentations.length * 1000 / elapsedMs, authorizedPerSecondFrames: displayBuckets, displayFps: hasPaint ? paintedFrames.length * 1000 / elapsedMs : null, displayPerSecondFrames: hasPaint ? paintBuckets : null, perSecondFrames: buckets, perSecondFps: percentiles(buckets), renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)), invalid, missingPaintSnapshot, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped, pendingInputs: inputs.size, samples, presentations, paintedFrames, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation };
       report.inputTimeouts = inputTimeouts;
       report.inputSampleCount = inputSamples.length;
       report.markerSampleCount = samples.length;

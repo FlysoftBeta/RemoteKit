@@ -4,6 +4,15 @@ import json
 from pathlib import Path
 
 
+def measured_paint_fields(report):
+    """Accept only known successful canvas-paint instruments, never decode counts."""
+    stage = report.get('frameCountStage')
+    version = (report.get('presentation') or {}).get('paintVersion')
+    if stage in ('viewport-paint-v2', 'viewport-canvas-paint') and version in ('event-driven-v2', 'plane-source-v3'):
+        return report.get('displayFps'), report.get('displayPerSecondFrames'), None
+    return None, None, f'Unsupported or absent canvas paint stage/version: {stage!r}/{version!r}'
+
+
 def load_metrics(path):
     records = [json.loads(line) for line in Path(path).read_text(encoding='utf-8-sig').splitlines()]
     chunks = {}

@@ -57,8 +57,8 @@ test('processor snapshots bind exact RTP including zero; late metadata cannot bo
   const second = s.frame(10), third = s.frame(11);
   s.readers[0].resolve({ done: false, value: second.value }); await flush(); s.raf();
   s.readers[0].resolve({ done: false, value: third.value }); await flush(); s.raf();
-  s.metadata(10); assert.equal(s.transport.displayReady, false); assert.equal(s.canvas.bitmap, 'pixels-0');
-  assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), false);
+  s.metadata(10); assert.equal(s.transport.displayReady, true); assert.equal(s.canvas.bitmap, 'pixels-0');
+  assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), true);
   s.metadata(11); s.raf(); assert.equal(s.canvas.bitmap, 'pixels-11'); assert.equal(s.transport.presentedFrame?.rtpTimestamp, 11);
   assert.equal(second.state.closed, 1); assert.equal(third.state.closed, 1);
   assert.equal(s.video.srcObject, null); assert.equal(s.videoCallbacks(), 0);
@@ -161,4 +161,24 @@ test('late metadata authorizes its captured snapshot only at the next RAF and th
   s.metadata(0); assert.equal(s.canvas.draws.length, 0); assert.equal(s.rafs.size, 1);
   s.raf(); assert.equal(s.canvas.bitmap, 'pixels-0'); assert.equal(s.canvas.draws.length, 1); assert.equal(s.rafs.size, 0);
   s.raf(); assert.equal(s.canvas.draws.length, 1); assert.equal(s.transport.presentationDiagnostics.processor.rafAdmitted, 1);
+});
+
+test('pending processor reads and unmatched metadata preserve only the actually painted input plane', async t => {
+  const s = setup(t); s.start(); s.metadata(1); const first = s.frame(1);
+  s.readers[0].resolve({ done: false, value: first.value }); await flush(); s.raf();
+  const candidate = s.frame(2); s.readers[0].resolve({ done: false, value: candidate.value }); await flush();
+  assert.equal(s.transport.presentedFrame?.rtpTimestamp, 1);
+  assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), true, 'read before RAF retains painted input');
+  s.raf(); assert.equal(s.transport.presentedFrame?.rtpTimestamp, 1);
+  assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), true, 'snapshot without metadata retains painted input');
+  s.metadata(2, '9'); s.raf(); assert.equal(s.transport.presentedFrame?.rtpTimestamp, 1);
+  assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), true, 'unmatched candidate cannot revoke input');
+  s.metadata(2); assert.equal(s.transport.presentedFrame?.rtpTimestamp, 1); s.raf();
+  assert.equal(s.transport.presentedFrame?.rtpTimestamp, 2); assert.equal(s.canvas.bitmap, 'pixels-2');
+  assert.equal(candidate.state.closed, 1); assert.equal(candidate.state.ownerClosed, 1);
+  s.message({ ...s.layout, epoch: '2', generation: '2', width: 800 });
+  assert.equal(s.transport.displayReady, false); assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), false, 'geometry epoch immediately revokes old input');
+  const waiting = s.frame(3); s.readers[0].resolve({ done: false, value: waiting.value }); await flush();
+  s.transport.disconnect(); assert.equal(waiting.state.closed, 1); assert.equal(waiting.state.ownerClosed, 1);
+  s.raf(); assert.equal(s.transport.displayReady, false); assert.equal(s.canvas.bitmap, 'pixels-2');
 });
