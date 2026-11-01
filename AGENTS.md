@@ -42,6 +42,18 @@
 
 ## 仓库组织
 
+### 后续产品化修正（当前优化计划之后执行）
+
+用户要求先沿原计划继续性能改进，认为当前改动已基本充分后再执行以下工作。控制平面与Viewer此后按实际产品打磨，不再受前文demo定位限制；下列新要求覆盖旧UI/平板/配置要求。完整任务清单见 `develop/docs/productization-next.md`。
+
+- 分辨率自适应：延迟超过300ms时自动降低分辨率，并相应换算Browser DPR；按Client Scale计算，默认取Viewer DPR，允许override。控制变量实验关闭此机制，仍按原分辨率验收。
+- Viewer质量设置只保留“优先高画质 / 自动 / 优先流畅”，统一调整分辨率、码率、目标帧数，不暴露其它质量preset/调参选项。
+- 保留配置下发式自动化测试设施；使用独立、无需交互控件的自动化测试页，和简洁Viewer及其自动调节隔离。无效实验开关移除，历史统一封存到一个文档，其它文档不再散布引用；Hybrid/VDEnc混跑可移除。对常规控制变量实验仍有用的开关可保留。细粒度GPU/延迟Profile设施保留并工程化。
+- UI使用MUI作为浏览器外壳，沉浸式、去除无意义边框与多余UI，内容区自动适配；设置统一放“更多（三点）→设置”。平板模拟改为每站点UA设置，放更多菜单，不再模拟平板Viewport。
+- split window是类似Android多应用并排的多窗口；修复新窗口创建处理。
+- Viewer与Control使用WebSocket连接。加入简易多用户；客户端只存用户token，不存任何设置，设置由Control托管。
+- 开启memory saver，由Control实现决策算法。Viewer断开后Control将Endpoint可见性设为false，用于决定是否进入memory saver；WebRTC连接状态独立决定是否渲染和编码。浏览器恢复数据仍由Endpoint Session/Browser托管。
+
 - `browser/`：独立 content embedder，GN 构建。Chromium 源码不属于本仓库。
 - `endpoint/`：C++20 模型、布局、输入和 Windows Client，CMake + Ninja，不依赖 Chromium 私有头。
 - `sdk/`：GN 产出的 C ABI SDK 与独立 CMake 消费端。跨 DLL 不传 C++ STL、libc++、Abseil 或 Chromium C++ 对象。
