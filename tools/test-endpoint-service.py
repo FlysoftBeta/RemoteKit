@@ -8,6 +8,7 @@ def main():
  p.add_argument('--endpoint',type=Path,default=ROOT/'build/endpoint/endpoint/endpoint_service.exe')
  p.add_argument('--browser',type=Path,default=Path('C:/src/chromium/src/out/dev/remotekit_browser.exe'))
  p.add_argument('--recovery',action='store_true')
+ p.add_argument('--snapshot-lifecycle',action='store_true',help='Check observation never launches or restarts a Browser')
  p.add_argument('--device-info',action='store_true')
  p.add_argument('--tenants',type=int,default=1)
  p.add_argument('--work-dir',type=Path,default=ROOT/'develop/tmp/service-smoke')
@@ -38,6 +39,47 @@ def main():
    if reply.get('id')!=str(serial) or not reply.get('ok'):raise RuntimeError(reply)
    return reply['result']
   try:
+   if a.snapshot_lifecycle:
+    def rejected_maintenance():
+     for method,args in [('view.configure',{'visible':False}),('view.lifecycle',{'action':'discard'})]:
+      try:call(method,viewId='1',requireRunning=True,**args)
+      except RuntimeError as error:assert 'browser not running' in str(error),error
+      else:raise AssertionError('guarded maintenance started an offline Browser')
+    rejected_maintenance()
+    for _ in range(3):
+     state=call('session.snapshot')
+     assert state['running'] is False and state['browserPid']==0 and state['views']==[] and state['events']==[],state
+    launched=call('session.ensure');pid=launched['browserPid']
+    assert pid>0 and call('session.ensure')['browserPid']==pid
+    call('view.ensure',viewId='1',url='about:blank',width=640,height=480,visible=False,
+      device={'mode':'desktop','deviceScaleFactor':1})
+    call('view.configure',viewId='1',requireRunning=True,visible=False)
+    live=call('session.snapshot');assert live['running'] and len(live['views'])==1,live
+    # Kill only this test's Browser root. Endpoint must observe the exact exit,
+    # terminate its retained job and preserve desired/recovery state itself.
+    import ctypes
+    kernel=ctypes.WinDLL('kernel32',use_last_error=True)
+    kernel.OpenProcess.restype=ctypes.c_void_p
+    kernel.WaitForSingleObject.argtypes=[ctypes.c_void_p,ctypes.c_uint32]
+    kernel.CloseHandle.argtypes=[ctypes.c_void_p]
+    handle=kernel.OpenProcess(0x00100000,False,pid)
+    assert handle,ctypes.get_last_error()
+    try:
+     subprocess.run(['taskkill','/PID',str(pid),'/F'],check=True,capture_output=True)
+     assert kernel.WaitForSingleObject(handle,10000)==0
+    finally:kernel.CloseHandle(handle)
+    rejected_maintenance()
+    for _ in range(3):
+     state=call('session.snapshot')
+     assert state['running'] is False and state['browserPid']==0 and state['views']==[] and state['pendingPopups']==[],state
+     assert state['events']==live['events'],state
+    restarted=call('session.ensure');assert restarted['browserPid']!=pid,restarted
+    state=call('session.snapshot');assert state['running'] and len(state['views'])==1,state
+    call('shutdown');child.wait(timeout=15);assert child.returncode==0
+    log.flush();launches=(run/'stderr.log').read_text(encoding='utf-8',errors='replace').count(' browser command ')
+    assert launches==2,launches
+    (run/'evidence.json').write_text(json.dumps(evidence,indent=2),encoding='utf-8')
+    print(json.dumps({'passed':True,'browserLaunches':launches,'evidence':str(run)}));return
    ids=[]
    for index in range(a.tenants):
     tenant='test-tenant-'+str(index+1);session=call('session.ensure',tenant);ids.append(session['sessionId'])

@@ -15,15 +15,17 @@ async (hostPage) => {
       const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }); contexts.push(context);
       const page = await context.newPage(); pages.push(page);
       page.on('pageerror', error => errors.push({ tenant: i, error: error.message }));
+      const gate=await page.request.get(config.origin+'/api/state');
+      if(gate.status()!==200)throw Error('Explicit diagnostics server required (REMOTEKIT_DIAGNOSTICS=1), with fresh isolated session: '+gate.status()+' '+await gate.text());
       await page.goto(config.origin + '/automation');
       await page.waitForFunction(() => window.remotekitDiagnostics?.state);
       await page.evaluate(async ({ config, index }) => {
+        if(window.remotekitDiagnostics.automaticQualityPolicy!==false)throw Error('Controlled automation requires adaptive quality disabled');
         const action = window.remotekitDiagnostics.action;
         await action({ type: 'device.set', device: { mode: 'desktop', width: config.width, height: config.height, deviceScaleFactor: config.dpr } });
         await action({ type: 'tab.create', title: `Benchmark ${config.id}/${index}`, url: `${config.fixtureOrigin || config.origin}/test-pattern.html?mode=${encodeURIComponent(config.mode)}&fps=60&probeRun=${encodeURIComponent(config.id + '-' + index)}${config.captureQuality ? '&quality=1&stopAfter=8000' : ''}` });
         const transport = window.remotekitDiagnostics.transport;
         window.remotekitDiagnostics.configure({
-          callbackRegistration: config.callbackRegistration,
           presentationMode: config.presentationMode,
           frameSource: config.frameSource ?? 'video',
           processorScheduler: config.processorScheduler ?? 'latest1',

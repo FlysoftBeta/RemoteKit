@@ -78,3 +78,9 @@ Profile 命令放在 command 对象内，避免与 envelope.id 冲突。例如�
 device_scale 支持0.5..4，fps 为1..120的发布上限，不保证内容每周期产生 damage。新 scale 需新资源代次；最大 atlas 纹理边长16384。
 
 服务模式只将visible页面排入atlas，后台逻辑页面保留。重排提升focus token，旧坐标输入失效；Endpoint另以RTP/显示代次保护客户端的视频与布局匹配。逻辑关闭保留墓碑，正常关闭前后的page.requests/page.reply和完成状态由Endpoint适配给Control。
+
+## 新增产品生命周期接口
+
+session.sitePreferences下发按origin的UA/Client Hints策略；产品平板模式只改变站点身份，不改变viewport、DPR或触控能力。view.configure中的低层device配置不等同于产品站点UA设置。
+
+snapshot同时提供pendingPopups、页面dialog及canDiscard状态。Control先持久化产品Tab与收养记录，再通过view.adopt将真实待收养WebContents绑定稳定WebView；不以重新打开URL替代popup。页面dialog回复必须带当前实例、文档和请求标识，Control额外绑定Browser进程身份；陈旧回复拒绝。具体字段以browser控制处理器及[产品协议](streaming-protocol.md)为准。

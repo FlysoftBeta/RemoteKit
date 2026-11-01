@@ -108,6 +108,9 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   if (!enabled.empty())
     enabled += ",";
   enabled += features::kWebContentsDiscard.name;
+#if !defined(REMOTEKIT_DEMO_HARNESS)
+  enabled += ",RemoteKitCaptureRoot,RemoteKitCaptureToAtlas,RemoteKitSinglePlaneDirect";
+#endif
   command.AppendSwitchASCII("enable-features", enabled);
   logging::LoggingSettings settings;
   settings.logging_dest = logging::LOG_TO_STDERR;

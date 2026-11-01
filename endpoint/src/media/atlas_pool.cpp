@@ -294,7 +294,7 @@ AtlasPool::Result AtlasPool::Poll(remotekit_rtc_frame& output,SharedAtlasFrame& 
   slot->pending=false;slot->refs.store(1);
   output={};output.struct_size=sizeof(output);output.width=s.setup.width;output.height=s.setup.height;
   output.d3d11_texture=slot->texture.Get();output.frame_id=slot->cookie;
-  output.capture_qpc=slot->observed_qpc;output.qpc_frequency=s.frequency;
+  output.capture_qpc=0;output.qpc_frequency=s.frequency;
   if(s.clock.consistent_across_processes && s.clock.high_resolution &&
      s.clock.qpc_frequency==s.frequency && slot->metadata.capture_time_us>0) {
    const int64_t midpoint=s.clock.qpc_before+(s.clock.qpc_after-s.clock.qpc_before)/2;
@@ -348,7 +348,7 @@ AtlasPool::Result AtlasPool::Poll(remotekit_rtc_frame& output,SharedAtlasFrame& 
   slot.refs=1;slot.active=true;s.retirement.Observe(frame.ready_fence_value,slot.cookie);
   output={};output.struct_size=sizeof(output);output.width=s.setup.width;output.height=s.setup.height;
   output.d3d11_texture=slot.texture.Get();output.frame_id=slot.cookie;
-  output.capture_qpc=slot.observed_qpc;output.qpc_frequency=s.frequency;
+  output.capture_qpc=0;output.qpc_frequency=s.frequency;
   if(s.clock.consistent_across_processes && s.clock.high_resolution && s.clock.qpc_frequency==s.frequency && frame.capture_time_us>0) {
    const int64_t midpoint=s.clock.qpc_before+(s.clock.qpc_after-s.clock.qpc_before)/2;
    const int64_t capture=midpoint+static_cast<int64_t>(double(frame.capture_time_us-s.clock.monotonic_us)*s.frequency/1000000.0);

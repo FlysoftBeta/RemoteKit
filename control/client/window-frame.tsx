@@ -242,7 +242,7 @@ export function WindowFrame({
                 ) : (
                   <Language fontSize="inherit" />
                 )}
-                <span>{tab.title || "新标签页"}</span>
+                <span>{tab.title || "新标签页"}{state.pageDialogs?.some(d => d.tabId === tab.id) && <span aria-label="页面等待处理对话框"> ●</span>}</span>
               </button>
               <IconButton
                 className="tab-close"

@@ -110,6 +110,10 @@ REMOTEKIT_SDK_API int remotekit_rtc_sample_clock(
 REMOTEKIT_SDK_API int remotekit_rtc_create(const struct remotekit_rtc_options*,
                                          uint64_t* peer);
 REMOTEKIT_SDK_API int remotekit_rtc_close(uint64_t peer);
+/* Update sender ceilings without replacing the peer or encoder sequence.
+ * WebRTC congestion control remains authoritative below these limits. */
+REMOTEKIT_SDK_API int remotekit_rtc_set_media_policy(uint64_t peer,
+    uint32_t target_bitrate_bps,uint32_t max_bitrate_bps,uint32_t target_fps);
 REMOTEKIT_SDK_API int remotekit_rtc_create_offer(uint64_t peer);
 /* offer=1 applies remote offer and emits local answer; offer=0 applies answer.
  * Send-only SDK: remote video must be recvonly/inactive; non-rejected audio and

@@ -515,11 +515,13 @@ class Qsv final : public HardwareEncoder {
     if(task.converted)task.converted->used=false;
     jobs_.erase(found);packets_.pop_front();return CodecResult::ready;
   }
-  bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error) override {
+  bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error,uint32_t maximum=0) override {
     (void)fps; // WebRTC reports observed input cadence, not a new BRC timebase.
     if(!jobs_.empty()||!packets_.empty()) {error="QSV rate reset requires drained queue";return false;}
+    const auto previous_max=settings_.max_bitrate;
+    if(maximum)settings_.max_bitrate=maximum;
     bitrate=std::min(bitrate,settings_.max_bitrate);
-    if(bitrate/1000==settings_.bitrate/1000)return true;
+    if(bitrate/1000==settings_.bitrate/1000 && previous_max==settings_.max_bitrate)return true;
     auto next=params_;
     next.mfx.TargetKbps=static_cast<mfxU16>(std::max(1u,bitrate/1000));
     next.mfx.MaxKbps=static_cast<mfxU16>(std::max(1u,(settings_.vbr?settings_.max_bitrate:bitrate)/1000));

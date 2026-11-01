@@ -55,9 +55,10 @@ int main(int argc,char** argv) {
   if(steps && completed==phase_end && inflight.empty() && phase_end<total) {
    const uint32_t rate=completed==120?500000:18000000;
    const uint32_t step_fps=completed==60?22:(completed==120?29:60);
-   if(!encoder->SetRates(rate,step_fps,error)){fprintf(stderr,"%s\n",error.c_str());return 12;}
+   const auto maximum=completed==120?36000000u:24000000u;
+   if(!encoder->SetRates(rate,step_fps,error,maximum)){fprintf(stderr,"%s\n",error.c_str());return 12;}
    force_key|=encoder->TakeKeyframeRequest();auto actual=encoder->ActualSettings();
-   fprintf(stderr,"rate step requested=%u actual=%u fps=%u\n",rate,actual.bitrate,actual.fps);
+   fprintf(stderr,"rate step requested=%u actual=%u max=%u fps=%u\n",rate,actual.bitrate,actual.max_bitrate,actual.fps);
    phase_end+=60;
   }
   while(submitted<phase_end&&!free.empty()) {

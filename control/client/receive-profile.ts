@@ -57,3 +57,16 @@ export async function probeReceiveCapabilities() {
   }
   return { userAgent: navigator.userAgent, results };
 }
+
+export interface ProductReceiveSelection { profile: ReceiveProfile; reason: string }
+export async function selectProductReceiveProfile(userAgent: string, codecs: readonly ReceiveCodecCapability[] | undefined,
+  probe: ((configuration: { codec: string; codedWidth: number; codedHeight: number }) => Promise<{ supported?: boolean }>) | undefined =
+    typeof VideoDecoder === 'undefined' ? undefined : configuration => VideoDecoder.isConfigSupported(configuration)) : Promise<ProductReceiveSelection> {
+  if (isChrome89(userAgent)) return { profile: chooseReceiveProfile(userAgent), reason: 'Chrome89 compatibility profile' };
+  if (!supportsExperimentalH264Level42(codecs)) return { profile: 'native', reason: 'H264 constrained-baseline mode1 RTP codec unavailable' };
+  if (!probe) return { profile: 'native', reason: 'VideoDecoder capability probe unavailable' };
+  try {
+    const result = await probe({ codec: 'avc1.42e02a', codedWidth: 1936, codedHeight: 1088 });
+    return result.supported ? { profile: 'h264-level42-experimental', reason: 'VideoDecoder supports avc1.42e02a at 1936x1088' } : { profile: 'native', reason: 'VideoDecoder rejected H264 level4.2 at 1936x1088' };
+  } catch (error) { return { profile: 'native', reason: 'VideoDecoder capability probe failed: ' + String(error) }; }
+}

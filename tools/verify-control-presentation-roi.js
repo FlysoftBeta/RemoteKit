@@ -1,3 +1,5 @@
+// Requires REMOTEKIT_DIAGNOSTICS=1 and isolated temporary browser context.
+// Configuration-driven /automation media/input correctness; does not validate product UI.
 // Isolated high-DPR ROI check; configure both views before RTC negotiation.
 async hostPage => {
   const config = /* CONFIG */ { origin: 'http://127.0.0.1:3001', screenshotPath: 'C:/Users/Flysoft/Desktop/remotekit2/develop/tmp/presentation-v3-roi/tablet.png' };
@@ -5,16 +7,20 @@ async hostPage => {
   const page = await (await browser.newContext({ viewport: { width: 1440, height: 1000 }, hasTouch: true })).newPage(), errors = [];
   page.on('pageerror', error => errors.push(error.message));
   try {
-    await page.goto(config.origin); await page.waitForFunction(() => document.querySelector('button[aria-label="新建标签页"]')?.disabled === false);
+    const gate=await page.request.get(config.origin+'/api/state');
+    if(gate.status()!==200)throw Error('Explicit diagnostics server required (REMOTEKIT_DIAGNOSTICS=1), with fresh isolated session: '+gate.status()+' '+await gate.text());
+    await page.goto(config.origin+'/automation');
+    await page.waitForFunction(()=>window.remotekitDiagnostics?.state);
+    await page.evaluate(()=>{if(window.remotekitDiagnostics.automaticQualityPolicy!==false)throw Error('Controlled automation requires adaptive quality disabled');});
     await page.evaluate(async origin => {
-      const action = async body => { const r = await fetch('/api/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); if (!r.ok) throw new Error(await r.text()); return r.json(); };
+      const action = window.remotekitDiagnostics.action;
       await action({ type: 'device.set', device: { mode: 'tablet', width: 820, height: 1180, deviceScaleFactor: 2 } });
       const a = await action({ type: 'tab.create', url: origin + '/test-pattern.html?mode=static&title=Tablet-A' });
       await action({ type: 'tab.create', url: origin + '/test-pattern.html?mode=static&title=Tablet-B' });
       await action({ type: 'split.set', id: a.activeTabId });
-      const t = window.remotekitDiagnostics.transport; t.receiveProfile = 'chrome89-h264-42'; t.presentationMode = 'single-plane-direct'; await t.connect();
+      const t = window.remotekitDiagnostics.transport; window.remotekitDiagnostics.configure({receiveProfile:'chrome89-h264-42',presentationMode:'single-plane-direct',frameSource:'video'});await window.remotekitDiagnostics.refresh();await t.connect();
     }, config.origin);
-    await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport; return t.displayReady && t.layout?.views.length === 2 && t.layout.views.every(v => { const f = t.getLastPresentation(v.id); return v.deviceScaleFactor === 2 && f && t.getPresentedPlane(v.id, f.rtpTimestamp); }) && document.querySelectorAll('.view-pane canvas:not(.no-frame)').length === 2; }, null, { timeout: 15000 });
+    await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport; return t.displayReady && t.layout?.views.length === 2 && t.layout.views.every(v => { const f = t.getLastPresentation(v.id); return v.deviceScaleFactor === 2 && f && t.getPresentedPlane(v.id, f.rtpTimestamp); }) && document.querySelectorAll('.remote-viewport canvas:not(.no-frame)').length === 2; }, null, { timeout: 15000 });
     const report = await page.evaluate(async () => {
       const t = window.remotekitDiagnostics.transport, { decodeMarker } = await import('/marker-codec.js');
       let views, sources;
@@ -34,8 +40,6 @@ async hostPage => {
       report.passed = planes.every(p => p.kind === 'atlas' && p.marker && p.encodedCrop[0] === p.sourceRect.width && p.encodedCrop[1] === p.sourceRect.height) && !t.diagnostics.error;
       const r = await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report) }); if (!r.ok) throw new Error('metrics ' + r.status); return report;
     });
-    await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent === '诊断').click()); await page.waitForFunction(() => document.querySelector('.overlay-toggle input'));
-    await page.evaluate(() => { const c = document.querySelector('.overlay-toggle input'); if (!c.checked) c.click(); document.querySelector('[aria-label="关闭侧栏"]').click(); });
     await page.screenshot({ path: config.screenshotPath, fullPage: true });
     if (!report.passed || errors.length) throw new Error('ROI validation failed: ' + JSON.stringify({ planes: report.planes, errors }));
     return { passed: true, layout: report.layout, planes: report.planes.map(({ markerPng, ...plane }) => plane), routing: report.presentation.presentationRouting, errors };

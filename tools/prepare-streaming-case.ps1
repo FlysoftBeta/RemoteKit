@@ -2,7 +2,6 @@ param(
   [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9_-]+$')][string]$Name,
   [int]$MarkerHz = -1,
   [ValidateSet('sync','worker')][string]$MarkerReadback = 'sync',
-  [ValidateSet('after-work','before-work')][string]$CallbackRegistration = 'after-work',
   [string]$ServiceDirectory = 'build/endpoint-package/endpoint',
   [int]$Width = 1280,
   [int]$Height = 720,
@@ -32,8 +31,10 @@ param(
   [ValidateSet(0,1,2,10)][int]$CaptureMaxPending=0,
   [switch]$OfficialTrace,
   [switch]$CopyOutputProfile,
-  [switch]$OffscreenRoot,
+  [Alias('OffscreenRoot')][switch]$CaptureRoot,
+  [switch]$CaptureToAtlas,
   [string]$BrowserEnableFeatures='',
+  [string]$BrowserDisableFeatures='',
   [ValidateRange(0,60)][int]$CaptureRenderFps=0,
   [ValidateSet('auto','off')][string]$BrowserDirectComposition='auto',
   [ValidateSet('auto','1')][string]$BrowserHostScale='auto',
@@ -51,7 +52,6 @@ param(
   [ValidateSet(0,60,120)][int]$ClientRefreshHz=0,
   [ValidateSet('native','chrome89-h264-42','chrome89-h264-51','h264-level42-experimental')][string]$ReceiveProfile='chrome89-h264-42',
   [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
-  [string]$QsvLowPowerPattern='',
   [ValidateSet('external','async')][string]$QsvVpp='external',
   [ValidateSet('copy','shared')][string]$AtlasInput='copy',
   [ValidateSet(1,16)][int]$AtlasAlignment=1,
@@ -60,12 +60,6 @@ param(
 $ErrorActionPreference = 'Stop'
 if($FrameSource -eq 'track-processor' -and $PresentationMode -ne 'snapshot'){throw 'track-processor requires snapshot presentation'}
 if($BitrateMbps -gt $MaxBitrateMbps){throw 'BitrateMbps must not exceed MaxBitrateMbps'}
-if($QsvLowPowerPattern -cnotmatch '^(?:(?:on|off)(?:,(?:on|off)){0,15})?$') {
-  throw 'QsvLowPowerPattern requires 1..16 comma-separated on/off entries, or an empty string'
-}
-if($QsvLowPowerPattern -and $PSBoundParameters.ContainsKey('QsvLowPower')) {
-  throw 'QsvLowPowerPattern cannot be combined with explicit QsvLowPower'
-}
 $QsvLowPower=$QsvLowPower.ToLowerInvariant()
 $rkBitrateBps=[uint32][Math]::Round($BitrateMbps*1000000)
 $rkMaxBitrateBps=[uint32][Math]::Round($MaxBitrateMbps*1000000)
@@ -84,14 +78,23 @@ if(-not $PSBoundParameters.ContainsKey('AtlasAlignment')){$AtlasAlignment=if($Qs
 if($QsvVpp -eq 'async' -and $AtlasAlignment -ne 16){throw 'QsvVpp async requires AtlasAlignment 16'}
 if($ServerTrace -and $DisableMediaTrace){throw 'ServerTrace also enables browser trace; use DisableMediaTrace without ServerTrace for the off baseline'}
 if($CopyOutputProfile -and -not $OfficialTrace){throw 'CopyOutputProfile requires OfficialTrace to collect its opt-in events'}
+# Product defaults must be overridden explicitly for controlled false baselines.
+$rkManagedFeatures=@{RemoteKitCaptureRoot=[bool]$CaptureRoot;RemoteKitCaptureToAtlas=[bool]$CaptureToAtlas;RemoteKitSinglePlaneDirect=[bool]$SinglePlaneDirect}
+foreach($rkFeature in $rkManagedFeatures.Keys){
+  if(($BrowserEnableFeatures+','+$BrowserDisableFeatures) -match ('(^|,)'+[regex]::Escape($rkFeature)+'(?=[:,<]|$)')){throw "Use the dedicated switch for $rkFeature, not BrowserEnableFeatures/BrowserDisableFeatures"}
+}
 $rkBrowserFeatures=@()
+$rkBrowserDisabledFeatures=@()
+if($BrowserDisableFeatures){$rkBrowserDisabledFeatures+=$BrowserDisableFeatures}
+foreach($rkFeature in ($rkManagedFeatures.Keys|Sort-Object)){
+  if($rkManagedFeatures[$rkFeature]){$rkBrowserFeatures+=$rkFeature}else{$rkBrowserDisabledFeatures+=$rkFeature}
+}
 if($BrowserEnableFeatures){$rkBrowserFeatures+=$BrowserEnableFeatures}
 if($CaptureMaxPending){$rkBrowserFeatures+="RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"}
 if($CopyOutputProfile){$rkBrowserFeatures+='RemoteKitCopyOutputProfile'}
-if($OffscreenRoot){$rkBrowserFeatures+='RemoteKitOffscreenRoot'}
-if($SinglePlaneDirect){$rkBrowserFeatures+='RemoteKitSinglePlaneDirect'}
 if($CaptureRenderFps){$rkBrowserFeatures+="RemoteKitCaptureRenderRate:max_fps/$CaptureRenderFps"}
 $rkBrowserFeaturesText=$rkBrowserFeatures -join ','
+$rkBrowserDisabledFeaturesText=$rkBrowserDisabledFeatures -join ','
 $rkRoot = Split-Path -Parent $PSScriptRoot
 $caseRoot = Join-Path $rkRoot "develop/tmp/$Name"
 if (Test-Path -LiteralPath $caseRoot) { throw "Use a new case name; existing measurements must be preserved: $caseRoot" }
@@ -109,7 +112,7 @@ foreach ($filename in @('endpoint_service.exe','libvpl.dll')) {
 $configuration = @{
   id=$Name; origin='http://127.0.0.1:3001'; fixtureOrigin='http://127.0.0.1:3013';
   tenants=$Tenants; width=$Width; height=$Height; dpr=1; mode=$FixtureMode;
-  warmupMs=5000; sampleMs=20000; receiveProfile=$ReceiveProfile; callbackRegistration=$CallbackRegistration;
+  warmupMs=5000; sampleMs=20000; receiveProfile=$ReceiveProfile; automaticQualityPolicy=$false;
   requirePaint=$true; paintVersion='event-driven-v2'; visibleVideoPreview=[bool]$VisibleVideoPreview;
   inputIntervalMs=$InputIntervalMs;markerReadback=$MarkerReadback;
   honorClientTimerResolution=[bool]$HonorClientTimerResolution;
@@ -120,9 +123,9 @@ $configuration = @{
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
   atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;frameSource=$FrameSource;processorScheduler=$ProcessorScheduler;processorProfile=[bool]$ProcessorProfile;
   singlePlaneDirect=[bool]$SinglePlaneDirect;
-  captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
-  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;adaptiveFps=$AdaptiveFps;offscreenRoot=[bool]$OffscreenRoot;
-  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;atlasInput=$AtlasInput;qsvLowPower=$QsvLowPower;qsvLowPowerPattern=$QsvLowPowerPattern;atlasAllocationAlignment=$AtlasAlignment;startBitrate=$rkBitrateBps;maxBitrate=$rkMaxBitrateBps;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
+  captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;browserDisableFeatures=$rkBrowserDisabledFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
+  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;adaptiveFps=$AdaptiveFps;captureRoot=[bool]$CaptureRoot;captureToAtlas=[bool]$CaptureToAtlas;
+  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;atlasInput=$AtlasInput;qsvLowPower=$QsvLowPower;atlasAllocationAlignment=$AtlasAlignment;startBitrate=$rkBitrateBps;maxBitrate=$rkMaxBitrateBps;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
 if ($DownlinkMbps) {
@@ -177,8 +180,8 @@ $rkEndpointArguments = @(
 if($rkBrowserFeaturesText){
   $rkEndpointArguments+="--browser-enable-features=$rkBrowserFeaturesText"
 }
+if($rkBrowserDisabledFeaturesText){$rkEndpointArguments+="--browser-disable-features=$rkBrowserDisabledFeaturesText"}
 if($OfficialTrace){$rkEndpointArguments+="--browser-trace-dir=$(Join-Path $caseRoot 'official-trace')"}
-if($QsvLowPowerPattern){$rkEndpointArguments+="--qsv-low-power-pattern=$QsvLowPowerPattern"}
 if ($QsvLowPower -or $RtcPlayoutMaxMs -ge 0) {
   $extraArgs=@()
   if($QsvLowPower){$configuration.endpoint.qsvLowPower=$QsvLowPower;$extraArgs+="--qsv-low-power=$QsvLowPower"}

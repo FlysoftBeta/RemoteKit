@@ -72,3 +72,26 @@ test('ordinary transport has no implicit HTTP signaling', async t => {
   const internal = transport as unknown as { rtcRequest: ControlRpc };
   await assert.rejects(internal.rtcRequest('rtc.offer', {}), /WebSocket/);
 });
+
+test('failed automatic level4.2 negotiation downgrades once and keeps original SDP evidence', async t => {
+  environment(t);
+  const codec = { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' };
+  t.mock.method(RTCRtpReceiver, 'getCapabilities', () => ({ codecs: [codec], headerExtensions: [] }));
+  const oldDecoder = Object.getOwnPropertyDescriptor(globalThis, 'VideoDecoder');
+  let probes = 0;
+  Object.defineProperty(globalThis, 'VideoDecoder', { configurable: true, value: { isConfigSupported: async () => { probes++; return { supported: true }; } } });
+  t.after(() => { if (oldDecoder) Object.defineProperty(globalThis, 'VideoDecoder', oldDecoder); else Reflect.deleteProperty(globalThis, 'VideoDecoder'); });
+  const sdp = 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 108\r\na=rtpmap:108 H264/90000\r\na=fmtp:108 packetization-mode=1;profile-level-id=42e01f\r\n';
+  t.mock.method(RTCPeerConnection.prototype, 'createOffer', async () => ({ type: 'offer' as const, sdp }));
+  let descriptions = 0;
+  t.mock.method(RTCPeerConnection.prototype, 'setRemoteDescription', async () => { if (++descriptions === 1) throw new Error('unsupported answer'); });
+  const transport = new RemoteTransport(); t.after(() => transport.disconnect());
+  transport.setControlRpc(async method => method === 'rtc.offer' ? { type: 'answer', sdp, connectionId: 'p' } : { closed: true });
+  await transport.connect(); await transport.connect();
+  assert.equal(transport.receiveProfile, 'native'); assert.equal(probes, 1);
+  assert.match(String(transport.diagnostics.receiveSelection?.reason), /negotiation failed/);
+  const previous = transport.signaling?.previousNegotiationFailure as Record<string, unknown>;
+  assert.equal(previous.originalOfferSdp, sdp);
+  assert.match(String(previous.effectiveOfferSdp), /42e02a/);
+  transport.disconnect();
+});

@@ -7,9 +7,10 @@
 #include "remotekit/tail_refresh.hpp"
 #include "remotekit/media_feedback.hpp"
 #include "remotekit/adaptive_fps.hpp"
-#include "remotekit/qsv_session_pattern.hpp"
+#include "remotekit/capture_clock.hpp"
 #include "remotekit/atlas_dimensions.hpp"
 #include "remotekit/coordinate_readiness.hpp"
+#include "remotekit/input_sequence.hpp"
 #include <json.hpp>
 #include <windows.h>
 #include <mmsystem.h>
@@ -74,19 +75,18 @@ size_t DecodedSize(const std::string& text) {
 }
 struct Options {
  fs::path browser,data,browser_trace_directory;
- std::string encoder="auto",browser_enable_features,browser_direct_composition="auto",browser_host_scale="auto",browser_render_host="offscreen";EncoderSettings encoding;
+ std::string encoder="qsv",browser_enable_features,browser_disable_features,browser_direct_composition="auto",browser_host_scale="auto",browser_render_host="offscreen";EncoderSettings encoding;
  uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096,browser_render_fps=0;
- uint32_t atlas_allocation_alignment=1;bool atlas_alignment_explicit=false;
+ uint32_t atlas_allocation_alignment=16;
  bool adaptive_fps=false;
- std::string atlas_input="copy";
+ std::string atlas_input="auto";
  bool qsv_low_power_explicit=false;
- std::string qsv_low_power_pattern_text;std::vector<uint32_t> qsv_low_power_pattern;
  int32_t rtc_playout_max_ms=-1;
  Options() {
   wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
   browser=Utf8Path(Env("REMOTEKIT_BROWSER",Utf8(fs::path(executable).parent_path()/"remotekit_browser.exe")));
   data=Utf8Path(Env("REMOTEKIT_DATA_PATH",Env("LOCALAPPDATA",".")+"/RemoteKit/streaming"));
-  encoder=Env("REMOTEKIT_ENCODER","auto");encoding.bitrate=18000000;encoding.max_bitrate=40000000;
+  encoder=Env("REMOTEKIT_ENCODER","qsv");encoding.bitrate=36000000;encoding.max_bitrate=48000000;
  }
  void Parse(int argc,char** argv) {
   for(int i=1;i<argc;++i){std::string arg=argv[i];auto equal=arg.find('=');
@@ -94,6 +94,7 @@ struct Options {
    auto key=arg.substr(0,equal),value=arg.substr(equal+1);
    if(key=="--browser")browser=Utf8Path(value);else if(key=="--data-path")data=Utf8Path(value);
    else if(key=="--browser-enable-features")browser_enable_features=value;
+   else if(key=="--browser-disable-features")browser_disable_features=value;
    else if(key=="--browser-direct-composition"){
     if(value!="auto"&&value!="off")throw std::runtime_error("browser-direct-composition must be auto or off");
     browser_direct_composition=value;
@@ -118,7 +119,7 @@ struct Options {
    else if(key=="--browser-trace-dir")browser_trace_directory=Utf8Path(value);
    else if(key=="--encoder")encoder=value;
    else if(key=="--atlas-input") {
-    if(value!="copy"&&value!="shared")throw std::runtime_error("atlas-input must be copy or shared");
+    if(value!="auto"&&value!="copy"&&value!="shared")throw std::runtime_error("atlas-input must be auto, copy or shared");
     atlas_input=value;
    }
    else if(key=="--qsv-vpp"){
@@ -127,7 +128,7 @@ struct Options {
    }
    else if(key=="--atlas-alignment"){
     if(value!="1"&&value!="16")throw std::runtime_error("atlas-alignment must be 1 or 16");
-    atlas_allocation_alignment=value=="16"?16:1;atlas_alignment_explicit=true;
+    atlas_allocation_alignment=value=="16"?16:1;
    }
    else if(key=="--fps")encoding.fps=std::stoul(value);
    else if(key=="--bitrate")encoding.bitrate=std::stoul(value);
@@ -138,10 +139,7 @@ struct Options {
    else if(key=="--qsv-low-power"){
     if(value!="auto"&&value!="on"&&value!="off")throw std::runtime_error("qsv-low-power must be auto, on or off");
     encoding.qsv_low_power=value=="on"?0x10u:(value=="off"?0x20u:0u);
-    qsv_low_power_explicit=true;
-   }
-   else if(key=="--qsv-low-power-pattern") {
-    qsv_low_power_pattern=remotekit::ParseQsvLowPowerPattern(value);qsv_low_power_pattern_text=value;
+    qsv_low_power_explicit=true;encoding.qsv_low_power_explicit=true;
    }
    else if(key=="--buffer-ms")encoding.buffer_ms=std::stoul(value);
    else if(key=="--rate-control"){if(value!="cbr"&&value!="vbr")throw std::runtime_error("rate-control must be cbr or vbr");encoding.vbr=value=="vbr";encoding.rate_control_explicit=true;}
@@ -161,13 +159,13 @@ struct Options {
      max_encode_width<16||max_encode_height<16||max_encode_width>4096||max_encode_height>4096)
    throw std::runtime_error("invalid encoder settings");
   browser=fs::absolute(browser);data=fs::absolute(data);
-  if(!atlas_alignment_explicit)atlas_allocation_alignment=encoding.qsv_async_vpp?16:1;
   if(encoding.qsv_async_vpp && (encoder!="qsv" || atlas_allocation_alignment!=16))
    throw std::runtime_error("qsv-vpp=async requires encoder=qsv and atlas-alignment=16");
   if(atlas_input=="shared" && (encoder!="qsv" || encoding.qsv_async_vpp || encoding.async_depth!=1))
    throw std::runtime_error("atlas-input=shared requires encoder=qsv, qsv-vpp=external and async-depth=1");
+  if(atlas_input=="auto")atlas_input=encoder=="qsv"&&!encoding.qsv_async_vpp&&encoding.async_depth==1?"shared":"copy";
+  if(!qsv_low_power_explicit && encoder!="nvenc")encoding.qsv_low_power=0x10u;
   if(encoder=="nvenc"&&encoding.qsv_low_power)throw std::runtime_error("qsv-low-power requires qsv or auto encoder");
-  remotekit::ValidateQsvLowPowerPattern(qsv_low_power_pattern,encoder,qsv_low_power_explicit);
   if(rtc_playout_max_ms!=-1&&(rtc_playout_max_ms<0||rtc_playout_max_ms>40950||rtc_playout_max_ms%10))
    throw std::runtime_error("rtc-playout-max-ms must be -1 or a multiple of 10 in 0..40950");
   if(adaptive_fps && !browser_render_fps && encoding.fps>60)
@@ -176,7 +174,6 @@ struct Options {
 };
 struct Session {
  Sdk& sdk;Options options;std::string tenant,id;fs::path directory;
- std::optional<size_t> qsv_pattern_index;
  HANDLE process=nullptr,job=nullptr;std::atomic<uint64_t> control{0};int request_id=0;
  bool producer_stop_pending=false;
  std::mutex rpc_mutex;
@@ -200,10 +197,14 @@ struct Session {
  std::mutex signal_mutex;std::string answer,rtc_error;bool ice_complete=false;
  std::condition_variable signal_wake;
  std::mutex input_mutex;std::condition_variable input_wake;std::deque<Event> input_queue;
+ remotekit::InputSequence input_sequence;
  std::thread input_thread;std::atomic<bool> stop_input{false};
  std::atomic<uint64_t> input_rejected{0},input_coalesced{0};
  Json layout;std::atomic<bool> data_open{false};
  Json site_preferences=Json::object();
+ std::mutex media_policy_mutex;Json requested_media_policy=nullptr;
+ std::atomic<uint32_t> policy_fps{0},policy_bitrate{0},policy_max{0};
+ std::atomic<double> capture_clock_uncertainty_ms{0};
  Json durable_events=Json::array();uint64_t next_event=1;
  std::set<std::string> observed_closed;
  bool output_suspended=false;
@@ -222,10 +223,6 @@ struct Session {
  Session(Sdk& api,const Options& opts,std::string tenant_id,std::string session_id):sdk(api),options(opts),
    tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id),
    adaptive(options.adaptive_fps,options.browser_render_fps?options.browser_render_fps:options.encoding.fps) {
-  if(!options.qsv_low_power_pattern.empty()) {
-   qsv_pattern_index=remotekit::QsvLowPowerPatternIndex(id,options.qsv_low_power_pattern.size());
-   options.encoding.qsv_low_power=options.qsv_low_power_pattern[*qsv_pattern_index];
-  }
   effective_idle_ms=std::min(1000u,options.idle_idr_ms);
   trace=ServerTrace::Create(tenant,id);pool.SetTrace(trace);
   fs::create_directories(directory);
@@ -238,7 +235,7 @@ struct Session {
   for(const auto& event:durable_events)if(event.value("type",std::string())=="view.closed")
    reconciled_closed=desired.erase(event.at("viewId").get<std::string>())!=0 || reconciled_closed;
   if(reconciled_closed)Save();
-  if(options.adaptive_fps)budget_thread=std::thread([this]{BudgetLoop();});
+  budget_thread=std::thread([this]{BudgetLoop();});
  }
  ~Session(){
   StopBudget();
@@ -282,6 +279,8 @@ struct Session {
   if(options.browser_host_scale=="1")append(L"--force-device-scale-factor=1");
   if(!options.browser_enable_features.empty())
    append(L"--enable-features="+std::wstring(options.browser_enable_features.begin(),options.browser_enable_features.end()));
+  if(!options.browser_disable_features.empty())
+   append(L"--disable-features="+std::wstring(options.browser_disable_features.begin(),options.browser_disable_features.end()));
   if(!options.browser_trace_directory.empty()) {
    fs::create_directories(options.browser_trace_directory);
    const auto file=options.browser_trace_directory/("session-"+id+"-"+std::to_string(QpcNow())+".json");
@@ -355,7 +354,7 @@ struct Session {
    throw std::runtime_error("source atlas exceeds the aligned 16-megapixel/8192-pixel resource budget");
   Rpc({{"method","output.configure"},{"width",value.width},{"height",value.height},
        {"device_scale",value.scale},{"allocation_alignment",options.atlas_allocation_alignment},
-       {"fps",options.encoding.fps},{"render_fps",options.browser_render_fps}});
+       {"fps",options.encoding.fps},{"render_fps",policy_fps.load()?policy_fps.load():options.browser_render_fps}});
   atlas_width=value.width;atlas_height=value.height;atlas_scale=value.scale;
   {std::lock_guard lock(adaptive_mutex);adaptive.Applied(adaptive.requested());adaptive_applied_known=true;
    adaptive.Reset(1000.0*QpcNow()/QpcFrequency(),AdaptiveCounters());}
@@ -495,7 +494,7 @@ struct Session {
   return {stats->completed.load(),stats->pending_replaced.load(),stats->queue_wait_us.load(),stats->queue_wait_samples.load()};
  }
  void ObserveAdaptiveFps(double now,const remotekit::SharedAtlasFrame& metadata,bool delivered,bool decision) {
-  if(!options.adaptive_fps)return;
+  if(!options.adaptive_fps && !policy_fps.load())return;
   remotekit::AdaptiveFps::Feedback feedback;
   if(decision) {
    const auto sample=media_feedback.Snapshot(QpcNow(),QpcFrequency());
@@ -520,7 +519,7 @@ struct Session {
   std::lock_guard policy_lock(adaptive_mutex);pending_budget.reset();
  }
  void EnableBudget() {
-  if(!options.adaptive_fps || output_suspended)return;
+  if((!options.adaptive_fps && !policy_fps.load()) || output_suspended)return;
   std::lock_guard control_lock(budget_control_mutex);budget_eligible=true;
  }
  void StopBudget() {
@@ -559,14 +558,21 @@ struct Session {
   }
  }
  Json Stats() {
-  auto value=stats->Snapshot();value["configuredIdleIdrMs"]=options.idle_idr_ms;
+  auto value=stats->Snapshot();
+  Json requested_policy;{std::lock_guard lock(media_policy_mutex);requested_policy=requested_media_policy;}
+  value["mediaPolicy"]={{"requested",requested_policy},{"applied",{
+    {"targetFps",nullptr},
+    {"bitrateKbps",value.value("appliedBitrate",Json(nullptr))},
+    {"maxBitrateKbps",value.value("appliedMaxBitrate",Json(nullptr))},
+    {"adaptive",policy_fps.load()!=0 || options.adaptive_fps}}}};
+  if(!value["mediaPolicy"]["applied"]["bitrateKbps"].is_null())value["mediaPolicy"]["applied"]["bitrateKbps"]=value["mediaPolicy"]["applied"]["bitrateKbps"].get<uint32_t>()/1000;
+  if(!value["mediaPolicy"]["applied"]["maxBitrateKbps"].is_null())value["mediaPolicy"]["applied"]["maxBitrateKbps"]=value["mediaPolicy"]["applied"]["maxBitrateKbps"].get<uint32_t>()/1000;
+  value["configuredIdleIdrMs"]=options.idle_idr_ms;
   value["qsvVpp"]=options.encoding.qsv_async_vpp?"async":"external";
-  value["qsvLowPowerSelection"]={{"pattern",options.qsv_low_power_pattern_text},
-    {"index",qsv_pattern_index?Json(*qsv_pattern_index):Json(nullptr)},
-    {"requested",options.encoding.qsv_low_power==0x10u?"on":(options.encoding.qsv_low_power==0x20u?"off":"auto")}};
   value["atlasAllocationAlignment"]=options.atlas_allocation_alignment;
   value.update(media_feedback.Snapshot(QpcNow(),QpcFrequency()));
   {std::lock_guard lock(adaptive_mutex);
+   value["mediaPolicy"]["applied"]["targetFps"]=adaptive_applied_known?Json(adaptive.applied()):Json(nullptr);
    value["adaptiveFps"]={{"enabled",adaptive.enabled()},{"requestedLimit",adaptive.requested()},
      {"effectiveLimit",adaptive.ceiling()},{"targetRenderFps",adaptive.target()},
      {"actualAppliedRenderFps",adaptive_applied_known?Json(adaptive.applied()):Json(nullptr)},
@@ -583,6 +589,7 @@ struct Session {
   const auto interval=source_interval_ms.load(),age=last_tail_age_ms.load();
   value["sourceFrameIntervalMs"]=interval>0?Json(interval):Json(nullptr);
   value["atlasReadyGateEnabled"]=pool.ready_gate_enabled();
+  value["encoderSelection"]=options.encoder;
   value["atlasInput"]=options.atlas_input;
   value["atlasSharedBorrows"]=pool.shared_borrows();
   value["atlasSharedHeldSlots"]=pool.shared_held_slots();
@@ -591,8 +598,17 @@ struct Session {
   value["atlasReadyGateDeferredFrames"]=pool.ready_gate_deferred_frames();
   value["lastTailAfterSourceMs"]=age>0?Json(age):Json(nullptr);return value;
  }
+ Json InactiveSnapshot() {
+  // Only a signaled process handle proves producer exit. Retire its GPU state
+  // through the existing stop boundary; observing a Session never launches it.
+  if(ProducerExited())Stop();
+  return {{"sessionId",id},{"browserPid",0},{"views",Json::array()},
+   {"pendingPopups",Json::array()},{"events",durable_events},{"running",false},{"stats",Stats()}};
+ }
  Json Snapshot() {
-  Start();auto snapshot=BrowserSnapshot();Json views=Json::array();bool removed=false;
+  if(!Alive() || producer_stop_pending)return InactiveSnapshot();
+  try {
+  auto snapshot=BrowserSnapshot();Json views=Json::array();bool removed=false;
   for(auto& session:snapshot.at("sessions"))for(auto& view:session.at("views")) {
    std::string view_id=view.at("view");
    if(view.value("close_state",std::string())=="closed") {
@@ -614,7 +630,13 @@ struct Session {
   if(removed)RefitOutput();
   return {{"sessionId",id},{"browserPid",process?GetProcessId(process):0},{"views",views},
    {"pendingPopups",snapshot.at("sessions").at(0).value("pendingPopups",Json::array())},
-   {"events",durable_events},{"running",Alive()},{"stats",Stats()}};
+   {"events",durable_events},{"running",true},{"stats",Stats()}};
+  }catch(...) {
+   // A producer can exit between the liveness check and any snapshot RPC.
+   // Preserve desired views and confirmed events; an exit is not window.close.
+   if(!control || ProducerExited())return InactiveSnapshot();
+   throw;
+  }
  }
  static void AddCloseRequest(Json& output,const Json& requests) {
   // page.requests wraps its snapshot in "requests". Handle its documented
@@ -681,10 +703,18 @@ struct Session {
   auto* self=static_cast<Session*>(context);std::lock_guard lock(self->encoder_mutex);
   self->encoders.emplace(encoder,std::make_unique<EncoderWorker>(self->sdk,encoder,self->encoder_device.Get(),
          self->options.encoder,self->options.encoding,self->stats,
-      [self,encoder_peer](uint32_t timestamp,uint64_t epoch,size_t encoded_bytes,bool keyframe) {
+      [self,encoder_peer](uint32_t timestamp,uint64_t epoch,size_t encoded_bytes,bool keyframe,const remotekit_rtc_frame& source) {
        // Enqueue only: signaling-thread destroy joins this encoder worker.
        Json message={{"type","frame"},{"rtpTimestamp",timestamp},{"layoutEpoch",std::to_string(epoch)},
                      {"encodedBytes",encoded_bytes},{"keyframe",keyframe}};
+       LARGE_INTEGER before{},after{};FILETIME utc{};
+       QueryPerformanceCounter(&before);GetSystemTimePreciseAsFileTime(&utc);QueryPerformanceCounter(&after);
+       ULARGE_INTEGER ticks{};ticks.LowPart=utc.dwLowDateTime;ticks.HighPart=utc.dwHighDateTime;
+       if(auto clock=remotekit::MapCaptureClock(source.capture_qpc,source.qpc_frequency,before.QuadPart,after.QuadPart,
+           double(ticks.QuadPart-116444736000000000ULL)/10000.0,self->capture_clock_uncertainty_ms.load())) {
+        message["captureWallTimeMs"]=clock->wall_ms;message["captureMonotonicMs"]=clock->monotonic_ms;
+        message["captureClockUncertaintyMs"]=clock->uncertainty_ms;message["sourceCaptureId"]=std::to_string(source.capture_qpc);
+       }
        std::lock_guard event_lock(self->event_mutex);
        if(self->events.size()<1024)self->events.push_back(Event{0x10000,message.dump(),"",0,encoder_peer});
        self->event_wake.notify_one();
@@ -692,7 +722,11 @@ struct Session {
  }
  static int ConfigureEncoder(void* context,uint64_t encoder,const remotekit_rtc_encoder_config* config) {
   auto* self=static_cast<Session*>(context);std::lock_guard lock(self->encoder_mutex);
-  auto found=self->encoders.find(encoder);return found!=self->encoders.end()&&found->second->Configure(*config)?0:1;
+  auto found=self->encoders.find(encoder);if(found==self->encoders.end())return 1;
+  auto limited=*config;if(self->policy_fps){
+   limited.bitrate_bps=std::min(limited.bitrate_bps,self->policy_bitrate.load());}
+  const bool ok=found->second->Configure(limited);
+  if(ok)found->second->Policy(self->policy_bitrate,self->policy_max,self->policy_fps);return ok?0:1;
  }
  static int Encode(void* context,uint64_t encoder,const remotekit_rtc_frame* frame,int key) {
   auto* self=static_cast<Session*>(context);std::lock_guard lock(self->encoder_mutex);
@@ -740,6 +774,7 @@ struct Session {
    catch(const std::exception& diagnostic){fprintf(stderr,"session %s atlas open failed sdk=%d status_query=%s\n",id.c_str(),result,diagnostic.what());}
    throw std::runtime_error("output open SDK "+std::to_string(result));
   }
+  capture_clock_uncertainty_ms=pool.clock_uncertainty_us()/1000;
   pool.SetSharedInput(options.atlas_input=="shared");
   std::string error;if(!pool.Open(setup,std::min(16u,options.encoding.async_depth+4),error))throw std::runtime_error(error);
   {std::lock_guard lock(encoder_mutex);encoder_device=pool.Device();}
@@ -803,6 +838,8 @@ struct Session {
   if(focus) {
    reply["focusRequestId"]=request.value("focusRequestId",Json());
    reply["layoutEpoch"]=request.value("layoutEpoch",Json());
+  } else if(request.is_object() && request.contains("sequence")) {
+   reply["clientSequence"]=request["sequence"];
   }
   Send(reply);
  }
@@ -828,20 +865,33 @@ struct Session {
    }
   }
   command["method"]=type;command.erase("type");
+  if(type=="input") {
+   const auto sequence=input_sequence.NextBrowser();
+   if(!sequence){++input_rejected;ReplyInput({{"ok",false},{"error","input_sequence_exhausted"}},request);return;}
+   command["sequence"]=std::to_string(*sequence);
+  }
   if(command.contains("outputGeneration")){command["output_generation"]=command["outputGeneration"];command.erase("outputGeneration");}
   // This connection is already bound to this Session by authenticated Control.
   // The browser validates membership and all token/sequence/output generations.
-  try {ReplyInput(Rpc(command),request);}
+  try {auto reply=Rpc(command);if(type=="input")reply["browserSequence"]=command["sequence"];ReplyInput(std::move(reply),request);}
   catch(const std::exception& error){ReplyInput({{"ok",false},{"error",error.what()}},request);}
  }
  void QueueInput(const Event& event) {
   std::lock_guard lock(input_mutex);
+  if(event.peer!=peer.load() || event.value!=0)return;
   auto parsed=Json::parse(event.bytes,nullptr,false);
+  // Validate arrival order before move coalescing can replace a newer packet.
+  // The Browser keeps its independent Session counter across RTC reconnects.
+  if(parsed.is_object() && parsed.value("type",Json())=="input" &&
+     (!parsed.contains("sequence") || !parsed["sequence"].is_string() ||
+      !input_sequence.Admit(event.peer,parsed["sequence"].get<std::string>()))) {
+   ++input_rejected;ReplyInput({{"ok",false},{"error","stale_client_sequence"}},parsed);return;
+  }
   bool move=!parsed.is_discarded()&&parsed.value("type",std::string())=="input"&&parsed.contains("event")&&
     parsed["event"].value("type",std::string())=="mouse"&&parsed["event"].value("action",std::string())=="move";
   if(move&&!input_queue.empty()) {
    auto before=Json::parse(input_queue.back().bytes,nullptr,false);
-   if(!before.is_discarded()&&before.value("view",std::string())==parsed.value("view",std::string())&&
+   if(input_queue.back().peer==event.peer&&!before.is_discarded()&&before.value("view",std::string())==parsed.value("view",std::string())&&
       before.contains("event")&&before["event"].value("type",std::string())=="mouse"&&
       before["event"].value("action",std::string())=="move") {
     input_queue.back()=event;++input_coalesced;input_wake.notify_one();return;
@@ -969,7 +1019,7 @@ struct Session {
     if(next!=layout)PublishLayout(std::move(next),epoch);
    }
    const auto handle=peer.load();const auto now=QpcNow();const double now_ms=1000.0*now/QpcFrequency();
-   if(options.adaptive_fps) {
+   if(options.adaptive_fps || policy_fps.load()) {
     if(current_metadata.generation && current_metadata.generation!=adaptive_generation) {
      adaptive_generation=current_metadata.generation;
      std::lock_guard lock(adaptive_mutex);adaptive.Reset(now_ms,AdaptiveCounters());
@@ -1075,10 +1125,11 @@ struct Session {
   config.context=this;config.event=EventCallback;config.encoder.struct_size=sizeof(config.encoder);
   config.encoder.create=CreateEncoder;config.encoder.configure=ConfigureEncoder;config.encoder.encode=Encode;
   config.encoder.set_rates=Rates;config.encoder.request_keyframe=Keyframe;config.encoder.destroy=DestroyEncoder;
-  config.min_bitrate_bps=500000;config.start_bitrate_bps=options.encoding.bitrate;config.max_bitrate_bps=options.encoding.max_bitrate;
+  config.min_bitrate_bps=500000;config.start_bitrate_bps=policy_bitrate.load()?policy_bitrate.load():options.encoding.bitrate;config.max_bitrate_bps=policy_max.load()?policy_max.load():options.encoding.max_bitrate;
   uint64_t handle=0;
   if(sdk.remotekit_rtc_create(&config,&handle)!=0)throw std::runtime_error("RTC create failed");
-  receive_level=0;refresh_connected=false;peer=handle;stop_media=false;data_open=false;layout=Json();
+  if(policy_fps && sdk.remotekit_rtc_set_media_policy(handle,policy_bitrate,policy_max,policy_fps)!=0){sdk.remotekit_rtc_close(handle);throw std::runtime_error("RTC media policy rejected");}
+  receive_level=0;refresh_connected=false;peer=handle;input_sequence.Bind(handle);stop_media=false;data_open=false;layout=Json();
   if(options.rtc_playout_max_ms>=0) {
    const int status=sdk.remotekit_rtc_set_playout_delay(handle,0,options.rtc_playout_max_ms);
    if(status!=0){ClosePeer();throw std::runtime_error("RTC playout delay rejected (SDK "+std::to_string(status)+")");}
@@ -1108,7 +1159,7 @@ struct Session {
   stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();
   rtc_connected=false;
   InvalidateLayout("rtc-closed");
-  {std::lock_guard lock(input_mutex);input_queue.clear();}
+  {std::lock_guard lock(input_mutex);input_queue.clear();input_sequence.Bind(0);}
   auto handle=peer.exchange(0);
   media_feedback.Bind(0,"","");
   if(handle)sdk.remotekit_rtc_close(handle);
@@ -1149,6 +1200,26 @@ struct Session {
    for(const auto& event:durable_events)if(!acknowledged.contains(event.at("eventId").get<std::string>()))remaining.push_back(event);
    durable_events=std::move(remaining);SaveEvents();return {{"accepted",true},{"remaining",durable_events.size()}};
   }
+  if(method=="session.mediaPolicy") {
+   auto number=[&](const char* key,uint32_t low,uint32_t high){const auto& v=request.at(key);
+    if(!v.is_number_integer() || v.get<int64_t>()<low || v.get<int64_t>()>high)throw std::runtime_error(std::string("invalid media policy ")+key);return v.get<uint32_t>();};
+   const auto fps=number("targetFps",1,60),bitrate=number("bitrateKbps",100,50000)*1000,maximum=number("maxBitrateKbps",100,60000)*1000;
+   if(bitrate>maximum || request.at("adaptive")!=true)throw std::runtime_error("invalid media policy");
+   if(policy_fps==fps && policy_bitrate==bitrate && policy_max==maximum) {
+    std::lock_guard lock(adaptive_mutex);
+    return {{"accepted",true},{"applied",Alive()&&control!=0&&adaptive_applied_known}};
+   }
+   const bool fps_changed=policy_fps!=fps;
+   if(peer && sdk.remotekit_rtc_set_media_policy(peer,bitrate,maximum,fps)!=0)throw std::runtime_error("RTC media policy rejected");
+   {std::lock_guard lock(media_policy_mutex);requested_media_policy={{"targetFps",fps},{"bitrateKbps",bitrate/1000},{"maxBitrateKbps",maximum/1000},{"adaptive",true}};}
+   {std::lock_guard lock(encoder_mutex);policy_fps=fps;policy_bitrate=bitrate;policy_max=maximum;for(auto& [encoder,worker]:encoders)worker->Policy(bitrate,maximum,fps);}
+   if(fps_changed) {std::lock_guard lock(adaptive_mutex);adaptive=remotekit::AdaptiveFps(true,fps);
+    adaptive.Reset(1000.0*QpcNow()/QpcFrequency(),AdaptiveCounters());adaptive_applied_known=false;
+    pending_budget=BudgetRequest{budget_epoch.load(),fps};}
+   EnableBudget();budget_wake.notify_one();
+   std::lock_guard lock(adaptive_mutex);
+   return {{"accepted",true},{"applied",Alive()&&control!=0&&adaptive_applied_known}};
+  }
   if(method=="session.sitePreferences") {
    const auto sites=request.at("sites");
    if(!sites.is_object() || sites.size()>4096)throw std::runtime_error("invalid site preferences");
@@ -1174,7 +1245,11 @@ struct Session {
     throw std::runtime_error("ICE candidate rejected");
    return Json::object();
   }
-  Start();auto view=ViewId(request);
+  const bool require_running=(method=="view.configure" || method=="view.lifecycle") && request.value("requireRunning",false);
+  if(require_running) {
+   if(!Alive() || !control || producer_stop_pending)throw std::runtime_error("browser not running; guarded maintenance cannot start it");
+  } else Start();
+  auto view=ViewId(request);
   if(method=="view.ensure" || method=="view.adopt") {
    if(!desired.contains(view) && durable_events.size()+desired.size()>=256)
     throw std::runtime_error("closed event capacity reserved; acknowledge events before creating views");
@@ -1230,7 +1305,7 @@ struct Session {
   if(method=="view.configure") {
    if(!desired.contains(view))throw std::runtime_error("view not found");
    auto config=desired.at(view);
-   for(auto& [key,value]:request.items())if(key!="id"&&key!="method")config[key]=value;
+   for(auto& [key,value]:request.items())if(key!="id"&&key!="method"&&key!="requireRunning")config[key]=value;
    return ApplyView(config,false);
   }
   throw std::runtime_error("unknown endpoint method: "+method);

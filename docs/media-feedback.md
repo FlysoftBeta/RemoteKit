@@ -1,18 +1,23 @@
-# 客户端媒体反馈
+# 媒体反馈、时钟与自适应
 
-此协议是本轮自适应源帧率的接口设计，正在实现。反馈走已有认证WebRTC DataChannel，不经过Control产品状态，也不添加browser与Endpoint逐帧通信。
+有两条反馈链，各司其职；都不增加browser↔Endpoint逐帧IPC。
 
-客户端连接存活时最多每1500ms发送一份`media.feedback`：
+## DataChannel源预算反馈
 
-```json
-{"type":"media.feedback","version":1,"seq":1,"layoutEpoch":"1","outputGeneration":"1","visible":true,"windowMs":1500,"rafSamples":90,"displayHzEstimate":60,"decodedFrames":90,"videoFrames":89,"planes":[{"view":"view-1","frames":89}],"roundTripTimeMs":10}
-```
+Client约每1500ms发送layout绑定的media.feedback，包含连接内seq、outputGeneration/layoutEpoch、document可见性、实际窗口长度、RAF样本/刷新估计、解码/丢帧/plane新帧增量及可用RTT。
 
-- `seq`为本连接递增整数；连接替换时重新计数。代次必须匹配当前布局与输出；Endpoint按自己的接收时间计算年龄，不能跨机器直接相减客户端时钟。
-- `windowMs`为实际采样窗口。`decodedFrames`、`videoFrames`和每个plane的`frames`都是该窗口增量；缺少可靠前值或计数回退时省略字段，不用0表示未知。每个plane只计新视频帧，重绘不计；多plane不相加当作视频FPS。
-- `visible`是document可见性，不改变Control的active tab/split产品状态。`planes`来自实际注册的可见布局渲染器，不能只上报选中页。
-- `displayHzEstimate`由有效RAF间隔估计，是当前回调能力而不是物理显示器刷新率。后台、样本不足时省略；报告`rafSamples`供判断。独立RAF只采样，不驱动canvas绘制。
-- `roundTripTimeMs`为可选RTC candidate-pair RTT。允许另报可选窗口`packetsLost`、`framesDropped`，字段缺测时省略。
-- Endpoint检查消息类型/版本、当前peer、单调seq、代次、有限数值与边界，过量反馈合并为最新一份；不占输入队列、不计入inputRejected。未知字段可忽略。
+Endpoint校验当前peer、单调seq、代次、有限值和边界，过量反馈合并为最新，不挤占输入队列。缺测省略，不以0代替。plane帧数不相加冒充视频FPS，同帧重绘不计；静态低FPS不直接判压力。显示Hz估计是回调能力，不是物理面板测量。
 
-初始实现只接通观测与常态编码队列计数，反馈不自动改变源帧率。随后由独立策略以≤1Hz、仅值变化时调用现有`output.configure {render_fps, fps}`，不携带几何或device_scale，不修改QSV名义帧率。低实际帧率本身不代表压力，静态页面不能据此降速；策略及参数的选择必须用实验验证。
+源策略在用户媒体targetFps上限内调度，按值变化更新本地BeginFrame/发布预算。网络码率仍由WebRTC拥塞控制；媒体策略设置上限，不反复重置start bitrate或强制高最低码率。
+
+## WS产品质量反馈
+
+SDK在原capture_qpc仍有效时用QPC↔系统UTC配对生成captureWallTimeMs、captureMonotonicMs、captureClockUncertaintyMs和sourceCaptureId，随真实wire RTP/epoch元数据送Client。SDK内部重映射的capture_time_us不是Unix时间，不能直接相减。无有效capture就省略，不能用纹理ready或编码时间冒充。
+
+Client通过Control clock.ping校准双方wall offset；当前Control和Endpoint在同机。以匹配wire RTP/epoch的实际canvas paint计算采集完成→呈现估算。重复sourceCaptureId（包括idle尾帧）、隐藏、陈旧请求、wall/monotonic跳变、过期校准或总不确定度>25ms不进入策略。
+
+每2秒窗口通过WS feedback送p95、sampleCount、windowMs、sequence、sourceCaptureId、sampledAtServerMs、visible、latencySource='capture-end-to-paint'及clockUncertaintyMs，可附displayHzEstimate。Control再次检查范围、去重和新鲜度。
+
+连续3个有效窗口>300ms时分辨率倍率乘0.8，调整冷却5秒；<150ms连续健康30秒逐级恢复。ClientScale与面积预算决定基础倍率，Browser DPR范围0.5–4。实际码率/FPS/编码尺寸受硬件、协商及网络约束，requested/applied分开报告。受控自动化不运行这套产品策略。
+
+Stats显示估算及不确定度；Pixel marker带CRC的render/input端到端值独立显示。capture-end→paint不含此前渲染/捕获等待，drawImage返回也不是物理屏幕点亮。分段p95不能相加。

@@ -59,3 +59,16 @@ test('only the verified desktop Chrome build defaults to 4.2 and saved choices t
   assert.equal(chooseReceiveProfile(ua + ' Edg/89.0'), 'native');
   assert.equal(chooseReceiveProfile(ua.replace('Chrome/89.0.4389.90', 'Chrome/157.0.0.0'), 'chrome89-h264-51'), 'native');
 });
+import { selectProductReceiveProfile } from '../client/receive-profile';
+test('product level4.2 requires real decoder and matching RTP codec capability', async () => {
+  const codecs = [{ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' }];
+  let count = 0;
+  const supported = async (config: { codec: string; codedWidth: number; codedHeight: number }) => { count++; assert.deepEqual(config, { codec: 'avc1.42e02a', codedWidth: 1936, codedHeight: 1088 }); return { supported: true }; };
+  assert.equal((await selectProductReceiveProfile('Chrome/157.0', codecs, supported)).profile, 'h264-level42-experimental');
+  assert.equal((await selectProductReceiveProfile('Chrome/157.0', [], supported)).profile, 'native');
+  assert.equal((await selectProductReceiveProfile('Chrome/157.0', codecs, undefined)).profile, 'native');
+  assert.equal((await selectProductReceiveProfile('Chrome/157.0', codecs, async () => ({ supported: false }))).profile, 'native');
+  assert.match((await selectProductReceiveProfile('Chrome/157.0', codecs, async () => { throw new Error('unsupported'); })).reason, /failed/);
+  assert.equal((await selectProductReceiveProfile('Chrome/89.0.4389.90', codecs, supported)).profile, 'chrome89-h264-42');
+  assert.equal(count, 1);
+});

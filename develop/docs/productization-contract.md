@@ -58,3 +58,24 @@ root固定契约、集成与取舍并完成commit/push。Sol实施server/store/W
 - pending数量限制16，30秒未收养释放；关闭/超时要有明确状态，不能把已关闭对象误收养为新页。pending不是普通orphan，避免对账提前销毁。
 - 自然window.close必须作为view.closed事件透出，不能因snapshot缺失就重建。Endpoint保存未确认closed事件（eventId、viewId、reason），snapshot.events重放，session.events.ack {eventIds:string[]}确认。Control产品删除持久化后才ack；按viewId/事件幂等。不得静默丢失未确认关闭；积压达到256时拒绝新增view并报告，直到清理，不无限增长。源Browser重启/崩溃导致缺失不能伪造自然close事件。
 - 普通page.requests事件不再被Endpoint读取后无声丢弃。恢复大数据仍归Browser/Session，Control仅保留产品关联与必要事件处理状态。
+
+## 标准页面对话框
+
+ProductState新增临时pageDialogs数组：{id,tabId,windowId,kind,message,defaultPrompt,origin,isReload?}，kind限alert/confirm/prompt/beforeunload。id由view/instance/document/request组合生成稳定opaque身份；Control保留当前请求与这些token的映射，不持久化页面对话文本。已由workspace.pendingClose处理的关tab beforeunload排除重复展示。
+
+新增action page.reply {dialogId,accept,text?}，Control验证当前请求仍属于本用户tab，再向Endpoint view.page.reply传viewId/requestId/instance/document/accept/text；过期明确拒绝。UI显示可见active tab中的最早请求，后台tab显示待处理标记；对话失效后关闭。alert只有确认，confirm/prompt可取消，导航beforeunload明确继续/留在页面；取消或保存失败不得误删tab。依现有MUI覆盖Dialog实现，不改变内容viewport。
+
+## 产品质量策略与真实延迟估算
+
+下列是root选定的初始产品策略，不是新的性能验收结果。受控自动化不调用产品mediaPolicy/自适应反馈，仍使用其显式固定配置。
+
+- quality：总可见源像素预算3840×2160、目标50FPS、目标44/max48Mbps；auto：1920×1080、52FPS、36/44Mbps；smooth：1600×900、60FPS、24/36Mbps。目标FPS受有效刷新率上限约束，无有效反馈默认60Hz。
+- 根据所有可见内容区的CSS面积和ClientScale，统一计算base resolutionFactor=min(1,sqrt(pixelBudget/(area*scale²)))；DPR=ClientScale×baseFactor×adaptiveFactor，限Browser支持的0.5–4。viewport DIP仍为真实内容区，ClientScale默认真实DPR或用户override。
+- 每2秒聚合有效的新源帧“采集完成→canvas提交”估算；排除idle尾帧/同sourceCaptureId重复，不能拿静态时长当排队。该估算与Pixel marker E2E分别标明。
+- 连续3个有效反馈窗口p95>300ms时adaptiveFactor乘0.8，调整最短间隔5秒；持续健康(<150ms)30秒且无新拥塞时逐级恢复，仍受像素预算/DPR上下限约束。未知或过期clock、隐藏、无新源帧不能触发降级或恢复。
+- 延迟来源：SDK在原始frame.capture_qpc仍可用处，以同机QPC↔系统UTC配对映射，随现有真实wire RTP/epoch帧消息附captureWallTimeMs、captureMonotonicMs、captureClockUncertaintyMs和sourceCaptureId（原capture_qpc字符串）。无有效QPC时省略，不用当前时间伪造。
+- Client通过Control clock.ping校准Client↔服务端wall offset（Control和Endpoint当前同机），保留往返不确定度；与wire RTP/epoch匹配的实际paint计算估算。总不确定度>25ms、样本过期或检测到wall/monotonic跳变时不用于策略。Stats明确报告估算与不确定度。
+- WS feedback参数使用presentationLatencyMs（该窗口p95）、latencySource='capture-end-to-paint'、clockUncertaintyMs、sampleCount、windowMs、displayHzEstimate等；不发送假Pixel marker。setControlRpc增加clock.ping/feedback，由Transport提供生产发送端，UI无需自行拼时间。
+- Endpoint新增session.mediaPolicy {targetFps,bitrateKbps,maxBitrateKbps,adaptive:true}，可缓存后启动；每Session独立，不修改全局options。source预算上限跟随targetFps，既有源自适应可在此上限内按显示/网络反馈降FPS；实际编码码率继续受WebRTC拥塞控制。设置变化安全送入现有编码rate路径，普通码率变化不重开序列。snapshot.stats报告requested/applied策略。
+- 已验证路径成为产品默认：service启用CaptureRoot/CaptureToAtlas/SinglePlaneDirect且保留几何fallback；QSV TU7/LPON/VBR/depth1、高码率；atlas-input默认auto，兼容QSV/external/depth1时shared，其余copy，显式shared不满足条件仍报错。NVENC不套QSV私有参数。
+- 普通新浏览器优先支持真实RTP身份的MSTP immutable/fifo2；能力或帧元数据不支持时回video，Chrome89保留video。诊断仍能显式选择路径。不要把不支持能力误称为正常成功，也不要在产品UI暴露这些实验选择。

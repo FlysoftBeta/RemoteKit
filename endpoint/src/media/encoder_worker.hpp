@@ -23,19 +23,20 @@ struct EncoderStats {
  std::optional<QsvLowPowerInfo> qsv_low_power;
  std::optional<uint32_t> applied_target_usage;
  uint32_t requested_target_usage=0;
- uint32_t requested_bitrate=0,requested_fps=0,applied_bitrate=0,applied_fps=0,actual_level=0;
+ uint32_t requested_bitrate=0,requested_fps=0,applied_bitrate=0,applied_max_bitrate=0,applied_fps=0,actual_level=0;
  nlohmann::json Snapshot();
 };
 class EncoderWorker {
  public:
   EncoderWorker(Sdk&,uint64_t encoder,ID3D11Device*,std::string mode,EncoderSettings defaults,
                 std::shared_ptr<EncoderStats> stats,
-                std::function<void(uint32_t,uint64_t,size_t,bool)> completed,
+                std::function<void(uint32_t,uint64_t,size_t,bool,const remotekit_rtc_frame&)> completed,
                 std::shared_ptr<ServerTrace> trace={},uint64_t peer=0);
   ~EncoderWorker();
   bool Configure(const remotekit_rtc_encoder_config&);
   bool Enqueue(const remotekit_rtc_frame&,bool keyframe);
   void Rates(uint32_t bitrate,uint32_t fps);
+  void Policy(uint32_t bitrate,uint32_t maximum,uint32_t fps);
   void Keyframe();
   void Stop();
  private:
@@ -47,7 +48,7 @@ class EncoderWorker {
  uint32_t nominal_fps_=0;bool fixed_rate_fps_=false;
   ComPtr<ID3D11Device> device_;std::string mode_;EncoderSettings settings_;
   std::shared_ptr<EncoderStats> stats_;
-  std::function<void(uint32_t,uint64_t,size_t,bool)> completed_;
+  std::function<void(uint32_t,uint64_t,size_t,bool,const remotekit_rtc_frame&)> completed_;
   std::shared_ptr<ServerTrace> trace_;uint64_t trace_peer_=0;
   std::unique_ptr<HardwareEncoder> hardware_;
   Nv12Converter converter_;
@@ -60,6 +61,8 @@ class EncoderWorker {
   std::mutex mutex_;std::condition_variable wake_;
   std::thread thread_;bool stopping_=false,configured_=false;std::atomic<bool> failed_{false};
   std::atomic<bool> keyframe_{true},paused_{false};
-  std::atomic<uint32_t> bitrate_{0},fps_{0},applied_bitrate_{0},applied_fps_{0};
+  uint32_t cc_bitrate_=0,cc_fps_=0;
+  std::atomic<uint32_t> policy_bitrate_{0},policy_max_{0},policy_fps_{0};
+  std::atomic<uint32_t> bitrate_{0},fps_{0},applied_bitrate_{0},applied_fps_{0},applied_max_{0};
 };
 }

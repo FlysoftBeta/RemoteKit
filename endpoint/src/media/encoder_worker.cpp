@@ -27,11 +27,12 @@ nlohmann::json EncoderStats::Snapshot() {
          {"requestedTargetUsage",requested_target_usage? nlohmann::json(requested_target_usage):nlohmann::json(nullptr)},
          {"appliedTargetUsage",applied_target_usage? nlohmann::json(*applied_target_usage):nlohmann::json(nullptr)},
          {"appliedBitrate",applied_bitrate? nlohmann::json(applied_bitrate):nlohmann::json(nullptr)},
+         {"appliedMaxBitrate",applied_max_bitrate? nlohmann::json(applied_max_bitrate):nlohmann::json(nullptr)},
          {"appliedFps",applied_fps? nlohmann::json(applied_fps):nlohmann::json(nullptr)},
          {"actualLevel",actual_level},{"error",error.empty()?nlohmann::json(nullptr):nlohmann::json(error)}};
 }
 EncoderWorker::EncoderWorker(Sdk& sdk,uint64_t encoder,ID3D11Device* device,std::string mode,
-       EncoderSettings defaults,std::shared_ptr<EncoderStats> stats,std::function<void(uint32_t,uint64_t,size_t,bool)> completed,
+       EncoderSettings defaults,std::shared_ptr<EncoderStats> stats,std::function<void(uint32_t,uint64_t,size_t,bool,const remotekit_rtc_frame&)> completed,
        std::shared_ptr<ServerTrace> trace,uint64_t peer):sdk_(sdk),encoder_(encoder),device_(device),
        mode_(std::move(mode)),settings_(defaults),stats_(std::move(stats)),completed_(std::move(completed)),trace_(std::move(trace)),trace_peer_(peer){}
 EncoderWorker::~EncoderWorker(){Stop();}
@@ -54,7 +55,7 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  }
  const auto requested_usage=settings_.target_usage;const bool requested_vbr=settings_.vbr;
  auto defaults=[&](bool qsv) {
-  settings_.target_usage=settings_.target_usage_explicit?requested_usage:(qsv?1u:4u);
+  settings_.target_usage=settings_.target_usage_explicit?requested_usage:(qsv?7u:4u);
   settings_.vbr=settings_.rate_control_explicit?requested_vbr:qsv;
  };
  defaults(mode_!="nvenc");
@@ -65,9 +66,9 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  if(!hardware_->Configure(device_.Get(),settings_,error)) {
   {std::lock_guard lock(stats_->mutex);stats_->qsv_low_power=hardware_->LowPowerInfo();}
   hardware_.reset();
-  if(mode_!="auto"||settings_.qsv_low_power||settings_.qsv_async_vpp){Error(error);return false;}
+  if(mode_!="auto"||(settings_.qsv_low_power&&settings_.qsv_low_power_explicit)||settings_.qsv_async_vpp){Error(error);return false;}
   const std::string qsv_error=error;
-  defaults(false);hardware_=CreateNvencEncoder();
+  defaults(false);settings_.qsv_low_power=0;hardware_=CreateNvencEncoder();
   hardware_->SetTrace(trace_,encoder_);
   if(!hardware_->Configure(device_.Get(),settings_,error)){Error("QSV: "+qsv_error+"; NVENC: "+error);hardware_.reset();return false;}
  }
@@ -80,12 +81,12 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  }
  {std::lock_guard lock(stats_->mutex);stats_->backend=hardware_->Name();stats_->error.clear();
   if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;
-  auto actual=hardware_->ActualSettings();stats_->applied_bitrate=actual.bitrate;stats_->applied_fps=actual.fps;
+  auto actual=hardware_->ActualSettings();stats_->applied_bitrate=actual.bitrate;stats_->applied_max_bitrate=actual.max_bitrate;stats_->applied_fps=actual.fps;
   stats_->actual_level=actual.level_idc;stats_->requested_bitrate=settings_.bitrate;stats_->requested_fps=settings_.fps;
   stats_->requested_target_usage=settings_.target_usage;
   if(std::string(hardware_->Name())=="qsv")stats_->applied_target_usage=actual.target_usage;}
  nominal_fps_=settings_.fps;fixed_rate_fps_=std::string(hardware_->Name())=="qsv";
- applied_bitrate_=settings_.bitrate;applied_fps_=settings_.fps;bitrate_=0;fps_=0;paused_=false;
+ applied_max_=settings_.max_bitrate;applied_bitrate_=settings_.bitrate;applied_fps_=settings_.fps;cc_bitrate_=settings_.bitrate;cc_fps_=settings_.fps;bitrate_=0;fps_=0;paused_=false;
  stopping_=false;failed_=false;configured_=true;
  thread_=std::thread([this]{Run();});return true;
 }
@@ -117,14 +118,24 @@ bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame,bool keyframe) {
  RK_SERVER_TRACE(trace_,"worker_enqueue",TraceIds::Frame(frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.queue=static_cast<int>(queue_.size()););
  wake_.notify_one();return true;
 }
+void EncoderWorker::Policy(uint32_t bitrate,uint32_t maximum,uint32_t fps) {
+ policy_bitrate_=bitrate;policy_max_=maximum;policy_fps_=fps;
+ if(cc_bitrate_)Rates(cc_bitrate_,cc_fps_);
+}
 void EncoderWorker::Rates(uint32_t bitrate,uint32_t fps){
+ cc_bitrate_=bitrate;cc_fps_=fps;
+ if(policy_bitrate_)bitrate=std::min(bitrate,policy_bitrate_.load());
+ if(policy_max_)bitrate=std::min(bitrate,policy_max_.load());
+ if(policy_fps_)fps=std::min(fps,policy_fps_.load());
  {std::lock_guard lock(stats_->mutex);stats_->requested_bitrate=bitrate;stats_->requested_fps=fps;}
  if(!bitrate){paused_=true;return;}
  paused_=false;
  // oneVPL consumes integer kbps; identical effective rates need no reset.
- bitrate=std::max(1000u,std::min(settings_.max_bitrate,bitrate)/1000*1000);
+ const auto level_max=remotekit::H264RateLimits(settings_.level_idc).bitrate_bps;
+ const auto maximum=policy_max_.load()?policy_max_.load():settings_.max_bitrate;
+ bitrate=std::max(1000u,std::min(level_max?std::min(maximum,level_max):maximum,bitrate)/1000*1000);
  fps=fixed_rate_fps_?nominal_fps_:std::max(1u,fps);
- if(bitrate==applied_bitrate_.load()/1000*1000 && fps==applied_fps_.load())return;
+ if(bitrate==applied_bitrate_.load()/1000*1000 && fps==applied_fps_.load() && maximum==applied_max_.load())return;
  bitrate_=bitrate;fps_=fps;wake_.notify_one();
 }
 void EncoderWorker::Keyframe(){++stats_->keyframe_requests;keyframe_=true;wake_.notify_one();}
@@ -143,7 +154,7 @@ void EncoderWorker::Complete(AccessUnit& unit) {
  auto status=sdk_.remotekit_rtc_encoded(encoder_,&result,&wire_timestamp);
  remotekit::TailRefreshLease::Finish(job.frame,status==0 && unit.keyframe);
  RK_SERVER_TRACE(trace_,"encoded_return",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.status=status;rk_record.bytes=unit.bytes.size();rk_record.ids.wire_known=status==0;rk_record.ids.wire_rtp_timestamp=wire_timestamp;);
- if(status==0 && completed_)completed_(wire_timestamp,job.frame.layout_epoch,unit.bytes.size(),unit.keyframe);
+ if(status==0 && completed_)completed_(wire_timestamp,job.frame.layout_epoch,unit.bytes.size(),unit.keyframe,job.frame);
  if(status!=0 && status!=REMOTEKIT_SDK_INVALID_STATE)Error("RTC encoded completion failed "+std::to_string(status));
  ++stats_->completed;stats_->bytes+=unit.bytes.size();if(unit.keyframe)++stats_->keyframes_encoded;
  stats_->last_encode_ms=1000.0*(QpcNow()-job.submitted_qpc)/QpcFrequency();
@@ -161,16 +172,22 @@ void EncoderWorker::Run() {
   const auto fps=rate?fps_.exchange(0):0;
   if(rate && inflight_.empty()) {
    std::string error;
-   if(!hardware_->SetRates(rate,fps?fps:settings_.fps,error)){
+   const auto maximum=policy_max_.load()?policy_max_.load():settings_.max_bitrate;
+   const auto limit=remotekit::H264RateLimits(settings_.level_idc).bitrate_bps;
+   const auto effective_max=limit?std::min(maximum,limit):maximum;
+   const auto effective_rate=std::min(rate,effective_max);
+   auto effective_fps=fps?fps:settings_.fps;
+   if(!fixed_rate_fps_ && policy_fps_)effective_fps=std::min(effective_fps,policy_fps_.load());
+   if(!hardware_->SetRates(effective_rate,effective_fps,error,effective_max)){
     {std::lock_guard lock(stats_->mutex);if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
     Error(error);break;
    }
    ++stats_->rate_updates;
    if(hardware_->TakeKeyframeRequest())keyframe_=true;
-   settings_.bitrate=rate;if(fps)settings_.fps=fps;
-   applied_bitrate_=rate;applied_fps_=settings_.fps;
+   settings_.bitrate=effective_rate;settings_.fps=effective_fps;
+   applied_max_=effective_max;applied_bitrate_=effective_rate;applied_fps_=settings_.fps;
    {std::lock_guard lock(stats_->mutex);auto actual=hardware_->ActualSettings();
-    stats_->applied_bitrate=actual.bitrate;stats_->applied_fps=actual.fps;stats_->actual_level=actual.level_idc;
+    stats_->applied_bitrate=actual.bitrate;stats_->applied_max_bitrate=actual.max_bitrate;stats_->applied_fps=actual.fps;stats_->actual_level=actual.level_idc;
     if(std::string(hardware_->Name())=="qsv")stats_->applied_target_usage=actual.target_usage;
     if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
   }

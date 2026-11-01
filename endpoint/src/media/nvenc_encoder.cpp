@@ -263,8 +263,9 @@ class Nvenc final : public HardwareEncoder {
       return CodecResult::error;
     return CodecResult::ready;
   }
-  bool SetRates(uint32_t bitrate, uint32_t fps, std::string& error) override {
+  bool SetRates(uint32_t bitrate, uint32_t fps, std::string& error,uint32_t maximum=0) override {
     if (!encoder_ || eos_ || !bitrate || !fps) { error = "NVENC invalid rate update"; return false; }
+    if(maximum)settings_.max_bitrate=maximum;
     auto next = config_;
     next.rcParams.averageBitRate = bitrate;
     next.rcParams.maxBitRate = settings_.vbr ? std::max(bitrate, settings_.max_bitrate) : bitrate;

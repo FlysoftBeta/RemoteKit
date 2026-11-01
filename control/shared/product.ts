@@ -4,7 +4,12 @@ export interface ProductSettings { qualityPreference: 'quality' | 'auto' | 'smoo
 export interface ProductTab { id: string; windowId: string; webviewId: string; title: string; url: string; pendingUrl?: string; canGoBack?: boolean; canGoForward?: boolean; loading?: boolean; residency?: 'live' | 'frozen' | 'discarded' | 'unloaded'; restoring?: boolean; pendingUaReloadOrigin?: string; popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: string } }
 export interface ProductWindow { id: string; activeTabId: string | null; weight: number }
 export interface ProductWorkspace { schemaVersion: 2; tenantId: string; revision: number; tabs: ProductTab[]; windows: ProductWindow[]; activeWindowId: string | null; layoutMode: 'side-by-side' | 'focused'; settings: ProductSettings; sites: Record<string, { tabletUa: boolean }>; pendingClose?: { id: string; windowId?: string; requestId?: string; awaiting?: boolean } | null; pendingWindowCloseId?: string | null }
-export interface ProductState { user: ProductUser; workspace: ProductWorkspace; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
+export interface PageDialog { id: string; tabId: string; windowId: string; kind: 'alert' | 'confirm' | 'prompt' | 'beforeunload'; message: string; defaultPrompt: string; origin: string; isReload?: boolean }
+export interface MediaPolicy { targetFps: number; bitrateKbps: number; maxBitrateKbps: number; adaptive: boolean }
+export interface AppliedMediaPolicy { targetFps: number | null; bitrateKbps: number | null; maxBitrateKbps: number | null; adaptive: boolean }
+export interface ProductFeedback { sequence: number; sourceCaptureId: string; sampledAtServerMs: number; visible: boolean; presentationLatencyMs: number; latencySource: 'capture-end-to-paint'; clockUncertaintyMs: number; sampleCount: number; windowMs: number; displayHzEstimate?: number }
+export interface ProductQuality { mode: 'product' | 'manual'; preference: ProductSettings['qualityPreference']; clientScale: number; baseResolutionFactor: number; adaptiveResolutionFactor: number; effectiveDpr: number; pixelBudget: number; targetFps: number; requested: MediaPolicy; applied: AppliedMediaPolicy | null; estimatedLatencyMs: number | null; clockUncertaintyMs: number | null; feedbackStatus: 'unknown' | 'valid' | 'stale'; reason: string }
+export interface ProductState { user: ProductUser; workspace: ProductWorkspace; pageDialogs: PageDialog[]; quality: ProductQuality; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
 export type ProductAction =
   | { type: 'window.create'; url?: string; title?: string }
   | { type: 'window.activate' | 'window.close'; windowId: string }
@@ -15,13 +20,14 @@ export type ProductAction =
   | { type: 'tab.navigate'; tabId: string; url: string }
   | { type: 'tab.command'; tabId: string; command: 'back' | 'forward' | 'reload' | 'stop' }
   | { type: 'settings.update'; settings: Partial<ProductSettings> }
+  | { type: 'page.reply'; dialogId: string; accept: boolean; text?: string }
   | { type: 'site.set'; origin: string; tabletUa: boolean; tabId?: string };
 export interface ViewerViewport { devicePixelRatio: number; refreshHz?: number; windows: { windowId: string; width: number; height: number; visible: boolean }[] }
 export interface ProductActionResult { state: ProductState; application?: { status: 'pending'; reason: string } }
 export interface SocketMethods {
   action: { params: ProductAction; result: ProductActionResult };
   viewport: { params: ViewerViewport; result: ProductState };
-  feedback: { params: { presentationLatencyMs?: number; [key: string]: unknown }; result: { accepted: boolean } };
+  feedback: { params: ProductFeedback; result: { accepted: boolean } };
   'rtc.offer': { params: { type: 'offer'; sdp: string }; result: { type: 'answer'; sdp: string; connectionId: string; endpointGeneration: number } };
   'rtc.ice': { params: { connectionId: string; candidate: unknown }; result: unknown };
   'rtc.close': { params: { connectionId: string }; result: { closed: boolean } };

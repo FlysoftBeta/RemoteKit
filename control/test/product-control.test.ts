@@ -16,11 +16,15 @@ class ProductEndpoint implements Endpoint {
   views = new Map<string, Map<string, any>>(); pending = false;
   running = false; browserPid = 10; failSites = false; failAck = false; loseAdoptReply = false;
   popups: any[] = []; events: any[] = []; onAdopt?: (args: any) => void;
+  stopBeforeMaintenance = false;
   async request(method: string, tenant: string, args: any = {}) {
     this.calls.push({ method, tenant, args }); let views = this.views.get(tenant); if (!views) this.views.set(tenant, views = new Map());
     if (method === 'session.sitePreferences') { if (this.failSites) throw new Error('UA apply failed'); return { accepted: true, applied: this.running }; }
+    if (method === 'session.mediaPolicy') return { accepted: true, applied: this.running };
     if (method === 'session.ensure') { this.running = true; return { browserPid: this.browserPid }; }
-    if (method === 'session.snapshot') return { views: [...views.values()].map(v => ({ ...v })), pendingPopups: this.popups, events: this.events };
+    if (method === 'session.snapshot') return { running: this.running, browserPid: this.browserPid, views: this.running ? [...views.values()].map(v => ({ ...v })) : [], pendingPopups: this.popups, events: this.events };
+    if (args.requireRunning && this.stopBeforeMaintenance) this.running = false;
+    if (args.requireRunning && !this.running) throw new Error('Browser not running');
     if (method === 'session.events.ack') { if (this.failAck) throw new Error('ack failed'); this.events = this.events.filter(e => !args.eventIds.includes(e.eventId)); return { accepted: true, remaining: this.events.length }; }
     if (method === 'view.adopt') {
       this.onAdopt?.(args);
@@ -31,6 +35,7 @@ class ProductEndpoint implements Endpoint {
     }
     if (method === 'view.ensure') views.set(args.viewId, { ...args, actual: 0, pending: false, canDiscard: true });
     if (method === 'view.configure') Object.assign(views.get(args.viewId)!, args);
+    if (method === 'view.page.reply') { const v = views.get(args.viewId)!; if (String(v.instance) !== args.instance || String(v.document) !== args.document) throw new Error('stale_page_request'); v.pageRequests.pending = v.pageRequests.pending.filter((p: any) => p.request !== args.requestId); return { accepted: true, browser: { ok: true, state: 'resolved' } }; }
     if (method === 'view.lifecycle') { const v = views.get(args.viewId)!; if (args.action === 'restore') { v.pending = true; v.desired = 0; } else v.actual = 2; return { accepted: true, completed: false, pending: true, lifecycleGeneration: '1' }; }
     if (method === 'view.close') { if (this.pending && !args.force) return { pending: true, requestId: 'close-1' }; views.delete(args.viewId); return { closed: true }; }
     if (method === 'view.close.reply') { if (args.accept) views.delete(args.viewId); return { accepted: true }; }
@@ -164,6 +169,49 @@ test('natural close commits removal before ack, retries failed ack and never rec
     endpoint.failAck = false; endpoint.calls = []; await control.tick(); assert.equal(endpoint.events.length, 0); assert.equal(store.workspace(user.tenantId).windows.length, 1); assert.equal(endpoint.calls.filter(c => c.method === 'view.ensure').length, 0);
     endpoint.events = [{ eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId, reason: 'window.close' }]; await control.tick(); assert.equal(store.workspace(user.tenantId).tabs.length, 0); assert.equal(endpoint.events.length, 0);
   } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+test('pageDialogs are transient, tenant/token bound and cancellation never deletes tabs or duplicates pendingClose', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  try {
+    await control.attachViewer(user.tenantId, 'lease', () => {}); const tab = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace.tabs[0];
+    const view = endpoint.views.get(user.tenantId)!.get(tab.webviewId); Object.assign(view, { instance: '1', document: '2', pageRequests: { pending: [{ request: '7', kind: 'prompt', message: 'private dialog text', default_prompt: 'initial', origin: 'https://page.test' }] } });
+    await control.tick(); const dialog = control.productState(user.tenantId).pageDialogs[0]; assert.equal(dialog.kind, 'prompt'); assert.equal(dialog.defaultPrompt, 'initial');
+    assert.ok(!JSON.stringify(store.workspace(user.tenantId)).includes('private dialog text')); assert.ok(!(store.db.prepare('SELECT data FROM workspace_tabs WHERE tenant=?').all(user.tenantId) as any[]).some(row => row.data.includes('private dialog text')));
+    const other = await store.register('another-user', 'password123'); await assert.rejects(control.productAction(other.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: true }));
+    await control.productAction(user.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: false, text: '取消' }, 'lease'); assert.equal(control.productState(user.tenantId).pageDialogs.length, 0); assert.equal(store.workspace(user.tenantId).tabs.length, 1); assert.equal(endpoint.calls.find(c => c.method === 'view.page.reply')!.args.document, '2');
+    await assert.rejects(control.productAction(user.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: true }, 'lease'), /过期/);
+    view.pageRequests.pending = [{ request: '8', kind: 'confirm', message: 'old document' }]; await control.tick(); const old = control.productState(user.tenantId).pageDialogs[0]; view.document = '3'; await assert.rejects(control.productAction(user.tenantId, { type: 'page.reply', dialogId: old.id, accept: true }, 'lease'), /过期/);
+    await control.tick(); const previousBrowser = control.productState(user.tenantId).pageDialogs[0]; endpoint.browserPid++; await assert.rejects(control.productAction(user.tenantId, { type: 'page.reply', dialogId: previousBrowser.id, accept: true }, 'lease'), /过期/);
+    const state = store.workspace(user.tenantId); state.pendingClose = { id: tab.id, requestId: '9', awaiting: false }; store.saveWorkspace(state); view.pageRequests.pending = [{ request: '9', kind: 'beforeunload', message: 'close' }]; await control.tick(); assert.equal(control.productState(user.tenantId).pageDialogs.length, 0); assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+  } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+test('product media policy precedes ensure, feedback is isolated and diagnostics remain manual', async () => {
+  const { store, endpoint, control, user } = await fixture(); const originalNow = Date.now;
+  try {
+    await control.attachViewer(user.tenantId, 'lease', () => {}); const firstPolicy = endpoint.calls.findIndex(c => c.method === 'session.mediaPolicy'), firstEnsure = endpoint.calls.findIndex(c => c.method === 'session.ensure'); assert.ok(firstPolicy >= 0 && firstPolicy < firstEnsure);
+    const ws = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace;
+    await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: ws.windows[0].id, width: 800, height: 600, visible: true }] });
+    let now = originalNow(); Date.now = () => now;
+    for (let sequence = 1; sequence <= 3; sequence++) { now += 2000; const result: any = await control.viewerRequest(user.tenantId, 'lease', 'feedback', { sequence, sourceCaptureId: String(sequence), sampledAtServerMs: now, visible: true, presentationLatencyMs: 400, latencySource: 'capture-end-to-paint', clockUncertaintyMs: 2, sampleCount: 50, windowMs: 2000 }); assert.equal(result.accepted, true); }
+    assert.equal(control.productState(user.tenantId).quality.adaptiveResolutionFactor, .8); assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, .8);
+    const other = await store.register('quality-other', 'password123'); assert.equal(control.productState(other.tenantId).quality.adaptiveResolutionFactor, 1);
+    const diag = store.session().tenantId; await control.action(diag, { type: 'tab.create', url: 'about:blank' }); endpoint.calls = []; await control.tick(); assert.ok(!endpoint.calls.some(c => c.tenant === diag && c.method === 'session.mediaPolicy')); assert.equal(control.productState(diag).quality.mode, 'manual');
+  } finally { Date.now = originalNow; await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+test('offline observation never restarts a lost Browser or recreates missing views, including maintenance race', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  try {
+    await control.attachViewer(user.tenantId, 'lease', () => {}); const workspace = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace;
+    await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: workspace.windows[0].id, width: 900, height: 700, visible: true }] });
+    endpoint.stopBeforeMaintenance = true; endpoint.calls = []; await control.detachViewer(user.tenantId, 'lease');
+    assert.ok(endpoint.calls.some(c => c.method === 'view.configure' && c.args.requireRunning === true)); assert.equal(endpoint.running, false);
+    endpoint.calls = []; await control.tick(); await control.tick(); assert.ok(endpoint.calls.every(c => c.method === 'session.snapshot')); assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+    endpoint.stopBeforeMaintenance = false; endpoint.views.get(user.tenantId)!.clear(); endpoint.calls = []; await control.attachViewer(user.tenantId, 'new-lease', () => {}); assert.ok(endpoint.calls.some(c => c.method === 'session.ensure')); assert.ok(endpoint.calls.some(c => c.method === 'view.ensure'));
+    await control.detachViewer(user.tenantId, 'new-lease'); endpoint.views.get(user.tenantId)!.clear(); endpoint.calls = []; await control.tick(); assert.ok(endpoint.calls.every(c => c.method === 'session.snapshot')); assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+  } finally { store.db.close(); }
 });
 
 function connect(url: string, cookie: string, origin = 'http://product.test') {

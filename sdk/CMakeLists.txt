@@ -37,3 +37,11 @@ add_custom_command(TARGET remotekit_control_client POST_BUILD
     "${SDK_ROOT}/bin" "$<TARGET_FILE_DIR:remotekit_control_client>")
 enable_testing()
 add_test(NAME remotekit_sdk_smoke COMMAND remotekit_sdk_smoke)
+
+add_executable(remotekit_rtc_smoke rtc-smoke.cc)
+target_link_libraries(remotekit_rtc_smoke PRIVATE RemoteKit::SDK d3d11)
+target_compile_features(remotekit_rtc_smoke PRIVATE cxx_std_17)
+add_custom_command(TARGET remotekit_rtc_smoke POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory
+    "${SDK_ROOT}/bin" "$<TARGET_FILE_DIR:remotekit_rtc_smoke>")
+add_test(NAME remotekit_rtc_smoke COMMAND remotekit_rtc_smoke)

@@ -24,6 +24,7 @@ import { RemoteTransport } from "./transport";
 import { request } from "./types";
 import {
   AuthView,
+  PageDialogs,
   SettingsDialog,
   errorMessage,
   type Action,
@@ -291,6 +292,7 @@ function Workspace({
           </div>
         )}
       </div>
+      <PageDialogs state={state} action={action} />
       <SettingsDialog
         state={state}
         open={settings}

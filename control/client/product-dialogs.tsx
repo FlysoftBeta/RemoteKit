@@ -303,3 +303,30 @@ export function SettingsDialog({
     </Dialog>
   );
 }
+
+export function PageDialogs({ state, action }: { state: ProductState; action: Action }) {
+  const visible = state.workspace.windows.filter(w => state.workspace.layoutMode === 'side-by-side' && window.innerWidth >= Math.max(720, state.workspace.windows.length * 365 - 5) || w.id === state.workspace.activeWindowId).map(w => w.activeTabId);
+  const dialog = state.pageDialogs?.find(d => visible.includes(d.tabId));
+  return dialog ? <PageDialogForm key={dialog.id} dialog={dialog} action={action} /> : null;
+}
+function PageDialogForm({ dialog, action }: { dialog: NonNullable<ProductState['pageDialogs']>[number]; action: Action }) {
+  const [text, setText] = useState(dialog.defaultPrompt ?? '');
+  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const reply = async (accept: boolean) => {
+    if (busy) return; setBusy(true); setError('');
+    try { await action({ type: 'page.reply', dialogId: dialog.id, accept, ...(dialog.kind === 'prompt' ? { text } : {}) }); }
+    catch (e) { setError(errorMessage(e)); setBusy(false); }
+  };
+  const leaving = dialog.kind === 'beforeunload';
+  return <Dialog open onClose={dialog.kind === 'alert' || busy ? undefined : () => void reply(false)} maxWidth="sm" fullWidth>
+    <DialogTitle>{leaving ? '离开此页面？' : dialog.origin || '页面消息'}</DialogTitle>
+    <DialogContent><Typography sx={{ whiteSpace: 'pre-wrap' }}>{dialog.message || (leaving ? '此页面可能有未保存的内容。' : '')}</Typography>
+      {dialog.kind === 'prompt' && <TextField autoFocus fullWidth value={text} disabled={busy} onChange={e => setText(e.target.value)} sx={{ mt: 2 }} />}
+      {error && <Alert severity="error">{error}</Alert>}
+      <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 2 }}>
+        {dialog.kind !== 'alert' && <Button disabled={busy} onClick={() => void reply(false)}>{leaving ? '留在页面' : '取消'}</Button>}
+        <Button disabled={busy} variant="contained" onClick={() => void reply(true)}>{leaving ? '继续离开' : '确认'}</Button>
+      </Box>
+    </DialogContent>
+  </Dialog>;
+}

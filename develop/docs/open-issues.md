@@ -11,3 +11,13 @@
 |P1|关闭全部tab后800ms，Viewer仍保留旧layout/displayReady=true；同RTC重建tab可恢复CRC6001。|补空布局通知与客户端画面/输入资格清理。|不阻塞固定scene性能对照；产品行为缺口。|
 |P1|故障旧pool在producer ready变UINT64_MAX后保持terminal_ready=false，但等值终点已由同State真实观察并退役；旧Close还会阻挡后代。详见endpoint-retirement-runtime.md。|逐代Close、等值历史证明复用已通过GPU/Browser退出硬件回归；未知更高终点继续保留。|已验证修复。|
 |P1|最后native refs递减后仍访问State的trace，ReapRetired可能同时析构State。|已先快照trace与记录字段，递减后只访问局部；编译与CPU检查通过。|修复已实现，不再阻塞。|
+
+## 首版后Astra审查输入（2026-11-02）
+
+先完成首版上传，随后审查，不把待核实项当作已确认bug。
+
+- 已确认：冷启动4个保存页面串行恢复，各失败导航等待约11秒，总时间超过Control 20秒RPC超时；稍后fallback恢复。证据product-runtime-qa.md，需优化恢复调度/超时语义。
+- 待核实：旧/已撤销Viewer的logout是否全局关闭同用户当前活跃Viewer；检查token、租约和注销作用域。
+- 待核实：旧数据库用户isLegacy状态与新质量策略、账号迁移的语义是否完整。
+- 待核实：质量策略仅面积预算是否遗漏极端长宽与组合atlas的8192轴上限。
+- 已完成：产品UI、WS、站点UA、popup/dialog、memory saver、自适应、capture时钟、重连输入序号和自动化驱动迁移；实际检查见product-runtime-qa.md。旧条目的空布局/恢复事务等应在审查中按当前代码重新确认，不能沿用旧结论。

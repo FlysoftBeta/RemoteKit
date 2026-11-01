@@ -1,40 +1,37 @@
-# Windows GPU atlas 输出
+# Windows GPU atlas与资源寿命
 
-默认串流服务按Session建立browser进程与Fence atlas，经Endpoint编码后由WebRTC传到客户端。服务页面采用每WebView独立的无HWND Aura宿主，ui::Compositor从创建时使用null accelerated widget，直接输出离屏纹理；保留Aura内容视图、输入与IME支持。atlas在GPU桥合并，不再绘制到本地atlas窗口。运行验收状态见[当前状态](current-state.zh-CN.md)。
+服务端无页面HWND，Aura/null-widget compositor直接合成离屏内容。Browser本地external BeginFrame只负责调度；没有屏幕Present，也不把调度ACK当GPU完成。
 
-browser本地external BeginFrame pacer按输出需求驱动各页，最多一个未ACK tick；ACK用于调度，不表示纹理GPU完成。宿主使用虚拟DSF1，页面DPR与实际backing独立配置。`--browser-render-host=window`是旧宿主的显式诊断对照，默认`offscreen`。原生demo独立保留Views窗口，使用`--presentation=fence`；`--presentation=native`仍是其显式HWND对照入口。
+## 当前路径
 
-## 资源与完成点
+| 阶段 | 路径及所有权 |
+|---|---|
+| 捕获 | 单plane/DPR1等满足条件时，Viz直接写三个拥有CSI的共享atlas目标；不支持的几何使用官方capture/桥接fallback |
+| 发布 | 真实GPU finished后才发布可读帧，Browser signal ready；布局/序号通过共享元数据传递 |
+| 消费 | QSV/external/depth1的auto输入租用共享BGRA；显式auto encoder及其他不兼容组合用copy/cache |
+| 转换与编码 | D3D11 NV12转换、oneVPL异步或NVENC各保留真实lease；硬件完成后释放 |
+| 归还 | 只有实际GPU读者完成、租约释放且对应consumed/done证明成立，producer才复用槽 |
 
-browser 通过官方 FrameSinkVideoCapturer 的 Windows mappable GPU 路径获取 BGRA capture 纹理。该路径先完成 Skia GPU finished callback，再交付 capture；交付本身没有 D3D ready fence。桥接 device 在能够打开源纹理的硬件 adapter 上建立，与 endpoint 使用同一 adapter LUID。
+Fallback可能包含capture→staging→共享槽copy；single-plane优化可减少中间阶段。它与直接Viz写共享目标是不同路径，不能用配置名称替代实际stats。两个端点使用同adapter LUID。
 
-| 顺序 | 操作 | 允许回收的资源 |
-| --- | --- | --- |
-| 1 | 源 keyed mutex key=0，非阻塞取得；GPU copy 源 → staging atlas | 尚不能归还 capture lease |
-| 2 | GPU signal ready fence `s`，提交队列 | CPU 查到 ready completed ≥ `s` 才调用内部 capture Done |
-| 3 | 找到 consumed 已完成的输出槽；GPU copy staging → 输出槽，signal ready `p` | 输出槽仍由 producer 保留 |
-| 4 | 共享内存 seqlock 发布 generation、frame、slot、`p`、时间戳和布局 | CPU 发布不代替 GPU 完成 |
-| 5 | endpoint GPU wait ready `p`，copy 输出槽 → 自有 cache，signal consumed `p` | consumed 实际完成后，producer 可复用该槽及更旧的槽 |
-| 6 | 串流服务从自有cache转换为NV12并异步编码；原生demo绘制、Present | cache及编码surface保留至各自实际GPU工作完成，不再读取已释放的producer纹理 |
+固定三个输出槽，满时合并/跳过，不无限排队。共享输入不能因编码器异步返回就提前释放；COM引用只保留对象，不防止池覆盖。静态保留最后有效内容，尾IDR最多一次；多plane仅对当前有效布局授权。
 
-capture 源 lease 与共享输出槽属于两个完成域。前者保护 Viz pool，后者保护跨进程源纹理；任何一边都不能用“copy 调用已经返回”作为 GPU 读完的证据。源纹理的 keyed mutex 属于 Chromium capture 适配，browser↔endpoint 输出同步使用两条 shared fence。
+## 完成与故障
 
-固定三个输出槽。全 atlas 按配置帧率发布；多个 WebView 的 damage 合并到 staging，槽满时保留最新内容。静态内容保留最后cache。冻结/卸载及尚未取得有效捕获的平面标为stale，串流客户端显示等待状态并停止坐标输入。stale→ready变化进入新layout epoch，必须与实际wire RTP匹配的视频一起授权，不能仅根据较新的布局消息解锁旧画面。
+Capture源lease与共享输出槽是两个完成域。fallback中capture资源须等桥接GPU读取完成再归还；输出槽须等Endpoint完成读取。直接目标在新的绑定/池代次建立新的纹理，不能把旧写入复用到新geometry。
 
-capture 的 keyed mutex 随 GPU write access scope 结束释放，不等 consumer Done。GPU finished 与 CPU EndAccess 之间可能有短暂竞争；bridge 遇 timeout 放弃本次读取并请求内部 refresh，不阻塞 UI。持续2秒仍无法取得锁或锁已 abandoned，则使本代输出失败并进入有界重建。
+共享映射ABI为`endpoint/include/remotekit/shared_atlas.h`的version2；用seqlock发布一致布局和时间戳，不存像素。ready/consumed值保护实际GPU操作，CPU发布位、提交返回、保留HANDLE及Fence的UINT64_MAX都不代替完成。
 
-设备尺寸切换时，Chromium可能暂时把旧比例内容放入新画布。每次capture绑定从首张几何不匹配帧起允许固定2秒过渡，丢弃这些帧并合并refresh，不复制旧比例像素到新atlas。独立轮询负责超时，后续坏帧不延长期限；首次正确几何结束过渡。格式、共享句柄、纹理与设备错误仍明确失败。
+按generation独立退役，健康代可以结束而不被另一未完成代阻塞。已经观察过的同State等值真实完成证明可以复用，未知更高终点不能放行。GPU失效与Browser进程实际退出是不同证明；退出清理绑定真实进程对象，不靠可复用PID。
 
-Fence保证读写顺序，不保证GPU任务立即执行。官方capture的begin→end包含CopyOutput排队、GPU工作和完成回调；它发生在本项目桥接ready fence之前。共享帧的`capture_time_us`采用Chromium的capture **end**，HUD“捕获完成→纹理就绪”不包含捕获本身。分段测量与默认关闭的ready gate/capture限流实验见[串流实验](streaming-experiments.zh-CN.md)。
+reconfigure、fatal、空内容及暂停立即发新epoch空layout，清Client ready/输入，再按状态关闭/重建输出。正常GPU匿名断连支持有界自动重建，真正fatal保留错误。关闭有等待上限，不能为通过测试伪造consumed。
 
-## 通信边界
+## 几何、节拍和通信
 
-Mojo只承担建立、句柄、配置、输入和资源重建。Endpoint消费线程本地轮询共享元数据；没有browser↔endpoint的逐帧ready、present、release通知或回复。Chromium内部renderer/Viz/GPU的frame与capture callback/Done IPC保留。Endpoint↔Client的WebRTC视频与DataChannel属于另一条通信边界。
+页面DPR、实际backing、atlas像素、编码采样比例分别报告。默认service atlas按16对齐；显式1保留给控制变量。产品窗口尺寸来自真实CSS内容区，设备UA不改变viewport。Client输入要反算DPR/mediaScale/letterbox，并验证layout epoch与实际wire RTP。
 
-映射ABI在`endpoint/include/remotekit/shared_atlas.h`：版本2、三槽、固定宽度字段与对齐，Windows Interlocked发布seqlock。句柄已经Duplicate到目标进程，由consumer关闭。shared fence的`UINT64_MAX`不作为完成值。句柄建立回复未送达时，SDK无法回收未知句柄，进程退出负责最终收尾。
+Browser内部捕获和Renderer/Viz/GPU IPC照常存在；browser↔Endpoint仅建立、配置、输入和资源重建走Mojo，没有逐帧ready/present/release。Client帧元数据随WebRTC DataChannel，是另一边界。
 
-资源代次变化重新导入 texture/fence，旧代停止输入和发布。DPI 改变通过关闭旧输出、配置新 scale、重建资源处理；控制连接失败明确停止。健康设备尚有 GPU read 时不强制回收；真实 device removal 与普通输出失败分别报告。关闭、重建有等待上限，不伪造 consumed。
+Fence保证顺序，不消除排队。capture begin→end包括请求、GPU工作和完成观察；本项目capture_time采用end，capture-end→ready不包括此前捕获阶段。GPU实际执行、CPU等待、编码和呈现分别计量，见[测量](streaming-experiments.zh-CN.md)。
 
-## 构建与运行边界
-
-browser/SDK使用Chromium GN增量产物；endpoint用独立CMake/Ninja和Windows D3D11/DXGI，不包含Chromium私有头。NV12转换、oneVPL异步H.264及WebRTC已通过UHD630/Chrome89真实链路检查；NVENC已编译，本机无NVIDIA硬件运行证据。音频未接入。各项功能与性能验证以[当前状态](current-state.zh-CN.md)为准。
+UHD630实际链路已验证；NVENC本机无NVIDIA硬件证据。原生demo独立构建，不能用它的窗口呈现结果覆盖服务离屏路径。[当前状态](current-state.zh-CN.md)集中列验收与限制。

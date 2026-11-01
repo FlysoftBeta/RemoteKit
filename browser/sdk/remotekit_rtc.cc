@@ -834,6 +834,26 @@ int remotekit_rtc_send_data(uint64_t id, const void* data, size_t size, int bina
     return p.data->Send(buffer) ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_BUSY;
   });
 }
+int remotekit_rtc_set_media_policy(uint64_t id,uint32_t target,uint32_t maximum,uint32_t fps) {
+  if(target<100000 || target>50000000 || maximum<target || maximum>60000000 || fps<1 || fps>60)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  return WithPeer(id,[&](Peer& peer) {
+    for(auto& sender:peer.pc->GetSenders()) {
+      auto parameters=sender->GetParameters();
+      for(auto& encoding:parameters.encodings) {encoding.max_bitrate_bps=maximum;encoding.max_framerate=double(fps);}
+      if(!sender->SetParameters(parameters).ok())return REMOTEKIT_SDK_INVALID_STATE;
+    }
+    // Runtime policy must not restart the bandwidth estimator. The requested
+    // target is used at peer creation; only the ceiling changes here.
+    if(peer.options.max_bitrate_bps!=maximum) {
+      webrtc::BitrateSettings bitrate;bitrate.max_bitrate_bps=maximum;
+      bitrate.min_bitrate_bps=std::min(500000u,target);
+      if(!peer.pc->SetBitrate(bitrate).ok())return REMOTEKIT_SDK_INVALID_STATE;
+      peer.options.max_bitrate_bps=maximum;
+    }
+    return REMOTEKIT_SDK_OK;
+  });
+}
 int remotekit_rtc_submit_texture(uint64_t id, const remotekit_rtc_frame* frame) {
   if (!frame || frame->struct_size != sizeof(*frame) || !frame->d3d11_texture ||
       !frame->retain || !frame->release || !frame->width || !frame->height ||
@@ -857,8 +877,8 @@ int remotekit_rtc_submit_texture(uint64_t id, const remotekit_rtc_frame* frame) 
     // media frame. Keep the original capture QPC for measurement and assign a
     // fresh monotonic media timestamp (>=1ms apart for a distinct 90kHz RTP ts).
     const int64_t clock_us = webrtc::TimeMicros();
-    input.capture_time_us = clock_us - static_cast<int64_t>(
-        static_cast<double>(now.QuadPart - input.capture_qpc) * 1000000.0 / frequency.QuadPart);
+    input.capture_time_us = input.capture_qpc > 0 ? clock_us - static_cast<int64_t>(
+        static_cast<double>(now.QuadPart - input.capture_qpc) * 1000000.0 / frequency.QuadPart) : 0;
     const int64_t media_timestamp = std::max(clock_us, p.last_media_timestamp_us + 1000);
     p.last_media_timestamp_us = media_timestamp;
     p.trace->Add("texture_submit", 0, &input, 0, 0, REMOTEKIT_SDK_OK, media_timestamp);

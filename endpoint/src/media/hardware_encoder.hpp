@@ -12,7 +12,7 @@ struct EncoderSettings {
   uint32_t level_idc=51,async_depth=1,gop=120,target_usage=4,buffer_ms=1000;
   bool vbr=false;
   bool qsv_async_vpp=false;
-  bool target_usage_explicit=false,rate_control_explicit=false;
+  bool target_usage_explicit=false,rate_control_explicit=false,qsv_low_power_explicit=false;
   uint32_t qsv_low_power=0; // mfxCodingOption: auto=0, on=0x10, off=0x20.
 };
 struct QsvLowPowerInfo {
@@ -41,7 +41,7 @@ class HardwareEncoder {
   virtual CodecResult Submit(ID3D11Texture2D*, bool keyframe,uint64_t frame_cookie,
                              std::string& error)=0;
   virtual CodecResult Poll(uint32_t timeout_ms,AccessUnit&,std::string& error)=0;
-  virtual bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error)=0;
+  virtual bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error,uint32_t maximum=0)=0;
   virtual bool Drain(std::vector<AccessUnit>&,std::string& error)=0;
   virtual const char* Name() const=0;
   virtual EncoderInput InputFormat() const { return EncoderInput::nv12; }

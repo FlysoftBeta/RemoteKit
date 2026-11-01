@@ -1,6 +1,6 @@
 # RemoteKit
 
-Windows 上的多租户 Chromium content embedder、独立 CMake/Ninja Endpoint 与浏览器串流 Demo。
+Windows 上的多租户 Chromium content embedder、独立 CMake/Ninja Endpoint 与浏览器串流工作区。
 
 [当前能力](docs/current-state.zh-CN.md) · [架构](docs/architecture.zh-CN.md) · [Control](control/README.md) · [测量与实验](docs/streaming-experiments.zh-CN.md)
 
@@ -17,7 +17,7 @@ tools\build-endpoint.cmd package
 
 `python3` 使用 depot_tools 实际解释器或 `C:\src\depot_tools\python3.bat`。`REMOTEKIT_VS` 可覆盖 VS 安装路径，`REMOTEKIT_PYTHON` 可覆盖工具脚本使用的解释器。媒体依赖由固定版本/hash工具获取到 `build`；Endpoint 编译不触发 Chromium 构建。
 
-## 串流 Demo
+## 串流工作区
 
 ```powershell
 cd control
@@ -31,7 +31,7 @@ npm start
 
 未设置 `REMOTEKIT_ENDPOINT` 时使用开发构建目录；以上命令明确选择Release服务。
 
-browser/SDK路径、接收档、设备配置、网络模拟与诊断说明见 [Control README](control/README.md)。性能结果按实际编码尺寸报告，硬件编码吞吐与端到端延迟分别测量。
+browser/SDK路径、账号设置、站点UA与诊断说明见 [Control README](control/README.md)。性能结果按实际编码尺寸报告，硬件编码吞吐与端到端延迟分别测量。
 
 ## 原生对照 Demo
 

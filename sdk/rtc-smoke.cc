@@ -93,6 +93,13 @@ int main(int argc, char** argv) {
   if (status != REMOTEKIT_SDK_OK) {
     std::fprintf(stderr, "create A failed %d\n", status); return 3;
   }
+  if (remotekit_rtc_set_media_policy(a,36000000,44000000,52)!=REMOTEKIT_SDK_OK ||
+      remotekit_rtc_set_media_policy(a,36000000,44000000,52)!=REMOTEKIT_SDK_OK ||
+      remotekit_rtc_set_media_policy(a,36000000,44000000,50)!=REMOTEKIT_SDK_OK ||
+      remotekit_rtc_set_media_policy(a,36000000,48000000,60)!=REMOTEKIT_SDK_OK ||
+      remotekit_rtc_set_media_policy(a,36000000,35000000,52)!=REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_set_media_policy(a,36000000,48000000,0)!=REMOTEKIT_SDK_INVALID_ARGUMENT)
+    return 36;
   if (remotekit_rtc_set_playout_delay(a, -1, -1) != REMOTEKIT_SDK_OK ||
       remotekit_rtc_set_playout_delay(a, -1, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
       remotekit_rtc_set_playout_delay(a, 10, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||

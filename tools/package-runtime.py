@@ -182,15 +182,15 @@ def main():
             '"%RK_ROOT%bin\\node.exe" "%RK_ROOT%run-control.cjs" %*\n', encoding='utf-8')
         shutil.copy2(package / 'run.cmd', package / 'run-control.cmd')
         (package / 'README.txt').write_text(
-            'RemoteKit Windows hardware streaming test package\n\n'
+            'RemoteKit Windows hardware streaming package\n\n'
             'Extract everything to a writable folder and run run.cmd. Open http://127.0.0.1:3001 in Chrome.\n'
-            'Each browser context/cookie gets an isolated Tenant/Session and browser process.\n'
-            'The service selects Intel QSV or NVIDIA NVENC through the installed GPU driver.\n'
-            'This package includes Node and the Control demo dependencies; no build tools are required.\n'
-            'Data is created in data/ and diagnostic metrics in metrics/.\n'
-            'For encoder experiments append --encoder=qsv/--encoder=nvenc, --fps, --bitrate, --max-bitrate,\n'
-            '--async-depth, --gop, --target-usage, --rate-control=cbr/vbr, --buffer-ms and --idle-idr-ms\n'
-            'to run.cmd, for example: run.cmd --browser-render-fps=16 --encoder=qsv\n'
+            'Create an account or log in. Each user has an isolated Tenant/Session and browser process.\n'
+            'Viewer state and settings use an authenticated WebSocket; diagnostics are disabled by default.\n'
+            'The service defaults to Intel QSV; NVIDIA NVENC can be explicitly selected on compatible hardware.\n'
+            'This package includes Node and the Control production dependencies; no build tools are required.\n'
+            'Data is created in data/. Diagnostic metrics, when enabled, are written in metrics/.\n'
+            'Quality, frame rate and bitrate are managed by Control from the Viewer quality preference.\n'
+            'Endpoint overrides can be appended to run.cmd, for example: run.cmd --encoder=nvenc\n'
             'Arguments use --name=value; quote arguments containing spaces.\n'
             'Hardware smoke and stream measurements are reported separately from this package creation.\n', encoding='utf-8')
         for name in ['run-web.cmd', 'run-native.cmd']:
@@ -202,7 +202,16 @@ def main():
             '--package', str(package)], capture_output=True, text=True, encoding='utf-8')
         validation = json.loads(smoke.stdout)
         if smoke.returncode: raise RuntimeError('Bundled runtime smoke failed: ' + str(validation))
-        print('Bundled HTTP/browser smoke passed: ' + validation['evidence'], flush=True)
+        print('Bundled product login/WebSocket/browser smoke passed: ' + validation['evidence'], flush=True)
+    # Use only explicit runtime inputs above; refuse accidental state, secrets or
+    # compiler artifacts before either hashing or archiving the package.
+    for file in package.rglob('*'):
+        relative = file.relative_to(package)
+        if any(part.lower() in {'data', 'profiles', 'profile', 'metrics', '.git'} for part in relative.parts):
+            raise RuntimeError('Non-runtime directory in package: ' + str(relative))
+        if file.is_file() and (file.name.lower() in {'cred.json', '.env'} or
+                              file.suffix.lower() in {'.pdb', '.obj', '.lib', '.exp', '.ilk', '.sqlite', '.db', '.ts', '.tsx', '.cpp', '.cc', '.h'}):
+            raise RuntimeError('Non-runtime file in package: ' + str(relative))
     files = []
     for file in sorted(package.rglob('*')):
         if file.is_file():

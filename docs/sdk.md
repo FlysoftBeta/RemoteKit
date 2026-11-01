@@ -124,3 +124,9 @@ requested limits, not a measured end-to-end delay guarantee.
 The reliable ordered DataChannel is named `remotekit`. Client messages and
 authorization boundaries are described in [streaming protocol](streaming-protocol.md).
 Runtime and hardware validation results are maintained in [current state](current-state.zh-CN.md).
+
+## Runtime media policy and capture clocks
+
+`remotekit_rtc_set_media_policy(peer, target_bps, max_bps, fps)` is an additive export. It adjusts sender limits without resetting congestion-control start bitrate. Repeating the same policy is a no-op; an FPS-only change does not reset bandwidth estimation. Endpoint reports requested and actually applied policy separately; missing exports return explicit unsupported behavior.
+
+Capture metadata is mapped from the original QPC timestamp to wall time before the SDK changes timestamp domains. `captureWallTimeMs`, `captureMonotonicMs`, `captureClockUncertaintyMs`, and decimal `sourceCaptureId` are optional and paired with actual wire RTP/epoch. Missing capture time is omitted, never replaced by ready/encode time. This does not change frame ABI or add Browser–Endpoint frame IPC. See [feedback timing](media-feedback.md).

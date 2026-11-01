@@ -1,97 +1,46 @@
-# RemoteKit 当前实现
+# RemoteKit当前状态
 
-基线：官方Chromium Release **157.0.8103.15**（`1aa07b638799e59656559ae6c6649d4b197f555e`），Windows x64。Chromium源码在外部源码树；本仓库拥有的Browser/共享模型/SDK由`tools/chromium.py`复制到`//remotekit`后增量构建。
+更新：2026-11-02。Windows x64；Chromium官方157.0.8103.15，固定基线`1aa07b638799e59656559ae6c6649d4b197f555e`，复用out/dev、out/rel增量构建。Chrome89继续支持。
 
-## 当前阶段
+## 本轮结果
 
-双租户45秒同组已达到实际canvas **51.69/51.73FPS、Pixel marker p95 76/79ms**，每路45个CRC有效。用户已取消额外120秒稳定复验及单租户重复复验，当前转入Control/Viewer产品化；不会继续为重复确认该结果增加性能组。
+双租户45秒同组实际canvas **51.69/51.73FPS，Pixel marker p95 76/79ms**，每路45个有效CRC。条件为1920×1080/DPR1、atlas/编码1936×1088、RTT10ms、每peer48Mbps，QSV TU7/LPON/VBR/depth1、36/max44Mbps；接收端Chromium157 headless、UHD630硬件H264/GPU canvas、fake60、immutable frame/fifo2及Worker CRC。Marker终点是canvas提交。
 
-该组保持1920×1080/DPR1、atlas/编码1936×1088、RTT10ms、每peer48Mbps，QSV TU7/LowPower ON/VBR/depth1、目标36/max44Mbps。接收端为Chromium157 headless、Intel UHD630硬件H264/GPU canvas及fake60，使用immutable VideoFrame/fifo2和Worker CRC；Chrome89原video路径支持保留。Marker终点是canvas绘制提交，Worker读回耗时另计。完整条件、指纹、配对和取消的未完成组见[验收记录](../develop/docs/headless-receiver-runtime.md)。
+用户已取消额外120秒稳定复验与单租户重复复验。后续产品改造做功能检查，不重复跑分；完整配对和证据见[性能记录](streaming-experiments.zh-CN.md)。同条件headed→headless的Intel3D从93.55%降至64.33%，其中包含RDP显示链开销的消除。
 
-同binary headed→headless配对的Intel3D均值由93.55%降到64.33%；RDP显示链的DWM/WUDF额外开销随动态窗口出现。无屏服务器的接收测试由此避免了RDP显示链干扰，不能把这个差值全部算为编码器优化。源GPU的绘制、合成、捕获与复制已能分别测量，详见[GPU计时](../develop/docs/viz-gpu-timing.md)和[环境调查](../develop/docs/gpu-environment-audit.md)。
+## 已实现并联调
 
-## 已完成的串流改进
-
-服务端每WebView采用无页面HWND的Aura离屏宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。Chromium进程仍有系统广播SingletonHwnd。高精度计时、单次尾IDR、背压和源预算控制已有实现与实播证据。
-
-共享BGRA输入候选保留真实GPU lease和有序退役；Viz CaptureToAtlas候选直接写三个拥有CSI的共享目标，避免Browser中间复制。正常导航、尺寸/DPR/多plane fallback、Chrome89输入/重连、普通关闭、源GPU同RTC自动恢复均已验证。生产默认与已验证候选目前仍有区别，后续发布整理会明确选用配置，不能仅依据实验名推断默认开启。
-
-Endpoint已修复故障退出时的等值GPU完成证明复用、各generation独立退役和最后引用释放后的访问；未知更高终点仍不能凭CPU状态放行。硬件退出回归见[退役验证](../develop/docs/endpoint-retirement-runtime.md)。
-
-客户端保留Chrome89 video接收路径；新浏览器支持不可变VideoFrame直接绘制、多plane共享读取与fifo2候选。CRC Worker从真实已绘制canvas取得不可变bitmap，绑定原始paint身份并单独记录读回完成时间。metrics分块上传校验长度和SHA256；工具区分源、采集、编码、解码、真实paint及测量干扰。阶段Control共78项检查、构建和生产smoke已通过；产品改造后的结果另行记录。
-
-## 正在实施的产品功能
-
-多用户、每Window独立tabs、MUI沉浸式UI、WS控制链路、服务端设置、每站点仅UA平板模式、Memory Saver、弹窗收养和质量自适应正在实施。尚不能把这些设计项视为已发布能力。状态/接口与任务边界见[实施契约](../develop/docs/productization-contract.md)，UI方案见[设计](../develop/docs/control-ui-design.md)。
-
-全部功能和文档整理后先上传一版，再由Astra对照文档审查代码库并落实必要修复；有变动再构建上传。历史实验保存在[性能记录](../develop/docs/performance-goal.md)及各组报告，不继续在当前状态页逐轮追加。
-## 结构
-
-- **browser**：独立 ContentMain/ContentBrowserClient/ContentRendererClient、BrowserContext 和 WebView adapter，不链接 Chrome 的 Browser/TabStripModel/BrowserView。服务使用无窗口Aura宿主，原生demo使用Views窗口。
-- **endpoint**：独立 C++20 + CMake/Ninja。Tenant → Session → Profile → WebView；当前每 Session 一个 Profile。MaxRects、不旋转、有 padding、显式排布失败；输入用 viewport DIP。
-- **SDK**：GN 构建 C ABI DLL，外部 CMake 只消费 C 头与 import lib。Mojo 本地 pipe 与跨进程 isolated 控制连接；新增真实 libwebrtc PeerConnection、SDP/ICE、DataChannel 与外部 H.264 编码 C ABI。
-- **Control/串流服务**：Control是产品状态source of truth；Endpoint托管Session/browser与恢复数据，每租户一条H.264 atlas视频。
-- **原生demo**：显式构建browser_demo与endpoint_client，保留原测试管理器；Fence默认，native HWND为对照入口。
-
-## 串流接入状态
-
-| 项目 | 当前证据 |
+| 范围 | 当前行为与证据 |
 |---|---|
-| Control与客户端 | SQLite产品状态、会话鉴权、Tab/分屏/导航/设备配置、周期对账、生产bundle；43项测试通过；1500ms媒体反馈与队列观测接通，尚未启用自适应策略；大metrics记录串行写入；真实beforeunload取消/确认、两次split重连通过；可配置LAN监听和HTTPS，本地TLS/secure-cookie检查通过 |
-| Chrome89 | 现有89.0.4389.90 headed真实运行；Sol检查桌面/平板UI与实际视频HUD；Pixel marker、IME composition、触摸响应、重复focus输入及endpoint退出自动恢复通过；主动断连后不自动重连 |
-| browser服务 | 单Session进程、动态页面、后台页不占atlas、独立Profile与恢复信息；1/4租户管理和尺寸重建实测通过 |
-| WebRTC SDK | 真正PeerConnection、SDP/ICE、DTLS/SCTP、native纹理租约、实际wire RTP、时钟校准、发送端stats；ABI2与共享atlas v2统一编译，4项RTC检查（含旧ABI拒绝、真实127候选ICE/DC与stats关闭屏障）及旧SDK检查通过 |
-| oneVPL | UHD630 legacy1.35真实异步编码；多inflight有效；固定名义fps、关闭HRD后240帧码率阶跃通过，普通码率Reset不重开序列；默认VBR/TU1/深度1/LowPower auto；显式LowPower ON及码率阶跃通过，实际模式与返回状态可观测 |
-| NVENC | 独立硬件backend编译通过；本机没有NVIDIA GPU/编码驱动DLL，初始化明确不可用 |
-| 显示与输入同步 | 按rVFC的实际RTP时间戳匹配显示代次；真实视频/marker验证通过。无按键悬停可进入未聚焦可见页面且不抢焦点，拖拽/点击等保留焦点约束；五按钮modifier已修正，真实hover/click/IME与mixed回归通过 |
-| 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；32a8313新解压包的真实启动参数、首帧/hover/click/IME/关闭与Sol视觉验收通过 |
-| 延迟定位 | 默认关闭的browser/SDK/Endpoint有界trace，关联同wire RTP与CopyOutput request；Ganesh/OpenGL的GPU flush批次计时已实测，ETW已有GPU队列/CPU调度证据。capture_time_us明确为capture end；HUD不再把该段误标为完整捕获耗时 |
-| 网络实验设施 | 真实UDP 10ms/24/48Mbps整形与Chrome89候选/转发通路验证通过 |
-| 性能 | 四1080精准render16加RTP播放延迟0/0，40秒复测canvas15.95–15.97FPS、marker p95 90–143ms；实际render20再次GPU满载。目标未达，默认render-fps仍0沿用输出配置，播放延迟默认unset；配对条件见串流实验 |
+| 产品Control | SQLite多用户、服务端设置、独立Window/tab、鉴权WS、单Viewer租约、对账；普通入口不使用匿名HTTP轮询 |
+| Viewer | MUI沉浸外壳、桌面split/窄屏聚焦、覆盖式设置、实际内容尺寸；普通页不暴露实验面板、不存localStorage设置 |
+| 页面功能 | 每origin仅UA/CH、首次请求/redirect/history/restore正确；真实popup收养保opener/sessionStorage、自然close；标准dialog和导航beforeunload |
+| 生命周期 | 默认120秒隐藏回收，Browser完整canDiscard守卫、真实discard/restore；Viewer visibility与RTC渲染需求分离；离线snapshot/维护不重启Browser |
+| 输入 | Chrome89/157真实H264 canvas、鼠标、dialog回复及恢复；重载/重新登录/接管后输入序号分层修复并复验，旧token/epoch与重复输入仍拒绝 |
+| 自适应 | 三质量档、ClientScale、面积预算、有效>300ms反馈降分辨率和迟滞恢复；真实DC采集时钟与paint形成WS反馈，静态尾帧排重 |
+| 编码与GPU | QSV TU7/LPON/VBR/depth1、16对齐、auto输入在兼容QSV路径选shared；Viz直写目标及几何fallback；普通码率Reset不重开序列 |
+| SDK/网络 | 真正libwebrtc PeerConnection/SDP/ICE/DTLS/SCTP、native纹理租约、wire RTP；每Session运行媒体策略保留拥塞控制 |
+| 测量设施 | 有界Browser/SDK/Endpoint trace、GPU pass计时、ETW/引擎占用、分块metrics校验、真实paint/CRC与时钟置信度；固定实验独立于产品策略 |
 
-网页viewport/DPR与媒体采样分离已运行验证，用于高DPR和分屏超出接收level时等比缩小视频；输入按mediaScale映射，统计显示源/编码尺寸。同一atlas内desktop@1与tablet@2保持独立网页DPR。平板真实页面检查已通过：Android Chrome UA不带Mobile、CH Android/mobile=false、platform Linux armv81、DPR≈2、viewport/screen820×1180、coarse/no-hover/touch10；使用公开原生设置，无JS伪装或CDP附加。WorkerNavigator另行核对。
+Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/窄屏、UA、popup、dialog、质量/ClientScale、120秒memory saver、WS断线/接管。生产能力探测已使157选择level4.2，真实双窗完整尺寸首帧通过；Chrome89保留兼容video路径。报告：[产品运行QA](../develop/docs/product-runtime-qa.md)。原生Windows输入法完整候选窗行为不能由协议composition检查替代。
 
-实验条件、已测数值与最终性能表见 [串流实验](streaming-experiments.zh-CN.md)。
+最新功能批Control全套102项通过，其后能力/收束改动做局部检查；Endpoint收束后8项CPU suites通过，SDK2项通过，Browser/SDK/Endpoint增量构建通过。最终发布构建会记录最终完整检查结果。
 
-RTC支持显式RTP播放延迟请求，默认未设置。新离屏宿主精准render16下，0/0在交错复测中重复降低接收等待，且canvas约16FPS；40秒对照的native收包→video呈现p95从97–114ms降至2.69–3.79ms。可用`run.cmd --browser-render-fps=16 --rtc-playout-max-ms=0`复现该重载档，不作为所有负载的默认值。本文paint统计为canvas绘制提交；GPU完成和物理屏刷新未测，marker读回成本另报。
+## 当前默认与资源规则
 
-新一轮4×1080分段实验确认：提前向同Session GPU队列提交ready Wait会阻挡旧帧VPP。可选ready gate把VPP等待p50约41–46ms降到5–7ms，但最终FPS/p95无稳定收益，默认关闭。Chromium capture pending上限1/2同样未改善整体吞吐，作为默认关闭的实验补丁保留。单720 direct呈现有匹配场景收益，四1080无一致收益，默认呈现方式保持snapshot。不同源节拍、marker频率和特殊flag的组不混用；详见串流实验。
+服务端每页无页面HWND的Aura离屏宿主，不走屏幕Present；进程仍有Chromium辅助SingletonHwnd。产品默认启用已验证捕获优化，unsupported几何走明确fallback。Browser↔Endpoint稳态没有逐帧Mojo；真实GPU完成与三槽租约不因重建/故障而放宽。
 
-新离屏宿主、精准render16的四租户请求级profile中，两个完整覆盖窗口的Session捕获Created→SendResult p95约25ms，Skia submitted→finished约22ms；同RTP样本的native收包→video呈现p95约100ms，JS绘制提交约2ms。旧窗口路径曾出现捕获p50约216ms、PerformWork任务post→run约139ms，不能当作新路径当前耗时。诊断trace与关闭profile的性能组分别报告，详见[逐段profile](../develop/docs/osr-render16-segment-profile.md)。
+默认service针对UHD630选择QSV；显式encoder=auto保留copy和NVENC回退，显式NVENC仍支持。普通客户端探测解码能力后选择level4.2，失败回native；高码率请求不能超越接收协商或网络上限。更多状态归属与流程见[系统设计](architecture.zh-CN.md)、[Control设计](control-plane.zh-CN.md)、[GPU输出](gpu-output.zh-CN.md)。
 
-服务模式已修复宿主DPI额外放大：每WebView通过官方capture scale override使实际backing跟随页面DPR；原生demo继续跟随宿主DPI。宿主150%下，desktop1920×1080@1和tablet820×1180@2分别实际提交1920×1080、1640×2360，混合平面的触控与中文输入通过。同帧静态画质PSNR由23.50提升至25.87dB。混合页仍共用atlas采样密度，desktop可能被放大到共同atlas比例；客户端平面尺寸标签由编码矩形反推，取整时可相差约1 DIP。
+## 已知限制与后续审查
 
-## 已实现
+- 冷启动恢复目前逐页等待导航完成，4页失败恢复约需4×11秒，可能超过Control RPC超时后才fallback；产品状态保留，已列入首版后的审查。
+- 每Session当前一个Profile；跨Browser sessionStorage、完整IME replacement/span、原生popup widget合成/命中覆盖，以及目录上传、认证/证书、跨端剪贴板、PDF/打印等仍是保留差距。
+- 本机无NVIDIA硬件，NVENC只有编译/接口边界检查；音频不在本轮。
+- 生产capture-end→paint是带时钟置信度的估算；Pixel marker测量及物理屏幕点亮是不同终点。
 
-| 能力 | 当前状态 |
-|---|---|
-| 独立 content embedder、多页呈现 | 已构建运行；使用 Views/Aura |
-| 原生窗口 DPI | endpoint/browser 统一 PMv2；嵌入窗口从创建时即为无边框；父窗口响应 DPI 变化，以物理客户区像素调整子窗口 |
-| GPU atlas | 官方 GPU capture → browser staging/三槽共享纹理 → endpoint 自有 cache；ready/consumed shared fence；共享内存发布帧与布局；已通过真实视频链路运行 |
-| 输出节拍/重建 | 全 atlas 帧率上限、damage 合并、槽满保留最新；DPI 新代资源导入、GPU 失败最多3次重建；稳态无 browser↔endpoint 逐帧 Mojo |
-| Session 存储隔离 | 独立 BrowserContext/路径，localStorage 隔离测试通过 |
-| UA/Client Hints | 官方 embedder_support 算法、Chrome 品牌、GREASE、平台与完整版本；运行验证通过 |
-| window.chrome | 官方 loadTimes/csi；普通网页 chrome.app stub；范围见[兼容表面](browser-compatibility.md) |
-| 输入模型 | Session/实例/文档/焦点 token 与序号校验；UTF-16 composition 校验 |
-| browser 输入 adapter | 实际 focused widget、OOPIF 路由、独立 char、双三击、按键/鼠标/IME 收尾；触控采用官方 TouchEmulator 与最终 ACK/gesture 路径 |
-| Fence client 输入 | letterbox/atlas 像素 → viewport DIP；SDK 工作线程保序；busy 有界重试、旧 token/输出代次丢弃；IMM composition/caret 候选窗反馈 |
-| 生命周期 | desired/actual、request/complete 分开；freeze/thaw 检查 renderer ack；原地 discard 等待实际回调 |
-| unload/restore adapter | 完整 history/PageState，同进程 sessionStorage namespace；真实提交后完成；opaque chunk 导入导出校验 Session/Profile/版本，POST 自动恢复明确拒绝 |
-| 页面请求 | dialog/beforeunload、普通文件选择、context menu、pseudo fullscreen、find/zoom/edit/navigation；once 回复、文档失效取消，控制端轮询 pending/events |
-| Profile 服务 | 默认 deny 的 origin/embedding 权限配置；HTTPS-only 会话目录下载、进度/取消和 Windows quarantine；不包含 SafeBrowsing |
-| patchset | SHA-256清单、检查/应用/逆序撤回、失败回滚；四项默认关闭补丁：bounded capture、CopyOutput profile、旧宿主offscreen root、capture render rate。统一GN构建及4项工具测试通过；render rate有真实Manager/Throttler CPU probe，未做实播矩阵。新离屏宿主不依赖后两项补丁 |
-| 独立 SDK 消费 | GN build、完整 runtime 导出、MSVC CMake/Ninja link 和 smoke 通过 |
+## 发布与入口
 
-## 验证与限制
+本轮代码/文档收尾后先构建并上传第一版，再由Astra审查代码库、落实必要修复；有改动再构建上传，最后删除goal。发布包不会携带开发Profile、数据或凭据。
 
-此前 native 路径的 endpoint 核心测试、4 项 patchset 测试、SDK smoke 和隐藏窗口集成测试已通过，涵盖 identity、Session 存储隔离、输入 token、生命周期与 URL restore。SDK 50ms 无响应请求在63ms结束并使旧 handle 失效。这些结果不覆盖本轮新增 GPU、完整导航恢复及页面请求。
-
-此前 DPI/GPU 阶段只做编译；本轮串流任务已授权并运行实验。GPU共享纹理、硬件编码、视频传输及正常尺寸重建已通过实际链路检查。原生 Windows IME、完整触控手势、下载和GPU故障恢复仍需目标机器测试。测试包记录 backend、构建指纹和文件校验和。
-
-保留 Aura，不称为无窗口 embedder。旧 demo 为固定 WebView 集合；动态管理的接入状态见上节。window.open 仍明确阻止；原生 popup 在 GPU 输出中的合成/命中尚未验证。pointer/keyboard lock 明确拒绝。目录上传、tooltip 原生 hook、HTTP/代理认证、客户端证书、PDF/打印及生产重连/认证未接通。跨 browser 的 sessionStorage 不随导航 blob 恢复。CDP 附加期间远程触控明确拒绝，以免争用同一个 emulator；native 与 injected touch 也遵循官方互斥规则。音频未接。真实编码视频、延迟和FPS结果以上述串流接入状态为准；SDK暴露项目所需C ABI，不是完整libwebrtc C++ API包。
-
-## 入口
-
-当前运行包为`develop/tmp/RemoteKit-win-x64-streaming-qsv-nvenc-20261101-111347.zip`，440.5MiB，对应`55ffdf1`，manifest为clean；SHA256为`97e3422e1b676f543053038a342134b435b17b9ef48d1c7bb7bf2c226271a924`。537个文件hash全部匹配，打包与全新解压后的独立smoke通过。Chrome89收到1928×1088 H.264，首次hover不抢焦点，点击marker60001、IME42和RTC close200通过，无pageerror；Sol视觉通过，测试页自身左下文字有重叠。测试数据/Profile/metrics均在包外，验收进程已关闭。完整证据位于`develop/tmp/delivery-55ffdf1-20261101-111347`，旧58cb326包继续保留。
-
-构建与运行：[README](../README.md)；[系统设计](architecture.zh-CN.md)；[GPU 输出](gpu-output.zh-CN.md)；[架构取舍](design-review.zh-CN.md)；[打包](packaging.zh-CN.md)；[控制协议](control-protocol.md)；[SDK](sdk.md)。本机调试输出为 `C:\src\chromium\src\out\dev\remotekit_browser.exe`。
+[构建运行](../README.md) · [Control](../control/README.md) · [打包](packaging.zh-CN.md) · [接口](streaming-protocol.md) · [SDK](sdk.md) · [历史选项归档](experiments-archive.zh-CN.md)
