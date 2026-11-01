@@ -226,10 +226,36 @@ index a881d16173..652ae1cd7a 100644
  
    // Maximum number of planes allowed when returning software NV12 results.
 diff --git a/components/viz/host/client_frame_sink_video_capturer.cc b/components/viz/host/client_frame_sink_video_capturer.cc
-index f66801eebe..ff744d9bf8 100644
+index f66801eebe..1f96c46b9c 100644
 --- a/components/viz/host/client_frame_sink_video_capturer.cc
 +++ b/components/viz/host/client_frame_sink_video_capturer.cc
-@@ -158,8 +158,9 @@ ClientFrameSinkVideoCapturer::CreateOverlay(int32_t stacking_index) {
+@@ -8,6 +8,7 @@
+ #include <utility>
+ 
+ #include "base/functional/bind.h"
++#include "base/logging.h"
+ #include "base/notimplemented.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "media/capture/mojom/video_capture_buffer.mojom.h"
+@@ -17,6 +18,17 @@ namespace viz {
+ 
+ namespace {
+ 
++// Internal disconnect reasons: Mojo reserves zero for transport loss. Service
++// uses one for resource reconfiguration and two for an explicit fatal failure.
++constexpr bool RequiresNewCaptureToAtlasResources(uint32_t reason) {
++  return reason == 0u || reason == 1u;
++}
++static_assert(RequiresNewCaptureToAtlasResources(0u));
++static_assert(RequiresNewCaptureToAtlasResources(1u));
++static_assert(!RequiresNewCaptureToAtlasResources(2u));
++static_assert(!RequiresNewCaptureToAtlasResources(3u));
++static_assert(!RequiresNewCaptureToAtlasResources(0xffffffffu));
++
+ // How long to wait before attempting to re-establish a lost connection.
+ constexpr base::TimeDelta kReEstablishConnectionDelay = base::Milliseconds(100);
+ 
+@@ -158,8 +170,9 @@ ClientFrameSinkVideoCapturer::CreateOverlay(int32_t stacking_index) {
    auto overlay =
        std::make_unique<Overlay>(weak_factory_.GetWeakPtr(), stacking_index);
    overlays_.push_back(overlay.get());
@@ -240,7 +266,7 @@ index f66801eebe..ff744d9bf8 100644
    return overlay;
  }
  
-@@ -214,15 +215,18 @@ void ClientFrameSinkVideoCapturer::EstablishConnection() {
+@@ -214,15 +227,18 @@ void ClientFrameSinkVideoCapturer::EstablishConnection() {
    capturer_remote_.reset();
    establish_connection_callback_.Run(
        capturer_remote_.BindNewPipeAndPassReceiver());
@@ -263,7 +289,7 @@ index f66801eebe..ff744d9bf8 100644
    if (animated_content_sampler_enabled_ && majority_damaged_pixel_min_ratio_) {
      capturer_remote_->SetAnimationFpsLockIn(*animated_content_sampler_enabled_,
                                              *majority_damaged_pixel_min_ratio_);
-@@ -241,15 +245,47 @@ void ClientFrameSinkVideoCapturer::EstablishConnection() {
+@@ -241,15 +257,53 @@ void ClientFrameSinkVideoCapturer::EstablishConnection() {
    if (target_) {
      capturer_remote_->ChangeTarget(target_.value(), sub_capture_version_);
    }
@@ -304,17 +330,23 @@ index f66801eebe..ff744d9bf8 100644
 +    is_started_ = false;
 +    consumer_receiver_.reset();
 +    consumer_ = nullptr;
++    const bool reconfigure = RequiresNewCaptureToAtlasResources(reason);
++    const std::string detail =
++        description.empty() ? (reason == 0u ? "Viz transport connection lost"
++                                           : "Viz disconnected without description")
++                            : description;
++    LOG(INFO) << "RemoteKitCaptureToAtlas connection_lost reason=" << reason
++              << " description=" << detail
++              << " classification=" << (reconfigure ? "reconfigure" : "fatal");
 +    if (capture_to_atlas_invalidated_) {
-+      std::move(capture_to_atlas_invalidated_)
-+          .Run(reason == 1,
-+               description.empty() ? "Viz connection lost" : description);
++      std::move(capture_to_atlas_invalidated_).Run(reconfigure, detail);
 +    }
 +    return;
 +  }
    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
        FROM_HERE,
        base::BindOnce(&ClientFrameSinkVideoCapturer::EstablishConnection,
-@@ -260,8 +296,9 @@ void ClientFrameSinkVideoCapturer::OnConnectionError() {
+@@ -260,8 +314,9 @@ void ClientFrameSinkVideoCapturer::OnConnectionError() {
  void ClientFrameSinkVideoCapturer::StartInternal() {
    DCHECK(is_started_);
  
@@ -325,7 +357,7 @@ index f66801eebe..ff744d9bf8 100644
    capturer_remote_->Start(consumer_receiver_.BindNewPipeAndPassRemote(),
                            buffer_format_preference_);
  }
-@@ -282,8 +319,9 @@ ClientFrameSinkVideoCapturer::Overlay::Overlay(
+@@ -282,8 +337,9 @@ ClientFrameSinkVideoCapturer::Overlay::Overlay(
  ClientFrameSinkVideoCapturer::Overlay::~Overlay() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
  
@@ -336,7 +368,7 @@ index f66801eebe..ff744d9bf8 100644
  }
  
  void ClientFrameSinkVideoCapturer::Overlay::SetImageAndBounds(
-@@ -292,8 +330,9 @@ void ClientFrameSinkVideoCapturer::Overlay::SetImageAndBounds(
+@@ -292,8 +348,9 @@ void ClientFrameSinkVideoCapturer::Overlay::SetImageAndBounds(
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
    DCHECK(!image.isNull());
  
@@ -347,7 +379,7 @@ index f66801eebe..ff744d9bf8 100644
  
    image_ = image;
    bounds_ = bounds;
-@@ -304,8 +343,9 @@ void ClientFrameSinkVideoCapturer::Overlay::SetBounds(
+@@ -304,8 +361,9 @@ void ClientFrameSinkVideoCapturer::Overlay::SetBounds(
      const gfx::RectF& bounds) {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
  
@@ -358,7 +390,7 @@ index f66801eebe..ff744d9bf8 100644
  
    bounds_ = bounds;
    overlay_->SetBounds(bounds_);
-@@ -344,8 +384,9 @@ void ClientFrameSinkVideoCapturer::Overlay::EstablishConnection(
+@@ -344,8 +402,9 @@ void ClientFrameSinkVideoCapturer::Overlay::EstablishConnection(
    // will realize this when the FrameSinkVideoCapturer's binding is lost, and
    // re-establish a connection to both that and this overlay.
  
@@ -1637,7 +1669,7 @@ index 0000000000..f434486801
 +#endif
 +}  // namespace viz
 diff --git a/components/viz/service/frame_sinks/video_capture/frame_sink_video_capturer_impl.cc b/components/viz/service/frame_sinks/video_capture/frame_sink_video_capturer_impl.cc
-index 330a2b5f91..8e9feda29e 100644
+index 330a2b5f91..b069a4bf64 100644
 --- a/components/viz/service/frame_sinks/video_capture/frame_sink_video_capturer_impl.cc
 +++ b/components/viz/service/frame_sinks/video_capture/frame_sink_video_capturer_impl.cc
 @@ -33,6 +33,8 @@
@@ -1668,7 +1700,7 @@ index 330a2b5f91..8e9feda29e 100644
  
    TRACE_EVENT_INSTANT(
        "gpu.capture", "SetResolvedTarget", "current",
-@@ -303,8 +310,88 @@ void FrameSinkVideoCapturerImpl::OnTargetWillGoAway() {
+@@ -303,8 +310,92 @@ void FrameSinkVideoCapturerImpl::OnTargetWillGoAway() {
    SetResolvedTarget(nullptr);
  }
  
@@ -1722,7 +1754,9 @@ index 330a2b5f91..8e9feda29e 100644
 +  }
 +  capture_to_atlas_invalidated_ = true;
 +  LOG(ERROR) << "RemoteKitCaptureToAtlas invalidated generation="
-+             << capture_to_atlas_generation_ << " reason=" << reason;
++             << capture_to_atlas_generation_
++             << " classification=" << (reconfigure ? "reconfigure" : "fatal")
++             << " reason=" << reason;
 +  Stop();
 +  if (resolved_target_) {
 +    resolved_target_->DetachCaptureClient(this);
@@ -1733,7 +1767,9 @@ index 330a2b5f91..8e9feda29e 100644
 +  }
 +  frame_pool_.reset();
 +  if (receiver_.is_bound()) {
-+    receiver_.ResetWithReason(reconfigure ? 1u : 0u, reason);
++    // Zero belongs to Mojo transport loss; explicit failures must remain fatal
++    // even if their description is empty. Keep in sync with the host mapping.
++    receiver_.ResetWithReason(reconfigure ? 1u : 2u, reason);
 +    // Do not erase the owner entry while a target/manager notification is
 +    // iterating it. The weak callback is canceled if shutdown destroys us.
 +    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
@@ -1757,7 +1793,7 @@ index 330a2b5f91..8e9feda29e 100644
    bool format_changed = false;
  
    if (format != media::PIXEL_FORMAT_I420 &&
-@@ -442,6 +529,12 @@ void FrameSinkVideoCapturerImpl::ChangeTarget(
+@@ -442,6 +533,12 @@ void FrameSinkVideoCapturerImpl::ChangeTarget(
      uint32_t sub_capture_version) {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
  
@@ -1770,7 +1806,7 @@ index 330a2b5f91..8e9feda29e 100644
    target_ = target;
  
    if (capture_version_sub_capture_ != sub_capture_version) {
-@@ -473,9 +566,21 @@ void FrameSinkVideoCapturerImpl::Start(
+@@ -473,9 +570,21 @@ void FrameSinkVideoCapturerImpl::Start(
    // Clear any marked frame if the capturer was restarted.
    MarkFrame(nullptr);
  
@@ -1795,7 +1831,7 @@ index 330a2b5f91..8e9feda29e 100644
  
    TRACE_EVENT_BEGIN("gpu.capture", "FrameSinkVideoCapturerImpl::Start",
                      perfetto::Track::FromPointer(this), "pixel_format_",
-@@ -952,6 +1057,12 @@ void FrameSinkVideoCapturerImpl::MaybeCaptureFrame(
+@@ -952,6 +1061,12 @@ void FrameSinkVideoCapturerImpl::MaybeCaptureFrame(
    CHECK(!source_size.IsEmpty());
    CHECK_EQ(region_properties->render_pass_subrect.size(), source_size);
  
@@ -1808,7 +1844,7 @@ index 330a2b5f91..8e9feda29e 100644
    const bool can_resurrect_content = CanResurrectFrame(capture_size);
    scoped_refptr<VideoFrame> frame;
    if (can_resurrect_content) {
-@@ -1339,6 +1450,88 @@ void FrameSinkVideoCapturerImpl::DidCopyFrame(
+@@ -1339,6 +1454,88 @@ void FrameSinkVideoCapturerImpl::DidCopyFrame(
    CHECK_GE(frame_capture.capture_frame_number, next_delivery_frame_number_);
    CHECK(frame_capture.frame);
    CHECK(result);
@@ -1897,7 +1933,7 @@ index 330a2b5f91..8e9feda29e 100644
  
    scoped_refptr<media::VideoFrame>& frame = frame_capture.frame;
    const gfx::Rect& content_rect = frame_capture.content_rect;
-@@ -1467,14 +1660,16 @@ void FrameSinkVideoCapturerImpl::DidCopyFrame(
+@@ -1467,14 +1664,16 @@ void FrameSinkVideoCapturerImpl::DidCopyFrame(
  #endif
        // MappableSI ARGB results are written to the existing pool texture.
        if (result->IsEmpty()) {
@@ -1917,7 +1953,7 @@ index 330a2b5f91..8e9feda29e 100644
      }
    } else {
      CHECK_EQ(pixel_format_, media::PIXEL_FORMAT_NV12);
-@@ -1673,6 +1868,16 @@ void FrameSinkVideoCapturerImpl::MaybeDeliverFrame(FrameCapture frame_capture) {
+@@ -1673,6 +1872,16 @@ void FrameSinkVideoCapturerImpl::MaybeDeliverFrame(FrameCapture frame_capture) {
    // It responds to the consumer's Done() notification by returning the video
    // frame to the `frame_pool_`. It responds to the optional ProvideFeedback()
    // by forwarding the measurement to the `oracle_`.
@@ -1934,7 +1970,7 @@ index 330a2b5f91..8e9feda29e 100644
    mojo::PendingRemote<mojom::FrameSinkVideoConsumerFrameCallbacks> callbacks;
    mojo::MakeSelfOwnedReceiver(
        std::make_unique<InFlightFrameDelivery>(
-@@ -1680,7 +1885,8 @@ void FrameSinkVideoCapturerImpl::MaybeDeliverFrame(FrameCapture frame_capture) {
+@@ -1680,7 +1889,8 @@ void FrameSinkVideoCapturerImpl::MaybeDeliverFrame(FrameCapture frame_capture) {
                           capture_weak_factory_.GetWeakPtr(), std::move(frame)),
            base::BindOnce(&VideoCaptureOracle::RecordConsumerFeedback,
                           feedback_weak_factory_.GetWeakPtr(),
@@ -1944,7 +1980,7 @@ index 330a2b5f91..8e9feda29e 100644
        callbacks.InitWithNewPipeAndPassReceiver());
  
    num_frames_in_flight_++;
-@@ -1736,8 +1942,10 @@ void FrameSinkVideoCapturerImpl::OnLog(const std::string& message) {
+@@ -1736,8 +1946,10 @@ void FrameSinkVideoCapturerImpl::OnLog(const std::string& message) {
  
  bool FrameSinkVideoCapturerImpl::ShouldMark(const media::VideoFrame& frame,
                                              int64_t content_version) const {
@@ -1957,7 +1993,7 @@ index 330a2b5f91..8e9feda29e 100644
  }
  
  void FrameSinkVideoCapturerImpl::MarkFrame(
-@@ -1749,7 +1957,8 @@ void FrameSinkVideoCapturerImpl::MarkFrame(
+@@ -1749,7 +1961,8 @@ void FrameSinkVideoCapturerImpl::MarkFrame(
  
  bool FrameSinkVideoCapturerImpl::CanResurrectFrame(
      const gfx::Size& size) const {
@@ -1967,7 +2003,7 @@ index 330a2b5f91..8e9feda29e 100644
           marked_frame_ && marked_frame_->coded_size() == size;
  }
  
-@@ -1783,6 +1992,10 @@ void FrameSinkVideoCapturerImpl::MaybeInformConsumerOfEmptyRegion() {
+@@ -1783,6 +1996,10 @@ void FrameSinkVideoCapturerImpl::MaybeInformConsumerOfEmptyRegion() {
  
  void FrameSinkVideoCapturerImpl::InvalidateBuffers() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);

@@ -97,3 +97,15 @@ capturer仅对 external pool + empty + typed4 + RGBA/SharedImage 走已有Captur
 验证：原out/dev、16核增量构建961步成功，最终定稿再增量5步成功；Browser/SDK/最小测试均编译链接。10/10 CPU通过，新增5项分别验证写入前typed、进入GPU后unknown、显式unknown不改写、正常结果非empty、普通pool保留unknown。最小target和viz_common GN check通过。七补丁独立重放、与活动源等价、完整撤回基线通过48源文件。证据为 build-pre-gpu-cancel.log、build-pre-gpu-cancel-final.log、tests-pre-gpu-cancel.log、patch-replay-pre-gpu-cancel.log、patch-status-pre-gpu-cancel.log。
 
 本任务未启动GPU；D2尚待独立20轮导航复测。若出现typed4以外失败，继续按精确日志定位，不把它放过。没有改变像素、分辨率、编码或正式验收条件。
+
+## 源 GPU 传输断连恢复映射
+
+本轮只改 Chromium host/service 两个 `.cc`。内部 disconnect reason 明确为：0 是 Mojo transport loss，1 是资源重配，2 是 service 显式 fatal；2 和其它未知值继续 fatal。host 对0/1调用已有 invalidation 的 reconfigure 分支，记录原始 reason、描述和分类；不会 EstablishConnection 重放旧池。service 的 GPU context lost、copy失败、delivery-before-Done 等现有显式错误统一发送2，原有 generation 失效和 lease 完成守卫保持。
+
+正常 Stop 不复活：browser 配置/失效回调仍检查 State 存在且 `!stopping_`；host 专用分支清 started/consumer 后始终 return，没有普通100ms reconnect。恢复继续沿既有 `kReconfigureNeeded` → 同RTC output.close/OpenOutput → 全新三槽代流程；本轮没有修改 Endpoint/Viewer、公共header、mojom或共享布局。
+
+验证：out/dev 原参数、16核单次 Browser/SDK/最小测试增量成功，实际4步、24.47秒。host 的 constexpr 断言覆盖0/1重配、2/3/UINT32_MAX fatal；现有最小CPU测试10/10通过。七补丁独立正向重放、48源文件与活动树等价、完整反向恢复通过；活动树 status 七项 applied。日志为 `build-transport-recovery.log`、`tests-transport-recovery.log`、`patch-replay-transport-recovery.log`、`patch-status-transport-recovery.log`。
+
+patch7 SHA-256：`123f00fe254e66fa27223a6783798a9c023ab2a559922f89ddb3db2f07e57144`（116230 bytes）。运行目录 `C:/src/chromium/src/out/dev`，新的 `components_viz_host.dll` SHA-256 为 `33214f2dc177405dfda2a0001645f6b80ce9e6757a8e7093b8017887bd97b526`，`components_viz_service.dll` 为 `e58bc7c0990341b2ca84b7c6a1d0570c28eb0e7d4132dcf409b0ff00821d1a8b`；全部产物指纹已更新到 `develop/tmp/capture-to-atlas/artifacts.json`。
+
+本轮未启动GPU、未提交。已编译和CPU验证；实际源GPU重启后同RTC自动恢复由独立runtime任务验证。
