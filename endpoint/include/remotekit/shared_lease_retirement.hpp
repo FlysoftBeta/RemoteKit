@@ -10,20 +10,25 @@ namespace remotekit {
 class SharedLeaseRetirement {
  public:
   struct Entry { uint64_t value, cookie; };
+  // Caller must first observe a valid producer GPU completed value >= value
+  // on the CPU. This proof belongs to this imported generation and remains
+  // valid if a later fence query reports device removal.
   void Observe(uint64_t value,uint64_t cookie) {
     if(terminal_requested_)throw std::logic_error("shared generation already retiring");
     if(!value || value==UINT64_MAX || value<=last_observed_)throw std::logic_error("shared lease fence regressed");
     entries_.push_back({value,cookie});last_observed_=value;
   }
   // Seal a stopped generation without inventing a pixel lease for its final
-  // unborrowed publications. GPU readiness must be observed on the CPU before
-  // the terminal can enlarge the cumulative acknowledgement prefix.
+  // unborrowed publications. An equal watermark reuses this generation's
+  // existing CPU-ready observation. A higher terminal still needs a valid
+  // current GPU completion observation before it can enlarge the prefix.
   bool ObserveUnborrowedThrough(uint64_t value,uint64_t producer_completed) {
     if(!value || value==UINT64_MAX || value<last_observed_ ||
        (terminal_requested_ && terminal_value_!=value))
       throw std::logic_error("invalid shared terminal watermark");
     terminal_requested_=true;terminal_value_=value;
-    if(producer_completed==UINT64_MAX || producer_completed<value)return false;
+    if(value!=last_observed_ &&
+       (producer_completed==UINT64_MAX || producer_completed<value))return false;
     terminal_ready_=true;last_observed_=value;return true;
   }
   bool terminal_ready() const {return terminal_ready_;}

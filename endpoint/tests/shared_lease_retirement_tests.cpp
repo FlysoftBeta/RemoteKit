@@ -62,6 +62,33 @@ int main() {
   unsigned real_retired=0;
   terminal.Commit(15,[&](uint64_t cookie){Require(cookie==11);++real_retired;});
   Require(real_retired==1 && terminal.size()==0 && terminal.retired_prefix()==15);
+  // Fault regression: this exact terminal was already observed GPU-ready and
+  // retired before the producer disappeared. A later invalid fence query
+  // cannot erase that same-generation completion proof.
+  SharedLeaseRetirement observed_terminal;observed_terminal.Observe(764,1);
+  observed_terminal.Commit(764,[](uint64_t cookie){Require(cookie==1);});
+  Require(observed_terminal.ObserveUnborrowedThrough(764,UINT64_MAX));
+  Require(observed_terminal.terminal_ready() && observed_terminal.retired_prefix()==764);
+  Require(observed_terminal.SafePrefix([](uint64_t){throw std::runtime_error("retired lease restored");return true;})==0);
+  // Ready proof does not release a real reader or bypass the owner's consumed
+  // and done signals. SafePrefix still stops before a held equal-value lease.
+  SharedLeaseRetirement held_terminal;held_terminal.Observe(10,11);
+  Require(held_terminal.ObserveUnborrowedThrough(10,UINT64_MAX));
+  Require(held_terminal.terminal_ready() && held_terminal.last_observed()==10);
+  Require(held_terminal.SafePrefix([](uint64_t){return false;})==9);
+  held_terminal.Commit(9,[](uint64_t){throw std::runtime_error("historical proof freed reader early");});
+  Require(held_terminal.size()==1 && held_terminal.SafePrefix([](uint64_t){return false;})==0);
+  Require(held_terminal.SafePrefix([](uint64_t){return true;})==10);
+  held_terminal.Commit(10,[](uint64_t cookie){Require(cookie==11);});
+  Require(held_terminal.retired_prefix()==10 && held_terminal.size()==0);
+  // Historical proof for 10 says nothing about the unknown higher terminal11.
+  SharedLeaseRetirement higher_terminal;higher_terminal.Observe(10,1);
+  Require(!higher_terminal.ObserveUnborrowedThrough(11,UINT64_MAX));
+  Require(!higher_terminal.terminal_ready() && higher_terminal.last_observed()==10);
+  Require(higher_terminal.SafePrefix([](uint64_t){return true;})==10);
+  higher_terminal.Commit(10,[](uint64_t cookie){Require(cookie==1);});
+  Require(!higher_terminal.ObserveUnborrowedThrough(11,UINT64_MAX));
+  Require(higher_terminal.retired_prefix()==10 && higher_terminal.SafePrefix([](uint64_t){return true;})==0);
   SharedLeaseRetirement never_borrowed;
   Require(!never_borrowed.ObserveUnborrowedThrough(3,2));
   Require(never_borrowed.SafePrefix([](uint64_t){throw std::runtime_error("invented terminal lease");return true;})==0);

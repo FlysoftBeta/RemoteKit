@@ -16,6 +16,7 @@ struct TraceIds {
  int64_t capture_time_us=0,capture_qpc=0;
  uint32_t rtp_timestamp=0,wire_rtp_timestamp=0;
  bool rtp_known=false,wire_known=false;
+ uint64_t atlas_pool=0;
  static TraceIds Frame(const remotekit_rtc_frame& f,bool has_rtp=false) {
   TraceIds ids;ids.frame_id=f.frame_id;ids.capture_time_us=f.capture_time_us;
   ids.capture_qpc=f.capture_qpc;ids.layout_epoch=f.layout_epoch;ids.rtp_timestamp=f.rtp_timestamp;ids.rtp_known=has_rtp;return ids;
@@ -73,6 +74,7 @@ class ServerTrace {
    const auto& i=r.ids;
    auto add=[&](const char* name,auto number){if(number)value[name]=number;};
    add("frame_id",i.frame_id);add("source_frame_id",i.source_frame_id);add("generation",i.generation);
+   add("atlas_pool",i.atlas_pool);
    add("capture_time_us",i.capture_time_us);add("capture_qpc",i.capture_qpc);add("layout_epoch",i.layout_epoch);
    // Zero is a valid RTP timestamp; include both on relevant encode records.
    if(i.rtp_known)value["rtp_timestamp"]=i.rtp_timestamp;
