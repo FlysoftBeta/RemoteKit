@@ -184,7 +184,10 @@ def main():
         (package / 'README.txt').write_text(
             'RemoteKit Windows hardware streaming package\n\n'
             'Extract everything to a writable folder and run run.cmd. Open http://127.0.0.1:3001 in Chrome.\n'
-            'Create an account or log in. Each user has an isolated Tenant/Session and browser process.\n'
+            'The first registered account becomes administrator without a server credential.\n'
+            'Open More > Administrator panel and set the server registration credential before creating other accounts.\n'
+            'Later registrations require that credential; account passwords are independent, and login needs no credential.\n'
+            'Each user has an isolated Tenant/Session and browser process.\n'
             'Viewer state and settings use an authenticated WebSocket; diagnostics are disabled by default.\n'
             'The service defaults to Intel QSV; NVIDIA NVENC can be explicitly selected on compatible hardware.\n'
             'This package includes Node and the Control production dependencies; no build tools are required.\n'

@@ -70,6 +70,7 @@ export function WindowFrame({
   action,
   online,
   onSettings,
+  onAdmin,
   onLogout,
   report,
   onGeometry,
@@ -82,6 +83,7 @@ export function WindowFrame({
   action: Action;
   online: boolean;
   onSettings: () => void;
+  onAdmin: () => void;
   onLogout: () => void;
   report: (error: unknown) => void;
   onGeometry: (id: string, width: number, height: number) => void;
@@ -499,6 +501,11 @@ export function WindowFrame({
         >
           设置
         </MenuItem>
+        {state.user.isAdmin && (
+          <MenuItem disabled={!online} onClick={() => { setMenu(null); onAdmin(); }}>
+            管理员面板
+          </MenuItem>
+        )}
         <Divider />
         <MenuItem disabled>{state.user.username}</MenuItem>
         <MenuItem

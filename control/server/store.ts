@@ -32,6 +32,9 @@ export class Store {
       CREATE TABLE IF NOT EXISTS user_settings (tenant TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS site_preferences (tenant TEXT NOT NULL, origin TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tenant,origin));
       CREATE TABLE IF NOT EXISTS diagnostic_devices (tenant TEXT PRIMARY KEY, data TEXT NOT NULL);`);
+    if (!(this.db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).some(column => column.name === 'is_admin')) this.db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
+    this.db.exec(`CREATE TABLE IF NOT EXISTS registration_policy (id INTEGER PRIMARY KEY CHECK(id=1), salt TEXT NOT NULL, credential_hash TEXT NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS single_admin ON users(is_admin) WHERE is_admin=1;`);
     this.db.exec('CREATE TABLE IF NOT EXISTS popup_receipts (tenant TEXT NOT NULL, provisional_id TEXT NOT NULL, tab_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,provisional_id))');
     this.db.transaction(() => {
       const legacyRows = this.db.prepare('SELECT id,state FROM tenants').all() as { id: string; state: string }[];
@@ -41,7 +44,7 @@ export class Store {
       for (const row of legacyRows) {
         if (this.db.prepare('SELECT tenant FROM workspaces WHERE tenant=?').get(row.id)) continue;
         const old = JSON.parse(row.state) as ControlState;
-        this.db.prepare('INSERT OR IGNORE INTO users VALUES (?,?,?,?,?,1)').run(randomUUID(), `legacy-${row.id}`, row.id, null, null);
+        this.db.prepare('INSERT OR IGNORE INTO users(id,username,tenant,salt,password_hash,legacy) VALUES (?,?,?,?,?,1)').run(randomUUID(), `legacy-${row.id}`, row.id, null, null);
         const migrated = migrateLegacy(old);
         for (const tab of migrated.tabs) if (!tab.webviewId) tab.webviewId = this.viewId();
         this.writeWorkspace(migrated);
@@ -49,6 +52,7 @@ export class Store {
         const owner = this.userForTenant(row.id)!;
         for (const session of this.db.prepare('SELECT token FROM sessions WHERE tenant=?').all(row.id) as { token: string }[]) this.db.prepare('INSERT OR IGNORE INTO auth_tokens VALUES (?,?,?)').run(tokenHash(session.token), owner.id, Date.now() + 30 * 86400000);
       }
+      if (!this.hasAdmin()) this.db.prepare('UPDATE users SET is_admin=1 WHERE rowid=(SELECT rowid FROM users WHERE legacy=0 ORDER BY rowid LIMIT 1)').run();
       let max = 0n;
       for (const row of this.db.prepare('SELECT data FROM workspace_tabs').all() as { data: string }[]) { const id = JSON.parse(row.data).webviewId; if (/^[1-9][0-9]*$/.test(id)) max = BigInt(id) > max ? BigInt(id) : max; }
       if (max > 0n) this.db.prepare('INSERT OR IGNORE INTO view_ids(id) VALUES (?)').run(max);
@@ -63,34 +67,55 @@ export class Store {
     return this.db.transaction(() => {
       const tenantId = randomUUID(), userId = randomUUID(), token = randomBytes(32).toString('hex');
       this.db.prepare('INSERT INTO tenants VALUES (?,?)').run(tenantId, '{}');
-      this.db.prepare('INSERT INTO users VALUES (?,?,?,?,?,1)').run(userId, `diagnostic-${userId}`, tenantId, null, null);
+      this.db.prepare('INSERT INTO users(id,username,tenant,salt,password_hash,legacy) VALUES (?,?,?,?,?,1)').run(userId, `diagnostic-${userId}`, tenantId, null, null);
       this.writeWorkspace(emptyWorkspace(tenantId)); this.issueToken(userId, token); return { token, tenantId, fresh: true };
     })();
   }
   private issueToken(userId: string, value = randomBytes(32).toString('hex')) { this.db.prepare('INSERT INTO auth_tokens VALUES (?,?,?)').run(tokenHash(value), userId, Date.now() + 30 * 86400000); return value; }
   identity(token?: string): { user: ProductUser; tenantId: string; legacy: boolean } | undefined {
     if (!token || token.length > 256) return;
-    const row = this.db.prepare('SELECT u.id,u.username,u.tenant,u.legacy FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=? AND t.expires_at>?').get(tokenHash(token), Date.now()) as { id: string; username: string; tenant: string; legacy: bigint } | undefined;
-    return row ? { user: { id: row.id, username: row.username }, tenantId: row.tenant, legacy: !!row.legacy } : undefined;
+    const row = this.db.prepare('SELECT u.id,u.username,u.tenant,u.legacy,u.is_admin FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=? AND t.expires_at>?').get(tokenHash(token), Date.now()) as { id: string; username: string; tenant: string; legacy: bigint; is_admin: bigint } | undefined;
+    return row ? { user: { id: row.id, username: row.username, isAdmin: !!row.is_admin }, tenantId: row.tenant, legacy: !!row.legacy } : undefined;
   }
   authenticated(token?: string): string | undefined { return this.identity(token)?.tenantId; }
-  userForTenant(tenant: string): ProductUser | undefined { return this.db.prepare('SELECT id,username FROM users WHERE tenant=?').get(tenant) as ProductUser | undefined; }
+  userForTenant(tenant: string): ProductUser | undefined { const row = this.db.prepare('SELECT id,username,is_admin FROM users WHERE tenant=?').get(tenant) as { id: string; username: string; is_admin: bigint } | undefined; return row ? { id: row.id, username: row.username, isAdmin: !!row.is_admin } : undefined; }
   isLegacy(tenant: string): boolean { return !!(this.db.prepare('SELECT legacy FROM users WHERE tenant=?').get(tenant) as { legacy: bigint } | undefined)?.legacy; }
   revoke(token?: string) { if (token) this.db.prepare('DELETE FROM auth_tokens WHERE hash=?').run(tokenHash(token)); }
-  async register(username: unknown, password: unknown) {
-    const name = this.credentials(username, password), salt = randomBytes(16).toString('hex'), hash = (await scrypt(password as string, salt, 64) as Buffer).toString('hex');
+  private hasAdmin() { return !!this.db.prepare('SELECT id FROM users WHERE is_admin=1').get(); }
+  private registrationCredential() { return this.db.prepare('SELECT salt,credential_hash FROM registration_policy WHERE id=1').get() as { salt: string; credential_hash: string } | undefined; }
+  registrationStatus() { const hasAdmin = this.hasAdmin(), configured = !!this.registrationCredential(); return { hasAdmin, credentialRequired: hasAdmin, registrationOpen: !hasAdmin || configured }; }
+  adminStatus() { return { registrationCredentialConfigured: !!this.registrationCredential() }; }
+  async setRegistrationCredential(tenant: string, value: unknown, validate: () => void = () => {}) {
+    const authorize = () => { validate(); if (!this.userForTenant(tenant)?.isAdmin) throw new Error('需要管理员权限'); };
+    authorize(); this.validateServerCredential(value);
+    const salt = randomBytes(16).toString('hex'), hash = (await scrypt(value as string, salt, 64) as Buffer).toString('hex');
+    return this.db.transaction(() => { authorize(); this.db.prepare('INSERT OR REPLACE INTO registration_policy VALUES (1,?,?)').run(salt, hash); return this.adminStatus(); })();
+  }
+  private validateServerCredential(value: unknown): asserts value is string { if (typeof value !== 'string' || value.length < 8 || value.length > 256) throw new Error('注册口令需8–256个字符'); }
+  async register(username: unknown, password: unknown, serverCredential?: unknown) {
+    const name = this.credentials(username, password), hasAdmin = this.hasAdmin(), credential = this.registrationCredential();
+    if (hasAdmin && !credential) throw new Error('管理员尚未配置注册口令，注册暂未开放');
+    if (hasAdmin) this.validateServerCredential(serverCredential);
+    const salt = randomBytes(16).toString('hex');
+    const [hash, supplied] = await Promise.all([scrypt(password as string, salt, 64), hasAdmin ? scrypt(serverCredential as string, credential!.salt, 64) : Promise.resolve(undefined)]) as [Buffer, Buffer | undefined];
+    if (hasAdmin && !timingSafeEqual(supplied!, Buffer.from(credential!.credential_hash, 'hex'))) throw new Error('注册口令错误');
     return this.db.transaction(() => {
+      // Hashing yields: check the exact current policy again before granting an account.
+      const current = this.registrationCredential();
+      if (this.hasAdmin() !== hasAdmin || current?.salt !== credential?.salt || current?.credential_hash !== credential?.credential_hash) throw new Error('注册策略已更新，请重试');
       if (this.db.prepare('SELECT id FROM users WHERE username=? COLLATE NOCASE').get(name)) throw new Error('用户名已存在');
-      const id = randomUUID(), tenantId = randomUUID(); this.db.prepare('INSERT INTO tenants VALUES (?,?)').run(tenantId, '{}'); this.db.prepare('INSERT INTO users VALUES (?,?,?,?,?,0)').run(id, name, tenantId, salt, hash);
-      this.writeWorkspace(emptyWorkspace(tenantId)); return { token: this.issueToken(id), tenantId, user: { id, username: name } };
+      const id = randomUUID(), tenantId = randomUUID(), isAdmin = !hasAdmin;
+      this.db.prepare('INSERT INTO tenants VALUES (?,?)').run(tenantId, '{}');
+      this.db.prepare('INSERT INTO users(id,username,tenant,salt,password_hash,legacy,is_admin) VALUES (?,?,?,?,?,0,?)').run(id, name, tenantId, salt, hash.toString('hex'), Number(isAdmin));
+      this.writeWorkspace(emptyWorkspace(tenantId)); return { token: this.issueToken(id), tenantId, user: { id, username: name, isAdmin } };
     })();
   }
   async login(username: unknown, password: unknown) {
     const name = this.credentials(username, password);
-    const row = this.db.prepare('SELECT id,username,tenant,salt,password_hash FROM users WHERE username=? COLLATE NOCASE AND legacy=0').get(name) as { id: string; username: string; tenant: string; salt: string; password_hash: string } | undefined;
+    const row = this.db.prepare('SELECT id,username,tenant,salt,password_hash,is_admin FROM users WHERE username=? COLLATE NOCASE AND legacy=0').get(name) as { id: string; username: string; tenant: string; salt: string; password_hash: string; is_admin: bigint } | undefined;
     const actual = await scrypt(password as string, row?.salt ?? 'unknown-user-salt', 64) as Buffer;
     if (!row || !timingSafeEqual(actual, Buffer.from(row.password_hash, 'hex'))) throw new Error('用户名或密码错误');
-    return { token: this.issueToken(row.id), tenantId: row.tenant, user: { id: row.id, username: row.username } };
+    return { token: this.issueToken(row.id), tenantId: row.tenant, user: { id: row.id, username: row.username, isAdmin: !!row.is_admin } };
   }
   private credentials(username: unknown, password: unknown) { if (typeof username !== 'string' || !/^[A-Za-z0-9_.-]{3,40}$/.test(username) || typeof password !== 'string' || password.length < 8 || password.length > 256) throw new Error('用户名需3–40个字母、数字或_.-，密码需8–256个字符'); return username; }
   workspace(tenant: string): ProductWorkspace {

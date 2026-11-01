@@ -16,6 +16,7 @@
 - Control是产品状态真相，持有User/Window/tab/设置与Endpoint对象有限引用。Chromium恢复数据由Endpoint Session/Browser托管；对象丢失可按有限产品信息重建，对账清理orphan。
 - `/control`使用TypeScript、better-sqlite3、Vite、React、MUI。普通Viewer采用沉浸式浏览器外壳、实际内容区尺寸、多个独立Window并排/窄屏切换；不是两个active tab冒充多Window。
 - 每站点平板设置只改变UA/CH，不模拟viewport；放更多菜单。设置统一在更多→设置。质量选择只保留优先高画质、自动、优先流畅；Client Scale默认Viewer DPR，可override。设置存Control，客户端只持久化用户token。
+- 首个正式注册用户为管理员；管理员面板管理服务器级注册口令。口令只用于后续注册，账号密码独立，设置由Control持久化，客户端不保存或回显口令。
 - Client直接与Endpoint建立H264 WebRTC及DataChannel输入；鉴权、信令、产品状态由Control管理，Viewer↔Control使用WebSocket。支持键鼠、文本、IME与触控。
 - 开启Control Memory Saver策略。Viewer断线决定产品visible=false及回收资格；RTC连接独立决定渲染/编码需求，不反向把hidden页面显示出来。
 - Rectangle Packing把多个可见平面合为视频atlas；必须处理DPR、DIP、编码采样比例、letterbox、screen坐标与旧布局输入门禁。
@@ -65,9 +66,11 @@ python3 tools/package-runtime.py
 - 子agent无普通commentary，重大阻碍/决策及时报告，常规内容final交付。任务外问题报告证据和影响，root统一排队，不无边界扩大。
 - 不频繁询问进度；有独立工作继续推进，等待使用工具允许的合理长超时，不忙轮询。
 
-## 本轮收尾与发布顺序
+## 已完成批次的验收与发布约定
 
 - 双租户45秒同组已达到约51.7FPS、Pixel marker p95 76/79ms，条件见当前状态。用户取消额外120秒稳定复验与单租户重复复验；不得为再次确认结果追加性能组。功能改动仍做必要检查。
 - 完成功能任务并认真整理codebase/docs后，先构建上传第一版。委派Sol6.1按[上传流程](docs/upload/README.md)执行，返回取件码；上传已授权，凭据不输出/打包。
 - 第一版上传后，委派Astra6 Medium对照文档审查代码库，寻找逻辑bug与有价值的重构。root审阅取舍，委派必要修复并同步文档；有任何变动，再构建并委派Sol上传第二版。
 - 完成两阶段交付和commit/push后，最后删除goal；不得提前结束。
+
+2026-11-02：上述两阶段审查交付已完成。后续新增功能按各自任务构建发布，不自动重复全库审查或性能矩阵。

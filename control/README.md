@@ -12,7 +12,7 @@ npm run dev
 npm run client
 ```
 
-生产构建使用`npm run build`，发布包使用仓库`tools/package-runtime.py`，最终用户不需要npm。首次打开正常Viewer创建账号；同账号恢复同一工作区，不同账号隔离。每账号当前只有一个活跃Viewer，新连接接管后旧Viewer不会自动抢回。
+生产构建使用`npm run build`，发布包使用仓库`tools/package-runtime.py`，最终用户不需要npm。首次打开正常Viewer创建的正式账号自动成为管理员；在更多→管理员面板设置注册口令后，其他用户使用该口令注册自己的账号。注册口令不是登录密码，未设置时不开放后续注册。升级旧数据库时保留账号并将最早的正式账号设为管理员；诊断账号不参与。同账号恢复同一工作区，不同账号隔离。每账号当前只有一个活跃Viewer，新连接接管后旧Viewer不会自动抢回。
 
 默认Control监听127.0.0.1:3001。开发Vite为5173并代理HTTP/WS。服务环境变量以server/main.ts为准：
 

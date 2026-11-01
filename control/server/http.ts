@@ -16,6 +16,7 @@ export function createHttp(control: Control, options: { origins: string[]; clien
     try {
       const address = new URL(req.url ?? '/', 'http://localhost'), path = address.pathname, token = readToken(req);
       const diagnostic = options.diagnostics === true;
+      if (path === '/api/auth/registration' && req.method === 'GET') return json(res, 200, control.store.registrationStatus());
       if (path === '/api/auth/me' && req.method === 'GET') { const identity = control.store.identity(token); if (!identity) throw new ApiError(401, '请先登录'); return json(res, 200, { authenticated: true, user: identity.user }); }
       if (path === '/api/state' && req.method === 'GET') {
         if (!diagnostic) throw new ApiError(404, '正常 Viewer 请使用 WebSocket');
@@ -29,7 +30,7 @@ export function createHttp(control: Control, options: { origins: string[]; clien
         const body = await readBody(req); if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ApiError(400, '需要 JSON 对象');
         if (['tenantId', 'tenant', 'userId', 'user'].some(key => key in body)) throw new ApiError(400, '客户端不能指定用户或租户');
         if (path === '/api/auth/register' || path === '/api/auth/login') {
-          let session; try { session = path.endsWith('register') ? await control.store.register(body.username, body.password) : await control.store.login(body.username, body.password); } catch (error) { throw new ApiError(path.endsWith('login') ? 401 : 400, error instanceof Error ? error.message : String(error)); }
+          let session; try { session = path.endsWith('register') ? await control.store.register(body.username, body.password, body.serverCredential) : await control.store.login(body.username, body.password); } catch (error) { throw new ApiError(path.endsWith('login') ? 401 : 400, error instanceof Error ? error.message : String(error)); }
           const previous = control.store.identity(token); if (previous) { control.store.revoke(token); await control.logout(previous.tenantId, authenticationIdentity(token!)); }
           res.setHeader('Set-Cookie', cookie(session.token)); return json(res, 200, { authenticated: true, user: session.user });
         }

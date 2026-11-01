@@ -217,6 +217,13 @@ export class Control extends EventEmitter {
     this.assertViewer(tenant, lease);
     if (!params || typeof params !== 'object' || Array.isArray(params)) throw new ApiError(400, '需要参数对象');
     if (['tenantId', 'tenant', 'userId', 'user'].some(key => key in params)) throw new ApiError(400, '客户端不能指定用户或租户');
+    if (method === 'admin.get' || method === 'admin.setRegistrationCredential') {
+      const authorize = () => { this.assertViewer(tenant, lease); if (!this.store.userForTenant(tenant)?.isAdmin) throw new ApiError(403, '需要管理员权限'); };
+      authorize();
+      if (method === 'admin.get') return this.store.adminStatus();
+      try { return await this.store.setRegistrationCredential(tenant, params.serverCredential, authorize); }
+      catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(400, error instanceof Error ? error.message : String(error)); }
+    }
     if (method === 'action') return this.productAction(tenant, params, lease);
     if (method === 'viewport') return this.viewport(tenant, params, lease);
     if (method === 'rtc.offer') return this.offer(tenant, params, lease);

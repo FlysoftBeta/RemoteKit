@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -23,6 +23,7 @@ import type {
   ProductSettings,
   ProductState,
   ProductUser,
+  RegistrationStatus,
 } from "../shared/product";
 import { request } from "./types";
 export type Action = (action: ProductAction) => Promise<unknown>;
@@ -36,8 +37,32 @@ export function AuthView({
   const [register, setRegister] = useState(false),
     [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
+    [serverCredential, setServerCredential] = useState(""),
+    [registration, setRegistration] = useState<RegistrationStatus | null>(null),
+    [registrationError, setRegistrationError] = useState(""),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const submitting = useRef(false), registrationRequest = useRef(0);
+  const refreshRegistration = useCallback(async () => {
+    const sequence = ++registrationRequest.current;
+    setRegistration(null);
+    setRegistrationError("");
+    try {
+      const result = await request<RegistrationStatus>("/api/auth/registration");
+      if (sequence === registrationRequest.current) setRegistration(result);
+    } catch (e) {
+      if (sequence === registrationRequest.current) setRegistrationError(errorMessage(e));
+    }
+  }, []);
+  useEffect(() => {
+    void refreshRegistration();
+    const refresh = () => { void refreshRegistration(); };
+    window.addEventListener("focus", refresh);
+    return () => {
+      registrationRequest.current++;
+      window.removeEventListener("focus", refresh);
+    };
+  }, [register, refreshRegistration]);
   return (
     <main className="auth-page">
       <Box
@@ -45,17 +70,26 @@ export function AuthView({
         className="auth-form"
         onSubmit={async (event) => {
           event.preventDefault();
+          if (submitting.current || (register && !registration?.registrationOpen)) return;
+          if (register && registration?.credentialRequired &&
+              (serverCredential.length < 8 || serverCredential.length > 256)) {
+            setError("注册口令须为 8–256 个字符");
+            return;
+          }
+          submitting.current = true;
           setBusy(true);
           setError("");
           try {
             const result = await request<{ user: ProductUser }>(
               `/api/auth/${register ? "register" : "login"}`,
-              { username, password },
+              { username, password, ...(register ? { serverCredential } : {}) },
             );
             onLogin(result.user);
           } catch (e) {
             setError(errorMessage(e));
+            if (register) void refreshRegistration();
           } finally {
+            submitting.current = false;
             setBusy(false);
           }
         }}
@@ -65,29 +99,55 @@ export function AuthView({
         </Typography>
         <Typography color="text.secondary">继续你的浏览器工作空间</Typography>
         {error && <Alert severity="error">{error}</Alert>}
+        {register && (
+          registrationError ? <Alert severity="error" action={
+            <Button color="inherit" onClick={() => void refreshRegistration()}>重试</Button>
+          }>无法读取注册状态：{registrationError}</Alert> :
+          !registration ? <Typography color="text.secondary" role="status">正在读取注册状态…</Typography> :
+          !registration.hasAdmin ? <Alert severity="info">首个账户将成为管理员。创建后，请在更多 → 管理员面板设置注册口令。</Alert> :
+          !registration.registrationOpen ? <Alert severity="info" action={
+            <Button color="inherit" onClick={() => void refreshRegistration()}>刷新</Button>
+          }>注册暂未开放，请联系管理员先设置注册口令。</Alert> : null
+        )}
         <TextField
           required
           autoFocus
           label="用户名"
+          disabled={busy}
           autoComplete="username"
           value={username}
           onChange={(e) => setUsername(e.target.value)}
         />
         <TextField
           required
-          label="密码"
+          label="账户密码"
+          disabled={busy}
           type="password"
           autoComplete={register ? "new-password" : "current-password"}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        <Button variant="contained" type="submit" disabled={busy}>
+        {register && registration?.credentialRequired && (
+          <TextField
+            required
+            label="注册口令（Server credential）"
+            disabled={busy}
+            type="password"
+            autoComplete="off"
+            value={serverCredential}
+            onChange={(e) => setServerCredential(e.target.value)}
+            helperText="由管理员提供，与账户密码不同。"
+            inputProps={{ minLength: 8, maxLength: 256 }}
+          />
+        )}
+        <Button variant="contained" type="submit" disabled={busy || (register && !registration?.registrationOpen)}>
           {busy ? "请稍候…" : register ? "创建账户" : "登录"}
         </Button>
         <Button
           disabled={busy}
           onClick={() => {
             setRegister(!register);
+            setServerCredential("");
             setError("");
           }}
         >

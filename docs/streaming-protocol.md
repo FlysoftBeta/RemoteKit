@@ -24,7 +24,7 @@ snapshot view的actual/desired为0 live、1 frozen、2 discarded、3 unloaded；
 
 ## Client↔Control
 
-正常入口为注册/登录后的用户工作区。认证HTTP接口为GET /api/auth/me及POST /api/auth/register、login、logout；使用HttpOnly、SameSite=Strict token cookie，HTTPS加Secure。写请求及WS upgrade检查Origin。
+正常入口为注册/登录后的用户工作区。公开GET /api/auth/registration返回hasAdmin/credentialRequired/registrationOpen。认证HTTP接口为GET /api/auth/me及POST /api/auth/register、login、logout；register增加serverCredential注册口令，首个正式账号免口令成为管理员，其他注册须已配置的当前口令；使用HttpOnly、SameSite=Strict token cookie，HTTPS加Secure。写请求及WS upgrade检查Origin。
 
 WebSocket `/api/socket`：
 
@@ -58,3 +58,5 @@ method包括action、viewport、feedback、rtc.offer/ice/close和clock.ping。�
 Source atlas可在NV12转换时按接收H264上限等比采样；布局和输入同时带对应比例。支持真实RTP元数据的新客户端使用不可变VideoFrame/fifo2；能力不足退回video。Chrome89保留video路径，其rVFC与drawImage不是原子frame handle；测量不得把它宣称为不可变帧验证。
 
 普通产品探测实际解码能力后选择已验证的H264 level4.2；不支持或协商失败回native，诊断显式选择独立。接收能力上限不会因提高产品码率请求而消失。
+
+管理员通过已鉴权WS的admin.get取得registrationCredentialConfigured，通过admin.setRegistrationCredential {serverCredential}替换注册口令。两者服务端检查管理员身份与当前lease；配置仅返回是否设置。口令8–256字符，角色与口令不允许由注册请求指定或覆盖；ProductUser.isAdmin表示服务端确定的身份。

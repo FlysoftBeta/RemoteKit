@@ -12,7 +12,7 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke
 
 默认输出develop/tmp下的目录、同名ZIP及SHA-256。包含Browser/SDK运行依赖、Release Endpoint/CRT、Node、Control生产bundle、客户端及SQLite依赖；目标机器无需开发工具，硬件编码由Intel/NVIDIA驱动提供。
 
-完整解压运行run.cmd，打开http://127.0.0.1:3001，创建账号或登录。同账号恢复同一工作区，不同账号隔离；当前一个账号只有一个活跃Viewer。设置和产品状态保存在服务器，客户端只持用户token。包首次运行创建data，发布时不带任何开发账号、Profile、凭据或数据。正常入口关闭diagnostics。
+完整解压运行run.cmd，打开http://127.0.0.1:3001，创建首个管理员账号或登录。管理员在更多→管理员面板设置注册口令后，其他用户才可注册；已有账号登录仍只需要自己的密码。同账号恢复同一工作区，不同账号隔离；当前一个账号只有一个活跃Viewer。设置和产品状态保存在服务器，客户端只持用户token。包首次运行创建data，发布时不带任何开发账号、Profile、凭据或数据。正常入口关闭diagnostics。
 
 运行参数可用--name=value附加到run.cmd，由Node launcher作为数据传递。普通用户在更多→设置选择质量偏好、Client Scale和memory saver，不需要编辑编码参数。监听、Origin及TLS配置见[Control说明](../control/README.md)；远程浏览器所需安全上下文应通过受信任HTTPS提供。
 

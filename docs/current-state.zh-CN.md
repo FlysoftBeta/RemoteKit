@@ -12,7 +12,7 @@
 
 | 范围 | 当前行为与证据 |
 |---|---|
-| 产品Control | SQLite多用户、服务端设置、独立Window/tab、鉴权WS、单Viewer租约、对账；普通入口不使用匿名HTTP轮询 |
+| 产品Control | SQLite多用户、首个正式用户管理员、服务端注册口令、独立Window/tab、鉴权WS、单Viewer租约、对账；普通入口不使用匿名HTTP轮询 |
 | Viewer | MUI沉浸外壳、桌面split/窄屏聚焦、覆盖式设置、实际内容尺寸；普通页不暴露实验面板、不存localStorage设置 |
 | 页面功能 | 每origin仅UA/CH、首次请求/redirect/history/restore正确；真实popup收养保opener/sessionStorage、自然close；标准dialog和导航beforeunload |
 | 生命周期 | 默认120秒隐藏回收，Browser完整canDiscard守卫、真实discard/restore；Viewer visibility与RTC渲染需求分离；离线snapshot/维护不重启Browser |
@@ -25,6 +25,8 @@
 Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/窄屏、UA、popup、dialog、质量/ClientScale、120秒memory saver、WS断线/接管。生产能力探测已使157选择level4.2，真实双窗完整尺寸首帧通过；Chrome89保留兼容video路径。报告：[产品运行QA](../develop/docs/product-runtime-qa.md)。原生Windows输入法完整候选窗行为不能由协议composition检查替代。
 
 首版506c45e发布检查：Control全套104项、生产构建与smoke通过；Endpoint收束后8项CPU suites、SDK2项通过，Browser/SDK/Endpoint增量构建通过。最终ZIP的559个文件hash全部匹配，包内普通注册/鉴权WS/Browser启动smoke通过；最终包smoke未另测RTC媒体。
+
+注册管理新增批次：首个正式账号为管理员，更多→管理员面板配置后续注册口令；旧数据库迁移最早正式用户，诊断账号不参与。Control全122项、类型检查、生产构建与smoke通过。Sol实际验证首注管理员、设置/错误/正确口令、普通用户入口隔离及独立登录；390×844窄屏无溢出，管理面板保存前中后内容区不变。账号密码和注册口令独立，配置只保存加盐hash。
 
 ## 当前默认与资源规则
 

@@ -30,6 +30,7 @@ import {
   type Action,
 } from "./product-dialogs";
 import { WindowFrame, WindowDivider } from "./window-frame";
+import { AdminDialog } from "./admin-dialog";
 import "./style.css";
 const theme = createTheme({
   palette: {
@@ -61,6 +62,7 @@ function Workspace({
     [error, setError] = useState(""),
     [viewportNotice, setViewportNotice] = useState(""),
     [settings, setSettings] = useState(false),
+    [admin, setAdmin] = useState(false),
     [, updateMedia] = useState(0),
     [focusAddress, setFocusAddress] = useState<string | null>(null),
     [width, setWidth] = useState(window.innerWidth);
@@ -201,6 +203,9 @@ function Workspace({
     return result;
   };
   const report = (e: unknown) => setError(errorMessage(e));
+  const loadRegistration = useCallback(() => connection.current!.request("admin.get", {}), []);
+  const saveRegistration = useCallback((serverCredential: string) =>
+    connection.current!.request("admin.setRegistrationCredential", { serverCredential }), []);
   if (status === "revoked")
     return (
       <main className="workspace-empty">
@@ -282,6 +287,7 @@ function Workspace({
               action={action}
               online={status === "online"}
               onSettings={() => setSettings(true)}
+              onAdmin={() => setAdmin(true)}
               onLogout={logout}
               report={report}
               onGeometry={onGeometry}
@@ -305,10 +311,18 @@ function Workspace({
             <Button color="inherit" onClick={logout}>
               退出登录
             </Button>
+            {state.user.isAdmin && <Button disabled={status !== "online"} onClick={() => setAdmin(true)}>管理员面板</Button>}
           </div>
         )}
       </div>
       <PageDialogs state={state} action={action} />
+      {state.user.isAdmin && <AdminDialog
+        open={admin}
+        online={status === "online"}
+        onClose={() => setAdmin(false)}
+        load={loadRegistration}
+        save={saveRegistration}
+      />}
       <SettingsDialog
         state={state}
         open={settings}

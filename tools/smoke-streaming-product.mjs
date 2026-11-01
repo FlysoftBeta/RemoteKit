@@ -11,12 +11,19 @@ let socket;
 try {
   assert.equal((await fetch(origin + '/api/auth/me')).status, 401);
   assert.equal((await fetch(origin + '/api/state')).status, 404, 'Diagnostics must be disabled');
+  assert.deepEqual(await (await fetch(origin + '/api/auth/registration')).json(), {
+    hasAdmin: false, credentialRequired: false, registrationOpen: true,
+  });
   const response = await fetch(origin + '/api/auth/register', {
     method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: 'package-smoke', password: randomBytes(24).toString('hex') }),
   });
   assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).user.isAdmin, true, 'The first registered user must be administrator');
   const cookie = response.headers.get('set-cookie').split(';')[0];
+  assert.deepEqual(await (await fetch(origin + '/api/auth/registration')).json(), {
+    hasAdmin: true, credentialRequired: true, registrationOpen: false,
+  });
   assert.equal((await fetch(origin + '/api/auth/me', { headers: { Cookie: cookie } })).status, 200);
   socket = new WebSocket(origin.replace(/^http/, 'ws') + '/api/socket', { origin, headers: { Cookie: cookie } });
   let latest, sequence = 0;

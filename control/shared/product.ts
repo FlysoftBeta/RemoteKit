@@ -1,5 +1,5 @@
 /** Persistent product state belongs to Control; clients keep only an HttpOnly token. */
-export interface ProductUser { id: string; username: string }
+export interface ProductUser { id: string; username: string; isAdmin: boolean }
 export interface ProductSettings { qualityPreference: 'quality' | 'auto' | 'smooth'; clientScaleOverride: number | null; memorySaverEnabled: boolean; showStats: boolean }
 export interface ProductTab { id: string; windowId: string; webviewId: string; title: string; url: string; pendingUrl?: string; canGoBack?: boolean; canGoForward?: boolean; loading?: boolean; residency?: 'live' | 'frozen' | 'discarded' | 'unloaded'; restoring?: boolean; pendingUaReloadOrigin?: string; popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: string } }
 export interface ProductWindow { id: string; activeTabId: string | null; weight: number }
@@ -26,7 +26,11 @@ export type ProductAction =
   | { type: 'site.set'; origin: string; tabletUa: boolean; tabId?: string };
 export interface ViewerViewport { devicePixelRatio: number; refreshHz?: number; windows: { windowId: string; width: number; height: number; visible: boolean }[] }
 export interface ProductActionResult { state: ProductState; application?: { status: 'pending'; reason: string } }
+export interface RegistrationStatus { hasAdmin: boolean; credentialRequired: boolean; registrationOpen: boolean }
+export interface AdminStatus { registrationCredentialConfigured: boolean }
 export interface SocketMethods {
+  'admin.get': { params: Record<string, never>; result: AdminStatus };
+  'admin.setRegistrationCredential': { params: { serverCredential: string }; result: AdminStatus };
   action: { params: ProductAction; result: ProductActionResult };
   viewport: { params: ViewerViewport; result: ProductState };
   feedback: { params: ProductFeedback; result: { accepted: boolean } };

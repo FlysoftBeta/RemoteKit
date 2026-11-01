@@ -45,7 +45,7 @@ class ProductEndpoint implements Endpoint {
 }
 async function fixture() {
   const store = new Store(':memory:'), endpoint = new ProductEndpoint(), control = new Control(store, endpoint);
-  const user = await store.register('testuser', 'password123'); return { store, endpoint, control, user };
+  const user = await store.register('testuser', 'password123'); await store.setRegistrationCredential(user.tenantId, 'test-registration'); return { store, endpoint, control, user };
 }
 
 test('v1 migration preserves tab/webview IDs, split windows, token and allocation; reopening is idempotent', async () => {
@@ -178,7 +178,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     const view = endpoint.views.get(user.tenantId)!.get(tab.webviewId); Object.assign(view, { instance: '1', document: '2', pageRequests: { pending: [{ request: '7', kind: 'prompt', message: 'private dialog text', default_prompt: 'initial', origin: 'https://page.test' }] } });
     await control.tick(); const dialog = control.productState(user.tenantId).pageDialogs[0]; assert.equal(dialog.kind, 'prompt'); assert.equal(dialog.defaultPrompt, 'initial');
     assert.ok(!JSON.stringify(store.workspace(user.tenantId)).includes('private dialog text')); assert.ok(!(store.db.prepare('SELECT data FROM workspace_tabs WHERE tenant=?').all(user.tenantId) as any[]).some(row => row.data.includes('private dialog text')));
-    const other = await store.register('another-user', 'password123'); await assert.rejects(control.productAction(other.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: true }));
+    const other = await store.register('another-user', 'password123', 'test-registration'); await assert.rejects(control.productAction(other.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: true }));
     await control.productAction(user.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: false, text: '取消' }, 'lease'); assert.equal(control.productState(user.tenantId).pageDialogs.length, 0); assert.equal(store.workspace(user.tenantId).tabs.length, 1); assert.equal(endpoint.calls.find(c => c.method === 'view.page.reply')!.args.document, '2');
     await assert.rejects(control.productAction(user.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: true }, 'lease'), /过期/);
     view.pageRequests.pending = [{ request: '8', kind: 'confirm', message: 'old document' }]; await control.tick(); const old = control.productState(user.tenantId).pageDialogs[0]; view.document = '3'; await assert.rejects(control.productAction(user.tenantId, { type: 'page.reply', dialogId: old.id, accept: true }, 'lease'), /过期/);
@@ -196,7 +196,7 @@ test('product media policy precedes ensure, feedback is isolated and diagnostics
     let now = originalNow(); Date.now = () => now;
     for (let sequence = 1; sequence <= 3; sequence++) { now += 2000; const result: any = await control.viewerRequest(user.tenantId, 'lease', 'feedback', { sequence, sourceCaptureId: String(sequence), sampledAtServerMs: now, visible: true, presentationLatencyMs: 400, latencySource: 'capture-end-to-paint', clockUncertaintyMs: 2, sampleCount: 50, windowMs: 2000 }); assert.equal(result.accepted, true); }
     assert.equal(control.productState(user.tenantId).quality.adaptiveResolutionFactor, .8); assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, .8);
-    const other = await store.register('quality-other', 'password123'); assert.equal(control.productState(other.tenantId).quality.adaptiveResolutionFactor, 1);
+    const other = await store.register('quality-other', 'password123', 'test-registration'); assert.equal(control.productState(other.tenantId).quality.adaptiveResolutionFactor, 1);
     const diag = store.session().tenantId; await control.action(diag, { type: 'tab.create', url: 'about:blank' }); endpoint.calls = []; await control.tick(); assert.ok(!endpoint.calls.some(c => c.tenant === diag && c.method === 'session.mediaPolicy')); assert.equal(control.productState(diag).quality.mode, 'manual');
   } finally { Date.now = originalNow; await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
 });
@@ -229,13 +229,21 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
   try {
     assert.equal((await fetch(base + '/api/state?diagnostics=1', { headers: { 'X-RemoteKit-Diagnostics': '1' } })).status, 404);
     assert.equal((await fetch(base + '/api/auth/me')).status, 401);
+    assert.deepEqual(await (await fetch(base + '/api/auth/registration')).json(), { hasAdmin: false, credentialRequired: false, registrationOpen: true });
     const register = await post('/api/auth/register', { username: 'alice', password: 'password123' }); assert.equal(register.status, 200); const cookieA = register.headers.get('set-cookie')!.split(';')[0]; assert.match(register.headers.get('set-cookie')!, /HttpOnly.*SameSite=Strict/);
-    const registerB = await post('/api/auth/register', { username: 'bob', password: 'password123' }); const cookieB = registerB.headers.get('set-cookie')!.split(';')[0];
+    assert.equal((await register.json()).user.isAdmin, true);
+    assert.equal((await (await fetch(base + '/api/auth/me', { headers: { Cookie: cookieA } })).json()).user.isAdmin, true);
+    assert.deepEqual(await (await fetch(base + '/api/auth/registration')).json(), { hasAdmin: true, credentialRequired: true, registrationOpen: false });
+    assert.equal((await post('/api/auth/register', { username: 'closed-user', password: 'password123' })).status, 400);
+    const a = connect(socketUrl, cookieA); peers.push(a); await a.wait(m => m.type === 'state');
+    assert.deepEqual((await a.request('configure', 'admin.setRegistrationCredential', { serverCredential: 'test-registration' })).result, { registrationCredentialConfigured: true });
+    assert.deepEqual(await (await fetch(base + '/api/auth/registration')).json(), { hasAdmin: true, credentialRequired: true, registrationOpen: true });
+    const registerB = await post('/api/auth/register', { username: 'bob', password: 'password123', serverCredential: 'test-registration' }); const cookieB = registerB.headers.get('set-cookie')!.split(';')[0];
     assert.equal((await post('/api/auth/login', { username: 'alice', password: 'wrong-pass' })).status, 401);
     assert.equal((await post('/api/actions', { type: 'tab.create', url: 'about:blank' }, cookieA)).status, 404);
-    const a = connect(socketUrl, cookieA); peers.push(a); await a.wait(m => m.type === 'state');
     const created = await a.request('1', 'action', { type: 'window.create' }); const stateA = created.result.state, win = stateA.workspace.windows[0], tab = stateA.workspace.tabs[0];
-    const b = connect(socketUrl, cookieB); peers.push(b); const initialB = await b.wait(m => m.type === 'state'); assert.equal(initialB.state.workspace.tabs.length, 0);
+    const b = connect(socketUrl, cookieB); peers.push(b); const initialB = await b.wait(m => m.type === 'state'); assert.equal(initialB.state.workspace.tabs.length, 0); assert.equal(initialB.state.user.isAdmin, false);
+    for (const method of ['admin.get', 'admin.setRegistrationCredential']) assert.equal((await b.request('admin-' + method, method, { serverCredential: 'unauthorized-secret', isAdmin: true })).error.code, 403);
     const foreign = await b.request('2', 'action', { type: 'tab.activate', tabId: tab.id }); assert.equal(foreign.error.code, 404);
     const scope = await b.request('3', 'action', { type: 'window.create', tenantId: stateA.workspace.tenantId }); assert.equal(scope.error.code, 400);
     await a.request('4', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: win.id, width: 900, height: 700, visible: true }] }); assert.equal(endpoint.views.get(stateA.workspace.tenantId)!.get(tab.webviewId).visible, true);
@@ -263,16 +271,17 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
   const post = (path: string, body: unknown, cookie: string) => fetch(base + path, { method: 'POST', headers: { Origin: 'http://product.test', 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body) });
   try {
     for (const operation of ['logout', 'login', 'register']) {
-      const name = 'scope-' + operation, a = await store.register(name, 'password123'), b = await store.login(name, 'password123');
+      const name = 'scope-' + operation, a = await store.register(name, 'password123', 'test-registration'), b = await store.login(name, 'password123');
+      if (a.user.isAdmin) await store.setRegistrationCredential(a.tenantId, 'test-registration');
       const old = connect(url, `rk_session=${a.token}`); peers.push(old); await old.wait(m => m.type === 'state');
       const current = connect(url, `rk_session=${b.token}`); peers.push(current); await current.wait(m => m.type === 'state'); await old.wait(m => m.type === 'lease');
-      const response = await post('/api/auth/' + operation, operation === 'logout' ? {} : { username: operation === 'register' ? 'new-' + name : name, password: 'password123' }, `rk_session=${a.token}`);
+      const response = await post('/api/auth/' + operation, operation === 'logout' ? {} : { username: operation === 'register' ? 'new-' + name : name, password: 'password123', serverCredential: 'test-registration' }, `rk_session=${a.token}`);
       assert.equal(response.status, 200); assert.equal(store.identity(a.token), undefined);
       const ping = await current.request(operation, 'clock.ping', {}); assert.equal(ping.type, 'result'); assert.equal(control.productState(b.tenantId).viewer.connected, true);
       // Same-token tabs share revocation even though only the latest owns media.
       const sameToken = connect(url, `rk_session=${b.token}`); peers.push(sameToken); await sameToken.wait(m => m.type === 'state'); await current.wait(m => m.type === 'lease');
       const revoked = sameToken.wait(m => m.type === 'lease' && m.reason === 'logout');
-      assert.equal((await post('/api/auth/' + operation, operation === 'logout' ? {} : { username: operation === 'register' ? 'active-' + name : name, password: 'password123' }, `rk_session=${b.token}`)).status, 200); await revoked;
+      assert.equal((await post('/api/auth/' + operation, operation === 'logout' ? {} : { username: operation === 'register' ? 'active-' + name : name, password: 'password123', serverCredential: 'test-registration' }, `rk_session=${b.token}`)).status, 200); await revoked;
       assert.equal(store.identity(b.token), undefined); assert.equal(control.productState(b.tenantId).viewer.connected, false);
     }
   } finally {
