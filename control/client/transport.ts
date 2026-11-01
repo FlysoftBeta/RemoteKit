@@ -5,12 +5,21 @@ import { ReconnectPolicy } from './reconnect';
 import { PresentationDiagnostics } from './presentation-diagnostics';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource, type PresentationMode, type PixelRect } from './plane-source';
 import { MediaFeedbackSampler } from './media-feedback';
+import { createTrackProcessor, processorRtpTimestamp, type TrackProcessor, type ProcessorVideoFrame } from './track-processor';
 
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource }
+export type FrameSource = 'video' | 'track-processor';
+interface ProcessorSource { processor: TrackProcessor; reader: ReadableStreamDefaultReader<ProcessorVideoFrame>; peer: RTCPeerConnection; attempt: number }
 
 /** All endpoint wire adaptation lives here; the UI never owns recovery state. */
 export class RemoteTransport {
+  frameSource: FrameSource = 'video';
+  private activeFrameSource: FrameSource = 'video';
+  private processorSource: ProcessorSource | undefined;
+  private processorRaf: number | undefined;
+  private pendingProcessorFrame: { frame: VideoFrame; rtp: number; source: ProcessorSource } | undefined;
+  private processorCounts = { total: undefined as number | undefined, discarded: undefined as number | undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: 0, height: 0 };
   receiveProfile: ReceiveProfile = loadReceiveProfile();
   signaling: Record<string, unknown> | undefined;
   probeReceiveCapabilities = probeReceiveCapabilities;
@@ -37,8 +46,8 @@ export class RemoteTransport {
   readonly encodedFrameSamples: { at: number; rtpTimestamp: number; layoutEpoch: string; encodedBytes?: number; keyframe?: boolean }[] = [];
   frameCallbackRegistration: 'after-work' | 'before-work' = 'after-work';
   get presentationDiagnostics() { return this.getPresentationDiagnostics(); }
-  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { paintVersion: 'plane-source-v3', presentationRouting: { mode: this.presentationMode, ...this.routing, fallback: { ...this.routing.fallback }, skippedRenderer: { ...this.routing.skippedRenderer } }, selectedViewId: this.selectedViewId, callbackRegistration: this.frameCallbackRegistration, encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples } : {}) }; }
-  resetPresentationDiagnostics() { this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
+  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { paintVersion: 'plane-source-v3', frameSource: this.activeFrameSource, processor: this.getProcessorDiagnostics(), presentationRouting: { mode: this.presentationMode, ...this.routing, fallback: { ...this.routing.fallback }, skippedRenderer: { ...this.routing.skippedRenderer } }, selectedViewId: this.selectedViewId, callbackRegistration: this.frameCallbackRegistration, encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples } : {}) }; }
+  resetPresentationDiagnostics() { this.processorCounts = { total: undefined, discarded: undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: this.processorCounts.width, height: this.processorCounts.height }; this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
   recordClientRaf(at: number) { this.presentation.clientRaf(at); }
   recordPresentationCost(name: string, at: number, durationMs: number, view: string | null = null) { this.presentation.cost(name, at, durationMs, view); }
   get displayReady() { return this.frameGate.ready && this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout?.epoch; }
@@ -111,6 +120,7 @@ export class RemoteTransport {
     if (!this.layout || !this.displayReady || this.displayedRtp !== rtpTimestamp || !this.layout.views.some(view => view.id === viewId)) return;
     const old = this.viewPresentations.get(viewId), isNewFrame = old?.rtpTimestamp !== rtpTimestamp || old.layoutEpoch !== this.layout.epoch;
     const frame = isNewFrame ? { viewId, rtpTimestamp, layoutEpoch: this.layout.epoch, paintedAt, paintedWallTime, authorizedAt: this.authorizedAt } : old!;
+    if (isNewFrame && this.activeFrameSource === 'track-processor') this.processorCounts.canvas++;
     this.viewPresentations.set(viewId, frame); this.presentation.paint(paintedAt, viewId, rtpTimestamp, frame.layoutEpoch, this.authorizedAt, isNewFrame);
     this.flushFocusedInput();
     if (isNewFrame) { if (this.dispatchingPaint) this.pendingPresentations.push(frame); else this.presentedListeners.forEach(listener => listener(frame)); }
@@ -157,6 +167,8 @@ export class RemoteTransport {
     const attempt = ++this.attempt;
     this.update({ connection: '正在连接', error: undefined });
     try {
+      this.activeFrameSource = this.frameSource;
+      if (this.activeFrameSource === 'track-processor' && this.presentationMode !== 'snapshot') throw new Error('track-processor 接收路径只支持 snapshot 呈现。');
       const peer = new RTCPeerConnection({ bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
       // Chrome89 can decode a replacement MediaStream on an old video while
       // never delivering rVFC again. Give each peer its own presentation state.
@@ -174,6 +186,7 @@ export class RemoteTransport {
       };
       peer.ontrack = event => {
         if (this.peer !== peer || this.video !== video) return;
+        if (this.activeFrameSource === 'track-processor') { this.startProcessorPump(peer, event.track); return; }
         video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
         this.startFramePump(peer);
         void video.play().catch(() => { if (this.peer === peer && this.video === video) this.update({ error: '视频播放被浏览器阻止，请重新连接。' }); });
@@ -207,6 +220,117 @@ export class RemoteTransport {
       if (attempt !== this.attempt) return;
       this.connectionFailed(error instanceof Error ? error.message : String(error));
     }
+  }
+  private getProcessorDiagnostics() {
+    const processor = this.processorSource?.processor;
+    return { ...this.processorCounts, total: processor?.totalFrames ?? this.processorCounts.total, discarded: processor?.discardedFrames ?? this.processorCounts.discarded };
+  }
+  private processorCurrent(source: ProcessorSource) { return this.peer === source.peer && this.attempt === source.attempt && this.processorSource === source; }
+  private closePendingProcessorFrame() {
+    const pending = this.pendingProcessorFrame; this.pendingProcessorFrame = undefined;
+    if (pending) { pending.frame.close(); this.processorCounts.ownerClosed++; }
+  }
+  private scheduleProcessorPresentation() {
+    const source = this.processorSource;
+    if (!source || !this.processorCurrent(source) || this.processorRaf !== undefined) return;
+    const matchingSnapshot = this.pendingSnapshotRtp !== undefined && this.pendingSnapshotRtp === this.frameGate.rtpTimestamp && this.frameGate.ready && this.layout && this.pendingFrame.width === this.layout.width && this.pendingFrame.height === this.layout.height;
+    if (!this.pendingProcessorFrame && !matchingSnapshot) return;
+    const id = requestAnimationFrame(() => {
+      if (this.processorRaf !== id) return;
+      this.processorRaf = undefined;
+      if (!this.processorCurrent(source)) return;
+      this.processorCounts.rafCallbacks++;
+      const pending = this.pendingProcessorFrame; this.pendingProcessorFrame = undefined;
+      try {
+        if (this.presentationMode !== 'snapshot') throw new Error('track-processor 接收路径只支持 snapshot 呈现。');
+        if (pending) {
+          if (pending.source !== source) return;
+          const { frame, rtp } = pending, width = frame.displayWidth, height = frame.displayHeight;
+          this.processorCounts.rafAdmitted++;
+          this.pendingSnapshotRtp = undefined;
+          if (this.pendingFrame.width !== width || this.pendingFrame.height !== height) { this.pendingFrame.width = width; this.pendingFrame.height = height; }
+          const context = this.pendingFrame.getContext('2d', { alpha: false });
+          if (!context) throw new Error('无法创建 track-processor 快照画布。');
+          const start = performance.now(); context.drawImage(frame, 0, 0);
+          this.presentation.cost('processorSnapshot', start, performance.now() - start);
+          this.pendingSnapshotRtp = rtp; this.routing.snapshotFrames++;
+        }
+        this.authorizeFrame(true);
+      } catch (error) {
+        if (this.processorCurrent(source)) { this.processorCounts.invalid++; this.processorFailed(error); }
+      } finally {
+        if (pending) { pending.frame.close(); this.processorCounts.ownerClosed++; }
+      }
+    });
+    this.processorRaf = id;
+  }
+  private stopProcessorPump() {
+    if (this.processorRaf !== undefined) cancelAnimationFrame(this.processorRaf);
+    this.processorRaf = undefined; this.closePendingProcessorFrame();
+    const source = this.processorSource;
+    if (!source) return;
+    this.processorCounts.total = source.processor.totalFrames;
+    this.processorCounts.discarded = source.processor.discardedFrames;
+    this.processorSource = undefined;
+    // The read loop releases the lock after its outstanding read settles.
+    void source.reader.cancel().catch(() => {});
+  }
+  private processorFailed(error: unknown) {
+    this.frameGate.observe(undefined); this.pendingSnapshotRtp = undefined;
+    for (const renderer of this.renderers) renderer.ready(false);
+    this.stopProcessorPump();
+    this.frameIssue = 'processor';
+    this.update({ error: error instanceof Error ? error.message : String(error) });
+  }
+  private startProcessorPump(peer: RTCPeerConnection, track: MediaStreamTrack) {
+    this.stopProcessorPump();
+    // A replacement track cannot authorize a retained snapshot from the old source.
+    this.frameGate.observe(undefined); this.pendingSnapshotRtp = undefined;
+    this.displayedRtp = undefined; this.displayedEpoch = undefined;
+    this.snapshotRtp = undefined; this.snapshotEpoch = undefined;
+    this.viewPresentations.clear(); this.paintedPlanes.clear();
+    for (const renderer of this.renderers) renderer.ready(false);
+    const attempt = this.attempt;
+    try {
+      if (this.presentationMode !== 'snapshot') throw new Error('track-processor 接收路径只支持 snapshot 呈现。');
+      const processor = createTrackProcessor(track), reader = processor.readable.getReader();
+      const source: ProcessorSource = { processor, reader, peer, attempt }; this.processorSource = source;
+      const current = () => this.processorCurrent(source);
+      void (async () => {
+        try {
+          while (current()) {
+            const result = await reader.read();
+            const frame = result.value;
+            try {
+              if (frame) this.processorCounts.read++;
+              if (!current()) { if (frame) this.processorCounts.stale++; return; }
+              if (result.done) throw new Error('track-processor 视频帧流已结束，画面与输入已暂停。');
+              if (!frame) throw new Error('track-processor 未返回 VideoFrame。');
+              if (this.presentationMode !== 'snapshot') throw new Error('track-processor 接收路径只支持 snapshot 呈现。');
+              const rtp = processorRtpTimestamp(frame);
+              this.frameGate.observe(rtp);
+              const width = frame.displayWidth, height = frame.displayHeight;
+              if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw new Error('track-processor 返回无效的视频尺寸。');
+              this.processorCounts.width = width; this.processorCounts.height = height;
+              this.diagnostics.videoWidth = width; this.diagnostics.videoHeight = height;
+              // Clone ownership before closing the read result. At most one
+              // decoded frame waits for display admission; replacing it avoids a copy.
+              if (this.pendingProcessorFrame) { this.closePendingProcessorFrame(); this.processorCounts.replaced++; }
+              const owner = frame.clone();
+              this.pendingSnapshotRtp = undefined;
+              this.pendingProcessorFrame = { frame: owner, rtp, source };
+              this.scheduleProcessorPresentation();
+            } finally {
+              if (frame) { frame.close(); this.processorCounts.closed++; }
+            }
+          }
+        } catch (error) {
+          if (current()) { this.processorCounts.invalid++; this.processorFailed(error); }
+        } finally {
+          reader.releaseLock();
+        }
+      })();
+    } catch (error) { this.processorCounts.invalid++; this.processorFailed(error); }
   }
   private startFramePump(peer: RTCPeerConnection) {
     const attempt = this.attempt, video = this.video;
@@ -245,7 +369,8 @@ export class RemoteTransport {
     };
     this.frameCallback = video.requestVideoFrameCallback(receive);
   }
-  private authorizeFrame() {
+  private authorizeFrame(fromProcessorRaf = false) {
+    if (this.activeFrameSource === 'track-processor' && !fromProcessorRaf) { this.scheduleProcessorPresentation(); return; }
     if (!this.frameGate.ready || !this.layout || this.pendingSnapshotRtp !== this.frameGate.rtpTimestamp || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
     if (this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout.epoch) return;
     // Swap the authorized snapshot rather than copying the atlas a second time.
@@ -253,13 +378,14 @@ export class RemoteTransport {
     this.pendingSnapshotRtp = undefined;
     this.snapshotRtp = this.frameGate.rtpTimestamp; this.snapshotEpoch = this.layout.epoch;
     this.beginAuthorizedFrame();
+    if (this.activeFrameSource === 'track-processor') this.processorCounts.authorized++;
     this.dispatchPaint(() => { for (const renderer of this.renderers) this.paintPlane(renderer, this.authorizedFrame, renderer.view, 'atlas'); });
   }
   private beginAuthorizedFrame() {
     this.displayedRtp = this.frameGate.rtpTimestamp; this.displayedEpoch = this.layout!.epoch;
     this.authorizedAt = performance.now(); this.presentation.authorize(this.authorizedAt, this.displayedRtp!, this.displayedEpoch);
     this.reconnect.connected();
-    if (this.frameIssue === 'missing-rtp') { this.frameIssue = undefined; this.update({ error: undefined }); }
+    if (this.frameIssue === 'missing-rtp' || this.frameIssue === 'processor') { this.frameIssue = undefined; this.update({ error: undefined }); }
   }
   private dispatchPaint(paint: () => void) {
     this.dispatchingPaint = true;
@@ -392,7 +518,8 @@ export class RemoteTransport {
             else if (typeof report.framesPerSecond === 'number') update.decodedFramesPerSecond = report.framesPerSecond;
             this.lastInboundSample = { timestamp: report.timestamp, bytes: report.bytesReceived, frames: report.framesDecoded };
           }
-          update.videoWidth = report.frameWidth; update.videoHeight = report.frameHeight;
+          update.videoWidth = this.activeFrameSource === 'track-processor' ? this.processorCounts.width || undefined : report.frameWidth;
+          update.videoHeight = this.activeFrameSource === 'track-processor' ? this.processorCounts.height || undefined : report.frameHeight;
           if (report.codecId) update.codec = stats.get(report.codecId)?.mimeType;
         }
         if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) { update.roundTripTime = report.currentRoundTripTime; update.selectedCandidates = { pair: report, local: stats.get(report.localCandidateId), remote: stats.get(report.remoteCandidateId) }; }
@@ -408,7 +535,7 @@ export class RemoteTransport {
           return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.visibility !== 'collapse';
         }).map(renderer => renderer.view.id));
         const feedback = this.mediaFeedback.sample({ layoutEpoch: this.layout.epoch, outputGeneration: this.layout.generation,
-          ...inboundCounters, videoFrames: this.videoPresentedFrames,
+          ...inboundCounters, ...(this.activeFrameSource === 'video' ? { videoFrames: this.videoPresentedFrames } : {}),
           planes: [...views].map(view => ({ view, frames: counts.get(view) })),
           roundTripTimeMs: update.roundTripTime === undefined ? undefined : update.roundTripTime * 1000 });
         if (feedback && this.channel.bufferedAmount <= 65536) this.channel.send(JSON.stringify(feedback));
@@ -434,6 +561,7 @@ export class RemoteTransport {
   }
   private closeLocal() {
     this.attempt++;
+    this.stopProcessorPump();
     this.mediaFeedback.stop(); this.statsReadingPeer = undefined; this.networkRead = undefined; this.videoPresentedFrames = undefined;
     if (this.frameCallback !== undefined) this.video.cancelVideoFrameCallback?.(this.frameCallback);
     this.frameCallback = undefined; this.frameGate.clear(); this.displayedRtp = undefined; this.displayedEpoch = undefined; this.frameIssue = undefined;

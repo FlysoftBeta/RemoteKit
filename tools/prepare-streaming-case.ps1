@@ -12,6 +12,8 @@ param(
   [ValidateSet(1,2,4)][int]$AsyncDepth = 1,
   [ValidateRange(1,7)][int]$TargetUsage = 4,
   [ValidateSet('cbr','vbr')][string]$RateControl = 'cbr',
+  [ValidateRange(0.1,50)][decimal]$BitrateMbps = 18,
+  [ValidateRange(0.1,60)][decimal]$MaxBitrateMbps = 40,
   [int]$BufferMs = 1000,
   [ValidateSet(0,24,48)][int]$DownlinkMbps = 0,
   [ValidateSet('animation','text','static','change-stop')][string]$FixtureMode = 'animation',
@@ -35,6 +37,7 @@ param(
   [ValidateSet('auto','1')][string]$BrowserHostScale='auto',
   [ValidateSet('offscreen','window')][string]$BrowserRenderHost='offscreen',
   [ValidateRange(0,60)][int]$BrowserRenderFps=0,
+  [ValidateSet('off','on')][string]$AdaptiveFps='off',
   [ValidateSet('canvas','compositor')][string]$FixtureKind='canvas',
   [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
   [switch]$DisableClientRafProbe,
@@ -43,11 +46,22 @@ param(
   [ValidateSet(0,60,120)][int]$ClientRefreshHz=0,
   [ValidateSet('native','chrome89-h264-42','chrome89-h264-51','h264-level42-experimental')][string]$ReceiveProfile='chrome89-h264-42',
   [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
+  [string]$QsvLowPowerPattern='',
   [ValidateSet('external','async')][string]$QsvVpp='external',
   [ValidateSet(1,16)][int]$AtlasAlignment=1,
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
 $ErrorActionPreference = 'Stop'
+if($BitrateMbps -gt $MaxBitrateMbps){throw 'BitrateMbps must not exceed MaxBitrateMbps'}
+if($QsvLowPowerPattern -cnotmatch '^(?:(?:on|off)(?:,(?:on|off)){0,15})?$') {
+  throw 'QsvLowPowerPattern requires 1..16 comma-separated on/off entries, or an empty string'
+}
+if($QsvLowPowerPattern -and $PSBoundParameters.ContainsKey('QsvLowPower')) {
+  throw 'QsvLowPowerPattern cannot be combined with explicit QsvLowPower'
+}
+$QsvLowPower=$QsvLowPower.ToLowerInvariant()
+$rkBitrateBps=[uint32][Math]::Round($BitrateMbps*1000000)
+$rkMaxBitrateBps=[uint32][Math]::Round($MaxBitrateMbps*1000000)
 if($ClientRefreshHz -ne 0 -and ($ClientMode -ne 'default' -or $DisableClientGpuVsync)) {
   throw 'ClientRefreshHz cannot be combined with software, unlimited, or DisableClientGpuVsync'
 }
@@ -97,8 +111,8 @@ $configuration = @{
   atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;
   singlePlaneDirect=[bool]$SinglePlaneDirect;
   captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
-  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;offscreenRoot=[bool]$OffscreenRoot;
-  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;atlasAllocationAlignment=$AtlasAlignment;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
+  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;adaptiveFps=$AdaptiveFps;offscreenRoot=[bool]$OffscreenRoot;
+  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;qsvLowPower=$QsvLowPower;qsvLowPowerPattern=$QsvLowPowerPattern;atlasAllocationAlignment=$AtlasAlignment;startBitrate=$rkBitrateBps;maxBitrate=$rkMaxBitrateBps;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
 if ($DownlinkMbps) {
@@ -141,7 +155,8 @@ $env:REMOTEKIT_ENDPOINT = Join-Path $caseRoot 'bin/endpoint_service.exe'
 $rkEndpointArguments = @(
   '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe', "--data-path=$caseRoot/sessions", "--browser-direct-composition=$BrowserDirectComposition", "--browser-host-scale=$BrowserHostScale", "--browser-render-host=$BrowserRenderHost",
   "--browser-render-fps=$BrowserRenderFps",
-  '--encoder=qsv','--fps=60','--bitrate=18000000','--max-bitrate=40000000',
+  "--adaptive-fps=$AdaptiveFps",
+  '--encoder=qsv','--fps=60',"--bitrate=$rkBitrateBps","--max-bitrate=$rkMaxBitrateBps",
   "--qsv-vpp=$QsvVpp", "--atlas-alignment=$AtlasAlignment",
   "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )
@@ -149,6 +164,7 @@ if($rkBrowserFeaturesText){
   $rkEndpointArguments+="--browser-enable-features=$rkBrowserFeaturesText"
 }
 if($OfficialTrace){$rkEndpointArguments+="--browser-trace-dir=$(Join-Path $caseRoot 'official-trace')"}
+if($QsvLowPowerPattern){$rkEndpointArguments+="--qsv-low-power-pattern=$QsvLowPowerPattern"}
 if ($QsvLowPower -or $RtcPlayoutMaxMs -ge 0) {
   $extraArgs=@()
   if($QsvLowPower){$configuration.endpoint.qsvLowPower=$QsvLowPower;$extraArgs+="--qsv-low-power=$QsvLowPower"}

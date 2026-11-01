@@ -127,5 +127,5 @@ python3 tools/package-runtime.py
 - 完整导航恢复已接 history/PageState 和同进程 sessionStorage namespace；跨 browser 的 sessionStorage 仍未恢复。导入校验 Session/Profile/版本，POST 不自动重放。
 - GPU/QSV/WebRTC 已有真实Chrome89视频与输入响应证据；正式FPS/p95、真实IME/触控、下载与资源重建的完成情况以当前状态和串流实验文档为准。动态popup、认证/证书、PDF/打印等缺口仍保留，不能视为用户放弃。
 - 网页设备DPR/viewport与媒体采样分辨率分开；Endpoint GPU转换按协商接收上限等比下采样，stats记录原始/编码尺寸。客户端用实际wire RTP匹配显示代次，防止新布局命中旧帧。
-- QSV当前实验选定VBR、TargetUsage 1、异步深度1；保留参数覆盖，NVENC不沿用未经硬件验证的QSV调优。普通码率Reset不重开序列；尾IDR保持正常150ms，在低fps时按源帧间隔自适应以避免风暴。
+- QSV既有基线为VBR、TargetUsage 1、异步深度1；用户最新实验方向是最快TargetUsage 7、高码率及跨Session混跑，默认采用何种配置仍依据实际结果决定。保留参数覆盖，NVENC不沿用未经硬件验证的QSV调优。普通码率Reset不重开序列；尾IDR保持正常150ms，在低fps时按源帧间隔自适应以避免风暴。
 - 性能结果必须区分源、采集、编码、解码与真实canvas呈现。四个同机接收端及同步marker读回会占用共享资源；特殊浏览器flag和关闭marker的诊断结果不能冒充默认客户端或Pixel marker延迟。现有矩阵未达>50FPS/<100ms目标，继续状态见实验文档。

@@ -24,6 +24,8 @@ nlohmann::json EncoderStats::Snapshot() {
          {"keyframesSubmitted",keyframes_submitted.load()},{"keyframesEncoded",keyframes_encoded.load()},
          {"lastEncodeMs",completed.load()?nlohmann::json(last_encode_ms.load()):nlohmann::json(nullptr)},
          {"lastRequestedBitrate",requested_bitrate},{"lastRequestedFps",requested_fps},
+         {"requestedTargetUsage",requested_target_usage? nlohmann::json(requested_target_usage):nlohmann::json(nullptr)},
+         {"appliedTargetUsage",applied_target_usage? nlohmann::json(*applied_target_usage):nlohmann::json(nullptr)},
          {"appliedBitrate",applied_bitrate? nlohmann::json(applied_bitrate):nlohmann::json(nullptr)},
          {"appliedFps",applied_fps? nlohmann::json(applied_fps):nlohmann::json(nullptr)},
          {"actualLevel",actual_level},{"error",error.empty()?nlohmann::json(nullptr):nlohmann::json(error)}};
@@ -39,6 +41,7 @@ void EncoderWorker::Error(const std::string& error) {
 }
 bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  Stop(); // WebRTC may configure an existing encoder after a size transition.
+ {std::lock_guard lock(stats_->mutex);stats_->applied_target_usage.reset();stats_->requested_target_usage=0;}
  settings_.width=config.width;settings_.height=config.height;
  settings_.fps=config.fps?config.fps:settings_.fps;
  settings_.bitrate=config.bitrate_bps?config.bitrate_bps:settings_.bitrate;
@@ -55,6 +58,7 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
   settings_.vbr=settings_.rate_control_explicit?requested_vbr:qsv;
  };
  defaults(mode_!="nvenc");
+ {std::lock_guard lock(stats_->mutex);stats_->requested_target_usage=settings_.target_usage;}
  std::string error;
  hardware_=mode_=="nvenc"?CreateNvencEncoder():CreateQsvEncoder();
  hardware_->SetTrace(trace_,encoder_);converter_.SetTrace(trace_);
@@ -77,7 +81,9 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  {std::lock_guard lock(stats_->mutex);stats_->backend=hardware_->Name();stats_->error.clear();
   if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;
   auto actual=hardware_->ActualSettings();stats_->applied_bitrate=actual.bitrate;stats_->applied_fps=actual.fps;
-  stats_->actual_level=actual.level_idc;stats_->requested_bitrate=settings_.bitrate;stats_->requested_fps=settings_.fps;}
+  stats_->actual_level=actual.level_idc;stats_->requested_bitrate=settings_.bitrate;stats_->requested_fps=settings_.fps;
+  stats_->requested_target_usage=settings_.target_usage;
+  if(std::string(hardware_->Name())=="qsv")stats_->applied_target_usage=actual.target_usage;}
  nominal_fps_=settings_.fps;fixed_rate_fps_=std::string(hardware_->Name())=="qsv";
  applied_bitrate_=settings_.bitrate;applied_fps_=settings_.fps;bitrate_=0;fps_=0;paused_=false;
  stopping_=false;failed_=false;configured_=true;
@@ -165,6 +171,7 @@ void EncoderWorker::Run() {
    applied_bitrate_=rate;applied_fps_=settings_.fps;
    {std::lock_guard lock(stats_->mutex);auto actual=hardware_->ActualSettings();
     stats_->applied_bitrate=actual.bitrate;stats_->applied_fps=actual.fps;stats_->actual_level=actual.level_idc;
+    if(std::string(hardware_->Name())=="qsv")stats_->applied_target_usage=actual.target_usage;
     if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
   }
   // Fill the hardware queue before waiting for completion, preserving real

@@ -10,6 +10,8 @@
 
 接收回调trace确认：约600个新video frame只有450次rVFC，后续canvas没有再丢帧；跨线程通知和呈现相位是实测损失来源。默认关闭的连续rVFC候选已增量编译并验证静止/恢复/重连，尚无稳定性能收益，保持关闭。精准模拟刷新与该候选分别保存为0005/0006补丁。大metrics报告改为带SHA-256校验的分块上传，正式分析工具可完整重组，不再因413丢失长记录。
 
+每Session独立QSV模式已实现：显式pattern按持久化Session id分配，stats包含选择和实际TU/LowPower；实验工具可配置目标/上限码率。默认关闭的自适应源帧率worker、TrackProcessor接收路径也已实现，原Chrome89/video默认保留。Endpoint Release构建及5项CPU测试、Control 60项测试/类型检查/生产构建/smoke通过；混跑、自适应和TrackProcessor的实际GPU功能与性能仍待运行验证。
+
 当前marker延迟统计终点为客户端canvas绘制提交，CRC同步读回耗时另记；不表示物理屏幕点亮。四接收端同机满载时，读回p95达331–408ms，会干扰后续工作；同时已存在服务端供给下降与解码排队，不能将全部瓶颈归于测量。后续将同时记录GPU/读回完成端点，并保持CRC验证。
 
 断开RDP后DXGI无显示输出，Chrome89 VSync回退实测约31ms，空页面RAF约32Hz。用户允许新版Chromium模拟刷新验收：已复用out/rel完成Chromium157局部增量构建，官方 `--fake-vsync-rate=60` 已用于真实H.264串流。新增显式 `h264-level42-experimental` 接收档，校验H.264能力后按Level4.2协商，保持原1936×1088媒体尺寸；45项Control测试、类型检查、构建与启动smoke通过。重连使用每连接独立video，旧回调、stream、DOM和marker测量正确结束。

@@ -21,6 +21,8 @@ struct EncoderStats {
  std::mutex mutex;std::string backend,error;
  nlohmann::json sender_rtc_stats;
  std::optional<QsvLowPowerInfo> qsv_low_power;
+ std::optional<uint32_t> applied_target_usage;
+ uint32_t requested_target_usage=0;
  uint32_t requested_bitrate=0,requested_fps=0,applied_bitrate=0,applied_fps=0,actual_level=0;
  nlohmann::json Snapshot();
 };
