@@ -20,7 +20,14 @@ class AtlasPool {
   bool Open(remotekit_sdk_atlas_setup setup,uint32_t pool_size,std::string& error);
   // Owns all setup handles, including failed Open. One polling owner thread.
   // ready returns one lease; caller releases it or transfers it to RTC submit.
-  enum class Result {idle,ready,error};
+  enum class Result {idle,ready,reconfigure,error};
+  // CPU-only publication snapshot and validation; resource replacement is a
+  // typed edge, evaluated before frame/layout fields that may now be stale.
+  static Result ReadPublication(SharedAtlasMapping&,const remotekit_sdk_atlas_setup&,
+                                SharedAtlasFrame&,std::string& error);
+  static bool ValidateTerminalPublication(const SharedAtlasFrame&,uint64_t generation,
+                                           uint64_t observed,std::string& error,
+                                           bool producer_exited=false);
   Result Poll(remotekit_rtc_frame&,SharedAtlasFrame&,std::string& error);
   ID3D11Device5* Device() const;
   SharedAtlasFrame LatestMetadata() const;
@@ -29,7 +36,9 @@ class AtlasPool {
   uint64_t shared_borrows() const {return borrows_.load();}
   uint64_t shared_held_slots() const {return held_.load();}
   uint64_t shared_retired_prefix() const {return retired_prefix_.load();}
-  bool Close(std::string& error);
+  // producer_exited requires a confirmed process-exit observation. Its proof
+  // persists on retained generations even if their GPU drain is incomplete.
+  bool Close(std::string& error,bool producer_exited=false);
   uint64_t drops() const;
   double last_copy_ms() const;
   bool ready_gate_enabled() const {return ready_gate_||shared_input_;}

@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
+import tempfile
 from pathlib import Path
 import subprocess
 import sys
@@ -39,7 +41,7 @@ def load_manifest():
                 raise PatchError(f"invalid patch path for {ident}")
             # Reject Windows absolute paths even on non-Windows hosts.
             from pathlib import PureWindowsPath
-            if PureWindowsPath(name).is_absolute() or PureWindowsPath(name).drive or ".." in PureWindowsPath(name).parts:
+            if PureWindowsPath(name).is_absolute() or PureWindowsPath(name).root or PureWindowsPath(name).drive or ".." in PureWindowsPath(name).parts:
                 raise PatchError(f"invalid patch path for {ident}")
             path = (MANIFEST.parent / name).resolve()
             if not path.is_relative_to(MANIFEST.parent.resolve()):
@@ -74,6 +76,57 @@ def classify(root, path):
     return "conflict"
 
 
+def series_states(root, patches):
+    """Validate overlapping patches in order without touching the real tree.
+
+    Later deltas may depend on earlier patches and prevent their standalone
+    reverse check. Peel applied deltas in reverse, then replay the entire series
+    in order. Only patch-owned files are copied; unrelated local files stay put.
+    """
+    names = set()
+    for ident, patch in patches:
+        result = subprocess.run(["git", "apply", "--numstat", "-z", "--", str(patch)],
+                                cwd=root, capture_output=True, check=True)
+        for record in result.stdout.decode("utf-8").split("\0"):
+            if not record:
+                continue
+            name = record.split("\t", 2)[2]
+            from pathlib import PureWindowsPath
+            path = PureWindowsPath(name)
+            if not name or path.is_absolute() or path.root or path.drive or ".." in path.parts or ".git" in path.parts:
+                raise PatchError("unsafe patch file path: " + name)
+            names.add(name)
+    # Preserve repository text/EOL rules when copying Windows working files.
+    attributes = {".gitattributes"}
+    for name in names:
+        attributes.update(str(parent / ".gitattributes")
+                          for parent in Path(name).parents if str(parent) != ".")
+    names.update(attributes)
+    with tempfile.TemporaryDirectory(prefix="remotekit-patchset-") as directory:
+        snapshot = Path(directory)
+        subprocess.run(["git", "init", "-q", str(snapshot)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for name in names:
+            source = root / name
+            if source.is_file():
+                target = snapshot / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, target)
+        applied = set()
+        for ident, patch in reversed(patches):
+            if git_apply(snapshot, patch, reverse=True, check=True).returncode == 0:
+                result = git_apply(snapshot, patch, reverse=True)
+                if result.returncode:
+                    raise PatchError("snapshot reverse failed for " + ident)
+                applied.add(ident)
+        for ident, patch in patches:
+            result = git_apply(snapshot, patch)
+            if result.returncode:
+                raise PatchError("conflicting patch " + ident + ": " + result.stderr.strip())
+        return [(ident, patch, "applied" if ident in applied else "pending")
+                for ident, patch in patches]
+
+
 def record_patch(root, patches, ident, files):
     """Record HEAD-relative edits only for paths absent from earlier patches."""
     if not ident or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", ident):
@@ -90,7 +143,7 @@ def record_patch(root, patches, ident, files):
     selected = []
     for name in files:
         from pathlib import PureWindowsPath
-        if Path(name).is_absolute() or PureWindowsPath(name).drive or ".." in PureWindowsPath(name).parts:
+        if Path(name).is_absolute() or PureWindowsPath(name).root or PureWindowsPath(name).drive or ".." in PureWindowsPath(name).parts:
             raise PatchError("record file must be relative to Chromium: " + name)
         resolved = (root / name).resolve(strict=True)
         if not resolved.is_relative_to(root) or not resolved.is_file():
@@ -147,7 +200,7 @@ def main(argv=None):
         if args.command == "record":
             record_patch(root, patches, args.id, args.file)
             return 0
-        states = [(ident, path, classify(root, path)) for ident, path in patches]
+        states = series_states(root, patches)
         if args.command == "status":
             for ident, _, state in states:
                 print(f"{ident}: {state}")
@@ -160,11 +213,7 @@ def main(argv=None):
                     if state == ("applied" if reverse else "pending")]
         if reverse:
             selected.reverse()
-        # Recheck the whole requested operation before making any changes.
-        for ident, path in selected:
-            check = git_apply(root, path, reverse=reverse, check=True)
-            if check.returncode:
-                raise PatchError(f"check failed for {ident}: {check.stderr.strip()}")
+        # series_states already validated the ordered operation in isolation.
         done = []
         for ident, path in selected:
             result = git_apply(root, path, reverse=reverse)

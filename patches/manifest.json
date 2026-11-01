@@ -31,6 +31,11 @@
       "id": "continuous-video-frame-callbacks",
       "path": "0006-continuous-video-frame-callbacks.patch",
       "sha256": "3b3630da6e53ed8d5d852e3a0ea7b9235c08f00baba009d0cd262184fe6261d7"
+    },
+    {
+      "id": "capture-to-atlas",
+      "path": "0007-capture-to-atlas.patch",
+      "sha256": "d2c0521b9b7f99baeb6c364f8d03269f57725cc77fd74ae8a13db93d481d527d"
     }
   ]
 }

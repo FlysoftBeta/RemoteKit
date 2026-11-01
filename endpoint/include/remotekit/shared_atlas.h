@@ -32,6 +32,9 @@ enum class SharedAtlasStatus : std::uint32_t {
   kStopped = 2,
   kDeviceLost = 3,
   kFailed = 4,
+  // Resource generation replacement; existing reads retire on consumed as usual.
+  // Appended without changing the mapping layout. Consumers must handle it.
+  kReconfigureNeeded = 5,
 };
 
 struct SharedAtlasView {

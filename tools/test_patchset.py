@@ -61,6 +61,49 @@ class PatchsetTests(unittest.TestCase):
         self.assertEqual((self.root / "file.txt").read_text(), "original\n")
         self.assertEqual((self.root / "untracked.txt").read_text(), "keep")
 
+    def test_dependent_delta_roundtrip_and_partial_state(self):
+        self.assertEqual(self.run_tool("apply")[0], 0)
+        self.git("add", "file.txt")
+        self.git("commit", "-qm", "first patch baseline")
+        (self.root / "file.txt").write_text("second change\n", encoding="utf-8")
+        delta = subprocess.check_output(["git", "diff", "--binary"], cwd=self.root)
+        (self.patches / "two.patch").write_bytes(delta)
+        self.manifest([self.entry, {"id": "two", "path": "two.patch",
+                                   "sha256": hashlib.sha256(delta).hexdigest()}])
+        # Full state cannot classify patch one by an independent reverse check.
+        self.assertEqual(self.run_tool("status")[0], 0)
+        self.assertEqual(self.run_tool("revert")[0], 0)
+        self.assertEqual((self.root / "file.txt").read_text(), "original\n")
+        self.assertIn("two: pending", self.run_tool("status")[1])
+        self.assertEqual(self.run_tool("apply")[0], 0)
+        self.assertEqual((self.root / "file.txt").read_text(), "second change\n")
+        self.git("apply", "--reverse", str(self.patches / "two.patch"))
+        status = self.run_tool("status")
+        self.assertEqual(status[0], 0)
+        self.assertIn("one: applied", status[1])
+        self.assertIn("two: pending", status[1])
+        self.assertEqual(self.run_tool("apply")[0], 0)
+        (self.root / "file.txt").write_text("local conflict\n", encoding="utf-8")
+        self.assertEqual(self.run_tool("apply")[0], 1)
+        self.assertEqual((self.root / "file.txt").read_text(), "local conflict\n")
+
+    def test_snapshot_preserves_git_text_attributes(self):
+        (self.root / ".gitattributes").write_bytes(b"*.cc text eol=lf\n")
+        source = self.root / "eol.cc"
+        source.write_bytes(b"original\n")
+        self.git("add", ".gitattributes", "eol.cc")
+        self.git("commit", "-qm", "text attributes")
+        source.write_bytes(b"changed\r\n")
+        delta = subprocess.check_output(["git", "diff", "--binary"], cwd=self.root)
+        (self.patches / "eol.patch").write_bytes(delta)
+        self.manifest([{"id": "eol", "path": "eol.patch",
+                        "sha256": hashlib.sha256(delta).hexdigest()}])
+        self.assertIn("eol: applied", self.run_tool("status")[1])
+        self.assertEqual(self.run_tool("revert")[0], 0)
+        self.assertEqual(source.read_text(), "original\n")
+        self.assertEqual(self.run_tool("apply")[0], 0)
+        self.assertEqual(source.read_text(), "changed\n")
+
     def test_conflict_does_not_modify(self):
         (self.root / "file.txt").write_text("local\n", encoding="utf-8")
         self.assertEqual(self.run_tool("status")[0], 1)
@@ -75,6 +118,38 @@ class PatchsetTests(unittest.TestCase):
             self.assertEqual(self.run_tool("apply")[0], 1)
         self.manifest([self.entry, self.entry])
         self.assertEqual(self.run_tool("apply")[0], 1)
+
+    def test_rejects_windows_rooted_paths_without_drive(self):
+        from pathlib import PureWindowsPath
+        for rooted in ("/foo.patch", "\\foo.patch"):
+            self.manifest([{**self.entry, "path": rooted}])
+            code, _, error = self.run_tool("apply")
+            self.assertEqual(code, 1)
+            self.assertIn("invalid patch path", error)
+        self.manifest([self.entry])
+        outside = Path(self.temp.name) / "outside.txt"
+        outside.write_bytes(b"original\n")
+        # Preserve the path root but remove its Windows drive. This used to
+        # escape snapshot/name even though is_absolute() and drive were false.
+        rooted = PureWindowsPath(str(outside)).as_posix()
+        drive = PureWindowsPath(rooted).drive
+        if drive:
+            rooted = rooted[len(drive):]
+        self.assertTrue(PureWindowsPath(rooted).root)
+        self.assertFalse(PureWindowsPath(rooted).drive)
+        diff = (self.patches / "one.patch").read_bytes()
+        diff = diff.replace(b"a/file.txt", ("a/" + rooted).encode())
+        diff = diff.replace(b"b/file.txt", ("b/" + rooted).encode())
+        patch = self.patches / "rooted.patch"
+        patch.write_bytes(diff)
+        with self.assertRaisesRegex(patchset.PatchError, "unsafe patch file path"):
+            patchset.series_states(self.root, [("rooted", patch)])
+        self.assertEqual(outside.read_bytes(), b"original\n")
+        # The same rooted form must not enter the record path resolver either.
+        for rooted_record in ("/foo.cc", "\\foo.cc"):
+            code, _, error = self.run_tool("record", "--id", "two", "--file", rooted_record)
+            self.assertEqual(code, 1)
+            self.assertIn("record file must be relative", error)
 
     def test_empty_series(self):
         self.manifest([])

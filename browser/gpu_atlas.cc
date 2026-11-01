@@ -19,12 +19,12 @@
 
 #include "base/check.h"
 #include "base/containers/span.h"
-#include "base/functional/bind.h"
-#include "base/functional/callback_helpers.h"
 #include "base/environment.h"
+#include "base/feature_list.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
-#include "base/feature_list.h"
+#include "base/functional/bind.h"
+#include "base/functional/callback_helpers.h"
 #include "base/json/json_writer.h"
 #include "base/process/process_handle.h"
 #include "base/sequence_checker.h"
@@ -36,16 +36,16 @@
 #include "base/timer/timer.h"
 #include "base/win/scoped_handle.h"
 #include "components/viz/host/client_frame_sink_video_capturer.h"
-#include "content/public/browser/render_widget_host_view.h"
 #include "content/browser/renderer_host/render_widget_host_view_base.h"
-#include "ui/aura/window.h"
-#include "ui/compositor/compositor.h"
+#include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "media/base/video_types.h"
 #include "media/capture/mojom/video_capture_buffer.mojom.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "services/viz/privileged/mojom/compositing/frame_sink_video_capture.mojom.h"
+#include "ui/aura/window.h"
+#include "ui/compositor/compositor.h"
 #include "ui/gfx/gpu_memory_buffer_handle.h"
 
 namespace remotekit::browser {
@@ -53,9 +53,12 @@ namespace {
 using Microsoft::WRL::ComPtr;
 constexpr uint32_t kStale = kSharedAtlasViewStale;
 constexpr uint64_t kRemoved = std::numeric_limits<uint64_t>::max();
-BASE_FEATURE(kRemoteKitCaptureRoot, "RemoteKitCaptureRoot",
+BASE_FEATURE(kRemoteKitCaptureRoot, "RemoteKitCaptureRoot", base::FEATURE_DISABLED_BY_DEFAULT);
+BASE_FEATURE(kRemoteKitCaptureToAtlas,
+             "RemoteKitCaptureToAtlas",
              base::FEATURE_DISABLED_BY_DEFAULT);
-BASE_FEATURE(kRemoteKitSinglePlaneDirect, "RemoteKitSinglePlaneDirect",
+BASE_FEATURE(kRemoteKitSinglePlaneDirect,
+             "RemoteKitSinglePlaneDirect",
              base::FEATURE_DISABLED_BY_DEFAULT);
 std::string Number(uint64_t value) {
   return base::NumberToString(value);
@@ -101,7 +104,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     }
     void OnNewCaptureVersion(const media::CaptureVersion&) override {}
     void OnFrameWithEmptyRegionCapture() override {}
-    void OnStopped() override { restart = true; }
+    void OnStopped() override {
+      // External invalidation carries its typed reason on the capturer pipe.
+      if (!owner->atlas_pool_configured_) restart = true;
+    }
     void OnLog(const std::string&) override {}
     void WebContentsDestroyed() override {
       Stop();
@@ -127,6 +133,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   };
   struct Lease {
     uint64_t fence_value = 0;
+    bool wait_consumed = false;
     ComPtr<ID3D11Texture2D> source;
     gfx::GpuMemoryBufferHandle handle;
     mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> callbacks;
@@ -147,7 +154,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   State(uint32_t width, uint32_t height, uint64_t generation)
       : width_(width), height_(height), generation_(generation) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
-    precise_poll_ = base::Environment::Create()->GetVar("REMOTEKIT_GPU_POLL").value_or("") == "precise";
+    precise_poll_ =
+        base::Environment::Create()->GetVar("REMOTEKIT_GPU_POLL").value_or("") == "precise";
     auto directory = base::Environment::Create()->GetVar("REMOTEKIT_MEDIA_TRACE");
     if (!directory || directory->empty())
       directory = base::Environment::Create()->GetVar("REMOTEKIT_SERVER_TRACE");
@@ -199,8 +207,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
                  base::BindRepeating(&State::Poll, base::Unretained(this)));
   }
   void ArmPrecisePoll() {
-    precise_timer_.Start(FROM_HERE, base::TimeTicks::Now() + base::Milliseconds(2),
-                         this, &State::PrecisePoll, base::subtle::DelayPolicy::kPrecise);
+    precise_timer_.Start(FROM_HERE, base::TimeTicks::Now() + base::Milliseconds(2), this,
+                         &State::PrecisePoll, base::subtle::DelayPolicy::kPrecise);
   }
   void PrecisePoll() {
     auto protect = shared_from_this();
@@ -224,9 +232,9 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     } else {
       // Precise delays >= maximum are downgraded by the scheduler. Wake
       // coarsely first for low-fps publication, then arm the real deadline.
-      const auto window = std::min(base::Milliseconds(32),
-          maximum - std::max(base::Microseconds(1),
-                            std::min(base::Milliseconds(4), maximum / 2)));
+      const auto window = std::min(
+          base::Milliseconds(32),
+          maximum - std::max(base::Microseconds(1), std::min(base::Milliseconds(4), maximum / 2)));
       if (remaining > window) {
         deadline -= window;
         policy = base::subtle::DelayPolicy::kFlexibleNoSooner;
@@ -237,8 +245,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     if (publication_timer_.IsRunning() && publication_wake_ <= deadline)
       return;
     publication_wake_ = deadline;
-    publication_timer_.Start(FROM_HERE, deadline, this,
-        &State::PublicationWake, policy);
+    publication_timer_.Start(FROM_HERE, deadline, this, &State::PublicationWake, policy);
   }
   void PublicationWake() {
     auto protect = shared_from_this();
@@ -258,7 +265,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     StopCaptures();
     DropPendingCapture();
     dirty_ = false;
-    if (status_ != SharedAtlasStatus::kDeviceLost && status_ != SharedAtlasStatus::kFailed)
+    if (status_ != SharedAtlasStatus::kDeviceLost && status_ != SharedAtlasStatus::kFailed &&
+        status_ != SharedAtlasStatus::kReconfigureNeeded)
       status_ = SharedAtlasStatus::kStopped;
     PublishStatus();
     if (!leases_.empty())
@@ -266,8 +274,27 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     Poll();
     SaveTrace();
   }
+  void ReconfigureNeeded(std::string reason) {
+    if (stopping_) return;
+    error_ = std::move(reason);
+    atlas_mode_ = "configuring";
+    atlas_reason_ = error_;
+    status_ = SharedAtlasStatus::kReconfigureNeeded;
+    stopping_ = true;
+    ResetPublicationSchedule();
+    stop_time_ = base::TimeTicks::Now();
+    StopCaptures();
+    DropPendingCapture();
+    dirty_ = false;
+    PublishStatus();
+    if (!leases_.empty()) keepalive_ = shared_from_this();
+  }
   void Lost(std::string message) {
     error_ = std::move(message);
+    if (atlas_pool_configured_) {
+      atlas_mode_ = "failed";
+      atlas_reason_ = error_;
+    }
     status_ = device_ && FAILED(device_->GetDeviceRemovedReason()) ? SharedAtlasStatus::kDeviceLost
                                                                    : SharedAtlasStatus::kFailed;
     stopping_ = true;
@@ -300,6 +327,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
     if (stopping_)
       return;
+    if (atlas_pool_configured_ && views.size() != 1) {
+      ReconfigureNeeded("capture-to-atlas view count changed; recreate output generation");
+      return;
+    }
     if (views.size() > kSharedAtlasMaxViews) {
       error_ = "too many atlas views";
       return;
@@ -310,6 +341,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         error_ = "invalid/duplicate atlas view bounds or id";
         return;
       }
+    }
+    if (base::FeatureList::IsEnabled(kRemoteKitCaptureToAtlas) && !atlas_pool_configured_) {
+      atlas_mode_ = views.size() == 1 ? "requested" : "fallback";
+      atlas_reason_ = views.size() == 1 ? "awaiting_root_eligibility" : "requires_single_view";
     }
     bool clear = false;
     bool metadata_changed = order_.size() != views.size();
@@ -323,15 +358,16 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         clear = true;
       }
       auto& c = *entry;
-      metadata_changed = metadata_changed || c.metadata.session_id != v.metadata.session_id ||
-                         c.metadata.instance_generation != v.metadata.instance_generation ||
-                         c.metadata.document_generation != v.metadata.document_generation ||
-                         c.metadata.focus_generation != v.metadata.focus_generation ||
-                         c.metadata.atlas_pixels_per_dip != v.metadata.atlas_pixels_per_dip ||
-                         c.metadata.page_device_scale_factor != v.metadata.page_device_scale_factor ||
-                         c.metadata.reserved != v.metadata.reserved ||
-                         !SameTextInput(c.metadata.text_input, v.metadata.text_input) ||
-                         c.enabled != v.capture_enabled;
+      metadata_changed =
+          metadata_changed || c.metadata.session_id != v.metadata.session_id ||
+          c.metadata.instance_generation != v.metadata.instance_generation ||
+          c.metadata.document_generation != v.metadata.document_generation ||
+          c.metadata.focus_generation != v.metadata.focus_generation ||
+          c.metadata.atlas_pixels_per_dip != v.metadata.atlas_pixels_per_dip ||
+          c.metadata.page_device_scale_factor != v.metadata.page_device_scale_factor ||
+          c.metadata.reserved != v.metadata.reserved ||
+          !SameTextInput(c.metadata.text_input, v.metadata.text_input) ||
+          c.enabled != v.capture_enabled;
       auto* contents = v.contents.get();
       auto* view = contents ? contents->GetRenderWidgetHostView() : nullptr;
       const uintptr_t identity = reinterpret_cast<uintptr_t>(view);
@@ -340,7 +376,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       auto* compositor = host ? host->compositor() : nullptr;
       c.root_pixels = compositor ? compositor->size() : gfx::Size();
       c.target_reason = "feature_disabled";
-      if (base::FeatureList::IsEnabled(kRemoteKitCaptureRoot)) {
+      if (base::FeatureList::IsEnabled(kRemoteKitCaptureRoot) ||
+          base::FeatureList::IsEnabled(kRemoteKitCaptureToAtlas)) {
         auto* native = static_cast<content::RenderWidgetHostViewBase*>(view);
         const gfx::Size expected(v.metadata.width_pixels, v.metadata.height_pixels);
         if (!host || !compositor)
@@ -352,8 +389,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
                  native->GetDeviceScaleFactor() != 1.f ||
                  native->GetScaleOverrideForCapture() != 1.f)
           c.target_reason = "unproven_device_scale";
-        else if (compositor->size() != expected ||
-                 host->GetBoundsInPixels().size() != expected ||
+        else if (compositor->size() != expected || host->GetBoundsInPixels().size() != expected ||
                  native->GetRequestedRendererSizeDevicePx() != expected ||
                  native->GetCompositorViewportPixelSize() != expected)
           c.target_reason = "backing_size_mismatch";
@@ -369,6 +405,15 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         }
       }
 
+      if (base::FeatureList::IsEnabled(kRemoteKitCaptureToAtlas) && !atlas_pool_configured_) {
+        if (views.size() == 1 && root_target && v.metadata.page_device_scale_factor == 1.f) {
+          atlas_mode_ = "bootstrap";
+          atlas_reason_ = "awaiting_adapter_capture";
+        } else {
+          atlas_mode_ = "fallback";
+          atlas_reason_ = views.size() != 1 ? "requires_single_view" : c.target_reason;
+        }
+      }
       const bool changed = c.web_contents() != contents ||
                            c.metadata.instance_generation != v.metadata.instance_generation ||
                            c.metadata.document_generation != v.metadata.document_generation ||
@@ -376,8 +421,13 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
                            c.metadata.y_pixels != v.metadata.y_pixels ||
                            c.metadata.width_pixels != v.metadata.width_pixels ||
                            c.metadata.height_pixels != v.metadata.height_pixels ||
-                           (c.capturer && c.identity != identity) ||
-                           c.root_target != root_target;
+                           (c.capturer && c.identity != identity) || c.root_target != root_target;
+      if (atlas_pool_configured_ &&
+          (changed || c.restart || views.size() != 1 || c.enabled != v.capture_enabled ||
+           c.metadata.page_device_scale_factor != v.metadata.page_device_scale_factor)) {
+        ReconfigureNeeded("capture-to-atlas binding changed; recreate output generation");
+        return;
+      }
       if (changed || c.restart) {
         c.Stop();
         c.Rebind(contents);
@@ -433,11 +483,18 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     }
     if (clear)
       ClearStage();
-    else if (metadata_changed && stage_)
+    else if (metadata_changed && stage_) {
       dirty_ = true;
+      if (atlas_pool_configured_)
+        for (auto& [id, c] : captures_)
+          if (c->capturer)
+            c->capturer->RequestRefreshFrame();
+    }
     PublishIfFree();
   }
   void ClearStage() {
+    if (atlas_pool_configured_)
+      return;
     // A different geometry/document cannot inherit any direct pixels. Already
     // submitted source reads remain protected by leases_, independent of this.
     ResetPublicationSchedule();
@@ -487,6 +544,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     auto it = captures_.find(id);
     if (it == captures_.end())
       return;
+    if (atlas_pool_configured_) {
+      ReconfigureNeeded("capture-to-atlas view stopped; recreate output generation");
+      return;
+    }
     it->second->manually_stopped = true;
     it->second->stale = true;
     it->second->Stop();
@@ -510,22 +571,30 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   }
   void RefreshGeometry(Capture& capture) {
     auto binding = capture.geometry.QueueRefresh();
-    if (!binding) return;
+    if (!binding)
+      return;
     std::weak_ptr<State> weak = shared_from_this();
     const auto id = capture.metadata.webview_id;
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
-        FROM_HERE, base::BindOnce([](std::weak_ptr<State> weak, uint64_t id, uint64_t binding) {
-          auto owner = weak.lock();
-          if (!owner || owner->stopping_) return;
-          auto found = owner->captures_.find(id);
-          if (found == owner->captures_.end()) return;
-          auto& capture = *found->second;
-          if (capture.capturer && capture.geometry.TakeRefresh(
-                  binding, base::TimeTicks::Now().since_origin().InMicroseconds())) {
-            ++owner->geometry_refreshes_;
-            capture.capturer->RequestRefreshFrame();
-          }
-        }, weak, id, *binding), base::Milliseconds(16));
+        FROM_HERE,
+        base::BindOnce(
+            [](std::weak_ptr<State> weak, uint64_t id, uint64_t binding) {
+              auto owner = weak.lock();
+              if (!owner || owner->stopping_)
+                return;
+              auto found = owner->captures_.find(id);
+              if (found == owner->captures_.end())
+                return;
+              auto& capture = *found->second;
+              if (capture.capturer &&
+                  capture.geometry.TakeRefresh(
+                      binding, base::TimeTicks::Now().since_origin().InMicroseconds())) {
+                ++owner->geometry_refreshes_;
+                capture.capturer->RequestRefreshFrame();
+              }
+            },
+            weak, id, *binding),
+        base::Milliseconds(16));
   }
   bool CreateOutput() {
     D3D11_TEXTURE2D_DESC desc{};
@@ -624,6 +693,130 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     context_->Flush();
     return value;
   }
+  void ConfigureAtlasPool(Capture& capture) {
+    CHECK(!atlas_pool_configured_);
+    atlas_pool_configured_ = true;
+    atlas_mode_ = "configuring";
+    atlas_reason_ = "importing_three_fresh_slots";
+    capture.capturer->StopAndResetConsumer();
+    std::vector<gfx::GpuMemoryBufferHandle> buffers;
+    for (size_t i = 0; i < slots_.size(); ++i) {
+      HANDLE duplicate = nullptr;
+      if (!DuplicateHandle(GetCurrentProcess(), slot_handles_[i].Get(), GetCurrentProcess(),
+                           &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        Lost("capture-to-atlas slot handle duplication failed");
+        return;
+      }
+      gfx::GpuMemoryBufferHandle handle(gfx::DXGIHandle{base::win::ScopedHandle(duplicate)});
+      handle.stride = width_ * 4;
+      atlas_slot_tokens_[i] = handle.dxgi_handle().token();
+      buffers.push_back(std::move(handle));
+    }
+    const auto id = capture.metadata.webview_id;
+    const auto weak = weak_from_this();
+    capture.capturer->ConfigureCaptureToAtlas(
+        generation_, gfx::Size(width_, height_),
+        gfx::Rect(capture.metadata.x_pixels, capture.metadata.y_pixels,
+                  capture.metadata.width_pixels, capture.metadata.height_pixels),
+        std::move(buffers),
+        base::BindOnce(
+            [](std::weak_ptr<State> weak, uint64_t id, bool success, const std::string& reason) {
+              auto self = weak.lock();
+              if (!self || self->stopping_)
+                return;
+              if (!success) {
+                self->Lost("capture-to-atlas configuration failed: " + reason);
+                return;
+              }
+              auto& c = *self->captures_.at(id);
+              self->atlas_mode_ = "active";
+              self->atlas_reason_ = reason;
+              c.geometry.Bind(++self->next_capture_binding_);
+              c.capturer->Start(&c, viz::mojom::BufferFormatPreference::kPreferMappableSharedImage);
+            },
+            weak, id),
+        base::BindOnce(
+            [](std::weak_ptr<State> weak, bool reconfigure, const std::string& reason) {
+              if (auto self = weak.lock(); self && !self->stopping_) {
+                if (reconfigure) self->ReconfigureNeeded("capture-to-atlas: " + reason);
+                else self->Lost("capture-to-atlas: " + reason);
+              }
+            },
+            weak));
+  }
+  void CaptureAtlasFrame(Capture& capture,
+                         media::mojom::VideoBufferHandlePtr data,
+                         media::mojom::VideoFrameInfoPtr info,
+                         const gfx::Rect& content_rect,
+                         mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> callbacks) {
+    const gfx::Rect visible(capture.metadata.x_pixels, capture.metadata.y_pixels,
+                            capture.metadata.width_pixels, capture.metadata.height_pixels);
+    auto reject = [&](const std::string& reason) {
+      if (callbacks)
+        callbacks->Done();
+      Lost("capture-to-atlas " + reason);
+    };
+    if (atlas_mode_ != "active" || !data || !info || !data->is_gpu_memory_buffer_handle() ||
+        info->pixel_format != media::PIXEL_FORMAT_ARGB ||
+        info->coded_size != gfx::Size(width_, height_) || info->visible_rect != visible ||
+        info->natural_size != visible.size() || content_rect != visible ||
+        data->get_gpu_memory_buffer_handle().type != gfx::DXGI_SHARED_HANDLE) {
+      reject("result geometry/format/state mismatch");
+      return;
+    }
+    auto handle = std::move(data->get_gpu_memory_buffer_handle());
+    size_t slot = slots_.size();
+    for (size_t i = 0; i < slots_.size(); ++i)
+      if (atlas_slot_tokens_[i] == handle.dxgi_handle().token())
+        slot = i;
+    if (slot == slots_.size()) {
+      reject("unknown slot token");
+      return;
+    }
+    const auto completed = consumed_->GetCompletedValue();
+    if (completed == kRemoved || (slot_values_[slot] && completed < slot_values_[slot])) {
+      reject("pool returned a slot still owned by consumer");
+      return;
+    }
+    // The capturer delivers only after successful GPU completion. No pixel read
+    // or copy is submitted here. The consumer's real read completion owns Done.
+    const auto value = Signal();
+    if (!value) {
+      if (callbacks)
+        callbacks->Done();
+      return;
+    }
+    Lease lease;
+    lease.wait_consumed = true;
+    lease.fence_value = value;
+    lease.handle = std::move(handle);
+    lease.callbacks = std::move(callbacks);
+    lease.submitted = base::TimeTicks::Now();
+    lease.capture_serial = capture_callbacks_;
+    lease.capture_time_us =
+        info->metadata.capture_end_time.value_or(lease.submitted).since_origin().InMicroseconds();
+    capture_time_us_ = lease.capture_time_us;
+    leases_.push_back(std::move(lease));
+    slot_values_[slot] = value;
+    capture.stale = false;
+    ++captured_;
+    ++atlas_direct_frames_;
+    SharedAtlasFrame frame{};
+    frame.generation = generation_;
+    frame.frame_id = ++frame_id_;
+    frame.ready_fence_value = value;
+    frame.capture_time_us = capture_time_us_;
+    frame.slot = static_cast<uint32_t>(slot);
+    frame.width_pixels = width_;
+    frame.height_pixels = height_;
+    frame.status = SharedAtlasStatus::kRunning;
+    frame.view_count = 1;
+    frame.views[0] = capture.metadata;
+    last_frame_ = frame;
+    status_ = SharedAtlasStatus::kRunning;
+    Trace("atlas_direct_publish", frame_id_, capture_time_us_, slot);
+    PublishStatus();
+  }
   void CaptureFrame(Capture& capture,
                     media::mojom::VideoBufferHandlePtr data,
                     media::mojom::VideoFrameInfoPtr info,
@@ -633,12 +826,13 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     ++capture_callbacks_;
     Trace("capture_callback", capture_callbacks_,
           info && info->metadata.capture_end_time
-              ? info->metadata.capture_end_time->since_origin().InMicroseconds() : 0,
-          capture.metadata.webview_id,
-          info ? info->metadata.capture_counter.value_or(-1) : -1,
+              ? info->metadata.capture_end_time->since_origin().InMicroseconds()
+              : 0,
+          capture.metadata.webview_id, info ? info->metadata.capture_counter.value_or(-1) : -1,
           info ? info->metadata.frame_rate.value_or(0) : 0,
           info && info->metadata.capture_begin_time
-              ? info->metadata.capture_begin_time->since_origin().InMicroseconds() : 0);
+              ? info->metadata.capture_begin_time->since_origin().InMicroseconds()
+              : 0);
     mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> callbacks(std::move(remote));
     auto drop = [&] {
       ++dropped_;
@@ -647,6 +841,11 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     };
     if (stopping_ || !capture.enabled || capture.manually_stopped) {
       drop();
+      return;
+    }
+    if (atlas_pool_configured_) {
+      CaptureAtlasFrame(capture, std::move(data), std::move(info), content_rect,
+                        std::move(callbacks));
       return;
     }
     const auto geometry_now = base::TimeTicks::Now().since_origin().InMicroseconds();
@@ -660,42 +859,53 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         info->coded_size !=
             gfx::Size(capture.metadata.width_pixels, capture.metadata.height_pixels) ||
         content_rect != gfx::Rect(info->coded_size)) {
-      const char* bucket = !data ? "missing-buffer" : !info ? "missing-info" :
-          !data->is_gpu_memory_buffer_handle() ? "buffer-kind" :
-          info->pixel_format != media::PIXEL_FORMAT_ARGB ? "pixel-format" :
-          info->coded_size != gfx::Size(capture.metadata.width_pixels,
-                                       capture.metadata.height_pixels) ? "coded-size" : "content-rect";
-      const auto detail = std::string("output invalid: capture is not exact-size BGRA ARGB GPU data bucket=") +
-           bucket + " view=" + Number(capture.metadata.webview_id) +
-           " requested=" + gfx::Size(capture.metadata.width_pixels,
-                                     capture.metadata.height_pixels).ToString() +
-           " coded=" + (info ? info->coded_size.ToString() : "none") +
-           " visible=" + (info ? info->visible_rect.ToString() : "none") +
-           " natural=" + (info ? info->natural_size.ToString() : "none") +
-           " content=" + content_rect.ToString() +
-           " pixel_format=" + (info ? media::VideoPixelFormatToString(info->pixel_format) : "none") +
-           " buffer_tag=" + (data ? base::NumberToString(static_cast<int>(data->which())) : "none") +
-           " gpu_handle_type=" + (data && data->is_gpu_memory_buffer_handle() ?
-               base::NumberToString(static_cast<int>(data->get_gpu_memory_buffer_handle().type)) : "none");
-      const bool geometry_only = data && info && data->is_gpu_memory_buffer_handle() &&
+      const char* bucket = !data                                            ? "missing-buffer"
+                           : !info                                          ? "missing-info"
+                           : !data->is_gpu_memory_buffer_handle()           ? "buffer-kind"
+                           : info->pixel_format != media::PIXEL_FORMAT_ARGB ? "pixel-format"
+                           : info->coded_size != gfx::Size(capture.metadata.width_pixels,
+                                                           capture.metadata.height_pixels)
+                               ? "coded-size"
+                               : "content-rect";
+      const auto detail =
+          std::string("output invalid: capture is not exact-size BGRA ARGB GPU data bucket=") +
+          bucket + " view=" + Number(capture.metadata.webview_id) + " requested=" +
+          gfx::Size(capture.metadata.width_pixels, capture.metadata.height_pixels).ToString() +
+          " coded=" + (info ? info->coded_size.ToString() : "none") +
+          " visible=" + (info ? info->visible_rect.ToString() : "none") +
+          " natural=" + (info ? info->natural_size.ToString() : "none") +
+          " content=" + content_rect.ToString() +
+          " pixel_format=" + (info ? media::VideoPixelFormatToString(info->pixel_format) : "none") +
+          " buffer_tag=" + (data ? base::NumberToString(static_cast<int>(data->which())) : "none") +
+          " gpu_handle_type=" +
+          (data && data->is_gpu_memory_buffer_handle()
+               ? base::NumberToString(static_cast<int>(data->get_gpu_memory_buffer_handle().type))
+               : "none");
+      const bool geometry_only =
+          data && info && data->is_gpu_memory_buffer_handle() &&
           info->pixel_format == media::PIXEL_FORMAT_ARGB &&
           data->get_gpu_memory_buffer_handle().type == gfx::DXGI_SHARED_HANDLE;
       if (geometry_only && capture.geometry.Defer(geometry_now)) {
         // Validate the real resource before granting any geometric grace. An
         // import is not a GPU read; no mismatched pixels enter the new atlas.
         ComPtr<ID3D11Texture2D> candidate;
-        if (!Import(data->get_gpu_memory_buffer_handle().dxgi_handle().buffer_handle(), candidate)) {
-          drop(); return;
+        if (!Import(data->get_gpu_memory_buffer_handle().dxgi_handle().buffer_handle(),
+                    candidate)) {
+          drop();
+          return;
         }
-        D3D11_TEXTURE2D_DESC desc{}; candidate->GetDesc(&desc);
+        D3D11_TEXTURE2D_DESC desc{};
+        candidate->GetDesc(&desc);
         ComPtr<IDXGIKeyedMutex> mutex;
         if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
             desc.Width != static_cast<UINT>(info->coded_size.width()) ||
-            desc.Height != static_cast<UINT>(info->coded_size.height()) ||
-            desc.ArraySize != 1 || desc.SampleDesc.Count != 1 ||
-            !(desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) || FAILED(candidate.As(&mutex))) {
+            desc.Height != static_cast<UINT>(info->coded_size.height()) || desc.ArraySize != 1 ||
+            desc.SampleDesc.Count != 1 ||
+            !(desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) ||
+            FAILED(candidate.As(&mutex))) {
           Lost("output invalid: transition resource format/dimensions/keyed mutex; " + detail);
-          drop(); return;
+          drop();
+          return;
         }
         capture.geometry_error = detail;
         ++geometry_drops_;
@@ -721,26 +931,40 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     D3D11_TEXTURE2D_DESC desc{};
     source->GetDesc(&desc);
     if (!trace_directory_.empty()) {
-      TraceGeometry geometry{gfx::Size(capture.metadata.width_pixels, capture.metadata.height_pixels),
-          info->coded_size, info->natural_size, info->visible_rect, content_rect,
-          desc.Width, desc.Height, static_cast<uint32_t>(desc.Format)};
+      TraceGeometry geometry{
+          gfx::Size(capture.metadata.width_pixels, capture.metadata.height_pixels),
+          info->coded_size,
+          info->natural_size,
+          info->visible_rect,
+          content_rect,
+          desc.Width,
+          desc.Height,
+          static_cast<uint32_t>(desc.Format)};
       const uint64_t view_id = capture.metadata.webview_id;
       auto previous = trace_geometry_.find(view_id);
       if (previous == trace_geometry_.end() || previous->second != geometry) {
         trace_geometry_[view_id] = geometry;
         if (trace_geometry_samples_.size() < 256) {
-          trace_geometry_samples_.Append(base::DictValue()
-              .Set("at_us", static_cast<double>(base::TimeTicks::Now().since_origin().InMicroseconds()))
-              .Set("webview_id", Number(view_id))
-              .Set("requested_width", geometry.requested.width()).Set("requested_height", geometry.requested.height())
-              .Set("coded_width", geometry.coded.width()).Set("coded_height", geometry.coded.height())
-              .Set("natural_width", geometry.natural.width()).Set("natural_height", geometry.natural.height())
-              .Set("visible_x", geometry.visible.x()).Set("visible_y", geometry.visible.y())
-              .Set("visible_width", geometry.visible.width()).Set("visible_height", geometry.visible.height())
-              .Set("content_width", geometry.content.width()).Set("content_height", geometry.content.height())
-              .Set("texture_width", static_cast<int>(geometry.texture_width))
-              .Set("texture_height", static_cast<int>(geometry.texture_height))
-              .Set("texture_format", static_cast<int>(geometry.texture_format)));
+          trace_geometry_samples_.Append(
+              base::DictValue()
+                  .Set("at_us",
+                       static_cast<double>(base::TimeTicks::Now().since_origin().InMicroseconds()))
+                  .Set("webview_id", Number(view_id))
+                  .Set("requested_width", geometry.requested.width())
+                  .Set("requested_height", geometry.requested.height())
+                  .Set("coded_width", geometry.coded.width())
+                  .Set("coded_height", geometry.coded.height())
+                  .Set("natural_width", geometry.natural.width())
+                  .Set("natural_height", geometry.natural.height())
+                  .Set("visible_x", geometry.visible.x())
+                  .Set("visible_y", geometry.visible.y())
+                  .Set("visible_width", geometry.visible.width())
+                  .Set("visible_height", geometry.visible.height())
+                  .Set("content_width", geometry.content.width())
+                  .Set("content_height", geometry.content.height())
+                  .Set("texture_width", static_cast<int>(geometry.texture_width))
+                  .Set("texture_height", static_cast<int>(geometry.texture_height))
+                  .Set("texture_format", static_cast<int>(geometry.texture_format)));
         }
       }
     }
@@ -753,9 +977,18 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     }
     if (!capture.geometry.Match(base::TimeTicks::Now().since_origin().InMicroseconds())) {
       Lost("capture geometry transition exceeded 2000ms: " + capture.geometry_error);
-      drop(); return;
+      drop();
+      return;
     }
     capture.geometry_error.clear();
+    if (atlas_mode_ == "bootstrap") {
+      // Import selected the adapter and allocated this generation's fresh slots.
+      // The ordinary bootstrap buffer has not been read by our GPU.
+      if (callbacks)
+        callbacks->Done();
+      ConfigureAtlasPool(capture);
+      return;
+    }
     if (single_plane_direct_) {
       if (pending_capture_)
         ++direct_pending_replaced_;
@@ -766,8 +999,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       pending.lease.handle = std::move(handle);
       pending.lease.callbacks = std::move(callbacks);
       pending.lease.capture_serial = capture_callbacks_;
-      pending.lease.capture_time_us = info->metadata.capture_end_time
-          .value_or(base::TimeTicks::Now()).since_origin().InMicroseconds();
+      pending.lease.capture_time_us =
+          info->metadata.capture_end_time.value_or(base::TimeTicks::Now())
+              .since_origin()
+              .InMicroseconds();
       pending_capture_ = std::move(pending);
       dirty_ = true;
       PublishIfFree();
@@ -787,8 +1022,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     lease.callbacks = std::move(callbacks);
     lease.submitted = base::TimeTicks::Now();
     lease.capture_serial = capture_callbacks_;
-    lease.capture_time_us = info->metadata.capture_end_time.value_or(lease.submitted)
-                                .since_origin().InMicroseconds();
+    lease.capture_time_us =
+        info->metadata.capture_end_time.value_or(lease.submitted).since_origin().InMicroseconds();
     // The source remains leased even if Signal/Release fails after the copy.
     lease.fence_value = Signal();
     leases_.push_back(std::move(lease));
@@ -806,8 +1041,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     if (stopping_)
       keepalive_ = shared_from_this();
   }
-  bool LockSource(Capture& capture, ID3D11Texture2D* source,
-                  ComPtr<IDXGIKeyedMutex>& mutex) {
+  bool LockSource(Capture& capture, ID3D11Texture2D* source, ComPtr<IDXGIKeyedMutex>& mutex) {
     if (FAILED(source->QueryInterface(IID_PPV_ARGS(&mutex)))) {
       Lost("output invalid: capture keyed mutex unavailable");
       return false;
@@ -846,6 +1080,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     return true;
   }
   void PublishIfFree() {
+    if (atlas_pool_configured_ || atlas_mode_ == "bootstrap")
+      return;
     if (stopping_ || !dirty_ || !consumed_ || !stage_) {
       publication_timer_.Stop();
       publication_wake_ = {};
@@ -881,8 +1117,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         auto pending = std::move(*pending_capture_);
         pending_capture_.reset();
         auto found = captures_.find(pending.webview_id);
-        if (found == captures_.end() || !found->second->capturer ||
-            !found->second->enabled || found->second->manually_stopped) {
+        if (found == captures_.end() || !found->second->capturer || !found->second->enabled ||
+            found->second->manually_stopped) {
           if (pending.lease.callbacks)
             pending.lease.callbacks->Done();
           ++dropped_;
@@ -911,12 +1147,12 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
           return;
         }
         auto& capture = *found->second;
-        context_->CopySubresourceRegion(slots_[slot].Get(), 0,
-            capture.metadata.x_pixels, capture.metadata.y_pixels, 0,
-            pending.lease.source.Get(), 0, nullptr);
+        context_->CopySubresourceRegion(slots_[slot].Get(), 0, capture.metadata.x_pixels,
+                                        capture.metadata.y_pixels, 0, pending.lease.source.Get(), 0,
+                                        nullptr);
         ++source_slot_copies_;
-        Trace("direct_source_copy", pending.lease.capture_serial,
-              pending.lease.capture_time_us, slot);
+        Trace("direct_source_copy", pending.lease.capture_serial, pending.lease.capture_time_us,
+              slot);
         pending.lease.submitted = base::TimeTicks::Now();
         capture_time_us_ = pending.lease.capture_time_us;
         capture.stale = false;
@@ -980,8 +1216,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     else
       // Consume only one current frame and skip all expired phase slots,
       // including after long static periods. Never replay an accumulated debt.
-      next_publication_deadline_ += period *
-          ((published_at - next_publication_deadline_).IntDiv(period) + 1);
+      next_publication_deadline_ +=
+          period * ((published_at - next_publication_deadline_).IntDiv(period) + 1);
   }
   bool InitializeDirectSlot(size_t slot) {
     if (direct_slot_initialized_[slot])
@@ -1017,9 +1253,13 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       }
     }
     for (auto it = leases_.begin(); it != leases_.end();) {
-      if (removed || (completed != kRemoved && it->fence_value && completed >= it->fence_value)) {
-        Trace("source_read_done", it->capture_serial, it->submitted.since_origin().InMicroseconds(),
-              completed, -1, 0, 0, it->capture_time_us);
+      const auto lease_completed =
+          it->wait_consumed && consumed_ ? consumed_->GetCompletedValue() : completed;
+      if (removed ||
+          (lease_completed != kRemoved && it->fence_value && lease_completed >= it->fence_value)) {
+        Trace(it->wait_consumed ? "atlas_consumed_done" : "source_read_done",
+              it->capture_serial, it->submitted.since_origin().InMicroseconds(),
+              lease_completed, -1, 0, 0, it->capture_time_us);
         if (it->callbacks)
           it->callbacks->Done();
         it = leases_.erase(it);
@@ -1125,14 +1365,32 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         .Set("reason", c->target_reason)
         .Set("root_frame_sink", c->root_target ? c->root_target->ToString() : "")
         .Set("root_width_pixels", c->root_pixels.width())
-        .Set("root_height_pixels", c->root_pixels.height());
+        .Set("root_height_pixels", c->root_pixels.height())
+        .Set("capture_to_atlas_visible_rect",
+             gfx::Rect(c->metadata.x_pixels, c->metadata.y_pixels,
+                       c->metadata.width_pixels, c->metadata.height_pixels).ToString());
   }
   base::DictValue Status() const {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
+    base::ListValue atlas_slots;
+    for (size_t i = 0; atlas_pool_configured_ && i < slots_.size(); ++i) {
+      atlas_slots.Append(base::DictValue()
+                             .Set("slot", static_cast<int>(i))
+                             .Set("token", atlas_slot_tokens_[i].ToString())
+                             .Set("published_fence", Number(slot_values_[i])));
+    }
     base::ListValue targets;
     for (const auto& [id, c] : captures_)
       targets.Append(CaptureStatus(id));
     return base::DictValue()
+        .Set("capture_to_atlas_requested", base::FeatureList::IsEnabled(kRemoteKitCaptureToAtlas))
+        .Set("capture_to_atlas_state", atlas_mode_)
+        .Set("capture_to_atlas_reason", atlas_reason_)
+        .Set("capture_to_atlas_direct_frames", Number(atlas_direct_frames_))
+        .Set("capture_to_atlas_pool_slots", atlas_pool_configured_ ? 3 : 0)
+        .Set("capture_to_atlas_slots", std::move(atlas_slots))
+        .Set("capture_to_atlas_width", static_cast<int>(width_))
+        .Set("capture_to_atlas_height", static_cast<int>(height_))
         .Set("capture_root_enabled", base::FeatureList::IsEnabled(kRemoteKitCaptureRoot))
         .Set("capture_targets", std::move(targets))
         .Set("generation", Number(generation_))
@@ -1147,7 +1405,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         .Set("geometry_transition_drops", Number(geometry_drops_))
         .Set("geometry_refreshes", Number(geometry_refreshes_))
         .Set("backpressure_polls", Number(backpressure_))
-        .Set("single_plane_direct_enabled", base::FeatureList::IsEnabled(kRemoteKitSinglePlaneDirect))
+        .Set("single_plane_direct_enabled",
+             base::FeatureList::IsEnabled(kRemoteKitSinglePlaneDirect))
         .Set("single_plane_direct_active", single_plane_direct_)
         .Set("pending_direct_capture", pending_capture_.has_value())
         .Set("source_stage_copies", Number(source_stage_copies_))
@@ -1180,29 +1439,44 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     bool high_resolution_timer;
     int64_t qpc, capture_time_us;
   };
-  void Trace(const char* stage, uint64_t serial, int64_t source_us, uint64_t detail,
-             int source_counter = -1, double frame_rate = 0, int64_t capture_begin_us = 0,
+  void Trace(const char* stage,
+             uint64_t serial,
+             int64_t source_us,
+             uint64_t detail,
+             int source_counter = -1,
+             double frame_rate = 0,
+             int64_t capture_begin_us = 0,
              int64_t capture_time_us = 0) {
-    if (trace_directory_.empty() || trace_events_.size() >= 64000) return;
-    LARGE_INTEGER qpc{}; QueryPerformanceCounter(&qpc);
+    if (trace_directory_.empty() || trace_events_.size() >= 64000)
+      return;
+    LARGE_INTEGER qpc{};
+    QueryPerformanceCounter(&qpc);
     if (!capture_time_us && (std::string_view(stage) == "capture_callback" ||
                              std::string_view(stage) == "atlas_publish"))
       capture_time_us = source_us;
-    trace_events_.push_back({stage, base::TimeTicks::Now().since_origin().InMicroseconds(),
-                             serial, source_us, detail, source_counter, frame_rate, capture_begin_us,
-                             base::Time::IsHighResolutionTimerInUse(), qpc.QuadPart, capture_time_us});
+    trace_events_.push_back({stage, base::TimeTicks::Now().since_origin().InMicroseconds(), serial,
+                             source_us, detail, source_counter, frame_rate, capture_begin_us,
+                             base::Time::IsHighResolutionTimerInUse(), qpc.QuadPart,
+                             capture_time_us});
   }
   void SaveTrace() {
-    if (trace_directory_.empty() || trace_saved_) return;
+    if (trace_directory_.empty() || trace_saved_)
+      return;
     trace_saved_ = true;
     base::ListValue events;
     for (const auto& event : trace_events_) {
-      auto row = base::DictValue().Set("stage", event.stage)
-          .Set("at_us", static_cast<double>(event.at_us)).Set("serial", Number(event.serial))
-          .Set("source_us", static_cast<double>(event.source_us)).Set("detail", Number(event.detail));
-      if (event.source_counter >= 0) row.Set("source_counter", event.source_counter);
-      if (event.frame_rate > 0) row.Set("source_frame_rate", event.frame_rate);
-      if (event.capture_begin_us) row.Set("capture_begin_us", static_cast<double>(event.capture_begin_us));
+      auto row = base::DictValue()
+                     .Set("stage", event.stage)
+                     .Set("at_us", static_cast<double>(event.at_us))
+                     .Set("serial", Number(event.serial))
+                     .Set("source_us", static_cast<double>(event.source_us))
+                     .Set("detail", Number(event.detail));
+      if (event.source_counter >= 0)
+        row.Set("source_counter", event.source_counter);
+      if (event.frame_rate > 0)
+        row.Set("source_frame_rate", event.frame_rate);
+      if (event.capture_begin_us)
+        row.Set("capture_begin_us", static_cast<double>(event.capture_begin_us));
       row.Set("high_resolution_timer", event.high_resolution_timer);
       row.Set("qpc", Number(event.qpc));
       if (event.capture_time_us)
@@ -1211,38 +1485,52 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         row.Set("source_frame_id", Number(event.serial));
       events.Append(std::move(row));
     }
-    LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
-    auto report = base::DictValue().Set("kind", "browser-gpu-cadence")
-        .Set("schema", "remotekit-media-trace-v1").Set("scope", "browser")
-        .Set("qpc_frequency", Number(frequency.QuadPart))
-        .Set("pid", static_cast<int>(base::GetCurrentProcId()))
-        .Set("generation", Number(generation_)).Set("width", static_cast<int>(width_))
-        .Set("height", static_cast<int>(height_)).Set("fps_limit", static_cast<int>(fps_))
-        .Set("poll_timer_mode", precise_poll_ ? "precise" : "default")
-        .Set("timer_high_resolution_start", trace_start_high_resolution_)
-        .Set("timer_high_resolution_stop", base::Time::IsHighResolutionTimerInUse())
-        .Set("capture_callbacks", Number(capture_callbacks_)).Set("captured", Number(captured_))
-        .Set("published", Number(frame_id_)).Set("dropped", Number(dropped_))
-        .Set("mutex_drops", Number(mutex_drops_)).Set("backpressure_polls", Number(backpressure_))
-        .Set("single_plane_direct_enabled", base::FeatureList::IsEnabled(kRemoteKitSinglePlaneDirect))
-        .Set("single_plane_direct_active", single_plane_direct_)
-        .Set("source_stage_copies", Number(source_stage_copies_))
-        .Set("stage_slot_copies", Number(stage_slot_copies_))
-        .Set("source_slot_copies", Number(source_slot_copies_))
-        .Set("direct_metadata_copies", Number(direct_metadata_copies_))
-        .Set("direct_slot_clears", Number(direct_slot_clears_))
-        .Set("direct_pending_replaced", Number(direct_pending_replaced_))
-        .Set("trace_full", trace_events_.size() == 64000).Set("events", std::move(events))
-        .Set("capture_geometry", std::move(trace_geometry_samples_));
+    LARGE_INTEGER frequency{};
+    QueryPerformanceFrequency(&frequency);
+    auto report = base::DictValue()
+                      .Set("kind", "browser-gpu-cadence")
+                      .Set("schema", "remotekit-media-trace-v1")
+                      .Set("scope", "browser")
+                      .Set("qpc_frequency", Number(frequency.QuadPart))
+                      .Set("pid", static_cast<int>(base::GetCurrentProcId()))
+                      .Set("generation", Number(generation_))
+                      .Set("width", static_cast<int>(width_))
+                      .Set("height", static_cast<int>(height_))
+                      .Set("fps_limit", static_cast<int>(fps_))
+                      .Set("poll_timer_mode", precise_poll_ ? "precise" : "default")
+                      .Set("timer_high_resolution_start", trace_start_high_resolution_)
+                      .Set("timer_high_resolution_stop", base::Time::IsHighResolutionTimerInUse())
+                      .Set("capture_callbacks", Number(capture_callbacks_))
+                      .Set("captured", Number(captured_))
+                      .Set("published", Number(frame_id_))
+                      .Set("dropped", Number(dropped_))
+                      .Set("mutex_drops", Number(mutex_drops_))
+                      .Set("backpressure_polls", Number(backpressure_))
+                      .Set("single_plane_direct_enabled",
+                           base::FeatureList::IsEnabled(kRemoteKitSinglePlaneDirect))
+                      .Set("single_plane_direct_active", single_plane_direct_)
+                      .Set("source_stage_copies", Number(source_stage_copies_))
+                      .Set("stage_slot_copies", Number(stage_slot_copies_))
+                      .Set("source_slot_copies", Number(source_slot_copies_))
+                      .Set("direct_metadata_copies", Number(direct_metadata_copies_))
+                      .Set("direct_slot_clears", Number(direct_slot_clears_))
+                      .Set("direct_pending_replaced", Number(direct_pending_replaced_))
+                      .Set("trace_full", trace_events_.size() == 64000)
+                      .Set("events", std::move(events))
+                      .Set("capture_geometry", std::move(trace_geometry_samples_));
     auto json = base::WriteJson(report);
-    if (!json) return;
+    if (!json)
+      return;
     auto path = trace_directory_.AppendASCII("browser-" + Number(base::GetCurrentProcId()) +
-        "-atlas-" + Number(generation_) + ".json");
-    base::ThreadPool::PostTask(FROM_HERE, {base::MayBlock(), base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
-        base::BindOnce([](base::FilePath path, std::string bytes) {
-          base::CreateDirectory(path.DirName());
-          base::WriteFile(path, bytes);
-        }, std::move(path), std::move(*json)));
+                                             "-atlas-" + Number(generation_) + ".json");
+    base::ThreadPool::PostTask(FROM_HERE,
+                               {base::MayBlock(), base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
+                               base::BindOnce(
+                                   [](base::FilePath path, std::string bytes) {
+                                     base::CreateDirectory(path.DirName());
+                                     base::WriteFile(path, bytes);
+                                   },
+                                   std::move(path), std::move(*json)));
   }
   SEQUENCE_CHECKER(sequence_);
   const uint32_t width_, height_;
@@ -1252,6 +1540,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   std::string error_;
   bool stopping_ = false, dirty_ = false, consumer_exited_ = false;
   bool single_plane_direct_ = false;
+  bool atlas_pool_configured_ = false;
+  std::string atlas_mode_ = "disabled", atlas_reason_ = "feature_disabled";
+  uint64_t atlas_direct_frames_ = 0;
+  std::array<gfx::DXGIHandleToken, kSharedAtlasSlotCount> atlas_slot_tokens_;
   bool drain_timed_out_ = false;
   base::TimeTicks stop_time_;
   base::TimeTicks next_publication_deadline_, publication_wake_;

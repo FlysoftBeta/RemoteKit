@@ -11,9 +11,24 @@ class SharedLeaseRetirement {
  public:
   struct Entry { uint64_t value, cookie; };
   void Observe(uint64_t value,uint64_t cookie) {
-    if(!value || value<=last_observed_)throw std::logic_error("shared lease fence regressed");
+    if(terminal_requested_)throw std::logic_error("shared generation already retiring");
+    if(!value || value==UINT64_MAX || value<=last_observed_)throw std::logic_error("shared lease fence regressed");
     entries_.push_back({value,cookie});last_observed_=value;
   }
+  // Seal a stopped generation without inventing a pixel lease for its final
+  // unborrowed publications. GPU readiness must be observed on the CPU before
+  // the terminal can enlarge the cumulative acknowledgement prefix.
+  bool ObserveUnborrowedThrough(uint64_t value,uint64_t producer_completed) {
+    if(!value || value==UINT64_MAX || value<last_observed_ ||
+       (terminal_requested_ && terminal_value_!=value))
+      throw std::logic_error("invalid shared terminal watermark");
+    terminal_requested_=true;terminal_value_=value;
+    if(producer_completed==UINT64_MAX || producer_completed<value)return false;
+    terminal_ready_=true;last_observed_=value;return true;
+  }
+  bool terminal_ready() const {return terminal_ready_;}
+  uint64_t terminal_value() const {return terminal_value_;}
+  uint64_t last_observed() const {return last_observed_;}
   template<class Released> uint64_t SafePrefix(Released released) const {
     uint64_t prefix=last_observed_;
     // Every skipped value is older than a CPU-ready observed publication and
@@ -34,6 +49,7 @@ class SharedLeaseRetirement {
   std::size_t size() const {return entries_.size();}
  private:
   std::deque<Entry> entries_;
-  uint64_t last_observed_=0,retired_prefix_=0;
+  uint64_t last_observed_=0,retired_prefix_=0,terminal_value_=0;
+  bool terminal_requested_=false,terminal_ready_=false;
 };
 }

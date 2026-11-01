@@ -45,6 +45,33 @@ int main() {
   startup.Commit(3,[](uint64_t cookie){Require(cookie==1);});
   Require(startup.size()==1 && startup.SafePrefix([](uint64_t){return false;})==0);
   Require(startup.SafePrefix([](uint64_t){return true;})==4);
+  // A frozen producer's last publications can be unborrowed. CPU readiness,
+  // then the oldest real reader, independently gate the final cumulative ack.
+  SharedLeaseRetirement terminal;terminal.Observe(10,11);bool held=true;
+  auto prefix=[&]{return terminal.SafePrefix([&](uint64_t cookie){Require(cookie==11);return !held;});};
+  Require(!terminal.ObserveUnborrowedThrough(15,14));
+  Require(!terminal.terminal_ready() && terminal.last_observed()==10 && prefix()==9);
+  terminal.Commit(9,[](uint64_t){throw std::runtime_error("terminal freed reader early");});
+  Require(!terminal.ObserveUnborrowedThrough(15,UINT64_MAX)); // device removal is not GPU completion
+  Require(!terminal.terminal_ready() && prefix()==0);
+  bool sealed=false;try{terminal.Observe(11,12);}catch(const std::logic_error&){sealed=true;}
+  Require(sealed);
+  Require(terminal.ObserveUnborrowedThrough(15,15));
+  Require(terminal.terminal_ready() && terminal.last_observed()==15 && prefix()==0);
+  held=false;Require(prefix()==15);
+  unsigned real_retired=0;
+  terminal.Commit(15,[&](uint64_t cookie){Require(cookie==11);++real_retired;});
+  Require(real_retired==1 && terminal.size()==0 && terminal.retired_prefix()==15);
+  SharedLeaseRetirement never_borrowed;
+  Require(!never_borrowed.ObserveUnborrowedThrough(3,2));
+  Require(never_borrowed.SafePrefix([](uint64_t){throw std::runtime_error("invented terminal lease");return true;})==0);
+  Require(never_borrowed.ObserveUnborrowedThrough(3,3));
+  Require(never_borrowed.SafePrefix([](uint64_t){return false;})==3);
+  never_borrowed.Commit(3,[](uint64_t){throw std::runtime_error("invented terminal lease");});
+  SharedLeaseRetirement fresh;fresh.Observe(1,1);
+  Require(fresh.SafePrefix([](uint64_t){return true;})==1 && never_borrowed.retired_prefix()==3);
+  bool changed=false;try{never_borrowed.ObserveUnborrowedThrough(4,4);}catch(const std::logic_error&){changed=true;}
+  Require(changed);
   std::cout<<"shared lease ordered retirement passed\n";return 0;
  } catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

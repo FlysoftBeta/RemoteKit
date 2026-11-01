@@ -178,6 +178,7 @@ struct Session {
  Sdk& sdk;Options options;std::string tenant,id;fs::path directory;
  std::optional<size_t> qsv_pattern_index;
  HANDLE process=nullptr,job=nullptr;std::atomic<uint64_t> control{0};int request_id=0;
+ bool producer_stop_pending=false;
  std::mutex rpc_mutex;
  std::map<std::string,Json> desired;
  int atlas_width=1920,atlas_height=1080;float atlas_scale=1;
@@ -228,7 +229,14 @@ struct Session {
   for(auto& view:saved)desired[ViewId(view)]=view;
   if(options.adaptive_fps)budget_thread=std::thread([this]{BudgetLoop();});
  }
- ~Session(){StopBudget();Stop();}
+ ~Session(){
+  StopBudget();
+  try{Stop();}catch(...){fprintf(stderr,"session shutdown unfinished; atlas resources retained\n");}
+  // Final OS handle cleanup is not proof of process exit. AtlasPool retains
+  // any unsafe generation when its own destructor cannot establish a drain.
+  if(job){CloseHandle(job);job=nullptr;}
+  if(process){CloseHandle(process);process=nullptr;}
+ }
  void Save(){Json values=Json::array();for(auto& [view,config]:desired)values.push_back(config);SaveJson(directory/"views.json",values);}
  Json Rpc(Json command) {
   std::lock_guard lock(rpc_mutex);
@@ -242,9 +250,10 @@ struct Session {
   return result;
  }
  bool Alive() const{return process&&WaitForSingleObject(process,0)==WAIT_TIMEOUT;}
+ bool ProducerExited() const{return process&&WaitForSingleObject(process,0)==WAIT_OBJECT_0;}
  void Start() {
-  if(Alive()&&control)return;
-  Stop();
+  if(!producer_stop_pending && Alive()&&control)return;
+  if(!Stop())throw std::runtime_error("previous browser termination unfinished; retry the retained producer before restart");
   job=CreateJobObjectW(nullptr,nullptr);if(!job)throw std::runtime_error("CreateJobObject failed");
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)))throw std::runtime_error("job limits failed");
@@ -324,7 +333,8 @@ struct Session {
   if(active){stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();}
   coordinate_readiness.Clear();
   media_feedback.Bind(peer.load(),"","");
-  try{Rpc({{"method","output.close"}});}catch(const std::exception&){}
+  try{Rpc({{"method","output.close"}});}
+  catch(const std::exception& error){fprintf(stderr,"output close unfinished: %s; resources retained until producer stop confirmed\n",error.what());}
   return active;
  }
  void GeometryConfig(const Geometry& value) {
@@ -594,15 +604,34 @@ struct Session {
    }
   }
  }
- void Stop() {
+ bool Stop() {
+  producer_stop_pending=process || job;
   ClosePeer();
   if(control){sdk.remotekit_sdk_control_close(control);control=0;}
+  // Keep the job/process identity until this exact process is confirmed gone.
+  // Closing the job first would lose the retry identity after a stop timeout.
+  if(job && !TerminateJobObject(job,0))
+   fprintf(stderr,"producer job termination request failed (Windows=%lu); waiting for retained process\n",GetLastError());
+  if(process) {
+   const auto exited=WaitForSingleObject(process,5000);
+   if(exited==WAIT_OBJECT_0) {
+    // A crash may leave the last mapping status Running. Preserve confirmed
+    // producer termination on retained generations before closing its handle.
+    std::string error;
+    if(!pool.Close(error,true))fprintf(stderr,"pool close after producer exit unfinished: %s\n",error.c_str());
+   } else {
+    fprintf(stderr,"producer termination not confirmed (wait=%lu); process/job identity and atlas resources retained\n",exited);
+    return false;
+   }
+   CloseHandle(process);process=nullptr;
+  }
   if(job){CloseHandle(job);job=nullptr;}
-  if(process){WaitForSingleObject(process,5000);CloseHandle(process);process=nullptr;}
+  producer_stop_pending=false;
   // A new browser may restart its local generation counters at one. Its
   // resources/documents still belong to a new presentation incarnation.
   current_geometry.clear();publication_epochs.clear();
   {std::lock_guard lock(adaptive_mutex);adaptive_applied_known=false;}
+  return true;
  }
  static void EventCallback(void* context,uint64_t peer,uint32_t type,const void* bytes,size_t size,
                            const char* auxiliary,int32_t value) {
@@ -664,10 +693,12 @@ struct Session {
    if(found!=self->encoders.end()){worker=std::move(found->second);self->encoders.erase(found);}}
   if(worker)worker->Stop();
  }
- void OpenOutput() {
+ void OpenOutput(bool preserve_visibility=false) {
   // GPU resources are initialized by the first capture. With no subscribed
   // view there is no capture to wait for; keep RTC/DataChannel alive instead.
-  output_suspended=std::none_of(desired.begin(),desired.end(),[](const auto& entry){
+  // MediaLoop's resource replacement uses its existing subscription state.
+  // Control may already be changing desired before PauseOutput joins us.
+  if(!preserve_visibility)output_suspended=std::none_of(desired.begin(),desired.end(),[](const auto& entry){
    return entry.second.value("visible",false);
   });
   if(output_suspended)return;
@@ -802,6 +833,7 @@ struct Session {
   uint64_t previous_encoded=stats->completed.load(),previous_bytes=stats->bytes.load(),previous_copies=pool.copied_frames();
   uint64_t previous_delivered=pool.delivered_frames();
   bool stream_started=false;remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
+  unsigned consecutive_reconfigures=0;
   std::shared_ptr<remotekit::TailIdrAttempt> tail_attempt;
   double next_tail_attempt_ms=0;
   uint64_t adaptive_generation=0;double next_adaptive_ms=0;
@@ -834,6 +866,37 @@ struct Session {
    }
    remotekit_rtc_frame frame{};remotekit::SharedAtlasFrame metadata{};std::string error;
    auto result=output_suspended?AtlasPool::Result::idle:pool.Poll(frame,metadata,error);
+   if(result==AtlasPool::Result::reconfigure) {
+    coordinate_readiness.Clear();
+    media_feedback.Bind(peer.load(),"","");
+    if(tail_attempt)tail_attempt->CancelWaiting();
+    tail_attempt.reset();
+    if(latest.release)latest.release(latest.release_context,latest.frame_id);
+    latest={};stream_started=false;next_tail_attempt_ms=0;
+    idle=remotekit::IdleIdrPolicy(options.idle_idr_ms);
+    effective_idle_ms=idle.delay_ms();source_interval_ms=0;last_tail_age_ms=0;
+    layout=Json();adaptive_generation=0;next_adaptive_ms=0;
+    try {
+     if(++consecutive_reconfigures>3)throw std::runtime_error("atlas repeatedly requested reconfiguration before a frame");
+     if(stop_media.load())break;
+     // Rpc and OpenOutput each acquire rpc_mutex independently. PauseOutput
+     // sets stop_media and joins without holding it; never nest those locks.
+     Rpc({{"method","output.close"}});
+     if(stop_media.load())break;
+     // Open retires the old generation, preserving all SDK/worker leases and
+     // their GPU consumed barriers. RTC and WebContents keep their identity.
+     OpenOutput(true);
+     if(stop_media.load())break;
+     previous_copies=pool.copied_frames();previous_delivered=pool.delivered_frames();
+     previous_encoded=stats->completed.load();previous_bytes=stats->bytes.load();
+     last_stats=QpcNow();refresh_connected=true;
+     {std::lock_guard lock(encoder_mutex);for(auto& [encoder,worker]:encoders)worker->Keyframe();}
+     continue;
+    } catch(const std::exception& failure) {
+     error=std::string("atlas reconfigure failed: ")+failure.what();
+     result=AtlasPool::Result::error;
+    }
+   }
    if(result==AtlasPool::Result::error) {
     coordinate_readiness.Clear();
     {std::lock_guard lock(stats->mutex);stats->error=error;}
@@ -871,6 +934,7 @@ struct Session {
    }
    const bool tail_ready=idle.TailDue(now_ms)&&!tail_attempt&&now_ms>=next_tail_attempt_ms;
    if(result==AtlasPool::Result::ready) {
+    consecutive_reconfigures=0;
     if(idle.Observe(metadata.generation,metadata.frame_id,metadata.capture_time_us,now_ms)) {
      if(tail_attempt)tail_attempt->CancelWaiting();
      tail_attempt.reset();next_tail_attempt_ms=0;
@@ -994,11 +1058,26 @@ struct Session {
   if(handle)sdk.remotekit_rtc_close(handle);
   std::map<uint64_t,std::unique_ptr<EncoderWorker>> remaining;
   {std::lock_guard lock(encoder_mutex);remaining.swap(encoders);}remaining.clear();
-  std::string error;if(!pool.Close(error))fprintf(stderr,"pool close: %s\n",error.c_str());
+  // Freeze the producer before snapshotting its final publication. Otherwise
+  // a consumed acknowledgement could permit another unobserved old frame.
+  bool producer_exited=ProducerExited();
+  bool producer_frozen=producer_exited;
+  if(control && !producer_exited) {
+   try{Rpc({{"method","output.close"}});producer_frozen=true;}
+   catch(const std::exception& error){fprintf(stderr,"pool close unfinished: producer stop failed: %s\n",error.what());}
+  }
+  // A failed/slow RPC can coincide with process exit. WAIT_FAILED and a
+  // missing handle are never evidence that a producer stopped publishing.
+  producer_exited=producer_exited || ProducerExited();
+  producer_frozen=producer_frozen || producer_exited;
+  // No handle also permits retrying a proof already stored on an old State;
+  // it does not authorize accepting a Running publication without that proof.
+  if(producer_frozen || !process) {
+   std::string error;if(!pool.Close(error,producer_exited))fprintf(stderr,"pool close: %s\n",error.c_str());
+  } else fprintf(stderr,"pool close unfinished: producer not confirmed stopped; resources retained\n");
   data_open=false;connection.clear();
   {std::lock_guard lock(stats->mutex);stats->sender_rtc_stats=nullptr;}
   {std::lock_guard lock(event_mutex);events.clear();}
-  if(control){try{Rpc({{"method","output.close"}});}catch(const std::exception&){}}
   if(trace)trace->Flush();
  }
  Json Command(const Json& request) {

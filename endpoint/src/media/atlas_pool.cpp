@@ -25,7 +25,9 @@ struct AtlasPool::State {
  ComPtr<ID3D11Fence> ready,consumed,done;
  std::array<ComPtr<ID3D11Texture2D>,3> textures;
  std::vector<std::unique_ptr<Slot>> pool;
- uint64_t last_frame=0,last_fence=0,next_cookie=0,copy_sequence=0,dropped=0;
+ uint64_t last_frame=0,last_fence=0,next_cookie=0,done_sequence=0,copies=0,dropped=0;
+ bool retiring=false,terminal_snapshot=false,producer_exited=false;
+ uint64_t terminal_value=0;
  bool shared_input=false;
  remotekit::SharedLeaseRetirement retirement;
  int64_t frequency=QpcFrequency();double copy_ms=0;bool untracked_read=false;
@@ -54,18 +56,44 @@ struct AtlasPool::State {
  Slot* Find(uint64_t cookie) {
   for(auto& slot:pool)if(slot->cookie==cookie)return slot.get();return nullptr;
  }
+ bool ObserveTerminal(std::string& error) {
+  if(!retiring)return true;
+  if(!terminal_snapshot) {
+   if(!mapping || !ready){error="atlas terminal metadata/fence unavailable; resources retained";return false;}
+   SharedAtlasFrame frame{};
+   const auto result=AtlasPool::ReadPublication(*mapping,setup,frame,error);
+   // A contended seqlock is retried by retirement polling; do not use a torn
+   // final fence. Starting cannot be terminal after output.close.
+   if(result==Result::idle && !frame.generation){error.clear();return true;}
+   if(!AtlasPool::ValidateTerminalPublication(frame,setup.generation,last_fence,error,producer_exited))return false;
+   terminal_value=frame.ready_fence_value;terminal_snapshot=true;error.clear();
+  }
+  if(terminal_value) {
+   retirement.ObserveUnborrowedThrough(terminal_value,ready->GetCompletedValue());
+  }
+  return true;
+ }
+ bool TerminalRetired() const {
+  return retiring && terminal_snapshot && (!terminal_value ||
+    (retirement.terminal_ready() && retirement.retired_prefix()>=terminal_value));
+ }
+ bool BeginRetirement(std::string& error) {
+  retiring=true;
+  return Retire(error);
+ }
  bool Retire(std::string& error) {
-  if(!shared_input || !context || untracked_read)return !untracked_read;
+  if(!context || untracked_read){error="atlas GPU retirement context/completion unavailable; resources retained";return false;}
+  if(!ObserveTerminal(error))return false;
   const auto prefix=retirement.SafePrefix([&](uint64_t cookie){auto* slot=Find(cookie);return slot && slot->refs.load()==0;});
   if(!prefix)return true;
   // No owner of this prefix can submit a future read. Earlier reads have all
   // been submitted before the final release, to this same immediate context.
   // Release callbacks never enter the driver or manipulate this ledger.
   untracked_read=true;
-  if(FAILED(context->Signal(consumed.Get(),prefix))){error="atlas shared consumed signal failed; resources retained";return false;}
-  const auto completion=copy_sequence+1;
-  if(FAILED(context->Signal(done.Get(),completion))){error="atlas shared retirement signal failed; resources retained";return false;}
-  copy_sequence=completion;
+  if(FAILED(context->Signal(consumed.Get(),prefix))){error="atlas consumed retirement signal failed; resources retained";return false;}
+  const auto completion=done_sequence+1;
+  if(FAILED(context->Signal(done.Get(),completion))){error="atlas local retirement signal failed; resources retained";return false;}
+  done_sequence=completion;
   retirement.Commit(prefix,[&](uint64_t cookie){auto* slot=Find(cookie);slot->active=false;slot->fence=completion;
    RK_SERVER_TRACE(trace,"atlas_shared_retire",Ids(*slot),rk_record.fence=prefix;rk_record.cookie=completion;rk_record.completed_fence=consumed->GetCompletedValue(););});
   RK_SERVER_TRACE(trace,"atlas_shared_prefix",(TraceIds{0,0,setup.generation,0,0}),rk_record.fence=prefix;rk_record.cookie=completion;rk_record.completed_fence=consumed->GetCompletedValue(););
@@ -77,16 +105,21 @@ struct AtlasPool::State {
   close(setup.mapping_handle);close(setup.ready_fence_handle);close(setup.consumed_fence_handle);
   for(auto texture:setup.texture_handles)close(texture);
  }
- bool Read(SharedAtlasFrame& frame,std::string& error) {
-  auto* sequence=reinterpret_cast<volatile LONG64*>(&mapping->publication_sequence);
+
+};
+AtlasPool::Result AtlasPool::ReadPublication(SharedAtlasMapping& mapping,
+ const remotekit_sdk_atlas_setup& setup,SharedAtlasFrame& frame,std::string& error) {
+ error.clear();
+  auto* sequence=reinterpret_cast<volatile LONG64*>(&mapping.publication_sequence);
   bool stable=false;
   for(int attempt=0;attempt<3;++attempt) {
    auto before=InterlockedCompareExchange64(sequence,0,0);if(before&1)continue;
-   std::memcpy(&frame,&mapping->frame,sizeof(frame));MemoryBarrier();
+   std::memcpy(&frame,&mapping.frame,sizeof(frame));MemoryBarrier();
    if(before==InterlockedCompareExchange64(sequence,0,0)){stable=true;break;}
   }
-  if(!stable)return false;
-  if(frame.status==SharedAtlasStatus::kStarting)return false;
+  if(!stable){frame={};return Result::idle;}
+  if(frame.status==SharedAtlasStatus::kStarting)return Result::idle;
+  if(frame.status==SharedAtlasStatus::kReconfigureNeeded)return Result::reconfigure;
   if(frame.status!=SharedAtlasStatus::kRunning){
    const char* status="unknown";
    switch(frame.status){
@@ -97,9 +130,8 @@ struct AtlasPool::State {
    }
    error=std::string("atlas producer ")+status+" status="+std::to_string(static_cast<uint32_t>(frame.status))+
      " expected_generation="+std::to_string(setup.generation)+" publication_generation="+std::to_string(frame.generation)+
-     " frame="+std::to_string(frame.frame_id)+" consumer_device_hresult="+
-     std::to_string(static_cast<int64_t>(device->GetDeviceRemovedReason()));
-   return false;
+     " frame="+std::to_string(frame.frame_id);
+   return Result::error;
   }
   if(frame.generation!=setup.generation||frame.width_pixels!=setup.width||frame.height_pixels!=setup.height||
      frame.slot>=3||!frame.frame_id||!frame.ready_fence_value||frame.ready_fence_value==UINT64_MAX||
@@ -108,17 +140,28 @@ struct AtlasPool::State {
        " expected_size="+std::to_string(setup.width)+"x"+std::to_string(setup.height)+
        " publication_size="+std::to_string(frame.width_pixels)+"x"+std::to_string(frame.height_pixels)+
        " slot="+std::to_string(frame.slot)+" frame="+std::to_string(frame.frame_id)+
-       " ready_fence="+std::to_string(frame.ready_fence_value)+" views="+std::to_string(frame.view_count);return false;}
+       " ready_fence="+std::to_string(frame.ready_fence_value)+" views="+std::to_string(frame.view_count);return Result::error;}
   for(uint32_t i=0;i<frame.view_count;++i) {
    auto& v=frame.views[i];
    if(!std::isfinite(v.atlas_pixels_per_dip)||v.atlas_pixels_per_dip<=0||
       !std::isfinite(v.page_device_scale_factor)||v.page_device_scale_factor<=0||
       v.x_pixels<0||v.y_pixels<0||uint64_t(v.x_pixels)+v.width_pixels>setup.width||
-      uint64_t(v.y_pixels)+v.height_pixels>setup.height){error="atlas view bounds mismatch";return false;}
+      uint64_t(v.y_pixels)+v.height_pixels>setup.height){error="atlas view bounds mismatch";return Result::error;}
   }
-  return true;
+  return Result::ready;
+}
+bool AtlasPool::ValidateTerminalPublication(const SharedAtlasFrame& frame,
+ uint64_t generation,uint64_t observed,std::string& error,bool producer_exited) {
+ if(frame.generation!=generation || !generation ||
+    (frame.status!=SharedAtlasStatus::kStopped && frame.status!=SharedAtlasStatus::kReconfigureNeeded &&
+     frame.status!=SharedAtlasStatus::kDeviceLost && frame.status!=SharedAtlasStatus::kFailed &&
+     !(producer_exited && frame.status==SharedAtlasStatus::kRunning)) ||
+    frame.ready_fence_value==UINT64_MAX || frame.ready_fence_value<observed ||
+    (!frame.ready_fence_value != !frame.frame_id)) {
+  error="invalid/future atlas terminal publication; resources retained";return false;
  }
-};
+ error.clear();return true;
+}
 AtlasPool::AtlasPool(){wchar_t enabled[2]{};ready_gate_=GetEnvironmentVariableW(L"REMOTEKIT_ATLAS_READY_GATE",enabled,2)==1&&enabled[0]==L'1';}
 AtlasPool::~AtlasPool(){std::string error;if(!Close(error)) {
  // Keep the state alive if a live GPU or SDK lease can still read it.
@@ -129,6 +172,7 @@ bool AtlasPool::Open(remotekit_sdk_atlas_setup setup,uint32_t count,std::string&
  ReapRetired();
  if(state_) {
   if(retired_.size()>=3){State discard;discard.setup=setup;error="too many outstanding atlas generations";return false;}
+  if(!state_->BeginRetirement(error)){State discard;discard.setup=setup;return false;}
   retired_.push_back(std::move(state_));
  }
  state_=std::make_shared<State>();auto& s=*state_;s.setup=setup;s.clock=clock_;s.trace=trace_;s.shared_input=shared_input_;
@@ -176,10 +220,10 @@ void AtlasPool::ReapRetired() {
  for(auto it=retired_.begin();it!=retired_.end();) {
   auto& old=**it;bool leased=false;
   const bool removed=old.device && FAILED(old.device->GetDeviceRemovedReason());
-  std::string error;if(!removed && old.shared_input && !old.untracked_read)old.Retire(error);
+  std::string error;if(!removed && !old.untracked_read)old.Retire(error);
   for(auto& slot:old.pool)leased|=slot->refs.load()!=0;
   const auto value=old.done?old.done->GetCompletedValue():0;
-  if(!leased && (removed || (!old.untracked_read && value!=UINT64_MAX && value>=old.copy_sequence)))it=retired_.erase(it);
+  if(!leased && (removed || (!old.untracked_read && old.TerminalRetired() && value!=UINT64_MAX && value>=old.done_sequence)))it=retired_.erase(it);
   else ++it;
  }
 }
@@ -201,6 +245,14 @@ AtlasPool::Result AtlasPool::Poll(remotekit_rtc_frame& output,SharedAtlasFrame& 
   }
  }
  if(completed==UINT64_MAX){error="atlas invalid GPU fence";return Result::error;}
+ SharedAtlasFrame frame{};
+ const auto publication=ReadPublication(*s.mapping,s.setup,frame,error);
+ if(publication==Result::reconfigure) {
+  if(!s.BeginRetirement(error))return Result::error;
+  return Result::reconfigure;
+ }
+ if(s.retiring)return Result::reconfigure;
+ if(publication!=Result::ready)return publication;
  State::Slot* first=nullptr;
  for(auto& slot:s.pool)if(slot->pending&&slot->fence<=completed&&(!first||slot->fence<first->fence))first=slot.get();
  for(auto& slot:s.pool) {
@@ -224,8 +276,6 @@ AtlasPool::Result AtlasPool::Poll(remotekit_rtc_frame& output,SharedAtlasFrame& 
     rk_record.fence=slot->fence;rk_record.completed_fence=completed;);
   ++delivered_;metadata=slot->metadata;return Result::ready;
  }
- SharedAtlasFrame frame{};
- if(!s.Read(frame,error))return error.empty()?Result::idle:Result::error;
  metadata=frame;s.latest=frame;
  if(s.trace && frame.frame_id!=s.observed_frame) {
   TraceRecord record;record.event="atlas_observed";record.ids.source_frame_id=frame.frame_id;
@@ -283,9 +333,9 @@ AtlasPool::Result AtlasPool::Poll(remotekit_rtc_frame& output,SharedAtlasFrame& 
    rk_record.fence=frame.ready_fence_value;rk_record.completed_fence=s.ready->GetCompletedValue();rk_record.slot=frame.slot;);
  if(FAILED(s.context->Wait(s.ready.Get(),frame.ready_fence_value))){error="atlas GPU ready wait failed";return Result::error;}
  s.untracked_read=true;
- s.context->CopyResource(free->texture.Get(),s.textures[frame.slot].Get());
+ s.context->CopyResource(free->texture.Get(),s.textures[frame.slot].Get());++s.copies;
  if(FAILED(s.context->Signal(s.consumed.Get(),frame.ready_fence_value))){error="atlas GPU consumed signal failed";return Result::error;}
- free->fence=++s.copy_sequence;free->pending=true;
+ free->fence=++s.done_sequence;free->pending=true;
  if(FAILED(s.context->Signal(s.done.Get(),free->fence))){error="atlas private copy signal failed";return Result::error;}
  s.untracked_read=false;
  if(frame.frame_id>s.last_frame+1)s.dropped+=frame.frame_id-s.last_frame-1;
@@ -299,22 +349,36 @@ double AtlasPool::clock_uncertainty_us() const {
 }
 ID3D11Device5* AtlasPool::Device() const{return state_?state_->device.Get():nullptr;}
 SharedAtlasFrame AtlasPool::LatestMetadata() const{return state_?state_->latest:SharedAtlasFrame{};}
-uint64_t AtlasPool::copied_frames() const{return state_&&!state_->shared_input?state_->copy_sequence:0;}
+uint64_t AtlasPool::copied_frames() const{return state_&&!state_->shared_input?state_->copies:0;}
 uint64_t AtlasPool::drops() const{return state_?state_->dropped:0;}
 double AtlasPool::last_copy_ms() const{return state_?state_->copy_ms:0;}
-bool AtlasPool::Close(std::string& error) {
+bool AtlasPool::Close(std::string& error,bool producer_exited) {
  std::vector<std::shared_ptr<State>> all=retired_;if(state_)all.push_back(state_);
+ // Record the exit proof on every generation before any lease/ready check can
+ // return early. Open and retirement polling must retain this termination cause.
+ if(producer_exited)for(auto& entry:all)entry->producer_exited=true;
  for(auto& entry:all) {
   auto& s=*entry;
   // Close is a barrier, not permission to retire a still-readable SDK frame.
   for(auto& slot:s.pool)if(slot->refs.load()){error="atlas pool still leased";return false;}
-  if(s.shared_input && s.device && SUCCEEDED(s.device->GetDeviceRemovedReason()) && !s.untracked_read && !s.Retire(error))return false;
+  if(s.device && SUCCEEDED(s.device->GetDeviceRemovedReason()) && !s.untracked_read) {
+   if(!s.BeginRetirement(error))return false;
+   if(!s.terminal_snapshot){error="atlas terminal publication not stable; resources retained";return false;}
+   if(s.terminal_value && !s.retirement.terminal_ready()) {
+    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+    auto hr=s.ready->SetEventOnCompletion(s.terminal_value,event);
+    auto wait=SUCCEEDED(hr)?WaitForSingleObject(event,5000):WAIT_FAILED;CloseHandle(event);
+    if(wait!=WAIT_OBJECT_0){error="atlas producer terminal readiness timed out; resources retained";return false;}
+    if(!s.Retire(error))return false;
+   }
+   if(!s.TerminalRetired()){error="atlas terminal retirement incomplete; resources retained";return false;}
+  }
   if(s.untracked_read && s.device && SUCCEEDED(s.device->GetDeviceRemovedReason())) {
    error="atlas GPU read has no completion fence; resources retained";return false;
   }
-  if(s.device&&SUCCEEDED(s.device->GetDeviceRemovedReason())&&s.done&&s.copy_sequence) {
+  if(s.device&&SUCCEEDED(s.device->GetDeviceRemovedReason())&&s.done&&s.done_sequence) {
    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
-   auto hr=s.done->SetEventOnCompletion(s.copy_sequence,event);s.context->Flush();
+   auto hr=s.done->SetEventOnCompletion(s.done_sequence,event);s.context->Flush();
    auto wait=SUCCEEDED(hr)?WaitForSingleObject(event,5000):WAIT_FAILED;CloseHandle(event);
    if(wait!=WAIT_OBJECT_0){error="atlas GPU drain timed out";return false;}
   }

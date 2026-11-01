@@ -21,8 +21,21 @@
 
 ## 实施与验收顺序
 
-实现、patchset管理及增量编译先完成，root审查生命周期后再由独立实验任务实跑。接口涉及capturer Mojo/host wrapper、专用固定池与Context导入、完成成功性、browser GPU atlas；不改Endpoint、Viewer或fixture。Chromium改动生成新的有序patch及hash，验证重放与撤回，复用out/dev，所有CPU cores，不与GPU计时并行。
+实现、patchset管理及增量编译先完成，root审查生命周期后再由独立实验任务实跑。接口涉及capturer Mojo/host wrapper、专用固定池与Context导入、完成成功性、browser GPU atlas，以及下面的Endpoint资源重建处理；Viewer和fixture不改。Chromium改动生成新的有序patch及hash，验证重放与撤回，复用out/dev，所有CPU cores，不与GPU计时并行。
 
 状态必须区分requested/bootstrap/configuring/active/fallback/failed，记录原因、实际尺寸、token/slot、lease和真实copy/直写数量。运行中失败停止本代并走重建，不静默回退掩盖失败。
 
 功能先验证像素CRC、四角/IME、静止/尾IDR/恢复、慢消费者背压、resize、同尺寸导航/target替换、DPR2及multi-plane往返、GPU进程故障与恢复。特别验证旧代没有写新槽、pool不分配第四槽、Stop不提前归还Endpoint仍读的槽。通过后按原条件fixed52两租户10+45秒，完整测GPU归因/逐环节FPS/同组marker。性能未测之前不计入收益。
+
+## 正常导航和binding替换的重建补充
+
+实施中确认harness原本不会自动重建failed output；不能把常规导航停流留作候选的最终行为。采用typed资源重建状态：在SharedAtlasStatus末尾追加kReconfigureNeeded，不改变结构大小或SDK C ABI，旧消费者遇到未知状态会安全失败而不会自动支持新行为。
+
+Browser正常target/binding变化时停止本代继续写入，发布该状态及原因，异步保留旧lease。Endpoint的AtlasPool返回专用reconfigure结果；MediaLoop在这个边沿清输入资格、取消等待的尾帧并释放本地latest，经已有RPC锁执行output.close/OpenOutput，得到harness新建的generation。重置帧流/尾帧与计数基线，下一帧请求IDR；保留RTC、WebContents和SDK/worker仍持有的真实旧lease。Pool.Open/后续ReapRetired按原机制处理旧consumed，新generation由现有ObserveLayout更新epoch。
+
+只在资源变更时调用控制RPC，不引入稳态轮询或逐帧消息。OpenOutput使用已有有界超时；检查关闭意图与锁顺序，失败明确结束当前媒体循环，不无限重试。真实GPU/context/import故障继续走失败状态，不能假称为普通配置切换。Browser旧State的异步keepalive不会阻塞close/open，新池与旧写入使用不同资源。
+## 退役终点与异常断线审查
+
+资源冻结后的最后publication可能从未被Endpoint借过。typed重建、普通Pause/Close与旧pool退休都需记录匹配旧generation的terminal watermark；先CPU观察ready到达，再在最老真实读者限制下推进GPU consumed，最后等本地done。不能用cookie0伪造lease，也不能把退休信号计作private copy。ClosePeer顺序为结束media/SDK/worker、确认producer停止发布、再关闭pool。若producer进程已确认退出，允许显式退出语义读取最后Running快照；普通RPC失败不能冒充退出或冻结。
+
+Viz的FrameCallbacks异常断开不能等同于显式Done：Browser崩溃时，回调管道和capture控制管道的关闭没有先后保证。专用delivery异常析构必须先同步使strong pool-generation失效，禁止再reserve，再释放VideoFrame；正常Done清除异常处理。即使capturer对象已销毁，generation仍需自行禁止复用。普通capture保持原行为。
