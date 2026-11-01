@@ -32,6 +32,7 @@ param(
   [switch]$OfficialTrace,
   [switch]$CopyOutputProfile,
   [switch]$OffscreenRoot,
+  [string]$BrowserEnableFeatures='',
   [ValidateRange(0,60)][int]$CaptureRenderFps=0,
   [ValidateSet('auto','off')][string]$BrowserDirectComposition='auto',
   [ValidateSet('auto','1')][string]$BrowserHostScale='auto',
@@ -76,6 +77,7 @@ if($QsvVpp -eq 'async' -and $AtlasAlignment -ne 16){throw 'QsvVpp async requires
 if($ServerTrace -and $DisableMediaTrace){throw 'ServerTrace also enables browser trace; use DisableMediaTrace without ServerTrace for the off baseline'}
 if($CopyOutputProfile -and -not $OfficialTrace){throw 'CopyOutputProfile requires OfficialTrace to collect its opt-in events'}
 $rkBrowserFeatures=@()
+if($BrowserEnableFeatures){$rkBrowserFeatures+=$BrowserEnableFeatures}
 if($CaptureMaxPending){$rkBrowserFeatures+="RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"}
 if($CopyOutputProfile){$rkBrowserFeatures+='RemoteKitCopyOutputProfile'}
 if($OffscreenRoot){$rkBrowserFeatures+='RemoteKitOffscreenRoot'}

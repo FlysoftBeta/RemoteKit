@@ -215,6 +215,7 @@ struct HarnessMainParts::State {
       view.metadata.page_device_scale_factor = PageScale(specs[i]);
       view.metadata.text_input = adapter.TextInputState();
       view.contents = adapter.contents();
+      view.offscreen_host = adapter.offscreen_host();
       view.capture_enabled = adapter.contents() && model->actual == Residency::live &&
                              !model->pending && output_enabled &&
                              !paused_output.contains(adapter.view_id());
@@ -436,7 +437,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           value.Set("height", specs[i].height);
           value.Set("device", specs[i].tablet ? "tablet" : "desktop");
           value.Set("deviceScaleFactor", PageScale(specs[i]));
-          value.Set("compositor", adapter->CompositorDiagnostics());
+          auto compositor = adapter->CompositorDiagnostics();
+          if (output) compositor.Set("capture", output->CaptureStatus(view_id));
+          value.Set("compositor", std::move(compositor));
           value.Set("visible", specs[i].visible);
           value.Set("lifecycle_uncertain", adapter->lifecycle_uncertain());
           auto touch = adapter->TouchInjectionStatus();

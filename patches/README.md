@@ -18,6 +18,14 @@ Ganesh submitted/finished 各自拥有独立 callback context；finished 保留�
 的 plain fallback 并转发原 Vulkan cleanup。Graphite 无 per-recording submitted
 callback，记录该缺口。补丁按清单顺序应用，逆序撤回。
 
+同一 Feature 还记录 Viz child 的第一处 paint flush 和 root 的现有
+`SkiaOutputDevice::Flush` GPU elapsed、实际 SkSurface 尺寸/色型/sample count，
+以及 output/context、本地 frame 序号和 child mailbox。原第二次 child
+cleanup/semaphore flush 保持原样，root callback 在已有 cleanup 组合后转发；
+不增加 flush、submit 或同步等待。Graphite paint 与 Vulkan secondary-CB
+明确记录不支持该测点。`tools/analyze-viz-gpu-profile.py --case CASE`
+分别统计两个 scope，不把它们和 renderer/CopyOutput 重叠区间相加。
+
 `0003-offscreen-root.patch` 提供默认关闭的 `RemoteKitOffscreenRoot`。
 启用时只把发给Viz的root surface handle设为空，使GPU输出使用官方offscreen
 纹理路径；浏览器Compositor的真实HWND、visible状态、尺寸与生命周期保持原样。

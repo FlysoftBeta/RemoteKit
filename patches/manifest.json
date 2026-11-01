@@ -10,7 +10,7 @@
     {
       "id": "copy-output-profile",
       "path": "0002-copy-output-profile.patch",
-      "sha256": "66828e5158ec26491dd953859a75ae83f97324bbac7c3bece1d56cd57a068a72"
+      "sha256": "38a0b40c733f33a31492424d0f78d3d41d2bb280e7c95a2cb0ffbbc2563b1758"
     },
     {
       "id": "offscreen-root",

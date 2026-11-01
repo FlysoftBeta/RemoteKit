@@ -13,6 +13,7 @@ namespace content {
 class WebContents;
 }
 namespace remotekit::browser {
+class OffscreenHost;
 
 // UI-sequence-only GPU producer. The borrowed WebContents must be stopped or
 // reported through SetViews before its execution instance is replaced.
@@ -23,6 +24,8 @@ class GpuAtlas final {
     SharedAtlasView metadata{};
     raw_ptr<content::WebContents> contents = nullptr;
     bool capture_enabled = false;
+    // Explicit service-host identity; null keeps native/demo capture on child.
+    raw_ptr<OffscreenHost> offscreen_host = nullptr;
   };
   GpuAtlas(uint32_t width_pixels, uint32_t height_pixels, uint64_t generation);
   ~GpuAtlas();
@@ -33,6 +36,7 @@ class GpuAtlas final {
   void StopView(uint64_t webview_id);
   base::DictValue DescribeForConsumer(uint32_t pid);
   base::DictValue Status() const;
+  base::DictValue CaptureStatus(uint64_t webview_id) const;
   // Nonblocking. Submitted source reads are retained asynchronously until GPU
   // completion or confirmed device removal, including after this owner dies.
   void Stop();

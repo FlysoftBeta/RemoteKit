@@ -1,4 +1,5 @@
 #include "remotekit/browser/gpu_atlas.h"
+#include "remotekit/browser/offscreen_host.h"
 #include "remotekit/capture_geometry.hpp"
 
 #include <d3d11_4.h>
@@ -36,6 +37,9 @@
 #include "base/win/scoped_handle.h"
 #include "components/viz/host/client_frame_sink_video_capturer.h"
 #include "content/public/browser/render_widget_host_view.h"
+#include "content/browser/renderer_host/render_widget_host_view_base.h"
+#include "ui/aura/window.h"
+#include "ui/compositor/compositor.h"
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "media/base/video_types.h"
@@ -49,6 +53,8 @@ namespace {
 using Microsoft::WRL::ComPtr;
 constexpr uint32_t kStale = kSharedAtlasViewStale;
 constexpr uint64_t kRemoved = std::numeric_limits<uint64_t>::max();
+BASE_FEATURE(kRemoteKitCaptureRoot, "RemoteKitCaptureRoot",
+             base::FEATURE_DISABLED_BY_DEFAULT);
 BASE_FEATURE(kRemoteKitSinglePlaneDirect, "RemoteKitSinglePlaneDirect",
              base::FEATURE_DISABLED_BY_DEFAULT);
 std::string Number(uint64_t value) {
@@ -110,6 +116,9 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     bool stale = true;
     bool restart = false;
     uintptr_t identity = 0;
+    std::optional<viz::FrameSinkId> root_target;
+    gfx::Size root_pixels;
+    std::string target_reason = "feature_disabled";
     base::TimeTicks mutex_busy_since;
     CaptureGeometryWait geometry;
     std::string geometry_error;
@@ -326,6 +335,40 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       auto* contents = v.contents.get();
       auto* view = contents ? contents->GetRenderWidgetHostView() : nullptr;
       const uintptr_t identity = reinterpret_cast<uintptr_t>(view);
+      std::optional<viz::FrameSinkId> root_target;
+      auto* host = v.offscreen_host.get();
+      auto* compositor = host ? host->compositor() : nullptr;
+      c.root_pixels = compositor ? compositor->size() : gfx::Size();
+      c.target_reason = "feature_disabled";
+      if (base::FeatureList::IsEnabled(kRemoteKitCaptureRoot)) {
+        auto* native = static_cast<content::RenderWidgetHostViewBase*>(view);
+        const gfx::Size expected(v.metadata.width_pixels, v.metadata.height_pixels);
+        if (!host || !compositor)
+          c.target_reason = "not_independent_offscreen_host";
+        else if (!native)
+          c.target_reason = "no_widget_view";
+        else if (v.metadata.page_device_scale_factor != 1.f ||
+                 compositor->device_scale_factor() != 1.f ||
+                 native->GetDeviceScaleFactor() != 1.f ||
+                 native->GetScaleOverrideForCapture() != 1.f)
+          c.target_reason = "unproven_device_scale";
+        else if (compositor->size() != expected ||
+                 host->GetBoundsInPixels().size() != expected ||
+                 native->GetRequestedRendererSizeDevicePx() != expected ||
+                 native->GetCompositorViewportPixelSize() != expected)
+          c.target_reason = "backing_size_mismatch";
+        else if (!native->GetNativeView() ||
+                 native->GetNativeView()->GetRootWindow() != host->window() ||
+                 native->GetNativeView()->bounds() != gfx::Rect(expected))
+          c.target_reason = "content_region_mismatch";
+        else if (!compositor->frame_sink_id().is_valid())
+          c.target_reason = "invalid_root_frame_sink";
+        else {
+          root_target = compositor->frame_sink_id();
+          c.target_reason = "pixel_preserving_root";
+        }
+      }
+
       const bool changed = c.web_contents() != contents ||
                            c.metadata.instance_generation != v.metadata.instance_generation ||
                            c.metadata.document_generation != v.metadata.document_generation ||
@@ -333,7 +376,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
                            c.metadata.y_pixels != v.metadata.y_pixels ||
                            c.metadata.width_pixels != v.metadata.width_pixels ||
                            c.metadata.height_pixels != v.metadata.height_pixels ||
-                           (c.capturer && c.identity != identity);
+                           (c.capturer && c.identity != identity) ||
+                           c.root_target != root_target;
       if (changed || c.restart) {
         c.Stop();
         c.Rebind(contents);
@@ -346,6 +390,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         c.manually_stopped = false;
       c.enabled = v.capture_enabled;
       c.metadata = v.metadata;
+      c.root_target = root_target;
       if (!c.enabled || c.manually_stopped || !view) {
         c.Stop();
         c.stale = true;
@@ -357,6 +402,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         c.capture_count = contents->IncrementCapturerCount(
             gfx::Size(v.metadata.width_pixels, v.metadata.height_pixels), false, false, false);
         c.capturer = view->CreateVideoCapturer();
+        if (c.root_target)
+          c.capturer->ChangeTarget(viz::VideoCaptureTarget(*c.root_target));
         c.identity = identity;
         c.capturer->SetFormat(media::PIXEL_FORMAT_ARGB);
         c.capturer->SetMinCapturePeriod(base::Seconds(1) / fps_);
@@ -1065,9 +1112,29 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         .Set("adapter_luid_high",
              base::NumberToString(static_cast<int32_t>(adapter_luid_.HighPart)));
   }
+  base::DictValue CaptureStatus(uint64_t id) const {
+    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
+    auto found = captures_.find(id);
+    if (found == captures_.end())
+      return base::DictValue().Set("reason", "no_capture");
+    const auto& c = found->second;
+    return base::DictValue()
+        .Set("webview_id", Number(id))
+        .Set("active", !!c->capturer)
+        .Set("effective_target", c->root_target ? "offscreen_root" : "widget_child")
+        .Set("reason", c->target_reason)
+        .Set("root_frame_sink", c->root_target ? c->root_target->ToString() : "")
+        .Set("root_width_pixels", c->root_pixels.width())
+        .Set("root_height_pixels", c->root_pixels.height());
+  }
   base::DictValue Status() const {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
+    base::ListValue targets;
+    for (const auto& [id, c] : captures_)
+      targets.Append(CaptureStatus(id));
     return base::DictValue()
+        .Set("capture_root_enabled", base::FeatureList::IsEnabled(kRemoteKitCaptureRoot))
+        .Set("capture_targets", std::move(targets))
         .Set("generation", Number(generation_))
         .Set("status", static_cast<int>(status_))
         .Set("fps_limit", static_cast<int>(fps_))
@@ -1248,6 +1315,9 @@ void GpuAtlas::StopView(uint64_t id) {
 }
 base::DictValue GpuAtlas::DescribeForConsumer(uint32_t pid) {
   return state_->Describe(pid);
+}
+base::DictValue GpuAtlas::CaptureStatus(uint64_t webview_id) const {
+  return state_->CaptureStatus(webview_id);
 }
 base::DictValue GpuAtlas::Status() const {
   return state_->Status();

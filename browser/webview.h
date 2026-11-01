@@ -57,6 +57,7 @@ class WebView final : public content::WebContentsObserver,
   WebView& operator=(const WebView&) = delete;
 
   content::WebContents* contents() const { return contents_.get(); }
+  OffscreenHost* offscreen_host() const { return offscreen_host_.get(); }
   SessionId session_id() const { return session_; }
   WebViewId view_id() const { return view_; }
   Status Navigate(const GURL&);

@@ -87,7 +87,7 @@ try {
     $cpu.Add(@{pid=$id;role=$known[$id].role;cpuCores=$cores;hostCpuPercent=$(if($null -ne $cores){100*$cores/$logicalCpus}else{$null});cpuSeconds=$seconds;workingSetBytes=$null})
    }catch{}
   }
-  $ownedGpu=[Collections.Generic.List[object]]::new();$engines=@{};$gpuError=$null
+  $ownedGpu=[Collections.Generic.List[object]]::new();$unownedGpu=[Collections.Generic.List[object]]::new();$engines=@{};$gpuError=$null
   $cpuMs=$cycle.Elapsed.TotalMilliseconds-$cpuStarted;$gpuStarted=$cycle.Elapsed.TotalMilliseconds
   try {
    $gpuSamples=if($pdh){$pdh.Read()}else{Get-CimInstance Win32_PerfRawData_GPUPerformanceCounters_GPUEngine}
@@ -107,13 +107,29 @@ try {
     if($known.ContainsKey($id)) {
      if($null -ne $util){$engines[$engine].ownedUtilPercent+=$util}
      $ownedGpu.Add(@{pid=$id;role=$known[$id].role;engine=$engine;type=$type;utilPercent=$util;runningTimeRaw=$(if(!$pdh){[int64]$gpu.RunningTime}else{$null});utilizationRaw=$(if(!$pdh){[int64]$gpu.UtilizationPercentage}else{$null});timestampSys100Ns=$(if(!$pdh){[int64]$gpu.Timestamp_Sys100NS}else{$null})})
+    } else {
+     # Keep every counter, including exited/unknown PIDs. A name is a separate
+     # best-effort observation, not an inferred benchmark role.
+     $unownedGpu.Add(@{pid=$id;engine=$engine;type=$type;utilPercent=$util;processName=$null})
     }
+   }
+   $unownedNames=@{}
+   $unownedIds=@($unownedGpu|ForEach-Object{$_.pid}|Sort-Object -Unique)
+   if($unownedIds.Count) {
+    foreach($process in @(Get-Process -Id $unownedIds -ErrorAction SilentlyContinue)) {
+     try{$unownedNames[[int]$process.Id]=$process.ProcessName}catch{}
+    }
+   }
+   $nameObservationWall=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+   foreach($counter in $unownedGpu) {
+    $counter.processNameObservedWallTimeMs=$nameObservationWall
+    if($unownedNames.ContainsKey([int]$counter.pid)){$counter.processName=$unownedNames[[int]$counter.pid]}
    }
   }catch{$gpuError=$_.Exception.Message}
   $self.Refresh();$selfCpu=$self.TotalProcessorTime.TotalSeconds;$selfAt=$clock.Elapsed.TotalSeconds
   $selfCores=if($selfAt -gt $previousSelfAt){($selfCpu-$previousSelfCpu)/($selfAt-$previousSelfAt)}else{$null}
   $previousSelfCpu=$selfCpu;$previousSelfAt=$selfAt
-  $writer.WriteLine((@{kind='resource-sample';gpuProvider=$GpuProvider;wallTimeMs=$wall;elapsedMs=$clock.ElapsedMilliseconds;collectionMs=$cycle.Elapsed.TotalMilliseconds;cpuCollectionMs=$cpuMs;gpuCollectionMs=($cycle.Elapsed.TotalMilliseconds-$gpuStarted);logicalCpus=$logicalCpus;collectorCpuCores=$selfCores;cpu=@($cpu);gpu=@($ownedGpu);engines=@($engines.Values);gpuError=$gpuError;metricsReadErrors=$metricsReadErrors;metricsLastReadError=$metricsLastReadError}|ConvertTo-Json -Depth 6 -Compress))
+  $writer.WriteLine((@{kind='resource-sample';gpuProvider=$GpuProvider;wallTimeMs=$wall;elapsedMs=$clock.ElapsedMilliseconds;collectionMs=$cycle.Elapsed.TotalMilliseconds;cpuCollectionMs=$cpuMs;gpuCollectionMs=($cycle.Elapsed.TotalMilliseconds-$gpuStarted);logicalCpus=$logicalCpus;collectorCpuCores=$selfCores;cpu=@($cpu);gpu=@($ownedGpu);unownedGpu=@($unownedGpu);engines=@($engines.Values);gpuError=$gpuError;metricsReadErrors=$metricsReadErrors;metricsLastReadError=$metricsLastReadError}|ConvertTo-Json -Depth 6 -Compress))
   $delay=$IntervalMs-$cycle.ElapsedMilliseconds;if($delay -gt 0){Start-Sleep -Milliseconds $delay}
  }
 }finally{$writer.Dispose();if($pdh){$pdh.Dispose()}}

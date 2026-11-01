@@ -39,6 +39,10 @@ def analyze(case):
     engines = collections.defaultdict(list)
     owned_engines = collections.defaultdict(list)
     gpu_roles = collections.defaultdict(list)
+    unowned_gpu = collections.defaultdict(list)
+    unowned_names = collections.defaultdict(set)
+    unowned_missing_names = collections.Counter()
+    unowned_sample_count = sum("unownedGpu" in s for s in samples)
     for sample in samples:
         role_cpu = collections.defaultdict(float)
         role_gpu = collections.defaultdict(float)
@@ -57,6 +61,17 @@ def analyze(case):
                 role_gpu[(gpu["role"], gpu["engine"])] += gpu["utilPercent"]
         for key, value in role_gpu.items():
             gpu_roles[key].append(value)
+        sample_unowned = collections.defaultdict(float)
+        for gpu in sample.get("unownedGpu", []):
+            key = (gpu["pid"], gpu["engine"])
+            if gpu.get("processName"):
+                unowned_names[key].add(gpu["processName"])
+            else:
+                unowned_missing_names[key] += 1
+            if gpu["utilPercent"] is not None:
+                sample_unowned[key] += gpu["utilPercent"]
+        for key, value in sample_unowned.items():
+            unowned_gpu[key].append(value)
     result = {"case": case.name, "wallWindowMs": [start, end],
               "sampleCount": len(samples), "malformedLines": malformed,
               "providers": sorted({s.get("gpuProvider", "cim") for s in samples}),
@@ -71,7 +86,17 @@ def analyze(case):
               "gpuByRoleAndPhysicalEnginePercent": [
                   {"role": k[0], "engine": k[1], "percent": summary(v)}
                   for k, v in gpu_roles.items()],
-              "interpretation": "GPU engine busy is scheduler running time, not proof of shader arithmetic. Independent engines are not added. CPU cores use process CPU time / elapsed wall time; divide by logical CPUs for host percent. Missing engine instances are not measured zero."}
+              "unownedGpuSampleCount": unowned_sample_count,
+              "unownedGpuByProcessAndPhysicalEnginePercent": [
+                  {"pid": k[0], "engine": k[1],
+                   "observedProcessNames": sorted(unowned_names[k]),
+                   "missingNameObservations": unowned_missing_names[k],
+                   "presentSamplesPercent": summary(v),
+                   # Observed contribution normalized over recorded samples;
+                   # absent instances are unknown, not measured zero busy time.
+                   "observedContributionPerRecordedWindowPercent": sum(v)/unowned_sample_count}
+                  for k, v in sorted(unowned_gpu.items())],
+              "interpretation": "GPU engine busy is scheduler running time, not proof of shader arithmetic. Independent engines are not added. CPU cores use process CPU time / elapsed wall time; divide by logical CPUs for host percent. Missing engine instances are not measured zero. observedContributionPerRecordedWindowPercent normalizes the observed contribution over recorded unowned samples; it does not estimate utilization during missing intervals."}
     (case/"resource-summary.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
     dominant = sorted(((k, v["mean"]) for k, v in result["gpuByPhysicalEnginePercent"].items()), key=lambda v: -v[1])[:3]
     print(json.dumps({"case": case.name, "samples": len(samples), "collectorCores": result["collectorCpuCores"]["mean"],

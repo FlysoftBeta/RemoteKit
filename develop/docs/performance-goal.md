@@ -12,7 +12,7 @@ UHD630、oneVPL异步H264、RTT10ms、每peer下行24–48Mbps，沿用1080p/DPR
 
 用户要求优先最快预设与高码率、VDEnc/Hybrid混跑。采用TU7/VBR/depth1，每peer48Mbps预算下目标36/max44Mbps，留传输余量。先比较全OFF、全ON、on/on/off、on/off/off，使用相同接收端、fixture、分辨率与marker。按实际GetVideoParam、各引擎占用和整链路结果判断，而不凭模式名称推断资源独立。具体边界与停止条件见[三租户矩阵](three-tenant-fast-mixed-plan.md)。
 
-当前分工：root负责架构、取舍、文档和commit/push；adaptive_budget_impl完成源码和统一构建；three_tenant_runtime已完成四组模式，source_budget_runtime独占GPU验证源准入并按授权转2租户。无CPU构建与计时GPU实验重叠。
+当前分工：root负责架构、取舍、文档和commit/push；混跑、源准入、源GPU归因及Viz精确计时均已完成，root_capture_candidate完成root捕获候选与功能/性能验证，正在收尾。无CPU构建与计时GPU实验重叠。
 
 已实现、构建与CPU测试通过，待实际GPU验证：
 
@@ -34,7 +34,7 @@ UHD630、oneVPL异步H264、RTT10ms、每peer下行24–48Mbps，沿用1080p/DPR
 
 ## 后续问题
 
-1. 先完成新混跑矩阵，再根据同组瓶颈选择下一项改进；仍无明显成效时转2租户。
+1. 已按用户授权转2租户。源准入使延迟达到91/99ms但FPS31–35；root捕获合并pass后约35–38FPS、p95 104/108ms。下一项优先验证已有client single-plane-direct，减少一次snapshot复制；保持原Chrome89/video路径和原像素/CRC。
 2. 自适应策略需要独立off/on运行验证，不把降低源帧率本身当作达到50FPS。
 3. TrackProcessor需要真实输入/几何/重连/静止/资源释放和性能验证；Canvas绘制可能仍有GPU复制。
 4. Endpoint私有BGRA复制可考虑消除，但共享槽必须按已退休连续前缀释放，所有读者结束前不得signal consumed；还需设计latest帧与尾IDR所有权。

@@ -16,6 +16,8 @@
 
 自适应源准入已实播：3租户提升到21.17–23.74FPS/p95 152–156ms；按授权转2租户后，关闭策略为22.99/23.42FPS、p95 444/401ms，开启为35.11/31.33FPS、p95 91/99ms。实际render配置与target/applied一致，几何、epoch、CRC保持，控制无错误。两租户延迟达标，FPS尚差15–19；正在拆分源GPU中的绘制、合成、捕获与复制成本，不能把进程占用全部算为网页绘制。详见[源准入实验](../develop/docs/source-budget-runtime.md)。
 
+源GPU细分已落实到真实flush：页面child批次约1.49ms、最终offscreen root约1.04ms，目标尺寸和sample count正常；请求/完成观察的百毫秒间隔不等于绘制执行。默认关闭的RemoteKitCaptureRoot改为捕获独立WebView root，实际将两pass合为一个六quad pass。原像素、CRC、resize、DPR2回退child再回root、点击与IME均通过；两租户profile-off为37.50/34.89FPS、p95 104/108ms，固定55反而饱和，仍未达标。下一对照减少客户端snapshot复制。详见[GPU计时](../develop/docs/viz-gpu-timing.md)和[root捕获](../develop/docs/root-capture-runtime.md)。
+
 当前marker延迟统计终点为客户端canvas绘制提交，CRC同步读回耗时另记；不表示物理屏幕点亮。四接收端同机满载时，读回p95达331–408ms，会干扰后续工作；同时已存在服务端供给下降与解码排队，不能将全部瓶颈归于测量。后续将同时记录GPU/读回完成端点，并保持CRC验证。
 
 断开RDP后DXGI无显示输出，Chrome89 VSync回退实测约31ms，空页面RAF约32Hz。用户允许新版Chromium模拟刷新验收：已复用out/rel完成Chromium157局部增量构建，官方 `--fake-vsync-rate=60` 已用于真实H.264串流。新增显式 `h264-level42-experimental` 接收档，校验H.264能力后按Level4.2协商，保持原1936×1088媒体尺寸；45项Control测试、类型检查、构建与启动smoke通过。重连使用每连接独立video，旧回调、stream、DOM和marker测量正确结束。
