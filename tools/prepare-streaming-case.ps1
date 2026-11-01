@@ -40,7 +40,7 @@ param(
   [switch]$DisableClientRafProbe,
   [ValidateSet('default','software','unlimited')][string]$ClientMode='default',
   [string]$ClientExecutablePath='C:/src/tmp/chrome89-google/app/chrome.exe',
-  [ValidateSet(0,60)][int]$ClientRefreshHz=0,
+  [ValidateSet(0,60,120)][int]$ClientRefreshHz=0,
   [ValidateSet('native','chrome89-h264-42','chrome89-h264-51','h264-level42-experimental')][string]$ReceiveProfile='chrome89-h264-42',
   [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
   [ValidateSet('external','async')][string]$QsvVpp='external',

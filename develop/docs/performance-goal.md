@@ -29,7 +29,9 @@
 
 - P1：Chrome89在断开的RDP会话无DXGI output，VSync Sleep17实际31ms，空页面约32Hz。用户已明确无法安装显示器，并允许新版/修改版Chromium模拟刷新验收；优先验证157官方 `--fake-vsync-rate=60`，复用out/rel，禁止全量构建。无需等待用户提供客户端，不切换用户会话。
 - 已解决P1：publication额外损失已修复并实播，source/atlas/encode/decode均约55FPS；保持Fence/lease，fixture未变。报告publication-runtime.md。
-- P1：157模拟60Hz同组video presentedFrames54.82FPS，但rVFC/canvas47.35FPS，p95 97ms，GPU70%且无网络/队列丢帧。正在做before-work回调顺序对照与生命周期审阅，不能用presentedFrames代替真实canvas。
+- P1：精准fake60空页60.003Hz；新fixture源/编码/解码60FPS。同配置单租户两组canvas54.86/p95122与45.25/p9574，仍不稳定；before-work无吞吐收益，默认不变。client_cadence_fresh正在唯一GPU窗口做10秒native trace逐事件归因，不能用播放器presentedFrames替代canvas。
+- P1：四compositor30依然3D99.85%，atlas约29→encode约14→canvas7.6–7.9，p95522–605ms；同步marker读回331–408ms与解码92–117ms并存。优先拆测量/接收开销和GPU复制成本，保留CRC，不因关闭marker得到漂亮结果而宣布达标。
+- P2：精准fake等待需保留原版成对ActivateHighResolutionTimer请求，避免附带改变同GPU进程其它延迟任务粒度；synthetic_vsync_receiver只改源，等待trace释放后增量构建单变量对照。是否解释延迟尚未证实。
 - P2：ApplyView源配置成功后若持久化或输出恢复失败，当前会保留停止状态并报告；Control对账不一定自动修复该状态，后续补恢复机制。
 - 已解决P1：双页手动重连复用旧video时解码/时间轴前进但所有rVFC停止；每连接新video修复已通过两次split重连，旧callback/stream/DOM清理。报告receiver-video-lifecycle.md。
 - P2：既有右边缘偏绿，direct off/on右16列逐字节相同；probe编码前NV12白边正确、coded padding为黑，但正式H264解码后根因尚未闭合。

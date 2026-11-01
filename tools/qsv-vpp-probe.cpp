@@ -139,8 +139,9 @@ static Json Verify(Gpu& gpu,ID3D11Texture2D* nv12,unsigned cropw,unsigned croph,
  for(unsigned x=cropw-std::min(16u,cropw);x<desc.Width;++x){unsigned chroma=x&~1u;size_t uv=static_cast<size_t>(mapped.RowPitch)*desc.Height+(y/2)*mapped.RowPitch+chroma;edge.push_back({{"x",x},{"insideCrop",x<cropw},{"yuv",{data[static_cast<size_t>(y)*mapped.RowPitch+x],data[uv],data[uv+1]}}});}
  return {{"colors",samples},{"rightCodedAndCropEdge",edge},{"codedPaddingExpected","unspecified: recorded to diagnose bleed, not claimed initialized"},{"maxColorError",max_error},{"cookie",observed_cookie},{"expectedCookie",cookie&255},{"ok",max_error<=4&&observed_cookie==(cookie&255)}};
 }
-static Json RunCase(const std::string& name,unsigned frames,unsigned scaling_mode,bool verify,bool vpp_only) {
- Json report={{"case",name},{"pid",GetCurrentProcessId()},{"framesRequested",frames},{"stage",vpp_only?"vpp-only":"same-session-vpp-encode"},{"scalingModeRequested",scaling_mode},{"geometryPolicy","full input crop to full output crop; not production letterbox"},{"verificationReadback",verify},{"events",Json::array()}};
+static Json RunCase(const std::string& name,unsigned frames,unsigned scaling_mode,bool verify,bool vpp_only,unsigned midstream_drain_at) {
+ Json report={{"case",name},{"pid",GetCurrentProcessId()},{"framesRequested",frames},{"stage",vpp_only?"vpp-only":"same-session-vpp-encode"},{"scalingModeRequested",scaling_mode},{"geometryPolicy","full input crop to full output crop; not production letterbox"},{"verificationReadback",verify},{"midstreamDrainAt",midstream_drain_at},{"events",Json::array()}};
+ if(midstream_drain_at)report["midstreamDrainScope"]="after final Sync of all prior frames; no Close/Reset before resuming; not held/busy/B-frame coverage";
  Gpu gpu;Session s;Engines engines;auto started=Clock::now();
  try {
   gpu.Open(report);s.allocator.device=gpu.device;report["engineCollectionAvailable"]=engines.Open();
@@ -171,6 +172,10 @@ static Json RunCase(const std::string& name,unsigned frames,unsigned scaling_mod
    for(unsigned i=0;i<count;++i){auto memory=std::make_unique<Memory>();D3D11_TEXTURE2D_DESC d{};d.Width=info.Width;d.Height=info.Height;d.MipLevels=d.ArraySize=1;d.Format=input?DXGI_FORMAT_B8G8R8A8_UNORM:DXGI_FORMAT_NV12;d.SampleDesc.Count=1;d.BindFlags=D3D11_BIND_RENDER_TARGET|(input?D3D11_BIND_SHADER_RESOURCE:D3D11_BIND_VIDEO_ENCODER);Hr(gpu.device->CreateTexture2D(&d,nullptr,&memory->texture),"external surface");surfaces[i].Info=info;surfaces[i].Data.MemId=memory.get();memories.push_back(std::move(memory));}
   };allocate(input_count,vp.vpp.In,true);allocate(output_count,vp.vpp.Out,false);
   std::ofstream bitstream;if(!vpp_only){auto filename=name+"-qsv-vpp.h264";if(std::filesystem::exists(filename))throw std::runtime_error("bitstream already exists; use a new output directory");bitstream.open(filename,std::ios::binary);if(!bitstream)throw std::runtime_error("open bitstream");report["bitstreamFile"]=filename;}
+  std::ofstream segment;
+  auto open_segment=[&](const char* phase){if(!midstream_drain_at)return;if(segment.is_open()){segment.flush();if(!segment)throw std::runtime_error("write H264 segment failed");segment.close();}auto filename=name+"-"+phase+"-drain.h264";if(std::filesystem::exists(filename))throw std::runtime_error("segment already exists; use a new output directory");segment.open(filename,std::ios::binary);if(!segment)throw std::runtime_error("open H264 segment");report[std::string(phase)+"DrainBitstreamFile"]=filename;};
+  open_segment("before");
+  auto write_packet=[&](const mfxBitstream& packet){if(packet.DataOffset>packet.MaxLength||packet.DataLength>packet.MaxLength-packet.DataOffset)throw std::runtime_error("invalid bitstream bounds");bitstream.write(reinterpret_cast<const char*>(packet.Data+packet.DataOffset),packet.DataLength);if(segment.is_open())segment.write(reinterpret_cast<const char*>(packet.Data+packet.DataOffset),packet.DataLength);if(!bitstream||(segment.is_open()&&!segment))throw std::runtime_error("write H264 packet failed");};
   std::vector<unsigned char> pixels;s.storage.resize(8*1024*1024);ComPtr<ID3D11Texture2D> staging;unsigned completed=0;auto runstart=Clock::now();
   auto sync=[&](mfxSyncPoint point,const char* stage){auto begin=Clock::now();mfxStatus status;do {status=MFXVideoCORE_SyncOperation(s.session,point,100);if(Ms(begin)>5000)throw std::runtime_error(std::string(stage)+" timeout");}while(status==MFX_WRN_IN_EXECUTION);Mfx(status,stage);return Ms(begin);};
   for(unsigned cookie=1;cookie<=frames;++cookie) {
@@ -180,17 +185,41 @@ static Json RunCase(const std::string& name,unsigned frames,unsigned scaling_mod
    mfxSyncPoint vs=nullptr,es=nullptr;auto begin=Clock::now();mfxStatus status;unsigned vbusy=0,ebusy=0;
    do {status=MFXVideoVPP_RunFrameVPPAsync(s.session,&input,&output,nullptr,&vs);if(status==MFX_WRN_DEVICE_BUSY){++vbusy;std::this_thread::sleep_for(std::chrono::milliseconds(1));}if(Ms(begin)>5000)throw std::runtime_error("VPP submit timeout");}while(status==MFX_WRN_DEVICE_BUSY);
    if(status!=MFX_ERR_NONE||!vs)throw std::runtime_error("VPP non-1:1 status "+std::to_string(status)+" (surface owners kept until Close)");
-   Json row={{"cookie",cookie},{"externalSourceUploadAndReadyMs",source_ms},{"vppInputLockedAfterSubmit",input.Data.Locked},{"vppOutputLockedAfterSubmit",output.Data.Locked},{"vppBusy",vbusy},{"vppSubmitMs",Ms(begin)}};auto& bs=s.bitstream;bs={};bs.Data=s.storage.data();bs.MaxLength=static_cast<mfxU32>(s.storage.size());
+   Json row={{"cookie",cookie},{"externalSourceUploadAndReadyMs",source_ms},{"vppInputLockedAfterSubmit",input.Data.Locked},{"vppOutputLockedAfterSubmit",output.Data.Locked},{"vppBusy",vbusy},{"vppSubmitMs",Ms(begin)}};if(midstream_drain_at)row["afterMidstreamDrain"]=cookie>midstream_drain_at;auto& bs=s.bitstream;bs={};bs.Data=s.storage.data();bs.MaxLength=static_cast<mfxU32>(s.storage.size());
    if(vpp_only)row["finalVppSyncMs"]=sync(vs,"VPP Sync");
    else {s.control={};if(cookie==1)s.control.FrameType=MFX_FRAMETYPE_I|MFX_FRAMETYPE_IDR|MFX_FRAMETYPE_REF;
     row["encodeBufferAttempts"]=Json::array();auto encode_begin=Clock::now();while(true){if(Ms(encode_begin)>5000)throw std::runtime_error("Encode submit timeout");status=MFXVideoENCODE_EncodeFrameAsync(s.session,&s.control,&output,&bs,&es);row["encodeBufferAttempts"].push_back({{"status",status},{"maxLength",bs.MaxLength},{"dataOffset",bs.DataOffset},{"dataLength",bs.DataLength}});if(status==MFX_ERR_NOT_ENOUGH_BUFFER&&s.storage.size()<64*1024*1024){s.storage.resize(s.storage.size()*2);bs.Data=s.storage.data();bs.MaxLength=static_cast<mfxU32>(s.storage.size());report["bitstreamBufferGrewToBytes"]=s.storage.size();continue;}if(status==MFX_WRN_DEVICE_BUSY){++ebusy;std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;}break;}
-    row["encodeSubmitStatus"]=status;row["encodeInputIsExactVppOutputObject"]=true;
+    row["encodeSubmitStatus"]=status;row["encodeInputIsExactVppOutputObject"]=true;if(midstream_drain_at&&cookie==midstream_drain_at+1)report["firstResumedEncodeStatus"]=status;
     if(status==MFX_ERR_MORE_DATA){do {status=MFXVideoENCODE_EncodeFrameAsync(s.session,nullptr,nullptr,&bs,&es);if(status==MFX_WRN_DEVICE_BUSY)std::this_thread::sleep_for(std::chrono::milliseconds(1));if(Ms(encode_begin)>5000)throw std::runtime_error("Encode delayed output timeout");}while(status==MFX_WRN_DEVICE_BUSY);row["encodeFlushStatus"]=status;}
-    if(status!=MFX_ERR_NONE){report["events"].push_back(row);Mfx(status,"Encode submit");}if(!es)throw std::runtime_error("Encode accepted without sync");row["finalEncodeSyncMs"]=sync(es,"Encode Sync");row["encodeBusy"]=ebusy;row["bitstreamTimestamp"]=bs.TimeStamp;row["finalBitstream"]={{"maxLength",bs.MaxLength},{"dataOffset",bs.DataOffset},{"dataLength",bs.DataLength}};if(bs.TimeStamp!=cookie)throw std::runtime_error("bitstream timestamp mismatch");bitstream.write(reinterpret_cast<const char*>(bs.Data+bs.DataOffset),bs.DataLength);row["bytes"]=bs.DataLength;
+    if(status!=MFX_ERR_NONE){report["events"].push_back(row);Mfx(status,"Encode submit");}if(!es)throw std::runtime_error("Encode accepted without sync");row["finalEncodeSyncMs"]=sync(es,"Encode Sync");row["encodeBusy"]=ebusy;row["bitstreamTimestamp"]=bs.TimeStamp;row["frameType"]=bs.FrameType;row["finalBitstream"]={{"maxLength",bs.MaxLength},{"dataOffset",bs.DataOffset},{"dataLength",bs.DataLength}};if(bs.TimeStamp!=cookie)throw std::runtime_error("bitstream timestamp mismatch");write_packet(bs);row["bytes"]=bs.DataLength;
    }
    row["inputLockedAfterFinalSync"]=input.Data.Locked;row["outputLockedAfterFinalSync"]=output.Data.Locked;if(input.Data.Locked||output.Data.Locked)throw std::runtime_error("surface still Locked after final sync");
    if(verify){row["verify"]=Verify(gpu,s.outputs[(cookie-1)%output_count]->texture.Get(),outw,outh,cookie,staging);if(!row["verify"]["ok"].get<bool>()){report["events"].push_back(row);throw std::runtime_error("NV12 color/crop/continuity verification failed");}}
    report["events"].push_back(std::move(row));++completed;report["framesCompleted"]=completed;
+   if(midstream_drain_at&&cookie>midstream_drain_at)report["resumedFramesCompleted"]=cookie-midstream_drain_at;
+   if(midstream_drain_at && cookie==midstream_drain_at) {
+    report["midstreamDrainCalls"]=Json::array();report["midstreamDrainCompleted"]=false;
+    auto drain_begin=Clock::now();unsigned packets=0;bool drained=false;
+    for(unsigned call=1;call<=64;++call) {
+     if(Ms(drain_begin)>5000)throw std::runtime_error("midstream NULL drain deadline");
+     bs={};bs.Data=s.storage.data();bs.MaxLength=static_cast<mfxU32>(s.storage.size());mfxSyncPoint point=nullptr;
+     auto status=MFXVideoENCODE_EncodeFrameAsync(s.session,nullptr,nullptr,&bs,&point);
+     Json drain_row={{"call",call},{"status",status},{"hasSync",point!=nullptr},{"maxLength",bs.MaxLength},{"dataOffset",bs.DataOffset},{"dataLength",bs.DataLength},{"timestampBeforeSync",bs.TimeStamp}};
+     if(status==MFX_WRN_DEVICE_BUSY){report["midstreamDrainCalls"].push_back(std::move(drain_row));std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;}
+     if(status==MFX_ERR_NOT_ENOUGH_BUFFER && s.storage.size()<64*1024*1024){report["midstreamDrainCalls"].push_back(std::move(drain_row));s.storage.resize(s.storage.size()*2);continue;}
+     if(status==MFX_ERR_MORE_DATA && !point){report["midstreamDrainCalls"].push_back(std::move(drain_row));drained=true;break;}
+     if(status!=MFX_ERR_NONE || !point){report["midstreamDrainCalls"].push_back(std::move(drain_row));throw std::runtime_error("midstream NULL drain rejected/unexpected status "+std::to_string(status));}
+     report["midstreamDrainCalls"].push_back(std::move(drain_row));auto& recorded=report["midstreamDrainCalls"].back();
+     recorded["finalEncodeSyncMs"]=sync(point,"midstream drain Encode Sync");recorded["timestampAfterSync"]=bs.TimeStamp;recorded["dataOffsetAfterSync"]=bs.DataOffset;recorded["dataLengthAfterSync"]=bs.DataLength;recorded["frameType"]=bs.FrameType;
+     write_packet(bs);++packets;
+    }
+    if(!drained)throw std::runtime_error("midstream NULL drain call budget exhausted");
+    unsigned locked=0;for(auto& surface:s.input_surfaces)locked+=surface.Data.Locked;for(auto& surface:s.output_surfaces)locked+=surface.Data.Locked;
+    report["midstreamDrainRemainingLocked"]=locked;report["midstreamDrainOutputPackets"]=packets;
+    if(locked)throw std::runtime_error("surface still Locked after midstream drain");
+    report["midstreamDrainCompleted"]=true;report["midstreamDrainMs"]=Ms(drain_begin);report["resumeWithoutCloseOrReset"]=true;
+    open_segment("after");
+   }
    std::this_thread::sleep_until(runstart+std::chrono::microseconds(static_cast<int64_t>(cookie)*1000000/60));
   }
   if(!vpp_only){s.bitstream={};s.bitstream.Data=s.storage.data();s.bitstream.MaxLength=static_cast<mfxU32>(s.storage.size());mfxSyncPoint point=nullptr;auto status=MFXVideoENCODE_EncodeFrameAsync(s.session,nullptr,nullptr,&s.bitstream,&point);report["encodeDrainStatus"]=status;if(status!=MFX_ERR_MORE_DATA)throw std::runtime_error("unexpected extra encode drain output");}
@@ -201,11 +230,12 @@ static Json RunCase(const std::string& name,unsigned frames,unsigned scaling_mod
 }
 int main(int argc,char** argv) {
  try {
-  std::string selected="noscale",output;unsigned frames=120,mode=0;bool verify=true,vpp_only=false;
-  for(int i=1;i<argc;++i){std::string arg=argv[i];if(arg=="--help"){puts("qsv_vpp_probe --output=NEW.json [--case=noscale|full|scale|all] [--frames=120] [--scaling-mode=0|1|2] [--verify=none] [--stage=vpp]\nGPU runs only when --output is supplied. Input texture is always real 1936x1088; noscale/scale valid crop 1928, full valid crop 1936. H264 files are placed beside JSON. verification adds explicit post-chain NV12 readback; disable only for engine attribution after correctness passes.");return 0;}else if(arg.starts_with("--output="))output=arg.substr(9);else if(arg.starts_with("--case="))selected=arg.substr(7);else if(arg.starts_with("--frames="))frames=std::stoul(arg.substr(9));else if(arg.starts_with("--scaling-mode="))mode=std::stoul(arg.substr(15));else if(arg=="--verify=none")verify=false;else if(arg=="--stage=vpp")vpp_only=true;else throw std::runtime_error("unknown argument "+arg);}
+  std::string selected="noscale",output;unsigned frames=120,mode=0,midstream_drain_at=0;bool verify=true,vpp_only=false;
+  for(int i=1;i<argc;++i){std::string arg=argv[i];if(arg=="--help"){puts("qsv_vpp_probe --output=NEW.json [--case=noscale|full|scale|all] [--frames=120] [--scaling-mode=0|1|2] [--verify=none] [--stage=vpp] [--midstream-drain-at=30]\nGPU runs only when --output is supplied. Input texture is always real 1936x1088; noscale/scale valid crop 1928, full valid crop 1936. H264 files are placed beside JSON. verification adds explicit post-chain NV12 readback; disable only for engine attribution after correctness passes. Midstream drain is opt-in, requires a single chain case with verification and 0<drain-at<frames, and resumes without Close/Reset; it does not simulate held/busy/B-frame reordering.");return 0;}else if(arg.starts_with("--output="))output=arg.substr(9);else if(arg.starts_with("--case="))selected=arg.substr(7);else if(arg.starts_with("--frames="))frames=std::stoul(arg.substr(9));else if(arg.starts_with("--scaling-mode="))mode=std::stoul(arg.substr(15));else if(arg.starts_with("--midstream-drain-at="))midstream_drain_at=std::stoul(arg.substr(21));else if(arg=="--verify=none")verify=false;else if(arg=="--stage=vpp")vpp_only=true;else throw std::runtime_error("unknown argument "+arg);}
   if(output.empty()||!frames||frames>600||mode>2||(selected!="noscale"&&selected!="full"&&selected!="scale"&&selected!="all"))throw std::runtime_error("invalid options; use --help");
+  if(midstream_drain_at && (midstream_drain_at>=frames || vpp_only || !verify || selected=="all"))throw std::runtime_error("midstream drain requires one chain case with verification and drain-at<frames");
   auto path=std::filesystem::absolute(output);if(std::filesystem::exists(path))throw std::runtime_error("output already exists");std::filesystem::create_directories(path.parent_path());std::filesystem::current_path(path.parent_path());Json result={{"schema","remotekit-qsv-vpp-probe-v1"},{"cases",Json::array()}};bool success=true;
-  for(auto name:std::array<std::string,3>{"noscale","full","scale"})if(selected==name||selected=="all"){auto row=RunCase(name,frames,mode,verify,vpp_only);bool okay=row["success"].get<bool>();result["cases"].push_back(std::move(row));success&=okay;if(!okay)break;}
+  for(auto name:std::array<std::string,3>{"noscale","full","scale"})if(selected==name||selected=="all"){auto row=RunCase(name,frames,mode,verify,vpp_only,midstream_drain_at);bool okay=row["success"].get<bool>();result["cases"].push_back(std::move(row));success&=okay;if(!okay)break;}
   result["success"]=success;std::ofstream file(path);file<<result.dump(2)<<'\n';if(!file)throw std::runtime_error("write report failed");printf("%s\n",success?"probe passed":"probe failed; see JSON");return success?0:1;
  }catch(const std::exception& error){fprintf(stderr,"%s\n",error.what());return 2;}
 }

@@ -23,7 +23,10 @@ const cards=page.querySelector('.cards');
 for(let i=0;i<12;i++){const card=document.createElement('article');card.className='card';card.innerHTML=`<span class="tag">Section ${String(i+1).padStart(2,'0')}</span><h2>${['Overview and activity','Traffic and observations','Projects and progress'][i%3]}</h2><div class="number">${[1280,60,24000,1080][i%4].toLocaleString('en-US')}</div>${chart}<p>Readable document text stays unchanged while the compositor translates this layer.</p><p class="fine">Fixed content · cards / text / vector graphics · ${i+1}</p>`;cards.appendChild(card);}
 sheet.appendChild(page);sheet.appendChild(page.cloneNode(true));
 if(mode==='static')sheet.style.animationPlayState='paused';
-let frame=0,stimulus=0,last=0,start=performance.now(),stopped=false,lastInput='',composition='',touches=0,pointer='';
+let frame=0,stimulus=0,start=performance.now(),stopped=false,lastInput='',composition='',touches=0,pointer='';
+const renderPeriod=1000/fps,renderTolerance=renderPeriod/2;
+// Fixed phase and nearest-RAF tolerance; skipped deadlines are never replayed.
+let nextRender=start+renderTolerance;
 window.rkCompositorFixture={kind:'dom-compositor-scroll-v1',mode,fps,sceneBuilds:1,sourceRafCount:0,markerRenders:0,startedAt:start};
 document.querySelector('#label').textContent='DOM compositor scroll · '+mode+' · marker target '+fps+' Hz';
 function capabilities(){document.querySelector('#status').textContent=JSON.stringify({fixture:'dom-compositor-scroll-v1',viewport:[innerWidth,innerHeight],DPR:devicePixelRatio,stimulus,lastInput,composition,touches,pointer});}
@@ -35,6 +38,6 @@ input.addEventListener('input',()=>{lastInput=input.value;const matches=[...inpu
 // Keep this exact anchor for tools/streaming-source-probe.mjs instrumentation.
 // Here "renders" means marker updates; CSS composition runs independently.
 function render(now){frame=(frame+1)>>>0;window.rkCompositorFixture.markerRenders++;drawMarker(marker,frame,Date.now(),stimulus);}
-function tick(now){window.rkCompositorFixture.sourceRafCount++;if(now-last>=1000/fps-1){last=now;if(mode==='static'){if(!stopped){render(now);stopped=true;}}else if(mode==='change-stop'&&now-start>stopAfter){if(!stopped){sheet.style.animationPlayState='paused';render(now);stopped=true;}}else render(now);}requestAnimationFrame(tick);}
+function tick(now){window.rkCompositorFixture.sourceRafCount++;if(now+renderTolerance>=nextRender){const before=frame;if(mode==='static'){if(!stopped){render(now);stopped=true;}}else if(mode==='change-stop'&&now-start>stopAfter){if(!stopped){sheet.style.animationPlayState='paused';render(now);stopped=true;}}else render(now);if(frame!==before)nextRender+=Math.max(1,Math.floor((now-nextRender)/renderPeriod)+1)*renderPeriod;}requestAnimationFrame(tick);}
 capabilities();requestAnimationFrame(tick);
 </script></body></html>
