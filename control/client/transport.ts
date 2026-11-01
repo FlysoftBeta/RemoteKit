@@ -181,7 +181,7 @@ export class RemoteTransport {
       this.bindChannel(peer.createDataChannel('remotekit', { ordered: true }));
       peer.ondatachannel = event => this.bindChannel(event.channel);
       const originalOffer = await peer.createOffer();
-      const effectiveOffer = configureReceiveOffer(originalOffer.sdp ?? '', this.receiveProfile, navigator.userAgent);
+      const effectiveOffer = configureReceiveOffer(originalOffer.sdp ?? '', this.receiveProfile, navigator.userAgent, codecs);
       await peer.setLocalDescription({ type: 'offer', sdp: effectiveOffer.sdp });
       await new Promise<void>((resolve, reject) => {
         if (peer.iceGatheringState === 'complete') { resolve(); return; }

@@ -1,20 +1,39 @@
-export type ReceiveProfile = 'native' | 'chrome89-h264-42' | 'chrome89-h264-51';
+export type ReceiveProfile = 'native' | 'chrome89-h264-42' | 'chrome89-h264-51' | 'h264-level42-experimental';
+export interface ReceiveCodecCapability { mimeType: string; clockRate: number; sdpFmtpLine?: string }
+const constrainedBaselineMode1 = (parameters: string) => /(?:^|;)\s*packetization-mode=1(?:;|$)/i.test(parameters) && /(?:^|;)\s*profile-level-id=42e0[0-9a-f]{2}(?:;|$)/i.test(parameters);
+export function supportsExperimentalH264Level42(codecs: readonly ReceiveCodecCapability[] | undefined) {
+  return !!codecs?.some(codec => codec.mimeType.toLowerCase() === 'video/h264' && codec.clockRate === 90000 && constrainedBaselineMode1(codec.sdpFmtpLine ?? ''));
+}
 export const isChrome89 = (userAgent: string) => /(?:Chrome|Chromium)\/89\./.test(userAgent);
 const storageKey = 'remotekit.receive-profile';
 export function chooseReceiveProfile(userAgent: string, saved?: string | null): ReceiveProfile {
-  if (saved === 'native' || isChrome89(userAgent) && (saved === 'chrome89-h264-42' || saved === 'chrome89-h264-51')) return saved;
+  if (saved === 'native' || saved === 'h264-level42-experimental' || isChrome89(userAgent) && (saved === 'chrome89-h264-42' || saved === 'chrome89-h264-51')) return saved;
   return /\bChrome\/89\.0\.4389\.90(?:\s|$)/.test(userAgent) && !/Android|Mobile|iPhone|iPad|Edg\/|OPR\//.test(userAgent) ? 'chrome89-h264-42' : 'native';
 }
 export function loadReceiveProfile(): ReceiveProfile { let saved: string | null = null; try { if (typeof window !== 'undefined') saved = window.localStorage.getItem(storageKey); } catch {} return chooseReceiveProfile(typeof navigator === 'undefined' ? '' : navigator.userAgent, saved); }
 export function saveReceiveProfile(profile: ReceiveProfile) { try { window.localStorage.setItem(storageKey, profile); } catch {} }
-export function configureReceiveOffer(sdp: string, profile: ReceiveProfile, userAgent: string) {
+export function configureReceiveOffer(sdp: string, profile: ReceiveProfile, userAgent: string, codecs?: readonly ReceiveCodecCapability[]) {
   if (profile === 'native') return { sdp, changes: [] as { payload: string; original: string; effective: string }[] };
-  if (!isChrome89(userAgent)) throw new Error('Chrome 89 实验接收档只适用于明确的 Chrome 89 测试客户端。');
+  const experimental = profile === 'h264-level42-experimental';
+  if (experimental && !supportsExperimentalH264Level42(codecs)) throw new Error('实验接收档需要客户端支持 H.264 constrained-baseline / packetization-mode=1。');
+  if (!experimental && !isChrome89(userAgent)) throw new Error('Chrome 89 实验接收档只适用于明确的 Chrome 89 测试客户端。');
   const target = profile === 'chrome89-h264-51' ? '42e033' : '42e02a';
   const changes: { payload: string; original: string; effective: string }[] = [];
+  let videoPayloads = new Set<string>();
+  const h264Payloads = new Set<string>();
+  let section = 0;
+  if (experimental) {
+    for (const line of sdp.split(/\r?\n/)) {
+      if (line.startsWith('m=')) { section++; videoPayloads = line.startsWith('m=video ') && line.split(/\s+/)[1] !== '0' ? new Set(line.split(/\s+/).slice(3)) : new Set(); }
+      const rtp = line.match(/^a=rtpmap:(\d+) H264\/90000\s*$/i);
+      if (rtp && videoPayloads.has(rtp[1])) h264Payloads.add(`${section}:${rtp[1]}`);
+    }
+  }
+  section = 0;
   const lines = sdp.split(/\r?\n/).map(line => {
+    if (line.startsWith('m=')) section++;
     const match = line.match(/^a=fmtp:(\d+) (.*)$/);
-    if (!match || !/(?:^|;)\s*packetization-mode=1(?:;|$)/i.test(match[2]) || !/(?:^|;)\s*profile-level-id=42e0[0-9a-f]{2}(?:;|$)/i.test(match[2])) return line;
+    if (!match || !constrainedBaselineMode1(match[2]) || experimental && !h264Payloads.has(`${section}:${match[1]}`)) return line;
     const effective = line.replace(/profile-level-id=42e0[0-9a-f]{2}/i, `profile-level-id=${target}`);
     changes.push({ payload: match[1], original: line, effective }); return effective;
   });

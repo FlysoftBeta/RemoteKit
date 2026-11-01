@@ -39,12 +39,20 @@ param(
   [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
   [switch]$DisableClientRafProbe,
   [ValidateSet('default','software','unlimited')][string]$ClientMode='default',
+  [string]$ClientExecutablePath='C:/src/tmp/chrome89-google/app/chrome.exe',
+  [ValidateSet(0,60)][int]$ClientRefreshHz=0,
+  [ValidateSet('native','chrome89-h264-42','chrome89-h264-51','h264-level42-experimental')][string]$ReceiveProfile='chrome89-h264-42',
   [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
   [ValidateSet('external','async')][string]$QsvVpp='external',
   [ValidateSet(1,16)][int]$AtlasAlignment=1,
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
 $ErrorActionPreference = 'Stop'
+if($ClientRefreshHz -ne 0 -and ($ClientMode -ne 'default' -or $DisableClientGpuVsync)) {
+  throw 'ClientRefreshHz cannot be combined with software, unlimited, or DisableClientGpuVsync'
+}
+if(-not (Test-Path -LiteralPath $ClientExecutablePath -PathType Leaf)) {throw "Client executable does not exist: $ClientExecutablePath"}
+$ClientExecutablePath=(Get-Item -LiteralPath $ClientExecutablePath).FullName
 $BrowserDirectComposition=$BrowserDirectComposition.ToLowerInvariant()
 $BrowserHostScale=$BrowserHostScale.ToLowerInvariant()
 $BrowserRenderHost=$BrowserRenderHost.ToLowerInvariant()
@@ -77,13 +85,14 @@ foreach ($filename in @('endpoint_service.exe','libvpl.dll')) {
 $configuration = @{
   id=$Name; origin='http://127.0.0.1:3001'; fixtureOrigin='http://127.0.0.1:3013';
   tenants=$Tenants; width=$Width; height=$Height; dpr=1; mode=$FixtureMode;
-  warmupMs=5000; sampleMs=20000; receiveProfile='chrome89-h264-42'; callbackRegistration=$CallbackRegistration;
+  warmupMs=5000; sampleMs=20000; receiveProfile=$ReceiveProfile; callbackRegistration=$CallbackRegistration;
   requirePaint=$true; paintVersion='event-driven-v2'; visibleVideoPreview=[bool]$VisibleVideoPreview;
   inputIntervalMs=$InputIntervalMs;
   honorClientTimerResolution=[bool]$HonorClientTimerResolution;
   timerPolicyTool=(Join-Path $rkRoot 'tools/probe-chrome-timer-policy.ps1'); timerPolicyOutput=(Join-Path $caseRoot 'timer-policy.json');
   captureQuality=[bool]$CaptureQuality; artifactToken=[guid]::NewGuid().ToString('N');
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
+  clientExecutablePath=$ClientExecutablePath;clientRefreshHz=$ClientRefreshHz;
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
   atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;
   singlePlaneDirect=[bool]$SinglePlaneDirect;
@@ -100,6 +109,7 @@ if ($PlayoutDelayHintMs -ge 0) { $configuration.playoutDelayHintMs = $PlayoutDel
 if ($DisableClientGpuVsync) { $configuration.clientExtraFlags = @('--disable-gpu-vsync') }
 if ($ClientMode -eq 'software') { $configuration.clientExtraFlags = @('--disable-gpu') }
 if ($ClientMode -eq 'unlimited') { $configuration.clientExtraFlags = @('--disable-frame-rate-limit') }
+if ($ClientRefreshHz -ne 0) { $configuration.clientExtraFlags = @("--fake-vsync-rate=$ClientRefreshHz") }
 $configuration.endpoint.pollTimer = if ($PreciseBrowserPoll) { 'precise' } else { 'default' }
 $configurationJson = ConvertTo-Json -InputObject $configuration -Depth 12 -Compress
 $driver = [IO.File]::ReadAllText((Join-Path $rkRoot 'tools/streaming-benchmark.js'))
@@ -107,6 +117,9 @@ $driver = [regex]::Replace($driver, 'const config = /\* CONFIG \*/ .*?;', { 'con
 [IO.File]::WriteAllText((Join-Path $caseRoot 'run.js'), $driver)
 [IO.File]::WriteAllText((Join-Path $caseRoot 'config.json'), $configurationJson)
 $fingerprints = @{}
+$fingerprints[$ClientExecutablePath]=(Get-FileHash -LiteralPath $ClientExecutablePath -Algorithm SHA256).Hash
+$clientChromeDll=Join-Path (Split-Path -Parent $ClientExecutablePath) 'chrome.dll'
+if(Test-Path -LiteralPath $clientChromeDll -PathType Leaf){$fingerprints[$clientChromeDll]=(Get-FileHash -LiteralPath $clientChromeDll -Algorithm SHA256).Hash}
 foreach ($relativePath in @('bin/endpoint_service.exe','bin/libvpl.dll')) {
   $fingerprints[$relativePath] = (Get-FileHash -LiteralPath (Join-Path $caseRoot $relativePath) -Algorithm SHA256).Hash
 }

@@ -4,7 +4,7 @@
 
 ## 验收与基线
 
-- Chrome89 headed、H264、UHD630 oneVPL异步编码；1/4租户、RTT10ms、每peer24–48Mbps。沿用1080p主要矩阵，保持画质和分辨率记录；不能跨组拼凑FPS/延迟、以静态重复帧计入动态FPS、关闭marker或特殊flag冒充默认达标。
+- Headed客户端、H264、UHD630 oneVPL异步编码；1/4租户、RTT10ms、每peer24–48Mbps。用户已允许新版Chromium显式模拟60Hz验收，结果注明客户端与刷新模式；保留Chrome89对照。沿用1080p主要矩阵；不能跨组拼凑FPS/延迟、以静态重复帧计入动态FPS、关闭marker或使用无限帧率替代正常呈现。
 - 当前四1080精准render16/RTP0/0：15.95–15.97FPS，marker p95 143/92/136/90ms，GPU3D约78%。render20满载的旧组是播放unset，因此尚不能推定0/0下的高帧率结果。
 - 无页面HWND的Aura宿主、高精度绝对deadline已经实现；这些是当前选择。允许进一步重构，保持Session隔离、真实Fence/lease、无稳态browser↔endpoint逐帧IPC。
 
@@ -12,11 +12,11 @@
 
 | 项目 | 负责人 | 范围与交付 |
 |---|---|---|
-| 实验与独立审阅 | throughput_fresh | direct A/B、观测接线实播完成；发现Chrome89重连旧video解码但rVFC停止，交客户端修复 |
-| QSV异步管线 | qsv_pipeline_fresh | 新上下文；按qsv-async-integration.md实现同session VPP→Encode候选，固定surface地址和真实lease；仅编辑待统一构建 |
-| 对齐与配置 | tail_idr_fresh | 物理atlas allocation_alignment16、CLI及正式CPU测试接线；不改变网页viewport/DPR；仅编辑 |
-| 客户端 | client_cadence_fresh | 反馈及每连接新video修复完成；43测试、正式build和两次split重连实播通过；资源已释放 |
-| QSV能力调查 | gpu_copy_fresh | probe noscale/full/scale各120帧成功，颜色误差≤1、cookie/Locked正确；资源已释放 |
+| 实验与工具 | async_runtime_fresh | QSV功能与1/4租户对照、publication归因完成；harness已接客户端路径/模拟60Hz，待新binary实播 |
+| QSV与独立审阅 | qsv_pipeline_fresh | async候选已构建实播并提交；publication独立审阅发现ClearStage重置遗漏，作者已修 |
+| 发布节拍 | publication_cadence_fresh | 绝对deadline与dirty精准唤醒已实现；保持Fence/lease，等待正式构建实播 |
+| 模拟刷新客户端与构建 | synthetic_vsync_receiver | 旧rel产物fake60预检约57.3FPS；唯一CPU窗口：out/dev服务端修复，再out/rel官方branding增量chrome |
+| QSV能力调查 | gpu_copy_fresh | probe三组120帧成功；midstream drain探针尚未构建运行，等待独占窗口 |
 | 架构与集成 | root | 决定复制消除和背压接口；更新记录、提交推送，依据实验安排后续工作 |
 
 ## 待推进
@@ -28,7 +28,8 @@
 未解决问题：
 
 - P1：Chrome89在断开的RDP会话无DXGI output，VSync Sleep17实际31ms，空页面约32Hz。用户已明确无法安装显示器，并允许新版/修改版Chromium模拟刷新验收；优先验证157官方 `--fake-vsync-rate=60`，复用out/rel，禁止全量构建。无需等待用户提供客户端，不切换用户会话。
-- P1：单租户10秒归因已确认render/capture54.87→publication42.38FPS，Poll约60Hz，无Endpoint drops；publication_cadence_fresh已获授权实现绝对deadline与dirty精准唤醒，保持Fence/lease，fixture暂不改。报告publication-cadence-next.md及qsv-async-runtime.md。
+- 已解决P1：publication额外损失已修复并实播，source/atlas/encode/decode均约55FPS；保持Fence/lease，fixture未变。报告publication-runtime.md。
+- P1：157模拟60Hz同组video presentedFrames54.82FPS，但rVFC/canvas47.35FPS，p95 97ms，GPU70%且无网络/队列丢帧。正在做before-work回调顺序对照与生命周期审阅，不能用presentedFrames代替真实canvas。
 - P2：ApplyView源配置成功后若持久化或输出恢复失败，当前会保留停止状态并报告；Control对账不一定自动修复该状态，后续补恢复机制。
 - 已解决P1：双页手动重连复用旧video时解码/时间轴前进但所有rVFC停止；每连接新video修复已通过两次split重连，旧callback/stream/DOM清理。报告receiver-video-lifecycle.md。
 - P2：既有右边缘偏绿，direct off/on右16列逐字节相同；probe编码前NV12白边正确、coded padding为黑，但正式H264解码后根因尚未闭合。

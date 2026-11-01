@@ -4,9 +4,9 @@
 
 服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。重载低延迟实验约16FPS、marker p95为90–143ms，吞吐目标仍未达到。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
 
-当前按用户指令持续推进≥50FPS/Pixel marker p95≤100ms目标，阶段包不作为停止点。单次尾IDR已改为实际keyframe编码成功才完成，并通过静态停止/重新活动实播；默认关闭的单plane直写共享槽候选通过功能及A/B。QSV同session异步VPP→Encode候选已通过深度1/2/4、输入、重连、几何切换和尾帧实播；单租户约30FPS/p95 80ms，四租户3D满载且无最终呈现收益，继续保留external默认。单租户采集约55FPS而发布约42FPS，已定位发布节拍的额外损失，正在修复。最新任务与问题见[持续性能目标](../develop/docs/performance-goal.md)。
+当前按用户指令持续推进≥50FPS/Pixel marker p95≤100ms目标，阶段包不作为停止点。单次尾IDR与单plane直写共享槽候选已实播验证。QSV同session异步VPP候选通过深度1/2/4、输入、重连、几何切换；性能对照无最终呈现收益，external保持默认。绝对publication节拍已消除单租户55→42FPS损失：新实播采集、发布、编码、解码均约55FPS。Chromium157模拟60Hz下canvas47.35FPS、marker p95 97ms；尚未达标，正在对比接收回调注册顺序。最新任务与问题见[持续性能目标](../develop/docs/performance-goal.md)。
 
-当前测试会话另有客户端环境上限：断开RDP后DXGI无显示输出，Chrome89 GPU VSync回退Sleep17，实测约31ms，空页面RAF也只有32Hz。该结论已有原生探针和Chrome trace。用户已允许新版或修改版 Chromium 模拟刷新作为验收客户端，优先验证本地157基线已有的 `--fake-vsync-rate=60`，复用 `out/rel` 增量产物。双页手动重连的旧video元素解码继续但rVFC停止问题，已改为每连接新video并通过两次split重连实播；旧回调、stream、DOM及marker测量正确结束。
+断开RDP后DXGI无显示输出，Chrome89 VSync回退实测约31ms，空页面RAF约32Hz。用户允许新版Chromium模拟刷新验收：已复用out/rel完成Chromium157局部增量构建，官方 `--fake-vsync-rate=60` 已用于真实H.264串流。新增显式 `h264-level42-experimental` 接收档，校验H.264能力后按Level4.2协商，保持原1936×1088媒体尺寸；45项Control测试、类型检查、构建与启动smoke通过。重连使用每连接独立video，旧回调、stream、DOM和marker测量正确结束。
 
 ## 结构
 

@@ -3,10 +3,14 @@
 async (hostPage) => {
   const config = /* CONFIG */ { id: 'pilot', origin: 'http://127.0.0.1:3001', tenants: 1, width: 1280, height: 720, dpr: 1, mode: 'animation', warmupMs: 5000, sampleMs: 20000, receiveProfile: 'chrome89-h264-42', endpoint: {}, network: {} };
   const flags = ['--no-first-run', '--no-default-browser-check', '--disable-features=WebRtcHideLocalIpsWithMdns,CalculateNativeWinOcclusion', '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', ...(config.clientExtraFlags ?? [])];
-  const browser = await hostPage.context().browser().browserType().launch({ executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: false, args: flags });
+  const clientExecutablePath = config.clientExecutablePath ?? 'C:/src/tmp/chrome89-google/app/chrome.exe';
+  const browser = await hostPage.context().browser().browserType().launch({ executablePath: clientExecutablePath, headless: false, args: flags });
   const pages = [], contexts = [], errors = [], closeResults = [];
-  let timerPolicy = null, measurementError;
+  let timerPolicy = null, measurementError, clientVersion;
   try {
+    const versionSession = await browser.newBrowserCDPSession();
+    try { clientVersion = await versionSession.send('Browser.getVersion'); }
+    finally { await versionSession.detach(); }
     for (let i = 0; i < config.tenants; ++i) {
       const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }); contexts.push(context);
       const page = await context.newPage(); pages.push(page);
@@ -73,7 +77,7 @@ async (hostPage) => {
     }
     // All peers stay alive together. No parameter groups overlap.
     await Promise.all(pages.map(page => page.waitForTimeout(config.warmupMs)));
-    const results = await Promise.all(pages.map((page, index) => page.evaluate(async ({ config, index, flags }) => {
+    const results = await Promise.all(pages.map((page, index) => page.evaluate(async ({ config, index, flags, clientVersion }) => {
       const transport = window.remotekitDiagnostics.transport;
       transport.resetPresentationDiagnostics?.();
       const { decodeMarker, percentiles } = await import('/marker-codec.js');
@@ -170,7 +174,7 @@ async (hostPage) => {
       const render = samples.flatMap(sample => sample.renderToObservedMs === null ? [] : [sample.renderToObservedMs]);
       const presentation = transport.presentationDiagnostics ?? null;
       const raw = JSON.stringify(transport.getPresentationDiagnostics?.(true) ?? null);
-      const report = { kind: 'streaming-benchmark', config, tenantIndex: index, flags, timeOrigin: performance.timeOrigin, startedAt: started, startedWall, clockSample, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility, clock: 'same-machine-wall-clock', frameCountStage: hasPaint ? 'viewport-canvas-paint' : 'authorized-snapshot; Viewport paint not measured', observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null, markerSamplesPerSecond: samples.length * 1000 / elapsedMs, markerTimestampMeaning: hasPaint ? 'canvas draw submission time; synchronous same-RTP plane source; CRC completion separate' : 'authorized snapshot; not Viewport paint', authorizedFrameFps: presentations.length * 1000 / elapsedMs, authorizedPerSecondFrames: displayBuckets, displayFps: hasPaint ? paintedFrames.length * 1000 / elapsedMs : null, displayPerSecondFrames: hasPaint ? paintBuckets : null, perSecondFrames: buckets, perSecondFps: percentiles(buckets), renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)), invalid, missingPaintSnapshot, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped, pendingInputs: inputs.size, samples, presentations, paintedFrames, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation };
+      const report = { kind: 'streaming-benchmark', config, clientVersion, tenantIndex: index, flags, timeOrigin: performance.timeOrigin, startedAt: started, startedWall, clockSample, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility, clock: 'same-machine-wall-clock', frameCountStage: hasPaint ? 'viewport-canvas-paint' : 'authorized-snapshot; Viewport paint not measured', observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null, markerSamplesPerSecond: samples.length * 1000 / elapsedMs, markerTimestampMeaning: hasPaint ? 'canvas draw submission time; synchronous same-RTP plane source; CRC completion separate' : 'authorized snapshot; not Viewport paint', authorizedFrameFps: presentations.length * 1000 / elapsedMs, authorizedPerSecondFrames: displayBuckets, displayFps: hasPaint ? paintedFrames.length * 1000 / elapsedMs : null, displayPerSecondFrames: hasPaint ? paintBuckets : null, perSecondFrames: buckets, perSecondFps: percentiles(buckets), renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)), invalid, missingPaintSnapshot, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped, pendingInputs: inputs.size, samples, presentations, paintedFrames, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation };
       report.inputTimeouts = inputTimeouts;
       report.inputSampleCount = inputSamples.length;
       report.markerSampleCount = samples.length;
@@ -205,9 +209,9 @@ async (hostPage) => {
         if (!saved.ok) throw new Error(`Decoded quality artifact upload failed ${saved.status}`);
       }
       return { tenantIndex: index, observedFps: report.observedFps, authorizedFrameFps: report.authorizedFrameFps, displayFps: report.displayFps, markerSamplesPerSecond: report.markerSamplesPerSecond, renderToObservedMs: report.renderToObservedMs, inputToObservedMs: report.inputToObservedMs, perSecondFrames: buckets, authorizedPerSecondFrames: displayBuckets, invalid, samples: samples.length, visibility, actualLayout: transport.layout, presentation, lastCounters: rtcSamples[rtcSamples.length - 1] };
-    }, { config, index, flags })));
+    }, { config, index, flags, clientVersion })));
     await Promise.all(pages.map(page => page.waitForTimeout(1200)));
-    return { id: config.id, browser: browser.version(), config, flags, timerPolicy, results, errors, closeResults };
+    return { id: config.id, browser: browser.version(), clientVersion, config, flags, timerPolicy, results, errors, closeResults };
   } catch (error) { measurementError = error; throw error;
   } finally {
     for (const [tenant, page] of pages.entries()) {

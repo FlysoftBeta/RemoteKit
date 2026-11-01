@@ -29,6 +29,7 @@
 #include "base/sequence_checker.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/task_features.h"
 #include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
@@ -198,6 +199,43 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     if (!stopping_ || !leases_.empty())
       ArmPrecisePoll();
   }
+  void ResetPublicationSchedule() {
+    publication_timer_.Stop();
+    publication_wake_ = {};
+    next_publication_deadline_ = {};
+  }
+  void ArmPublicationWake(base::TimeTicks deadline) {
+    if (stopping_ || !dirty_)
+      return;
+    const auto maximum = base::kMaxPreciseDelay.Get();
+    auto policy = base::subtle::DelayPolicy::kPrecise;
+    const auto remaining = deadline - base::TimeTicks::Now();
+    if (maximum <= base::Microseconds(1)) {
+      policy = base::subtle::DelayPolicy::kFlexibleNoSooner;
+    } else {
+      // Precise delays >= maximum are downgraded by the scheduler. Wake
+      // coarsely first for low-fps publication, then arm the real deadline.
+      const auto window = std::min(base::Milliseconds(32),
+          maximum - std::max(base::Microseconds(1),
+                            std::min(base::Milliseconds(4), maximum / 2)));
+      if (remaining > window) {
+        deadline -= window;
+        policy = base::subtle::DelayPolicy::kFlexibleNoSooner;
+      }
+    }
+    // Capture callbacks and the health poll may meet the same pending wake.
+    // Keep its earlier admission instead of repeatedly pushing it back.
+    if (publication_timer_.IsRunning() && publication_wake_ <= deadline)
+      return;
+    publication_wake_ = deadline;
+    publication_timer_.Start(FROM_HERE, deadline, this,
+        &State::PublicationWake, policy);
+  }
+  void PublicationWake() {
+    auto protect = shared_from_this();
+    publication_wake_ = {};
+    Poll();  // Reap only truly completed source reads, then try publication.
+  }
   void StopCaptures() {
     for (auto& [id, capture] : captures_)
       capture->Stop();
@@ -207,6 +245,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     if (!stopping_)
       stop_time_ = base::TimeTicks::Now();
     stopping_ = true;
+    ResetPublicationSchedule();
     StopCaptures();
     DropPendingCapture();
     dirty_ = false;
@@ -223,6 +262,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     status_ = device_ && FAILED(device_->GetDeviceRemovedReason()) ? SharedAtlasStatus::kDeviceLost
                                                                    : SharedAtlasStatus::kFailed;
     stopping_ = true;
+    ResetPublicationSchedule();
     stop_time_ = base::TimeTicks::Now();
     StopCaptures();
     DropPendingCapture();
@@ -348,10 +388,12 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       ClearStage();
     else if (metadata_changed && stage_)
       dirty_ = true;
+    PublishIfFree();
   }
   void ClearStage() {
     // A different geometry/document cannot inherit any direct pixels. Already
     // submitted source reads remain protected by leases_, independent of this.
+    ResetPublicationSchedule();
     DropPendingCapture();
     direct_base_slot_.reset();
     direct_slot_initialized_.fill(false);
@@ -372,6 +414,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       dirty_ = true;
       capture_time_us_ = base::TimeTicks::Now().since_origin().InMicroseconds();
     }
+    PublishIfFree();
   }
   void DropPendingCapture() {
     if (!pending_capture_)
@@ -404,13 +447,19 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       DropPendingCapture();
     MarkLastStale(id);
     dirty_ = stage_ != nullptr;
+    PublishIfFree();
   }
   void SetFps(uint32_t fps) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
-    fps_ = std::clamp(fps, 1u, 120u);
+    fps = std::clamp(fps, 1u, 120u);
+    if (fps_ == fps)
+      return;
+    fps_ = fps;
+    ResetPublicationSchedule();
     for (auto& [id, c] : captures_)
       if (c->capturer)
         c->capturer->SetMinCapturePeriod(base::Seconds(1) / fps_);
+    PublishIfFree();
   }
   void RefreshGeometry(Capture& capture) {
     auto binding = capture.geometry.QueueRefresh();
@@ -750,11 +799,16 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     return true;
   }
   void PublishIfFree() {
-    if (stopping_ || !dirty_ || !consumed_ || !stage_)
+    if (stopping_ || !dirty_ || !consumed_ || !stage_) {
+      publication_timer_.Stop();
+      publication_wake_ = {};
       return;
+    }
     const auto now = base::TimeTicks::Now();
-    if (!last_publication_.is_null() && now - last_publication_ < base::Seconds(1) / fps_)
+    if (!next_publication_deadline_.is_null() && now < next_publication_deadline_) {
+      ArmPublicationWake(next_publication_deadline_);
       return;
+    }
     const auto completed = consumed_->GetCompletedValue();
     if (completed == kRemoved) {
       Lost("consumed fence reports device removal");
@@ -769,6 +823,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       }
     if (slot == slots_.size()) {
       ++backpressure_;
+      ArmPublicationWake(now + base::Milliseconds(2));
       return;
     }
     std::optional<Lease> submitted_source;
@@ -780,11 +835,24 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         pending_capture_.reset();
         auto found = captures_.find(pending.webview_id);
         if (found == captures_.end() || !found->second->capturer ||
-            !found->second->enabled || found->second->manually_stopped ||
-            !LockSource(*found->second, pending.lease.source.Get(), source_mutex)) {
+            !found->second->enabled || found->second->manually_stopped) {
           if (pending.lease.callbacks)
             pending.lease.callbacks->Done();
           ++dropped_;
+          ArmPublicationWake(base::TimeTicks::Now() + base::Milliseconds(2));
+          return;
+        }
+        if (!LockSource(*found->second, pending.lease.source.Get(), source_mutex)) {
+          if (!stopping_) {
+            // No GPU read was submitted. Keep the newest source owner until
+            // retry or replacement; no ready/consumed fence is advanced.
+            pending_capture_ = std::move(pending);
+            ArmPublicationWake(base::TimeTicks::Now() + base::Milliseconds(2));
+          } else {
+            if (pending.lease.callbacks)
+              pending.lease.callbacks->Done();
+            ++dropped_;
+          }
           return;
         }
         if (!InitializeDirectSlot(slot)) {
@@ -856,7 +924,17 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     status_ = SharedAtlasStatus::kRunning;
     PublishStatus();
     dirty_ = false;
-    last_publication_ = now;
+    publication_timer_.Stop();
+    publication_wake_ = {};
+    const auto period = base::Seconds(1) / fps_;
+    const auto published_at = base::TimeTicks::Now();
+    if (next_publication_deadline_.is_null())
+      next_publication_deadline_ = published_at + period;
+    else
+      // Consume only one current frame and skip all expired phase slots,
+      // including after long static periods. Never replay an accumulated debt.
+      next_publication_deadline_ += period *
+          ((published_at - next_publication_deadline_).IntDiv(period) + 1);
   }
   bool InitializeDirectSlot(size_t slot) {
     if (direct_slot_initialized_[slot])
@@ -905,6 +983,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         !stopping_) {
       consumer_exited_ = true;
       stopping_ = true;
+      ResetPublicationSchedule();
       stop_time_ = base::TimeTicks::Now();
       StopCaptures();
       DropPendingCapture();
@@ -1108,9 +1187,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   bool single_plane_direct_ = false;
   bool drain_timed_out_ = false;
   base::TimeTicks stop_time_;
-  base::TimeTicks last_publication_;
+  base::TimeTicks next_publication_deadline_, publication_wake_;
   base::RepeatingTimer timer_;
   base::DeadlineTimer precise_timer_;
+  base::DeadlineTimer publication_timer_;
   bool precise_poll_ = false;
   std::shared_ptr<State> keepalive_;
   std::map<uint64_t, std::unique_ptr<Capture>> captures_;

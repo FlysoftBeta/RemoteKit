@@ -12,9 +12,13 @@ $logicalCpus=[Environment]::ProcessorCount
 $known=@{}; $previousCpu=@{}; $previousGpu=@{}; $receiverRootId=$null
 $metricsReadErrors=0; $metricsLastReadError=$null
 $inventoryAt=-10000; $clock=[Diagnostics.Stopwatch]::StartNew()
-$receiverPath='C:\src\tmp\chrome89-google\app\chrome.exe'
-$receiverFilter=$receiverPath.Replace('\','\\')
-$filter="Name='remotekit_browser.exe' OR Name='endpoint_service.exe' OR (Name='chrome.exe' AND ExecutablePath='$receiverFilter')"
+$caseConfig=Get-Content -LiteralPath (Join-Path $caseRoot 'config.json') -Raw|ConvertFrom-Json
+$receiverPath=if($caseConfig.clientExecutablePath){[string]$caseConfig.clientExecutablePath}else{'C:\src\tmp\chrome89-google\app\chrome.exe'}
+$receiverPath=[IO.Path]::GetFullPath($receiverPath.Replace('/','\'))
+$receiverName=[IO.Path]::GetFileName($receiverPath)
+$receiverFilter=$receiverPath.Replace('\','\\').Replace("'","\'")
+$receiverNameFilter=$receiverName.Replace('\','\\').Replace("'","\'")
+$filter="Name='remotekit_browser.exe' OR Name='endpoint_service.exe' OR (Name='$receiverNameFilter' AND ExecutablePath='$receiverFilter')"
 $writer=[IO.StreamWriter]::new($output,$false,[Text.UTF8Encoding]::new($false));$writer.AutoFlush=$true
 $self=Get-Process -Id $PID; $previousSelfCpu=$self.TotalProcessorTime.TotalSeconds; $previousSelfAt=0
 $pdh=$null
