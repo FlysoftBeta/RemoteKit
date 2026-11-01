@@ -11,6 +11,7 @@
 #include <cmath>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -22,6 +23,7 @@
 #include "base/environment.h"
 #include "base/files/file_path.h"
 #include "base/files/file_util.h"
+#include "base/feature_list.h"
 #include "base/json/json_writer.h"
 #include "base/process/process_handle.h"
 #include "base/sequence_checker.h"
@@ -46,6 +48,8 @@ namespace {
 using Microsoft::WRL::ComPtr;
 constexpr uint32_t kStale = kSharedAtlasViewStale;
 constexpr uint64_t kRemoved = std::numeric_limits<uint64_t>::max();
+BASE_FEATURE(kRemoteKitSinglePlaneDirect, "RemoteKitSinglePlaneDirect",
+             base::FEATURE_DISABLED_BY_DEFAULT);
 std::string Number(uint64_t value) {
   return base::NumberToString(value);
 }
@@ -119,6 +123,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     base::TimeTicks submitted;
     uint64_t capture_serial = 0;
     int64_t capture_time_us = 0;
+  };
+  struct PendingCapture {
+    Lease lease;
+    uint64_t webview_id = 0;
   };
   struct Consumer {
     uint32_t pid = 0;
@@ -200,6 +208,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       stop_time_ = base::TimeTicks::Now();
     stopping_ = true;
     StopCaptures();
+    DropPendingCapture();
     dirty_ = false;
     if (status_ != SharedAtlasStatus::kDeviceLost && status_ != SharedAtlasStatus::kFailed)
       status_ = SharedAtlasStatus::kStopped;
@@ -216,6 +225,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     stopping_ = true;
     stop_time_ = base::TimeTicks::Now();
     StopCaptures();
+    DropPendingCapture();
     dirty_ = false;
     PublishStatus();
     if (!leases_.empty())
@@ -327,24 +337,49 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         ++it;
     }
     order_ = std::move(order);
+    const bool direct = base::FeatureList::IsEnabled(kRemoteKitSinglePlaneDirect) &&
+                        order_.size() == 1 && captures_.at(order_[0])->enabled &&
+                        captures_.at(order_[0])->capturer;
+    if (direct != single_plane_direct_) {
+      single_plane_direct_ = direct;
+      clear = true;
+    }
     if (clear)
       ClearStage();
     else if (metadata_changed && stage_)
       dirty_ = true;
   }
   void ClearStage() {
+    // A different geometry/document cannot inherit any direct pixels. Already
+    // submitted source reads remain protected by leases_, independent of this.
+    DropPendingCapture();
+    direct_base_slot_.reset();
+    direct_slot_initialized_.fill(false);
     MarkLastStale(0);
     for (auto& [id, c] : captures_) {
       c->stale = true;
       if (c->capturer)
         c->capturer->RequestRefreshFrame();
     }
-    if (context_ && stage_rtv_) {
+    if (single_plane_direct_ && context_) {
+      // Publish new stale geometry promptly even if no fresh capture arrives.
+      dirty_ = true;
+      capture_time_us_ = base::TimeTicks::Now().since_origin().InMicroseconds();
+    }
+    if (context_ && stage_rtv_ && !single_plane_direct_) {
       constexpr float white[] = {1, 1, 1, 1};
       context_->ClearRenderTargetView(stage_rtv_.Get(), white);
       dirty_ = true;
       capture_time_us_ = base::TimeTicks::Now().since_origin().InMicroseconds();
     }
+  }
+  void DropPendingCapture() {
+    if (!pending_capture_)
+      return;
+    if (pending_capture_->lease.callbacks)
+      pending_capture_->lease.callbacks->Done();
+    pending_capture_.reset();
+    ++dropped_;
   }
   void MarkLastStale(uint64_t id) {
     bool changed = false;
@@ -365,6 +400,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     it->second->manually_stopped = true;
     it->second->stale = true;
     it->second->Stop();
+    if (pending_capture_ && pending_capture_->webview_id == id)
+      DropPendingCapture();
     MarkLastStale(id);
     dirty_ = stage_ != nullptr;
   }
@@ -623,47 +660,31 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       drop(); return;
     }
     capture.geometry_error.clear();
+    if (single_plane_direct_) {
+      if (pending_capture_)
+        ++direct_pending_replaced_;
+      DropPendingCapture();
+      PendingCapture pending;
+      pending.webview_id = capture.metadata.webview_id;
+      pending.lease.source = std::move(source);
+      pending.lease.handle = std::move(handle);
+      pending.lease.callbacks = std::move(callbacks);
+      pending.lease.capture_serial = capture_callbacks_;
+      pending.lease.capture_time_us = info->metadata.capture_end_time
+          .value_or(base::TimeTicks::Now()).since_origin().InMicroseconds();
+      pending_capture_ = std::move(pending);
+      dirty_ = true;
+      PublishIfFree();
+      return;
+    }
     ComPtr<IDXGIKeyedMutex> mutex;
-    if (FAILED(source.As(&mutex))) {
-      Lost("output invalid: capture keyed mutex unavailable");
+    if (!LockSource(capture, source.Get(), mutex)) {
       drop();
       return;
     }
-    const HRESULT acquired = mutex->AcquireSync(0, 0);
-    if (acquired != S_OK) {
-      ++mutex_drops_;
-      if (acquired == static_cast<HRESULT>(WAIT_TIMEOUT) || acquired == DXGI_ERROR_WAIT_TIMEOUT) {
-        if (capture.mutex_busy_since.is_null())
-          capture.mutex_busy_since = base::TimeTicks::Now();
-        if (base::TimeTicks::Now() - capture.mutex_busy_since >= base::Seconds(2)) {
-          Lost("source keyed mutex remained busy for 2 seconds");
-          drop();
-          return;
-        }
-        // A static page may not damage again after a temporary source lock.
-        std::weak_ptr<State> weak = shared_from_this();
-        const auto id = capture.metadata.webview_id;
-        base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
-            FROM_HERE,
-            base::BindOnce(
-                [](std::weak_ptr<State> weak, uint64_t id) {
-                  if (auto state = weak.lock(); state && !state->stopping_) {
-                    auto found = state->captures_.find(id);
-                    if (found != state->captures_.end() && found->second->capturer)
-                      found->second->capturer->RequestRefreshFrame();
-                  }
-                },
-                weak, id),
-            base::Milliseconds(10));
-      } else {
-        Lost("output invalid: source keyed mutex abandoned or failed");
-      }
-      drop();
-      return;
-    }
-    capture.mutex_busy_since = {};
     context_->CopySubresourceRegion(stage_.Get(), 0, capture.metadata.x_pixels,
                                     capture.metadata.y_pixels, 0, source.Get(), 0, nullptr);
+    ++source_stage_copies_;
     Lease lease;
     lease.source = source;
     lease.handle = std::move(handle);
@@ -689,6 +710,45 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     if (stopping_)
       keepalive_ = shared_from_this();
   }
+  bool LockSource(Capture& capture, ID3D11Texture2D* source,
+                  ComPtr<IDXGIKeyedMutex>& mutex) {
+    if (FAILED(source->QueryInterface(IID_PPV_ARGS(&mutex)))) {
+      Lost("output invalid: capture keyed mutex unavailable");
+      return false;
+    }
+    const HRESULT acquired = mutex->AcquireSync(0, 0);
+    if (acquired != S_OK) {
+      ++mutex_drops_;
+      if (acquired == static_cast<HRESULT>(WAIT_TIMEOUT) || acquired == DXGI_ERROR_WAIT_TIMEOUT) {
+        if (capture.mutex_busy_since.is_null())
+          capture.mutex_busy_since = base::TimeTicks::Now();
+        if (base::TimeTicks::Now() - capture.mutex_busy_since >= base::Seconds(2)) {
+          Lost("source keyed mutex remained busy for 2 seconds");
+          return false;
+        }
+        // A static page may not damage again after a temporary source lock.
+        std::weak_ptr<State> weak = shared_from_this();
+        const auto id = capture.metadata.webview_id;
+        base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+            FROM_HERE,
+            base::BindOnce(
+                [](std::weak_ptr<State> weak, uint64_t id) {
+                  if (auto state = weak.lock(); state && !state->stopping_) {
+                    auto found = state->captures_.find(id);
+                    if (found != state->captures_.end() && found->second->capturer)
+                      found->second->capturer->RequestRefreshFrame();
+                  }
+                },
+                weak, id),
+            base::Milliseconds(10));
+      } else {
+        Lost("output invalid: source keyed mutex abandoned or failed");
+      }
+      return false;
+    }
+    capture.mutex_busy_since = {};
+    return true;
+  }
   void PublishIfFree() {
     if (stopping_ || !dirty_ || !consumed_ || !stage_)
       return;
@@ -702,7 +762,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     }
     size_t slot = slots_.size();
     for (size_t i = 0; i < slots_.size(); ++i)
-      if (slot_values_[i] == 0 || completed >= slot_values_[i]) {
+      if ((!single_plane_direct_ || direct_base_slot_ != i) &&
+          (slot_values_[i] == 0 || completed >= slot_values_[i])) {
         slot = i;
         break;
       }
@@ -710,11 +771,67 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       ++backpressure_;
       return;
     }
-    context_->CopyResource(slots_[slot].Get(), stage_.Get());
+    std::optional<Lease> submitted_source;
+    ComPtr<IDXGIKeyedMutex> source_mutex;
+    if (single_plane_direct_) {
+      if (pending_capture_) {
+        // Remove the unsubmitted owner before LockSource/Signal can enter Lost.
+        auto pending = std::move(*pending_capture_);
+        pending_capture_.reset();
+        auto found = captures_.find(pending.webview_id);
+        if (found == captures_.end() || !found->second->capturer ||
+            !found->second->enabled || found->second->manually_stopped ||
+            !LockSource(*found->second, pending.lease.source.Get(), source_mutex)) {
+          if (pending.lease.callbacks)
+            pending.lease.callbacks->Done();
+          ++dropped_;
+          return;
+        }
+        if (!InitializeDirectSlot(slot)) {
+          if (FAILED(source_mutex->ReleaseSync(0)))
+            Lost("source keyed mutex ReleaseSync failed");
+          if (pending.lease.callbacks)
+            pending.lease.callbacks->Done();
+          ++dropped_;
+          return;
+        }
+        auto& capture = *found->second;
+        context_->CopySubresourceRegion(slots_[slot].Get(), 0,
+            capture.metadata.x_pixels, capture.metadata.y_pixels, 0,
+            pending.lease.source.Get(), 0, nullptr);
+        ++source_slot_copies_;
+        Trace("direct_source_copy", pending.lease.capture_serial,
+              pending.lease.capture_time_us, slot);
+        pending.lease.submitted = base::TimeTicks::Now();
+        capture_time_us_ = pending.lease.capture_time_us;
+        capture.stale = false;
+        ++captured_;
+        submitted_source = std::move(pending.lease);
+      } else if (direct_base_slot_) {
+        context_->CopyResource(slots_[slot].Get(), slots_[*direct_base_slot_].Get());
+        direct_slot_initialized_[slot] = true;
+        ++direct_metadata_copies_;
+      } else if (!InitializeDirectSlot(slot)) {
+        return;
+      }
+    } else {
+      context_->CopyResource(slots_[slot].Get(), stage_.Get());
+      ++stage_slot_copies_;
+    }
     uint64_t value = Signal();
-    if (!value)
+    if (submitted_source) {
+      submitted_source->fence_value = value;
+      leases_.push_back(std::move(*submitted_source));
+      if (FAILED(source_mutex->ReleaseSync(0)))
+        Lost("source keyed mutex ReleaseSync failed");
+      if (stopping_)
+        keepalive_ = shared_from_this();
+    }
+    if (!value || stopping_)
       return;
     slot_values_[slot] = value;
+    if (single_plane_direct_)
+      direct_base_slot_ = slot;
     SharedAtlasFrame frame{};
     frame.generation = generation_;
     frame.frame_id = ++frame_id_;
@@ -740,6 +857,20 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     PublishStatus();
     dirty_ = false;
     last_publication_ = now;
+  }
+  bool InitializeDirectSlot(size_t slot) {
+    if (direct_slot_initialized_[slot])
+      return true;
+    ComPtr<ID3D11RenderTargetView> target;
+    if (FAILED(device_->CreateRenderTargetView(slots_[slot].Get(), nullptr, &target))) {
+      Lost("direct slot render target creation failed");
+      return false;
+    }
+    constexpr float white[] = {1, 1, 1, 1};
+    context_->ClearRenderTargetView(target.Get(), white);
+    direct_slot_initialized_[slot] = true;
+    ++direct_slot_clears_;
+    return true;
   }
   void Poll() {
     Trace("poll", frame_id_, capture_time_us_, captured_);
@@ -776,6 +907,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       stopping_ = true;
       stop_time_ = base::TimeTicks::Now();
       StopCaptures();
+      DropPendingCapture();
       dirty_ = false;
       status_ = SharedAtlasStatus::kStopped;
       error_ = "consumer exited; recreate output generation";
@@ -869,6 +1001,15 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         .Set("geometry_transition_drops", Number(geometry_drops_))
         .Set("geometry_refreshes", Number(geometry_refreshes_))
         .Set("backpressure_polls", Number(backpressure_))
+        .Set("single_plane_direct_enabled", base::FeatureList::IsEnabled(kRemoteKitSinglePlaneDirect))
+        .Set("single_plane_direct_active", single_plane_direct_)
+        .Set("pending_direct_capture", pending_capture_.has_value())
+        .Set("source_stage_copies", Number(source_stage_copies_))
+        .Set("stage_slot_copies", Number(stage_slot_copies_))
+        .Set("source_slot_copies", Number(source_slot_copies_))
+        .Set("direct_metadata_copies", Number(direct_metadata_copies_))
+        .Set("direct_slot_clears", Number(direct_slot_clears_))
+        .Set("direct_pending_replaced", Number(direct_pending_replaced_))
         .Set("pending_source_leases", static_cast<int>(leases_.size()))
         .Set("drain_timed_out", drain_timed_out_)
         .Set("consumer_exited", consumer_exited_);
@@ -937,6 +1078,14 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         .Set("capture_callbacks", Number(capture_callbacks_)).Set("captured", Number(captured_))
         .Set("published", Number(frame_id_)).Set("dropped", Number(dropped_))
         .Set("mutex_drops", Number(mutex_drops_)).Set("backpressure_polls", Number(backpressure_))
+        .Set("single_plane_direct_enabled", base::FeatureList::IsEnabled(kRemoteKitSinglePlaneDirect))
+        .Set("single_plane_direct_active", single_plane_direct_)
+        .Set("source_stage_copies", Number(source_stage_copies_))
+        .Set("stage_slot_copies", Number(stage_slot_copies_))
+        .Set("source_slot_copies", Number(source_slot_copies_))
+        .Set("direct_metadata_copies", Number(direct_metadata_copies_))
+        .Set("direct_slot_clears", Number(direct_slot_clears_))
+        .Set("direct_pending_replaced", Number(direct_pending_replaced_))
         .Set("trace_full", trace_events_.size() == 64000).Set("events", std::move(events))
         .Set("capture_geometry", std::move(trace_geometry_samples_));
     auto json = base::WriteJson(report);
@@ -956,6 +1105,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   SharedAtlasStatus status_ = SharedAtlasStatus::kStarting;
   std::string error_;
   bool stopping_ = false, dirty_ = false, consumer_exited_ = false;
+  bool single_plane_direct_ = false;
   bool drain_timed_out_ = false;
   base::TimeTicks stop_time_;
   base::TimeTicks last_publication_;
@@ -966,6 +1116,9 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   std::map<uint64_t, std::unique_ptr<Capture>> captures_;
   std::vector<uint64_t> order_;
   std::vector<Lease> leases_;
+  // This source has not been read by our GPU. Replacing it can call Done
+  // immediately; once submitted it must move to the fence-protected leases_.
+  std::optional<PendingCapture> pending_capture_;
   ComPtr<ID3D11Device5> device_;
   ComPtr<ID3D11DeviceContext4> context_;
   ComPtr<ID3D11Texture2D> stage_;
@@ -973,6 +1126,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   std::array<ComPtr<ID3D11Texture2D>, kSharedAtlasSlotCount> slots_;
   std::array<base::win::ScopedHandle, kSharedAtlasSlotCount> slot_handles_;
   std::array<uint64_t, kSharedAtlasSlotCount> slot_values_{};
+  // Producer-only pixel base. Never select it for writing, even if consumed.
+  // All access is on context_, so a submitted clone precedes later reuse.
+  std::optional<size_t> direct_base_slot_;
+  std::array<bool, kSharedAtlasSlotCount> direct_slot_initialized_{};
   ComPtr<ID3D11Fence> ready_, consumed_;
   base::win::ScopedHandle ready_handle_, consumed_handle_, mapping_handle_;
   raw_ptr<SharedAtlasMapping> mapping_ = nullptr;
@@ -981,6 +1138,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   SharedAtlasFrame last_frame_{};
   uint64_t next_fence_ = 1, frame_id_ = 0, captured_ = 0, dropped_ = 0;
   uint64_t mutex_drops_ = 0, backpressure_ = 0;
+  uint64_t source_stage_copies_ = 0, stage_slot_copies_ = 0, source_slot_copies_ = 0;
+  uint64_t direct_metadata_copies_ = 0, direct_slot_clears_ = 0, direct_pending_replaced_ = 0;
   uint64_t capture_callbacks_ = 0;
   uint64_t next_capture_binding_ = 0, geometry_drops_ = 0, geometry_refreshes_ = 0;
   base::FilePath trace_directory_;

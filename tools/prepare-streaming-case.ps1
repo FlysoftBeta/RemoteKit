@@ -25,6 +25,7 @@ param(
   [switch]$ServerTrace,
   [switch]$DisableMediaTrace,
   [switch]$AtlasReadyGate,
+  [switch]$SinglePlaneDirect,
   [ValidateSet(0,1,2,10)][int]$CaptureMaxPending=0,
   [switch]$OfficialTrace,
   [switch]$CopyOutputProfile,
@@ -51,6 +52,7 @@ $rkBrowserFeatures=@()
 if($CaptureMaxPending){$rkBrowserFeatures+="RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"}
 if($CopyOutputProfile){$rkBrowserFeatures+='RemoteKitCopyOutputProfile'}
 if($OffscreenRoot){$rkBrowserFeatures+='RemoteKitOffscreenRoot'}
+if($SinglePlaneDirect){$rkBrowserFeatures+='RemoteKitSinglePlaneDirect'}
 if($CaptureRenderFps){$rkBrowserFeatures+="RemoteKitCaptureRenderRate:max_fps/$CaptureRenderFps"}
 $rkBrowserFeaturesText=$rkBrowserFeatures -join ','
 $rkRoot = Split-Path -Parent $PSScriptRoot
@@ -79,6 +81,7 @@ $configuration = @{
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
   atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;
+  singlePlaneDirect=[bool]$SinglePlaneDirect;
   captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
   officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;offscreenRoot=[bool]$OffscreenRoot;
   endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};

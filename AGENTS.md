@@ -60,6 +60,7 @@
 - Chromium 有其他项目留下的修改。保留原 `rb` 分支、stash 和未跟踪 `re`；不要清理、重置或把它们套回 RemoteKit。原 tracked 修改已保存到名为 `RemoteKit baseline preservation 2026-10-31 (original rb tracked edits)` 的 stash。
 - **复用 `out/dev`、`out/rel` 的增量产物，避免全量构建。** 可继承合适 GN args，不继承其他项目的业务开关。参数备份为 `out/dev/args.before-remotekit.gn`。
 - 用户允许跑满所有 CPU cores。构建默认使用全部逻辑 CPU，不主动限制到少量 jobs。不要并发操作同一个 Chromium out 目录的 gen/build；多个目标放在一次 Ninja 调用中。
+- 正式性能采样与构建也应错开：CPU编译会争用同机资源，不能因为不直接启动GPU就并行计时实验。主Agent明确分配采样/构建窗口；其他Agent可只读与编辑。若发生重叠，标明受影响组并在干净窗口复测，不忽略污染。
 - **不要读取或引用 `C:\Users\Flysoft\Desktop\remotekit` 的内容。** 那是旧实现，除非用户之后明确引用。
 - Python 使用 depot_tools 的实际解释器或 `C:\src\depot_tools\python3.bat`，不要用 WindowsApps 空别名。当前 VS 为 `C:\Program Files\Microsoft Visual Studio\18\Community`，工具脚本支持的环境覆盖优先于硬编码。
 - 用户授权必要的系统修改，可使用 Windows sudo，无需为已授权的常规步骤再次征求同意。宿主审批拦截不等于用户没有授权；如遇拦截，如实说明动作与拒绝原因。
