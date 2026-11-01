@@ -12,6 +12,8 @@
 
 每Session独立QSV模式已实现：显式pattern按持久化Session id分配，stats包含选择和实际TU/LowPower；实验工具可配置目标/上限码率。默认关闭的自适应源帧率worker、TrackProcessor接收路径也已实现，原Chrome89/video默认保留。Endpoint Release构建及5项CPU测试、Control 60项测试/类型检查/生产构建/smoke通过；混跑、自适应和TrackProcessor的实际GPU功能与性能仍待运行验证。
 
+三租户TU7/36–44Mbps矩阵已完成：全OFF为10.53–11.36FPS/p95 1054–1200ms，全ON为12.46–12.68FPS/p95 852–921ms，两个混跑均约11.7–12.5FPS/p95 843–947ms。实际TU7、ON/OFF及混跑比例全部正确，原分辨率/CRC保留。3D约99.8%，source GPU约60%；全ON JS提交57–59FPS，但实际atlas17–20FPS。混跑未突破主要瓶颈；正在验证自适应源准入，若仍远离目标，按授权转2租户。详见[完整实验](../develop/docs/three-tenant-fast-mixed-runtime.md)。
+
 当前marker延迟统计终点为客户端canvas绘制提交，CRC同步读回耗时另记；不表示物理屏幕点亮。四接收端同机满载时，读回p95达331–408ms，会干扰后续工作；同时已存在服务端供给下降与解码排队，不能将全部瓶颈归于测量。后续将同时记录GPU/读回完成端点，并保持CRC验证。
 
 断开RDP后DXGI无显示输出，Chrome89 VSync回退实测约31ms，空页面RAF约32Hz。用户允许新版Chromium模拟刷新验收：已复用out/rel完成Chromium157局部增量构建，官方 `--fake-vsync-rate=60` 已用于真实H.264串流。新增显式 `h264-level42-experimental` 接收档，校验H.264能力后按Level4.2协商，保持原1936×1088媒体尺寸；45项Control测试、类型检查、构建与启动smoke通过。重连使用每连接独立video，旧回调、stream、DOM和marker测量正确结束。

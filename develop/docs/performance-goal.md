@@ -12,7 +12,7 @@ UHD630、oneVPL异步H264、RTT10ms、每peer下行24–48Mbps，沿用1080p/DPR
 
 用户要求优先最快预设与高码率、VDEnc/Hybrid混跑。采用TU7/VBR/depth1，每peer48Mbps预算下目标36/max44Mbps，留传输余量。先比较全OFF、全ON、on/on/off、on/off/off，使用相同接收端、fixture、分辨率与marker。按实际GetVideoParam、各引擎占用和整链路结果判断，而不凭模式名称推断资源独立。具体边界与停止条件见[三租户矩阵](three-tenant-fast-mixed-plan.md)。
 
-当前分工：root负责架构、取舍、文档和commit/push；adaptive_budget_impl完成源码和统一构建；下一实验agent独占GPU执行矩阵。无CPU构建与计时GPU实验重叠。
+当前分工：root负责架构、取舍、文档和commit/push；adaptive_budget_impl完成源码和统一构建；three_tenant_runtime已完成四组模式，source_budget_runtime独占GPU验证源准入并按授权转2租户。无CPU构建与计时GPU实验重叠。
 
 已实现、构建与CPU测试通过，待实际GPU验证：
 
@@ -21,6 +21,8 @@ UHD630、oneVPL异步H264、RTT10ms、每peer下行24–48Mbps，沿用1080p/DPR
 - 默认关闭的TrackProcessor接收路径，原Chrome89/video路径保留；最多一个待呈现VideoFrame，每RAF最多准入一次。Control 60项测试、类型检查和生产构建/smoke通过；还需真实功能、CRC、生命周期与性能验证。
 
 ## 已有证据
+
+三租户新矩阵完成：TU7实际生效，全ON最佳12.46–12.68FPS/p95 852–921ms，两个混跑没有额外收益。所有组3D约99.8%，source GPU约60%，源JS57–59但actual atlas17–20FPS。完整对照见[混跑报告](three-tenant-fast-mixed-runtime.md)。下一组只启用adaptive-fps，观察源负载/积压；仍远离目标则转2租户全ON基线，不再扩三租户编码预设矩阵。
 
 绝对publication节拍修复了源55→发布42FPS损失；修正fixture自身漂移后，单租户源、发布、编码、解码约60FPS。精准模拟60Hz并保留进程高精度请求后的同配置两次为51.53FPS/p95 123ms与50.77FPS/p95 76ms，尚未稳定同时达标。
 
@@ -40,5 +42,6 @@ UHD630、oneVPL异步H264、RTT10ms、每peer下行24–48Mbps，沿用1080p/DPR
 6. ApplyView源配置成功后持久化或恢复失败可能保持停止，Control对账未必修复；需要后续恢复机制。
 7. 默认alignment1右边缘偏绿根因未闭合；alignment16候选白边实播正常，不能说旧问题完全解决。
 8. 多Profile、真实NVENC硬件及原功能缺口继续保留，不因性能任务取消。
+9. 通用matrix工具对新Client的paint版本输出paintFps=null；完整displayFps数据存在，混跑报告已直接读取真实计数。后续工具修复需同时支持旧v2与新v3，未知版本仍显式拒绝，不能用decode或metadata计数冒充paint。
 
 每批有意义的改动验证后commit/push，继续未达目标项。
