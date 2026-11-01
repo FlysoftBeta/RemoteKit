@@ -65,3 +65,22 @@ source GPU进程CPU0.69→0.87核，source renderer0.56→0.91核。20档增加�
 额外一个短静态页回归 `osr-deadline-static-input`：Chrome89 H264，hover不变焦，真实点击marker60001、IME后视频marker42；关闭订阅后重新连接，共享输出generation1→2且静态marker42重新到达，验证停用/恢复后不会永久停帧。没有重跑完整功能矩阵。
 
 实验与构建均已结束，自有case进程已清理。源码冻结，未commit/push；后续策略由主Agent决定。
+
+## 单平面direct呈现的有界负面对照
+
+按主Agent决定，额外只跑一组 `osr-deadline-4x1080-render20-direct`，把准确render20的Client呈现改为现有single-plane-direct，其余条件与snapshot20完全相同。没有关闭marker或加入浏览器诊断flag。browser/service、DLL和所有Client assets的SHA256逐项相同。
+
+| 指标 | snapshot20 | single-plane-direct20 |
+|---|---:|---:|
+| source RAF FPS | 20.000 | 20.000 |
+| encode FPS | 17.5–18.1 | 16.4–16.8 |
+| decode FPS | 16.9 | 14.1–15.0 |
+| 实际canvas FPS | 10.30–10.94 | 8.23–9.54 |
+| marker p95 | 736–800ms | 824–968ms |
+| marker读回p95 | 312–364ms | 294–366ms |
+| receiver物理3D均值 | 18.61% | 16.55% |
+| 全机物理3D均值 | 99.60% | 99.67% |
+
+四个Peer分别记录165–191个directFrames，snapshotFrames均0、fallback为空，确认实际走direct。receiver GPU占用稍降，但没有使总GPU脱离满载，也没有改善读回/最终输出。direct组整机CPU p95为76.1%，snapshot为50.1%；这是一组有界实测，不据此宣称direct本身在所有负载都更慢。
+
+原始数据与资源分解保留，汇总为 `develop/tmp/osr-direct-result/`。没有明显收益，已停止该候选，不追加组合矩阵、不改默认；自有进程已清理。

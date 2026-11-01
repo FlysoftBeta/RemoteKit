@@ -2,7 +2,7 @@
 
 基线：官方 Chromium Release **157.0.8103.15**（`1aa07b638799e59656559ae6c6649d4b197f555e`），Windows x64。源码在本仓库；`tools/chromium.py` 把 browser、共享模型和 SDK shim 放入 Chromium 的 `//remotekit`。
 
-服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。60FPS驱动的性能对照仍未达到目标，继续调优本地pacer背压。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
+服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。重载低延迟实验约16FPS、marker p95为90–143ms，吞吐目标仍未达到。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
 
 ## 结构
 
@@ -16,7 +16,7 @@
 
 | 项目 | 当前证据 |
 |---|---|
-| Control与客户端 | SQLite产品状态、会话鉴权、Tab/分屏/导航/设备配置、周期对账、生产bundle；34项测试通过；真实beforeunload取消/确认通过；可配置LAN监听和HTTPS，本地TLS/secure-cookie检查通过 |
+| Control与客户端 | SQLite产品状态、会话鉴权、Tab/分屏/导航/设备配置、周期对账、生产bundle；36项测试通过；大metrics记录串行写入，四Tenant并发与失败后恢复通过；真实beforeunload取消/确认通过；可配置LAN监听和HTTPS，本地TLS/secure-cookie检查通过 |
 | Chrome89 | 现有89.0.4389.90 headed真实运行；Sol检查桌面/平板UI与实际视频HUD；Pixel marker、IME composition、触摸响应、重复focus输入及endpoint退出自动恢复通过；主动断连后不自动重连 |
 | browser服务 | 单Session进程、动态页面、后台页不占atlas、独立Profile与恢复信息；1/4租户管理和尺寸重建实测通过 |
 | WebRTC SDK | 真正PeerConnection、SDP/ICE、DTLS/SCTP、native纹理租约、实际wire RTP、时钟校准、发送端stats；ABI2与共享atlas v2统一编译，4项RTC检查（含旧ABI拒绝、真实127候选ICE/DC与stats关闭屏障）及旧SDK检查通过 |
@@ -26,17 +26,17 @@
 | 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；最终55ffdf1包首帧/hover/click/IME验收通过 |
 | 延迟定位 | 默认关闭的browser/SDK/Endpoint有界trace，关联同wire RTP与CopyOutput request；Ganesh/OpenGL的GPU flush批次计时已实测，ETW已有GPU队列/CPU调度证据。capture_time_us明确为capture end；HUD不再把该段误标为完整捕获耗时 |
 | 网络实验设施 | 真实UDP 10ms/24/48Mbps整形与Chrome89候选/转发通路验证通过 |
-| 性能 | 精确定时后四1080：实际render16时canvas14.44–15.40FPS/p95 311–379ms；render20时canvas10.30–10.94FPS/p95 736–800ms，GPU再次满载。目标未达，默认render-fps仍0沿用输出配置；旧矩阵与配对条件见串流实验 |
+| 性能 | 四1080精准render16加RTP播放延迟0/0，40秒复测canvas15.95–15.97FPS、marker p95 90–143ms；实际render20再次GPU满载。目标未达，默认render-fps仍0沿用输出配置，播放延迟默认unset；配对条件见串流实验 |
 
 网页viewport/DPR与媒体采样分离已运行验证，用于高DPR和分屏超出接收level时等比缩小视频；输入按mediaScale映射，统计显示源/编码尺寸。同一atlas内desktop@1与tablet@2保持独立网页DPR。平板真实页面检查已通过：Android Chrome UA不带Mobile、CH Android/mobile=false、platform Linux armv81、DPR≈2、viewport/screen820×1180、coarse/no-hover/touch10；使用公开原生设置，无JS伪装或CDP附加。WorkerNavigator另行核对。
 
 实验条件、已测数值与最终性能表见 [串流实验](streaming-experiments.zh-CN.md)。
 
-RTC支持显式RTP播放延迟请求，默认未设置。0/0与0/10ms对照降低接收等待，但JS/canvas绘制FPS下降，未同时达到两项目标。本文paint统计为canvas绘制提交；GPU完成和物理屏刷新未测，marker读回成本另报。
+RTC支持显式RTP播放延迟请求，默认未设置。新离屏宿主精准render16下，0/0在交错复测中重复降低接收等待，且canvas约16FPS；40秒对照的native收包→video呈现p95从97–114ms降至2.69–3.79ms。可用`run.cmd --browser-render-fps=16 --rtc-playout-max-ms=0`复现该重载档，不作为所有负载的默认值。本文paint统计为canvas绘制提交；GPU完成和物理屏刷新未测，marker读回成本另报。
 
 新一轮4×1080分段实验确认：提前向同Session GPU队列提交ready Wait会阻挡旧帧VPP。可选ready gate把VPP等待p50约41–46ms降到5–7ms，但最终FPS/p95无稳定收益，默认关闭。Chromium capture pending上限1/2同样未改善整体吞吐，作为默认关闭的实验补丁保留。单720 direct呈现有匹配场景收益，四1080无一致收益，默认呈现方式保持snapshot。不同源节拍、marker频率和特殊flag的组不混用；详见串流实验。
 
-请求级profile已定位四租户捕获的主要间隔：S4 Created→SendResult p50约216ms，Skia submitted→finished约203ms，同批GPU elapsed约0.81ms。它包含GPU排队与完成观察滞后，不是约200ms纯copy。慢帧完成回调出现在PerformWork任务内，该任务实际post→run约139ms；此前surface completion poll并非主要入口，没有按错误靶点调整轮询。同boot单720请求p50约9.68ms。profile为诊断负载，不作为性能改善结果。
+新离屏宿主、精准render16的四租户请求级profile中，两个完整覆盖窗口的Session捕获Created→SendResult p95约25ms，Skia submitted→finished约22ms；同RTP样本的native收包→video呈现p95约100ms，JS绘制提交约2ms。旧窗口路径曾出现捕获p50约216ms、PerformWork任务post→run约139ms，不能当作新路径当前耗时。诊断trace与关闭profile的性能组分别报告，详见[逐段profile](../develop/docs/osr-render16-segment-profile.md)。
 
 服务模式已修复宿主DPI额外放大：每WebView通过官方capture scale override使实际backing跟随页面DPR；原生demo继续跟随宿主DPI。宿主150%下，desktop1920×1080@1和tablet820×1180@2分别实际提交1920×1080、1640×2360，混合平面的触控与中文输入通过。同帧静态画质PSNR由23.50提升至25.87dB。混合页仍共用atlas采样密度，desktop可能被放大到共同atlas比例；客户端平面尺寸标签由编码矩形反推，取整时可相差约1 DIP。
 

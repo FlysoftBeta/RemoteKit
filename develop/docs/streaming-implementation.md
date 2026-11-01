@@ -167,7 +167,11 @@ P2输入修复：OOPIF实播已有双renderer及iframe中文预编辑/提交、�
 
 最新三档同binary对照：pacer配置60/30/20，canvas分别4.85–6.03/6.72–8.22/15.24–15.89FPS，marker p95分别1657–2112/875–1014/184–317ms。20档实际pacer约16/s，不能写成真实20FPS。详见source-render-pacer.md。
 
-已定位的定时机制：RepeatingTimer默认FlexibleNoSooner且按实际回调时刻重排，Windows存在约16ms leeway；官方precise deadline机制可避免该延迟，但默认MaxPreciseDelay=36ms，20fps的50ms任务会被降级。高精度manager已经由Content初始化。主Agent选定DeadlineTimer绝对phase，远deadline先coarse预唤醒，进入阈值内再precise；预唤醒不发BF，跳过过期phase，不忙等或手动全机timeBeginPeriod。先验证实际60/30/20 tick，再比较四租户实际16/20，最多补一个60对照。策略尚在实施。
+精准pacer已实现并推送12393b4：DeadlineTimer绝对phase，远deadline先coarse预唤醒，进入官方阈值内再precise；预唤醒不发BF，跳过过期phase，不忙等或手动全机timeBeginPeriod。轻量场景实际60/30/20Hz通过；四1080实际16优于20，后者GPU再次满载。direct呈现没有收益，不改默认snapshot。逐段profile已将新路径捕获与接收播放等待分开，现有RTP播放延迟0/0候选有收益，最终交错复测已完成采集，正在核验数据。
+
+已解决P1：40秒四Peer大metrics同时上传时，Control独立appendFile的512KiB写块交错。原始数据保留，两组各24种块归属中只有一种同时满足完整JSON及RTP/回调连续性，恢复证据见source-playout-delay.md。7e30ee1串行写入完整记录，四Tenant大报告及失败后队列恢复、36项测试/typecheck/build/smoke通过，Client资产不变。
+
+最终交错复测：精准render16加RTP0/0后四1080为15.95–15.97FPS、marker p95为143/92/136/90ms，native播放段p95降到2.69–3.79ms，loss/PLI/NACK均0。GPU79.28→78.23%，先导组大幅GPU下降未重复，不作稳定收益。默认保持render0/播放unset，测试包可显式追加参数；代码与文档冻结后执行最终包验收，不再扩展本轮矩阵。
 
 ## 输出采样决策
 

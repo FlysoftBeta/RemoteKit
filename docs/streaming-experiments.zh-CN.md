@@ -88,6 +88,21 @@ Chromium补丁提供默认关闭的`RemoteKitBoundedCapture:max_pending/1`或`/2
 
 20档又进入满载，16档最终输出更好；两档都未达到目标。默认render-fps仍为0，没有将固定低上限推广为默认。静态点击/IME与关闭后重新订阅通过。详细计时、GPU角色和帧率口径见[精准pacer报告](../develop/docs/source-render-deadline.md)。
 
+### 新离屏路径的播放延迟复核
+
+精准render16、四1080、snapshot、marker1Hz、每peer24Mbps/RTT10ms、无特殊客户端flag、全部profile关闭。保持browser、Endpoint与Client不变，使用已有`--rtc-playout-max-ms=0`请求RTP min/max=0/0。首组20秒有收益后，再按unset→0/0各采样40秒，前后形成0→unset→0交错复核。
+
+| Peer | unset canvas FPS | 0/0 canvas FPS | unset marker p95 | 0/0 marker p95 |
+|---|---:|---:|---:|---:|
+| 0 | 15.27 | 15.95 | 169ms | 143ms |
+| 1 | 15.07 | 15.97 | 233ms | 92ms |
+| 2 | 15.64 | 15.95 | 180ms | 136ms |
+| 3 | 15.17 | 15.97 | 172ms | 90ms |
+
+native收包→video呈现p95从97–114ms降至2.69–3.79ms，loss/PLI/NACK均0。GPU3D均值79.28→78.23%；首组96→78%的大降幅未重复，不作为稳定收益。延迟收益重复，FPS仍受16上限，未达到>50FPS/<100ms目标。保持默认配置，重载测试可显式运行`run.cmd --browser-render-fps=16 --rtc-playout-max-ms=0`。
+
+40秒大报告发现Control并发appendFile写块交错；原始字节保留，独立恢复文件已核验完整JSON及Peer/Session/SSRC、RTP连续性。随后修复完整记录串行写入，新增四Tenant大报告回归；未改变Client媒体路径。详细证据见[播放延迟报告](../develop/docs/source-playout-delay.md)，请求级分段见[新路径profile](../develop/docs/osr-render16-segment-profile.md)。
+
 ## 网络模拟
 
 使用只绑定loopback的双UDP socket整形器，两端SDP候选指向整形器；确认selected candidate与实际转发字节，失败不回退直连。每方向基础延迟5ms，下行24或48Mbps；按UDP/IP28字节开销计量。无额外随机丢包，过载时按有界队列丢包。它模拟链路延迟和容量，不代表实地无线干扰或重传。
