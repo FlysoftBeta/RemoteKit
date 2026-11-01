@@ -6,6 +6,11 @@
       "id": "bounded-capture-pending",
       "path": "0001-bounded-capture-pending.patch",
       "sha256": "6d8bf4e9efd793fee458bc1f5ac7de33f9eeac08beeb85b620216579f0aaedc3"
+    },
+    {
+      "id": "copy-output-profile",
+      "path": "0002-copy-output-profile.patch",
+      "sha256": "66828e5158ec26491dd953859a75ae83f97324bbac7c3bece1d56cd57a068a72"
     }
   ]
 }

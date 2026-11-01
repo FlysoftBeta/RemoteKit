@@ -97,7 +97,15 @@ Chrome89的rVFC元数据读取与drawImage(video)并非原子取得同一个fram
 
 优先级P1：完成检查调度异常。205次带toplevel.flow关联的GPU delayed check任务请求延后2000us，实际post→run p50 47.092ms、p95 61.074ms，任务CPU体p50约0.022ms。需要区分timer/线程排队、GPU提交/执行、完成检查，不把全部304ms归因于通知。
 
-已批准下一步默认关闭的独立profile补丁：以同一request关联capture创建、GPU dispatch、flush、真实submit分支及提交回调、GPU elapsed（支持时）、完成观察与SendResult。保留原submit/poll/callback/lease行为，记录后端与semaphore数；Skia flush elapsed可能含此前未flush工作，不能标为纯copy。先短1×720和4×1080诊断，随后决定是否改调度。Control只读核对WPR/ETW工具可用性，GPU实验由media独占。新包等待这批诊断与clean revision，不覆盖旧checkpoint。
+默认关闭的独立profile补丁0002已实现并完成增量构建：以同一request关联capture创建、GPU dispatch、flush、真实submit分支及提交回调、GPU elapsed（支持时）、完成观察与SendResult。保留原submit/poll/callback/lease行为，记录后端与semaphore数；Skia flush elapsed可能含此前未flush工作，不能标为纯copy。关机前1×720得到413个完整请求，Ganesh/OpenGL支持elapsed，flush batch p50约0.66ms、p95约3.63ms；四租户实验在关机时进行中，恢复后检查文件完整性并按需要用新case重跑，不跨boot混合QPC或性能对照。
+
+官方profile及ETW工具/报告已分别提交推送c767c6d、77cb5bb。ETW零丢失；250ms完整包样本中源GPU提交等待125–225ms、DMA跨度约3–4ms，源GPU进程显式CPU Ready→Run最长0.439ms。不能把DMA跨度当纯copy，也不能把进程统计当GpuMain定向结论，详细范围见etw-gpuqueue-profile.md。
+
+关机恢复已完成：旧四租户组的metrics/trace已写完，保留为旧boot记录；新boot独立四1080与单720均完成，未跨boot合并时间轴。请求级结果见copy-output-profile.md：四S4请求p50约216ms，submitted→finished约203ms，同批GPU elapsed约0.81ms。主要等待已定位到提交与完成观察之间，不能全算callback延迟。
+
+优先级P1后续定位改为真正的PerformWork/MakeCurrent完成观察入口。S4慢帧实际PerformWork任务post→run139.454ms；surface CheckAsyncWorkCompletion仅覆盖1/142个finished，撤回直接调surface poll的假设。局部submit虽Skipped，成功Skia submitted约1ms后已出现，不盲目强制submit。后续需要同context的not-ready/ready观察边界，与GPU队列分开量化。本轮不再加补丁或改变调度参数，先交付已验证批次。
+
+0002回调所有权审阅、两项补丁撤回/重应用、统一增量构建/SDK导出和4项patchset测试已通过。delivery_resume已核对UI/Server/Endpoint、旧ZIP和验收证据哈希，下一步由主Agent提交clean revision，再生成新包并全新解压验收；旧checkpoint保留。
 
 ## 输出采样决策
 

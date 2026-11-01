@@ -40,6 +40,10 @@ Chromium补丁提供默认关闭的`RemoteKitBoundedCapture:max_pending/1`或`/2
 
 独立GPUView ETW采集已完成，稳定串流记录12.75秒，零丢失事件/缓冲。已解析的250ms片段按context→device→payload PID归属，并按context+submitSequence配对完整DMA包：四个源GPU进程的具体包提交等待125–225ms，DMA Start→Stop跨度约3–4ms；这证明该诊断片段确有长GPU提交等待。DMA跨度不是纯copy执行，完整包筛选会排除跨窗口长包，不能外推为全窗分布。源GPU进程385个显式CPU Ready→Run配对最长0.439ms，未显示这些观测线程发生CPU运行机会饥饿；缺失线程名，未定向识别GpuMain。工具为`tools/streaming-etw.ps1`，命令、时钟锚、覆盖范围和原始证据见[ETW报告](../develop/docs/etw-gpuqueue-profile.md)。
 
+请求级profile补丁已把同一CopyOutput的dispatch、flush、Skia submitted/finished、mailbox和SendResult连通，并取得Ganesh/OpenGL实际GPU flush批次elapsed。重启后独立4×1080诊断中，S4稳态142个完整请求的Created→SendResult p50/p95为215.977/283.458ms，submitted→finished为203.317/272.052ms，GPU batch elapsed为0.813/1.050ms。同boot单720的241个完整请求为9.677/14.723ms，batch elapsed为0.657/0.690ms。各阶段分位不可相加；elapsed不是映射到CPU时钟的硬件完成时刻，不能把余量全部算作通知延迟。
+
+四租户慢帧229的finished落在CommandBufferStub::PerformWork任务内，该任务请求约2ms，精确flow post→run为139.454ms。S4仅1/142个finished落在surface CheckAsyncWorkCompletion，故撤回直接调整surface 2ms poll的假设。CopyOutput局部显式submit均Skipped，但成功Skia submitted约在flush return后1ms出现，也没有据此强制submit。下一定位点是实际PerformWork/MakeCurrent完成检查入口及ready观察边界。重启前后数据、startup/稳态窗口和GPU elapsed含义详见[请求级profile报告](../develop/docs/copy-output-profile.md)；本轮未改提交或轮询策略。
+
 ## 网络模拟
 
 使用只绑定loopback的双UDP socket整形器，两端SDP候选指向整形器；确认selected candidate与实际转发字节，失败不回退直连。每方向基础延迟5ms，下行24或48Mbps；按UDP/IP28字节开销计量。无额外随机丢包，过载时按有界队列丢包。它模拟链路延迟和容量，不代表实地无线干扰或重传。

@@ -27,6 +27,7 @@ param(
   [switch]$AtlasReadyGate,
   [ValidateSet(0,1,2,10)][int]$CaptureMaxPending=0,
   [switch]$OfficialTrace,
+  [switch]$CopyOutputProfile,
   [ValidateSet('canvas','compositor')][string]$FixtureKind='canvas',
   [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
   [switch]$DisableClientRafProbe,
@@ -36,6 +37,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if($ServerTrace -and $DisableMediaTrace){throw 'ServerTrace also enables browser trace; use DisableMediaTrace without ServerTrace for the off baseline'}
+if($CopyOutputProfile -and -not $OfficialTrace){throw 'CopyOutputProfile requires OfficialTrace to collect its opt-in events'}
+$rkBrowserFeatures=@()
+if($CaptureMaxPending){$rkBrowserFeatures+="RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"}
+if($CopyOutputProfile){$rkBrowserFeatures+='RemoteKitCopyOutputProfile'}
+$rkBrowserFeaturesText=$rkBrowserFeatures -join ','
 $rkRoot = Split-Path -Parent $PSScriptRoot
 $caseRoot = Join-Path $rkRoot "develop/tmp/$Name"
 if (Test-Path -LiteralPath $caseRoot) { throw "Use a new case name; existing measurements must be preserved: $caseRoot" }
@@ -62,7 +68,7 @@ $configuration = @{
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
   atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;
-  captureMaxPending=$CaptureMaxPending;browserEnableFeatures=$(if($CaptureMaxPending){"RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"}else{''});
+  captureMaxPending=$CaptureMaxPending;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
   officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;
   endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
@@ -102,8 +108,8 @@ $rkEndpointArguments = @(
   '--encoder=qsv','--fps=60','--bitrate=18000000','--max-bitrate=40000000',
   "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )
-if($CaptureMaxPending){
-  $rkEndpointArguments+="--browser-enable-features=RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"
+if($rkBrowserFeaturesText){
+  $rkEndpointArguments+="--browser-enable-features=$rkBrowserFeaturesText"
 }
 if($OfficialTrace){$rkEndpointArguments+="--browser-trace-dir=$(Join-Path $caseRoot 'official-trace')"}
 if ($QsvLowPower -or $RtcPlayoutMaxMs -ge 0) {

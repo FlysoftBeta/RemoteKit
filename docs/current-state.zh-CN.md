@@ -22,7 +22,7 @@
 | NVENC | 独立硬件backend编译通过；本机没有NVIDIA GPU/编码驱动DLL，初始化明确不可用 |
 | 显示与输入同步 | 按rVFC的实际RTP时间戳匹配显示代次；真实视频/marker验证通过。无按键悬停可进入未聚焦可见页面且不抢焦点，拖拽/点击等保留焦点约束；五按钮modifier已修正，真实hover/click/IME与mixed回归通过 |
 | 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；最终bundle撤回了一项错误显示改动，待新包首帧验收 |
-| 延迟定位 | 默认关闭的browser/SDK/Endpoint有界trace，关联同wire RTP的capture、copy、VPP、编码与客户端帧龄；PDH记录进程/视频引擎负载。capture_time_us明确为capture end；HUD不再把该段误标为完整捕获耗时 |
+| 延迟定位 | 默认关闭的browser/SDK/Endpoint有界trace，关联同wire RTP与CopyOutput request；Ganesh/OpenGL的GPU flush批次计时已实测，ETW已有GPU队列/CPU调度证据。capture_time_us明确为capture end；HUD不再把该段误标为完整捕获耗时 |
 | 网络实验设施 | 真实UDP 10ms/24/48Mbps整形与Chrome89候选/转发通路验证通过 |
 | 性能 | 16组原矩阵及DPI修复后的分层/画质对照完成；目标未达。当前默认720p单租户31.74 FPS/p95 111ms；四720源约47、呈现约12 FPS；四1080源约20、呈现约9 FPS。诊断flag下单租户约53 FPS、p95 103–105ms，未作为默认 |
 
@@ -33,6 +33,8 @@
 RTC支持显式RTP播放延迟请求，默认未设置。0/0与0/10ms对照降低接收等待，但JS/canvas绘制FPS下降，未同时达到两项目标。本文paint统计为canvas绘制提交；GPU完成和物理屏刷新未测，marker读回成本另报。
 
 新一轮4×1080分段实验确认：提前向同Session GPU队列提交ready Wait会阻挡旧帧VPP。可选ready gate把VPP等待p50约41–46ms降到5–7ms，但最终FPS/p95无稳定收益，默认关闭。Chromium capture pending上限1/2同样未改善整体吞吐，作为默认关闭的实验补丁保留。单720 direct呈现有匹配场景收益，四1080无一致收益，默认呈现方式保持snapshot。不同源节拍、marker频率和特殊flag的组不混用；详见串流实验。
+
+请求级profile已定位四租户捕获的主要间隔：S4 Created→SendResult p50约216ms，Skia submitted→finished约203ms，同批GPU elapsed约0.81ms。它包含GPU排队与完成观察滞后，不是约200ms纯copy。慢帧完成回调出现在PerformWork任务内，该任务实际post→run约139ms；此前surface completion poll并非主要入口，没有按错误靶点调整轮询。同boot单720请求p50约9.68ms。profile为诊断负载，不作为性能改善结果。
 
 服务模式已修复宿主DPI额外放大：每WebView通过官方capture scale override使实际backing跟随页面DPR；原生demo继续跟随宿主DPI。宿主150%下，desktop1920×1080@1和tablet820×1180@2分别实际提交1920×1080、1640×2360，混合平面的触控与中文输入通过。同帧静态画质PSNR由23.50提升至25.87dB。混合页仍共用atlas采样密度，desktop可能被放大到共同atlas比例；客户端平面尺寸标签由编码矩形反推，取整时可相差约1 DIP。
 
@@ -54,7 +56,7 @@ RTC支持显式RTP播放延迟请求，默认未设置。0/0与0/10ms对照降�
 | unload/restore adapter | 完整 history/PageState，同进程 sessionStorage namespace；真实提交后完成；opaque chunk 导入导出校验 Session/Profile/版本，POST 自动恢复明确拒绝 |
 | 页面请求 | dialog/beforeunload、普通文件选择、context menu、pseudo fullscreen、find/zoom/edit/navigation；once 回复、文档失效取消，控制端轮询 pending/events |
 | Profile 服务 | 默认 deny 的 origin/embedding 权限配置；HTTPS-only 会话目录下载、进度/取消和 Windows quarantine；不包含 SafeBrowsing |
-| patchset | SHA-256清单、检查/应用/逆序撤回、失败回滚；WebRTC使用官方component边界，旧visibility补丁已撤回。当前包含默认关闭的bounded capture实验补丁，正式撤回/重应用与统一GN构建通过；既有4项工具测试通过 |
+| patchset | SHA-256清单、检查/应用/逆序撤回、失败回滚；WebRTC使用官方component边界。当前两项默认关闭补丁：bounded capture实验、CopyOutput请求级profile；两项正式逆序撤回/顺序重应用、统一GN构建及4项工具测试通过 |
 | 独立 SDK 消费 | GN build、完整 runtime 导出、MSVC CMake/Ninja link 和 smoke 通过 |
 
 ## 验证与限制
