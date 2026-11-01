@@ -19,6 +19,8 @@ python3 tools/package-runtime.py
 
 `run.cmd` 设置Endpoint/browser路径、SQLite和Session数据位置。初次运行在包内创建 `data/`，诊断结果写入 `metrics/`。不同浏览器会话对应独立Tenant。接收档、设备配置和网络模拟见 [Control说明](../control/README.md)，实际性能结果见 [串流实验](streaming-experiments.zh-CN.md)。
 
+可在命令行追加Endpoint参数，例如`run.cmd --browser-render-fps=16 --rtc-playout-max-ms=0`。参数使用`--name=value`，包含空格时加引号；包内Node launcher将参数作为数据追加到默认参数之后，不需手改JSON或启动脚本。无参数运行保持默认设置，具体实验档位的效果见串流实验。
+
 ## 原生对照包
 
 ```powershell

@@ -175,14 +175,11 @@ def main():
         'PDBs, import libraries, build-only/frontend source files, and development profiles are excluded.\n'
         'The latest DPI changes are included; this package was not launched or runtime-tested.\n', encoding='utf-8')
     if streaming:
+        shutil.copy2(ROOT / 'tools/streaming-launcher.cjs', package / 'run-control.cjs')
         (package / 'run.cmd').write_text(
-            '@echo off\nsetlocal\nset "RK_ROOT=%~dp0"\nset "RK_PATH=%RK_ROOT:\\=/%"\n'
-            'set "REMOTEKIT_ENDPOINT=%RK_ROOT%bin\\endpoint_service.exe"\n'
-            'set REMOTEKIT_ENDPOINT_ARGS=["--browser=%RK_PATH%bin/remotekit_browser.exe","--data-path=%RK_PATH%data/endpoint"]\n'
-            'set "REMOTEKIT_CONTROL_DB=%RK_ROOT%data\\control.db"\n'
-            'set "REMOTEKIT_METRICS_DIR=%RK_ROOT%metrics"\n'
+            '@echo off\nsetlocal DisableDelayedExpansion\nset "RK_ROOT=%~dp0"\n'
             'echo Open http://127.0.0.1:3001 in Chrome. Close this console to stop.\n'
-            '"%RK_ROOT%bin\\node.exe" "%RK_ROOT%control\\dist\\server.mjs"\n', encoding='utf-8')
+            '"%RK_ROOT%bin\\node.exe" "%RK_ROOT%run-control.cjs" %*\n', encoding='utf-8')
         shutil.copy2(package / 'run.cmd', package / 'run-control.cmd')
         (package / 'README.txt').write_text(
             'RemoteKit Windows hardware streaming test package\n\n'
@@ -193,7 +190,8 @@ def main():
             'Data is created in data/ and diagnostic metrics in metrics/.\n'
             'For encoder experiments append --encoder=qsv/--encoder=nvenc, --fps, --bitrate, --max-bitrate,\n'
             '--async-depth, --gop, --target-usage, --rate-control=cbr/vbr, --buffer-ms and --idle-idr-ms\n'
-            'to REMOTEKIT_ENDPOINT_ARGS in run.cmd. Arguments use --name=value.\n'
+            'to run.cmd, for example: run.cmd --browser-render-fps=16 --encoder=qsv\n'
+            'Arguments use --name=value; quote arguments containing spaces.\n'
             'Hardware smoke and stream measurements are reported separately from this package creation.\n', encoding='utf-8')
         for name in ['run-web.cmd', 'run-native.cmd']:
             (package / name).unlink(missing_ok=True)
