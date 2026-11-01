@@ -5,6 +5,9 @@ import { resolve, extname, sep } from 'node:path';
 import { ApiError, Control } from './control';
 
 export function createHttp(control: Control, options: { origins: string[]; clientDir: string; metricsDir: string; tls?: { key: Buffer; cert: Buffer } }) {
+  // appendFile may split a large record into several writes. Serialize whole
+  // records across tenants, and retain a usable queue after a failed write.
+  let metricsWrite: Promise<void> = Promise.resolve();
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Cache-Control', 'no-store');
     try {
@@ -29,8 +32,13 @@ export function createHttp(control: Control, options: { origins: string[]; clien
         if (path === '/api/rtc/close') return json(res, 200, await control.closeRtc(tenant, body));
         if (path === '/api/rtc/network') return json(res, 200, control.networkStats(tenant, body));
         if (path === '/api/metrics') {
-          await mkdir(options.metricsDir, { recursive: true });
-          await appendFile(resolve(options.metricsDir, 'client-metrics.jsonl'), JSON.stringify({ receivedAt: new Date().toISOString(), tenantId: tenant, metrics: body }) + '\n');
+          const record = JSON.stringify({ receivedAt: new Date().toISOString(), tenantId: tenant, metrics: body }) + '\n';
+          const write = metricsWrite.then(async () => {
+            await mkdir(options.metricsDir, { recursive: true });
+            await appendFile(resolve(options.metricsDir, 'client-metrics.jsonl'), record);
+          });
+          metricsWrite = write.catch(() => {});
+          await write;
           return json(res, 200, { stored: true });
         }
         throw new ApiError(404, '接口不存在');
