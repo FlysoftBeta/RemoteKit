@@ -15,6 +15,9 @@ struct EncoderStats {
  std::atomic<uint64_t> submitted{0},completed{0},bytes{0},dropped{0};
  std::atomic<double> last_encode_ms{0};
  std::atomic<uint64_t> rate_updates{0},keyframe_requests{0},keyframes_submitted{0},keyframes_encoded{0};
+ std::atomic<uint64_t> pending{0},inflight{0},pending_replaced{0},hardware_busy{0};
+ std::atomic<uint64_t> paused_drops{0},error_drops{0},inactive_drops{0},cancelled_drops{0};
+ std::atomic<uint64_t> queue_wait_us{0},queue_wait_samples{0};
  std::mutex mutex;std::string backend,error;
  nlohmann::json sender_rtc_stats;
  std::optional<QsvLowPowerInfo> qsv_low_power;
@@ -34,7 +37,7 @@ class EncoderWorker {
   void Keyframe();
   void Stop();
  private:
-  struct Job {remotekit_rtc_frame frame{};bool key=false;uint64_t cookie=0;int64_t submitted_qpc=0;uint32_t surface=0;};
+  struct Job {remotekit_rtc_frame frame{};bool key=false;uint64_t cookie=0;int64_t enqueued_qpc=0,submitted_qpc=0;uint32_t surface=0;};
   void Run();
   void Complete(AccessUnit&);
   void Error(const std::string&);

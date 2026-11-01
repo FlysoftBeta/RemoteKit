@@ -5,6 +5,7 @@
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
 #include "remotekit/tail_refresh.hpp"
+#include "remotekit/media_feedback.hpp"
 #include "remotekit/coordinate_readiness.hpp"
 #include <json.hpp>
 #include <windows.h>
@@ -147,6 +148,7 @@ struct Session {
  remotekit::CoordinateReadiness coordinate_readiness;
  std::atomic<uint64_t> peer{0};std::string connection;
  std::shared_ptr<EncoderStats> stats=std::make_shared<EncoderStats>();
+ remotekit::MediaFeedback media_feedback;
  std::mutex encoder_mutex;std::map<uint64_t,std::unique_ptr<EncoderWorker>> encoders;
  ComPtr<ID3D11Device> encoder_device;
  struct Event{uint32_t type;std::string bytes,auxiliary;int32_t value;uint64_t peer;};
@@ -270,6 +272,7 @@ struct Session {
   const bool active=peer.load()!=0;
   if(active){stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();}
   coordinate_readiness.Clear();
+  media_feedback.Bind(peer.load(),"","");
   try{Rpc({{"method","output.close"}});}catch(const std::exception&){}
   return active;
  }
@@ -392,6 +395,7 @@ struct Session {
  }
  Json Stats() {
   auto value=stats->Snapshot();value["configuredIdleIdrMs"]=options.idle_idr_ms;
+  value.update(media_feedback.Snapshot(QpcNow(),QpcFrequency()));
   value["rtcPlayoutDelayRequested"]={{"minMs",options.rtc_playout_max_ms<0?-1:0},
                                      {"maxMs",options.rtc_playout_max_ms}};
   value["effectiveIdleIdrMs"]=effective_idle_ms.load();value["tailIdrSubmissions"]=tail_submissions.load();
@@ -445,6 +449,12 @@ struct Session {
                            const char* auxiliary,int32_t value) {
   auto* self=static_cast<Session*>(context);
   Event event{type,std::string(static_cast<const char*>(bytes?bytes:""),size),auxiliary?auxiliary:"",value,peer};
+  if(type==REMOTEKIT_RTC_DATA) {
+   auto message=Json::parse(event.bytes,nullptr,false);
+   if(message.is_object() && message.value("type",Json())=="media.feedback") {
+    self->media_feedback.Receive(peer,message,QpcNow(),size);return;
+   }
+  }
   if(type==REMOTEKIT_RTC_ICE_COMPLETE || type==REMOTEKIT_RTC_ERROR) {
    std::lock_guard lock(self->signal_mutex);
    if(type==REMOTEKIT_RTC_ICE_COMPLETE){self->answer=event.bytes;self->ice_complete=true;}
@@ -524,6 +534,9 @@ struct Session {
  }
  void PublishLayout(Json next,uint64_t epoch) {
   std::map<std::string,bool> ready;
+  std::set<std::string> feedback_views;
+  for(const auto& view:next.at("views"))feedback_views.insert(view.at("id").get<std::string>());
+  media_feedback.Bind(peer.load(),next.at("epoch").get<std::string>(),next.at("generation").get<std::string>(),std::move(feedback_views));
   for(const auto& view:next.at("views"))ready[view.at("id").get<std::string>()]=!view.value("stale",false);
   coordinate_readiness.Set(epoch,std::move(ready));
   layout=std::move(next);Send(layout);
@@ -799,7 +812,9 @@ struct Session {
   stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();
   coordinate_readiness.Clear();
   {std::lock_guard lock(input_mutex);input_queue.clear();}
-  auto handle=peer.exchange(0);if(handle)sdk.remotekit_rtc_close(handle);
+  auto handle=peer.exchange(0);
+  media_feedback.Bind(0,"","");
+  if(handle)sdk.remotekit_rtc_close(handle);
   std::map<uint64_t,std::unique_ptr<EncoderWorker>> remaining;
   {std::lock_guard lock(encoder_mutex);remaining.swap(encoders);}remaining.clear();
   std::string error;if(!pool.Close(error))fprintf(stderr,"pool close: %s\n",error.c_str());

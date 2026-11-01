@@ -15,6 +15,11 @@ nlohmann::json EncoderStats::Snapshot() {
  }
  return {{"qsvLowPower",low_power},{"senderRtcStats",sender_rtc_stats},{"encoder",backend},{"encodeSubmitted",submitted.load()},{"encodeCompleted",completed.load()},
          {"encodedBytes",bytes.load()},{"encodeDropped",dropped.load()},
+         {"encodePending",pending.load()},{"encodeInflight",inflight.load()},
+         {"pendingReplaced",pending_replaced.load()},{"hardwareBusy",hardware_busy.load()},
+         {"pausedDrops",paused_drops.load()},{"errorDrops",error_drops.load()},
+         {"inactiveDrops",inactive_drops.load()},{"cancelledDrops",cancelled_drops.load()},
+         {"queueWaitUs",queue_wait_us.load()},{"queueWaitSamples",queue_wait_samples.load()},
          {"rateUpdates",rate_updates.load()},{"keyframeRequests",keyframe_requests.load()},
          {"keyframesSubmitted",keyframes_submitted.load()},{"keyframesEncoded",keyframes_encoded.load()},
          {"lastEncodeMs",completed.load()?nlohmann::json(last_encode_ms.load()):nlohmann::json(nullptr)},
@@ -81,10 +86,14 @@ bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame,bool keyframe) {
  std::lock_guard lock(mutex_);
  if(!configured_||stopping_||failed_||paused_) {
   RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(frame,true),rk_record.reason="not_running_or_paused";rk_record.encoder=encoder_;rk_record.peer=trace_peer_;);
+  if(failed_)++stats_->error_drops;
+  else if(!configured_||stopping_)++stats_->inactive_drops;
+  else ++stats_->paused_drops;
   ++stats_->dropped;return false;
  }
  if(!queue_.empty()) {
   auto previous=queue_.front();queue_.pop_front();
+  --stats_->pending;++stats_->pending_replaced;
   remotekit::TailRefreshLease::Finish(previous.frame,false);
   RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(previous.frame,true),rk_record.reason="pending_replaced";rk_record.cookie=previous.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;);
   keyframe=keyframe||previous.key;
@@ -93,11 +102,11 @@ bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame,bool keyframe) {
   if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,previous.frame.rtp_timestamp);
   ++stats_->dropped;
  }
- Job job;job.frame=frame;job.key=keyframe;job.cookie=++cookie_;
+ Job job;job.frame=frame;job.key=keyframe;job.cookie=++cookie_;job.enqueued_qpc=QpcNow();
  // Hold both COM lifetime and the distinct atlas-pool slot lease.
  static_cast<ID3D11Texture2D*>(frame.d3d11_texture)->AddRef();
  frame.retain(frame.release_context,frame.frame_id);
- queue_.push_back(job);
+ queue_.push_back(job);++stats_->pending;
  RK_SERVER_TRACE(trace_,"worker_enqueue",TraceIds::Frame(frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.queue=static_cast<int>(queue_.size()););
  wake_.notify_one();return true;
 }
@@ -116,6 +125,7 @@ void EncoderWorker::Complete(AccessUnit& unit) {
  auto found=inflight_.find(unit.frame_cookie);
  if(found==inflight_.end()){Error("unknown hardware frame completion cookie");return;}
  auto job=found->second;inflight_.erase(found);free_.push_back(job.surface);
+ --stats_->inflight;
  RK_SERVER_TRACE(trace_,"hardware_complete",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.bytes=unit.bytes.size();rk_record.inflight=static_cast<int>(inflight_.size()););
  remotekit_rtc_encoded_frame result{};result.struct_size=sizeof(result);
  result.annex_b=unit.bytes.data();result.size=unit.bytes.size();result.width=settings_.width;result.height=settings_.height;
@@ -160,11 +170,15 @@ void EncoderWorker::Run() {
   // async_depth 2/4 behavior. A bounded host queue drops rather than growing.
   while(!free_.empty() && !bitrate_.load()) {
    Job job;
-   {std::lock_guard lock(mutex_);if(queue_.empty()||stopping_)break;job=queue_.front();queue_.pop_front();}
+   {std::lock_guard lock(mutex_);if(queue_.empty()||stopping_)break;job=queue_.front();queue_.pop_front();--stats_->pending;}
+   const auto dequeued=QpcNow();
+   stats_->queue_wait_us+=static_cast<uint64_t>(1000000.0*std::max<int64_t>(0,dequeued-job.enqueued_qpc)/QpcFrequency());
+   ++stats_->queue_wait_samples;
    RK_SERVER_TRACE(trace_,"worker_dequeue",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.inflight=static_cast<int>(inflight_.size()););
    job.surface=free_.front();std::string error;
    if(trace_)converter_.SetTraceFrame(TraceIds::Frame(job.frame,true));
    if(!converter_.Convert(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture),surfaces_[job.surface].Get(),error)) {
+    ++stats_->error_drops;
     remotekit::TailRefreshLease::Finish(job.frame,false);
     if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
     ++stats_->dropped;
@@ -185,12 +199,14 @@ void EncoderWorker::Run() {
    auto status=hardware_->Submit(surfaces_[job.surface].Get(),key,job.cookie,error);
    RK_SERVER_TRACE(trace_,"hardware_submit",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.status=static_cast<int>(status););
    if(status==CodecResult::busy) {
+    ++stats_->hardware_busy;
     if(key)keyframe_=true;
     bool replaced=false;
     {std::lock_guard lock(mutex_);
-     if(queue_.empty())queue_.push_back(job);
+     if(queue_.empty()){job.enqueued_qpc=QpcNow();queue_.push_back(job);++stats_->pending;}
      else {queue_.front().key=queue_.front().key||key;replaced=true;}}
     if(replaced) {
+     ++stats_->pending_replaced;
      remotekit::TailRefreshLease::Finish(job.frame,false);
      if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
      RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="busy_replaced";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
@@ -200,6 +216,7 @@ void EncoderWorker::Run() {
     break;
    }
    if(status!=CodecResult::accepted) {
+    ++stats_->error_drops;
     remotekit::TailRefreshLease::Finish(job.frame,false);
     RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="hardware_submit_error";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
     if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
@@ -207,7 +224,7 @@ void EncoderWorker::Run() {
     job.frame.release(job.frame.release_context,job.frame.frame_id);
     static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();Error(error);break;
    }
-   free_.pop_front();inflight_.emplace(job.cookie,job);++stats_->submitted;if(key)++stats_->keyframes_submitted;
+   free_.pop_front();inflight_.emplace(job.cookie,job);++stats_->inflight;++stats_->submitted;if(key)++stats_->keyframes_submitted;
   }
   if(failed_)break;
   if(!inflight_.empty()) {
@@ -223,6 +240,7 @@ void EncoderWorker::Run() {
  // lease, including error paths and queued jobs never submitted to hardware.
  hardware_.reset();
  for(auto& [cookie,job]:inflight_) {
+  --stats_->inflight;if(failed_)++stats_->error_drops;else ++stats_->cancelled_drops;
   remotekit::TailRefreshLease::Finish(job.frame,false);
   RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="close_inflight";rk_record.cookie=cookie;rk_record.encoder=encoder_;);
   if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
@@ -233,6 +251,7 @@ void EncoderWorker::Run() {
  inflight_.clear();
  std::lock_guard lock(mutex_);
  for(auto& job:queue_) {
+  --stats_->pending;if(failed_)++stats_->error_drops;else ++stats_->cancelled_drops;
   remotekit::TailRefreshLease::Finish(job.frame,false);
   RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="close_pending";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
   if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
