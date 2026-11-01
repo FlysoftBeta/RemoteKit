@@ -78,6 +78,7 @@ struct Options {
  uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096,browser_render_fps=0;
  uint32_t atlas_allocation_alignment=1;bool atlas_alignment_explicit=false;
  bool adaptive_fps=false;
+ std::string atlas_input="copy";
  bool qsv_low_power_explicit=false;
  std::string qsv_low_power_pattern_text;std::vector<uint32_t> qsv_low_power_pattern;
  int32_t rtc_playout_max_ms=-1;
@@ -116,6 +117,10 @@ struct Options {
    }
    else if(key=="--browser-trace-dir")browser_trace_directory=Utf8Path(value);
    else if(key=="--encoder")encoder=value;
+   else if(key=="--atlas-input") {
+    if(value!="copy"&&value!="shared")throw std::runtime_error("atlas-input must be copy or shared");
+    atlas_input=value;
+   }
    else if(key=="--qsv-vpp"){
     if(value!="external"&&value!="async")throw std::runtime_error("qsv-vpp must be external or async");
     encoding.qsv_async_vpp=value=="async";
@@ -159,6 +164,8 @@ struct Options {
   if(!atlas_alignment_explicit)atlas_allocation_alignment=encoding.qsv_async_vpp?16:1;
   if(encoding.qsv_async_vpp && (encoder!="qsv" || atlas_allocation_alignment!=16))
    throw std::runtime_error("qsv-vpp=async requires encoder=qsv and atlas-alignment=16");
+  if(atlas_input=="shared" && (encoder!="qsv" || encoding.qsv_async_vpp || encoding.async_depth!=1))
+   throw std::runtime_error("atlas-input=shared requires encoder=qsv, qsv-vpp=external and async-depth=1");
   if(encoder=="nvenc"&&encoding.qsv_low_power)throw std::runtime_error("qsv-low-power requires qsv or auto encoder");
   remotekit::ValidateQsvLowPowerPattern(qsv_low_power_pattern,encoder,qsv_low_power_explicit);
   if(rtc_playout_max_ms!=-1&&(rtc_playout_max_ms<0||rtc_playout_max_ms>40950||rtc_playout_max_ms%10))
@@ -550,6 +557,10 @@ struct Session {
   const auto interval=source_interval_ms.load(),age=last_tail_age_ms.load();
   value["sourceFrameIntervalMs"]=interval>0?Json(interval):Json(nullptr);
   value["atlasReadyGateEnabled"]=pool.ready_gate_enabled();
+  value["atlasInput"]=options.atlas_input;
+  value["atlasSharedBorrows"]=pool.shared_borrows();
+  value["atlasSharedHeldSlots"]=pool.shared_held_slots();
+  value["atlasSharedRetiredPrefix"]=pool.shared_retired_prefix();
   value["atlasReadyGateDeferredPolls"]=pool.ready_gate_deferred_polls();
   value["atlasReadyGateDeferredFrames"]=pool.ready_gate_deferred_frames();
   value["lastTailAfterSourceMs"]=age>0?Json(age):Json(nullptr);return value;
@@ -673,6 +684,7 @@ struct Session {
    catch(const std::exception& diagnostic){fprintf(stderr,"session %s atlas open failed sdk=%d status_query=%s\n",id.c_str(),result,diagnostic.what());}
    throw std::runtime_error("output open SDK "+std::to_string(result));
   }
+  pool.SetSharedInput(options.atlas_input=="shared");
   std::string error;if(!pool.Open(setup,std::min(16u,options.encoding.async_depth+4),error))throw std::runtime_error(error);
   {std::lock_guard lock(encoder_mutex);encoder_device=pool.Device();}
  }
@@ -788,6 +800,7 @@ struct Session {
  void MediaLoop() {
   remotekit_rtc_frame latest{};int64_t last_stats=QpcNow();
   uint64_t previous_encoded=stats->completed.load(),previous_bytes=stats->bytes.load(),previous_copies=pool.copied_frames();
+  uint64_t previous_delivered=pool.delivered_frames();
   bool stream_started=false;remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
   std::shared_ptr<remotekit::TailIdrAttempt> tail_attempt;
   double next_tail_attempt_ms=0;
@@ -913,8 +926,11 @@ struct Session {
     report["encodedFps"]=(encoded-previous_encoded)/seconds;
     report["encodedBitrateBps"]=8.0*(bytes-previous_bytes)/seconds;
     report["atlasCopies"]=copies;report["atlasCopyFps"]=(copies-previous_copies)/seconds;
+    const auto delivered=pool.delivered_frames();
+    report["atlasDeliveredFrames"]=delivered;report["atlasDeliveredFps"]=(delivered-previous_delivered)/seconds;
+    previous_delivered=delivered;
     previous_encoded=encoded;previous_bytes=bytes;previous_copies=copies;
-    report["atlasPoolDrops"]=pool.drops();report["lastGpuCopyMs"]=pool.last_copy_ms();
+    report["atlasPoolDrops"]=pool.drops();report["lastGpuCopyMs"]=pool.shared_input()?Json(nullptr):Json(pool.last_copy_ms());
     report["sourceWidth"]=current_metadata.width_pixels;report["sourceHeight"]=current_metadata.height_pixels;
     report["sourceAtlasWidth"]=current_metadata.width_pixels;report["sourceAtlasHeight"]=current_metadata.height_pixels;
     report["encodedWidth"]=sampling.width;report["encodedHeight"]=sampling.height;report["mediaScale"]=sampling.scale;

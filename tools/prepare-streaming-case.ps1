@@ -50,6 +50,7 @@ param(
   [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
   [string]$QsvLowPowerPattern='',
   [ValidateSet('external','async')][string]$QsvVpp='external',
+  [ValidateSet('copy','shared')][string]$AtlasInput='copy',
   [ValidateSet(1,16)][int]$AtlasAlignment=1,
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
@@ -74,6 +75,8 @@ $BrowserDirectComposition=$BrowserDirectComposition.ToLowerInvariant()
 $BrowserHostScale=$BrowserHostScale.ToLowerInvariant()
 $BrowserRenderHost=$BrowserRenderHost.ToLowerInvariant()
 $QsvVpp=$QsvVpp.ToLowerInvariant()
+$AtlasInput=$AtlasInput.ToLowerInvariant()
+if($AtlasInput -eq 'shared' -and ($QsvVpp -ne 'external' -or $AsyncDepth -ne 1)){throw 'AtlasInput shared requires QsvVpp external and AsyncDepth 1'}
 if(-not $PSBoundParameters.ContainsKey('AtlasAlignment')){$AtlasAlignment=if($QsvVpp -eq 'async'){16}else{1}}
 if($QsvVpp -eq 'async' -and $AtlasAlignment -ne 16){throw 'QsvVpp async requires AtlasAlignment 16'}
 if($ServerTrace -and $DisableMediaTrace){throw 'ServerTrace also enables browser trace; use DisableMediaTrace without ServerTrace for the off baseline'}
@@ -116,7 +119,7 @@ $configuration = @{
   singlePlaneDirect=[bool]$SinglePlaneDirect;
   captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
   officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;adaptiveFps=$AdaptiveFps;offscreenRoot=[bool]$OffscreenRoot;
-  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;qsvLowPower=$QsvLowPower;qsvLowPowerPattern=$QsvLowPowerPattern;atlasAllocationAlignment=$AtlasAlignment;startBitrate=$rkBitrateBps;maxBitrate=$rkMaxBitrateBps;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
+  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;atlasInput=$AtlasInput;qsvLowPower=$QsvLowPower;qsvLowPowerPattern=$QsvLowPowerPattern;atlasAllocationAlignment=$AtlasAlignment;startBitrate=$rkBitrateBps;maxBitrate=$rkMaxBitrateBps;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
 if ($DownlinkMbps) {
@@ -162,6 +165,7 @@ $rkEndpointArguments = @(
   "--adaptive-fps=$AdaptiveFps",
   '--encoder=qsv','--fps=60',"--bitrate=$rkBitrateBps","--max-bitrate=$rkMaxBitrateBps",
   "--qsv-vpp=$QsvVpp", "--atlas-alignment=$AtlasAlignment",
+  "--atlas-input=$AtlasInput",
   "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )
 if($rkBrowserFeaturesText){

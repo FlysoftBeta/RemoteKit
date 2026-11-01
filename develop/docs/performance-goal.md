@@ -12,11 +12,11 @@ UHD630、oneVPL异步H264、RTT10ms、每peer下行24–48Mbps、1080p/DPR1和CR
 
 ## 当前实施
 
-root负责架构、取舍、接口、审阅与commit/push；shared_atlas_input负责下一有界实现与实验。CPU构建不得与计时GPU组重叠。
+root负责架构、取舍、接口、审阅与commit/push；opaque_receiver负责接收端opaque canvas和Chrome89共享路径回归。CPU构建不得与计时GPU组重叠。
 
 已完成：源准入、细粒度GPU profiling、root捕获合并pass、client直接video对照、TrackProcessor输入准入修正、不可变VideoFrame直接绘制多plane。Chrome89/video默认保留。
 
-下一候选：Endpoint直接租用共享BGRA槽，省shared→private复制。默认copy不变，shared为实验配置，先限制QSV/external/depth1。最后一个真实读者释放后，由AtlasPool既有owner按观察序列的安全前缀在同GPU context排consumed signal，禁止乱序释放或CPU伪造完成；旧generation沿用真实GPU完成和资源退役机制。先功能/生命周期/CRC，再同条件两租户adaptive对照；有明确收益才增加固定52组。方案依据见[共享槽调查](endpoint-direct-lease-next.md)，实现与实跑尚未完成。
+已实现：Endpoint直接租用共享BGRA槽，省shared→private复制。默认copy不变，shared为实验配置，先限制QSV/external/depth1。最后一个真实读者释放后，由AtlasPool既有owner按观察序列的安全前缀在同GPU context排consumed signal，禁止乱序释放或CPU伪造完成；旧generation沿用真实GPU完成和资源退役机制。功能/生命周期/CRC及两租户adaptive、固定52、固定56对照已完成。方案依据见[共享槽调查](endpoint-direct-lease-next.md)，实现、6项测试和真实生命周期验证已通过。同源52两租户46.86/48.26FPS、p95 83/94ms，GPU84.92%；固定56回退，停止提高源预算。详见[实跑](shared-atlas-input.md)。下一项将H264实际视频plane canvas设为opaque，检查是否减少不必要透明合成；不改时序/统计，不增加用户开关。
 
 ## 已有关键证据
 
@@ -31,7 +31,7 @@ root负责架构、取舍、接口、审阅与commit/push；shared_atlas_input�
 
 ## 后续问题
 
-1. 下一共享槽候选必须保留latest、尾IDR和SDK所有权，验证三槽回转、generation隔离、延迟release、关闭屏障及真实VPP input兼容。
+1. 共享槽已验证latest、尾IDR、SDK所有权、三槽回转、generation切换、关闭和真实VPP input；破坏性GPU故障及Signal失败注入尚未覆盖。
 2. 增加canvas提交和GPU/读回完成两端点；保留CRC并量化测量干扰。
 3. ApplyView配置成功后持久化/恢复失败可能保持停止，需恢复机制。
 4. alignment1右边缘偏绿根因未闭合；alignment16候选正常。

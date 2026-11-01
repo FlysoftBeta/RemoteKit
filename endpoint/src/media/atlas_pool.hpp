@@ -12,6 +12,8 @@ class AtlasPool {
  public:
   AtlasPool();~AtlasPool();
   void SetTrace(std::shared_ptr<ServerTrace> trace){trace_=std::move(trace);}
+  void SetSharedInput(bool enabled){shared_input_=enabled;}
+  bool shared_input() const {return shared_input_;}
   void SetClock(const remotekit_rtc_clock_sample& sample);
   std::optional<double> capture_to_ready_ms() const;
   double clock_uncertainty_us() const;
@@ -23,10 +25,14 @@ class AtlasPool {
   ID3D11Device5* Device() const;
   SharedAtlasFrame LatestMetadata() const;
   uint64_t copied_frames() const;
+  uint64_t delivered_frames() const {return delivered_.load();}
+  uint64_t shared_borrows() const {return borrows_.load();}
+  uint64_t shared_held_slots() const {return held_.load();}
+  uint64_t shared_retired_prefix() const {return retired_prefix_.load();}
   bool Close(std::string& error);
   uint64_t drops() const;
   double last_copy_ms() const;
-  bool ready_gate_enabled() const {return ready_gate_;}
+  bool ready_gate_enabled() const {return ready_gate_||shared_input_;}
   uint64_t ready_gate_deferred_polls() const {return gate_polls_.load();}
   uint64_t ready_gate_deferred_frames() const {return gate_frames_.load();}
  private:
@@ -38,6 +44,8 @@ class AtlasPool {
   remotekit_rtc_clock_sample clock_{};
   std::shared_ptr<ServerTrace> trace_;
   bool ready_gate_=false;
+  std::atomic<bool> shared_input_{false};
+  std::atomic<uint64_t> delivered_{0},borrows_{0},held_{0},retired_prefix_{0};
   std::atomic<uint64_t> gate_polls_{0},gate_frames_{0};
 };
 }

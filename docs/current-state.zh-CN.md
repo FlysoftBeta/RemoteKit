@@ -18,13 +18,15 @@
 
 源GPU细分已落实到真实flush：页面child批次约1.49ms、最终offscreen root约1.04ms，目标尺寸和sample count正常；请求/完成观察的百毫秒间隔不等于绘制执行。默认关闭的RemoteKitCaptureRoot改为捕获独立WebView root，实际将两pass合为一个六quad pass。原像素、CRC、resize、DPR2回退child再回root、点击与IME均通过；两租户profile-off为37.50/34.89FPS、p95 104/108ms，固定55反而饱和，仍未达标。详见[GPU计时](../develop/docs/viz-gpu-timing.md)和[root捕获](../develop/docs/root-capture-runtime.md)。
 
-TrackProcessor现已让全部plane直接读取同一个不可变VideoFrame，省去应用层整atlas快照复制，默认video/Chrome89保留。两租户为39.24/42.68FPS、p95 108/105ms，GPU均值81.62%；固定源52FPS后，编码约42.5FPS、canvas约40FPS、p95 128/126ms，GPU97.78%，不能靠提高准入帧率补足差距。65项测试、生产构建、真实双plane/DPR缩放/静态重挂载/输入/重连及Chrome89回归通过。下一候选是安全租用共享槽以省Endpoint私有BGRA复制，尚未验证。详见[不可变帧实验](../develop/docs/immutable-frame-runtime.md)。
+TrackProcessor现已让全部plane直接读取同一个不可变VideoFrame，省去应用层整atlas快照复制，默认video/Chrome89保留。两租户为39.24/42.68FPS、p95 108/105ms，GPU均值81.62%；固定源52FPS后，编码约42.5FPS、canvas约40FPS、p95 128/126ms，GPU97.78%，不能靠提高准入帧率补足差距。65项测试、生产构建、真实双plane/DPR缩放/静态重挂载/输入/重连及Chrome89回归通过。Endpoint共享槽候选已完成，结果见下段。详见[不可变帧实验](../develop/docs/immutable-frame-runtime.md)。
 
 客户端single-plane-direct真实跳过snapshot后为37.16/33.85FPS、p95 116/132ms，无收益；Chrome89首帧、输入、重连通过。TrackProcessor实播发现并修复read提前使已呈现画面不可输入的问题，保留真正epoch变化的输入拒绝；read→RAF空隙输入、静止/恢复、重连、owner释放及Chrome89默认video回归均通过。两租户MSTP+Canvas snapshot为39.07/41.47FPS、p95 103/107ms，CRC全部有效，未达标；背景GPU变化使跨组差值不能全归因该路径。下一候选直接用immutable VideoFrame绘制各plane，省掉整atlas中间Canvas复制。详见[直接video对照](../develop/docs/client-direct-runtime.md)和[MSTP验证](../develop/docs/processor-runtime.md)。
 
 当前marker延迟统计终点为客户端canvas绘制提交，CRC同步读回耗时另记；不表示物理屏幕点亮。四接收端同机满载时，读回p95达331–408ms，会干扰后续工作；同时已存在服务端供给下降与解码排队，不能将全部瓶颈归于测量。后续将同时记录GPU/读回完成端点，并保持CRC验证。
 
 断开RDP后DXGI无显示输出，Chrome89 VSync回退实测约31ms，空页面RAF约32Hz。用户允许新版Chromium模拟刷新验收：已复用out/rel完成Chromium157局部增量构建，官方 `--fake-vsync-rate=60` 已用于真实H.264串流。新增显式 `h264-level42-experimental` 接收档，校验H.264能力后按Level4.2协商，保持原1936×1088媒体尺寸；45项Control测试、类型检查、构建与启动smoke通过。重连使用每连接独立video，旧回调、stream、DOM和marker测量正确结束。
+
+Endpoint直接租用共享BGRA槽已实播验证，保持真实lease、有序GPU退役与三槽协议，默认copy不变。相同source52下，两租户从copy的40.20/40.51FPS、p95 128/126ms提升至shared的46.86/48.26FPS、p95 83/94ms；GPU97.78%降到84.92%，私有复制和编码替换丢帧为0。source56反而GPU95.91%、canvas约45FPS，仍未达到目标。6项CPU测试、首帧/静态恢复/输入/重连/尺寸与generation重建通过；启动跳过旧帧的三槽互等已修复。下一项检查接收端视频canvas的不必要透明合成。详见[共享槽实验](../develop/docs/shared-atlas-input.md)。
 
 ## 结构
 

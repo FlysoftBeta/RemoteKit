@@ -75,7 +75,7 @@ def analyze(case):
         samples = client["rtcSamples"]
         first, last = samples[0], samples[-1]
         seconds = (last["at"]-first["at"])/1000
-        for namespace, names in (("rtc", ("framesReceived", "framesDecoded", "keyFramesDecoded", "bytesReceived")), ("endpoint", ("atlasCopies", "encodeSubmitted", "encodeCompleted", "encodeDropped"))):
+        for namespace, names in (("rtc", ("framesReceived", "framesDecoded", "keyFramesDecoded", "bytesReceived")), ("endpoint", ("atlasCopies", "atlasDeliveredFrames", "atlasSharedBorrows", "encodeSubmitted", "encodeCompleted", "encodeDropped"))):
             for name in names:
                 a, b = (first.get(namespace) or {}).get(name), (last.get(namespace) or {}).get(name)
                 result["receiver"][name+"PerSecond"] = (b-a)/seconds if a is not None and b is not None else None
