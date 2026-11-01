@@ -51,6 +51,7 @@ export class PresentationDiagnostics {
       return [view, { ...count, fps }];
     }));
   }
+  paintFrameCounts() { return new Map([...this.paintCounts].map(([view, count]) => [view, count.frames])); }
   cost(name: keyof PresentationDiagnostics['costs'], at: number, durationMs: number, view: string | null = null) { if (this.costs[name]) push(this.costs[name], [at, durationMs, view]); }
   snapshot(raw = false) {
     const pending = this.pending && this.observed.get(this.pending.rtp)?.outcome === 'pending' ? { ...this.pending, ageMs: performance.now() - this.pending.at } : null;

@@ -18,10 +18,6 @@ async (hostPage) => {
         await action({ type: 'device.set', device: { mode: 'desktop', width: config.width, height: config.height, deviceScaleFactor: config.dpr } });
         await action({ type: 'tab.create', title: `Benchmark ${config.id}/${index}`, url: `${config.fixtureOrigin || config.origin}/test-pattern.html?mode=${encodeURIComponent(config.mode)}&fps=60&probeRun=${encodeURIComponent(config.id + '-' + index)}${config.captureQuality ? '&quality=1&stopAfter=8000' : ''}` });
         const transport = window.remotekitDiagnostics.transport;
-        if (config.visibleVideoPreview) {
-          Object.assign(transport.video.style, { position: 'fixed', top: '70px', right: '12px', width: '160px', height: '90px', opacity: '1', zIndex: '2147483647', pointerEvents: 'none', display: 'block', visibility: 'visible' });
-          document.body.appendChild(transport.video);
-        }
         if (config.callbackRegistration) transport.frameCallbackRegistration = config.callbackRegistration;
         if (config.presentationMode) {
           if (!transport.registerPlane) throw new Error('This client does not support the requested presentation experiment');
@@ -29,6 +25,10 @@ async (hostPage) => {
         }
         transport.receiveProfile = config.receiveProfile;
         await transport.connect();
+        if (config.visibleVideoPreview) {
+          Object.assign(transport.video.style, { position: 'fixed', top: '70px', right: '12px', width: '160px', height: '90px', opacity: '1', zIndex: '2147483647', pointerEvents: 'none', display: 'block', visibility: 'visible' });
+          document.body.appendChild(transport.video);
+        }
         window.rkBenchmarkReceivers = (transport.peer?.getReceivers() ?? []).filter(receiver => receiver.track?.kind === 'video').map(receiver => {
           const supported = 'playoutDelayHint' in receiver;
           const result = { supported, original: supported ? receiver.playoutDelayHint : null, requestedMs: config.playoutDelayHintMs ?? null };

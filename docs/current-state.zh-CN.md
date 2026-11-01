@@ -4,6 +4,10 @@
 
 服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。重载低延迟实验约16FPS、marker p95为90–143ms，吞吐目标仍未达到。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
 
+当前按用户指令持续推进≥50FPS/Pixel marker p95≤100ms目标，阶段包不作为停止点。单次尾IDR已改为实际keyframe编码成功才完成，并通过静态停止/重新活动实播；默认关闭的单plane直写共享槽候选通过功能及A/B。QSV同session异步VPP→Encode的独立硬件probe已通过无缩放/缩放120帧验证，正在集成，尚无产品性能结论。最新任务与问题见[持续性能目标](../develop/docs/performance-goal.md)。
+
+当前测试会话另有客户端环境上限：断开RDP后DXGI无显示输出，Chrome89 GPU VSync回退Sleep17，实测约31ms，空页面RAF也只有32Hz。该结论已有原生探针和Chrome trace，并非串流工作负载推测；正常显示输出客户端尚待复测。双页手动重连的旧video元素解码继续但rVFC停止问题，已改为每连接新video并通过两次split重连实播；旧回调、stream、DOM及marker测量正确结束。
+
 ## 结构
 
 - **browser**：独立 ContentMain/ContentBrowserClient/ContentRendererClient、BrowserContext 和 WebView adapter，不链接 Chrome 的 Browser/TabStripModel/BrowserView。服务使用无窗口Aura宿主，原生demo使用Views窗口。
@@ -16,7 +20,7 @@
 
 | 项目 | 当前证据 |
 |---|---|
-| Control与客户端 | SQLite产品状态、会话鉴权、Tab/分屏/导航/设备配置、周期对账、生产bundle；36项测试通过；大metrics记录串行写入，四Tenant并发与失败后恢复通过；真实beforeunload取消/确认通过；可配置LAN监听和HTTPS，本地TLS/secure-cookie检查通过 |
+| Control与客户端 | SQLite产品状态、会话鉴权、Tab/分屏/导航/设备配置、周期对账、生产bundle；43项测试通过；1500ms媒体反馈与队列观测接通，尚未启用自适应策略；大metrics记录串行写入；真实beforeunload取消/确认、两次split重连通过；可配置LAN监听和HTTPS，本地TLS/secure-cookie检查通过 |
 | Chrome89 | 现有89.0.4389.90 headed真实运行；Sol检查桌面/平板UI与实际视频HUD；Pixel marker、IME composition、触摸响应、重复focus输入及endpoint退出自动恢复通过；主动断连后不自动重连 |
 | browser服务 | 单Session进程、动态页面、后台页不占atlas、独立Profile与恢复信息；1/4租户管理和尺寸重建实测通过 |
 | WebRTC SDK | 真正PeerConnection、SDP/ICE、DTLS/SCTP、native纹理租约、实际wire RTP、时钟校准、发送端stats；ABI2与共享atlas v2统一编译，4项RTC检查（含旧ABI拒绝、真实127候选ICE/DC与stats关闭屏障）及旧SDK检查通过 |

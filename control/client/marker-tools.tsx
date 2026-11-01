@@ -9,7 +9,7 @@ export function MarkerTools({ transport, viewId }: { transport: RemoteTransport;
   const [status, setStatus] = useState('');
   const [sampleHz, setSampleHz] = useState(10);
   useEffect(() => () => run.current?.stop(), []);
-  useEffect(() => { run.current?.stop(); setActive(false); }, [viewId]);
+  useEffect(() => { run.current?.stop(); setActive(false); }, [viewId, transport.diagnostics.connectionId]);
   useEffect(() => { if (!active) return; const timer = setInterval(() => { if (run.current) transport.setMarkerStats(run.current.report()); }, 1000); return () => clearInterval(timer); }, [active, transport]);
   const surface = () => transport.layout?.views.find(view => view.id === viewId);
   const start = () => {

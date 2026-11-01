@@ -12,12 +12,25 @@
 
 | 项目 | 负责人 | 范围与交付 |
 |---|---|---|
-| 新高帧率基线 | throughput_fresh | 独占GPU；0/0下1/4×1080 render60，必要时四租户30；30秒有效窗口、逐环节FPS/延迟/各GPU引擎与实际码率 |
-| GPU复制与同步审查 | gpu_copy_fresh | 只读；单/多plane copy/clear/scale和VPP生命周期，候选改动及约束；不构建、不占GPU |
-| 单次尾IDR | tail_idr_fresh | Endpoint限定范围；新源活动重arm、成功提交后本轮不再重复；失败保留pending，不干扰PLI/重连；CPU测试不覆盖运行中实验bin |
+| 实验与独立审阅 | throughput_fresh | direct A/B、观测接线实播完成；发现Chrome89重连旧video解码但rVFC停止，交客户端修复 |
+| QSV异步管线 | qsv_pipeline_fresh | 新上下文；按qsv-async-integration.md实现同session VPP→Encode候选，固定surface地址和真实lease；仅编辑待统一构建 |
+| 对齐与配置 | tail_idr_fresh | 物理atlas allocation_alignment16、CLI及正式CPU测试接线；不改变网页viewport/DPR；仅编辑 |
+| 客户端 | client_cadence_fresh | 反馈及每连接新video修复完成；43测试、正式build和两次split重连实播通过；资源已释放 |
+| QSV能力调查 | gpu_copy_fresh | probe noscale/full/scale各120帧成功，颜色误差≤1、cookie/Locked正确；资源已释放 |
 | 架构与集成 | root | 决定复制消除和背压接口；更新记录、提交推送，依据实验安排后续工作 |
 
 ## 待推进
+
+最新基线：1×1080 render60/0/0，源render55.27、encode/decode42.9、canvas29.92FPS、marker p9586ms，GPU69%。4×1080 render60为5.56–6.00FPS/p951249–1473ms，render30为6.20–6.86FPS/p95703–729ms，GPU均99.8%。不能用单租户延迟与其他组帧率拼接目标。
+
+已提交：7b96d8f单次真实尾IDR；0ce2973默认关闭direct publication及实验；eda49ff异步VPP硬件probe；e9f04d9接收反馈与编码队列观测。direct四1080 render16 off/on为15.65–15.83→15.93–16.00FPS，p95130–197→90–149ms，GPU87.84→79.78%。干净on30仍7.16–7.30FPS/p95679–774ms、GPU99.78%；编译重叠旧组明确弃用，不能拿其丢包归因产品。
+
+未解决问题：
+
+- P1：Chrome89在断开的RDP会话无DXGI output，VSync Sleep17实际31ms，空页面约32Hz；默认客户端最终50FPS验收需正常显示输出环境。已询问用户现成可用客户端，不因此停止服务端优化，也不自行切用户会话。
+- 已解决P1：双页手动重连复用旧video时解码/时间轴前进但所有rVFC停止；每连接新video修复已通过两次split重连，旧callback/stream/DOM清理。报告receiver-video-lifecycle.md。
+- P2：既有右边缘偏绿，direct off/on右16列逐字节相同；probe编码前NV12白边正确、coded padding为黑，但正式H264解码后根因尚未闭合。
+- P2：反馈观测接通不等于帧率策略已实现；下一步仍需算法、changed-only限频控制及稳定性实验。
 
 1. GPU吞吐：先确认高帧率0/0基线，再选择可验证的copy/同步消除；固定16FPS只用于诊断，不能当最终解法。
 2. 背压与自适应：以真实资源和时序为依据，对源准入和最新帧队列建立有界控制。显示器/网络共同限制目标帧率，不能把超时或ACK当GPU完成，也不能因静态没有capture而死锁。

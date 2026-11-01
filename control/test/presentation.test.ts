@@ -26,8 +26,23 @@ function setup(mode: 'snapshot' | 'single-plane-direct' = 'snapshot') {
   const register = (node = new Canvas(), v = view, epoch = t.layout!.epoch) => ({ node, remove: t.registerPlane({ view: v, layoutEpoch: epoch, layoutGeneration: t.layout!.generation }, node as any, () => {}) });
   const metadata = (rtp: number, epoch = t.layout!.epoch) => message({ type: 'frame', rtpTimestamp: rtp, layoutEpoch: epoch });
   const frame = (rtp: number) => callback(performance.now(), { rtpTimestamp: rtp, presentedFrames: rtp });
-  return { t, video, view, layout, message, register, metadata, frame, paints, sent };
+  return { t, video, view, layout, message, register, metadata, frame, paints, sent, frameCallback: () => callback };
 }
+
+test('a replaced receiver video cannot authorize or reschedule old callbacks', () => {
+  const { t, view, register, metadata, frame, paints, frameCallback } = setup(); register();
+  metadata(10); frame(10); const oldCallback = frameCallback(), peer = (t as any).peer;
+  let nextCallback: (at: number, metadata: object) => void = () => {}, registrations = 0;
+  const freshVideo = { videoWidth: 648, videoHeight: 488,
+    requestVideoFrameCallback(cb: typeof nextCallback) { nextCallback = cb; return ++registrations; },
+    cancelVideoFrameCallback() {}, pause() {} };
+  (t as any).receiverVideo = freshVideo; (t as any).startFramePump(peer);
+  metadata(11); oldCallback(performance.now(), { rtpTimestamp: 11, presentedFrames: 11 });
+  assert.equal(paints.length, 1); assert.equal(registrations, 1);
+  nextCallback(performance.now(), { rtpTimestamp: 11, presentedFrames: 1 });
+  assert.equal(paints.length, 2); assert.equal(t.getLastPresentation(view.id)?.rtpTimestamp, 11);
+  assert.equal(registrations, 2);
+});
 
 test('snapshot source keeps atlas crop and encoded dimensions without applying DPR twice', () => {
   const { t, view, register, metadata, frame, paints } = setup(); const { node } = register(); metadata(10); frame(10);

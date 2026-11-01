@@ -4,6 +4,7 @@ import { configureReceiveOffer, originalGatheredOffer, probeReceiveCapabilities,
 import { ReconnectPolicy } from './reconnect';
 import { PresentationDiagnostics } from './presentation-diagnostics';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource, type PresentationMode, type PixelRect } from './plane-source';
+import { MediaFeedbackSampler } from './media-feedback';
 
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource }
@@ -13,7 +14,8 @@ export class RemoteTransport {
   receiveProfile: ReceiveProfile = loadReceiveProfile();
   signaling: Record<string, unknown> | undefined;
   probeReceiveCapabilities = probeReceiveCapabilities;
-  readonly video = document.createElement('video');
+  private receiverVideo = this.createReceiverVideo();
+  get video() { return this.receiverVideo; }
   private authorizedFrame = document.createElement('canvas');
   // A direct plane is never exposed as a full atlas through this legacy getter.
   get displayFrame() { return this.displayReady && this.snapshotRtp === this.displayedRtp && this.snapshotEpoch === this.displayedEpoch ? this.authorizedFrame : undefined; }
@@ -55,6 +57,14 @@ export class RemoteTransport {
   selectedViewId: string | undefined;
   private lastInboundSample: { timestamp: number; bytes: number; frames?: number } | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
+  private statsReadingPeer: RTCPeerConnection | undefined;
+  private networkRead: { peer: RTCPeerConnection; connectionId: string } | undefined;
+  private videoPresentedFrames: number | undefined;
+  private mediaFeedback = new MediaFeedbackSampler({
+    now: () => performance.now(), visible: () => document.visibilityState === 'visible',
+    requestFrame: callback => requestAnimationFrame(callback), cancelFrame: id => cancelAnimationFrame(id),
+    onVisibility: callback => { document.addEventListener('visibilitychange', callback); return () => document.removeEventListener('visibilitychange', callback); },
+  });
   private sequence = 0n;
   readonly inputTrace: Record<string, unknown>[] = [];
   readonly inputResults: Record<string, unknown>[] = [];
@@ -69,7 +79,11 @@ export class RemoteTransport {
   private connectingPromise: Promise<void> | undefined;
   private pendingFailure: string | undefined;
   private manualRestart = false;
-  constructor() { this.video.autoplay = true; this.video.muted = true; this.video.playsInline = true; }
+  private createReceiverVideo() {
+    const video = document.createElement('video');
+    video.autoplay = true; video.muted = true; video.playsInline = true;
+    return video;
+  }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   subscribeFrames = (listener: () => void) => { this.frameListeners.add(listener); return () => { this.frameListeners.delete(listener); }; };
   registerPlane(identity: PlaneIdentity, canvas: HTMLCanvasElement, ready: (ready: boolean) => void) {
@@ -144,6 +158,9 @@ export class RemoteTransport {
     this.update({ connection: '正在连接', error: undefined });
     try {
       const peer = new RTCPeerConnection({ bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
+      // Chrome89 can decode a replacement MediaStream on an old video while
+      // never delivering rVFC again. Give each peer its own presentation state.
+      const video = this.createReceiverVideo(); this.receiverVideo = video;
       this.peer = peer;
       const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
       const codecs = RTCRtpReceiver.getCapabilities?.('video')?.codecs;
@@ -156,10 +173,10 @@ export class RemoteTransport {
         this.update({ connection: labels[peer.connectionState] ?? peer.connectionState });
       };
       peer.ontrack = event => {
-        if (this.peer !== peer) return;
-        this.video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+        if (this.peer !== peer || this.video !== video) return;
+        video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
         this.startFramePump(peer);
-        void this.video.play().catch(() => this.update({ error: '视频播放被浏览器阻止，请重新连接。' }));
+        void video.play().catch(() => { if (this.peer === peer && this.video === video) this.update({ error: '视频播放被浏览器阻止，请重新连接。' }); });
       };
       this.bindChannel(peer.createDataChannel('remotekit', { ordered: true }));
       peer.ondatachannel = event => this.bindChannel(event.channel);
@@ -184,6 +201,7 @@ export class RemoteTransport {
       this.update({ connectionId: answer.connectionId, networkSimulation: answer.networkSimulation });
       await peer.setRemoteDescription(answer);
       if (attempt !== this.attempt) return;
+      this.mediaFeedback.start();
       this.timer = setInterval(() => { void this.readStats(peer); }, 1500);
     } catch (error) {
       if (attempt !== this.attempt) return;
@@ -191,40 +209,41 @@ export class RemoteTransport {
     }
   }
   private startFramePump(peer: RTCPeerConnection) {
-    const attempt = this.attempt;
-    if (this.frameCallback !== undefined) this.video.cancelVideoFrameCallback?.(this.frameCallback);
-    if (typeof this.video.requestVideoFrameCallback !== 'function') { this.update({ error: '浏览器缺少视频帧时间戳回调，无法安全匹配布局；画面与输入已暂停。' }); return; }
+    const attempt = this.attempt, video = this.video;
+    if (this.frameCallback !== undefined) video.cancelVideoFrameCallback?.(this.frameCallback);
+    if (typeof video.requestVideoFrameCallback !== 'function') { this.update({ error: '浏览器缺少视频帧时间戳回调，无法安全匹配布局；画面与输入已暂停。' }); return; }
     const receive = (_now: number, metadata: VideoFrameCallbackMetadata) => {
-      if (this.peer !== peer || attempt !== this.attempt) return;
+      if (this.peer !== peer || attempt !== this.attempt || this.video !== video) return;
       const callbackStarted = performance.now();
       const beforeWork = this.frameCallbackRegistration === 'before-work';
-      if (beforeWork) this.frameCallback = this.video.requestVideoFrameCallback(receive);
+      if (beforeWork) this.frameCallback = video.requestVideoFrameCallback(receive);
       try {
       const rtp = (metadata as VideoFrameCallbackMetadata & { rtpTimestamp?: number }).rtpTimestamp;
       this.frameGate.observe(rtp);
       const at = performance.now();
-      this.presentation.video(at, this.frameGate.rtpTimestamp, this.layout?.epoch, this.frameGate.epochFor(this.frameGate.rtpTimestamp), { ...metadata, decoded: (this.video as HTMLVideoElement & { webkitDecodedFrameCount?: number }).webkitDecodedFrameCount });
+      this.videoPresentedFrames = metadata.presentedFrames;
+      this.presentation.video(at, this.frameGate.rtpTimestamp, this.layout?.epoch, this.frameGate.epochFor(this.frameGate.rtpTimestamp), { ...metadata, decoded: (video as HTMLVideoElement & { webkitDecodedFrameCount?: number }).webkitDecodedFrameCount });
       if (this.frameGate.rtpTimestamp === undefined) {
         if (this.frameIssue !== 'missing-rtp') { this.frameIssue = 'missing-rtp'; this.update({ error: '视频帧缺少 rtpTimestamp，无法安全匹配布局；画面与输入已暂停。' }); }
       } else {
-        const width = this.video.videoWidth, height = this.video.videoHeight;
+        const width = video.videoWidth, height = video.videoHeight;
         if (width > 0 && height > 0) {
           if (this.tryDirectFrame(width, height)) return;
           if (this.pendingFrame.width !== width || this.pendingFrame.height !== height) { this.pendingFrame.width = width; this.pendingFrame.height = height; }
           const context = this.pendingFrame.getContext('2d', { alpha: false });
           if (!context) return;
-          const start = performance.now(); context.drawImage(this.video, 0, 0); this.presentation.cost('videoSnapshot', start, performance.now() - start);
+          const start = performance.now(); context.drawImage(video, 0, 0); this.presentation.cost('videoSnapshot', start, performance.now() - start);
           this.pendingSnapshotRtp = this.frameGate.rtpTimestamp;
           this.routing.snapshotFrames++;
           this.authorizeFrame();
         }
       }
       } finally {
-        if (!beforeWork && this.peer === peer && attempt === this.attempt) this.frameCallback = this.video.requestVideoFrameCallback(receive);
+        if (!beforeWork && this.peer === peer && attempt === this.attempt && this.video === video) this.frameCallback = video.requestVideoFrameCallback(receive);
         this.presentation.cost('videoCallbackTotal', callbackStarted, performance.now() - callbackStarted);
       }
     };
-    this.frameCallback = this.video.requestVideoFrameCallback(receive);
+    this.frameCallback = video.requestVideoFrameCallback(receive);
   }
   private authorizeFrame() {
     if (!this.frameGate.ready || !this.layout || this.pendingSnapshotRtp !== this.frameGate.rtpTimestamp || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
@@ -355,12 +374,16 @@ export class RemoteTransport {
     this.channel.send(JSON.stringify({ type: 'focus', focusRequestId: requestId, view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, layoutEpoch: this.layout.epoch, focused }));
   }
   private async readStats(peer: RTCPeerConnection) {
+    if (peer !== this.peer || this.statsReadingPeer === peer) return;
+    this.statsReadingPeer = peer;
     try {
       const stats = await peer.getStats();
       if (peer !== this.peer) return;
       const update: Partial<Diagnostics> = {};
+      let inboundCounters: { decodedFrames?: number; packetsLost?: number; framesDropped?: number } = {};
       stats.forEach(report => {
         if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) {
+          inboundCounters = { decodedFrames: report.framesDecoded, packetsLost: report.packetsLost, framesDropped: report.framesDropped };
           update.framesDecoded = report.framesDecoded; update.framesPerSecond = report.framesPerSecond; update.bytesReceived = report.bytesReceived;
           if (typeof report.timestamp === 'number' && typeof report.bytesReceived === 'number') {
             const previous = this.lastInboundSample;
@@ -374,11 +397,36 @@ export class RemoteTransport {
         }
         if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) { update.roundTripTime = report.currentRoundTripTime; update.selectedCandidates = { pair: report, local: stats.get(report.localCandidateId), remote: stats.get(report.remoteCandidateId) }; }
       });
-      if (this.diagnostics.networkSimulation && this.connectionId) update.networkSimulation = await request('/api/rtc/network', { connectionId: this.connectionId });
       const paints = this.presentation.paintStatistics(); update.paintFpsByView = Object.fromEntries(Object.entries(paints).map(([id, value]) => [id, value.fps]));
       update.displayFramesPerSecond = this.selectedViewId ? paints[this.selectedViewId]?.fps : undefined;
       this.update(update);
+      if (this.layout && this.channel?.readyState === 'open') {
+        const counts = this.presentation.paintFrameCounts();
+        const views = new Set([...this.renderers].filter(renderer => {
+          if (!this.rendererCurrent(renderer)) return false;
+          const rect = renderer.canvas.getBoundingClientRect(), style = getComputedStyle(renderer.canvas);
+          return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.visibility !== 'collapse';
+        }).map(renderer => renderer.view.id));
+        const feedback = this.mediaFeedback.sample({ layoutEpoch: this.layout.epoch, outputGeneration: this.layout.generation,
+          ...inboundCounters, videoFrames: this.videoPresentedFrames,
+          planes: [...views].map(view => ({ view, frames: counts.get(view) })),
+          roundTripTimeMs: update.roundTripTime === undefined ? undefined : update.roundTripTime * 1000 });
+        if (feedback && this.channel.bufferedAmount <= 65536) this.channel.send(JSON.stringify(feedback));
+      }
+      this.refreshNetworkStats(peer);
     } catch { /* A closed peer no longer has stats. */ }
+    finally { if (this.statsReadingPeer === peer) this.statsReadingPeer = undefined; }
+  }
+  private refreshNetworkStats(peer: RTCPeerConnection) {
+    const connectionId = this.connectionId;
+    if (peer !== this.peer || !this.diagnostics.networkSimulation || !connectionId ||
+        this.networkRead?.peer === peer && this.networkRead.connectionId === connectionId) return;
+    const sample = { peer, connectionId }; this.networkRead = sample;
+    // Relay diagnostics must not extend the native media counter window or block feedback.
+    void request<Record<string, unknown>>('/api/rtc/network', { connectionId }).then(networkSimulation => {
+      if (this.networkRead === sample && this.peer === peer && this.connectionId === connectionId) this.update({ networkSimulation });
+    }).catch(() => { /* Keep the last relay observation while native media feedback continues. */ })
+      .finally(() => { if (this.networkRead === sample) this.networkRead = undefined; });
   }
   disconnect() {
     this.reconnect.stop(); clearTimeout(this.retryTimer); this.retryTimer = undefined; this.pendingFailure = undefined; this.manualRestart = false;
@@ -386,6 +434,7 @@ export class RemoteTransport {
   }
   private closeLocal() {
     this.attempt++;
+    this.mediaFeedback.stop(); this.statsReadingPeer = undefined; this.networkRead = undefined; this.videoPresentedFrames = undefined;
     if (this.frameCallback !== undefined) this.video.cancelVideoFrameCallback?.(this.frameCallback);
     this.frameCallback = undefined; this.frameGate.clear(); this.displayedRtp = undefined; this.displayedEpoch = undefined; this.frameIssue = undefined;
     this.lastInboundSample = undefined;
@@ -396,7 +445,7 @@ export class RemoteTransport {
     if (this.connectionId) { void request('/api/rtc/close', { connectionId: this.connectionId }).catch(() => {}); this.connectionId = undefined; }
     clearInterval(this.timer);
     const peer = this.peer; this.peer = null; this.channel = null; peer?.close();
-    this.video.pause(); this.video.srcObject = null; this.layout = null;
+    this.video.pause(); this.video.srcObject = null; this.video.remove?.(); this.layout = null;
     this.pendingFocus = null;
     this.diagnostics = { connection: '未连接', channel: '未连接' }; this.notify();
   }
