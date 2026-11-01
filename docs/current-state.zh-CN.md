@@ -23,7 +23,7 @@
 | oneVPL | UHD630 legacy1.35真实异步编码；多inflight有效；固定名义fps、关闭HRD后240帧码率阶跃通过，普通码率Reset不重开序列；默认VBR/TU1/深度1/LowPower auto；显式LowPower ON及码率阶跃通过，实际模式与返回状态可观测 |
 | NVENC | 独立硬件backend编译通过；本机没有NVIDIA GPU/编码驱动DLL，初始化明确不可用 |
 | 显示与输入同步 | 按rVFC的实际RTP时间戳匹配显示代次；真实视频/marker验证通过。无按键悬停可进入未聚焦可见页面且不抢焦点，拖拽/点击等保留焦点约束；五按钮modifier已修正，真实hover/click/IME与mixed回归通过 |
-| 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；最终55ffdf1包首帧/hover/click/IME验收通过 |
+| 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；32a8313新解压包的真实启动参数、首帧/hover/click/IME/关闭与Sol视觉验收通过 |
 | 延迟定位 | 默认关闭的browser/SDK/Endpoint有界trace，关联同wire RTP与CopyOutput request；Ganesh/OpenGL的GPU flush批次计时已实测，ETW已有GPU队列/CPU调度证据。capture_time_us明确为capture end；HUD不再把该段误标为完整捕获耗时 |
 | 网络实验设施 | 真实UDP 10ms/24/48Mbps整形与Chrome89候选/转发通路验证通过 |
 | 性能 | 四1080精准render16加RTP播放延迟0/0，40秒复测canvas15.95–15.97FPS、marker p95 90–143ms；实际render20再次GPU满载。目标未达，默认render-fps仍0沿用输出配置，播放延迟默认unset；配对条件见串流实验 |

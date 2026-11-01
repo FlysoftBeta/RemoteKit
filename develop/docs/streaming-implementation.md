@@ -173,6 +173,8 @@ P2输入修复：OOPIF实播已有双renderer及iframe中文预编辑/提交、�
 
 最终交错复测：精准render16加RTP0/0后四1080为15.95–15.97FPS、marker p95为143/92/136/90ms，native播放段p95降到2.69–3.79ms，loss/PLI/NACK均0。GPU79.28→78.23%，先导组大幅GPU下降未重复，不作稳定收益。默认保持render0/播放unset，测试包可显式追加参数；代码与文档冻结后执行最终包验收，不再扩展本轮矩阵。
 
+本批交付已验收：`RemoteKit-win-x64-streaming-qsv-nvenc-20261101-140731.zip`，clean32a8313，461949701字节，SHA256 `7d81c0b772b53d6d7a92ceaa48d1e75e668413e17a8b954d5529a5a001cbb464`。新解压538项manifest hash与正式smoke通过，真实run.cmd的16/0参数传入Endpoint；headed Chrome89首帧、hover不抢焦点、click60001、IME42、close200和Sol视觉通过。证据delivery-32a8313-20261101-140731；自建进程残留0，managed浏览器已关闭。旧55ffdf1包保留。本批完成，>50FPS及全部Peer p95<100ms目标仍未达到；后续重点是GPU吞吐，用户五项新增建议仍未单独展开。
+
 ## 输出采样决策
 
 平板高DPR/分屏可能超过接收端level的MaxFS/MaxMBPS。保留网页viewport/DPR及browser源atlas，由endpoint GPU NV12转换等比下采样到协商限制；NativeBuffer逻辑尺寸是编码尺寸，真实D3D texture尺寸保持源尺寸。layout坐标转编码像素，mediaScale独立于deviceScaleFactor，输入按两者乘积转DIP。stats/HUD明确源/编码尺寸与比例。该选择用于功能与编码约束，不把缩小后的FPS报告成原分辨率性能。
