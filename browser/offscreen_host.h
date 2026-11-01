@@ -56,6 +56,9 @@ class OffscreenHost final : public aura::WindowTreeHost,
 
  private:
   void Tick();
+  void ArmDeadline();
+  void OnCoarseWake();
+  void MaybeIssueFrame();
   void OnAck(uint64_t generation, uint64_t sequence, const viz::BeginFrameAck& ack);
   gfx::Rect bounds_;
   const uint64_t source_id_;
@@ -63,12 +66,14 @@ class OffscreenHost final : public aura::WindowTreeHost,
   std::unique_ptr<aura::client::FocusClient> focus_client_;
   std::unique_ptr<aura::client::WindowParentingClient> parenting_client_;
   std::unique_ptr<ui::InputMethod> minimal_input_method_;
-  base::RepeatingTimer timer_;
+  base::DeadlineTimer timer_;
   base::TimeDelta interval_ = base::Hertz(60);
+  base::TimeTicks next_deadline_;
   uint32_t configured_fps_ = 60;
   bool enabled_ = false, pending_ = false, tick_due_ = false;
   uint64_t generation_ = 1, sequence_ = 0, sent_ = 0, acked_ = 0;
   uint64_t merged_ = 0, aborted_ = 0;
+  uint64_t coarse_wakes_ = 0, skipped_ticks_ = 0;
   base::WeakPtrFactory<OffscreenHost> weak_factory_{this};
 };
 }  // namespace remotekit::browser

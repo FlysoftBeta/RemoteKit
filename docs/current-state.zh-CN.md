@@ -26,7 +26,7 @@
 | 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；最终55ffdf1包首帧/hover/click/IME验收通过 |
 | 延迟定位 | 默认关闭的browser/SDK/Endpoint有界trace，关联同wire RTP与CopyOutput request；Ganesh/OpenGL的GPU flush批次计时已实测，ETW已有GPU队列/CPU调度证据。capture_time_us明确为capture end；HUD不再把该段误标为完整捕获耗时 |
 | 网络实验设施 | 真实UDP 10ms/24/48Mbps整形与Chrome89候选/转发通路验证通过 |
-| 性能 | 新离屏宿主60FPS驱动：单1080 canvas29.3FPS/marker p95 155ms；四1080 canvas5.9–6.3FPS/p95 1377–1435ms。源吞吐提高但四租户编码仍约11FPS，GPU负载积压；本地pacer调优进行中，目标未达。旧矩阵与配对条件见串流实验 |
+| 性能 | 精确定时后四1080：实际render16时canvas14.44–15.40FPS/p95 311–379ms；render20时canvas10.30–10.94FPS/p95 736–800ms，GPU再次满载。目标未达，默认render-fps仍0沿用输出配置；旧矩阵与配对条件见串流实验 |
 
 网页viewport/DPR与媒体采样分离已运行验证，用于高DPR和分屏超出接收level时等比缩小视频；输入按mediaScale映射，统计显示源/编码尺寸。同一atlas内desktop@1与tablet@2保持独立网页DPR。平板真实页面检查已通过：Android Chrome UA不带Mobile、CH Android/mobile=false、platform Linux armv81、DPR≈2、viewport/screen820×1180、coarse/no-hover/touch10；使用公开原生设置，无JS伪装或CDP附加。WorkerNavigator另行核对。
 

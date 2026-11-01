@@ -8,6 +8,7 @@
 #include "base/scoped_observation.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/task_features.h"
 #include "components/viz/common/frame_sinks/begin_frame_args.h"
 #include "components/viz/common/frame_sinks/begin_frame_source.h"
 #include "content/public/browser/web_contents.h"
@@ -143,8 +144,12 @@ void OffscreenHost::SetRenderDemand(bool enabled, uint32_t fps) {
   timer_.Stop();
   compositor()->SetVisible(enabled);
   if (!enabled) { tick_due_ = false; return; }
-  timer_.Start(FROM_HERE, interval_, this, &OffscreenHost::Tick);
-  Tick();
+  // Establish a new phase on demand/fps changes. The first frame refreshes
+  // immediately; subsequent ticks stay on this absolute phase.
+  next_deadline_ = base::TimeTicks::Now() + interval_;
+  tick_due_ = true;
+  MaybeIssueFrame();
+  ArmDeadline();
 }
 
 void OffscreenHost::Detach() {
@@ -161,9 +166,52 @@ void OffscreenHost::Detach() {
 
 void OffscreenHost::ClearFocus() { focus_client_->FocusWindow(nullptr); }
 
+void OffscreenHost::ArmDeadline() {
+  if (!enabled_) return;
+  const auto remaining = next_deadline_ - base::TimeTicks::Now();
+  const auto maximum = base::kMaxPreciseDelay.Get();
+  if (maximum <= base::Microseconds(1)) {
+    // An override can disable precision altogether. Keep one cancellable
+    // coarse task instead of repeatedly pre-waking at the same deadline.
+    timer_.Start(FROM_HERE, next_deadline_, this, &OffscreenHost::Tick,
+                 base::subtle::DelayPolicy::kFlexibleNoSooner);
+    return;
+  }
+  // The scheduler downgrades precise delays >= maximum. Default 36ms gives
+  // a 32ms precise window; smaller configured thresholds retain a margin too.
+  const auto window = std::min(base::Milliseconds(32),
+      maximum - std::max(base::Microseconds(1),
+                        std::min(base::Milliseconds(4), maximum / 2)));
+  if (remaining > window) {
+    timer_.Start(FROM_HERE, next_deadline_ - window, this,
+                 &OffscreenHost::OnCoarseWake,
+                 base::subtle::DelayPolicy::kFlexibleNoSooner);
+  } else {
+    timer_.Start(FROM_HERE, next_deadline_, this, &OffscreenHost::Tick,
+                 base::subtle::DelayPolicy::kPrecise);
+  }
+}
+
+void OffscreenHost::OnCoarseWake() {
+  ++coarse_wakes_;
+  ArmDeadline();  // A pre-wake never issues a BeginFrame.
+}
+
 void OffscreenHost::Tick() {
   if (!enabled_) return;
-  if (pending_) { tick_due_ = true; ++merged_; return; }
+  const auto now = base::TimeTicks::Now();
+  if (now < next_deadline_) { ArmDeadline(); return; }
+  const int64_t missed = (now - next_deadline_).IntDiv(interval_);
+  skipped_ticks_ += missed;
+  next_deadline_ += interval_ * (missed + 1);
+  tick_due_ = true;
+  if (pending_) ++merged_;
+  else MaybeIssueFrame();
+  ArmDeadline();  // Skip obsolete phase slots; never replay them in a burst.
+}
+
+void OffscreenHost::MaybeIssueFrame() {
+  if (!enabled_ || pending_ || !tick_due_) return;
   tick_due_ = false;
   pending_ = true;
   sequence_ = ++g_begin_frame_sequence;
@@ -193,7 +241,7 @@ void OffscreenHost::OnAck(uint64_t generation, uint64_t sequence,
   ++acked_;
   if (enabled_ && tick_due_)
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(&OffscreenHost::Tick, weak_factory_.GetWeakPtr()));
+        FROM_HERE, base::BindOnce(&OffscreenHost::MaybeIssueFrame, weak_factory_.GetWeakPtr()));
 }
 
 base::DictValue OffscreenHost::Diagnostics() const {
@@ -205,6 +253,10 @@ base::DictValue OffscreenHost::Diagnostics() const {
       .Set("pacerFps", interval_.ToHz()).Set("controllerGeneration", base::NumberToString(generation_))
       .Set("configuredFps", static_cast<int>(configured_fps_))
       .Set("sampleTimeTicksUs", base::NumberToString(base::TimeTicks::Now().since_origin().InMicroseconds()))
+      .Set("timerKind", "absolute-deadline")
+      .Set("maxPreciseDelayUs", base::NumberToString(base::kMaxPreciseDelay.Get().InMicroseconds()))
+      .Set("coarseWakes", base::NumberToString(coarse_wakes_))
+      .Set("skippedPhaseTicks", base::NumberToString(skipped_ticks_))
       .Set("beginFrameSourceId", base::NumberToString(source_id_))
       .Set("lastSequence", base::NumberToString(sequence_)).Set("sent", base::NumberToString(sent_))
       .Set("acked", base::NumberToString(acked_)).Set("merged", base::NumberToString(merged_))

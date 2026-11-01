@@ -73,7 +73,20 @@ Chromium补丁提供默认关闭的`RemoteKitBoundedCapture:max_pending/1`或`/2
 | 1 | 31.6 / 186 | 29.3 / 155 |
 | 4 | 7.0–7.8 / 976–1196 | 5.9–6.3 / 1377–1435 |
 
-四租户source由18.0–18.6升至32.6–34.3FPS，但编码仍约11FPS，3D busy99.2→99.8%。无窗口架构解决了原生Present依赖，60fps驱动仍造成过量提交。新增`--browser-render-fps=0..60`独立控制本地pacer（0沿用输出配置），capture/atlas/QSV名义fps不随之改变；背压调优正在进行。具体运行与输入证据见[离屏宿主报告](../develop/docs/source-aura-osr.md)。
+四租户source由18.0–18.6升至32.6–34.3FPS，但编码仍约11FPS，3D busy99.2→99.8%。这组采用相对计时器的初版pacer，配置60并未实际达到60。新增`--browser-render-fps=0..60`独立控制本地pacer（0沿用输出配置），capture/atlas/QSV名义fps不随之改变。具体运行与输入证据见[离屏宿主报告](../develop/docs/source-aura-osr.md)。
+
+### 本地pacer定时修复与预算
+
+初版RepeatingTimer允许Windows延迟合并且每次按实际唤醒时刻重排，配置60/30/20的实际tick约34/22.5/16Hz。现改为官方DeadlineTimer绝对相位，跳过过期槽；远期deadline先预唤醒，再在官方max precise delay阈值内精确定时。预唤醒不发帧，ACK只消费已有tick，未修改全机timer。轻量640×360的实际提交/ACK已验证为59.98/30.02/19.98Hz，RAF也与60/30/20吻合。
+
+精确定时后的四1080，同binary/bundle、snapshot、1Hz marker、24Mbps/10ms、5+20秒：
+
+| 实际source预算 | encode FPS | canvas FPS | marker p95 ms | GPU3D均值 |
+|---|---:|---:|---:|---:|
+| 16 | 15.9–16.1 | 14.44–15.40 | 311–379 | 96.12% |
+| 20 | 17.5–18.1 | 10.30–10.94 | 736–800 | 99.60% |
+
+20档又进入满载，16档最终输出更好；两档都未达到目标。默认render-fps仍为0，没有将固定低上限推广为默认。静态点击/IME与关闭后重新订阅通过。详细计时、GPU角色和帧率口径见[精准pacer报告](../develop/docs/source-render-deadline.md)。
 
 ## 网络模拟
 
