@@ -38,6 +38,8 @@ Chromium补丁提供默认关闭的`RemoteKitBoundedCapture:max_pending/1`或`/2
 
 官方细粒度trace已关联一次308.388ms慢捕获：CopyOutputRequest存续304.223ms，SendResult至capture end为3.156ms，再至browser回调0.777ms。现有GPU-thread CopyOutput事件未携带request id，renderer GPU timers不能当作该copy的执行时间。同一稳态窗口205次完成检查任务按toplevel.flow关联，requested delay为2ms，实际post→run p50 47.092ms、p95 61.074ms，任务CPU体p50约0.022ms。该调度滞后已测到，但对具体捕获延迟的贡献仍需GPU完成时间才能量化。原生trace有约5–10%的吞吐影响，且仅Session3/4覆盖部分正式采样窗口；详见[官方捕获profile](../develop/docs/official-capture-profile.md)。下一步以同一request补齐提交/完成打点，并用独立ETW诊断区分GPU队列与CPU调度。
 
+独立GPUView ETW采集已完成，稳定串流记录12.75秒，零丢失事件/缓冲。已解析的250ms片段按context→device→payload PID归属，并按context+submitSequence配对完整DMA包：四个源GPU进程的具体包提交等待125–225ms，DMA Start→Stop跨度约3–4ms；这证明该诊断片段确有长GPU提交等待。DMA跨度不是纯copy执行，完整包筛选会排除跨窗口长包，不能外推为全窗分布。源GPU进程385个显式CPU Ready→Run配对最长0.439ms，未显示这些观测线程发生CPU运行机会饥饿；缺失线程名，未定向识别GpuMain。工具为`tools/streaming-etw.ps1`，命令、时钟锚、覆盖范围和原始证据见[ETW报告](../develop/docs/etw-gpuqueue-profile.md)。
+
 ## 网络模拟
 
 使用只绑定loopback的双UDP socket整形器，两端SDP候选指向整形器；确认selected candidate与实际转发字节，失败不回退直连。每方向基础延迟5ms，下行24或48Mbps；按UDP/IP28字节开销计量。无额外随机丢包，过载时按有界队列丢包。它模拟链路延迟和容量，不代表实地无线干扰或重传。
