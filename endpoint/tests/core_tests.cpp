@@ -4,6 +4,7 @@
 #include "remotekit/core.hpp"
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
+#include "remotekit/tail_refresh.hpp"
 #include "remotekit/capture_geometry.hpp"
 #include "remotekit/coordinate_readiness.hpp"
 using namespace remotekit;
@@ -17,7 +18,51 @@ using namespace remotekit;
 static bool Overlap(const PixelRect& a, const PixelRect& b) {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
+static void TailAttemptTests() {
+  using State=TailIdrAttempt::State;
+  TailIdrAttempt timed_out;
+  CHECK(timed_out.CancelWaiting() && !timed_out.BeginEncoding()); // Late SDK delivery is rejected.
+  timed_out.Finish(true);CHECK(timed_out.state()==State::canceled);
+  TailIdrAttempt inflight;
+  CHECK(inflight.BeginEncoding() && !inflight.BeginEncoding());
+  CHECK(!inflight.CancelWaiting()); // A long GPU queue cannot trigger duplicate attempts.
+  inflight.Finish(true);inflight.Finish(false);CHECK(inflight.state()==State::succeeded);
+  CHECK(!inflight.BeginEncoding()); // Already satisfied token can never encode again.
+  TailIdrAttempt failed;
+  CHECK(failed.BeginEncoding());failed.Finish(false);
+  failed.Finish(true);CHECK(failed.state()==State::failed);
+  // Exercise the real forwarding lease, including release before Encode,
+  // rejected SDK submit, worker drops/close, success, and superseded late tags.
+  struct Pool {int refs=1;uint64_t cookie=77;};
+  Pool pool;
+  remotekit_rtc_frame source{};source.frame_id=pool.cookie;source.release_context=&pool;
+  source.retain=[](void* context,uint64_t cookie) {auto* p=static_cast<Pool*>(context);CHECK(cookie==p->cookie);++p->refs;};
+  source.release=[](void* context,uint64_t cookie) {auto* p=static_cast<Pool*>(context);CHECK(cookie==p->cookie && p->refs>0);--p->refs;};
+  for(int outcome=0;outcome<5;++outcome) {
+    auto attempt=std::make_shared<TailIdrAttempt>();
+    auto tagged=TailRefreshLease::Wrap(source,attempt);CHECK(pool.refs==2);
+    if(outcome==0) { // SDK rejects, or drops source before Encode.
+      tagged.release(tagged.release_context,tagged.frame_id);
+      CHECK(attempt->state()==State::failed && pool.refs==1);continue;
+    }
+    if(outcome==1) { // Superseded source or timeout; no GPU queue admission.
+      CHECK(attempt->CancelWaiting() && !TailRefreshLease::BeginEncoding(tagged));
+      tagged.release(tagged.release_context,tagged.frame_id);
+      CHECK(attempt->state()==State::canceled && pool.refs==1);continue;
+    }
+    CHECK(TailRefreshLease::BeginEncoding(tagged));
+    tagged.retain(tagged.release_context,tagged.frame_id);CHECK(pool.refs==3);
+    tagged.release(tagged.release_context,tagged.frame_id);CHECK(pool.refs==2); // SDK releases original.
+    if(outcome==2)TailRefreshLease::Finish(tagged,false); // Queue replacement/worker cancellation.
+    if(outcome==3)TailRefreshLease::Finish(tagged,true); // Actual keyframe encoded and SDK accepted.
+    tagged.release(tagged.release_context,tagged.frame_id); // Includes fallback worker close.
+    CHECK(pool.refs==1 && attempt->state()==(outcome==3?State::succeeded:State::failed));
+  }
+  CHECK(TailRefreshLease::BeginEncoding(source)); // Normal frames are unaffected.
+  TailRefreshLease::Finish(source,true);CHECK(pool.refs==1);
+}
 int main() {
+  TailAttemptTests();
   CaptureGeometryWait geometry;
   geometry.Bind(1);
   CHECK(geometry.Defer(100));
@@ -52,7 +97,27 @@ int main() {
   IdleIdrPolicy normal(150);normal.Observe(1,1,1,0);normal.Observe(1,2,2,40);
   CHECK(normal.delay_ms()==150);
   IdleIdrPolicy disabled(0);disabled.Observe(1,1,1,0);disabled.Observe(1,2,2,500);
-  CHECK(disabled.delay_ms()==0);
+  CHECK(disabled.delay_ms()==0 && !disabled.TailDue(10000));
+  IdleIdrPolicy once(150);
+  CHECK(!once.TailDue(1000)); // No source content to refresh yet.
+  CHECK(once.Observe(1,1,100,1000));
+  CHECK(!once.TailDue(1149) && once.TailDue(1150));
+  CHECK(!once.CompleteRefresh(1150,false) && once.TailDue(1151)); // Busy/failure retries.
+  CHECK(once.CompleteRefresh(1151,true) && !once.TailDue(10000));
+  CHECK(!once.CompleteRefresh(10000,true)); // Later recovery IDRs cannot rearm the tail.
+  CHECK(!once.Observe(1,2,100,10001) && !once.TailDue(20000)); // Same capture, new atlas ID.
+  CHECK(once.Observe(1,3,200,20000)); // New content rearms after the completed tail.
+  CHECK(!once.CompleteRefresh(20100,true) && once.TailDue(20150)); // Early recovery preserves tail.
+  CHECK(once.CompleteRefresh(20150,true) && !once.TailDue(30000)); // Due recovery can satisfy tail.
+  CHECK(once.Observe(2,3,200,30000)); // Resource generation is a new source incarnation.
+  CHECK(once.TailDue(30150));
+  CHECK(once.Observe(2,4,300,30100) && !once.TailDue(30399)); // Fresh content supersedes pending tail.
+  CHECK(once.TailDue(30400)); // Low-fps 3x interval rule remains active.
+  IdleIdrPolicy no_capture_clock(150);
+  CHECK(no_capture_clock.Observe(1,1,0,0));
+  CHECK(no_capture_clock.CompleteRefresh(150,true));
+  CHECK(!no_capture_clock.Observe(1,1,0,1000) && !no_capture_clock.TailDue(1000));
+  CHECK(no_capture_clock.Observe(1,2,0,3000) && no_capture_clock.TailDue(3150));
   CHECK(H264RateLimits(31).bitrate_bps == 14000000 && H264RateLimits(31).cpb_kb == 1750);
   auto full = FitH264Sampling(1928, 1088, 60, 42);
   CHECK(full.width == 1928 && full.height == 1088 && full.scale == 1);

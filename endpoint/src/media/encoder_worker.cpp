@@ -1,5 +1,6 @@
 #include "encoder_worker.hpp"
 #include "remotekit/sampling.hpp"
+#include "remotekit/tail_refresh.hpp"
 #include <chrono>
 namespace remotekit::media {
 nlohmann::json EncoderStats::Snapshot() {
@@ -84,6 +85,7 @@ bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame,bool keyframe) {
  }
  if(!queue_.empty()) {
   auto previous=queue_.front();queue_.pop_front();
+  remotekit::TailRefreshLease::Finish(previous.frame,false);
   RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(previous.frame,true),rk_record.reason="pending_replaced";rk_record.cookie=previous.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;);
   keyframe=keyframe||previous.key;
   previous.frame.release(previous.frame.release_context,previous.frame.frame_id);
@@ -122,6 +124,7 @@ void EncoderWorker::Complete(AccessUnit& unit) {
  uint32_t wire_timestamp=0;
  RK_SERVER_TRACE(trace_,"encoded_begin",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;);
  auto status=sdk_.remotekit_rtc_encoded(encoder_,&result,&wire_timestamp);
+ remotekit::TailRefreshLease::Finish(job.frame,status==0 && unit.keyframe);
  RK_SERVER_TRACE(trace_,"encoded_return",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.status=status;rk_record.bytes=unit.bytes.size();rk_record.ids.wire_known=status==0;rk_record.ids.wire_rtp_timestamp=wire_timestamp;);
  if(status==0 && completed_)completed_(wire_timestamp,job.frame.layout_epoch,unit.bytes.size(),unit.keyframe);
  if(status!=0 && status!=REMOTEKIT_SDK_INVALID_STATE)Error("RTC encoded completion failed "+std::to_string(status));
@@ -162,6 +165,7 @@ void EncoderWorker::Run() {
    job.surface=free_.front();std::string error;
    if(trace_)converter_.SetTraceFrame(TraceIds::Frame(job.frame,true));
    if(!converter_.Convert(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture),surfaces_[job.surface].Get(),error)) {
+    remotekit::TailRefreshLease::Finish(job.frame,false);
     if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
     ++stats_->dropped;
     if(!converter_.SafeToRelease()) {
@@ -187,6 +191,7 @@ void EncoderWorker::Run() {
      if(queue_.empty())queue_.push_back(job);
      else {queue_.front().key=queue_.front().key||key;replaced=true;}}
     if(replaced) {
+     remotekit::TailRefreshLease::Finish(job.frame,false);
      if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
      RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="busy_replaced";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
      ++stats_->dropped;job.frame.release(job.frame.release_context,job.frame.frame_id);
@@ -195,6 +200,7 @@ void EncoderWorker::Run() {
     break;
    }
    if(status!=CodecResult::accepted) {
+    remotekit::TailRefreshLease::Finish(job.frame,false);
     RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="hardware_submit_error";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
     if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
     ++stats_->dropped;
@@ -217,6 +223,7 @@ void EncoderWorker::Run() {
  // lease, including error paths and queued jobs never submitted to hardware.
  hardware_.reset();
  for(auto& [cookie,job]:inflight_) {
+  remotekit::TailRefreshLease::Finish(job.frame,false);
   RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="close_inflight";rk_record.cookie=cookie;rk_record.encoder=encoder_;);
   if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
   ++stats_->dropped;
@@ -226,6 +233,7 @@ void EncoderWorker::Run() {
  inflight_.clear();
  std::lock_guard lock(mutex_);
  for(auto& job:queue_) {
+  remotekit::TailRefreshLease::Finish(job.frame,false);
   RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="close_pending";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
   if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
   ++stats_->dropped;

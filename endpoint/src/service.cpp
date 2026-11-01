@@ -4,6 +4,7 @@
 #include "remotekit/core.hpp"
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
+#include "remotekit/tail_refresh.hpp"
 #include "remotekit/coordinate_readiness.hpp"
 #include <json.hpp>
 #include <windows.h>
@@ -164,7 +165,7 @@ struct Session {
  std::atomic<bool> refresh_connected{false};
  std::atomic<uint32_t> effective_idle_ms{150};
  std::atomic<double> source_interval_ms{0},last_tail_age_ms{0};
- std::atomic<uint64_t> tail_submissions{0};
+ std::atomic<uint64_t> tail_submissions{0},tail_completions{0};
  remotekit::MediaSampling sampling;
  std::shared_ptr<ServerTrace> trace;
  std::map<std::string,std::string> recovery_documents;
@@ -394,6 +395,7 @@ struct Session {
   value["rtcPlayoutDelayRequested"]={{"minMs",options.rtc_playout_max_ms<0?-1:0},
                                      {"maxMs",options.rtc_playout_max_ms}};
   value["effectiveIdleIdrMs"]=effective_idle_ms.load();value["tailIdrSubmissions"]=tail_submissions.load();
+  value["tailIdrCompletions"]=tail_completions.load();
   const auto interval=source_interval_ms.load(),age=last_tail_age_ms.load();
   value["sourceFrameIntervalMs"]=interval>0?Json(interval):Json(nullptr);
   value["atlasReadyGateEnabled"]=pool.ready_gate_enabled();
@@ -471,7 +473,13 @@ struct Session {
  }
  static int Encode(void* context,uint64_t encoder,const remotekit_rtc_frame* frame,int key) {
   auto* self=static_cast<Session*>(context);std::lock_guard lock(self->encoder_mutex);
-  auto found=self->encoders.find(encoder);return found!=self->encoders.end()&&found->second->Enqueue(*frame,key!=0)?0:REMOTEKIT_SDK_BUSY;
+  // A source-queue timeout/new source can supersede a tail before Encode runs.
+  // Reject that old tag before GPU work; independent PLI requests already went
+  // through Keyframe() and remain pending on the worker.
+  if(!remotekit::TailRefreshLease::BeginEncoding(*frame))return REMOTEKIT_SDK_BUSY;
+  auto found=self->encoders.find(encoder);
+  if(found!=self->encoders.end()&&found->second->Enqueue(*frame,key!=0 || remotekit::TailRefreshLease::From(*frame)))return 0;
+  remotekit::TailRefreshLease::Finish(*frame,false);return REMOTEKIT_SDK_BUSY;
  }
  static void Rates(void* context,uint64_t encoder,uint32_t bitrate,uint32_t fps) {
   auto* self=static_cast<Session*>(context);std::lock_guard lock(self->encoder_mutex);
@@ -617,9 +625,12 @@ struct Session {
   }
  }
  void MediaLoop() {
-  remotekit_rtc_frame latest{};int64_t last_update=QpcNow(),last_stats=last_update;
+  remotekit_rtc_frame latest{};int64_t last_stats=QpcNow();
   uint64_t previous_encoded=stats->completed.load(),previous_bytes=stats->bytes.load(),previous_copies=pool.copied_frames();
-  bool idle_sent=false,stream_started=false;remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
+  bool stream_started=false;remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
+  std::shared_ptr<remotekit::TailIdrAttempt> tail_attempt;
+  double next_tail_attempt_ms=0;
+  constexpr double tail_retry_ms=250;
   effective_idle_ms=idle.delay_ms();source_interval_ms=0;
   while(!stop_media) {
    std::deque<Event> incoming;
@@ -663,46 +674,63 @@ struct Session {
     auto next=Layout(current_metadata);const auto epoch=ObserveLayout(current_metadata);next["epoch"]=std::to_string(epoch);
     if(next!=layout)PublishLayout(std::move(next),epoch);
    }
-   const auto handle=peer.load();const auto now=QpcNow();
+   const auto handle=peer.load();const auto now=QpcNow();const double now_ms=1000.0*now/QpcFrequency();
+   if(tail_attempt) {
+    using State=remotekit::TailIdrAttempt::State;
+    if(now_ms>=next_tail_attempt_ms)tail_attempt->CancelWaiting();
+    const auto state=tail_attempt->state();
+    if(state==State::succeeded && idle.CompleteRefresh(now_ms,true)) {
+     ++tail_completions;last_tail_age_ms=idle.age_ms(now_ms);
+    }
+    if(state!=State::source_wait && state!=State::encoding)tail_attempt.reset();
+   }
+   const bool tail_ready=idle.TailDue(now_ms)&&!tail_attempt&&now_ms>=next_tail_attempt_ms;
    if(result==AtlasPool::Result::ready) {
+    if(idle.Observe(metadata.generation,metadata.frame_id,metadata.capture_time_us,now_ms)) {
+     if(tail_attempt)tail_attempt->CancelWaiting();
+     tail_attempt.reset();next_tail_attempt_ms=0;
+     effective_idle_ms=idle.delay_ms();source_interval_ms=idle.interval_ms();
+    }
     frame.layout_epoch=FrameEpoch(metadata);
     sampling=remotekit::FitH264Sampling(frame.width,frame.height,options.encoding.fps,receive_level.load(),options.max_encode_width,options.max_encode_height);
     if(sampling.width){frame.width=sampling.width;frame.height=sampling.height;}
     if(latest.release)latest.release(latest.release_context,latest.frame_id);
     latest=frame;latest.retain(latest.release_context,latest.frame_id);
-    if(refresh_connected.exchange(false)) {
+    const bool refresh=refresh_connected.exchange(false);
+    if(refresh) {
      std::lock_guard lock(encoder_mutex);for(auto& [encoder,worker]:encoders)worker->Keyframe();
     }
     RK_SERVER_TRACE(trace,"rtc_submit_begin",TraceIds::Frame(frame),rk_record.peer=handle;rk_record.reason="fresh";);
     const int submit_status=(!handle||!receive_level.load())?REMOTEKIT_SDK_INVALID_STATE:sdk.remotekit_rtc_submit_texture(handle,&frame);
     RK_SERVER_TRACE(trace,"rtc_submit_return",TraceIds::Frame(frame),rk_record.peer=handle;rk_record.reason="fresh";rk_record.status=submit_status;);
-    if(submit_status!=0)frame.release(frame.release_context,frame.frame_id);
-    stream_started=receive_level.load()!=0;
-    if(idle.Observe(metadata.generation,metadata.frame_id,metadata.capture_time_us,
-                    1000.0*now/QpcFrequency())) {
-     last_update=now;idle_sent=false;effective_idle_ms=idle.delay_ms();source_interval_ms=idle.interval_ms();
-    }
+    if(submit_status!=0) {
+     frame.release(frame.release_context,frame.frame_id);
+     if(refresh)refresh_connected=true;
+    } else stream_started=true;
    } else if(handle && receive_level.load() && latest.release &&
-             (!stream_started || refresh_connected.load() || (!idle_sent && idle.delay_ms() &&
-              now-last_update>=QpcFrequency()*idle.delay_ms()/1000))) {
-    const bool tail=stream_started&&!refresh_connected.load()&&!idle_sent&&idle.delay_ms()&&
-        now-last_update>=QpcFrequency()*idle.delay_ms()/1000;
-    refresh_connected=false;
+             (!stream_started || refresh_connected.load() || tail_ready)) {
+    const bool tail=tail_ready;
+    const bool refresh=refresh_connected.exchange(false);
     {std::lock_guard lock(encoder_mutex);for(auto& [encoder,worker]:encoders)worker->Keyframe();}
     auto repeat=latest;
     sampling=remotekit::FitH264Sampling(current_metadata.width_pixels,current_metadata.height_pixels,
                                       options.encoding.fps,receive_level.load(),options.max_encode_width,options.max_encode_height);
     if(sampling.width){repeat.width=sampling.width;repeat.height=sampling.height;}
     if(!stream_started)repeat.layout_epoch=FrameEpoch(current_metadata);
-    repeat.retain(repeat.release_context,repeat.frame_id);
+    if(tail) {
+     tail_attempt=std::make_shared<remotekit::TailIdrAttempt>();
+     next_tail_attempt_ms=now_ms+tail_retry_ms;
+     repeat=remotekit::TailRefreshLease::Wrap(repeat,tail_attempt);
+    } else repeat.retain(repeat.release_context,repeat.frame_id);
     // Tail IDR retains content epoch and capture time. SDK assigns a fresh
     // submit/RTP timestamp independently.
     RK_SERVER_TRACE(trace,"rtc_submit_begin",TraceIds::Frame(repeat),rk_record.peer=handle;rk_record.reason=tail?"tail":"refresh";);
     const int submit_status=sdk.remotekit_rtc_submit_texture(handle,&repeat);
     RK_SERVER_TRACE(trace,"rtc_submit_return",TraceIds::Frame(repeat),rk_record.peer=handle;rk_record.reason=tail?"tail":"refresh";rk_record.status=submit_status;);
-    if(submit_status!=0)repeat.release(repeat.release_context,repeat.frame_id);
-    else if(tail){++tail_submissions;last_tail_age_ms=1000.0*(now-last_update)/QpcFrequency();}
-    stream_started=true;idle_sent=true;
+    if(submit_status!=0) {
+     repeat.release(repeat.release_context,repeat.frame_id);
+     if(refresh)refresh_connected=true;
+    } else {stream_started=true;if(tail)++tail_submissions;}
    }
    if(now-last_stats>=QpcFrequency()) {
     if(trace)trace->WallClock();
@@ -729,6 +757,7 @@ struct Session {
    }
    std::unique_lock lock(event_mutex);event_wake.wait_for(lock,std::chrono::milliseconds(1),[&]{return stop_media||!events.empty();});
   }
+  if(tail_attempt)tail_attempt->CancelWaiting();
   if(latest.release)latest.release(latest.release_context,latest.frame_id);
  }
  Json Offer(const Json& request) {
