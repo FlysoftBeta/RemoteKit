@@ -21,3 +21,5 @@ Client通过Control clock.ping校准双方wall offset；当前Control和Endpoint
 连续3个有效窗口>300ms时分辨率倍率乘0.8，调整冷却5秒；<150ms连续健康30秒逐级恢复。ClientScale与面积预算决定基础倍率，Browser DPR范围0.5–4。实际码率/FPS/编码尺寸受硬件、协商及网络约束，requested/applied分开报告。受控自动化不运行这套产品策略。
 
 Stats显示估算及不确定度；Pixel marker带CRC的render/input端到端值独立显示。capture-end→paint不含此前渲染/捕获等待，drawImage返回也不是物理屏幕点亮。分段p95不能相加。
+
+同一反馈对象的sequence终生单调。时钟或测量reset只丢弃校准/样本，保留序号与已见源帧身份，避免服务端等待旧序号追平或把静态尾帧重新计样。

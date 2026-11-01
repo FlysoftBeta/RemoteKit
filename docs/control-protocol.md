@@ -84,3 +84,11 @@ device_scale 支持0.5..4，fps 为1..120的发布上限，不保证内容每周
 session.sitePreferences下发按origin的UA/Client Hints策略；产品平板模式只改变站点身份，不改变viewport、DPR或触控能力。view.configure中的低层device配置不等同于产品站点UA设置。
 
 snapshot同时提供pendingPopups、页面dialog及canDiscard状态。Control先持久化产品Tab与收养记录，再通过view.adopt将真实待收养WebContents绑定稳定WebView；不以重新打开URL替代popup。页面dialog回复必须带当前实例、文档和请求标识，Control额外绑定Browser进程身份；陈旧回复拒绝。具体字段以browser控制处理器及[产品协议](streaming-protocol.md)为准。
+
+## 有界恢复与原子几何
+
+Endpoint主dispatcher串行拥有Session控制状态；stdin reader只入队，定时维护轮转推进恢复，单步不轮询等待导航。关闭、导航、重建取消旧任务。Browser navigationRevision随导航条目和PageState改变，export.begin返回实际导出revision；Endpoint按此保存，不用document代次代替完整导航状态。
+
+output.configure可带viewConfigs更新已存在页面的viewport/device/DPR/visible。输出须已关闭；先验证候选配置、物理资源预算和完整PackAtlas可行性，再一次提交页面与atlas几何。校验失败保持原状态；create/adopt先隐藏创建，再加入最终事务。逻辑extent允许低DPR下超过8192，物理轴仍不超过8192，面积仍不超过16Mi像素；实际viewport DIP不被夹小。
+
+view.closed.ack仅在Endpoint持久化关闭证据后调用，按当前browserIncarnation确认。重复ACK幂等；已确认完整墓碑不再加入snapshot，紧凑closed-ID集合继续保护当前Browser中已关闭的身份。

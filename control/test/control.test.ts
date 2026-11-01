@@ -13,10 +13,10 @@ class FakeEndpoint implements Endpoint {
   details = new Map<string, Record<string, unknown>>(); delayedClose = false;
   async request(method: string, tenant: string, args: any = {}) {
     this.calls.push({ method, tenant, args }); const views = this.views.get(tenant) ?? new Set<string>(); this.views.set(tenant, views);
-    if (method === 'session.snapshot') return { views: [...views].map(viewId => ({ viewId, ...this.details.get(viewId) })) };
+    if (method === 'session.snapshot') return { running: true, browserIncarnation: 'browser-A', views: [...views].map(viewId => ({ viewId, instance: '1', document: '2', ...this.details.get(viewId) })) };
     if (method === 'view.ensure') views.add(args.viewId);
-    if (method === 'view.close') { if (this.delayedClose && !args.force) return { accepted: true }; if (this.pending && !args.force) return { pending: true, requestId: 'request-1' }; views.delete(args.viewId); return { closed: true }; }
-    if (method === 'view.close.reply') { if (args.accept) views.delete(args.viewId); return { accepted: args.accept }; }
+    if (method === 'view.close') { if (this.delayedClose && !args.force) return { accepted: true, browserIncarnation: 'browser-A', instance: '1', document: '2' }; if (this.pending && !args.force) return { pending: true, requestId: 'request-1', browserIncarnation: 'browser-A', instance: '1', document: '2' }; views.delete(args.viewId); return { closed: true }; }
+    if (method === 'view.close.reply') { if (args.accept) this.details.set(args.viewId, { close_state: 'closed' }); return { accepted: true, browser: { ok: true } }; }
     if (method === 'rtc.offer') return { sdp: 'v=0\r\na=candidate:contract-fixture' };
     return {};
   }
@@ -55,8 +55,8 @@ test('periodic observation recovers missing views without redundant configuratio
   await assert.rejects(control.action(tenant, { type: 'tab.command', id: tab.id, command: 'arbitrary' }));
   endpoint.views.get(tenant)!.clear(); endpoint.calls = []; await control.tick(); assert.equal(endpoint.calls.find(call => call.method === 'view.ensure')?.args.url, 'https://redirected.test/');
   endpoint.delayedClose = true; await control.action(tenant, { type: 'tab.close', id: tab.id }); assert.equal(control.state(tenant).pendingClose?.awaiting, true);
-  endpoint.details.set(tab.webviewId!, { close_state: 'closing', pending_close: { requestId: 'late-1' } }); await control.tick(); assert.deepEqual(control.state(tenant).pendingClose, { id: tab.id, requestId: 'late-1', awaiting: false });
-  await control.action(tenant, { type: 'tab.close', id: tab.id, requestId: 'late-1', cancel: true }); assert.equal(control.state(tenant).tabs.length, 1); store.db.close();
+  endpoint.details.set(tab.webviewId!, { close_state: 'closing', pending_close: { requestId: 'late-1' } }); await control.tick(); assert.equal(control.state(tenant).pendingClose?.nativeRequestId, 'late-1'); assert.equal(control.state(tenant).pendingClose?.awaiting, false);
+  await control.action(tenant, { type: 'tab.close', id: tab.id, requestId: control.state(tenant).pendingClose!.requestId, cancel: true }); assert.equal(control.state(tenant).tabs.length, 1); store.db.close();
 });
 test('device mode changes configure before normal reload; size-only changes preserve the page', async () => {
   const store = new Store(':memory:'), endpoint = new FakeEndpoint(), control = new Control(store, endpoint), tenant = store.session().tenantId;
@@ -70,9 +70,9 @@ test('stable mappings, restart reconciliation, orphan cleanup and close cancella
   const created = await control.action(tenantId, { type: 'tab.create', url: 'example.com' }); const tab = created.tabs[0]; assert.match(tab.webviewId!, /^[1-9][0-9]*$/);
   endpoint.views.set(tenantId, new Set(['999'])); await control.reconcileAll(); assert.deepEqual([...endpoint.views.get(tenantId)!], [tab.webviewId]); assert.equal(control.state(tenantId).tabs[0].webviewId, tab.webviewId);
   endpoint.pending = true;
-  let result = await control.action(tenantId, { type: 'tab.close', id: tab.id }); assert.equal(result.tabs.length, 1); assert.equal(result.pendingClose?.requestId, 'request-1');
-  result = await control.action(tenantId, { type: 'tab.close', id: tab.id, requestId: 'request-1', cancel: true }); assert.equal(result.tabs.length, 1); assert.equal(result.pendingClose, null);
-  await control.action(tenantId, { type: 'tab.close', id: tab.id }); await control.action(tenantId, { type: 'tab.close', id: tab.id, requestId: 'request-1', confirm: true });
+  let result = await control.action(tenantId, { type: 'tab.close', id: tab.id }); assert.equal(result.tabs.length, 1); assert.equal(result.pendingClose?.nativeRequestId, 'request-1');
+  result = await control.action(tenantId, { type: 'tab.close', id: tab.id, requestId: result.pendingClose!.requestId, cancel: true }); assert.equal(result.tabs.length, 1); assert.equal(result.pendingClose, null);
+  await control.action(tenantId, { type: 'tab.close', id: tab.id }); await control.action(tenantId, { type: 'tab.close', id: tab.id, requestId: control.state(tenantId).pendingClose!.requestId, confirm: true });
   assert.equal((await control.getState(tenantId)).tabs.length, 0); store.db.close();
 });
 test('HTTP cookie isolation, origin checks and offer/ICE tenant binding', async () => {

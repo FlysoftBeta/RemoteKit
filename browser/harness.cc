@@ -30,6 +30,7 @@
 #include "remotekit/browser/webview.h"
 #include "remotekit/endpoint/include/remotekit/core.hpp"
 #include "remotekit/endpoint/include/remotekit/atlas_dimensions.hpp"
+#include "remotekit/endpoint/include/remotekit/atlas_plan.hpp"
 #include "remotekit/protocol/control.h"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
@@ -92,6 +93,9 @@ struct HarnessMainParts::State {
     return spec.page_dsf > 0 ? spec.page_dsf : output_scale;
   }
   std::map<WebViewId, base::DictValue> closed_views;
+  // ACK removes the replay payload, while the compact identity set prevents
+  // a delayed create request from resurrecting a closed view in this process.
+  std::set<WebViewId> retired_views;
   Result<Atlas> Layout(const std::vector<ViewSpec>& next, WebViewId extra = 0,
                        int width = 0, int height = 0) {
     std::vector<PackItem> items;
@@ -100,7 +104,7 @@ struct HarnessMainParts::State {
       items.push_back({i < contents.size() ? contents[i]->view_id() : extra,
                        next[i].width, next[i].height, 1.0});
     }
-    return PackAtlas(width ? width : logical_width, height ? height : logical_height, 4, items);
+    return PackAtlas(width ? width : logical_width, height ? height : logical_height, 4, OrderAtlasItems(std::move(items)));
   }
   void ApplyLayout(const Atlas& atlas) {
     placements.clear();
@@ -128,6 +132,7 @@ struct HarnessMainParts::State {
     tombstone.Set("close_state", "closed");
     tombstone.Set("close_reason", page_requests[index]->close_reason());
     closed_views.insert_or_assign(view, std::move(tombstone));
+    retired_views.insert(view);
     std::erase_if(adopted_popups, [view](const auto& item) { return item.second == view; });
     if (output) output->StopView(view);
     paused_output.insert(view);
@@ -347,12 +352,49 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     for (const auto& [name, target] : {std::pair{"width", &next_width}, std::pair{"height", &next_height}}) {
       if (!request.Find(name)) continue;
       const auto value = request.FindInt(name);
-      if (!value || *value < 16 || *value > 8192) return error("invalid_atlas_dimensions");
+      if (!value || *value < 16 || *value > 16384) return error("invalid_atlas_dimensions");
       *target = *value;
     }
     if (output && (next_width != logical_width || next_height != logical_height))
       return error("close_output_before_size_change");
-    auto next_layout = Layout(specs, 0, next_width, next_height);
+    // Source geometry and output extent are one transaction. In particular,
+    // neither the old nor new layout must fit a max(old,new) intermediate atlas.
+    auto next_specs = specs;
+    if (request.Find("viewConfigs")) {
+      if (output) return error("close_output_before_view_transaction");
+      const auto* configs = request.FindList("viewConfigs");
+      if (!configs || configs->size() > kSharedAtlasMaxViews)
+        return error("invalid_view_configs");
+      std::set<uint64_t> configured;
+      for (const auto& value : *configs) {
+        const auto* config = value.GetIfDict();
+        uint64_t session = 0, view = 0;
+        if (!config || !ReadId(*config, "session", &session) ||
+            !ReadId(*config, "view", &view) || !configured.insert(view).second)
+          return error("invalid_or_duplicate_view_identity");
+        size_t index = 0;
+        while (index < contents.size() && contents[index]->view_id() != view) ++index;
+        if (index == contents.size() || contents[index]->session_id() != session)
+          return error("view_transaction_identity_mismatch");
+        auto& spec = next_specs[index];
+        const auto width = config->FindInt("width"), height = config->FindInt("height");
+        const auto* device = config->FindString("device");
+        const auto page_scale = Number(*config, "device_scale_factor");
+        const auto visible = config->FindBool("visible");
+        if (!width || !height || *width < 1 || *height < 1 ||
+            *width > 8192 || *height > 8192 || !device ||
+            (*device != "desktop" && *device != "tablet") || !page_scale ||
+            !std::isfinite(*page_scale) || *page_scale < .5 || *page_scale > 4 ||
+            !visible.has_value())
+          return error("invalid_view_transaction_configuration");
+        spec.width = *width; spec.height = *height;
+        spec.tablet = demo && *device == "tablet";
+        spec.page_dsf = static_cast<float>(*page_scale); spec.visible = *visible;
+        if (page_requests[index]->close_state() == "closing" && spec != specs[index])
+          return error("view_closing");
+      }
+    }
+    auto next_layout = Layout(next_specs, 0, next_width, next_height);
     if (!next_layout) return error("atlas_no_space");
     auto next_scale = output_scale;
     auto next_alignment = allocation_alignment;
@@ -391,7 +433,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     const auto dimensions = AtlasAllocationDimensions(next_width, next_height, next_scale, next_alignment);
     if (!dimensions) return error("atlas_resource_budget_exceeded");
     const bool layout_changed = logical_width != next_width || logical_height != next_height ||
-                                output_scale != next_scale;
+                                output_scale != next_scale || specs != next_specs;
+    // Every rejection above leaves both specs and output configuration intact.
+    specs = std::move(next_specs);
     logical_width = next_width; logical_height = next_height;
     output_scale = next_scale;
     allocation_alignment = next_alignment;
@@ -462,6 +506,28 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     reply.Set("ok", true);
     return reply;
   }
+  if (*method == "view.closed.ack") {
+    uint64_t session = 0;
+    const auto* incarnation = request.FindString("browserIncarnation");
+    const auto* ids = request.FindList("views");
+    const auto current = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("browser-incarnation");
+    if (!ReadId(request, "session", &session) || !endpoint.FindSession(session) ||
+        !incarnation || current.empty() || *incarnation != current || !ids || ids->size() > 256)
+      return error("invalid_closed_ack_target");
+    std::vector<uint64_t> parsed;
+    for (const auto& value : *ids) {
+      uint64_t view = 0;
+      if (!value.is_string() || !base::StringToUint64(value.GetString(), &view) || !view)
+        return error("invalid_closed_ack_view");
+      const auto found = closed_views.find(view);
+      if (found != closed_views.end() && *found->second.FindString("session") != base::NumberToString(session))
+        return error("wrong_closed_ack_session");
+      parsed.push_back(view);
+    }
+    for (auto view : parsed) closed_views.erase(view);
+    reply.Set("ok", true); reply.Set("accepted", true);
+    return reply;
+  }
   if (*method == "snapshot") {
     base::ListValue list;
     for (SessionId session_id : sessions) {
@@ -496,6 +562,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           auto compositor = adapter->CompositorDiagnostics();
           if (output) compositor.Set("capture", output->CaptureStatus(view_id));
           value.Set("compositor", std::move(compositor));
+          value.Set("navigationRevision", base::NumberToString(adapter->navigation_revision()));
           value.Set("visible", specs[i].visible);
           value.Set("lifecycle_uncertain", adapter->lifecycle_uncertain());
           auto discard = CanDiscard(i);
@@ -571,7 +638,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (!ReadId(request, "session", &session) || !ReadId(request, "view", &view) ||
         !endpoint.FindSession(session) || (!demo && session != sessions.front()))
       return error("invalid_session_or_view");
-    if (closed_views.contains(view)) return error("view_id_closed");
+    if (retired_views.contains(view)) return error("view_id_closed");
     const bool adopting = *method == "view.adopt";
     const auto* provisional = request.FindString("provisionalId");
     if (adopting && !provisional) return error("provisional_id_required");
@@ -668,7 +735,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     uint64_t session = 0, view = 0;
     if (!ReadId(request, "session", &session) || !ReadId(request, "view", &view) ||
         !endpoint.FindSession(session)) return error("invalid_session_or_view");
-    if (closed_views.contains(view)) {
+    if (retired_views.contains(view)) {
       reply.Set("ok", true);
       reply.Set("accepted", true);
       reply.Set("completed", true);
@@ -704,6 +771,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         page_requests[index]->close_state() == "closed") return error("view_closing");
     const auto* url = request.FindString("url");
     if (!url || !GURL(*url).is_valid()) return error("invalid_url");
+    transfers.erase(view);
     if (output) output->StopView(view);
     paused_output.insert(view); UpdateOutput();
     page_requests[index]->Bind(nullptr);
@@ -821,6 +889,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       transfer.document = token.document;
       transfer.total = saved.value.size();
       transfer.data = std::move(saved.value);
+      reply.Set("navigationRevision", base::NumberToString(adapter.navigation_revision()));
       transfers[view] = std::move(transfer);
     } else if (*method == "navigation.import.begin") {
       uint64_t size = 0;

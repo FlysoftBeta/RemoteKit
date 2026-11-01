@@ -1,0 +1,12 @@
+# name scale alignment itemWidthxHeight[,item...] expectedLogicalWidth expectedLogicalHeight expectedPhysicalWidth expectedPhysicalHeight; 0 means infeasible
+single-wide 1 16 8192x400 0 0 0 0
+single-wide-low .5 16 8192x400 8200 408 4112 208
+double-wide 1 16 4096x600,4096x600 4104 1216 4112 1216
+low-dpr .5 16 1920x1080 1928 1088 976 544
+portrait-high 4 16 400x8192 0 0 0 0
+minimum-impossible .5 16 8192x8192,8192x8192 0 0 0 0
+mixed 1.25 16 1200x900,800x1200 2016 1208 2528 1520
+empty 1 16 - 16 16 16 16
+wide-pair 1 16 4096x600,4096x600 4104 1216 4112 1216
+tall-pair 1 16 600x4096,600x4096 1216 4104 1216 4112
+mixed-reversed 1.25 16 800x1200,1200x900 2016 1208 2528 1520

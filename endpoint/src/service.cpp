@@ -9,12 +9,14 @@
 #include "remotekit/adaptive_fps.hpp"
 #include "remotekit/capture_clock.hpp"
 #include "remotekit/atlas_dimensions.hpp"
+#include "remotekit/atlas_plan.hpp"
 #include "remotekit/coordinate_readiness.hpp"
 #include "remotekit/input_sequence.hpp"
 #include <json.hpp>
 #include <windows.h>
 #include <mmsystem.h>
 #include <wincrypt.h>
+#include <objbase.h>
 #include <fcntl.h>
 #include <io.h>
 #include <algorithm>
@@ -56,6 +58,12 @@ std::string Required(const Json& object,const char* name) {
  if(!object.contains(name)||!object[name].is_string()||object[name].get<std::string>().empty())
   throw std::runtime_error(std::string("required string: ")+name);
  return object[name].get<std::string>();
+}
+std::string NewIncarnation() {
+ GUID value{};if(FAILED(CoCreateGuid(&value)))throw std::runtime_error("browser incarnation generation failed");
+ const auto* bytes=reinterpret_cast<const unsigned char*>(&value);std::string result;
+ for(size_t i=0;i<sizeof(value);++i){result+="0123456789abcdef"[bytes[i]>>4];result+="0123456789abcdef"[bytes[i]&15];}
+ return result;
 }
 std::string ViewId(const Json& request) {
  auto id=Required(request,"viewId");
@@ -176,6 +184,7 @@ struct Session {
  Sdk& sdk;Options options;std::string tenant,id;fs::path directory;
  HANDLE process=nullptr,job=nullptr;std::atomic<uint64_t> control{0};int request_id=0;
  bool producer_stop_pending=false;
+ std::string browser_incarnation;
  std::mutex rpc_mutex;
  std::map<std::string,Json> desired;
  int atlas_width=1920,atlas_height=1080;float atlas_scale=1;
@@ -207,7 +216,8 @@ struct Session {
  std::atomic<double> capture_clock_uncertainty_ms{0};
  Json durable_events=Json::array();uint64_t next_event=1;
  std::set<std::string> observed_closed;
- bool output_suspended=false;
+ std::atomic<bool> output_suspended{false},has_visible_output{false},reconciliation_pending{false};
+ int64_t next_reconciliation=0;
  std::string current_geometry;
  std::map<std::pair<uint64_t,uint64_t>,uint64_t> publication_epochs;
  std::atomic<uint64_t> layout_epoch{0};
@@ -219,7 +229,16 @@ struct Session {
  std::atomic<uint64_t> tail_submissions{0},tail_completions{0};
  remotekit::MediaSampling sampling;
  std::shared_ptr<ServerTrace> trace;
- std::map<std::string,std::string> recovery_documents;
+ std::map<std::string,std::string> recovery_revisions;
+ struct Recovery {
+  std::string phase="load",error,transfer;
+  Json saved;
+  size_t chunk=0;uint64_t offset=0,buffer_bytes=0;
+  int64_t deadline=0,next_poll=0;
+  bool Pending() const {return phase!="complete" && phase!="fallback_started" && phase!="failed";}
+ };
+ std::map<std::string,Recovery> recoveries;
+ std::string recovery_cursor;
  Session(Sdk& api,const Options& opts,std::string tenant_id,std::string session_id):sdk(api),options(opts),
    tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id),
    adaptive(options.adaptive_fps,options.browser_render_fps?options.browser_render_fps:options.encoding.fps) {
@@ -247,6 +266,31 @@ struct Session {
  }
  void Save(){Json values=Json::array();for(auto& [view,config]:desired)values.push_back(config);SaveJson(directory/"views.json",values);}
  void SaveEvents(){SaveJson(directory/"events.json",{{"next",next_event},{"events",durable_events}});}
+ void RecordClosed(const std::string& view,const std::string& reason) {
+  if(!observed_closed.contains(view)) {
+   const bool recorded=std::any_of(durable_events.begin(),durable_events.end(),[&](const Json& event){
+    return event.value("type",std::string())=="view.closed" && event.value("viewId",std::string())==view;
+   });
+   if(!recorded) {
+    if(durable_events.size()>=256)throw std::runtime_error("closed event backlog full; acknowledge events before reconciliation");
+    auto closed_events=durable_events;
+    closed_events.push_back({{"eventId",std::to_string(next_event)},{"type","view.closed"},{"viewId",view},{"reason",reason}});
+    SaveJson(directory/"events.json",{{"next",next_event+1},{"events",closed_events}});
+    durable_events=std::move(closed_events);++next_event;
+   }
+   // Event is durable first. A crash before the second save is repaired by
+   // constructor replay, which removes these IDs before starting a Browser.
+   if(desired.contains(view)) {
+    Json remaining=Json::array();for(const auto& [view_id,config]:desired)if(view_id!=view)remaining.push_back(config);
+    SaveJson(directory/"views.json",remaining);desired.erase(view);
+   }
+   observed_closed.insert(view);
+  }
+  recoveries.erase(view);recovery_revisions.erase(view);fs::remove(directory/"recovery"/(view+".json"));
+ }
+ void AckClosed(const Json& views) {
+  if(!views.empty())Rpc({{"method","view.closed.ack"},{"session",id},{"views",views},{"browserIncarnation",browser_incarnation}});
+ }
  Json Rpc(Json command) {
   std::lock_guard lock(rpc_mutex);
   if(!control)throw std::runtime_error("browser control unavailable");
@@ -267,9 +311,11 @@ struct Session {
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)))throw std::runtime_error("job limits failed");
   std::string channel="RemoteKit.service."+std::to_string(GetCurrentProcessId())+"."+id+"."+std::to_string(QpcNow());
+  browser_incarnation=NewIncarnation();
   std::wstring command=Quote(options.browser.wstring());
   auto append=[&](std::wstring arg){command+=L" "+Quote(arg);};
   append(L"--control-channel="+std::wstring(channel.begin(),channel.end()));
+  append(L"--browser-incarnation="+std::wstring(browser_incarnation.begin(),browser_incarnation.end()));
   append(L"--session-id="+std::wstring(id.begin(),id.end()));
   append(L"--tenant-id="+std::wstring(id.begin(),id.end()));
   append(L"--data-path="+directory.wstring());
@@ -311,34 +357,32 @@ struct Session {
   if(status!=0||!control)throw std::runtime_error("browser control connect failed "+std::to_string(status));
   fprintf(stderr,"session %s browser pid %lu\n",id.c_str(),GetProcessId(process));
   observed_closed.clear();
+  recovery_revisions.clear();recoveries.clear();recovery_cursor.clear();
   Rpc({{"method","session.sitePreferences"},{"session",id},{"sites",site_preferences}});
   if(!desired.empty()) {
-   // Expand to all desired visible planes before recreation. No decoder exists
-   // yet; one final configure below chooses the exact current output extent.
-   auto geometry=DesiredGeometry();Geometry expanded=geometry;
-   expanded.width=std::max(geometry.width,atlas_width);expanded.height=std::max(geometry.height,atlas_height);
-   GeometryConfig(expanded);
+   // Hidden construction never requires the previous/final atlas to fit an
+   // intermediate set of specs. One transaction applies the complete layout.
    for(auto& [view,config]:desired)CreateView(config,true);
-   GeometryConfig(geometry);
+   GeometryConfig(DesiredGeometry());
   }
+  reconciliation_pending=false;
  }
  Json BrowserSnapshot(){return Rpc({{"method","snapshot"}});}
  struct Geometry {int width=16,height=16;float scale=1;};
  Geometry DesiredGeometry() {
-  Geometry value;int width=0,height=0;
+  std::vector<remotekit::PackItem> items;float scale=.5f;
   for(auto& [view,config]:desired) {
    if(!config.value("visible",false))continue;
    const auto device=config.value("device",Json::object());
    int w=config.value("width",device.value("width",1440));
    int h=config.value("height",device.value("height",900));
    if(w<1||h<1||w>8192||h>8192)throw std::runtime_error("invalid viewport dimensions");
-   width+=w+8;height=std::max(height,h+8);
-   value.scale=std::max(value.scale,device.value("deviceScaleFactor",1.0f));
+   items.push_back({std::stoull(view),w,h,1.0});
+   scale=std::max(scale,device.value("deviceScaleFactor",1.0f));
   }
-  value.width=std::max(16,width);value.height=std::max(16,height);
-  if(!remotekit::AtlasAllocationDimensions(value.width,value.height,value.scale,options.atlas_allocation_alignment))
-   throw std::runtime_error("visible source atlas exceeds the aligned 16-megapixel/8192-pixel resource budget");
-  return value;
+  const auto plan=remotekit::PlanAtlas(items,items.empty()?1.f:scale,options.atlas_allocation_alignment);
+  if(!plan)throw std::runtime_error("visible source atlas cannot be packed within the aligned 16-megapixel/8192-pixel resource budget");
+  return {plan->width,plan->height,plan->scale};
  }
  bool PauseOutput() {
   DisableBudget();
@@ -352,20 +396,30 @@ struct Session {
  void GeometryConfig(const Geometry& value) {
   if(!remotekit::AtlasAllocationDimensions(value.width,value.height,value.scale,options.atlas_allocation_alignment))
    throw std::runtime_error("source atlas exceeds the aligned 16-megapixel/8192-pixel resource budget");
-  Rpc({{"method","output.configure"},{"width",value.width},{"height",value.height},
+  Json configs=Json::array();
+  bool visible_output=false;
+  for(const auto& [view,config]:desired) {
+   const auto device=config.value("device",Json::object());
+   const bool visible=!Recovering(view)&&config.value("visible",false);visible_output|=visible;
+   configs.push_back({{"session",id},{"view",view},
+     {"width",config.value("width",device.value("width",1440))},
+     {"height",config.value("height",device.value("height",900))},
+     {"device",device.value("mode",std::string("desktop"))},
+     {"device_scale_factor",device.value("deviceScaleFactor",1.0f)},
+     {"visible",visible}});
+  }
+  Rpc({{"method","output.configure"},{"width",value.width},{"height",value.height},{"viewConfigs",std::move(configs)},
        {"device_scale",value.scale},{"allocation_alignment",options.atlas_allocation_alignment},
        {"fps",options.encoding.fps},{"render_fps",policy_fps.load()?policy_fps.load():options.browser_render_fps}});
   atlas_width=value.width;atlas_height=value.height;atlas_scale=value.scale;
+  has_visible_output=visible_output;
   {std::lock_guard lock(adaptive_mutex);adaptive.Applied(adaptive.requested());adaptive_applied_known=true;
    adaptive.Reset(1000.0*QpcNow()/QpcFrequency(),AdaptiveCounters());}
  }
  void RefitOutput() {
   const auto geometry=DesiredGeometry();
-  if(geometry.width==atlas_width&&geometry.height==atlas_height&&geometry.scale==atlas_scale)return;
-  const bool active=PauseOutput();
-  try{GeometryConfig(geometry);ResumeOutput(active);}catch(...){
-   try{ResumeOutput(active);}catch(const std::exception&){}throw;
-  }
+  if(!reconciliation_pending && geometry.width==atlas_width&&geometry.height==atlas_height&&geometry.scale==atlas_scale)return;
+  ReconcileOutput();
  }
  void ResumeOutput(bool active) {
   if(!active)return;
@@ -373,48 +427,36 @@ struct Session {
   media_thread=std::thread([this]{MediaLoop();});
   EnableBudget();
  }
+ void ReconcileOutput() {
+  const bool active=PauseOutput();
+  try{GeometryConfig(DesiredGeometry());Save();ResumeOutput(active);reconciliation_pending=false;}
+  catch(...) {reconciliation_pending=true;next_reconciliation=QpcNow()+QpcFrequency();output_suspended=true;throw;}
+ }
  Json ApplyView(const Json& config,bool create,bool recovering=false) {
   auto view=ViewId(config);auto old=desired.find(view);
   Json previous=old==desired.end()?Json():old->second;
   auto normalized=[](Json value){value.erase("id");value.erase("method");return value;};
-  if(!previous.is_null() && normalized(previous)==normalized(config))return {{"accepted",true},{"completed",true}};
-  const Geometry previous_geometry{atlas_width,atlas_height,atlas_scale};
+  if(!previous.is_null() && normalized(previous)==normalized(config)) {
+   if(reconciliation_pending || (output_suspended && has_visible_output && rtc_connected))ReconcileOutput();
+   return {{"accepted",true},{"completed",true}};
+  }
   bool source_applied=false;
   desired[view]=config;Geometry geometry;
   try{geometry=DesiredGeometry();}catch(...){if(previous.is_null())desired.erase(view);else desired[view]=previous;throw;}
   const bool active=PauseOutput();
   try {
-   Geometry expanded=geometry;expanded.width=std::max(geometry.width,atlas_width);
-   expanded.height=std::max(geometry.height,atlas_height);
-   GeometryConfig(expanded);
-   Json result;
-   if(create)result=CreateView(config,recovering);
-   else {
-    const auto device=config.value("device",Json::object());
-    Json request={{"method","view.configure"},{"session",id},{"view",view},
-     {"width",config.value("width",device.value("width",1440))},
-     {"height",config.value("height",device.value("height",900))},
-     {"device",device.value("mode",std::string("desktop"))},{"visible",config.value("visible",false)}};
-    if(device.contains("deviceScaleFactor"))request["device_scale_factor"]=device["deviceScaleFactor"];
-    result=Rpc(request);
-   }
+   Json result={{"accepted",true},{"completed",true}};
+   if(create){result=CreateView(config,recovering);source_applied=true;}
+   GeometryConfig(geometry);
    source_applied=true;
-   GeometryConfig(geometry);Save();ResumeOutput(active);return result;
+   reconciliation_pending=true;Save();ResumeOutput(active);reconciliation_pending=false;return result;
   } catch(const std::exception& failure) {
    const std::string original=failure.what();
-   if(previous.is_null())desired.erase(view);else desired[view]=previous;
-   try {
-    // Resume may itself have failed after opening output. Roll back only while
-    // it is closed, and preserve the old physical scale as well as DIP size.
-    PauseOutput();GeometryConfig(previous_geometry);
-    if(source_applied)throw std::runtime_error("source view already changed; output stopped for reconciliation");
-    ResumeOutput(active);
-   } catch(const std::exception& rollback) {
-    PauseOutput();output_suspended=true;
-    const auto message=original+"; output rollback failed: "+rollback.what();
-    {std::lock_guard lock(stats->mutex);stats->error=message;}
-    throw std::runtime_error(message);
-   }
+   // Before commit the candidate can be discarded. After a source/adoption
+   // commit the accepted desired state must survive persistence/media failure.
+   if(!source_applied){if(previous.is_null())desired.erase(view);else desired[view]=previous;}
+   reconciliation_pending=true;next_reconciliation=QpcNow()+QpcFrequency();output_suspended=true;
+   {std::lock_guard lock(stats->mutex);stats->error=original;}
    throw;
   }
  }
@@ -423,57 +465,119 @@ struct Session {
   std::string mode=device.is_object()?device.value("mode",std::string("desktop")):std::string("desktop");
   Json request={{"method","view.create"},{"session",id},{"view",view},{"url",recovering && fs::exists(directory/"recovery"/(view+".json")) ? std::string("about:blank") : config.value("url",std::string("about:blank"))},
     {"width",config.value("width",device.value("width",1440))},{"height",config.value("height",device.value("height",900))},
-    {"device",mode},{"visible",config.value("visible",false)}};
+    {"device",mode},{"visible",false}};
   if(!recovering && config.value("method",std::string())=="view.adopt") {
    request["method"]="view.adopt";request["provisionalId"]=Required(config,"provisionalId");
   }
   if(device.contains("deviceScaleFactor"))request["device_scale_factor"]=device["deviceScaleFactor"];
+  if(recovering && fs::exists(directory/"recovery"/(view+".json")))request["visible"]=false;
   auto result=Rpc(request);
-  if(recovering)RestoreNavigation(view);
+  if(recovering && fs::exists(directory/"recovery"/(view+".json")))recoveries[view]=Recovery{};
   return result;
  }
- void RestoreNavigation(const std::string& view) {
-  const auto path=directory/"recovery"/(view+".json");if(!fs::exists(path))return;
+ bool Recovering(const std::string& view) const {
+  const auto found=recoveries.find(view);return found!=recoveries.end() && found->second.Pending();
+ }
+ Json RecoveryStatus(const Recovery& recovery) const {
+  return {{"pending",recovery.Pending()},{"phase",recovery.phase},{"error",recovery.error}};
+ }
+ Json RecoverySnapshot() const {
+  Json views=Json::object();bool pending=false;
+  for(const auto& [view,recovery]:recoveries){views[view]=RecoveryStatus(recovery);pending|=recovery.Pending();}
+  return {{"pending",pending},{"views",std::move(views)}};
+ }
+ bool CancelRecovery(const std::string& view) {
+  auto found=recoveries.find(view);if(found==recoveries.end())return false;
+  const bool pending=found->second.Pending();const auto transfer=found->second.transfer;
+  recoveries.erase(found);recovery_revisions.erase(view);
+  if(!transfer.empty() && control) {
+   try{Rpc({{"method","navigation.transfer.cancel"},{"session",id},{"view",view},{"transfer",transfer}});}
+   catch(const std::exception& error){fprintf(stderr,"recovery transfer cancel: %s\n",error.what());}
+  }
+  return pending;
+ }
+ // Called only by the JSONL dispatcher. One phase/one selected view per turn;
+ // never sleep or poll inside a phase. Media/input workers do not own this map.
+ void MaintainRecovery() {
+  if(reconciliation_pending && Alive() && control && !producer_stop_pending && QpcNow()>=next_reconciliation) {
+   try{ReconcileOutput();}catch(const std::exception& error){fprintf(stderr,"session %s reconciliation: %s\n",id.c_str(),error.what());}
+   return;
+  }
+  if(recoveries.empty() || !Alive() || !control || producer_stop_pending)return;
+  auto selected=recoveries.upper_bound(recovery_cursor);
+  const auto now=QpcNow();
+  for(size_t count=0;count<recoveries.size();++count) {
+   if(selected==recoveries.end())selected=recoveries.begin();
+   if(selected->second.Pending() && selected->second.next_poll<=now)break;
+   ++selected;
+  }
+  if(selected==recoveries.end() || !selected->second.Pending() || selected->second.next_poll>now)return;
+  const auto view=selected->first;recovery_cursor=view;auto& task=selected->second;
+  if(!desired.contains(view)){CancelRecovery(view);return;}
   try {
-   auto saved=LoadJson(path);
-   for(int attempt=0;attempt<100;++attempt) {
-    bool settled=false;
-    auto snapshot=BrowserSnapshot();
-    for(auto& session:snapshot["sessions"])for(auto& current:session["views"])
-     if(current.value("view",std::string())==view && !current.value("loading",false))settled=true;
-    if(settled)break;std::this_thread::sleep_for(std::chrono::milliseconds(10));
+   if(task.phase=="load") {
+    const auto path=directory/"recovery"/(view+".json");
+    const auto file_bytes=fs::file_size(path);
+    if(file_bytes>96*1024*1024)throw std::runtime_error("navigation recovery file exceeds bound");
+    uint64_t buffered=0;for(const auto& [key,recovery]:recoveries)buffered+=recovery.buffer_bytes;
+    if(buffered+file_bytes>96*1024*1024){task.next_poll=now+QpcFrequency()/20;return;}
+    task.saved=LoadJson(path);const auto size=std::stoull(task.saved.at("size").get<std::string>());
+    if(!size || size>64*1024*1024 || !task.saved.at("chunks").is_array() || task.saved["chunks"].size()>256)
+     throw std::runtime_error("invalid navigation recovery size/chunks");
+    task.buffer_bytes=file_bytes;
+    task.phase="settling";task.deadline=now+QpcFrequency();
+   } else if(task.phase=="settling" || task.phase=="waiting") {
+    const auto snapshot=BrowserSnapshot();const Json* current=nullptr;
+    for(const auto& session:snapshot.at("sessions"))for(const auto& candidate:session.at("views"))
+     if(candidate.value("view",std::string())==view)current=&candidate;
+    if(!current || current->value("close_state",std::string())=="closed") {CancelRecovery(view);return;}
+    if(task.phase=="settling") {
+     if(!current->value("loading",false) || now>=task.deadline)task.phase="unload";
+    } else if(!current->value("pending",true)) {
+     const auto last=current->value("last_lifecycle",Json::object());
+     if(current->value("actual",-1)!=0 || !last.value("succeeded",false))
+      throw std::runtime_error(last.value("detail",std::string("navigation recovery failed")));
+     task.phase="visible";
+    } else if(now>=task.deadline)throw std::runtime_error("navigation recovery did not finish");
+    task.next_poll=now+QpcFrequency()/20;
+   } else if(task.phase=="unload") {
+    Rpc({{"method","lifecycle"},{"session",id},{"view",view},{"action","unload"}});task.phase="begin";
+   } else if(task.phase=="begin") {
+    auto reply=Rpc({{"method","navigation.import.begin"},{"session",id},{"view",view},{"size",task.saved.at("size")}});
+    task.transfer=reply.at("transfer");task.phase="chunks";
+   } else if(task.phase=="chunks") {
+    if(task.chunk==task.saved.at("chunks").size()){task.phase="commit";return;}
+    const auto& chunk=task.saved["chunks"][task.chunk];const auto bytes=chunk.at("bytes").get<uint64_t>();
+    if(!bytes || bytes>256*1024 || DecodedSize(chunk.at("data").get<std::string>())!=bytes)
+     throw std::runtime_error("invalid navigation recovery chunk");
+    Rpc({{"method","navigation.import.chunk"},{"session",id},{"view",view},{"transfer",task.transfer},
+         {"offset",std::to_string(task.offset)},{"data",chunk.at("data")}});
+    task.offset+=bytes;++task.chunk;
+   } else if(task.phase=="commit") {
+    Rpc({{"method","navigation.import.commit"},{"session",id},{"view",view},{"transfer",task.transfer}});
+    task.transfer.clear();task.saved=nullptr;task.buffer_bytes=0;task.phase="restore";
+   } else if(task.phase=="restore") {
+    Rpc({{"method","lifecycle"},{"session",id},{"view",view},{"action","restore"}});
+    task.phase="waiting";task.deadline=now+QpcFrequency()*11;
+   } else if(task.phase=="visible") {
+    task.phase="complete";
+    try{ReconcileOutput();}catch(const std::exception& error){task.error=error.what();}
+   } else if(task.phase=="fallback") {
+    // Fresh GET of the product URL, never automatic replay of imported POST.
+    Rpc({{"method","view.recreate"},{"session",id},{"view",view},
+         {"url",desired.at(view).value("url",std::string("about:blank"))}});
+    task.saved=nullptr;task.buffer_bytes=0;task.transfer.clear();task.phase="fallback_started";
+    try{ReconcileOutput();}catch(const std::exception& error){task.error+="; output reconciliation: "+std::string(error.what());}
    }
-   Rpc({{"method","lifecycle"},{"session",id},{"view",view},{"action","unload"}});
-   auto begin=Rpc({{"method","navigation.import.begin"},{"session",id},{"view",view},{"size",saved.at("size")}});
-   auto transfer=begin.at("transfer");uint64_t offset=0;
-   for(auto& chunk:saved.at("chunks")) {
-    Rpc({{"method","navigation.import.chunk"},{"session",id},{"view",view},{"transfer",transfer},
-         {"offset",std::to_string(offset)},{"data",chunk.at("data")}});
-    offset+=chunk.at("bytes").get<uint64_t>();
-   }
-   Rpc({{"method","navigation.import.commit"},{"session",id},{"view",view},{"transfer",transfer}});
-   Rpc({{"method","lifecycle"},{"session",id},{"view",view},{"action","restore"}});
-   bool restored=false;
-   const auto deadline=QpcNow()+QpcFrequency()*11;
-   while(QpcNow()<deadline && !restored) {
-    auto snapshot=BrowserSnapshot();
-    for(auto& session:snapshot["sessions"])for(auto& current:session["views"])
-     if(current.value("view",std::string())==view && !current.value("pending",true) && current.value("actual",-1)==0)restored=true;
-    if(!restored)std::this_thread::sleep_for(std::chrono::milliseconds(20));
-   }
-   if(!restored)throw std::runtime_error("navigation recovery did not finish");
-   Rpc({{"method","visible"},{"session",id},{"view",view},{"visible",desired.at(view).value("visible",false)}});
   } catch(const std::exception& error) {
    fprintf(stderr,"session %s view %s navigation recovery: %s\n",id.c_str(),view.c_str(),error.what());
-   // Reconstruct from product URL with a fresh GET, never replay a saved POST.
-   Rpc({{"method","view.recreate"},{"session",id},{"view",view},
-        {"url",desired.at(view).value("url",std::string("about:blank"))}});
+   task.error=error.what();task.saved=nullptr;task.buffer_bytes=0;task.phase=task.phase=="fallback"?"failed":"fallback";
   }
  }
  void CaptureNavigation(const Json& browser_view) {
-  if(!browser_view.contains("document")||browser_view.value("loading",false)||browser_view.value("pending",false))return;
-  const std::string view=browser_view.at("view"),document=browser_view.at("document");
-  if(recovery_documents[view]==document)return;
+  if(!browser_view.contains("navigationRevision")||browser_view.value("loading",false)||browser_view.value("pending",false))return;
+  const std::string view=browser_view.at("view"),revision=browser_view.at("navigationRevision");
+  if(Recovering(view) || recovery_revisions[view]==revision)return;
   try {
    auto begin=Rpc({{"method","navigation.export.begin"},{"session",id},{"view",view}});
    auto transfer=begin.at("transfer");uint64_t size=std::stoull(begin.at("size").get<std::string>()),offset=0;
@@ -486,8 +590,8 @@ struct Session {
     chunks.push_back({{"data",chunk.at("data")},{"bytes",count}});offset+=count;
    }
    Rpc({{"method","navigation.transfer.cancel"},{"session",id},{"view",view},{"transfer",transfer}});
-   SaveJson(directory/"recovery"/(view+".json"),{{"size",std::to_string(size)},{"chunks",chunks}});
-   recovery_documents[view]=document;
+   SaveJson(directory/"recovery"/(view+".json"),{{"size",std::to_string(size)},{"chunks",chunks},{"navigationRevision",begin.at("navigationRevision")}});
+   recovery_revisions[view]=begin.at("navigationRevision").get<std::string>();
   }catch(const std::exception& error){fprintf(stderr,"navigation save: %s\n",error.what());}
  }
  remotekit::AdaptiveFps::Counters AdaptiveCounters() const {
@@ -570,6 +674,7 @@ struct Session {
   value["configuredIdleIdrMs"]=options.idle_idr_ms;
   value["qsvVpp"]=options.encoding.qsv_async_vpp?"async":"external";
   value["atlasAllocationAlignment"]=options.atlas_allocation_alignment;
+  value["reconciliationPending"]=reconciliation_pending.load();
   value.update(media_feedback.Snapshot(QpcNow(),QpcFrequency()));
   {std::lock_guard lock(adaptive_mutex);
    value["mediaPolicy"]["applied"]["targetFps"]=adaptive_applied_known?Json(adaptive.applied()):Json(nullptr);
@@ -603,34 +708,38 @@ struct Session {
   // through the existing stop boundary; observing a Session never launches it.
   if(ProducerExited())Stop();
   return {{"sessionId",id},{"browserPid",0},{"views",Json::array()},
-   {"pendingPopups",Json::array()},{"events",durable_events},{"running",false},{"stats",Stats()}};
+   {"pendingPopups",Json::array()},{"events",durable_events},{"running",false},{"browserIncarnation",nullptr},{"stats",Stats()},{"recovery",RecoverySnapshot()}};
  }
  Json Snapshot() {
   if(!Alive() || producer_stop_pending)return InactiveSnapshot();
   try {
-  auto snapshot=BrowserSnapshot();Json views=Json::array();bool removed=false;
+  auto snapshot=BrowserSnapshot();Json views=Json::array(),closed_acks=Json::array();bool removed=false;
   for(auto& session:snapshot.at("sessions"))for(auto& view:session.at("views")) {
    std::string view_id=view.at("view");
    if(view.value("close_state",std::string())=="closed") {
-    if(desired.contains(view_id) && !observed_closed.contains(view_id)) {
-     if(durable_events.size()>=256)throw std::runtime_error("closed event backlog full; acknowledge events before reconciliation");
-     durable_events.push_back({{"eventId",std::to_string(next_event++)},{"type","view.closed"},
-       {"viewId",view_id},{"reason",view.value("close_reason",std::string("closed"))}});
-     SaveEvents();observed_closed.insert(view_id);
-    }
-    if(desired.erase(view_id)){removed=true;Save();fs::remove(directory/"recovery"/(view_id+".json"));}
+    removed|=desired.contains(view_id);RecordClosed(view_id,view.value("close_reason",std::string("closed")));
+    closed_acks.push_back(view_id);
     continue;
    }
    Json item=view;item["viewId"]=view_id;
+   if(const auto recovery=recoveries.find(view_id);recovery!=recoveries.end()) {
+    item["recovery"]=RecoveryStatus(recovery->second);
+    item["browserPending"]=item.value("pending",false);
+    // Includes Endpoint import/restore work. actual and browserPending retain
+    // the observed Browser state while Control can avoid a conflicting thaw.
+    item["pending"]=item.value("pending",false)||recovery->second.Pending();
+    if(recovery->second.Pending()){item["browserDesired"]=item["desired"];item["desired"]=0;}
+   }
    auto requests=Rpc({{"method","page.requests"},{"session",id},{"view",view_id}});
    if(view.value("close_state",std::string())=="closing")AddCloseRequest(item,requests);
    item["pageRequests"]=requests.value("requests",requests);
    CaptureNavigation(view);views.push_back(std::move(item));
   }
   if(removed)RefitOutput();
+  AckClosed(closed_acks);
   return {{"sessionId",id},{"browserPid",process?GetProcessId(process):0},{"views",views},
    {"pendingPopups",snapshot.at("sessions").at(0).value("pendingPopups",Json::array())},
-   {"events",durable_events},{"running",true},{"stats",Stats()}};
+   {"events",durable_events},{"running",true},{"browserIncarnation",browser_incarnation},{"stats",Stats()},{"recovery",RecoverySnapshot()}};
   }catch(...) {
    // A producer can exit between the liveness check and any snapshot RPC.
    // Preserve desired views and confirmed events; an exit is not window.close.
@@ -652,6 +761,9 @@ struct Session {
   }
  }
  bool Stop() {
+  recoveries.clear();recovery_cursor.clear();recovery_revisions.clear();reconciliation_pending=false;
+  has_visible_output=false;
+  browser_incarnation.clear();
   producer_stop_pending=process || job;
   ClosePeer();
   if(control){sdk.remotekit_sdk_control_close(control);control=0;}
@@ -757,9 +869,7 @@ struct Session {
   // view there is no capture to wait for; keep RTC/DataChannel alive instead.
   // MediaLoop's resource replacement uses its existing subscription state.
   // Control may already be changing desired before PauseOutput joins us.
-  if(!preserve_visibility)output_suspended=std::none_of(desired.begin(),desired.end(),[](const auto& entry){
-   return entry.second.value("visible",false);
-  });
+  if(!preserve_visibility)output_suspended=!has_visible_output.load();
   if(output_suspended || !rtc_connected)return;
   remotekit_rtc_clock_sample clock{};clock.struct_size=sizeof(clock);
   if(sdk.sample_clock && sdk.sample_clock(&clock)==0){pool.SetClock(clock);if(trace)trace->SdkClock(clock);}
@@ -1189,7 +1299,7 @@ struct Session {
  }
  Json Command(const Json& request) {
   const auto method=Required(request,"method");
-  if(method=="session.ensure"){Start();return {{"sessionId",id},{"browserPid",GetProcessId(process)},{"running",true}};}
+  if(method=="session.ensure"){Start();return {{"sessionId",id},{"browserPid",GetProcessId(process)},{"running",true},{"accepted",true},{"browserIncarnation",browser_incarnation},{"recovery",RecoverySnapshot()}};}
   if(method=="session.snapshot")return Snapshot();
   if(method=="session.events.ack") {
    const auto ids=request.at("eventIds");
@@ -1245,7 +1355,11 @@ struct Session {
     throw std::runtime_error("ICE candidate rejected");
    return Json::object();
   }
-  const bool require_running=(method=="view.configure" || method=="view.lifecycle") && request.value("requireRunning",false);
+  const bool page_reply=method=="view.page.reply" || method=="view.close.reply";
+  if(page_reply && (!Alive() || !control || producer_stop_pending || browser_incarnation.empty() ||
+     request.value("browserIncarnation",std::string())!=browser_incarnation))
+   throw std::runtime_error("stale_browser_incarnation");
+  const bool require_running=page_reply || ((method=="view.configure" || method=="view.lifecycle") && request.value("requireRunning",false));
   if(require_running) {
    if(!Alive() || !control || producer_stop_pending)throw std::runtime_error("browser not running; guarded maintenance cannot start it");
   } else Start();
@@ -1262,16 +1376,25 @@ struct Session {
    return ApplyView(request,true);
   }
   if(method=="view.close") {
+   CancelRecovery(view);
+   const auto snapshot=BrowserSnapshot();Json identity={{"browserIncarnation",browser_incarnation}};
+   for(const auto& session:snapshot.at("sessions"))for(const auto& current:session.at("views"))
+    if(current.value("view",std::string())==view && current.contains("instance") && current.contains("document")) {
+     identity["instance"]=current["instance"];identity["document"]=current["document"];
+    }
    auto result=Rpc({{"method","view.close"},{"session",id},{"view",view},{"force",request.value("force",false)}});
    bool closed=result.value("completed",false);
-   if(closed){desired.erase(view);Save();fs::remove(directory/"recovery"/(view+".json"));RefitOutput();return {{"closed",true}};}
+   if(closed){RecordClosed(view,"requested");AckClosed(Json::array({view}));RefitOutput();identity["closed"]=true;identity["completed"]=true;return identity;}
    auto requests=Rpc({{"method","page.requests"},{"session",id},{"view",view}});
    Json output={{"accepted",true},{"pageRequests",requests.value("requests",requests)}};
+   output.update(identity);
    AddCloseRequest(output,requests);return output;
   }
   if(method=="view.close.reply") {
    auto close_request_id=Required(request,"requestId");
-   auto result=Rpc({{"method","page.reply"},{"session",id},{"view",view},{"request",close_request_id},{"accept",request.at("accept")}});
+   if(!request.contains("accept") || !request["accept"].is_boolean())throw std::runtime_error("accept boolean required");
+   auto result=Rpc({{"method","page.reply"},{"session",id},{"view",view},{"request",close_request_id},{"accept",request["accept"]},
+      {"instance",Required(request,"instance")},{"document",Required(request,"document")},{"close_only",true}});
    return {{"accepted",true},{"browser",result}};
   }
   if(method=="view.page.reply") {
@@ -1291,16 +1414,27 @@ struct Session {
   if(method=="view.command") {
    const auto action=Required(request,"command");
    if(action!="back"&&action!="forward"&&action!="reload"&&action!="stop")throw std::runtime_error("unsupported page command");
+   if(CancelRecovery(view)) {
+    Rpc({{"method","view.recreate"},{"session",id},{"view",view},
+         {"url",desired.at(view).value("url",std::string("about:blank"))}});
+    fs::remove(directory/"recovery"/(view+".json"));ReconcileOutput();
+   }
    return Rpc({{"method","page.command"},{"session",id},{"view",view},{"action",action}});
   }
   if(method=="view.lifecycle") {
    const auto action=Required(request,"action");
    if(action!="discard" && action!="restore")throw std::runtime_error("unsupported lifecycle action");
+   if(Recovering(view))return {{"accepted",true},{"pending",true},{"completed",false},{"recovery",RecoveryStatus(recoveries.at(view))}};
    return Rpc({{"method","lifecycle"},{"session",id},{"view",view},{"action",action}});
   }
   if(method=="view.navigate") {
-   auto result=Rpc({{"method","navigate"},{"session",id},{"view",view},{"url",Required(request,"url")}});
-   if(desired.contains(view)){desired[view]["url"]=request["url"];Save();}return result;
+   const auto url=Required(request,"url");
+   const bool cancelled=CancelRecovery(view);
+   auto result=Rpc({{"method",cancelled?"view.recreate":"navigate"},{"session",id},{"view",view},{"url",url}});
+   fs::remove(directory/"recovery"/(view+".json"));recovery_revisions.erase(view);
+   if(desired.contains(view)){desired[view]["url"]=request["url"];Save();}
+   if(cancelled)ReconcileOutput();
+   return result;
   }
   if(method=="view.configure") {
    if(!desired.contains(view))throw std::runtime_error("view not found");
@@ -1309,6 +1443,38 @@ struct Session {
    return ApplyView(config,false);
   }
   throw std::runtime_error("unknown endpoint method: "+method);
+ }
+};
+// stdin may remain idle for minutes while navigation completion still needs
+// progress. The reader owns only its queue; Session state stays on dispatcher.
+class ServiceRequests {
+ std::mutex mutex_;std::condition_variable wake_;std::deque<std::string> queue_;
+ bool stopping_=false,eof_=false;std::thread reader_;
+ public:
+ ServiceRequests():reader_([this]{
+  std::string line;
+  while(std::getline(std::cin,line)) {
+   std::unique_lock lock(mutex_);
+   wake_.wait(lock,[&]{return stopping_||queue_.size()<256;});
+   if(stopping_)break;
+   queue_.push_back(std::move(line));wake_.notify_all();
+  }
+  {std::lock_guard lock(mutex_);eof_=true;}wake_.notify_all();
+ }){}
+ ~ServiceRequests() {
+  {std::lock_guard lock(mutex_);stopping_=true;}wake_.notify_all();
+  // Cancel a synchronous stdin pipe read on shutdown. Repeating closes the
+  // small race between the reader checking stopping_ and entering ReadFile.
+  while(WaitForSingleObject(reader_.native_handle(),20)==WAIT_TIMEOUT)
+   CancelSynchronousIo(reader_.native_handle());
+  reader_.join();
+ }
+ bool Next(std::string& line,bool& eof) {
+  std::unique_lock lock(mutex_);
+  wake_.wait_for(lock,std::chrono::milliseconds(20),[&]{return eof_||!queue_.empty();});
+  eof=eof_&&queue_.empty();
+  if(queue_.empty())return false;
+  line=std::move(queue_.front());queue_.pop_front();wake_.notify_all();return true;
  }
 };
 }
@@ -1320,8 +1486,10 @@ int main(int argc,char** argv) {
   Sdk sdk;sdk.Open(options.browser.parent_path()/"remotekit_sdk.dll");
   auto registry=LoadJson(options.data/"sessions.json",{{"next",1},{"tenants",Json::object()}});
   std::map<std::string,std::unique_ptr<Session>> sessions;
-  std::string line;
-  while(std::getline(std::cin,line)) {
+  ServiceRequests requests;std::string maintenance_cursor,line;
+  while(true) {
+   bool eof=false;const bool received=requests.Next(line,eof);if(eof)break;
+   if(received) {
    if(line.size()>1024*1024){std::cout<<Json({{"id",nullptr},{"ok",false},{"error","request exceeds 1 MiB"}}).dump()<<'\n'<<std::flush;continue;}
    Json request=Json::parse(line,nullptr,false),response={{"id",request.is_object()?request.value("id",Json(nullptr)):Json(nullptr)}};
    bool shutdown=false;
@@ -1345,6 +1513,13 @@ int main(int argc,char** argv) {
     response["ok"]=true;
    }catch(const std::exception& error){response["ok"]=false;response["error"]=error.what();fprintf(stderr,"endpoint: %s\n",error.what());}
    std::cout<<response.dump()<<'\n'<<std::flush;if(shutdown)break;
+   }
+   // Round-robin Sessions even when no more JSONL calls arrive. A single
+   // recovery step never contains a navigation completion wait.
+   if(!sessions.empty()) {
+    auto selected=sessions.upper_bound(maintenance_cursor);if(selected==sessions.end())selected=sessions.begin();
+    maintenance_cursor=selected->first;selected->second->MaintainRecovery();
+   }
   }
   sessions.clear();return 0;
  }catch(const std::exception& error){fprintf(stderr,"endpoint startup: %s\n",error.what());return 1;}

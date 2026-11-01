@@ -7,8 +7,9 @@ export class CaptureLatency {
   private samples: { ms: number; uncertainty: number; id: string; at: number }[] = [];
   private previous?: CaptureTiming;
   private since = 0;
+  // Feedback identity belongs to this object, not to a clock calibration window.
   private sequence = 0;
-  reset() { this.clock = undefined; this.frames.clear(); this.seen.clear(); this.samples = []; this.previous = undefined; this.since = 0; this.sequence = 0; }
+  reset() { this.clock = undefined; this.frames.clear(); this.samples = []; this.previous = undefined; this.since = 0; }
   calibrate(start: number, startWall: number, end: number, endWall: number, server: number) {
     if (![start, startWall, end, endWall, server].every(Number.isFinite) || end < start || Math.abs(endWall - startWall - (end - start)) > 5) { this.reset(); return; }
     const uncertainty = (end - start) / 2 + 1;

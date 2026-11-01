@@ -15,4 +15,4 @@
 
 原生popup widget像素/命中、完整IME replacement/span、多Profile、跨Browser sessionStorage、目录上传、认证/证书、跨端剪贴板、PDF/打印等差距仍保留。音频不在本轮。不能把缺少产品UI或旧demo拒绝行为当成用户放弃。
 
-当前首版后审查关注冷启动逐页恢复等待及边界逻辑；实际结果统一写[当前状态](current-state.zh-CN.md)，不在这里追加实验时间线。[系统设计](architecture.zh-CN.md)与[Control设计](control-plane.zh-CN.md)记录当前功能逻辑。
+首版后Astra审查已推动恢复状态机、确定性几何规划及原子提交、反馈流身份分离三项有界重构，并修复关闭/回复和token作用域逻辑。实际结果统一写[当前状态](current-state.zh-CN.md)，不在这里追加实验时间线。[系统设计](architecture.zh-CN.md)与[Control设计](control-plane.zh-CN.md)记录当前功能逻辑。

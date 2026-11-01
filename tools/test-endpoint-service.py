@@ -99,6 +99,7 @@ def main():
      time.sleep(6)
      os.kill(state['browserPid'],9)
      time.sleep(.1)
+     call('session.ensure',tenant)
      deadline=time.monotonic()+20
      while time.monotonic()<deadline:
       state=call('session.snapshot',tenant)

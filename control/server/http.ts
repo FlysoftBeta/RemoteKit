@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { createServer as createHttpsServer } from 'node:https';
 import { readFile, appendFile, mkdir } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ApiError, Control } from './control';
 import type { ProductState } from '../shared/product';
@@ -30,10 +30,10 @@ export function createHttp(control: Control, options: { origins: string[]; clien
         if (['tenantId', 'tenant', 'userId', 'user'].some(key => key in body)) throw new ApiError(400, '客户端不能指定用户或租户');
         if (path === '/api/auth/register' || path === '/api/auth/login') {
           let session; try { session = path.endsWith('register') ? await control.store.register(body.username, body.password) : await control.store.login(body.username, body.password); } catch (error) { throw new ApiError(path.endsWith('login') ? 401 : 400, error instanceof Error ? error.message : String(error)); }
-          const previous = control.store.identity(token); if (previous) { control.store.revoke(token); await control.logout(previous.tenantId); }
+          const previous = control.store.identity(token); if (previous) { control.store.revoke(token); await control.logout(previous.tenantId, authenticationIdentity(token!)); }
           res.setHeader('Set-Cookie', cookie(session.token)); return json(res, 200, { authenticated: true, user: session.user });
         }
-        if (path === '/api/auth/logout') { const previous = control.store.identity(token); control.store.revoke(token); if (previous) await control.logout(previous.tenantId); res.setHeader('Set-Cookie', cookie('', true)); return json(res, 200, { loggedOut: true }); }
+        if (path === '/api/auth/logout') { const previous = control.store.identity(token); control.store.revoke(token); if (previous) await control.logout(previous.tenantId, authenticationIdentity(token!)); res.setHeader('Set-Cookie', cookie('', true)); return json(res, 200, { loggedOut: true }); }
         const identity = control.store.identity(token); if (!identity) throw new ApiError(401, '请先登录'); const tenant = identity.tenantId;
         if (path === '/api/metrics') {
           const record = JSON.stringify({ receivedAt: new Date().toISOString(), tenantId: tenant, metrics: body }) + '\n';
@@ -69,7 +69,7 @@ export function createHttp(control: Control, options: { origins: string[]; clien
       sockets.handleUpgrade(req, socket, head, ws => {
         const lease = randomUUID(), peer = { tenant: identity.tenantId, lease, token, alive: true }; peers.set(ws, peer);
         const pending = new Set<string>();
-        const ready = control.attachViewer(peer.tenant, lease, reason => { send(ws, { type: 'lease', status: 'revoked', reason }); ws.close(4001, reason); });
+        const ready = control.attachViewer(peer.tenant, lease, reason => { send(ws, { type: 'lease', status: 'revoked', reason }); ws.close(4001, reason); }, { identity: authenticationIdentity(token), valid: () => control.store.identity(token)?.tenantId === peer.tenant });
         void ready.then(state => send(ws, { type: 'state', revision: state.workspace.revision, state })).catch(() => ws.close(1011, 'Viewer unavailable'));
         ws.on('pong', () => { peer.alive = true; }); ws.on('error', () => {});
         ws.on('close', () => { peers.delete(ws); void control.detachViewer(peer.tenant, lease).catch(() => {}); });
@@ -93,3 +93,5 @@ export function createHttp(control: Control, options: { origins: string[]; clien
 function readToken(req: IncomingMessage) { return req.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith('rk_session='))?.slice(11); }
 function json(res: ServerResponse, status: number, body: unknown) { res.statusCode = status; res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(JSON.stringify(body)); }
 async function readBody(req: IncomingMessage) { let size = 0; const chunks: Buffer[] = []; for await (const chunk of req) { size += chunk.length; if (size > 1024 * 1024) throw new ApiError(413, '请求过大'); chunks.push(Buffer.from(chunk)); } try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new ApiError(400, 'JSON 格式错误'); } }
+
+function authenticationIdentity(token: string) { return createHash('sha256').update(token).digest('hex'); }

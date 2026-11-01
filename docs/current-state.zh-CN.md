@@ -24,7 +24,7 @@
 
 Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/窄屏、UA、popup、dialog、质量/ClientScale、120秒memory saver、WS断线/接管。生产能力探测已使157选择level4.2，真实双窗完整尺寸首帧通过；Chrome89保留兼容video路径。报告：[产品运行QA](../develop/docs/product-runtime-qa.md)。原生Windows输入法完整候选窗行为不能由协议composition检查替代。
 
-最新功能批Control全套102项通过，其后能力/收束改动做局部检查；Endpoint收束后8项CPU suites通过，SDK2项通过，Browser/SDK/Endpoint增量构建通过。最终发布构建会记录最终完整检查结果。
+首版506c45e发布检查：Control全套104项、生产构建与smoke通过；Endpoint收束后8项CPU suites、SDK2项通过，Browser/SDK/Endpoint增量构建通过。最终ZIP的559个文件hash全部匹配，包内普通注册/鉴权WS/Browser启动smoke通过；最终包smoke未另测RTC媒体。
 
 ## 当前默认与资源规则
 
@@ -32,15 +32,19 @@ Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/�
 
 默认service针对UHD630选择QSV；显式encoder=auto保留copy和NVENC回退，显式NVENC仍支持。普通客户端探测解码能力后选择level4.2，失败回native；高码率请求不能超越接收协商或网络上限。更多状态归属与流程见[系统设计](architecture.zh-CN.md)、[Control设计](control-plane.zh-CN.md)、[GPU输出](gpu-output.zh-CN.md)。
 
-## 已知限制与后续审查
+## 审查修复
 
-- 冷启动恢复目前逐页等待导航完成，4页失败恢复约需4×11秒，可能超过Control RPC超时后才fallback；产品状态保留，已列入首版后的审查。
+审查修复版已修复串行恢复阻塞、恢复快照遗漏、token注销作用域、atlas几何边界、反馈序号重置、关闭墓碑积累及两项关闭/回复竞态。四页恢复ensure约0.204秒，其他Tenant观察不再等待；真实冷恢复验证了history、表单和滚动位置，POST只回退GET。证据见develop/tmp/recovery-regression与geometry-regression。
+
+## 保留差距
+
+
 - 每Session当前一个Profile；跨Browser sessionStorage、完整IME replacement/span、原生popup widget合成/命中覆盖，以及目录上传、认证/证书、跨端剪贴板、PDF/打印等仍是保留差距。
 - 本机无NVIDIA硬件，NVENC只有编译/接口边界检查；音频不在本轮。
 - 生产capture-end→paint是带时钟置信度的估算；Pixel marker测量及物理屏幕点亮是不同终点。
 
 ## 发布与入口
 
-本轮代码/文档收尾后先构建并上传第一版，再由Astra审查代码库、落实必要修复；有改动再构建上传，最后删除goal。发布包不会携带开发Profile、数据或凭据。
+首版506c45e已构建并上传。Astra完成全链审查与有界修复复核；修复后的Control117项、生产构建/smoke及原生恢复/几何回归通过，审查修复版按打包/上传流程交付；取件码与最终hash保存在本机发布delivery记录并随交付回复提供。发布包不携带开发Profile、数据或凭据。首版交付记录位于develop/tmp/release-506c45e-delivery.json。
 
 [构建运行](../README.md) · [Control](../control/README.md) · [打包](packaging.zh-CN.md) · [接口](streaming-protocol.md) · [SDK](sdk.md) · [历史选项归档](experiments-archive.zh-CN.md)

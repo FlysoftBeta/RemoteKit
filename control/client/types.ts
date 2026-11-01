@@ -1,6 +1,7 @@
+import type { PendingClose } from '../shared/product';
 export interface Tab { id: string; title: string; url: string; webviewId: string | null; pendingUrl?: string; canGoBack?: boolean; canGoForward?: boolean; loading?: boolean }
 export interface Device { mode: 'desktop' | 'tablet'; width: number; height: number; deviceScaleFactor: number }
-export interface ControlState { tenantId: string; tabs: Tab[]; activeTabId: string | null; splitTabId: string | null; device: Device; endpointGeneration?: number; endpointError?: string | null; pendingClose?: { id: string; requestId?: string; awaiting?: boolean } | null }
+export interface ControlState { tenantId: string; tabs: Tab[]; activeTabId: string | null; splitTabId: string | null; device: Device; endpointGeneration?: number; endpointError?: string | null; pendingClose?: PendingClose | null }
 export interface Surface { id: string; session: string; instance: string; document: string; focus: string; x: number; y: number; width: number; height: number; deviceScaleFactor: number; mediaScale?: number; stale?: boolean }
 export interface Layout { type: 'layout'; generation: string; epoch: string; width: number; height: number; views: Surface[] }
 export interface CanvasPresentation { viewId: string; rtpTimestamp: number; layoutEpoch: string; paintedAt: number; paintedWallTime: number; authorizedAt: number }

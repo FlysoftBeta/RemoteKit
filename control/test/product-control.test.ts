@@ -22,23 +22,23 @@ class ProductEndpoint implements Endpoint {
     if (method === 'session.sitePreferences') { if (this.failSites) throw new Error('UA apply failed'); return { accepted: true, applied: this.running }; }
     if (method === 'session.mediaPolicy') return { accepted: true, applied: this.running };
     if (method === 'session.ensure') { this.running = true; return { browserPid: this.browserPid }; }
-    if (method === 'session.snapshot') return { running: this.running, browserPid: this.browserPid, views: this.running ? [...views.values()].map(v => ({ ...v })) : [], pendingPopups: this.popups, events: this.events };
+    if (method === 'session.snapshot') return { running: this.running, browserPid: this.browserPid, browserIncarnation: 'browser-' + this.browserPid, views: this.running ? [...views.values()].map(v => ({ ...v })) : [], pendingPopups: this.popups, events: this.events };
     if (args.requireRunning && this.stopBeforeMaintenance) this.running = false;
     if (args.requireRunning && !this.running) throw new Error('Browser not running');
     if (method === 'session.events.ack') { if (this.failAck) throw new Error('ack failed'); this.events = this.events.filter(e => !args.eventIds.includes(e.eventId)); return { accepted: true, remaining: this.events.length }; }
     if (method === 'view.adopt') {
       this.onAdopt?.(args);
       if (!views.has(args.viewId) && !this.popups.some(p => p.provisionalId === args.provisionalId && p.status === 'pending')) throw new Error('popup_not_pending');
-      views.set(args.viewId, { ...args, actual: 0, pending: false, canDiscard: true }); this.popups = this.popups.filter(p => p.provisionalId !== args.provisionalId);
+      views.set(args.viewId, { ...args, instance: '1', document: '1', actual: 0, pending: false, canDiscard: true }); this.popups = this.popups.filter(p => p.provisionalId !== args.provisionalId);
       if (this.loseAdoptReply) { this.loseAdoptReply = false; throw new Error('response lost'); }
       return { accepted: true, completed: true };
     }
-    if (method === 'view.ensure') views.set(args.viewId, { ...args, actual: 0, pending: false, canDiscard: true });
+    if (method === 'view.ensure') views.set(args.viewId, { ...args, instance: '1', document: '1', actual: 0, pending: false, canDiscard: true });
     if (method === 'view.configure') Object.assign(views.get(args.viewId)!, args);
     if (method === 'view.page.reply') { const v = views.get(args.viewId)!; if (String(v.instance) !== args.instance || String(v.document) !== args.document) throw new Error('stale_page_request'); v.pageRequests.pending = v.pageRequests.pending.filter((p: any) => p.request !== args.requestId); return { accepted: true, browser: { ok: true, state: 'resolved' } }; }
     if (method === 'view.lifecycle') { const v = views.get(args.viewId)!; if (args.action === 'restore') { v.pending = true; v.desired = 0; } else v.actual = 2; return { accepted: true, completed: false, pending: true, lifecycleGeneration: '1' }; }
-    if (method === 'view.close') { if (this.pending && !args.force) return { pending: true, requestId: 'close-1' }; views.delete(args.viewId); return { closed: true }; }
-    if (method === 'view.close.reply') { if (args.accept) views.delete(args.viewId); return { accepted: true }; }
+    if (method === 'view.close') { if (this.pending && !args.force) return { pending: true, requestId: 'close-1', browserIncarnation: 'browser-' + this.browserPid, instance: String(views.get(args.viewId).instance), document: String(views.get(args.viewId).document) }; views.delete(args.viewId); return { closed: true }; }
+    if (method === 'view.close.reply') { if (args.accept) views.get(args.viewId).close_state = 'closed'; return { accepted: true, browser: { ok: true } }; }
     if (method === 'rtc.offer') return { sdp: 'v=0\r\n' };
     return {};
   }
@@ -82,8 +82,8 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
     await control.attachViewer(user.tenantId, 'lease', () => {}); let state = (await control.productAction(user.tenantId, { type: 'window.create', url: 'https://EXAMPLE.com/path' }, 'lease')).state;
     const w = state.workspace.windows[0], tab = state.workspace.tabs[0]; endpoint.pending = true;
     state = (await control.productAction(user.tenantId, { type: 'window.close', windowId: w.id }, 'lease')).state;
-    assert.equal(state.workspace.tabs.length, 1); assert.equal(state.workspace.pendingClose?.requestId, 'close-1');
-    state = (await control.productAction(user.tenantId, { type: 'tab.close', tabId: tab.id, requestId: 'close-1', cancel: true }, 'lease')).state;
+    assert.equal(state.workspace.tabs.length, 1); assert.equal(state.workspace.pendingClose?.nativeRequestId, 'close-1');
+    state = (await control.productAction(user.tenantId, { type: 'tab.close', tabId: tab.id, requestId: state.workspace.pendingClose!.requestId, cancel: true }, 'lease')).state;
     assert.equal(state.workspace.windows.length, 1); assert.equal(state.workspace.pendingWindowCloseId, null);
     const site = await control.productAction(user.tenantId, { type: 'site.set', origin: 'https://EXAMPLE.com:443/foo', tabletUa: true }, 'lease'); assert.equal(site.application, undefined); assert.deepEqual(site.state.workspace.sites, { 'https://example.com': { tabletUa: true } });
     state = (await control.productAction(user.tenantId, { type: 'settings.update', settings: { clientScaleOverride: 1.5, qualityPreference: 'smooth' } }, 'lease')).state;
@@ -183,7 +183,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     await assert.rejects(control.productAction(user.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: true }, 'lease'), /过期/);
     view.pageRequests.pending = [{ request: '8', kind: 'confirm', message: 'old document' }]; await control.tick(); const old = control.productState(user.tenantId).pageDialogs[0]; view.document = '3'; await assert.rejects(control.productAction(user.tenantId, { type: 'page.reply', dialogId: old.id, accept: true }, 'lease'), /过期/);
     await control.tick(); const previousBrowser = control.productState(user.tenantId).pageDialogs[0]; endpoint.browserPid++; await assert.rejects(control.productAction(user.tenantId, { type: 'page.reply', dialogId: previousBrowser.id, accept: true }, 'lease'), /过期/);
-    const state = store.workspace(user.tenantId); state.pendingClose = { id: tab.id, requestId: '9', awaiting: false }; store.saveWorkspace(state); view.pageRequests.pending = [{ request: '9', kind: 'beforeunload', message: 'close' }]; await control.tick(); assert.equal(control.productState(user.tenantId).pageDialogs.length, 0); assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+    const state = store.workspace(user.tenantId); state.pendingClose = { id: tab.id, requestId: 'opaque-9', nativeRequestId: '9', browserIncarnation: 'browser-' + endpoint.browserPid, instance: String(view.instance), document: String(view.document), awaiting: false }; store.saveWorkspace(state); view.pageRequests.pending = [{ request: '9', kind: 'beforeunload', message: 'close' }]; await control.tick(); assert.equal(control.productState(user.tenantId).pageDialogs.length, 0); assert.equal(store.workspace(user.tenantId).tabs.length, 1);
   } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
 });
 
@@ -253,4 +253,78 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     for (const tenant of store.all()) await control.serial(tenant, async () => {});
     await new Promise<void>(resolve => server.close(() => resolve())); store.db.close();
   }
+});
+
+test('cookie logout/login/register replacement cannot revoke another token Viewer of the same user', async () => {
+  const store = new Store(':memory:'), control = new Control(store, new ProductEndpoint());
+  const server = createHttp(control, { origins: ['http://product.test'], clientDir: '.', metricsDir: '.' });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening'); const base = `http://127.0.0.1:${(server.address() as any).port}`, url = base.replace('http:', 'ws:') + '/api/socket';
+  const peers: ReturnType<typeof connect>[] = [];
+  const post = (path: string, body: unknown, cookie: string) => fetch(base + path, { method: 'POST', headers: { Origin: 'http://product.test', 'Content-Type': 'application/json', Cookie: cookie }, body: JSON.stringify(body) });
+  try {
+    for (const operation of ['logout', 'login', 'register']) {
+      const name = 'scope-' + operation, a = await store.register(name, 'password123'), b = await store.login(name, 'password123');
+      const old = connect(url, `rk_session=${a.token}`); peers.push(old); await old.wait(m => m.type === 'state');
+      const current = connect(url, `rk_session=${b.token}`); peers.push(current); await current.wait(m => m.type === 'state'); await old.wait(m => m.type === 'lease');
+      const response = await post('/api/auth/' + operation, operation === 'logout' ? {} : { username: operation === 'register' ? 'new-' + name : name, password: 'password123' }, `rk_session=${a.token}`);
+      assert.equal(response.status, 200); assert.equal(store.identity(a.token), undefined);
+      const ping = await current.request(operation, 'clock.ping', {}); assert.equal(ping.type, 'result'); assert.equal(control.productState(b.tenantId).viewer.connected, true);
+      // Same-token tabs share revocation even though only the latest owns media.
+      const sameToken = connect(url, `rk_session=${b.token}`); peers.push(sameToken); await sameToken.wait(m => m.type === 'state'); await current.wait(m => m.type === 'lease');
+      const revoked = sameToken.wait(m => m.type === 'lease' && m.reason === 'logout');
+      assert.equal((await post('/api/auth/' + operation, operation === 'logout' ? {} : { username: operation === 'register' ? 'active-' + name : name, password: 'password123' }, `rk_session=${b.token}`)).status, 200); await revoked;
+      assert.equal(store.identity(b.token), undefined); assert.equal(control.productState(b.tenantId).viewer.connected, false);
+    }
+  } finally {
+    for (const { ws } of peers) if (ws.readyState !== WebSocket.CLOSED) { const closed = once(ws, 'close'); ws.terminate(); await closed; }
+    for (const tenant of store.all()) await control.serial(tenant, async () => {});
+    await new Promise<void>(resolve => server.close(() => resolve())); store.db.close();
+  }
+});
+
+test('lease authentication is checked inside queued operations and late old close cannot detach replacement', async () => {
+  const { store, control, user } = await fixture(); let valid = true;
+  try {
+    await control.attachViewer(user.tenantId, 'old', () => {}, { identity: 'hash-A', valid: () => valid });
+    let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+    const blocked = control.serial(user.tenantId, () => gate);
+    const pending = control.viewerRequest(user.tenantId, 'old', 'clock.ping', {});
+    valid = false; release(); await blocked;
+    await assert.rejects(pending, (e: any) => e.status === 401);
+    await control.attachViewer(user.tenantId, 'new', () => {}, { identity: 'hash-B', valid: () => true });
+    await control.logout(user.tenantId, 'hash-A'); await control.detachViewer(user.tenantId, 'old');
+    assert.equal(control.productState(user.tenantId).viewer.connected, true);
+    assert.ok(await control.viewerRequest(user.tenantId, 'new', 'clock.ping', {}));
+    await control.logout(user.tenantId, 'hash-B'); assert.equal(control.productState(user.tenantId).viewer.connected, false);
+  } finally { store.db.close(); }
+});
+
+test('impossible viewport is rejected without replacing valid geometry; limited state stays usable and can recover', async () => {
+  const { store, control, endpoint, user } = await fixture();
+  try {
+    await control.attachViewer(user.tenantId, 'lease', () => {});
+    const state = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace;
+    const w = state.windows[0], tab = state.tabs[0];
+    await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: w.id, width: 800, height: 600, visible: true }] });
+    await assert.rejects(control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: w.id, width: 8192, height: 8192, visible: true }] }), (error: any) => error.status === 400 && /minimum DPR/.test(error.message));
+    assert.equal(endpoint.views.get(user.tenantId)!.get(tab.webviewId).width, 800);
+    assert.equal(control.productState(user.tenantId).quality.resourceLimitation, null);
+    // An empty window may receive geometry before it has a tab. A later tab
+    // creation must surface a limitation rather than break state serialization.
+    await control.productAction(user.tenantId, { type: 'tab.close', tabId: tab.id }, 'lease');
+    await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: w.id, width: 8192, height: 8192, visible: true }] });
+    endpoint.calls = [];
+    const limited = (await control.productAction(user.tenantId, { type: 'tab.create', windowId: w.id }, 'lease')).state;
+    assert.match(limited.quality.resourceLimitation!, /minimum DPR/); assert.equal(limited.quality.effectiveDpr, .5); assert.equal(limited.quality.reason, 'resource-limited');
+    assert.ok(limited.endpointError); assert.ok(!endpoint.calls.some(c => ['session.ensure', 'view.ensure', 'view.configure'].includes(c.method)));
+    endpoint.views.get(user.tenantId)!.set('99999', { viewId: '99999' }); endpoint.calls = [];
+    await control.tick(); await control.tick();
+    assert.ok(endpoint.calls.some(c => c.method === 'view.close' && c.args.orphan));
+    assert.ok(!endpoint.calls.some(c => ['session.ensure', 'view.ensure', 'view.configure'].includes(c.method)));
+    assert.ok(control.productState(user.tenantId).quality.resourceLimitation);
+    await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: w.id, width: 900, height: 700, visible: true }] });
+    assert.equal(control.productState(user.tenantId).quality.resourceLimitation, null); assert.equal(control.productState(user.tenantId).endpointError, null);
+    await control.productAction(user.tenantId, { type: 'window.close', windowId: w.id }, 'lease');
+    assert.equal(control.productState(user.tenantId).workspace.windows.length, 0);
+  } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
 });

@@ -6,7 +6,7 @@ Control启动endpoint_service，以stdin/stdout UTF-8 JSONL管理；stdout只输
 
 | method | 主要语义 |
 |---|---|
-| session.ensure | 显式启动/取得Session，幂等 |
+| session.ensure | 显式启动/取得Session，幂等；accepted不等待导航恢复完成，返回browserIncarnation/recovery |
 | session.snapshot | 只读运行状态、live views、stats、pendingPopups和未确认events；不启动Browser |
 | session.sitePreferences | 完整origin规则表；未启动时缓存，启动前应用；返回accepted/applied |
 | session.mediaPolicy | targetFps/bitrateKbps/maxBitrateKbps/adaptive；每Session独立缓存，requested与真实applied分开 |
@@ -14,13 +14,13 @@ Control启动endpoint_service，以stdin/stdout UTF-8 JSONL管理；stdout只输
 | view.ensure / view.configure | 稳定viewId、URL/viewport/device/visible；configure可带requireRunning防离线维护拉起Browser |
 | view.lifecycle | viewId、discard/restore；accepted/pending/completed分开，可带requireRunning |
 | view.navigate / view.command | 地址或back/forward/reload/stop |
-| view.close / view.close.reply | 正常关闭/确认；force用于明确清理，不能代替用户beforeunload |
+| view.close / view.close.reply | 正常关闭/确认；回复带browserIncarnation、instance、document和原requestId，只能命中原beforeunload；force用于明确清理 |
 | view.adopt | provisionalId、产品分配的viewId及配置；收养真实WebContents，重复同绑定幂等 |
-| view.page.reply | viewId/requestId/instance/document/accept/text；仅标准dialog，过期拒绝 |
+| view.page.reply | viewId/requestId/browserIncarnation/instance/document/accept/text；仅同一运行实例标准dialog，过期拒绝且不启动Browser |
 | rtc.offer / rtc.ice / rtc.close | 当前Session与connectionId下的媒体协商/清理 |
 | shutdown | 正常清理资源与子进程 |
 
-snapshot view的actual/desired为0 live、1 frozen、2 discarded、3 unloaded；包含pending、lifecycle_generation、last_lifecycle、canDiscard/discardBlockReason。不能从accepted推断renderer已完成。
+snapshot view的actual/desired为0 live、1 frozen、2 discarded、3 unloaded；包含pending、lifecycle_generation、last_lifecycle、canDiscard/discardBlockReason。不能从accepted推断renderer已完成。异步恢复时recovery={pending,phase,error}记录Endpoint任务；browserPending/browserDesired保留Browser观察值，投影pending不会把中间空页当作恢复完成。
 
 ## Client↔Control
 

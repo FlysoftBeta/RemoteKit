@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import type { ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, AppliedMediaPolicy } from '../shared/product';
+import type { ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, AppliedMediaPolicy, PendingClose } from '../shared/product';
 import { QualityController } from './quality';
 import type { ControlState, Device } from '../client/types';
 import type { Endpoint } from './endpoint';
@@ -16,7 +16,7 @@ export class Control extends EventEmitter {
   private endpointGeneration = 0;
   private relays = new Map<string, LoopbackRelay>();
   private diagnosticTenants = new Set<string>();
-  private viewers = new Map<string, { id: string; revoke: (reason: 'another-viewer' | 'logout') => void; viewport?: ViewerViewport; feedback?: Record<string, unknown> }>();
+  private viewers = new Map<string, { id: string; authentication?: { identity: string; valid: () => boolean }; revoke: (reason: 'another-viewer' | 'logout') => void; viewport?: ViewerViewport; feedback?: Record<string, unknown> }>();
   private lastViewports = new Map<string, ViewerViewport>();
   private started = new Set<string>();
   private hiddenSince = new Map<string, number>();
@@ -25,7 +25,7 @@ export class Control extends EventEmitter {
   private mediaApplications = new Map<string, { encoded: string; applied: boolean; browserPid?: number }>();
   private qualityControllers = new Map<string, QualityController>();
   private actualMediaPolicies = new Map<string, AppliedMediaPolicy>();
-  private dialogs = new Map<string, (PageDialog & { viewId: string; requestId: string; instance: string; document: string })[]>();
+  private dialogs = new Map<string, (PageDialog & { viewId: string; requestId: string; browserIncarnation: string; instance: string; document: string })[]>();
   constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation) { super(); }
   serial<T>(tenant: string, work: () => Promise<T>): Promise<T> {
     const next = (this.queues.get(tenant) ?? Promise.resolve()).catch(() => {}).then(work);
@@ -40,26 +40,26 @@ export class Control extends EventEmitter {
       if (state.pendingClose?.awaiting) {
         try {
           const snapshot = await this.endpoint.request('session.snapshot', tenant);
-          this.observe(state, snapshot);
+          await this.observe(state, snapshot);
         } catch (error) { this.errors.set(tenant, String(error)); }
       }
       return this.state(tenant);
     });
   }
-  private observe(state: ControlState, snapshot: any) {
+  private async observe(state: ControlState, snapshot: any) {
     if (!Array.isArray(snapshot?.views)) return;
     const before = JSON.stringify(state);
+    const events = (Array.isArray(snapshot.events) ? snapshot.events : []).filter((event: any) => event?.type === 'view.closed' && typeof event.eventId === 'string' && typeof event.viewId === 'string');
     for (const tab of [...state.tabs]) {
       const view = snapshot.views.find((view: any) => String(view.viewId ?? view.id) === tab.webviewId);
+      if (events.some((event: any) => event.viewId === tab.webviewId) || view?.close_state === 'closed') {
+        state.tabs = state.tabs.filter(item => item.id !== tab.id); if (state.pendingClose?.id === tab.id) state.pendingClose = null;
+        if (state.activeTabId === tab.id) state.activeTabId = state.tabs[0]?.id ?? null;
+        if (state.splitTabId === tab.id) state.splitTabId = null;
+        continue;
+      }
       if (state.pendingClose?.id === tab.id) {
-        if (!view || view.close_state === 'closed') {
-          state.tabs = state.tabs.filter(item => item.id !== tab.id); state.pendingClose = null;
-          if (state.activeTabId === tab.id) state.activeTabId = state.tabs[0]?.id ?? null;
-          if (state.splitTabId === tab.id) state.splitTabId = null;
-          continue;
-        }
-        const requestId = view.pending_close?.requestId ?? view.closeRequestId ?? view.close_request_id;
-        if (requestId) state.pendingClose = { id: tab.id, requestId: String(requestId), awaiting: false };
+        this.observePendingClose(state, snapshot, view);
       }
       if (!view) continue;
       if (typeof view.title === 'string') tab.title = view.title.slice(0, 120);
@@ -71,6 +71,7 @@ export class Control extends EventEmitter {
       }
     }
     if (JSON.stringify(state) !== before) this.store.save(state);
+    if (events.length) { const result = await this.endpoint.request('session.events.ack', state.tenantId, { eventIds: events.map((event: any) => event.eventId) }); if (result?.accepted !== true) throw new Error('Endpoint关闭事件尚未确认'); }
   }
   async reconcile(tenant: string) {
     if (!this.diagnosticTenants.has(tenant)) return this.reconcileProduct(tenant);
@@ -78,7 +79,7 @@ export class Control extends EventEmitter {
     try {
       await this.endpoint.request('session.ensure', tenant);
       const snapshot = await this.endpoint.request('session.snapshot', tenant);
-      this.observe(state, snapshot);
+      await this.observe(state, snapshot);
       const actual: { viewId?: string; id?: string }[] = snapshot?.views ?? [];
       // Hide old foreground views before showing new ones, avoiding transient atlas overflow.
       const ordered = [...state.tabs].sort((a, b) => Number(a.id === state.activeTabId || a.id === state.splitTabId) - Number(b.id === state.activeTabId || b.id === state.splitTabId));
@@ -122,10 +123,10 @@ export class Control extends EventEmitter {
           const current = requireTab();
           if (state.pendingClose && state.pendingClose.id !== current.id) throw new ApiError(409, '请先处理当前页面的关闭请求');
           const replying = body.confirm === true || body.cancel === true;
-          if (replying && (state.pendingClose?.id !== current.id || state.pendingClose.requestId !== body.requestId)) throw new ApiError(409, '关闭请求已失效');
-          const result = replying ? await this.endpoint.request('view.close.reply', tenant, { viewId: current.webviewId, accept: body.confirm === true, requestId: body.requestId }) : await this.endpoint.request('view.close', tenant, { viewId: current.webviewId, force: false });
+          if (replying && (state.pendingClose?.id !== current.id || !body.requestId || state.pendingClose.requestId !== body.requestId)) throw new ApiError(409, '关闭请求已失效');
+          const result = replying ? await this.replyClose(tenant, current.webviewId!, state.pendingClose!, body.confirm === true) : await this.endpoint.request('view.close', tenant, { viewId: current.webviewId, force: false });
           if (body.cancel === true) { state.pendingClose = null; this.store.save(state); return this.state(tenant); }
-          if (result?.pending || result?.accepted || result?.status === 'pending' || result?.status === 'accepted') { state.pendingClose = { id: current.id, requestId: result.requestId ?? body.requestId, awaiting: body.confirm === true || !!result.accepted || result.status === 'accepted' }; this.store.save(state); return this.state(tenant); }
+          if (result?.pending || result?.accepted || result?.status === 'pending' || result?.status === 'accepted') { state.pendingClose = replying ? { ...state.pendingClose!, awaiting: true } : this.pendingClose(current.id, result); this.store.save(state); return this.state(tenant); }
           if (!(result?.closed === true || result?.status === 'closed')) throw new ApiError(409, 'Endpoint 尚未确认页面关闭');
           state.tabs = state.tabs.filter(item => item.id !== current.id);
           state.pendingClose = null;
@@ -182,14 +183,14 @@ export class Control extends EventEmitter {
     return this.relays.get(body.connectionId)?.snapshot() ?? { enabled: false };
   }
   productState(tenant: string): ProductState {
-    return { user: this.store.userForTenant(tenant)!, workspace: this.store.workspace(tenant), pageDialogs: (this.dialogs.get(tenant) ?? []).map(({ viewId, requestId, instance, document, ...dialog }) => dialog), quality: this.qualityFor(tenant), endpointGeneration: this.endpointGeneration, endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant) }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
+    return { user: this.store.userForTenant(tenant)!, workspace: this.store.workspace(tenant), pageDialogs: (this.dialogs.get(tenant) ?? []).map(({ viewId, requestId, browserIncarnation, instance, document, ...dialog }) => dialog), quality: this.qualityFor(tenant), endpointGeneration: this.endpointGeneration, endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant) }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
   }
   private push(tenant: string) { this.emit('state', tenant, this.productState(tenant)); }
   private saveProduct(state: ProductWorkspace) { const changed = this.store.saveWorkspace(state); if (changed) this.push(state.tenantId); }
-  assertViewer(tenant: string, lease: string) { if (this.viewers.get(tenant)?.id !== lease) throw new ApiError(409, '此窗口已由另一个 Viewer 接管'); }
-  async attachViewer(tenant: string, id: string, revoke: (reason: 'another-viewer' | 'logout') => void) {
+  assertViewer(tenant: string, lease: string) { const viewer = this.viewers.get(tenant); if (viewer?.id !== lease) throw new ApiError(409, '此窗口已由另一个 Viewer 接管'); if (viewer.authentication && !viewer.authentication.valid()) throw new ApiError(401, '登录已过期'); }
+  async attachViewer(tenant: string, id: string, revoke: (reason: 'another-viewer' | 'logout') => void, authentication?: { identity: string; valid: () => boolean }) {
     this.qualityController(tenant).resetConnection();
-    const old = this.viewers.get(tenant); this.viewers.set(tenant, { id, revoke }); old?.revoke('another-viewer');
+    const old = this.viewers.get(tenant); this.viewers.set(tenant, { id, revoke, authentication }); old?.revoke('another-viewer');
     return this.serial(tenant, async () => {
       this.assertViewer(tenant, id); await this.closeMedia(tenant);
       try { await this.reconcileProduct(tenant); } catch { /* State carries Endpoint error; controls still work offline. */ }
@@ -206,7 +207,7 @@ export class Control extends EventEmitter {
       this.push(tenant);
     });
   }
-  async logout(tenant: string) { const viewer = this.viewers.get(tenant); if (viewer) { viewer.revoke('logout'); await this.detachViewer(tenant, viewer.id); } }
+  async logout(tenant: string, authenticationIdentity: string) { const viewer = this.viewers.get(tenant); if (viewer?.authentication?.identity === authenticationIdentity) { viewer.revoke('logout'); await this.detachViewer(tenant, viewer.id); } }
   private async closeMedia(tenant: string) {
     const previous = this.connections.get(tenant); if (!previous) return;
     try { await this.endpoint.request('rtc.close', tenant, { connectionId: previous }); } catch { }
@@ -243,6 +244,9 @@ export class Control extends EventEmitter {
       if (typeof body.devicePixelRatio !== 'number' || !Number.isFinite(body.devicePixelRatio) || body.devicePixelRatio < .5 || body.devicePixelRatio > 4 || !Array.isArray(body.windows) || body.windows.length > 8 || (body.refreshHz !== undefined && (!Number.isFinite(body.refreshHz) || body.refreshHz < 1 || body.refreshHz > 500))) throw new ApiError(400, '无效的显示区域');
       const ids = new Set<string>();
       for (const w of body.windows) { if (!w || ids.has(w.windowId) || !state.windows.some(item => item.id === w.windowId) || typeof w.visible !== 'boolean' || !Number.isInteger(w.width) || !Number.isInteger(w.height) || w.width < 1 || w.height < 1 || w.width > 8192 || w.height > 8192) throw new ApiError(400, '无效的窗口显示区域'); ids.add(w.windowId); }
+      // Preflight cannot mutate the live controller or replace a valid viewport.
+      const feasibility = new QualityController().snapshot(state, body);
+      if (feasibility.resourceLimitation) throw new ApiError(400, feasibility.resourceLimitation);
       this.viewers.get(tenant)!.viewport = { devicePixelRatio: body.devicePixelRatio, refreshHz: body.refreshHz, windows: body.windows.map((w: any) => ({ windowId: w.windowId, width: w.width, height: w.height, visible: w.visible })) };
       this.lastViewports.set(tenant, this.viewers.get(tenant)!.viewport!);
       try { await this.reconcileProduct(tenant); } catch { }
@@ -272,7 +276,7 @@ export class Control extends EventEmitter {
         case 'tab.command': { const t = tab(); if (!['back', 'forward', 'reload', 'stop'].includes(action.command)) throw new ApiError(400, '未知导航命令'); await this.endpoint.request('view.command', tenant, { viewId: t.webviewId, command: action.command }); break; }
         case 'tab.close': {
           const t = tab(), replying = action.confirm === true || action.cancel === true;
-          if (replying) { if (state.pendingClose?.id !== t.id || state.pendingClose.requestId !== action.requestId) throw new ApiError(409, '关闭请求已失效'); await this.endpoint.request('view.close.reply', tenant, { viewId: t.webviewId, requestId: action.requestId, accept: action.confirm === true }); if (action.cancel === true) { state.pendingClose = null; state.pendingWindowCloseId = null; } else state.pendingClose = { ...state.pendingClose, awaiting: true }; }
+          if (replying) { if (state.pendingClose?.id !== t.id || !action.requestId || state.pendingClose.requestId !== action.requestId) throw new ApiError(409, '关闭请求已失效'); await this.replyClose(tenant, t.webviewId, state.pendingClose, action.confirm === true); if (action.cancel === true) { state.pendingClose = null; state.pendingWindowCloseId = null; } else state.pendingClose = { ...state.pendingClose, awaiting: true }; }
           else await this.closeProductTab(state, t);
           break;
         }
@@ -282,7 +286,7 @@ export class Control extends EventEmitter {
           const dialog = this.dialogs.get(tenant)?.find(d => d.id === action.dialogId);
           if (!dialog || !state.tabs.some(t => t.id === dialog.tabId && t.webviewId === dialog.viewId)) throw new ApiError(410, '页面对话已过期');
           if (dialog.kind === 'alert' && !action.accept) throw new ApiError(400, '提示对话仅支持确认');
-          const result = await this.endpoint.request('view.page.reply', tenant, { viewId: dialog.viewId, requestId: dialog.requestId, instance: dialog.instance, document: dialog.document, accept: action.accept, ...(action.text === undefined ? {} : { text: action.text }) });
+          const result = await this.endpoint.request('view.page.reply', tenant, { viewId: dialog.viewId, requestId: dialog.requestId, browserIncarnation: dialog.browserIncarnation, instance: dialog.instance, document: dialog.document, accept: action.accept, ...(action.text === undefined ? {} : { text: action.text }) });
           if (result?.accepted !== true || result?.browser?.ok !== true) throw new ApiError(409, 'Endpoint未确认页面对话回复');
           this.dialogs.set(tenant, (this.dialogs.get(tenant) ?? []).filter(d => d.id !== dialog.id)); this.push(tenant); break;
         }
@@ -316,12 +320,38 @@ export class Control extends EventEmitter {
     });
   }
   private removeProductTab(state: ProductWorkspace, tab: ProductTab) { state.tabs = state.tabs.filter(t => t.id !== tab.id); const w = state.windows.find(w => w.id === tab.windowId); if (w?.activeTabId === tab.id) w.activeTabId = state.tabs.find(t => t.windowId === w.id)?.id ?? null; if (state.pendingClose?.id === tab.id) state.pendingClose = null; this.hiddenSince.delete(state.tenantId + '/' + tab.webviewId); }
+  private pendingClose(id: string, result: any, windowId?: string): PendingClose {
+    if (typeof result.browserIncarnation !== 'string' || !result.browserIncarnation || result.instance === undefined || result.document === undefined) throw new ApiError(409, 'Endpoint关闭请求缺少页面身份');
+    const nativeRequestId = result.requestId === undefined ? undefined : String(result.requestId);
+    return { id, ...(windowId ? { windowId } : {}), browserIncarnation: result.browserIncarnation, instance: String(result.instance), document: String(result.document),
+      ...(nativeRequestId ? { nativeRequestId, requestId: this.closeToken(result.browserIncarnation, id, String(result.instance), String(result.document), nativeRequestId) } : {}), awaiting: !nativeRequestId };
+  }
+  private closeToken(browser: string, tab: string, instance: string, document: string, request: string) { return createHash('sha256').update(JSON.stringify([browser, tab, instance, document, request])).digest('hex'); }
+  private observePendingClose(state: { pendingClose?: PendingClose | null; pendingWindowCloseId?: string | null }, snapshot: any, view: any) {
+    const pending = state.pendingClose; if (!pending) return;
+    // Offline/replaced targets invalidate confirmation intent, retaining the tab/window.
+    // A missing view alone provides no evidence that a close completed.
+    if (snapshot.running === false || !pending.browserIncarnation || snapshot.browserIncarnation !== pending.browserIncarnation || view && (String(view.instance) !== pending.instance || String(view.document) !== pending.document)) {
+      state.pendingClose = null; state.pendingWindowCloseId = null; return;
+    }
+    const request = view?.pending_close?.requestId ?? view?.closeRequestId ?? view?.close_request_id;
+    if (request !== undefined) {
+      const nativeRequestId = String(request);
+      state.pendingClose = { ...pending, nativeRequestId, requestId: this.closeToken(pending.browserIncarnation, pending.id, pending.instance!, pending.document!, nativeRequestId), awaiting: false };
+    }
+  }
+  private async replyClose(tenant: string, viewId: string, pending: PendingClose, accept: boolean) {
+    if (!pending.browserIncarnation || !pending.instance || !pending.document || !pending.nativeRequestId) throw new ApiError(409, '关闭请求已失效');
+    const result = await this.endpoint.request('view.close.reply', tenant, { viewId, browserIncarnation: pending.browserIncarnation, instance: pending.instance, document: pending.document, requestId: pending.nativeRequestId, accept });
+    if (result?.accepted !== true || result?.browser?.ok !== true) throw new ApiError(409, 'Endpoint未确认关闭请求回复');
+    return result;
+  }
   private async closeProductTab(state: ProductWorkspace, tab: ProductTab) {
     if (state.pendingClose && state.pendingClose.id !== tab.id) throw new ApiError(409, '请先处理当前关闭请求');
     if (tab.popup && tab.popup.status !== 'adopted') { this.removeProductTab(state, tab); return; }
     const result = await this.endpoint.request('view.close', state.tenantId, { viewId: tab.webviewId, force: false });
     if (result.closed === true) this.removeProductTab(state, tab);
-    else if (result.accepted || result.pending) state.pendingClose = { id: tab.id, windowId: tab.windowId, requestId: result.requestId, awaiting: !!result.accepted };
+    else if (result.accepted || result.pending) state.pendingClose = this.pendingClose(tab.id, result, tab.windowId);
     else throw new ApiError(409, 'Endpoint 尚未确认页面关闭');
   }
   private async continueWindowClose(state: ProductWorkspace) {
@@ -336,17 +366,20 @@ export class Control extends EventEmitter {
     try {
       if (!this.viewers.has(tenant)) { await this.observeOffline(tenant); return; }
       const desired = this.store.workspace(tenant);
-      // This operation caches preferences without starting an offline Browser.
-      await this.applySites(tenant, desired);
-      await this.applyMedia(tenant);
-      if (!this.viewers.has(tenant)) { if (this.started.has(tenant)) await this.observeOffline(tenant); return; }
-      const ensured = await this.endpoint.request('session.ensure', tenant); this.started.add(tenant);
-      if (!this.viewers.has(tenant)) { await this.observeOffline(tenant); return; }
-      const applied = this.siteApplications.get(tenant)!;
-      if (!applied.applied || ensured.browserPid !== undefined && applied.browserPid !== ensured.browserPid) await this.applySites(tenant, desired, true, ensured.browserPid);
-      if (!this.siteApplications.get(tenant)?.applied) throw new Error('站点身份尚未应用，等待Endpoint恢复');
-      const media = this.mediaApplications.get(tenant)!;
-      if (!media.applied || ensured.browserPid !== undefined && media.browserPid !== ensured.browserPid) await this.applyMedia(tenant, true, ensured.browserPid);
+      let resourceLimitation = this.qualityFor(tenant, desired).resourceLimitation;
+      if (!resourceLimitation) {
+        // This operation caches preferences without starting an offline Browser.
+        await this.applySites(tenant, desired);
+        await this.applyMedia(tenant);
+        if (!this.viewers.has(tenant)) { if (this.started.has(tenant)) await this.observeOffline(tenant); return; }
+        const ensured = await this.endpoint.request('session.ensure', tenant); this.started.add(tenant);
+        if (!this.viewers.has(tenant)) { await this.observeOffline(tenant); return; }
+        const applied = this.siteApplications.get(tenant)!;
+        if (!applied.applied || ensured.browserPid !== undefined && applied.browserPid !== ensured.browserPid) await this.applySites(tenant, desired, true, ensured.browserPid);
+        if (!this.siteApplications.get(tenant)?.applied) throw new Error('站点身份尚未应用，等待Endpoint恢复');
+        const media = this.mediaApplications.get(tenant)!;
+        if (!media.applied || ensured.browserPid !== undefined && media.browserPid !== ensured.browserPid) await this.applyMedia(tenant, true, ensured.browserPid);
+      }
       // Native source/encoder application may finish after views or RTC exist.
       // Accepted policy is cached before their creation; stats retain unknown actuals.
       const snapshot = await this.endpoint.request('session.snapshot', tenant), state = this.store.workspace(tenant), actual: any[] = Array.isArray(snapshot?.views) ? snapshot.views : [];
@@ -355,32 +388,41 @@ export class Control extends EventEmitter {
       if (!this.viewers.has(tenant)) { await this.observeOffline(tenant); return; }
       await this.observePopups(state, snapshot);
       this.store.prunePopupReceipts(tenant);
+      if (state.pendingClose) this.observePendingClose(state, snapshot, actual.find(v => String(v.viewId ?? v.view ?? v.id) === state.tabs.find(t => t.id === state.pendingClose?.id)?.webviewId));
       for (const t of [...state.tabs]) {
         const current = actual.find(v => String(v.viewId ?? v.view ?? v.id) === t.webviewId);
-        if (!current) { if (state.pendingClose?.id === t.id) this.removeProductTab(state, t); continue; }
+        if (!current) continue;
         if (t.popup?.status === 'pending') t.popup = { provisionalId: t.popup.provisionalId, status: 'adopted' };
         if (current.close_state === 'closed') { this.removeProductTab(state, t); continue; }
-        if (state.pendingClose?.id === t.id) { const requestId = current.pending_close?.requestId ?? current.requestId; if (requestId) state.pendingClose = { ...state.pendingClose, requestId: String(requestId), awaiting: false }; }
-        for (const key of ['title', 'loading', 'canGoBack', 'canGoForward'] as const) if (typeof current[key] === (key === 'title' ? 'string' : 'boolean')) (t as any)[key] = key === 'title' ? current[key].slice(0, 120) : current[key];
-        if (typeof current.url === 'string' && /^(https?:\/\/|about:blank$)/.test(current.url) && (!t.pendingUrl || current.url === t.pendingUrl || current.loading === false)) { t.url = current.url; delete t.pendingUrl; }
+        // Recovery uses an initial blank WebContents, then imports/restores history.
+        // Its intermediate URL/title/history are not a new product navigation.
+        const recovering = current.recovery?.pending === true;
+        if (!recovering) {
+          for (const key of ['title', 'loading', 'canGoBack', 'canGoForward'] as const) if (typeof current[key] === (key === 'title' ? 'string' : 'boolean')) (t as any)[key] = key === 'title' ? current[key].slice(0, 120) : current[key];
+          if (typeof current.url === 'string' && /^(https?:\/\/|about:blank$)/.test(current.url) && (!t.pendingUrl || current.url === t.pendingUrl || current.loading === false)) { t.url = current.url; delete t.pendingUrl; }
+        }
         if (Number.isInteger(current.actual) && current.actual >= 0 && current.actual <= 3) t.residency = (['live', 'frozen', 'discarded', 'unloaded'] as const)[current.actual];
-        t.restoring = !!current.pending && current.desired === 0;
+        t.restoring = recovering || !!current.pending && current.desired === 0;
       }
       await this.continueWindowClose(state); this.saveProduct(state); this.collectDialogs(tenant, state, snapshot);
+      resourceLimitation = this.qualityFor(tenant, state).resourceLimitation;
+      if (snapshot.running === false && !resourceLimitation) throw new Error('Browser已离线，页面保留并等待恢复');
       const viewer = this.viewers.get(tenant), viewport = viewer?.viewport ?? this.lastViewports.get(tenant);
       const wanted = (t: ProductTab) => !!viewer?.viewport?.windows.some(w => w.windowId === t.windowId && w.visible) && state.windows.some(w => w.id === t.windowId && w.activeTabId === t.id) && (state.layoutMode !== 'focused' || t.windowId === state.activeWindowId);
       const ordered = [...state.tabs].sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
-      for (const t of ordered) {
+      for (const t of resourceLimitation ? [] : ordered) {
         if (!this.viewers.has(tenant)) { await this.observeOffline(tenant); return; }
         const current = actual.find(v => String(v.viewId ?? v.view ?? v.id) === t.webviewId), key = tenant + '/' + t.webviewId, visible = wanted(t), region = viewport?.windows.find(w => w.windowId === t.windowId), dpr = this.qualityFor(tenant, state).effectiveDpr;
         if (t.popup?.status === 'failed') continue;
         if (visible) this.hiddenSince.delete(key); else if (!this.hiddenSince.has(key)) this.hiddenSince.set(key, Date.now());
-        const actualState = current?.actual ?? 0;
+        const actualState = current?.actual ?? 0, recovering = current?.recovery?.pending === true;
         let readyToShow = actualState === 0 && !current?.pending;
         if (visible && actualState !== 0 && !current?.pending) {
           const attempt = this.transitions.get(key); if (!attempt || attempt.action !== 'restore' || Date.now() - attempt.at > 12000) { await this.endpoint.request('view.lifecycle', tenant, { viewId: t.webviewId, action: 'restore' }); this.transitions.set(key, { action: 'restore', at: Date.now() }); } readyToShow = false;
         } else if (readyToShow) this.transitions.delete(key);
-        const config = { viewId: t.webviewId, width: region?.width ?? 1440, height: region?.height ?? 900, device: { mode: 'desktop', deviceScaleFactor: dpr }, visible: visible && readyToShow };
+        // Endpoint hides the recovering WebContents while retaining this desired
+        // visibility for its final recovery step. Do not persist a temporary hide.
+        const config = { viewId: t.webviewId, width: region?.width ?? 1440, height: region?.height ?? 900, device: { mode: 'desktop', deviceScaleFactor: dpr }, visible: visible && (recovering || readyToShow) };
         const encoded = JSON.stringify(config);
         if (!current && t.popup?.status === 'pending') {
           try {
@@ -395,7 +437,7 @@ export class Control extends EventEmitter {
           continue;
         }
         if (!current) { await this.endpoint.request('view.ensure', tenant, { ...config, url: t.pendingUrl ?? t.url }); this.configurations.set(key, encoded); }
-        else if (this.configurations.get(key) !== encoded || current.visible !== undefined && current.visible !== config.visible) { await this.endpoint.request('view.configure', tenant, config); this.configurations.set(key, encoded); }
+        else if (this.configurations.get(key) !== encoded || !recovering && current.visible !== undefined && current.visible !== config.visible) { await this.endpoint.request('view.configure', tenant, config); this.configurations.set(key, encoded); }
         if (t.pendingUaReloadOrigin && readyToShow) {
           const requestedOrigin = t.pendingUaReloadOrigin;
           if (current && new URL(t.url).origin === requestedOrigin) await this.endpoint.request('view.command', tenant, { viewId: t.webviewId, command: 'reload' });
@@ -406,13 +448,17 @@ export class Control extends EventEmitter {
         }
       }
       for (const v of actual) { const viewId = String(v.viewId ?? v.view ?? v.id); if (!state.tabs.some(t => t.webviewId === viewId) && !v.provisional && !closedViews.has(viewId)) await this.endpoint.request('view.close', tenant, { viewId, force: true, orphan: true }); }
-      const previousError = this.errors.delete(tenant); if (previousError) this.push(tenant);
+      if (resourceLimitation) {
+        const changed = this.errors.get(tenant) !== resourceLimitation;
+        this.errors.set(tenant, resourceLimitation); if (changed) this.push(tenant);
+      } else { const previousError = this.errors.delete(tenant); if (previousError) this.push(tenant); }
     } catch (error) { this.dialogs.delete(tenant); this.errors.set(tenant, error instanceof Error ? error.message : String(error)); this.push(tenant); throw error; }
   }
   private async observeOffline(tenant: string) {
     // Snapshot is read-only. Maintenance must never revive a missing Browser/view.
     const snapshot = await this.endpoint.request('session.snapshot', tenant), state = this.store.workspace(tenant);
     await this.consumeClosedEvents(state, snapshot); this.dialogs.delete(tenant);
+    if (state.pendingClose) { const tab = state.tabs.find(t => t.id === state.pendingClose?.id); this.observePendingClose(state, snapshot, (snapshot.views ?? []).find((v: any) => String(v.viewId ?? v.view ?? v.id) === tab?.webviewId)); this.saveProduct(state); }
     if (snapshot.running === false) { this.started.delete(tenant); this.siteApplications.delete(tenant); this.mediaApplications.delete(tenant); this.actualMediaPolicies.delete(tenant); this.push(tenant); return; }
     for (const tab of state.tabs) {
       const current = (snapshot.views ?? []).find((view: any) => String(view.viewId ?? view.view ?? view.id) === tab.webviewId);
@@ -437,16 +483,16 @@ export class Control extends EventEmitter {
     this.mediaApplications.set(tenant, { encoded, applied: result.applied === true, browserPid });
   }
   private collectDialogs(tenant: string, state: ProductWorkspace, snapshot: any) {
-    const found: (PageDialog & { viewId: string; requestId: string; instance: string; document: string })[] = [];
+    const found: (PageDialog & { viewId: string; requestId: string; browserIncarnation: string; instance: string; document: string })[] = [];
     for (const view of Array.isArray(snapshot.views) ? snapshot.views : []) {
       const viewId = String(view.viewId ?? view.view ?? view.id), tab = state.tabs.find(t => t.webviewId === viewId);
-      if (!tab || view.instance === undefined || view.document === undefined) continue;
+      if (!tab || snapshot.running === false || typeof snapshot.browserIncarnation !== 'string' || !snapshot.browserIncarnation || view.instance === undefined || view.document === undefined) continue;
       const instance = String(view.instance), document = String(view.document);
       for (const request of Array.isArray(view.pageRequests?.pending) ? view.pageRequests.pending : []) {
         if (!['alert', 'confirm', 'prompt', 'beforeunload'].includes(request.kind) || typeof request.request !== 'string' || state.pendingClose?.id === tab.id && request.kind === 'beforeunload') continue;
         // Browser replacement may restart its local token/request counters.
-        const id = createHash('sha256').update(JSON.stringify([tenant, snapshot.browserPid ?? null, viewId, instance, document, request.request])).digest('hex');
-        found.push({ id, tabId: tab.id, windowId: tab.windowId, viewId, instance, document, requestId: request.request, kind: request.kind, message: String(request.message ?? ''), defaultPrompt: String(request.default_prompt ?? ''), origin: String(request.origin ?? ''), ...(typeof request.is_reload === 'boolean' ? { isReload: request.is_reload } : {}) });
+        const id = createHash('sha256').update(JSON.stringify([tenant, snapshot.browserIncarnation, viewId, instance, document, request.request])).digest('hex');
+        found.push({ id, tabId: tab.id, windowId: tab.windowId, viewId, browserIncarnation: snapshot.browserIncarnation, instance, document, requestId: request.request, kind: request.kind, message: String(request.message ?? ''), defaultPrompt: String(request.default_prompt ?? ''), origin: String(request.origin ?? ''), ...(typeof request.is_reload === 'boolean' ? { isReload: request.is_reload } : {}) });
       }
     }
     const changed = JSON.stringify(found) !== JSON.stringify(this.dialogs.get(tenant) ?? []); this.dialogs.set(tenant, found); if (changed) this.push(tenant);

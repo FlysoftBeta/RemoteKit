@@ -86,6 +86,7 @@ class WebView final : public content::WebContentsObserver,
   // Opaque navigation-only persistence, no external file I/O. Import requires
   // an unloaded adapter and carries no cross-process sessionStorage contents.
   Result<std::string> ExportNavigation() const;
+  std::uint64_t navigation_revision() const { return navigation_revision_; }
   Status ImportNavigation(std::string_view);
   // Return value reports whether a request was accepted. Completion runs once
   // for accepted operations (possibly synchronously). Rejected requests never
@@ -98,6 +99,9 @@ class WebView final : public content::WebContentsObserver,
  private:
   void DevToolsAgentHostAttached(content::DevToolsAgentHost*) override;
   void DidFinishNavigation(content::NavigationHandle*) override;
+  void NavigationEntryCommitted(const content::LoadCommittedDetails&) override;
+  void NavigationEntryChanged(const content::EntryChangedDetails&) override;
+  void NavigationListPruned(const content::PrunedDetails&) override;
   void DidStartNavigation(content::NavigationHandle*) override;
   void ReadyToCommitNavigation(content::NavigationHandle*) override;
   void RenderViewReady() override;
@@ -146,6 +150,7 @@ class WebView final : public content::WebContentsObserver,
   SessionId session_;
   WebViewId view_;
   std::unique_ptr<content::WebContents> contents_;
+  std::uint64_t navigation_revision_ = 1;
   const bool use_offscreen_host_;
   std::unique_ptr<OffscreenHost> offscreen_host_;
   bool render_demand_ = false;

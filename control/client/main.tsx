@@ -59,6 +59,7 @@ function Workspace({
   const [state, setState] = useState<ProductState | null>(null),
     [status, setStatus] = useState<ConnectionStatus>("connecting"),
     [error, setError] = useState(""),
+    [viewportNotice, setViewportNotice] = useState(""),
     [settings, setSettings] = useState(false),
     [, updateMedia] = useState(0),
     [focusAddress, setFocusAddress] = useState<string | null>(null),
@@ -73,7 +74,9 @@ function Workspace({
     ),
     latest = useRef(state),
     statusRef = useRef(status),
-    generation = useRef<number | undefined>(undefined);
+    generation = useRef<number | undefined>(undefined),
+    viewportRequest = useRef(0),
+    viewportFailure = useRef("");
   latest.current = state;
   statusRef.current = status;
   const sendViewport = useCallback(() => {
@@ -99,7 +102,18 @@ function Workspace({
             (all || w.id === current.workspace.activeWindowId),
         })),
       };
-      void connection.current?.request("viewport", params).catch(() => {});
+      const request = ++viewportRequest.current;
+      void connection.current?.request("viewport", params).then(() => {
+        if (request !== viewportRequest.current) return;
+        viewportFailure.current = ""; setViewportNotice("");
+      }).catch((failure) => {
+        if (request !== viewportRequest.current || statusRef.current !== "online") return;
+        const notice = /minimum DPR|atlas|显示区域|窗口显示区域|resource|budget/i.test(errorMessage(failure))
+          ? "当前画面尺寸超出可用范围，已保留原尺寸；请缩小窗口后重试。"
+          : "暂时无法更新画面尺寸，请稍后重试。";
+        if (viewportFailure.current === notice) return;
+        viewportFailure.current = notice; setViewportNotice(notice);
+      });
     }, 100);
   }, []);
   const onGeometry = useCallback(
@@ -157,6 +171,7 @@ function Workspace({
     document.addEventListener("visibilitychange", sendViewport);
     return () => {
       active = false;
+      viewportRequest.current++;
       clearTimeout(viewportTimer.current);
       media.disconnect();
       socket.close();
@@ -242,9 +257,10 @@ function Workspace({
           {status === "failed" ? "暂时无法连接" : "正在恢复连接…"}
         </Alert>
       )}
-      {(error || state.endpointError) && (
-        <Alert severity="warning" onClose={() => setError("")}>
-          {error || state.endpointError}
+      {(error || viewportNotice || state.endpointError) && (
+        <Alert severity="warning" onClose={() => { setError(""); setViewportNotice(""); }}
+          sx={!error && (viewportNotice || state.quality.resourceLimitation) ? { position: "absolute", top: 8, left: 12, right: 12, zIndex: 1400 } : undefined}>
+          {error || viewportNotice || (state.quality.resourceLimitation ? "当前画面尺寸超出可用范围，请缩小窗口或关闭部分窗口。" : state.endpointError)}
         </Alert>
       )}
       <div className={`window-workspace ${sideBySide ? "side-by-side" : ""}`}>

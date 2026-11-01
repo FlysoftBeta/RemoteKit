@@ -1447,6 +1447,9 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
   }
   contents_ = std::move(restored.value);
   BrowserContext::InstallSiteIdentity(contents_.get());
+  // Attaching the host may activate a restored controller synchronously. Watch
+  // before attachment so DidStartNavigation can bind its completion identity.
+  Observe(contents_.get());
   AttachOffscreenHost();
   const int configured_width = viewport_width_;
   const int configured_height = viewport_height_;
@@ -1454,7 +1457,6 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
   ConfigureDevice(configured_width, configured_height, tablet_, device_scale_,
                   match_page_backing_);
   visible_ = false;
-  Observe(contents_.get());
   auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
   implementation->GetInputEventRouter();
   implementation->GetTouchEmulator(true);
@@ -1587,6 +1589,18 @@ void WebView::ReadyToCommitNavigation(content::NavigationHandle* navigation) {
   if (input_frame_ && NavigationAffectsFrame(navigation, input_frame_.get()))
     ReleaseKeyboard(false, true);
   ReleasePointer(true);
+}
+// NavigationEntryChanged includes renderer-reported PageState updates (form
+// values and scroll), not just cross-document commits. No renderer polling is
+// needed to know whether the last export has become stale.
+void WebView::NavigationEntryCommitted(const content::LoadCommittedDetails&) {
+  ++navigation_revision_;
+}
+void WebView::NavigationEntryChanged(const content::EntryChangedDetails&) {
+  ++navigation_revision_;
+}
+void WebView::NavigationListPruned(const content::PrunedDetails&) {
+  ++navigation_revision_;
 }
 void WebView::DidFinishNavigation(content::NavigationHandle* navigation) {
   input_commit_navigations_.erase(navigation->GetNavigationId());

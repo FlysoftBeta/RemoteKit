@@ -458,6 +458,10 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply) {
   if (found == pending_.end())
     return Result("unknown_or_finished_request");
   auto* request = found->second.get();
+  if (reply.FindBool("close_only").value_or(false) &&
+      (close_state_ != "closing" || request->type != Pending::Type::dialog ||
+       !request->data.FindBool("beforeunload").value_or(false)))
+    return Result("closing_beforeunload_required");
   if (reply.FindBool("dialog_only").value_or(false) && request->type != Pending::Type::dialog)
     return Result("standard_dialog_required");
   auto* frame = request->document.AsRenderFrameHostIfValid();

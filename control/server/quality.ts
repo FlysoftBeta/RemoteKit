@@ -1,3 +1,4 @@
+import { feasibleDpr } from './atlas-plan';
 import type { AppliedMediaPolicy, ProductFeedback, ProductQuality, ProductWorkspace, ViewerViewport } from '../shared/product';
 const presets = { quality: { pixels: 3840 * 2160, fps: 50, bitrate: 44000, max: 48000 }, auto: { pixels: 1920 * 1080, fps: 52, bitrate: 36000, max: 44000 }, smooth: { pixels: 1600 * 900, fps: 60, bitrate: 24000, max: 36000 } };
 export class QualityController {
@@ -34,12 +35,17 @@ export class QualityController {
   snapshot(workspace: ProductWorkspace, viewport?: ViewerViewport, now = Date.now(), manual = false, applied: AppliedMediaPolicy | null = null): ProductQuality {
     const preset = presets[workspace.settings.qualityPreference], scale = workspace.settings.clientScaleOverride ?? viewport?.devicePixelRatio ?? 1;
     const visible = viewport?.windows.filter(w => w.visible && workspace.windows.some(window => window.id === w.windowId && !!window.activeTabId) && (workspace.layoutMode !== 'focused' || w.windowId === workspace.activeWindowId)) ?? [];
-    const area = visible.reduce((total, w) => total + w.width * w.height, 0), base = area ? Math.min(1, Math.sqrt(preset.pixels / (area * scale * scale))) : 1;
+    const area = visible.reduce((total, w) => total + w.width * w.height, 0), areaBase = area ? Math.min(1, Math.sqrt(preset.pixels / (area * scale * scale))) : 1;
+    let base = areaBase, resourceLimitation: string | null = null;
+    if (!manual) {
+      try { base = feasibleDpr(visible, scale * areaBase) / scale; }
+      catch (error) { resourceLimitation = error instanceof Error ? error.message : String(error); base = .5 / scale; }
+    }
     this.minimumFactor = Math.min(1, .5 / (scale * base)); this.factor = Math.max(this.minimumFactor, this.factor);
     const valid = !!this.last && now >= this.last.wallAt && now - this.last.wallAt <= 5000;
     const hz = valid && Number.isFinite(this.last!.value.displayHzEstimate) && this.last!.value.displayHzEstimate! >= 1 && this.last!.value.displayHzEstimate! <= 500 ? this.last!.value.displayHzEstimate! : 60;
     const fps = Math.max(1, Math.min(preset.fps, Math.floor(hz)));
     const requested = { targetFps: fps, bitrateKbps: preset.bitrate, maxBitrateKbps: preset.max, adaptive: true };
-    return { mode: manual ? 'manual' : 'product', preference: workspace.settings.qualityPreference, clientScale: scale, baseResolutionFactor: base, adaptiveResolutionFactor: manual ? 1 : this.factor, effectiveDpr: Math.max(.5, Math.min(4, scale * base * (manual ? 1 : this.factor))), pixelBudget: preset.pixels, targetFps: fps, requested, applied, estimatedLatencyMs: valid ? this.last!.value.presentationLatencyMs : null, clockUncertaintyMs: valid ? this.last!.value.clockUncertaintyMs : null, feedbackStatus: valid ? 'valid' : this.last ? 'stale' : 'unknown', reason: manual ? 'diagnostic-fixed-configuration' : this.reason };
+    return { resourceLimitation, mode: manual ? 'manual' : 'product', preference: workspace.settings.qualityPreference, clientScale: scale, baseResolutionFactor: base, adaptiveResolutionFactor: manual ? 1 : this.factor, effectiveDpr: Math.max(.5, Math.min(4, scale * base * (manual ? 1 : this.factor))), pixelBudget: preset.pixels, targetFps: fps, requested, applied, estimatedLatencyMs: valid ? this.last!.value.presentationLatencyMs : null, clockUncertaintyMs: valid ? this.last!.value.clockUncertaintyMs : null, feedbackStatus: valid ? 'valid' : this.last ? 'stale' : 'unknown', reason: resourceLimitation ? 'resource-limited' : manual ? 'diagnostic-fixed-configuration' : this.reason };
   }
 }

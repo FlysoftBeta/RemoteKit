@@ -14,13 +14,13 @@ Control、Endpoint与Browser的职责分开：Control拥有产品关系与期望
 
 一个User对应一个workspace及Tenant/Session；一个workspace有多个Window，每Window独立activeTab。平铺Tab通过windowId归属，关闭最后一个Tab保留空Window。布局变窄只切换可见Window，不搬动或合并Tab。
 
-SQLite迁移保留旧Tab/WebView引用及token。旧匿名身份仍标为legacy，专用自动化使用隔离legacy会话；正常新用户通过注册/登录获得独立工作区。当前每用户单活跃Viewer，新连接接管旧连接，旧端停止媒体且不自动争夺。
+SQLite迁移保留旧Tab/WebView引用及token。旧匿名身份仍标为legacy，专用自动化使用隔离legacy会话；正常新用户通过注册/登录获得独立工作区。当前每用户单活跃Viewer，新连接接管旧连接，旧端停止媒体且不自动争夺。租约绑定token身份，注销/切换账号只撤销同token租约；旧token退出不踢另一个token的活跃Viewer。
 
 ## 操作、对账与恢复
 
 每Tenant操作串行。Control先保存产品意图，再调用Endpoint，实际状态通过快照和WS更新；接受导航或恢复不等于页面已完成。周期对账只在值变化时配置页面，避免周期性打断输出和输入。
 
-在线恢复顺序是下发完整站点规则和媒体策略、确保Session、再恢复/创建所需WebView。Endpoint优先使用内部导航恢复数据；没有可用数据时才使用Control持有的有限地址信息。Control不保存或解释PageState。
+在线恢复顺序是下发完整站点规则和媒体策略、确保Session、再恢复/创建所需WebView。Endpoint优先使用内部导航恢复数据；没有可用数据时才使用Control持有的有限地址信息。Control不保存或解释PageState。恢复由定时状态机分步推进，不在session.ensure逐页等待；恢复期间Control保留产品URL/导航意图，显示restoring，不把中间about:blank写回产品状态。Browser navigationRevision覆盖同文档history和PageState变化，Endpoint按导出revision更新恢复文件。
 
 离线维护不启动Browser，也不补建缺失WebView。session.snapshot是观察；Browser退出时返回running:false。对仍运行的页做隐藏/回收时带requireRunning，避免快照之后进程退出又被维护请求拉起。自然关闭与崩溃丢对象用不同证据处理。
 
@@ -34,9 +34,9 @@ SQLite迁移保留旧Tab/WebView引用及token。旧匿名身份仍标为legacy�
 
 window.open产生的真实WebContents先进入pending容器，不进入普通orphan集合。Control先持久化产品Window/Tab与viewId，再adopt该对象，保留opener和sessionStorage。前台/后台Tab进入opener的Window；new window/popup产生独立Window，尺寸由Viewer真实布局决定。
 
-pending上限16、30秒超时；关闭/过期对象不会按URL伪装为成功收养。自然window.close产生持久view.closed事件，Control先删除产品关联再ACK；重放幂等。未确认事件达到256时拒绝新增view，不静默丢事件。
+pending上限16、30秒超时；关闭/过期对象不会按URL伪装为成功收养。自然window.close产生持久view.closed事件，Control先删除产品关联再ACK；重放幂等。Endpoint持久化关闭事件及desired移除后再ACK Browser，Browser删除完整事件墓碑，但保留本进程紧凑关闭ID集合防旧ID复活。未确认事件达到256时拒绝新增view，不静默丢事件。
 
-alert/confirm/prompt和导航beforeunload是临时pageDialogs。对话身份绑定Browser进程、view、instance、document和request；回复前刷新检查，Browser执行点再次校验。后台页显示待处理标记，可见activeTab的请求用MUI Dialog处理。关Tab的beforeunload由pendingClose流程处理，避免重复对话；取消不删Tab。
+alert/confirm/prompt和导航beforeunload是临时pageDialogs。对话身份绑定不可复用的browserIncarnation、view、instance、document和request；回复前刷新检查，Endpoint只向相同运行实例发送，Browser执行点再次校验。关闭确认的公共requestId为完整身份哈希，原生请求号只在服务端保存。后台页显示待处理标记，可见activeTab的请求用MUI Dialog处理。关Tab的beforeunload由pendingClose流程处理，避免重复对话；取消不删Tab；离线或Browser替换取消旧关闭意图并保留Tab。只有明确关闭响应/状态/持久事件才删除，缺页不是关闭证据。
 
 ## 站点身份与画质
 
@@ -57,3 +57,6 @@ tablet UA按HTTP(S) origin保存。首次导航、redirect、history、reload和
 ## 代码入口与验证
 
 状态/请求类型：[shared/product.ts](../control/shared/product.ts)；数据库：[store.ts](../control/server/store.ts)；产品对账：[control.ts](../control/server/control.ts)；HTTP/WS：[http.ts](../control/server/http.ts)；媒体接收：[transport.ts](../control/client/transport.ts)。运行方式见[Control入口](../control/README.md)，接口见[串流协议](streaming-protocol.md)。实际验收及已知限制集中在[当前状态](current-state.zh-CN.md)。
+
+
+几何规划同时约束面积、单轴、padding和alignment；Control与Endpoint使用共享fixture核对确定性规划。DPR可低于1，实际viewport不变。最低DPR仍无法分配时返回resourceLimitation；不可行resize保留旧有效布局并显示提示，状态查询、关窗和后续resize仍可用。输出暂停后通过Browser原子viewConfigs提交最终布局，避免横竖布局切换产生超限中间矩形。
