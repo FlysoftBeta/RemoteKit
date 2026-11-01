@@ -10,6 +10,7 @@ import { createTrackProcessor, processorRtpTimestamp, type TrackProcessor, type 
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource }
 export type FrameSource = 'video' | 'track-processor';
+interface ProcessorFrameOwner { frame: VideoFrame; rtp: number; source: ProcessorSource }
 interface ProcessorSource { processor: TrackProcessor; reader: ReadableStreamDefaultReader<ProcessorVideoFrame>; peer: RTCPeerConnection; attempt: number }
 
 /** All endpoint wire adaptation lives here; the UI never owns recovery state. */
@@ -18,7 +19,9 @@ export class RemoteTransport {
   private activeFrameSource: FrameSource = 'video';
   private processorSource: ProcessorSource | undefined;
   private processorRaf: number | undefined;
-  private pendingProcessorFrame: { frame: VideoFrame; rtp: number; source: ProcessorSource } | undefined;
+  private pendingProcessorFrame: ProcessorFrameOwner | undefined;
+  private latestProcessorFrame: ProcessorFrameOwner | undefined;
+  private retiringProcessorOwners = 0;
   private processorCounts = { total: undefined as number | undefined, discarded: undefined as number | undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: 0, height: 0 };
   receiveProfile: ReceiveProfile = loadReceiveProfile();
   signaling: Record<string, unknown> | undefined;
@@ -100,7 +103,8 @@ export class RemoteTransport {
     this.renderers.add(renderer);
     const cached = this.paintedPlanes.get(identity.view.id);
     if (this.rendererCurrent(renderer) && this.displayReady) {
-      if (this.displayFrame) this.paintPlane(renderer, this.displayFrame, identity.view, 'atlas');
+      if (this.activeFrameSource === 'track-processor' && this.latestProcessorFrame) this.paintPlane(renderer, this.latestProcessorFrame.frame, identity.view, 'plane-frame');
+      else if (this.displayFrame) this.paintPlane(renderer, this.displayFrame, identity.view, 'atlas');
       else if (cached && planeMatchesLayout(cached.identity, this.layout) && cached.source.rtpTimestamp === this.displayedRtp) {
         // Retain the existing plane bitmap across a static same-layout remount.
         const copiesBitmap = cached.canvas !== canvas;
@@ -223,50 +227,52 @@ export class RemoteTransport {
   }
   private getProcessorDiagnostics() {
     const processor = this.processorSource?.processor;
-    return { ...this.processorCounts, total: processor?.totalFrames ?? this.processorCounts.total, discarded: processor?.discardedFrames ?? this.processorCounts.discarded };
+    return { ...this.processorCounts, drawing: this.activeFrameSource === 'track-processor' ? 'immutable-frame-planes' : 'inactive', atlasSnapshotCopies: 0, ownersHeld: Number(!!this.pendingProcessorFrame) + Number(!!this.latestProcessorFrame) + this.retiringProcessorOwners, pendingOwners: Number(!!this.pendingProcessorFrame), displayedOwners: Number(!!this.latestProcessorFrame), retiringOwners: this.retiringProcessorOwners, total: processor?.totalFrames ?? this.processorCounts.total, discarded: processor?.discardedFrames ?? this.processorCounts.discarded };
   }
   private processorCurrent(source: ProcessorSource) { return this.peer === source.peer && this.attempt === source.attempt && this.processorSource === source; }
   private closePendingProcessorFrame() {
     const pending = this.pendingProcessorFrame; this.pendingProcessorFrame = undefined;
     if (pending) { pending.frame.close(); this.processorCounts.ownerClosed++; }
   }
+  private processorFrameAlreadyDisplayed(rtp: number) { return !!this.latestProcessorFrame && this.latestProcessorFrame.rtp === rtp && this.displayedRtp === rtp && this.displayedEpoch === this.layout?.epoch && this.displayReady; }
+  private closeLatestProcessorFrame() {
+    const latest = this.latestProcessorFrame; this.latestProcessorFrame = undefined;
+    if (latest) { latest.frame.close(); this.processorCounts.ownerClosed++; }
+  }
   private scheduleProcessorPresentation() {
-    const source = this.processorSource;
-    if (!source || !this.processorCurrent(source) || this.processorRaf !== undefined) return;
-    const matchingSnapshot = this.pendingSnapshotRtp !== undefined && this.frameGate.epochFor(this.pendingSnapshotRtp) === this.layout?.epoch && this.layout && this.pendingFrame.width === this.layout.width && this.pendingFrame.height === this.layout.height;
-    if (!this.pendingProcessorFrame && !matchingSnapshot) return;
+    const source = this.processorSource, pending = this.pendingProcessorFrame, layout = this.layout;
+    if (pending && this.processorFrameAlreadyDisplayed(pending.rtp)) { this.closePendingProcessorFrame(); return; }
+    if (!source || !this.processorCurrent(source) || this.processorRaf !== undefined || !pending || !layout || this.frameGate.epochFor(pending.rtp) !== layout.epoch || pending.frame.displayWidth !== layout.width || pending.frame.displayHeight !== layout.height) return;
     const id = requestAnimationFrame(() => {
       if (this.processorRaf !== id) return;
       this.processorRaf = undefined;
       if (!this.processorCurrent(source)) return;
       this.processorCounts.rafCallbacks++;
-      const pending = this.pendingProcessorFrame; this.pendingProcessorFrame = undefined;
+      if (this.presentationMode !== 'snapshot') { this.processorCounts.invalid++; this.processorFailed(new Error('track-processor 接收路径只支持 snapshot 呈现。')); return; }
+      // Reads can replace the candidate while RAF is pending. Admission never
+      // changes the last painted authorization until this exact frame matches.
+      const candidate = this.pendingProcessorFrame, layout = this.layout;
+      if (candidate && this.processorFrameAlreadyDisplayed(candidate.rtp)) { this.closePendingProcessorFrame(); return; }
+      if (!candidate || candidate.source !== source || !layout || this.frameGate.epochFor(candidate.rtp) !== layout.epoch || candidate.frame.displayWidth !== layout.width || candidate.frame.displayHeight !== layout.height) return;
+      this.pendingProcessorFrame = undefined;
+      const old = this.latestProcessorFrame;
+      this.latestProcessorFrame = candidate; this.retiringProcessorOwners += Number(!!old);
       try {
-        if (this.presentationMode !== 'snapshot') throw new Error('track-processor 接收路径只支持 snapshot 呈现。');
-        if (pending) {
-          if (pending.source !== source) return;
-          const { frame, rtp } = pending, width = frame.displayWidth, height = frame.displayHeight;
-          this.processorCounts.rafAdmitted++;
-          this.pendingSnapshotRtp = undefined;
-          if (this.pendingFrame.width !== width || this.pendingFrame.height !== height) { this.pendingFrame.width = width; this.pendingFrame.height = height; }
-          const context = this.pendingFrame.getContext('2d', { alpha: false });
-          if (!context) throw new Error('无法创建 track-processor 快照画布。');
-          const start = performance.now(); context.drawImage(frame, 0, 0);
-          this.presentation.cost('processorSnapshot', start, performance.now() - start);
-          this.pendingSnapshotRtp = rtp; this.routing.snapshotFrames++;
-        }
-        this.authorizeFrame(true);
-      } catch (error) {
-        if (this.processorCurrent(source)) { this.processorCounts.invalid++; this.processorFailed(error); }
+        this.frameGate.observe(candidate.rtp);
+        this.beginAuthorizedFrame();
+        this.processorCounts.rafAdmitted++; this.processorCounts.authorized++;
+        // All planes read the same immutable frame. Canvas keeps its own GPU
+        // resource references after drawImage returns; no atlas snapshot copy.
+        this.dispatchPaint(() => { for (const renderer of this.renderers) this.paintPlane(renderer, candidate.frame, renderer.view, 'plane-frame'); });
       } finally {
-        if (pending) { pending.frame.close(); this.processorCounts.ownerClosed++; }
+        if (old) { old.frame.close(); this.processorCounts.ownerClosed++; this.retiringProcessorOwners--; }
       }
     });
     this.processorRaf = id;
   }
   private stopProcessorPump() {
     if (this.processorRaf !== undefined) cancelAnimationFrame(this.processorRaf);
-    this.processorRaf = undefined; this.closePendingProcessorFrame();
+    this.processorRaf = undefined; this.closePendingProcessorFrame(); this.closeLatestProcessorFrame();
     const source = this.processorSource;
     if (!source) return;
     this.processorCounts.total = source.processor.totalFrames;
@@ -313,6 +319,7 @@ export class RemoteTransport {
               if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw new Error('track-processor 返回无效的视频尺寸。');
               this.processorCounts.width = width; this.processorCounts.height = height;
               this.diagnostics.videoWidth = width; this.diagnostics.videoHeight = height;
+              if (this.processorFrameAlreadyDisplayed(rtp)) continue;
               // Clone ownership before closing the read result. At most one
               // decoded frame waits for display admission; replacing it avoids a copy.
               if (this.pendingProcessorFrame) { this.closePendingProcessorFrame(); this.processorCounts.replaced++; }
@@ -369,14 +376,8 @@ export class RemoteTransport {
     };
     this.frameCallback = video.requestVideoFrameCallback(receive);
   }
-  private authorizeFrame(fromProcessorRaf = false) {
-    if (this.activeFrameSource === 'track-processor' && !fromProcessorRaf) { this.scheduleProcessorPresentation(); return; }
-    if (this.activeFrameSource === 'track-processor') {
-      // Inspect a candidate without changing the currently displayed authorization.
-      // Late metadata, wrong epoch and wrong geometry must leave that plane intact.
-      if (this.pendingSnapshotRtp === undefined || !this.layout || this.frameGate.epochFor(this.pendingSnapshotRtp) !== this.layout.epoch || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
-      this.frameGate.observe(this.pendingSnapshotRtp);
-    }
+  private authorizeFrame() {
+    if (this.activeFrameSource === 'track-processor') { this.scheduleProcessorPresentation(); return; }
     if (!this.frameGate.ready || !this.layout || this.pendingSnapshotRtp !== this.frameGate.rtpTimestamp || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
     if (this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout.epoch) return;
     // Swap the authorized snapshot rather than copying the atlas a second time.
@@ -384,7 +385,6 @@ export class RemoteTransport {
     this.pendingSnapshotRtp = undefined;
     this.snapshotRtp = this.frameGate.rtpTimestamp; this.snapshotEpoch = this.layout.epoch;
     this.beginAuthorizedFrame();
-    if (this.activeFrameSource === 'track-processor') this.processorCounts.authorized++;
     this.dispatchPaint(() => { for (const renderer of this.renderers) this.paintPlane(renderer, this.authorizedFrame, renderer.view, 'atlas'); });
   }
   private beginAuthorizedFrame() {
@@ -422,19 +422,20 @@ export class RemoteTransport {
     this.dispatchPaint(() => { if (this.paintPlane(renderer!, this.video, renderer!.view, 'plane')) this.routing.directFrames++; });
     return true;
   }
-  private paintPlane(renderer: PlaneRenderer, image: HTMLCanvasElement | HTMLVideoElement, rect: PixelRect, kind: 'atlas' | 'plane') {
+  private paintPlane(renderer: PlaneRenderer, image: HTMLCanvasElement | HTMLVideoElement | VideoFrame, rect: PixelRect, kind: 'atlas' | 'plane' | 'plane-frame') {
     if (!this.rendererCurrent(renderer)) { this.countReason(this.routing.skippedRenderer, 'identity-epoch-geometry'); renderer.ready(false); return false; }
     if (!this.displayReady || this.displayedRtp === undefined || !this.layout) { renderer.ready(false); return false; }
     if (renderer.view.stale) { this.countReason(this.routing.skippedRenderer, 'source-not-ready'); renderer.ready(false); return false; }
     const view = renderer.view, node = renderer.canvas, context = node.getContext('2d');
-    const imageWidth = 'videoWidth' in image ? image.videoWidth : image.width, imageHeight = 'videoHeight' in image ? image.videoHeight : image.height;
+    const imageWidth = 'displayWidth' in image ? image.displayWidth : 'videoWidth' in image ? image.videoWidth : image.width, imageHeight = 'displayHeight' in image ? image.displayHeight : 'videoHeight' in image ? image.videoHeight : image.height;
     if (!context || rect.x < 0 || rect.y < 0 || rect.width !== view.width || rect.height !== view.height || rect.x + rect.width > imageWidth || rect.y + rect.height > imageHeight) { this.countReason(this.routing.skippedRenderer, 'source-dimensions'); renderer.ready(false); return false; }
     const start = performance.now();
     if (node.width !== view.width || node.height !== view.height) { node.width = view.width; node.height = view.height; }
-    if (image !== node) context.drawImage(image, rect.x, rect.y, rect.width, rect.height, 0, 0, node.width, node.height);
+    try { if (image !== node) context.drawImage(image, rect.x, rect.y, rect.width, rect.height, 0, 0, node.width, node.height); }
+    catch (error) { if (kind !== 'plane-frame') throw error; this.countReason(this.routing.skippedRenderer, 'draw-failed'); renderer.ready(false); return false; }
     const paintedAt = performance.now(), paintedWallTime = Date.now();
     this.presentation.cost('viewportDraw', start, paintedAt - start, view.id);
-    const source: PresentedPlaneSource = { image: kind === 'atlas' ? image : node, sourceRect: kind === 'atlas' ? { x: view.x, y: view.y, width: view.width, height: view.height } : { x: 0, y: 0, width: view.width, height: view.height }, kind, viewId: view.id, rtpTimestamp: this.displayedRtp, layoutEpoch: this.layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1) };
+    const source: PresentedPlaneSource = { image: kind === 'atlas' ? image : node, sourceRect: kind === 'atlas' ? { x: view.x, y: view.y, width: view.width, height: view.height } : { x: 0, y: 0, width: view.width, height: view.height }, kind: kind === 'plane-frame' ? 'plane' : kind, viewId: view.id, rtpTimestamp: this.displayedRtp, layoutEpoch: this.layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1) };
     this.paintedPlanes.set(view.id, { identity: { view: { ...view }, layoutEpoch: this.layout.epoch, layoutGeneration: this.layout.generation }, canvas: node, source });
     if (kind === 'atlas') this.directEpochReady = this.layout.epoch;
     this.reportPresented(view.id, this.displayedRtp, paintedAt, paintedWallTime);
@@ -457,6 +458,7 @@ export class RemoteTransport {
       try {
         const message = JSON.parse(String(event.data));
         if (message.type === 'layout' && Array.isArray(message.views)) {
+          if (this.activeFrameSource === 'track-processor' && this.layout && (this.layout.epoch !== message.epoch || this.layout.generation !== message.generation || this.layout.width !== message.width || this.layout.height !== message.height || this.layout.views.length !== message.views.length || this.layout.views.some(view => !message.views.some((next: Surface) => samePlane(view, next))))) { this.closePendingProcessorFrame(); this.closeLatestProcessorFrame(); this.frameGate.observe(undefined); }
           this.layout = message;
           for (const [id, plane] of this.paintedPlanes) if (!planeMatchesLayout(plane.identity, this.layout)) { this.paintedPlanes.delete(id); this.viewPresentations.delete(id); }
           for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) renderer.ready(false);

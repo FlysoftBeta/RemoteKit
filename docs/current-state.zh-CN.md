@@ -16,7 +16,9 @@
 
 自适应源准入已实播：3租户提升到21.17–23.74FPS/p95 152–156ms；按授权转2租户后，关闭策略为22.99/23.42FPS、p95 444/401ms，开启为35.11/31.33FPS、p95 91/99ms。实际render配置与target/applied一致，几何、epoch、CRC保持，控制无错误。两租户延迟达标，FPS尚差15–19；正在拆分源GPU中的绘制、合成、捕获与复制成本，不能把进程占用全部算为网页绘制。详见[源准入实验](../develop/docs/source-budget-runtime.md)。
 
-源GPU细分已落实到真实flush：页面child批次约1.49ms、最终offscreen root约1.04ms，目标尺寸和sample count正常；请求/完成观察的百毫秒间隔不等于绘制执行。默认关闭的RemoteKitCaptureRoot改为捕获独立WebView root，实际将两pass合为一个六quad pass。原像素、CRC、resize、DPR2回退child再回root、点击与IME均通过；两租户profile-off为37.50/34.89FPS、p95 104/108ms，固定55反而饱和，仍未达标。下一对照减少客户端snapshot复制。详见[GPU计时](../develop/docs/viz-gpu-timing.md)和[root捕获](../develop/docs/root-capture-runtime.md)。
+源GPU细分已落实到真实flush：页面child批次约1.49ms、最终offscreen root约1.04ms，目标尺寸和sample count正常；请求/完成观察的百毫秒间隔不等于绘制执行。默认关闭的RemoteKitCaptureRoot改为捕获独立WebView root，实际将两pass合为一个六quad pass。原像素、CRC、resize、DPR2回退child再回root、点击与IME均通过；两租户profile-off为37.50/34.89FPS、p95 104/108ms，固定55反而饱和，仍未达标。详见[GPU计时](../develop/docs/viz-gpu-timing.md)和[root捕获](../develop/docs/root-capture-runtime.md)。
+
+TrackProcessor现已让全部plane直接读取同一个不可变VideoFrame，省去应用层整atlas快照复制，默认video/Chrome89保留。两租户为39.24/42.68FPS、p95 108/105ms，GPU均值81.62%；固定源52FPS后，编码约42.5FPS、canvas约40FPS、p95 128/126ms，GPU97.78%，不能靠提高准入帧率补足差距。65项测试、生产构建、真实双plane/DPR缩放/静态重挂载/输入/重连及Chrome89回归通过。下一候选是安全租用共享槽以省Endpoint私有BGRA复制，尚未验证。详见[不可变帧实验](../develop/docs/immutable-frame-runtime.md)。
 
 客户端single-plane-direct真实跳过snapshot后为37.16/33.85FPS、p95 116/132ms，无收益；Chrome89首帧、输入、重连通过。TrackProcessor实播发现并修复read提前使已呈现画面不可输入的问题，保留真正epoch变化的输入拒绝；read→RAF空隙输入、静止/恢复、重连、owner释放及Chrome89默认video回归均通过。两租户MSTP+Canvas snapshot为39.07/41.47FPS、p95 103/107ms，CRC全部有效，未达标；背景GPU变化使跨组差值不能全归因该路径。下一候选直接用immutable VideoFrame绘制各plane，省掉整atlas中间Canvas复制。详见[直接video对照](../develop/docs/client-direct-runtime.md)和[MSTP验证](../develop/docs/processor-runtime.md)。
 

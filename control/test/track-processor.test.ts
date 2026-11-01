@@ -48,7 +48,7 @@ function setup(t: test.TestContext) {
   return { transport, internal, video, options, readers, rafs, raf, canvas, view, layout, message, metadata, frame, start, videoCallbacks: () => videoCallbacks };
 }
 
-test('processor snapshots bind exact RTP including zero; late metadata cannot borrow newer pixels', async t => {
+test('immutable processor frames bind exact RTP including zero; late metadata cannot borrow newer pixels', async t => {
   const s = setup(t); s.start(); assert.equal(s.readers[0].reads, 1);
   assert.deepEqual(s.options, [{ track: { kind: 'video' }, maxBufferSize: 1 }]);
   const first = s.frame(0); s.readers[0].resolve({ done: false, value: first.value }); await flush(); s.raf();
@@ -83,13 +83,10 @@ for (const rtp of [undefined, -1, 0x100000000, 1.5, NaN]) test(`invalid processo
   assert.match(s.transport.diagnostics.error!, /rtpTimestamp/); assert.equal(s.readers[0].cancelled, 1); assert.equal(s.readers[0].released, 1); assert.equal(s.videoCallbacks(), 0);
 });
 
-test('processor metadata and canvas failures close frames and invalidate pending authorization', async t => {
+test('processor metadata failures close frames and invalidate pending authorization', async t => {
   const s = setup(t); s.start(); const frame = s.frame(1); frame.value.metadata = () => { throw new Error('metadata unavailable'); };
   s.readers[0].resolve({ done: false, value: frame.value }); await flush(); s.raf();
   assert.equal(frame.state.closed, 1); assert.equal(s.transport.displayReady, false); assert.match(s.transport.diagnostics.error!, /metadata unavailable/);
-  s.start(); const next = s.frame(2); s.internal.pendingFrame.getContext = () => ({ drawImage() { throw new Error('canvas failed'); } });
-  s.readers[1].resolve({ done: false, value: next.value }); await flush(); s.raf(); s.metadata(2);
-  assert.equal(next.state.closed, 1); assert.equal(s.transport.displayReady, false); assert.match(s.transport.diagnostics.error!, /canvas failed/);
 });
 
 test('processor read failure, absent API, and direct-mode combination are explicit errors', async t => {
@@ -131,7 +128,7 @@ test('an ended processor stream releases its reader and leaves input disabled', 
   assert.match(s.transport.diagnostics.error!, /已结束/);
 });
 
-test('one RAF admits only the latest decoded owner and closes superseded owners before copying', async t => {
+test('one RAF admits the latest owner and retains it until replacement or disconnect', async t => {
   const s = setup(t); s.start();
   const first = s.frame(10), latest = s.frame(11);
   s.metadata(10); s.metadata(11);
@@ -140,10 +137,12 @@ test('one RAF admits only the latest decoded owner and closes superseded owners 
   s.readers[0].resolve({ done: false, value: latest.value }); await flush();
   assert.equal(first.state.ownerClosed, 1); assert.equal(latest.state.closed, 1);
   assert.equal(s.rafs.size, 1); assert.equal(s.canvas.draws.length, 0);
-  s.raf(); assert.equal(s.canvas.bitmap, 'pixels-11'); assert.equal(s.canvas.draws.length, 1); assert.equal(latest.state.ownerClosed, 1);
+  s.raf(); assert.equal(s.canvas.bitmap, 'pixels-11'); assert.equal(s.canvas.draws.length, 1); assert.equal(latest.state.ownerClosed, 0);
   const counts = s.transport.presentationDiagnostics.processor;
-  assert.equal(counts.read, 2); assert.equal(counts.rafAdmitted, 1); assert.equal(counts.replaced, 1); assert.equal(counts.canvas, 1); assert.equal(counts.ownerClosed, 2);
+  assert.equal(counts.read, 2); assert.equal(counts.rafAdmitted, 1); assert.equal(counts.replaced, 1); assert.equal(counts.canvas, 1); assert.equal(counts.ownerClosed, 1); assert.equal(counts.ownersHeld, 1); assert.equal(counts.atlasSnapshotCopies, 0);
+  assert.equal(s.transport.presentationDiagnostics.presentationRouting.snapshotFrames, 0);
   assert.equal(s.rafs.size, 0); s.raf(); s.metadata(11); assert.equal(s.rafs.size, 0); assert.equal(s.canvas.draws.length, 1);
+  s.transport.disconnect(); assert.equal(latest.state.ownerClosed, 1); assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0);
 });
 
 test('disconnect before RAF releases the pending owner and cancels presentation', async t => {
@@ -154,10 +153,10 @@ test('disconnect before RAF releases the pending owner and cancels presentation'
   cancelledCallback(performance.now()); assert.equal(s.canvas.draws.length, 0); assert.equal(s.transport.displayReady, false);
 });
 
-test('late metadata authorizes its captured snapshot only at the next RAF and then goes idle', async t => {
+test('late metadata retains its immutable owner until next RAF admission and then goes idle', async t => {
   const s = setup(t); s.start(); const frame = s.frame(0);
   s.readers[0].resolve({ done: false, value: frame.value }); await flush(); s.raf();
-  assert.equal(frame.state.ownerClosed, 1); assert.equal(s.rafs.size, 0); assert.equal(s.canvas.draws.length, 0);
+  assert.equal(frame.state.ownerClosed, 0); assert.equal(s.rafs.size, 0); assert.equal(s.canvas.draws.length, 0);
   s.metadata(0); assert.equal(s.canvas.draws.length, 0); assert.equal(s.rafs.size, 1);
   s.raf(); assert.equal(s.canvas.bitmap, 'pixels-0'); assert.equal(s.canvas.draws.length, 1); assert.equal(s.rafs.size, 0);
   s.raf(); assert.equal(s.canvas.draws.length, 1); assert.equal(s.transport.presentationDiagnostics.processor.rafAdmitted, 1);
@@ -175,10 +174,81 @@ test('pending processor reads and unmatched metadata preserve only the actually 
   assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), true, 'unmatched candidate cannot revoke input');
   s.metadata(2); assert.equal(s.transport.presentedFrame?.rtpTimestamp, 1); s.raf();
   assert.equal(s.transport.presentedFrame?.rtpTimestamp, 2); assert.equal(s.canvas.bitmap, 'pixels-2');
-  assert.equal(candidate.state.closed, 1); assert.equal(candidate.state.ownerClosed, 1);
+  assert.equal(candidate.state.closed, 1); assert.equal(candidate.state.ownerClosed, 0); assert.equal(first.state.ownerClosed, 1);
   s.message({ ...s.layout, epoch: '2', generation: '2', width: 800 });
+  assert.equal(candidate.state.ownerClosed, 1); assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0);
   assert.equal(s.transport.displayReady, false); assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), false, 'geometry epoch immediately revokes old input');
   const waiting = s.frame(3); s.readers[0].resolve({ done: false, value: waiting.value }); await flush();
   s.transport.disconnect(); assert.equal(waiting.state.closed, 1); assert.equal(waiting.state.ownerClosed, 1);
   s.raf(); assert.equal(s.transport.displayReady, false); assert.equal(s.canvas.bitmap, 'pixels-2');
+});
+
+
+test('immutable atlas owner feeds offset scaled planes and static remount without snapshot or new frame', async t => {
+  const s = setup(t); s.start();
+  const a = { ...s.view, x: 4, y: 8, width: 256, height: 224, deviceScaleFactor: 2, mediaScale: .5 };
+  const b = { ...s.view, id: '2', x: 272, y: 16, width: 256, height: 224, deviceScaleFactor: 2, mediaScale: .5 };
+  s.message({ ...s.layout, epoch: '2', views: [a, b] });
+  const ca = new Canvas(), cb = new Canvas();
+  const remove = s.transport.registerPlane({ view: a, layoutEpoch: '2', layoutGeneration: '1' }, ca as any, () => {});
+  s.transport.registerPlane({ view: b, layoutEpoch: '2', layoutGeneration: '1' }, cb as any, () => {});
+  const frame = s.frame(20); s.metadata(20, '2'); s.readers[0].resolve({ done: false, value: frame.value }); await flush(); s.raf();
+  assert.equal(ca.draws[0][0], cb.draws[0][0]); assert.equal(ca.bitmap, 'pixels-20'); assert.equal(cb.bitmap, 'pixels-20');
+  assert.deepEqual(ca.draws[0].slice(1), [4, 8, 256, 224, 0, 0, 256, 224]);
+  assert.deepEqual(cb.draws[0].slice(1), [272, 16, 256, 224, 0, 0, 256, 224]);
+  const source = s.transport.getPresentedPlane('2', 20)!;
+  assert.equal(source.image, cb); assert.equal(source.kind, 'plane'); assert.deepEqual(source.sourceRect, { x: 0, y: 0, width: 256, height: 224 }); assert.equal(source.pixelsPerDip, 1);
+  assert.equal(s.transport.sendInput(b, { type: 'mouse', x: 100, y: 80 }), true);
+  remove(); ca.isConnected = false;
+  const remount = new Canvas(), before = s.transport.presentationDiagnostics.processor.canvas;
+  s.transport.registerPlane({ view: a, layoutEpoch: '2', layoutGeneration: '1' }, remount as any, () => {});
+  assert.equal(remount.draws[0][0], cb.draws[0][0], 'remount reads immutable frame rather than copying old canvas');
+  assert.equal(remount.bitmap, 'pixels-20'); assert.equal(s.transport.presentationDiagnostics.processor.canvas, before);
+  assert.equal(frame.state.ownerClosed, 0); assert.equal(s.transport.displayFrame, undefined);
+  const next = s.frame(21); s.metadata(21, '2'); s.readers[0].resolve({ done: false, value: next.value }); await flush();
+  assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 2);
+  let heldInDispatch = 0; s.transport.subscribePresentedFrames(() => { heldInDispatch = s.transport.presentationDiagnostics.processor.ownersHeld; }); s.raf();
+  assert.equal(heldInDispatch, 2); assert.equal(frame.state.ownerClosed, 1); assert.equal(next.state.ownerClosed, 0);
+  s.transport.disconnect(); assert.equal(next.state.ownerClosed, 1); assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0);
+});
+
+test('failed plane draw does not count paint or release its owner and remount can retry', async t => {
+  const s = setup(t); s.start();
+  s.canvas.getContext = () => ({ drawImage() { throw new Error('draw failed'); } });
+  const frame = s.frame(30); s.metadata(30); s.readers[0].resolve({ done: false, value: frame.value }); await flush(); s.raf();
+  assert.equal(s.transport.getLastPresentation('1'), undefined); assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), false);
+  assert.equal(s.transport.presentationDiagnostics.processor.canvas, 0); assert.equal(s.transport.presentationDiagnostics.presentationRouting.skippedRenderer['draw-failed'], 1);
+  assert.equal(frame.state.ownerClosed, 0); assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 1);
+  s.canvas.isConnected = false; const fresh = new Canvas();
+  s.transport.registerPlane({ view: s.view, layoutEpoch: '1', layoutGeneration: '1' }, fresh as any, () => {});
+  assert.equal(fresh.bitmap, 'pixels-30'); assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), true);
+  assert.equal(s.transport.presentationDiagnostics.processor.canvas, 1); assert.equal(frame.state.ownerClosed, 0);
+  s.transport.disconnect(); assert.equal(frame.state.ownerClosed, 1);
+});
+
+
+test('changing processor mode before scheduled RAF rejects admission and releases both owners', async t => {
+  const s = setup(t); s.start(); const first = s.frame(40); s.metadata(40);
+  s.readers[0].resolve({ done: false, value: first.value }); await flush(); s.raf();
+  const second = s.frame(41); s.metadata(41); s.readers[0].resolve({ done: false, value: second.value }); await flush();
+  s.transport.presentationMode = 'single-plane-direct'; s.raf();
+  assert.equal(s.canvas.bitmap, 'pixels-40'); assert.equal(first.state.ownerClosed, 1); assert.equal(second.state.ownerClosed, 1);
+  assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0); assert.equal(s.transport.sendInput(s.view, { type: 'mouse' }), false);
+  assert.match(s.transport.diagnostics.error!, /snapshot/);
+});
+
+
+test('duplicate displayed RTP closes the read without cloning, replacing pending, or inventing paint', async t => {
+  const s = setup(t); s.start(); const first = s.frame(50); s.metadata(50);
+  s.readers[0].resolve({ done: false, value: first.value }); await flush(); s.raf();
+  const before = s.transport.presentationDiagnostics.processor, duplicate = s.frame(50);
+  duplicate.value.clone = () => { throw new Error('duplicate must not clone'); };
+  s.readers[0].resolve({ done: false, value: duplicate.value }); await flush();
+  assert.equal(duplicate.state.closed, 1); assert.equal(s.rafs.size, 0); assert.equal(s.canvas.draws.length, 1);
+  let after = s.transport.presentationDiagnostics.processor;
+  assert.equal(after.canvas, before.canvas); assert.equal(after.authorized, before.authorized); assert.equal(after.rafAdmitted, before.rafAdmitted); assert.equal(after.ownersHeld, 1); assert.equal(first.state.ownerClosed, 0);
+  const next = s.frame(51); s.metadata(51); s.readers[0].resolve({ done: false, value: next.value }); await flush();
+  const lateDuplicate = s.frame(50); s.readers[0].resolve({ done: false, value: lateDuplicate.value }); await flush();
+  assert.equal(lateDuplicate.state.closed, 1); assert.equal(next.state.ownerClosed, 0); s.raf(); assert.equal(s.canvas.bitmap, 'pixels-51');
+  s.transport.disconnect(); assert.equal(next.state.ownerClosed, 1); assert.equal(first.state.ownerClosed, 1);
 });
