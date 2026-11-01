@@ -43,10 +43,10 @@ class PatchsetTests(unittest.TestCase):
     def manifest(self, entries):
         patchset.MANIFEST.write_text(json.dumps({"schema_version": 1, "patches": entries}), encoding="utf-8")
 
-    def run_tool(self, command):
+    def run_tool(self, command, *args):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = patchset.main(["--chromium-root", str(self.root), command])
+            code = patchset.main(["--chromium-root", str(self.root), command, *args])
         return code, out.getvalue(), err.getvalue()
 
     def test_apply_revert_and_idempotency(self):
@@ -80,6 +80,34 @@ class PatchsetTests(unittest.TestCase):
         self.manifest([])
         for command in ("status", "apply", "revert"):
             self.assertEqual(self.run_tool(command)[0], 0)
+
+    def test_record_selected_paths_roundtrip(self):
+        (self.root / "new.txt").write_text("before\n", encoding="utf-8")
+        self.git("add", "new.txt")
+        self.git("commit", "-qm", "second file")
+        self.assertEqual(self.run_tool("apply")[0], 0)
+        (self.root / "new.txt").write_text("after\n", encoding="utf-8")
+        self.assertEqual(self.run_tool("record", "--id", "two", "--file", "new.txt")[0], 0)
+        entries = json.loads(patchset.MANIFEST.read_text())["patches"]
+        self.assertEqual(entries[0], self.entry)
+        self.assertEqual([entry["id"] for entry in entries], ["one", "two"])
+        self.assertEqual(self.run_tool("status")[0], 0)
+        self.assertEqual(self.run_tool("revert")[0], 0)
+        self.assertEqual((self.root / "new.txt").read_text(), "before\n")
+        self.assertEqual(self.run_tool("apply")[0], 0)
+        self.assertEqual((self.root / "new.txt").read_text(), "after\n")
+
+    def test_record_rejects_overlap_and_untracked(self):
+        self.assertEqual(self.run_tool("apply")[0], 0)
+        (self.root / "file.txt").write_text("second change\n", encoding="utf-8")
+        before = patchset.MANIFEST.read_bytes()
+        code, _, err = self.run_tool("record", "--id", "two", "--file", "file.txt")
+        self.assertEqual(code, 1)
+        self.assertIn("already patched", err)
+        (self.root / "untracked.txt").write_text("no\n", encoding="utf-8")
+        self.assertEqual(self.run_tool("record", "--id", "two", "--file", "untracked.txt")[0], 1)
+        self.assertEqual(patchset.MANIFEST.read_bytes(), before)
+        self.assertEqual(sorted(path.name for path in self.patches.glob("*.patch")), ["one.patch"])
 
 
 if __name__ == "__main__":

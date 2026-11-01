@@ -3,6 +3,7 @@ import argparse
 import json
 import statistics
 from pathlib import Path
+from streaming_metrics import load_metrics
 
 
 def distribution(values):
@@ -22,7 +23,7 @@ def series(values):
 
 
 def analyze(case):
-    records = [json.loads(line)["metrics"] for line in (case/"metrics/client-metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+    records = [record["metrics"] for record in load_metrics(case/"metrics/client-metrics.jsonl")]
     clients = [record for record in records if record.get("kind") == "streaming-benchmark"]
     output = []
     source_documents = [json.loads(path.read_text(encoding="utf-8")) for path in (case/"source-trace").glob("*.json")]

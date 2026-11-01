@@ -10,6 +10,7 @@ import json
 import re
 import statistics
 from pathlib import Path
+from streaming_metrics import load_metrics
 
 
 def read_lines(path):
@@ -26,7 +27,7 @@ def dist(values):
 
 
 def analyze(root):
-    envelopes = read_lines(root/'metrics/client-metrics.jsonl')
+    envelopes = load_metrics(root/'metrics/client-metrics.jsonl')
     reports = {r['tenantId']: r['metrics'] for r in envelopes
                if r.get('metrics', {}).get('kind') == 'streaming-benchmark'}
     browsers = {}

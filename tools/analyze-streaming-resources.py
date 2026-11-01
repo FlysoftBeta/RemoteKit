@@ -4,6 +4,7 @@ import collections
 import json
 import statistics
 from pathlib import Path
+from streaming_metrics import load_metrics
 
 
 def summary(values):
@@ -16,8 +17,8 @@ def summary(values):
 
 
 def analyze(case):
-    metrics = [json.loads(line).get("metrics", {}) for line in
-               (case/"metrics/client-metrics.jsonl").read_text(encoding="utf-8").splitlines()]
+    metrics = [record.get("metrics", {}) for record in
+               load_metrics(case/"metrics/client-metrics.jsonl")]
     clients = [m for m in metrics if m.get("kind") == "streaming-benchmark"]
     start = min(m["startedWall"] for m in clients)
     end = max(m["startedWall"]+m["elapsedMs"] for m in clients)

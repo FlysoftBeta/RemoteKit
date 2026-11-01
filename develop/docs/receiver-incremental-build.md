@@ -37,3 +37,27 @@ out/rel/args.gn备份到 `develop/tmp/receiver-incremental-build/args.before-202
 | chrome_elf.dll | 1,591,296 | `c7d725e630b4f85fd20752412c97001949b58359a3ff06599a6e54534aa28d8d` |
 
 完整日志与机器可读产物：`develop/tmp/receiver-incremental-build/chrome-plan.log`、`chrome-build.log`、`build-timing.json`、`artifacts.json`。未启动浏览器或运行GPU；CPU/GPU资源已交还主 Agent，下一步由runtime在新binary上验证publication与synthetic60真实串流/marker。
+
+## 0005精准模拟刷新后续增量
+
+主 Agent审阅接受0005（SHA256 `9215c41dddf06248a5b743a57c7c7777e0b2f18b9a09c4981d7a05a85002239a`）后，独占CPU窗口再次执行 `autoninja -C out/rel chrome -j 16`，没有gen、改args或clean。56步/43.77秒成功，skip97,677，外层44.932秒，16:34:47–16:35:31（UTC+8）。chrome.dll链接14.62秒。
+
+最新chrome.dll大小340,850,688字节，SHA256 `a0f2e596eb42fed41ccc69faa53a97db195e5ed971d04862cee8f3002cbe6637`；chrome.exe壳未变，hash仍为 `f833f59831e7d428e1527bf1e12c0d4a2b338a0cbd4239a050f280c1c62ea62a`。两者产品名Chromium、版本157.0.8103.15。out/dev及SDK未动，patchset status五项applied；没有GPU/浏览器运行，资源已交还主 Agent。
+
+记录：`develop/tmp/receiver-incremental-build/synthetic-deadline-build.log`、`synthetic-deadline-timing.json`、`synthetic-deadline-artifacts.json`。
+
+## 配对高精度timer请求修正版
+
+0005当前hash为 `f90452cb86b58970f4162a1eb8c350f99f0d33f28c45b1992c3a099f8e345ebd`，恢复整个fake等待期间与旧Sleep路径相同的成对高精度timer请求，避免把进程timer语义变化混入cadence优化。独占CPU窗口 `autoninja -C out/rel chrome -j 16` 成功：48步/33.56秒，skip97,685；外层34.711秒，16:51:03–16:51:38（UTC+8）。没有gen、clean、改args或out/dev/SDK变化。
+
+当前chrome.dll SHA256 `5809b86306592699ceb34aa75546411c77782550cd8800b75eca153ab1dc3332`，chrome.exe仍 `f833f59831e7d428e1527bf1e12c0d4a2b338a0cbd4239a050f280c1c62ea62a`。patchset五项applied；没有GPU/浏览器运行，不预称性能改善。资源已交还主 Agent，后续单变量运行验证。
+
+记录：`develop/tmp/receiver-incremental-build/synthetic-paired-timer-build.log`、`synthetic-paired-timer-timing.json`、`synthetic-paired-timer-artifacts.json`。
+
+## 0006 rVFC候选增量
+
+主 Agent审阅接受默认关闭的0006后，独占CPU窗口 `autoninja -C out/rel chrome -j 16` 成功：48步/45.46秒，skip97,685；外层46.571秒，16:57:21–16:58:07（UTC+8）。无需编译修正；0006 hash仍 `3b3630da6e53ed8d5d852e3a0ea7b9235c08f00baba009d0cd262184fe6261d7`，0005保持f90452，patchset六项applied。
+
+当前chrome.dll SHA256 `20c0f298d2012b6841ba8acb7af7f62dc6df23a40f899073c9d74dd0fc034fcc`，chrome.exe仍 `f833f59831e7d428e1527bf1e12c0d4a2b338a0cbd4239a050f280c1c62ea62a`。没有gen、clean、改args或out/dev变化；未运行浏览器/GPU，资源交还后由runtime使用同binary进行feature off/on配对。
+
+记录：`develop/tmp/receiver-incremental-build/rvfc-cadence-build.log`、`rvfc-cadence-timing.json`、`rvfc-cadence-artifacts.json`。

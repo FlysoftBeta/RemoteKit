@@ -1,6 +1,6 @@
 # 精准 synthetic60 接收端实播
 
-2026-11-01，全部CPU构建结束后的独占GPU窗口，host-managed Playwright，正式prepare/benchmark/resource工具。精准fake60把空页实际RAF恢复到60Hz；单1080两次实播仍未在同组同时达到canvas≥50FPS与marker p95≤100ms。四1080 compositor30仍把GPU占满，没有追加render60。
+2026-11-01，全部CPU构建结束后的独占GPU窗口，host-managed Playwright，正式prepare/benchmark/resource工具。精准fake60把空页实际RAF恢复到60Hz；恢复等待期间高精度timer请求后，单1080复测在同组达到canvas50.77FPS、marker p9576ms。相同binary首次为51.53FPS/p95123ms，单租户稳定性仍需改进。四1080 compositor30仍把GPU占满，没有追加render60。
 
 ## 配置、指纹与空页检查
 
@@ -85,3 +85,53 @@ GPU3D99.85%，因此没有追加compositor60。源绘制仍约30FPS，但atlas�
 每组保留config、fingerprints、metrics/client-metrics.jsonl、source-trace、endpoint-responses.jsonl、resource-samples.jsonl、resource-summary.json，以及本轮派生stage-summary.json/segments-summary.json。复测无pageerror、RTC close200/63.4ms；四组peer无pageerror、close均200/57.8–156.3ms，未见drain timeout。
 
 所有自建接收端、source与Control已关闭，3001/3013无监听，host-managed正式browser_close完成，GPU交还主Agent。未修改产品/fixture/默认参数、未构建或提交。
+
+## 恢复等待期间高精度timer请求的单变量验证
+
+新独占窗口在构建结束后开始。receiver DLL SHA256 `5809B86306592699CEB34AA75546411C77782550CD8800B75ECA153AB1DC3332`：保留精准deadline/waitable timer，同时恢复等待期间的高精度timer请求。与上两组精准60相比，只变receiver DLL和对应patch manifest；source、SDK、Endpoint、fixture、Client bundle及全部实验参数的指纹不变。没有四租户扩展或额外trace。
+
+新组目录 `develop/tmp/precise-timer-request-fake60-t1`、`develop/tmp/precise-timer-request-fake60-t1-repeat`，仍5+30秒/marker1Hz/ResourceProfile，所有原始及派生stage/segments/resource摘要保存齐全。
+
+| 同组指标 | 恢复timer请求首次 | 同配置复测 |
+|---|---:|---:|
+| source RAF/render FPS |59.99|59.99|
+| atlas FPS |60.04|60.05|
+| encode FPS |58.07|60.01|
+| decode FPS |57.91|59.95|
+| 接收端RAF Hz |59.92|59.96|
+| metadata presentedFrames FPS |57.97|59.97|
+| 真实rVFC/authorized/canvas FPS |51.53|50.77|
+| marker p50/p95/p99 ms |73/123/123|57/76/107|
+| CRC有效/无效 |30/0|30/0|
+| worker平均队列等候ms |1.784|0.560|
+| pendingReplaced增量 |58|0|
+| marker同步readback p95ms |20.6|11.6|
+
+复测在同组同时达到单租户FPS≥50与p95≤100ms，真实source/encoded/video仍1936×1088、mediaScale1，未降分辨率或关闭marker。首次p95123仍超标，因此此次单变量不能证明稳定性问题已解决，也不覆盖四租户目标。两次有效elapsed30023/30019.4ms，Endpoint error/errorDrops0、atlasPoolDrops0、RTC packetsLost/framesDropped0、frameGate missed0、整形器丢包0，全部可见，无pageerror。RTC close分别HTTP200/398.5ms与200/55.1ms。
+
+| 分段统计ms | 首次 | 复测 |
+|---|---:|---:|
+| capture→ready快照p50/p95 |14.33/16.93|4.59/7.52|
+| lastEncode快照p50/p95 |8.04/14.19|6.40/9.05|
+| GPU copy快照p50/p95 |4.74/11.49|2.97/5.66|
+| RTC平均decode |1.075|0.825|
+| RTC平均jitter buffer |3.532|3.941|
+| RTC平均processing |4.695|4.834|
+| receive→rVFC p50/p95 |11.9/17.2|8.6/15.5|
+| presentation→rVFC p50/p95 |10.5/15.8|7.5/14.0|
+
+首次两次123ms marker，同RTP的render→receive分别107.3/106.0ms，receive→canvas15.7/17.0ms；复测唯一107ms异常分别104.5/2.5ms。异常仍主要位于接收帧到达之前，而不是收到视频后的JS绘制。首次编码58而source/atlas60，并伴pendingReplaced58，不能把首次延迟增加单归接收端timer或rVFC相位。快照与累计平均的口径沿用上节，不冒充异常帧的逐帧server trace。
+
+| 引擎/角色平均占用% | 首次 | 复测 |
+|---|---:|---:|
+|3D总计|82.04|76.13|
+|3D sourceGPU|25.07|22.91|
+|3D sourceBrowser|5.23|4.75|
+|3D Endpoint|18.26|17.77|
+|3D receiverGPU|18.81|16.81|
+|VideoDecode总计|18.24|17.38|
+|VideoDecode Endpoint|11.08|10.55|
+|VideoDecode receiverGPU|7.16|6.84|
+|VideoProcessing Endpoint/总计|7.53|7.04|
+
+完整资源窗口30/29个样本，GPU errors0、resource.err为空；采样器平均0.05840/0.05557 CPU核，collection117.83/85.71ms。期间没有CPU构建或其他GPU任务重叠。两组自建浏览器/Control/source均已退出，3001/3013无监听，正式browser_close已完成，GPU已释放。没有修改产品/fixture或提交。

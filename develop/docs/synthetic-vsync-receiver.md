@@ -95,17 +95,33 @@ $env:vs2026_install = 'C:/Program Files/Microsoft Visual Studio/18/Community'
 
 不建议为独立Chrome接收端调用 `tools/chromium.py build --target chrome`：该工具同时stage RemoteKit overlay并补充root_extra_deps，给纯客户端构建增加无关变动。现有out/rel的build.ninja已有chrome目标，GL静态库是 `obj/ui/gl/gl_wrapper.lib`，涉及代码变化时正常增量最终链接chrome.dll。
 
-## 后备补丁点（尚未选择、尚未实施）
+## 精准模拟刷新补丁（精度请求修正已编译）
 
-如果实测官方开关仍无法保持≥50Hz，最小增强可留在 `ui/gl/vsync_thread_win.cc/.h` 的fake-only分支：持有下一绝对deadline，使用专用高精度waitable timer，迟到跳过过期tick，不补发burst；空闲/恢复时重置deadline。这样真实DXGI/DComp及fallback行为不变，不需添加重复开关。时间戳应代表实际发出，deadline用于控制节拍；保证无observer后没有持续唤醒。
+后续runtime测得已有fake60的RAF约56.5、video counter约55而canvas约47；fake120可使canvas约51.98/p95约76ms，上游约54.3不变。主 Agent因此选择先把模拟60Hz本身改为准确phase，不改rVFC或renderer算法。这里的后续数值来自主 Agent交接摘要，不混入上表空页预检。
 
-如果确需上述Chromium tracked修改，必须生成有序patch并登记 `patches/manifest.json` SHA256，再复用out/rel增量链接。当前调查没有改任何patch或Chromium文件。
+已在Chromium `ui/gl/vsync_thread_win.cc/.h`实现fake-only等待，生成 `patches/0005-synthetic-vsync-deadline.patch`，当前SHA256 `f90452cb86b58970f4162a1eb8c350f99f0d33f28c45b1992c3a099f8e345ebd`，追加为manifest第五项，原四项内容/hash/顺序保留。
+
+- 首次、observer集合清空、suspend或任务长闲置（至少四周期）后，从当前单调时间+interval建立phase。
+- 以绝对deadline计算每次剩余时间，懒创建带 `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` 的auto-reset一次性timer；创建失败尝试普通timer，arm/wait失败回到原Sleep机制。
+- 每次真实醒来后按整数interval跳过过期槽，下一deadline严格在未来；任务进来时已经迟到也跳过过期槽，不burst、不把每轮Sleep向上取整累计进phase。
+- WaitForSingleObject超时限于当前剩余周期的毫秒向上取整；不使用INFINITE，不引入超出原Sleep周期的固定长等待。整个fake等待期间保留旧Sleep路径成对 `ActivateHighResolutionTimer(true/false)` 请求，不论采用waitable timer或Sleep；Sleep降级内部不再嵌套请求。
+- 保留原WaitForVSync尾部的实际TimeTicks::Now()通知、PostTaskIfNeeded/observer停等逻辑。timer周期参数为0，idle没有新增循环唤醒。handle仅在VSync线程访问，由ScopedHandle持有，声明在Thread之前，保证比线程存活更久。
+
+源码自审确认：真实DXGI/DComp等待分支及其Sleep fallback没有变；保护phase重置位的锁不跨等待持有。fake分支将interval统一限制为至少1ms，同一个值用于等待与Notify；60/120Hz不变，极高Hz也不会因取整为0而空转，helper以DCHECK检查正值。SetWaitableTimer使用负100ns相对时间，phase仍由单调TimeTicks决定，不依赖墙钟。高精度timer创建失败会尝试普通timer；Set/Wait运行期失败则直接使用Sleep降级。
+
+正式 `tools/patchset.py record`新增显式id/file生成入口，只接受root内tracked文件，拒绝与前序patch文件重叠，使用literal pathspec限定diff，并原子更新manifest。6项工具测试通过（含新patch顺序/roundtrip与重叠/未跟踪拒绝），patchset status五项全部applied；Chromium clang-format与diff check通过。
+
+主 Agent接受独立审阅与1ms边界修复后，已在唯一CPU窗口执行 `autoninja -C out/rel chrome -j 16`：56步/43.77秒成功，skip97,677；未修改args、gen或clean。新chrome.dll SHA256为 `a0f2e596eb42fed41ccc69faa53a97db195e5ed971d04862cee8f3002cbe6637`，exe壳hash仍为 `f833f59831e7d428e1527bf1e12c0d4a2b338a0cbd4239a050f280c1c62ea62a`，均Chromium157.0.8103.15。out/dev与SDK未动；未启动浏览器/GPU，真实节拍与串流交由runtime后续检查。记录位于 `develop/tmp/receiver-incremental-build/synthetic-deadline-*`。
+
+该次构建对应旧0005 hash `9215c41dddf06248a5b743a57c7c7777e0b2f18b9a09c4981d7a05a85002239a`。后续源码审阅发现它除改cadence外，还取消了旧Sleep等待期间的进程高精度timer请求；当前修正版把请求移到整个fake等待循环之外，保留旧语义。循环内只有continue或break，没有提前return；所有break到达唯一false配对，Sleep没有第二次请求，方法返回前恢复。它是否影响同GPU进程延迟任务或解释实测延迟，需要后续A/B，尚未确定根因。
+
+当前f90452修正版已在唯一CPU窗口增量编译：48步/33.56秒，skip97,685，外层34.711秒；没有gen、clean、改args或out/dev/SDK变化。最新chrome.dll SHA256 `5809b86306592699ceb34aa75546411c77782550cd8800b75eca153ab1dc3332`，exe壳hash仍为上面的f833f598；未启动GPU/浏览器，不预称性能改善。记录位于 `develop/tmp/receiver-incremental-build/synthetic-paired-timer-*`。
 
 ## 清除旧产物来源的增量方案与成本
 
 当前tracked `chrome/app/theme/chromium/BRANDING` 已是官方Chromium，`build/config/chrome_build.gni`也是基线、无本地diff。当前args没有PRTS自定义GN项；旧项目注释不是编译开关。`is_chrome_branded=false`、H.264 codec、release/O2、非component及symbols0都可保留。Widevine/CDM几项来自既有配置，串流接收页不需要，后续宜删除这些显式启用项并采用官方默认；变动涉及CDM边界，不应为改产品名而翻转整个branding编译flag。
 
-已经直接发现陈旧生成输入：`out/rel/gen/base/version_info/version_info_values.h` 的PRODUCT_NAME仍为PRTS、LAST_CHANGE全0；`out/rel/gen/chrome/common/chrome_version.h` 的产品名也仍PRTS，而源BRANDING为Chromium。这说明“源码已恢复”没有让生成物全部刷新，现有chrome也确实带旧代码风险；不能只替换exe的Version资源就称为干净。
+首次调查直接发现陈旧生成输入：`out/rel/gen/base/version_info/version_info_values.h` 的PRODUCT_NAME及 `out/rel/gen/chrome/common/chrome_version.h` 的产品名为PRTS，而源BRANDING为Chromium。后续正常增量已把这些header及产物恢复为Chromium，详情见配套构建报告；旧binary预检结果仍单独保留。
 
 建议在主 Agent 分配的无采样构建窗口，备份args后移除不需要的CDM业务配置，保留影响绝大多数编译命令的release/optimization/compiler参数，正常 `gn gen out/rel` 再单次 `autoninja -C out/rel chrome`。GN与Ninja应按当前依赖更新品牌生成header、版本资源、受旧tracked代码恢复影响的对象及chrome.dll/exe最终链接。不要clean整个out，不删对象，不用 `is_chrome_branded=true`。
 

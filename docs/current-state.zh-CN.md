@@ -2,9 +2,13 @@
 
 基线：官方 Chromium Release **157.0.8103.15**（`1aa07b638799e59656559ae6c6649d4b197f555e`），Windows x64。源码在本仓库；`tools/chromium.py` 把 browser、共享模型和 SDK shim 放入 Chromium 的 `//remotekit`。
 
-服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。重载低延迟实验约16FPS、marker p95为90–143ms，吞吐目标仍未达到。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
+用户最新要求：保留Chrome89，重载目标先改3租户，若有界优化仍无明显成效可转2租户；优先最快TU7、高码率及VDEnc/Hybrid跨租户混跑。以下4租户/TU1结果是既有调查，不是当前必达配置。FPS≥50、p95≤100ms和原分辨率/marker要求不变。
 
-当前按用户指令持续推进≥50FPS/Pixel marker p95≤100ms目标，阶段包不作为停止点。单次尾IDR与单plane直写共享槽候选已实播验证。QSV同session异步VPP与LowPower ON对照均无最终呈现收益，保留外部颜色转换加oneVPL异步编码默认。绝对publication节拍消除了55→42FPS损失；修复测试页自身漂移后，单租户源、发布、编码、解码已约60FPS。精准模拟60Hz的两次同配置实播分别为canvas54.86FPS/p95 122ms与45.25FPS/p95 74ms，尚未稳定同时达标。四1080 compositor/render30仍3D99.85%、canvas7.63–7.90FPS/p95 522–605ms。正在逐事件定位接收回调相位损失与GPU排队；最新任务见[持续性能目标](../develop/docs/performance-goal.md)。
+服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。既有四租户实验未达吞吐目标；新三租户最快预设和混跑矩阵正在准备。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
+
+当前按用户指令持续推进≥50FPS/Pixel marker p95≤100ms目标，阶段包不作为停止点。单次尾IDR与单plane直写共享槽候选已实播验证。既有TU1矩阵中，同session异步VPP与LowPower ON对照无最终呈现收益，保留外部颜色转换加oneVPL异步编码默认。绝对publication节拍消除了55→42FPS损失；修复测试页自身漂移后，单租户源、发布、编码、解码已约60FPS。精准模拟60Hz并保留进程高精度计时请求后的两次同配置实播为canvas51.53FPS/p95 123ms与50.77FPS/p95 76ms，尚未稳定同时达标。四1080 compositor/render30仍3D99.85%、canvas7.63–7.90FPS/p95 522–605ms。最新任务见[持续性能目标](../develop/docs/performance-goal.md)。
+
+接收回调trace确认：约600个新video frame只有450次rVFC，后续canvas没有再丢帧；跨线程通知和呈现相位是实测损失来源。默认关闭的连续rVFC候选已增量编译并验证静止/恢复/重连，尚无稳定性能收益，保持关闭。精准模拟刷新与该候选分别保存为0005/0006补丁。大metrics报告改为带SHA-256校验的分块上传，正式分析工具可完整重组，不再因413丢失长记录。
 
 当前marker延迟统计终点为客户端canvas绘制提交，CRC同步读回耗时另记；不表示物理屏幕点亮。四接收端同机满载时，读回p95达331–408ms，会干扰后续工作；同时已存在服务端供给下降与解码排队，不能将全部瓶颈归于测量。后续将同时记录GPU/读回完成端点，并保持CRC验证。
 

@@ -35,6 +35,25 @@ RemoteKit SDK 通过 Chromium 官方
 `//third_party/webrtc_overrides:webrtc_component` 使用 libwebrtc，
 无需修改 `timeutils` 的 target visibility。
 
+`0005-synthetic-vsync-deadline.patch` 只增强Windows已有
+`--fake-vsync-rate=60`（或其他正数Hz）的等待：使用单调绝对deadline维持
+phase，优先一次性高精度waitable timer，创建失败尝试普通timer，Set/Wait
+运行期失败直接Sleep回退。fake interval统一至少1ms，等待与Notify使用同值。
+迟到跳过过期tick，不补发burst；idle与suspend后重建phase。真实DXGI/DComp
+等待、renderer/rVFC与呈现反馈通路保持原样。out/rel增量chrome已编译通过，
+当前后续修正版保留整个fake等待期间旧有成对高精度timer请求，不永久开启、
+Sleep降级不重复嵌套；修正版out/rel增量chrome已编译通过，待A/B运行验证。
+
 后续修改 Chromium tracked 源码时，将补丁加入 `manifest.json` 的有序清单，
 填写 SHA-256，并用 `tools/patchset.py` 管理检查、应用和逆序撤回。
 Chromium overlay `//remotekit` 由 `tools/chromium.py` 维护，不属于 tracked patch。
+
+新补丁可用正式工具生成，例如：
+
+```
+python3 tools/patchset.py --chromium-root C:/src/chromium/src record --id synthetic-vsync-deadline --file ui/gl/vsync_thread_win.cc --file ui/gl/vsync_thread_win.h
+```
+
+`record`按显式文件生成HEAD diff并追加清单/hash，不修改Chromium源码。
+它只接受tracked路径，并拒绝前序patch已经包含的文件，避免把旧patch累计
+收录到新patch中；已有文件的后续叠加修改需要另行维护有序diff，不能用此命令。

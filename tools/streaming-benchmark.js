@@ -181,8 +181,27 @@ async (hostPage) => {
       report.receiverPlayout = window.rkBenchmarkReceivers;
       const videoRect = transport.video.getBoundingClientRect(), videoStyle = getComputedStyle(transport.video);
       report.videoElement = { connected: transport.video.isConnected, rect: { x: videoRect.x, y: videoRect.y, width: videoRect.width, height: videoRect.height }, opacity: videoStyle.opacity, display: videoStyle.display, visibility: videoStyle.visibility };
-      const response = await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(report) });
-      if (!response.ok) throw new Error(`Metrics upload failed ${response.status}`);
+      // Upload only after the measurement has ended. Keep the complete report,
+      // including arrays, when it grows beyond Control's 1 MiB request limit.
+      const reportText = JSON.stringify(report);
+      const reportBytes = new TextEncoder().encode(reportText);
+      const saveMetrics = async body => {
+        const response = await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        if (!response.ok) throw new Error(`Metrics upload failed ${response.status}`);
+      };
+      if (reportBytes.length <= 900000) {
+        await saveMetrics(report);
+      } else {
+        const digest = await crypto.subtle.digest('SHA-256', reportBytes);
+        const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+        const chunks = Math.ceil(reportText.length / 200000);
+        const identity = { runId: config.id, tenantIndex: index, chunks };
+        for (let part = 0; part < chunks; ++part) {
+          await saveMetrics({ kind: 'benchmark-report-chunk', ...identity, part, text: reportText.slice(part * 200000, (part + 1) * 200000) });
+        }
+        await saveMetrics({ kind: 'benchmark-report-manifest', ...identity, encoding: 'utf-8', characters: reportText.length, bytes: reportBytes.length, sha256,
+          summary: { displayFps: report.displayFps, authorizedFrameFps: report.authorizedFrameFps, renderToObservedMs: report.renderToObservedMs, markerSampleCount: report.markerSampleCount, invalid: report.invalid, startedWall, elapsedMs } });
+      }
       const chunks = Math.ceil(raw.length / 200000);
       for (let part = 0; part < chunks; ++part) {
         const saved = await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'presentation-raw-chunk', runId: config.id, tenantIndex: index, part, chunks, text: raw.slice(part * 200000, (part + 1) * 200000) }) });

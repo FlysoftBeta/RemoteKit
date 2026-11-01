@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -73,10 +74,68 @@ def classify(root, path):
     return "conflict"
 
 
+def record_patch(root, patches, ident, files):
+    """Record HEAD-relative edits only for paths absent from earlier patches."""
+    if not ident or not re.fullmatch(r"[a-z0-9][a-z0-9-]*", ident):
+        raise PatchError("record requires a lowercase --id (letters, digits, hyphens)")
+    if any(old_id == ident for old_id, _ in patches):
+        raise PatchError("duplicate patch id: " + ident)
+    if not files:
+        raise PatchError("record requires explicit --file paths")
+    owned = set()
+    for _, patch in patches:
+        result = subprocess.run(["git", "apply", "--numstat", "-z", "--", str(patch)],
+                                cwd=root, text=True, capture_output=True, check=True)
+        owned.update(line.split("\t", 2)[2] for line in result.stdout.split("\0") if line)
+    selected = []
+    for name in files:
+        from pathlib import PureWindowsPath
+        if Path(name).is_absolute() or PureWindowsPath(name).drive or ".." in PureWindowsPath(name).parts:
+            raise PatchError("record file must be relative to Chromium: " + name)
+        resolved = (root / name).resolve(strict=True)
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            raise PatchError("record file escapes Chromium or is not a file: " + name)
+        relative = resolved.relative_to(root).as_posix()
+        if relative in owned:
+            raise PatchError("record cannot append a HEAD diff for an already patched file: " + relative)
+        tracked = subprocess.run(["git", "--literal-pathspecs", "ls-files", "--error-unmatch", "--", relative],
+                                 cwd=root, capture_output=True)
+        if tracked.returncode:
+            raise PatchError("record requires a tracked file: " + relative)
+        selected.append(relative)
+    result = subprocess.run(["git", "--literal-pathspecs", "diff", "HEAD", "--binary", "--", *selected],
+                            cwd=root, capture_output=True, check=True)
+    if not result.stdout:
+        raise PatchError("selected files have no changes")
+    name = f"{len(patches) + 1:04d}-{ident}.patch"
+    path = MANIFEST.parent / name
+    if path.exists():
+        raise PatchError("refusing to overwrite patch: " + name)
+    path.write_bytes(result.stdout)
+    try:
+        if classify(root, path) != "applied":
+            raise PatchError("recorded patch cannot be reversed from current files")
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        manifest["patches"].append({"id": ident, "path": name,
+                                    "sha256": hashlib.sha256(result.stdout).hexdigest()})
+        temporary = MANIFEST.with_suffix(".json.tmp")
+        try:
+            temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(MANIFEST)
+        finally:
+            temporary.unlink(missing_ok=True)
+    except Exception:
+        path.unlink()
+        raise
+    print(f"{ident}: recorded {name}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chromium-root", required=True, type=Path, help="path to Chromium git worktree")
-    parser.add_argument("command", choices=("status", "apply", "revert"))
+    parser.add_argument("command", choices=("status", "apply", "revert", "record"))
+    parser.add_argument("--id", help="new patch id for record")
+    parser.add_argument("--file", action="append", help="tracked Chromium path for record; repeat")
     args = parser.parse_args(argv)
     try:
         root = args.chromium_root.resolve(strict=True)
@@ -85,6 +144,9 @@ def main(argv=None):
         if probe.returncode or Path(probe.stdout.strip()).resolve() != root:
             raise PatchError("chromium root must be the root of a Git worktree")
         patches = load_manifest()
+        if args.command == "record":
+            record_patch(root, patches, args.id, args.file)
+            return 0
         states = [(ident, path, classify(root, path)) for ident, path in patches]
         if args.command == "status":
             for ident, _, state in states:
@@ -117,7 +179,7 @@ def main(argv=None):
             done.append((ident, path))
             print(f"{ident}: {'reverted' if reverse else 'applied'}")
         return 0
-    except (PatchError, OSError) as exc:
+    except (PatchError, OSError, subprocess.CalledProcessError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

@@ -5,6 +5,7 @@ import json
 import re
 import statistics
 from pathlib import Path
+from streaming_metrics import load_metrics
 
 
 def dist(values):
@@ -44,8 +45,7 @@ def summarize(rows):
 
 
 def measurement_windows(case):
-    reports = {row['tenantId']: row['metrics'] for row in map(json.loads,
-        (case/'metrics/client-metrics.jsonl').read_text(encoding='utf-8-sig').splitlines())
+    reports = {row['tenantId']: row['metrics'] for row in load_metrics(case/'metrics/client-metrics.jsonl')
         if row.get('metrics', {}).get('kind') == 'streaming-benchmark'}
     windows = {}
     for source in (case/'server-trace').glob('server-*.jsonl'):

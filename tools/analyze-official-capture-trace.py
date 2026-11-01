@@ -5,6 +5,7 @@ import json
 import re
 import statistics
 from pathlib import Path
+from streaming_metrics import load_metrics
 
 
 def distribution(values):
@@ -45,7 +46,7 @@ def analyze(case):
     browser_pids = dict(re.findall(r'session (\d+) browser pid (\d+)',
         (case/'control.err').read_text(encoding='utf-8-sig', errors='replace')))
     browser_callbacks = []
-    reports = {r['tenantId']: r['metrics'] for r in map(json.loads, (case/'metrics/client-metrics.jsonl').read_text(encoding='utf-8-sig').splitlines())
+    reports = {r['tenantId']: r['metrics'] for r in load_metrics(case/'metrics/client-metrics.jsonl')
                if r.get('metrics', {}).get('kind') == 'streaming-benchmark'}
     session_windows = {}
     for source in (case/'server-trace').glob('server-*.jsonl'):

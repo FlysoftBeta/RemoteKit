@@ -1,0 +1,158 @@
+diff --git a/ui/gl/vsync_thread_win.cc b/ui/gl/vsync_thread_win.cc
+index f100349ec0..170ad9ec62 100644
+--- a/ui/gl/vsync_thread_win.cc
++++ b/ui/gl/vsync_thread_win.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "ui/gl/vsync_thread_win.h"
+ 
++#include <algorithm>
++
+ #include "base/functional/bind.h"
+ #include "base/memory/stack_allocated.h"
+ #include "base/notreached.h"
+@@ -97,11 +99,15 @@ void VSyncThreadWin::AddObserver(VSyncObserver* obs) {
+ void VSyncThreadWin::RemoveObserver(VSyncObserver* obs) {
+   AutoVSyncThreadLock auto_lock(this);
+   observers_.RemoveObserver(obs);
++  if (observers_.empty()) {
++    reset_fake_vsync_phase_ = true;
++  }
+ }
+ 
+ void VSyncThreadWin::OnSuspend() {
+   AutoVSyncThreadLock auto_lock(this);
+   is_suspended_ = true;
++  reset_fake_vsync_phase_ = true;
+ }
+ 
+ void VSyncThreadWin::OnResume() {
+@@ -110,6 +116,74 @@ void VSyncThreadWin::OnResume() {
+   PostTaskIfNeeded();
+ }
+ 
++void VSyncThreadWin::WaitForFakeVSync(base::TimeDelta interval) {
++  TRACE_EVENT0("gpu", "WaitForVSync SyntheticDeadline");
++  DCHECK_GT(interval, base::TimeDelta());
++  bool reset_phase;
++  {
++    AutoVSyncThreadLock auto_lock(this);
++    reset_phase = reset_fake_vsync_phase_;
++    reset_fake_vsync_phase_ = false;
++  }
++
++  const auto now = base::TimeTicks::Now();
++  if (reset_phase || next_fake_vsync_.is_null() ||
++      now - next_fake_vsync_ >= interval * 4) {
++    next_fake_vsync_ = now + interval;
++  } else if (next_fake_vsync_ <= now) {
++    next_fake_vsync_ +=
++        interval * ((now - next_fake_vsync_).IntDiv(interval) + 1);
++  }
++
++  if (!fake_vsync_timer_initialized_) {
++    fake_vsync_timer_initialized_ = true;
++    fake_vsync_timer_.Set(::CreateWaitableTimerExW(
++        nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
++        TIMER_MODIFY_STATE | SYNCHRONIZE));
++    if (!fake_vsync_timer_.is_valid()) {
++      fake_vsync_timer_.Set(::CreateWaitableTimerExW(
++          nullptr, nullptr, 0, TIMER_MODIFY_STATE | SYNCHRONIZE));
++    }
++  }
++
++  // Retain the original fake-vsync sleep path's process timer-resolution
++  // request for the entire wait, including when a waitable timer is used.
++  // Other delayed tasks in this GPU process may rely on the same resolution.
++  base::Time::ActivateHighResolutionTimer(true);
++  for (;;) {
++    const auto remaining = next_fake_vsync_ - base::TimeTicks::Now();
++    if (remaining <= base::TimeDelta()) {
++      break;
++    }
++    const DWORD timeout_ms =
++        static_cast<DWORD>(remaining.InMillisecondsRoundedUp());
++    if (fake_vsync_timer_.is_valid()) {
++      LARGE_INTEGER due_time;
++      // Negative 100ns units request a relative, one-shot wait. The phase is
++      // maintained in monotonic TimeTicks, independent of wall-clock changes.
++      due_time.QuadPart = -remaining.InNanoseconds() / 100;
++      if (due_time.QuadPart == 0) {
++        due_time.QuadPart = -1;
++      }
++      if (::SetWaitableTimer(fake_vsync_timer_.get(), &due_time, 0, nullptr,
++                             nullptr, FALSE) &&
++          ::WaitForSingleObject(fake_vsync_timer_.get(), timeout_ms) !=
++              WAIT_FAILED) {
++        continue;
++      }
++      fake_vsync_timer_.Close();
++    }
++    // Preserve the existing sleep fallback without accumulating its rounding
++    // and scheduling error into the next frame's phase.
++    ::Sleep(timeout_ms);
++  }
++  base::Time::ActivateHighResolutionTimer(false);
++
++  const auto wake_time = base::TimeTicks::Now();
++  next_fake_vsync_ +=
++      interval * ((wake_time - next_fake_vsync_).IntDiv(interval) + 1);
++}
++
+ void VSyncThreadWin::WaitForVSync() {
+   base::TimeDelta vsync_interval;
+   bool should_sleep = false;
+@@ -117,11 +191,13 @@ void VSyncThreadWin::WaitForVSync() {
+   if (auto fake_interval = switches::GetFakeVsyncIntervalFromCommandLine()) {
+     // Skip the real hardware wait entirely, for either derived class
+     // (VSyncThreadWinDXGI's vblank wait or VSyncThreadWinDComp's compositor
+-    // clock wait), and pace via Sleep() at the fake rate instead. Observers
++    // clock wait), and pace via a one-shot timer at the fake rate. Observers
+     // are still notified through the same path a real vsync signal would
+     // use below.
+-    vsync_interval = *fake_interval;
+-    should_sleep = true;
++    // Bound both the wait and the interval reported to observers. Extremely
++    // high command-line rates can otherwise round down to zero and busy-loop.
++    vsync_interval = std::max(*fake_interval, base::Milliseconds(1));
++    WaitForFakeVSync(vsync_interval);
+   } else {
+     const base::TimeTicks wait_for_vsync_start_time = base::TimeTicks::Now();
+     bool wait_succeeded = WaitForVSyncImpl(&vsync_interval);
+diff --git a/ui/gl/vsync_thread_win.h b/ui/gl/vsync_thread_win.h
+index d0a4be43eb..b92df79697 100644
+--- a/ui/gl/vsync_thread_win.h
++++ b/ui/gl/vsync_thread_win.h
+@@ -14,6 +14,8 @@
+ #include "base/observer_list_types.h"
+ #include "base/power_monitor/power_observer.h"
+ #include "base/threading/thread.h"
++#include "base/time/time.h"
++#include "base/win/scoped_handle.h"
+ #include "ui/gfx/vsync_provider.h"
+ #include "ui/gl/gl_export.h"
+ 
+@@ -67,14 +69,23 @@ class GL_EXPORT VSyncThreadWin : public base::PowerSuspendObserver {
+   class SCOPED_LOCKABLE AutoVSyncThreadLock;
+ 
+   void WaitForVSync();
++  void WaitForFakeVSync(base::TimeDelta interval);
+ 
+   void PostTaskIfNeeded() EXCLUSIVE_LOCKS_REQUIRED(lock_);
+ 
++  // Only accessed on vsync_thread_. The timer is armed only while waiting for
++  // an observed fake vsync, never periodically while the thread is idle. Keep
++  // its handle alive until after the thread has stopped.
++  base::TimeTicks next_fake_vsync_;
++  bool fake_vsync_timer_initialized_ = false;
++  base::win::ScopedHandle fake_vsync_timer_;
++
+   base::Thread vsync_thread_;
+ 
+   base::Lock lock_;
+   bool GUARDED_BY(lock_) is_vsync_task_posted_ = false;
+   bool GUARDED_BY(lock_) is_suspended_ = false;
++  bool GUARDED_BY(lock_) reset_fake_vsync_phase_ = true;
+   base::ObserverList<VSyncObserver> GUARDED_BY(lock_) observers_;
+ };
+ }  // namespace gl

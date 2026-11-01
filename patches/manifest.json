@@ -21,6 +21,16 @@
       "id": "capture-render-rate",
       "path": "0004-capture-render-rate.patch",
       "sha256": "a06da420c6fea610d56ee19eee5e6018c0355cd54d86f721fde51852b36e805e"
+    },
+    {
+      "id": "synthetic-vsync-deadline",
+      "path": "0005-synthetic-vsync-deadline.patch",
+      "sha256": "f90452cb86b58970f4162a1eb8c350f99f0d33f28c45b1992c3a099f8e345ebd"
+    },
+    {
+      "id": "continuous-video-frame-callbacks",
+      "path": "0006-continuous-video-frame-callbacks.patch",
+      "sha256": "3b3630da6e53ed8d5d852e3a0ea7b9235c08f00baba009d0cd262184fe6261d7"
     }
   ]
 }

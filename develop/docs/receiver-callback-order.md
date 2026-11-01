@@ -140,3 +140,102 @@ PageAnimator中的rVFC步骤与RAF步骤共享渲染服务，却不是同一个�
 当前原生trace没有在OnExecution事件中直接暴露is_hfr、两个interval值或stale计数。若首轮仍无法区分，只能将这些保留为未知，再由主Agent决定是否增加有界官方patch观察；不在本轮无证据下修改调度算法。
 
 还可在采样首尾读取`video.getVideoPlaybackQuality()`作为辅助：MS的DroppedFrameCount来自播放器compositor，SetCurrentFrame会把从未rendered的前帧计入本地drop；它与RTC网络loss、Endpoint queue drop语义不同。即使该计数上升，也不能直接称网络丢帧或物理显示丢帧。
+
+## 已执行：精准fake60、10秒native trace
+
+证据目录：`develop/tmp/precise-fake60-receiver-trace10`。唯一实验组，暖机5秒、有效10007.3ms；接收端157.0.8103.15、精准fake60 DLL SHA256为`a0f2e596eb42fed41ccc69faa53a97db195e5ed971d04862cee8f3002cbe6637`。单1080新phase canvas fixture、source60、服务端单plane直写、atlas alignment16、QSV external/TU1/VBR/d1、每Peer24Mbps/RTT10ms、RTP0/0、marker1Hz、after-work、snapshot。没有产品变更、额外rVFC链、Blink patch或构建。
+
+trace categories为media/blink/cc/toplevel/disabled-by-default-devtools.timeline，原始文件约58.7MB。此组是有trace的定位实验，不与此前无trace组混作达标结果；实际canvas44.97FPS、marker p50/p95/p99为53/120/120ms，CRC有效10、无效0。native decode同窗增加600帧，RTC packetsLost/framesDropped增量0；RAF600次、按首尾间隔为60.003Hz。
+
+### 同窗计数闭合
+
+通过raw rVFC的mediaTime精确匹配native SetCurrentFrame Timestamp，再用450组presentationTime映射两种时间轴，offset中位数21122640564µs，450组offset跨度193µs。以下native计数均截取同一10007.3ms窗口、同一receiver renderer PID9328；没有把source进程或多JS callback重复相加。
+
+| 层 | 同窗计数 |
+|---|---:|
+| MSCompositor SetCurrentFrame（只数带Timestamp的instant事件） | 600 |
+| 主线程OnRequestVideoFrameCallback | 445 |
+| ScheduleExecution总调用 | 826 |
+| 其中did_schedule=true / false合并 | 542 / 284 |
+| PageAnimator rendering service / 普通RAF | 600 / 600 |
+| OnRenderingSteps | 543 |
+| 其中没有Execute的stale轮次 | 93 |
+| ExecuteVideoFrameCallbacks | 450 |
+| benchmark raw rVFC callback | 450 |
+| transport实际canvas新帧 | 450 |
+| epoch matched / missed / pending | 450 / 0 / 无 |
+
+**损失已定位到MS媒体帧推进与Blink主线程rVFC rendering steps之间；没有在Execute→JS callback→产品canvas段继续丢失。** 600次普通rendering service中，57次没有rVFC OnRenderingSteps；有步骤的543次又有93次读取到与上次相同的presentedFrames，因此只派发450次。57+93与总差额相符，但它们不构成逐个媒体帧的独立丢弃原因标签：媒体更新的相位和突发会共同造成这些轮次。
+
+raw相邻callback的presentedFrames增量分布：1帧324次、2帧113次、3帧7次、4帧4次、11帧1次；首尾计数296→894，449个callback间隔中合计越过149次媒体推进。窗口边缘再差1次，不能把600与首尾差598之间的小差异解释为额外产品丢帧。
+
+### 典型序列一：通知错过rendering steps，下一轮合并两帧
+
+下表时间为有效窗口起点后的毫秒；这一段没有长marker读取，前后Execute wall time均不足1ms。
+
+| 时间ms | 事件 |
+|---:|---|
+| 141.108 | SetCurrentFrame，媒体Timestamp5233611 |
+| 141.180 | 主线程收到OnRequest，141.183真正Schedule |
+| 145.725 | OnRenderingSteps；145.731 Execute，读取presentedFrames304，耗时0.799ms |
+| 146.397 / 146.500 | transport和既有benchmark各登记下次rVFC |
+| 162.258 | 下一普通rendering service，**无rVFC步骤排队** |
+| 164.143 | 新媒体帧305进入SetCurrentFrame |
+| 164.270 / 164.274 | 通知到主线程并排队，已错过162.258这轮步骤 |
+| 173.436 | 又一媒体帧306进入SetCurrentFrame |
+| 179.980 / 179.987 | 下轮步骤/Execute只取最新306，305没有单独进入JS；Execute0.671ms |
+
+这说明少一次callback无需假设网络丢包、产品gate等待或慢JS；当前帧推进/通知与60Hz rendering phase错开就已在该序列中造成合并。one-shot closure在305时被消费，306没有第二份独立通知，并不表示306被丢弃；它成为下一JS callback看到的最新帧。
+
+### 典型序列二：有预排队仍可能先stale、再合并
+
+- 395.470ms Execute读取319，耗时1.121ms；396.593ms原生fast path自行Schedule下一步骤。
+- 412.152ms OnRenderingSteps读取到同一319，耗时0.033ms，没有Execute；412.156ms继续Schedule。
+- 414.131ms媒体帧320推进，414.231ms通知到达；414.233ms Schedule因已有pending而合并。
+- 423.123ms媒体帧321推进。
+- 428.910ms下一步骤、428.914ms Execute读取321，跳过320的独立JS派发；Execute1.602ms。
+
+这段说明“总是保证有下一次调度”也不等于每个媒体帧必定被60Hz JS采样一次；媒体帧在前一轮稍后到达、下一帧又较早到达时，可出现先stale后跳号。也不能因为跨线程本身就宣称调度器丢事件，trace展示的是最新帧采样与相位的具体行为。
+
+### fast path的已观测与未知
+
+450个fresh Execute结束后，有292轮在同一OnRenderingSteps尾部自行Schedule，有158轮没有；93个stale轮次中89轮自行Schedule、4轮没有。当前帧中transport/benchmark已经重新登记callback，且没有连接更换，因此fresh分支尾部不自行Schedule，**按现有源码控制流推断是当次is_hfr=false**；fresh已将consecutive_stale_frames清0，不能用“连续stale达到2”解释这158轮。
+
+这是控制流推断，不是直接trace到的is_hfr或interval值。此次600次RenderWithoutAlgorithm事件确认使用无algorithm更新路径；该路径last_render_length会被媒体帧timestamp差和UpdateCurrentFrame deadline范围分别更新，而preferred interval还可能使用RTP估计器。没有新增观察字段，不能进一步断言哪种值/更新次序使5%条件失败。
+
+若需要继续修复而非只诊断，下一最小观测应由主Agent决定：在现有OnExecution有界trace中输出rendering_interval、average_frame_duration、is_hfr及stale计数，必要时记录是哪种MS interval来源。当前trace已足以否定产品canvas阶段继续损失，尚不足以安全改变Blink fast-path阈值或间隔算法。本轮没有擅自patch。
+
+### marker和长延迟的实际边界
+
+450次Execute wall p50/p95/max为0.899/1.915/31.643ms，CPU为0.695/1.447/3.453ms；transport callback cost p95为1.6ms。10个marker读回p50/p95为5.7/28.7ms，最大同步读回确实造成一处主线程长停顿并放大局部跳号，但前述两个亚毫秒/约1ms序列已表明它不是所有约15FPS差额的解释。
+
+本组120ms marker按同RTP分解为render→receive113.3ms、receive→canvas6.7ms；87ms点分别84.4/2.6ms。没有逐帧server trace，不能继续把到达前时间拆成capture/encode/pacer/网络，更不能把该p95异常全部归给rVFC。其余marker的receive→canvas为1.8–18.6ms。
+
+### 产物与清理
+
+原始`receiver-trace.json`、`metrics/client-metrics.jsonl`、source与Endpoint轨迹、config/fingerprints均在上述目录。派生`trace-summary.json`、`presentation-raw.json`、`jump-sequences.json`、`typical-phase-sequences.json`提供同窗统计和可复核事件序列；SetCurrentFrame Timestamp与raw mediaTime是主要关联键。
+
+实验结束后已关闭自建browser、Control/source/resource及其后代，所属默认host正式browser_close完成；最终无接收chrome/RemoteKit进程，3001/3013无监听。GPU已交还；本轮只追加该报告，没有生产、默认、工具或Chromium修改。
+
+## 后续实现：默认关闭的连续rVFC观察补丁
+
+按主Agent固定接口，已在唯一源码文件`third_party/blink/renderer/modules/video_rvfc/video_frame_callback_requester_impl.cc`实现私有`BASE_FEATURE`：`RemoteKitContinuousVideoFrameCallbacks`，默认disabled。显式`--enable-features=RemoteKitContinuousVideoFrameCallbacks`才扩大原自排条件：
+
+```text
+(is_hfr || continuous_feature_enabled)
+ && callback_collection非空
+ && consecutive_stale_frames < 2
+```
+
+presentedFrames相等时仍只增加stale，不调用ExecuteVideoFrameCallbacks；没有把旧帧重复派发、改metadata/RTP/时间戳或进入其他绘制路径。新增观测字段保留在blink trace：OnRenderingSteps记录feature开关和进入前stale；同一函数内SchedulingState instant记录is_hfr、rendering_interval_us、average_frame_duration_us、更新后的stale、feature及has_callbacks。没有逐帧console或文件IO。
+
+生命周期检查结论：
+
+- 新帧令stale清零；若随后静止，最多自排两次stale检查，到2后停止，仍依赖下一次真实media通知重新唤醒，不形成空转无限回调。
+- callback全部取消时，原入口直接返回，尾部集合非空检查也仍保留；已排队但被取消的执行不会重新登记。
+- player/source清理仍由原weak factory失效和pending/stale重置处理；本补丁不持有额外对象、不添加timer或队列。
+- 默认关闭时仍走原is_hfr逻辑，只有有界trace字段增加；具体实验收益和静态停止仍需构建后实播验证。
+
+通过正式`tools/patchset.py record --id continuous-video-frame-callbacks --file ...`生成`patches/0006-continuous-video-frame-callbacks.patch`并追加manifest，SHA256为`3b3630da6e53ed8d5d852e3a0ea7b9235c08f00baba009d0cd262184fe6261d7`。0005只涉及ui/gl/vsync_thread_win.cc/.h，与0006的Blink文件无重叠；0005 hash仍为`f90452cb86b58970f4162a1eb8c350f99f0d33f28c45b1992c3a099f8e345ebd`，未覆盖。
+
+源码git diff --check及patchset状态检查通过，六项patch均applied；record已核查新patch可从当前工作树反向应用。本步骤没有gen/build、GPU、浏览器、运行测试或commit，编译和运行验证尚待下一资源窗口。

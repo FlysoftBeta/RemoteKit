@@ -2,6 +2,7 @@
 """Read existing streaming cases into tenant-level JSON and a compact layer table."""
 import argparse,json,re
 from pathlib import Path
+from streaming_metrics import load_metrics
 ROOT=Path(__file__).resolve().parents[1]
 def load(path):
  try:return json.loads(path.read_text(encoding='utf-8'))
@@ -21,9 +22,8 @@ def bench_metrics(folder):
  records={}
  path=folder/'metrics/client-metrics.jsonl'
  if path.is_file():
-  for line in path.read_text(encoding='utf-8').splitlines():
-   try:value=json.loads(line).get('metrics',{})
-   except ValueError:continue
+  for record in load_metrics(path):
+   value=record.get('metrics',{})
    if value.get('kind')=='streaming-benchmark':records[value['tenantIndex']]=value
  return records
 
