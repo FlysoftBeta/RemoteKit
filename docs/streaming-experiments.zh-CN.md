@@ -8,7 +8,33 @@
 
 Pixel marker 从实际接收视频像素识别，包含源帧号、时间、输入刺激号和CRC。输入到画面响应使用同一客户端performance.now；本机loopback可显式开启Date.now画面时间比较，跨机器不直接相减。采集到Endpoint就绪使用经一致性检查的Chromium TimeTicks/QPC校准，编码提交/完成使用QPC。RTP时间戳采用WebRTC实际发送值，客户端rVFC回调匹配显示代次后才显示/命中输入。
 
-本文的paint是Viewport调用drawImage返回后的JS时间，FPS按独立RTP的绘制提交计数，不是GPU完成或物理屏幕刷新。marker另外读取同帧授权atlas，并记录读回完成时间与成本；它也不等同于Viewport的物理显示完成。
+本文的paint是Viewport调用drawImage返回后的JS时间，FPS按独立RTP的绘制提交计数，不是GPU完成或物理屏幕刷新。marker读取匹配RTP的授权plane source及其明确sourceRect，并记录读回完成时间与成本；它也不等同于Viewport的物理显示完成。Chrome89的rVFC元数据读取与drawImage(video)不是原子取得同一个frame handle；多平面的共同快照保证后续平面使用相同像素，不宣称像素与RTP已获得原子绑定。
+
+## 捕获与呈现分段定位
+
+Fence保证GPU读写顺序，不能消除排队。Chromium官方capture begin在预留帧缓冲之前，end在收到CopyOutput完成结果后、按序交付之前。Windows mappable ARGB路径等待GPU finished callback。因此begin→end包含请求排队、GPU工作和完成观察，不能直接称为GPU执行时间。共享帧的`capture_time_us`取自capture **end**；HUD“捕获完成→纹理就绪”不含捕获本身。
+
+新增`REMOTEKIT_SERVER_TRACE=<目录>`，默认关闭，以有界记录关联source generation/frame、私有cache cookie、encoder/input RTP和实际wire RTP；关闭peer后写文件，不增加browser↔endpoint逐帧IPC。`tools/analyze-streaming-server-trace.py CASE...`输出分段分布、同RTP marker关联和缺失项。QPC/TimeTicks/壁钟映射与客户端timeOrigin夹测共同记录；各阶段p95不能相加。
+
+四1080、每peer24Mbps/10ms RTT、d1/TU1/VBR、默认客户端flag的同版本ready gate对照：
+
+| 阶段或结果 | Gate关闭 | Gate开启 |
+|---|---:|---:|
+| VPP真实fence等待p50 | 41–46ms | 4.7–7.4ms |
+| 捕获完成→encoded返回p50 | 125–141ms | 61–98ms |
+| 解码FPS | 11.5–12.1 | 13.7–14.4 |
+| Canvas提交FPS | 6.4–7.0 | 6.35–6.90 |
+| Marker render→canvas提交p95 | 906–1223ms | 1133–1218ms |
+
+原因已确认：同Session的D3D immediate context提前排入新帧的ready Wait，会阻挡旧帧VPP。`REMOTEKIT_ATLAS_READY_GATE=1`先观察ready完成，再执行原Wait/copy/consumed顺序，减少该等待，但接收端等待增长，端到端没有稳定收益，默认保持关闭。
+
+客户端新增可选`single-plane-direct`呈现方式：唯一可见平面与注册renderer的epoch/geometry匹配，且该epoch已有首次快照绘制后，同次rVFC直接绘制video到plane canvas；多平面和过渡期使用snapshot。默认仍为snapshot。同一31–32源render/s的单720对照，canvas提交22→30.5FPS，marker p95 405→156ms；四1080没有一致收益。不能与较早53源FPS组混用。marker/画质工具已修正缩采样ROI重复乘DPR的问题；desktop1/scale1旧结果不受影响。
+
+Chromium补丁提供默认关闭的`RemoteKitBoundedCapture:max_pending/1`或`/2`，限制预留至按序交付的请求数，保留damage并合并refresh，不改变lease/fence回收。早期marker关闭组，cap1把capture p50约159–163ms降至87–101ms，但canvas仍约8–9FPS；后续组cap1/2的真实capture约1.6/3.2FPS，renderer的42–48次render/s不能当作采集FPS。上限没有稳定整体收益，默认不启用。最后变化按源实际写入marker与接收CRC匹配，Stop/reopen检查通过。
+
+`tools/watch-streaming-resources.ps1 -Name CASE`使用PDH按进程和物理引擎采样；CASE必须是已准备的实验目录。四租户高负载组物理3D引擎约99% busy，但busy含调度/等待，不证明纯shader执行或硬件延迟下限。Intel驱动的VideoDecode名称也不能直接推断工作是接收端解码。缺少覆盖采样区间的资源记录时明确标缺失，不填0。
+
+完整同帧证据与case索引见[服务器分段报告](../develop/docs/server-frame-age-probe.md)和[捕获上限实验](../develop/docs/bounded-capture-probe.md)。当前各对照均未达到动态FPS>50且marker p95<100ms。
 
 ## 网络模拟
 

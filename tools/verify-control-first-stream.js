@@ -13,8 +13,10 @@ async (hostPage) => {
     const { decodeMarker } = await import('/marker-codec.js'), t = window.remotekitDiagnostics.transport;
     const c = document.createElement('canvas'); c.width = 256; c.height = 112; const ctx = c.getContext('2d'), deadline = performance.now() + 4000;
     while (performance.now() < deadline) {
-      const view = t.layout?.views[0], frame = view && t.getLastPresentation(view.id), source = frame && t.getPaintedFrame(view.id, frame.rtpTimestamp);
-      if (source) { const scale = view.deviceScaleFactor * (view.mediaScale ?? 1); ctx.drawImage(source, view.x, view.y, 256 * scale, 112 * scale, 0, 0, 256, 112); const marker = decodeMarker(ctx.getImageData(0, 0, 256, 112)); if (marker && (expected === null || marker.stimulus === expected)) return marker; }
+      const view = t.layout?.views[0], frame = view && t.getLastPresentation(view.id);
+      const legacy = !t.getPresentedPlane && frame && t.getPaintedFrame(view.id, frame.rtpTimestamp);
+      const source = frame && (t.getPresentedPlane ? t.getPresentedPlane(view.id, frame.rtpTimestamp) : legacy && { image: legacy, sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1), rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch });
+      if (source && source.rtpTimestamp === frame.rtpTimestamp && source.layoutEpoch === frame.layoutEpoch) { const scale = source.pixelsPerDip; ctx.drawImage(source.image, source.sourceRect.x, source.sourceRect.y, 256 * scale, 112 * scale, 0, 0, 256, 112); const marker = decodeMarker(ctx.getImageData(0, 0, 256, 112)); if (marker && (expected === null || marker.stimulus === expected)) return marker; }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     return null;
@@ -22,13 +24,14 @@ async (hostPage) => {
   try {
     await page.goto(config.origin);
     await page.waitForFunction(() => document.querySelector('button[aria-label="新建标签页"]')?.disabled === false);
-    await page.evaluate(async origin => {
+    await page.evaluate(async ({ origin, presentationMode }) => {
       const action = async body => { const r = await fetch('/api/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); if (!r.ok) throw new Error(JSON.stringify(data)); return data; };
       await action({ type: 'device.set', device: { mode: 'desktop', width: 1920, height: 1080, deviceScaleFactor: 1 } });
       await action({ type: 'tab.create', url: origin + '/test-pattern.html?mode=animation&fps=60&activationMarker=1', title: 'Pixel marker first stream' });
       const t = window.remotekitDiagnostics.transport; t.receiveProfile = 'chrome89-h264-42';
+      if (presentationMode) { if (!t.registerPlane) throw new Error('Presentation experiment unsupported by this client'); t.presentationMode = presentationMode; }
       window.rkReceiveCapabilities = await t.probeReceiveCapabilities(); await t.connect();
-    }, config.origin);
+    }, config);
     // An authorized atlas can arrive before React mounts the product Tab.
     // Wait for the real plane paint required by input, not displayReady alone.
     await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport, view = t.layout?.views[0]; return t.video.videoWidth > 0 && view && t.diagnostics.channel === '已连接' && t.displayReady && t.getLastPresentation(view.id) && document.querySelector('.view-pane canvas:not(.no-frame)'); }, null, { timeout: 20000 });
@@ -55,6 +58,7 @@ async (hostPage) => {
   } catch (error) { failure = String(error); }
   try {
     const observed = await page.evaluate(async () => { const t = window.remotekitDiagnostics?.transport; return { diagnostics: t?.diagnostics, layout: t?.layout, displayReady: t?.displayReady, presentedFrame: t?.presentedFrame, presentation: t?.presentationDiagnostics, inputTrace: t?.inputTrace, inputResults: t?.inputResults, hover: window.rkHover, receiveCapabilities: window.rkReceiveCapabilities, signaling: t?.signaling, state: await (await fetch('/api/state')).json(), video: { width: t?.video.videoWidth, height: t?.video.videoHeight, decodedFrames: t?.video.webkitDecodedFrameCount }, reports: t?.peer ? Array.from((await t.peer.getStats()).values()) : [], requestVideoFrameCallback: window.rkVideoFrameMetadata, markerBefore: window.rkFirstMarker, markerAfterClick: window.rkClickMarker, markerAfterStimulus: window.rkStimulusMarker }; });
+    if (!failure && config.presentationMode === 'single-plane-direct' && !(observed.presentation?.presentationRouting?.directFrames > 0)) failure = 'No eligible direct frames were actually painted: ' + JSON.stringify(observed.presentation?.presentationRouting);
     if (!failure && (observed.diagnostics?.error || observed.state.endpointError || observed.inputResults?.some(reply => reply.ok === false))) failure = 'Remote input or endpoint reported an error: ' + JSON.stringify({ error: observed.diagnostics?.error, endpointError: observed.state.endpointError, rejected: observed.inputResults?.filter(reply => reply.ok === false) });
     const report = { kind: 'first-stream-functional-debug', passed: !failure, config, browserVersion: browser.version(), failure, pageErrors, exchanges: await Promise.all(exchanges), ...observed };
     await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === '诊断')?.click());

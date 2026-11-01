@@ -35,27 +35,15 @@ function Viewport({ tab, device, secondary = false, overlay = false }: { tab: Ta
   const composing = useRef(false);
   const compositionCommit = useRef<string | null>(null);
   const surface = transport.layout?.views.find(view => view.id === tab.webviewId);
+  const layoutEpoch = transport.layout?.epoch, layoutGeneration = transport.layout?.generation;
   const [frameReady, setFrameReady] = useState(false);
   useEffect(() => {
     setFrameReady(false);
-    if (!surface) return;
-    const draw = () => {
-      const node = canvas.current; const frame = transport.displayFrame;
-      if (node && transport.displayReady && frame.width > 0 && surface.x + surface.width <= frame.width && surface.y + surface.height <= frame.height) {
-        const start = performance.now();
-        if (node.width !== surface.width || node.height !== surface.height) { node.width = surface.width; node.height = surface.height; }
-        node.getContext('2d')?.drawImage(frame, surface.x, surface.y, surface.width, surface.height, 0, 0, node.width, node.height);
-        transport.recordPresentationCost('viewportDraw', start, performance.now() - start, surface.id);
-        node.classList.remove('no-frame');
-        const presented = transport.presentedFrame;
-        if (presented?.rtpTimestamp !== undefined) transport.reportPresented(surface.id, presented.rtpTimestamp, performance.now(), Date.now());
-        setFrameReady(true);
-      } else setFrameReady(false);
-    };
-    const unsubscribe = transport.subscribePaint(draw);
-    const observer = new ResizeObserver(draw); if (canvas.current) observer.observe(canvas.current);
-    draw(); return () => { unsubscribe(); observer.disconnect(); };
-  }, [surface]);
+    if (!surface || !canvas.current || !layoutEpoch || !layoutGeneration) return;
+    // The encoded bitmap survives CSS resizing. Transport validates this exact
+    // renderer identity before either an atlas crop or the opt-in direct draw.
+    return transport.registerPlane({ view: surface, layoutEpoch, layoutGeneration }, canvas.current, setFrameReady);
+  }, [surface, layoutEpoch, layoutGeneration]);
   const send = (event: Record<string, unknown>) => { if (surface) transport.sendInput(surface, event); };
   const point = (event: { clientX: number; clientY: number }) => {
     const rect = canvas.current!.getBoundingClientRect();
@@ -63,7 +51,7 @@ function Viewport({ tab, device, secondary = false, overlay = false }: { tab: Ta
   };
   const pointer = (event: React.PointerEvent<HTMLCanvasElement>, action: string) => {
     if (!surface || !frameReady) return;
-    if (action === 'down') { event.preventDefault(); editor.current?.focus({ preventScroll: true }); event.currentTarget.setPointerCapture(event.pointerId); }
+    if (action === 'down') { event.preventDefault(); editor.current?.focus({ preventScroll: true }); transport.focus(surface, true); event.currentTarget.setPointerCapture(event.pointerId); }
     const position = point(event);
     if (event.pointerType === 'touch') send({ type: 'touch', action: ({ down: 'start', up: 'end', move: 'move', cancel: 'cancel' } as Record<string, string>)[action], points: [{ id: event.pointerId, ...position, pressure: event.pressure }] });
     else if (action !== 'cancel') send({ type: 'mouse', action, ...position, button: (action === 'move' || action === 'leave') ? 0 : [1, 2, 3, 4, 5][event.button] ?? 0, modifiers: modifiers(event) | mouseButtonModifiers(event.buttons), click_count: (action === 'move' || action === 'leave') ? 0 : Math.min(3, Math.max(1, event.detail)) });

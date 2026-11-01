@@ -57,6 +57,8 @@ struct SharedAtlasFrame {
   std::uint64_t frame_id;
   // Producer's actual GPU-copy completion point, also used on consumed fence.
   std::uint64_t ready_fence_value;
+  // Latest content-update time in producer TimeTicks microseconds. Captured
+  // content uses Chromium capture_end_time, not render/capture-begin time.
   std::int64_t capture_time_us;
   std::uint32_t slot;
   std::uint32_t width_pixels;

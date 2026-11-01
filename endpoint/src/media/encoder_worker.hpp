@@ -25,7 +25,8 @@ class EncoderWorker {
  public:
   EncoderWorker(Sdk&,uint64_t encoder,ID3D11Device*,std::string mode,EncoderSettings defaults,
                 std::shared_ptr<EncoderStats> stats,
-                std::function<void(uint32_t,uint64_t,size_t,bool)> completed);
+                std::function<void(uint32_t,uint64_t,size_t,bool)> completed,
+                std::shared_ptr<ServerTrace> trace={},uint64_t peer=0);
   ~EncoderWorker();
   bool Configure(const remotekit_rtc_encoder_config&);
   bool Enqueue(const remotekit_rtc_frame&,bool keyframe);
@@ -42,6 +43,7 @@ class EncoderWorker {
   ComPtr<ID3D11Device> device_;std::string mode_;EncoderSettings settings_;
   std::shared_ptr<EncoderStats> stats_;
   std::function<void(uint32_t,uint64_t,size_t,bool)> completed_;
+  std::shared_ptr<ServerTrace> trace_;uint64_t trace_peer_=0;
   std::unique_ptr<HardwareEncoder> hardware_;
   Nv12Converter converter_;
   std::vector<ComPtr<ID3D11Texture2D>> surfaces_;

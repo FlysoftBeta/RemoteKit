@@ -9,6 +9,7 @@ shared_library("remotekit_sdk") {
     "remotekit_rtc.cc",
     "remotekit_sdk.cc",
     "rtc_silent_audio.h",
+    "rtc_trace.h",
   ]
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
   libs = [ "ws2_32.lib" ]

@@ -4,8 +4,8 @@ async (hostPage) => {
   const config = /* CONFIG */ { id: 'pilot', origin: 'http://127.0.0.1:3001', tenants: 1, width: 1280, height: 720, dpr: 1, mode: 'animation', warmupMs: 5000, sampleMs: 20000, receiveProfile: 'chrome89-h264-42', endpoint: {}, network: {} };
   const flags = ['--no-first-run', '--no-default-browser-check', '--disable-features=WebRtcHideLocalIpsWithMdns,CalculateNativeWinOcclusion', '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', ...(config.clientExtraFlags ?? [])];
   const browser = await hostPage.context().browser().browserType().launch({ executablePath: 'C:/src/tmp/chrome89-google/app/chrome.exe', headless: false, args: flags });
-  const pages = [], contexts = [], errors = [];
-  let timerPolicy = null;
+  const pages = [], contexts = [], errors = [], closeResults = [];
+  let timerPolicy = null, measurementError;
   try {
     for (let i = 0; i < config.tenants; ++i) {
       const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }); contexts.push(context);
@@ -23,6 +23,10 @@ async (hostPage) => {
           document.body.appendChild(transport.video);
         }
         if (config.callbackRegistration) transport.frameCallbackRegistration = config.callbackRegistration;
+        if (config.presentationMode) {
+          if (!transport.registerPlane) throw new Error('This client does not support the requested presentation experiment');
+          transport.presentationMode = config.presentationMode;
+        }
         transport.receiveProfile = config.receiveProfile;
         await transport.connect();
         window.rkBenchmarkReceivers = (transport.peer?.getReceivers() ?? []).filter(receiver => receiver.track?.kind === 'video').map(receiver => {
@@ -87,6 +91,7 @@ async (hostPage) => {
       }
       let previousFrame, previousRtp, previousPaintRtp, lastMarkerAt = -Infinity, invalid = 0, skipped = 0, missingPaintSnapshot = 0;
       const started = performance.now(), startedWall = Date.now();
+      const clockSample = { performanceBefore: started, wallTime: startedWall, performanceAfter: performance.now() };
       const visibility = [{ at: started, value: document.visibilityState }];
       const visibilityChanged = () => visibility.push({ at: performance.now(), value: document.visibilityState });
       document.addEventListener('visibilitychange', visibilityChanged);
@@ -111,11 +116,12 @@ async (hostPage) => {
         }
         if (config.markerHz === 0 || (config.markerHz > 0 && observedAt - lastMarkerAt < 1000 / config.markerHz && !inputs.size)) return;
         lastMarkerAt = observedAt;
-        const frameCanvas = painted ? transport.getPaintedFrame(view.id, rtp) : transport.displayFrame;
-        if (!frameCanvas) { ++missingPaintSnapshot; return; }
+        const legacy = transport.getPresentedPlane ? undefined : (painted ? transport.getPaintedFrame(view.id, rtp) : transport.displayFrame);
+        const source = transport.getPresentedPlane ? transport.getPresentedPlane(view.id, rtp) : legacy && { image: legacy, kind: 'atlas', sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1), rtpTimestamp: rtp, layoutEpoch: epoch };
+        if (!source || source.rtpTimestamp !== rtp || source.layoutEpoch !== epoch) { ++missingPaintSnapshot; return; }
         const drawStarted = performance.now();
-        const pixelsPerDip = view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1);
-        context.drawImage(frameCanvas, view.x, view.y, 256 * pixelsPerDip, 112 * pixelsPerDip, 0, 0, 256, 112);
+        const pixelsPerDip = source.pixelsPerDip;
+        context.drawImage(source.image, source.sourceRect.x, source.sourceRect.y, 256 * pixelsPerDip, 112 * pixelsPerDip, 0, 0, 256, 112);
         transport.recordPresentationCost?.('markerDraw', drawStarted, performance.now() - drawStarted);
         const readbackStarted = performance.now();
         const pixels = context.getImageData(0, 0, 256, 112);
@@ -128,7 +134,7 @@ async (hostPage) => {
         if (previousFrame !== undefined) { const delta = (marker.frameId - previousFrame) >>> 0; if (delta > 0 && delta < 100000) skipped += delta - 1; }
         previousFrame = marker.frameId;
         const delay = ((observedWall >>> 0) - marker.timestamp) >>> 0;
-        const sample = { observedAt, markerCompletedAt: performance.now(), frameId: marker.frameId, stimulus: marker.stimulus, rtp, epoch, renderToObservedMs: delay < 60000 ? delay : null };
+        const sample = { observedAt, markerCompletedAt: performance.now(), frameId: marker.frameId, stimulus: marker.stimulus, rtp, epoch, sourceKind: source.kind ?? 'atlas', renderToObservedMs: delay < 60000 ? delay : null };
         samples.push(sample);
         const sent = inputs.get(marker.stimulus);
         if (sent !== undefined) { inputSamples.push({ sequence: marker.stimulus, delayMs: observedAt - sent, observedAt, frameId: marker.frameId }); inputs.delete(marker.stimulus); }
@@ -164,7 +170,7 @@ async (hostPage) => {
       const render = samples.flatMap(sample => sample.renderToObservedMs === null ? [] : [sample.renderToObservedMs]);
       const presentation = transport.presentationDiagnostics ?? null;
       const raw = JSON.stringify(transport.getPresentationDiagnostics?.(true) ?? null);
-      const report = { kind: 'streaming-benchmark', config, tenantIndex: index, flags, startedWall, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility, clock: 'same-machine-wall-clock', frameCountStage: hasPaint ? 'viewport-paint-v2' : 'authorized-snapshot; Viewport paint not measured', observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null, markerSamplesPerSecond: samples.length * 1000 / elapsedMs, markerTimestampMeaning: hasPaint ? 'actual canvas paint time; same-RTP snapshot; CRC completion separate' : 'authorized snapshot; not Viewport paint', authorizedFrameFps: presentations.length * 1000 / elapsedMs, authorizedPerSecondFrames: displayBuckets, displayFps: hasPaint ? paintedFrames.length * 1000 / elapsedMs : null, displayPerSecondFrames: hasPaint ? paintBuckets : null, perSecondFrames: buckets, perSecondFps: percentiles(buckets), renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)), invalid, missingPaintSnapshot, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped, pendingInputs: inputs.size, samples, presentations, paintedFrames, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation };
+      const report = { kind: 'streaming-benchmark', config, tenantIndex: index, flags, timeOrigin: performance.timeOrigin, startedAt: started, startedWall, clockSample, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility, clock: 'same-machine-wall-clock', frameCountStage: hasPaint ? 'viewport-canvas-paint' : 'authorized-snapshot; Viewport paint not measured', observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null, markerSamplesPerSecond: samples.length * 1000 / elapsedMs, markerTimestampMeaning: hasPaint ? 'canvas draw submission time; synchronous same-RTP plane source; CRC completion separate' : 'authorized snapshot; not Viewport paint', authorizedFrameFps: presentations.length * 1000 / elapsedMs, authorizedPerSecondFrames: displayBuckets, displayFps: hasPaint ? paintedFrames.length * 1000 / elapsedMs : null, displayPerSecondFrames: hasPaint ? paintBuckets : null, perSecondFrames: buckets, perSecondFps: percentiles(buckets), renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)), invalid, missingPaintSnapshot, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped, pendingInputs: inputs.size, samples, presentations, paintedFrames, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation };
       report.inputTimeouts = inputTimeouts;
       report.inputSampleCount = inputSamples.length;
       report.markerSampleCount = samples.length;
@@ -183,25 +189,43 @@ async (hostPage) => {
       }
       if (config.captureQuality) {
         const view = transport.layout.views[0], frame = transport.presentedFrame;
-        const atlas = transport.getPaintedFrame(view.id, frame.rtpTimestamp);
-        if (!atlas) throw new Error('Quality snapshot no longer matches current painted RTP');
-        const scale = view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1);
+        const legacy = transport.getPresentedPlane ? undefined : transport.getPaintedFrame(view.id, frame.rtpTimestamp);
+        const source = transport.getPresentedPlane ? transport.getPresentedPlane(view.id, frame.rtpTimestamp) : legacy && { image: legacy, kind: 'atlas', sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1), rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch };
+        if (!source || source.rtpTimestamp !== frame.rtpTimestamp || source.layoutEpoch !== frame.layoutEpoch) throw new Error('Quality source no longer matches current painted RTP');
+        const scale = source.pixelsPerDip;
         const image = document.createElement('canvas');
-        image.width = Math.round(view.width * scale); image.height = Math.round(view.height * scale);
-        image.getContext('2d').drawImage(atlas, view.x, view.y, image.width, image.height, 0, 0, image.width, image.height);
+        // Layout width/height are already encoded pixels; apply no second DPR.
+        image.width = view.width; image.height = view.height;
+        const crop = source.sourceRect;
+        image.getContext('2d').drawImage(source.image, crop.x, crop.y, crop.width, crop.height, 0, 0, image.width, image.height);
         context.drawImage(image, 0, 0, 256 * scale, 112 * scale, 0, 0, 256, 112);
         const marker = decodeMarker(context.getImageData(0, 0, 256, 112));
-        const artifact = { kind: 'decoded-reference', run: config.id + '-' + index, marker, rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch, width: image.width, height: image.height, capturedAfterMeasurement: true, image: image.toDataURL('image/png') };
+        const artifact = { kind: 'decoded-reference', run: config.id + '-' + index, marker, rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch, sourceKind: source.kind, sourceRect: crop, pixelsPerDip: scale, width: image.width, height: image.height, capturedAfterMeasurement: true, image: image.toDataURL('image/png') };
         const saved = await fetch(`${config.fixtureOrigin}/decoded-artifact?probeRun=${encodeURIComponent(artifact.run)}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-RK-Artifact': config.artifactToken }, body: JSON.stringify(artifact) });
         if (!saved.ok) throw new Error(`Decoded quality artifact upload failed ${saved.status}`);
       }
       return { tenantIndex: index, observedFps: report.observedFps, authorizedFrameFps: report.authorizedFrameFps, displayFps: report.displayFps, markerSamplesPerSecond: report.markerSamplesPerSecond, renderToObservedMs: report.renderToObservedMs, inputToObservedMs: report.inputToObservedMs, perSecondFrames: buckets, authorizedPerSecondFrames: displayBuckets, invalid, samples: samples.length, visibility, actualLayout: transport.layout, presentation, lastCounters: rtcSamples[rtcSamples.length - 1] };
     }, { config, index, flags })));
     await Promise.all(pages.map(page => page.waitForTimeout(1200)));
-    return { id: config.id, browser: browser.version(), config, flags, timerPolicy, results, errors };
+    return { id: config.id, browser: browser.version(), config, flags, timerPolicy, results, errors, closeResults };
+  } catch (error) { measurementError = error; throw error;
   } finally {
-    for (const page of pages) await page.evaluate(() => window.remotekitDiagnostics?.transport.disconnect()).catch(() => {});
+    for (const [tenant, page] of pages.entries()) {
+      try {
+        const result = await page.evaluate(async () => {
+          const t = window.remotekitDiagnostics?.transport, connectionId = t?.diagnostics.connectionId;
+          try {
+            if (!connectionId) return { connectionId: null, status: null };
+            const started = performance.now(), response = await fetch('/api/rtc/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId }) });
+            if (!response.ok) throw new Error(`RTC close ${response.status}`);
+            return { connectionId, status: response.status, elapsedMs: performance.now() - started };
+          } finally { t?.disconnect(); }
+        });
+        closeResults.push({ tenant, ...result });
+      } catch (error) { closeResults.push({ tenant, error: String(error) }); }
+    }
     for (const context of contexts) await context.close().catch(() => {});
     await browser.close();
+    if (!measurementError && closeResults.some(result => result.error)) throw new Error('RTC shutdown failed: ' + JSON.stringify(closeResults));
   }
 }

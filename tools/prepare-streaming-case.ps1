@@ -22,12 +22,20 @@ param(
   [string]$FixtureDirectory = 'control/dist/client',
   [switch]$CaptureQuality,
   [switch]$ResourceProfile,
+  [switch]$ServerTrace,
+  [switch]$DisableMediaTrace,
+  [switch]$AtlasReadyGate,
+  [ValidateSet(0,1,2,10)][int]$CaptureMaxPending=0,
+  [switch]$OfficialTrace,
+  [ValidateSet('canvas','compositor')][string]$FixtureKind='canvas',
+  [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
   [switch]$DisableClientRafProbe,
   [ValidateSet('default','software','unlimited')][string]$ClientMode='default',
   [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
 $ErrorActionPreference = 'Stop'
+if($ServerTrace -and $DisableMediaTrace){throw 'ServerTrace also enables browser trace; use DisableMediaTrace without ServerTrace for the off baseline'}
 $rkRoot = Split-Path -Parent $PSScriptRoot
 $caseRoot = Join-Path $rkRoot "develop/tmp/$Name"
 if (Test-Path -LiteralPath $caseRoot) { throw "Use a new case name; existing measurements must be preserved: $caseRoot" }
@@ -36,7 +44,8 @@ foreach ($directory in @('bin','metrics','browser-trace','source-trace','fixture
   New-Item -ItemType Directory -Path (Join-Path $caseRoot $directory) -Force | Out-Null
 }
 foreach ($filename in @('test-pattern.html','marker-codec.js')) {
-  Copy-Item -LiteralPath (Join-Path (Join-Path $rkRoot $FixtureDirectory) $filename) -Destination (Join-Path $caseRoot "fixture/$filename")
+  $sourceFilename=if($filename -eq 'test-pattern.html' -and $FixtureKind -eq 'compositor'){'compositor-pattern.html'}else{$filename}
+  Copy-Item -LiteralPath (Join-Path (Join-Path $rkRoot $FixtureDirectory) $sourceFilename) -Destination (Join-Path $caseRoot "fixture/$filename")
 }
 foreach ($filename in @('endpoint_service.exe','libvpl.dll')) {
   Copy-Item -LiteralPath (Join-Path $serviceRoot $filename) -Destination (Join-Path $caseRoot "bin/$filename")
@@ -51,6 +60,10 @@ $configuration = @{
   timerPolicyTool=(Join-Path $rkRoot 'tools/probe-chrome-timer-policy.ps1'); timerPolicyOutput=(Join-Path $caseRoot 'timer-policy.json');
   captureQuality=[bool]$CaptureQuality; artifactToken=[guid]::NewGuid().ToString('N');
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
+  serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
+  atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;
+  captureMaxPending=$CaptureMaxPending;browserEnableFeatures=$(if($CaptureMaxPending){"RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"}else{''});
+  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;
   endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
@@ -78,36 +91,45 @@ foreach ($relativePath in @('fixture/test-pattern.html','fixture/marker-codec.js
 foreach ($relativePath in @('control/public/test-pattern.html','control/dist/server.mjs','tools/streaming-benchmark.js','tools/streaming-source-probe.mjs','tools/watch-streaming-resources.ps1','tools/windows-gpu-counters.cs','tools/streaming-endpoint-tee.mjs','tools/prepare-streaming-case.ps1')) {
   $fingerprints[$relativePath] = (Get-FileHash -LiteralPath (Join-Path $rkRoot $relativePath) -Algorithm SHA256).Hash
 }
-foreach ($absolutePath in @('C:/src/chromium/src/out/dev/remotekit_browser.exe','C:/src/chromium/src/out/dev/remotekit_sdk.dll')) {
+foreach ($absolutePath in @('C:/src/chromium/src/out/dev/remotekit_browser.exe','C:/src/chromium/src/out/dev/remotekit_sdk.dll','C:/src/chromium/src/out/dev/components_viz_service.dll')) {
   $fingerprints[$absolutePath] = (Get-FileHash -LiteralPath $absolutePath -Algorithm SHA256).Hash
 }
+$fingerprints['patches/manifest.json']=(Get-FileHash -LiteralPath (Join-Path $rkRoot 'patches/manifest.json') -Algorithm SHA256).Hash
 $fingerprints | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $caseRoot 'fingerprints.json')
 $env:REMOTEKIT_ENDPOINT = Join-Path $caseRoot 'bin/endpoint_service.exe'
-$env:REMOTEKIT_ENDPOINT_ARGS = ConvertTo-Json -Compress -InputObject @(
+$rkEndpointArguments = @(
   '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe', "--data-path=$caseRoot/sessions",
   '--encoder=qsv','--fps=60','--bitrate=18000000','--max-bitrate=40000000',
   "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )
+if($CaptureMaxPending){
+  $rkEndpointArguments+="--browser-enable-features=RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"
+}
+if($OfficialTrace){$rkEndpointArguments+="--browser-trace-dir=$(Join-Path $caseRoot 'official-trace')"}
 if ($QsvLowPower -or $RtcPlayoutMaxMs -ge 0) {
   $extraArgs=@()
   if($QsvLowPower){$configuration.endpoint.qsvLowPower=$QsvLowPower;$extraArgs+="--qsv-low-power=$QsvLowPower"}
   if($RtcPlayoutMaxMs -ge 0){$extraArgs+="--rtc-playout-max-ms=$RtcPlayoutMaxMs"}
-  $env:REMOTEKIT_ENDPOINT_ARGS=ConvertTo-Json -Compress -InputObject (@(ConvertFrom-Json $env:REMOTEKIT_ENDPOINT_ARGS)+$extraArgs)
+  $rkEndpointArguments+=$extraArgs
   $configurationJson=ConvertTo-Json -InputObject $configuration -Depth 12 -Compress
   [IO.File]::WriteAllText((Join-Path $caseRoot 'config.json'),$configurationJson)
-  $driver=[regex]::Replace($driver,'const config = /\* CONFIG \*/ .*?;',{'const config = '+$configurationJson+';'})
+  $driver=[regex]::Replace($driver,'(?m)^  const config = .*?;$',{'  const config = '+$configurationJson+';'})
   [IO.File]::WriteAllText((Join-Path $caseRoot 'run.js'),$driver)
 }
 $env:REMOTEKIT_CONTROL_DB = Join-Path $caseRoot 'control.db'
 $env:REMOTEKIT_METRICS_DIR = Join-Path $caseRoot 'metrics'
-$env:REMOTEKIT_MEDIA_TRACE = Join-Path $caseRoot 'browser-trace'
+$env:REMOTEKIT_MEDIA_TRACE = if($DisableMediaTrace){$null}else{Join-Path $caseRoot 'browser-trace'}
+$env:REMOTEKIT_SERVER_TRACE = if($ServerTrace){Join-Path $caseRoot 'server-trace'}else{$null}
+$env:REMOTEKIT_ATLAS_READY_GATE = if($AtlasReadyGate){'1'}else{$null}
 $env:REMOTEKIT_NETWORK_SIM = if ($DownlinkMbps) { ConvertTo-Json -Compress -InputObject @{oneWayDelayMs=5;downlinkMbps=$DownlinkMbps;uplinkMbps=1000;maxQueueBytes=300000;maxQueueDelayMs=100} } else { 'off' }
 $env:REMOTEKIT_RTC_LOOPBACK_TEST = if ($DownlinkMbps) { '1' } else { '0' }
 $env:REMOTEKIT_GPU_POLL = if ($PreciseBrowserPoll) { 'precise' } else { 'default' }
 $env:PORT = '3001'
+$env:REMOTEKIT_ENDPOINT_ARGS=ConvertTo-Json -Compress -InputObject $rkEndpointArguments
+[IO.File]::WriteAllText((Join-Path $caseRoot 'endpoint-args.json'),$env:REMOTEKIT_ENDPOINT_ARGS)
 $nodeExe = (Get-Command node.exe).Source
 if ($ResourceProfile) {
-  $endpointArgs=ConvertFrom-Json $env:REMOTEKIT_ENDPOINT_ARGS
+  $endpointArgs=$rkEndpointArguments
   $env:REMOTEKIT_ENDPOINT_ARGS=ConvertTo-Json -Compress -InputObject (@((Join-Path $rkRoot 'tools/streaming-endpoint-tee.mjs'),(Join-Path $caseRoot 'endpoint-responses.jsonl'),$env:REMOTEKIT_ENDPOINT)+@($endpointArgs))
   $env:REMOTEKIT_ENDPOINT=$nodeExe
 }
@@ -122,7 +144,7 @@ if ($HonorClientTimerResolution) {
 }
 $casePids | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $caseRoot 'pids.json')
 if ($ResourceProfile) {
-  $resourceArguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $rkRoot 'tools/watch-streaming-resources.ps1')+'" -Name '+$Name
+  $resourceArguments='-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+(Join-Path $rkRoot 'tools/watch-streaming-resources.ps1')+'" -Name '+$Name+' -DurationSeconds 300'
   $resourceProcess=Start-Process -FilePath 'C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe' -ArgumentList $resourceArguments -WindowStyle Hidden -RedirectStandardOutput (Join-Path $caseRoot 'resource.log') -RedirectStandardError (Join-Path $caseRoot 'resource.err') -PassThru
   $casePids.resource_pid=$resourceProcess.Id
   $casePids|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $caseRoot 'pids.json')

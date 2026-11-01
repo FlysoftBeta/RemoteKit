@@ -89,20 +89,25 @@ bool Nv12Converter::Convert(ID3D11Texture2D* bgra,ID3D11Texture2D* nv12,std::str
     !Check(video_->CreateVideoProcessorOutputView(nv12,enumerator_.Get(),&out,&output),"VP output",error))return false;
  safe_to_release_=false;
  D3D11_VIDEO_PROCESSOR_STREAM stream{};stream.Enable=TRUE;stream.pInputSurface=input.Get();
+ RK_SERVER_TRACE(trace_,"vpp_submit",trace_ids_,);
  if(!Check(video_context_->VideoProcessorBlt(processor_.Get(),output.Get(),0,1,&stream),"VP BGRA NV12",error))return false;
+ RK_SERVER_TRACE(trace_,"vpp_blt_return",trace_ids_,);
  const uint64_t value=++sequence_;
  if(!Check(context_->Signal(fence_.Get(),value),"VP Signal",error))return false;
  context_->Flush();
  HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);
  if(!event){error="VP completion event";return false;}
  HRESULT hr=fence_->SetEventOnCompletion(value,event);
+ RK_SERVER_TRACE(trace_,"vpp_wait_begin",trace_ids_,rk_record.fence=value;rk_record.status=hr;);
  const DWORD wait=SUCCEEDED(hr)?WaitForSingleObject(event,5000):WAIT_FAILED;
+ RK_SERVER_TRACE(trace_,"vpp_wait_return",trace_ids_,rk_record.fence=value;rk_record.status=static_cast<int>(wait););
  CloseHandle(event);
  if(wait!=WAIT_OBJECT_0||fence_->GetCompletedValue()==UINT64_MAX) {
   safe_to_release_=FAILED(device_->GetDeviceRemovedReason());
   error="VP GPU completion failed";return false;
  }
  safe_to_release_=true;
+ RK_SERVER_TRACE(trace_,"vpp_complete",trace_ids_,rk_record.fence=value;);
  return true;
 }
 }

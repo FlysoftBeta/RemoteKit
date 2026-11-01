@@ -2,6 +2,7 @@ import { decodeMarker, MARKER_WIDTH, MARKER_HEIGHT, percentiles } from '../publi
 import type { Surface, CanvasPresentation } from './types';
 import { markerSourceRect } from './coordinates';
 import { MarkerSchedule } from './marker-schedule';
+import type { PresentedPlaneSource } from './plane-source';
 export interface MarkerSample { observedAt: number; sampledAt: number; processedAt: number; paintToReadMs: number; processingMs: number; rtpTimestamp?: number; layoutEpoch?: string; frameId: number; stimulus: number; renderToObservedMs?: number; inputToObservedMs?: number }
 export class MarkerMeasurement {
   private canvas = document.createElement('canvas');
@@ -19,7 +20,7 @@ export class MarkerMeasurement {
   private schedule: MarkerSchedule;
   private paintCount = 0; private firstPaint?: number; private lastPaint?: number;
   private readCount = 0; private firstRead?: number; private lastRead?: number;
-  constructor(private video: HTMLVideoElement, private surface: () => Surface | undefined, private options: { sameMachineClock: boolean; sampleHz?: number; parameters: Record<string, unknown>; decodedFrames?: () => number | undefined; frameSource?: (frame?: CanvasPresentation) => CanvasImageSource | undefined; subscribeFrame?: (listener: (frame: CanvasPresentation) => void) => () => void; recordCost?: (name: string, at: number, durationMs: number) => void }) { this.canvas.width = MARKER_WIDTH; this.canvas.height = MARKER_HEIGHT; this.schedule = new MarkerSchedule(options.sampleHz ?? 10); }
+  constructor(private video: HTMLVideoElement, private surface: () => Surface | undefined, private options: { sameMachineClock: boolean; sampleHz?: number; parameters: Record<string, unknown>; decodedFrames?: () => number | undefined; planeSource?: (frame?: CanvasPresentation) => PresentedPlaneSource | undefined; subscribeFrame?: (listener: (frame: CanvasPresentation) => void) => () => void; recordCost?: (name: string, at: number, durationMs: number) => void }) { this.canvas.width = MARKER_WIDTH; this.canvas.height = MARKER_HEIGHT; this.schedule = new MarkerSchedule(options.sampleHz ?? 10); }
   start() {
     if (this.running) return; this.running = true;
     if (this.options.subscribeFrame) { this.unsubscribe = this.options.subscribeFrame(frame => this.read(true, frame)); return; }
@@ -32,7 +33,9 @@ export class MarkerMeasurement {
     const video = this.video as HTMLVideoElement & { webkitDecodedFrameCount?: number };
     if (!frameCallback) { const count = video.webkitDecodedFrameCount ?? this.options.decodedFrames?.(); if (count === undefined || count === this.decodedFrames) return; this.decodedFrames = count; }
     const surface = this.surface(); if (!surface || video.readyState < 2) return;
-    const source = this.options.frameSource ? this.options.frameSource(frame) : video; if (!source) return;
+    const plane = this.options.planeSource?.(frame);
+    if (this.options.planeSource && (!plane || !frame || plane.rtpTimestamp !== frame.rtpTimestamp || plane.layoutEpoch !== frame.layoutEpoch || plane.viewId !== frame.viewId)) return;
+    const source = plane?.image ?? video;
     const sampledAt = performance.now(), observedAt = frame?.paintedAt ?? sampledAt, observedWallTime = frame?.paintedWallTime ?? Date.now();
     this.paintCount++; this.firstPaint ??= observedAt; this.lastPaint = observedAt;
     // Inspect the first presented response while an input stimulus is pending.
@@ -41,7 +44,7 @@ export class MarkerMeasurement {
     this.readCount++; this.firstRead ??= observedAt; this.lastRead = observedAt;
     const context = this.canvas.getContext('2d', { willReadFrequently: true } as CanvasRenderingContext2DSettings)!;
     try {
-      const region = markerSourceRect(surface, MARKER_WIDTH, MARKER_HEIGHT);
+      const region = plane ? { x: plane.sourceRect.x, y: plane.sourceRect.y, width: MARKER_WIDTH * plane.pixelsPerDip, height: MARKER_HEIGHT * plane.pixelsPerDip } : markerSourceRect(surface, MARKER_WIDTH, MARKER_HEIGHT);
       let started = performance.now();
       context.drawImage(source, region.x, region.y, region.width, region.height, 0, 0, MARKER_WIDTH, MARKER_HEIGHT);
       this.options.recordCost?.('markerDraw', started, performance.now() - started); started = performance.now();

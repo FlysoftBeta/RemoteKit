@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 namespace remotekit::media {
+class ServerTrace;
 struct EncoderSettings {
   uint32_t width=0,height=0,fps=60,bitrate=24000000,max_bitrate=48000000;
   uint32_t level_idc=51,async_depth=1,gop=120,target_usage=4,buffer_ms=1000;
@@ -30,6 +31,7 @@ enum class CodecResult { accepted, busy, ready, pending, error };
 // Worker fills up to async_depth, then polls. Never sync immediately per Submit.
 class HardwareEncoder {
  public:
+  void SetTrace(std::shared_ptr<ServerTrace> trace,uint64_t encoder){trace_=std::move(trace);trace_encoder_=encoder;}
   virtual ~HardwareEncoder() = default;
   virtual bool Configure(ID3D11Device*, const EncoderSettings&, std::string& error)=0;
   virtual CodecResult Submit(ID3D11Texture2D*, bool keyframe,uint64_t frame_cookie,
@@ -43,6 +45,8 @@ class HardwareEncoder {
   virtual EncoderSettings ActualSettings() const {
     EncoderSettings value;value.bitrate=value.max_bitrate=value.fps=value.level_idc=0;return value;
   }
+ protected:
+  std::shared_ptr<ServerTrace> trace_;uint64_t trace_encoder_=0;
 };
 std::unique_ptr<HardwareEncoder> CreateQsvEncoder();
 std::unique_ptr<HardwareEncoder> CreateNvencEncoder();

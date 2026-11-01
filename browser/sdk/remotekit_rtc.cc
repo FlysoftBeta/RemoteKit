@@ -23,6 +23,9 @@
 
 #include "base/no_destructor.h"
 #include "base/environment.h"
+#include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/process/process_handle.h"
 #include "base/json/json_writer.h"
 #include "base/time/time.h"
 #include "base/values.h"
@@ -58,6 +61,7 @@ void RemoteKitSdkEndRtc();
 
 namespace {
 #include "remotekit/browser/sdk/rtc_silent_audio.h"
+#include "remotekit/browser/sdk/rtc_trace.h"
 
 constexpr size_t kMaxMessage = 1024 * 1024;
 constexpr size_t kMaxAccessUnit = 32 * 1024 * 1024;
@@ -138,6 +142,7 @@ struct EncoderState {
   bool active = true;
   bool logged_sps = false;
   std::shared_ptr<RequestedPlayoutDelay> playout_delay;
+  std::shared_ptr<SdkTrace> trace;
 };
 struct RemoteReceiveLimits {
   std::atomic<uint32_t> h264_level{51};
@@ -159,10 +164,12 @@ uint64_t NewID() {
 class ExternalEncoder : public webrtc::VideoEncoder {
  public:
   ExternalEncoder(uint64_t peer, const remotekit_rtc_options& options,
-                  uint32_t level, std::shared_ptr<RequestedPlayoutDelay> playout)
+                  uint32_t level, std::shared_ptr<RequestedPlayoutDelay> playout,
+                  std::shared_ptr<SdkTrace> trace)
       : peer_(peer), id_(NewID()), options_(options), level_(level),
         state_(std::make_shared<EncoderState>()) {
     state_->playout_delay = std::move(playout);
+    state_->trace = std::move(trace);
     auto& r = GetRegistry();
     std::lock_guard lock(r.mutex);
     r.encoders.emplace(id_, state_);
@@ -234,11 +241,13 @@ class ExternalEncoder : public webrtc::VideoEncoder {
       return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
     auto input = static_cast<TextureBuffer*>(frame.video_frame_buffer().get())->frame();
     input.rtp_timestamp = frame.rtp_timestamp();
+    state_->trace->Add("encode_enter", id_, &input, input.rtp_timestamp);
     const bool key = types && std::find(types->begin(), types->end(),
         webrtc::VideoFrameType::kVideoFrameKey) != types->end();
     if (key && options_.encoder.request_keyframe)
       options_.encoder.request_keyframe(options_.context, id_);
     const int result = options_.encoder.encode(options_.context, id_, &input, key);
+    state_->trace->Add("encode_return", id_, &input, input.rtp_timestamp, 0, result);
     if (result == REMOTEKIT_SDK_BUSY) {
       std::lock_guard lock(state_->mutex);
       if (state_->active && state_->callback)
@@ -298,8 +307,10 @@ class ExternalEncoderFactory : public webrtc::VideoEncoderFactory {
  public:
   ExternalEncoderFactory(uint64_t peer, const remotekit_rtc_options& o,
                          std::shared_ptr<RemoteReceiveLimits> remote,
-                         std::shared_ptr<RequestedPlayoutDelay> playout)
-      : peer_(peer), options_(o), remote_(std::move(remote)), playout_(std::move(playout)) {}
+                         std::shared_ptr<RequestedPlayoutDelay> playout,
+                         std::shared_ptr<SdkTrace> trace)
+      : peer_(peer), options_(o), remote_(std::move(remote)), playout_(std::move(playout)),
+        trace_(std::move(trace)) {}
   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
     return {H264Format()};
   }
@@ -313,13 +324,14 @@ class ExternalEncoderFactory : public webrtc::VideoEncoderFactory {
     const uint32_t receive_level = remote_->h264_level.load();
     if (!receive_level) return nullptr;
     return std::make_unique<ExternalEncoder>(peer_, options_,
-        std::min(static_cast<uint32_t>(profile->level), receive_level), playout_);
+        std::min(static_cast<uint32_t>(profile->level), receive_level), playout_, trace_);
   }
  private:
   uint64_t peer_;
   remotekit_rtc_options options_;
   std::shared_ptr<RemoteReceiveLimits> remote_;
   std::shared_ptr<RequestedPlayoutDelay> playout_;
+  std::shared_ptr<SdkTrace> trace_;
 };
 
 class LocalDescriptionObserver;
@@ -331,7 +343,7 @@ class Peer : public webrtc::PeerConnectionObserver,
              public std::enable_shared_from_this<Peer> {
  public:
   Peer(uint64_t id, const remotekit_rtc_options& options)
-      : id(id), options(options) {}
+      : id(id), options(options), trace(std::make_shared<SdkTrace>(id)) {}
   ~Peer() override = default;
   int Start();
   void Close() {
@@ -352,6 +364,7 @@ class Peer : public webrtc::PeerConnectionObserver,
       leases->done.wait(lock, [this] { return leases->active == 0; });
     }
     std::lock_guard lock(event_mutex); // Wait for an already running callback.
+    trace->Save();
   }
   void Event(uint32_t type, const void* bytes = nullptr, size_t size = 0,
              const char* auxiliary = nullptr, int32_t value = 0) {
@@ -401,6 +414,7 @@ class Peer : public webrtc::PeerConnectionObserver,
   }
   const uint64_t id;
   remotekit_rtc_options options;
+  std::shared_ptr<SdkTrace> trace;
   std::mutex api_mutex, event_mutex;
   std::atomic<bool> closing{false};
   std::atomic<bool> stats_pending{false};
@@ -592,7 +606,7 @@ int Peer::Start() {
     deps.audio_encoder_factory = webrtc::make_ref_counted<EmptyAudioEncoders>();
     deps.audio_decoder_factory = webrtc::make_ref_counted<EmptyAudioDecoders>();
     deps.video_encoder_factory = std::make_unique<ExternalEncoderFactory>(
-        id, options, remote_limits, playout_delay);
+        id, options, remote_limits, playout_delay, trace);
     deps.video_decoder_factory = std::make_unique<SendOnlyDecoderCapabilities>();
     const bool loopback_test = base::Environment::Create()->GetVar("REMOTEKIT_RTC_LOOPBACK_TEST").value_or("") == "1";
     webrtc::EnableMedia(deps);
@@ -847,6 +861,7 @@ int remotekit_rtc_submit_texture(uint64_t id, const remotekit_rtc_frame* frame) 
         static_cast<double>(now.QuadPart - input.capture_qpc) * 1000000.0 / frequency.QuadPart);
     const int64_t media_timestamp = std::max(clock_us, p.last_media_timestamp_us + 1000);
     p.last_media_timestamp_us = media_timestamp;
+    p.trace->Add("texture_submit", 0, &input, 0, 0, REMOTEKIT_SDK_OK, media_timestamp);
     p.source->Submit(input, media_timestamp);
     return REMOTEKIT_SDK_OK;
   });
@@ -865,6 +880,7 @@ int remotekit_rtc_encoded(uint64_t id, const remotekit_rtc_encoded_frame* frame,
     if (it != r.encoders.end()) s = it->second.lock();
   }
   if (!s) return REMOTEKIT_SDK_INVALID_STATE;
+  s->trace->Add("encoded_begin", id, nullptr, frame->rtp_timestamp, 0, 0, 0, frame->capture_time_us);
   std::lock_guard lock(s->mutex);
   if (!s->active || !s->callback) return REMOTEKIT_SDK_INVALID_STATE;
   if (!s->logged_sps) {
@@ -907,6 +923,10 @@ int remotekit_rtc_encoded(uint64_t id, const remotekit_rtc_encoded_frame* frame,
   codec.codecSpecific.H264.temporal_idx = webrtc::kNoTemporalIdx;
   codec.codecSpecific.H264.idr_frame = frame->keyframe != 0;
   auto result = s->callback->OnEncodedImage(image, &codec);
+  s->trace->Add("encoded_return", id, nullptr, frame->rtp_timestamp,
+      result.error == webrtc::EncodedImageCallback::Result::OK ? result.frame_id : 0,
+      result.error == webrtc::EncodedImageCallback::Result::OK ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE,
+      0, frame->capture_time_us);
   if (result.error == webrtc::EncodedImageCallback::Result::OK && wire_rtp_timestamp)
     *wire_rtp_timestamp = result.frame_id;
   return result.error == webrtc::EncodedImageCallback::Result::OK
@@ -923,6 +943,7 @@ int remotekit_rtc_encoder_drop(uint64_t id, uint32_t rtp_timestamp) {
   if (!state) return REMOTEKIT_SDK_INVALID_STATE;
   std::lock_guard lock(state->mutex);
   if (!state->active || !state->callback) return REMOTEKIT_SDK_INVALID_STATE;
+  state->trace->Add("encoder_drop", id, nullptr, rtp_timestamp);
   state->callback->OnFrameDropped(rtp_timestamp, 0, true);
   return REMOTEKIT_SDK_OK;
 }

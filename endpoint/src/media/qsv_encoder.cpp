@@ -1,4 +1,5 @@
 #include "hardware_encoder.hpp"
+#include "server_trace.hpp"
 #include "remotekit/sampling.hpp"
 #include <vpl/mfxdispatcher.h>
 #include <vpl/mfxvideo.h>
@@ -226,12 +227,14 @@ class Qsv final : public HardwareEncoder {
     task->bitstream.Data=task->storage.data();task->bitstream.MaxLength=static_cast<mfxU32>(task->storage.size());
     mfxEncodeCtrl control{};
     if(key) control.FrameType=MFX_FRAMETYPE_I|MFX_FRAMETYPE_IDR|MFX_FRAMETYPE_REF;
+    RK_SERVER_TRACE(trace_,"mfx_submit_begin",TraceIds{},rk_record.cookie=cookie;rk_record.encoder=trace_encoder_;);
     auto status=MFXVideoENCODE_EncodeFrameAsync(session_,&control,&task->surface,&task->bitstream,&task->sync);
     while(status==MFX_ERR_NOT_ENOUGH_BUFFER && task->storage.size()<64*1024*1024) {
       task->storage.resize(std::min<size_t>(64*1024*1024,task->storage.size()*2));
       task->bitstream.Data=task->storage.data();task->bitstream.MaxLength=static_cast<mfxU32>(task->storage.size());
       status=MFXVideoENCODE_EncodeFrameAsync(session_,&control,&task->surface,&task->bitstream,&task->sync);
     }
+    RK_SERVER_TRACE(trace_,"mfx_submit_return",TraceIds{},rk_record.cookie=cookie;rk_record.encoder=trace_encoder_;rk_record.status=status;);
     if(status==MFX_WRN_DEVICE_BUSY) return CodecResult::busy;
     if(status==MFX_ERR_MORE_DATA) {
       // MORE_DATA accepted the surface. Retain its frame and memory until a
@@ -263,7 +266,9 @@ class Qsv final : public HardwareEncoder {
     }
     if(tasks_.empty()) return CodecResult::pending;
     auto& task=*tasks_.front();
+    RK_SERVER_TRACE(trace_,"mfx_sync_begin",TraceIds{},rk_record.cookie=task.cookie;rk_record.encoder=trace_encoder_;);
     auto status=MFXVideoCORE_SyncOperation(session_,task.sync,timeout);
+    RK_SERVER_TRACE(trace_,"mfx_sync_return",TraceIds{},rk_record.cookie=task.cookie;rk_record.encoder=trace_encoder_;rk_record.status=status;);
     if(status==MFX_WRN_IN_EXECUTION) return CodecResult::pending;
     if(!Status(status,"MFX SyncOperation",error)) return CodecResult::error;
     output.frame_cookie=task.bitstream.TimeStamp;
@@ -304,13 +309,17 @@ class Qsv final : public HardwareEncoder {
     reset.StartNewSequence=MFX_CODINGOPTION_OFF;
     std::array<mfxExtBuffer*,4> reset_extensions={extensions_[0],extensions_[1],extensions_[2],reinterpret_cast<mfxExtBuffer*>(&reset)};
     next.ExtParam=reset_extensions.data();next.NumExtParam=static_cast<mfxU16>(reset_extensions.size());
+    RK_SERVER_TRACE(trace_,"mfx_reset_begin",TraceIds{},rk_record.encoder=trace_encoder_;);
     const auto status=MFXVideoENCODE_Reset(session_,&next);
+    RK_SERVER_TRACE(trace_,"mfx_reset_return",TraceIds{},rk_record.encoder=trace_encoder_;rk_record.status=status;);
     // A driver rejecting no-new-sequence Reset must be diagnosed explicitly;
     // silently reinitializing here would turn every BWE change into an IDR.
     if(!Status(status,"MFX bitrate-only Reset StartNewSequence=OFF",error))return false;
     next.ExtParam=extensions_.data();next.NumExtParam=static_cast<mfxU16>(extensions_.size());
     params_=next;settings_.bitrate=bitrate;
+    RK_SERVER_TRACE(trace_,"mfx_get_params_begin",TraceIds{},rk_record.encoder=trace_encoder_;);
     const auto get_status=MFXVideoENCODE_GetVideoParam(session_,&params_);
+    RK_SERVER_TRACE(trace_,"mfx_get_params_return",TraceIds{},rk_record.encoder=trace_encoder_;rk_record.status=get_status;);
     low_power_.get_video_param_status=get_status;low_power_.initialized.reset();
     if(get_status>=0)low_power_.initialized=params_.mfx.LowPower;
     if(!Status(get_status,"MFX GetVideoParam after rate update",error))return false;

@@ -1,4 +1,5 @@
 #include "remotekit/browser/gpu_atlas.h"
+#include "remotekit/capture_geometry.hpp"
 
 #include <d3d11_4.h>
 #include <dxgi1_2.h>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/check.h"
@@ -69,6 +71,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     ~Capture() override { Stop(); }
     void Rebind(content::WebContents* contents) { Observe(contents); }
     void Stop() {
+      geometry.Stop();
+      geometry_error.clear();
       if (capturer)
         capturer->StopAndResetConsumer();
       capturer.reset();
@@ -102,6 +106,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     bool restart = false;
     uintptr_t identity = 0;
     base::TimeTicks mutex_busy_since;
+    CaptureGeometryWait geometry;
+    std::string geometry_error;
     base::ScopedClosureRunner capture_count;
     std::unique_ptr<viz::ClientFrameSinkVideoCapturer> capturer;
   };
@@ -112,6 +118,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     mojo::Remote<viz::mojom::FrameSinkVideoConsumerFrameCallbacks> callbacks;
     base::TimeTicks submitted;
     uint64_t capture_serial = 0;
+    int64_t capture_time_us = 0;
   };
   struct Consumer {
     uint32_t pid = 0;
@@ -123,7 +130,10 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       : width_(width), height_(height), generation_(generation) {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
     precise_poll_ = base::Environment::Create()->GetVar("REMOTEKIT_GPU_POLL").value_or("") == "precise";
-    if (auto directory = base::Environment::Create()->GetVar("REMOTEKIT_MEDIA_TRACE")) {
+    auto directory = base::Environment::Create()->GetVar("REMOTEKIT_MEDIA_TRACE");
+    if (!directory || directory->empty())
+      directory = base::Environment::Create()->GetVar("REMOTEKIT_SERVER_TRACE");
+    if (directory && !directory->empty()) {
       trace_directory_ = base::FilePath::FromUTF8Unsafe(*directory);
       trace_events_.reserve(64000);
       trace_start_high_resolution_ = base::Time::IsHighResolutionTimerInUse();
@@ -305,6 +315,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         c.capturer->SetResolutionConstraints(size, size, true);
         c.capturer->SetAutoThrottlingEnabled(false);
         c.capturer->SetAnimationFpsLockIn(false, 0.0f);
+        c.geometry.Bind(++next_capture_binding_);
         c.capturer->Start(&c, viz::mojom::BufferFormatPreference::kPreferMappableSharedImage);
       }
     }
@@ -363,6 +374,25 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     for (auto& [id, c] : captures_)
       if (c->capturer)
         c->capturer->SetMinCapturePeriod(base::Seconds(1) / fps_);
+  }
+  void RefreshGeometry(Capture& capture) {
+    auto binding = capture.geometry.QueueRefresh();
+    if (!binding) return;
+    std::weak_ptr<State> weak = shared_from_this();
+    const auto id = capture.metadata.webview_id;
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
+        FROM_HERE, base::BindOnce([](std::weak_ptr<State> weak, uint64_t id, uint64_t binding) {
+          auto owner = weak.lock();
+          if (!owner || owner->stopping_) return;
+          auto found = owner->captures_.find(id);
+          if (found == owner->captures_.end()) return;
+          auto& capture = *found->second;
+          if (capture.capturer && capture.geometry.TakeRefresh(
+                  binding, base::TimeTicks::Now().since_origin().InMicroseconds())) {
+            ++owner->geometry_refreshes_;
+            capture.capturer->RequestRefreshFrame();
+          }
+        }, weak, id, *binding), base::Milliseconds(16));
   }
   bool CreateOutput() {
     D3D11_TEXTURE2D_DESC desc{};
@@ -486,12 +516,61 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       drop();
       return;
     }
+    const auto geometry_now = base::TimeTicks::Now().since_origin().InMicroseconds();
+    if (capture.geometry.TimedOut(geometry_now)) {
+      Lost("capture geometry transition exceeded 2000ms: " + capture.geometry_error);
+      drop();
+      return;
+    }
     if (!data || !info || !data->is_gpu_memory_buffer_handle() ||
         info->pixel_format != media::PIXEL_FORMAT_ARGB ||
         info->coded_size !=
             gfx::Size(capture.metadata.width_pixels, capture.metadata.height_pixels) ||
         content_rect != gfx::Rect(info->coded_size)) {
-      Lost("output invalid: capture is not exact-size BGRA ARGB GPU data");
+      const char* bucket = !data ? "missing-buffer" : !info ? "missing-info" :
+          !data->is_gpu_memory_buffer_handle() ? "buffer-kind" :
+          info->pixel_format != media::PIXEL_FORMAT_ARGB ? "pixel-format" :
+          info->coded_size != gfx::Size(capture.metadata.width_pixels,
+                                       capture.metadata.height_pixels) ? "coded-size" : "content-rect";
+      const auto detail = std::string("output invalid: capture is not exact-size BGRA ARGB GPU data bucket=") +
+           bucket + " view=" + Number(capture.metadata.webview_id) +
+           " requested=" + gfx::Size(capture.metadata.width_pixels,
+                                     capture.metadata.height_pixels).ToString() +
+           " coded=" + (info ? info->coded_size.ToString() : "none") +
+           " visible=" + (info ? info->visible_rect.ToString() : "none") +
+           " natural=" + (info ? info->natural_size.ToString() : "none") +
+           " content=" + content_rect.ToString() +
+           " pixel_format=" + (info ? media::VideoPixelFormatToString(info->pixel_format) : "none") +
+           " buffer_tag=" + (data ? base::NumberToString(static_cast<int>(data->which())) : "none") +
+           " gpu_handle_type=" + (data && data->is_gpu_memory_buffer_handle() ?
+               base::NumberToString(static_cast<int>(data->get_gpu_memory_buffer_handle().type)) : "none");
+      const bool geometry_only = data && info && data->is_gpu_memory_buffer_handle() &&
+          info->pixel_format == media::PIXEL_FORMAT_ARGB &&
+          data->get_gpu_memory_buffer_handle().type == gfx::DXGI_SHARED_HANDLE;
+      if (geometry_only && capture.geometry.Defer(geometry_now)) {
+        // Validate the real resource before granting any geometric grace. An
+        // import is not a GPU read; no mismatched pixels enter the new atlas.
+        ComPtr<ID3D11Texture2D> candidate;
+        if (!Import(data->get_gpu_memory_buffer_handle().dxgi_handle().buffer_handle(), candidate)) {
+          drop(); return;
+        }
+        D3D11_TEXTURE2D_DESC desc{}; candidate->GetDesc(&desc);
+        ComPtr<IDXGIKeyedMutex> mutex;
+        if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
+            desc.Width != static_cast<UINT>(info->coded_size.width()) ||
+            desc.Height != static_cast<UINT>(info->coded_size.height()) ||
+            desc.ArraySize != 1 || desc.SampleDesc.Count != 1 ||
+            !(desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX) || FAILED(candidate.As(&mutex))) {
+          Lost("output invalid: transition resource format/dimensions/keyed mutex; " + detail);
+          drop(); return;
+        }
+        capture.geometry_error = detail;
+        ++geometry_drops_;
+        RefreshGeometry(capture);
+        drop();
+        return;
+      }
+      Lost(detail);
       drop();
       return;
     }
@@ -539,6 +618,11 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       drop();
       return;
     }
+    if (!capture.geometry.Match(base::TimeTicks::Now().since_origin().InMicroseconds())) {
+      Lost("capture geometry transition exceeded 2000ms: " + capture.geometry_error);
+      drop(); return;
+    }
+    capture.geometry_error.clear();
     ComPtr<IDXGIKeyedMutex> mutex;
     if (FAILED(source.As(&mutex))) {
       Lost("output invalid: capture keyed mutex unavailable");
@@ -586,6 +670,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     lease.callbacks = std::move(callbacks);
     lease.submitted = base::TimeTicks::Now();
     lease.capture_serial = capture_callbacks_;
+    lease.capture_time_us = info->metadata.capture_end_time.value_or(lease.submitted)
+                                .since_origin().InMicroseconds();
     // The source remains leased even if Signal/Release fails after the copy.
     lease.fence_value = Signal();
     leases_.push_back(std::move(lease));
@@ -665,9 +751,19 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       Lost("ready fence reports device removal");
     if (removed && status_ != SharedAtlasStatus::kDeviceLost)
       Lost("D3D device removed");
+    if (!stopping_) {
+      const auto now = base::TimeTicks::Now().since_origin().InMicroseconds();
+      for (const auto& [id, capture] : captures_) {
+        if (capture->geometry.TimedOut(now)) {
+          Lost("capture geometry transition exceeded 2000ms: " + capture->geometry_error);
+          break;
+        }
+      }
+    }
     for (auto it = leases_.begin(); it != leases_.end();) {
       if (removed || (completed != kRemoved && it->fence_value && completed >= it->fence_value)) {
-        Trace("source_read_done", it->capture_serial, it->submitted.since_origin().InMicroseconds(), completed);
+        Trace("source_read_done", it->capture_serial, it->submitted.since_origin().InMicroseconds(),
+              completed, -1, 0, 0, it->capture_time_us);
         if (it->callbacks)
           it->callbacks->Done();
         it = leases_.erase(it);
@@ -770,6 +866,8 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
         .Set("capture_callbacks", Number(capture_callbacks_))
         .Set("dropped", Number(dropped_))
         .Set("mutex_drops", Number(mutex_drops_))
+        .Set("geometry_transition_drops", Number(geometry_drops_))
+        .Set("geometry_refreshes", Number(geometry_refreshes_))
         .Set("backpressure_polls", Number(backpressure_))
         .Set("pending_source_leases", static_cast<int>(leases_.size()))
         .Set("drain_timed_out", drain_timed_out_)
@@ -793,13 +891,19 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
     double frame_rate;
     int64_t capture_begin_us;
     bool high_resolution_timer;
+    int64_t qpc, capture_time_us;
   };
   void Trace(const char* stage, uint64_t serial, int64_t source_us, uint64_t detail,
-             int source_counter = -1, double frame_rate = 0, int64_t capture_begin_us = 0) {
+             int source_counter = -1, double frame_rate = 0, int64_t capture_begin_us = 0,
+             int64_t capture_time_us = 0) {
     if (trace_directory_.empty() || trace_events_.size() >= 64000) return;
+    LARGE_INTEGER qpc{}; QueryPerformanceCounter(&qpc);
+    if (!capture_time_us && (std::string_view(stage) == "capture_callback" ||
+                             std::string_view(stage) == "atlas_publish"))
+      capture_time_us = source_us;
     trace_events_.push_back({stage, base::TimeTicks::Now().since_origin().InMicroseconds(),
                              serial, source_us, detail, source_counter, frame_rate, capture_begin_us,
-                             base::Time::IsHighResolutionTimerInUse()});
+                             base::Time::IsHighResolutionTimerInUse(), qpc.QuadPart, capture_time_us});
   }
   void SaveTrace() {
     if (trace_directory_.empty() || trace_saved_) return;
@@ -813,9 +917,17 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
       if (event.frame_rate > 0) row.Set("source_frame_rate", event.frame_rate);
       if (event.capture_begin_us) row.Set("capture_begin_us", static_cast<double>(event.capture_begin_us));
       row.Set("high_resolution_timer", event.high_resolution_timer);
+      row.Set("qpc", Number(event.qpc));
+      if (event.capture_time_us)
+        row.Set("capture_time_us", static_cast<double>(event.capture_time_us));
+      if (std::string_view(event.stage) == "atlas_publish")
+        row.Set("source_frame_id", Number(event.serial));
       events.Append(std::move(row));
     }
+    LARGE_INTEGER frequency{}; QueryPerformanceFrequency(&frequency);
     auto report = base::DictValue().Set("kind", "browser-gpu-cadence")
+        .Set("schema", "remotekit-media-trace-v1").Set("scope", "browser")
+        .Set("qpc_frequency", Number(frequency.QuadPart))
         .Set("pid", static_cast<int>(base::GetCurrentProcId()))
         .Set("generation", Number(generation_)).Set("width", static_cast<int>(width_))
         .Set("height", static_cast<int>(height_)).Set("fps_limit", static_cast<int>(fps_))
@@ -870,6 +982,7 @@ class GpuAtlas::State : public std::enable_shared_from_this<GpuAtlas::State> {
   uint64_t next_fence_ = 1, frame_id_ = 0, captured_ = 0, dropped_ = 0;
   uint64_t mutex_drops_ = 0, backpressure_ = 0;
   uint64_t capture_callbacks_ = 0;
+  uint64_t next_capture_binding_ = 0, geometry_drops_ = 0, geometry_refreshes_ = 0;
   base::FilePath trace_directory_;
   std::vector<TraceEvent> trace_events_;
   std::map<uint64_t, TraceGeometry> trace_geometry_;

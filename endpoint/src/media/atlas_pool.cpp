@@ -13,7 +13,7 @@ struct AtlasPool::State {
   std::atomic<uint64_t> cookie{0};
   uint64_t fence=0;
   int64_t observed_qpc=0;
-  bool pending=false;
+  bool pending=false,ready_traced=false;
   SharedAtlasFrame metadata{};
  };
  remotekit_sdk_atlas_setup setup{};
@@ -27,13 +27,25 @@ struct AtlasPool::State {
  int64_t frequency=QpcFrequency();double copy_ms=0;bool untracked_read=false;
  SharedAtlasFrame latest{};remotekit_rtc_clock_sample clock{};
  std::optional<double> capture_ready_ms;
+ std::shared_ptr<ServerTrace> trace;uint64_t observed_frame=0,deferred_frame=0;
+ TraceIds Ids(const Slot& slot) const {
+  TraceIds ids;ids.frame_id=slot.cookie;ids.source_frame_id=slot.metadata.frame_id;
+  ids.generation=slot.metadata.generation;ids.capture_time_us=slot.metadata.capture_time_us;return ids;
+ }
  static void Retain(void* context,uint64_t cookie) {
   auto* self=static_cast<State*>(context);
-  for(auto& slot:self->pool) if(slot->cookie==cookie){slot->refs.fetch_add(1);return;}
+  for(auto& slot:self->pool) if(slot->cookie==cookie){const auto before=slot->refs.fetch_add(1);
+   RK_SERVER_TRACE(self->trace,"lease_retain",self->Ids(*slot),rk_record.refs=before+1;);return;}
  }
  static void Release(void* context,uint64_t cookie) {
   auto* self=static_cast<State*>(context);
-  for(auto& slot:self->pool) if(slot->cookie==cookie){slot->refs.fetch_sub(1);return;}
+  for(auto& slot:self->pool) if(slot->cookie==cookie){
+   if(self->trace) {
+    // Snapshot identity while this lease still prevents slot reuse.
+    const auto ids=self->Ids(*slot);const auto before=slot->refs.fetch_sub(1);
+    RK_SERVER_TRACE(self->trace,"lease_release",ids,rk_record.refs=before-1;);
+   } else slot->refs.fetch_sub(1);
+   return;}
  }
  ~State() {
   if(mapping)UnmapViewOfFile(mapping);
@@ -51,10 +63,28 @@ struct AtlasPool::State {
   }
   if(!stable)return false;
   if(frame.status==SharedAtlasStatus::kStarting)return false;
-  if(frame.status!=SharedAtlasStatus::kRunning){error="atlas producer stopped/device lost";return false;}
+  if(frame.status!=SharedAtlasStatus::kRunning){
+   const char* status="unknown";
+   switch(frame.status){
+    case SharedAtlasStatus::kStopped:status="stopped";break;
+    case SharedAtlasStatus::kDeviceLost:status="device-lost";break;
+    case SharedAtlasStatus::kFailed:status="failed";break;
+    default:break;
+   }
+   error=std::string("atlas producer ")+status+" status="+std::to_string(static_cast<uint32_t>(frame.status))+
+     " expected_generation="+std::to_string(setup.generation)+" publication_generation="+std::to_string(frame.generation)+
+     " frame="+std::to_string(frame.frame_id)+" consumer_device_hresult="+
+     std::to_string(static_cast<int64_t>(device->GetDeviceRemovedReason()));
+   return false;
+  }
   if(frame.generation!=setup.generation||frame.width_pixels!=setup.width||frame.height_pixels!=setup.height||
      frame.slot>=3||!frame.frame_id||!frame.ready_fence_value||frame.ready_fence_value==UINT64_MAX||
-     frame.view_count>kSharedAtlasMaxViews){error="atlas publication mismatch";return false;}
+     frame.view_count>kSharedAtlasMaxViews){error="atlas publication mismatch expected_generation="+
+       std::to_string(setup.generation)+" publication_generation="+std::to_string(frame.generation)+
+       " expected_size="+std::to_string(setup.width)+"x"+std::to_string(setup.height)+
+       " publication_size="+std::to_string(frame.width_pixels)+"x"+std::to_string(frame.height_pixels)+
+       " slot="+std::to_string(frame.slot)+" frame="+std::to_string(frame.frame_id)+
+       " ready_fence="+std::to_string(frame.ready_fence_value)+" views="+std::to_string(frame.view_count);return false;}
   for(uint32_t i=0;i<frame.view_count;++i) {
    auto& v=frame.views[i];
    if(!std::isfinite(v.atlas_pixels_per_dip)||v.atlas_pixels_per_dip<=0||
@@ -65,7 +95,7 @@ struct AtlasPool::State {
   return true;
  }
 };
-AtlasPool::AtlasPool()=default;
+AtlasPool::AtlasPool(){wchar_t enabled[2]{};ready_gate_=GetEnvironmentVariableW(L"REMOTEKIT_ATLAS_READY_GATE",enabled,2)==1&&enabled[0]==L'1';}
 AtlasPool::~AtlasPool(){std::string error;if(!Close(error)) {
  // Keep the state alive if a live GPU or SDK lease can still read it.
  auto* retained=new std::shared_ptr<State>(std::move(state_));(void)retained;
@@ -77,7 +107,7 @@ bool AtlasPool::Open(remotekit_sdk_atlas_setup setup,uint32_t count,std::string&
   if(retired_.size()>=3){State discard;discard.setup=setup;error="too many outstanding atlas generations";return false;}
   retired_.push_back(std::move(state_));
  }
- state_=std::make_shared<State>();auto& s=*state_;s.setup=setup;s.clock=clock_;
+ state_=std::make_shared<State>();auto& s=*state_;s.setup=setup;s.clock=clock_;s.trace=trace_;
  auto fail=[&](const char* text){error=text;return false;};
  if(!setup.width||!setup.height||!setup.generation||count<2||count>16)return fail("invalid atlas setup/pool size");
  LUID luid{setup.adapter_luid_low,setup.adapter_luid_high};
@@ -131,6 +161,13 @@ AtlasPool::Result AtlasPool::Poll(remotekit_rtc_frame& output,SharedAtlasFrame& 
  if(!state_){error="atlas not open";return Result::error;}auto& s=*state_;
  if(FAILED(s.device->GetDeviceRemovedReason())){error="atlas consumer device lost";return Result::error;}
  auto completed=s.done->GetCompletedValue();
+ if(s.trace) {
+  const auto ready_completed=s.ready->GetCompletedValue();
+  for(auto& slot:s.pool)if(slot->pending&&!slot->ready_traced&&ready_completed!=UINT64_MAX&&ready_completed>=slot->metadata.ready_fence_value) {
+   RK_SERVER_TRACE(s.trace,"atlas_ready_observed",s.Ids(*slot),rk_record.fence=slot->metadata.ready_fence_value;rk_record.completed_fence=ready_completed;);
+   slot->ready_traced=true;
+  }
+ }
  if(completed==UINT64_MAX){error="atlas invalid GPU fence";return Result::error;}
  State::Slot* first=nullptr;
  for(auto& slot:s.pool)if(slot->pending&&slot->fence<=completed&&(!first||slot->fence<first->fence))first=slot.get();
@@ -151,18 +188,45 @@ AtlasPool::Result AtlasPool::Poll(remotekit_rtc_frame& output,SharedAtlasFrame& 
   }
   output.release_context=&s;output.retain=&State::Retain;output.release=&State::Release;
   s.copy_ms=1000.0*(QpcNow()-slot->observed_qpc)/s.frequency;
+  RK_SERVER_TRACE(s.trace,"atlas_private_copy_complete",s.Ids(*slot),
+    rk_record.fence=slot->fence;rk_record.completed_fence=completed;);
   metadata=slot->metadata;return Result::ready;
  }
  SharedAtlasFrame frame{};
  if(!s.Read(frame,error))return error.empty()?Result::idle:Result::error;
  metadata=frame;s.latest=frame;
+ if(s.trace && frame.frame_id!=s.observed_frame) {
+  TraceRecord record;record.event="atlas_observed";record.ids.source_frame_id=frame.frame_id;
+  record.ids.generation=frame.generation;record.ids.capture_time_us=frame.capture_time_us;
+  record.fence=frame.ready_fence_value;record.completed_fence=s.ready->GetCompletedValue();record.slot=frame.slot;
+  record.pending=0;record.leased=0;for(const auto& slot:s.pool){record.pending+=slot->pending;record.leased+=slot->refs.load()!=0;}
+  s.trace->Add(record);s.observed_frame=frame.frame_id;
+ }
  if(frame.frame_id<s.last_frame){error="atlas frame regressed";return Result::error;}
  if(frame.frame_id==s.last_frame)return Result::idle;
  if(frame.ready_fence_value<=s.last_fence){error="atlas fence regressed";return Result::error;}
+ if(ready_gate_) {
+  const auto ready=s.ready->GetCompletedValue();
+  if(ready==UINT64_MAX){error="atlas ready fence device removed";return Result::error;}
+  if(ready<frame.ready_fence_value) {
+   ++gate_polls_;
+   if(s.deferred_frame!=frame.frame_id) {
+    ++gate_frames_;s.deferred_frame=frame.frame_id;
+    RK_SERVER_TRACE(s.trace,"atlas_ready_deferred",(TraceIds{0,frame.frame_id,frame.generation,0,frame.capture_time_us}),
+      rk_record.fence=frame.ready_fence_value;rk_record.completed_fence=ready;rk_record.reason="ready_gate";);
+   }
+   // No slot reserved, submitted frame/fence advanced, or consumed signal.
+   // Re-read the latest candidate on the next normal polling iteration.
+   return Result::idle;
+  }
+ }
  State::Slot* free=nullptr;
  for(auto& slot:s.pool)if(!slot->pending&&slot->refs.load()==0){free=slot.get();break;}
  if(!free)return Result::idle;
  free->observed_qpc=QpcNow();free->cookie=++s.next_cookie;free->metadata=frame;
+ free->ready_traced=false;
+ RK_SERVER_TRACE(s.trace,"atlas_private_copy_submit",s.Ids(*free),
+   rk_record.fence=frame.ready_fence_value;rk_record.completed_fence=s.ready->GetCompletedValue();rk_record.slot=frame.slot;);
  if(FAILED(s.context->Wait(s.ready.Get(),frame.ready_fence_value))){error="atlas GPU ready wait failed";return Result::error;}
  s.untracked_read=true;
  s.context->CopyResource(free->texture.Get(),s.textures[frame.slot].Get());

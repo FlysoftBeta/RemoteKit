@@ -13,6 +13,8 @@ function setup() {
   const channel: any = { readyState: 'open', bufferedAmount: 0, send: (data: string) => sent.push(JSON.parse(data)) };
   transport.layout = { type: 'layout', generation: '1', epoch: '2', width: 1280, height: 480, views: [a, b] };
   Object.defineProperty(transport, 'displayReady', { get: () => true });
+  // These tests isolate focus ACK ordering; rendering readiness has its own tests.
+  (transport as any).canInput = () => true;
   (transport as any).viewPresentations.set('1', { layoutEpoch: '2' }); (transport as any).viewPresentations.set('2', { layoutEpoch: '2' });
   (transport as any).bindChannel(channel);
   const ack = (request: Record<string, any>, extras: Record<string, unknown> = {}) => channel.onmessage({ data: JSON.stringify({ type: 'focus', ok: true, focusRequestId: request.focusRequestId, layoutEpoch: request.layoutEpoch, token: { view: request.view, session: request.session, instance: request.instance, document: request.document, focus: request.focus }, ...extras }) });

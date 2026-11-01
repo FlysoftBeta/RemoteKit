@@ -4,6 +4,7 @@
 #include "remotekit/core.hpp"
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
+#include "remotekit/coordinate_readiness.hpp"
 #include <json.hpp>
 #include <windows.h>
 #include <mmsystem.h>
@@ -67,8 +68,8 @@ size_t DecodedSize(const std::string& text) {
  return size;
 }
 struct Options {
- fs::path browser,data;
- std::string encoder="auto";EncoderSettings encoding;
+ fs::path browser,data,browser_trace_directory;
+ std::string encoder="auto",browser_enable_features;EncoderSettings encoding;
  uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096;
  int32_t rtc_playout_max_ms=-1;
  Options() {
@@ -82,6 +83,8 @@ struct Options {
    if(equal==std::string::npos)throw std::runtime_error("arguments require --name=value");
    auto key=arg.substr(0,equal),value=arg.substr(equal+1);
    if(key=="--browser")browser=Utf8Path(value);else if(key=="--data-path")data=Utf8Path(value);
+   else if(key=="--browser-enable-features")browser_enable_features=value;
+   else if(key=="--browser-trace-dir")browser_trace_directory=Utf8Path(value);
    else if(key=="--encoder")encoder=value;
    else if(key=="--fps")encoding.fps=std::stoul(value);
    else if(key=="--bitrate")encoding.bitrate=std::stoul(value);
@@ -123,6 +126,7 @@ struct Session {
  std::map<std::string,Json> desired;
  int atlas_width=1920,atlas_height=1080;float atlas_scale=1;
  AtlasPool pool;std::thread media_thread;std::atomic<bool> stop_media{false};
+ remotekit::CoordinateReadiness coordinate_readiness;
  std::atomic<uint64_t> peer{0};std::string connection;
  std::shared_ptr<EncoderStats> stats=std::make_shared<EncoderStats>();
  std::mutex encoder_mutex;std::map<uint64_t,std::unique_ptr<EncoderWorker>> encoders;
@@ -145,10 +149,12 @@ struct Session {
  std::atomic<double> source_interval_ms{0},last_tail_age_ms{0};
  std::atomic<uint64_t> tail_submissions{0};
  remotekit::MediaSampling sampling;
+ std::shared_ptr<ServerTrace> trace;
  std::map<std::string,std::string> recovery_documents;
  Session(Sdk& api,const Options& opts,std::string tenant_id,std::string session_id):sdk(api),options(opts),
    tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id) {
   effective_idle_ms=std::min(1000u,options.idle_idr_ms);
+  trace=ServerTrace::Create(tenant,id);pool.SetTrace(trace);
   fs::create_directories(directory);
   auto saved=LoadJson(directory/"views.json",Json::array());
   for(auto& view:saved)desired[ViewId(view)]=view;
@@ -181,6 +187,17 @@ struct Session {
   append(L"--tenant-id="+std::wstring(id.begin(),id.end()));
   append(L"--data-path="+directory.wstring());
   append(L"--atlas-width=1920");append(L"--atlas-height=1080");
+  if(!options.browser_enable_features.empty())
+   append(L"--enable-features="+std::wstring(options.browser_enable_features.begin(),options.browser_enable_features.end()));
+  if(!options.browser_trace_directory.empty()) {
+   fs::create_directories(options.browser_trace_directory);
+   const auto file=options.browser_trace_directory/("session-"+id+"-"+std::to_string(QpcNow())+".json");
+   append(L"--trace-startup=gpu.capture,viz,gpu,toplevel,toplevel.flow,disabled-by-default-gpu.service,disabled-by-default-gpu.device");
+   append(L"--trace-startup-duration=16");append(L"--trace-startup-format=json");
+   append(L"--trace-startup-file="+file.wstring());
+   append(L"--trace-startup-record-mode=record-until-full");
+   append(L"--default-trace-buffer-size-limit-in-kb=32768");
+  }
   STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=SW_HIDE;
   PROCESS_INFORMATION info{};
   if(!CreateProcessW(options.browser.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_SUSPENDED|CREATE_NO_WINDOW,
@@ -230,6 +247,7 @@ struct Session {
  bool PauseOutput() {
   const bool active=peer.load()!=0;
   if(active){stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();}
+  coordinate_readiness.Clear();
   try{Rpc({{"method","output.close"}});}catch(const std::exception&){}
   return active;
  }
@@ -357,6 +375,9 @@ struct Session {
   value["effectiveIdleIdrMs"]=effective_idle_ms.load();value["tailIdrSubmissions"]=tail_submissions.load();
   const auto interval=source_interval_ms.load(),age=last_tail_age_ms.load();
   value["sourceFrameIntervalMs"]=interval>0?Json(interval):Json(nullptr);
+  value["atlasReadyGateEnabled"]=pool.ready_gate_enabled();
+  value["atlasReadyGateDeferredPolls"]=pool.ready_gate_deferred_polls();
+  value["atlasReadyGateDeferredFrames"]=pool.ready_gate_deferred_frames();
   value["lastTailAfterSourceMs"]=age>0?Json(age):Json(nullptr);return value;
  }
  Json Snapshot() {
@@ -421,7 +442,7 @@ struct Session {
        std::lock_guard event_lock(self->event_mutex);
        if(self->events.size()<1024)self->events.push_back(Event{0x10000,message.dump(),"",0,encoder_peer});
        self->event_wake.notify_one();
-      }));return 0;
+      },self->trace,encoder_peer));return 0;
  }
  static int ConfigureEncoder(void* context,uint64_t encoder,const remotekit_rtc_encoder_config* config) {
   auto* self=static_cast<Session*>(context);std::lock_guard lock(self->encoder_mutex);
@@ -453,17 +474,30 @@ struct Session {
   });
   if(output_suspended)return;
   remotekit_rtc_clock_sample clock{};clock.struct_size=sizeof(clock);
-  if(sdk.sample_clock && sdk.sample_clock(&clock)==0)pool.SetClock(clock);
+  if(sdk.sample_clock && sdk.sample_clock(&clock)==0){pool.SetClock(clock);if(trace)trace->SdkClock(clock);}
   remotekit_sdk_atlas_setup setup{};setup.struct_size=sizeof(setup);
   int result;
   {std::lock_guard lock(rpc_mutex);result=sdk.remotekit_sdk_control_open_atlas(control,GetCurrentProcessId(),options.encoding.fps,&setup,15000);}
-  if(result!=0)throw std::runtime_error("output open SDK "+std::to_string(result));
+  if(result!=0) {
+   // The SDK's DATA_MISMATCH also covers a browser-side non-pending error.
+   // Preserve the producer's actual status/error rather than infer device loss.
+   try{fprintf(stderr,"session %s atlas open failed sdk=%d desired=%dx%d@%.3f browser=%s\n",
+       id.c_str(),result,atlas_width,atlas_height,atlas_scale,Rpc({{"method","output.status"}}).dump().c_str());}
+   catch(const std::exception& diagnostic){fprintf(stderr,"session %s atlas open failed sdk=%d status_query=%s\n",id.c_str(),result,diagnostic.what());}
+   throw std::runtime_error("output open SDK "+std::to_string(result));
+  }
   std::string error;if(!pool.Open(setup,std::min(16u,options.encoding.async_depth+4),error))throw std::runtime_error(error);
   {std::lock_guard lock(encoder_mutex);encoder_device=pool.Device();}
  }
  void Send(const Json& message) {
   auto handle=peer.load();if(!handle||!data_open)return;
   auto encoded=message.dump();sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+ }
+ void PublishLayout(Json next,uint64_t epoch) {
+  std::map<std::string,bool> ready;
+  for(const auto& view:next.at("views"))ready[view.at("id").get<std::string>()]=!view.value("stale",false);
+  coordinate_readiness.Set(epoch,std::move(ready));
+  layout=std::move(next);Send(layout);
  }
  Json Layout(const remotekit::SharedAtlasFrame& frame) {
   auto fit=remotekit::FitH264Sampling(frame.width_pixels,frame.height_pixels,options.encoding.fps,receive_level.load(),options.max_encode_width,options.max_encode_height);
@@ -484,7 +518,7 @@ struct Session {
  }
  std::string GeometryKey(const remotekit::SharedAtlasFrame& frame) {
   auto value=Layout(frame);
-  for(auto& view:value["views"]) {view.erase("focus");view.erase("stale");}
+  for(auto& view:value["views"])view.erase("focus");
   return value.dump();
  }
  uint64_t ObserveLayout(const remotekit::SharedAtlasFrame& frame) {
@@ -513,12 +547,20 @@ struct Session {
   auto type=command.value("type",std::string());
   if(type!="input"&&type!="focus")return;
   const auto request=command;
-  if(command.value("layoutEpoch",std::string())!=std::to_string(layout_epoch.load())) {
+  const auto request_epoch=layout_epoch.load();
+  if(command.value("layoutEpoch",std::string())!=std::to_string(request_epoch)) {
    ++input_rejected;ReplyInput({{"ok",false},{"error","stale_layout_epoch"}},request);return;
   }
   command.erase("layoutEpoch");command.erase("focusRequestId");
   if(command.value("session",std::string())!=id) {
    ++input_rejected;ReplyInput({{"ok",false},{"error","wrong_session"}},request);return;
+  }
+  if(type=="input" && command.contains("event") && command["event"].is_object()) {
+   const auto event_type=command["event"].value("type",std::string());
+   if((event_type=="mouse"||event_type=="wheel"||event_type=="touch") &&
+      !coordinate_readiness.Allows(command.value("view",std::string()),request_epoch)) {
+    ++input_rejected;ReplyInput({{"ok",false},{"error","view_not_ready"}},request);return;
+   }
   }
   command["method"]=type;command.erase("type");
   if(command.contains("outputGeneration")){command["output_generation"]=command["outputGeneration"];command.erase("outputGeneration");}
@@ -585,6 +627,7 @@ struct Session {
    remotekit_rtc_frame frame{};remotekit::SharedAtlasFrame metadata{};std::string error;
    auto result=output_suspended?AtlasPool::Result::idle:pool.Poll(frame,metadata,error);
    if(result==AtlasPool::Result::error) {
+    coordinate_readiness.Clear();
     {std::lock_guard lock(stats->mutex);stats->error=error;}
     fprintf(stderr,"session %s media: %s\n",id.c_str(),error.c_str());break;
    }
@@ -593,11 +636,11 @@ struct Session {
     if(current_geometry!="no-visible-views"){current_geometry="no-visible-views";layout_epoch.fetch_add(1);}
     Json empty={{"type","layout"},{"generation","0"},{"width",16},{"height",16},
                 {"mediaScale",1},{"views",Json::array()},{"epoch",std::to_string(layout_epoch.load())}};
-    if(empty!=layout){layout=std::move(empty);Send(layout);}
+    if(empty!=layout)PublishLayout(std::move(empty),layout_epoch.load());
    }
    if(current_metadata.generation) {
-    auto next=Layout(current_metadata);next["epoch"]=std::to_string(ObserveLayout(current_metadata));
-    if(next!=layout){layout=next;Send(layout);}
+    auto next=Layout(current_metadata);const auto epoch=ObserveLayout(current_metadata);next["epoch"]=std::to_string(epoch);
+    if(next!=layout)PublishLayout(std::move(next),epoch);
    }
    const auto handle=peer.load();const auto now=QpcNow();
    if(result==AtlasPool::Result::ready) {
@@ -609,7 +652,10 @@ struct Session {
     if(refresh_connected.exchange(false)) {
      std::lock_guard lock(encoder_mutex);for(auto& [encoder,worker]:encoders)worker->Keyframe();
     }
-    if(!handle || !receive_level.load() || sdk.remotekit_rtc_submit_texture(handle,&frame)!=0)frame.release(frame.release_context,frame.frame_id);
+    RK_SERVER_TRACE(trace,"rtc_submit_begin",TraceIds::Frame(frame),rk_record.peer=handle;rk_record.reason="fresh";);
+    const int submit_status=(!handle||!receive_level.load())?REMOTEKIT_SDK_INVALID_STATE:sdk.remotekit_rtc_submit_texture(handle,&frame);
+    RK_SERVER_TRACE(trace,"rtc_submit_return",TraceIds::Frame(frame),rk_record.peer=handle;rk_record.reason="fresh";rk_record.status=submit_status;);
+    if(submit_status!=0)frame.release(frame.release_context,frame.frame_id);
     stream_started=receive_level.load()!=0;
     if(idle.Observe(metadata.generation,metadata.frame_id,metadata.capture_time_us,
                     1000.0*now/QpcFrequency())) {
@@ -630,11 +676,15 @@ struct Session {
     repeat.retain(repeat.release_context,repeat.frame_id);
     // Tail IDR retains content epoch and capture time. SDK assigns a fresh
     // submit/RTP timestamp independently.
-    if(sdk.remotekit_rtc_submit_texture(handle,&repeat)!=0)repeat.release(repeat.release_context,repeat.frame_id);
+    RK_SERVER_TRACE(trace,"rtc_submit_begin",TraceIds::Frame(repeat),rk_record.peer=handle;rk_record.reason=tail?"tail":"refresh";);
+    const int submit_status=sdk.remotekit_rtc_submit_texture(handle,&repeat);
+    RK_SERVER_TRACE(trace,"rtc_submit_return",TraceIds::Frame(repeat),rk_record.peer=handle;rk_record.reason=tail?"tail":"refresh";rk_record.status=submit_status;);
+    if(submit_status!=0)repeat.release(repeat.release_context,repeat.frame_id);
     else if(tail){++tail_submissions;last_tail_age_ms=1000.0*(now-last_update)/QpcFrequency();}
     stream_started=true;idle_sent=true;
    }
    if(now-last_stats>=QpcFrequency()) {
+    if(trace)trace->WallClock();
     if(handle && sdk.request_stats)sdk.request_stats(handle);
     auto report=Stats();report["type"]="stats";
     const double seconds=static_cast<double>(now-last_stats)/QpcFrequency();
@@ -697,6 +747,7 @@ struct Session {
  void ClosePeer() {
   stop_input=true;input_wake.notify_all();if(input_thread.joinable())input_thread.join();
   stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();
+  coordinate_readiness.Clear();
   {std::lock_guard lock(input_mutex);input_queue.clear();}
   auto handle=peer.exchange(0);if(handle)sdk.remotekit_rtc_close(handle);
   std::map<uint64_t,std::unique_ptr<EncoderWorker>> remaining;
@@ -706,6 +757,7 @@ struct Session {
   {std::lock_guard lock(stats->mutex);stats->sender_rtc_stats=nullptr;}
   {std::lock_guard lock(event_mutex);events.clear();}
   if(control){try{Rpc({{"method","output.close"}});}catch(const std::exception&){}}
+  if(trace)trace->Flush();
  }
  Json Command(const Json& request) {
   const auto method=Required(request,"method");

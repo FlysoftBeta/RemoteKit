@@ -4,6 +4,8 @@
 #include "remotekit/core.hpp"
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
+#include "remotekit/capture_geometry.hpp"
+#include "remotekit/coordinate_readiness.hpp"
 using namespace remotekit;
 #define CHECK(x)                                                       \
   do {                                                                 \
@@ -16,6 +18,29 @@ static bool Overlap(const PixelRect& a, const PixelRect& b) {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 int main() {
+  CaptureGeometryWait geometry;
+  geometry.Bind(1);
+  CHECK(geometry.Defer(100));
+  auto refresh = geometry.QueueRefresh(); CHECK(refresh && *refresh == 1);
+  CHECK(!geometry.QueueRefresh()); // Coalesce requests until the posted task runs.
+  CHECK(geometry.Defer(1900100) && !geometry.TimedOut(1999999));
+  CHECK(!geometry.Defer(2000100) && geometry.TimedOut(2000100));
+  CHECK(!geometry.Match(2000100)); // A late frame cannot extend the deadline.
+  geometry.Bind(2); CHECK(geometry.Defer(0)); auto old_refresh = geometry.QueueRefresh();
+  geometry.Stop(); CHECK(!geometry.TakeRefresh(*old_refresh, 1));
+  geometry.Bind(3); CHECK(geometry.Defer(50)); auto new_refresh = geometry.QueueRefresh();
+  CHECK(!geometry.TakeRefresh(*old_refresh, 60)); CHECK(geometry.TakeRefresh(*new_refresh, 60));
+  CHECK(geometry.Match(100)); CHECK(!geometry.Defer(101)); CHECK(!geometry.QueueRefresh());
+  CHECK(!geometry.TimedOut(9000000));
+  geometry.Bind(4); CHECK(geometry.Defer(1000));
+  CHECK(geometry.TimedOut(2001000)); // Poll can expire the window without another frame.
+  CoordinateReadiness readiness;
+  readiness.Set(7, {{"1", true}, {"2", false}});
+  CHECK(readiness.Allows("1", 7) && !readiness.Allows("2", 7));
+  CHECK(!readiness.Allows("1", 6) && !readiness.Allows("missing", 7));
+  readiness.Set(8, {{"1", true}, {"2", true}});
+  CHECK(readiness.Allows("2", 8) && !readiness.Allows("2", 7));
+  readiness.Clear(); CHECK(!readiness.Allows("1", 8));
   IdleIdrPolicy tail(150);
   CHECK(tail.Observe(1,1,100,0) && tail.delay_ms()==150);
   CHECK(tail.Observe(1,2,200,125) && tail.delay_ms()==375);

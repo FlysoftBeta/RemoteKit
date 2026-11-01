@@ -3,6 +3,10 @@ import { FrameEpochGate } from './frame-epoch';
 import { configureReceiveOffer, originalGatheredOffer, probeReceiveCapabilities, loadReceiveProfile, type ReceiveProfile } from './receive-profile';
 import { ReconnectPolicy } from './reconnect';
 import { PresentationDiagnostics } from './presentation-diagnostics';
+import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource, type PresentationMode, type PixelRect } from './plane-source';
+
+interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
+interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource }
 
 /** All endpoint wire adaptation lives here; the UI never owns recovery state. */
 export class RemoteTransport {
@@ -11,8 +15,17 @@ export class RemoteTransport {
   probeReceiveCapabilities = probeReceiveCapabilities;
   readonly video = document.createElement('video');
   private authorizedFrame = document.createElement('canvas');
-  get displayFrame() { return this.authorizedFrame; }
+  // A direct plane is never exposed as a full atlas through this legacy getter.
+  get displayFrame() { return this.displayReady && this.snapshotRtp === this.displayedRtp && this.snapshotEpoch === this.displayedEpoch ? this.authorizedFrame : undefined; }
   private pendingFrame = document.createElement('canvas');
+  private pendingSnapshotRtp: number | undefined;
+  private snapshotRtp: number | undefined;
+  private snapshotEpoch: string | undefined;
+  private directEpochReady: string | undefined;
+  presentationMode: PresentationMode = 'snapshot';
+  private renderers = new Set<PlaneRenderer>();
+  private paintedPlanes = new Map<string, PaintedPlane>();
+  private routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {} as Record<string, number>, skippedRenderer: {} as Record<string, number> };
   private frameGate = new FrameEpochGate();
   private displayedRtp: number | undefined;
   private displayedEpoch: string | undefined;
@@ -22,8 +35,8 @@ export class RemoteTransport {
   readonly encodedFrameSamples: { at: number; rtpTimestamp: number; layoutEpoch: string; encodedBytes?: number; keyframe?: boolean }[] = [];
   frameCallbackRegistration: 'after-work' | 'before-work' = 'after-work';
   get presentationDiagnostics() { return this.getPresentationDiagnostics(); }
-  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { paintVersion: 'event-driven-v2', selectedViewId: this.selectedViewId, callbackRegistration: this.frameCallbackRegistration, encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples } : {}) }; }
-  resetPresentationDiagnostics() { this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; }
+  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { paintVersion: 'plane-source-v3', presentationRouting: { mode: this.presentationMode, ...this.routing, fallback: { ...this.routing.fallback }, skippedRenderer: { ...this.routing.skippedRenderer } }, selectedViewId: this.selectedViewId, callbackRegistration: this.frameCallbackRegistration, encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples } : {}) }; }
+  resetPresentationDiagnostics() { this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
   recordClientRaf(at: number) { this.presentation.clientRaf(at); }
   recordPresentationCost(name: string, at: number, durationMs: number, view: string | null = null) { this.presentation.cost(name, at, durationMs, view); }
   get displayReady() { return this.frameGate.ready && this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout?.epoch; }
@@ -34,7 +47,6 @@ export class RemoteTransport {
   private channel: RTCDataChannel | null = null;
   private listeners = new Set<() => void>();
   private frameListeners = new Set<() => void>();
-  private paintListeners = new Set<() => void>();
   private presentedListeners = new Set<(frame: CanvasPresentation) => void>();
   private viewPresentations = new Map<string, CanvasPresentation>();
   private pendingPresentations: CanvasPresentation[] = [];
@@ -60,19 +72,36 @@ export class RemoteTransport {
   constructor() { this.video.autoplay = true; this.video.muted = true; this.video.playsInline = true; }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   subscribeFrames = (listener: () => void) => { this.frameListeners.add(listener); return () => { this.frameListeners.delete(listener); }; };
-  subscribePaint = (listener: () => void) => { this.paintListeners.add(listener); return () => { this.paintListeners.delete(listener); }; };
+  registerPlane(identity: PlaneIdentity, canvas: HTMLCanvasElement, ready: (ready: boolean) => void) {
+    const renderer: PlaneRenderer = { ...identity, view: { ...identity.view }, canvas, ready };
+    this.renderers.add(renderer);
+    const cached = this.paintedPlanes.get(identity.view.id);
+    if (this.rendererCurrent(renderer) && this.displayReady) {
+      if (this.displayFrame) this.paintPlane(renderer, this.displayFrame, identity.view, 'atlas');
+      else if (cached && planeMatchesLayout(cached.identity, this.layout) && cached.source.rtpTimestamp === this.displayedRtp) {
+        // Retain the existing plane bitmap across a static same-layout remount.
+        const copiesBitmap = cached.canvas !== canvas;
+        if (this.paintPlane(renderer, cached.canvas, { x: 0, y: 0, width: identity.view.width, height: identity.view.height }, 'plane') && copiesBitmap) this.routing.retainedPlaneRedraws++;
+      }
+    }
+    return () => { this.renderers.delete(renderer); };
+  }
   subscribePresentedFrames = (listener: (frame: CanvasPresentation) => void) => { this.presentedListeners.add(listener); return () => { this.presentedListeners.delete(listener); }; };
-  getLastPresentation(viewId: string) { const frame = this.viewPresentations.get(viewId); return frame?.layoutEpoch === this.layout?.epoch ? frame : undefined; }
+  getLastPresentation(viewId: string) { const frame = this.viewPresentations.get(viewId), plane = this.paintedPlanes.get(viewId); return frame?.layoutEpoch === this.layout?.epoch && plane && planeMatchesLayout(plane.identity, this.layout) ? frame : undefined; }
   getPaintedFrame(viewId: string, rtpTimestamp: number) { const frame = this.getLastPresentation(viewId); return frame?.rtpTimestamp === rtpTimestamp && this.displayedRtp === rtpTimestamp && this.displayReady ? this.displayFrame : undefined; }
-  reportPresented(viewId: string, rtpTimestamp: number, paintedAt: number, paintedWallTime = Date.now()) {
+  getPresentedPlane(viewId: string, rtpTimestamp: number): PresentedPlaneSource | undefined {
+    const plane = this.paintedPlanes.get(viewId), frame = this.getLastPresentation(viewId);
+    return this.displayReady && this.displayedRtp === rtpTimestamp && frame?.rtpTimestamp === rtpTimestamp && plane && [...this.renderers].some(renderer => renderer.canvas === plane.canvas && renderer.view.id === viewId && this.rendererCurrent(renderer)) ? plane.source : undefined;
+  }
+  private reportPresented(viewId: string, rtpTimestamp: number, paintedAt: number, paintedWallTime = Date.now()) {
     if (!this.layout || !this.displayReady || this.displayedRtp !== rtpTimestamp || !this.layout.views.some(view => view.id === viewId)) return;
     const old = this.viewPresentations.get(viewId), isNewFrame = old?.rtpTimestamp !== rtpTimestamp || old.layoutEpoch !== this.layout.epoch;
-    const frame = { viewId, rtpTimestamp, layoutEpoch: this.layout.epoch, paintedAt, paintedWallTime, authorizedAt: this.authorizedAt };
+    const frame = isNewFrame ? { viewId, rtpTimestamp, layoutEpoch: this.layout.epoch, paintedAt, paintedWallTime, authorizedAt: this.authorizedAt } : old!;
     this.viewPresentations.set(viewId, frame); this.presentation.paint(paintedAt, viewId, rtpTimestamp, frame.layoutEpoch, this.authorizedAt, isNewFrame);
     this.flushFocusedInput();
     if (isNewFrame) { if (this.dispatchingPaint) this.pendingPresentations.push(frame); else this.presentedListeners.forEach(listener => listener(frame)); }
   }
-  private canInput(viewId: string) { return this.displayReady && !!this.getLastPresentation(viewId); }
+  private canInput(viewId: string) { return this.displayReady && this.displayedRtp !== undefined && !!this.getPresentedPlane(viewId, this.displayedRtp); }
   private notify() { this.listeners.forEach(listener => listener()); }
   private update(change: Partial<Diagnostics>) { this.diagnostics = { ...this.diagnostics, ...change }; this.notify(); }
   setMarkerStats(report: { inputToObservedMs: { p50: number | null; p95: number | null }; renderToObservedMs: { p50: number | null; p95: number | null }; samples: unknown[]; markerSampleHz?: number | null }) {
@@ -180,8 +209,13 @@ export class RemoteTransport {
       } else {
         const width = this.video.videoWidth, height = this.video.videoHeight;
         if (width > 0 && height > 0) {
+          if (this.tryDirectFrame(width, height)) return;
           if (this.pendingFrame.width !== width || this.pendingFrame.height !== height) { this.pendingFrame.width = width; this.pendingFrame.height = height; }
-          const start = performance.now(); this.pendingFrame.getContext('2d', { alpha: false })?.drawImage(this.video, 0, 0); this.presentation.cost('videoSnapshot', start, performance.now() - start);
+          const context = this.pendingFrame.getContext('2d', { alpha: false });
+          if (!context) return;
+          const start = performance.now(); context.drawImage(this.video, 0, 0); this.presentation.cost('videoSnapshot', start, performance.now() - start);
+          this.pendingSnapshotRtp = this.frameGate.rtpTimestamp;
+          this.routing.snapshotFrames++;
           this.authorizeFrame();
         }
       }
@@ -193,19 +227,68 @@ export class RemoteTransport {
     this.frameCallback = this.video.requestVideoFrameCallback(receive);
   }
   private authorizeFrame() {
-    if (!this.frameGate.ready || !this.layout || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
+    if (!this.frameGate.ready || !this.layout || this.pendingSnapshotRtp !== this.frameGate.rtpTimestamp || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
     if (this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout.epoch) return;
     // Swap the authorized snapshot rather than copying the atlas a second time.
     [this.authorizedFrame, this.pendingFrame] = [this.pendingFrame, this.authorizedFrame];
-    this.displayedRtp = this.frameGate.rtpTimestamp; this.displayedEpoch = this.layout.epoch;
+    this.pendingSnapshotRtp = undefined;
+    this.snapshotRtp = this.frameGate.rtpTimestamp; this.snapshotEpoch = this.layout.epoch;
+    this.beginAuthorizedFrame();
+    this.dispatchPaint(() => { for (const renderer of this.renderers) this.paintPlane(renderer, this.authorizedFrame, renderer.view, 'atlas'); });
+  }
+  private beginAuthorizedFrame() {
+    this.displayedRtp = this.frameGate.rtpTimestamp; this.displayedEpoch = this.layout!.epoch;
     this.authorizedAt = performance.now(); this.presentation.authorize(this.authorizedAt, this.displayedRtp!, this.displayedEpoch);
     this.reconnect.connected();
     if (this.frameIssue === 'missing-rtp') { this.frameIssue = undefined; this.update({ error: undefined }); }
+  }
+  private dispatchPaint(paint: () => void) {
     this.dispatchingPaint = true;
-    try { this.paintListeners.forEach(listener => listener()); }
+    try { paint(); }
     finally { this.dispatchingPaint = false; const frames = this.pendingPresentations.splice(0); for (const frame of frames) this.presentedListeners.forEach(listener => listener(frame)); }
     this.flushFocusedInput();
     this.frameListeners.forEach(listener => listener());
+  }
+  private countReason(bucket: Record<string, number>, reason: string) { bucket[reason] = (bucket[reason] ?? 0) + 1; }
+  private rendererCurrent(renderer: PlaneRenderer) { return this.renderers.has(renderer) && renderer.canvas.isConnected && planeMatchesLayout(renderer, this.layout); }
+  private tryDirectFrame(width: number, height: number) {
+    if (this.presentationMode !== 'single-plane-direct') return false;
+    let reason: string | undefined;
+    const layout = this.layout, renderer = [...this.renderers][0];
+    if (!layout || layout.views.length !== 1) reason = 'plane-count';
+    else if (layout.views[0].stale) reason = 'plane-not-ready';
+    else if (!this.frameGate.ready) reason = 'metadata-unmatched';
+    else if (width !== layout.width || height !== layout.height) reason = 'video-dimensions';
+    else if (this.directEpochReady !== layout.epoch) reason = 'layout-transition';
+    else if (this.renderers.size !== 1) reason = 'renderer-count';
+    else if (!renderer || !this.rendererCurrent(renderer)) reason = 'renderer-stale';
+    if (reason) { this.countReason(this.routing.fallback, reason); return false; }
+    this.pendingSnapshotRtp = undefined;
+    this.snapshotRtp = undefined; this.snapshotEpoch = undefined;
+    this.beginAuthorizedFrame();
+    // Exactly one video read. As in the snapshot path, rVFC metadata and this
+    // first draw are separate browser operations, not an atomic frame handle.
+    this.dispatchPaint(() => { if (this.paintPlane(renderer!, this.video, renderer!.view, 'plane')) this.routing.directFrames++; });
+    return true;
+  }
+  private paintPlane(renderer: PlaneRenderer, image: HTMLCanvasElement | HTMLVideoElement, rect: PixelRect, kind: 'atlas' | 'plane') {
+    if (!this.rendererCurrent(renderer)) { this.countReason(this.routing.skippedRenderer, 'identity-epoch-geometry'); renderer.ready(false); return false; }
+    if (!this.displayReady || this.displayedRtp === undefined || !this.layout) { renderer.ready(false); return false; }
+    if (renderer.view.stale) { this.countReason(this.routing.skippedRenderer, 'source-not-ready'); renderer.ready(false); return false; }
+    const view = renderer.view, node = renderer.canvas, context = node.getContext('2d');
+    const imageWidth = 'videoWidth' in image ? image.videoWidth : image.width, imageHeight = 'videoHeight' in image ? image.videoHeight : image.height;
+    if (!context || rect.x < 0 || rect.y < 0 || rect.width !== view.width || rect.height !== view.height || rect.x + rect.width > imageWidth || rect.y + rect.height > imageHeight) { this.countReason(this.routing.skippedRenderer, 'source-dimensions'); renderer.ready(false); return false; }
+    const start = performance.now();
+    if (node.width !== view.width || node.height !== view.height) { node.width = view.width; node.height = view.height; }
+    if (image !== node) context.drawImage(image, rect.x, rect.y, rect.width, rect.height, 0, 0, node.width, node.height);
+    const paintedAt = performance.now(), paintedWallTime = Date.now();
+    this.presentation.cost('viewportDraw', start, paintedAt - start, view.id);
+    const source: PresentedPlaneSource = { image: kind === 'atlas' ? image : node, sourceRect: kind === 'atlas' ? { x: view.x, y: view.y, width: view.width, height: view.height } : { x: 0, y: 0, width: view.width, height: view.height }, kind, viewId: view.id, rtpTimestamp: this.displayedRtp, layoutEpoch: this.layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1) };
+    this.paintedPlanes.set(view.id, { identity: { view: { ...view }, layoutEpoch: this.layout.epoch, layoutGeneration: this.layout.generation }, canvas: node, source });
+    if (kind === 'atlas') this.directEpochReady = this.layout.epoch;
+    this.reportPresented(view.id, this.displayedRtp, paintedAt, paintedWallTime);
+    renderer.ready(true);
+    return true;
   }
   private flushFocusedInput() {
     const pending = this.pendingFocus;
@@ -224,6 +307,9 @@ export class RemoteTransport {
         const message = JSON.parse(String(event.data));
         if (message.type === 'layout' && Array.isArray(message.views)) {
           this.layout = message;
+          for (const [id, plane] of this.paintedPlanes) if (!planeMatchesLayout(plane.identity, this.layout)) { this.paintedPlanes.delete(id); this.viewPresentations.delete(id); }
+          for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) renderer.ready(false);
+          if (![...this.paintedPlanes.values()].some(plane => planeMatchesLayout(plane.identity, this.layout))) this.directEpochReady = undefined;
           this.frameGate.setEpoch(message.epoch);
           this.authorizeFrame();
           const pending = this.pendingFocus;
@@ -254,14 +340,14 @@ export class RemoteTransport {
     if (this.pendingFocus?.view === surface.id) { if (!this.pendingFocus.focused) { this.traceInput('blocked', surface, event, 'blur-pending'); return false; } if (this.pendingFocus.events.length < 64) { this.pendingFocus.events.push(event); this.traceInput('queued-focus', surface, event); return true; } this.traceInput('blocked', surface, event, 'focus-queue-full'); return false; }
     if (this.channel.bufferedAmount > 256 * 1024) { this.update({ error: '输入通道拥塞，请稍后重试。' }); return; }
     const current = this.layout.views.find(view => view.id === surface.id);
-    if (!current || current.instance !== surface.instance || current.document !== surface.document) { this.traceInput('blocked', surface, event, 'stale-surface'); return false; }
+    if (!current || !samePlane(current, surface)) { this.traceInput('blocked', surface, event, 'stale-surface'); return false; }
     this.channel.send(JSON.stringify({ type: 'input', view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, outputGeneration: this.layout.generation, layoutEpoch: this.layout.epoch, sequence: String(++this.sequence), event }));
     this.traceInput('sent', surface, event); return true;
   }
   focus(surface: Surface, focused: boolean) {
     if (this.channel?.readyState !== 'open' || !this.layout || !this.canInput(surface.id)) return;
     const current = this.layout.views.find(view => view.id === surface.id);
-    if (!current || current.instance !== surface.instance || current.document !== surface.document) return;
+    if (!current || !samePlane(current, surface)) return;
     const pending = this.pendingFocus;
     if (pending && pending.view === current.id && pending.session === current.session && pending.instance === current.instance && pending.document === current.document && pending.epoch === this.layout.epoch && pending.generation === this.layout.generation && pending.focused === focused) return;
     const requestId = `${this.attempt}:${++this.focusSequence}`;
@@ -304,6 +390,8 @@ export class RemoteTransport {
     this.frameCallback = undefined; this.frameGate.clear(); this.displayedRtp = undefined; this.displayedEpoch = undefined; this.frameIssue = undefined;
     this.lastInboundSample = undefined;
     this.viewPresentations.clear(); this.pendingPresentations = []; this.dispatchingPaint = false;
+    this.pendingSnapshotRtp = undefined; this.snapshotRtp = undefined; this.snapshotEpoch = undefined; this.directEpochReady = undefined;
+    this.paintedPlanes.clear(); for (const renderer of this.renderers) renderer.ready(false); this.renderers.clear();
     this.endpointGeneration = undefined;
     if (this.connectionId) { void request('/api/rtc/close', { connectionId: this.connectionId }).catch(() => {}); this.connectionId = undefined; }
     clearInterval(this.timer);

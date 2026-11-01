@@ -48,7 +48,7 @@ try {
    }
    foreach($process in $inventory) {
     $id=[int]$process.ProcessId;if(!$roles.ContainsKey($id)){continue}
-    $flags=@([regex]::Matches([string]$process.CommandLine,'--(?:use-angle|use-gl)=[^\s]+|--disable-gpu(?:\s|$)')|ForEach-Object{$_.Value.Trim()})
+    $flags=@([regex]::Matches([string]$process.CommandLine,'--(?:use-angle|use-gl)=[^\s]+|--disable-gpu(?:\s|$)|--(?:enable|disable)-features=[^\s"]+')|ForEach-Object{$_.Value.Trim()})
     $known[$id]=@{pid=$id;parentPid=[int]$process.ParentProcessId;role=$roles[$id];name=$process.Name;flags=$flags;createdUtc=$process.CreationDate.ToUniversalTime().ToString('o')}
    }
    $saved=Get-Content -LiteralPath (Join-Path $caseRoot 'pids.json') -Raw|ConvertFrom-Json

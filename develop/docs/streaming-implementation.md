@@ -30,9 +30,9 @@ Browser capture → Fence atlas → Endpoint 自有纹理 → GPU 色彩转换 N
 |---|---|---|
 | browser单Session服务、动态页面、tablet、demo编译隔离 | endpoint_probe | v2统一编译；混合DPR、设备模式reload、browser kill历史恢复实测通过 |
 | WebRTC C ABI与NVENC | media_probe | ABI2、真实双Peer/ICE/DTLS-SCTP/lease/stats关闭屏障通过，NVENC编译通过 |
-| 无窗口GPU消费、QSV、多租户endpoint_service | endpoint_probe | Release与model检查通过；真实QSV码率阶跃、LowPower ON/OFF观测通过；hover权限与playout CLI已编译验收；58cb326 clean最终包完成 |
-| Control/React/marker/网络模拟 | control_server | build、26 tests、生产smoke、mixed回归及新解压最终ZIP真实H264/hover/click/IME/视觉验收全部通过；所有自建进程已关闭 |
-| 独立QSV/端到端矩阵 | media_probe | 16组/40租户段及第二轮45分钟定位完成，修复DPI放大；补3组RTP播放延迟对照，低延迟与FPS有权衡，默认保持unset；无更多实验在运行 |
+| 无窗口GPU消费、QSV、多租户endpoint_service | endpoint_probe | 上一批包验收通过；新一轮补充逐帧QPC时间、帧ID及wire RTP关联诊断，定位排队与GPU等待 |
+| Control/React/marker/网络模拟 | control_server | 上一批26 tests和解压包实播、输入、视觉验收通过；新一轮只读核查画布复制与单平面快速路径，待接口决定后实验 |
+| 独立QSV/端到端矩阵 | media_probe | 前两轮及playout对照完成；新一轮独占GPU采样窗口，补SDK/捕获trace并关联视频引擎、CPU与同RTP各段帧龄 |
 | 正式文档、评估、commit/push | 主Agent | 持续维护；完整结果验证后按范围提交推送 |
 
 试验评估：暖机3–5秒，有效采样至少20秒；延迟p50/p95/p99、每秒FPS分布，优先p95<100ms+平均动态FPS>50；720p/1080p、DPR、可见平面数明确记录。网络模拟额外Node单核开销要一起报告。
@@ -62,7 +62,36 @@ Browser capture → Fence atlas → Endpoint 自有纹理 → GPU 色彩转换 N
 - 已补RTP playout-delay显式API/CLI，默认unset。720单租户特殊flag下：unset 53.03FPS/p95 103ms，max0 46.13FPS/82ms，max10 45.43FPS/92ms；不混合不同配置宣称达标。
 - 后续性能诊断优先项：按同一RTP补齐server capture/VPP/encode阶段时间及GPU执行/等待计时。当前四1080的render→收包约661ms，只有聚合统计不足以确定具体队列；接收后的等待已用RTP界限对照验证，但没有消除JS/canvas消费损失。
 - 最终交付：`develop/tmp/RemoteKit-win-x64-streaming-qsv-nvenc-20261101-065450.zip`，440.5MiB，revision58cb326/clean，SHA256 `0c696646a192462678d34b1910bb7975331b99c0c26a0a4b25f265e364611c77`。全新包外解压验收记录在`develop/tmp/final-package-58cb326-result.json`，首次hover不改focus/epoch，click CRC60001、IME42，截图无错误，应用依赖来自包内；数据/Profile/metrics均包外。运行验收完成，无剩余测试/打包任务。
-- 干净checkpoint为56f1495，已推送并生成20261101-052354 ZIP；包内Node/SQLite/UI/browser管理smoke通过。最终ZIP还需一次真实RTC首帧、marker和输入验收，不能用管理smoke替代。
+
+## 新一轮定位与改进
+
+用户已授权开始实验和改进，并允许随时检查video engine占用。上一批交付保留为checkpoint；本轮从39abcda开始。
+
+第一阶段按同一wire RTP关联源capture、atlas发现/ready、私有copy、SDK投递、worker排队、VPP、MFX提交/完成和发送交接。诊断默认关闭、有界保存；不增加browser↔endpoint逐帧IPC，不改变GPU租约。QPC、TimeTicks与壁钟需要测量映射和误差，缺失阶段不能用猜测填补。
+
+初始场景为1×720、4×720、4×1080，保持24Mbps/10ms RTT和既有编码默认。标记关闭时测吞吐，必要的1Hz标记测延迟，至少一组比较诊断开关开销。PDH按进程与物理引擎记录3D、Video Encode/Decode、Video Processing及采集器CPU成本；引擎名称不直接代表调用者的编码/解码任务。
+
+客户端已决定实现可选的单平面快速路径：只有一个可见plane、元数据匹配，且唯一renderer注册的epoch/geometry均匹配时，同次rVFC直接绘制video到plane canvas。多平面、迟到元数据、挂载与布局过渡保持一次快照兜底，默认暂不切换。Viewport backing为encoded crop大小，CSS resize保留现有像素。新增明确plane source与sourceRect描述，诊断不得把plane canvas当完整atlas；最终是否作为默认取决于同场景A/B及视觉/输入验收。
+
+Chrome89的rVFC元数据读取与drawImage(video)并非原子取得同一个frame handle；现有快照保证后续平面共享像素，不能误写成已证明像素与RTP原子绑定。
+
+本轮新发现并纳入处理：
+
+- 布局通知先授权帧、再通知React，旧绘制订阅可能仍持旧surface；原bounds与viewId/epoch检查不足以验证该订阅几何。源码时序风险，尚未复现实播错误。两种呈现路径都需校验订阅epoch/geometry。
+- benchmark质量裁切将已编码的view.width/height再次乘DPR×mediaScale，非1比例下错误。迁移plane source API时同步修正；既有desktop1/scale1质量结果不受此问题影响。
+- AtlasPool会在source ready尚未完成时向同Session的D3D11 immediate context排入GPU Wait，后续旧ready帧的VPP可能被挡住；各Session没有共享C++ D3D锁。新增默认关闭的`REMOTEKIT_ATLAS_READY_GATE=1`供A/B：先观察ready完成，再保留原Wait/copy/consumed顺序。不提前释放租约，也不把GPU利用率当作已证明此处是瓶颈。是否改变默认由同4×1080 trace与性能对照决定。
+
+首组trace确认，shared frame的`capture_time_us`取自Chromium的`capture_end_time`，不是capture begin。四1080同wire样本中，browser capture begin→end约400ms，capture end→encoded返回约145ms均值；后者不能误写成整个捕获/服务器耗时。MFX Submit与encoded C ABI调用p95均不足1ms。后续需用官方capture元数据设置位置和必要的短时trace解释捕获内部排队，结合客户端时间夹测闭合marker render→receive；不再仅通过QSV参数解释整个延迟。
+
+第一阶段完整结果见`server-frame-age-probe.md`。ready gate把VPP等待中位数约42–46ms降到5–7ms，但四1080最终FPS/p95没有一致改善，默认保持关闭。单720在本组31–32源FPS下，direct使canvas提交22→30.5FPS、p95 405→156ms；不可与此前53源FPS组混用。客户端33 tests与真实Chrome89首帧/hover/click/IME、静态renderer重挂载、split fallback、预配置tablet2的ROI裁切和Sol视觉检查通过。
+
+第二阶段选择默认关闭的Chromium capture pending上限实验（1/2，对照原默认）。官方capture begin在ReserveVideoFrame之前，end在OnFrameReadyForDelivery收到完成结果后；Mappable ARGB路径等待GPU finished callback。因此该区间包含排队、GPU工作和完成回调。现有trace重建出每Tenant最高5–9个未完成捕获。限制计数采用`next_capture_frame_number_ - next_delivery_frame_number_`，包含完成后等待按序交付者；保持dirty/content版本，在名额释放时按最小capture period合并refresh，Stop取消旧代次重试。不得通过提前归还纹理减少时延。Chromium修改需要正式patchset/hash与可复现验证。
+
+直播设备切换已定位并修复：Chromium把旧16:9画面暂时放入1640×2360新画布，content rect为1640×923、纵向偏移718；原校验把这张过渡帧视为producer失败，并非GPU设备丢失。每次capture绑定允许从首张几何不匹配帧起固定2秒的过渡期，丢弃过渡帧并合并refresh；Poll独立检查截止时间，后续坏帧不延长等待。正常几何结束过渡，格式、句柄与设备错误仍立即失败。stale→ready进入新layout epoch，客户端必须匹配新视频才能绘制并发送坐标输入；服务端也拒绝未就绪平面上的坐标输入。34项Control测试、Native CTest及统一GN构建通过；真实live双plane desktop→tablet2与CRC通过，完整单/双plane、direct/snapshot两种路径的8阶段往返已通过，touch/click/IME101–112均有CRC，29次stale布局无stale绘制，旧epoch拒绝；Sol视觉检查通过。
+
+往返验收发现本地textarea保持focus时，远端焦点已切换，pointerdown的editor.focus不会再次触发onFocus，导致首个touch.start被拒。已采用pointerdown显式请求远端focus，保持关联ACK、排队与epoch/token校验，触控/IME回归通过。最终bundle为index-CTjYS6kC.js，34 tests/build/typecheck/smoke通过；撤回了全连接首错保留的额外行为，仍由inputResults完整序列定位首因。待clean revision打包并验收首帧。用户曾临时占用3001，重试已确认自建服务和本轮bundle，端口冲突不算产品故障。
+
+捕获pending上限1/2实验已完成，结果见`bounded-capture-probe.md`。早期cap1减少捕获帧龄，但最终FPS没有改善；后续组实际capture降至约1.6/3.2FPS，不能把renderer的42–48次render/s当作采集FPS。最后变化已按源实际写入marker与客户端CRC验证送达，Stop/reopen通过。cap与ready gate均保持默认关闭。当前运行同默认canvas trace-off/on及独立CSS compositor场景，使用官方Viz/GPU trace区分排队、执行与回调；trace开销组不作为性能提升证据。
 
 ## 输出采样决策
 

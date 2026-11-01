@@ -85,7 +85,7 @@ def analyze(case):
     (case/"summary.json").write_text(json.dumps(output, indent=2), encoding="utf-8")
     for result in output:
         receiver = result["receiver"]
-        print(json.dumps({"case": case.name, "tenant": result["tenantIndex"], "sourceRafFps": result["source"].get("raf", {}).get("fps"), "decodedFps": receiver.get("framesDecodedPerSecond"), "authorizedRtpFps": receiver["authorizedRtpFps"], "markerFps": receiver["markerFps"], "markerSampleHz": receiver["markerSamplesPerSecond"], "latency": receiver["latency"], "hostLoad": result.get("hostLoad")}, ensure_ascii=False))
+        print(json.dumps({"case": case.name, "tenant": result["tenantIndex"], "sourceRafFps": result["source"].get("raf", {}).get("fps"), "rendererRafFps": result["source"].get("raf", {}).get("fps"), "rendererRenderFps": result["source"].get("renders", {}).get("fps"), "decodedFps": receiver.get("framesDecodedPerSecond"), "authorizedRtpFps": receiver["authorizedRtpFps"], "markerFps": receiver["markerFps"], "markerSampleHz": receiver["markerSamplesPerSecond"], "latency": receiver["latency"], "hostLoad": result.get("hostLoad")}, ensure_ascii=False))
 
 
 if __name__ == "__main__":
