@@ -1,33 +1,30 @@
 # RemoteKit 当前实现
 
-基线：官方 Chromium Release **157.0.8103.15**（`1aa07b638799e59656559ae6c6649d4b197f555e`），Windows x64。源码在本仓库；`tools/chromium.py` 把 browser、共享模型和 SDK shim 放入 Chromium 的 `//remotekit`。
+基线：官方Chromium Release **157.0.8103.15**（`1aa07b638799e59656559ae6c6649d4b197f555e`），Windows x64。Chromium源码在外部源码树；本仓库拥有的Browser/共享模型/SDK由`tools/chromium.py`复制到`//remotekit`后增量构建。
 
-用户最新要求：保留Chrome89，重载目标先改3租户，若有界优化仍无明显成效可转2租户；优先最快TU7、高码率及VDEnc/Hybrid跨租户混跑。以下4租户/TU1结果是既有调查，不是当前必达配置。FPS≥50、p95≤100ms和原分辨率/marker要求不变。
+## 当前阶段
 
-服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。三租户最快预设和混跑矩阵已完成，仍未达到目标，现按授权转2租户。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
+双租户45秒同组已达到实际canvas **51.69/51.73FPS、Pixel marker p95 76/79ms**，每路45个CRC有效。用户已取消额外120秒稳定复验及单租户重复复验，当前转入Control/Viewer产品化；不会继续为重复确认该结果增加性能组。
 
-当前按用户指令持续推进≥50FPS/Pixel marker p95≤100ms目标，阶段包不作为停止点。单次尾IDR与单plane直写共享槽候选已实播验证。既有TU1矩阵中，同session异步VPP与LowPower ON对照无最终呈现收益，保留外部颜色转换加oneVPL异步编码默认。绝对publication节拍消除了55→42FPS损失；修复测试页自身漂移后，单租户源、发布、编码、解码已约60FPS。精准模拟60Hz并保留进程高精度计时请求后的两次同配置实播为canvas51.53FPS/p95 123ms与50.77FPS/p95 76ms，尚未稳定同时达标。四1080 compositor/render30仍3D99.85%、canvas7.63–7.90FPS/p95 522–605ms。最新任务见[持续性能目标](../develop/docs/performance-goal.md)。
+该组保持1920×1080/DPR1、atlas/编码1936×1088、RTT10ms、每peer48Mbps，QSV TU7/LowPower ON/VBR/depth1、目标36/max44Mbps。接收端为Chromium157 headless、Intel UHD630硬件H264/GPU canvas及fake60，使用immutable VideoFrame/fifo2和Worker CRC；Chrome89原video路径支持保留。Marker终点是canvas绘制提交，Worker读回耗时另计。完整条件、指纹、配对和取消的未完成组见[验收记录](../develop/docs/headless-receiver-runtime.md)。
 
-接收回调trace确认：约600个新video frame只有450次rVFC，后续canvas没有再丢帧；跨线程通知和呈现相位是实测损失来源。默认关闭的连续rVFC候选已增量编译并验证静止/恢复/重连，尚无稳定性能收益，保持关闭。精准模拟刷新与该候选分别保存为0005/0006补丁。大metrics报告改为带SHA-256校验的分块上传，正式分析工具可完整重组，不再因413丢失长记录。
+同binary headed→headless配对的Intel3D均值由93.55%降到64.33%；RDP显示链的DWM/WUDF额外开销随动态窗口出现。无屏服务器的接收测试由此避免了RDP显示链干扰，不能把这个差值全部算为编码器优化。源GPU的绘制、合成、捕获与复制已能分别测量，详见[GPU计时](../develop/docs/viz-gpu-timing.md)和[环境调查](../develop/docs/gpu-environment-audit.md)。
 
-每Session独立QSV模式已实现：显式pattern按持久化Session id分配，stats包含选择和实际TU/LowPower；实验工具可配置目标/上限码率。默认关闭的自适应源帧率worker、TrackProcessor接收路径也已实现，原Chrome89/video默认保留。Endpoint Release构建及5项CPU测试通过；Control最新61项测试/类型检查/生产构建/smoke通过；混跑、自适应及TrackProcessor均已有实播证据。
+## 已完成的串流改进
 
-三租户TU7/36–44Mbps矩阵已完成：全OFF为10.53–11.36FPS/p95 1054–1200ms，全ON为12.46–12.68FPS/p95 852–921ms，两个混跑均约11.7–12.5FPS/p95 843–947ms。实际TU7、ON/OFF及混跑比例全部正确，原分辨率/CRC保留。3D约99.8%，source GPU约60%；全ON JS提交57–59FPS，但实际atlas17–20FPS。混跑未突破主要瓶颈，详见[完整实验](../develop/docs/three-tenant-fast-mixed-runtime.md)。
+服务端每WebView采用无页面HWND的Aura离屏宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。Chromium进程仍有系统广播SingletonHwnd。高精度计时、单次尾IDR、背压和源预算控制已有实现与实播证据。
 
-自适应源准入已实播：3租户提升到21.17–23.74FPS/p95 152–156ms；按授权转2租户后，关闭策略为22.99/23.42FPS、p95 444/401ms，开启为35.11/31.33FPS、p95 91/99ms。实际render配置与target/applied一致，几何、epoch、CRC保持，控制无错误。两租户延迟达标，FPS尚差15–19；正在拆分源GPU中的绘制、合成、捕获与复制成本，不能把进程占用全部算为网页绘制。详见[源准入实验](../develop/docs/source-budget-runtime.md)。
+共享BGRA输入候选保留真实GPU lease和有序退役；Viz CaptureToAtlas候选直接写三个拥有CSI的共享目标，避免Browser中间复制。正常导航、尺寸/DPR/多plane fallback、Chrome89输入/重连、普通关闭、源GPU同RTC自动恢复均已验证。生产默认与已验证候选目前仍有区别，后续发布整理会明确选用配置，不能仅依据实验名推断默认开启。
 
-源GPU细分已落实到真实flush：页面child批次约1.49ms、最终offscreen root约1.04ms，目标尺寸和sample count正常；请求/完成观察的百毫秒间隔不等于绘制执行。默认关闭的RemoteKitCaptureRoot改为捕获独立WebView root，实际将两pass合为一个六quad pass。原像素、CRC、resize、DPR2回退child再回root、点击与IME均通过；两租户profile-off为37.50/34.89FPS、p95 104/108ms，固定55反而饱和，仍未达标。详见[GPU计时](../develop/docs/viz-gpu-timing.md)和[root捕获](../develop/docs/root-capture-runtime.md)。
+Endpoint已修复故障退出时的等值GPU完成证明复用、各generation独立退役和最后引用释放后的访问；未知更高终点仍不能凭CPU状态放行。硬件退出回归见[退役验证](../develop/docs/endpoint-retirement-runtime.md)。
 
-TrackProcessor现已让全部plane直接读取同一个不可变VideoFrame，省去应用层整atlas快照复制，默认video/Chrome89保留。两租户为39.24/42.68FPS、p95 108/105ms，GPU均值81.62%；固定源52FPS后，编码约42.5FPS、canvas约40FPS、p95 128/126ms，GPU97.78%，不能靠提高准入帧率补足差距。65项测试、生产构建、真实双plane/DPR缩放/静态重挂载/输入/重连及Chrome89回归通过。Endpoint共享槽候选已完成，结果见下段。详见[不可变帧实验](../develop/docs/immutable-frame-runtime.md)。
+客户端保留Chrome89 video接收路径；新浏览器支持不可变VideoFrame直接绘制、多plane共享读取与fifo2候选。CRC Worker从真实已绘制canvas取得不可变bitmap，绑定原始paint身份并单独记录读回完成时间。metrics分块上传校验长度和SHA256；工具区分源、采集、编码、解码、真实paint及测量干扰。阶段Control共78项检查、构建和生产smoke已通过；产品改造后的结果另行记录。
 
-客户端single-plane-direct真实跳过snapshot后为37.16/33.85FPS、p95 116/132ms，无收益；Chrome89首帧、输入、重连通过。TrackProcessor实播发现并修复read提前使已呈现画面不可输入的问题，保留真正epoch变化的输入拒绝；read→RAF空隙输入、静止/恢复、重连、owner释放及Chrome89默认video回归均通过。两租户MSTP+Canvas snapshot为39.07/41.47FPS、p95 103/107ms，CRC全部有效，未达标；背景GPU变化使跨组差值不能全归因该路径。下一候选直接用immutable VideoFrame绘制各plane，省掉整atlas中间Canvas复制。详见[直接video对照](../develop/docs/client-direct-runtime.md)和[MSTP验证](../develop/docs/processor-runtime.md)。
+## 正在实施的产品功能
 
-当前marker延迟统计终点为客户端canvas绘制提交，CRC同步读回耗时另记；不表示物理屏幕点亮。四接收端同机满载时，读回p95达331–408ms，会干扰后续工作；同时已存在服务端供给下降与解码排队，不能将全部瓶颈归于测量。后续将同时记录GPU/读回完成端点，并保持CRC验证。
+多用户、每Window独立tabs、MUI沉浸式UI、WS控制链路、服务端设置、每站点仅UA平板模式、Memory Saver、弹窗收养和质量自适应正在实施。尚不能把这些设计项视为已发布能力。状态/接口与任务边界见[实施契约](../develop/docs/productization-contract.md)，UI方案见[设计](../develop/docs/control-ui-design.md)。
 
-断开RDP后DXGI无显示输出，Chrome89 VSync回退实测约31ms，空页面RAF约32Hz。用户允许新版Chromium模拟刷新验收：已复用out/rel完成Chromium157局部增量构建，官方 `--fake-vsync-rate=60` 已用于真实H.264串流。新增显式 `h264-level42-experimental` 接收档，校验H.264能力后按Level4.2协商，保持原1936×1088媒体尺寸；45项Control测试、类型检查、构建与启动smoke通过。重连使用每连接独立video，旧回调、stream、DOM和marker测量正确结束。
-
-Endpoint直接租用共享BGRA槽已实播验证，保持真实lease、有序GPU退役与三槽协议，默认copy不变。相同source52下，两租户从copy的40.20/40.51FPS、p95 128/126ms提升至shared的46.86/48.26FPS、p95 83/94ms；GPU97.78%降到84.92%，私有复制和编码替换丢帧为0。source56反而GPU95.91%、canvas约45FPS，仍未达到目标。6项CPU测试、首帧/静态恢复/输入/重连/尺寸与generation重建通过；启动跳过旧帧的三槽互等已修复。实际视频canvas已明确设为不透明，65项测试与Chrome89共享路径首帧/IME/重连通过；该对照45.67/46.88FPS、p95 104/97ms，没有性能收益。由Viz固定池导入三张共享目标、通过现有BlitRequest直接写atlas的候选已完成源码与增量编译，默认关闭；pool/请求分类10项、Endpoint 7项、patch工具9项CPU检查通过。正常资源重建、terminal退役与异常断线冻结已实现。首轮硬件直写与CRC通过、源端三种整幅copy为0；导航压力复现了进入GPU前被取消的空请求被误判为整条输出失败；typed取消修复已编译并通过CPU检查，正在重跑导航与恢复功能门，尚无正式性能结果。详见[共享槽实验](../develop/docs/shared-atlas-input.md)。
-
+全部功能和文档整理后先上传一版，再由Astra对照文档审查代码库并落实必要修复；有变动再构建上传。历史实验保存在[性能记录](../develop/docs/performance-goal.md)及各组报告，不继续在当前状态页逐轮追加。
 ## 结构
 
 - **browser**：独立 ContentMain/ContentBrowserClient/ContentRendererClient、BrowserContext 和 WebView adapter，不链接 Chrome 的 Browser/TabStripModel/BrowserView。服务使用无窗口Aura宿主，原生demo使用Views窗口。

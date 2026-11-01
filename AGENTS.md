@@ -139,5 +139,14 @@ python3 tools/package-runtime.py
 - 完整导航恢复已接 history/PageState 和同进程 sessionStorage namespace；跨 browser 的 sessionStorage 仍未恢复。导入校验 Session/Profile/版本，POST 不自动重放。
 - GPU/QSV/WebRTC 已有真实Chrome89视频与输入响应证据；正式FPS/p95、真实IME/触控、下载与资源重建的完成情况以当前状态和串流实验文档为准。动态popup、认证/证书、PDF/打印等缺口仍保留，不能视为用户放弃。
 - 网页设备DPR/viewport与媒体采样分辨率分开；Endpoint GPU转换按协商接收上限等比下采样，stats记录原始/编码尺寸。客户端用实际wire RTP匹配显示代次，防止新布局命中旧帧。
-- QSV既有基线为VBR、TargetUsage 1、异步深度1；用户最新实验方向是最快TargetUsage 7、高码率及跨Session混跑，默认采用何种配置仍依据实际结果决定。保留参数覆盖，NVENC不沿用未经硬件验证的QSV调优。普通码率Reset不重开序列；尾IDR保持正常150ms，在低fps时按源帧间隔自适应以避免风暴。
-- 性能结果必须区分源、采集、编码、解码与真实canvas呈现。四个同机接收端及同步marker读回会占用共享资源；特殊浏览器flag和关闭marker的诊断结果不能冒充默认客户端或Pixel marker延迟。现有矩阵未达>50FPS/<100ms目标，继续状态见实验文档。
+- QSV本轮选定VBR、TargetUsage 7、LowPower ON、异步深度1及较高码率；混跑未带来收益，历史开关后续统一归档。保留参数覆盖，NVENC不沿用未经硬件验证的QSV调优。普通码率Reset不重开序列；尾IDR保持正常150ms，在低fps时按源帧间隔自适应以避免风暴。
+- 性能结果必须区分源、采集、编码、解码与真实canvas呈现。四个同机接收端及同步marker读回会占用共享资源；特殊浏览器flag和关闭marker的诊断结果不能冒充默认客户端或Pixel marker延迟。最新两租户45秒headless接收组已达到≥50FPS、Pixel marker p95≤100ms，完整条件见当前状态及实验文档；用户已取消额外重复复验。
+
+## 本轮最终收尾要求（2026-11-01）
+
+- 双租户45秒同组已达到实际canvas约51.7FPS、Pixel marker p95 76/79ms。用户明确取消额外120秒稳定复验与单租户重复复验；不再为重复确认该结果新增性能组。后续功能变更仍做必要针对性检查。
+- 完成当前全部功能任务后，统一清理、整理codebase与docs，尤其精简AGENTS.md：保留长期要求与必要工作约束，当前实现/实验历史归入对应文档，不能删除尚未完成的真实要求。
+- 文档整理必须认真核对功能逻辑与实际实践：状态归属、生命周期、接口、恢复/错误路径、真实运行行为与证据；不能只做格式整理或照抄设计意图。
+- 在最终Astra代码审查及其修复改进开始前，先构建并上传第一版发布包；由GPT-6.1 Sol按docs/upload/README.md执行并返回取件码。上传已获明确授权，凭据只用于登录，不输出或打包。
+- 第一版上传后，委派GPT-6 Astra / Medium对照文档审查代码库，寻找逻辑bug和有价值的重构机会；root审阅取舍，委派实施必要改进并同步文档。有任何变动则再构建、委派Sol上传一版，返回新的取件码。
+- 上传与交付完成后，最后删除goal；在这些任务完成前不得提前结束goal。
