@@ -46,15 +46,15 @@ Session 保持单 producer 身份：Stop 先置 pending，TerminateJobObject 后
 ## 最终验证结果
 
 - out/dev 的 remotekit_browser、remotekit_sdk、独立 capture_to_atlas_pool_unittests 增量编译链接通过；最终含 trace 修正的 browser 再构建通过。原 H264/component args 保留，没有构建 out/rel。
-- 专用 pool 5/5 CPU 测试通过，实际运行 2ms；Endpoint Debug 编译与 7/7 CTest 通过，Endpoint Release service 增量编译通过。
+- 最小 CPU 目标 10/10 通过（pool 生命周期 5 项、typed 取消 5 项），实际运行 6ms；Endpoint Debug 编译与 7/7 CTest 通过，Endpoint Release service 增量编译通过。
 - terminal CPU 测试覆盖 kStopped（普通 Pause/Close 的冻结结果）与 kReconfigureNeeded（typed 重建）的校验、跨 generation/回退/UINT64_MAX 拒绝，以及最后帧未借、producer ready 未到、旧真实 lease 阻止 terminal、释放后最终水位和新代独立。seqlock 不稳定时清空输出再 idle，避免把 torn payload 用作终点。普通 Pause/Close 和 typed 导航的完整 RPC/GPU 恢复流程仍须下一阶段实跑；没有把这些 CPU helper 测试写成已完成集成验证。
-- patchset 工具 9/9 测试通过。最终 7 项在独立 replay-diagnostic 目录完整正向重放、与活动源等价、全逆向恢复基线通过，共 39 个源文件；活动 Chromium 没有 reset，status 为全 applied。
+- patchset 工具 9/9 测试通过。最终 7 项在独立 replay-pre-gpu-cancel 目录完整正向重放、与活动源等价、全逆向恢复基线通过，共 48 个源文件；活动 Chromium 没有 reset，status 为全 applied。
 - 新 pool 独立 GN header dependency check 通过。browser/SDK 的额外 GN check 分别被既有私有头 RenderWidgetHostViewBase 和 platform_key_map_win 可见性规则阻止；本批实际编译链接成功，按主 Agent 决定记录该缺口，不扩大上游可见性。
 - 两处 content 单测 capturer mock 已补新纯虚接口的明确拒绝 override；没有构建完整 content_unittests/viz_unittests。
 
-最终 patch：0007-capture-to-atlas.patch，SHA-256 `d2c0521b9b7f99baeb6c364f8d03269f57725cc77fd74ae8a13db93d481d527d`，22 文件，83261 bytes。
+最终 patch：0007-capture-to-atlas.patch，SHA-256 `d51c5a3d588a9a4d9b379294fa7eddb0c05f8fe75ac90687e0fbcad6d53d172b`，31 文件，114514 bytes。
 
-证据位于 develop/tmp/capture-to-atlas：build-final-trace.log、build-verified.log、build-disconnect2.log、build-disconnect-mojo2.log、pool-tests.log、patchset-tests-diagnostic.log、patch-replay-diagnostic.log、patch-status-diagnostic.log、artifacts.json。Endpoint CTest 原始记录在 build/endpoint/Testing/Temporary/LastTest.log。
+证据位于 develop/tmp/capture-to-atlas：build-final-trace.log、build-verified.log、build-disconnect2.log、build-disconnect-mojo2.log、pool-tests.log、patchset-tests-diagnostic.log、patch-replay-pre-gpu-cancel.log、patch-status-diagnostic.log、artifacts.json。Endpoint CTest 原始记录在 build/endpoint/Testing/Temporary/LastTest.log。
 
 ## 运行交接
 
@@ -63,13 +63,13 @@ Session 保持单 producer 身份：Stop 先置 pending，TerminateJobObject 后
 
 | 产物 | 实际路径 | SHA-256 |
 |---|---|---|
-| remotekit_browser.exe | `C:/src/chromium/src/out/dev/remotekit_browser.exe` | `039c024e4c255f5bc53345b5fc836b46bd8452c67073422f93679cbe41702c5c` |
+| remotekit_browser.exe | `C:/src/chromium/src/out/dev/remotekit_browser.exe` | `d4b6c9ad9ade3b171fc2dd7fa84a1841aa9c0014abbc4e2e1efc3c5544882824` |
 | remotekit_sdk.dll | `C:/src/chromium/src/out/dev/remotekit_sdk.dll` | `91433dd933a89557108b590093bac751e6d583bc66775d569fbfe4d074b19922` |
-| components_viz_service.dll | `C:/src/chromium/src/out/dev/components_viz_service.dll` | `6630c67bc4494030edeee9b21557222e5e854152164eb365042d8561e26441aa` |
-| components_viz_host.dll | `C:/src/chromium/src/out/dev/components_viz_host.dll` | `750a3afd493211a1a1fe24a2eecbbfdb1f276be54843f39f80b4d5bd93d33afb` |
-| viz_common.dll | `C:/src/chromium/src/out/dev/viz_common.dll` | `e0e041af6f692f786988b23e28b151d98105b2c97003f34397d0375ec6066a37` |
+| components_viz_service.dll | `C:/src/chromium/src/out/dev/components_viz_service.dll` | `57bf94d54ab1a9b01cf5106b7948e9780813d7614b6f8a6527254b683b803cc5` |
+| components_viz_host.dll | `C:/src/chromium/src/out/dev/components_viz_host.dll` | `99066a17557e0158546593960f5b05c60d383de5c3af30280af3e4d91e6ed9a0` |
+| viz_common.dll | `C:/src/chromium/src/out/dev/viz_common.dll` | `22db93649d36e20ce12d391667fb0440d9f3d8051f88695df9629236823ccbdb` |
 | media.dll | `C:/src/chromium/src/out/dev/media.dll` | `b1b18704cb12c2f65abb6e7363eba648d8bf5c10037ca39b6e4bfca8ec97a885` |
-| content.dll | `C:/src/chromium/src/out/dev/content.dll` | `664626557c5dad93a1df4d38613ad8f5f3fbef9359f9404876179f702f8eacc7` |
+| content.dll | `C:/src/chromium/src/out/dev/content.dll` | `048f5f0272e2a009d5046b9a7e30a273248e620dc514a57672bf5885dd936ccc` |
 | endpoint_release | `C:/Users/Flysoft/Desktop/remotekit2/build/endpoint-package/endpoint/endpoint_service.exe` | `7a708e4f1affc67b5c243845c9345cf4525b1a29204619e43b13c0b84a932e38` |
 
 本实施任务没有自行启动 GPU。独立首轮硬件门已通过直接输出、CRC4001/4002、输入和零 source copy，但第三代导航失败；详见 capture-to-atlas-runtime.md。诊断复现后仍需完成恢复、背压、普通 Pause/Close、resize、DPR2/multiview 和故障门，再进入原条件 fixed52 两租户性能对照。FPS 与 marker p95 收益没有预记。
@@ -84,3 +84,16 @@ capturer 的 result_rejected 记录 empty、CopyOutputResult error 名称/代码
 
 patchset 的 manifest、snapshot 文件名和 record 三个入口都新增拒绝 PureWindowsPath.root，包含 drive 为空但以 / 或反斜杠开头的 rooted-no-drive 形式。新增回归验证这些路径被拒绝，外部 canary 不变，同时合法相对补丁路径继续通过；工具测试 9/9。
 
+## D2：仅重试写入前的 typed 取消
+
+D1 的 nav20 第8轮/gen9失败已确认是 unsatisfied request 析构的 empty/unknown，actual RGBA/SharedImage 符合预期；请求年龄0.569ms、content version7→8、target相同，没有Skia失败日志。源码中 Surface::RequestCopyOfOutputOnRenderPass 会在加入新请求前删除同 source 的旧请求；无active root和ClearCopyRequests也会销毁请求。旧D1没有取消调用点，不能唯一断言就是同source替换。D2给这三处加INFO origin/request_id/replacement_id；20轮复现将提供实际调用点证据。
+
+新增 CopyOutputResult::Error::kCancelledBeforeGpu（追加值4），同步 Mojo enum/双向traits，普通截图API仍映射成既有unknown。CopyOutputRequest 只有同时满足“专用CSI label、尚未进入写入路由、未完成就析构”才生成这个typed error；显式SendError(unknown/timeout等)不改写。
+
+MarkGpuWorkStarted 在 SkiaOutputSurfaceImpl::CopyOutput 第一入口、任何GPU任务/import排队前设置，直接OnGpu入口也设置。它不会重置。当前GL/Ganesh硬件路由为SkiaRenderer→Impl→OnGpu；SoftwareRenderer有SharedImage CPU写入，所以入口也保守设置；NullRenderer不写目标。进入任一可写路由后，即使排队/执行失败，都不能重新分类成安全取消。
+
+capturer仅对 external pool + empty + typed4 + RGBA/SharedImage 走已有CaptureFailed/oracle重试路径。不发布ready、不增加成功帧，固定槽由原Frame释放流程归还；其它empty/错误/格式/几何失配仍停止本代。正常取消有独立CaptureResult及INFO日志，不计入GPU readback成败样本；真正GPU错误仍ERROR。默认普通捕获语义不变，没有宽泛忽略empty/unknown。
+
+验证：原out/dev、16核增量构建961步成功，最终定稿再增量5步成功；Browser/SDK/最小测试均编译链接。10/10 CPU通过，新增5项分别验证写入前typed、进入GPU后unknown、显式unknown不改写、正常结果非empty、普通pool保留unknown。最小target和viz_common GN check通过。七补丁独立重放、与活动源等价、完整撤回基线通过48源文件。证据为 build-pre-gpu-cancel.log、build-pre-gpu-cancel-final.log、tests-pre-gpu-cancel.log、patch-replay-pre-gpu-cancel.log、patch-status-pre-gpu-cancel.log。
+
+本任务未启动GPU；D2尚待独立20轮导航复测。若出现typed4以外失败，继续按精确日志定位，不把它放过。没有改变像素、分辨率、编码或正式验收条件。

@@ -12,11 +12,11 @@ UHD630、oneVPL异步H264、RTT10ms、每peer下行24–48Mbps、1080p/DPR1和CR
 
 ## 当前实施
 
-root负责架构、取舍、接口、审阅与commit/push；capture_to_atlas_impl区分pre-GPU取消与真实GPU失败；修复编译后capture_to_atlas_runtime继续20轮导航及剩余功能门，尚未开始正式A/B。CPU构建不得与计时GPU组重叠。
+root负责架构、取舍、接口、审阅与commit/push；pre-GPU取消修复D2已编译并通过10项CPU检查；capture_to_atlas_runtime独占GPU继续20轮导航及剩余功能门，尚未开始正式A/B。CPU构建不得与计时GPU组重叠。
 
 已完成：源准入、细粒度GPU profiling、root捕获合并pass、client直接video对照、TrackProcessor输入准入修正、不可变VideoFrame直接绘制多plane。Chrome89/video默认保留。
 
-已实现：Endpoint直接租用共享BGRA槽，省shared→private复制。默认copy不变，shared为实验配置，先限制QSV/external/depth1。最后一个真实读者释放后，由AtlasPool既有owner按观察序列的安全前缀在同GPU context排consumed signal，禁止乱序释放或CPU伪造完成；旧generation沿用真实GPU完成和资源退役机制。功能/生命周期/CRC及两租户adaptive、固定52、固定56对照已完成。方案依据见[共享槽调查](endpoint-direct-lease-next.md)，实现、6项测试和真实生命周期验证已通过。同源52两租户46.86/48.26FPS、p95 83/94ms，GPU84.92%；固定56回退，停止提高源预算。详见[实跑](shared-atlas-input.md)。视频plane改opaque已验证，没有性能收益；Chrome89 shared输入/重连与65项Control检查通过。源码审计确认BlitRequest支持外部目的纹理。已选Viz owning CSI固定三槽池、GPU成功完成后ready、consumed完成后归还lease；不同pool代次使用新资源，保留可见像素/guardband与旧路径。见[实施决策](capture-to-atlas-plan.md)，源码、增量编译、pool5/Endpoint7/patch工具8项CPU检查与七补丁重放/撤回通过；首轮硬件直写/CRC与零源端copy已确认，但导航压力确认未进入GPU的请求取消被当作整条输出故障，正在补typed取消；功能门未通过前不跑正式A/B。见[capture直写实跑](capture-to-atlas-runtime.md)。
+已实现：Endpoint直接租用共享BGRA槽，省shared→private复制。默认copy不变，shared为实验配置，先限制QSV/external/depth1。最后一个真实读者释放后，由AtlasPool既有owner按观察序列的安全前缀在同GPU context排consumed signal，禁止乱序释放或CPU伪造完成；旧generation沿用真实GPU完成和资源退役机制。功能/生命周期/CRC及两租户adaptive、固定52、固定56对照已完成。方案依据见[共享槽调查](endpoint-direct-lease-next.md)，实现、6项测试和真实生命周期验证已通过。同源52两租户46.86/48.26FPS、p95 83/94ms，GPU84.92%；固定56回退，停止提高源预算。详见[实跑](shared-atlas-input.md)。视频plane改opaque已验证，没有性能收益；Chrome89 shared输入/重连与65项Control检查通过。源码审计确认BlitRequest支持外部目的纹理。已选Viz owning CSI固定三槽池、GPU成功完成后ready、consumed完成后归还lease；不同pool代次使用新资源，保留可见像素/guardband与旧路径。见[实施决策](capture-to-atlas-plan.md)，源码、增量编译、pool与请求分类10/Endpoint7/patch工具9项CPU检查与七补丁重放/撤回通过；首轮硬件直写/CRC与零源端copy已确认，但导航压力确认未进入GPU的请求取消被当作整条输出故障，typed取消D2已完成，正在硬件复测；功能门未通过前不跑正式A/B。见[capture直写实跑](capture-to-atlas-runtime.md)。
 
 ## 已有关键证据
 
