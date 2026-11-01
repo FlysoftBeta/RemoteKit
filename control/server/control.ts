@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import type { ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport } from '../shared/product';
 import type { ControlState, Device } from '../client/types';
 import type { Endpoint } from './endpoint';
 import { Store } from './store';
 import { LoopbackRelay, rewriteSdp, selectLocalCandidate, type NetworkSimulation } from './network-sim.mjs';
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
-export class Control {
+export class Control extends EventEmitter {
   private queues = new Map<string, Promise<unknown>>();
   private errors = new Map<string, string>();
   private connections = new Map<string, string>();
@@ -12,7 +14,14 @@ export class Control {
   private ticking = false;
   private endpointGeneration = 0;
   private relays = new Map<string, LoopbackRelay>();
-  constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation) {}
+  private diagnosticTenants = new Set<string>();
+  private viewers = new Map<string, { id: string; revoke: (reason: 'another-viewer' | 'logout') => void; viewport?: ViewerViewport; feedback?: Record<string, unknown> }>();
+  private lastViewports = new Map<string, ViewerViewport>();
+  private started = new Set<string>();
+  private hiddenSince = new Map<string, number>();
+  private transitions = new Map<string, { action: string; at: number }>();
+  private siteApplications = new Map<string, { encoded: string; applied: boolean; browserPid?: number }>();
+  constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation) { super(); }
   serial<T>(tenant: string, work: () => Promise<T>): Promise<T> {
     const next = (this.queues.get(tenant) ?? Promise.resolve()).catch(() => {}).then(work);
     this.queues.set(tenant, next); void next.finally(() => { if (this.queues.get(tenant) === next) this.queues.delete(tenant); }).catch(() => {});
@@ -20,6 +29,7 @@ export class Control {
   }
   state(tenant: string) { return { ...this.store.state(tenant), endpointError: this.errors.get(tenant) ?? null, endpointGeneration: this.endpointGeneration, ...(this.simulation ? { networkSimulation: this.simulation } : {}) }; }
   async getState(tenant: string) {
+    this.diagnosticTenants.add(tenant);
     return this.serial(tenant, async () => {
       const state = this.store.state(tenant);
       if (state.pendingClose?.awaiting) {
@@ -58,6 +68,7 @@ export class Control {
     if (JSON.stringify(state) !== before) this.store.save(state);
   }
   async reconcile(tenant: string) {
+    if (!this.diagnosticTenants.has(tenant)) return this.reconcileProduct(tenant);
     const state = this.store.state(tenant);
     try {
       await this.endpoint.request('session.ensure', tenant);
@@ -78,10 +89,11 @@ export class Control {
       this.errors.delete(tenant);
     } catch (error) { this.errors.set(tenant, error instanceof Error ? error.message : String(error)); throw error; }
   }
-  async tick() { if (this.ticking) return; this.ticking = true; try { await Promise.all(this.store.all().map(tenant => this.serial(tenant, () => this.reconcile(tenant)).catch(() => {}))); } finally { this.ticking = false; } }
+  async tick() { if (this.ticking) return; this.ticking = true; try { await Promise.all([...new Set([...this.diagnosticTenants, ...this.viewers.keys(), ...this.started])].map(tenant => this.serial(tenant, () => this.reconcile(tenant)).catch(() => {}))); } finally { this.ticking = false; } }
   closeRelays() { for (const relay of this.relays.values()) relay.close(); this.relays.clear(); }
-  async reconcileAll() { this.endpointGeneration++; this.closeRelays(); this.connections.clear(); this.configurations.clear(); for (const tenant of this.store.all()) await this.serial(tenant, async () => { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); await this.reconcile(tenant); }).catch(() => {}); }
+  async reconcileAll() { this.endpointGeneration++; this.closeRelays(); this.connections.clear(); this.configurations.clear(); this.started.clear(); this.transitions.clear(); this.siteApplications.clear(); for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()])) await this.serial(tenant, async () => { if (this.diagnosticTenants.has(tenant)) { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); } await this.reconcile(tenant); this.push(tenant); }).catch(() => {}); }
   async action(tenant: string, body: any) {
+    this.diagnosticTenants.add(tenant);
     return this.serial(tenant, async () => {
       const state = this.store.state(tenant);
       let reloadDevicePages = false;
@@ -126,9 +138,10 @@ export class Control {
       return this.state(tenant);
     });
   }
-  async offer(tenant: string, body: any) {
+  async offer(tenant: string, body: any, lease?: string) {
     if (body.type !== 'offer' || typeof body.sdp !== 'string' || body.sdp.length > 900000 || !body.sdp.startsWith('v=0')) throw new ApiError(400, '无效的 SDP offer');
     return this.serial(tenant, async () => {
+      if (lease) this.assertViewer(tenant, lease);
       await this.reconcile(tenant);
       const previous = this.connections.get(tenant);
       if (previous) { try { await this.endpoint.request('rtc.close', tenant, { connectionId: previous }); } finally { this.relays.get(previous)?.close(); this.relays.delete(previous); this.connections.delete(tenant); } }
@@ -151,8 +164,9 @@ export class Control {
     if (this.simulation) throw new ApiError(400, '网络实验使用完整 gathered SDP，拒绝额外 trickle 候选');
     return this.endpoint.request('rtc.ice', tenant, { connectionId: body.connectionId, candidate: body.candidate });
   }
-  async closeRtc(tenant: string, body: any) {
+  async closeRtc(tenant: string, body: any, lease?: string) {
     return this.serial(tenant, async () => {
+      if (lease) this.assertViewer(tenant, lease);
       if (this.connections.get(tenant) !== body.connectionId) throw new ApiError(403, '连接不属于当前会话');
       try { await this.endpoint.request('rtc.close', tenant, { connectionId: body.connectionId }); } finally { this.relays.get(body.connectionId)?.close(); this.relays.delete(body.connectionId); this.connections.delete(tenant); } return { closed: true };
     });
@@ -160,6 +174,245 @@ export class Control {
   networkStats(tenant: string, body: any) {
     if (this.connections.get(tenant) !== body.connectionId) throw new ApiError(403, '连接不属于当前会话');
     return this.relays.get(body.connectionId)?.snapshot() ?? { enabled: false };
+  }
+  productState(tenant: string): ProductState {
+    return { user: this.store.userForTenant(tenant)!, workspace: this.store.workspace(tenant), endpointGeneration: this.endpointGeneration, endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant) }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
+  }
+  private push(tenant: string) { this.emit('state', tenant, this.productState(tenant)); }
+  private saveProduct(state: ProductWorkspace) { const changed = this.store.saveWorkspace(state); if (changed) this.push(state.tenantId); }
+  assertViewer(tenant: string, lease: string) { if (this.viewers.get(tenant)?.id !== lease) throw new ApiError(409, '此窗口已由另一个 Viewer 接管'); }
+  async attachViewer(tenant: string, id: string, revoke: (reason: 'another-viewer' | 'logout') => void) {
+    const old = this.viewers.get(tenant); this.viewers.set(tenant, { id, revoke }); old?.revoke('another-viewer');
+    return this.serial(tenant, async () => {
+      this.assertViewer(tenant, id); await this.closeMedia(tenant);
+      try { await this.reconcileProduct(tenant); } catch { /* State carries Endpoint error; controls still work offline. */ }
+      this.push(tenant); return this.productState(tenant);
+    });
+  }
+  async detachViewer(tenant: string, id: string) {
+    if (this.viewers.get(tenant)?.id !== id) return;
+    this.viewers.delete(tenant);
+    return this.serial(tenant, async () => {
+      // A replacement owns media now; an old close must not hide or close it.
+      if (this.viewers.has(tenant)) return;
+      await this.closeMedia(tenant); try { await this.reconcileProduct(tenant); } catch { }
+      this.push(tenant);
+    });
+  }
+  async logout(tenant: string) { const viewer = this.viewers.get(tenant); if (viewer) { viewer.revoke('logout'); await this.detachViewer(tenant, viewer.id); } }
+  private async closeMedia(tenant: string) {
+    const previous = this.connections.get(tenant); if (!previous) return;
+    try { await this.endpoint.request('rtc.close', tenant, { connectionId: previous }); } catch { }
+    finally { this.connections.delete(tenant); this.relays.get(previous)?.close(); this.relays.delete(previous); }
+  }
+  async viewerRequest(tenant: string, lease: string, method: string, params: any) {
+    this.assertViewer(tenant, lease);
+    if (!params || typeof params !== 'object' || Array.isArray(params)) throw new ApiError(400, '需要参数对象');
+    if (['tenantId', 'tenant', 'userId', 'user'].some(key => key in params)) throw new ApiError(400, '客户端不能指定用户或租户');
+    if (method === 'action') return this.productAction(tenant, params, lease);
+    if (method === 'viewport') return this.viewport(tenant, params, lease);
+    if (method === 'rtc.offer') return this.offer(tenant, params, lease);
+    if (method === 'rtc.close') return this.closeRtc(tenant, params, lease);
+    return this.serial(tenant, async () => {
+      this.assertViewer(tenant, lease);
+      if (method === 'rtc.ice') return this.ice(tenant, params);
+      if (method === 'clock.ping') return { serverTime: Date.now(), ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}) };
+      if (method === 'feedback') { this.viewers.get(tenant)!.feedback = params; return { accepted: true }; }
+      throw new ApiError(400, '未知 WebSocket 方法');
+    });
+  }
+  private viewport(tenant: string, body: any, lease: string) {
+    return this.serial(tenant, async () => {
+      this.assertViewer(tenant, lease);
+      const state = this.store.workspace(tenant);
+      if (typeof body.devicePixelRatio !== 'number' || !Number.isFinite(body.devicePixelRatio) || body.devicePixelRatio < .5 || body.devicePixelRatio > 4 || !Array.isArray(body.windows) || body.windows.length > 8 || (body.refreshHz !== undefined && (!Number.isFinite(body.refreshHz) || body.refreshHz < 1 || body.refreshHz > 500))) throw new ApiError(400, '无效的显示区域');
+      const ids = new Set<string>();
+      for (const w of body.windows) { if (!w || ids.has(w.windowId) || !state.windows.some(item => item.id === w.windowId) || typeof w.visible !== 'boolean' || !Number.isInteger(w.width) || !Number.isInteger(w.height) || w.width < 1 || w.height < 1 || w.width > 8192 || w.height > 8192) throw new ApiError(400, '无效的窗口显示区域'); ids.add(w.windowId); }
+      this.viewers.get(tenant)!.viewport = { devicePixelRatio: body.devicePixelRatio, refreshHz: body.refreshHz, windows: body.windows.map((w: any) => ({ windowId: w.windowId, width: w.width, height: w.height, visible: w.visible })) };
+      this.lastViewports.set(tenant, this.viewers.get(tenant)!.viewport!);
+      try { await this.reconcileProduct(tenant); } catch { }
+      this.push(tenant); return this.productState(tenant);
+    });
+  }
+  async productAction(tenant: string, body: ProductAction, lease?: string): Promise<ProductActionResult> {
+    return this.serial(tenant, async () => {
+      if (lease) this.assertViewer(tenant, lease);
+      const state = this.store.workspace(tenant), action = body as any;
+      const tab = () => { const found = state.tabs.find(t => t.id === action.tabId); if (!found) throw new ApiError(404, '标签页不存在'); return found; };
+      const window = () => { const found = state.windows.find(w => w.id === action.windowId); if (!found) throw new ApiError(404, '窗口不存在'); return found; };
+      const createTab = (windowId: string) => { if (state.tabs.length >= 32) throw new ApiError(400, '最多支持32个标签页'); const next: ProductTab = { id: randomUUID(), windowId, webviewId: this.store.viewId(), title: String(action.title ?? '新标签页').slice(0, 120), url: url(action.url ?? 'about:blank') }; state.tabs.push(next); state.windows.find(w => w.id === windowId)!.activeTabId = next.id; state.activeWindowId = windowId; };
+      let application: ProductActionResult['application'];
+      switch (action.type) {
+        case 'window.create': { if (state.windows.length >= 8) throw new ApiError(400, '最多支持8个窗口'); const id = randomUUID(); state.windows.push({ id, activeTabId: null, weight: 1 }); createTab(id); break; }
+        case 'window.activate': state.activeWindowId = window().id; break;
+        case 'window.layout': {
+          if (!['side-by-side', 'focused'].includes(action.mode)) throw new ApiError(400, '无效的窗口布局'); state.layoutMode = action.mode;
+          if (action.weights !== undefined) { if (!Array.isArray(action.weights) || action.weights.length > 8 || new Set(action.weights.map((w: any) => w.windowId)).size !== action.weights.length) throw new ApiError(400, '无效的窗口比例'); for (const entry of action.weights) { const w = state.windows.find(w => w.id === entry.windowId); if (!w || typeof entry.weight !== 'number' || !Number.isFinite(entry.weight) || entry.weight < .1 || entry.weight > 10) throw new ApiError(400, '无效的窗口比例'); w.weight = entry.weight; } } break;
+        }
+        case 'window.close': { const w = window(); if (state.pendingWindowCloseId && state.pendingWindowCloseId !== w.id) throw new ApiError(409, '请先处理当前关闭请求'); state.pendingWindowCloseId = w.id; await this.continueWindowClose(state); break; }
+        case 'tab.create': createTab(window().id); break;
+        case 'tab.activate': { const t = tab(); state.windows.find(w => w.id === t.windowId)!.activeTabId = t.id; state.activeWindowId = t.windowId; break; }
+        case 'tab.move': { const t = tab(), target = window(), old = state.windows.find(w => w.id === t.windowId)!; t.windowId = target.id; if (old.activeTabId === t.id) old.activeTabId = state.tabs.find(item => item.windowId === old.id)?.id ?? null; target.activeTabId = t.id; state.activeWindowId = target.id; break; }
+        case 'tab.navigate': { const t = tab(), address = url(action.url); await this.endpoint.request('view.navigate', tenant, { viewId: t.webviewId, url: address }); t.url = address; t.pendingUrl = address; break; }
+        case 'tab.command': { const t = tab(); if (!['back', 'forward', 'reload', 'stop'].includes(action.command)) throw new ApiError(400, '未知导航命令'); await this.endpoint.request('view.command', tenant, { viewId: t.webviewId, command: action.command }); break; }
+        case 'tab.close': {
+          const t = tab(), replying = action.confirm === true || action.cancel === true;
+          if (replying) { if (state.pendingClose?.id !== t.id || state.pendingClose.requestId !== action.requestId) throw new ApiError(409, '关闭请求已失效'); await this.endpoint.request('view.close.reply', tenant, { viewId: t.webviewId, requestId: action.requestId, accept: action.confirm === true }); if (action.cancel === true) { state.pendingClose = null; state.pendingWindowCloseId = null; } else state.pendingClose = { ...state.pendingClose, awaiting: true }; }
+          else await this.closeProductTab(state, t);
+          break;
+        }
+        case 'settings.update': {
+          const value = action.settings;
+          if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['qualityPreference', 'clientScaleOverride', 'memorySaverEnabled', 'showStats'].includes(k))) throw new ApiError(400, '无效的设置');
+          if ('qualityPreference' in value && !['quality', 'auto', 'smooth'].includes(value.qualityPreference)) throw new ApiError(400, '无效的画面质量');
+          if ('clientScaleOverride' in value && value.clientScaleOverride !== null && (typeof value.clientScaleOverride !== 'number' || !Number.isFinite(value.clientScaleOverride) || value.clientScaleOverride < .5 || value.clientScaleOverride > 4)) throw new ApiError(400, '显示比例需0.5–4');
+          if ('memorySaverEnabled' in value && typeof value.memorySaverEnabled !== 'boolean') throw new ApiError(400, '无效的内存设置');
+          if ('showStats' in value && typeof value.showStats !== 'boolean') throw new ApiError(400, '无效的统计设置'); Object.assign(state.settings, value); break;
+        }
+        case 'site.set': {
+          let origin: string; try { const parsed = new URL(action.origin); if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.origin.length > 2048) throw new Error(); origin = parsed.origin; } catch { throw new ApiError(400, '站点需有效HTTP(S) origin，最长2048字符'); }
+          if (typeof action.tabletUa !== 'boolean') throw new ApiError(400, '无效的站点设置');
+          if (action.tabId && new URL(tab().url).origin !== origin) throw new ApiError(400, '标签页不属于该站点');
+          if (!(origin in state.sites) && Object.keys(state.sites).length >= 4096) throw new ApiError(400, '站点设置已达上限');
+          state.sites[origin] = { tabletUa: action.tabletUa };
+          if (action.tabId) tab().pendingUaReloadOrigin = origin;
+          application = { status: 'pending', reason: '设置已保存，正在应用站点身份' }; break;
+        }
+        default: throw new ApiError(400, '未知产品操作');
+      }
+      this.saveProduct(state);
+      try { await this.reconcileProduct(tenant); } catch { }
+      if (action.type === 'site.set') {
+        const latest = this.store.workspace(tenant), applied = this.siteApplications.get(tenant)?.applied === true;
+        if (applied && (!action.tabId || !latest.tabs.find(t => t.id === action.tabId)?.pendingUaReloadOrigin)) application = undefined;
+        else application = { status: 'pending', reason: '设置已保存，应用成功后刷新当前页；其他页面下次加载生效' };
+      }
+      this.push(tenant); return { state: this.productState(tenant), ...(application ? { application } : {}) };
+    });
+  }
+  private removeProductTab(state: ProductWorkspace, tab: ProductTab) { state.tabs = state.tabs.filter(t => t.id !== tab.id); const w = state.windows.find(w => w.id === tab.windowId); if (w?.activeTabId === tab.id) w.activeTabId = state.tabs.find(t => t.windowId === w.id)?.id ?? null; if (state.pendingClose?.id === tab.id) state.pendingClose = null; this.hiddenSince.delete(state.tenantId + '/' + tab.webviewId); }
+  private async closeProductTab(state: ProductWorkspace, tab: ProductTab) {
+    if (state.pendingClose && state.pendingClose.id !== tab.id) throw new ApiError(409, '请先处理当前关闭请求');
+    if (tab.popup && tab.popup.status !== 'adopted') { this.removeProductTab(state, tab); return; }
+    const result = await this.endpoint.request('view.close', state.tenantId, { viewId: tab.webviewId, force: false });
+    if (result.closed === true) this.removeProductTab(state, tab);
+    else if (result.accepted || result.pending) state.pendingClose = { id: tab.id, windowId: tab.windowId, requestId: result.requestId, awaiting: !!result.accepted };
+    else throw new ApiError(409, 'Endpoint 尚未确认页面关闭');
+  }
+  private async continueWindowClose(state: ProductWorkspace) {
+    if (!state.pendingWindowCloseId || state.pendingClose) return;
+    const id = state.pendingWindowCloseId;
+    for (const tab of state.tabs.filter(t => t.windowId === id)) { await this.closeProductTab(state, tab); this.saveProduct(state); if (state.pendingClose) return; }
+    state.windows = state.windows.filter(w => w.id !== id); if (state.activeWindowId === id) state.activeWindowId = state.windows[0]?.id ?? null; state.pendingWindowCloseId = null;
+  }
+  private async reconcileProduct(tenant: string) {
+    if (!this.viewers.has(tenant) && !this.started.has(tenant)) return;
+    try {
+      const desired = this.store.workspace(tenant);
+      // This operation caches preferences without starting an offline Browser.
+      await this.applySites(tenant, desired);
+      const ensured = await this.endpoint.request('session.ensure', tenant); this.started.add(tenant);
+      const applied = this.siteApplications.get(tenant)!;
+      if (!applied.applied || ensured.browserPid !== undefined && applied.browserPid !== ensured.browserPid) await this.applySites(tenant, desired, true, ensured.browserPid);
+      if (!this.siteApplications.get(tenant)?.applied) throw new Error('站点身份尚未应用，等待Endpoint恢复');
+      const snapshot = await this.endpoint.request('session.snapshot', tenant), state = this.store.workspace(tenant), actual: any[] = Array.isArray(snapshot?.views) ? snapshot.views : [];
+      const closedViews = await this.consumeClosedEvents(state, snapshot);
+      await this.observePopups(state, snapshot);
+      this.store.prunePopupReceipts(tenant);
+      for (const t of [...state.tabs]) {
+        const current = actual.find(v => String(v.viewId ?? v.view ?? v.id) === t.webviewId);
+        if (!current) { if (state.pendingClose?.id === t.id) this.removeProductTab(state, t); continue; }
+        if (t.popup?.status === 'pending') t.popup = { provisionalId: t.popup.provisionalId, status: 'adopted' };
+        if (current.close_state === 'closed') { this.removeProductTab(state, t); continue; }
+        if (state.pendingClose?.id === t.id) { const requestId = current.pending_close?.requestId ?? current.requestId; if (requestId) state.pendingClose = { ...state.pendingClose, requestId: String(requestId), awaiting: false }; }
+        for (const key of ['title', 'loading', 'canGoBack', 'canGoForward'] as const) if (typeof current[key] === (key === 'title' ? 'string' : 'boolean')) (t as any)[key] = key === 'title' ? current[key].slice(0, 120) : current[key];
+        if (typeof current.url === 'string' && /^(https?:\/\/|about:blank$)/.test(current.url) && (!t.pendingUrl || current.url === t.pendingUrl || current.loading === false)) { t.url = current.url; delete t.pendingUrl; }
+        if (Number.isInteger(current.actual) && current.actual >= 0 && current.actual <= 3) t.residency = (['live', 'frozen', 'discarded', 'unloaded'] as const)[current.actual];
+        t.restoring = !!current.pending && current.desired === 0;
+      }
+      await this.continueWindowClose(state); this.saveProduct(state);
+      const viewer = this.viewers.get(tenant), viewport = viewer?.viewport ?? this.lastViewports.get(tenant);
+      const wanted = (t: ProductTab) => !!viewer?.viewport?.windows.some(w => w.windowId === t.windowId && w.visible) && state.windows.some(w => w.id === t.windowId && w.activeTabId === t.id) && (state.layoutMode !== 'focused' || t.windowId === state.activeWindowId);
+      const ordered = [...state.tabs].sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
+      for (const t of ordered) {
+        const current = actual.find(v => String(v.viewId ?? v.view ?? v.id) === t.webviewId), key = tenant + '/' + t.webviewId, visible = wanted(t), region = viewport?.windows.find(w => w.windowId === t.windowId), dpr = state.settings.clientScaleOverride ?? viewport?.devicePixelRatio ?? 1;
+        if (t.popup?.status === 'failed') continue;
+        if (visible) this.hiddenSince.delete(key); else if (!this.hiddenSince.has(key)) this.hiddenSince.set(key, Date.now());
+        const actualState = current?.actual ?? 0;
+        let readyToShow = actualState === 0 && !current?.pending;
+        if (visible && actualState !== 0 && !current?.pending) {
+          const attempt = this.transitions.get(key); if (!attempt || attempt.action !== 'restore' || Date.now() - attempt.at > 12000) { await this.endpoint.request('view.lifecycle', tenant, { viewId: t.webviewId, action: 'restore' }); this.transitions.set(key, { action: 'restore', at: Date.now() }); } readyToShow = false;
+        } else if (readyToShow) this.transitions.delete(key);
+        const config = { viewId: t.webviewId, width: region?.width ?? 1440, height: region?.height ?? 900, device: { mode: 'desktop', deviceScaleFactor: dpr }, visible: visible && readyToShow };
+        const encoded = JSON.stringify(config);
+        if (!current && t.popup?.status === 'pending') {
+          try {
+            const adopted = await this.endpoint.request('view.adopt', tenant, { ...config, url: t.url, provisionalId: t.popup.provisionalId });
+            if (adopted?.accepted !== true || adopted.completed !== true) throw new Error('Endpoint尚未完成新页面收养');
+            t.popup = { provisionalId: t.popup.provisionalId, status: 'adopted' }; this.saveProduct(state); this.configurations.set(key, encoded);
+          } catch (error) {
+            // Transport failures are retried with the same binding, never with view.ensure.
+            if (String(error).includes('popup_not_pending')) { t.popup = { provisionalId: t.popup.provisionalId, status: 'failed', error: '新页面已关闭或过期，请关闭后重试' }; this.saveProduct(state); }
+            else throw error;
+          }
+          continue;
+        }
+        if (!current) { await this.endpoint.request('view.ensure', tenant, { ...config, url: t.pendingUrl ?? t.url }); this.configurations.set(key, encoded); }
+        else if (this.configurations.get(key) !== encoded || current.visible !== undefined && current.visible !== config.visible) { await this.endpoint.request('view.configure', tenant, config); this.configurations.set(key, encoded); }
+        if (t.pendingUaReloadOrigin && readyToShow) {
+          const requestedOrigin = t.pendingUaReloadOrigin;
+          if (current && new URL(t.url).origin === requestedOrigin) await this.endpoint.request('view.command', tenant, { viewId: t.webviewId, command: 'reload' });
+          delete t.pendingUaReloadOrigin; this.saveProduct(state);
+        }
+        if (!visible && state.settings.memorySaverEnabled && current?.canDiscard === true && !current.pending && actualState === 0 && !current.audible && !current.captured && !current.pending_close && current.close_state !== 'closing' && state.pendingClose?.id !== t.id && state.pendingWindowCloseId !== t.windowId && Date.now() - this.hiddenSince.get(key)! >= 120000) {
+          const attempt = this.transitions.get(key); if (!attempt || attempt.action !== 'discard' || Date.now() - attempt.at > 12000) { await this.endpoint.request('view.lifecycle', tenant, { viewId: t.webviewId, action: 'discard' }); this.transitions.set(key, { action: 'discard', at: Date.now() }); }
+        }
+      }
+      for (const v of actual) { const viewId = String(v.viewId ?? v.view ?? v.id); if (!state.tabs.some(t => t.webviewId === viewId) && !v.provisional && !closedViews.has(viewId)) await this.endpoint.request('view.close', tenant, { viewId, force: true, orphan: true }); }
+      const previousError = this.errors.delete(tenant); if (previousError) this.push(tenant);
+    } catch (error) { this.errors.set(tenant, error instanceof Error ? error.message : String(error)); this.push(tenant); throw error; }
+  }
+  private async applySites(tenant: string, state: ProductWorkspace, force = false, browserPid?: number) {
+    const encoded = JSON.stringify(state.sites), previous = this.siteApplications.get(tenant);
+    if (!force && previous?.encoded === encoded && previous.applied) return;
+    this.siteApplications.set(tenant, { encoded, applied: false, browserPid });
+    const result = await this.endpoint.request('session.sitePreferences', tenant, { sites: state.sites });
+    if (result?.accepted !== true) throw new Error('Endpoint未接受站点身份设置');
+    this.siteApplications.set(tenant, { encoded, applied: result.applied === true, browserPid });
+  }
+  private async consumeClosedEvents(state: ProductWorkspace, snapshot: any): Promise<Set<string>> {
+    const closed = new Set<string>(), eventIds: string[] = [];
+    for (const event of Array.isArray(snapshot.events) ? snapshot.events : []) {
+      if (event?.type !== 'view.closed' || typeof event.eventId !== 'string' || typeof event.viewId !== 'string') continue;
+      closed.add(event.viewId); eventIds.push(event.eventId);
+      const tab = state.tabs.find(t => t.webviewId === event.viewId); if (tab) this.removeProductTab(state, tab);
+    }
+    if (eventIds.length) {
+      // Commit product deletion before acknowledging durable Endpoint events.
+      this.saveProduct(state);
+      const result = await this.endpoint.request('session.events.ack', state.tenantId, { eventIds });
+      if (result?.accepted !== true) throw new Error('Endpoint关闭事件尚未确认');
+    }
+    return closed;
+  }
+  private async observePopups(state: ProductWorkspace, snapshot: any) {
+    for (const popup of Array.isArray(snapshot.pendingPopups) ? snapshot.pendingPopups : []) {
+      if (!popup || typeof popup.provisionalId !== 'string' || popup.provisionalId.length > 256) continue;
+      const existing = state.tabs.find(t => t.popup?.provisionalId === popup.provisionalId);
+      if (existing) {
+        if (existing.popup?.status === 'pending' && ['closed', 'timed_out'].includes(popup.status)) { existing.popup = { provisionalId: popup.provisionalId, status: 'failed', error: popup.status === 'timed_out' ? '新页面创建已过期' : '新页面已关闭' }; this.saveProduct(state); }
+        continue;
+      }
+      if (popup.status !== 'pending' || popup.userGesture !== true || this.store.popupTabId(state.tenantId, popup.provisionalId) || state.tabs.length >= 32) continue;
+      const opener = state.tabs.find(t => t.webviewId === popup.openerViewId); if (!opener) continue;
+      let target = state.windows.find(w => w.id === opener.windowId); if (!target) continue;
+      if (![3, 4, 5, 6].includes(popup.disposition)) continue;
+      if ([5, 6].includes(popup.disposition)) { if (state.windows.length >= 8) continue; target = { id: randomUUID(), activeTabId: null, weight: 1 }; state.windows.push(target); }
+      let address: string; try { address = url(popup.url); } catch { address = 'about:blank'; }
+      const tab: ProductTab = { id: randomUUID(), windowId: target.id, webviewId: this.store.viewId(), title: '新页面', url: address, popup: { provisionalId: popup.provisionalId, status: 'pending' } };
+      state.tabs.push(tab); if (popup.disposition !== 4) { target.activeTabId = tab.id; state.activeWindowId = target.id; }
+      this.store.savePopupWorkspace(state, popup.provisionalId, tab.id); this.push(state.tenantId);
+    }
   }
 }
 function url(value: unknown) {

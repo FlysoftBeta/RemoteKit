@@ -15,6 +15,7 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/timer/timer.h"
+#include "base/unguessable_token.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
@@ -70,6 +71,7 @@ class WindowObserver final : public views::WidgetObserver {
 }  // namespace
 
 struct HarnessMainParts::State {
+  ~State() { pending_popups.clear(); }
   wm::WMState wm_state;
   std::unique_ptr<display::Screen> screen;
   HarnessViewsDelegate views_delegate;
@@ -124,7 +126,9 @@ struct HarnessMainParts::State {
     tombstone.Set("view", base::NumberToString(view));
     tombstone.Set("session", base::NumberToString(session));
     tombstone.Set("close_state", "closed");
+    tombstone.Set("close_reason", page_requests[index]->close_reason());
     closed_views.insert_or_assign(view, std::move(tombstone));
+    std::erase_if(adopted_popups, [view](const auto& item) { return item.second == view; });
     if (output) output->StopView(view);
     paused_output.insert(view);
     UpdateOutput();
@@ -145,10 +149,53 @@ struct HarnessMainParts::State {
     if (layout) ApplyLayout(layout.value);
   }
   void DrainClosed() {
+    PrunePopups();
     for (size_t i = contents.size(); i > 0; --i)
       if (page_requests[i - 1]->close_state() == "closed") RemoveView(i - 1);
   }
   std::vector<SessionId> sessions;
+  struct PendingPopup {
+    SessionId session;
+    WebViewId opener;
+    GURL url;
+    WindowOpenDisposition disposition;
+    bool user_gesture;
+    base::TimeTicks deadline;
+    std::string status = "pending";
+    std::unique_ptr<content::WebContents> contents;
+    std::unique_ptr<PageRequests> requests;
+  };
+  std::map<std::string, PendingPopup> pending_popups;
+  std::map<std::string, WebViewId> adopted_popups;
+  void PrunePopups() {
+    for (auto& [key, popup] : pending_popups) {
+      if (popup.status != "pending") continue;
+      const bool closed = popup.requests->close_state() == "closed";
+      if (!closed && base::TimeTicks::Now() < popup.deadline) continue;
+      popup.status = closed ? "closed" : "timed_out";
+      popup.requests.reset(); popup.contents.reset();
+      popup.deadline = base::TimeTicks::Now() + base::Seconds(30);
+    }
+    std::erase_if(pending_popups, [](const auto& entry) {
+      return entry.second.status != "pending" && base::TimeTicks::Now() >= entry.second.deadline;
+    });
+  }
+  void WirePopups(PageRequests* requests, SessionId session, WebViewId opener) {
+    requests->SetPopupHandler([this, session, opener](std::unique_ptr<content::WebContents> page,
+        const GURL& url, WindowOpenDisposition disposition, bool gesture) -> content::WebContents* {
+      PrunePopups();
+      if (pending_popups.size() >= 16 || !gesture) return nullptr;
+      const auto key = base::UnguessableToken::Create().ToString();
+      PendingPopup popup{session, opener, url, disposition, gesture,
+                         base::TimeTicks::Now() + base::Seconds(30)};
+      popup.contents = std::move(page); popup.contents->WasHidden();
+      popup.requests = std::make_unique<PageRequests>();
+      popup.requests->Bind(popup.contents.get());
+      auto* result = popup.contents.get();
+      pending_popups.emplace(key, std::move(popup));
+      return result;
+    });
+  }
   std::vector<ProfileId> profiles;
   std::vector<std::unique_ptr<BrowserContext>> contexts;
   std::vector<std::unique_ptr<PageRequests>> page_requests;
@@ -181,6 +228,14 @@ struct HarnessMainParts::State {
   base::RepeatingClosure quit;
 
   base::DictValue HandleControl(const base::DictValue& request);
+  Status CanDiscard(size_t index) const {
+    if (page_requests[index]->close_state() == "closing" ||
+        page_requests[index]->close_state() == "closed")
+      return {Error::unavailable, "WebView is closing"};
+    if (page_requests[index]->pending_count())
+      return {Error::busy, "Page request pending"};
+    return contents[index]->CanDiscard();
+  }
   void UpdateOutput() {
     for (size_t i = 0; i < contents.size(); ++i) {
       const auto& adapter = contents[i];
@@ -433,6 +488,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           if (adapter->view_id() != view_id)
             continue;
           value.Set("close_state", page_requests[i]->close_state());
+          value.Set("close_reason", page_requests[i]->close_reason());
           value.Set("width", specs[i].width);
           value.Set("height", specs[i].height);
           value.Set("device", specs[i].tablet ? "tablet" : "desktop");
@@ -442,6 +498,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           value.Set("compositor", std::move(compositor));
           value.Set("visible", specs[i].visible);
           value.Set("lifecycle_uncertain", adapter->lifecycle_uncertain());
+          auto discard = CanDiscard(i);
+          value.Set("canDiscard", static_cast<bool>(discard));
+          value.Set("discardBlockReason", discard.message);
           auto touch = adapter->TouchInjectionStatus();
           value.Set("touch_code", static_cast<int>(touch.error));
           value.Set("touch_detail", touch.message);
@@ -477,18 +536,54 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       session_value.Set("session", base::NumberToString(session_id));
       session_value.Set("tenant", session->tenant);
       session_value.Set("views", std::move(views));
+      base::ListValue popups;
+      for (const auto& [key, popup] : pending_popups) {
+        if (popup.session != session_id) continue;
+        base::DictValue item;
+        item.Set("provisionalId", key);
+        item.Set("openerViewId", base::NumberToString(popup.opener));
+        item.Set("url", popup.contents && !popup.contents->GetLastCommittedURL().is_empty()
+                            ? popup.contents->GetLastCommittedURL().spec() : popup.url.spec());
+        item.Set("disposition", static_cast<int>(popup.disposition));
+        item.Set("userGesture", popup.user_gesture); item.Set("status", popup.status);
+        popups.Append(std::move(item));
+      }
+      session_value.Set("pendingPopups", std::move(popups));
       list.Append(std::move(session_value));
     }
     reply.Set("ok", true);
     reply.Set("sessions", std::move(list));
     return reply;
   }
-  if (*method == "view.create") {
+  if (*method == "session.sitePreferences") {
+    uint64_t session = 0;
+    const auto* sites = request.FindDict("sites");
+    if (!ReadId(request, "session", &session) || !sites) return error("session_and_sites_required");
+    const auto owner = std::ranges::find(sessions, session);
+    if (owner == sessions.end()) return error("session_not_found");
+    std::string detail;
+    if (!contexts[owner - sessions.begin()]->SetSitePreferences(*sites, &detail)) return error(detail);
+    reply.Set("ok", true); reply.Set("accepted", true); reply.Set("applied", true);
+    return reply;
+  }
+  if (*method == "view.create" || *method == "view.adopt") {
     uint64_t session = 0, view = 0;
     if (!ReadId(request, "session", &session) || !ReadId(request, "view", &view) ||
         !endpoint.FindSession(session) || (!demo && session != sessions.front()))
       return error("invalid_session_or_view");
     if (closed_views.contains(view)) return error("view_id_closed");
+    const bool adopting = *method == "view.adopt";
+    const auto* provisional = request.FindString("provisionalId");
+    if (adopting && !provisional) return error("provisional_id_required");
+    if (adopting && adopted_popups.contains(*provisional)) {
+      if (adopted_popups.at(*provisional) != view) return error("popup_already_adopted_elsewhere");
+      reply.Set("ok", true); reply.Set("accepted", true); reply.Set("completed", true);
+      reply.Set("token", TokenValue(endpoint.Token(session, view).value)); return reply;
+    }
+    PrunePopups();
+    if (adopting && (!pending_popups.contains(*provisional) ||
+        pending_popups.at(*provisional).session != session ||
+        pending_popups.at(*provisional).status != "pending")) return error("popup_not_pending");
     ViewSpec spec;
     spec.width = request.FindInt("width").value_or(0);
     spec.height = request.FindInt("height").value_or(0);
@@ -509,9 +604,10 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       spec.page_dsf = static_cast<float>(*scale);
     }
     spec.url = *url;
-    spec.tablet = device && *device == "tablet";
+    spec.tablet = demo && device && *device == "tablet";
     for (size_t i = 0; i < contents.size(); ++i) {
       if (contents[i]->view_id() != view) continue;
+      if (adopting) return error("view_id_already_exists");
       if (contents[i]->session_id() != session || specs[i] != spec)
         return error("view_id_configuration_conflict");
       reply.Set("ok", true);
@@ -529,12 +625,19 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     while (owner < sessions.size() && sessions[owner] != session) ++owner;
     auto created = endpoint.CreateWebView(session, profiles[owner], view);
     if (!created) return error(created.status.message);
-    auto adapter = std::make_unique<WebView>(contexts[owner].get(), &endpoint, session, view, offscreen);
+    std::unique_ptr<content::WebContents> adopted;
+    if (adopting) {
+      auto& popup = pending_popups.at(*provisional);
+      popup.requests->Bind(nullptr); popup.requests.reset();
+      adopted = std::move(popup.contents);
+    }
+    auto adapter = std::make_unique<WebView>(contexts[owner].get(), &endpoint, session, view, offscreen, std::move(adopted));
     adapter->SetNativeFocusEnabled(demo &&
         !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
     adapter->ConfigureDevice(spec.width, spec.height, spec.tablet, PageScale(spec), !demo);
     auto requests = std::make_unique<PageRequests>();
     requests->Bind(adapter->contents());
+    WirePopups(requests.get(), session, view);
     views::WebView* native = nullptr;
     if (!offscreen) {
       native = root->AddChildView(std::make_unique<views::WebView>(contexts[owner].get()));
@@ -546,10 +649,14 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     specs = std::move(next);
     ApplyLayout(layout.value);
     contents.back()->SetVisible(spec.visible);
-    auto navigated = contents.back()->Navigate(GURL(spec.url));
+    auto navigated = adopting ? Status{} : contents.back()->Navigate(GURL(spec.url));
     if (!navigated) {
       RemoveView(contents.size() - 1);
       return error(navigated.message);
+    }
+    if (adopting) {
+      adopted_popups[*provisional] = view;
+      pending_popups.erase(*provisional);
     }
     reply.Set("ok", true);
     reply.Set("accepted", true);
@@ -611,6 +718,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     contents[index]->ConfigureDevice(specs[index].width, specs[index].height, specs[index].tablet, PageScale(specs[index]), !demo);
     page_requests[index] = std::make_unique<PageRequests>();
     page_requests[index]->Bind(contents[index]->contents());
+    WirePopups(page_requests[index].get(), session, view);
     if (native_views[index]) native_views[index]->SetWebContents(contents[index]->contents());
     contents[index]->SetVisible(specs[index].visible);
     const auto status = contents[index]->Navigate(GURL(*url));
@@ -629,7 +737,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (request.Find("height")) spec.height = request.FindInt("height").value_or(0);
     if (const auto* device = request.FindString("device")) {
       if (*device != "desktop" && *device != "tablet") return error("invalid_device");
-      spec.tablet = *device == "tablet";
+      spec.tablet = demo && *device == "tablet";
     } else if (request.Find("device")) return error("invalid_device");
     if (request.Find("device_scale_factor")) {
       const auto scale = Number(request, "device_scale_factor");
@@ -647,6 +755,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     next[index] = spec;
     auto layout = Layout(next);
     if (!layout) return error("atlas_no_space");
+    const auto visibility = adapter.SetVisible(spec.visible);
+    if (!visibility) return error(visibility.message);
     specs = std::move(next);
     ApplyLayout(layout.value);
     reply.Set("ok", true);
@@ -671,6 +781,16 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     return result;
   }
   if (*method == "page.requests" || *method == "page.reply" || *method == "page.command") {
+    if (*method == "page.reply") {
+      const auto token = endpoint.Token(session, view).value;
+      for (const auto& [key, expected] : {std::pair{"instance", token.instance},
+                                        std::pair{"document", token.document}}) {
+        if (!request.Find(key)) continue;
+        uint64_t supplied = 0;
+        if (!ReadId(request, key, &supplied) || supplied != expected)
+          return error("stale_page_request_target");
+      }
+    }
     auto result = *method == "page.requests"
                       ? page_requests[index]->Snapshot()
                       : (*method == "page.reply" ? page_requests[index]->Reply(request)
@@ -798,7 +918,15 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     auto visible = request.FindBool("visible");
     if (!visible)
       return error("visible_boolean_required");
+    auto next = specs;
+    next[index].visible = *visible;
+    auto layout = Layout(next);
+    if (!layout) return error("atlas_no_space");
     status = adapter.SetVisible(*visible);
+    if (status) {
+      specs = std::move(next);
+      ApplyLayout(layout.value);
+    }
   } else if (*method == "navigate") {
     const auto* url = request.FindString("url");
     if (!url)
@@ -819,6 +947,10 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       operation = Lifecycle::discard;
     if (!operation)
       return error("unknown_lifecycle_action");
+    if (*operation == Lifecycle::discard) {
+      const auto allowed = CanDiscard(index);
+      if (!allowed) return error(allowed.message);
+    }
     if (output) {
       paused_output.insert(view);
       output->StopView(view);
@@ -834,6 +966,10 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     paused_output.erase(view);
     UpdateOutput();
     reply.Set("accepted", static_cast<bool>(status));
+    const auto* lifecycle = endpoint.FindWebView(session, view);
+    reply.Set("pending", lifecycle->pending.has_value());
+    reply.Set("completed", static_cast<bool>(status) && !lifecycle->pending);
+    reply.Set("lifecycleGeneration", base::NumberToString(lifecycle->lifecycle_generation));
   } else if (*method == "input") {
     if (request.Find("output_generation")) {
       uint64_t generation = 0;

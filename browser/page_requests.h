@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -37,10 +38,17 @@ class PageRequests final : public content::WebContentsDelegate,
   // view/widget hook must forward them here; this method creates no native UI.
   void RequestClose();
   const std::string& close_state() const { return close_state_; }
+  const std::string& close_reason() const { return close_reason_; }
   void CloseContents(content::WebContents*) override;
   using content::WebContentsObserver::BeforeUnloadFired;
   void BeforeUnloadFired(content::WebContents*, bool, bool*) override;
   void ReportTooltip(const std::u16string& text);
+  using PopupHandler = std::function<content::WebContents*(std::unique_ptr<content::WebContents>,
+      const GURL&, WindowOpenDisposition, bool)>;
+  void SetPopupHandler(PopupHandler handler) { popup_handler_ = std::move(handler); }
+  content::WebContents* AddNewContents(content::WebContents*, std::unique_ptr<content::WebContents>,
+      const GURL&, WindowOpenDisposition, const blink::mojom::WindowFeatures&,
+      bool user_gesture, bool* was_blocked) override;
 
   content::JavaScriptDialogManager* GetJavaScriptDialogManager(content::WebContents*) override;
   void RunJavaScriptDialog(content::WebContents*,
@@ -98,6 +106,7 @@ class PageRequests final : public content::WebContentsDelegate,
                            bool final_update) override;
 
   std::string close_state_ = "open";
+  std::string close_reason_ = "removed";
   std::uint64_t next_id_ = 1;
   std::map<std::uint64_t, std::unique_ptr<Pending>> pending_;
   std::deque<base::DictValue> events_;
@@ -106,6 +115,7 @@ class PageRequests final : public content::WebContentsDelegate,
   content::WeakDocumentPtr find_document_;
   int find_request_id_ = -1;
   bool find_pending_ = false;
+  PopupHandler popup_handler_;
   base::WeakPtrFactory<PageRequests> weak_factory_{this};
 };
 

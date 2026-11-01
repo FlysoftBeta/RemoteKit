@@ -1,4 +1,5 @@
 // Host Playwright browser_run_code_unsafe entry; dedicated Chrome89, no OS input.
+// Server must explicitly enable REMOTEKIT_DIAGNOSTICS=1. Tests /automation media/input.
 // Override only CONFIG in a temporary copy for a package test or another port.
 async (hostPage) => {
   const config = /* CONFIG */ { origin: 'http://127.0.0.1:3001', screenshotPath: 'C:/Users/Flysoft/Desktop/remotekit2/develop/tmp/first-stream/chrome89.png', profileDirectory: null };
@@ -22,10 +23,10 @@ async (hostPage) => {
     return null;
   }, expected);
   try {
-    await page.goto(config.origin);
-    await page.waitForFunction(() => document.querySelector('button[aria-label="新建标签页"]')?.disabled === false);
+    await page.goto(config.origin + '/automation');
+    await page.waitForFunction(() => window.remotekitDiagnostics?.state);
     await page.evaluate(async ({ origin, presentationMode }) => {
-      const action = async body => { const r = await fetch('/api/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await r.json(); if (!r.ok) throw new Error(JSON.stringify(data)); return data; };
+      const action = window.remotekitDiagnostics.action;
       await action({ type: 'device.set', device: { mode: 'desktop', width: 1920, height: 1080, deviceScaleFactor: 1 } });
       await action({ type: 'tab.create', url: origin + '/test-pattern.html?mode=animation&fps=60&activationMarker=1', title: 'Pixel marker first stream' });
       const t = window.remotekitDiagnostics.transport; t.receiveProfile = 'chrome89-h264-42';
@@ -34,8 +35,8 @@ async (hostPage) => {
     }, config);
     // An authorized atlas can arrive before React mounts the product Tab.
     // Wait for the real plane paint required by input, not displayReady alone.
-    await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport, view = t.layout?.views[0]; return t.video.videoWidth > 0 && view && t.diagnostics.channel === '已连接' && t.displayReady && t.getLastPresentation(view.id) && document.querySelector('.view-pane canvas:not(.no-frame)'); }, null, { timeout: 20000 });
-    const before = await page.evaluate(() => { const t = window.remotekitDiagnostics.transport, s = t.layout.views[0], r = document.querySelector('.view-pane canvas').getBoundingClientRect(), scale = s.deviceScaleFactor * (s.mediaScale ?? 1); return { focus: s.focus, epoch: t.layout.epoch, activeLabel: document.activeElement?.getAttribute('aria-label'), resultCount: t.inputResults.length, point: { x: r.left + 350 / (s.width / scale) * r.width, y: r.top + 30 / (s.height / scale) * r.height } }; });
+    await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport, view = t.layout?.views[0]; return t.video.videoWidth > 0 && view && t.diagnostics.channel === '已连接' && t.displayReady && t.getLastPresentation(view.id) && document.querySelector('.remote-viewport canvas:not(.no-frame)'); }, null, { timeout: 20000 });
+    const before = await page.evaluate(() => { const t = window.remotekitDiagnostics.transport, s = t.layout.views[0], r = document.querySelector('.remote-viewport canvas').getBoundingClientRect(), scale = s.deviceScaleFactor * (s.mediaScale ?? 1); return { focus: s.focus, epoch: t.layout.epoch, activeLabel: document.activeElement?.getAttribute('aria-label'), resultCount: t.inputResults.length, point: { x: r.left + 350 / (s.width / scale) * r.width, y: r.top + 30 / (s.height / scale) * r.height } }; });
     await page.mouse.move(before.point.x, before.point.y);
     await page.waitForFunction(count => window.remotekitDiagnostics.transport.inputResults.slice(count).some(result => result.type === 'input.result'), before.resultCount, { timeout: 5000 });
     const hover = await page.evaluate(before => { const t = window.remotekitDiagnostics.transport; return { before, after: { focus: t.layout.views[0].focus, epoch: t.layout.epoch, activeLabel: document.activeElement?.getAttribute('aria-label') }, replies: t.inputResults.slice(before.resultCount), error: t.diagnostics.error }; }, before);
@@ -61,10 +62,6 @@ async (hostPage) => {
     if (!failure && config.presentationMode === 'single-plane-direct' && !(observed.presentation?.presentationRouting?.directFrames > 0)) failure = 'No eligible direct frames were actually painted: ' + JSON.stringify(observed.presentation?.presentationRouting);
     if (!failure && (observed.diagnostics?.error || observed.state.endpointError || observed.inputResults?.some(reply => reply.ok === false))) failure = 'Remote input or endpoint reported an error: ' + JSON.stringify({ error: observed.diagnostics?.error, endpointError: observed.state.endpointError, rejected: observed.inputResults?.filter(reply => reply.ok === false) });
     const report = { kind: 'first-stream-functional-debug', passed: !failure, config, browserVersion: browser.version(), failure, pageErrors, exchanges: await Promise.all(exchanges), ...observed };
-    await page.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === '诊断')?.click());
-    await page.waitForFunction(() => document.querySelector('.overlay-toggle input'));
-    await page.evaluate(() => { const checkbox = document.querySelector('.overlay-toggle input'); if (!checkbox.checked) checkbox.click(); });
-    await page.evaluate(() => document.querySelector('[aria-label="关闭侧栏"]').click());
     await page.screenshot({ path: config.screenshotPath, fullPage: true });
     report.rtcClose = await page.evaluate(async () => { const t = window.remotekitDiagnostics.transport; if (!t.diagnostics.connectionId) return null; const start = performance.now(), r = await fetch('/api/rtc/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ connectionId: t.diagnostics.connectionId }) }); return { elapsedMs: performance.now() - start, status: r.status }; });
     await page.evaluate(() => window.remotekitDiagnostics.transport.disconnect());

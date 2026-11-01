@@ -77,7 +77,7 @@ test('stable mappings, restart reconciliation, orphan cleanup and close cancella
 });
 test('HTTP cookie isolation, origin checks and offer/ICE tenant binding', async () => {
   const store = new Store(':memory:'); const endpoint = new FakeEndpoint(); const control = new Control(store, endpoint);
-  const server = createHttp(control, { origins: ['http://test.local'], clientDir: '.', metricsDir: '.' }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const server = createHttp(control, { diagnostics: true, origins: ['http://test.local'], clientDir: '.', metricsDir: '.' }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); if (!address || typeof address === 'string') throw new Error(); const base = `http://127.0.0.1:${address.port}`;
   const session = async () => { const res = await fetch(base + '/api/state'); return { cookie: res.headers.get('set-cookie')!.split(';')[0], state: await res.json() as any }; };
   const a = await session(), b = await session(); assert.notEqual(a.state.tenantId, b.state.tenantId); assert.match(a.cookie, /rk_session=/);

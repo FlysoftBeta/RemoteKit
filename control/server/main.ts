@@ -19,7 +19,7 @@ const tlsKey = process.env.REMOTEKIT_HTTPS_KEY, tlsCert = process.env.REMOTEKIT_
 if (!!tlsKey !== !!tlsCert) throw new Error('REMOTEKIT_HTTPS_KEY and REMOTEKIT_HTTPS_CERT must be configured together');
 const tls = tlsKey && tlsCert ? { key: readFileSync(tlsKey), cert: readFileSync(tlsCert) } : undefined;
 const scheme = tls ? 'https' : 'http';
-const server = createHttp(control, { tls, origins: (process.env.REMOTEKIT_CONTROL_ORIGINS ?? `${scheme}://127.0.0.1:${port},${scheme}://localhost:${port},http://127.0.0.1:5173,http://localhost:5173`).split(',').map(value => value.trim()), clientDir: resolve(root, 'dist/client'), metricsDir: resolve(process.env.REMOTEKIT_METRICS_DIR ?? resolve(root, '../develop/tmp/metrics')) });
+const server = createHttp(control, { tls, diagnostics: process.env.REMOTEKIT_DIAGNOSTICS === '1', origins: (process.env.REMOTEKIT_CONTROL_ORIGINS ?? `${scheme}://127.0.0.1:${port},${scheme}://localhost:${port},http://127.0.0.1:5173,http://localhost:5173`).split(',').map(value => value.trim()), clientDir: resolve(root, 'dist/client'), metricsDir: resolve(process.env.REMOTEKIT_METRICS_DIR ?? resolve(root, '../develop/tmp/metrics')) });
 const reconciliationTimer = setInterval(() => { void control.tick(); }, 1500);
 server.listen(port, host, () => { endpoint.start(); const address = server.address(); console.log(`RemoteKit Control ${scheme}://${host}:${typeof address === 'object' ? address?.port : port}`); });
 let closing = false;

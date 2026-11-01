@@ -19,6 +19,7 @@
 #include "remotekit/browser/compat_renderer.h"
 #include "remotekit/browser/harness.h"
 #include "remotekit/browser/webview.h"
+#include "remotekit/browser/browser_context.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -43,6 +44,17 @@ class ContentClient final : public content::ContentClient {
 };
 class BrowserClient final : public content::ContentBrowserClient {
  public:
+  void OnWebContentsCreated(content::WebContents* contents) override {
+    BrowserContext::InstallSiteIdentity(contents);
+  }
+  bool CanCreateWindow(content::RenderFrameHost*, const GURL&, const GURL&,
+      const url::Origin&, content::mojom::WindowContainerType, const GURL&,
+      const content::Referrer&, const std::string&, WindowOpenDisposition,
+      const blink::mojom::WindowFeatures&, bool user_gesture, bool,
+      bool* no_javascript_access) override {
+    *no_javascript_access = false;
+    return user_gesture;
+  }
   std::unique_ptr<content::DevToolsManagerDelegate> CreateDevToolsManagerDelegate() override {
     return std::make_unique<content::DevToolsManagerDelegate>();
   }

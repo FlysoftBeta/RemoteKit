@@ -15,22 +15,22 @@ async (hostPage) => {
       const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } }); contexts.push(context);
       const page = await context.newPage(); pages.push(page);
       page.on('pageerror', error => errors.push({ tenant: i, error: error.message }));
-      await page.goto(config.origin);
-      await page.waitForFunction(() => document.querySelector('button[aria-label="新建标签页"]')?.disabled === false);
+      await page.goto(config.origin + '/automation');
+      await page.waitForFunction(() => window.remotekitDiagnostics?.state);
       await page.evaluate(async ({ config, index }) => {
-        const action = async body => { const response = await fetch('/api/actions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); const data = await response.json(); if (!response.ok) throw new Error(JSON.stringify(data)); return data; };
+        const action = window.remotekitDiagnostics.action;
         await action({ type: 'device.set', device: { mode: 'desktop', width: config.width, height: config.height, deviceScaleFactor: config.dpr } });
         await action({ type: 'tab.create', title: `Benchmark ${config.id}/${index}`, url: `${config.fixtureOrigin || config.origin}/test-pattern.html?mode=${encodeURIComponent(config.mode)}&fps=60&probeRun=${encodeURIComponent(config.id + '-' + index)}${config.captureQuality ? '&quality=1&stopAfter=8000' : ''}` });
         const transport = window.remotekitDiagnostics.transport;
-        if (config.callbackRegistration) transport.frameCallbackRegistration = config.callbackRegistration;
-        if (config.presentationMode) {
-          if (!transport.registerPlane) throw new Error('This client does not support the requested presentation experiment');
-          transport.presentationMode = config.presentationMode;
-        }
-        transport.frameSource = config.frameSource ?? 'video';
-        transport.processorScheduler = config.processorScheduler ?? 'latest1';
-        transport.processorProfile = config.processorProfile === true;
-        transport.receiveProfile = config.receiveProfile;
+        window.remotekitDiagnostics.configure({
+          callbackRegistration: config.callbackRegistration,
+          presentationMode: config.presentationMode,
+          frameSource: config.frameSource ?? 'video',
+          processorScheduler: config.processorScheduler ?? 'latest1',
+          processorProfile: config.processorProfile === true,
+          receiveProfile: config.receiveProfile,
+        });
+        await window.remotekitDiagnostics.refresh();
         await transport.connect();
         if (config.visibleVideoPreview) {
           Object.assign(transport.video.style, { position: 'fixed', top: '70px', right: '12px', width: '160px', height: '90px', opacity: '1', zIndex: '2147483647', pointerEvents: 'none', display: 'block', visibility: 'visible' });

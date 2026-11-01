@@ -197,6 +197,7 @@ $env:REMOTEKIT_ATLAS_READY_GATE = if($AtlasReadyGate){'1'}else{$null}
 $env:REMOTEKIT_NETWORK_SIM = if ($DownlinkMbps) { ConvertTo-Json -Compress -InputObject @{oneWayDelayMs=5;downlinkMbps=$DownlinkMbps;uplinkMbps=1000;maxQueueBytes=300000;maxQueueDelayMs=100} } else { 'off' }
 $env:REMOTEKIT_RTC_LOOPBACK_TEST = if ($DownlinkMbps) { '1' } else { '0' }
 $env:REMOTEKIT_GPU_POLL = if ($PreciseBrowserPoll) { 'precise' } else { 'default' }
+$env:REMOTEKIT_DIAGNOSTICS = '1'
 $env:PORT = '3001'
 $env:REMOTEKIT_ENDPOINT_ARGS=ConvertTo-Json -Compress -InputObject $rkEndpointArguments
 [IO.File]::WriteAllText((Join-Path $caseRoot 'endpoint-args.json'),$env:REMOTEKIT_ENDPOINT_ARGS)

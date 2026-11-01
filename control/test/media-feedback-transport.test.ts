@@ -21,7 +21,7 @@ test('transport feedback is independent of delayed/failed relay HTTP and disconn
   Object.defineProperty(globalThis, 'getComputedStyle', { configurable: true, value: () => ({ visibility: 'visible' }) });
   t.mock.method(performance, 'now', () => now);
   t.after(() => { for (const [name, original] of originals) { if (original) Object.defineProperty(globalThis, name, original); else delete (globalThis as Record<string, unknown>)[name]; } });
-  const transport = new RemoteTransport();
+  const transport = new RemoteTransport(); transport.enableDiagnosticHttp();
   type Internals = { peer: RTCPeerConnection; channel: RTCDataChannel; layout: Layout; videoPresentedFrames: number; connectionId: string;
     mediaFeedback: MediaFeedbackSampler; presentation: PresentationDiagnostics;
     renderers: Set<unknown>; readStats(peer: RTCPeerConnection): Promise<void>; closeLocal(): void };

@@ -1,6 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { configureReceiveOffer, originalGatheredOffer, chooseReceiveProfile, supportsExperimentalH264Level42 } from '../client/receive-profile';
+import { configureReceiveOffer, originalGatheredOffer, chooseReceiveProfile, loadReceiveProfile, supportsExperimentalH264Level42 } from '../client/receive-profile';
+test('product receive defaults never read persisted experimental settings', t => {
+  const oldWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let storageReads = 0;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { get localStorage() { storageReads++; throw new Error('Persistence forbidden'); } } });
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { userAgent: 'Chrome/157.0' } });
+  t.after(() => {
+    if (oldWindow) Object.defineProperty(globalThis, 'window', oldWindow); else Reflect.deleteProperty(globalThis, 'window');
+    if (oldNavigator) Object.defineProperty(globalThis, 'navigator', oldNavigator); else Reflect.deleteProperty(globalThis, 'navigator');
+  });
+  assert.equal(loadReceiveProfile(), 'native');
+  assert.equal(storageReads, 0);
+});
 test('Chrome89 4.2 profile is explicit, constrained-baseline mode1 only and preserves native offer', () => {
   const original = 'v=0\r\na=fmtp:108 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f\r\na=fmtp:110 packetization-mode=0;profile-level-id=42e01f\r\na=fmtp:112 packetization-mode=1;profile-level-id=4d0015\r\n';
   assert.equal(configureReceiveOffer(original, 'native', 'Chrome/157.0').sdp, original);

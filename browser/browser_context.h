@@ -1,8 +1,11 @@
 #pragma once
+#include <map>
+#include <string>
 #include "base/files/file_path.h"
 #include "base/values.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/client_hints_controller_delegate.h"
+namespace content { class WebContents; }
 
 namespace remotekit::browser {
 class ProfilePermissions;
@@ -19,6 +22,10 @@ class BrowserContext final : public content::BrowserContext {
   content::DownloadManagerDelegate* GetDownloadManagerDelegate() override;
   base::DictValue PermissionsCommand(const base::DictValue&);
   base::DictValue DownloadsCommand(const base::DictValue&);
+  bool SetSitePreferences(const base::DictValue&, std::string* error);
+  bool TabletUaFor(const GURL&) const;
+  // Attach before the first navigation, including provisional popup contents.
+  static void InstallSiteIdentity(content::WebContents*);
   content::BrowserPluginGuestManager* GetGuestManager() override { return nullptr; }
   storage::SpecialStoragePolicy* GetSpecialStoragePolicy() override { return nullptr; }
   content::PlatformNotificationService* GetPlatformNotificationService() override {
@@ -43,5 +50,6 @@ class BrowserContext final : public content::BrowserContext {
   std::unique_ptr<content::ClientHintsControllerDelegate> client_hints_;
   std::unique_ptr<ProfilePermissions> permissions_;
   std::unique_ptr<ProfileDownloads> downloads_;
+  std::map<std::string, bool> site_preferences_;
 };
 }  // namespace remotekit::browser

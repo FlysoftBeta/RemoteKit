@@ -7,6 +7,8 @@ import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneS
 import { MediaFeedbackSampler } from './media-feedback';
 import { createTrackProcessor, processorRtpTimestamp, type TrackProcessor, type ProcessorVideoFrame } from './track-processor';
 
+export type ControlRpc = (method: 'rtc.offer' | 'rtc.ice' | 'rtc.close', params: unknown) => Promise<unknown>;
+
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource }
 export type FrameSource = 'video' | 'track-processor';
@@ -15,6 +17,15 @@ interface ProcessorSource { processor: TrackProcessor; reader: ReadableStreamDef
 
 /** All endpoint wire adaptation lives here; the UI never owns recovery state. */
 export class RemoteTransport {
+  private controlRpc: ControlRpc | undefined;
+  private diagnosticHttp = false;
+  setControlRpc(callback: ControlRpc) { this.controlRpc = callback; this.diagnosticHttp = false; }
+  enableDiagnosticHttp() { this.diagnosticHttp = true; this.controlRpc = undefined; }
+  private rtcRequest<T>(method: 'rtc.offer' | 'rtc.ice' | 'rtc.close', params: unknown): Promise<T> {
+    if (this.controlRpc) return this.controlRpc(method, params) as Promise<T>;
+    if (this.diagnosticHttp) return request<T>('/api/' + method.replace('.', '/'), params);
+    return Promise.reject(new Error('Control WebSocket 未连接'));
+  }
   frameSource: FrameSource = 'video';
   private activeFrameSource: FrameSource = 'video';
   private processorSource: ProcessorSource | undefined;
@@ -218,8 +229,8 @@ export class RemoteTransport {
       });
       if (attempt !== this.attempt) return;
       this.signaling = { receiveProfile: this.receiveProfile, originalOfferSdp: originalOffer.sdp, originalGatheredSdp: originalGatheredOffer(peer.localDescription?.sdp ?? '', originalOffer.sdp ?? ''), effectiveOfferSdp: peer.localDescription?.sdp, changes: effectiveOffer.changes };
-      const answer = await request<RTCSessionDescriptionInit & { connectionId: string; endpointGeneration?: number; networkSimulation?: Record<string, unknown> }>('/api/rtc/offer', { type: 'offer', sdp: peer.localDescription?.sdp });
-      if (attempt !== this.attempt) { void request('/api/rtc/close', { connectionId: answer.connectionId }).catch(() => {}); return; }
+      const answer = await this.rtcRequest<RTCSessionDescriptionInit & { connectionId: string; endpointGeneration?: number; networkSimulation?: Record<string, unknown> }>('rtc.offer', { type: 'offer', sdp: peer.localDescription?.sdp });
+      if (attempt !== this.attempt) { void this.rtcRequest('rtc.close', { connectionId: answer.connectionId }).catch(() => {}); return; }
       this.connectionId = answer.connectionId;
       this.endpointGeneration = answer.endpointGeneration;
       this.signaling.answerSdp = answer.sdp;
@@ -589,7 +600,7 @@ export class RemoteTransport {
   }
   private refreshNetworkStats(peer: RTCPeerConnection) {
     const connectionId = this.connectionId;
-    if (peer !== this.peer || !this.diagnostics.networkSimulation || !connectionId ||
+    if (!this.diagnosticHttp || peer !== this.peer || !this.diagnostics.networkSimulation || !connectionId ||
         this.networkRead?.peer === peer && this.networkRead.connectionId === connectionId) return;
     const sample = { peer, connectionId }; this.networkRead = sample;
     // Relay diagnostics must not extend the native media counter window or block feedback.
@@ -613,7 +624,7 @@ export class RemoteTransport {
     this.pendingSnapshotRtp = undefined; this.snapshotRtp = undefined; this.snapshotEpoch = undefined; this.directEpochReady = undefined;
     this.paintedPlanes.clear(); for (const renderer of this.renderers) renderer.ready(false); this.renderers.clear();
     this.endpointGeneration = undefined;
-    if (this.connectionId) { void request('/api/rtc/close', { connectionId: this.connectionId }).catch(() => {}); this.connectionId = undefined; }
+    if (this.connectionId) { void this.rtcRequest('rtc.close', { connectionId: this.connectionId }).catch(() => {}); this.connectionId = undefined; }
     clearInterval(this.timer);
     const peer = this.peer; this.peer = null; this.channel = null; peer?.close();
     this.video.pause(); this.video.srcObject = null; this.video.remove?.(); this.layout = null;

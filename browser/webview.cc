@@ -1,4 +1,5 @@
 #include "browser/webview.h"
+#include "remotekit/browser/browser_context.h"
 #include "browser/offscreen_host.h"
 #include "browser/navigation_state.h"
 #include "browser/compat.h"
@@ -155,7 +156,7 @@ WebView::WebView(content::BrowserContext* context,
                  Endpoint* endpoint,
                  SessionId session,
                  WebViewId view,
-                 bool offscreen_host)
+                 bool offscreen_host, std::unique_ptr<content::WebContents> adopted)
     : context_(context), endpoint_(endpoint), session_(session), view_(view),
       use_offscreen_host_(offscreen_host) {
   DeviceAdapters().push_back(this);
@@ -165,7 +166,7 @@ WebView::WebView(content::BrowserContext* context,
   CHECK(endpoint_->FindWebView(session_, view_));
   const auto* model = endpoint_->FindWebView(session_, view_);
   if (model->actual == Residency::live)
-    CreateContents();
+    CreateContents(std::move(adopted));
 }
 WebView::~WebView() {
   std::erase(DeviceAdapters(), this);
@@ -185,14 +186,15 @@ WebView::~WebView() {
   if (callback)
     callback(Fail(Error::unavailable, "WebView adapter destroyed"));
 }
-void WebView::CreateContents() {
+void WebView::CreateContents(std::unique_ptr<content::WebContents> adopted) {
   CancelTouches(false);
   touch_owner_lost_ = false;
   touch_status_ = {};
   input_commit_navigations_.clear();
   content::WebContents::CreateParams params(context_);
   params.initially_hidden = !visible_;
-  contents_ = content::WebContents::Create(params);
+  contents_ = adopted ? std::move(adopted) : content::WebContents::Create(params);
+  BrowserContext::InstallSiteIdentity(contents_.get());
   Observe(contents_.get());
   AttachOffscreenHost();
   // Track native sequence starts from the beginning, even while disabled.
@@ -220,7 +222,6 @@ void WebView::SetRenderDemand(bool enabled, uint32_t fps) {
   render_demand_ = enabled;
   render_fps_ = fps;
   if (!use_offscreen_host_) return;
-  if (enabled && !visible_) SetVisible(true);
   if (offscreen_host_) offscreen_host_->SetRenderDemand(enabled && visible_, fps);
 }
 void WebView::OverridePreferences(content::WebContents* contents,
@@ -246,7 +247,6 @@ void WebView::InvalidateLayoutInput() {
 void WebView::ConfigureDevice(int width, int height, bool tablet, float scale,
                              bool match_page_backing) {
   const bool mode_changed = tablet_ != tablet;
-  const bool initializing = viewport_width_ == 0;
   const bool changed = viewport_width_ != width || viewport_height_ != height ||
                        mode_changed || device_scale_ != scale ||
                        match_page_backing_ != match_page_backing;
@@ -262,31 +262,6 @@ void WebView::ConfigureDevice(int width, int height, bool tablet, float scale,
   device_scale_ = scale;
   if (offscreen_host_) offscreen_host_->SetViewport(gfx::Size(width, height));
   if (!contents_ || !changed) return;
-  blink::UserAgentOverride ua;
-  if (tablet_) {
-    ua.ua_string_override = embedder_support::BuildUserAgentFromOSAndProduct(
-        "Linux; Android 10; K", "Chrome/" + version_info::GetMajorVersionNumber() + ".0.0.0");
-    auto metadata = ChromeUserAgentMetadata();
-    metadata.platform = "Android";
-    metadata.platform_version = "13.0.0";
-    metadata.architecture = "arm";
-    metadata.bitness = "64";
-    metadata.model.clear();
-    metadata.mobile = false;
-    metadata.wow64 = false;
-    metadata.form_factors = {"Tablet"};
-    ua.ua_metadata_override = std::move(metadata);
-  }
-  if (mode_changed || initializing) {
-    // Reload/back/forward inherit the NavigationEntry flag, not the new-tab
-    // default. Device mode belongs to this logical view's whole history.
-    auto& controller = contents_->GetController();
-    for (int i = 0; i < controller.GetEntryCount(); ++i)
-      controller.GetEntryAtIndex(i)->SetIsOverridingUserAgent(tablet_);
-    if (auto* pending = controller.GetPendingEntry())
-      pending->SetIsOverridingUserAgent(tablet_);
-  }
-  contents_->SetUserAgentOverride(ua, true);
   contents_->OnWebPreferencesChanged();
   ApplyDevice();
 }
@@ -412,6 +387,10 @@ Status WebView::Navigate(const GURL& url) {
   return {};
 }
 Status WebView::SetVisible(bool visible) {
+  if (!contents_ && !visible) {
+    visible_ = false;
+    return {};
+  }
   if (!contents_)
     return Fail(Error::unavailable, "WebView is unloaded");
   const auto* model = endpoint_->FindWebView(session_, view_);
@@ -1236,11 +1215,18 @@ Status WebView::DispatchInput(const InputEvent& input) {
 }
 
 Status WebView::CheckQuiescent() const {
-  if (!contents_ || contents_->GetVisibility() != content::Visibility::HIDDEN ||
-      contents_->IsCurrentlyAudible() || contents_->IsLoading() || contents_->IsCrashed() ||
-      contents_->IsBeingDestroyed() || contents_->HasUncommittedNavigationInPrimaryMainFrame() ||
+  if (!contents_) return Fail(Error::unavailable, "WebView is unloaded");
+  if (contents_->GetVisibility() != content::Visibility::HIDDEN)
+    return Fail(Error::unavailable, "WebView is visible");
+  if (contents_->IsCurrentlyAudible())
+    return Fail(Error::unavailable, "WebView is playing audio");
+  if (contents_->IsLoading() || contents_->HasUncommittedNavigationInPrimaryMainFrame() ||
       contents_->GetController().GetPendingEntry())
-    return Fail(Error::unavailable, "Lifecycle requires hidden, idle, inaudible, healthy contents");
+    return Fail(Error::unavailable, "Navigation is in progress");
+  if (contents_->IsCrashed()) return Fail(Error::unavailable, "Renderer has crashed");
+  if (contents_->IsBeingDestroyed()) return Fail(Error::unavailable, "WebView is being destroyed");
+  if (!contents_->GetPrimaryMainFrame())
+    return Fail(Error::unavailable, "Live main frame required");
   if (contents_->GetPrimaryMainFrame()->GetSiteInstance()->GetRelatedActiveContentsCount() > 1)
     return Fail(Error::unavailable, "Related active WebContents prevents lifecycle transition");
   if (contents_->IsBeingCaptured() || contents_->HasPictureInPictureVideo() ||
@@ -1276,6 +1262,32 @@ Status WebView::CheckQuiescent() const {
   return media_stream
              ? Fail(Error::unavailable, "Active media stream prevents lifecycle transition")
              : Status{};
+}
+
+Status WebView::CanDiscard() const {
+  if (lifecycle_request_)
+    return Fail(Error::busy, "Lifecycle transition pending");
+  if (lifecycle_uncertain_)
+    return Fail(Error::unavailable, "Browser lifecycle state uncertain; unload required");
+  const auto* model = endpoint_->FindWebView(session_, view_);
+  if (!model) return Fail(Error::not_found, "WebView model missing");
+  if (model->pending) return Fail(Error::busy, "Lifecycle operation pending");
+  if (model->actual != Residency::live && model->actual != Residency::frozen)
+    return Fail(Error::invalid, "Discard requires live or frozen state");
+  if (touch_cleanup_pending_ || (touch_emulator_owned_ &&
+      (!touches_.empty() || touch_pending_callbacks_)))
+    return Fail(Error::busy, "Touch cancellation must drain before discard; retry");
+  if (touch_owner_lost_)
+    return Fail(Error::unavailable, "Touch cleanup uncertain; unload required");
+  if (contents_ && contents_->NeedToFireBeforeUnloadOrUnloadEvents())
+    return Fail(Error::unavailable, "Beforeunload or unload handler prevents discard");
+  auto quiet = CheckQuiescent();
+  if (!quiet) return quiet;
+  if (!base::FeatureList::IsEnabled(::features::kWebContentsDiscard))
+    return Fail(Error::unsupported, "WebContentsDiscard feature is disabled");
+  if (contents_->WasDiscarded())
+    return Fail(Error::unavailable, "WebContents is already marked discarded");
+  return CaptureNavigationState(*contents_).status;
 }
 
 bool WebView::AllPageViewsAcknowledged(bool frozen) const {
@@ -1325,6 +1337,10 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
   const auto* model = endpoint_->FindWebView(session_, view_);
   if (!model)
     return Fail(Error::not_found, "WebView model missing");
+  if (action == Lifecycle::discard) {
+    auto allowed = CanDiscard();
+    if (!allowed) return allowed;
+  }
   const Residency previous = model->actual;
   PendingKind kind = PendingKind::none;
   if (action == Lifecycle::freeze || action == Lifecycle::discard ||
@@ -1430,6 +1446,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
     return {};
   }
   contents_ = std::move(restored.value);
+  BrowserContext::InstallSiteIdentity(contents_.get());
   AttachOffscreenHost();
   const int configured_width = viewport_width_;
   const int configured_height = viewport_height_;

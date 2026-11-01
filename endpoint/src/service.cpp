@@ -203,12 +203,16 @@ struct Session {
  std::thread input_thread;std::atomic<bool> stop_input{false};
  std::atomic<uint64_t> input_rejected{0},input_coalesced{0};
  Json layout;std::atomic<bool> data_open{false};
+ Json site_preferences=Json::object();
+ Json durable_events=Json::array();uint64_t next_event=1;
+ std::set<std::string> observed_closed;
  bool output_suspended=false;
  std::string current_geometry;
  std::map<std::pair<uint64_t,uint64_t>,uint64_t> publication_epochs;
  std::atomic<uint64_t> layout_epoch{0};
  std::atomic<uint32_t> receive_level{0};
  std::atomic<bool> refresh_connected{false};
+ std::atomic<bool> rtc_connected{false};
  std::atomic<uint32_t> effective_idle_ms{150};
  std::atomic<double> source_interval_ms{0},last_tail_age_ms{0};
  std::atomic<uint64_t> tail_submissions{0},tail_completions{0};
@@ -226,7 +230,14 @@ struct Session {
   trace=ServerTrace::Create(tenant,id);pool.SetTrace(trace);
   fs::create_directories(directory);
   auto saved=LoadJson(directory/"views.json",Json::array());
+  site_preferences=LoadJson(directory/"site-preferences.json",Json::object());
+  auto event_state=LoadJson(directory/"events.json",{{"next",1},{"events",Json::array()}});
+  next_event=event_state.value("next",uint64_t(1));durable_events=event_state.value("events",Json::array());
   for(auto& view:saved)desired[ViewId(view)]=view;
+  bool reconciled_closed=false;
+  for(const auto& event:durable_events)if(event.value("type",std::string())=="view.closed")
+   reconciled_closed=desired.erase(event.at("viewId").get<std::string>())!=0 || reconciled_closed;
+  if(reconciled_closed)Save();
   if(options.adaptive_fps)budget_thread=std::thread([this]{BudgetLoop();});
  }
  ~Session(){
@@ -238,6 +249,7 @@ struct Session {
   if(process){CloseHandle(process);process=nullptr;}
  }
  void Save(){Json values=Json::array();for(auto& [view,config]:desired)values.push_back(config);SaveJson(directory/"views.json",values);}
+ void SaveEvents(){SaveJson(directory/"events.json",{{"next",next_event},{"events",durable_events}});}
  Json Rpc(Json command) {
   std::lock_guard lock(rpc_mutex);
   if(!control)throw std::runtime_error("browser control unavailable");
@@ -299,6 +311,8 @@ struct Session {
   }
   if(status!=0||!control)throw std::runtime_error("browser control connect failed "+std::to_string(status));
   fprintf(stderr,"session %s browser pid %lu\n",id.c_str(),GetProcessId(process));
+  observed_closed.clear();
+  Rpc({{"method","session.sitePreferences"},{"session",id},{"sites",site_preferences}});
   if(!desired.empty()) {
    // Expand to all desired visible planes before recreation. No decoder exists
    // yet; one final configure below chooses the exact current output extent.
@@ -331,8 +345,7 @@ struct Session {
   DisableBudget();
   const bool active=peer.load()!=0;
   if(active){stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();}
-  coordinate_readiness.Clear();
-  media_feedback.Bind(peer.load(),"","");
+  InvalidateLayout("output-paused");
   try{Rpc({{"method","output.close"}});}
   catch(const std::exception& error){fprintf(stderr,"output close unfinished: %s; resources retained until producer stop confirmed\n",error.what());}
   return active;
@@ -412,6 +425,9 @@ struct Session {
   Json request={{"method","view.create"},{"session",id},{"view",view},{"url",recovering && fs::exists(directory/"recovery"/(view+".json")) ? std::string("about:blank") : config.value("url",std::string("about:blank"))},
     {"width",config.value("width",device.value("width",1440))},{"height",config.value("height",device.value("height",900))},
     {"device",mode},{"visible",config.value("visible",false)}};
+  if(!recovering && config.value("method",std::string())=="view.adopt") {
+   request["method"]="view.adopt";request["provisionalId"]=Required(config,"provisionalId");
+  }
   if(device.contains("deviceScaleFactor"))request["device_scale_factor"]=device["deviceScaleFactor"];
   auto result=Rpc(request);
   if(recovering)RestoreNavigation(view);
@@ -580,16 +596,25 @@ struct Session {
   for(auto& session:snapshot.at("sessions"))for(auto& view:session.at("views")) {
    std::string view_id=view.at("view");
    if(view.value("close_state",std::string())=="closed") {
+    if(desired.contains(view_id) && !observed_closed.contains(view_id)) {
+     if(durable_events.size()>=256)throw std::runtime_error("closed event backlog full; acknowledge events before reconciliation");
+     durable_events.push_back({{"eventId",std::to_string(next_event++)},{"type","view.closed"},
+       {"viewId",view_id},{"reason",view.value("close_reason",std::string("closed"))}});
+     SaveEvents();observed_closed.insert(view_id);
+    }
     if(desired.erase(view_id)){removed=true;Save();fs::remove(directory/"recovery"/(view_id+".json"));}
     continue;
    }
    Json item=view;item["viewId"]=view_id;
    auto requests=Rpc({{"method","page.requests"},{"session",id},{"view",view_id}});
-   AddCloseRequest(item,requests);
+   if(view.value("close_state",std::string())=="closing")AddCloseRequest(item,requests);
+   item["pageRequests"]=requests.value("requests",requests);
    CaptureNavigation(view);views.push_back(std::move(item));
   }
   if(removed)RefitOutput();
-  return {{"sessionId",id},{"browserPid",process?GetProcessId(process):0},{"views",views},{"running",Alive()},{"stats",Stats()}};
+  return {{"sessionId",id},{"browserPid",process?GetProcessId(process):0},{"views",views},
+   {"pendingPopups",snapshot.at("sessions").at(0).value("pendingPopups",Json::array())},
+   {"events",durable_events},{"running",Alive()},{"stats",Stats()}};
  }
  static void AddCloseRequest(Json& output,const Json& requests) {
   // page.requests wraps its snapshot in "requests". Handle its documented
@@ -701,7 +726,7 @@ struct Session {
   if(!preserve_visibility)output_suspended=std::none_of(desired.begin(),desired.end(),[](const auto& entry){
    return entry.second.value("visible",false);
   });
-  if(output_suspended)return;
+  if(output_suspended || !rtc_connected)return;
   remotekit_rtc_clock_sample clock{};clock.struct_size=sizeof(clock);
   if(sdk.sample_clock && sdk.sample_clock(&clock)==0){pool.SetClock(clock);if(trace)trace->SdkClock(clock);}
   remotekit_sdk_atlas_setup setup{};setup.struct_size=sizeof(setup);
@@ -731,6 +756,13 @@ struct Session {
   for(const auto& view:next.at("views"))ready[view.at("id").get<std::string>()]=!view.value("stale",false);
   coordinate_readiness.Set(epoch,std::move(ready));
   layout=std::move(next);Send(layout);
+ }
+ void InvalidateLayout(const char* reason) {
+  current_geometry=std::string("invalid:")+reason;
+  publication_epochs.clear();
+  const auto epoch=layout_epoch.fetch_add(1)+1;
+  PublishLayout({{"type","layout"},{"generation","0"},{"width",16},{"height",16},
+    {"mediaScale",1},{"views",Json::array()},{"epoch",std::to_string(epoch)}},epoch);
  }
  Json Layout(const remotekit::SharedAtlasFrame& frame) {
   auto fit=remotekit::FitH264Sampling(frame.width_pixels,frame.height_pixels,options.encoding.fps,receive_level.load(),options.max_encode_width,options.max_encode_height);
@@ -852,8 +884,27 @@ struct Session {
      if(sample.is_object()) {std::lock_guard lock(stats->mutex);stats->sender_rtc_stats=std::move(sample);}
     } else if(event.type==REMOTEKIT_RTC_REFRESH_REQUEST) {
      refresh_connected=true;
-    } else if(event.type==REMOTEKIT_RTC_STATE && event.value==2) {
-     refresh_connected=true;
+    } else if(event.type==REMOTEKIT_RTC_STATE) {
+     const bool connected=event.value==2;
+     if(connected!=rtc_connected.exchange(connected)) {
+      if(tail_attempt)tail_attempt->CancelWaiting();
+      tail_attempt.reset();
+      if(latest.release)latest.release(latest.release_context,latest.frame_id);
+      latest={};stream_started=false;next_tail_attempt_ms=0;
+      InvalidateLayout(connected?"rtc-resuming":"rtc-disconnected");
+      try {
+       if(connected) {OpenOutput();refresh_connected=true;}
+       else Rpc({{"method","output.close"}});
+      } catch(const std::exception& failure) {
+       {std::lock_guard lock(stats->mutex);stats->error=failure.what();}
+       InvalidateLayout("rtc-output-error");
+       try{Rpc({{"method","output.close"}});}catch(const std::exception& close_error) {
+        fprintf(stderr,"session %s fatal output stop: %s\n",id.c_str(),close_error.what());
+       }
+       fprintf(stderr,"session %s RTC output: %s\n",id.c_str(),failure.what());
+       return;
+      }
+     }
     } else if(event.type==REMOTEKIT_RTC_DATA_STATE) {
      const bool opened=event.value==1;
      if(opened&&!data_open.exchange(opened))refresh_connected=true;
@@ -864,18 +915,22 @@ struct Session {
     }
     else if(event.type==REMOTEKIT_RTC_ERROR)fprintf(stderr,"RTC %s: %s\n",id.c_str(),event.bytes.c_str());
    }
+   if(!rtc_connected) {
+    std::unique_lock lock(event_mutex);
+    event_wake.wait_for(lock,std::chrono::milliseconds(20),[&]{return stop_media||!events.empty();});
+    continue;
+   }
    remotekit_rtc_frame frame{};remotekit::SharedAtlasFrame metadata{};std::string error;
    auto result=output_suspended?AtlasPool::Result::idle:pool.Poll(frame,metadata,error);
    if(result==AtlasPool::Result::reconfigure) {
-    coordinate_readiness.Clear();
-    media_feedback.Bind(peer.load(),"","");
+    InvalidateLayout("reconfigure");
     if(tail_attempt)tail_attempt->CancelWaiting();
     tail_attempt.reset();
     if(latest.release)latest.release(latest.release_context,latest.frame_id);
     latest={};stream_started=false;next_tail_attempt_ms=0;
     idle=remotekit::IdleIdrPolicy(options.idle_idr_ms);
     effective_idle_ms=idle.delay_ms();source_interval_ms=0;last_tail_age_ms=0;
-    layout=Json();adaptive_generation=0;next_adaptive_ms=0;
+    adaptive_generation=0;next_adaptive_ms=0;
     try {
      if(++consecutive_reconfigures>3)throw std::runtime_error("atlas repeatedly requested reconfiguration before a frame");
      if(stop_media.load())break;
@@ -898,16 +953,16 @@ struct Session {
     }
    }
    if(result==AtlasPool::Result::error) {
-    coordinate_readiness.Clear();
+    InvalidateLayout("fatal");
+    try{Rpc({{"method","output.close"}});}catch(const std::exception& close_error) {
+     fprintf(stderr,"session %s fatal output stop: %s\n",id.c_str(),close_error.what());
+    }
     {std::lock_guard lock(stats->mutex);stats->error=error;}
     fprintf(stderr,"session %s media: %s\n",id.c_str(),error.c_str());break;
    }
    const auto current_metadata=output_suspended?remotekit::SharedAtlasFrame{}:pool.LatestMetadata();
    if(output_suspended) {
-    if(current_geometry!="no-visible-views"){current_geometry="no-visible-views";layout_epoch.fetch_add(1);}
-    Json empty={{"type","layout"},{"generation","0"},{"width",16},{"height",16},
-                {"mediaScale",1},{"views",Json::array()},{"epoch",std::to_string(layout_epoch.load())}};
-    if(empty!=layout)PublishLayout(std::move(empty),layout_epoch.load());
+    if(current_geometry!="invalid:no-visible-views")InvalidateLayout("no-visible-views");
    }
    if(current_metadata.generation) {
     auto next=Layout(current_metadata);const auto epoch=ObserveLayout(current_metadata);next["epoch"]=std::to_string(epoch);
@@ -1013,7 +1068,7 @@ struct Session {
   if(latest.release)latest.release(latest.release_context,latest.frame_id);
  }
  Json Offer(const Json& request) {
-  Start();ClosePeer();OpenOutput();
+  Start();ClosePeer();
   connection=Required(request,"connectionId");
   {std::lock_guard lock(signal_mutex);answer.clear();rtc_error.clear();ice_complete=false;}
   remotekit_rtc_options config{};config.struct_size=sizeof(config);config.abi_version=REMOTEKIT_RTC_ABI_VERSION;
@@ -1051,7 +1106,8 @@ struct Session {
   DisableBudget();
   stop_input=true;input_wake.notify_all();if(input_thread.joinable())input_thread.join();
   stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();
-  coordinate_readiness.Clear();
+  rtc_connected=false;
+  InvalidateLayout("rtc-closed");
   {std::lock_guard lock(input_mutex);input_queue.clear();}
   auto handle=peer.exchange(0);
   media_feedback.Bind(0,"","");
@@ -1084,6 +1140,27 @@ struct Session {
   const auto method=Required(request,"method");
   if(method=="session.ensure"){Start();return {{"sessionId",id},{"browserPid",GetProcessId(process)},{"running",true}};}
   if(method=="session.snapshot")return Snapshot();
+  if(method=="session.events.ack") {
+   const auto ids=request.at("eventIds");
+   if(!ids.is_array() || ids.size()>256)throw std::runtime_error("invalid event ids");
+   std::set<std::string> acknowledged;
+   for(const auto& value:ids){if(!value.is_string())throw std::runtime_error("invalid event id");acknowledged.insert(value.get<std::string>());}
+   Json remaining=Json::array();
+   for(const auto& event:durable_events)if(!acknowledged.contains(event.at("eventId").get<std::string>()))remaining.push_back(event);
+   durable_events=std::move(remaining);SaveEvents();return {{"accepted",true},{"remaining",durable_events.size()}};
+  }
+  if(method=="session.sitePreferences") {
+   const auto sites=request.at("sites");
+   if(!sites.is_object() || sites.size()>4096)throw std::runtime_error("invalid site preferences");
+   for(auto& [origin,value]:sites.items()) {
+    if(origin.size()>2048 || !(origin.starts_with("https://") || origin.starts_with("http://")) ||
+       !value.is_object() || !value.contains("tabletUa") || !value["tabletUa"].is_boolean())
+     throw std::runtime_error("invalid site preference");
+   }
+   if(Alive()&&control)Rpc({{"method","session.sitePreferences"},{"session",id},{"sites",sites}});
+   site_preferences=sites;SaveJson(directory/"site-preferences.json",site_preferences);
+   return {{"accepted",true},{"applied",Alive()&&control!=0}};
+  }
   if(method=="rtc.offer")return Offer(request);
   if(method=="rtc.close") {
    if(request.value("connectionId",std::string())==connection)ClosePeer();
@@ -1098,7 +1175,14 @@ struct Session {
    return Json::object();
   }
   Start();auto view=ViewId(request);
-  if(method=="view.ensure") {
+  if(method=="view.ensure" || method=="view.adopt") {
+   if(!desired.contains(view) && durable_events.size()+desired.size()>=256)
+    throw std::runtime_error("closed event capacity reserved; acknowledge events before creating views");
+   if(method=="view.adopt" && desired.contains(view)) {
+    if(desired.at(view).value("provisionalId",std::string())!=Required(request,"provisionalId"))
+     throw std::runtime_error("view already belongs to another popup");
+    return {{"accepted",true},{"completed",true}};
+   }
    if(desired.contains(view))return ApplyView(request,false);
    return ApplyView(request,true);
   }
@@ -1106,17 +1190,38 @@ struct Session {
    auto result=Rpc({{"method","view.close"},{"session",id},{"view",view},{"force",request.value("force",false)}});
    bool closed=result.value("completed",false);
    if(closed){desired.erase(view);Save();fs::remove(directory/"recovery"/(view+".json"));RefitOutput();return {{"closed",true}};}
-   Json output={{"accepted",true}};AddCloseRequest(output,Rpc({{"method","page.requests"},{"session",id},{"view",view}}));return output;
+   auto requests=Rpc({{"method","page.requests"},{"session",id},{"view",view}});
+   Json output={{"accepted",true},{"pageRequests",requests.value("requests",requests)}};
+   AddCloseRequest(output,requests);return output;
   }
   if(method=="view.close.reply") {
    auto close_request_id=Required(request,"requestId");
    auto result=Rpc({{"method","page.reply"},{"session",id},{"view",view},{"request",close_request_id},{"accept",request.at("accept")}});
    return {{"accepted",true},{"browser",result}};
   }
+  if(method=="view.page.reply") {
+   if(!desired.contains(view))throw std::runtime_error("view not found");
+   if(!request.contains("accept") || !request["accept"].is_boolean())
+    throw std::runtime_error("accept boolean required");
+   Json command={{"method","page.reply"},{"session",id},{"view",view},
+    {"request",Required(request,"requestId")},{"instance",Required(request,"instance")},
+    {"document",Required(request,"document")},{"accept",request["accept"]},{"dialog_only",true}};
+   if(request.contains("text")) {
+    if(!request["text"].is_string() || request["text"].get_ref<const std::string&>().size()>16384)
+     throw std::runtime_error("invalid or oversized dialog text");
+    command["text"]=request["text"];
+   }
+   return {{"accepted",true},{"browser",Rpc(command)}};
+  }
   if(method=="view.command") {
    const auto action=Required(request,"command");
    if(action!="back"&&action!="forward"&&action!="reload"&&action!="stop")throw std::runtime_error("unsupported page command");
    return Rpc({{"method","page.command"},{"session",id},{"view",view},{"action",action}});
+  }
+  if(method=="view.lifecycle") {
+   const auto action=Required(request,"action");
+   if(action!="discard" && action!="restore")throw std::runtime_error("unsupported lifecycle action");
+   return Rpc({{"method","lifecycle"},{"session",id},{"view",view},{"action",action}});
   }
   if(method=="view.navigate") {
    auto result=Rpc({{"method","navigate"},{"session",id},{"view",view},{"url",Required(request,"url")}});

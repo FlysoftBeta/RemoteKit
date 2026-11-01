@@ -15,6 +15,7 @@
 #include "base/values.h"
 #include "content/public/browser/devtools_agent_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
+#include "content/public/browser/web_contents.h"
 #include "remotekit/core.hpp"
 #include "remotekit/shared_atlas.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
@@ -51,7 +52,7 @@ class WebView final : public content::WebContentsObserver,
  public:
   using Completion = std::function<void(Status)>;
   WebView(content::BrowserContext*, Endpoint*, SessionId, WebViewId,
-          bool offscreen_host = false);
+          bool offscreen_host = false, std::unique_ptr<content::WebContents> adopted = {});
   ~WebView() override;
   WebView(const WebView&) = delete;
   WebView& operator=(const WebView&) = delete;
@@ -91,6 +92,8 @@ class WebView final : public content::WebContentsObserver,
   // invoke it. Renderer ack/poll and navigation completion have a 10s bound.
   // A timeout leaves browser state uncertain: only unload is then allowed.
   Status RequestLifecycle(Lifecycle, Completion = {});
+  // Read-only eligibility. Execution repeats this guard on the UI sequence.
+  Status CanDiscard() const;
 
  private:
   void DevToolsAgentHostAttached(content::DevToolsAgentHost*) override;
@@ -103,7 +106,7 @@ class WebView final : public content::WebContentsObserver,
   void OnWebContentsLostFocus(content::RenderWidgetHost*) override;
   void RenderFrameDeleted(content::RenderFrameHost*) override;
   void RenderFrameHostChanged(content::RenderFrameHost*, content::RenderFrameHost*) override;
-  void CreateContents();
+  void CreateContents(std::unique_ptr<content::WebContents> adopted = {});
   void AttachOffscreenHost();
   void DropContents();
   void ApplyDevice(content::RenderFrameHost* frame = nullptr);

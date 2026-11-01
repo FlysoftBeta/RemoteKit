@@ -17,7 +17,7 @@ test('optional HTTPS serves trusted local test TLS, secure cookies and configure
   try { await promisify(execFile)(openssl, ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1'], { windowsHide: true }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') { context.skip('OpenSSL unavailable for ephemeral test certificate'); return; } throw error; }
   const store = new Store(':memory:'), control = new Control(store, { request: async () => ({ views: [] }) }), origins: string[] = [];
-  const cert = await readFile(certPath), server = createHttp(control, { origins, clientDir: resolve(process.cwd(), 'dist/client'), metricsDir: directory, tls: { key: await readFile(keyPath), cert } });
+  const cert = await readFile(certPath), server = createHttp(control, { diagnostics: true, origins, clientDir: resolve(process.cwd(), 'dist/client'), metricsDir: directory, tls: { key: await readFile(keyPath), cert } });
   server.listen(0, '0.0.0.0'); await once(server, 'listening'); const address = server.address(); if (!address || typeof address === 'string') throw new Error(); assert.equal(address.address, '0.0.0.0');
   const origin = `https://127.0.0.1:${address.port}`; origins.push(origin);
   try {

@@ -123,6 +123,7 @@ void PageRequests::RequestClose() {
   if (close_state_ == "closing" || close_state_ == "closed")
     return;
   close_state_ = "closing";
+  close_reason_ = "requested";
   if (!web_contents()) {
     close_state_ = "closed";
     return;
@@ -139,6 +140,7 @@ void PageRequests::BeforeUnloadFired(content::WebContents*, bool proceed,
     close_state_ = "cancelled";
 }
 void PageRequests::CloseContents(content::WebContents*) {
+  if (close_state_ != "closing") close_reason_ = "window.close";
   close_state_ = "closed";
 }
 void PageRequests::Event(base::DictValue event) {
@@ -423,11 +425,26 @@ bool PageRequests::IsWebContentsCreationOverridden(content::RenderFrameHost*,
                                                    const GURL&,
                                                    const std::string&,
                                                    const GURL& target_url) {
+  if (popup_handler_) return false;
   auto event = Kind("blocked_popup");
   event.Set("url", Clip(target_url.spec()));
   event.Set("reason", "dynamic_webview_creation_unsupported");
   Event(std::move(event));
   return true;
+}
+content::WebContents* PageRequests::AddNewContents(content::WebContents*,
+    std::unique_ptr<content::WebContents> contents, const GURL& url,
+    WindowOpenDisposition disposition, const blink::mojom::WindowFeatures&,
+    bool user_gesture, bool* was_blocked) {
+  if (!popup_handler_ || !user_gesture) {
+    if (was_blocked) *was_blocked = true;
+    auto event = Kind("blocked_popup"); event.Set("url", Clip(url.spec()));
+    event.Set("reason", "user_gesture_required"); Event(std::move(event));
+    return nullptr;
+  }
+  auto* adopted = popup_handler_(std::move(contents), url, disposition, user_gesture);
+  if (!adopted && was_blocked) *was_blocked = true;
+  return adopted;
 }
 
 base::DictValue PageRequests::Reply(const base::DictValue& reply) {
@@ -441,6 +458,8 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply) {
   if (found == pending_.end())
     return Result("unknown_or_finished_request");
   auto* request = found->second.get();
+  if (reply.FindBool("dialog_only").value_or(false) && request->type != Pending::Type::dialog)
+    return Result("standard_dialog_required");
   auto* frame = request->document.AsRenderFrameHostIfValid();
   if (!Live(frame)) {
     Cancel(id, "document_invalidated");

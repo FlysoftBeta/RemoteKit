@@ -5,13 +5,12 @@ export function supportsExperimentalH264Level42(codecs: readonly ReceiveCodecCap
   return !!codecs?.some(codec => codec.mimeType.toLowerCase() === 'video/h264' && codec.clockRate === 90000 && constrainedBaselineMode1(codec.sdpFmtpLine ?? ''));
 }
 export const isChrome89 = (userAgent: string) => /(?:Chrome|Chromium)\/89\./.test(userAgent);
-const storageKey = 'remotekit.receive-profile';
+
 export function chooseReceiveProfile(userAgent: string, saved?: string | null): ReceiveProfile {
   if (saved === 'native' || saved === 'h264-level42-experimental' || isChrome89(userAgent) && (saved === 'chrome89-h264-42' || saved === 'chrome89-h264-51')) return saved;
   return /\bChrome\/89\.0\.4389\.90(?:\s|$)/.test(userAgent) && !/Android|Mobile|iPhone|iPad|Edg\/|OPR\//.test(userAgent) ? 'chrome89-h264-42' : 'native';
 }
-export function loadReceiveProfile(): ReceiveProfile { let saved: string | null = null; try { if (typeof window !== 'undefined') saved = window.localStorage.getItem(storageKey); } catch {} return chooseReceiveProfile(typeof navigator === 'undefined' ? '' : navigator.userAgent, saved); }
-export function saveReceiveProfile(profile: ReceiveProfile) { try { window.localStorage.setItem(storageKey, profile); } catch {} }
+export function loadReceiveProfile(): ReceiveProfile { return chooseReceiveProfile(typeof navigator === 'undefined' ? '' : navigator.userAgent); }
 export function configureReceiveOffer(sdp: string, profile: ReceiveProfile, userAgent: string, codecs?: readonly ReceiveCodecCapability[]) {
   if (profile === 'native') return { sdp, changes: [] as { payload: string; original: string; effective: string }[] };
   const experimental = profile === 'h264-level42-experimental';

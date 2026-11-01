@@ -13,7 +13,7 @@ test('metrics writes keep concurrent large tenant records intact and recover aft
   const metricsDir = join(directory, 'metrics');
   const store = new Store(':memory:');
   const control = new Control(store, { request: async () => ({}) });
-  const server = createHttp(control, { origins: ['http://test.local'], clientDir: directory, metricsDir });
+  const server = createHttp(control, { diagnostics: true, origins: ['http://test.local'], clientDir: directory, metricsDir });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const sessions = Array.from({ length: 4 }, () => store.session());
