@@ -4,15 +4,17 @@
 
 用户最新要求：保留Chrome89，重载目标先改3租户，若有界优化仍无明显成效可转2租户；优先最快TU7、高码率及VDEnc/Hybrid跨租户混跑。以下4租户/TU1结果是既有调查，不是当前必达配置。FPS≥50、p95≤100ms和原分辨率/marker要求不变。
 
-服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。既有四租户实验未达吞吐目标；新三租户最快预设和混跑矩阵正在准备。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
+服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。三租户最快预设和混跑矩阵已完成，仍未达到目标，现按授权转2租户。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
 
 当前按用户指令持续推进≥50FPS/Pixel marker p95≤100ms目标，阶段包不作为停止点。单次尾IDR与单plane直写共享槽候选已实播验证。既有TU1矩阵中，同session异步VPP与LowPower ON对照无最终呈现收益，保留外部颜色转换加oneVPL异步编码默认。绝对publication节拍消除了55→42FPS损失；修复测试页自身漂移后，单租户源、发布、编码、解码已约60FPS。精准模拟60Hz并保留进程高精度计时请求后的两次同配置实播为canvas51.53FPS/p95 123ms与50.77FPS/p95 76ms，尚未稳定同时达标。四1080 compositor/render30仍3D99.85%、canvas7.63–7.90FPS/p95 522–605ms。最新任务见[持续性能目标](../develop/docs/performance-goal.md)。
 
 接收回调trace确认：约600个新video frame只有450次rVFC，后续canvas没有再丢帧；跨线程通知和呈现相位是实测损失来源。默认关闭的连续rVFC候选已增量编译并验证静止/恢复/重连，尚无稳定性能收益，保持关闭。精准模拟刷新与该候选分别保存为0005/0006补丁。大metrics报告改为带SHA-256校验的分块上传，正式分析工具可完整重组，不再因413丢失长记录。
 
-每Session独立QSV模式已实现：显式pattern按持久化Session id分配，stats包含选择和实际TU/LowPower；实验工具可配置目标/上限码率。默认关闭的自适应源帧率worker、TrackProcessor接收路径也已实现，原Chrome89/video默认保留。Endpoint Release构建及5项CPU测试、Control 60项测试/类型检查/生产构建/smoke通过；混跑、自适应和TrackProcessor的实际GPU功能与性能仍待运行验证。
+每Session独立QSV模式已实现：显式pattern按持久化Session id分配，stats包含选择和实际TU/LowPower；实验工具可配置目标/上限码率。默认关闭的自适应源帧率worker、TrackProcessor接收路径也已实现，原Chrome89/video默认保留。Endpoint Release构建及5项CPU测试、Control 60项测试/类型检查/生产构建/smoke通过；混跑及自适应已实播，TrackProcessor仍待实际GPU验证。
 
-三租户TU7/36–44Mbps矩阵已完成：全OFF为10.53–11.36FPS/p95 1054–1200ms，全ON为12.46–12.68FPS/p95 852–921ms，两个混跑均约11.7–12.5FPS/p95 843–947ms。实际TU7、ON/OFF及混跑比例全部正确，原分辨率/CRC保留。3D约99.8%，source GPU约60%；全ON JS提交57–59FPS，但实际atlas17–20FPS。混跑未突破主要瓶颈；正在验证自适应源准入，若仍远离目标，按授权转2租户。详见[完整实验](../develop/docs/three-tenant-fast-mixed-runtime.md)。
+三租户TU7/36–44Mbps矩阵已完成：全OFF为10.53–11.36FPS/p95 1054–1200ms，全ON为12.46–12.68FPS/p95 852–921ms，两个混跑均约11.7–12.5FPS/p95 843–947ms。实际TU7、ON/OFF及混跑比例全部正确，原分辨率/CRC保留。3D约99.8%，source GPU约60%；全ON JS提交57–59FPS，但实际atlas17–20FPS。混跑未突破主要瓶颈，详见[完整实验](../develop/docs/three-tenant-fast-mixed-runtime.md)。
+
+自适应源准入已实播：3租户提升到21.17–23.74FPS/p95 152–156ms；按授权转2租户后，关闭策略为22.99/23.42FPS、p95 444/401ms，开启为35.11/31.33FPS、p95 91/99ms。实际render配置与target/applied一致，几何、epoch、CRC保持，控制无错误。两租户延迟达标，FPS尚差15–19；正在拆分源GPU中的绘制、合成、捕获与复制成本，不能把进程占用全部算为网页绘制。详见[源准入实验](../develop/docs/source-budget-runtime.md)。
 
 当前marker延迟统计终点为客户端canvas绘制提交，CRC同步读回耗时另记；不表示物理屏幕点亮。四接收端同机满载时，读回p95达331–408ms，会干扰后续工作；同时已存在服务端供给下降与解码排队，不能将全部瓶颈归于测量。后续将同时记录GPU/读回完成端点，并保持CRC验证。
 
