@@ -45,4 +45,12 @@ if(WIN32)
   target_link_libraries(endpoint_encoder_smoke PRIVATE remotekit_media)
   add_custom_command(TARGET endpoint_encoder_smoke POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_encoder_smoke>)
+  add_executable(endpoint_qsv_vpp_probe EXCLUDE_FROM_ALL ../tools/qsv-vpp-probe.cpp)
+  target_include_directories(endpoint_qsv_vpp_probe PRIVATE ${RK_DEPS} ${RK_DEPS}/libvpl-2.17.0/api)
+  target_compile_definitions(endpoint_qsv_vpp_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
+    _WIN32_WINNT=0x0A00 WINVER=0x0A00 MFX_DEPRECATED_OFF)
+  target_compile_options(endpoint_qsv_vpp_probe PRIVATE /W4 /utf-8)
+  target_link_libraries(endpoint_qsv_vpp_probe PRIVATE VPL d3d11 dxgi pdh)
+  add_custom_command(TARGET endpoint_qsv_vpp_probe POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_qsv_vpp_probe>)
 endif()
