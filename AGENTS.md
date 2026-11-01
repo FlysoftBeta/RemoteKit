@@ -36,6 +36,8 @@
 - **2026-11-01 新任务开启编码器和 WebRTC 媒体/网络管线**：oneVPL 异步 H.264、NVENC、libwebrtc；音频仍不在本轮范围。目标客户端 Chrome 89 Desktop，1/4 租户、RTT 10ms、下行 24–48Mbps，动态内容目标 FPS>50、Pixel marker 端到端延迟<100ms；目标需要实验测定，不能写作已达成。
 - 新增 `/control`，使用 TypeScript、Better-sqlite3、Vite、React；产品状态由 Control 持有，浏览器恢复数据由 Endpoint Session 与 Browser 托管。Client 直连 Endpoint WebRTC，Control 鉴权与管理。支持多 tab、split、桌面/平板布局和受 Control 管理的平板设备配置；原生 demo 保留为显式构建目标。
 - 用户要求实际使用 Fence 方案，正常运行不产生逐帧呈现通信。这里的边界是 browser ↔ endpoint；不要承诺 Chromium 内部 renderer/Viz/GPU 没有帧 IPC。
+- 2026-11-01 用户要求渲染路径参照 `C:\src\tmp\electron-investigation\IMPLEMENTATION-SKETCH.zh-CN.md` 第5节：无原生窗口的离屏合成目标、browser本地external BeginFrame pacer、共享纹理与双向Fence。应替换服务端窗口输出路径，不继续在显示管线中间拦截。**Aura暂时无需去除，有功能依赖可保留**；文档中旧的去Aura要求不适用。其余职责、恢复信息与音频范围仍以本文件及最新任务为准。
+- 用户再次强调参考libcef OSR、无HWND：服务页面宿主从创建时使用null accelerated widget，不创建用于页面呈现的HWND；隐藏窗口不满足这一要求。实际窗口与Present路径应运行核查。
 - 必须正确处理 HiDPI、窗口 DPI 变化与点击坐标，区分客户区物理像素、atlas 像素、viewport DIP、letterbox 和 screen 坐标。
 
 ## 仓库组织
@@ -106,7 +108,7 @@ python3 tools/package-runtime.py
 
 下面记录的是 **当前实现选择，不是不可更改的用户需求**。详细能力及缺口以 `docs/current-state.zh-CN.md` 为准，取舍见 `docs/design-review.zh-CN.md`。
 
-- 保留 Views/Aura 平台适配，不链接 Chrome Browser/TabStripModel/BrowserView；不能称为无 Aura、无 HWND embedder。
+- 服务端保留Aura内容视图/输入适配，每WebView使用无页面HWND的离屏宿主与本地external BeginFrame；原生demo保留Views窗口。不链接Chrome Browser/TabStripModel/BrowserView。Chromium仍有系统广播辅助SingletonHwnd，不把整个进程描述为零HWND。
 - 默认路径为 `/control` 产品状态 + 独立 endpoint_service + 每 Session 一个 browser 进程/atlas。原 browser harness 与原生 endpoint client 仅由显式 demo 构建目标保留。此进程布置是本轮架构选择，不是用户不可更改的限制。
 - WebView 身份不依赖 WebContents。操作接受、执行中、实际完成分别报告；输入验证 Session、实例、文档、焦点、序号及可用的输出代次。
 - 当前每 Session 一个 Profile，第二个明确 unsupported；多 Profile 是尚未实现的目标。

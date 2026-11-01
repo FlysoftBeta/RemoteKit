@@ -28,6 +28,12 @@ param(
   [ValidateSet(0,1,2,10)][int]$CaptureMaxPending=0,
   [switch]$OfficialTrace,
   [switch]$CopyOutputProfile,
+  [switch]$OffscreenRoot,
+  [ValidateRange(0,60)][int]$CaptureRenderFps=0,
+  [ValidateSet('auto','off')][string]$BrowserDirectComposition='auto',
+  [ValidateSet('auto','1')][string]$BrowserHostScale='auto',
+  [ValidateSet('offscreen','window')][string]$BrowserRenderHost='offscreen',
+  [ValidateRange(0,60)][int]$BrowserRenderFps=0,
   [ValidateSet('canvas','compositor')][string]$FixtureKind='canvas',
   [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
   [switch]$DisableClientRafProbe,
@@ -36,11 +42,16 @@ param(
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
 $ErrorActionPreference = 'Stop'
+$BrowserDirectComposition=$BrowserDirectComposition.ToLowerInvariant()
+$BrowserHostScale=$BrowserHostScale.ToLowerInvariant()
+$BrowserRenderHost=$BrowserRenderHost.ToLowerInvariant()
 if($ServerTrace -and $DisableMediaTrace){throw 'ServerTrace also enables browser trace; use DisableMediaTrace without ServerTrace for the off baseline'}
 if($CopyOutputProfile -and -not $OfficialTrace){throw 'CopyOutputProfile requires OfficialTrace to collect its opt-in events'}
 $rkBrowserFeatures=@()
 if($CaptureMaxPending){$rkBrowserFeatures+="RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"}
 if($CopyOutputProfile){$rkBrowserFeatures+='RemoteKitCopyOutputProfile'}
+if($OffscreenRoot){$rkBrowserFeatures+='RemoteKitOffscreenRoot'}
+if($CaptureRenderFps){$rkBrowserFeatures+="RemoteKitCaptureRenderRate:max_fps/$CaptureRenderFps"}
 $rkBrowserFeaturesText=$rkBrowserFeatures -join ','
 $rkRoot = Split-Path -Parent $PSScriptRoot
 $caseRoot = Join-Path $rkRoot "develop/tmp/$Name"
@@ -68,8 +79,8 @@ $configuration = @{
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
   atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;
-  captureMaxPending=$CaptureMaxPending;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
-  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;
+  captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
+  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;offscreenRoot=[bool]$OffscreenRoot;
   endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;startBitrate=18000000;maxBitrate=40000000;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
@@ -97,14 +108,18 @@ foreach ($relativePath in @('fixture/test-pattern.html','fixture/marker-codec.js
 foreach ($relativePath in @('control/public/test-pattern.html','control/dist/server.mjs','tools/streaming-benchmark.js','tools/streaming-source-probe.mjs','tools/watch-streaming-resources.ps1','tools/windows-gpu-counters.cs','tools/streaming-endpoint-tee.mjs','tools/prepare-streaming-case.ps1')) {
   $fingerprints[$relativePath] = (Get-FileHash -LiteralPath (Join-Path $rkRoot $relativePath) -Algorithm SHA256).Hash
 }
-foreach ($absolutePath in @('C:/src/chromium/src/out/dev/remotekit_browser.exe','C:/src/chromium/src/out/dev/remotekit_sdk.dll','C:/src/chromium/src/out/dev/components_viz_service.dll')) {
+foreach ($absolutePath in @('C:/src/chromium/src/out/dev/remotekit_browser.exe','C:/src/chromium/src/out/dev/remotekit_sdk.dll','C:/src/chromium/src/out/dev/components_viz_service.dll','C:/src/chromium/src/out/dev/content.dll')) {
   $fingerprints[$absolutePath] = (Get-FileHash -LiteralPath $absolutePath -Algorithm SHA256).Hash
 }
 $fingerprints['patches/manifest.json']=(Get-FileHash -LiteralPath (Join-Path $rkRoot 'patches/manifest.json') -Algorithm SHA256).Hash
+foreach ($asset in Get-ChildItem -LiteralPath (Join-Path $rkRoot 'control/dist/client/assets') -File) {
+  $fingerprints['control/dist/client/assets/'+$asset.Name]=(Get-FileHash -LiteralPath $asset.FullName -Algorithm SHA256).Hash
+}
 $fingerprints | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $caseRoot 'fingerprints.json')
 $env:REMOTEKIT_ENDPOINT = Join-Path $caseRoot 'bin/endpoint_service.exe'
 $rkEndpointArguments = @(
-  '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe', "--data-path=$caseRoot/sessions",
+  '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe', "--data-path=$caseRoot/sessions", "--browser-direct-composition=$BrowserDirectComposition", "--browser-host-scale=$BrowserHostScale", "--browser-render-host=$BrowserRenderHost",
+  "--browser-render-fps=$BrowserRenderFps",
   '--encoder=qsv','--fps=60','--bitrate=18000000','--max-bitrate=40000000',
   "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )

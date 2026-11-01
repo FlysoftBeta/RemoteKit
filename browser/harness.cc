@@ -25,6 +25,7 @@
 #include "remotekit/browser/devtools.h"
 #include "remotekit/browser/gpu_atlas.h"
 #include "remotekit/browser/page_requests.h"
+#include "remotekit/browser/offscreen_host.h"
 #include "remotekit/browser/webview.h"
 #include "remotekit/endpoint/include/remotekit/core.hpp"
 #include "remotekit/protocol/control.h"
@@ -73,6 +74,7 @@ struct HarnessMainParts::State {
   HarnessViewsDelegate views_delegate;
   Endpoint endpoint;
   bool demo = false;
+  bool offscreen = false;
   raw_ptr<views::View> root = nullptr;
   struct ViewSpec {
     int width = 480, height = 360;
@@ -104,8 +106,10 @@ struct HarnessMainParts::State {
       contents[i]->InvalidateLayoutInput();
       const bool visible = found != atlas.placements.end();
       const auto rect = visible ? found->content : PixelRect{0, 0, specs[i].width, specs[i].height};
-      native_views[i]->SetBounds(rect.x, rect.y, rect.width, rect.height);
-      native_views[i]->SetVisible(visible);
+      if (native_views[i]) {
+        native_views[i]->SetBounds(rect.x, rect.y, rect.width, rect.height);
+        native_views[i]->SetVisible(visible);
+      }
       contents[i]->SetVisible(visible);
       placements.emplace_back(rect.x, rect.y, rect.width, rect.height);
       contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
@@ -124,8 +128,10 @@ struct HarnessMainParts::State {
     paused_output.insert(view);
     UpdateOutput();
     page_requests[index]->Bind(nullptr);
-    native_views[index]->SetWebContents(nullptr);
-    root->RemoveChildViewT(native_views[index].get());
+    if (native_views[index]) {
+      native_views[index]->SetWebContents(nullptr);
+      root->RemoveChildViewT(native_views[index].get());
+    }
     native_views.erase(native_views.begin() + index);
     page_requests.erase(page_requests.begin() + index);
     contents.erase(contents.begin() + index);
@@ -155,6 +161,7 @@ struct HarnessMainParts::State {
   float output_scale = 1;
   bool output_enabled = true;
   uint32_t output_fps = 30;
+  uint32_t render_fps = 0;  // Zero follows output fps; never changes capture/encode.
   int logical_width = 0, logical_height = 0;
   uint32_t output_width = 0, output_height = 0;
   uint64_t output_generation = 0;
@@ -173,8 +180,14 @@ struct HarnessMainParts::State {
 
   base::DictValue HandleControl(const base::DictValue& request);
   void UpdateOutput() {
-    for (const auto& adapter : contents)
+    for (size_t i = 0; i < contents.size(); ++i) {
+      const auto& adapter = contents[i];
       adapter->RefreshBackingScale();
+      const auto* model = endpoint.FindWebView(adapter->session_id(), adapter->view_id());
+      adapter->SetRenderDemand(output && output_enabled && specs[i].visible &&
+          model && model->actual == Residency::live && !model->pending &&
+          !paused_output.contains(adapter->view_id()), render_fps ? render_fps : output_fps);
+    }
     if (!output)
       return;
     std::vector<GpuAtlas::View> views;
@@ -208,6 +221,8 @@ struct HarnessMainParts::State {
     output->SetViews(std::move(views));
   }
   void OnControlClosed() {
+    if (offscreen) output_enabled = false;
+    for (const auto& adapter : contents) adapter->SetRenderDemand(false, output_fps);
     if (output)
       output->Stop();
     for (size_t i = 0; i < contents.size(); ++i) {
@@ -284,6 +299,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     auto next_scale = output_scale;
     auto next_enabled = output_enabled;
     auto next_fps = output_fps;
+    auto next_render_fps = render_fps;
     if (request.Find("device_scale")) {
       if (!scale || !std::isfinite(*scale) || *scale < 0.5 || *scale > 4)
         return error("invalid_device_scale");
@@ -301,6 +317,11 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         return error("invalid_output_fps");
       next_fps = value->GetInt();
     }
+    if (const auto* value = request.Find("render_fps")) {
+      if (!value->is_int() || value->GetInt() < 0 || value->GetInt() > 60)
+        return error("invalid_render_fps");
+      next_render_fps = value->GetInt();
+    }
     const bool layout_changed = logical_width != next_width || logical_height != next_height ||
                                 output_scale != next_scale;
     logical_width = next_width; logical_height = next_height;
@@ -309,12 +330,13 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
     output_enabled = next_enabled;
     output_fps = next_fps;
+    render_fps = next_render_fps;
     output_width = (static_cast<uint32_t>(std::ceil(logical_width * output_scale)) + 1u) & ~1u;
     output_height = (static_cast<uint32_t>(std::ceil(logical_height * output_scale)) + 1u) & ~1u;
     if (output)
       output->SetFps(output_fps);
     if (layout_changed) {
-      root->SetPreferredSize(gfx::Size(logical_width, logical_height));
+      if (root) root->SetPreferredSize(gfx::Size(logical_width, logical_height));
       if (widget) widget->SetSize(gfx::Size(logical_width, logical_height));
       ApplyLayout(next_layout.value);
     }
@@ -362,6 +384,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (output)
       output->Stop();
     output.reset();
+    UpdateOutput();
     reply.Set("ok", true);
     return reply;
   }
@@ -485,14 +508,17 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     while (owner < sessions.size() && sessions[owner] != session) ++owner;
     auto created = endpoint.CreateWebView(session, profiles[owner], view);
     if (!created) return error(created.status.message);
-    auto adapter = std::make_unique<WebView>(contexts[owner].get(), &endpoint, session, view);
+    auto adapter = std::make_unique<WebView>(contexts[owner].get(), &endpoint, session, view, offscreen);
     adapter->SetNativeFocusEnabled(demo &&
         !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
     adapter->ConfigureDevice(spec.width, spec.height, spec.tablet, PageScale(spec), !demo);
     auto requests = std::make_unique<PageRequests>();
     requests->Bind(adapter->contents());
-    auto* native = root->AddChildView(std::make_unique<views::WebView>(contexts[owner].get()));
-    native->SetWebContents(adapter->contents());
+    views::WebView* native = nullptr;
+    if (!offscreen) {
+      native = root->AddChildView(std::make_unique<views::WebView>(contexts[owner].get()));
+      native->SetWebContents(adapter->contents());
+    }
     contents.push_back(std::move(adapter));
     page_requests.push_back(std::move(requests));
     native_views.push_back(native);
@@ -553,18 +579,18 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (output) output->StopView(view);
     paused_output.insert(view); UpdateOutput();
     page_requests[index]->Bind(nullptr);
-    native_views[index]->SetWebContents(nullptr);
+    if (native_views[index]) native_views[index]->SetWebContents(nullptr);
     const auto profile = endpoint.FindWebView(session, view)->profile;
     const auto owner = std::ranges::find(profiles, profile);
     if (owner == profiles.end()) return error("profile_missing");
     contents[index].reset();
     endpoint.ResetWebView(session, view);
-    contents[index] = std::make_unique<WebView>(contexts[owner - profiles.begin()].get(), &endpoint, session, view);
+    contents[index] = std::make_unique<WebView>(contexts[owner - profiles.begin()].get(), &endpoint, session, view, offscreen);
     contents[index]->SetNativeFocusEnabled(demo && !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
     contents[index]->ConfigureDevice(specs[index].width, specs[index].height, specs[index].tablet, PageScale(specs[index]), !demo);
     page_requests[index] = std::make_unique<PageRequests>();
     page_requests[index]->Bind(contents[index]->contents());
-    native_views[index]->SetWebContents(contents[index]->contents());
+    if (native_views[index]) native_views[index]->SetWebContents(contents[index]->contents());
     contents[index]->SetVisible(specs[index].visible);
     const auto status = contents[index]->Navigate(GURL(*url));
     paused_output.erase(view); UpdateOutput();
@@ -778,12 +804,12 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       UpdateOutput();
     }
     page_requests[index]->CancelAll("lifecycle_transition");
-    if (*operation == Lifecycle::unload)
+    if (*operation == Lifecycle::unload && native_views[index])
       native_views[index]->SetWebContents(nullptr);
     page_requests[index]->Bind(nullptr);
     status = adapter.RequestLifecycle(*operation);
     page_requests[index]->Bind(adapter.contents());
-    native_views[index]->SetWebContents(adapter.contents());
+    if (native_views[index]) native_views[index]->SetWebContents(adapter.contents());
     paused_output.erase(view);
     UpdateOutput();
     reply.Set("accepted", static_cast<bool>(status));
@@ -929,9 +955,21 @@ HarnessMainParts::HarnessMainParts() = default;
 HarnessMainParts::~HarnessMainParts() = default;
 int HarnessMainParts::PreMainMessageLoopRun() {
   state_ = std::make_unique<State>();
-  if (!display::Screen::HasScreen())
-    state_->screen = views::CreateDesktopScreen();
   const auto& command = *base::CommandLine::ForCurrentProcess();
+#if defined(REMOTEKIT_DEMO_HARNESS)
+  state_->demo = true;
+#endif
+  const auto host_mode = command.GetSwitchValueASCII("remotekit-render-host");
+  if (!host_mode.empty() && host_mode != "offscreen" && host_mode != "window") return 2;
+  state_->offscreen = !state_->demo && host_mode != "window";
+  if (state_->offscreen) {
+    CHECK(!display::Screen::HasScreen());
+    state_->screen = CreateOffscreenScreen();
+    display::Screen::SetScreenInstance(state_->screen.get());
+    state_->output_fps = 60;
+  } else if (!display::Screen::HasScreen()) {
+    state_->screen = views::CreateDesktopScreen();
+  }
   base::FilePath data = command.GetSwitchValuePath("data-path");
   if (data.empty()) {
     CHECK(base::PathService::Get(base::DIR_LOCAL_APP_DATA, &data));
@@ -1002,7 +1040,7 @@ int HarnessMainParts::PreMainMessageLoopRun() {
   auto packed = PackAtlas(atlas_width, atlas_height, 4, items);
   CHECK(packed);
   int width = 0, height = 0;
-  auto root = std::make_unique<views::View>();
+  auto root = state_->offscreen ? nullptr : std::make_unique<views::View>();
   state_->root = root.get();
   for (size_t i = 0; i < urls.size(); ++i) {
     const size_t owner = i % state_->sessions.size();
@@ -1029,24 +1067,27 @@ int HarnessMainParts::PreMainMessageLoopRun() {
     state_->contents.push_back(std::move(contents));
   }
   if (!state_->demo) { width = atlas_width; height = atlas_height; }
+  if (!state_->offscreen) {
   root->SetPreferredSize(gfx::Size(width, height));
   auto delegate = std::make_unique<views::WidgetDelegate>();
   delegate->SetTitle(u"RemoteKit — content embedder harness");
   const bool embedded = command.HasSwitch("parent-window");
-  delegate->SetHasWindowSizeControls(!embedded);
+  const bool frame_less = embedded || !state_->demo;
+  delegate->SetHasWindowSizeControls(!frame_less);
   delegate->SetContentsView(std::move(root));
   auto* widget = new views::Widget();
-  // The embedded HWND has no non-client area. Choose the corresponding Views
+  // Embedded and service HWNDs have no non-client area. Choose the Views
   // type before Init instead of leaving a titled widget's frame layout behind
   // when changing the Win32 style during reparenting.
   views::Widget::InitParams params(views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
-                                   embedded ? views::Widget::InitParams::TYPE_WINDOW_FRAMELESS
+                                   frame_less ? views::Widget::InitParams::TYPE_WINDOW_FRAMELESS
                                             : views::Widget::InitParams::TYPE_WINDOW);
-  params.remove_standard_frame = embedded;
+  params.remove_standard_frame = frame_less;
   state_->window_delegate = std::move(delegate);
   params.delegate = state_->window_delegate.get();
   params.bounds = gfx::Rect(state_->demo ? 40 : -20000, state_->demo ? 40 : -20000,
-                            width + 20, height + 50);
+                            width + (state_->demo ? 20 : 0),
+                            height + (state_->demo ? 50 : 0));
   widget->Init(std::move(params));
   state_->widget = widget;
   state_->observer = std::make_unique<WindowObserver>(
@@ -1077,6 +1118,9 @@ int HarnessMainParts::PreMainMessageLoopRun() {
     widget->Show();
   state_->output_scale = state_->demo ?
       GetDpiForWindow(widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget()) / 96.0f : 1.0f;
+  } else {
+    state_->output_scale = 1.f;
+  }
   state_->logical_width = width;
   state_->logical_height = height;
   state_->output_width = (static_cast<uint32_t>(std::ceil(width * state_->output_scale)) + 1u) & ~1u;
@@ -1106,7 +1150,12 @@ void HarnessMainParts::PostMainMessageLoopRun() {
     state_->widget->CloseNow();
   state_->window_delegate.reset();
   state_->contents.clear();
+  // Offscreen compositor teardown can make sync Mojo calls. Run the deferred
+  // deletions after WebContents destruction and before its virtual Screen dies.
+  base::RunLoop().RunUntilIdle();
   state_->contexts.clear();
+  if (state_->screen && display::Screen::Get() == state_->screen.get())
+    display::Screen::SetScreenInstance(nullptr);
   state_.reset();
 }
 }  // namespace remotekit::browser

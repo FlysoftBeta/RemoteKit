@@ -1,4 +1,5 @@
 #include "browser/webview.h"
+#include "browser/offscreen_host.h"
 #include "browser/navigation_state.h"
 #include "browser/compat.h"
 
@@ -153,8 +154,10 @@ gfx::PointF ViewportToScreen(content::RenderWidgetHostViewBase* view, gfx::Point
 WebView::WebView(content::BrowserContext* context,
                  Endpoint* endpoint,
                  SessionId session,
-                 WebViewId view)
-    : context_(context), endpoint_(endpoint), session_(session), view_(view) {
+                 WebViewId view,
+                 bool offscreen_host)
+    : context_(context), endpoint_(endpoint), session_(session), view_(view),
+      use_offscreen_host_(offscreen_host) {
   DeviceAdapters().push_back(this);
   CHECK(context_);
   CHECK(endpoint_);
@@ -174,7 +177,7 @@ WebView::~WebView() {
   ReleaseKeyboard(false, true);
   ReleasePointer(true);
   Observe(nullptr);
-  contents_.reset();
+  DropContents();
   auto callback = std::move(completion_);
   if (lifecycle_request_)
     endpoint_->CompleteLifecycle(session_, *lifecycle_request_, false);
@@ -191,12 +194,34 @@ void WebView::CreateContents() {
   params.initially_hidden = !visible_;
   contents_ = content::WebContents::Create(params);
   Observe(contents_.get());
+  AttachOffscreenHost();
   // Track native sequence starts from the beginning, even while disabled.
   // Creating an emulator only when injecting into an already active native
   // sequence would miss its start and defeat the official mutual exclusion.
   auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
   implementation->GetInputEventRouter();
   implementation->GetTouchEmulator(true);
+}
+void WebView::AttachOffscreenHost() {
+  if (!use_offscreen_host_ || !contents_) return;
+  offscreen_host_ = std::make_unique<OffscreenHost>(contents_.get(),
+      gfx::Size(std::max(1, viewport_width_ ? viewport_width_ : 480),
+                std::max(1, viewport_height_ ? viewport_height_ : 360)));
+  offscreen_host_->SetRenderDemand(render_demand_ && visible_, render_fps_);
+}
+void WebView::DropContents() {
+  auto host = std::move(offscreen_host_);
+  if (host) host->Detach();
+  contents_.reset();
+  if (host)
+    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, std::move(host));
+}
+void WebView::SetRenderDemand(bool enabled, uint32_t fps) {
+  render_demand_ = enabled;
+  render_fps_ = fps;
+  if (!use_offscreen_host_) return;
+  if (enabled && !visible_) SetVisible(true);
+  if (offscreen_host_) offscreen_host_->SetRenderDemand(enabled && visible_, fps);
 }
 void WebView::OverridePreferences(content::WebContents* contents,
                                    blink::web_pref::WebPreferences* prefs) {
@@ -235,6 +260,7 @@ void WebView::ConfigureDevice(int width, int height, bool tablet, float scale,
   viewport_height_ = height;
   tablet_ = tablet;
   device_scale_ = scale;
+  if (offscreen_host_) offscreen_host_->SetViewport(gfx::Size(width, height));
   if (!contents_ || !changed) return;
   blink::UserAgentOverride ua;
   if (tablet_) {
@@ -398,6 +424,7 @@ Status WebView::SetVisible(bool visible) {
       return status;
   }
   visible_ = visible;
+  if (offscreen_host_) offscreen_host_->SetRenderDemand(visible && render_demand_, render_fps_);
   if (visible)
     contents_->WasShown();
   else
@@ -589,8 +616,9 @@ Status WebView::Focus(bool focused) {
   if (!status)
     return status;
   if (contents_) {
-    if (focused && native_focus_enabled_)
+    if (focused && (native_focus_enabled_ || offscreen_host_))
       contents_->Focus();
+    if (!focused && offscreen_host_) offscreen_host_->ClearFocus();
     if (auto* host = RootWidget(contents_.get())) {
       host->SetActive(focused);
       if (focused)
@@ -651,6 +679,7 @@ Status WebView::BuildTouchState(const TouchInput& input,
 }
 base::DictValue WebView::CompositorDiagnostics() const {
   base::DictValue result;
+  if (offscreen_host_) result.Set("renderHost", offscreen_host_->Diagnostics());
   auto* native_view = RootView(contents_.get());
   if (!native_view)
     return result;
@@ -1358,7 +1387,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
   }
   if (action == Lifecycle::unload) {
     Observe(nullptr);
-    contents_.reset();
+    DropContents();
     CancelTouches(false);
     input_commit_navigations_.clear();
     lifecycle_uncertain_ = false;
@@ -1391,7 +1420,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
     return {};
   }
   Observe(nullptr);
-  contents_.reset();
+  DropContents();
   CancelTouches(false);
   touch_owner_lost_ = false;
   touch_status_ = {};
@@ -1401,6 +1430,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
     return {};
   }
   contents_ = std::move(restored.value);
+  AttachOffscreenHost();
   const int configured_width = viewport_width_;
   const int configured_height = viewport_height_;
   viewport_width_ = 0;

@@ -11,6 +11,16 @@
       "id": "copy-output-profile",
       "path": "0002-copy-output-profile.patch",
       "sha256": "66828e5158ec26491dd953859a75ae83f97324bbac7c3bece1d56cd57a068a72"
+    },
+    {
+      "id": "offscreen-root",
+      "path": "0003-offscreen-root.patch",
+      "sha256": "311c58f1928bade950dfe91cc86f67eabfc303e60c7465bdf3eaab602097f6b8"
+    },
+    {
+      "id": "capture-render-rate",
+      "path": "0004-capture-render-rate.patch",
+      "sha256": "a06da420c6fea610d56ee19eee5e6018c0355cd54d86f721fde51852b36e805e"
     }
   ]
 }

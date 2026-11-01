@@ -2,9 +2,11 @@
 
 基线：官方 Chromium Release **157.0.8103.15**（`1aa07b638799e59656559ae6c6649d4b197f555e`），Windows x64。源码在本仓库；`tools/chromium.py` 把 browser、共享模型和 SDK shim 放入 Chromium 的 `//remotekit`。
 
+服务端已采用每WebView独立无页面HWND的Aura宿主、null widget compositor和本地external BeginFrame，原生demo保留窗口。统一构建、Chrome89真实H.264/输入、桌面和平板四角、混合DPR、跨进程iframe中文输入及真实source GPU故障恢复已通过。60FPS驱动的性能对照仍未达到目标，继续调优本地pacer背压。源进程仍有Chromium系统广播用SingletonHwnd，已确认它不是页面呈现窗口。
+
 ## 结构
 
-- **browser**：独立 ContentMain/ContentBrowserClient/ContentRendererClient、BrowserContext 和 WebView adapter，不链接 Chrome 的 Browser/TabStripModel/BrowserView。当前呈现 backend 使用官方 Views/Aura。
+- **browser**：独立 ContentMain/ContentBrowserClient/ContentRendererClient、BrowserContext 和 WebView adapter，不链接 Chrome 的 Browser/TabStripModel/BrowserView。服务使用无窗口Aura宿主，原生demo使用Views窗口。
 - **endpoint**：独立 C++20 + CMake/Ninja。Tenant → Session → Profile → WebView；当前每 Session 一个 Profile。MaxRects、不旋转、有 padding、显式排布失败；输入用 viewport DIP。
 - **SDK**：GN 构建 C ABI DLL，外部 CMake 只消费 C 头与 import lib。Mojo 本地 pipe 与跨进程 isolated 控制连接；新增真实 libwebrtc PeerConnection、SDP/ICE、DataChannel 与外部 H.264 编码 C ABI。
 - **Control/串流服务**：Control是产品状态source of truth；Endpoint托管Session/browser与恢复数据，每租户一条H.264 atlas视频。
@@ -24,7 +26,7 @@
 | 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；最终55ffdf1包首帧/hover/click/IME验收通过 |
 | 延迟定位 | 默认关闭的browser/SDK/Endpoint有界trace，关联同wire RTP与CopyOutput request；Ganesh/OpenGL的GPU flush批次计时已实测，ETW已有GPU队列/CPU调度证据。capture_time_us明确为capture end；HUD不再把该段误标为完整捕获耗时 |
 | 网络实验设施 | 真实UDP 10ms/24/48Mbps整形与Chrome89候选/转发通路验证通过 |
-| 性能 | 16组原矩阵及DPI修复后的分层/画质对照完成；目标未达。当前默认720p单租户31.74 FPS/p95 111ms；四720源约47、呈现约12 FPS；四1080源约20、呈现约9 FPS。诊断flag下单租户约53 FPS、p95 103–105ms，未作为默认 |
+| 性能 | 新离屏宿主60FPS驱动：单1080 canvas29.3FPS/marker p95 155ms；四1080 canvas5.9–6.3FPS/p95 1377–1435ms。源吞吐提高但四租户编码仍约11FPS，GPU负载积压；本地pacer调优进行中，目标未达。旧矩阵与配对条件见串流实验 |
 
 网页viewport/DPR与媒体采样分离已运行验证，用于高DPR和分屏超出接收level时等比缩小视频；输入按mediaScale映射，统计显示源/编码尺寸。同一atlas内desktop@1与tablet@2保持独立网页DPR。平板真实页面检查已通过：Android Chrome UA不带Mobile、CH Android/mobile=false、platform Linux armv81、DPR≈2、viewport/screen820×1180、coarse/no-hover/touch10；使用公开原生设置，无JS伪装或CDP附加。WorkerNavigator另行核对。
 
@@ -56,7 +58,7 @@ RTC支持显式RTP播放延迟请求，默认未设置。0/0与0/10ms对照降�
 | unload/restore adapter | 完整 history/PageState，同进程 sessionStorage namespace；真实提交后完成；opaque chunk 导入导出校验 Session/Profile/版本，POST 自动恢复明确拒绝 |
 | 页面请求 | dialog/beforeunload、普通文件选择、context menu、pseudo fullscreen、find/zoom/edit/navigation；once 回复、文档失效取消，控制端轮询 pending/events |
 | Profile 服务 | 默认 deny 的 origin/embedding 权限配置；HTTPS-only 会话目录下载、进度/取消和 Windows quarantine；不包含 SafeBrowsing |
-| patchset | SHA-256清单、检查/应用/逆序撤回、失败回滚；WebRTC使用官方component边界。当前两项默认关闭补丁：bounded capture实验、CopyOutput请求级profile；两项正式逆序撤回/顺序重应用、统一GN构建及4项工具测试通过 |
+| patchset | SHA-256清单、检查/应用/逆序撤回、失败回滚；四项默认关闭补丁：bounded capture、CopyOutput profile、旧宿主offscreen root、capture render rate。统一GN构建及4项工具测试通过；render rate有真实Manager/Throttler CPU probe，未做实播矩阵。新离屏宿主不依赖后两项补丁 |
 | 独立 SDK 消费 | GN build、完整 runtime 导出、MSVC CMake/Ninja link 和 smoke 通过 |
 
 ## 验证与限制

@@ -37,6 +37,7 @@ class WebTouchEvent;
 }
 namespace remotekit::browser {
 class NavigationState;
+class OffscreenHost;
 
 // UI-sequence-only execution adapter. BrowserContext and Endpoint outlive this.
 // Unload restore retains complete committed history/PageState and same-process
@@ -49,7 +50,8 @@ class WebView final : public content::WebContentsObserver,
                       public content::DevToolsAgentHostObserver {
  public:
   using Completion = std::function<void(Status)>;
-  WebView(content::BrowserContext*, Endpoint*, SessionId, WebViewId);
+  WebView(content::BrowserContext*, Endpoint*, SessionId, WebViewId,
+          bool offscreen_host = false);
   ~WebView() override;
   WebView(const WebView&) = delete;
   WebView& operator=(const WebView&) = delete;
@@ -66,6 +68,7 @@ class WebView final : public content::WebContentsObserver,
   // Service rendering follows page DPR; demo rendering follows native DPI.
   // Also called from the existing output timer to notice host-DPI changes.
   void RefreshBackingScale();
+  void SetRenderDemand(bool enabled, uint32_t fps);
   void InvalidateLayoutInput();
   static void OverridePreferences(content::WebContents*, blink::web_pref::WebPreferences*);
   SharedAtlasTextInput TextInputState() const;
@@ -100,6 +103,8 @@ class WebView final : public content::WebContentsObserver,
   void RenderFrameDeleted(content::RenderFrameHost*) override;
   void RenderFrameHostChanged(content::RenderFrameHost*, content::RenderFrameHost*) override;
   void CreateContents();
+  void AttachOffscreenHost();
+  void DropContents();
   void ApplyDevice(content::RenderFrameHost* frame = nullptr);
   void ApplyBackingScale(content::RenderWidgetHostViewBase*);
   content::RenderWidgetHostImpl* FocusedWidget() const;
@@ -137,6 +142,10 @@ class WebView final : public content::WebContentsObserver,
   SessionId session_;
   WebViewId view_;
   std::unique_ptr<content::WebContents> contents_;
+  const bool use_offscreen_host_;
+  std::unique_ptr<OffscreenHost> offscreen_host_;
+  bool render_demand_ = false;
+  uint32_t render_fps_ = 60;
   int viewport_width_ = 0, viewport_height_ = 0;
   bool tablet_ = false;
   float device_scale_ = 1;

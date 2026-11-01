@@ -1,0 +1,153 @@
+diff --git a/components/viz/service/frame_sinks/compositor_frame_sink_support.cc b/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
+index 798d04318b..af650b6ca4 100644
+--- a/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
++++ b/components/viz/service/frame_sinks/compositor_frame_sink_support.cc
+@@ -283,6 +283,10 @@ void CompositorFrameSinkSupport::SetThrottleInterval(base::TimeDelta interval) {
+   throttler_.SetThrottleInterval(interval);
+ }
+ 
++void CompositorFrameSinkSupport::SetCaptureRenderInterval(base::TimeDelta interval) {
++  throttler_.SetCaptureRenderInterval(interval);
++}
++
+ void CompositorFrameSinkSupport::SetAllowThrottling(bool allowed) {
+   throttler_.SetAllowThrottling(allowed);
+ }
+diff --git a/components/viz/service/frame_sinks/compositor_frame_sink_support.h b/components/viz/service/frame_sinks/compositor_frame_sink_support.h
+index 78659653c9..c644355db1 100644
+--- a/components/viz/service/frame_sinks/compositor_frame_sink_support.h
++++ b/components/viz/service/frame_sinks/compositor_frame_sink_support.h
+@@ -168,6 +168,7 @@ class VIZ_SERVICE_EXPORT CompositorFrameSinkSupport
+   // throttled by other signals (e.g. cadence) unless SetAllowThrottling(false)
+   // is called.
+   void SetThrottleInterval(base::TimeDelta interval);
++  void SetCaptureRenderInterval(base::TimeDelta interval);
+ 
+   // If |allowed| is false, the begin frame interval will be base::TimeDelta()
+   // regardless of any other throttling.
+diff --git a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+index fd2f7e5ec5..8a9a6aca82 100644
+--- a/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
++++ b/components/viz/service/frame_sinks/frame_sink_manager_impl.cc
+@@ -19,9 +19,11 @@
+ #include "base/containers/map_util.h"
+ #include "base/containers/queue.h"
+ #include "base/debug/alias.h"
++#include "base/feature_list.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/logging.h"
++#include "base/metrics/field_trial_params.h"
+ #include "base/metrics/histogram_functions.h"
+ #include "base/observer_list.h"
+ #include "base/task/sequenced_task_runner.h"
+@@ -58,6 +60,12 @@
+ 
+ namespace viz {
+ 
++namespace {
++BASE_FEATURE(kRemoteKitCaptureRenderRate, base::FEATURE_DISABLED_BY_DEFAULT);
++const base::FeatureParam<int> kCaptureRenderMaxFps{
++    &kRemoteKitCaptureRenderRate, "max_fps", 30};
++}  // namespace
++
+ FrameSinkManagerImpl::InitParams::InitParams(
+     OutputSurfaceProvider* output_surface_provider,
+     GmbVideoFramePoolContextProvider* gmb_context_provider)
+@@ -1258,6 +1266,7 @@ void FrameSinkManagerImpl::UpdateThrottlingRecursively(
+                   [this, &default_throttle](const FrameSinkId& child_id) {
+                     if (auto* support = GetFrameSinkForId(child_id)) {
+                       support->SetThrottleInterval(default_throttle);
++                      support->SetCaptureRenderInterval(base::TimeDelta());
+                       support->SetAllowThrottling(true);
+                     }
+                   });
+@@ -1336,13 +1345,22 @@ void FrameSinkManagerImpl::ApplyThrottlingRules(
+     }
+   }
+ 
+-  // Do not allow throttling on frame sinks currently being captured.
++  const bool capture_admission =
++      base::FeatureList::IsEnabled(kRemoteKitCaptureRenderRate);
++  const base::TimeDelta capture_interval =
++      capture_admission
++          ? base::Hertz(std::clamp(kCaptureRenderMaxFps.Get(), 1, 60))
++          : base::TimeDelta();
++  // Normally capture is exempt. The opt-in rule admits BeginFrames at the
++  // requested rate while retaining stricter explicit/cadence throttles.
+   for (const auto& id : captured_roots) {
+-    RecurseChildren(id, [this](const FrameSinkId& frame_sink_id) {
+-      if (auto* support = GetFrameSinkForId(frame_sink_id)) {
+-        support->SetAllowThrottling(false);
+-      }
+-    });
++    RecurseChildren(
++        id, [this, capture_admission, capture_interval](const FrameSinkId& frame_sink_id) {
++          if (auto* support = GetFrameSinkForId(frame_sink_id)) {
++            support->SetCaptureRenderInterval(capture_interval);
++            support->SetAllowThrottling(capture_admission);
++          }
++        });
+   }
+ }
+ 
+@@ -1354,6 +1372,7 @@ void FrameSinkManagerImpl::UpdateThrottling() {
+ 
+   for (auto& [id, support] : support_map_) {
+     support->SetThrottleInterval(gloabl_throttle);
++    support->SetCaptureRenderInterval(base::TimeDelta());
+     support->SetAllowThrottling(true);
+   }
+ 
+diff --git a/components/viz/service/frame_sinks/frame_sink_throttler.cc b/components/viz/service/frame_sinks/frame_sink_throttler.cc
+index 80ec37aca4..06da2923c4 100644
+--- a/components/viz/service/frame_sinks/frame_sink_throttler.cc
++++ b/components/viz/service/frame_sinks/frame_sink_throttler.cc
+@@ -28,6 +28,14 @@ void FrameSinkThrottler::SetAllowThrottling(bool allowed) {
+   UpdateBeginFrameInterval();
+ }
+ 
++void FrameSinkThrottler::SetCaptureRenderInterval(base::TimeDelta interval) {
++  if (capture_render_interval_ == interval) {
++    return;
++  }
++  capture_render_interval_ = interval;
++  UpdateBeginFrameInterval();
++}
++
+ void FrameSinkThrottler::SetCadenceThrottleInterval(base::TimeDelta interval) {
+   if (cadence_throttle_interval_ == interval) {
+     return;
+@@ -67,6 +75,10 @@ void FrameSinkThrottler::UpdateBeginFrameInterval() {
+     interval = cadence_throttle_interval_;
+   }
+ 
++  if (capture_render_interval_.is_positive()) {
++    // Capture admission must not relax explicit or effective cadence limits.
++    interval = std::max({interval, throttle_interval_, capture_render_interval_});
++  }
+   begin_frame_interval_ = interval;
+ }
+ 
+diff --git a/components/viz/service/frame_sinks/frame_sink_throttler.h b/components/viz/service/frame_sinks/frame_sink_throttler.h
+index 1ee68a497f..c27bf333e1 100644
+--- a/components/viz/service/frame_sinks/frame_sink_throttler.h
++++ b/components/viz/service/frame_sinks/frame_sink_throttler.h
+@@ -28,6 +28,9 @@ class VIZ_SERVICE_EXPORT FrameSinkThrottler {
+   // is called.
+   void SetThrottleInterval(base::TimeDelta interval);
+ 
++  // A capture-specific admission limit. Zero restores normal cadence policy.
++  void SetCaptureRenderInterval(base::TimeDelta interval);
++
+   // Disabling throttling will force the begin frame interval to be
+   // base::TimeDelta() regardless of any other throttling signals (e.g. cadence,
+   // background state, etc.). This is typically used for scenarios like screen
+@@ -62,6 +65,7 @@ class VIZ_SERVICE_EXPORT FrameSinkThrottler {
+   // Explicitly-set throttle_interval, used unless the interaction throttling
+   // results in a larger value or cadence throttling is possible.
+   base::TimeDelta throttle_interval_;
++  base::TimeDelta capture_render_interval_;
+ 
+   // If false, the begin frame interval will be base::TimeDelta() regardless of
+   // any other throttling.

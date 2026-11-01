@@ -8,6 +8,7 @@
 window.fixtureEvents=[];
 const log=e=>{fixtureEvents.push({type:e.type,data:e.data??null,value:editor.value});events.textContent=JSON.stringify(fixtureEvents.slice(-4),null,1)};
 for(const type of ['beforeinput','input','compositionstart','compositionupdate','compositionend','keydown','keyup'])editor.addEventListener(type,log);
+if(new URL(location.href).searchParams.has('focusReport'))setInterval(()=>{if(document.activeElement===editor){const title='MAIN_FOCUS '+editor.value;if(document.title!==title)document.title=title;}},100);
 for(const type of ['pointerdown','pointermove','pointerup','touchstart','touchmove','touchend'])touch.addEventListener(type,e=>{position.textContent=e.type;log(e)});
 frame.src=location.protocol==='file:'?'frame.html':`http://localhost:${location.port}/frame.html`;
 (async()=>{identity.textContent=JSON.stringify({ua:navigator.userAgent,brands:navigator.userAgentData?.brands,high:await navigator.userAgentData?.getHighEntropyValues(['architecture','bitness','platformVersion','fullVersionList']),chrome:Object.keys(window.chrome??{}),csi:chrome.csi(),loadTimes:chrome.loadTimes()},null,1)})();

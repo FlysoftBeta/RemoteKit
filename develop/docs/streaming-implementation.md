@@ -107,6 +107,52 @@ Chrome89的rVFC元数据读取与drawImage(video)并非原子取得同一个fram
 
 0002回调所有权审阅、两项补丁撤回/重应用、统一增量构建/SDK导出和4项patchset测试已通过；已提交推送55ffdf1。新包`RemoteKit-win-x64-streaming-qsv-nvenc-20261101-111347.zip`为clean55ffdf1，461935509字节，SHA256 `97e3422e1b676f543053038a342134b435b17b9ef48d1c7bb7bf2c226271a924`。537项文件校验、两次独立smoke、真实Chrome89首帧/hover/click60001/IME42/close200及Sol视觉均通过，证据在delivery-55ffdf1-20261101-111347；9个自建进程已清理、端口3117无监听。旧checkpoint保留，本批交付完成。性能目标仍未达到，P1后续定位保持上述真实完成观察路径与GPU队列问题。
 
+## 提交后等待的实质改进
+
+用户要求继续改进。对既有慢帧进一步关联发现，S4完成观察任务迟到137.464ms，其中137.361ms被已执行任务覆盖；内部DXGISwapChainImageBacking::Present持续131.914ms。S3/S2同类Present为147.837/84.290ms。CrGpuMain被同步Present阻塞，同线程高优先级完成检查不能抢占它，因此不实施该优先级方案。
+
+主Agent选定首个有界对照：仅串流Session source browser使用标准`--disable-direct-composition`，保留GPU、官方CopyOutput和Fence；接收端Chrome89不改。Endpoint新增可覆盖的`browser-direct-composition=auto|off`，初始默认auto。先确认off路径真实GPU/H264与profile，再用相同二进制、默认编码、snapshot、24Mbps/10ms进行四1080 auto/off对照及单720回退检查。以canvas FPS、同RTP marker p95、读回成本和功能正确性决定是否保留/推广，不能仅凭Present scope消失就判成功。
+
+直接source→共享slot、单plane省一次atlas copy在源码层面可行，但需要正确维护最新像素位置、padding和多plane/静态fallback；暂缓，先处理已有直接证据的Present阻塞。root compositor仍呈现2880×1620而WebView捕获1920×1080的额外开销也在只读核对，未经验证不改viewport/DPR。
+
+第一对DComp auto/off已完成：off上游render/encode略升、CPU下降，但canvas FPS无改善。profile证明阻塞转移到NativeViewGLSurfaceEGL::PostSubBuffer（慢帧约448ms），故停止其余矩阵，不推广off默认。
+
+主Agent选择下一实现：默认关闭Feature RemoteKitOffscreenRoot，仅source Session browser的VizProcessTransportFactory把root_params->widget置为官方null surface handle，保留浏览器侧真实HWND、Compositor可见性、完整尺寸和生命周期。官方SkiaOutputDeviceOffscreen保留GPU纹理、Reshape/BeginPaint与swap ACK，没有原生Present；不是隐藏Compositor或软件截图。独立0003补丁，先profile验证，再同binary/profile-off/marker1Hz四1080 A/B与必要重复；有最终收益后才测轻载/重建/输入并决定默认。宿主DPI的root额外像素面积作为后续独立变量，不混入本次对照。
+
+offscreen首对退化：源render约20→40–42/s，capture约20→10/s，canvas约7.6–8.5→6.3–6.7FPS，marker p95约1085–1195→1633–1952ms；3D busy仍约99%。原生Present虽消失，但提交更多GPU工作，不能推广此默认，余下矩阵停止。静态点击/IME最后变化通过；0003仅保留默认关闭诊断能力。
+
+下一独立变量为source-only标准`--force-device-scale-factor=1`，通过Endpoint `browser-host-scale=auto|1`和prepare参数控制，初始默认auto。源码确认ScreenWin与WinHost的Chromium DPI解释会跟随forced值，RWHV native DSF分母也变1；Control仍独立设置网页DPR1/2。先验证root实际尺寸、desktop/tablet backing与混合输入，再做同binary、DComp auto、offscreen关的auto/host1端到端对照。有最终收益才重复和轻载回归；不修改系统DPI，不手工调整root transform。
+
+source宿主实际仍有系统边框，ConfigureOutput却把atlas客户区尺寸当outer size。已改为source-only frameless，native demo保持原行为；真实renderer metadata、四角像素、右下mouse/touch、IME/reload和mixed通过。旧裁剪是本地root裁剪，renderer提交仍完整，不能夸大为视频丢边。修复后有效auto/host1对照仍无最终收益，默认保持auto；报告见source-host-scale.md。
+
+下一架构实验为真正的source BeginFrame admission：默认关闭Feature RemoteKitCaptureRenderRate，参数max_fps。直接Throttle会被正在capture的豁免取消，因此在GPU FrameSinkManager当前捕获子树规则中显式应用，不维护Host ID缓存。FrameSinkThrottler新增默认0的capture_render_interval，仅>0时与explicit及cadence有效间隔取max；为0时保留原行为，停捕获/重算清理旧值。不注入JS、不隐藏页面、不增加browser↔endpoint逐帧IPC。
+
+0004已完成统一构建及真实Manager/Throttler CPU probe（on/off），尚无实播性能数据。用户纠正架构后停止30/20矩阵，保留默认关闭的实验源码，不将其作为新输出路径的依赖。
+
+## 当前执行：按设计替换服务渲染宿主
+
+用户指定参照`C:/src/tmp/electron-investigation/IMPLEMENTATION-SKETCH.zh-CN.md`第5节，并明确Aura无需去除。之前将保留Aura连带成保留原生显示窗口是主Agent架构判断失误；不再沿该窗口路径追加拦截修补。
+
+主Agent选定每WebView独立的无原生窗口Aura WindowTreeHost，参考官方Headless宿主。保留WebContentsViewAura/RWHVAura、DelegatedFrameHost、输入/OOPIF/IME；source不创建Views Widget或atlas显示窗口。ui::Compositor从构造开始使用null accelerated widget及external BeginFrame，直接采用官方离屏目标，不依赖0003。rectangle packing在现有GPU桥完成。
+
+服务虚拟host统一DSF1，与Windows屏幕DPI脱钩；页面设备DPR仍由现有仿真与capture scale override控制。host物理尺寸、内容DIP、网页backing及atlas位置分别维护。browser本地pacer按输出fps驱动，每host最多一个未ACK tick并合并过期tick；ACK与真实GPU完成分开，现有source lease和双向Fence保留。旧窗口路径只作明确诊断对照，原生demo维持原行为。
+
+profile_resume负责实现、唯一GN/GPU窗口、真实Chrome89功能与1/4租户对照；delivery_resume准备最小验收集并做独立代码审阅。先验证single视频/input/IME、DPR切换/mixed及OOPIF，再测无native Present和性能，不把架构替换本身宣称为已达到目标。
+
+新宿主统一编译及single720真实Chrome89 H264、hover、click60001、IME42已通过，90次BeginFrame提交/ACK一致。四角与右下mouse/touch、IME92、reload及静态最后变化通过；真实renderer metadata为desktop1920×1080@1、tablet1640×2360@2，host分别1920×1080与820×1180@1。Windows的InputMethodMinimal仍有纯虚方法，故采用官方Headless同款MockInputMethod避免本地WinTSF，远程IME继续直达RWH。
+
+窗口枚举发现不可见Chrome_WidgetWin_0，经当前ui_gfx.dll加载基址、PE/PDB vtable及对象身份确认是gfx::SingletonHwnd广播辅助窗，证据osr-aura-edges/window-object-proof.json。不是页面呈现窗口；不把整个Chromium进程描述为零HWND。独立源码审阅未发现确定缺陷，mixed/OOPIF/GPU恢复及性能对照仍在执行。
+
+已解决P1：split第二个离屏host曾使Viz CHECK退出。修正子进程LoggingSettings继承HANDLE后取得准确日志：Got overlapping IssueExternalBeginFrame。多个host复用了kManualSourceId，Viz的全局sink观察按source_id归属，使不同host的pending互相污染。已采用CEF式官方StubBeginFrameSource为每host分配独立source_id，未修改Viz观察/ACK语义。双host各239次提交/ACK一致，8阶段设备/呈现切换、静态恢复、旧epoch拒绝及混合DPR/中文输入通过；16秒官方trace无DXGI或NativeViewGLSurfaceEGL的Present/PostSubBuffer。
+
+P2输入修复：OOPIF实播已有双renderer及iframe中文预编辑/提交、切回主文档和再次输入证据。其间leave后出现invalid_mouse和布局移动；旧trace未保存x/y，不能确定缺字段还是非有限值。delivery已将leave按当前几何clamp，无效尺寸/非有限坐标拒绝，并补mousecancel结束。主Agent复核后确认模型允许捕获中的有限越界坐标，因此move/up/cancel保持原始DIP，避免破坏拖拽/边缘滚动；不放宽browser验证。35项测试/typecheck/build/smoke通过，最终bundle为index-Bsj1jkWQ.js，profile负责实播验收。证据osr-aura-oopif-final/metrics/client-metrics.jsonl。跨iframe切换后IME验收等待实际DOM焦点反馈，不把点击派发完成误当已聚焦。
+
+真实source GPU进程故障已通过：同一Chrome89连接，GPU19116→1544，decoded35→181，后续click/IME同RTP marker88返回；有效共享输出generation/epoch保持1。这组无pending tick，221提交/ACK；另一组in-flight时controllerGeneration1→2、cancelled1并恢复1752ACK，覆盖断连取消。未用ACK或故障伪造GPU完成，也未为测试强制共享输出重建。接下来运行新Client边界实播和同binary的1/4×1080新旧宿主性能pair。
+
+60fps新旧宿主配对结果：单1080 source/encode32.0→36.4，marker p95 186→155ms，但canvas31.6→29.3；四1080 source18.0–18.6→32.6–34.3，encode11.2–11.9→11.1–11.9，canvas7.0–7.8→5.9–6.3，p95 976–1196→1377–1435ms，3D99.2→99.8%。架构与功能已接通，60fps驱动下负载仍积压，未达到目标。
+
+下一步由主Agent固定独立browser-render-fps（0沿用输出上限），只影响新OffscreenHost本地pacer，不改capture/atlas上限、QSV名义fps、码率和客户端。以同新binary/最终bundle做四1080的60基线、30、20各一次有界对照，依据最终呈现/marker结果决定背压方案；不采用0004，不先实现自适应算法。delivery只读盘点真实资源和capture时序信号，防止把ACK或不存在的静态capture当作GPU完成。
+
 ## 输出采样决策
 
 平板高DPR/分屏可能超过接收端level的MaxFS/MaxMBPS。保留网页viewport/DPR及browser源atlas，由endpoint GPU NV12转换等比下采样到协商限制；NativeBuffer逻辑尺寸是编码尺寸，真实D3D texture尺寸保持源尺寸。layout坐标转编码像素，mediaScale独立于deviceScaleFactor，输入按两者乘积转DIP。stats/HUD明确源/编码尺寸与比例。该选择用于功能与编码约束，不把缩小后的FPS报告成原分辨率性能。

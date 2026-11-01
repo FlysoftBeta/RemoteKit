@@ -1,6 +1,8 @@
 # Windows GPU atlas 输出
 
-默认串流服务按Session建立browser进程与Fence atlas，经Endpoint编码后由WebRTC传到客户端。原生demo使用 `--presentation=fence`，`--presentation=native` 是显式 HWND 对照入口。内部内容视图保留 Views/Aura与非零尺寸capture host，当前不属于无 Aura/无 HWND embedder。
+默认串流服务按Session建立browser进程与Fence atlas，经Endpoint编码后由WebRTC传到客户端。服务页面采用每WebView独立的无HWND Aura宿主，ui::Compositor从创建时使用null accelerated widget，直接输出离屏纹理；保留Aura内容视图、输入与IME支持。atlas在GPU桥合并，不再绘制到本地atlas窗口。运行验收状态见[当前状态](current-state.zh-CN.md)。
+
+browser本地external BeginFrame pacer按输出需求驱动各页，最多一个未ACK tick；ACK用于调度，不表示纹理GPU完成。宿主使用虚拟DSF1，页面DPR与实际backing独立配置。`--browser-render-host=window`是旧宿主的显式诊断对照，默认`offscreen`。原生demo独立保留Views窗口，使用`--presentation=fence`；`--presentation=native`仍是其显式HWND对照入口。
 
 ## 资源与完成点
 

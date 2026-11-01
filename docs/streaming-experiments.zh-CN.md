@@ -42,7 +42,38 @@ Chromium补丁提供默认关闭的`RemoteKitBoundedCapture:max_pending/1`或`/2
 
 请求级profile补丁已把同一CopyOutput的dispatch、flush、Skia submitted/finished、mailbox和SendResult连通，并取得Ganesh/OpenGL实际GPU flush批次elapsed。重启后独立4×1080诊断中，S4稳态142个完整请求的Created→SendResult p50/p95为215.977/283.458ms，submitted→finished为203.317/272.052ms，GPU batch elapsed为0.813/1.050ms。同boot单720的241个完整请求为9.677/14.723ms，batch elapsed为0.657/0.690ms。各阶段分位不可相加；elapsed不是映射到CPU时钟的硬件完成时刻，不能把余量全部算作通知延迟。
 
-四租户慢帧229的finished落在CommandBufferStub::PerformWork任务内，该任务请求约2ms，精确flow post→run为139.454ms。S4仅1/142个finished落在surface CheckAsyncWorkCompletion，故撤回直接调整surface 2ms poll的假设。CopyOutput局部显式submit均Skipped，但成功Skia submitted约在flush return后1ms出现，也没有据此强制submit。下一定位点是实际PerformWork/MakeCurrent完成检查入口及ready观察边界。重启前后数据、startup/稳态窗口和GPU elapsed含义详见[请求级profile报告](../develop/docs/copy-output-profile.md)；本轮未改提交或轮询策略。
+四租户慢帧229的finished落在CommandBufferStub::PerformWork任务内，该任务请求约2ms，精确flow post→run为139.454ms。S4仅1/142个finished落在surface CheckAsyncWorkCompletion，故撤回直接调整surface 2ms poll的假设。CopyOutput局部显式submit均Skipped，但成功Skia submitted约在flush return后1ms出现，也没有据此强制submit。重启前后数据、startup/稳态窗口和GPU elapsed含义详见[请求级profile报告](../develop/docs/copy-output-profile.md)。
+
+继续展开该CrGpuMain任务：到期后137.464ms的滞后中，137.361ms被前一RunTask覆盖，其中DXGISwapChainImageBacking::Present占131.914ms、CPU时间仅0.465ms。同线程的高优先级完成检查无法抢占正在阻塞的Present，所以没有提升poll优先级或缩短其间隔。其他Session也出现84–148ms的Present。详见[完成观察阻塞调查](../develop/docs/completion-observer-investigation.md)。
+
+### 源端窗口与负载对照
+
+各行是独立的同binary配对实验：四1080、每peer24Mbps/RTT10ms、Chrome89默认snapshot、1Hz marker、profile关闭、5秒暖机加20秒有效窗口。范围覆盖四租户；各行基线不能互换。
+
+| source候选 | 配对基线：canvas FPS / marker p95 ms | 候选：canvas FPS / marker p95 ms | 结论 |
+|---|---|---|---|
+| 关闭DirectComposition | 8.29–9.74 / 992–1082 | 8.15–8.89 / 864–1009 | 等待转移至NativeViewGLSurfaceEGL::PostSubBuffer，未改善最终吞吐 |
+| 官方offscreen root | 7.64–8.50 / 1085–1195 | 6.30–6.70 / 1633–1952 | 去掉Present后源render约20升至40–42，GPU积压与最终结果恶化 |
+| host scale强制1（已修正窗口边框） | 8.29–8.69 / 989–1127 | 6.74–7.54 / 987–1027 | 源render/capture提高，编码/呈现下降，3D仍约99% |
+
+三项均保留为显式实验选项，默认不启用：服务参数`--browser-direct-composition=off`、`--browser-host-scale=1`，以及Feature `RemoteKitOffscreenRoot`。只作用于source browser，不改变Chrome89 receiver。分项报告见[source DirectComposition](../develop/docs/source-direct-composition.md)、[offscreen root](../develop/docs/source-offscreen-root.md)及[host scale](../develop/docs/source-host-scale.md)。
+
+有效host-auto基线的20个资源样本中，同一物理3D engine平均busy99.206%，按PID归属source GPU52.301%、source browser13.319%、Endpoint19.895%、receiver GPU13.689%。计数按完整LUID/physical adapter/engine分组跨PID求和，不混合engine、不截断到100%。VideoDecode21.480%中Endpoint占14.181%、receiver占7.297%；VideoProcessing9.380%全部来自Endpoint，没有独立VideoEncode实例。Windows驱动engine标签不等于API职责；busy也不能直接解释为shader算术饱和。
+
+已修复source宿主窗口的边框尺寸差额：服务窗口使用无边框客户区，atlas1928×1088不再被窗口外框尺寸挤小；原生demo保持原行为。此前WebView实际提交仍完整，该问题是本地root裁剪。真实renderer metadata、桌面/平板四角像素、右下mouse/touch、IME和reload验证通过；host scale有效对照使用修复后的同一binary，未混入旧裁剪样本。
+
+### 无页面HWND宿主
+
+服务已切换为每WebView独立的无原生窗口Aura宿主，从创建时使用null widget和external BeginFrame；不依赖旧offscreen-root/capture-rate实验补丁。每host使用独立BeginFrame source ID，避免多页任务混入同一ACK跟踪。真实多页、混合DPR、OOPIF中文输入及source GPU进程故障恢复通过，官方trace不再出现窗口Present。进程中的SingletonHwnd已通过对象身份核查为系统广播辅助窗。
+
+以下配对均为1080p、24Mbps/RTT10ms、默认snapshot、1Hz marker、profile关闭、5秒暖机加20秒稳态；每对使用相同binary和Client bundle。
+
+| 租户 | 旧窗口canvas FPS / marker p95 ms | 新离屏60fps驱动canvas FPS / marker p95 ms |
+|---|---|---|
+| 1 | 31.6 / 186 | 29.3 / 155 |
+| 4 | 7.0–7.8 / 976–1196 | 5.9–6.3 / 1377–1435 |
+
+四租户source由18.0–18.6升至32.6–34.3FPS，但编码仍约11FPS，3D busy99.2→99.8%。无窗口架构解决了原生Present依赖，60fps驱动仍造成过量提交。新增`--browser-render-fps=0..60`独立控制本地pacer（0沿用输出配置），capture/atlas/QSV名义fps不随之改变；背压调优正在进行。具体运行与输入证据见[离屏宿主报告](../develop/docs/source-aura-osr.md)。
 
 ## 网络模拟
 

@@ -7,6 +7,7 @@
 #include "base/logging/logging_settings.h"
 #include "base/memory/ref_counted_memory.h"
 #include "base/path_service.h"
+#include "base/strings/string_number_conversions.h"
 #include "components/embedder_support/user_agent_utils.h"
 #include "content/public/browser/browser_main_parts.h"
 #include "content/public/browser/content_browser_client.h"
@@ -99,6 +100,16 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   logging::LoggingSettings settings;
   settings.logging_dest = logging::LOG_TO_STDERR;
   auto log_path = command.GetSwitchValuePath("log-file");
+  // Chromium child processes receive an inherited logging HANDLE, not a path.
+  // Preserve it so GPU/renderer failures reach this Session's browser log.
+  if (command.GetSwitchValueASCII("enable-logging") == "handle") {
+    uint64_t log_handle = 0;
+    if (base::StringToUint64(command.GetSwitchValueASCII("log-file"), &log_handle) &&
+        log_handle) {
+      settings.logging_dest |= logging::LOG_TO_FILE;
+      settings.log_file = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(log_handle));
+    }
+  }
   if (log_path.empty() && command.HasSwitch("data-path"))
     log_path = command.GetSwitchValuePath("data-path").AppendASCII("browser.log");
   if (!log_path.empty() && log_path.IsAbsolute() && base::CreateDirectory(log_path.DirName())) {

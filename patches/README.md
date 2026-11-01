@@ -18,6 +18,19 @@ Ganesh submitted/finished 各自拥有独立 callback context；finished 保留�
 的 plain fallback 并转发原 Vulkan cleanup。Graphite 无 per-recording submitted
 callback，记录该缺口。补丁按清单顺序应用，逆序撤回。
 
+`0003-offscreen-root.patch` 提供默认关闭的 `RemoteKitOffscreenRoot`。
+启用时只把发给Viz的root surface handle设为空，使GPU输出使用官方offscreen
+纹理路径；浏览器Compositor的真实HWND、visible状态、尺寸与生命周期保持原样。
+不改CopyOutput、GPU完成回调、capture lease或共享Fence。实验只给source
+Session browser启用，native demo与接收端Chrome89保持默认。
+
+`0004-capture-render-rate.patch` 是默认关闭的BeginFrame admission实验，
+Feature为 `RemoteKitCaptureRenderRate:max_fps/30`（参数限制1–60）。
+仅捕获子树设置独立render interval，保留更严格的explicit/cadence规则，
+捕获停止或层级重算会清除旧输入；关闭时保留Chromium原捕获豁免行为。
+聚焦GN probe验证策略与层级生命周期。用户转向OSR后，本实验未运行GPU性能组，
+不作为已验证优化或生产默认。
+
 RemoteKit SDK 通过 Chromium 官方
 `//third_party/webrtc_overrides:webrtc_component` 使用 libwebrtc，
 无需修改 `timeutils` 的 target visibility。

@@ -37,6 +37,8 @@ template("browser_executable") {
     "main_delegate.h",
     "navigation_state.cc",
     "navigation_state.h",
+    "offscreen_host.cc",
+    "offscreen_host.h",
     "page_requests.cc",
     "page_requests.h",
     "profile_services.cc",
@@ -81,9 +83,12 @@ template("browser_executable") {
     "//services/viz/privileged/mojom/compositing",
     "//third_party/blink/public:blink",
     "//ui/aura",
+    "//ui/compositor",
     "//ui/base",
+    "//ui/base/ime",
     "//ui/display",
     "//ui/gfx",
+    "//ui/events/platform",
     "//ui/views",
     "//ui/views/controls/webview",
     "//ui/wm",
@@ -104,6 +109,17 @@ browser_executable("remotekit_browser") {
 }
 browser_executable("remotekit_browser_demo") {
   demo = true
+}
+
+executable("remotekit_capture_render_rate_probe") {
+  testonly = true
+  sources = [ "capture_render_rate_probe.cc" ]
+  deps = [
+    "//base",
+    "//components/viz/common",
+    "//components/viz/service",
+    "//mojo/core/embedder",
+  ]
 }
 
 repack("pak") {

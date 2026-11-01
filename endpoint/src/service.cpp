@@ -69,8 +69,8 @@ size_t DecodedSize(const std::string& text) {
 }
 struct Options {
  fs::path browser,data,browser_trace_directory;
- std::string encoder="auto",browser_enable_features;EncoderSettings encoding;
- uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096;
+ std::string encoder="auto",browser_enable_features,browser_direct_composition="auto",browser_host_scale="auto",browser_render_host="offscreen";EncoderSettings encoding;
+ uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096,browser_render_fps=0;
  int32_t rtc_playout_max_ms=-1;
  Options() {
   wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
@@ -84,6 +84,23 @@ struct Options {
    auto key=arg.substr(0,equal),value=arg.substr(equal+1);
    if(key=="--browser")browser=Utf8Path(value);else if(key=="--data-path")data=Utf8Path(value);
    else if(key=="--browser-enable-features")browser_enable_features=value;
+   else if(key=="--browser-direct-composition"){
+    if(value!="auto"&&value!="off")throw std::runtime_error("browser-direct-composition must be auto or off");
+    browser_direct_composition=value;
+   }
+   else if(key=="--browser-host-scale"){
+    if(value!="auto"&&value!="1")throw std::runtime_error("browser-host-scale must be auto or 1");
+    browser_host_scale=value;
+   }
+   else if(key=="--browser-render-host"){
+    if(value!="offscreen"&&value!="window")throw std::runtime_error("browser-render-host must be offscreen or window");
+    browser_render_host=value;
+   }
+   else if(key=="--browser-render-fps"){
+    if(value.empty()||!std::all_of(value.begin(),value.end(),[](char c){return c>='0'&&c<='9';})||std::stoul(value)>60)
+     throw std::runtime_error("browser-render-fps must be an integer in 0..60");
+    browser_render_fps=std::stoul(value);
+   }
    else if(key=="--browser-trace-dir")browser_trace_directory=Utf8Path(value);
    else if(key=="--encoder")encoder=value;
    else if(key=="--fps")encoding.fps=std::stoul(value);
@@ -187,6 +204,9 @@ struct Session {
   append(L"--tenant-id="+std::wstring(id.begin(),id.end()));
   append(L"--data-path="+directory.wstring());
   append(L"--atlas-width=1920");append(L"--atlas-height=1080");
+  append(L"--remotekit-render-host="+std::wstring(options.browser_render_host.begin(),options.browser_render_host.end()));
+  if(options.browser_direct_composition=="off")append(L"--disable-direct-composition");
+  if(options.browser_host_scale=="1")append(L"--force-device-scale-factor=1");
   if(!options.browser_enable_features.empty())
    append(L"--enable-features="+std::wstring(options.browser_enable_features.begin(),options.browser_enable_features.end()));
   if(!options.browser_trace_directory.empty()) {
@@ -198,6 +218,7 @@ struct Session {
    append(L"--trace-startup-record-mode=record-until-full");
    append(L"--default-trace-buffer-size-limit-in-kb=32768");
   }
+  fprintf(stderr,"session %s browser command %s\n",id.c_str(),Utf8(fs::path(command)).c_str());
   STARTUPINFOW startup{};startup.cb=sizeof(startup);startup.dwFlags=STARTF_USESHOWWINDOW;startup.wShowWindow=SW_HIDE;
   PROCESS_INFORMATION info{};
   if(!CreateProcessW(options.browser.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_SUSPENDED|CREATE_NO_WINDOW,
@@ -253,7 +274,7 @@ struct Session {
  }
  void GeometryConfig(const Geometry& value) {
   Rpc({{"method","output.configure"},{"width",value.width},{"height",value.height},
-       {"device_scale",value.scale},{"fps",options.encoding.fps}});
+       {"device_scale",value.scale},{"fps",options.encoding.fps},{"render_fps",options.browser_render_fps}});
   atlas_width=value.width;atlas_height=value.height;atlas_scale=value.scale;
  }
  void RefitOutput() {

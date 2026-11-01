@@ -7,7 +7,7 @@ import './style.css';
 import { MarkerTools } from './marker-tools';
 import { StatsOverlay } from './stats-overlay';
 import { ReceiveSettings } from './receive-settings';
-import { clientPointToDip, surfacePixelScale } from './coordinates';
+import { clientPointToDip, pointerPointToDip, surfacePixelScale, type PointerAction } from './coordinates';
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, React.ReactNode> = {
@@ -34,6 +34,7 @@ function Viewport({ tab, device, secondary = false, overlay = false }: { tab: Ta
   const editor = useRef<HTMLTextAreaElement>(null);
   const composing = useRef(false);
   const compositionCommit = useRef<string | null>(null);
+  const mouseCapture = useRef<{ pointerId: number; button: number; identity: string } | null>(null);
   const surface = transport.layout?.views.find(view => view.id === tab.webviewId);
   const layoutEpoch = transport.layout?.epoch, layoutGeneration = transport.layout?.generation;
   const [frameReady, setFrameReady] = useState(false);
@@ -45,17 +46,32 @@ function Viewport({ tab, device, secondary = false, overlay = false }: { tab: Ta
     return transport.registerPlane({ view: surface, layoutEpoch, layoutGeneration }, canvas.current, setFrameReady);
   }, [surface, layoutEpoch, layoutGeneration]);
   const send = (event: Record<string, unknown>) => { if (surface) transport.sendInput(surface, event); };
-  const point = (event: { clientX: number; clientY: number }) => {
-    const rect = canvas.current!.getBoundingClientRect();
-    return clientPointToDip(surface!, rect, event.clientX, event.clientY);
+  const point = (event: { clientX: number; clientY: number }, action?: PointerAction, captured = false) => {
+    if (!surface || !canvas.current) return null;
+    const rect = canvas.current.getBoundingClientRect();
+    return action ? pointerPointToDip(surface, rect, event.clientX, event.clientY, action, captured) : clientPointToDip(surface, rect, event.clientX, event.clientY);
   };
-  const pointer = (event: React.PointerEvent<HTMLCanvasElement>, action: string) => {
-    if (!surface || !frameReady) return;
-    if (action === 'down') { event.preventDefault(); editor.current?.focus({ preventScroll: true }); transport.focus(surface, true); event.currentTarget.setPointerCapture(event.pointerId); }
-    const position = point(event);
-    if (event.pointerType === 'touch') send({ type: 'touch', action: ({ down: 'start', up: 'end', move: 'move', cancel: 'cancel' } as Record<string, string>)[action], points: [{ id: event.pointerId, ...position, pressure: event.pressure }] });
-    else if (action !== 'cancel') send({ type: 'mouse', action, ...position, button: (action === 'move' || action === 'leave') ? 0 : [1, 2, 3, 4, 5][event.button] ?? 0, modifiers: modifiers(event) | mouseButtonModifiers(event.buttons), click_count: (action === 'move' || action === 'leave') ? 0 : Math.min(3, Math.max(1, event.detail)) });
-    if ((action === 'up' || action === 'cancel') && event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  const pointer = (event: React.PointerEvent<HTMLCanvasElement>, action: PointerAction) => {
+    const captured = event.currentTarget.hasPointerCapture(event.pointerId);
+    const identity = `${surface?.session}:${surface?.id}:${surface?.instance}:${surface?.document}:${layoutGeneration}:${layoutEpoch}`;
+    const pressed = mouseCapture.current?.pointerId === event.pointerId && mouseCapture.current.identity === identity ? mouseCapture.current : null;
+    const release = () => {
+      if (action !== 'up' && action !== 'cancel') return;
+      if (captured) event.currentTarget.releasePointerCapture(event.pointerId);
+      if (mouseCapture.current?.pointerId === event.pointerId) mouseCapture.current = null;
+    };
+    if (!surface || !frameReady) { release(); return; }
+    // Leaving the canvas still needs a viewport point to clear remote hover.
+    const position = point(event, action, captured || !!pressed);
+    if (position) {
+      if (action === 'down') {
+        event.preventDefault(); editor.current?.focus({ preventScroll: true }); transport.focus(surface, true); event.currentTarget.setPointerCapture(event.pointerId);
+        if (event.pointerType !== 'touch') mouseCapture.current = { pointerId: event.pointerId, button: [1, 2, 3, 4, 5][event.button] ?? 0, identity };
+      }
+      if (event.pointerType === 'touch') send({ type: 'touch', action: ({ down: 'start', up: 'end', move: 'move', cancel: 'cancel' } as Record<string, string>)[action], points: [{ id: event.pointerId, ...position, pressure: event.pressure }] });
+      else if (action !== 'cancel' || pressed) send({ type: 'mouse', action: action === 'cancel' ? 'up' : action, ...position, button: action === 'cancel' ? pressed!.button : (action === 'move' || action === 'leave') ? 0 : [1, 2, 3, 4, 5][event.button] ?? 0, modifiers: modifiers(event) | mouseButtonModifiers(event.buttons), click_count: (action === 'move' || action === 'leave') ? 0 : Math.min(3, Math.max(1, event.detail)) });
+    }
+    release();
   };
   const key = (event: React.KeyboardEvent<HTMLTextAreaElement>, action: string) => {
     if (composing.current || event.nativeEvent.isComposing) return;
@@ -65,7 +81,7 @@ function Viewport({ tab, device, secondary = false, overlay = false }: { tab: Ta
   return <section className={`view-pane ${device.mode === 'tablet' ? 'tablet-view' : ''}`} aria-label={secondary ? '分屏页面' : '主页面'}>
     <div className="view-label"><span className="view-dot" /><span>{tab.title || '新标签页'}</span><span className="view-dimensions">{surface ? `${Math.round(surface.width / surfacePixelScale(surface))} × ${Math.round(surface.height / surfacePixelScale(surface))}` : `${device.width} × ${device.height}`} DIP</span></div>
     <div className="viewport-stage"><div className={`remote-surface ${device.mode}`} style={{ aspectRatio: `${surface?.width ?? device.width} / ${surface?.height ?? device.height}` }}>
-      <canvas ref={canvas} aria-label={`${tab.title || '远程页面'}画面`} className={frameReady ? '' : 'no-frame'} onPointerDown={event => pointer(event, 'down')} onPointerMove={event => pointer(event, 'move')} onPointerUp={event => pointer(event, 'up')} onPointerCancel={event => pointer(event, 'cancel')} onPointerLeave={event => { if (event.pointerType !== 'touch') pointer(event, 'leave'); }} onContextMenu={event => event.preventDefault()} onWheel={event => { if (surface && frameReady) { const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? surface.height / surfacePixelScale(surface) : 1; send({ type: 'wheel', ...point(event), dx: -event.deltaX * unit, dy: -event.deltaY * unit, modifiers: modifiers(event) }); } }} />
+      <canvas ref={canvas} aria-label={`${tab.title || '远程页面'}画面`} className={frameReady ? '' : 'no-frame'} onPointerDown={event => pointer(event, 'down')} onPointerMove={event => pointer(event, 'move')} onPointerUp={event => pointer(event, 'up')} onPointerCancel={event => pointer(event, 'cancel')} onPointerLeave={event => { if (event.pointerType !== 'touch') pointer(event, 'leave'); }} onContextMenu={event => event.preventDefault()} onWheel={event => { if (surface && frameReady) { const position = point(event); if (!position) return; const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? surface.height / surfacePixelScale(surface) : 1; send({ type: 'wheel', ...position, dx: -event.deltaX * unit, dy: -event.deltaY * unit, modifiers: modifiers(event) }); } }} />
       <textarea ref={editor} className="remote-input" aria-label="远程页面键盘输入" autoCapitalize="off" autoComplete="off" spellCheck={false} onFocus={() => surface && transport.focus(surface, true)} onBlur={() => { if (surface) transport.focus(surface, false); }} onKeyDown={event => key(event, 'down')} onKeyUp={event => key(event, 'up')} onCompositionStart={() => { composing.current = true; }} onCompositionUpdate={event => send({ type: 'ime_set', text: event.data, selection_start: event.data.length, selection_end: event.data.length })} onCompositionEnd={event => { composing.current = false; compositionCommit.current = event.data; setTimeout(() => { compositionCommit.current = null; }, 0); send({ type: 'ime_commit', text: event.data }); if (editor.current) editor.current.value = ''; }} onInput={event => { if (!composing.current) { const native = event.nativeEvent as InputEvent; if (native.inputType !== 'insertCompositionText' && native.inputType !== 'insertFromComposition' && native.data && native.data !== compositionCommit.current) send({ type: 'ime_commit', text: native.data }); event.currentTarget.value = ''; } }} />
       {!frameReady && <div className="empty-view"><div className="empty-icon"><Icon name={device.mode === 'tablet' ? 'tablet' : 'monitor'} size={30} /></div><h2>{transport.diagnostics.connection === '已连接' ? '等待页面画面' : '远程页面尚未连接'}</h2><p>{transport.diagnostics.connection === '已连接' ? '连接已建立，等待 Endpoint 的布局与视频。' : '连接 Endpoint 后，页面将在这里呈现。'}</p><span className="empty-url">{tab.url || 'about:blank'}</span></div>}
       {overlay && <StatsOverlay diagnostics={transport.diagnostics} surface={surface} />}

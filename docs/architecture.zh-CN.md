@@ -74,7 +74,9 @@ Control 保存产品页面清单及期望配置，Endpoint Session 与 browser �
 
 ## 内容视图、合成与 GPU 输出
 
-保留 Views/Aura 平台适配和 content 视图，继续使用 ui::Compositor、cc、Viz、GPU。该选择减少 Windows 输入、widget 和 OOPIF 的平台重实现；不等于装配 Chrome 窗口产品层，也不等于无 Aura/无 HWND embedder。若以后更换内容视图后端，需要一并覆盖 view 工厂、native types、compositor transport、popup 与输入，不能只替换一个类。
+服务模式保留 Aura/content 视图及其输入、IME、OOPIF 支持，为每个 WebView 配置无原生窗口的 Aura 宿主和 ui::Compositor。合成目标从创建时就是离屏纹理，不经过本地屏幕 Present；cc、Viz、GPU 继续负责网页合成。rectangle packing 在 GPU 输出桥完成，不再为了 atlas 创建显示窗口。原生 demo 单独保留 Views 窗口路径。
+
+该选择依据用户指定实现草案第5节的离屏渲染路径；用户已明确无需移除 Aura。服务宿主使用独立虚拟屏幕坐标和 DSF1，页面设备 DPR 由设备配置与 backing scale 控制，避免 Windows 显示器 DPI 改变服务渲染尺寸。迁移与运行验证进度见当前状态文档。
 
 示例用不旋转的 MaxRects 将多个 WebView 排入单个 atlas/window，带 padding，排布失败显式返回。当前 viewport 为固定大小；动态配置与重排能力尚不完整。viewport 使用 DIP，采集/atlas 使用像素，endpoint 显示时还有 letterbox 缩放。PMv2、DPI 切屏和命中变换须使用同一组几何信息。
 
@@ -90,7 +92,7 @@ Mojo 处理建立、共享句柄、配置、输入和资源重建；正常输出
 
 ## 节拍与时钟
 
-browser 负责网页合成与采集节拍，endpoint 调整输出需求、目标帧率和尺寸；网络 pacing 以后由 WebRTC 独立处理。当前保留 Chromium 合成节拍，限制 damage capture 与全 atlas 发布频率，不另造 external BeginFrame 时钟。需要自有时钟时应在 browser 本地合并未确认的 tick，仍不做逐帧跨进程往返。
+browser 负责网页合成与采集节拍，endpoint 调整输出需求、目标帧率和尺寸；网络 pacing 由 WebRTC 独立处理。离屏宿主启用 external BeginFrame，由 browser 本地 pacer 驱动；每个宿主最多保留一个未确认 tick，过期 tick 合并，不做 browser↔endpoint 逐帧请求往返。BeginFrame ACK 表示该次合成调度的响应，不替代保护纹理租约的 GPU Fence。
 
 静态页面保留最后图像，窗口重绘使用消费端 cache。订阅、恢复、resize 后需要 refresh。背压来自真实资源占用和 consumed fence，不来自 endpoint 的逐帧控制回复。保留采集时间戳及其单调时钟含义；未来音视频对齐不能直接用接收时刻替代采集时刻。
 
