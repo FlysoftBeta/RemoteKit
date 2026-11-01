@@ -21,7 +21,7 @@
 | oneVPL | UHD630 legacy1.35真实异步编码；多inflight有效；固定名义fps、关闭HRD后240帧码率阶跃通过，普通码率Reset不重开序列；默认VBR/TU1/深度1/LowPower auto；显式LowPower ON及码率阶跃通过，实际模式与返回状态可观测 |
 | NVENC | 独立硬件backend编译通过；本机没有NVIDIA GPU/编码驱动DLL，初始化明确不可用 |
 | 显示与输入同步 | 按rVFC的实际RTP时间戳匹配显示代次；真实视频/marker验证通过。无按键悬停可进入未聚焦可见页面且不抢焦点，拖拽/点击等保留焦点约束；五按钮modifier已修正，真实hover/click/IME与mixed回归通过 |
-| 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；最终bundle撤回了一项错误显示改动，待新包首帧验收 |
+| 呈现与设备切换 | renderer注册校验epoch/geometry，提供可选single-plane-direct，默认snapshot；多平面统一快照，静态同epoch重挂载保留像素；live desktop→tablet2的过渡几何故障已修复并实播验证，stale→ready推进epoch并限制坐标输入；单/双平面两种呈现方式的8阶段往返、真实触控/点击/IME、旧epoch拒绝与Sol视觉检查通过；最终55ffdf1包首帧/hover/click/IME验收通过 |
 | 延迟定位 | 默认关闭的browser/SDK/Endpoint有界trace，关联同wire RTP与CopyOutput request；Ganesh/OpenGL的GPU flush批次计时已实测，ETW已有GPU队列/CPU调度证据。capture_time_us明确为capture end；HUD不再把该段误标为完整捕获耗时 |
 | 网络实验设施 | 真实UDP 10ms/24/48Mbps整形与Chrome89候选/转发通路验证通过 |
 | 性能 | 16组原矩阵及DPI修复后的分层/画质对照完成；目标未达。当前默认720p单租户31.74 FPS/p95 111ms；四720源约47、呈现约12 FPS；四1080源约20、呈现约9 FPS。诊断flag下单租户约53 FPS、p95 103–105ms，未作为默认 |
@@ -69,6 +69,6 @@ RTC支持显式RTP播放延迟请求，默认未设置。0/0与0/10ms对照降�
 
 ## 入口
 
-上一批运行包对应`58cb326`，manifest为clean，作为checkpoint保留。已从ZIP全新解压验证包内Node/SQLite/Endpoint/SDK/browser独立运行；Chrome89收到1928×1088 H.264，首次hover不抢焦点，真实点击与IME的Pixel marker回应通过，截图无错误横幅。测试数据与Profile均在包外，验收进程已关闭。本轮变更的新包将在最终往返验收与提交后生成。
+当前运行包为`develop/tmp/RemoteKit-win-x64-streaming-qsv-nvenc-20261101-111347.zip`，440.5MiB，对应`55ffdf1`，manifest为clean；SHA256为`97e3422e1b676f543053038a342134b435b17b9ef48d1c7bb7bf2c226271a924`。537个文件hash全部匹配，打包与全新解压后的独立smoke通过。Chrome89收到1928×1088 H.264，首次hover不抢焦点，点击marker60001、IME42和RTC close200通过，无pageerror；Sol视觉通过，测试页自身左下文字有重叠。测试数据/Profile/metrics均在包外，验收进程已关闭。完整证据位于`develop/tmp/delivery-55ffdf1-20261101-111347`，旧58cb326包继续保留。
 
 构建与运行：[README](../README.md)；[系统设计](architecture.zh-CN.md)；[GPU 输出](gpu-output.zh-CN.md)；[架构取舍](design-review.zh-CN.md)；[打包](packaging.zh-CN.md)；[控制协议](control-protocol.md)；[SDK](sdk.md)。本机调试输出为 `C:\src\chromium\src\out\dev\remotekit_browser.exe`。

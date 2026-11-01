@@ -105,7 +105,7 @@ Chrome89的rVFC元数据读取与drawImage(video)并非原子取得同一个fram
 
 优先级P1后续定位改为真正的PerformWork/MakeCurrent完成观察入口。S4慢帧实际PerformWork任务post→run139.454ms；surface CheckAsyncWorkCompletion仅覆盖1/142个finished，撤回直接调surface poll的假设。局部submit虽Skipped，成功Skia submitted约1ms后已出现，不盲目强制submit。后续需要同context的not-ready/ready观察边界，与GPU队列分开量化。本轮不再加补丁或改变调度参数，先交付已验证批次。
 
-0002回调所有权审阅、两项补丁撤回/重应用、统一增量构建/SDK导出和4项patchset测试已通过。delivery_resume已核对UI/Server/Endpoint、旧ZIP和验收证据哈希，下一步由主Agent提交clean revision，再生成新包并全新解压验收；旧checkpoint保留。
+0002回调所有权审阅、两项补丁撤回/重应用、统一增量构建/SDK导出和4项patchset测试已通过；已提交推送55ffdf1。新包`RemoteKit-win-x64-streaming-qsv-nvenc-20261101-111347.zip`为clean55ffdf1，461935509字节，SHA256 `97e3422e1b676f543053038a342134b435b17b9ef48d1c7bb7bf2c226271a924`。537项文件校验、两次独立smoke、真实Chrome89首帧/hover/click60001/IME42/close200及Sol视觉均通过，证据在delivery-55ffdf1-20261101-111347；9个自建进程已清理、端口3117无监听。旧checkpoint保留，本批交付完成。性能目标仍未达到，P1后续定位保持上述真实完成观察路径与GPU队列问题。
 
 ## 输出采样决策
 
