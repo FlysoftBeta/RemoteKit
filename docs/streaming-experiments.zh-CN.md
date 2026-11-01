@@ -36,6 +36,8 @@ Chromium补丁提供默认关闭的`RemoteKitBoundedCapture:max_pending/1`或`/2
 
 完整同帧证据与case索引见[服务器分段报告](../develop/docs/server-frame-age-probe.md)和[捕获上限实验](../develop/docs/bounded-capture-probe.md)。当前各对照均未达到动态FPS>50且marker p95<100ms。
 
+官方细粒度trace已关联一次308.388ms慢捕获：CopyOutputRequest存续304.223ms，SendResult至capture end为3.156ms，再至browser回调0.777ms。现有GPU-thread CopyOutput事件未携带request id，renderer GPU timers不能当作该copy的执行时间。同一稳态窗口205次完成检查任务按toplevel.flow关联，requested delay为2ms，实际post→run p50 47.092ms、p95 61.074ms，任务CPU体p50约0.022ms。该调度滞后已测到，但对具体捕获延迟的贡献仍需GPU完成时间才能量化。原生trace有约5–10%的吞吐影响，且仅Session3/4覆盖部分正式采样窗口；详见[官方捕获profile](../develop/docs/official-capture-profile.md)。下一步以同一request补齐提交/完成打点，并用独立ETW诊断区分GPU队列与CPU调度。
+
 ## 网络模拟
 
 使用只绑定loopback的双UDP socket整形器，两端SDP候选指向整形器；确认selected candidate与实际转发字节，失败不回退直连。每方向基础延迟5ms，下行24或48Mbps；按UDP/IP28字节开销计量。无额外随机丢包，过载时按有界队列丢包。它模拟链路延迟和容量，不代表实地无线干扰或重传。

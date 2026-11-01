@@ -93,6 +93,12 @@ Chrome89的rVFC元数据读取与drawImage(video)并非原子取得同一个fram
 
 捕获pending上限1/2实验已完成，结果见`bounded-capture-probe.md`。早期cap1减少捕获帧龄，但最终FPS没有改善；后续组实际capture降至约1.6/3.2FPS，不能把renderer的42–48次render/s当作采集FPS。最后变化已按源实际写入marker与客户端CRC验证送达，Stop/reopen通过。cap与ready gate均保持默认关闭。当前运行同默认canvas trace-off/on及独立CSS compositor场景，使用官方Viz/GPU trace区分排队、执行与回调；trace开销组不作为性能提升证据。
 
+功能修复与既有trace已提交并推送`be9546d`。原生官方trace已取得初步细粒度证据：session4/capture_counter153的捕获至browser回调约308ms，其中CopyOutputRequest生命周期304.223ms，SendResult至capture end为3.156ms，再至browser回调0.777ms。现有GPU-thread CopyOutput CPU事件无request id，renderer GPU timers不能代替该copy的执行时间。
+
+优先级P1：完成检查调度异常。205次带toplevel.flow关联的GPU delayed check任务请求延后2000us，实际post→run p50 47.092ms、p95 61.074ms，任务CPU体p50约0.022ms。需要区分timer/线程排队、GPU提交/执行、完成检查，不把全部304ms归因于通知。
+
+已批准下一步默认关闭的独立profile补丁：以同一request关联capture创建、GPU dispatch、flush、真实submit分支及提交回调、GPU elapsed（支持时）、完成观察与SendResult。保留原submit/poll/callback/lease行为，记录后端与semaphore数；Skia flush elapsed可能含此前未flush工作，不能标为纯copy。先短1×720和4×1080诊断，随后决定是否改调度。Control只读核对WPR/ETW工具可用性，GPU实验由media独占。新包等待这批诊断与clean revision，不覆盖旧checkpoint。
+
 ## 输出采样决策
 
 平板高DPR/分屏可能超过接收端level的MaxFS/MaxMBPS。保留网页viewport/DPR及browser源atlas，由endpoint GPU NV12转换等比下采样到协商限制；NativeBuffer逻辑尺寸是编码尺寸，真实D3D texture尺寸保持源尺寸。layout坐标转编码像素，mediaScale独立于deviceScaleFactor，输入按两者乘积转DIP。stats/HUD明确源/编码尺寸与比例。该选择用于功能与编码约束，不把缩小后的FPS报告成原分辨率性能。
