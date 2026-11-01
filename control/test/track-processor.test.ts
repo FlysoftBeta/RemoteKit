@@ -252,3 +252,114 @@ test('duplicate displayed RTP closes the read without cloning, replacing pending
   assert.equal(lateDuplicate.state.closed, 1); assert.equal(next.state.ownerClosed, 0); s.raf(); assert.equal(s.canvas.bitmap, 'pixels-51');
   s.transport.disconnect(); assert.equal(next.state.ownerClosed, 1); assert.equal(first.state.ownerClosed, 1);
 });
+
+test('fifo2 presents one owner per distinct RAF in read order, then retains latest for remount', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.start();
+  const a = s.frame(60), b = s.frame(61); s.metadata(60); s.metadata(61);
+  s.readers[0].resolve({ done: false, value: a.value }); await flush();
+  s.readers[0].resolve({ done: false, value: b.value }); await flush();
+  assert.equal(s.transport.presentationDiagnostics.processor.pendingOwners, 2);
+  s.raf(); assert.equal(s.canvas.bitmap, 'pixels-60'); assert.equal(s.canvas.draws.length, 1); assert.equal(s.rafs.size, 1);
+  s.raf(); assert.equal(s.canvas.bitmap, 'pixels-61'); assert.equal(s.canvas.draws.length, 2); assert.equal(s.rafs.size, 0);
+  assert.equal(a.state.ownerClosed, 1); assert.equal(b.state.ownerClosed, 0);
+  const fresh = new Canvas(); s.transport.registerPlane({ view: s.view, layoutEpoch: '1', layoutGeneration: '1' }, fresh as any, () => {});
+  assert.equal(fresh.bitmap, 'pixels-61'); assert.equal(s.transport.presentationDiagnostics.processor.authorized, 2);
+  assert.equal(s.transport.presentationDiagnostics.processor.scheduler, 'fifo2');
+  assert.equal(s.transport.presentationDiagnostics.callbackRegistration, 'not-applicable');
+  s.transport.disconnect(); assert.equal(b.state.ownerClosed, 1);
+});
+
+test('fifo2 overflow closes oldest pending exactly once and keeps the latest two in order', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.start();
+  const frames = [s.frame(70), s.frame(71), s.frame(72)];
+  for (let i = 0; i < frames.length; i++) { s.metadata(70 + i); s.readers[0].resolve({ done: false, value: frames[i].value }); await flush(); }
+  assert.deepEqual(frames.map(f => f.state.ownerClosed), [1, 0, 0]);
+  assert.equal(s.transport.presentationDiagnostics.processor.replaced, 1);
+  s.raf(); assert.equal(s.canvas.bitmap, 'pixels-71'); s.raf(); assert.equal(s.canvas.bitmap, 'pixels-72');
+  s.transport.disconnect(); assert.deepEqual(frames.map(f => f.state.ownerClosed), [1, 1, 1]);
+  assert.deepEqual(frames.map(f => f.state.closed), [1, 1, 1]);
+});
+
+test('fifo2 blocks on unmatched head metadata without reordering or borrowing authorization', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.start();
+  const a = s.frame(80), b = s.frame(81); s.metadata(81);
+  s.readers[0].resolve({ done: false, value: a.value }); await flush();
+  s.readers[0].resolve({ done: false, value: b.value }); await flush(); s.raf();
+  assert.equal(s.rafs.size, 0); assert.equal(s.canvas.draws.length, 0);
+  s.metadata(80, '9'); s.raf(); assert.equal(s.canvas.draws.length, 0);
+  s.metadata(80); s.raf(); assert.equal(s.canvas.bitmap, 'pixels-80');
+  assert.equal(s.transport.presentedFrame?.rtpTimestamp, 80);
+  s.raf(); assert.equal(s.canvas.bitmap, 'pixels-81');
+  s.transport.disconnect(); assert.equal(a.state.ownerClosed, 1); assert.equal(b.state.ownerClosed, 1);
+});
+
+test('fifo2 epoch change releases latest and both pending owners and cancels their authorization', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.start();
+  const frames = [s.frame(90), s.frame(91), s.frame(92)];
+  s.metadata(90); s.readers[0].resolve({ done: false, value: frames[0].value }); await flush(); s.raf();
+  for (let i = 1; i < 3; i++) { s.metadata(90 + i); s.readers[0].resolve({ done: false, value: frames[i].value }); await flush(); }
+  assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 3);
+  s.message({ ...s.layout, epoch: '2' }); s.raf();
+  assert.equal(s.canvas.draws.length, 1); assert.equal(s.transport.displayReady, false);
+  assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0);
+  assert.deepEqual(frames.map(f => f.state.ownerClosed), [1, 1, 1]); s.transport.disconnect();
+  assert.deepEqual(frames.map(f => f.state.ownerClosed), [1, 1, 1]);
+});
+
+test('fifo2 disconnect during paint closes remaining pending, displayed and retiring owners once', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.start();
+  const frames = [s.frame(100), s.frame(101), s.frame(102)];
+  s.metadata(100); s.readers[0].resolve({ done: false, value: frames[0].value }); await flush(); s.raf();
+  for (let i = 1; i < 3; i++) { s.metadata(100 + i); s.readers[0].resolve({ done: false, value: frames[i].value }); await flush(); }
+  s.transport.subscribePresentedFrames(() => s.transport.disconnect()); s.raf();
+  assert.deepEqual(frames.map(f => f.state.ownerClosed), [1, 1, 1]);
+  assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0); assert.equal(s.rafs.size, 0);
+});
+
+test('fifo2 duplicate pending read does not clone or reorder the queue', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.start();
+  for (const rtp of [110, 111]) { s.metadata(rtp); s.readers[0].resolve({ done: false, value: s.frame(rtp).value }); await flush(); }
+  const duplicate = s.frame(110); duplicate.value.clone = () => { throw new Error('must not clone'); };
+  s.readers[0].resolve({ done: false, value: duplicate.value }); await flush();
+  assert.equal(duplicate.state.closed, 1); s.raf(); assert.equal(s.canvas.bitmap, 'pixels-110');
+  s.raf(); assert.equal(s.canvas.bitmap, 'pixels-111'); s.transport.disconnect();
+});
+
+test('fifo2 reader failure releases queued owners and late old-source read cannot paint', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.start(); const old = s.readers[0];
+  const a = s.frame(115), b = s.frame(116);
+  for (const frame of [a, b]) { old.resolve({ done: false, value: frame.value }); await flush(); }
+  old.reject(new Error('fifo reader failed')); await flush(); s.raf();
+  assert.equal(a.state.ownerClosed, 1); assert.equal(b.state.ownerClosed, 1); assert.equal(old.released, 1);
+  assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0); assert.equal(s.rafs.size, 0);
+  s.start(); const fresh = s.readers[1], late = s.frame(117); s.start();
+  fresh.resolve({ done: false, value: late.value }); await flush();
+  assert.equal(late.state.closed, 1); assert.equal(s.canvas.draws.length, 0); s.transport.disconnect();
+});
+
+test('fifo2 synchronous paint subscriber failure releases queued and displayed owners', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.start();
+  const a = s.frame(118), b = s.frame(119);
+  for (const [rtp, frame] of [[118, a], [119, b]] as const) { s.metadata(rtp); s.readers[0].resolve({ done: false, value: frame.value }); await flush(); }
+  s.transport.subscribePresentedFrames(() => { throw new Error('paint subscriber failed'); }); s.raf();
+  assert.equal(a.state.ownerClosed, 1); assert.equal(b.state.ownerClosed, 1);
+  assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0); assert.equal(s.rafs.size, 0);
+  assert.equal(s.transport.displayReady, false); assert.match(s.transport.diagnostics.error!, /paint subscriber failed/);
+});
+
+test('processor profile ring is bounded, chronological, exported only with raw, and reset preserves owners', async t => {
+  const s = setup(t); s.transport.processorScheduler = 'fifo2'; s.transport.processorProfile = true; s.start();
+  s.internal.processorEventLimit = 8;
+  for (let rtp = 120; rtp < 123; rtp++) { s.metadata(rtp); s.readers[0].resolve({ done: false, value: s.frame(rtp).value }); await flush(); }
+  s.raf(); s.raf();
+  assert.equal('processorProfile' in s.transport.getPresentationDiagnostics(), false);
+  const profile = s.transport.getPresentationDiagnostics(true).processorProfile!;
+  assert.equal(profile.capacity, 8); assert.equal(profile.events.length, 8); assert.ok(profile.overwritten > 0);
+  assert.ok(profile.events.some(event => event.event === 'raf' && typeof event.timestamp === 'number' && typeof event.entryNow === 'number'));
+  assert.ok(profile.events.some(event => event.event === 'paint' && typeof event.paintStartedAt === 'number' && typeof event.paintEndedAt === 'number'));
+  assert.ok(profile.events.every((event, i, all) => !i || Number(event.at) >= Number(all[i - 1].at)));
+  const owners = s.transport.presentationDiagnostics.processor.ownersHeld;
+  s.transport.resetPresentationDiagnostics(); assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, owners);
+  assert.equal(s.transport.getPresentationDiagnostics(true).processorProfile!.events.length, 0);
+  s.transport.disconnect(); assert.equal(s.transport.presentationDiagnostics.processor.ownersHeld, 0);
+});

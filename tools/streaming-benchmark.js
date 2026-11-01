@@ -28,6 +28,8 @@ async (hostPage) => {
           transport.presentationMode = config.presentationMode;
         }
         transport.frameSource = config.frameSource ?? 'video';
+        transport.processorScheduler = config.processorScheduler ?? 'latest1';
+        transport.processorProfile = config.processorProfile === true;
         transport.receiveProfile = config.receiveProfile;
         await transport.connect();
         if (config.visibleVideoPreview) {
@@ -82,6 +84,13 @@ async (hostPage) => {
       const transport = window.remotekitDiagnostics.transport;
       transport.resetPresentationDiagnostics?.();
       const { decodeMarker, percentiles } = await import('/marker-codec.js');
+      const markerReadbackMode = config.markerReadback ?? 'sync';
+      if (!['sync', 'worker'].includes(markerReadbackMode)) throw new Error('Unknown markerReadback mode');
+      const markerReader = markerReadbackMode === 'worker'
+        ? await new (await import('/benchmark-marker-readback.js')).BenchmarkMarkerReadback().start() : null;
+      if (markerReader && !transport.subscribePresentedFrames) throw new Error('worker marker requires actual plane paint instrumentation');
+      const markerJobs = [], markerFailures = [];
+      let markerCompletion = Promise.resolve();
       const markerCanvas = document.createElement('canvas'); markerCanvas.width = 256; markerCanvas.height = 112;
       const context = markerCanvas.getContext('2d');
       const samples = [], presentations = [], paintedFrames = [], rtcSamples = [], inputSamples = [], inputTimeouts = [], clientRaf = [], rawVideoFrames = [], inputs = new Map();
@@ -107,6 +116,18 @@ async (hostPage) => {
           previousRtp = rtp;
         }
       };
+      const acceptMarker = (marker, identity, extra = {}) => {
+        const { observedAt, observedWall, rtp, epoch, sourceKind } = identity;
+        if (!marker) { ++invalid; return; }
+        if (marker.frameId === previousFrame) return;
+        if (previousFrame !== undefined) { const delta = (marker.frameId - previousFrame) >>> 0; if (delta > 0 && delta < 100000) skipped += delta - 1; }
+        previousFrame = marker.frameId;
+        const delay = ((observedWall >>> 0) - marker.timestamp) >>> 0;
+        const sample = { observedAt, observedWall, markerCompletedAt: performance.now(), frameId: marker.frameId, stimulus: marker.stimulus, rtp, epoch, sourceKind, renderToObservedMs: delay < 60000 ? delay : null, ...extra };
+        samples.push(sample);
+        const sent = inputs.get(marker.stimulus);
+        if (sent !== undefined) { inputSamples.push({ sequence: marker.stimulus, delayMs: observedAt - sent, observedAt, frameId: marker.frameId }); inputs.delete(marker.stimulus); }
+      };
       const read = painted => {
         const view = transport.layout?.views[0];
         if (!view || !transport.displayReady) return;
@@ -124,6 +145,24 @@ async (hostPage) => {
         const legacy = transport.getPresentedPlane ? undefined : (painted ? transport.getPaintedFrame(view.id, rtp) : transport.displayFrame);
         const source = transport.getPresentedPlane ? transport.getPresentedPlane(view.id, rtp) : legacy && { image: legacy, kind: 'atlas', sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1), rtpTimestamp: rtp, layoutEpoch: epoch };
         if (!source || source.rtpTimestamp !== rtp || source.layoutEpoch !== epoch) { ++missingPaintSnapshot; return; }
+        const identity = { observedAt, observedWall, paintedAt: observedAt, paintedWallTime: observedWall, rtp, epoch, sourceKind: source.kind ?? 'atlas' };
+        if (markerReader) {
+          // getPresentedPlane(kind=plane) is the actual Viewport HTML canvas.
+          // Atlas snapshots and decoder VideoFrames are intentionally rejected.
+          const rect = { x: source.sourceRect.x, y: source.sourceRect.y, width: 256 * source.pixelsPerDip, height: 112 * source.pixelsPerDip };
+          if (!painted || source.kind !== 'plane' || !(source.image instanceof HTMLCanvasElement) || !Object.values(rect).every(Number.isInteger) || rect.x < 0 || rect.y < 0 || rect.x + rect.width > source.image.width || rect.y + rect.height > source.image.height) {
+            markerFailures.push({ ...identity, error: 'worker marker requires an actual painted plane canvas with integral in-bounds ROI' }); return;
+          }
+          const task = markerReader.submit(source.image, rect, identity).then(result => ({ result }), error => ({ error: String(error) }));
+          // Snapshot submissions are immediate; consume results in paint order.
+          markerCompletion = markerCompletion.then(async () => {
+            const { result, error } = await task;
+            if (error) { markerFailures.push({ ...identity, error }); return; }
+            markerJobs.push({ id: result.id, ...identity, sourceRect: result.sourceRect, costs: result.costs, crcValid: !!result.marker });
+            acceptMarker(result.marker, result.identity, { markerJobId: result.id, sourceRect: result.sourceRect, readbackCosts: result.costs });
+          });
+          return;
+        }
         const drawStarted = performance.now();
         const pixelsPerDip = source.pixelsPerDip;
         context.drawImage(source.image, source.sourceRect.x, source.sourceRect.y, 256 * pixelsPerDip, 112 * pixelsPerDip, 0, 0, 256, 112);
@@ -134,15 +173,7 @@ async (hostPage) => {
         const decodeStarted = performance.now();
         const marker = decodeMarker(pixels);
         transport.recordPresentationCost?.('markerDecode', decodeStarted, performance.now() - decodeStarted);
-        if (!marker) { ++invalid; return; }
-        if (marker.frameId === previousFrame) return;
-        if (previousFrame !== undefined) { const delta = (marker.frameId - previousFrame) >>> 0; if (delta > 0 && delta < 100000) skipped += delta - 1; }
-        previousFrame = marker.frameId;
-        const delay = ((observedWall >>> 0) - marker.timestamp) >>> 0;
-        const sample = { observedAt, markerCompletedAt: performance.now(), frameId: marker.frameId, stimulus: marker.stimulus, rtp, epoch, sourceKind: source.kind ?? 'atlas', renderToObservedMs: delay < 60000 ? delay : null };
-        samples.push(sample);
-        const sent = inputs.get(marker.stimulus);
-        if (sent !== undefined) { inputSamples.push({ sequence: marker.stimulus, delayMs: observedAt - sent, observedAt, frameId: marker.frameId }); inputs.delete(marker.stimulus); }
+        acceptMarker(marker, identity);
       };
       const unsubscribeAuthorized = transport.subscribeFrames(recordAuthorized);
       const unsubscribe = hasPaint ? transport.subscribePresentedFrames(read) : transport.subscribeFrames(() => read(null));
@@ -163,9 +194,14 @@ async (hostPage) => {
       clearInterval(timer); clearInterval(stimulus); unsubscribe(); unsubscribeAuthorized(); document.removeEventListener('visibilitychange', visibilityChanged);
       observing = false; cancelAnimationFrame(rafId);
       if (videoCallbackId !== undefined) transport.video.cancelVideoFrameCallback?.(videoCallbackId);
+      const measurementEnded = performance.now();
+      await markerCompletion;
+      const markerDrainMs = performance.now() - measurementEnded;
+      markerReader?.close();
       await collect();
       const ended = performance.now();
-      const elapsedMs = ended - started;
+      // Worker drain is outside the paint/FPS window, never an E2E endpoint.
+      const elapsedMs = ended - started - (markerReader ? markerDrainMs : 0);
       const buckets = Array.from({ length: Math.ceil(config.sampleMs / 1000) }, () => 0);
       for (const sample of samples) { const bucket = Math.floor((sample.observedAt - started) / 1000); if (bucket >= 0 && bucket < buckets.length) ++buckets[bucket]; }
       const displayBuckets = buckets.map(() => 0);
@@ -177,8 +213,12 @@ async (hostPage) => {
       const raw = JSON.stringify(transport.getPresentationDiagnostics?.(true) ?? null);
       const report = { kind: 'streaming-benchmark', config, clientVersion, tenantIndex: index, flags, timeOrigin: performance.timeOrigin, startedAt: started, startedWall, clockSample, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility, clock: 'same-machine-wall-clock', frameSource: config.frameSource ?? 'video', frameCountStage: hasPaint ? 'viewport-canvas-paint' : 'authorized-snapshot; Viewport paint not measured', observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null, markerSamplesPerSecond: samples.length * 1000 / elapsedMs, markerTimestampMeaning: hasPaint ? 'canvas draw submission time; synchronous same-RTP plane source; CRC completion separate' : 'authorized snapshot; not Viewport paint', authorizedFrameFps: presentations.length * 1000 / elapsedMs, authorizedPerSecondFrames: displayBuckets, displayFps: hasPaint ? paintedFrames.length * 1000 / elapsedMs : null, displayPerSecondFrames: hasPaint ? paintBuckets : null, perSecondFrames: buckets, perSecondFps: percentiles(buckets), renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)), invalid, missingPaintSnapshot, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped, pendingInputs: inputs.size, samples, presentations, paintedFrames, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation };
       report.inputTimeouts = inputTimeouts;
+      report.markerReadback = { requested: markerReadbackMode, effective: markerReadbackMode, drainMs: markerDrainMs, jobs: markerJobs, failures: markerFailures, ownership: markerReader?.stats ?? null,
+        costsMs: Object.fromEntries(['captureCallMs', 'bitmapReadyMs', 'turnaroundMs', 'workerDrawMs', 'workerReadbackMs', 'workerDecodeMs', 'workerTotalMs'].map(name => [name, percentiles(markerJobs.map(job => job.costs[name]))])) };
+      if (markerReader) report.markerTimestampMeaning = 'actual plane canvas draw submission time; immutable bitmap captured in same paint callback; worker CRC completion separate';
       report.inputSampleCount = inputSamples.length;
       report.markerSampleCount = samples.length;
+      report.markerExpectedMinimum = markerReader && config.markerHz > 0 ? Math.floor(config.sampleMs * config.markerHz / 1000) : null;
       report.receiverPlayout = window.rkBenchmarkReceivers;
       const videoRect = transport.video.getBoundingClientRect(), videoStyle = getComputedStyle(transport.video);
       report.videoElement = { connected: transport.video.isConnected, rect: { x: videoRect.x, y: videoRect.y, width: videoRect.width, height: videoRect.height }, opacity: videoStyle.opacity, display: videoStyle.display, visibility: videoStyle.visibility };
@@ -208,6 +248,8 @@ async (hostPage) => {
         const saved = await fetch('/api/metrics', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'presentation-raw-chunk', runId: config.id, tenantIndex: index, part, chunks, text: raw.slice(part * 200000, (part + 1) * 200000) }) });
         if (!saved.ok) throw new Error(`Presentation raw upload failed ${saved.status}`);
       }
+      if (markerFailures.length) throw new Error(`worker marker failed ${markerFailures.length} jobs; raw metrics saved`);
+      if (report.markerExpectedMinimum !== null && samples.length < report.markerExpectedMinimum) throw new Error(`worker marker has ${samples.length}/${report.markerExpectedMinimum} required CRC-valid samples; raw metrics saved`);
       if (config.markerHz !== 0 && ['animation', 'text'].includes(config.mode) && !samples.length) {
         throw new Error(`No CRC-valid marker samples: invalid=${invalid}, missingSnapshot=${missingPaintSnapshot}; raw metrics saved`);
       }

@@ -1,6 +1,7 @@
 param(
   [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9_-]+$')][string]$Name,
   [int]$MarkerHz = -1,
+  [ValidateSet('sync','worker')][string]$MarkerReadback = 'sync',
   [ValidateSet('after-work','before-work')][string]$CallbackRegistration = 'after-work',
   [string]$ServiceDirectory = 'build/endpoint-package/endpoint',
   [int]$Width = 1280,
@@ -42,6 +43,8 @@ param(
   [ValidateSet('canvas','compositor')][string]$FixtureKind='canvas',
   [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
   [ValidateSet('video','track-processor')][string]$FrameSource='video',
+  [ValidateSet('latest1','fifo2')][string]$ProcessorScheduler='latest1',
+  [switch]$ProcessorProfile,
   [switch]$DisableClientRafProbe,
   [ValidateSet('default','software','unlimited')][string]$ClientMode='default',
   [string]$ClientExecutablePath='C:/src/tmp/chrome89-google/app/chrome.exe',
@@ -108,14 +111,14 @@ $configuration = @{
   tenants=$Tenants; width=$Width; height=$Height; dpr=1; mode=$FixtureMode;
   warmupMs=5000; sampleMs=20000; receiveProfile=$ReceiveProfile; callbackRegistration=$CallbackRegistration;
   requirePaint=$true; paintVersion='event-driven-v2'; visibleVideoPreview=[bool]$VisibleVideoPreview;
-  inputIntervalMs=$InputIntervalMs;
+  inputIntervalMs=$InputIntervalMs;markerReadback=$MarkerReadback;
   honorClientTimerResolution=[bool]$HonorClientTimerResolution;
   timerPolicyTool=(Join-Path $rkRoot 'tools/probe-chrome-timer-policy.ps1'); timerPolicyOutput=(Join-Path $caseRoot 'timer-policy.json');
   captureQuality=[bool]$CaptureQuality; artifactToken=[guid]::NewGuid().ToString('N');
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
   clientExecutablePath=$ClientExecutablePath;clientRefreshHz=$ClientRefreshHz;
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
-  atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;frameSource=$FrameSource;
+  atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;frameSource=$FrameSource;processorScheduler=$ProcessorScheduler;processorProfile=[bool]$ProcessorProfile;
   singlePlaneDirect=[bool]$SinglePlaneDirect;
   captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
   officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;adaptiveFps=$AdaptiveFps;offscreenRoot=[bool]$OffscreenRoot;
@@ -148,6 +151,9 @@ foreach ($relativePath in @('fixture/test-pattern.html','fixture/marker-codec.js
   $fingerprints[$relativePath] = (Get-FileHash -LiteralPath (Join-Path $caseRoot $relativePath) -Algorithm SHA256).Hash
 }
 foreach ($relativePath in @('control/public/test-pattern.html','control/dist/server.mjs','tools/streaming-benchmark.js','tools/streaming-source-probe.mjs','tools/watch-streaming-resources.ps1','tools/windows-gpu-counters.cs','tools/streaming-endpoint-tee.mjs','tools/prepare-streaming-case.ps1')) {
+  $fingerprints[$relativePath] = (Get-FileHash -LiteralPath (Join-Path $rkRoot $relativePath) -Algorithm SHA256).Hash
+}
+foreach ($relativePath in @('control/dist/client/marker-codec.js','control/dist/client/benchmark-marker-readback.js','control/dist/client/benchmark-marker-worker.js')) {
   $fingerprints[$relativePath] = (Get-FileHash -LiteralPath (Join-Path $rkRoot $relativePath) -Algorithm SHA256).Hash
 }
 foreach ($absolutePath in @('C:/src/chromium/src/out/dev/remotekit_browser.exe','C:/src/chromium/src/out/dev/remotekit_sdk.dll','C:/src/chromium/src/out/dev/components_viz_service.dll','C:/src/chromium/src/out/dev/content.dll')) {

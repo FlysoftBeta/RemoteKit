@@ -10,7 +10,7 @@ import { createTrackProcessor, processorRtpTimestamp, type TrackProcessor, type 
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource }
 export type FrameSource = 'video' | 'track-processor';
-interface ProcessorFrameOwner { frame: VideoFrame; rtp: number; source: ProcessorSource }
+interface ProcessorFrameOwner { frame: VideoFrame; rtp: number; source: ProcessorSource; readAt: number; sourceTimestamp: number }
 interface ProcessorSource { processor: TrackProcessor; reader: ReadableStreamDefaultReader<ProcessorVideoFrame>; peer: RTCPeerConnection; attempt: number }
 
 /** All endpoint wire adaptation lives here; the UI never owns recovery state. */
@@ -19,7 +19,15 @@ export class RemoteTransport {
   private activeFrameSource: FrameSource = 'video';
   private processorSource: ProcessorSource | undefined;
   private processorRaf: number | undefined;
-  private pendingProcessorFrame: ProcessorFrameOwner | undefined;
+  // Test-harness-only policy, captured at processor start; no product UI.
+  processorScheduler: 'latest1' | 'fifo2' = 'latest1';
+  processorProfile = false;
+  private activeProcessorScheduler: 'latest1' | 'fifo2' = 'latest1';
+  private pendingProcessorFrames: ProcessorFrameOwner[] = [];
+  private processorEvents: Record<string, unknown>[] = [];
+  private processorEventCursor = 0;
+  private processorEventCount = 0;
+  private readonly processorEventLimit = 16384;
   private latestProcessorFrame: ProcessorFrameOwner | undefined;
   private retiringProcessorOwners = 0;
   private processorCounts = { total: undefined as number | undefined, discarded: undefined as number | undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: 0, height: 0 };
@@ -49,8 +57,8 @@ export class RemoteTransport {
   readonly encodedFrameSamples: { at: number; rtpTimestamp: number; layoutEpoch: string; encodedBytes?: number; keyframe?: boolean }[] = [];
   frameCallbackRegistration: 'after-work' | 'before-work' = 'after-work';
   get presentationDiagnostics() { return this.getPresentationDiagnostics(); }
-  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { paintVersion: 'plane-source-v3', frameSource: this.activeFrameSource, processor: this.getProcessorDiagnostics(), presentationRouting: { mode: this.presentationMode, ...this.routing, fallback: { ...this.routing.fallback }, skippedRenderer: { ...this.routing.skippedRenderer } }, selectedViewId: this.selectedViewId, callbackRegistration: this.frameCallbackRegistration, encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples } : {}) }; }
-  resetPresentationDiagnostics() { this.processorCounts = { total: undefined, discarded: undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: this.processorCounts.width, height: this.processorCounts.height }; this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
+  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { paintVersion: 'plane-source-v3', frameSource: this.activeFrameSource, processor: this.getProcessorDiagnostics(), presentationRouting: { mode: this.presentationMode, ...this.routing, fallback: { ...this.routing.fallback }, skippedRenderer: { ...this.routing.skippedRenderer } }, selectedViewId: this.selectedViewId, callbackRegistration: this.activeFrameSource === 'video' ? this.frameCallbackRegistration : 'not-applicable', encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples, processorProfile: this.processorProfileSnapshot() } : {}) }; }
+  resetPresentationDiagnostics() { this.processorEvents = []; this.processorEventCursor = 0; this.processorEventCount = 0; this.processorCounts = { total: undefined, discarded: undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: this.processorCounts.width, height: this.processorCounts.height }; this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
   recordClientRaf(at: number) { this.presentation.clientRaf(at); }
   recordPresentationCost(name: string, at: number, durationMs: number, view: string | null = null) { this.presentation.cost(name, at, durationMs, view); }
   get displayReady() { return this.frameGate.ready && this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout?.epoch; }
@@ -227,52 +235,74 @@ export class RemoteTransport {
   }
   private getProcessorDiagnostics() {
     const processor = this.processorSource?.processor;
-    return { ...this.processorCounts, drawing: this.activeFrameSource === 'track-processor' ? 'immutable-frame-planes' : 'inactive', atlasSnapshotCopies: 0, ownersHeld: Number(!!this.pendingProcessorFrame) + Number(!!this.latestProcessorFrame) + this.retiringProcessorOwners, pendingOwners: Number(!!this.pendingProcessorFrame), displayedOwners: Number(!!this.latestProcessorFrame), retiringOwners: this.retiringProcessorOwners, total: processor?.totalFrames ?? this.processorCounts.total, discarded: processor?.discardedFrames ?? this.processorCounts.discarded };
+    return { ...this.processorCounts, drawing: this.activeFrameSource === 'track-processor' ? 'immutable-frame-planes' : 'inactive', atlasSnapshotCopies: 0, scheduler: this.activeFrameSource === 'track-processor' ? this.activeProcessorScheduler : 'inactive', scheduling: this.activeFrameSource === 'track-processor' ? 'requestAnimationFrame' : 'inactive', profileEnabled: this.processorProfile, ownersHeld: this.pendingProcessorFrames.length + Number(!!this.latestProcessorFrame) + this.retiringProcessorOwners, pendingOwners: this.pendingProcessorFrames.length, displayedOwners: Number(!!this.latestProcessorFrame), retiringOwners: this.retiringProcessorOwners, total: processor?.totalFrames ?? this.processorCounts.total, discarded: processor?.discardedFrames ?? this.processorCounts.discarded };
   }
   private processorCurrent(source: ProcessorSource) { return this.peer === source.peer && this.attempt === source.attempt && this.processorSource === source; }
-  private closePendingProcessorFrame() {
-    const pending = this.pendingProcessorFrame; this.pendingProcessorFrame = undefined;
-    if (pending) { pending.frame.close(); this.processorCounts.ownerClosed++; }
+  private profileProcessor(event: string, values: Record<string, unknown> = {}) {
+    if (!this.processorProfile) return;
+    const entry = { event, at: performance.now(), queueDepth: this.pendingProcessorFrames.length, ...values };
+    if (this.processorEvents.length < this.processorEventLimit) this.processorEvents.push(entry);
+    else { this.processorEvents[this.processorEventCursor] = entry; this.processorEventCursor = (this.processorEventCursor + 1) % this.processorEventLimit; }
+    this.processorEventCount++;
+  }
+  private processorProfileSnapshot() {
+    return { enabled: this.processorProfile, capacity: this.processorEventLimit, total: this.processorEventCount, overwritten: Math.max(0, this.processorEventCount - this.processorEvents.length), events: [...this.processorEvents.slice(this.processorEventCursor), ...this.processorEvents.slice(0, this.processorEventCursor)] };
+  }
+  private dropProcessorOwner(owner: ProcessorFrameOwner, reason: string) {
+    this.profileProcessor('drop', { rtp: owner.rtp, readAt: owner.readAt, reason, metadataEpoch: this.frameGate.epochFor(owner.rtp) ?? null, layoutEpoch: this.layout?.epoch, rafPending: this.processorRaf !== undefined });
+    owner.frame.close(); this.processorCounts.ownerClosed++;
+  }
+  private closePendingProcessorFrame(reason = 'reset') {
+    const pending = this.pendingProcessorFrames.splice(0);
+    for (const owner of pending) this.dropProcessorOwner(owner, reason);
   }
   private processorFrameAlreadyDisplayed(rtp: number) { return !!this.latestProcessorFrame && this.latestProcessorFrame.rtp === rtp && this.displayedRtp === rtp && this.displayedEpoch === this.layout?.epoch && this.displayReady; }
   private closeLatestProcessorFrame() {
     const latest = this.latestProcessorFrame; this.latestProcessorFrame = undefined;
-    if (latest) { latest.frame.close(); this.processorCounts.ownerClosed++; }
+    if (latest) { this.profileProcessor('close-latest', { rtp: latest.rtp }); latest.frame.close(); this.processorCounts.ownerClosed++; }
   }
   private scheduleProcessorPresentation() {
-    const source = this.processorSource, pending = this.pendingProcessorFrame, layout = this.layout;
-    if (pending && this.processorFrameAlreadyDisplayed(pending.rtp)) { this.closePendingProcessorFrame(); return; }
+    const source = this.processorSource, layout = this.layout;
+    while (this.pendingProcessorFrames[0] && this.processorFrameAlreadyDisplayed(this.pendingProcessorFrames[0].rtp)) this.dropProcessorOwner(this.pendingProcessorFrames.shift()!, 'duplicate-displayed');
+    const pending = this.pendingProcessorFrames[0];
     if (!source || !this.processorCurrent(source) || this.processorRaf !== undefined || !pending || !layout || this.frameGate.epochFor(pending.rtp) !== layout.epoch || pending.frame.displayWidth !== layout.width || pending.frame.displayHeight !== layout.height) return;
-    const id = requestAnimationFrame(() => {
+    const requestedAt = performance.now();
+    const id = requestAnimationFrame(timestamp => {
       if (this.processorRaf !== id) return;
       this.processorRaf = undefined;
       if (!this.processorCurrent(source)) return;
+      const entryNow = performance.now();
       this.processorCounts.rafCallbacks++;
+      const candidate = this.pendingProcessorFrames[0], layout = this.layout;
+      this.profileProcessor('raf', { id, requestedAt, timestamp, entryNow, rtp: candidate?.rtp });
       if (this.presentationMode !== 'snapshot') { this.processorCounts.invalid++; this.processorFailed(new Error('track-processor 接收路径只支持 snapshot 呈现。')); return; }
-      // Reads can replace the candidate while RAF is pending. Admission never
-      // changes the last painted authorization until this exact frame matches.
-      const candidate = this.pendingProcessorFrame, layout = this.layout;
-      if (candidate && this.processorFrameAlreadyDisplayed(candidate.rtp)) { this.closePendingProcessorFrame(); return; }
-      if (!candidate || candidate.source !== source || !layout || this.frameGate.epochFor(candidate.rtp) !== layout.epoch || candidate.frame.displayWidth !== layout.width || candidate.frame.displayHeight !== layout.height) return;
-      this.pendingProcessorFrame = undefined;
+      if (candidate && this.processorFrameAlreadyDisplayed(candidate.rtp)) { this.dropProcessorOwner(this.pendingProcessorFrames.shift()!, 'duplicate-displayed'); this.scheduleProcessorPresentation(); return; }
+      if (!candidate || candidate.source !== source || !layout || this.frameGate.epochFor(candidate.rtp) !== layout.epoch || candidate.frame.displayWidth !== layout.width || candidate.frame.displayHeight !== layout.height) {
+        this.profileProcessor('raf-rejected', { rtp: candidate?.rtp, reason: !candidate ? 'empty' : candidate.source !== source ? 'source' : !layout ? 'layout' : this.frameGate.epochFor(candidate.rtp) !== layout.epoch ? 'metadata-epoch' : 'dimensions' });
+        return;
+      }
+      this.pendingProcessorFrames.shift();
       const old = this.latestProcessorFrame;
       this.latestProcessorFrame = candidate; this.retiringProcessorOwners += Number(!!old);
       try {
         this.frameGate.observe(candidate.rtp);
         this.beginAuthorizedFrame();
         this.processorCounts.rafAdmitted++; this.processorCounts.authorized++;
-        // All planes read the same immutable frame. Canvas keeps its own GPU
-        // resource references after drawImage returns; no atlas snapshot copy.
+        // One immutable frame per refresh; fifo2 leaves the next owner for a later RAF.
         this.dispatchPaint(() => { for (const renderer of this.renderers) this.paintPlane(renderer, candidate.frame, renderer.view, 'plane-frame'); });
+      } catch (error) {
+        this.processorCounts.invalid++; this.processorFailed(error);
       } finally {
         if (old) { old.frame.close(); this.processorCounts.ownerClosed++; this.retiringProcessorOwners--; }
+        this.scheduleProcessorPresentation();
       }
     });
     this.processorRaf = id;
+    this.profileProcessor('raf-request', { id, requestedAt, rtp: pending.rtp });
   }
   private stopProcessorPump() {
     if (this.processorRaf !== undefined) cancelAnimationFrame(this.processorRaf);
-    this.processorRaf = undefined; this.closePendingProcessorFrame(); this.closeLatestProcessorFrame();
+    this.processorRaf = undefined; this.closePendingProcessorFrame('stop'); this.closeLatestProcessorFrame();
     const source = this.processorSource;
     if (!source) return;
     this.processorCounts.total = source.processor.totalFrames;
@@ -282,6 +312,7 @@ export class RemoteTransport {
     void source.reader.cancel().catch(() => {});
   }
   private processorFailed(error: unknown) {
+    this.profileProcessor('error', { reason: error instanceof Error ? error.message : String(error) });
     this.frameGate.observe(undefined); this.pendingSnapshotRtp = undefined;
     for (const renderer of this.renderers) renderer.ready(false);
     this.stopProcessorPump();
@@ -299,6 +330,8 @@ export class RemoteTransport {
     const attempt = this.attempt;
     try {
       if (this.presentationMode !== 'snapshot') throw new Error('track-processor 接收路径只支持 snapshot 呈现。');
+      if (this.processorScheduler !== 'latest1' && this.processorScheduler !== 'fifo2') throw new Error('Unsupported processor scheduler');
+      this.activeProcessorScheduler = this.processorScheduler;
       const processor = createTrackProcessor(track), reader = processor.readable.getReader();
       const source: ProcessorSource = { processor, reader, peer, attempt }; this.processorSource = source;
       const current = () => this.processorCurrent(source);
@@ -306,7 +339,7 @@ export class RemoteTransport {
         try {
           while (current()) {
             const result = await reader.read();
-            const frame = result.value;
+            const frame = result.value, readAt = performance.now();
             try {
               if (frame) this.processorCounts.read++;
               if (!current()) { if (frame) this.processorCounts.stale++; return; }
@@ -319,13 +352,14 @@ export class RemoteTransport {
               if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw new Error('track-processor 返回无效的视频尺寸。');
               this.processorCounts.width = width; this.processorCounts.height = height;
               this.diagnostics.videoWidth = width; this.diagnostics.videoHeight = height;
-              if (this.processorFrameAlreadyDisplayed(rtp)) continue;
-              // Clone ownership before closing the read result. At most one
-              // decoded frame waits for display admission; replacing it avoids a copy.
-              if (this.pendingProcessorFrame) { this.closePendingProcessorFrame(); this.processorCounts.replaced++; }
+              const sourceTimestamp = frame.timestamp;
+              this.profileProcessor('read', { rtp, readAt, sourceTimestamp, epoch: this.frameGate.epochFor(rtp) ?? null, layoutEpoch: this.layout?.epoch });
+              if (this.processorFrameAlreadyDisplayed(rtp) || this.pendingProcessorFrames.some(owner => owner.rtp === rtp)) { this.profileProcessor('drop-read', { rtp, reason: 'duplicate' }); continue; }
               const owner = frame.clone();
+              const capacity = this.activeProcessorScheduler === 'fifo2' ? 2 : 1;
+              while (this.pendingProcessorFrames.length >= capacity) { this.dropProcessorOwner(this.pendingProcessorFrames.shift()!, capacity === 2 ? 'fifo-overflow-oldest' : 'latest-replaced'); this.processorCounts.replaced++; }
               this.pendingSnapshotRtp = undefined;
-              this.pendingProcessorFrame = { frame: owner, rtp, source };
+              this.pendingProcessorFrames.push({ frame: owner, rtp, source, readAt, sourceTimestamp });
               this.scheduleProcessorPresentation();
             } finally {
               if (frame) { frame.close(); this.processorCounts.closed++; }
@@ -432,8 +466,9 @@ export class RemoteTransport {
     const start = performance.now();
     if (node.width !== view.width || node.height !== view.height) { node.width = view.width; node.height = view.height; }
     try { if (image !== node) context.drawImage(image, rect.x, rect.y, rect.width, rect.height, 0, 0, node.width, node.height); }
-    catch (error) { if (kind !== 'plane-frame') throw error; this.countReason(this.routing.skippedRenderer, 'draw-failed'); renderer.ready(false); return false; }
+    catch (error) { if (kind !== 'plane-frame') throw error; this.countReason(this.routing.skippedRenderer, 'draw-failed'); this.profileProcessor('paint-failed', { rtp: this.displayedRtp, view: view.id, paintStartedAt: start, reason: 'draw-failed' }); renderer.ready(false); return false; }
     const paintedAt = performance.now(), paintedWallTime = Date.now();
+    if (kind === 'plane-frame') this.profileProcessor('paint', { rtp: this.displayedRtp, epoch: this.layout.epoch, view: view.id, paintStartedAt: start, paintEndedAt: paintedAt });
     this.presentation.cost('viewportDraw', start, paintedAt - start, view.id);
     const source: PresentedPlaneSource = { image: kind === 'atlas' ? image : node, sourceRect: kind === 'atlas' ? { x: view.x, y: view.y, width: view.width, height: view.height } : { x: 0, y: 0, width: view.width, height: view.height }, kind: kind === 'plane-frame' ? 'plane' : kind, viewId: view.id, rtpTimestamp: this.displayedRtp, layoutEpoch: this.layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1) };
     this.paintedPlanes.set(view.id, { identity: { view: { ...view }, layoutEpoch: this.layout.epoch, layoutGeneration: this.layout.generation }, canvas: node, source });
@@ -458,7 +493,7 @@ export class RemoteTransport {
       try {
         const message = JSON.parse(String(event.data));
         if (message.type === 'layout' && Array.isArray(message.views)) {
-          if (this.activeFrameSource === 'track-processor' && this.layout && (this.layout.epoch !== message.epoch || this.layout.generation !== message.generation || this.layout.width !== message.width || this.layout.height !== message.height || this.layout.views.length !== message.views.length || this.layout.views.some(view => !message.views.some((next: Surface) => samePlane(view, next))))) { this.closePendingProcessorFrame(); this.closeLatestProcessorFrame(); this.frameGate.observe(undefined); }
+          if (this.activeFrameSource === 'track-processor' && this.layout && (this.layout.epoch !== message.epoch || this.layout.generation !== message.generation || this.layout.width !== message.width || this.layout.height !== message.height || this.layout.views.length !== message.views.length || this.layout.views.some(view => !message.views.some((next: Surface) => samePlane(view, next))))) { this.closePendingProcessorFrame('layout-change'); this.closeLatestProcessorFrame(); this.frameGate.observe(undefined); }
           this.layout = message;
           for (const [id, plane] of this.paintedPlanes) if (!planeMatchesLayout(plane.identity, this.layout)) { this.paintedPlanes.delete(id); this.viewPresentations.delete(id); }
           for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) renderer.ready(false);
@@ -471,7 +506,7 @@ export class RemoteTransport {
           this.flushFocusedInput();
           this.notify();
         }
-        if (message.type === 'frame') { const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); this.authorizeFrame(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
+        if (message.type === 'frame') { const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); if (this.activeFrameSource === 'track-processor') this.profileProcessor('metadata', { rtp: message.rtpTimestamp, epoch: message.layoutEpoch }); this.authorizeFrame(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
         if (message.type === 'stats') this.update({ endpoint: message });
         if (message.type === 'input.result' || message.type === 'focus') {
           this.inputResults.push({ at: performance.now(), ...message }); if (this.inputResults.length > 128) this.inputResults.shift();
