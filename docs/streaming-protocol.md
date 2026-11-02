@@ -63,6 +63,10 @@ method包括action、viewport、feedback、rtc.offer/ice/close和clock.ping。�
 
 正式Viewer优先协商video，每个可见平面使用共享同一接收track的独立video。目标位置与大小来自客户端内容bounds，atlas矩形仅用于源裁剪；输入层使用相同bounds。video静音、内联，无原生controls、画中画、远程播放和媒体交互；声音由独立Viewer音频管线播放。默认路径不运行MSTP读取或canvas绘制，能力/协议失败才恢复canvas。
 
+video模式中的透明canvas只承载既有鼠标、键盘/IME与触控入口（`data-video-input=true`），其DOM存在不表示canvas绘制后端运行。呈现注册以稳定的viewId绑定；focus、同view文档更新或布局代次改变只更新现有renderer的身份与门禁，不因React surface对象变化拆除video。真正移除viewport或接收track/peer变化才更换对应媒体资源。
+
+同一接收track的多个video不是多条H264接收链。固定Chromium157源码中，`VideoReceiveStream2`解码后经`VideoRtpTrackSource`/`VideoBroadcaster`和Blink `MediaStreamVideoTrack`分发同一已解码帧；每个video另有`WebMediaPlayerMS` compositor/sink，并可能执行自己的GPU帧格式转换。因而增加平面会增加呈现资源，不应声称总开销不变，也不能把各元素的decoded计数相加当作物理解码次数。此处源码结论限定157；旧浏览器功能兼容和历史GPU采样是不同证据。
+
 Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更新，覆盖已进入编码器的旧结果。当前peer完整最新ACK只解除等待，当前布局首个成功发送仍须为关键帧。旧epoch结果丢弃并正常结束编码/纹理/尾帧租约；静态重发保留实际纹理身份，不给旧纹理重贴新布局。隐藏页可持续等待，不通过超时强行放行。切canvas解除ACK等待但保留关键帧恢复，未协商的旧canvas客户端保持原行为。
 
 每个video自身首次真实RTP/epoch匹配后才恢复该平面的显示和输入。布局换代、隐藏、重连立即撤销ready；同一已确认布局内晚到的逐帧元数据不改变裁剪关系，不凭未知RTP生成延迟或Marker样本。rVFC是compositor提交观察，不是逐帧拒绝API，也不证明物理屏幕点亮。

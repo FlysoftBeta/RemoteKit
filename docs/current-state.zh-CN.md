@@ -48,6 +48,10 @@ Endpoint在真正编码结果发送处设布局屏障，覆盖旧inflight结果�
 
 Native Debug/Release增量构建、12套CPU及Control179项、类型检查、生产构建/smoke已通过，包含后台切换期间canvas回退动作恢复及旧play Promise拒绝隔离。89/157正式video单窗/split、bounds与输入、resize、157 DPR2、重连、实际音频PCM及文件共存已通过；默认MSTP/viewport draw计数均为0。同尺寸1456×832 atlas的双窗权重交换使A/B源位置真正互换，客户端仍各自正确裁剪。
 
+上述8423204首版验收仅覆盖点击等输入，遗漏连续滚轮与原生scrollbar拖拽，不能据此宣称完整输入通过。用户反馈后复现并修复三处问题：稳定viewId注册避免focus/导航拆除video；wheel先完成焦点确认，并在Browser复用Aura滚动序列处理后再路由；mouse move按held modifiers构造Blink button以保留原生拖动。观察到的闪断是video/srcObject重建，原RTC并未重连。
+
+修复版Control182项、类型检查、生产构建与smoke通过，Browser out/dev增量通过。89/157真实连续组均通过：失焦后wheel、连续burst、间隔后重开、nested wheel、根/nested scrollbar拖动、跨Window滚动、resize与Viewer reload后滚动；验证了真实scrollY/scrollTop及DOM事件。focus/导航/resize保持video、srcObject与RTC身份，旧epoch ACK暂存期间客户端拒绝旧输入并在放行后恢复。完整证据见[输入与生命周期回归](../develop/docs/video-input-runtime-qa.md)。本次没有重跑历史性能矩阵；音频/上传仍引用首版功能组，不冒充新增复验。
+
 真实检查发现并修复一次静态resize空layout的源码原因：Viz失败capture未结算Oracle pending，导致无damage的刷新一直被拒绝。0007现统一恰一次结算成功/失败交付；Browser与小测试目标已增量构建，3个直接调用真实交付/Oracle的CPU回归通过，patchset hash与隔离撤回/重放通过。修复后原split→focused→静态首metadata延迟→1100→390序列在2秒内恢复epoch28/gen10和video ready；本次运行未自然触发GPU取消，取消机制由CPU注入回归验证。此前3次诊断未复现不算修复证据。完整记录及截图见[默认video运行QA](../develop/docs/default-video-runtime-qa.md)。
 
 触控保留客户端采样时间与有界历史，服务端不再用包到达间隔估计手势；0008区分同步完成回调与真正派发拒绝，0009修复无屏幕时零PPI导致的惯性失效。服务构建固定逻辑PPI96与generic-desktop手势配置，客户端DPR和媒体帧率预算独立，native demo保留宿主适配。最终正常/途中70ms停顿/抬手100ms延迟三组滚动为502/501/502 DIP，均有约404–418ms惯性、零拒绝；嵌套滚动、OOPIF、touch-action/preventDefault、取消和DPR2坐标另有真实检查。新增Chromium unit用例未单独构建content_unittests，运行证据来自实际生产链路。见[可复用检查入口](touch-source-qa.md)与[触控运行记录](../develop/docs/touch-source-runtime-qa.md)。
@@ -81,7 +85,7 @@ Browser/SDK已增量构建，Endpoint11套CPU通过；最终Control171项、类�
 
 ## 发布与入口
 
-当前批次在音频/上传实现之上接入默认video，已完成上述构建与功能验收，按最终本地提交生成新的streaming包。此前c379f6c未发布，旧取件码不属于本批。实现契约见[默认video计划](../develop/docs/default-video-plan.md)，起始状态见[完整交接](../develop/docs/HANDOFF-2026-11-02-default-video.zh-CN.md)。仅本次允许GitHub推送尽力而为，优先完成包上传；长期提交推送约定不变。
+8423204默认video首版已提交、推送并上传。随后发现的滚轮、原生scrollbar与video生命周期缺陷已按上述范围修复和真实验证，修正版必须从新的本地提交重新打包上传；首版取件码744995不代表修正版。实现契约见[默认video计划](../develop/docs/default-video-plan.md)，起始状态见[完整交接](../develop/docs/HANDOFF-2026-11-02-default-video.zh-CN.md)。本次发布优先上传，GitHub推送尽力而为；长期提交推送约定不变。
 
 串流包包含Browser、Endpoint、Node及Control生产runtime，完整解压后运行run.cmd。打包执行smoke、逐文件manifest与ZIP校验，不携带开发Profile、数据、凭据或PDB；smoke覆盖服务启动与管理，媒体功能依据对应真实运行报告。版本、取件码与最终hash记录在本机develop/tmp的release delivery文件，并随交付回复提供。先前Astra全链审查和有界修复已完成，后续新增功能按实际范围验证发布。
 

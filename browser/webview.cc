@@ -29,6 +29,7 @@
 #include "content/browser/renderer_host/frame_tree.h"                    // nogncheck
 #include "content/browser/renderer_host/frame_tree_node.h"               // nogncheck
 #include "content/browser/renderer_host/input/touch_emulator_impl.h"     // nogncheck
+#include "content/browser/renderer_host/input/mouse_wheel_phase_handler.h"  // nogncheck
 #include "content/browser/renderer_host/page_lifecycle_state_manager.h"  // nogncheck
 #include "content/browser/renderer_host/render_frame_host_impl.h"        // nogncheck
 #include "content/browser/renderer_host/render_frame_metadata_provider_impl.h"  // nogncheck
@@ -36,6 +37,7 @@
 #include "content/browser/renderer_host/render_widget_host_delegate.h"   // nogncheck
 #include "content/browser/renderer_host/render_widget_host_impl.h"       // nogncheck
 #include "content/browser/renderer_host/render_widget_host_view_base.h"  // nogncheck
+#include "content/browser/renderer_host/render_widget_host_view_aura.h"  // nogncheck
 #include "content/browser/renderer_host/text_input_manager.h"            // nogncheck
 #include "content/browser/web_contents/web_contents_impl.h"              // nogncheck
 #include "content/public/browser/devtools_agent_host.h"
@@ -134,6 +136,33 @@ blink::WebPointerProperties::Button Button(std::uint8_t button) {
       return B::kNoButton;
   }
 }
+constexpr blink::WebPointerProperties::Button MouseMoveButton(std::uint32_t modifiers) {
+  using B = blink::WebPointerProperties::Button;
+  // Blink uses button on moves to retain drag/scrollbar state. The wire button
+  // describes the changed button, so moves instead use the held-button flags.
+  // Match ui::MakeWebMouseEvent's ordering for chorded mouse buttons.
+  if (modifiers & blink::WebInputEvent::kRightButtonDown) return B::kRight;
+  if (modifiers & blink::WebInputEvent::kMiddleButtonDown) return B::kMiddle;
+  if (modifiers & blink::WebInputEvent::kLeftButtonDown) return B::kLeft;
+  if (modifiers & blink::WebInputEvent::kForwardButtonDown) return B::kForward;
+  if (modifiers & blink::WebInputEvent::kBackButtonDown) return B::kBack;
+  return B::kNoButton;
+}
+static_assert(MouseMoveButton(0) == blink::WebPointerProperties::Button::kNoButton);
+static_assert(MouseMoveButton(blink::WebInputEvent::kShiftKey) ==
+              blink::WebPointerProperties::Button::kNoButton);
+static_assert(MouseMoveButton(blink::WebInputEvent::kLeftButtonDown) ==
+              blink::WebPointerProperties::Button::kLeft);
+static_assert(MouseMoveButton(blink::WebInputEvent::kMiddleButtonDown |
+                              blink::WebInputEvent::kLeftButtonDown) ==
+              blink::WebPointerProperties::Button::kMiddle);
+static_assert(MouseMoveButton(kMouseButtonModifiers) ==
+              blink::WebPointerProperties::Button::kRight);
+static_assert(MouseMoveButton(blink::WebInputEvent::kBackButtonDown) ==
+              blink::WebPointerProperties::Button::kBack);
+static_assert(MouseMoveButton(blink::WebInputEvent::kBackButtonDown |
+                              blink::WebInputEvent::kForwardButtonDown) ==
+              blink::WebPointerProperties::Button::kForward);
 content::RenderWidgetHostImpl* RootWidget(content::WebContents* contents) {
   if (!contents || !contents->GetPrimaryMainFrame())
     return nullptr;
@@ -1170,6 +1199,11 @@ Status WebView::DispatchInput(const InputEvent& input) {
   auto* router = root->GetInputEventRouter();
   if (routed && !router)
     return Fail(Error::unavailable, "Input routing unavailable");
+  auto* wheel_phase_handler = std::holds_alternative<WheelInput>(input.payload)
+      ? static_cast<content::RenderWidgetHostViewAura*>(root_view)->GetMouseWheelPhaseHandler()
+      : nullptr;
+  if (std::holds_alternative<WheelInput>(input.payload) && !wheel_phase_handler)
+    return Fail(Error::unavailable, "Mouse wheel phase handling unavailable");
   std::map<std::uint32_t, TouchPoint> next_touches;
   if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
     if (touch_owner_lost_)
@@ -1265,7 +1299,8 @@ Status WebView::DispatchInput(const InputEvent& input) {
           blink::WebMouseEvent event(type, static_cast<int>(value.modifiers), now);
           event.SetPositionInWidget(static_cast<float>(value.x), static_cast<float>(value.y));
           event.SetPositionInScreen(ViewportToScreen(root_view, event.PositionInWidget()));
-          event.button = Button(value.button);
+          event.button = value.action == MouseInput::Action::move
+                             ? MouseMoveButton(value.modifiers) : Button(value.button);
           event.click_count = (value.action == MouseInput::Action::move ||
                                value.action == MouseInput::Action::leave) ? 0 : value.click_count;
           last_mouse_ = value;
@@ -1275,6 +1310,9 @@ Status WebView::DispatchInput(const InputEvent& input) {
             pressed_mouse_buttons_.erase(value.button);
           router->RouteMouseEvent(root_view, &event, ui::LatencyInfo());
         } else if constexpr (std::is_same_v<T, WheelInput>) {
+          // Match Aura's OnMouseWheelEvent: zero deltas do not begin a sequence.
+          if (value.delta_x == 0 && value.delta_y == 0)
+            return;
           blink::WebMouseWheelEvent event(Type::kMouseWheel, static_cast<int>(value.modifiers),
                                           now);
           event.SetPositionInWidget(static_cast<float>(value.x), static_cast<float>(value.y));
@@ -1284,6 +1322,11 @@ Status WebView::DispatchInput(const InputEvent& input) {
           event.delta_units = ui::ScrollGranularity::kScrollByPixel;
           event.event_action =
               blink::WebMouseWheelEvent::GetPlatformSpecificDefaultEventAction(event);
+          // The router hit-tests only begin phases. Reuse Aura's existing
+          // latching and synthetic end timer before routing, as native input does.
+          wheel_phase_handler->SendWheelEndForTouchpadScrollingIfNeeded(true);
+          wheel_phase_handler->AddPhaseIfNeededAndScheduleEndEvent(
+              event, /*should_route_event=*/true, /*is_fling_capable=*/false);
           router->RouteMouseWheelEvent(root_view, &event, ui::LatencyInfo());
         } else if constexpr (std::is_same_v<T, ImeSet>) {
           host->ImeSetComposition(value.text, {}, gfx::Range::InvalidRange(),

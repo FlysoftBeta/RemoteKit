@@ -51,6 +51,8 @@ Endpoint 参数 `--qsv-vpp=external|async` 默认 external。async 必须显式�
 
 modifiers 使用 Blink WebInputEvent 位：Shift=1、Ctrl=2、Alt=4、Meta=8；鼠标按住左/中/右键分别为64/128/256，后退/前进键为1048576/2097152。仅 button=0 且没有上述鼠标按住位的 move/leave 可发送给未聚焦的可见 live WebView；悬停不改变焦点，仍校验 Session、实例、文档、当前 focus generation、sequence 和输出代次。拖拽、down/up、wheel、键盘、IME、触控继续要求焦点。
 
+Viewer在派发wheel前完成focus确认。Browser把mouse move的held modifiers转换为Blink move.button，down/up继续使用changed button；不能把wire move的button=0直接传作Blink NoButton，否则原生scrollbar会取消拖动。wheel复用现有Aura MouseWheelPhaseHandler建立begin/sequence/end，再经InputEventRouter路由；phase=None直接进入router不会完成首次hit-test。零delta不建立滚动序列。input.result成功仅表示接受派发，运行验收必须观察远端真实wheel事件与scrollY/scrollTop变化。
+
 `key` 携带 action(down/up/char)、physical_code、windows_key_code、dom_code、dom_key(十进制字符串)、modifiers、repeat、text、unmodified_text。char 只投递字符事件；旧 down 携带 text 的形式仍会随后产生字符事件，两种入口不能重复使用。文本最大四个 UTF-16 code unit，也不能与 IME commit 重复提交。mouse 可加 click_count(1..3，move/leave 可0)。
 
 `touch` 携带 action(start/move/end/cancel) 和 points，每点包括 id/x/y/pressure。points 是本次改变的 contacts，最多16点。adapter 使用官方 TouchEmulator、首次 start 的异步 OOPIF hit-test 与最终 ACK，生成滚动/缩放 gesture。解析目标或取消收尾期间，所有输入在 AcceptInput 前返回 busy(code=6)；SDK helper 映射为 BUSY(8)，可在原 token/sequence 下有界重试，token 变化则丢弃。受理后的异步失败不允许重放，读取 snapshot 的 touch 状态。CDP 附加期间远程 touch 拒绝，native/injected touch 按官方规则互斥。

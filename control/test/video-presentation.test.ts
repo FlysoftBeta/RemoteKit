@@ -9,7 +9,7 @@ const second: Surface = { ...first, id: '2', x: 648 };
 const layout: Layout = { type: 'layout', generation: '12', epoch: '20', width: 1296, height: 488, views: [first, second] };
 const key = { version: 1, barrierId: '10000000000000001', outputGeneration: '12', layoutEpoch: '20' };
 
-function environment(t: TestContext) {
+function environment(t: TestContext, stableViewport = false) {
   let cleanup = () => {}; t.after(() => cleanup());
   class Element {
     style: any = { setProperty(name: string, value: unknown) { this[name] = value; } };
@@ -51,7 +51,12 @@ function environment(t: TestContext) {
   const message = (message: object) => channel.onmessage({ data: JSON.stringify(message) });
   message(layout);
   const ready = [false, false], canvases = [new Element('canvas'), new Element('canvas')];
-  const removers = canvases.map((canvas, index) => { canvas.parentElement = new Element('section'); return transport.registerPlane({ view: layout.views[index], layoutEpoch: '20', layoutGeneration: '12' }, canvas as any, value => ready[index] = value); });
+  const removers = canvases.map((canvas, index) => {
+    canvas.parentElement = new Element('section');
+    const readyChanged = (value: boolean) => ready[index] = value;
+    return stableViewport ? transport.registerViewport(layout.views[index].id, canvas as any, readyChanged) :
+      transport.registerPlane({ view: layout.views[index], layoutEpoch: '20', layoutGeneration: '12' }, canvas as any, readyChanged);
+  });
   const raf = () => { const pending = [...rafs.values()]; rafs.clear(); for (const callback of pending) callback(performance.now()); };
   const metadata = (rtpTimestamp: number, layoutEpoch = '20') => message({ type: 'frame', rtpTimestamp, layoutEpoch });
   cleanup = () => { for (const remove of removers) remove(); transport.disconnect(); };
@@ -95,6 +100,64 @@ test('each video needs its own matched RTP before input, without canvas copies o
   assert.equal(s.canvases.reduce((count, canvas) => count + canvas.draws, 0), 0);
   assert.equal(s.transport.presentationDiagnostics.rendering.atlasSnapshotCopies, 0);
   assert.equal(s.transport.presentationDiagnostics.processor.read, 0);
+});
+
+test('viewport focus-only layouts preserve media authorization and queued drag/wheel input', t => {
+  const s = environment(t, true); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  const video = s.videos[1]; s.metadata(10); video.frame(10);
+  const initial = s.transport.layout!.views[0];
+  s.transport.ensureInputFocus(initial);
+  const request = s.sent.find(message => message.type === 'focus');
+  assert.ok(request);
+  assert.equal(s.transport.sendInput(initial, { type: 'mouse', action: 'down', x: 630, y: 30 }), true);
+  // Endpoint publishes a fresh layout object while acknowledging focus. It
+  // must not destroy the video or clear the down event waiting for its token.
+  s.message({ ...layout, views: [{ ...first, focus: '1' }, { ...second }] });
+  assert.equal(s.ready[0], true); assert.equal(s.videos.length, 3);
+  assert.equal(video.removed, false); assert.ok(video.srcObject);
+  s.message({ type: 'focus', ok: true, focusRequestId: request.focusRequestId, layoutEpoch: '20', token: { ...first, view: first.id, focus: '1' } });
+  const current = s.transport.layout!.views[0];
+  s.transport.ensureInputFocus(current);
+  assert.equal(s.sent.filter(message => message.type === 'focus').length, 1, 'wheel does not refocus an established lease');
+  for (const event of [{ type: 'mouse', action: 'move', x: 630, y: 250 }, { type: 'mouse', action: 'up', x: 630, y: 250 }, { type: 'wheel', x: 100, y: 100, dx: 0, dy: -120 }])
+    assert.equal(s.transport.sendInput(current, event), true);
+  assert.deepEqual(s.sent.filter(message => message.type === 'input').map(message => [message.event.type, message.event.action, message.focus]),
+    [['mouse', 'down', '1'], ['mouse', 'move', '1'], ['mouse', 'up', '1'], ['wheel', undefined, '1']]);
+});
+
+test('viewport document and epoch changes retain video but require the new barrier and own RTP', t => {
+  const s = environment(t, true); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  const [a, b] = s.videos.slice(1); s.metadata(10); a.frame(10); b.frame(10);
+  const next = { ...layout, epoch: '21', views: [{ ...first, document: 'new-document' }, { ...second }] };
+  s.message(next); assert.deepEqual(s.ready, [false, false]); assert.equal(s.videos.length, 3);
+  assert.equal(a.removed, false); assert.ok(a.srcObject);
+  assert.equal(s.transport.sendInput(first, { type: 'wheel', dy: -120 }), false);
+  s.metadata(11, '21'); a.frame(11); assert.deepEqual(s.ready, [false, false], 'RTP cannot bypass unacknowledged barrier');
+  s.message({ type: 'presentation.prepare', ...key, barrierId: '10000000000000002', layoutEpoch: '21' }); s.raf(); s.raf();
+  a.frame(10); assert.deepEqual(s.ready, [false, false], 'old-epoch callback remains rejected');
+  a.frame(11); assert.deepEqual(s.ready, [true, false], 'the second video needs its own new-epoch callback');
+  assert.equal(s.transport.sendInput(first, { type: 'wheel', dy: -120 }), false, 'old document input remains rejected');
+  assert.equal(s.transport.sendInput(next.views[0], { type: 'wheel', dy: -120 }), true);
+  b.frame(11); assert.deepEqual(s.ready, [true, true]);
+});
+
+test('viewport registrations survive RTC replacement while old receiver callbacks stay inert', t => {
+  const s = environment(t, true); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  const oldVideo = s.videos[1], oldCallback = oldVideo.callback!;
+  s.metadata(10); oldVideo.frame(10); assert.equal(s.ready[0], true);
+  s.transport.disconnect(); assert.deepEqual(s.ready, [false, false]); assert.equal(oldVideo.srcObject, null);
+  const track = { kind: 'video', id: 'replacement' };
+  s.internal.peer = { close() {} }; s.internal.processorTrack = track;
+  s.internal.presentationBackend = 'pending'; s.internal.bindChannel(s.channel);
+  s.message(layout); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  const freshVideo = s.videos[3]; assert.deepEqual(freshVideo.srcObject.tracks, [track]);
+  s.metadata(20); oldCallback(performance.now(), { rtpTimestamp: 20, presentedFrames: 1 });
+  assert.deepEqual(s.ready, [false, false]);
+  freshVideo.frame(20); assert.deepEqual(s.ready, [true, false]);
 });
 
 test('same-barrier late metadata retains authorized display; initial static miss schedules bounded fresh frames', t => {

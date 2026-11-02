@@ -16,7 +16,8 @@ import { SharedPlaneRenderer, type SharedFrame, type SharedPlaneResult } from '.
 export type ControlRpc = (method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback', params: unknown) => Promise<unknown>;
 
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
-interface VideoPlane { video: HTMLVideoElement; clip: HTMLDivElement; observer: ResizeObserver; callback?: number; ready: boolean; rtp?: number; stats: VideoCompositorStats; metadataRetries: number }
+interface ViewportRegistration { viewId: string; canvas: HTMLCanvasElement; ready: (ready: boolean) => void; renderer?: PlaneRenderer; remove?: () => void }
+interface VideoPlane { video: HTMLVideoElement; track: MediaStreamTrack; clip: HTMLDivElement; observer: ResizeObserver; callback?: number; ready: boolean; rtp?: number; stats: VideoCompositorStats; metadataRetries: number }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource; shared?: boolean }
 export type FrameSource = 'video' | 'track-processor';
 interface ProcessorFrameOwner { frame: VideoFrame; rtp: number; source: ProcessorSource; readAt: number; sourceTimestamp: number }
@@ -129,6 +130,7 @@ export class RemoteTransport {
   private directEpochReady: string | undefined;
   presentationMode: PresentationMode = 'snapshot';
   private renderers = new Set<PlaneRenderer>();
+  private viewports = new Set<ViewportRegistration>();
   private paintedPlanes = new Map<string, PaintedPlane>();
   private sharedRenderer?: SharedPlaneRenderer;
   private plane2dDraws = 0;
@@ -339,7 +341,10 @@ export class RemoteTransport {
     renderer.canvas.style.opacity = ''; renderer.canvas.removeAttribute('data-video-input');
   }
   private attachVideoPlane(renderer: PlaneRenderer) {
-    if (this.videoPlanes.has(renderer) || !this.processorTrack || !this.peer || !this.rendererCurrent(renderer) || !this.layout) return;
+    if (!this.processorTrack || !this.peer || !this.rendererCurrent(renderer) || !this.layout) return;
+    const existing = this.videoPlanes.get(renderer);
+    if (existing?.track === this.processorTrack) return;
+    if (existing) this.detachVideoPlane(renderer);
     const canvas = renderer.canvas, parent = canvas.parentElement;
     if (!parent) return;
     const video = this.createReceiverVideo(), clip = document.createElement('div');
@@ -353,7 +358,7 @@ export class RemoteTransport {
       if (!this.videoPlanes.has(renderer)) return;
       this.hideVideoPlane(renderer); this.positionVideoPlane(renderer); this.requestPresentationRefresh();
     });
-    const plane: VideoPlane = { video, clip, observer, ready: false, stats: new VideoCompositorStats(), metadataRetries: 0 };
+    const plane: VideoPlane = { video, track: this.processorTrack, clip, observer, ready: false, stats: new VideoCompositorStats(), metadataRetries: 0 };
     this.videoPlanes.set(renderer, plane); observer.observe(canvas); observer.observe(parent); this.positionVideoPlane(renderer);
     const peer = this.peer, attempt = this.attempt;
     const receive = (_now: number, metadata: VideoFrameCallbackMetadata) => {
@@ -432,7 +437,41 @@ export class RemoteTransport {
   }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   subscribeFrames = (listener: () => void) => { this.frameListeners.add(listener); return () => { this.frameListeners.delete(listener); }; };
+  // Product viewports outlive layout messages, input tokens and document
+  // identities. Only their authorization changes; the receiver keeps playing.
+  registerViewport(viewId: string, canvas: HTMLCanvasElement, ready: (ready: boolean) => void) {
+    const registration: ViewportRegistration = { viewId, canvas, ready };
+    this.viewports.add(registration); this.syncViewports();
+    return () => { this.viewports.delete(registration); registration.remove?.(); };
+  }
+  private syncViewports() {
+    if (!this.layout) return;
+    for (const registration of this.viewports) {
+      const view = this.layout.views.find(view => view.id === registration.viewId);
+      if (!view) {
+        if (registration.renderer) this.hideVideoPlane(registration.renderer);
+        registration.ready(false); continue;
+      }
+      const identity = { view, layoutEpoch: this.layout.epoch, layoutGeneration: this.layout.generation };
+      if (!registration.renderer) {
+        const mounted = this.registerPlaneRenderer(identity, registration.canvas, registration.ready);
+        registration.renderer = mounted.renderer; registration.remove = mounted.remove;
+      } else {
+        const renderer = registration.renderer;
+        if (!planeMatchesLayout(renderer, this.layout)) { this.hideVideoPlane(renderer); renderer.ready(false); }
+        Object.assign(renderer, identity, { view: { ...view } });
+        if (this.presentationBackend === 'video') {
+          if (renderer.canvas.width !== view.width) renderer.canvas.width = view.width;
+          if (renderer.canvas.height !== view.height) renderer.canvas.height = view.height;
+          this.attachVideoPlane(renderer); this.positionVideoPlane(renderer);
+        }
+      }
+    }
+  }
   registerPlane(identity: PlaneIdentity, canvas: HTMLCanvasElement, ready: (ready: boolean) => void) {
+    return this.registerPlaneRenderer(identity, canvas, ready).remove;
+  }
+  private registerPlaneRenderer(identity: PlaneIdentity, canvas: HTMLCanvasElement, ready: (ready: boolean) => void) {
     const renderer: PlaneRenderer = { ...identity, view: { ...identity.view }, canvas, ready };
     this.renderers.add(renderer);
     if (this.presentationBackend === 'video') this.attachVideoPlane(renderer);
@@ -447,7 +486,8 @@ export class RemoteTransport {
         if (this.paintPlane(renderer, cached.canvas, { x: 0, y: 0, width: identity.view.width, height: identity.view.height }, 'plane') && copiesBitmap) this.routing.retainedPlaneRedraws++;
       }
     }
-    return () => { this.detachVideoPlane(renderer); this.renderers.delete(renderer);if(this.sharedRenderer?.backend==='shared-webgl'){this.sharedRenderer.clear();if(!this.redrawCurrentPresentation())this.requestPresentationRefresh();} };
+    const remove = () => { this.detachVideoPlane(renderer); this.renderers.delete(renderer);if(this.sharedRenderer?.backend==='shared-webgl'){this.sharedRenderer.clear();if(!this.redrawCurrentPresentation())this.requestPresentationRefresh();} };
+    return { renderer, remove };
   }
   subscribePresentedFrames = (listener: (frame: CanvasPresentation) => void) => { this.presentedListeners.add(listener); return () => { this.presentedListeners.delete(listener); }; };
   getLastPresentation(viewId: string) { if (this.presentationBackend === 'video') return this.videoPlaneFor(viewId)?.plane.ready && this.videoPlaneFor(viewId)?.plane.rtp === this.viewPresentations.get(viewId)?.rtpTimestamp ? this.viewPresentations.get(viewId) : undefined; const frame = this.viewPresentations.get(viewId), plane = this.paintedPlanes.get(viewId); return frame?.layoutEpoch === this.layout?.epoch && plane && planeMatchesLayout(plane.identity, this.layout) ? frame : undefined; }
@@ -913,6 +953,7 @@ export class RemoteTransport {
           this.markConnection('firstLayout');
           if (this.activeFrameSource === 'track-processor' && this.layout && (this.layout.epoch !== message.epoch || this.layout.generation !== message.generation || this.layout.width !== message.width || this.layout.height !== message.height || this.layout.views.length !== message.views.length || this.layout.views.some(view => !message.views.some((next: Surface) => samePlane(view, next))))) { this.closePendingProcessorFrame('layout-change'); this.closeLatestProcessorFrame(); this.frameGate.observe(undefined); }
           this.layout = message;
+          this.syncViewports();
           for (const [id, plane] of this.paintedPlanes) if (!planeMatchesLayout(plane.identity, this.layout)) { this.paintedPlanes.delete(id); this.viewPresentations.delete(id); }
           for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) { this.hideVideoPlane(renderer); renderer.ready(false); }
           if (![...this.paintedPlanes.values()].some(plane => planeMatchesLayout(plane.identity, this.layout))) this.directEpochReady = undefined;
@@ -1089,6 +1130,7 @@ export class RemoteTransport {
     this.viewPresentations.clear(); this.pendingPresentations = []; this.dispatchingPaint = false;
     this.pendingSnapshotRtp = undefined; this.snapshotRtp = undefined; this.snapshotEpoch = undefined; this.directEpochReady = undefined;
     this.paintedPlanes.clear(); for (const renderer of this.renderers) renderer.ready(false); this.renderers.clear();
+    for (const registration of this.viewports) { registration.renderer = undefined; registration.remove = undefined; }
     this.endpointGeneration = undefined;
     if (this.connectionId) { void this.rtcRequest('rtc.close', { connectionId: this.connectionId }).catch(() => {}); this.connectionId = undefined; }
     clearInterval(this.timer);

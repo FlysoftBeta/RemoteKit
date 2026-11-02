@@ -1,6 +1,17 @@
 # 当前问题与收尾记录
 
-由root维护。首版506c45e已上传；完整审查依据见[审查报告](post-release-astra-review.md)。本轮不重复性能组，只检查修复行为。
+由root维护。最新已发布基线8423204；旧全库审查依据见[审查报告](post-release-astra-review.md)。本轮不重复性能组，只检查用户报告的连续交互与媒体生命周期。
+
+## 8423204发布后输入与video回归
+
+此前默认video验收覆盖点击坐标，未覆盖连续滚轮和真实滚动条拖拽，不能据此声称输入全面通过。root承担方案审阅和验收范围不足的责任。
+
+| 项目 | 证据、决策与进度 |
+|---|---|
+| V3 focus/导航看似重连 | 89/157旧版实际peer/connectionId/track不变，但video与srcObject反复重建。根因是React注册effect依赖surface对象。改为可见viewport稳定持有renderer/video；focus仅更新输入身份，document/epoch改变仍隐藏并验证新ACK和该元素自身RTP。Control182项/生产构建与89/157连续运行通过，focus/导航/resize均保持媒体身份 |
+| I1 滚轮无效 | 存在焦点和派发两个缺口。Client补ensureInputFocus/非passive监听后，实测仍是input.result ok而DOM无wheel。根因是直接RouteMouseWheelEvent的phase=None，router未建立hit-test目标。已复用Aura已有MouseWheelPhaseHandler补begin/sequence/end再路由。89/157实际失焦、burst、间隔重开、nested、跨窗、resize/reload后wheel均通过；不能把AcceptInput成功当网页消费 |
+| I2 原生scrollbar拖拽取消 | Browser把move的changed-button=0直接转成Blink NoButton，Chromium主线程和compositor均据此取消drag。adapter现从held modifiers生成move.button，down/up保留changed button语义；7项编译期断言与Browser增量通过，89/157均实际页面scrollY 0→2739、nested 0→903 |
+| D1 多video是否重复解码 | Chromium157源码确认同remote track共享receive stream decoder，解码后VideoFrame分发给各sink；每元素仍有独立player/compositor及可能的转换成本。不能相加各元素webkitDecodedFrameCount声称重复物理解码，亦不把157源码结论扩写成所有浏览器保证 |
 
 ## 首版后修复
 

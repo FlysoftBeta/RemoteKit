@@ -57,16 +57,9 @@ export function RemoteViewport({
   const [frameReady, setFrameReady] = useState(false);
   useEffect(() => {
     setFrameReady(false);
-    if (!surface || !canvas.current || !layoutEpoch || !layoutGeneration)
-      return;
-    // The encoded bitmap survives CSS resizing. Transport validates this exact
-    // renderer identity before either an atlas crop or the opt-in direct draw.
-    return transport.registerPlane(
-      { view: surface, layoutEpoch, layoutGeneration },
-      canvas.current,
-      setFrameReady,
-    );
-  }, [transport, surface, layoutEpoch, layoutGeneration]);
+    if (!canvas.current) return;
+    return transport.registerViewport(viewId, canvas.current, setFrameReady);
+  }, [transport, viewId]);
   const send = (event: Record<string, unknown>) => {
     return !!(surface && (frameReady || event.type === 'touch' && event.action === 'cancel') && transport.sendInput(surface, event));
   };
@@ -243,6 +236,25 @@ export function RemoteViewport({
     else heldKeys.current.delete(event.code);
     send(value);
   };
+  const wheelRef = useRef<(event: WheelEvent) => void>(() => {});
+  wheelRef.current = (event) => {
+    if (!surface || !frameReady) return;
+    const position = point(event);
+    if (!position) return;
+    // React's delegated wheel listener is passive. Prevent browser scrolling
+    // with a native listener, and establish the same input lease as a click.
+    event.preventDefault();
+    transport.ensureInputFocus(surface);
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? surface.height / surfacePixelScale(surface) : 1;
+    send({ type: 'wheel', ...position, dx: -event.deltaX * unit, dy: -event.deltaY * unit, modifiers: modifiers(event) });
+  };
+  useEffect(() => {
+    const node = canvas.current;
+    if (!node) return;
+    const wheel = (event: WheelEvent) => wheelRef.current(event);
+    node.addEventListener('wheel', wheel, { passive: false });
+    return () => node.removeEventListener('wheel', wheel);
+  }, []);
   return (
     <section className="remote-viewport" aria-label="远程页面">
       <canvas
@@ -258,25 +270,6 @@ export function RemoteViewport({
           if (event.pointerType !== "touch") pointer(event, "leave");
         }}
         onContextMenu={(event) => event.preventDefault()}
-        onWheel={(event) => {
-          if (surface && frameReady) {
-            const position = point(event);
-            if (!position) return;
-            const unit =
-              event.deltaMode === 1
-                ? 16
-                : event.deltaMode === 2
-                  ? surface.height / surfacePixelScale(surface)
-                  : 1;
-            send({
-              type: "wheel",
-              ...position,
-              dx: -event.deltaX * unit,
-              dy: -event.deltaY * unit,
-              modifiers: modifiers(event),
-            });
-          }
-        }}
       />
       <textarea
         ref={editor}
