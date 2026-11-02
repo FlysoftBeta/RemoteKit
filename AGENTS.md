@@ -22,6 +22,7 @@
 - Rectangle Packing把多个可见平面合为视频atlas；必须处理DPR、DIP、编码采样比例、letterbox、screen坐标与旧布局输入门禁。
 - Endpoint用独立CMake/Ninja，Mojo/libwebrtc纳入SDK边界；跨DLL不传C++ STL/libc++/Abseil/Chromium对象。oneVPL异步H264与NVENC均在范围内。新增音频目标必须是Chromium播放输出target，不用系统hook/capture。旧内置demo仅由显式构建目标包含。
 - 音频播放配置按整个Viewer统一并由Control保存：更多菜单紧凑放左右声道多选Switch与“不播放”（清空选择）。
+- Viewer默认使用video呈现。显示布局来自客户端内容bounds，atlas矩形用于裁剪；不启用原生controls、画中画和多余媒体功能。新路径必须保持布局/输入对应正确，不能把实验原型直接当成已完成的产品实现。
 - 网页文件上传使用自定义dialog，支持设备文件和摄像头拍照。拍照用摄像头feature而非capture input；从短时间序列挑选几张清晰照片，并限制并发/内存，避免端侧卡顿。客户端、远程处理或WASM按实验证据取舍，不把候选方案固化为要求。
 - 实际GPU Fence保护读写与复用；CPU发布位、提交返回或持有HANDLE不能假装完成。browser↔endpoint正常帧不增加逐帧ready/present/release消息；Chromium内部IPC和Endpoint↔Client媒体元数据是不同边界。
 - 保留Views/Aura功能适配是允许的；服务渲染目标为离屏，不需要本地屏幕Present。不要把无页面HWND说成整个Chromium进程零HWND。
