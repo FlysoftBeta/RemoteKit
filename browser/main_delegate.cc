@@ -1,4 +1,6 @@
 #include "remotekit/browser/main_delegate.h"
+#include "remotekit/browser/audio_target.h"
+#include "media/audio/audio_manager.h"
 
 #include "base/base_paths.h"
 #include "base/command_line.h"
@@ -44,6 +46,12 @@ class ContentClient final : public content::ContentClient {
 };
 class BrowserClient final : public content::ContentBrowserClient {
  public:
+#if !defined(REMOTEKIT_DEMO_HARNESS)
+  std::unique_ptr<media::AudioManager> CreateAudioManager(media::AudioLogFactory* log) override {
+    return CreateAudioTarget(log);
+  }
+  bool OverridesAudioManager() override { return true; }
+#endif
   void OnWebContentsCreated(content::WebContents* contents) override {
     BrowserContext::InstallSiteIdentity(contents);
   }
@@ -135,7 +143,8 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
     settings.log_file_path = log_path.value().c_str();
     settings.lock_log = logging::LOCK_LOG_FILE;
   }
-  logging::InitLogging(settings);
+  const bool logging_ready = logging::InitLogging(settings);
+  if (!command.HasSwitch("type")) LOG(INFO) << "RemoteKit startup InitLogging=" << logging_ready;
   return std::nullopt;
 }
 void MainDelegate::PreSandboxStartup() {

@@ -1,6 +1,9 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import type { ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, AppliedMediaPolicy, PendingClose } from '../shared/product';
+import { FILE_LIMITS } from '../shared/product';
+import { FileUploads, FileUploadError, type InternalFileRequest, type UploadLimits } from './file-uploads';
+import type { Readable } from 'node:stream';
 import { QualityController } from './quality';
 import type { ControlState, Device } from '../client/types';
 import type { Endpoint, RtcSignal } from './endpoint';
@@ -27,8 +30,14 @@ export class Control extends EventEmitter {
   private qualityControllers = new Map<string, QualityController>();
   private actualMediaPolicies = new Map<string, AppliedMediaPolicy>();
   private dialogs = new Map<string, (PageDialog & { viewId: string; requestId: string; browserIncarnation: string; instance: string; document: string })[]>();
-  constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation) {
+  private fileRequests = new Map<string, InternalFileRequest[]>();
+  private uploads: FileUploads;
+  constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation, fileLimits: UploadLimits = FILE_LIMITS) {
     super(); endpoint.onSignal?.(event => this.receiveSignal(event));
+    this.uploads = new FileUploads(endpoint, (tenant, lease, authentication) => {
+      this.assertViewer(tenant, lease);
+      if ((this.viewers.get(tenant)?.authentication?.identity ?? '') !== authentication) throw new ApiError(401, '上传登录身份已改变');
+    }, (tenant, id) => this.fileRequests.get(tenant)?.find(request => request.id === id), fileLimits);
   }
   private receiveSignal(event: RtcSignal) {
     const binding = this.signalBindings.get(event.connectionId);
@@ -227,7 +236,7 @@ export class Control extends EventEmitter {
     return this.relays.get(body.connectionId)?.snapshot() ?? { enabled: false };
   }
   productState(tenant: string): ProductState {
-    return { user: this.store.userForTenant(tenant)!, workspace: this.store.workspace(tenant), pageDialogs: (this.dialogs.get(tenant) ?? []).map(({ viewId, requestId, browserIncarnation, instance, document, ...dialog }) => dialog), quality: this.qualityFor(tenant), endpointGeneration: this.endpointGeneration, endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant), trickleIce: !!this.endpoint.onSignal && !this.simulation }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
+    return { user: this.store.userForTenant(tenant)!, workspace: this.store.workspace(tenant), pageDialogs: (this.dialogs.get(tenant) ?? []).map(({ viewId, requestId, browserIncarnation, instance, document, ...dialog }) => dialog), fileRequests: (this.fileRequests.get(tenant) ?? []).map(({ binding, ...request }) => request), quality: this.qualityFor(tenant), endpointGeneration: this.endpointGeneration, endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant), trickleIce: !!this.endpoint.onSignal && !this.simulation }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
   }
   private push(tenant: string) { this.emit('state', tenant, this.productState(tenant)); }
   private saveProduct(state: ProductWorkspace) { const changed = this.store.saveWorkspace(state); if (changed) this.push(state.tenantId); }
@@ -237,6 +246,7 @@ export class Control extends EventEmitter {
     const old = this.viewers.get(tenant); this.viewers.set(tenant, { id, revoke, authentication }); old?.revoke('another-viewer');
     const previous = this.connections.get(tenant); if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
+      if (old) await this.uploads.revoke(tenant, old.id);
       this.assertViewer(tenant, id); await this.closeMedia(tenant);
       try { await this.reconcileProduct(tenant); } catch { /* State carries Endpoint error; controls still work offline. */ }
       this.push(tenant); return this.productState(tenant);
@@ -247,6 +257,7 @@ export class Control extends EventEmitter {
     this.viewers.delete(tenant);
     const previous = this.connections.get(tenant); if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
+      await this.uploads.revoke(tenant, id);
       // A replacement owns media now; an old close must not hide or close it.
       if (this.viewers.has(tenant)) return;
       await this.closeMedia(tenant); try { await this.reconcileProduct(tenant); } catch { }
@@ -279,6 +290,14 @@ export class Control extends EventEmitter {
     if (method === 'rtc.ice') return this.ice(tenant, params);
     return this.serial(tenant, async () => {
       this.assertViewer(tenant, lease);
+      if (['files.begin','files.commit','files.cancel'].includes(method)) {
+        try {
+          const authentication = this.viewers.get(tenant)?.authentication?.identity ?? '';
+          const result = method === 'files.begin' ? await this.uploads.begin(tenant, lease, authentication, params) : method === 'files.commit' ? await this.uploads.commit(tenant, lease, authentication, params) : await this.uploads.cancel(tenant, lease, authentication, params);
+          try { this.collectDialogs(tenant, this.store.workspace(tenant), await this.endpoint.request('session.snapshot', tenant)); } catch { }
+          return result;
+        } catch (error) { if (error instanceof FileUploadError) throw new ApiError(error.status, error.message); throw error; }
+      }
       if (method === 'clock.ping') return { serverTime: Date.now(), ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}) };
       if (method === 'feedback') {
         if (this.diagnosticTenants.has(tenant)) return { accepted: false };
@@ -348,10 +367,11 @@ export class Control extends EventEmitter {
         }
         case 'settings.update': {
           const value = action.settings;
-          if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['qualityPreference', 'clientScaleOverride', 'memorySaverEnabled', 'showStats'].includes(k))) throw new ApiError(400, '无效的设置');
+          if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['qualityPreference', 'clientScaleOverride', 'memorySaverEnabled', 'showStats','audioChannels'].includes(k))) throw new ApiError(400, '无效的设置');
           if ('qualityPreference' in value && !['quality', 'auto', 'smooth'].includes(value.qualityPreference)) throw new ApiError(400, '无效的画面质量');
           if ('clientScaleOverride' in value && value.clientScaleOverride !== null && (typeof value.clientScaleOverride !== 'number' || !Number.isFinite(value.clientScaleOverride) || value.clientScaleOverride < .5 || value.clientScaleOverride > 4)) throw new ApiError(400, '显示比例需0.5–4');
           if ('memorySaverEnabled' in value && typeof value.memorySaverEnabled !== 'boolean') throw new ApiError(400, '无效的内存设置');
+          if ('audioChannels' in value && (!value.audioChannels || typeof value.audioChannels !== 'object' || Array.isArray(value.audioChannels) || Object.keys(value.audioChannels).length !== 2 || typeof value.audioChannels.left !== 'boolean' || typeof value.audioChannels.right !== 'boolean')) throw new ApiError(400, '声道设置需同时提供左右开关');
           if ('showStats' in value && typeof value.showStats !== 'boolean') throw new ApiError(400, '无效的统计设置'); Object.assign(state.settings, value); break;
         }
         case 'site.set': {
@@ -511,12 +531,12 @@ export class Control extends EventEmitter {
         const changed = this.errors.get(tenant) !== resourceLimitation;
         this.errors.set(tenant, resourceLimitation); if (changed) this.push(tenant);
       } else { const previousError = this.errors.delete(tenant); if (previousError) this.push(tenant); }
-    } catch (error) { this.dialogs.delete(tenant); this.errors.set(tenant, error instanceof Error ? error.message : String(error)); this.push(tenant); throw error; }
+    } catch (error) { this.dialogs.delete(tenant); this.fileRequests.delete(tenant); this.uploads.retireMissing(tenant, new Set()); this.errors.set(tenant, error instanceof Error ? error.message : String(error)); this.push(tenant); throw error; }
   }
   private async observeOffline(tenant: string) {
     // Snapshot is read-only. Maintenance must never revive a missing Browser/view.
     const snapshot = await this.endpoint.request('session.snapshot', tenant), state = this.store.workspace(tenant);
-    await this.consumeClosedEvents(state, snapshot); this.dialogs.delete(tenant);
+    await this.consumeClosedEvents(state, snapshot); this.dialogs.delete(tenant); this.fileRequests.delete(tenant); this.uploads.retireMissing(tenant, new Set());
     if (state.pendingClose) { const tab = state.tabs.find(t => t.id === state.pendingClose?.id); this.observePendingClose(state, snapshot, (snapshot.views ?? []).find((v: any) => String(v.viewId ?? v.view ?? v.id) === tab?.webviewId)); this.saveProduct(state); }
     if (snapshot.running === false) { this.started.delete(tenant); this.siteApplications.delete(tenant); this.mediaApplications.delete(tenant); this.actualMediaPolicies.delete(tenant); this.push(tenant); return; }
     for (const tab of state.tabs) {
@@ -543,18 +563,27 @@ export class Control extends EventEmitter {
   }
   private collectDialogs(tenant: string, state: ProductWorkspace, snapshot: any) {
     const found: (PageDialog & { viewId: string; requestId: string; browserIncarnation: string; instance: string; document: string })[] = [];
+    const files: InternalFileRequest[] = [];
     for (const view of Array.isArray(snapshot.views) ? snapshot.views : []) {
       const viewId = String(view.viewId ?? view.view ?? view.id), tab = state.tabs.find(t => t.webviewId === viewId);
       if (!tab || snapshot.running === false || typeof snapshot.browserIncarnation !== 'string' || !snapshot.browserIncarnation || view.instance === undefined || view.document === undefined) continue;
       const instance = String(view.instance), document = String(view.document);
       for (const request of Array.isArray(view.pageRequests?.pending) ? view.pageRequests.pending : []) {
+        if (request.kind === 'file_chooser' && typeof request.request === 'string') {
+          const id = createHash('sha256').update(JSON.stringify([tenant, snapshot.browserIncarnation, viewId, instance, document, request.request])).digest('hex');
+          files.push({ id, tabId: tab.id, windowId: tab.windowId, origin: String(request.origin ?? ''), multiple: request.multiple === true, accept: Array.isArray(request.accept_types) ? request.accept_types.filter((type: unknown): type is string => typeof type === 'string').slice(0,64) : [], state: request.state === 'validating' ? 'validating' : 'pending', limits: { ...this.uploads.limits }, binding: { browserIncarnation: snapshot.browserIncarnation, view: viewId, instance, document, request: request.request } });
+        }
         if (!['alert', 'confirm', 'prompt', 'beforeunload'].includes(request.kind) || typeof request.request !== 'string' || state.pendingClose?.id === tab.id && request.kind === 'beforeunload') continue;
         // Browser replacement may restart its local token/request counters.
         const id = createHash('sha256').update(JSON.stringify([tenant, snapshot.browserIncarnation, viewId, instance, document, request.request])).digest('hex');
         found.push({ id, tabId: tab.id, windowId: tab.windowId, viewId, browserIncarnation: snapshot.browserIncarnation, instance, document, requestId: request.request, kind: request.kind, message: String(request.message ?? ''), defaultPrompt: String(request.default_prompt ?? ''), origin: String(request.origin ?? ''), ...(typeof request.is_reload === 'boolean' ? { isReload: request.is_reload } : {}) });
       }
     }
-    const changed = JSON.stringify(found) !== JSON.stringify(this.dialogs.get(tenant) ?? []); this.dialogs.set(tenant, found); if (changed) this.push(tenant);
+    const changed = JSON.stringify(found) !== JSON.stringify(this.dialogs.get(tenant) ?? []) || JSON.stringify(files) !== JSON.stringify(this.fileRequests.get(tenant) ?? []); this.dialogs.set(tenant, found); this.fileRequests.set(tenant, files); this.uploads.retireMissing(tenant, new Set(files.map(request => request.id))); if (changed) this.push(tenant);
+  }
+  async receiveFileUpload(tenant: string, authentication: string, ticket: string, source: Readable, contentLength?: string) {
+    try { await this.uploads.stream(tenant, authentication, ticket, source, contentLength); }
+    catch (error) { if (error instanceof FileUploadError) throw new ApiError(error.status, error.message); throw error; }
   }
   private async applySites(tenant: string, state: ProductWorkspace, force = false, browserPid?: number) {
     const encoded = JSON.stringify(state.sites), previous = this.siteApplications.get(tenant);

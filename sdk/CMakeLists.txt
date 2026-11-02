@@ -45,3 +45,9 @@ add_custom_command(TARGET remotekit_rtc_smoke POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy_directory
     "${SDK_ROOT}/bin" "$<TARGET_FILE_DIR:remotekit_rtc_smoke>")
 add_test(NAME remotekit_rtc_smoke COMMAND remotekit_rtc_smoke)
+add_executable(remotekit_audio_smoke audio-smoke.cc)
+target_link_libraries(remotekit_audio_smoke PRIVATE RemoteKit::SDK)
+target_compile_features(remotekit_audio_smoke PRIVATE cxx_std_20)
+add_custom_command(TARGET remotekit_audio_smoke POST_BUILD
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${SDK_ROOT}/bin" "$<TARGET_FILE_DIR:remotekit_audio_smoke>")
+add_test(NAME remotekit_audio_smoke COMMAND remotekit_audio_smoke)

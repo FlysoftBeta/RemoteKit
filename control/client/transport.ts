@@ -1,4 +1,5 @@
 import { CaptureLatency } from './capture-latency';
+import { ViewerAudioOutput, stereoOpusOffer } from './audio-output';
 import { mergeTouchMoves } from './touch-input';
 import { request, type Diagnostics, type Layout, type Surface, type CanvasPresentation } from './types';
 import { FrameEpochGate } from './frame-epoch';
@@ -21,6 +22,7 @@ interface ProcessorSource { processor: TrackProcessor; reader: ReadableStreamDef
 
 /** All endpoint wire adaptation lives here; the UI never owns recovery state. */
 export class RemoteTransport {
+  readonly audio = new ViewerAudioOutput(() => this.notify());
   readonly touchInputStats = { queued: 0, merged: 0, dropped: 0, cancelled: 0, sourceGestures: 0, arrivalFallbackGestures: 0 };
   private queuedInput: { surface: Surface; event: Record<string, unknown>; epoch: string; generation: string }[] = [];
   private inputDrainTimer?: ReturnType<typeof setTimeout>;
@@ -157,7 +159,9 @@ export class RemoteTransport {
   }
   private getRenderingDiagnostics() {
     const percentile=(values:number[])=>{const sorted=[...values].sort((a,b)=>a-b);return {samples:sorted.length,p50:sorted.length?sorted[Math.ceil(sorted.length*.5)-1]:null,p95:sorted.length?sorted[Math.ceil(sorted.length*.95)-1]:null};};
-    return {backend:this.sharedRenderer?.backend??'canvas-2d',shared:{...this.sharedRenderer?.counts},plane2dDraws:this.plane2dDraws,atlasSnapshotCopies:this.routing.snapshotFrames,mediaRefreshRequests:this.mediaRefreshRequests,scheduling:{metadataMissingAtRead:this.presentationFlow.metadataMissingAtRead,metadataBlockedSchedules:this.presentationFlow.metadataBlockedSchedules,drops:{...this.presentationFlow.drops},readToAuthorizeMs:percentile(this.presentationFlow.readToAuthorize),rafWaitMs:percentile(this.presentationFlow.rafWait)}};
+    const eligible=[...this.renderers].filter(r=>this.rendererCurrent(r)&&!r.view.stale);
+    const backendReason=this.sharedRenderer?.backend==='shared-webgl'?'multiple-planes':eligible.length<2?'single-or-no-eligible-plane':/(?:Chrome|Chromium)\/89\./.test(navigator.userAgent)?'chrome89-compatible-2d':typeof WebGL2RenderingContext!=='function'?'webgl2-unavailable':new Set(eligible.map(r=>r.view.id)).size!==eligible.length?'duplicate-plane':this.sharedRenderer?.counts.fallbackReason??'waiting-for-shared-frame';
+    return {backend:this.sharedRenderer?.backend??'canvas-2d',backendReason,frameSource:this.activeFrameSource,frameSourceFallbackReason:this.signaling?.processorFallbackReason as string|undefined,visibility:globalThis.document?.visibilityState,shared:{...this.sharedRenderer?.counts},plane2dDraws:this.plane2dDraws,atlasSnapshotCopies:this.routing.snapshotFrames,mediaRefreshRequests:this.mediaRefreshRequests,scheduling:{metadataMissingAtRead:this.presentationFlow.metadataMissingAtRead,metadataBlockedSchedules:this.presentationFlow.metadataBlockedSchedules,drops:{...this.presentationFlow.drops},readToAuthorizeMs:percentile(this.presentationFlow.readToAuthorize),rafWaitMs:percentile(this.presentationFlow.rafWait)}};
   }
   private routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {} as Record<string, number>, skippedRenderer: {} as Record<string, number> };
   private frameGate = new FrameEpochGate();
@@ -314,6 +318,7 @@ export class RemoteTransport {
       const video = this.createReceiverVideo(); this.receiverVideo = video;
       this.peer = peer;
       const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
+      peer.addTransceiver('audio', { direction: 'recvonly' });
       const codecs = RTCRtpReceiver.getCapabilities?.('video')?.codecs;
       if (codecs && typeof transceiver.setCodecPreferences === 'function') transceiver.setCodecPreferences([...codecs.filter(codec => codec.mimeType.toLowerCase() === 'video/h264'), ...codecs.filter(codec => codec.mimeType.toLowerCase() !== 'video/h264')]);
       peer.onconnectionstatechange = () => {
@@ -325,6 +330,7 @@ export class RemoteTransport {
       };
       peer.ontrack = event => {
         if (this.peer !== peer || this.video !== video) return;
+        if (event.track.kind === 'audio') { this.audio.attach(event.track); return; }
         this.markConnection('track');
         if (this.activeFrameSource === 'track-processor') { this.processorTrack = event.track; this.startProcessorPump(peer, event.track); return; }
         video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
@@ -346,6 +352,7 @@ export class RemoteTransport {
       const originalOffer = await peer.createOffer();
       this.markConnection('createOfferEnd');
       const effectiveOffer = configureReceiveOffer(originalOffer.sdp ?? '', this.receiveProfile, navigator.userAgent, codecs);
+      effectiveOffer.sdp = stereoOpusOffer(effectiveOffer.sdp);
       this.signaling = { receiveSelection: this.productReceiveSelection, previousNegotiationFailure: this.receiveFallback, receiveProfile: this.receiveProfile, originalOfferSdp: originalOffer.sdp, effectiveOfferSdp: effectiveOffer.sdp, changes: effectiveOffer.changes };
       await peer.setLocalDescription({ type: 'offer', sdp: effectiveOffer.sdp });
       this.markConnection('setLocalEnd');
@@ -822,6 +829,7 @@ export class RemoteTransport {
     this.closeLocal();
   }
   private closeLocal() {
+    this.audio.detach();
     this.sharedRenderer?.dispose();this.sharedRenderer=undefined;this.mediaRefreshAt=-Infinity;
     clearTimeout(this.inputDrainTimer); this.inputDrainTimer = undefined; this.queuedInput = []; this.inputFocus.clear();
     this.signalAttemptId = undefined; this.remoteSignalConnection = undefined; this.remoteDescriptionReady = false; this.remoteIce = []; this.localIce = []; this.iceDelivery = Promise.resolve(); this.localIceDelivery = Promise.resolve();

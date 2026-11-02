@@ -364,9 +364,9 @@ export function SettingsDialog({
   );
 }
 
-export function PageDialogs({ state, action }: { state: ProductState; action: Action }) {
+export function PageDialogs({ state, action, activeId }: { state: ProductState; action: Action; activeId?:string|null }) {
   const visible = state.workspace.windows.filter(w => state.workspace.layoutMode === 'side-by-side' && window.innerWidth >= Math.max(720, state.workspace.windows.length * 365 - 5) || w.id === state.workspace.activeWindowId).map(w => w.activeTabId);
-  const dialog = state.pageDialogs?.find(d => visible.includes(d.tabId));
+  const dialog = state.pageDialogs?.find(d => activeId===undefined?visible.includes(d.tabId):d.id===activeId);
   return dialog ? <PageDialogForm key={dialog.id} dialog={dialog} action={action} /> : null;
 }
 function PageDialogForm({ dialog, action }: { dialog: NonNullable<ProductState['pageDialogs']>[number]; action: Action }) {

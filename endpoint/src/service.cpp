@@ -1,6 +1,8 @@
 #include "media/atlas_pool.hpp"
 #include "media/encoder_worker.hpp"
 #include "media/sdk_loader.hpp"
+#include "media/audio_ring.hpp"
+#include "remotekit/file_upload.hpp"
 #include "remotekit/core.hpp"
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
@@ -185,11 +187,15 @@ struct Session {
  Sdk& sdk;Options options;std::string tenant,id;fs::path directory;
  HANDLE process=nullptr,job=nullptr;std::atomic<uint64_t> control{0};int request_id=0;
  bool producer_stop_pending=false;
- std::string browser_incarnation;
+ bool process_in_job=false;
+ std::string browser_incarnation,process_incarnation;
+ remotekit::FileUploadStore file_uploads;
  std::mutex rpc_mutex;
  std::map<std::string,Json> desired;
  int atlas_width=1920,atlas_height=1080;float atlas_scale=1;
  AtlasPool pool;std::thread media_thread;std::atomic<bool> stop_media{false};
+ AudioRing audio_ring;std::thread audio_thread;std::atomic<bool> stop_audio{false};
+ std::atomic<uint64_t> audio_gaps{0},audio_submitted{0},audio_rejected{0};
  remotekit::CoordinateReadiness coordinate_readiness;
  std::atomic<uint64_t> peer{0};std::string connection;
  std::shared_ptr<EncoderStats> stats=std::make_shared<EncoderStats>();
@@ -263,7 +269,7 @@ struct Session {
  std::map<std::string,Recovery> recoveries;
  std::string recovery_cursor;
  Session(Sdk& api,const Options& opts,std::string tenant_id,std::string session_id):sdk(api),options(opts),
-   tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id),
+   tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id),file_uploads(directory/"uploads"),
    adaptive(options.adaptive_fps,options.browser_render_fps?options.browser_render_fps:options.encoding.fps) {
   effective_idle_ms=std::min(1000u,options.idle_idr_ms);
   trace=ServerTrace::Create(tenant,id);pool.SetTrace(trace);
@@ -378,10 +384,19 @@ struct Session {
   if(!CreateProcessW(options.browser.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_SUSPENDED|CREATE_NO_WINDOW,
        nullptr,options.browser.parent_path().c_str(),&startup,&info))throw std::runtime_error("browser launch Windows "+std::to_string(GetLastError()));
   process=info.hProcess;
+  process_incarnation=browser_incarnation;
+  process_in_job=false;
   if(!AssignProcessToJobObject(job,process)) {
    const auto error=GetLastError();CloseHandle(info.hThread);
+   // This exact process was created suspended by us and never joined the job.
+   // Terminating the empty job cannot release it. Retain the process handle
+   // for Stop's confirmation/retry even if the targeted termination fails.
+   const bool terminated=TerminateProcess(process,1)!=FALSE;
+   const auto waited=WaitForSingleObject(process,5000);
+   fprintf(stderr,"unassigned browser cleanup terminated=%d wait=%lu\n",terminated,waited);
    throw std::runtime_error("browser job assignment Windows "+std::to_string(error)+" "+ProcessDiagnostic());
   }
+  process_in_job=true;
   if(ResumeThread(info.hThread)==DWORD(-1)) {
    const auto error=GetLastError();CloseHandle(info.hThread);
    throw std::runtime_error("browser resume Windows "+std::to_string(error)+" "+ProcessDiagnostic());
@@ -763,6 +778,7 @@ struct Session {
   value["adaptiveFps"]["displayLimit"]=!feedback_age.is_null() && feedback_age.get<double>()<=5000 &&
     value.value("feedbackVisible",false) && value.contains("feedbackDisplayHzEstimate")?
       Json(static_cast<uint32_t>(std::ceil(value["feedbackDisplayHzEstimate"].get<double>()))):Json(nullptr);
+  value["audio"]={{"submitted",audio_submitted.load()},{"gaps",audio_gaps.load()},{"rejected",audio_rejected.load()}};
   value["rtcPlayoutDelayRequested"]={{"minMs",options.rtc_playout_max_ms<0?-1:0},
                                      {"maxMs",options.rtc_playout_max_ms}};
   value["effectiveIdleIdrMs"]=effective_idle_ms.load();value["tailIdrSubmissions"]=tail_submissions.load();
@@ -848,8 +864,11 @@ struct Session {
   if(job && !TerminateJobObject(job,0))
    fprintf(stderr,"producer job termination request failed (Windows=%lu); waiting for retained process\n",GetLastError());
   if(process) {
+   if(!process_in_job && WaitForSingleObject(process,0)==WAIT_TIMEOUT && !TerminateProcess(process,1))
+    fprintf(stderr,"unassigned producer termination failed (Windows=%lu); retaining exact process\n",GetLastError());
    const auto exited=WaitForSingleObject(process,5000);
    if(exited==WAIT_OBJECT_0) {
+    file_uploads.ConfirmBrowserStopped(process_incarnation);process_incarnation.clear();
     // A crash may leave the last mapping status Running. Preserve confirmed
     // producer termination on retained generations before closing its handle.
     std::string error;
@@ -858,7 +877,7 @@ struct Session {
     fprintf(stderr,"producer termination not confirmed (wait=%lu); process/job identity and atlas resources retained\n",exited);
     return false;
    }
-   CloseHandle(process);process=nullptr;
+   CloseHandle(process);process=nullptr;process_in_job=false;
   }
   if(job){CloseHandle(job);job=nullptr;}
   producer_stop_pending=false;
@@ -1399,6 +1418,9 @@ struct Session {
   if(sdk.remotekit_rtc_set_remote_description(handle,1,sdp.data(),sdp.size())!=0) {
    ClosePeer();throw std::runtime_error("RTC remote offer rejected");
   }
+  if(sdp.find("m=audio ")!=std::string::npos) {
+   try{OpenAudio();}catch(...){ClosePeer();throw;}
+  }
   if(trickle_signals) {
    uint32_t level=0;
    if(sdk.remotekit_rtc_get_receive_level(handle,&level)!=0 || !level) {
@@ -1440,6 +1462,11 @@ struct Session {
   }
  }
  void ClosePeer() {
+  const bool had_audio=audio_ring.IsOpen();
+  stop_audio=true;
+  if(audio_thread.joinable())audio_thread.join();
+  if(had_audio && control && Alive())try{Rpc({{"method","audio.close"}});}catch(const std::exception& error){fprintf(stderr,"audio close: %s\n",error.what());}
+  audio_ring.Close();
   trickle_signals=false;
   DisableBudget();
   stop_input=true;input_wake.notify_all();if(input_thread.joinable())input_thread.join();
@@ -1474,8 +1501,113 @@ struct Session {
   {std::lock_guard lock(event_mutex);events.clear();}
   if(trace)trace->Flush();
  }
+ void OpenAudio() {
+  const uint64_t generation=static_cast<uint64_t>(QpcNow());
+  const std::string name="Local\\RemoteKit.audio."+browser_incarnation+"."+std::to_string(generation);
+  audio_ring.Open(name,generation,std::stoull(id));
+  try {Rpc({{"method","audio.open"},{"mapping",name},{"generation",std::to_string(generation)},{"session",id}});}
+  catch(...) {audio_ring.Close();throw;}
+  audio_gaps=0;audio_submitted=0;audio_rejected=0;stop_audio=false;
+  audio_thread=std::thread([this,generation]{
+   uint64_t gaps=0,stale=0;
+   while(!stop_audio.load()) {
+    remotekit::AudioPacket packet{};
+    if(!audio_ring.Poll(packet,gaps)) {std::this_thread::sleep_for(std::chrono::milliseconds(2));continue;}
+    audio_gaps=gaps+stale;
+    const auto handle=peer.load();
+    if(!handle || !rtc_connected.load())continue;
+    // Bound age independently of the video encoder and never await its queue.
+    if(QpcNow()-packet.first_sample_qpc>QpcFrequency()/20) {++stale;audio_gaps=gaps+stale;continue;}
+    const int status=sdk.remotekit_rtc_submit_audio(handle,packet.pcm,480,generation,packet.sequence,
+      packet.sample_index,packet.first_sample_qpc,packet.discontinuity);
+    if(status==0)++audio_submitted;else ++audio_rejected;
+   }
+  });
+ }
+ using FileBinding=remotekit::FileUploadStore::Binding;
+ FileBinding ParseFileBinding(const Json& value) {
+  return {Required(value,"browserIncarnation"),Required(value,"view"),Required(value,"instance"),Required(value,"document"),Required(value,"request")};
+ }
+ Json FileBrowserCommand(const FileBinding& binding,const char* method) {
+  if(!Alive() || !control || producer_stop_pending || binding.browser_incarnation!=browser_incarnation ||
+     !desired.contains(binding.view))throw std::runtime_error("stale_file_request_target");
+  return {{"method",method},{"session",id},{"view",binding.view},{"instance",binding.instance},
+    {"document",binding.document},{"request",binding.request}};
+ }
+ Json FileStatus(const std::string& upload,const FileBinding& binding) {
+  const auto* batch=file_uploads.Find(upload);
+  if(!batch || !(batch->binding==binding))throw std::runtime_error("unknown_file_upload");
+  if(batch->state==remotekit::FileUploadStore::State::selected)
+   return {{"uploadId",upload},{"state","selected"},{"pending",false},{"selected",true}};
+  auto status=Rpc(FileBrowserCommand(binding,"page.fileStatus"));
+  const auto state=status.value("state",std::string("unknown"));
+  if(state=="selected")file_uploads.MarkSelected(upload);
+  else if(state=="cancelled")file_uploads.DiscardUnselected(upload);
+  Json result={{"uploadId",upload},{"state",state},{"pending",state=="pending" || state=="validating"},{"selected",state=="selected"}};
+  if(status.contains("error"))result["error"]=status["error"];
+  return result;
+ }
+ Json FileCommand(const std::string& method,const Json& request) {
+  if(method=="session.files.revoke") {file_uploads.RevokeUncommitted();return {{"accepted",true}};}
+  if(method=="session.files.cancel") {
+   const auto upload=request.value("uploadId",std::string());
+   if(request.value("cancelRequest",false)) {
+    const auto binding=ParseFileBinding(request.at("binding"));
+    if(!upload.empty()) {
+     const auto status=FileStatus(upload,binding);
+     if(status.value("state",std::string())=="selected" || status.value("state",std::string())=="cancelled")return status;
+    }
+    auto status=Rpc(FileBrowserCommand(binding,"page.fileStatus"));
+    const auto state=status.value("state",std::string());
+    if(state=="pending" || state=="validating") {
+     auto command=FileBrowserCommand(binding,"page.reply");command["file_only"]=true;command["accept"]=false;
+     Rpc(command);
+    }
+    if(!upload.empty())return FileStatus(upload,binding);
+    status=Rpc(FileBrowserCommand(binding,"page.fileStatus"));
+    return {{"accepted",true},{"state",status.value("state",std::string("unknown"))}};
+   }
+   if(upload.empty()){file_uploads.RevokeUncommitted();return {{"accepted",true}};}
+   const auto* batch=file_uploads.Find(upload);
+   if(!batch)return {{"accepted",true},{"state","cancelled"}};
+   if(!file_uploads.Cancel(upload))return FileStatus(upload,batch->binding);
+   return {{"accepted",true},{"state","cancelled"}};
+  }
+  const auto binding=ParseFileBinding(request.at("binding"));
+  if(method=="session.files.begin") {
+   if(Rpc(FileBrowserCommand(binding,"page.fileStatus")).value("state",std::string())!="pending")
+    throw std::runtime_error("file_request_not_pending");
+   const auto& values=request.at("files");
+   if(!values.is_array() || values.empty() || values.size()>64)throw std::runtime_error("invalid_file_count");
+   std::vector<remotekit::FileUploadStore::Spec> specs;
+   for(const auto& value:values) {
+    if(!value.at("size").is_number_unsigned() &&
+       (!value.at("size").is_number_integer() || value.at("size").get<int64_t>()<0))throw std::runtime_error("invalid_file_size");
+    specs.push_back({Required(value,"name"),value.value("type",std::string()),value.at("size").get<uint64_t>()});
+   }
+   const auto& batch=file_uploads.Begin(binding,specs);Json files=Json::array();
+   for(const auto& file:batch.files)files.push_back({{"ticket",file.ticket},{"path",Utf8(file.path)}});
+   return {{"uploadId",batch.id},{"files",files}};
+  }
+  const auto upload=Required(request,"uploadId");
+  if(method=="session.files.status")return FileStatus(upload,binding);
+  if(method!="session.files.commit")throw std::runtime_error("unknown_file_upload_method");
+  const auto* existing=file_uploads.Find(upload);
+  if(!existing || !(existing->binding==binding))throw std::runtime_error("unknown_file_upload");
+  if(existing->state==remotekit::FileUploadStore::State::submitted || existing->state==remotekit::FileUploadStore::State::selected)
+   return FileStatus(upload,binding);
+  if(Rpc(FileBrowserCommand(binding,"page.fileStatus")).value("state",std::string())!="pending")
+   throw std::runtime_error("file_request_not_pending");
+  const auto& batch=file_uploads.Seal(upload,binding);Json files=Json::array();
+  for(const auto& file:batch.files)files.push_back({{"path",Utf8(file.path)},{"displayName",file.name}});
+  auto command=FileBrowserCommand(binding,"page.reply");command["file_only"]=true;command["accept"]=true;command["files"]=files;
+  file_uploads.MarkSubmitted(upload); // An RPC timeout can occur after Browser received these paths.
+  Rpc(command);
+  return FileStatus(upload,binding);
+ }
  Json Command(const Json& request) {
   const auto method=Required(request,"method");
+  if(method.starts_with("session.files."))return FileCommand(method,request);
   if(method=="session.ensure"){Start();return {{"sessionId",id},{"browserPid",GetProcessId(process)},{"running",true},{"accepted",true},{"browserIncarnation",browser_incarnation},{"recovery",RecoverySnapshot()}};}
   if(method=="session.snapshot")return Snapshot();
   if(method=="session.events.ack") {

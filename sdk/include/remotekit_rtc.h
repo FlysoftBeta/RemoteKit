@@ -116,8 +116,8 @@ REMOTEKIT_SDK_API int remotekit_rtc_set_media_policy(uint64_t peer,
     uint32_t target_bitrate_bps,uint32_t max_bitrate_bps,uint32_t target_fps);
 REMOTEKIT_SDK_API int remotekit_rtc_create_offer(uint64_t peer);
 /* offer=1 applies remote offer and emits local answer; offer=0 applies answer.
- * Send-only SDK: remote video must be recvonly/inactive; non-rejected audio and
- * remote video sendonly/sendrecv return INVALID_ARGUMENT before applying SDP. */
+ * Send-only SDK: remote media must be recvonly/inactive. Audio requires
+ * Opus/48000/2 with stereo=1. Video-only offers remain supported. */
 REMOTEKIT_SDK_API int remotekit_rtc_set_remote_description(uint64_t peer,
     int offer, const char* sdp, size_t size);
 REMOTEKIT_SDK_API int remotekit_rtc_add_ice(uint64_t peer, const char* mid,
@@ -151,6 +151,18 @@ REMOTEKIT_SDK_API int remotekit_rtc_send_data(uint64_t peer,
  * the caller's responsibility before submission. No CPU pixel readback. */
 REMOTEKIT_SDK_API int remotekit_rtc_submit_texture(uint64_t peer,
     const struct remotekit_rtc_frame* frame);
+/* Synchronous consumption; no caller pointer retained. Exactly 480 frames of
+ * interleaved S16 stereo at 48kHz. sequence and first_sample_qpc must increase
+ * within a source generation. sample_index is the first sample's position in
+ * that generation (multiple of 480); it includes dropped source periods.
+ * New generations restart the sender timeline. Short gaps up to 80ms are
+ * filled with bounded silence; longer gaps restart the sender. QPC uses
+ * QueryPerformanceCounter in the local machine domain and always increases.
+ * Success is accepted PCM, not remote playback. An unnegotiated audio source
+ * returns INVALID_STATE. Call on a dedicated audio thread, outside video locks. */
+REMOTEKIT_SDK_API int remotekit_rtc_submit_audio(uint64_t peer,
+    const int16_t* pcm, uint32_t frames, uint64_t generation, uint64_t sequence,
+    uint64_t sample_index, int64_t first_sample_qpc, uint32_t discontinuity);
 /* Thread-safe; input bytes are copied before return. Late completions safely
  * return INVALID_STATE. Success means accepted by WebRTC, not delivered.
  * Optional wire_rtp_timestamp is zeroed on entry and set only on success to

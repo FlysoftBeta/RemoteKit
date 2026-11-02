@@ -17,6 +17,8 @@ template("browser_executable") {
   configs += [ "//build/config/win:windowed" ]
   sources = [
     "//chrome/renderer/loadtimes_bindings.cc",
+    "audio_target.cc",
+    "audio_target.h",
     "//chrome/renderer/loadtimes_bindings.h",
     "browser_context.cc",
     "browser_context.h",

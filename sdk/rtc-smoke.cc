@@ -100,6 +100,11 @@ int main(int argc, char** argv) {
       remotekit_rtc_set_media_policy(a,36000000,35000000,52)!=REMOTEKIT_SDK_INVALID_ARGUMENT ||
       remotekit_rtc_set_media_policy(a,36000000,48000000,0)!=REMOTEKIT_SDK_INVALID_ARGUMENT)
     return 36;
+  int16_t audio_pcm[960]{};
+  if (remotekit_rtc_submit_audio(a, nullptr, 480, 1, 1, 0, 1, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_submit_audio(a, audio_pcm, 479, 1, 1, 0, 1, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_submit_audio(a, audio_pcm, 480, 1, 0, 0, 1, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
+      remotekit_rtc_submit_audio(a, audio_pcm, 480, 1, 1, 0, 1, 0) != REMOTEKIT_SDK_INVALID_STATE) return 38;
   if (remotekit_rtc_set_playout_delay(a, -1, -1) != REMOTEKIT_SDK_OK ||
       remotekit_rtc_set_playout_delay(a, -1, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||
       remotekit_rtc_set_playout_delay(a, 10, 0) != REMOTEKIT_SDK_INVALID_ARGUMENT ||

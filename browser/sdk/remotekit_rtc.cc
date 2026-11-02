@@ -56,6 +56,10 @@
 #include "third_party/webrtc/rtc_base/thread.h"
 #include "third_party/webrtc/rtc_base/time_utils.h"
 
+#include "remotekit/browser/sdk/rtc_audio_source.h"
+#include "remotekit/endpoint/include/remotekit/audio_timeline.h"
+#include "third_party/webrtc/api/audio_codecs/opus/audio_encoder_opus.h"
+
 int RemoteKitSdkBeginRtc();
 void RemoteKitSdkEndRtc();
 
@@ -67,18 +71,41 @@ constexpr size_t kMaxMessage = 1024 * 1024;
 constexpr size_t kMaxAccessUnit = 32 * 1024 * 1024;
 using webrtc::scoped_refptr;
 
-class EmptyAudioEncoders : public webrtc::AudioEncoderFactory {
+class StereoOpusEncoders : public webrtc::AudioEncoderFactory {
  public:
-  std::vector<webrtc::AudioCodecSpec> GetSupportedEncoders() override { return {}; }
-  std::optional<webrtc::AudioCodecInfo> QueryAudioEncoder(
-      const webrtc::SdpAudioFormat&) override { return std::nullopt; }
-  std::unique_ptr<webrtc::AudioEncoder> Create(const webrtc::Environment&,
-      const webrtc::SdpAudioFormat&, Options) override { return nullptr; }
+  std::vector<webrtc::AudioCodecSpec> GetSupportedEncoders() override {
+    std::vector<webrtc::AudioCodecSpec> specs;
+    webrtc::AudioEncoderOpus::AppendSupportedEncoders(&specs);
+    for (auto& spec : specs) { spec.format.parameters["stereo"] = "1"; spec.format.parameters["sprop-stereo"] = "1"; }
+    return specs;
+  }
+  std::optional<webrtc::AudioCodecInfo> QueryAudioEncoder(const webrtc::SdpAudioFormat& format) override {
+    auto config = webrtc::AudioEncoderOpus::SdpToConfig(format);
+    if (!config || config->num_channels != 2) return std::nullopt;
+    return webrtc::AudioEncoderOpus::QueryAudioEncoder(*config);
+  }
+  std::unique_ptr<webrtc::AudioEncoder> Create(const webrtc::Environment& env,
+      const webrtc::SdpAudioFormat& format, Options options) override {
+    auto config = webrtc::AudioEncoderOpus::SdpToConfig(format);
+    if (!config || config->num_channels != 2) return nullptr;
+    config->application = webrtc::AudioEncoderOpusConfig::ApplicationMode::kAudio;
+    return webrtc::AudioEncoderOpus::MakeAudioEncoder(env, *config, options);
+  }
 };
-class EmptyAudioDecoders : public webrtc::AudioDecoderFactory {
+// WebRTC validates receive codec parameters even for a sendonly answer. As
+// with the video capability factory, describe Opus but never create a decoder;
+// authenticated remote sending directions are rejected before applying SDP.
+class SendOnlyAudioDecoderCapabilities : public webrtc::AudioDecoderFactory {
  public:
-  std::vector<webrtc::AudioCodecSpec> GetSupportedDecoders() override { return {}; }
-  bool IsSupportedDecoder(const webrtc::SdpAudioFormat&) override { return false; }
+  std::vector<webrtc::AudioCodecSpec> GetSupportedDecoders() override {
+    std::vector<webrtc::AudioCodecSpec> specs;
+    webrtc::AudioEncoderOpus::AppendSupportedEncoders(&specs);
+    for (auto& spec : specs) { spec.format.parameters["stereo"] = "1"; spec.format.parameters["sprop-stereo"] = "1"; }
+    return specs;
+  }
+  bool IsSupportedDecoder(const webrtc::SdpAudioFormat& format) override {
+    return format.name == "opus" && format.clockrate_hz == 48000 && format.num_channels == 2;
+  }
   std::unique_ptr<webrtc::AudioDecoder> Create(const webrtc::Environment&,
       const webrtc::SdpAudioFormat&) override { return nullptr; }
 };
@@ -348,10 +375,13 @@ class Peer : public webrtc::PeerConnectionObserver,
   int Start();
   void Close() {
     closing.store(true);
+    std::lock_guard audio_guard(audio_mutex);
     if (signaling_started) signaling->BlockingCall([this] {
       if (data) { data->UnregisterObserver(); data->Close(); data = nullptr; }
       if (pc) { pc->Close(); pc = nullptr; }
       source = nullptr;
+      audio_source = nullptr;
+      audio_sender = nullptr;
       factory = nullptr;
     });
     if (signaling) signaling->Stop();
@@ -425,6 +455,14 @@ class Peer : public webrtc::PeerConnectionObserver,
   scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory;
   scoped_refptr<webrtc::PeerConnectionInterface> pc;
   scoped_refptr<TextureSource> source;
+  scoped_refptr<PageAudioSource> audio_source;
+  scoped_refptr<webrtc::RtpSenderInterface> audio_sender;
+  remotekit::AudioTimeline audio_timeline;
+  uint64_t audio_clock_generation = 0, audio_origin_sample = 0;
+  int64_t audio_origin_capture_ms = 0;
+  std::atomic<uint64_t> audio_silence_blocks{0}, audio_restarts_gap{0}, audio_restarts_epoch{0}, audio_restarts_discontinuity{0};
+  std::atomic<int> audio_last_restart{0};
+  std::mutex audio_mutex;
   scoped_refptr<webrtc::DataChannelInterface> data;
   std::shared_ptr<LeaseTracker> leases = std::make_shared<LeaseTracker>();
   std::shared_ptr<RemoteReceiveLimits> remote_limits = std::make_shared<RemoteReceiveLimits>();
@@ -465,6 +503,14 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
     result.Set("requestedPlayoutDelay", base::DictValue()
         .Set("minMs", requested == UINT64_MAX ? -1 : static_cast<int>(requested >> 32))
         .Set("maxMs", requested == UINT64_MAX ? -1 : static_cast<int>(requested & UINT32_MAX)));
+    result.Set("audioTimeline", base::DictValue()
+        .Set("silenceBlocks", static_cast<double>(peer->audio_silence_blocks.load()))
+        .Set("gapRestarts", static_cast<double>(peer->audio_restarts_gap.load()))
+        .Set("epochRestarts", static_cast<double>(peer->audio_restarts_epoch.load()))
+        .Set("discontinuityRestarts", static_cast<double>(peer->audio_restarts_discontinuity.load()))
+        .Set("lastRestartReason", peer->audio_last_restart.load() == 1 ? "source-gap" :
+             peer->audio_last_restart.load() == 2 ? "source-generation" :
+             peer->audio_last_restart.load() == 3 ? "source-discontinuity" : "none"));
     base::ListValue outbound;
     std::string transport_id;
     for (const auto* stream : report->GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>()) {
@@ -603,8 +649,8 @@ int Peer::Start() {
     deps.socket_factory = network->socketserver();
     deps.signaling_thread = signaling.get();
     deps.adm = webrtc::make_ref_counted<SilentAudioDevice>();
-    deps.audio_encoder_factory = webrtc::make_ref_counted<EmptyAudioEncoders>();
-    deps.audio_decoder_factory = webrtc::make_ref_counted<EmptyAudioDecoders>();
+    deps.audio_encoder_factory = webrtc::make_ref_counted<StereoOpusEncoders>();
+    deps.audio_decoder_factory = webrtc::make_ref_counted<SendOnlyAudioDecoderCapabilities>();
     deps.video_encoder_factory = std::make_unique<ExternalEncoderFactory>(
         id, options, remote_limits, playout_delay, trace);
     deps.video_decoder_factory = std::make_unique<SendOnlyDecoderCapabilities>();
@@ -725,6 +771,67 @@ int remotekit_rtc_close(uint64_t id) {
 int remotekit_rtc_create_offer(uint64_t id) {
   return WithPeer(id, [](Peer& p) { p.Offer(true); return REMOTEKIT_SDK_OK; });
 }
+int remotekit_rtc_submit_audio(uint64_t id, const int16_t* pcm, uint32_t frames,
+    uint64_t generation, uint64_t sequence, uint64_t sample_index,
+    int64_t first_sample_qpc, uint32_t discontinuity) {
+  if (!pcm || frames != 480 || !generation || !sequence || sample_index % 480 ||
+      first_sample_qpc <= 0 || discontinuity > 1)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  auto peer = FindPeer(id);
+  if (!peer) return REMOTEKIT_SDK_INVALID_STATE;
+  webrtc::scoped_refptr<PageAudioSource> source;
+  {
+    std::lock_guard lock(peer->api_mutex);
+    if (peer->closing.load() || !peer->audio_source) return REMOTEKIT_SDK_INVALID_STATE;
+    source = peer->audio_source;
+  }
+  std::lock_guard lock(peer->audio_mutex);
+  if (peer->closing.load()) return REMOTEKIT_SDK_INVALID_STATE;
+  const auto advance = peer->audio_timeline.Plan(generation, sequence, sample_index, first_sample_qpc, discontinuity != 0);
+  if (advance.step == remotekit::AudioStep::reject) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  LARGE_INTEGER qpc, frequency;
+  QueryPerformanceCounter(&qpc); QueryPerformanceFrequency(&frequency);
+  const int64_t delta_us = static_cast<int64_t>(
+      static_cast<long double>(qpc.QuadPart - first_sample_qpc) * 1000000 / frequency.QuadPart);
+  if (delta_us < -100000 || delta_us > 1000000) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  const bool new_clock = peer->audio_clock_generation != generation;
+  const int64_t mapped_capture_ms = (webrtc::TimeMicros() - delta_us) / 1000;
+  const int64_t capture_ms = new_clock ? mapped_capture_ms :
+      peer->audio_origin_capture_ms + static_cast<int64_t>((sample_index - peer->audio_origin_sample) / 48);
+  // Reject incoherent/overflow-sized sample positions before WebRTC computes
+  // RTP deltas. The disciplined source clock and same-machine QPC agree.
+  if (std::abs(capture_ms - mapped_capture_ms) > 20) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (advance.step == remotekit::AudioStep::restart_gap || advance.step == remotekit::AudioStep::restart_epoch ||
+      advance.step == remotekit::AudioStep::restart_discontinuity) {
+    // ChannelSend::StartSend sets first_frame_, which advances its existing
+    // RTP clock by the absolute capture-time gap instead of compressing it.
+    const int status = peer->signaling->BlockingCall([&] {
+      if (peer->closing.load() || !peer->audio_sender) return REMOTEKIT_SDK_INVALID_STATE;
+      auto parameters = peer->audio_sender->GetParameters();
+      for (auto& encoding : parameters.encodings) encoding.active = false;
+      if (!peer->audio_sender->SetParameters(parameters).ok()) return REMOTEKIT_SDK_INVALID_STATE;
+      parameters = peer->audio_sender->GetParameters();
+      for (auto& encoding : parameters.encodings) encoding.active = true;
+      return peer->audio_sender->SetParameters(parameters).ok() ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+    });
+    if (status != REMOTEKIT_SDK_OK) return status;
+    if (advance.step == remotekit::AudioStep::restart_gap) { ++peer->audio_restarts_gap; peer->audio_last_restart = 1; }
+    else if (advance.step == remotekit::AudioStep::restart_epoch) { ++peer->audio_restarts_epoch; peer->audio_last_restart = 2; }
+    else { ++peer->audio_restarts_discontinuity; peer->audio_last_restart = 3; }
+  }
+  if (advance.silence_blocks) {
+    const int16_t silence[960]{};
+    for (uint32_t i = advance.silence_blocks; i > 0; --i) source->Submit(silence, capture_ms - i * 10);
+    peer->audio_silence_blocks += advance.silence_blocks;
+  }
+  source->Submit(pcm, capture_ms);
+  peer->audio_timeline.Commit(generation, sequence, sample_index, first_sample_qpc);
+  if (new_clock) {
+    peer->audio_clock_generation = generation; peer->audio_origin_sample = sample_index;
+    peer->audio_origin_capture_ms = capture_ms;
+  }
+  return REMOTEKIT_SDK_OK;
+}
 int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* bytes, size_t size) {
   if (!ValidBytes(bytes, size) || (offer != 0 && offer != 1)) return REMOTEKIT_SDK_INVALID_ARGUMENT;
   return WithPeer(id, [&](Peer& p) {
@@ -732,17 +839,36 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
     auto sdp = webrtc::CreateSessionDescription(offer ? webrtc::SdpType::kOffer :
         webrtc::SdpType::kAnswer, std::string(bytes, size), &error);
     if (!sdp) { p.Error(error.description); return REMOTEKIT_SDK_INVALID_ARGUMENT; }
-    // This factory intentionally has no receiving video decoder and no audio
-    // codecs/devices. Reject unsupported directions before WebRTC can create
-    // receive streams from an authenticated but incompatible remote offer.
+    bool receives_audio = false;
+    // No receiving media is supported. Validate all sections before mutation.
     for (const auto& section : sdp->description()->contents()) {
       if (section.rejected) continue;
       const auto* media = section.media_description();
-      if (media->as_audio()) return REMOTEKIT_SDK_INVALID_ARGUMENT;
-      if (media->as_video() &&
+      if ((media->as_audio() || media->as_video()) &&
           (media->direction() == webrtc::RtpTransceiverDirection::kSendOnly ||
            media->direction() == webrtc::RtpTransceiverDirection::kSendRecv))
         return REMOTEKIT_SDK_INVALID_ARGUMENT;
+      if (const auto* audio = media->as_audio(); audio &&
+          media->direction() == webrtc::RtpTransceiverDirection::kRecvOnly) {
+        bool stereo_opus = false;
+        for (const auto& codec : audio->codecs()) {
+          const auto stereo = codec.params.find("stereo");
+          if (codec.name == "opus" && codec.clockrate == 48000 && codec.channels == 2 &&
+              stereo != codec.params.end() && stereo->second == "1") stereo_opus = true;
+        }
+        if (!stereo_opus) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+        receives_audio = true;
+      }
+    }
+    if (receives_audio && !p.audio_source) {
+      p.audio_source = webrtc::make_ref_counted<PageAudioSource>();
+      auto audio_track = p.factory->CreateAudioTrack("remotekit-audio", p.audio_source.get());
+      auto added = p.pc->AddTrack(audio_track, {"remotekit"});
+      if (!added.ok()) return REMOTEKIT_SDK_INVALID_STATE;
+      p.audio_sender = added.value();
+      for (auto& transceiver : p.pc->GetTransceivers())
+        if (transceiver->sender() == added.value() && !transceiver->SetDirectionWithError(
+            webrtc::RtpTransceiverDirection::kSendOnly).ok()) return REMOTEKIT_SDK_INVALID_STATE;
     }
     // Level asymmetry lets our answer advertise a different receive level;
     // it does not increase the remote receiver's declared capability. Read the

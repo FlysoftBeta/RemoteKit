@@ -20,7 +20,9 @@
 - Client直接与Endpoint建立H264 WebRTC及DataChannel输入；鉴权、信令、产品状态由Control管理，Viewer↔Control使用WebSocket。支持键鼠、文本、IME与触控。
 - 开启Control Memory Saver策略。Viewer断线决定产品visible=false及回收资格；RTC连接独立决定渲染/编码需求，不反向把hidden页面显示出来。
 - Rectangle Packing把多个可见平面合为视频atlas；必须处理DPR、DIP、编码采样比例、letterbox、screen坐标与旧布局输入门禁。
-- Endpoint用独立CMake/Ninja，Mojo/libwebrtc纳入SDK边界；跨DLL不传C++ STL/libc++/Abseil/Chromium对象。oneVPL异步H264与NVENC均在范围内，音频本轮不做。旧内置demo仅由显式构建目标包含。
+- Endpoint用独立CMake/Ninja，Mojo/libwebrtc纳入SDK边界；跨DLL不传C++ STL/libc++/Abseil/Chromium对象。oneVPL异步H264与NVENC均在范围内。新增音频目标必须是Chromium播放输出target，不用系统hook/capture。旧内置demo仅由显式构建目标包含。
+- 音频播放配置按整个Viewer统一并由Control保存：更多菜单紧凑放左右声道多选Switch与“不播放”（清空选择）。
+- 网页文件上传使用自定义dialog，支持设备文件和摄像头拍照。拍照用摄像头feature而非capture input；从短时间序列挑选几张清晰照片，并限制并发/内存，避免端侧卡顿。客户端、远程处理或WASM按实验证据取舍，不把候选方案固化为要求。
 - 实际GPU Fence保护读写与复用；CPU发布位、提交返回或持有HANDLE不能假装完成。browser↔endpoint正常帧不增加逐帧ready/present/release消息；Chromium内部IPC和Endpoint↔Client媒体元数据是不同边界。
 - 保留Views/Aura功能适配是允许的；服务渲染目标为离屏，不需要本地屏幕Present。不要把无页面HWND说成整个Chromium进程零HWND。
 - 服务串流与输入的关键参数尽量独立于宿主系统设置，避免服务器显示器、DPI、刷新率或RDP改变行为；客户端DPR/刷新能力和产品媒体策略仍作为适配输入。具体固定值与实现方式放正式架构文档，不固化为用户要求。
@@ -62,6 +64,8 @@ python3 tools/package-runtime.py
 
 - 用户明确授权subagent，跨对话保留。root负责核心架构/边界、契约、取舍、拆分、集成审阅与commit/push；不能把核心架构决策委派。
 - 实现、深入调查、实验、构建与测试委派。普通复杂任务Sol6.1 Medium，简单机械任务Terra6.1 Medium，极复杂任务Astra6 Medium；始终fork_turns="none"，提示完整上下文。
+- Subagent是上下文隔离primitive：不同任务必须新建代理，不把已完成任务的代理转去无关领域；仅紧密相关的连续工作可复用。重要milestone后优先用简短交接记录开启新上下文。工具并发/线程额度不足时排队或收尾释放，不以跨任务复用绕过隔离要求。
+- 不向已完成代理发送仅排队的send_message来要求停止，避免残留pending_init。若已确认任务结束但占槽，可用一次followup_task要求“不调用工具、不做新工作，立即final”，收到完成通知后再重试创建新代理；这是生命周期清理，不是复用旧上下文执行新任务。
 - 简单文档、决策/任务记录和轻量doc check由root直接做。
 - 明确输入输出、文件归属和依赖；高耦合先定接口或串行，不并改同一文件。实验设范围、预算、判定和停止条件。
 - 子agent无普通commentary，重大阻碍/决策及时报告，常规内容final交付。任务外问题报告证据和影响，root统一排队，不无边界扩大。

@@ -6,7 +6,7 @@ import type { ControlState } from '../client/types';
 import type { ProductUser, ProductWorkspace } from '../shared/product';
 const scrypt = promisify(scryptCallback);
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
-export const defaultSettings = () => ({ qualityPreference: 'auto' as const, clientScaleOverride: null, memorySaverEnabled: true, showStats: false });
+export const defaultSettings = () => ({ qualityPreference: 'auto' as const, clientScaleOverride: null, memorySaverEnabled: true, showStats: false, audioChannels: { left: true, right: true } });
 export function emptyWorkspace(tenantId: string): ProductWorkspace { return { schemaVersion: 2, tenantId, revision: 0, tabs: [], windows: [], activeWindowId: null, layoutMode: 'side-by-side', settings: defaultSettings(), sites: {}, pendingClose: null, pendingWindowCloseId: null }; }
 export function migrateLegacy(state: ControlState): ProductWorkspace {
   const result = emptyWorkspace(state.tenantId), first = randomUUID(), second = randomUUID();

@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Alert,
@@ -32,6 +32,10 @@ import {
 } from "./product-dialogs";
 import { WindowFrame, WindowDivider } from "./window-frame";
 import { AdminDialog } from "./admin-dialog";
+import { FileChooserDialog } from './file-chooser-dialog';
+import { foregroundRequest } from './foreground-request';
+import type { FileRpc } from './file-upload';
+import type { AudioChannels } from './audio-output';
 import "./style.css";
 const theme = createTheme({
   palette: {
@@ -64,10 +68,13 @@ function Workspace({
     [viewportNotice, setViewportNotice] = useState(""),
     [settings, setSettings] = useState(false),
     [admin, setAdmin] = useState(false),
+    [audioSaving, setAudioSaving] = useState(false),
+    [audioError, setAudioError] = useState(''),
     [, updateMedia] = useState(0),
     [focusAddress, setFocusAddress] = useState<string | null>(null),
     [width, setWidth] = useState(window.innerWidth);
   const transport = useRef<RemoteTransport | null>(null);
+  const audioPending = useRef(false);
   if (!transport.current) transport.current = new RemoteTransport();
   const media = transport.current;
   const connection = useRef<ControlConnection | null>(null),
@@ -206,9 +213,20 @@ function Workspace({
     return result;
   };
   const report = (e: unknown) => setError(errorMessage(e));
+  const saveAudio = (channels:AudioChannels) => {
+    if(audioPending.current || statusRef.current!=='online')return;
+    audioPending.current=true;setAudioSaving(true);setAudioError('');
+    void action({type:'settings.update',settings:{audioChannels:channels}}).catch(()=>setAudioError('声音设置未保存，请重试')).finally(()=>{audioPending.current=false;setAudioSaving(false);});
+  };
+  useEffect(()=>{if(state)media.audio.setChannels(state.workspace.settings.audioChannels);},[state?.workspace.settings.audioChannels,media]);
   const loadRegistration = useCallback(() => connection.current!.request("admin.get", {}), []);
   const saveRegistration = useCallback((serverCredential: string) =>
     connection.current!.request("admin.setRegistrationCredential", { serverCredential }), []);
+  const fileRpc = useMemo<FileRpc>(() => ({
+    begin: (requestId, files) => connection.current!.request('files.begin', { requestId, files: files.map(file => ({name:file.name,size:file.size,type:file.type})) }),
+    commit: uploadId => connection.current!.request('files.commit', {uploadId}),
+    cancel: (requestId,uploadId) => connection.current!.request('files.cancel', {requestId,uploadId}),
+  }), []);
   if (status === "revoked")
     return (
       <main className="workspace-empty">
@@ -245,8 +263,11 @@ function Workspace({
       width >= Math.max(720, workspace.windows.length * 365 - 5),
     windows = workspace.windows,
     pending = workspace.pendingClose;
+  const foreground = !settings && !admin && !(pending && !pending.awaiting) ? foregroundRequest(state,width) : null;
+  const fileRequest = foreground?.kind==='file' ? state.fileRequests.find(request=>request.id===foreground.id) : undefined;
   return (
     <main className="viewer-shell">
+      {media.audio.state === 'blocked' && (workspace.settings.audioChannels?.left !== false || workspace.settings.audioChannels?.right !== false) && <Button variant="contained" onClick={() => media.audio.resume()} sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}>点击开启声音</Button>}
       {status !== "online" && (
         <Alert
           severity="warning"
@@ -296,6 +317,7 @@ function Workspace({
               onGeometry={onGeometry}
               focusAddress={focusAddress}
               visible={sideBySide || w.id === workspace.activeWindowId}
+              audioSaving={audioSaving} audioError={audioError} saveAudio={saveAudio}
             />
           </React.Fragment>
         ))}
@@ -318,7 +340,8 @@ function Workspace({
           </div>
         )}
       </div>
-      <PageDialogs state={state} action={action} />
+      <PageDialogs state={state} action={action} activeId={foreground?.kind==='page'?foreground.id:null} />
+      {fileRequest && <FileChooserDialog key={fileRequest.id} request={fileRequest} online={status==='online'} rpc={fileRpc} />}
       {state.user.isAdmin && <AdminDialog
         open={admin}
         online={status === "online"}

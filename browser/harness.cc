@@ -1,4 +1,5 @@
 #include "remotekit/browser/harness.h"
+#include "remotekit/browser/audio_target.h"
 
 #include <algorithm>
 #include <cmath>
@@ -506,6 +507,17 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     reply.Set("ok", true);
     return reply;
   }
+  if (*method == "audio.open") {
+    uint64_t generation = 0, session = 0;
+    const auto* name = request.FindString("mapping");
+    if (!name || !ReadId(request, "generation", &generation) ||
+        !ReadId(request, "session", &session) || sessions.size() != 1 || sessions[0] != session ||
+        !OpenAudioTarget(*name, generation, session)) return error("invalid_audio_target");
+    reply.Set("ok", true); return reply;
+  }
+  if (*method == "audio.close") {
+    CloseAudioTarget(); reply.Set("ok", true); return reply;
+  }
   if (*method == "view.closed.ack") {
     uint64_t session = 0;
     const auto* incarnation = request.FindString("browserIncarnation");
@@ -848,8 +860,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     result.Set("id", id);
     return result;
   }
-  if (*method == "page.requests" || *method == "page.reply" || *method == "page.command") {
-    if (*method == "page.reply") {
+  if (*method == "page.requests" || *method == "page.reply" || *method == "page.command" || *method == "page.fileStatus") {
+    if (*method == "page.reply" || *method == "page.fileStatus") {
       const auto token = endpoint.Token(session, view).value;
       for (const auto& [key, expected] : {std::pair{"instance", token.instance},
                                         std::pair{"document", token.document}}) {
@@ -858,6 +870,12 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         if (!ReadId(request, key, &supplied) || supplied != expected)
           return error("stale_page_request_target");
       }
+    }
+    if (*method == "page.fileStatus") {
+      const auto* key = request.FindString("request");
+      if (!key) return error("file_request_required");
+      auto result = page_requests[index]->FileStatus(*key);
+      result.Set("version", 1); result.Set("id", id); return result;
     }
     auto result = *method == "page.requests"
                       ? page_requests[index]->Snapshot()
@@ -1215,6 +1233,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
 HarnessMainParts::HarnessMainParts() = default;
 HarnessMainParts::~HarnessMainParts() = default;
 int HarnessMainParts::PreMainMessageLoopRun() {
+  LOG(INFO) << "RemoteKit startup PreMain entered";
   state_ = std::make_unique<State>();
   const auto& command = *base::CommandLine::ForCurrentProcess();
 #if defined(REMOTEKIT_DEMO_HARNESS)
@@ -1266,6 +1285,7 @@ int HarnessMainParts::PreMainMessageLoopRun() {
         data.AppendASCII("session-" + base::NumberToString(session.value))
             .AppendASCII("profile-" + base::NumberToString(profile.value))));
   }
+  LOG(INFO) << "RemoteKit startup Profile ready";
   if (state_->demo) StartDevTools(data);
 #if defined(REMOTEKIT_DEMO_HARNESS)
   auto urls = base::SplitString(command.GetSwitchValueASCII("urls"), "|", base::TRIM_WHITESPACE,
@@ -1397,6 +1417,7 @@ int HarnessMainParts::PreMainMessageLoopRun() {
         command.GetSwitchValueASCII("control-channel"),
         base::BindRepeating(&State::HandleControl, base::Unretained(state_.get())),
         base::BindOnce(&State::OnControlClosed, base::Unretained(state_.get())));
+    LOG(INFO) << "RemoteKit startup control ready";
   }
   return 0;
 }

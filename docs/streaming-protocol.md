@@ -53,6 +53,8 @@ method包括action、viewport、feedback、rtc.offer/ice/close和clock.ping。�
 - media.feedback：布局绑定的显示/解码/丢帧等观察，供Endpoint源预算控制。
 - stats：实际测量和状态；未知项保持缺失，不以零冒充。
 
+音频为同一PeerConnection上的Session级Opus输出track；客户端offer音频方向为recvonly或inactive，不接受客户端上行音频。video-only旧offer继续兼容。文件字节经Control的HTTP流式上传，不使用DataChannel；WS `files.begin/commit/cancel`及ticket/文件生命周期见[音频与文件](audio-and-files.zh-CN.md)。
+
 客户端只在匹配真实wire RTP与当前layout epoch后呈现/授权输入。空layout、故障、暂停或重建立即撤销旧ready；有新layout但没有匹配帧时不能点击旧画面。重绘同一帧不增加FPS。
 
 Source atlas可在NV12转换时按接收H264上限等比采样；布局和输入同时带对应比例。支持真实RTP元数据的新客户端使用不可变VideoFrame/fifo2；能力不足退回video。Chrome89保留video路径，其rVFC与drawImage不是原子frame handle；测量不得把它宣称为不可变帧验证。

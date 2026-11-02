@@ -57,9 +57,10 @@ base::DictValue Kind(const char* kind) {
 bool Live(content::RenderFrameHost* frame) {
   return frame && frame->IsActive();
 }
-using ValidatedFiles = std::pair<std::vector<base::FilePath>, std::string>;
-ValidatedFiles ValidateFiles(std::vector<base::FilePath> paths) {
-  for (const auto& path : paths) {
+using ValidatedFiles = std::pair<std::vector<PageRequests::SelectedFile>, std::string>;
+ValidatedFiles ValidateFiles(std::vector<PageRequests::SelectedFile> paths) {
+  for (const auto& selected : paths) {
+    const auto& path = selected.path;
     if (!path.IsAbsolute())
       return {{}, "file_path_must_be_absolute"};
 #if BUILDFLAG(IS_WIN)
@@ -181,6 +182,7 @@ void PageRequests::Cancel(std::uint64_t id, const std::string& reason) {
   event.Set("request", base::NumberToString(id));
   event.Set("reason", Clip(reason));
   Event(std::move(event));
+  if (request->file) FileResult(id, "cancelled", reason);
   if (request->type == Pending::Type::menu && reason != "context_menu_superseded" && web_contents())
     web_contents()->NotifyContextMenuClosed(GURL());
   if (request->file)
@@ -224,6 +226,26 @@ void PageRequests::Prune() {
     if (!weak)
       return;
   }
+}
+void PageRequests::FileResult(std::uint64_t id, const char* state, const std::string& error) {
+  auto result = Result(); result.Set("state", state);
+  if (!error.empty()) result.Set("error", Clip(error));
+  file_results_.insert_or_assign(id, std::move(result));
+  while (file_results_.size() > kLimit) file_results_.erase(file_results_.begin());
+}
+base::DictValue PageRequests::FileStatus(const std::string& key) {
+  const auto weak = weak_factory_.GetWeakPtr();
+  Prune();
+  if (!weak) return Result("manager_destroyed");
+  std::uint64_t id = 0;
+  if (!base::StringToUint64(key, &id) || base::NumberToString(id) != key) return Result("invalid_file_request");
+  const auto found = pending_.find(id);
+  if (found != pending_.end()) {
+    if (!found->second->file) return Result("file_request_required");
+    auto result = Result(); result.Set("state", found->second->validating ? "validating" : "pending"); return result;
+  }
+  const auto completed = file_results_.find(id);
+  return completed == file_results_.end() ? Result("unknown_file_request") : completed->second.Clone();
 }
 base::DictValue PageRequests::Snapshot() {
   auto weak = weak_factory_.GetWeakPtr();
@@ -464,32 +486,41 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply) {
     return Result("closing_beforeunload_required");
   if (reply.FindBool("dialog_only").value_or(false) && request->type != Pending::Type::dialog)
     return Result("standard_dialog_required");
+  if (reply.FindBool("file_only").value_or(false) && request->type != Pending::Type::file)
+    return Result("file_request_required");
   auto* frame = request->document.AsRenderFrameHostIfValid();
   if (!Live(frame)) {
     Cancel(id, "document_invalidated");
     return Result("document_invalidated");
   }
-  if (request->validating)
-    return Result("reply_already_validating");
   if (!*accept) {
     Cancel(id, "remote_rejected");
     return Result();
   }
+  if (request->validating)
+    return Result("reply_already_validating");
   if (request->type == Pending::Type::file) {
-    const auto* values = reply.FindList("paths");
+    const auto* values = reply.FindList("files");
+    const bool legacy = !values && !reply.FindBool("file_only").value_or(false);
+    if (legacy) values = reply.FindList("paths");
     const bool multiple = request->mode == blink::mojom::FileChooserParams::Mode::kOpenMultiple;
     if (!values || values->empty() || values->size() > kLimit || (!multiple && values->size() != 1))
       return Result("invalid_file_count");
-    std::vector<base::FilePath> paths;
+    std::vector<SelectedFile> paths;
     for (const auto& value : *values) {
-      const auto* path = value.GetIfString();
+      const auto* file = value.GetIfDict();
+      const auto* path = legacy ? value.GetIfString() : file ? file->FindString("path") : nullptr;
+      const auto* display = file ? file->FindString("displayName") : nullptr;
       if (!path || path->empty() || path->size() > kStringLimit ||
           path->find('\0') != std::string::npos || !base::IsStringUTF8(*path))
         return Result("invalid_file_path");
       auto native = base::FilePath::FromUTF8Unsafe(*path);
       if (!native.IsAbsolute())
         return Result("file_path_must_be_absolute");
-      paths.push_back(std::move(native));
+      if (!legacy && (!display || display->empty() || display->size() > 1024 || !base::IsStringUTF8(*display) ||
+                      display->find_first_of("/\\:\0", 0, 4) != std::string::npos || *display == "." || *display == ".."))
+        return Result("invalid_file_display_name");
+      paths.push_back({std::move(native), display ? base::UTF8ToUTF16(*display) : std::u16string()});
     }
     request->validating = true;
     request->data.Set("state", "validating");
@@ -559,7 +590,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply) {
 }
 
 void PageRequests::FilesValidated(std::uint64_t id,
-                                  std::vector<base::FilePath> paths,
+                                  std::vector<SelectedFile> paths,
                                   std::string error) {
   auto found = pending_.find(id);
   if (found == pending_.end())
@@ -575,15 +606,17 @@ void PageRequests::FilesValidated(std::uint64_t id,
   auto request = std::move(found->second);
   pending_.erase(found);
   std::vector<blink::mojom::FileChooserFileInfoPtr> files;
-  for (auto& path : paths) {
+  for (auto& selected : paths) {
     auto native = blink::mojom::NativeFileInfo::New();
-    native->file_path = std::move(path);
+    native->file_path = std::move(selected.path);
+    native->display_name = std::move(selected.display_name);
     files.push_back(blink::mojom::FileChooserFileInfo::NewNativeFile(std::move(native)));
   }
   auto event = Kind("request_replied");
   event.Set("request", base::NumberToString(id));
   event.Set("state", "selected");
   Event(std::move(event));
+  FileResult(id, "selected");
   request->file->FileSelected(std::move(files), base::FilePath(), request->mode);
 }
 

@@ -26,6 +26,13 @@ export function createHttp(control: Control, options: { origins: string[]; clien
       }
       if (path.startsWith('/api/')) {
         if (req.method !== 'POST') throw new ApiError(405, '不支持的方法'); checkOrigin(req);
+        if (path.startsWith('/api/files/')) {
+          const identity = control.store.identity(token); if (!identity || !token) throw new ApiError(401, '请先登录');
+          if (req.headers['content-type'] !== 'application/octet-stream') throw new ApiError(415, '需要原始文件内容');
+          const ticket = path.slice('/api/files/'.length); if (!/^[a-zA-Z0-9_-]{16,128}$/.test(ticket)) throw new ApiError(404, '文件ticket不存在');
+          await control.receiveFileUpload(identity.tenantId, authenticationIdentity(token), ticket, req, req.headers['content-length']);
+          res.statusCode = 204; res.end(); return;
+        }
         if (!req.headers['content-type']?.startsWith('application/json')) throw new ApiError(415, '需要 JSON 请求');
         const body = await readBody(req); if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ApiError(400, '需要 JSON 对象');
         if (['tenantId', 'tenant', 'userId', 'user'].some(key => key in body)) throw new ApiError(400, '客户端不能指定用户或租户');

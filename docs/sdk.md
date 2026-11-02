@@ -127,6 +127,8 @@ Runtime and hardware validation results are maintained in [current state](curren
 
 ## Runtime media policy and capture clocks
 
+`remotekit_rtc_submit_audio(peer, pcm, frames, generation, sequence, sample_index, first_sample_qpc, discontinuity)` is an additive audio export. It accepts interleaved S16 stereo at 48 kHz, 480 frames per block, on a dedicated audio thread. PCM is copied during the call; success means accepted, not remotely played. Generation and sample index preserve the source timeline, and the first sample uses local QPC. Audio is negotiated only for a receiving client; video-only peers remain supported. The updated Endpoint requires the corresponding SDK export. See [audio ownership and lifecycle](audio-and-files.zh-CN.md).
+
 `remotekit_rtc_set_media_policy(peer, target_bps, max_bps, fps)` is an additive export. It adjusts sender limits without resetting congestion-control start bitrate. Repeating the same policy is a no-op; an FPS-only change does not reset bandwidth estimation. Endpoint reports requested and actually applied policy separately; missing exports return explicit unsupported behavior.
 
 Capture metadata is mapped from the original QPC timestamp to wall time before the SDK changes timestamp domains. `captureWallTimeMs`, `captureMonotonicMs`, `captureClockUncertaintyMs`, and decimal `sourceCaptureId` are optional and paired with actual wire RTP/epoch. Missing capture time is omitted, never replaced by ready/encode time. This does not change frame ABI or add Browser–Endpoint frame IPC. See [feedback timing](media-feedback.md).

@@ -38,7 +38,19 @@ Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/�
 
 标签页加载spinner已修复：原通用span规则把MUI图标当标题扩宽并裁切。标题样式现独立，桌面与390px窄屏实测图标均13×13px，旋转中心稳定、加载结束正常消失；见[视觉检查](../develop/docs/loading-spinner-runtime-qa.md)。
 
+video+clip-path已完成固定1936×816/50FPS、157接收端的四组对照。单video接收CPU约0.291核、3D计数0%，WebGL为0.343核/11.50%；双video未见解码负载翻倍。源/解码均约50FPS，video未显示呈现帧率优势。它值得保留为低3D成本候选，但动态布局换代和输入对应还需媒体生命周期设计，产品继续使用canvas。该组没有复现用户Chrome138的12FPS，新增stats帮助区分源预算与接收呈现瓶颈。见[对照记录](../develop/docs/video-clip-evaluation.md)。
+
 触控保留客户端采样时间与有界历史，服务端不再用包到达间隔估计手势；0008区分同步完成回调与真正派发拒绝，0009修复无屏幕时零PPI导致的惯性失效。服务构建固定逻辑PPI96与generic-desktop手势配置，客户端DPR和媒体帧率预算独立，native demo保留宿主适配。最终正常/途中70ms停顿/抬手100ms延迟三组滚动为502/501/502 DIP，均有约404–418ms惯性、零拒绝；嵌套滚动、OOPIF、touch-action/preventDefault、取消和DPR2坐标另有真实检查。新增Chromium unit用例未单独构建content_unittests，运行证据来自实际生产链路。见[可复用检查入口](touch-source-qa.md)与[触控运行记录](../develop/docs/touch-source-runtime-qa.md)。
+
+## 新增音频与文件
+
+Browser真实音频播放target、独立PCM共享环和SDK Opus发送已实现，不依赖系统声音捕获。整个Viewer统一保存左右声道选择。157已测实际PCM声道门控与重连，89已测实际PCM、静音保存与恢复；一次闪光/声脉冲点测音频比canvas晚5.6ms，尚无长期同步或真正网络音频gap实验。
+
+真实网页文件选择已完成单/多文件、Unicode名称与字节、零字节、取消、导航失效、旧lease ticket拒绝以及同文档history后的延迟读取；89单文件通过。157桌面与390px窄屏dialog/菜单通过视觉检查。
+
+摄像头改为不可变ImageBitmap交给OffscreenCanvas Worker，同一帧评分与编码。首次冷burst同步p95从首版31.2ms降为157的1.5ms、89的5.35ms；各6次采样，均无>50ms长任务。两版显示3张1280×720候选，89拍摄中取消后轨道、Worker与图像资源释放。使用fake-camera，实体设备成像效果和旧能力fallback性能尚未验证；见[摄像头优化](../develop/docs/camera-bitmap-worker-optimization.md)。
+
+Browser/SDK已增量构建，Endpoint11套CPU通过；最终Control171项、类型检查、生产构建与启动smoke全部通过，包含文件单选与摄像头fallback修正。实现边界见[音频与文件](audio-and-files.zh-CN.md)，功能证据见[运行QA](../develop/docs/audio-files-runtime-qa2.md)。
 
 ## 当前默认与资源规则
 
@@ -54,7 +66,7 @@ Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/�
 
 
 - 每Session当前一个Profile；跨Browser sessionStorage、完整IME replacement/span、原生popup widget合成/命中覆盖，以及目录上传、认证/证书、跨端剪贴板、PDF/打印等仍是保留差距。官方注入触摸路径关闭了原生longpress/showpress定时器，原生长按功能尚未补齐。
-- 本机无NVIDIA硬件，NVENC只有编译/接口边界检查；音频不在本轮。
+- 本机无NVIDIA硬件，NVENC只有编译/接口边界检查。音频真实网络gap、autoplay拒绝及上传断传/commit竞态未作运行验证；实体摄像头效果和能力fallback性能仍待验证。
 - 生产capture-end→paint是带时钟置信度的估算；Pixel marker测量及物理屏幕点亮是不同终点。
 
 ## 发布与入口

@@ -8,6 +8,8 @@ import {
   IconButton,
   InputBase,
   Menu,
+  MenuList,
+  Popover,
   MenuItem,
   Tooltip,
   Typography,
@@ -35,6 +37,8 @@ import type {
 import { RemoteTransport } from "./transport";
 import { RemoteViewport } from "./remote-viewport";
 import type { Action } from "./product-dialogs";
+import { AudioControls } from './audio-controls';
+import type { AudioChannels } from './audio-output';
 export function Tool({
   title,
   children,
@@ -76,6 +80,7 @@ export function WindowFrame({
   onGeometry,
   focusAddress,
   visible,
+  audioSaving, audioError, saveAudio,
 }: {
   win: ProductWindow;
   state: ProductState;
@@ -89,6 +94,7 @@ export function WindowFrame({
   onGeometry: (id: string, width: number, height: number) => void;
   focusAddress: string | null;
   visible: boolean;
+  audioSaving:boolean;audioError:string;saveAudio:(channels:AudioChannels)=>void;
 }) {
   const tabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
     active = tabs.find((t) => t.id === win.activeTabId),
@@ -130,6 +136,7 @@ export function WindowFrame({
     const listener = (event: KeyboardEvent) => {
       if (
         focused &&
+        !document.querySelector('[role="dialog"][aria-modal="true"]') &&
         (event.ctrlKey || event.metaKey) &&
         !event.altKey &&
         event.key.toLowerCase() === "l"
@@ -244,7 +251,7 @@ export function WindowFrame({
                 ) : (
                   <Language fontSize="inherit" />
                 )}
-                <span className="tab-title">{tab.title || "新标签页"}{state.pageDialogs?.some(d => d.tabId === tab.id) && <span aria-label="页面等待处理对话框"> ●</span>}</span>
+                <span className="tab-title">{tab.title || "新标签页"}{(state.pageDialogs?.some(d => d.tabId === tab.id)||state.fileRequests?.some(d=>d.tabId===tab.id)) && <span aria-label="页面等待处理请求"> ●</span>}</span>
               </button>
               <IconButton
                 className="tab-close"
@@ -398,7 +405,8 @@ export function WindowFrame({
           </div>
         )}
       </div>
-      <Menu anchorEl={menu} open={!!menu} onClose={() => setMenu(null)}>
+      <Popover anchorEl={menu} open={!!menu} onClose={() => setMenu(null)} slotProps={{ paper: { sx: { width: 360, maxWidth: 'calc(100vw - 24px)' } } }}>
+        <MenuList autoFocusItem={!!menu}>
         <MenuItem
           disabled={!online}
           onClick={() => {
@@ -493,12 +501,11 @@ export function WindowFrame({
           </div>
         </MenuItem>
         <Divider />
-        <MenuItem
-          onClick={() => {
-            setMenu(null);
-            onSettings();
-          }}
-        >
+        </MenuList>
+        <AudioControls channels={state.workspace.settings.audioChannels ?? { left: true, right: true }} online={online} playback={transport.audio.state} resume={() => transport.audio.resume()} save={saveAudio} busy={audioSaving} error={audioError} />
+        <Divider />
+        <MenuList>
+        <MenuItem onClick={() => { setMenu(null); onSettings(); }}>
           设置
         </MenuItem>
         {state.user.isAdmin && (
@@ -516,7 +523,8 @@ export function WindowFrame({
         >
           退出登录
         </MenuItem>
-      </Menu>
+        </MenuList>
+      </Popover>
       <Menu
         anchorEl={switcher}
         open={!!switcher}

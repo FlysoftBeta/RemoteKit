@@ -31,6 +31,8 @@ class PageRequests final : public content::WebContentsDelegate,
   void Bind(content::WebContents* contents);
   base::DictValue Snapshot();
   base::DictValue Reply(const base::DictValue& reply);
+  base::DictValue FileStatus(const std::string& request);
+  struct SelectedFile { base::FilePath path; std::u16string display_name; };
   base::DictValue Command(const base::DictValue& command);
   void CancelAll(const std::string& reason);
   size_t pending_count() const { return pending_.size(); }
@@ -94,7 +96,8 @@ class PageRequests final : public content::WebContentsDelegate,
   void Event(base::DictValue);
   void Cancel(std::uint64_t id, const std::string& reason);
   void Prune();
-  void FilesValidated(std::uint64_t, std::vector<base::FilePath>, std::string);
+  void FilesValidated(std::uint64_t, std::vector<SelectedFile>, std::string);
+  void FileResult(std::uint64_t, const char*, const std::string& error = {});
   void DidStartNavigation(content::NavigationHandle*) override;
   void DidFinishNavigation(content::NavigationHandle*) override;
   void RenderFrameDeleted(content::RenderFrameHost*) override;
@@ -110,6 +113,7 @@ class PageRequests final : public content::WebContentsDelegate,
   std::uint64_t next_id_ = 1;
   std::map<std::uint64_t, std::unique_ptr<Pending>> pending_;
   std::deque<base::DictValue> events_;
+  std::map<std::uint64_t, base::DictValue> file_results_;
   bool fullscreen_ = false;
   bool cancelling_ = false;
   content::WeakDocumentPtr find_document_;

@@ -68,4 +68,4 @@ Stats区分源、采集、编码、解码及实际canvas提交。生产采集完
 
 以下差距保留，不因旧demo拒绝或没有UI就视为用户取消：多Profile；跨Browser sessionStorage；完整IME replacement/span与真实输入法专项；原生popup widget像素/命中覆盖；目录上传、远端HTTP/代理认证与证书选择、完整跨端剪贴板、PDF/打印等产品装配。现有普通文件/下载/权限/find/zoom/edit等机制的接入边界见当前状态和Browser协议。
 
-音频不在本轮。将来按网页输出组采集而非系统混音，由Endpoint在Session内重采样/混音为48kHz stereo、10ms/480帧块及单Opus track；不得跨Session混音。采集时间、后台音乐和本地静音需独立管理，音频线程不做同步Mojo或无界等待。这个方向不是当前已实现能力。
+音频已接入Browser自己的播放目标，不录制系统混音。Browser在Session内重采样/混音为48kHz stereo、10ms/480帧块，通过独立共享音频环交给Endpoint/SDK的Opus track；不得跨Session混音。文件选择由Browser真实FileSelectListener完成，Endpoint Session托管文件生命周期。产品设置、上传流程与资源边界见[音频与文件](audio-and-files.zh-CN.md)，验收范围见当前状态。

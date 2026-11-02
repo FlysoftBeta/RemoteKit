@@ -1,4 +1,4 @@
-// No device, capture, playout or audio codec is connected.
+// No device, capture or playout. Page audio is supplied by PageAudioSource.
 class SilentAudioDevice : public webrtc::AudioDeviceModule {
  public:
   int32_t ActiveAudioLayer(AudioLayer* audioLayer) const override { if (audioLayer) *audioLayer = kDummyAudio; return 0; }

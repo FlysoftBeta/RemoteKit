@@ -27,6 +27,7 @@ struct Sdk {
  RK_SDK_FUNCTION(remotekit_rtc_open_data_channel)
  RK_SDK_FUNCTION(remotekit_rtc_send_data)
  RK_SDK_FUNCTION(remotekit_rtc_submit_texture)
+ RK_SDK_FUNCTION(remotekit_rtc_submit_audio)
  RK_SDK_FUNCTION(remotekit_rtc_encoded)
 #undef RK_SDK_FUNCTION
  void Open(const std::filesystem::path& path) {
@@ -42,6 +43,7 @@ struct Sdk {
  RK_LOAD(remotekit_rtc_set_media_policy)
  RK_LOAD(remotekit_rtc_set_playout_delay)
  RK_LOAD(remotekit_rtc_submit_texture) RK_LOAD(remotekit_rtc_encoded)
+ RK_LOAD(remotekit_rtc_submit_audio)
 #undef RK_LOAD
   sample_clock=reinterpret_cast<decltype(sample_clock)>(GetProcAddress(module,"remotekit_rtc_sample_clock"));
   request_stats=reinterpret_cast<decltype(request_stats)>(GetProcAddress(module,"remotekit_rtc_request_stats"));
