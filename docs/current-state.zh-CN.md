@@ -2,7 +2,7 @@
 
 更新：2026-11-03。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。只复用out/dev、out/rel增量构建，继续支持Chrome89。
 
-**当前架构重构批次已完成规定范围的功能验收，产品提交14859f6已推送，正在打包上传。** 上一发布为4de343c（取件码354383），不是本批新包。首次打包发现旧smoke仍用已禁止的WS产品动作；正式工具已同步新契约并通过startup检查及Unicode失败回归，发布仍须完成本次包内真实WebRTC产品检查。六模块审计、独立集成复审及运行发现问题的修复已完成，具体证据见[问题清单](../develop/docs/open-issues.md)、[本轮契约](../develop/docs/robustness-contract-20261103.md)。
+**当前架构重构批次已发布：包版本1e13f11，取件码353287。** 产品提交14859f6及发布工具提交1e13f11均已推送。六模块审计、独立集成复审、规定范围的功能验收和包内真实WebRTC检查完成；上一发布4de343c/354383不是本批包。具体证据见[问题清单](../develop/docs/open-issues.md)、[本轮契约](../develop/docs/robustness-contract-20261103.md)。
 
 ## 当前架构与实现
 
@@ -45,8 +45,14 @@
 
 每Session目前单Profile；完整IME replacement/span、原生popup widget合成/命中、目录上传、认证/证书、跨端剪贴板、PDF/打印及原生长按仍有缺口。POST reload缺少repost确认协议时明确拒绝，不能伪装GET成功。没有本机NVIDIA硬件、实体移动软键盘及真实摄像头效果验收；NVENC的CPU/编译证据、模拟viewport及fake-camera均须如实区分。capture-end→呈现延迟是带时钟置信度的估计，不是物理屏幕点亮。
 
-## 发布要求
+## 本次发布
 
-完成新增路径验证、整理文档并由root本地commit后，委派全新Sol按[打包](packaging.zh-CN.md)与[上传](upload/README.md)构建校验streaming包。包须包含最新Browser、SDK、Endpoint、Node及Control生产runtime，解压run.cmd；不带Profile、数据、凭据、日志或PDB。返回新取件码/链接、SHA256及Viewer效果图。本次上传优先、GitHub push尽力而为；不得把354383或744995当新发布。
+root本地提交后由全新Sol按[打包](packaging.zh-CN.md)与[上传](upload/README.md)执行。新包`RemoteKit-win-x64-streaming-qsv-nvenc-20261103-034122.zip`，462549473 bytes，manifest基线`1e13f119df92f6477588fce1946034490d3c65a7`且source clean；2026-11-03 03:44（UTC+8）上传，取件码**353287**，[本次下载链接](https://airportal.cn/353287/WCrXhtcznc)，上传有效期24小时。
+
+SHA256：`78692bab3f9993a5aabb4d1e6dbfbfe915cc3c7f9acfc8cf24442a0b40c0b08e`。
+
+本次包startup smoke、560项manifest文件hash、ZIP CRC与内部hash、102项无PDB SDK运行依赖和关键源产物hash通过。包内Node生产server/Endpoint/Browser的host-managed实际检查通过RTC DC建窗、导航、video、点击及wheel；Browser实际路径属于新包，MSTP/draw/WS产品动作均0，无pageerror。CLI startup与这次真实产品检查分开记录，已修旧WS action smoke及Python代码页遮蔽错误的问题。
+
+完整解压运行run.cmd。包内不含开发Profile、数据、凭据、日志或PDB；测试服务和contexts均已关闭。完整本机交付记录为`develop/tmp/release-1e13f11-delivery.json`，包内实景为`develop/tmp/release-1e13f11-product-qa/packaged-viewer.png`；桌面/起始页/设置/窄屏图见Viewer运行报告。
 
 [系统架构](architecture.zh-CN.md) · [Control](control-plane.zh-CN.md) · [协议](streaming-protocol.md) · [输入](client-gestures.zh-CN.md) · [导航](navigation-operations.zh-CN.md) · [GPU](gpu-output.zh-CN.md) · [音频与文件](audio-and-files.zh-CN.md)

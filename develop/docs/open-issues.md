@@ -1,8 +1,8 @@
 # 当前问题与收尾记录
 
-由root维护。最新已发布基线4de343c；当前按用户要求逐模块审阅与重构，做新增路径必要功能验证，不重复历史性能组。旧全库审查依据见[审查报告](post-release-astra-review.md)。
+由root维护。最新已发布基线1e13f11，取件码353287；本批逐模块审阅、重构和规定范围新增路径验证已完成，不重复历史性能组。旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
-2026-11-03进度：输入修正版4de343c已经发布；用户随后要求逐模块审阅与架构重构、新增搜索引擎/起始页。六份模块审计及独立集成复审已完成，修复代码与阶段CPU检查正在集成。跨机管理、DC常规操作/文件、收据与状态同步、独立时钟、移动编辑/Client手势的契约、责任及实际证据见[本轮架构记录](robustness-contract-20261103.md)。本页以下表格是此前已关闭问题，不代表新增批次验收完成；下一发布须独立新提交/构建/取件码。
+2026-11-03进度：产品重构14859f6及工具修正1e13f11已提交推送，新streaming包通过startup、包内WebRTC操作、逐文件/ZIP校验后上传。跨机管理、DC常规操作/文件、收据同步、独立时钟、移动编辑/Client手势的契约和证据见[本轮架构记录](robustness-contract-20261103.md)。下列问题按对应源码、CPU和真实证据关闭；实体设备与尚未装配能力仍见当前状态，不能宣称整个浏览器无任何缺口。
 
 ## 本批运行发现与待验收项
 
@@ -22,7 +22,7 @@
 | G3 child销毁后输入锁定 | 已修有界精确token+sequence退役证明，未知/超时仍unconfirmed，正常cancel仍等canonical ACK。279项Control/原生构建通过；89/157真实owned child销毁→明确invalidated→同doc新tap通过、无误投及遮罩，旧回执不清新held owner |
 | F3 正常停止丢弃未交付atlas帧 | 已修StopAndResetConsumer跨Mojo pipe丢排队帧：正常退役转drainer，仅对producer实际写完但应用未读帧Done；已交付lease保留consumed Fence、未知断开仍隔离。生产构建、真实Mojo5例/池13项及11补丁撤回重放通过；89/157专项自然generation1→17无atlas fatal/CHECK/重启 |
 | 新路径功能覆盖 | 规定范围验收完成：89/157布局/文档失效、触控/滚轮/scrollbar、bounds与DPR坐标、无原生媒体入口；双Tenant管理断链保持媒体；DC文件/拍照字节、实际PCM、搜索持久化、模拟IME/键盘resize；真实popup opener/关闭、Sol清洁效果图。实体移动键盘/NVIDIA/真实摄像头效果仍是明确硬件边界，见当前状态与各运行报告 |
-| P1 发布smoke契约过期 | 产品14859f6已推送；打包旧Node smoke仍通过WS action建窗口，被新契约明确拒绝。正式CLI校验同步为startup/auth/assets/WS/clock及拒绝旧产品入口，实际Window/Browser产品验证由发布前包内host-managed WebRTC步骤承担；并修父子Python代码页遮蔽失败原因的问题。工具修复、真实startup和父子Unicode失败回归已通过；本次新包与host-managed WebRTC验收待发布代理完成 |
+| P1 发布smoke契约过期 | 1e13f11已同步CLI startup/auth/assets/WS/clock及拒绝旧产品入口，修复父子Unicode失败证据；新包startup通过。独立包内host-managed WebRTC真实建窗/导航/点击/wheel、默认video及包内Browser路径通过；560逐文件hash与ZIP CRC/hash通过，已上传353287 |
 
 ## 8423204发布后输入与video回归
 
