@@ -26,6 +26,26 @@ def copy_endpoint(source, binary, streaming):
     return target
 
 
+def run_startup_smoke(package, *, work_dir=None):
+    """Run the startup validator with UTF-8 output and preserve real failures."""
+    command = [sys.executable, '-X', 'utf8', str(ROOT / 'tools/test-streaming-package.py'),
+               '--package', str(package)]
+    if work_dir is not None:
+        command.extend(['--work-dir', str(work_dir)])
+    env = os.environ.copy()
+    env.update(PYTHONUTF8='1', PYTHONIOENCODING='utf-8')
+    smoke = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', errors='replace', env=env)
+    try:
+        validation = json.loads(smoke.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f'Bundled startup smoke returned invalid JSON (exit {smoke.returncode}): '
+                           f'stdout={smoke.stdout!r}; stderr={smoke.stderr!r}') from error
+    if smoke.returncode or not validation.get('passed'):
+        raise RuntimeError('Bundled startup smoke failed: ' + json.dumps(validation, ensure_ascii=False)
+                           + ('; stderr=' + smoke.stderr if smoke.stderr else ''))
+    return validation
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--chromium-root', type=Path, default=Path(r'C:\src\chromium\src'))
@@ -35,7 +55,7 @@ def main():
     parser.add_argument('--destination', type=Path, default=ROOT / 'develop/tmp')
     parser.add_argument('--endpoint', type=Path)
     parser.add_argument('--node', type=Path)
-    parser.add_argument('--smoke', action='store_true', help='Launch the streaming bundle before archiving (uses GPU/browser)')
+    parser.add_argument('--smoke', action='store_true', help='Validate streaming startup/auth/Endpoint management before archiving; real Viewer RTC product/media checks remain required')
     args = parser.parse_args()
     chromium = args.chromium_root.resolve()
     output = chromium / 'out' / args.out
@@ -208,11 +228,8 @@ def main():
     validation = None
     if args.smoke:
         if not streaming: parser.error('--smoke requires --kind streaming')
-        smoke = subprocess.run([sys.executable, str(ROOT / 'tools/test-streaming-package.py'),
-            '--package', str(package)], capture_output=True, text=True, encoding='utf-8')
-        validation = json.loads(smoke.stdout)
-        if smoke.returncode: raise RuntimeError('Bundled runtime smoke failed: ' + str(validation))
-        print('Bundled product login/WebSocket/browser smoke passed: ' + validation['evidence'], flush=True)
+        validation = run_startup_smoke(package)
+        print('Bundled startup/auth/Endpoint management smoke passed (RTC product/media checks separate): ' + validation['evidence'], flush=True)
     # Use only explicit runtime inputs above; refuse accidental state, secrets or
     # compiler artifacts before either hashing or archiving the package.
     for file in package.rglob('*'):
@@ -239,7 +256,9 @@ def main():
         'endpoint_client_frame_metadata': streaming, 'chromium_internal_frame_ipc': True,
         'endpoint_configuration': 'Release', 'browser_configuration': args.out,
         'runtime_launched': bool(validation and validation.get('passed')),
-        'runtime_validation': ({key: validation[key] for key in ['passed', 'scope', 'rtcMediaTested', 'endpointSha256']} if validation else None), 'files': files,
+        'runtime_validation': ({key: validation[key] for key in ['passed', 'validationKind', 'scope',
+            'browserProductOperationsTested', 'rtcMediaTested', 'endpointManagementReachable',
+            'webSocketProductActionRejected', 'workspaceUnchanged', 'endpointSha256']} if validation else None), 'files': files,
         'excluded_runtime_graph_entries': sorted(set(excluded)),
     }
     (package / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -262,4 +281,6 @@ def main():
 
 
 if __name__ == '__main__':
+    sys.stdout.reconfigure(encoding='utf-8', errors='backslashreplace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='backslashreplace')
     main()

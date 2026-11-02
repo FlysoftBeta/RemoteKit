@@ -16,7 +16,9 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke
 
 运行参数可用--name=value附加到run.cmd，由Node launcher作为数据传递。普通用户在更多→设置选择质量偏好、Client Scale和memory saver，不需要编辑编码参数。监听、Origin及TLS配置见[Control说明](../control/README.md)；远程浏览器所需安全上下文应通过受信任HTTPS提供。
 
-manifest.json记录源码基线、构建参数、backend和逐文件SHA-256；ZIP另有.sha256。打包工具拒绝凭据、Profile、数据、PDB和构建输入。--smoke在包外创建临时数据，检查正常注册、鉴权WS、窗口/Browser启动和时钟接口。发布记录还应注明实际运行过的媒体/输入检查，不能把文件收集当成端到端验收。
+manifest.json记录源码基线、构建参数、backend和逐文件SHA-256；ZIP另有.sha256。打包工具拒绝凭据、Profile、数据、PDB和构建输入。--smoke在包外创建临时数据，检查包内Node/生产静态资源、注册首管理员、鉴权WS状态、SQLite和时钟接口，并确认WS不能绕过WebRTC提交产品动作。此CLI检查不再通过旧WS action创建窗口，runtime_validation明确标记未测试RTC媒体；不能称其已验证Browser页面或产品DataChannel。
+
+正式发布还必须对本次实际包执行host-managed Playwright产品检查：使用包内Node/Endpoint/Browser、独立临时data与端口，真实注册/登录、建立WebRTC、通过产品UI创建Window并导航受控页面，检查默认video与真实点击/滚动，核对Browser进程来自包内路径；关闭本次自有服务后再上传。此步骤补足包内产品/Browser链路，不重复源码阶段已通过的全功能或性能矩阵。分别记录CLI启动检查、包内WebRTC产品检查和既有功能QA，不把三者混为一项。
 
 ## 原生对照包
 

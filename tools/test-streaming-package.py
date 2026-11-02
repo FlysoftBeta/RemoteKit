@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Test a streaming package's normal login, WebSocket, SQLite and browser startup."""
-import argparse,hashlib,json,os,re,socket,subprocess,time,urllib.request
+"""Test bundled streaming startup/auth/management; RTC product/media checks require a real Viewer."""
+import argparse,hashlib,json,os,re,socket,subprocess,sys,time,urllib.request
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 def main():
@@ -10,8 +10,8 @@ def main():
  a=p.parse_args();package=a.package.resolve()
  run=a.work_dir.resolve()/str(time.time_ns());run.mkdir(parents=True)
  result={'passed':False,'package':str(package),'evidence':str(run),
-   'scope':'bundled Node + production UI assets + user registration + WebSocket + SQLite + Endpoint/browser management; no RTC media',
-   'rtcMediaTested':False};child=None
+   'scope':'startup: bundled Node + production UI assets + SQLite first-admin registration + authenticated WebSocket state + clock/admin + Endpoint management reconciliation + rejected WS browser action with unchanged workspace; no RTC product operations or media',
+   'validationKind':'startup','browserProductOperationsTested':False,'rtcMediaTested':False};child=None
  try:
   for relative in ['bin/node.exe','bin/endpoint_service.exe','bin/remotekit_browser.exe','control/dist/server.mjs','control/dist/client/index.html']:
    if not (package/relative).is_file():raise FileNotFoundError(relative)
@@ -19,7 +19,7 @@ def main():
   with socket.socket() as probe:probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
   origin='http://127.0.0.1:'+str(port);env=os.environ.copy()
   opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-  for name in ['NODE_PATH','NODE_OPTIONS','REMOTEKIT_HTTPS_KEY','REMOTEKIT_HTTPS_CERT','REMOTEKIT_NETWORK_SIM','REMOTEKIT_DIAGNOSTICS','REMOTEKIT_RTC_LOOPBACK_TEST']:env.pop(name,None)
+  for name in ['NODE_PATH','NODE_OPTIONS','REMOTEKIT_HTTPS_KEY','REMOTEKIT_HTTPS_CERT','REMOTEKIT_NETWORK_SIM','REMOTEKIT_DIAGNOSTICS','REMOTEKIT_RTC_LOOPBACK_TEST','REMOTEKIT_ENDPOINT_NODE_ID','REMOTEKIT_ENDPOINT_TOKEN','REMOTEKIT_ENDPOINT_TLS_PROXY']:env.pop(name,None)
   env.update(PORT=str(port),REMOTEKIT_CONTROL_HOST='127.0.0.1',REMOTEKIT_CONTROL_ORIGINS=origin,
     REMOTEKIT_CONTROL_DB=str(run/'control.db'),REMOTEKIT_METRICS_DIR=str(run/'metrics'),
     REMOTEKIT_ENDPOINT=str(package/'bin/endpoint_service.exe'),
@@ -44,7 +44,7 @@ def main():
    check=subprocess.run([str(package/'bin/node.exe'),str(ROOT/'tools/smoke-streaming-product.mjs'),
      str(package),origin],cwd=run,env=env,capture_output=True,text=True,encoding='utf-8',timeout=55)
    (run/'product-smoke.stderr.log').write_text(check.stderr,encoding='utf-8')
-   if check.returncode:raise AssertionError('Product WebSocket smoke failed: '+check.stderr)
+   if check.returncode:raise AssertionError('Startup WebSocket smoke failed: '+check.stderr)
    result.update(passed=True,assets=assets,**json.loads(check.stdout))
  except Exception as error:result['error']=str(error)
  finally:
@@ -57,4 +57,9 @@ def main():
   (run/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
  print(json.dumps(result,ensure_ascii=False))
  return 0 if result['passed'] else 1
-if __name__=='__main__':raise SystemExit(main())
+if __name__=='__main__':
+ # Structured subprocess output has an explicit encoding even under Windows'
+ # legacy console code page, including errors containing non-ASCII paths/text.
+ sys.stdout.reconfigure(encoding='utf-8',errors='backslashreplace')
+ sys.stderr.reconfigure(encoding='utf-8',errors='backslashreplace')
+ raise SystemExit(main())

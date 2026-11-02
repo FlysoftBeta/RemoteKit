@@ -22,6 +22,7 @@
 | G3 child销毁后输入锁定 | 已修有界精确token+sequence退役证明，未知/超时仍unconfirmed，正常cancel仍等canonical ACK。279项Control/原生构建通过；89/157真实owned child销毁→明确invalidated→同doc新tap通过、无误投及遮罩，旧回执不清新held owner |
 | F3 正常停止丢弃未交付atlas帧 | 已修StopAndResetConsumer跨Mojo pipe丢排队帧：正常退役转drainer，仅对producer实际写完但应用未读帧Done；已交付lease保留consumed Fence、未知断开仍隔离。生产构建、真实Mojo5例/池13项及11补丁撤回重放通过；89/157专项自然generation1→17无atlas fatal/CHECK/重启 |
 | 新路径功能覆盖 | 规定范围验收完成：89/157布局/文档失效、触控/滚轮/scrollbar、bounds与DPR坐标、无原生媒体入口；双Tenant管理断链保持媒体；DC文件/拍照字节、实际PCM、搜索持久化、模拟IME/键盘resize；真实popup opener/关闭、Sol清洁效果图。实体移动键盘/NVIDIA/真实摄像头效果仍是明确硬件边界，见当前状态与各运行报告 |
+| P1 发布smoke契约过期 | 产品14859f6已推送；打包旧Node smoke仍通过WS action建窗口，被新契约明确拒绝。正式CLI校验同步为startup/auth/assets/WS/clock及拒绝旧产品入口，实际Window/Browser产品验证由发布前包内host-managed WebRTC步骤承担；并修父子Python代码页遮蔽失败原因的问题。工具修复、真实startup和父子Unicode失败回归已通过；本次新包与host-managed WebRTC验收待发布代理完成 |
 
 ## 8423204发布后输入与video回归
 

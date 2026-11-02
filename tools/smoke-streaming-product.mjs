@@ -6,7 +6,9 @@ import { randomBytes } from 'node:crypto';
 
 const [packageRoot, origin] = process.argv.slice(2);
 const { WebSocket } = createRequire(resolve(packageRoot, 'control/dist/server.mjs'))('ws');
-const timeout = setTimeout(() => { console.error('Product package smoke timed out'); process.exit(1); }, 45000);
+// Startup/authentication contract only. Browser actions and media require a real
+// Viewer WebRTC check against the extracted package during release validation.
+const timeout = setTimeout(() => { console.error('Package startup smoke timed out'); process.exit(1); }, 45000);
 let socket;
 try {
   assert.equal((await fetch(origin + '/api/auth/me')).status, 401);
@@ -34,7 +36,7 @@ try {
     if (message.type === 'state') { latest = message.state; for (const check of [...states]) check(); }
     if (message.type === 'result' || message.type === 'error') {
       const waiter = pending.get(message.id); pending.delete(message.id);
-      if (waiter) message.type === 'error' ? waiter.reject(new Error(JSON.stringify(message.error))) : waiter.resolve(message.result);
+      if (waiter) message.type === 'error' ? waiter.reject(Object.assign(new Error(message.error.message), { code: message.error.code })) : waiter.resolve(message.result);
     }
   });
   await new Promise((resolve, reject) => { socket.once('open', resolve); socket.once('error', reject); });
@@ -47,13 +49,27 @@ try {
   });
   const initial = await waitState(() => true);
   assert.equal(initial.quality.mode, 'product');
-  const created = await rpc('action', { type: 'window.create', url: 'about:blank' });
-  const windowId = created.state.workspace.activeWindowId;
-  await rpc('viewport', { devicePixelRatio: 1, refreshHz: 60, windows: [{ windowId, width: 800, height: 600, visible: true }] });
-  const state = await waitState(state => !state.endpointError && state.workspace.tabs.length === 1 && state.workspace.tabs[0].loading === false && state.workspace.tabs[0].residency === 'live');
-  const viewId = state.workspace.tabs[0].webviewId;
-  assert.match(viewId, /^[1-9][0-9]*$/);
-  assert.equal(state.workspace.tenantId, initial.workspace.tenantId);
-  assert.ok((await rpc('clock.ping', { clientTime: Date.now() })).serverTime > 0);
-  console.log(JSON.stringify({ tenantId: state.workspace.tenantId, viewId, auth: 'registered-user', transport: 'websocket', diagnostics: false, qualityMode: state.quality.mode }));
+  assert.equal(initial.endpointError, null, 'Endpoint management reconciliation must be reachable');
+  assert.deepEqual(await rpc('admin.get', {}), { registrationCredentialConfigured: false });
+  await assert.rejects(rpc('action', { type: 'window.create', url: 'about:blank' }),
+    error => error.code === 400 && /WebRTC/.test(error.message), 'Browser actions must be rejected over WebSocket');
+  const clientTime = Date.now();
+  const clock = await rpc('clock.ping', { clientTime });
+  assert.ok(clock.serverTime > 0);
+  assert.equal(clock.clientTime, clientTime);
+  // A fresh authenticated snapshot proves the rejected action did not mutate
+  // persisted product state; a lack of push messages alone would not prove it.
+  await new Promise(resolve => { socket.once('close', resolve); socket.close(); });
+  socket = new WebSocket(origin.replace(/^http/, 'ws') + '/api/socket', { origin, headers: { Cookie: cookie } });
+  const state = await new Promise((resolve, reject) => {
+    socket.on('message', data => { const message = JSON.parse(data.toString()); if (message.type === 'state') resolve(message.state); });
+    socket.once('error', reject);
+    socket.once('close', () => reject(new Error('WebSocket closed before fresh state')));
+  });
+  assert.deepEqual(state.workspace, initial.workspace, 'Rejected WebSocket action must leave workspace unchanged');
+  assert.equal(state.endpointError, null);
+  console.log(JSON.stringify({ tenantId: state.workspace.tenantId, auth: 'registered-first-administrator',
+    transport: 'authenticated-websocket', diagnostics: false, qualityMode: state.quality.mode,
+    endpointManagementReachable: true, webSocketProductActionRejected: true, workspaceUnchanged: true,
+    adminReachable: true, clockChecked: true, browserProductOperationsTested: false, rtcMediaTested: false }));
 } finally { clearTimeout(timeout); socket?.terminate(); }
