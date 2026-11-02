@@ -29,6 +29,12 @@ class FileUploadStore {
   // root is Session-owned. Call ConfirmBrowserStopped only on confirmed exit,
   // never merely a lost control channel. Destructor does not delete selections.
   const Batch& Begin(const Binding&, const std::vector<Spec>&);
+  const Batch& BeginOrResume(const Binding&, const std::vector<Spec>&);
+  const Batch* FindBinding(const Binding&) const;
+  std::uint64_t Write(const std::string& id, const Binding&, std::size_t file,
+                      std::uint64_t offset, const std::vector<std::uint8_t>& bytes);
+  std::vector<std::uint64_t> Offsets(const std::string& id, const Binding&) const;
+  bool CancelBinding(const Binding&);
   const Batch& Seal(const std::string& id, const Binding&);
   void MarkSubmitted(const std::string& id);
   void MarkSelected(const std::string& id);

@@ -17,6 +17,7 @@
 #include "base/location.h"
 #include "base/no_destructor.h"
 #include "base/pickle.h"
+#include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "components/input/native_web_keyboard_event.h"
@@ -28,7 +29,9 @@
 #include "components/input/render_widget_host_input_event_router.h"
 #include "content/browser/renderer_host/frame_tree.h"                    // nogncheck
 #include "content/browser/renderer_host/frame_tree_node.h"               // nogncheck
+#include "content/browser/renderer_host/navigation_request.h"            // nogncheck
 #include "content/browser/renderer_host/input/touch_emulator_impl.h"     // nogncheck
+#include "browser/client_gesture_bridge.h"
 #include "content/browser/renderer_host/input/mouse_wheel_phase_handler.h"  // nogncheck
 #include "content/browser/renderer_host/page_lifecycle_state_manager.h"  // nogncheck
 #include "content/browser/renderer_host/render_frame_host_impl.h"        // nogncheck
@@ -44,6 +47,8 @@
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/navigation_entry.h"
+#include "content/public/browser/reload_type.h"
+#include "net/base/net_errors.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_widget_host_view.h"
 #include "content/public/browser/site_instance.h"
@@ -402,19 +407,207 @@ Status WebView::ImportNavigation(std::string_view bytes) {
   navigation_state_ = std::make_unique<NavigationState>(std::move(imported.value));
   return {};
 }
-Status WebView::Navigate(const GURL& url) {
+Status WebView::Navigate(const GURL& url, const base::DictValue* operation) {
   if (!url.is_valid())
     return Fail(Error::invalid, "Invalid navigation URL");
+  return RunNavigation("navigate", url, operation);
+}
+Status WebView::NavigationCommand(const base::DictValue& request) {
+  const auto* action = request.FindString("action");
+  if (!action || (*action != "back" && *action != "forward" &&
+                  *action != "reload" && *action != "stop"))
+    return Fail(Error::invalid, "invalid_navigation_action");
+  return RunNavigation(*action, GURL(), &request);
+}
+std::optional<Status> WebView::ExistingNavigationOperation(
+    const GURL& url, const base::DictValue& request) {
+  if (!request.Find("operationId") && !request.Find("operationGeneration") &&
+      !request.Find("operationSequence")) return std::nullopt;
+  const auto* id = request.FindString("operationId");
+  const auto* generation = request.FindString("operationGeneration");
+  const auto* sequence = request.FindString("operationSequence");
+  std::uint64_t parsed = 0;
+  if (!id || !generation || !sequence || !base::StringToUint64(*sequence, &parsed))
+    return Fail(Error::invalid, "navigation_operation_identity_required");
+  const auto result = navigation_operations_.Check({*id, *generation, parsed}, "navigate\n" + url.spec());
+  using Acceptance = NavigationOperations::Acceptance;
+  if (result == Acceptance::fresh) return std::nullopt;
+  if (result == Acceptance::duplicate) {
+    const auto* record = navigation_operations_.Find({*id, *generation, parsed});
+    return record->admitted ? Status{} : Status{Error::unavailable, record->error};
+  }
+  if (result == Acceptance::stale) return Fail(Error::stale, "stale_navigation_operation");
+  if (result == Acceptance::full) return Fail(Error::busy, "navigation_operation_capacity");
+  return Fail(Error::invalid, "navigation_operation_conflict");
+}
+NavigationOperations WebView::ReleaseNavigationOperations() {
+  navigation_operations_.Supersede();
+  navigation_handles_.clear();
+  navigation_operation_timer_.Stop();
+  return std::move(navigation_operations_);
+}
+void WebView::RestoreNavigationOperations(NavigationOperations operations) {
+  navigation_operations_ = std::move(operations);
+}
+Status WebView::AcknowledgeNavigation(const base::DictValue& request) {
+  const auto* id = request.FindString("operationId");
+  const auto* generation = request.FindString("operationGeneration");
+  if (!id || id->empty() || !generation || generation->empty())
+    return Fail(Error::invalid, "navigation_operation_identity_required");
+  return navigation_operations_.Ack({*id, *generation, 0})
+             ? Status{} : Fail(Error::busy, "navigation_operation_pending");
+}
+base::ListValue WebView::NavigationOperationSnapshot() const {
+  base::ListValue result;
+  for (const auto& [key, record] : navigation_operations_.records()) {
+    base::DictValue value;
+    value.Set("operationId", record.identity.id);
+    value.Set("operationGeneration", record.identity.generation);
+    value.Set("operationSequence", base::NumberToString(record.identity.sequence));
+    value.Set("state", record.state);
+    if (record.terminal()) {
+      value.Set("documentCommitted", record.document_committed);
+      value.Set("isErrorPage", record.is_error_page);
+    }
+    if (record.navigation_id) value.Set("navigationId", base::NumberToString(record.navigation_id));
+    if (!record.url.empty()) value.Set("url", record.url);
+    if (!record.error.empty()) value.Set("error", record.error);
+    result.Append(std::move(value));
+  }
+  return result;
+}
+Status WebView::RunNavigation(const std::string& action, const GURL& url,
+                              const base::DictValue* request) {
+  NavigationOperations::Record* operation = nullptr;
+  std::optional<NavigationOperations::Identity> identity;
+  if (request && (request->Find("operationId") || request->Find("operationGeneration") ||
+                  request->Find("operationSequence"))) {
+    const auto* id = request->FindString("operationId");
+    const auto* generation = request->FindString("operationGeneration");
+    const auto* sequence = request->FindString("operationSequence");
+    std::uint64_t parsed = 0;
+    if (!id || !generation || !sequence || !base::StringToUint64(*sequence, &parsed))
+      return Fail(Error::invalid, "navigation_operation_identity_required");
+    identity = NavigationOperations::Identity{*id, *generation, parsed};
+    const auto accepted = navigation_operations_.Accept(*identity, action + "\n" + url.spec());
+    using Acceptance = NavigationOperations::Acceptance;
+    if (accepted == Acceptance::duplicate) {
+      const auto* original = navigation_operations_.Find(*identity);
+      return original->admitted ? Status{} : Status{Error::unavailable, original->error};
+    }
+    if (accepted == Acceptance::full) return Fail(Error::busy, "navigation_operation_capacity");
+    if (accepted == Acceptance::stale) return Fail(Error::stale, "stale_navigation_operation");
+    if (accepted != Acceptance::fresh)
+      return Fail(Error::invalid, "navigation_operation_conflict");
+    operation = navigation_operations_.Find(*identity);
+    operation->url = url.spec();
+  }
   const auto* model = endpoint_->FindWebView(session_, view_);
   if (lifecycle_uncertain_ || !contents_ || !model || model->actual != Residency::live ||
-      model->pending)
+      model->pending) {
+    if (operation) navigation_operations_.Finish(*operation, "failed", "view_unavailable");
     return Fail(Error::unavailable, "WebView cannot navigate in this state");
-  content::NavigationController::LoadURLParams params(url);
-  params.override_user_agent = tablet_ ? content::NavigationController::UA_OVERRIDE_TRUE :
-                                       content::NavigationController::UA_OVERRIDE_FALSE;
-  if (!contents_->GetController().LoadURLWithParams(params))
-    return Fail(Error::unavailable, "Navigation was not started");
+  }
+  auto& controller = contents_->GetController();
+  const char* invalid = nullptr;
+  if (action == "back" && !controller.CanGoBack()) invalid = "no_back_entry";
+  if (action == "forward" && !controller.CanGoForward()) invalid = "no_forward_entry";
+  // A repost prompt has no product reply protocol. Do not guess a navigation
+  // identity or silently replay POST data as a GET.
+  if (action == "reload" && controller.GetLastCommittedEntry() &&
+      controller.GetLastCommittedEntry()->GetHasPostData()) invalid = "reload_post_confirmation_unsupported";
+  if (invalid) {
+    if (operation) navigation_operations_.Finish(*operation, "failed", invalid);
+    return Fail(Error::unavailable, invalid);
+  }
+  if (operation) operation->admitted = true;
+  if (action == "stop") {
+    for (const auto& [key, record] : navigation_operations_.records()) {
+      if (operation == &record) continue;
+      if (auto* current = navigation_operations_.Find(record.identity))
+        navigation_operations_.Finish(*current, "cancelled", "stopped");
+    }
+    contents_->Stop();
+    if (operation) navigation_operations_.Finish(*operation, "committed");
+    return {};
+  }
+  // A command owns only handles created by this controller call. Subsequent
+  // renderer/JS navigations never inherit its product identity.
+  navigation_operations_.Supersede(identity ? &*identity : nullptr);
+  issuing_navigation_ = identity;
+  std::vector<base::WeakPtr<content::NavigationHandle>> handles;
+  bool no_navigation = false;
+  bool cancelled_during_start = false;
+  if (action == "navigate") {
+    content::NavigationController::LoadURLParams params(url);
+    params.override_user_agent = tablet_ ? content::NavigationController::UA_OVERRIDE_TRUE :
+                                         content::NavigationController::UA_OVERRIDE_FALSE;
+    auto result = controller.LoadURLWithParamsForResult(params);
+    if (result.has_value()) handles.push_back(result.value());
+    else {
+      no_navigation = true;
+      cancelled_during_start = result.error() == content::NavigationNotStartedReason::kCancelledDuringStart;
+    }
+  } else if (action == "back") {
+    handles = controller.GoBack();
+  } else if (action == "forward") {
+    handles = controller.GoForward();
+  } else {
+    controller.Reload(content::ReloadType::NORMAL, true);
+    // Reload's public API returns void. Read the actual request created by
+    // that call, including a request waiting for beforeunload, rather than
+    // assigning the next unrelated DidStartNavigation to this operation.
+    auto* reload_request = static_cast<content::WebContentsImpl*>(contents_.get())
+                               ->GetPrimaryFrameTree().root()->navigation_request();
+    if (reload_request && reload_request->GetReloadType() != content::ReloadType::NONE)
+      handles.push_back(reload_request->GetWeakPtr());
+  }
+  for (const auto& handle : handles) {
+    if (!handle) continue;
+    BindNavigation(handle.get(), false);
+    navigation_handles_[handle->GetNavigationId()] = handle;
+  }
+  issuing_navigation_.reset();
+  if (operation) {
+    navigation_operations_.EndCollection(*operation);
+    if (!operation->terminal() && operation->handles.empty())
+      navigation_operations_.Finish(*operation, cancelled_during_start ? "cancelled" : "failed",
+          cancelled_during_start ? "navigation_cancelled_during_start" :
+          no_navigation ? "navigation_not_started" : "no_navigation_created");
+  }
+  if (!navigation_handles_.empty() && !navigation_operation_timer_.IsRunning())
+    navigation_operation_timer_.Start(FROM_HERE, base::Milliseconds(50), this,
+                                     &WebView::PollNavigationOperations);
   return {};
+}
+void WebView::BindNavigation(content::NavigationHandle* navigation, bool started) {
+  auto* record = navigation_operations_.ByNavigation(navigation->GetNavigationId());
+  if (!record && issuing_navigation_ && !navigation->IsRendererInitiated()) {
+    record = navigation_operations_.Find(*issuing_navigation_);
+    if (record && record->terminal()) record = nullptr;
+  }
+  if (!record) return;
+  navigation_operations_.Bind(*record, navigation->GetNavigationId(),
+      navigation->IsInPrimaryMainFrame(), started, navigation->GetURL().spec());
+}
+void WebView::PollNavigationOperations() {
+  for (auto it = navigation_handles_.begin(); it != navigation_handles_.end();) {
+    auto* record = navigation_operations_.ByNavigation(it->first);
+    if (!record || !it->second) {
+      // Chromium explicitly permits a pre-start handle to disappear without
+      // DidFinishNavigation. A committed handle has already been made terminal
+      // in DidFinishNavigation before its weak pointer expires.
+      if (record) navigation_operations_.Complete(*record, it->first, "cancelled", "navigation_destroyed_before_finish");
+      it = navigation_handles_.erase(it);
+    } else ++it;
+  }
+  if (navigation_handles_.empty()) navigation_operation_timer_.Stop();
+}
+void WebView::BeforeUnloadDialogCancelled() {
+  PollNavigationOperations();
+}
+void WebView::DidRedirectNavigation(content::NavigationHandle* navigation) {
+  BindNavigation(navigation, false);
 }
 Status WebView::SetVisible(bool visible) {
   if (!contents_ && !visible) {
@@ -764,6 +957,15 @@ Status WebView::TouchInjectionStatus() const {
     return {Error::none, "Submitted to Chromium; input processing pending, execution unconfirmed"};
   return touch_status_;
 }
+std::string WebView::ClientTouchSequence() const {
+  return client_gesture_bridge_ ? client_gesture_bridge_->sequence() : std::string();
+}
+void WebView::RefreshClientTouchOwner() {
+  if (client_gesture_bridge_ && !TouchTargetAlive()) {
+    CancelTouches(false);
+    touch_status_ = Fail(Error::stale, "Client touch target/document invalidated");
+  }
+}
 
 void WebView::DevToolsAgentHostAttached(content::DevToolsAgentHost* host) {
   if (!contents_ || host->GetWebContents() != contents_.get())
@@ -830,6 +1032,30 @@ Status WebView::EnsureTouchEmulator() {
 }
 
 void WebView::CancelTouches(bool deliver) {
+  auto weak_self = weak_factory_.GetWeakPtr();
+  if (client_touch_token_)
+    retired_client_touches_.Retire(*client_touch_token_, client_touch_sequence_, !TouchTargetAlive());
+  if (client_gesture_bridge_) {
+    if (touch_cleanup_pending_) return;
+    if (deliver && TouchTargetAlive() && !touches_.empty()) {
+      TouchInput cancel;
+      cancel.action = TouchInput::Action::cancel;
+      cancel.client_gestures = true;
+      cancel.clock = touch_clock_;
+      InjectTouches(cancel);
+      if (!weak_self) return;
+    }
+    client_gesture_bridge_->Cancel(deliver);
+    if (!weak_self) return;
+    touch_cleanup_pending_ = touch_pending_callbacks_ != 0;
+    touches_.clear();
+    touch_pointer_ids_.clear();
+    touch_clock_.reset();
+    touch_hit_test_pending_ = false;
+    ++touch_epoch_;
+    if (touch_cleanup_pending_) return;
+    client_gesture_bridge_.reset();
+  }
   if (!touches_.empty() || touch_hit_test_pending_) ++touch_cancelled_;
   touch_clock_.reset();
   ++touch_epoch_;
@@ -921,6 +1147,24 @@ void WebView::OnTouchProcessed(std::uint64_t expected) {
   }
 }
 
+void WebView::OnClientTouchProcessed(bool alive) {
+  if (touch_pending_callbacks_) --touch_pending_callbacks_;
+  if (!alive) {
+    const bool invalidated = !TouchTargetAlive();
+    if (client_touch_token_)
+      retired_client_touches_.Retire(*client_touch_token_, client_touch_sequence_, invalidated);
+    touch_owner_lost_ = !invalidated;
+    touch_pending_callbacks_ = 0;
+    touch_status_ = Fail(Error::stale, "Client touch owner/ACK invalidated");
+    if (invalidated) CancelTouches(false);
+  }
+  if (touch_cleanup_pending_ && !touch_pending_callbacks_) {
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(&WebView::FinishTouchCleanup,
+                                 weak_factory_.GetWeakPtr(), touch_ack_epoch_));
+  }
+}
+
 void WebView::FinishTouchCleanup(std::uint64_t expected) {
   if (!touch_cleanup_pending_ || touch_ack_epoch_ != expected || touch_pending_callbacks_)
     return;
@@ -940,6 +1184,7 @@ Status WebView::PrepareTouchClock(const TouchInput& touch) {
   };
   if (first) {
     touch_clock_.reset();
+    touch_clock_origin_ = base::TimeTicks::Now();
     if (!touch.clock) { ++touch_fallback_gestures_; return {}; }
     if (touch.clock->elapsed_us != 0) return reject();
     touch_clock_ = touch.clock;
@@ -972,6 +1217,21 @@ Status WebView::PrepareTouchClock(const TouchInput& touch) {
 }
 
 Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token) {
+  const bool first = touch.action == TouchInput::Action::start && touches_.empty();
+  if (!first && client_touch_mode_ != touch.client_gestures)
+    return Fail(Error::invalid, "Touch gesture mode cannot change within a sequence");
+  if (first) {
+    if (client_gesture_bridge_) client_gesture_bridge_->Cancel(true);
+    client_gesture_bridge_.reset();
+    if (touch.client_gestures && touch_emulator_owned_ && touch_emulator_) {
+      static_cast<content::TouchEmulatorImpl*>(touch_emulator_.get())->Disable();
+      touch_emulator_owned_ = false;
+      touch_emulator_.reset();
+    }
+    client_touch_mode_ = touch.client_gestures;
+    client_touch_token_ = touch.client_gestures ? std::optional<InputToken>(token) : std::nullopt;
+    client_touch_sequence_ = touch.clock ? touch.clock->sequence_id : std::string();
+  }
   auto clock = PrepareTouchClock(touch);
   if (!clock) return clock;
   if (touch.action == TouchInput::Action::start && touches_.empty()) {
@@ -1004,7 +1264,10 @@ Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token
     // not delivered: TouchInjectionStatus() exposes the eventual result.
     return touch_hit_test_pending_ ? Status{} : touch_status_;
   }
-  return touch_status_ = InjectTouches(touch);
+  auto weak = weak_factory_.GetWeakPtr();
+  const auto result = InjectTouches(touch);
+  if (weak) touch_status_ = result;
+  return result;
 }
 
 void WebView::OnTouchTarget(std::uint64_t epoch,
@@ -1047,7 +1310,15 @@ void WebView::OnTouchTarget(std::uint64_t epoch,
   touch_target_view_ = std::move(target);
   touch_target_frame_ = target_frame->GetWeakPtr();
   touch_target_document_ = target_frame->GetDocumentToken();
-  touch_status_ = InjectTouches(touch);
+  if (touch.client_gestures) {
+    client_gesture_bridge_ = base::MakeRefCounted<ClientGestureBridge>(
+        pointer_root_widget_->GetInputEventRouter(), pointer_root_view_.get(),
+        touch_target_view_.get(), touch.clock->sequence_id, touch_clock_origin_,
+        base::BindRepeating(&WebView::OnClientTouchProcessed, weak_factory_.GetWeakPtr()));
+  }
+  auto weak = weak_factory_.GetWeakPtr();
+  const auto result = InjectTouches(touch);
+  if (weak) touch_status_ = result;
 }
 
 Status WebView::SendTouchEvent(const blink::WebTouchEvent& event) {
@@ -1074,6 +1345,7 @@ Status WebView::SendTouchEvent(const blink::WebTouchEvent& event) {
 }
 
 Status WebView::InjectTouches(const TouchInput& touch) {
+  auto weak_self = weak_factory_.GetWeakPtr();
   if (!TouchTargetAlive()) {
     CancelTouches(false);
     return Fail(Error::stale, "Touch target/document changed");
@@ -1083,31 +1355,41 @@ Status WebView::InjectTouches(const TouchInput& touch) {
   for (const auto& point : touch.points)
     if (!FloatFits(point.x + touch_root_offset_x_) || !FloatFits(point.y + touch_root_offset_y_))
       return Fail(Error::invalid, "Transformed touch point outside Blink representation");
-  auto ready = EnsureTouchEmulator();
+  auto ready = touch.client_gestures ? Status{} : EnsureTouchEmulator();
   if (!ready)
     return ready;
   if (!touch.samples.empty()) {
     TouchInput history = touch;
     history.samples.clear();
+    history.gestures.clear();
     for (const auto& sample : touch.samples) {
       history.points = sample.points;
       history.clock->elapsed_us = sample.elapsed_us;
       auto status = InjectTouches(history);
+      if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
       if (!status) return status;
     }
     history.points = touch.points;
     history.clock = touch.clock;
+    history.gestures = touch.gestures;
     return InjectTouches(history);
   }
   const auto emit = [&](Type type, std::optional<std::uint32_t> changed) -> Status {
     const auto now = base::TimeTicks::Now();
-    const auto sampled = touch.clock && touch.clock->source
+    const auto sampled = touch.clock && (touch.clock->source || touch.client_gestures)
                              ? touch_clock_origin_ + base::Microseconds(touch.clock->elapsed_us)
                              : now;
     ++touch_samples_;
     touch_last_dispatch_wall_ms_ = base::Time::Now().InMillisecondsFSinceUnixEpoch();
     touch_last_source_age_ms_ = (now - sampled).InMillisecondsF();
-    blink::WebTouchEvent event(type, 0, sampled);
+    // Keep unclamped source age for calibration diagnostics. Native input uses
+    // the Browser clock even if a later packet has less delay than the first.
+    if (touch.client_gestures && !client_gesture_bridge_)
+      return Fail(Error::stale, "Client gesture bridge missing");
+    const auto dispatched = touch.client_gestures
+                                ? client_gesture_bridge_->NativeTimestamp(sampled)
+                                : sampled;
+    blink::WebTouchEvent event(type, 0, dispatched);
     event.dispatch_type = type == Type::kTouchCancel
                               ? blink::WebInputEvent::DispatchType::kEventNonBlocking
                               : blink::WebInputEvent::DispatchType::kBlocking;
@@ -1128,12 +1410,32 @@ Status WebView::InjectTouches(const TouchInput& touch) {
     }
     // TouchEmulator assigns the global ui::GetNextTouchEventId() before routing
     // and owns canonical (including synthetic/OOPIF) ACK and gesture synthesis.
+    if (touch.client_gestures) {
+      if (!client_gesture_bridge_) return Fail(Error::stale, "Client gesture bridge missing");
+      std::vector<TouchInput::Gesture> gestures;
+      for (const auto& gesture : touch.gestures) {
+        const bool first = gesture.type == TouchInput::Gesture::Type::tap_down;
+        if (!changed || (!touch.points.empty() && changed ==
+                (first ? touch.points.front().id : touch.points.back().id)))
+          gestures.push_back(gesture);
+      }
+      for (auto& gesture : gestures) {
+        gesture.x += touch_root_offset_x_;
+        gesture.y += touch_root_offset_y_;
+      }
+      ++touch_pending_callbacks_;
+      auto result = client_gesture_bridge_->Dispatch(event, gestures, touch.clock->elapsed_us);
+      if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
+      if (!result && touch_pending_callbacks_) --touch_pending_callbacks_;
+      return result;
+    }
     return SendTouchEvent(event);
   };
   if (touch.action == TouchInput::Action::cancel) {
     ++touch_cancelled_;
     // MotionEventWeb requires ALL contacts cancelled in a cancellation event.
     auto status = emit(Type::kTouchCancel, std::nullopt);
+    if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
     touches_.clear();
     touch_pointer_ids_.clear();
     return status;
@@ -1153,6 +1455,7 @@ Status WebView::InjectTouches(const TouchInput& touch) {
                        : touch.action == TouchInput::Action::move ? Type::kTouchMove
                                                                   : Type::kTouchEnd,
                        point.id);
+    if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
     if (!status) {
       CancelTouches(true);
       return status;
@@ -1169,6 +1472,7 @@ Status WebView::DispatchInput(const InputEvent& input) {
       (blink::WebInputEvent::kLeftButtonDown | blink::WebInputEvent::kMiddleButtonDown |
        blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
        blink::WebInputEvent::kForwardButtonDown));
+  RefreshClientTouchOwner();
   if (touch_hit_test_pending_ || touch_cleanup_pending_)
     return Fail(Error::busy, "Resolving/draining touch; retry this input with the same sequence");
   if (!input_commit_navigations_.empty())
@@ -1195,7 +1499,8 @@ Status WebView::DispatchInput(const InputEvent& input) {
   }
   const bool routed = std::holds_alternative<MouseInput>(input.payload) ||
                       std::holds_alternative<WheelInput>(input.payload) ||
-                      std::holds_alternative<TouchInput>(input.payload);
+                      std::holds_alternative<TouchInput>(input.payload) ||
+                      std::holds_alternative<GestureInput>(input.payload);
   auto* router = root->GetInputEventRouter();
   if (routed && !router)
     return Fail(Error::unavailable, "Input routing unavailable");
@@ -1206,6 +1511,18 @@ Status WebView::DispatchInput(const InputEvent& input) {
     return Fail(Error::unavailable, "Mouse wheel phase handling unavailable");
   std::map<std::uint32_t, TouchPoint> next_touches;
   if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
+    if (touch->client_gestures && touch->clock &&
+        ClientTouchRetired(input.token, touch->clock->sequence_id)) {
+      auto accepted = endpoint_->AcceptInput(session_, input);
+      if (!accepted) return accepted;
+      if (touch->action == TouchInput::Action::start)
+        return Fail(Error::invalid, "Retired client touch sequence cannot restart");
+      return Fail(Error::stale, "Client touch owner explicitly invalidated");
+    }
+    if (touch->client_gestures && touch->clock && client_touch_token_ &&
+        (!touches_.empty() || touch->action != TouchInput::Action::start) &&
+        touch->clock->sequence_id != client_touch_sequence_)
+      return Fail(Error::stale, "Client touch sequence does not own the current contacts");
     if (touch_owner_lost_)
       return Fail(Error::unavailable, "Touch ownership became uncertain; reload WebView required");
     if (HasTouchEmulatorConflict())
@@ -1255,6 +1572,11 @@ Status WebView::DispatchInput(const InputEvent& input) {
     PrepareKeyboardTarget(host);
   if (const auto* touch = std::get_if<TouchInput>(&input.payload))
     return DispatchTouches(*touch, input.token);
+  if (const auto* gesture = std::get_if<GestureInput>(&input.payload)) {
+    if (!TouchTargetAlive() || !client_gesture_bridge_)
+      return Fail(Error::stale, "Momentum document/target lost");
+    return client_gesture_bridge_->Momentum(*gesture);
+  }
   std::visit(
       [&](const auto& value) {
         using T = std::decay_t<decltype(value)>;
@@ -1665,6 +1987,7 @@ void WebView::OnDiscarded(std::uint64_t generation) {
 }
 
 void WebView::DidStartNavigation(content::NavigationHandle* navigation) {
+  BindNavigation(navigation, true);
   if (!navigation->IsSameDocument()) {
     auto* focused = contents_ ? contents_->GetFocusedFrame() : nullptr;
     if (focused && NavigationAffectsFrame(navigation, focused))
@@ -1732,6 +2055,22 @@ void WebView::NavigationListPruned(const content::PrunedDetails&) {
   ++navigation_revision_;
 }
 void WebView::DidFinishNavigation(content::NavigationHandle* navigation) {
+  if (auto* operation = navigation_operations_.ByNavigation(navigation->GetNavigationId())) {
+    if (navigation->IsInPrimaryMainFrame()) operation->url = navigation->GetURL().spec();
+    if (navigation->HasCommitted() && !navigation->IsErrorPage() &&
+        navigation->GetNetErrorCode() == net::OK)
+      navigation_operations_.Complete(*operation, navigation->GetNavigationId(), "committed", {},
+          navigation->HasCommitted(), navigation->IsErrorPage());
+    else if (navigation->GetNetErrorCode() == net::ERR_ABORTED)
+      navigation_operations_.Complete(*operation, navigation->GetNavigationId(), "cancelled", "navigation_aborted",
+          navigation->HasCommitted(), navigation->IsErrorPage());
+    else
+      navigation_operations_.Complete(*operation, navigation->GetNavigationId(), "failed",
+          navigation->GetNetErrorCode() == net::OK ? "navigation_not_committed" :
+          net::ErrorToShortString(navigation->GetNetErrorCode()),
+          navigation->HasCommitted(), navigation->IsErrorPage());
+  }
+  navigation_handles_.erase(navigation->GetNavigationId());
   input_commit_navigations_.erase(navigation->GetNavigationId());
   if (input_frame_ && !KeyboardTargetAlive())
     ReleaseKeyboard(false, false);
@@ -1781,6 +2120,11 @@ void WebView::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {
     return;
   if (model && model->actual == Residency::discarded && !lifecycle_request_)
     return;
+  for (const auto& [key, record] : navigation_operations_.records())
+    if (auto* operation = navigation_operations_.Find(record.identity))
+      navigation_operations_.Finish(*operation, "failed", "renderer_exited");
+  navigation_handles_.clear();
+  navigation_operation_timer_.Stop();
   auto callback = std::move(completion_);
   if (lifecycle_request_)
     FinishLifecycle(false, Fail(Error::unavailable, "Renderer exited during lifecycle transition"));

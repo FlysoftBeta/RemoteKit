@@ -16,7 +16,7 @@ class ProductEndpoint implements Endpoint {
   views = new Map<string, Map<string, any>>(); pending = false;
   running = false; browserPid = 10; failSites = false; failAck = false; loseAdoptReply = false;
   popups: any[] = []; events: any[] = []; onAdopt?: (args: any) => void;
-  stopBeforeMaintenance = false;
+  stopBeforeMaintenance = false; loseEnsureReply = false;
   async request(method: string, tenant: string, args: any = {}) {
     this.calls.push({ method, tenant, args }); let views = this.views.get(tenant); if (!views) this.views.set(tenant, views = new Map());
     if (method === 'session.sitePreferences') { if (this.failSites) throw new Error('UA apply failed'); return { accepted: true, applied: this.running }; }
@@ -33,7 +33,8 @@ class ProductEndpoint implements Endpoint {
       if (this.loseAdoptReply) { this.loseAdoptReply = false; throw new Error('response lost'); }
       return { accepted: true, completed: true };
     }
-    if (method === 'view.ensure') views.set(args.viewId, { ...args, instance: '1', document: '1', actual: 0, pending: false, canDiscard: true });
+    if (method === 'view.ensure') { views.set(args.viewId, { ...args, instance: '1', document: '1', actual: 0, pending: false, canDiscard: true }); if (this.loseEnsureReply) { this.loseEnsureReply = false; throw new Error('ensure response lost'); } }
+    if (method === 'view.navigate') Object.assign(views.get(args.viewId)!, { url: args.url });
     if (method === 'view.configure') Object.assign(views.get(args.viewId)!, args);
     if (method === 'view.page.reply') { const v = views.get(args.viewId)!; if (String(v.instance) !== args.instance || String(v.document) !== args.document) throw new Error('stale_page_request'); v.pageRequests.pending = v.pageRequests.pending.filter((p: any) => p.request !== args.requestId); return { accepted: true, browser: { ok: true, state: 'resolved' } }; }
     if (method === 'view.lifecycle') { const v = views.get(args.viewId)!; if (args.action === 'restore') { v.pending = true; v.desired = 0; } else v.actual = 2; return { accepted: true, completed: false, pending: true, lifecycleGeneration: '1' }; }
@@ -63,7 +64,7 @@ test('offline startup does not create Browsers; multi-window mutations preserve 
     await control.reconcileAll(); await control.tick(); assert.equal(endpoint.calls.length, 0);
     await control.attachViewer(user.tenantId, 'lease', () => {});
     let result = await control.productAction(user.tenantId, { type: 'window.create', url: 'https://a.test/' }, 'lease'); const a = result.state.workspace.windows[0], tabA = result.state.workspace.tabs[0];
-    result = await control.productAction(user.tenantId, { type: 'window.create' }, 'lease'); const b = result.state.workspace.windows[1], tabB = result.state.workspace.tabs[1];
+    result = await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease'); const b = result.state.workspace.windows[1], tabB = result.state.workspace.tabs[1];
     await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 2, windows: [{ windowId: a.id, width: 800, height: 600, visible: true }, { windowId: b.id, width: 700, height: 600, visible: true }] });
     assert.equal(endpoint.views.get(user.tenantId)!.get(tabA.webviewId).visible, true); assert.equal(endpoint.views.get(user.tenantId)!.get(tabB.webviewId).width, 700);
     const next = await control.productAction(user.tenantId, { type: 'tab.move', tabId: tabA.id, windowId: b.id }, 'lease');
@@ -95,7 +96,7 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
 test('memory saver uses hidden age and canDiscard; activating a discarded page waits for actual live completion', async () => {
   const { store, endpoint, control, user } = await fixture();
   try {
-    await control.attachViewer(user.tenantId, 'lease', () => {}); const created = await control.productAction(user.tenantId, { type: 'window.create' }, 'lease'), tab = created.state.workspace.tabs[0], w = created.state.workspace.windows[0];
+    await control.attachViewer(user.tenantId, 'lease', () => {}); const created = await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease'), tab = created.state.workspace.tabs[0], w = created.state.workspace.windows[0];
     (control as any).hiddenSince.set(user.tenantId + '/' + tab.webviewId, Date.now() - 121000);
     const view = endpoint.views.get(user.tenantId)!.get(tab.webviewId); view.canDiscard = false; await control.tick(); assert.equal(endpoint.calls.filter(c => c.method === 'view.lifecycle').length, 0);
     view.canDiscard = true; await control.tick(); assert.equal(view.actual, 2);
@@ -140,8 +141,8 @@ test('popup adoption persists identity first; background stays unfocused, new wi
   try {
     await control.attachViewer(user.tenantId, 'lease', () => {}); const initial = (await control.productAction(user.tenantId, { type: 'window.create', url: 'https://opener.test' }, 'lease')).state.workspace, opener = initial.tabs[0];
     endpoint.onAdopt = args => { const persisted = store.workspace(user.tenantId).tabs.find(t => t.webviewId === args.viewId); assert.equal(persisted?.popup?.provisionalId, args.provisionalId); assert.equal(persisted?.popup?.status, 'pending'); };
-    endpoint.popups = [{ provisionalId: 'background', openerViewId: opener.webviewId, url: 'https://child.test/b', disposition: 4, userGesture: true, status: 'pending' }]; endpoint.calls = []; await control.tick();
-    let state = store.workspace(user.tenantId), child = state.tabs.find(t => t.popup?.provisionalId === 'background')!; assert.ok(child); assert.equal(child.popup!.status, 'adopted'); assert.equal(child.windowId, opener.windowId); assert.equal(state.windows[0].activeTabId, opener.id); assert.equal(state.activeWindowId, initial.activeWindowId); assert.equal(endpoint.calls.filter(c => c.method === 'view.ensure').length, 0);
+    endpoint.popups = [{ provisionalId: 'background', openerViewId: opener.webviewId, url: 'about:blank', disposition: 4, userGesture: true, status: 'pending' }]; endpoint.calls = []; await control.tick();
+    let state = store.workspace(user.tenantId), child = state.tabs.find(t => t.popup?.provisionalId === 'background')!; assert.ok(child); assert.equal(child.kind, 'remote'); assert.equal(child.url, 'about:blank'); assert.equal(child.popup!.status, 'adopted'); assert.equal(child.windowId, opener.windowId); assert.equal(state.windows[0].activeTabId, opener.id); assert.equal(state.activeWindowId, initial.activeWindowId); assert.equal(endpoint.calls.filter(c => c.method === 'view.ensure').length, 0);
     endpoint.popups = [{ provisionalId: 'background', openerViewId: opener.webviewId, url: child.url, disposition: 4, userGesture: true, status: 'pending' }]; await control.tick(); assert.equal(store.workspace(user.tenantId).tabs.length, 2);
     endpoint.popups = [{ provisionalId: 'new-window', openerViewId: opener.webviewId, url: 'https://child.test/w', disposition: 6, userGesture: true, status: 'pending' }]; endpoint.loseAdoptReply = true; await control.tick();
     state = store.workspace(user.tenantId); const newWindow = state.tabs.find(t => t.popup?.provisionalId === 'new-window')!; assert.notEqual(newWindow.windowId, opener.windowId); assert.equal(state.windows.length, 2);
@@ -153,7 +154,7 @@ test('popup adoption persists identity first; background stays unfocused, new wi
 test('expired pending popup is never URL-recreated; closing its product tab does not resurface it', async () => {
   const { store, endpoint, control, user } = await fixture();
   try {
-    await control.attachViewer(user.tenantId, 'lease', () => {}); const opener = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace.tabs[0];
+    await control.attachViewer(user.tenantId, 'lease', () => {}); const opener = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease')).state.workspace.tabs[0];
     const popup = { provisionalId: 'expired', openerViewId: opener.webviewId, url: 'https://expired.test/', disposition: 3, userGesture: true, status: 'pending' };
     endpoint.popups = [popup]; endpoint.onAdopt = () => { throw new Error('temporary transport failure'); }; await control.tick(); const pending = store.workspace(user.tenantId).tabs.find(t => t.popup?.provisionalId === popup.provisionalId)!;
     endpoint.onAdopt = undefined; popup.status = 'timed_out'; endpoint.calls = []; await control.tick(); assert.equal(store.workspace(user.tenantId).tabs.find(t => t.id === pending.id)!.popup!.status, 'failed'); assert.equal(endpoint.calls.filter(c => c.method === 'view.ensure' || c.method === 'view.adopt').length, 0);
@@ -164,7 +165,7 @@ test('expired pending popup is never URL-recreated; closing its product tab does
 test('natural close commits removal before ack, retries failed ack and never recreates the closed view', async () => {
   const { store, endpoint, control, user } = await fixture();
   try {
-    await control.attachViewer(user.tenantId, 'lease', () => {}); const tab = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace.tabs[0];
+    await control.attachViewer(user.tenantId, 'lease', () => {}); const tab = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease')).state.workspace.tabs[0];
     endpoint.views.get(user.tenantId)!.delete(tab.webviewId); endpoint.events = [{ eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId, reason: 'window.close' }]; endpoint.failAck = true; await control.tick(); assert.equal(store.workspace(user.tenantId).tabs.length, 0); assert.equal(endpoint.events.length, 1);
     endpoint.failAck = false; endpoint.calls = []; await control.tick(); assert.equal(endpoint.events.length, 0); assert.equal(store.workspace(user.tenantId).windows.length, 1); assert.equal(endpoint.calls.filter(c => c.method === 'view.ensure').length, 0);
     endpoint.events = [{ eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId, reason: 'window.close' }]; await control.tick(); assert.equal(store.workspace(user.tenantId).tabs.length, 0); assert.equal(endpoint.events.length, 0);
@@ -174,7 +175,7 @@ test('natural close commits removal before ack, retries failed ack and never rec
 test('pageDialogs are transient, tenant/token bound and cancellation never deletes tabs or duplicates pendingClose', async () => {
   const { store, endpoint, control, user } = await fixture();
   try {
-    await control.attachViewer(user.tenantId, 'lease', () => {}); const tab = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace.tabs[0];
+    await control.attachViewer(user.tenantId, 'lease', () => {}); const tab = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease')).state.workspace.tabs[0];
     const view = endpoint.views.get(user.tenantId)!.get(tab.webviewId); Object.assign(view, { instance: '1', document: '2', pageRequests: { pending: [{ request: '7', kind: 'prompt', message: 'private dialog text', default_prompt: 'initial', origin: 'https://page.test' }] } });
     await control.tick(); const dialog = control.productState(user.tenantId).pageDialogs[0]; assert.equal(dialog.kind, 'prompt'); assert.equal(dialog.defaultPrompt, 'initial');
     assert.ok(!JSON.stringify(store.workspace(user.tenantId)).includes('private dialog text')); assert.ok(!(store.db.prepare('SELECT data FROM workspace_tabs WHERE tenant=?').all(user.tenantId) as any[]).some(row => row.data.includes('private dialog text')));
@@ -191,7 +192,7 @@ test('product media policy precedes ensure, feedback is isolated and diagnostics
   const { store, endpoint, control, user } = await fixture(); const originalNow = Date.now;
   try {
     await control.attachViewer(user.tenantId, 'lease', () => {}); const firstPolicy = endpoint.calls.findIndex(c => c.method === 'session.mediaPolicy'), firstEnsure = endpoint.calls.findIndex(c => c.method === 'session.ensure'); assert.ok(firstPolicy >= 0 && firstPolicy < firstEnsure);
-    const ws = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace;
+    const ws = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease')).state.workspace;
     await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: ws.windows[0].id, width: 800, height: 600, visible: true }] });
     let now = originalNow(); Date.now = () => now;
     for (let sequence = 1; sequence <= 3; sequence++) { now += 2000; const result: any = await control.viewerRequest(user.tenantId, 'lease', 'feedback', { sequence, sourceCaptureId: String(sequence), sampledAtServerMs: now, visible: true, presentationLatencyMs: 400, latencySource: 'capture-end-to-paint', clockUncertaintyMs: 2, sampleCount: 50, windowMs: 2000 }); assert.equal(result.accepted, true); }
@@ -204,7 +205,7 @@ test('product media policy precedes ensure, feedback is isolated and diagnostics
 test('offline observation never restarts a lost Browser or recreates missing views, including maintenance race', async () => {
   const { store, endpoint, control, user } = await fixture();
   try {
-    await control.attachViewer(user.tenantId, 'lease', () => {}); const workspace = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace;
+    await control.attachViewer(user.tenantId, 'lease', () => {}); const workspace = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease')).state.workspace;
     await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: workspace.windows[0].id, width: 900, height: 700, visible: true }] });
     endpoint.stopBeforeMaintenance = true; endpoint.calls = []; await control.detachViewer(user.tenantId, 'lease');
     assert.ok(endpoint.calls.some(c => c.method === 'view.configure' && c.args.requireRunning === true)); assert.equal(endpoint.running, false);
@@ -241,14 +242,14 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     const registerB = await post('/api/auth/register', { username: 'bob', password: 'password123', serverCredential: 'test-registration' }); const cookieB = registerB.headers.get('set-cookie')!.split(';')[0];
     assert.equal((await post('/api/auth/login', { username: 'alice', password: 'wrong-pass' })).status, 401);
     assert.equal((await post('/api/actions', { type: 'tab.create', url: 'about:blank' }, cookieA)).status, 404);
-    const created = await a.request('1', 'action', { type: 'window.create' }); const stateA = created.result.state, win = stateA.workspace.windows[0], tab = stateA.workspace.tabs[0];
+    assert.equal((await a.request('1', 'action', { type: 'window.create', url: 'about:blank' })).error.code,400); const stateA = (await control.productAction(store.authenticated(cookieA.split('=')[1])!, {type:'window.create',url:'about:blank'})).state, win = stateA.workspace.windows[0], tab = stateA.workspace.tabs[0];
     const b = connect(socketUrl, cookieB); peers.push(b); const initialB = await b.wait(m => m.type === 'state'); assert.equal(initialB.state.workspace.tabs.length, 0); assert.equal(initialB.state.user.isAdmin, false);
     for (const method of ['admin.get', 'admin.setRegistrationCredential']) assert.equal((await b.request('admin-' + method, method, { serverCredential: 'unauthorized-secret', isAdmin: true })).error.code, 403);
-    const foreign = await b.request('2', 'action', { type: 'tab.activate', tabId: tab.id }); assert.equal(foreign.error.code, 404);
+    const foreign = await b.request('2', 'action', { type: 'tab.activate', tabId: tab.id }); assert.equal(foreign.error.code, 400);
     const scope = await b.request('3', 'action', { type: 'window.create', tenantId: stateA.workspace.tenantId }); assert.equal(scope.error.code, 400);
     await a.request('4', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: win.id, width: 900, height: 700, visible: true }] }); assert.equal(endpoint.views.get(stateA.workspace.tenantId)!.get(tab.webviewId).visible, true);
     const replacement = connect(socketUrl, cookieA); peers.push(replacement); const revoked = await a.wait(m => m.type === 'lease'); assert.equal(revoked.reason, 'another-viewer'); await replacement.wait(m => m.type === 'state');
-    await assert.rejects(control.viewerRequest(stateA.workspace.tenantId, 'stale-lease', 'action', { type: 'window.create' }));
+    await assert.rejects(control.viewerRequest(stateA.workspace.tenantId, 'stale-lease', 'action', { type: 'window.create', url: 'about:blank' }));
     await replacement.request('5', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: win.id, width: 901, height: 700, visible: true }] });
     const detached = new Promise<void>(resolve => { const observed = (tenant: string, state: any) => { if (tenant === stateA.workspace.tenantId && !state.viewer.connected) { control.off('state', observed); resolve(); } }; control.on('state', observed); });
     replacement.ws.close(); await once(replacement.ws, 'close'); await detached;
@@ -297,7 +298,7 @@ test('lease authentication is checked inside queued operations and late old clos
     await control.attachViewer(user.tenantId, 'old', () => {}, { identity: 'hash-A', valid: () => valid });
     let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
     const blocked = control.serial(user.tenantId, () => gate);
-    const pending = control.viewerRequest(user.tenantId, 'old', 'clock.ping', {});
+    const pending = control.productAction(user.tenantId, {type:'window.create'}, 'old');
     valid = false; release(); await blocked;
     await assert.rejects(pending, (e: any) => e.status === 401);
     await control.attachViewer(user.tenantId, 'new', () => {}, { identity: 'hash-B', valid: () => true });
@@ -312,7 +313,7 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
   const { store, control, endpoint, user } = await fixture();
   try {
     await control.attachViewer(user.tenantId, 'lease', () => {});
-    const state = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace;
+    const state = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease')).state.workspace;
     const w = state.windows[0], tab = state.tabs[0];
     await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: w.id, width: 800, height: 600, visible: true }] });
     await assert.rejects(control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: w.id, width: 8192, height: 8192, visible: true }] }), (error: any) => error.status === 400 && /minimum DPR/.test(error.message));
@@ -323,7 +324,7 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
     await control.productAction(user.tenantId, { type: 'tab.close', tabId: tab.id }, 'lease');
     await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: w.id, width: 8192, height: 8192, visible: true }] });
     endpoint.calls = [];
-    const limited = (await control.productAction(user.tenantId, { type: 'tab.create', windowId: w.id }, 'lease')).state;
+    const limited = (await control.productAction(user.tenantId, { type: 'tab.create', windowId: w.id, url: 'about:blank' }, 'lease')).state;
     assert.match(limited.quality.resourceLimitation!, /minimum DPR/); assert.equal(limited.quality.effectiveDpr, .5); assert.equal(limited.quality.reason, 'resource-limited');
     assert.ok(limited.endpointError); assert.ok(!endpoint.calls.some(c => ['session.ensure', 'view.ensure', 'view.configure'].includes(c.method)));
     endpoint.views.get(user.tenantId)!.set('99999', { viewId: '99999' }); endpoint.calls = [];
@@ -335,5 +336,80 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
     assert.equal(control.productState(user.tenantId).quality.resourceLimitation, null); assert.equal(control.productState(user.tenantId).endpointError, null);
     await control.productAction(user.tenantId, { type: 'window.close', windowId: w.id }, 'lease');
     assert.equal(control.productState(user.tenantId).workspace.windows.length, 0);
+  } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+
+test('start tabs stay local, first navigation ensures the real target, and explicit blank stays remote', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  try {
+    await control.attachViewer(user.tenantId, 'lease', () => {});
+    let state = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace;
+    const tab = state.tabs[0], win = state.windows[0];
+    assert.equal(tab.kind, 'start'); assert.equal(tab.url, '');
+    assert.equal(endpoint.calls.some(c => c.method === 'view.ensure'), false);
+    await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: win.id, width: 800, height: 600, visible: true }] });
+    assert.equal(endpoint.calls.some(c => c.method === 'view.ensure'), false);
+    await control.productAction(user.tenantId, { type: 'tab.command', tabId: tab.id, command: 'reload' }, 'lease');
+    assert.equal(endpoint.calls.some(c => c.method === 'view.command'), false);
+    await control.productAction(user.tenantId, { type: 'settings.update', settings: { searchEngine: 'baidu' } }, 'lease');
+    state = (await control.productAction(user.tenantId, { type: 'tab.navigate', tabId: tab.id, url: '中文 & hello' }, 'lease')).state.workspace;
+    assert.equal(state.tabs[0].kind, 'remote'); assert.equal(state.tabs[0].webviewId, tab.webviewId);
+    assert.equal(state.tabs[0].url, 'https://www.baidu.com/s?wd=' + encodeURIComponent('中文 & hello'));
+    const ensures = endpoint.calls.filter(c => c.method === 'view.ensure'); assert.equal(ensures.length, 1); assert.equal(ensures[0].args.url, state.tabs[0].url);
+    assert.equal(endpoint.calls.some(c => c.method === 'view.navigate'), false);
+    const blank = (await control.productAction(user.tenantId, { type: 'tab.create', windowId: win.id, url: 'about:blank' }, 'lease')).state.workspace.tabs[1];
+    assert.equal(blank.kind, 'remote'); assert.equal(blank.url, 'about:blank');
+    const start = (await control.productAction(user.tenantId, { type: 'tab.create', windowId: win.id }, 'lease')).state.workspace.tabs[2];
+    const closeCount = endpoint.calls.filter(c => c.method === 'view.close').length;
+    await control.productAction(user.tenantId, { type: 'tab.close', tabId: start.id }, 'lease');
+    assert.equal(endpoint.calls.filter(c => c.method === 'view.close').length, closeCount);
+    await assert.rejects(control.productAction(user.tenantId, { type: 'settings.update', settings: { searchEngine: 'unsafe' } as any }, 'lease'));
+  } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+test('old settings gain Google without changing existing blank tab identity', async () => {
+  const { store, control, user } = await fixture();
+  try {
+    const state = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' })).state.workspace;
+    delete (state.settings as any).searchEngine; delete state.tabs[0].kind;
+    store.saveWorkspace(state);
+    const migrated = store.workspace(user.tenantId);
+    assert.equal(migrated.settings.searchEngine, 'google'); assert.notEqual(migrated.tabs[0].kind, 'start');
+    await control.productAction(user.tenantId, { type: 'settings.update', settings: { searchEngine: 'duckduckgo' } });
+    assert.equal(store.workspace(user.tenantId).settings.searchEngine, 'duckduckgo');
+  } finally { store.db.close(); }
+});
+
+test('reopening an old database persists the search default and retains explicit start identity', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'rk-search-migrate-')), path = join(dir, 'control.db');
+  let store = new Store(path);
+  try {
+    const session = store.session(), workspace = store.workspace(session.tenantId);
+    workspace.windows.push({ id: 'w', activeTabId: 'start', weight: 1 }); workspace.activeWindowId = 'w';
+    workspace.tabs.push({ id: 'start', windowId: 'w', webviewId: store.viewId(), kind: 'start', title: '新标签页', url: '' });
+    store.saveWorkspace(workspace);
+    const old: any = workspace.settings; delete old.searchEngine;
+    store.db.prepare('UPDATE user_settings SET data=? WHERE tenant=?').run(JSON.stringify(old), session.tenantId);
+    store.db.close(); store = new Store(path);
+    assert.equal(store.workspace(session.tenantId).settings.searchEngine, 'google');
+    assert.equal(store.workspace(session.tenantId).tabs[0].kind, 'start');
+    assert.equal(JSON.parse((store.db.prepare('SELECT data FROM user_settings WHERE tenant=?').get(session.tenantId) as any).data).searchEngine, 'google');
+  } finally { store.db.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('failed first navigation retains start and a retry navigates an already-created hidden view', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  try {
+    await control.attachViewer(user.tenantId, 'lease', () => {});
+    const tab = (await control.productAction(user.tenantId, { type: 'window.create' }, 'lease')).state.workspace.tabs[0];
+    endpoint.loseEnsureReply = true;
+    await assert.rejects(control.productAction(user.tenantId, { type: 'tab.navigate', tabId: tab.id, url: 'first query' }, 'lease'), /response lost/);
+    assert.equal(store.workspace(user.tenantId).tabs[0].kind, 'start');
+    await control.tick(); assert.equal(endpoint.views.get(user.tenantId)!.get(tab.webviewId).visible, false);
+    const result = await control.productAction(user.tenantId, { type: 'tab.navigate', tabId: tab.id, url: 'second query' }, 'lease');
+    assert.equal(result.state.workspace.tabs[0].kind, 'remote');
+    assert.equal(endpoint.calls.filter(c => c.method === 'view.ensure').length, 1);
+    assert.equal(endpoint.calls.filter(c => c.method === 'view.navigate').slice(-1)[0]?.args.url, 'https://www.google.com/search?q=second%20query');
   } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
 });

@@ -226,10 +226,10 @@ index a881d16173..652ae1cd7a 100644
  
    // Maximum number of planes allowed when returning software NV12 results.
 diff --git a/components/viz/host/client_frame_sink_video_capturer.cc b/components/viz/host/client_frame_sink_video_capturer.cc
-index f66801eebe..1f96c46b9c 100644
+index f66801eebe..b4c0cc88d0 100644
 --- a/components/viz/host/client_frame_sink_video_capturer.cc
 +++ b/components/viz/host/client_frame_sink_video_capturer.cc
-@@ -8,6 +8,7 @@
+@@ -8,15 +8,55 @@
  #include <utility>
  
  #include "base/functional/bind.h"
@@ -237,10 +237,40 @@ index f66801eebe..1f96c46b9c 100644
  #include "base/notimplemented.h"
  #include "base/task/single_thread_task_runner.h"
  #include "media/capture/mojom/video_capture_buffer.mojom.h"
-@@ -17,6 +18,17 @@ namespace viz {
+ #include "media/capture/mojom/video_capture_types.mojom.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
+ 
+ namespace viz {
  
  namespace {
  
++// Stop is sent over a different pipe from frame delivery. Keep undispatched
++// deliveries alive after their client is gone, and explicitly return only the
++// frames that never reached it. The external-destination copy has already
++// finished its GPU write before OnFrameCaptured is sent; this receiver never
++// reads or publishes those pixels. Previously forwarded frames remain owned
++// by their original callbacks and the consumer's real read-completion fence.
++class StoppedCaptureToAtlasConsumer final
++    : public mojom::FrameSinkVideoConsumer {
++ public:
++  void OnFrameCaptured(
++      media::mojom::VideoBufferHandlePtr,
++      media::mojom::VideoFrameInfoPtr,
++      const gfx::Rect&,
++      mojo::PendingRemote<mojom::FrameSinkVideoConsumerFrameCallbacks>
++          callbacks) override {
++    mojo::Remote<mojom::FrameSinkVideoConsumerFrameCallbacks> done(
++        std::move(callbacks));
++    if (done) {
++      done->Done();
++    }
++  }
++  void OnNewCaptureVersion(const media::CaptureVersion&) override {}
++  void OnFrameWithEmptyRegionCapture() override {}
++  void OnStopped() override {}
++  void OnLog(const std::string&) override {}
++};
++
 +// Internal disconnect reasons: Mojo reserves zero for transport loss. Service
 +// uses one for resource reconfiguration and two for an explicit fatal failure.
 +constexpr bool RequiresNewCaptureToAtlasResources(uint32_t reason) {
@@ -255,7 +285,35 @@ index f66801eebe..1f96c46b9c 100644
  // How long to wait before attempting to re-establish a lost connection.
  constexpr base::TimeDelta kReEstablishConnectionDelay = base::Milliseconds(100);
  
-@@ -158,8 +170,9 @@ ClientFrameSinkVideoCapturer::CreateOverlay(int32_t stacking_index) {
+@@ -30,6 +70,9 @@ ClientFrameSinkVideoCapturer::ClientFrameSinkVideoCapturer(
+ 
+ ClientFrameSinkVideoCapturer::~ClientFrameSinkVideoCapturer() {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  if (capture_to_atlas_configured_ && consumer_receiver_.is_bound()) {
++    StopAndResetConsumer();
++  }
+ }
+ 
+ void ClientFrameSinkVideoCapturer::SetFormat(media::VideoPixelFormat format) {
+@@ -134,7 +177,16 @@ void ClientFrameSinkVideoCapturer::StopAndResetConsumer() {
+ 
+   Stop();
+   consumer_ = nullptr;
+-  consumer_receiver_.reset();
++  if (capture_to_atlas_configured_ && consumer_receiver_.is_bound()) {
++    // Unbind preserves queued messages, including their frame callback pipes.
++    // Viz Stop (or capturer destruction/transport loss) closes the remote after
++    // OnStopped, which also destroys this independent, self-owned receiver.
++    mojo::MakeSelfOwnedReceiver(
++        std::make_unique<StoppedCaptureToAtlasConsumer>(),
++        consumer_receiver_.Unbind());
++  } else {
++    consumer_receiver_.reset();
++  }
+ }
+ 
+ void ClientFrameSinkVideoCapturer::RequestRefreshFrame() {
+@@ -158,8 +210,9 @@ ClientFrameSinkVideoCapturer::CreateOverlay(int32_t stacking_index) {
    auto overlay =
        std::make_unique<Overlay>(weak_factory_.GetWeakPtr(), stacking_index);
    overlays_.push_back(overlay.get());
@@ -266,7 +324,7 @@ index f66801eebe..1f96c46b9c 100644
    return overlay;
  }
  
-@@ -214,15 +227,18 @@ void ClientFrameSinkVideoCapturer::EstablishConnection() {
+@@ -214,15 +267,18 @@ void ClientFrameSinkVideoCapturer::EstablishConnection() {
    capturer_remote_.reset();
    establish_connection_callback_.Run(
        capturer_remote_.BindNewPipeAndPassReceiver());
@@ -289,7 +347,7 @@ index f66801eebe..1f96c46b9c 100644
    if (animated_content_sampler_enabled_ && majority_damaged_pixel_min_ratio_) {
      capturer_remote_->SetAnimationFpsLockIn(*animated_content_sampler_enabled_,
                                              *majority_damaged_pixel_min_ratio_);
-@@ -241,15 +257,53 @@ void ClientFrameSinkVideoCapturer::EstablishConnection() {
+@@ -241,15 +297,53 @@ void ClientFrameSinkVideoCapturer::EstablishConnection() {
    if (target_) {
      capturer_remote_->ChangeTarget(target_.value(), sub_capture_version_);
    }
@@ -346,7 +404,7 @@ index f66801eebe..1f96c46b9c 100644
    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
        FROM_HERE,
        base::BindOnce(&ClientFrameSinkVideoCapturer::EstablishConnection,
-@@ -260,8 +314,9 @@ void ClientFrameSinkVideoCapturer::OnConnectionError() {
+@@ -260,8 +354,9 @@ void ClientFrameSinkVideoCapturer::OnConnectionError() {
  void ClientFrameSinkVideoCapturer::StartInternal() {
    DCHECK(is_started_);
  
@@ -357,7 +415,7 @@ index f66801eebe..1f96c46b9c 100644
    capturer_remote_->Start(consumer_receiver_.BindNewPipeAndPassRemote(),
                            buffer_format_preference_);
  }
-@@ -282,8 +337,9 @@ ClientFrameSinkVideoCapturer::Overlay::Overlay(
+@@ -282,8 +377,9 @@ ClientFrameSinkVideoCapturer::Overlay::Overlay(
  ClientFrameSinkVideoCapturer::Overlay::~Overlay() {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
  
@@ -368,7 +426,7 @@ index f66801eebe..1f96c46b9c 100644
  }
  
  void ClientFrameSinkVideoCapturer::Overlay::SetImageAndBounds(
-@@ -292,8 +348,9 @@ void ClientFrameSinkVideoCapturer::Overlay::SetImageAndBounds(
+@@ -292,8 +388,9 @@ void ClientFrameSinkVideoCapturer::Overlay::SetImageAndBounds(
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
    DCHECK(!image.isNull());
  
@@ -379,7 +437,7 @@ index f66801eebe..1f96c46b9c 100644
  
    image_ = image;
    bounds_ = bounds;
-@@ -304,8 +361,9 @@ void ClientFrameSinkVideoCapturer::Overlay::SetBounds(
+@@ -304,8 +401,9 @@ void ClientFrameSinkVideoCapturer::Overlay::SetBounds(
      const gfx::RectF& bounds) {
    DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
  
@@ -390,7 +448,7 @@ index f66801eebe..1f96c46b9c 100644
  
    bounds_ = bounds;
    overlay_->SetBounds(bounds_);
-@@ -344,8 +402,9 @@ void ClientFrameSinkVideoCapturer::Overlay::EstablishConnection(
+@@ -344,8 +442,9 @@ void ClientFrameSinkVideoCapturer::Overlay::EstablishConnection(
    // will realize this when the FrameSinkVideoCapturer's binding is lost, and
    // re-establish a connection to both that and this overlay.
  

@@ -160,6 +160,61 @@ const FileUploadStore::Batch& FileUploadStore::Seal(const std::string& id, const
   batch.state = State::sealed;
   return batch;
 }
+const FileUploadStore::Batch* FileUploadStore::FindBinding(const Binding& binding) const {
+  for (const auto& [id, batch] : batches_) if (batch.binding == binding) return &batch;
+  return nullptr;
+}
+const FileUploadStore::Batch& FileUploadStore::BeginOrResume(const Binding& binding, const std::vector<Spec>& specs) {
+  if (const auto* batch = FindBinding(binding)) {
+    if (batch->files.size() != specs.size()) throw std::runtime_error("file_upload_specs_conflict");
+    for (std::size_t i = 0; i < specs.size(); ++i)
+      if (batch->files[i].name != specs[i].name || batch->files[i].type != specs[i].type || batch->files[i].size != specs[i].size)
+        throw std::runtime_error("file_upload_specs_conflict");
+    return *batch;
+  }
+  return Begin(binding, specs);
+}
+std::vector<std::uint64_t> FileUploadStore::Offsets(const std::string& id, const Binding& binding) const {
+  const auto* batch = Find(id);
+  if (!batch || !(batch->binding == binding)) throw std::runtime_error("unknown_file_upload");
+  std::vector<std::uint64_t> offsets;
+  for (const auto& file : batch->files) {
+    if (!RegularFile(file.path)) throw std::runtime_error("invalid_upload_file");
+    const auto size = std::filesystem::file_size(file.path);
+    if (size > file.size) throw std::runtime_error("invalid_upload_size");
+    offsets.push_back(size);
+  }
+  return offsets;
+}
+std::uint64_t FileUploadStore::Write(const std::string& id, const Binding& binding, std::size_t index,
+                                   std::uint64_t offset, const std::vector<std::uint8_t>& bytes) {
+  const auto* batch = Find(id);
+  if (!batch || !(batch->binding == binding)) throw std::runtime_error("unknown_file_upload");
+  if (batch->state != State::uploading) throw std::runtime_error("file_upload_not_writable");
+  if (index >= batch->files.size() || bytes.empty() || bytes.size() > 16384) throw std::runtime_error("invalid_file_chunk");
+  const auto& file = batch->files[index];
+  if (offset > file.size || bytes.size() > file.size - offset || !RegularFile(file.path)) throw std::runtime_error("invalid_file_chunk_range");
+  const auto received = std::filesystem::file_size(file.path);
+  if (offset > received || (offset < received && bytes.size() > received - offset)) throw std::runtime_error("file_chunk_out_of_order");
+  std::fstream stream(file.path, std::ios::binary | std::ios::in | std::ios::out);
+  if (!stream) throw std::runtime_error("cannot_open_upload_file");
+  if (offset < received) {
+    std::vector<std::uint8_t> previous(bytes.size());
+    stream.seekg(static_cast<std::streamoff>(offset));
+    stream.read(reinterpret_cast<char*>(previous.data()), static_cast<std::streamsize>(previous.size()));
+    if (!stream || previous != bytes) throw std::runtime_error("file_chunk_conflict");
+    return received;
+  }
+  stream.seekp(static_cast<std::streamoff>(offset));
+  stream.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+  stream.flush();
+  if (!stream) throw std::runtime_error("cannot_write_upload_file");
+  return offset + bytes.size();
+}
+bool FileUploadStore::CancelBinding(const Binding& binding) {
+  const auto* batch = FindBinding(binding);
+  return !batch || Cancel(batch->id);
+}
 void FileUploadStore::MarkSubmitted(const std::string& id) {
   auto& batch = batches_.at(id);
   if (batch.state == State::sealed) batch.state = State::submitted;

@@ -53,8 +53,10 @@ REMOTEKIT_SDK_API int remotekit_sdk_webrtc_time_millis(int64_t* value);
  * Handles belong to this SDK instance and are never reused. */
 REMOTEKIT_SDK_API int remotekit_sdk_control_connect(const char* name_utf8, uint64_t* handle);
 /* One raw UTF-8 JSON message/reply, at most 1 MiB each. Browser validates UTF-8.
- * timeout_ms must be 1..30000. All SDK calls are serialized: use one caller
- * thread; timeout bounds the active request, not time queued behind other calls.
+ * timeout_ms must be 1..30000. Requests serialize per channel; independent
+ * channels may run concurrently. Timeout bounds the active request, not queue
+ * time. Close cancels active/queued requests; shutdown rejects new operations
+ * and drains operation leases before destroying the SDK runtime.
  * Any error on an existing handle invalidates/closes that connection, including
  * invalid arguments, timeout, oversized response, or insufficient capacity.
  * BUFFER_TOO_SMALL reports the required size in output_size; other errors set

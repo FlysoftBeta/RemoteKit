@@ -1,9 +1,9 @@
 #include "remotekit/browser/control_server.h"
+#include "remotekit/browser/control_response.h"
 #include <vector>
 #include "base/check.h"
 #include "base/functional/bind.h"
 #include "base/json/json_reader.h"
-#include "base/json/json_writer.h"
 #include "base/strings/string_util.h"
 
 namespace remotekit::browser {
@@ -59,10 +59,12 @@ void ControlServer::OnReadable(MojoResult result) {
     } else {
       reply = handler_.Run(*parsed);
     }
-    auto encoded = base::WriteJson(reply);
-    if (!encoded || encoded->size() > 1024 * 1024 ||
-        mojo::WriteMessageRaw(pipe_.get(), encoded->data(), encoded->size(), nullptr, 0,
-                              MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
+    const base::DictValue invalid_request;
+    if (!WriteControlResponse(parsed ? *parsed : invalid_request, reply,
+          base::BindRepeating([](ControlServer* server, std::string_view encoded) {
+            return mojo::WriteMessageRaw(server->pipe_.get(), encoded.data(), encoded.size(), nullptr, 0,
+                                        MOJO_WRITE_MESSAGE_FLAG_NONE) == MOJO_RESULT_OK;
+          }, base::Unretained(this)))) {
       Close();
       return;
     }

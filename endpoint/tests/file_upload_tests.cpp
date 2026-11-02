@@ -49,6 +49,35 @@ int main() {
     CHECK(!store.Find(cancelled.id));
   }
   {
+    FileUploadStore store(root / "direct-chunks", {32, 64, 64, 4, 8});
+    const FileUploadStore::Binding binding{"chunk-browser", "1", "1", "1", "1"};
+    const std::vector<FileUploadStore::Spec> specs{{"bytes.txt", "text/plain", 6}};
+    const auto first = store.BeginOrResume(binding, specs);
+    CHECK(store.BeginOrResume(binding, specs).id == first.id); // Lost begin reply reserves once.
+    CHECK(store.reserved_bytes() == 6 && store.reserved_files() == 1);
+    CHECK(Throws([&] { store.BeginOrResume(binding, {{"different", "", 6}}); }));
+    CHECK(store.Write(first.id, binding, 0, 0, {'a','b','c'}) == 3);
+    CHECK(store.Write(first.id, binding, 0, 0, {'a','b','c'}) == 3); // Lost chunk ACK.
+    CHECK(Throws([&] { store.Write(first.id, binding, 0, 0, {'x','b','c'}); }));
+    CHECK(Throws([&] { store.Write(first.id, binding, 0, 4, {'e'}); }));
+    CHECK(Throws([&] { store.Write(first.id, binding, 0, 2, {'c','d'}); }));
+    CHECK(Throws([&] { store.Write(first.id, binding, 0, 3, {'d','e','f','g'}); }));
+    auto stale = binding; stale.document = "2";
+    CHECK(Throws([&] { store.Write(first.id, stale, 0, 3, {'d','e','f'}); }));
+    CHECK(store.Offsets(first.id, binding) == std::vector<std::uint64_t>{3});
+    CHECK(Throws([&] { store.Seal(first.id, binding); }));
+    CHECK(store.Write(first.id, binding, 0, 3, {'d','e','f'}) == 6);
+    { std::ifstream input(first.files[0].path, std::ios::binary); std::string bytes((std::istreambuf_iterator<char>(input)), {}); CHECK(bytes == "abcdef"); }
+    CHECK(store.CancelBinding(binding)); // No uploadId needed after lost begin.
+    CHECK(store.CancelBinding(binding));
+    CHECK(!fs::exists(first.files[0].path) && store.reserved_bytes() == 0);
+    const auto again = store.BeginOrResume(binding, specs);
+    CHECK(again.id != first.id);
+    store.Seal(store.BeginOrResume(stale, {{"empty", "", 0}}).id, stale);
+    CHECK(store.CancelBinding(binding));
+    store.RevokeUncommitted(); CHECK(store.reserved_bytes() == 0);
+  }
+  {
     FileUploadStore long_paths(root / std::string(120, 'a') / std::string(120, 'b'));
     const auto batch = long_paths.Begin({"long-browser", "1", "1", "1", "1"}, {{"long.txt", "", 1}});
     { std::ofstream output(batch.files[0].path, std::ios::binary); output << 'x'; }

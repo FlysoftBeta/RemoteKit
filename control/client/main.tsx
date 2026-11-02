@@ -1,5 +1,6 @@
 /// <reference types="vite/client" />
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { projectOperations, snapshotNewer, requireAcceptedReceipt, type PendingOperation, operationId } from './product-operations';
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Alert,
@@ -16,6 +17,7 @@ import {
 } from "@mui/material";
 import type {
   ProductState,
+  OperationReceipt,
   ProductUser,
   ViewerViewport,
 } from "../shared/product";
@@ -34,7 +36,6 @@ import { WindowFrame, WindowDivider } from "./window-frame";
 import { AdminDialog } from "./admin-dialog";
 import { FileChooserDialog } from './file-chooser-dialog';
 import { foregroundRequest } from './foreground-request';
-import type { FileRpc } from './file-upload';
 import type { AudioChannels } from './audio-output';
 import "./style.css";
 const theme = createTheme({
@@ -62,7 +63,7 @@ function Workspace({
   logout: () => void;
   expired: () => void;
 }) {
-  const [state, setState] = useState<ProductState | null>(null),
+  const [authoritative, setState] = useState<ProductState | null>(null),
     [status, setStatus] = useState<ConnectionStatus>("connecting"),
     [error, setError] = useState(""),
     [viewportNotice, setViewportNotice] = useState(""),
@@ -73,6 +74,8 @@ function Workspace({
     [, updateMedia] = useState(0),
     [focusAddress, setFocusAddress] = useState<string | null>(null),
     [width, setWidth] = useState(window.innerWidth);
+  const [pendingOperations,setPendingOperations]=useState<PendingOperation[]>([]);
+  const state=projectOperations(authoritative,pendingOperations);
   const transport = useRef<RemoteTransport | null>(null);
   const audioPending = useRef(false);
   if (!transport.current) transport.current = new RemoteTransport();
@@ -87,7 +90,7 @@ function Workspace({
     generation = useRef<number | undefined>(undefined),
     viewportRequest = useRef(0),
     viewportFailure = useRef("");
-  latest.current = state;
+  latest.current = authoritative;
   statusRef.current = status;
   const sendViewport = useCallback(() => {
     clearTimeout(viewportTimer.current);
@@ -109,6 +112,7 @@ function Workspace({
             Math.max(1, window.innerHeight - 88),
           visible:
             document.visibilityState !== "hidden" &&
+            current.workspace.tabs.some(t => t.id === w.activeTabId && t.kind !== 'start') &&
             (all || w.id === current.workspace.activeWindowId),
         })),
       };
@@ -139,13 +143,14 @@ function Workspace({
     const socket = new ControlConnection(
       (next) => {
         if (!active) return;
+        setPendingOperations(entries=>entries.map(entry=>{const receipt=next.operationReceipts?.find(receipt=>receipt.operationId===entry.operationId && receipt.operationGeneration===entry.operationGeneration);return receipt?{...entry,receipt}:entry;}));
         media.trickleIce = next.viewer.trickleIce === true;
         if (generation.current !== next.endpointGeneration) {
           media.observeEndpointGeneration(next.endpointGeneration);
           generation.current = next.endpointGeneration;
         }
         setState((previous) =>
-          !previous || next.workspace.revision >= previous.workspace.revision
+          snapshotNewer(next,previous)
             ? next
             : previous,
         );
@@ -193,6 +198,7 @@ function Workspace({
     };
   }, [media]);
   useEffect(sendViewport, [
+    state?.workspace.revision,
     state?.workspace.activeWindowId,
     state?.workspace.windows.length,
     state?.workspace.layoutMode,
@@ -200,17 +206,23 @@ function Workspace({
     width,
     sendViewport,
   ]);
+  useEffect(()=>{if(authoritative)setPendingOperations(entries=>{const remaining=entries.filter(entry=>!entry.receipt || (['accepted','applying','unknown'].includes(entry.receipt.status) && !entry.receipt.resolved) || entry.receipt.status==='committed' && (entry.receipt.revision??Infinity)>authoritative.workspace.revision);return remaining.length===entries.length?entries:remaining;});},[authoritative,pendingOperations]);
+  useEffect(()=>{const timer=setInterval(()=>{for(const entry of pendingOperations.filter(entry=>!entry.receipt || ['applying','accepted','unknown'].includes(entry.receipt.status) && !entry.receipt.resolved))void connection.current?.request('operation.status',{operationId:entry.operationId,operationGeneration:entry.operationGeneration}).then(receipt=>{if(['rejected','expired'].includes(receipt.status))setError(receipt.error??'操作未完成，请核对当前工作区');setPendingOperations(entries=>entries.map(item=>item.operationId===entry.operationId?{...item,receipt}:item));}).catch(()=>{});},2000);return()=>clearInterval(timer);},[pendingOperations]);
+  useEffect(()=>{const retired=pendingOperations.find(entry=>entry.receipt?.resolved && entry.receipt.status==='unknown');if(retired)setError(retired.receipt?.error??'原页面已结束，操作执行结果未知');},[pendingOperations]);
   const action: Action = async (command) => {
-    const result = await connection.current!.request("action", command);
-    setState((previous) =>
-      !previous ||
-      result.state.workspace.revision >= previous.workspace.revision
-        ? result.state
-        : previous,
-    );
-    if (command.type === "window.create")
-      setFocusAddress(result.state.workspace.activeWindowId);
-    return result;
+    const source=latest.current;if(!source?.operationGeneration)throw new Error('正在同步产品状态');
+    if(Object.values(command).some(value=>typeof value==='string'&&value.startsWith('pending-')))throw new Error('此操作正在等待确认');
+    if(pendingOperations.length>=64)throw new Error('待确认操作过多，请等待同步');
+    const operation:PendingOperation={operationId:operationId(),operationGeneration:source.operationGeneration,action:command};
+    setPendingOperations(entries=>[...entries,operation]);
+    let receipt: OperationReceipt;
+    try {receipt=await media.productAction(operation);} catch (failure) {
+      if((failure as {operationSent?:boolean}).operationSent===false){setPendingOperations(entries=>entries.filter(entry=>entry.operationId!==operation.operationId));throw failure;}
+      try {receipt=await connection.current!.request('operation.status',{operationId:operation.operationId,operationGeneration:operation.operationGeneration});}
+      catch {receipt={operationId:operation.operationId,operationGeneration:operation.operationGeneration,status:'unknown' as const,error:'操作结果未知，请等待连接恢复后核对工作区'};}
+    }
+    setPendingOperations(entries=>entries.map(entry=>entry.operationId===operation.operationId?{...entry,receipt}:entry));
+    return requireAcceptedReceipt(receipt);
   };
   const report = (e: unknown) => setError(errorMessage(e));
   const saveAudio = (channels:AudioChannels) => {
@@ -222,11 +234,7 @@ function Workspace({
   const loadRegistration = useCallback(() => connection.current!.request("admin.get", {}), []);
   const saveRegistration = useCallback((serverCredential: string) =>
     connection.current!.request("admin.setRegistrationCredential", { serverCredential }), []);
-  const fileRpc = useMemo<FileRpc>(() => ({
-    begin: (requestId, files) => connection.current!.request('files.begin', { requestId, files: files.map(file => ({name:file.name,size:file.size,type:file.type})) }),
-    commit: uploadId => connection.current!.request('files.commit', {uploadId}),
-    cancel: (requestId,uploadId) => connection.current!.request('files.cancel', {requestId,uploadId}),
-  }), []);
+  const fileRpc = media.files;
   if (status === "revoked")
     return (
       <main className="workspace-empty">
@@ -267,6 +275,7 @@ function Workspace({
   const fileRequest = foreground?.kind==='file' ? state.fileRequests.find(request=>request.id===foreground.id) : undefined;
   return (
     <main className="viewer-shell">
+      {pendingOperations.length>0 && <Alert severity="info" sx={{position:'absolute',top:88,left:'50%',transform:'translateX(-50%)',zIndex:1190}} action={pendingOperations.some(entry=>entry.receipt?.status==='unknown')?<Button onClick={()=>setPendingOperations(entries=>entries.filter(entry=>entry.receipt?.status!=='unknown'))}>以当前工作区为准</Button>:undefined}>{pendingOperations.length} 个操作{pendingOperations.some(entry=>entry.receipt?.status==='unknown')?'结果未知，请核对工作区':'正在同步'}{media.diagnostics.channel!=='已连接'?'，等待数据通道连接':''}</Alert>}
       {media.audio.state === 'blocked' && (workspace.settings.audioChannels?.left !== false || workspace.settings.audioChannels?.right !== false) && <Button variant="contained" onClick={() => media.audio.resume()} sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}>点击开启声音</Button>}
       {status !== "online" && (
         <Alert
@@ -350,6 +359,7 @@ function Workspace({
         save={saveRegistration}
       />}
       <SettingsDialog
+        online={status === "online"}
         state={state}
         open={settings}
         onClose={() => setSettings(false)}

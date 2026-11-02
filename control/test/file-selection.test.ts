@@ -1,9 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cameraFormat, acceptsFile, mergeSelection, combineSelection, validateSelection } from '../client/file-selection';
+import { cameraFormat, fileChooserAccept, acceptsFile, mergeSelection, combineSelection, validateSelection } from '../client/file-selection';
 import { foregroundRequest } from '../client/foreground-request';
 import type { FileRequest, ProductState } from '../shared/product';
 const request:FileRequest={id:'opaque',tabId:'a',windowId:'w',origin:'https://example.test',multiple:false,accept:['.JPG','image/png'],state:'pending',limits:{maxFiles:3,maxFileBytes:100,maxBatchBytes:150,sessionBytes:1000}};
+
+test('omitted file hints do not restrict selection to an incomplete accept list', () => {
+  assert.deepEqual(fileChooserAccept(request), request.accept);
+  const partial = { ...request, accept: ['application/pdf'], acceptTypesOmitted: true };
+  assert.deepEqual(fileChooserAccept(partial), []);
+  assert.equal(cameraFormat(fileChooserAccept(partial)), 'image/jpeg');
+  assert.equal(validateSelection([new File(['bytes'], 'unlisted.txt')], partial), '');
+  assert.deepEqual(partial.accept, ['application/pdf']);
+});
 test('file accept/multiple/limits and camera format follow request',()=>{
   assert.equal(cameraFormat(['application/pdf']),null);assert.equal(cameraFormat(['image/*']),'image/jpeg');assert.equal(cameraFormat(['.png']),'image/png');
   assert.ok(acceptsFile({name:'hello.JPG',type:''},request.accept));

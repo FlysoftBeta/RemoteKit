@@ -3,10 +3,10 @@ import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual, cre
 import { promisify } from 'node:util';
 import { isDeepStrictEqual } from 'node:util';
 import type { ControlState } from '../client/types';
-import type { ProductUser, ProductWorkspace } from '../shared/product';
+import type { ProductUser, ProductWorkspace, OperationReceipt } from '../shared/product';
 const scrypt = promisify(scryptCallback);
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
-export const defaultSettings = () => ({ qualityPreference: 'auto' as const, clientScaleOverride: null, memorySaverEnabled: true, showStats: false, audioChannels: { left: true, right: true } });
+export const defaultSettings = () => ({ searchEngine: 'google' as const, qualityPreference: 'auto' as const, clientScaleOverride: null, memorySaverEnabled: true, showStats: false, audioChannels: { left: true, right: true } });
 export function emptyWorkspace(tenantId: string): ProductWorkspace { return { schemaVersion: 2, tenantId, revision: 0, tabs: [], windows: [], activeWindowId: null, layoutMode: 'side-by-side', settings: defaultSettings(), sites: {}, pendingClose: null, pendingWindowCloseId: null }; }
 export function migrateLegacy(state: ControlState): ProductWorkspace {
   const result = emptyWorkspace(state.tenantId), first = randomUUID(), second = randomUUID();
@@ -35,6 +35,11 @@ export class Store {
     if (!(this.db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).some(column => column.name === 'is_admin')) this.db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
     this.db.exec(`CREATE TABLE IF NOT EXISTS registration_policy (id INTEGER PRIMARY KEY CHECK(id=1), salt TEXT NOT NULL, credential_hash TEXT NOT NULL);
       CREATE UNIQUE INDEX IF NOT EXISTS single_admin ON users(is_admin) WHERE is_admin=1;`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS operation_sequences (tenant TEXT PRIMARY KEY, sequence TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS operation_generations (tenant TEXT PRIMARY KEY, generation TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS operation_receipts (tenant TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant,id));`);
+    // A process restart cannot prove whether an in-flight native side effect ran.
+    for (const row of this.db.prepare('SELECT tenant,id,receipt FROM operation_receipts').all() as {tenant:string;id:string;receipt:string}[]) { const receipt = JSON.parse(row.receipt); if (['accepted','applying'].includes(receipt.status)) { receipt.status = 'unknown'; receipt.error = 'Control重启，执行结果待对账'; this.db.prepare('UPDATE operation_receipts SET receipt=? WHERE tenant=? AND id=?').run(JSON.stringify(receipt), row.tenant, row.id); } }
     this.db.exec('CREATE TABLE IF NOT EXISTS popup_receipts (tenant TEXT NOT NULL, provisional_id TEXT NOT NULL, tab_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,provisional_id))');
     this.db.transaction(() => {
       const legacyRows = this.db.prepare('SELECT id,state FROM tenants').all() as { id: string; state: string }[];
@@ -58,7 +63,7 @@ export class Store {
       if (max > 0n) this.db.prepare('INSERT OR IGNORE INTO view_ids(id) VALUES (?)').run(max);
       for (const row of this.db.prepare('SELECT tenant,data FROM user_settings').all() as { tenant: string; data: string }[]) {
         const settings = JSON.parse(row.data);
-        if (settings.showStats === undefined) this.db.prepare('UPDATE user_settings SET data=? WHERE tenant=?').run(JSON.stringify({ ...defaultSettings(), ...settings }), row.tenant);
+        if (settings.showStats === undefined || settings.searchEngine === undefined) this.db.prepare('UPDATE user_settings SET data=? WHERE tenant=?').run(JSON.stringify({ ...defaultSettings(), ...settings }), row.tenant);
       }
     })();
   }
@@ -154,5 +159,30 @@ export class Store {
     this.db.transaction(() => { this.saveWorkspace(state); this.db.prepare('INSERT INTO popup_receipts VALUES (?,?,?,?)').run(state.tenantId, provisionalId, tabId, Date.now()); })();
   }
   prunePopupReceipts(tenant: string) { this.db.prepare('DELETE FROM popup_receipts WHERE tenant=? AND created_at<? AND tab_id NOT IN (SELECT id FROM workspace_tabs WHERE tenant=?)').run(tenant, Date.now() - 120000, tenant); }
+  operationGeneration(tenant: string): string {
+    let row = this.db.prepare('SELECT generation FROM operation_generations WHERE tenant=?').get(tenant) as {generation:string} | undefined;
+    if (!row) { row = {generation:randomUUID()}; this.db.prepare('INSERT INTO operation_generations VALUES (?,?)').run(tenant,row.generation); }
+    return row.generation;
+  }
+  operation(tenant: string, id: string): {payload:string; receipt:OperationReceipt} | undefined {
+    const row = this.db.prepare('SELECT payload,receipt FROM operation_receipts WHERE tenant=? AND id=?').get(tenant,id) as {payload:string;receipt:string} | undefined;
+    return row && {payload:row.payload,receipt:JSON.parse(row.receipt)};
+  }
+  recentOperations(tenant:string):OperationReceipt[] {return (this.db.prepare('SELECT receipt FROM operation_receipts WHERE tenant=? ORDER BY rowid DESC LIMIT 64').all(tenant) as {receipt:string}[]).map(row=>JSON.parse(row.receipt));}
+  pendingOperations(tenant:string):{action:any;receipt:OperationReceipt}[] {return (this.db.prepare("SELECT payload,receipt FROM operation_receipts WHERE tenant=? AND json_extract(receipt,'$.status') IN ('accepted','applying','unknown')").all(tenant) as {payload:string;receipt:string}[]).map(row=>({action:JSON.parse(row.payload),receipt:JSON.parse(row.receipt)})).filter(item=>['accepted','applying','unknown'].includes(item.receipt.status));}
+  reserveOperation(tenant:string, payload:string, receipt:OperationReceipt): boolean {
+    const count = this.db.prepare('SELECT COUNT(*) AS count FROM operation_receipts WHERE tenant=?').get(tenant) as {count:bigint};
+    if (count.count >= 4096n) {
+      const unresolved = (this.db.prepare('SELECT receipt FROM operation_receipts WHERE tenant=?').all(tenant) as {receipt:string}[]).some(row=>{const receipt=JSON.parse(row.receipt);return ['accepted','applying'].includes(receipt.status)||receipt.status==='unknown'&&!receipt.resolved;});
+      if(unresolved) throw new Error('操作收据已满，请先核对未确认的操作');
+      // Rotate only between operations. Old generations always receive expired.
+      this.db.transaction(() => { this.db.prepare('DELETE FROM operation_receipts WHERE tenant=?').run(tenant); this.db.prepare('UPDATE operation_generations SET generation=? WHERE tenant=?').run(randomUUID(),tenant); })();
+      return false;
+    }
+    this.db.transaction(()=>{const previous=this.db.prepare('SELECT sequence FROM operation_sequences WHERE tenant=?').get(tenant) as {sequence:string}|undefined;const sequence=BigInt(previous?.sequence??'0')+1n;if(sequence>18446744073709551615n)throw new Error('操作序号已耗尽');receipt.operationSequence=sequence.toString();this.db.prepare('INSERT OR REPLACE INTO operation_sequences VALUES (?,?)').run(tenant,receipt.operationSequence);this.db.prepare('INSERT INTO operation_receipts VALUES (?,?,?,?)').run(tenant,receipt.operationId,payload,JSON.stringify(receipt));})(); return true;
+  }
+  saveOperation(state:ProductWorkspace, receipt:OperationReceipt) {
+    this.db.transaction(() => { this.saveWorkspace(state); receipt.revision=state.revision; this.db.prepare('UPDATE operation_receipts SET receipt=? WHERE tenant=? AND id=?').run(JSON.stringify(receipt),state.tenantId,receipt.operationId); })();
+  }
   viewId(): string { return String(this.db.prepare('INSERT INTO view_ids DEFAULT VALUES').run().lastInsertRowid); }
 }

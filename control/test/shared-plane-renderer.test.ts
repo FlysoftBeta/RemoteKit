@@ -12,16 +12,16 @@ test('shared geometry retains exact marker ROI pixels and transparent gap, bound
 });
 
 function fixture(t:TestContext){
-  const listeners=new Map<string,()=>void>(),rafs:(()=>void)[]=[],canvases:any[]=[];let error=0,uploads=0;
+  const listeners=new Map<string,()=>void>(),rafs:(()=>void)[]=[],observers:(()=>void)[]=[],canvases:any[]=[];let error=0,uploads=0;
   const gl:any={NO_ERROR:0,VERTEX_SHADER:1,FRAGMENT_SHADER:2,COMPILE_STATUS:3,LINK_STATUS:4,ARRAY_BUFFER:5,FLOAT:6,TEXTURE_2D:7,TEXTURE_MIN_FILTER:8,TEXTURE_MAG_FILTER:9,LINEAR:10,TEXTURE_WRAP_S:11,TEXTURE_WRAP_T:12,CLAMP_TO_EDGE:13,MAX_TEXTURE_SIZE:14,MAX_RENDERBUFFER_SIZE:15,RGBA:16,UNSIGNED_BYTE:17,SCISSOR_TEST:18,COLOR_BUFFER_BIT:19,DYNAMIC_DRAW:20,TRIANGLES:21,
     createShader:()=>({}),getShaderParameter:()=>true,createProgram:()=>({}),getProgramParameter:()=>true,createBuffer:()=>({}),createTexture:()=>({}),getAttribLocation:()=>1,getParameter:()=>8192,getError:()=>{const value=error;error=0;return value},getExtension:()=>null,texImage2D:()=>uploads++};
   for(const name of ['shaderSource','compileShader','deleteShader','attachShader','linkProgram','useProgram','bindBuffer','enableVertexAttribArray','vertexAttribPointer','bindTexture','texParameteri','clearColor','disable','clear','enable','bufferData','viewport','scissor','drawArrays','deleteTexture','deleteBuffer','deleteProgram'])gl[name]=()=>{};
   const makeCanvas=()=>{const events=new Map<string,(e:any)=>void>(),rect={left:0,top:88,width:320,height:180};const canvas:any={style:{opacity:''},width:0,height:0,isConnected:true,setAttribute(){},getContext:()=>gl,addEventListener:(name:string,fn:(e:any)=>void)=>events.set(name,fn),remove(){this.isConnected=false},getBoundingClientRect:()=>rect,events,rect};canvases.push(canvas);return canvas};
-  const environment:Record<string,unknown>={window:{addEventListener:(name:string,fn:()=>void)=>listeners.set(name,fn),removeEventListener(){}},document:{visibilityState:'visible',body:{append:(canvas:any)=>canvas.isConnected=true},createElement:makeCanvas,addEventListener(){},removeEventListener(){}},requestAnimationFrame:(fn:()=>void)=>{rafs.push(fn);return rafs.length},cancelAnimationFrame(){},ResizeObserver:class{observe(){}unobserve(){}disconnect(){}}};
+  const environment:Record<string,unknown>={window:{addEventListener:(name:string,fn:()=>void)=>listeners.set(name,fn),removeEventListener(){}},document:{visibilityState:'visible',body:{append:(canvas:any)=>canvas.isConnected=true},createElement:makeCanvas,addEventListener(){},removeEventListener(){}},requestAnimationFrame:(fn:()=>void)=>{rafs.push(fn);return rafs.length},cancelAnimationFrame(){},ResizeObserver:class{constructor(callback:()=>void){observers.push(callback)}observe(){}unobserve(){}disconnect(){}}};
   for(const [name,value]of Object.entries(environment)){const old=Object.getOwnPropertyDescriptor(globalThis,name);Object.defineProperty(globalThis,name,{configurable:true,value});t.after(()=>old?Object.defineProperty(globalThis,name,old):Reflect.deleteProperty(globalThis,name));}
   const targets=[0,1].map(i=>{const canvas=makeCanvas();canvas.rect.left=i*325;return {canvas,view:{id:String(i+1),session:'1',instance:'1',document:'1',focus:'1',x:4+i*324,y:4,width:320,height:180,deviceScaleFactor:1},layoutEpoch:'e',layoutGeneration:'g'};}) as SharedPlaneTarget[];
   const frame:SharedFrame={rtpTimestamp:10,layout:{type:'layout',epoch:'e',generation:'g',width:656,height:188,views:targets.map(x=>x.view)}};
-  return {targets,frame,canvases,listeners,rafs,get uploads(){return uploads},failUpload(){error=1282}};
+  return {targets,frame,canvases,listeners,rafs,observers,get uploads(){return uploads},failUpload(){error=1282}};
 }
 
 test('shared upload succeeds once, supplies actual visible ROI, and static resize redraw does not upload/new-frame count',t=>{
@@ -37,6 +37,24 @@ test('context loss restores input plane canvases before synchronous fallback cal
   const f=fixture(t);let failures=0;const renderer=new SharedPlaneRenderer({isCurrent:()=>true,onRedraw(){},onFailure:reason=>{failures++;assert.equal(reason,'context-lost');assert.equal(f.targets[0].canvas.style.opacity,'');}});
   const draw=renderer.render({} as CanvasImageSource,f.frame,f.targets)!;(draw.canvas as any).events.get('webglcontextlost')({preventDefault(){}});
   assert.equal(failures,1);assert.equal(renderer.backend,'canvas-2d');assert.equal(renderer.isVisible(draw.canvas),false);assert.equal(renderer.render({} as CanvasImageSource,f.frame,f.targets),undefined);renderer.dispose();
+});
+
+test('static invalid geometry retires visible backing before fallback and later valid bounds can resume',t=>{
+  for(const invalid of ['zero','budget','disconnected']) {
+    const f=fixture(t);let fallback=0,resume=0;
+    const renderer=new SharedPlaneRenderer({isCurrent:()=>true,onRedraw:()=>assert.fail('invalid geometry cannot redraw'),
+      onFailure:reason=>{fallback++;assert.equal(reason,'geometry-budget-or-hidden');assert.equal(renderer.isVisible(draw.canvas),false);assert.equal(f.targets[0].canvas.style.opacity,'');},
+      onResume:()=>{resume++;renderer.render({} as CanvasImageSource,f.frame,f.targets);}});
+    const draw=renderer.render({} as CanvasImageSource,f.frame,f.targets)!;
+    const target=f.targets[1].canvas as any;
+    if(invalid==='zero')target.rect.width=0;else if(invalid==='budget')target.rect.left=9000;else target.isConnected=false;
+    f.listeners.get('resize')!();f.rafs.shift()!();
+    assert.equal(fallback,1);assert.equal(renderer.isVisible(draw.canvas),false);assert.equal(draw.canvas.isConnected,false);
+    assert.equal(renderer.counts.frames,1);assert.equal(renderer.counts.redraws,0);
+    target.rect.width=320;target.rect.left=325;target.isConnected=true;
+    f.observers[f.observers.length-1]();f.rafs.shift()!();assert.equal(resume,1);assert.equal(renderer.backend,'shared-webgl');
+    renderer.dispose();
+  }
 });
 
 test('upload error never hides 2D plane or reports a shared paint, stale generation cannot redraw retained texture',t=>{

@@ -1,6 +1,27 @@
 # 当前问题与收尾记录
 
-由root维护。最新已发布基线8423204；旧全库审查依据见[审查报告](post-release-astra-review.md)。本轮不重复性能组，只检查用户报告的连续交互与媒体生命周期。
+由root维护。最新已发布基线4de343c；当前按用户要求逐模块审阅与重构，做新增路径必要功能验证，不重复历史性能组。旧全库审查依据见[审查报告](post-release-astra-review.md)。
+
+2026-11-03进度：输入修正版4de343c已经发布；用户随后要求逐模块审阅与架构重构、新增搜索引擎/起始页。六份模块审计及独立集成复审已完成，修复代码与阶段CPU检查正在集成。跨机管理、DC常规操作/文件、收据与状态同步、独立时钟、移动编辑/Client手势的契约、责任及实际证据见[本轮架构记录](robustness-contract-20261103.md)。本页以下表格是此前已关闭问题，不代表新增批次验收完成；下一发布须独立新提交/构建/取件码。
+
+## 本批运行发现与待验收项
+
+| 项目 | 当前证据与进度 |
+|---|---|
+| V4 split长时白屏 | 布局候选缺clientGestures而已发布layout含该字段，每Tick误判变化；2.375秒重复1000次prepare，Client反复取消两rAF导致ACK饥饿。已修完整布局比较及两端事务幂等；157/DPR2原场景实际复验580ms恢复，两plane裁剪正确，无flood |
+| V5 窄屏误退canvas | 隐藏旧Window current=false却累计retry到3触发全局fallback。已修watchdog仅统计当前有效未ready plane；定向/生产构建及89/DPR1、157/DPR2实际split→1100→390约6秒→split通过，隐藏重试0、可见ready、返回各自新帧/坐标正确，媒体身份保持且稳态MSTP/draw0 |
+| S1 快照组合字节上限 | 已限制最终URL字节与accept提示预算；Browser响应超限改有界语义错误而非关闭健康通道。Control、Browser真实生产helper probe与Endpoint语义错误回归通过；不宣称任意巨型页面状态已支持分页 |
+| N1 首导航失败遮蔽错误页 | 已分开真实primary documentCommitted与failed收据；已提交仍remote，未提交回start并hide-only残留Native。CPU、生产构建及89/157实际错误页/首导航取消恢复通过 |
+| N2 receipt被当workspace解包 | 已收紧receipt类型并去掉state.workspace读取，pending/unknown语义保留。CPU/构建及157实际前进后退无原异常banner通过 |
+| N3 Browser错误文档空白 | 已补embedder PrepareErrorPage静态中文HTML，动态文本转义、无JS/外部资源；生产helper/构建及Astra设计审阅通过，Sol实际89/157错误页标题/URL/net错误可读、remote+rejected正确 |
+| N4 start首导航stop丢回滚归属 | stop保留独立收据、不占原导航owner；即时终态同步活动对象，finally不回退applying。明确回start清loading。CPU/构建及89/157真实首导航stop回start/Native隐藏通过；最后157补验loading=false、stop按钮0/refresh1/progressbar0，无SDK5重试，remote stop保留原URL |
+| G1 首tap致命退出 | 已修生产候选touchscreen设备类型，probe实际执行filter输出→Blink转换；157首tap真实复验恰一次click、terminal processed通过 |
+| G2 拖动转惯性丢位移 | production ScrollPredictor CPU与真实轨迹证明服务端二次预测在相位转换时丢/增尾差。正式离屏Browser固定关闭该重采样，保留原始事件/权限仲裁且不影响demo/Viewer。默认新产物DOM510对Client509.815，延迟轨迹510/509/510通过 |
+| F1 Viz BeginFrame完成时序 | 已用真实Scheduler/Mojo CPU复现早NAK留下的旧interval完成污染新callback；0011只接受精确退役ID，有界8项满则背压，保留未知/重复完成CHECK。生产构建、正反例及11补丁撤回/重放通过；最新89/157常规手势组无此前CHECK/GPU崩溃/Browser重启 |
+| F2 Native输入未来时间 | arrival fallback首包原点叠加后包source elapsed产生约57ms未来时间。已分离source elapsed与非未来、非递减Native dispatch timestamp，生产helper/probe通过；新版89/157延迟轨迹位移一致且未出现旧reporter断言 |
+| G3 child销毁后输入锁定 | 已修有界精确token+sequence退役证明，未知/超时仍unconfirmed，正常cancel仍等canonical ACK。279项Control/原生构建通过；89/157真实owned child销毁→明确invalidated→同doc新tap通过、无误投及遮罩，旧回执不清新held owner |
+| F3 正常停止丢弃未交付atlas帧 | 已修StopAndResetConsumer跨Mojo pipe丢排队帧：正常退役转drainer，仅对producer实际写完但应用未读帧Done；已交付lease保留consumed Fence、未知断开仍隔离。生产构建、真实Mojo5例/池13项及11补丁撤回重放通过；89/157专项自然generation1→17无atlas fatal/CHECK/重启 |
+| 新路径功能覆盖 | 规定范围验收完成：89/157布局/文档失效、触控/滚轮/scrollbar、bounds与DPR坐标、无原生媒体入口；双Tenant管理断链保持媒体；DC文件/拍照字节、实际PCM、搜索持久化、模拟IME/键盘resize；真实popup opener/关闭、Sol清洁效果图。实体移动键盘/NVIDIA/真实摄像头效果仍是明确硬件边界，见当前状态与各运行报告 |
 
 ## 8423204发布后输入与video回归
 

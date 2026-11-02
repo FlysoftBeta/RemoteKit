@@ -9,6 +9,10 @@ import {
   DialogTitle,
   Divider,
   FormControlLabel,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem,
   IconButton,
   Radio,
   RadioGroup,
@@ -19,14 +23,15 @@ import {
 } from "@mui/material";
 import Close from "@mui/icons-material/Close";
 import type {
-  ProductAction,
   ProductSettings,
   ProductState,
   ProductUser,
   RegistrationStatus,
 } from "../shared/product";
+import { SEARCH_ENGINES } from '../shared/product';
 import { request } from "./types";
-export type Action = (action: ProductAction) => Promise<unknown>;
+export type { ProductActionHandler as Action } from './product-operations';
+import type { ProductActionHandler as Action } from './product-operations';
 export const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 export function AuthView({
@@ -158,6 +163,7 @@ export function AuthView({
   );
 }
 export function SettingsDialog({
+  online,
   state,
   open,
   onClose,
@@ -165,6 +171,7 @@ export function SettingsDialog({
   logout,
 }: {
   state: ProductState;
+  online: boolean;
   open: boolean;
   onClose: () => void;
   action: Action;
@@ -192,7 +199,7 @@ export function SettingsDialog({
       await action({ type: "settings.update", settings: value });
       setResult((p) => ({ ...p, [key]: "已保存" }));
     } catch (e) {
-      setResult((p) => ({ ...p, [key]: errorMessage(e) }));
+      setResult((p) => ({ ...p, [key]: `未保存，请重试：${errorMessage(e)}` }));
     } finally {
       setBusy((p) => ({ ...p, [key]: false }));
     }
@@ -201,9 +208,9 @@ export function SettingsDialog({
     <Typography
       className="setting-result"
       role="status"
-      color={result[key] === "已保存" ? "text.secondary" : "error"}
+      color={busy[key] || !result[key] || result[key] === "已保存" ? "text.secondary" : "error"}
     >
-      {result[key] || " "}
+      {busy[key] ? "正在保存…" : result[key] || " "}
     </Typography>
   );
   return (
@@ -222,6 +229,19 @@ export function SettingsDialog({
         </IconButton>
       </DialogTitle>
       <DialogContent dividers>
+        <div className="setting-section">
+          <Typography fontWeight={600} sx={{ mb: 2 }}>搜索</Typography>
+          <FormControl fullWidth size="small" disabled={!online || busy.search}>
+            <InputLabel id="search-engine-label">默认搜索引擎</InputLabel>
+            <Select labelId="search-engine-label" label="默认搜索引擎" value={settings.searchEngine}
+              onChange={event => void save('search', { searchEngine: event.target.value as ProductSettings['searchEngine'] })}>
+              {SEARCH_ENGINES.map(engine => <MenuItem key={engine.value} value={engine.value}>{engine.label}</MenuItem>)}
+            </Select>
+          </FormControl>
+          <Typography variant="caption" color="text.secondary">用于地址栏和起始页中的搜索</Typography>
+          {note('search')}
+        </div>
+        <Divider sx={{ mb: 2 }} />
         <Typography fontWeight={600}>画面质量</Typography>
         <RadioGroup
           aria-label="画面质量"

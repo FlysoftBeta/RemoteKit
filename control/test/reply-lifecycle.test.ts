@@ -42,7 +42,7 @@ async function fixture() {
   const store = new Store(':memory:'), endpoint = new LifecycleEndpoint(), control = new Control(store, endpoint);
   const { tenantId: tenant } = await store.register('lifecycle-user', 'password123');
   await control.attachViewer(tenant, 'lease', () => {});
-  const created = await control.productAction(tenant, { type: 'window.create' }, 'lease');
+  const created = await control.productAction(tenant, { type: 'window.create', url: 'about:blank' }, 'lease');
   const tab = created.state.workspace.tabs[0];
   return { store, endpoint, control, tenant, tab };
 }
@@ -57,11 +57,12 @@ test('file requests bind Browser identity, stay separate from dialogs and revoke
       if (method === 'session.files.begin') return { uploadId: 'allocated-upload', files: [{ ticket: 'one-time-ticket-123456', path: resolve('private-upload.part') }] };
       return { state: 'cancelled' };
     };
-    endpoint.view.pageRequests = { pending: [{ request: '7', kind: 'file_chooser', origin: 'https://files.test', multiple: false, accept_types: ['.txt'] }] };
+    endpoint.view.pageRequests = { pending: [{ request: '7', kind: 'file_chooser', origin: 'https://files.test', multiple: false, accept_types: ['.txt'], accept_types_omitted: true }] };
     await control.tick();
     const request = control.productState(tenant).fileRequests[0];
     assert.ok(request); assert.equal(control.productState(tenant).pageDialogs.length, 0);
     assert.equal('binding' in request, false); assert.deepEqual(request.accept, ['.txt']);
+    assert.equal(request.acceptTypesOmitted, true);
     const starts = endpoint.starts;
     const begun = await control.viewerRequest(tenant, 'lease', 'files.begin', { requestId: request.id, files: [{ name: 'file.txt', size: 3, type: 'text/plain' }] });
     assert.deepEqual(calls.find(call => call.method === 'session.files.begin').args.binding, { browserIncarnation: 'browser-A', view: endpoint.view.viewId, instance: '1', document: '2', request: '7' });

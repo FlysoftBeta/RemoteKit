@@ -15,6 +15,14 @@ BASE = '1aa07b638799e59656559ae6c6649d4b197f555e'
 def run(cmd, cwd):
     subprocess.run([str(x) for x in cmd], cwd=cwd, check=True)
 
+def copy_if_changed(source, target):
+    """Copy changed content without carrying an old source mtime into Ninja."""
+    if target.exists() and target.read_bytes() == source.read_bytes():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(source, target)
+    return True
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--chromium-root', type=Path, default=Path(r'C:\src\chromium\src'))
@@ -44,9 +52,7 @@ def main():
             for path in src.rglob('*'):
                 if path.is_file() and path.suffix in ['.h', '.hpp', '.cc', '.cpp', '.gn', '.mojom']:
                     target = destination / path.relative_to(ROOT)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    if not target.exists() or target.read_bytes() != path.read_bytes():
-                        shutil.copy2(path, target)
+                    if copy_if_changed(path, target):
                         if path.suffix == '.gn': gn_changed = True
     if args.command == 'stage':
         return

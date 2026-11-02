@@ -1,14 +1,16 @@
 /** Persistent product state belongs to Control; clients keep only an HttpOnly token. */
 export interface ProductUser { id: string; username: string; isAdmin: boolean }
-export interface ProductSettings { qualityPreference: 'quality' | 'auto' | 'smooth'; clientScaleOverride: number | null; memorySaverEnabled: boolean; showStats: boolean; audioChannels: { left: boolean; right: boolean } }
-export interface ProductTab { id: string; windowId: string; webviewId: string; title: string; url: string; pendingUrl?: string; canGoBack?: boolean; canGoForward?: boolean; loading?: boolean; residency?: 'live' | 'frozen' | 'discarded' | 'unloaded'; restoring?: boolean; pendingUaReloadOrigin?: string; popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: string } }
+export type SearchEngine = 'google' | 'bing' | 'duckduckgo' | 'baidu';
+export const SEARCH_ENGINES: { value: SearchEngine; label: string }[] = [{ value: 'google', label: 'Google' }, { value: 'bing', label: 'Bing' }, { value: 'duckduckgo', label: 'DuckDuckGo' }, { value: 'baidu', label: '百度' }];
+export interface ProductSettings { searchEngine: SearchEngine; qualityPreference: 'quality' | 'auto' | 'smooth'; clientScaleOverride: number | null; memorySaverEnabled: boolean; showStats: boolean; audioChannels: { left: boolean; right: boolean } }
+export interface ProductTab { navigation?: {resolved?:boolean;browserIncarnation?:string;operationId:string;operationGeneration:string;status:'applying'|'unknown'|'committed'|'rejected';previousUrl:string;previousKind:'start'|'remote'}; kind?: 'start' | 'remote'; id: string; windowId: string; webviewId: string; title: string; url: string; pendingUrl?: string; canGoBack?: boolean; canGoForward?: boolean; loading?: boolean; residency?: 'live' | 'frozen' | 'discarded' | 'unloaded'; restoring?: boolean; pendingUaReloadOrigin?: string; popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: string } }
 export interface ProductWindow { id: string; activeTabId: string | null; weight: number }
 /** Browser-local request IDs are never exposed as the user confirmation token. */
 export interface PendingClose { id: string; windowId?: string; requestId?: string; nativeRequestId?: string; browserIncarnation?: string; instance?: string; document?: string; awaiting?: boolean }
 export interface ProductWorkspace { schemaVersion: 2; tenantId: string; revision: number; tabs: ProductTab[]; windows: ProductWindow[]; activeWindowId: string | null; layoutMode: 'side-by-side' | 'focused'; settings: ProductSettings; sites: Record<string, { tabletUa: boolean }>; pendingClose?: PendingClose | null; pendingWindowCloseId?: string | null }
 export interface PageDialog { id: string; tabId: string; windowId: string; kind: 'alert' | 'confirm' | 'prompt' | 'beforeunload'; message: string; defaultPrompt: string; origin: string; isReload?: boolean }
 export const FILE_LIMITS = { maxFileBytes: 256 * 1024 * 1024, maxBatchBytes: 512 * 1024 * 1024, maxFiles: 64, sessionBytes: 1024 * 1024 * 1024 } as const;
-export interface FileRequest { id: string; tabId: string; windowId: string; origin: string; multiple: boolean; accept: string[]; state: 'pending' | 'validating'; limits: { maxFileBytes: number; maxBatchBytes: number; maxFiles: number; sessionBytes: number } }
+export interface FileRequest { id: string; tabId: string; windowId: string; origin: string; multiple: boolean; accept: string[]; acceptTypesOmitted?: boolean; state: 'pending' | 'validating'; limits: { maxFileBytes: number; maxBatchBytes: number; maxFiles: number; sessionBytes: number } }
 export interface UploadFileSpec { name: string; size: number; type: string }
 export interface FileUploadBegin { uploadId: string; files: { ticket: string; url: string }[] }
 export interface FileUploadResult { state: 'selected' | 'validating' | 'cancelled' }
@@ -16,7 +18,7 @@ export interface MediaPolicy { targetFps: number; bitrateKbps: number; maxBitrat
 export interface AppliedMediaPolicy { targetFps: number | null; bitrateKbps: number | null; maxBitrateKbps: number | null; adaptive: boolean; codecTargetFps?: number | null; fpsLimitation?: string; preferResolution?: boolean }
 export interface ProductFeedback { sequence: number; sourceCaptureId: string; sampledAtServerMs: number; visible: boolean; presentationLatencyMs: number; latencySource: 'capture-end-to-paint'; clockUncertaintyMs: number; sampleCount: number; windowMs: number; displayHzEstimate?: number }
 export interface ProductQuality { resourceLimitation: string | null; mode: 'product' | 'manual'; preference: ProductSettings['qualityPreference']; clientScale: number; baseResolutionFactor: number; adaptiveResolutionFactor: number; effectiveDpr: number; pixelBudget: number; targetFps: number; requested: MediaPolicy; applied: AppliedMediaPolicy | null; estimatedLatencyMs: number | null; clockUncertaintyMs: number | null; feedbackStatus: 'unknown' | 'valid' | 'stale'; reason: string }
-export interface ProductState { user: ProductUser; workspace: ProductWorkspace; pageDialogs: PageDialog[]; fileRequests: FileRequest[]; quality: ProductQuality; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean; trickleIce?: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
+export interface ProductState { operationReceipts?:OperationReceipt[]; serverIncarnation?: string; snapshotSequence?: number; operationGeneration?: string; user: ProductUser; workspace: ProductWorkspace; pageDialogs: PageDialog[]; fileRequests: FileRequest[]; quality: ProductQuality; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean; trickleIce?: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
 export type ProductAction =
   | { type: 'window.create'; url?: string; title?: string }
   | { type: 'window.activate' | 'window.close'; windowId: string }
@@ -31,6 +33,9 @@ export type ProductAction =
   | { type: 'site.set'; origin: string; tabletUa: boolean; tabId?: string };
 export interface ViewerViewport { devicePixelRatio: number; refreshHz?: number; windows: { windowId: string; width: number; height: number; visible: boolean }[] }
 export interface ProductActionResult { state: ProductState; application?: { status: 'pending'; reason: string } }
+export type OperationStatus = 'accepted' | 'applying' | 'committed' | 'rejected' | 'unknown' | 'expired';
+export interface ProductOperation { operationId: string; operationGeneration: string; action: ProductAction }
+export interface OperationReceipt { browserIncarnation?:string; resolved?:boolean; resolution?:'target-retired'; operationSequence?:string; operationId: string; operationGeneration: string; status: OperationStatus; revision?: number; application?: ProductActionResult['application']; error?: string }
 export interface RegistrationStatus { hasAdmin: boolean; credentialRequired: boolean; registrationOpen: boolean }
 export interface AdminStatus { registrationCredentialConfigured: boolean }
 export interface SocketMethods {
@@ -39,6 +44,7 @@ export interface SocketMethods {
   'files.cancel': { params: { requestId: string; uploadId?: string }; result: FileUploadResult };
   'admin.get': { params: Record<string, never>; result: AdminStatus };
   'admin.setRegistrationCredential': { params: { serverCredential: string }; result: AdminStatus };
+  'operation.status': { params: { operationId: string; operationGeneration: string }; result: OperationReceipt };
   action: { params: ProductAction; result: ProductActionResult };
   viewport: { params: ViewerViewport; result: ProductState };
   feedback: { params: ProductFeedback; result: { accepted: boolean } };

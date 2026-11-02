@@ -1,0 +1,66 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { DeferredEditingInput, MobileEditingState, editableInputMode, type EditableMessage } from '../client/mobile-editing-state';
+import { EditingInput } from '../client/editing-input';
+import type { Surface } from '../client/types';
+const view: Surface = { session: 's', id: 'v', instance: 'i', document: 'd', focus: 'f', x: 0, y: 0, width: 100, height: 100, deviceScaleFactor: 1 };
+const message = (revision: string, surface: Surface | null = view, active = true): EditableMessage => ({ type: 'input.editable', version: 1, revision, view: surface, editable: { type: active ? 1 : 0, active, flags: 0, selectionStart: 0, selectionEnd: 0, compositionStart: -1, compositionEnd: -1, caretX: 0, caretY: 0, caretWidth: 1, caretHeight: 10 } });
+test('ordered peer editable state rejects old focus/document resurrection and null clears', () => {
+  const state = new MobileEditingState();
+  assert.equal(state.receive(message('9'), [view]), true);
+  assert.equal(state.forView(view)?.revision, '9');
+  assert.equal(state.receive(message('10', null, false), [view]), true);
+  assert.equal(state.receive(message('9'), [view]), false);
+  assert.equal(state.forView(view), undefined);
+  const next = { ...view, document: 'new' };
+  assert.equal(state.receive(message('11'), [next]), true);
+  assert.equal(state.receive(message('10', next), [next]), false);
+  assert.equal(state.receive(message('12', next), [next]), true);
+  state.reconcile([{ ...next, focus: 'new-focus' }]);
+  assert.equal(state.current, undefined);
+});
+test('same-document resize keeps composition; blur and document invalidation discard old ends', () => {
+  const state = new MobileEditingState(), input = new EditingInput();
+  state.receive(message('1'), [view]); input.focus('attempt/doc'); input.start('attempt/doc');
+  state.reconcile([{ ...view, height: 50 }]);
+  assert.ok(state.forView(view)); assert.ok(input.composing);
+  state.receive(message('2', view, false), [view]);
+  if (!state.forView(view)) input.invalidate();
+  input.focus('attempt/new');
+  assert.equal(input.end('attempt/new', '旧', 1), undefined);
+  state.receive(message('3'), [view]); state.reconcile([{ ...view, document: 'new' }]);
+  assert.equal(state.current, undefined);
+});
+test('Chromium type mapping and malformed feedback never enable a keyboard', () => {
+  assert.deepEqual([0,1,2,3,4,5,6,7,14,15,17,18].map(editableInputMode), ['none','text','text','search','email','decimal','tel','url','text','text','text','none']);
+  const state = new MobileEditingState();
+  assert.equal(state.receive({ ...message('1'), editable: { ...message('1').editable, caretX: NaN } }, [view]), false);
+  assert.equal(state.receive(message('1', { ...view, focus: 'old' }), [view]), true);
+  assert.equal(state.forView(view), undefined);
+});
+test('early focus feedback is bounded until matching ACK and expires without reopening', () => {
+  const state = new MobileEditingState(), next = { ...view, focus: 'next' };
+  state.receive(message('1', next), [view], 0);
+  assert.equal(state.forView(view), undefined);
+  state.reconcile([next], 100); assert.ok(state.forView(next));
+  state.receive(message('2', view), [next], 200);
+  state.reconcile([view], 1700); assert.equal(state.forView(view), undefined);
+  state.receive(message('3', next), [view], 1800);
+  state.reconcile([{ ...next, document: 'new' }], 1801);
+  state.reconcile([next], 1802); assert.equal(state.forView(next), undefined);
+});
+test('resize defers a bounded composition with the same focus owner and drops old documents', () => {
+  const buffer = new DeferredEditingInput();
+  buffer.enqueue('peer/doc/focus', { type: 'ime_set', text: '你' });
+  buffer.enqueue('peer/doc/focus', { type: 'ime_set', text: '你好' });
+  buffer.enqueue('peer/doc/focus', { type: 'ime_commit', text: '你好' });
+  buffer.enqueue('peer/doc/focus', { type: 'key', action: 'down', key: 'Backspace' });
+  buffer.enqueue('peer/doc/focus', { type: 'key', action: 'up', key: 'Backspace' });
+  assert.deepEqual(buffer.drain('peer/doc/focus').map(event => event.type), ['ime_set', 'ime_commit', 'key', 'key']);
+  assert.deepEqual(buffer.drain('peer/doc/focus'), [], 'repeated ready cannot flush twice');
+  buffer.enqueue('peer/doc/focus', { type: 'ime_commit', text: '旧' });
+  assert.deepEqual(buffer.drain('peer/new/focus'), []);
+  assert.equal(buffer.enqueue('peer/doc/focus', { type: 'ime_set', text: 'x'.repeat(32769) }), false);
+  buffer.clear(); buffer.enqueue('peer/doc/focus', { type: 'ime_commit', text: 'expired' }, 0);
+  assert.deepEqual(buffer.drain('peer/doc/focus', 3000), []);
+});

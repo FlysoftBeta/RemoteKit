@@ -1,4 +1,7 @@
 import type { FileRequest } from '../shared/product';
+export function fileChooserAccept(request: Pick<FileRequest, 'accept' | 'acceptTypesOmitted'>): string[] {
+    return request.acceptTypesOmitted ? [] : request.accept;
+}
 export function acceptsFile(file: Pick<File, 'name' | 'type'>, accept: string[]) {
     if (!accept.length)
         return true;

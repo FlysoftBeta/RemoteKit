@@ -1,7 +1,9 @@
+import { DcFileClient } from './dc-file-client';
 import { barrierMatchesLayout, configurePresentationVideo, presentationBarrier, videoPlaneGeometry, VideoCompositorStats, type PresentationBarrier } from './video-presentation';
 import { CaptureLatency } from './capture-latency';
+import { ClockDomain, ClockProbe } from './clock-domain';
 import { ViewerAudioOutput, stereoOpusOffer } from './audio-output';
-import { mergeTouchMoves } from './touch-input';
+import { mergeTouchMoves, mergeGestureMomentum } from './touch-input';
 import { request, type Diagnostics, type Layout, type Surface, type CanvasPresentation } from './types';
 import { FrameEpochGate } from './frame-epoch';
 import { configureReceiveOffer, originalGatheredOffer, probeReceiveCapabilities, loadReceiveProfile, selectProductReceiveProfile, type ProductReceiveSelection, type ReceiveProfile } from './receive-profile';
@@ -10,14 +12,17 @@ import { PresentationDiagnostics } from './presentation-diagnostics';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource, type PresentationMode, type PixelRect } from './plane-source';
 import { MediaFeedbackSampler } from './media-feedback';
 import { createTrackProcessor, processorRtpTimestamp, type TrackProcessor, type ProcessorVideoFrame } from './track-processor';
-import type { RtcServerSignal } from '../shared/product';
+import type { ProductOperation, OperationReceipt, RtcServerSignal } from '../shared/product';
 import { SharedPlaneRenderer, type SharedFrame, type SharedPlaneResult } from './shared-plane-renderer';
+import { MobileEditingState } from './mobile-editing-state';
 
 export type ControlRpc = (method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback', params: unknown) => Promise<unknown>;
+export interface InputResult { sequence: string; surface: Surface; identity: string; event: Record<string, unknown>; ok: boolean; error?: string; touchState?: 'processed' | 'terminal-invalidated'; touchSequenceId?: string }
 
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
 interface ViewportRegistration { viewId: string; canvas: HTMLCanvasElement; ready: (ready: boolean) => void; renderer?: PlaneRenderer; remove?: () => void }
-interface VideoPlane { video: HTMLVideoElement; track: MediaStreamTrack; clip: HTMLDivElement; observer: ResizeObserver; callback?: number; ready: boolean; rtp?: number; stats: VideoCompositorStats; metadataRetries: number }
+interface VideoObservation { sequence: number; barrier: PresentationBarrier; peer: RTCPeerConnection; track: MediaStreamTrack; attempt: number; identity: PlaneIdentity; rtp: number; at: number; wall: number }
+interface VideoPlane { video: HTMLVideoElement; track: MediaStreamTrack; clip: HTMLDivElement; observer: ResizeObserver; callback?: number; ready: boolean; rtp?: number; stats: VideoCompositorStats; metadataRetries: number; observationSequence: number; pendingObservation?: VideoObservation }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource; shared?: boolean }
 export type FrameSource = 'video' | 'track-processor';
 interface ProcessorFrameOwner { frame: VideoFrame; rtp: number; source: ProcessorSource; readAt: number; sourceTimestamp: number }
@@ -25,12 +30,28 @@ interface ProcessorSource { processor: TrackProcessor; reader: ReadableStreamDef
 
 /** All endpoint wire adaptation lives here; the UI never owns recovery state. */
 export class RemoteTransport {
+  readonly mobileEditing = new MobileEditingState();
+  private freezeCopies = 0;
+  recordResizeFreezeCopy() { this.freezeCopies++; }
+  readonly files=new DcFileClient(()=>this.channel);
+  private productPending = new Map<string,{operation:ProductOperation;resolve:(receipt:OperationReceipt)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>;sent:boolean}>();
+  productAction(operation:ProductOperation):Promise<OperationReceipt> {
+    if(this.productPending.size>=64)return Promise.reject(new Error('待确认操作过多，请等待同步'));
+    return new Promise((resolve,reject)=>{ const timer=setTimeout(()=>{const sent=this.productPending.get(operation.operationId)?.sent??false;this.productPending.delete(operation.operationId);reject(Object.assign(new Error(sent?'操作结果未知，正在核对；请勿重复执行':'数据通道尚未连接，操作未发送'),{operationSent:sent}));},20000);this.productPending.set(operation.operationId,{operation,resolve,reject,timer,sent:false});this.flushProductActions(); });
+  }
+  private flushProductActions() { const channel=this.channel;if(channel?.readyState!=='open')return;for(const entry of this.productPending.values()){if(entry.sent)continue;try{channel.send(JSON.stringify({type:'product.action',version:1,...entry.operation}));entry.sent=true;}catch{/* Leave unsent intent pending until the bounded deadline. */}} }
   readonly audio = new ViewerAudioOutput(() => this.notify());
   readonly touchInputStats = { queued: 0, merged: 0, dropped: 0, cancelled: 0, sourceGestures: 0, arrivalFallbackGestures: 0 };
+  clientGestures = false;
   private queuedInput: { surface: Surface; event: Record<string, unknown>; epoch: string; generation: string }[] = [];
   private inputDrainTimer?: ReturnType<typeof setTimeout>;
+  private focusTimer?: ReturnType<typeof setTimeout>;
   private inputFocus = new Map<string, { token: string; identity: string; focused: boolean }>();
   inputIdentity(surface: Surface) { const known = this.inputFocus.get(surface.id); return `${this.attempt}:${surface.session}:${surface.id}:${surface.instance}:${surface.document}:${this.layout?.generation}:${this.layout?.epoch}:${known?.token === surface.focus ? known.identity : surface.focus}`; }
+  editingIdentity(surface: Surface) { return `${this.attempt}:${surface.session}:${surface.id}:${surface.instance}:${surface.document}`; }
+  private inputResultListeners = new Set<(result: InputResult) => void>();
+  private sentInput = new Map<string, { surface: Surface; identity: string; event: Record<string, unknown> }>();
+  subscribeInputResults(listener: (result: InputResult) => void) { this.inputResultListeners.add(listener); return () => { this.inputResultListeners.delete(listener); }; }
   ensureInputFocus(surface: Surface) { const known = this.inputFocus.get(surface.id); if (known?.focused && known.token === surface.focus) return; this.focus(surface, true); }
   touchStartWall(sampleAt: number) { return this.latency.inputStart(sampleAt, performance.now(), Date.now()); }
   trickleIce = false;
@@ -73,8 +94,9 @@ export class RemoteTransport {
   private productReceiveSelection?: ProductReceiveSelection;
   private receiveFallback?: Record<string, unknown>;
   private latency = new CaptureLatency();
-  private clockReading = false;
-  private clockAt = -Infinity;
+  private endpointClockProbe = new ClockProbe(this.latency.endpointClock);
+  private controlClock = new ClockDomain();
+  private controlClockProbe = new ClockProbe(this.controlClock);
   private feedbackReading = false;
   private processorFallback = false;
   private displayHzEstimate?: number;
@@ -178,7 +200,7 @@ export class RemoteTransport {
     const percentile=(values:number[])=>{const sorted=[...values].sort((a,b)=>a-b);return {samples:sorted.length,p50:sorted.length?sorted[Math.ceil(sorted.length*.5)-1]:null,p95:sorted.length?sorted[Math.ceil(sorted.length*.95)-1]:null};};
     const eligible=[...this.renderers].filter(r=>this.rendererCurrent(r)&&!r.view.stale);
     const backendReason=this.sharedRenderer?.backend==='shared-webgl'?'multiple-planes':eligible.length<2?'single-or-no-eligible-plane':/(?:Chrome|Chromium)\/89\./.test(navigator.userAgent)?'chrome89-compatible-2d':typeof WebGL2RenderingContext!=='function'?'webgl2-unavailable':new Set(eligible.map(r=>r.view.id)).size!==eligible.length?'duplicate-plane':this.sharedRenderer?.counts.fallbackReason??'waiting-for-shared-frame';
-    return {backend:this.presentationBackend === 'video' ? 'video' : this.presentationBackend === 'pending' ? 'video-negotiating' : this.sharedRenderer?.backend??'canvas-2d',backendReason:this.presentationFallbackReason ?? (this.presentationBackend === 'video' ? 'negotiated-video' : backendReason),videoCompositorByView:Object.fromEntries([...this.videoPlanes].map(([renderer, plane])=>[renderer.view.id,plane.stats.snapshot(performance.now())])),frameSource:this.activeFrameSource,frameSourceFallbackReason:this.signaling?.processorFallbackReason as string|undefined,visibility:globalThis.document?.visibilityState,shared:{...this.sharedRenderer?.counts},plane2dDraws:this.plane2dDraws,atlasSnapshotCopies:this.routing.snapshotFrames,mediaRefreshRequests:this.mediaRefreshRequests,scheduling:{metadataMissingAtRead:this.presentationFlow.metadataMissingAtRead,metadataBlockedSchedules:this.presentationFlow.metadataBlockedSchedules,drops:{...this.presentationFlow.drops},readToAuthorizeMs:percentile(this.presentationFlow.readToAuthorize),rafWaitMs:percentile(this.presentationFlow.rafWait)}};
+    return {backend:this.presentationBackend === 'video' ? 'video' : this.presentationBackend === 'pending' ? 'video-negotiating' : this.sharedRenderer?.backend??'canvas-2d',backendReason:this.presentationFallbackReason ?? (this.presentationBackend === 'video' ? 'negotiated-video' : backendReason),videoCompositorByView:Object.fromEntries([...this.videoPlanes].map(([renderer, plane])=>[renderer.view.id,plane.stats.snapshot(performance.now())])),frameSource:this.activeFrameSource,frameSourceFallbackReason:this.signaling?.processorFallbackReason as string|undefined,visibility:globalThis.document?.visibilityState,shared:{...this.sharedRenderer?.counts},plane2dDraws:this.plane2dDraws,freezeCopies:this.freezeCopies,atlasSnapshotCopies:this.routing.snapshotFrames,mediaRefreshRequests:this.mediaRefreshRequests,scheduling:{metadataMissingAtRead:this.presentationFlow.metadataMissingAtRead,metadataBlockedSchedules:this.presentationFlow.metadataBlockedSchedules,drops:{...this.presentationFlow.drops},readToAuthorizeMs:percentile(this.presentationFlow.readToAuthorize),rafWaitMs:percentile(this.presentationFlow.rafWait)}};
   }
   private routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {} as Record<string, number>, skippedRenderer: {} as Record<string, number> };
   private frameGate = new FrameEpochGate();
@@ -190,7 +212,7 @@ export class RemoteTransport {
   readonly encodedFrameSamples: { at: number; rtpTimestamp: number; layoutEpoch: string; encodedBytes?: number; keyframe?: boolean }[] = [];
   get presentationDiagnostics() { return this.getPresentationDiagnostics(); }
   getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { rendering:this.getRenderingDiagnostics(), touchInput:{...this.touchInputStats}, paintVersion: 'plane-source-v3', frameSource: this.activeFrameSource, processor: this.getProcessorDiagnostics(), presentationRouting: { mode: this.presentationMode, ...this.routing, fallback: { ...this.routing.fallback }, skippedRenderer: { ...this.routing.skippedRenderer } }, selectedViewId: this.selectedViewId, callbackRegistration: this.activeFrameSource === 'video' ? 'after-work' : 'not-applicable', presentationEndpoint: this.presentationBackend === 'video' ? 'video-compositor-observation' : 'canvas-js-submit', encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples, processorProfile: this.processorProfileSnapshot() } : {}) }; }
-  resetPresentationDiagnostics() { for (const plane of this.videoPlanes.values()) plane.stats = new VideoCompositorStats(); this.sharedRenderer?.resetDiagnostics();this.presentationFlow={metadataMissingAtRead:0,metadataBlockedSchedules:0,drops:{},readToAuthorize:[],rafWait:[]};this.plane2dDraws=0;this.mediaRefreshRequests=0;this.processorEvents = []; this.processorEventCursor = 0; this.processorEventCount = 0; this.processorCounts = { total: undefined, discarded: undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: this.processorCounts.width, height: this.processorCounts.height }; this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
+  resetPresentationDiagnostics() { for (const plane of this.videoPlanes.values()) plane.stats = new VideoCompositorStats(); this.sharedRenderer?.resetDiagnostics();this.presentationFlow={metadataMissingAtRead:0,metadataBlockedSchedules:0,drops:{},readToAuthorize:[],rafWait:[]};this.plane2dDraws=0;this.freezeCopies=0;this.mediaRefreshRequests=0;this.processorEvents = []; this.processorEventCursor = 0; this.processorEventCount = 0; this.processorCounts = { total: undefined, discarded: undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: this.processorCounts.width, height: this.processorCounts.height }; this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
   recordClientRaf(at: number) { this.presentation.clientRaf(at); }
   recordPresentationCost(name: string, at: number, durationMs: number, view: string | null = null) { this.presentation.cost(name, at, durationMs, view); }
   get displayReady() { if (this.presentationBackend === 'video') return [...this.videoPlanes].some(([renderer, plane]) => plane.ready && this.rendererCurrent(renderer)); if (this.presentationBackend === 'pending') return false; return this.frameGate.ready && this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout?.epoch; }
@@ -261,6 +283,15 @@ export class RemoteTransport {
     });
   }
   private preparePresentation(key: PresentationBarrier, channel: RTCDataChannel) {
+    if (this.channel !== channel || channel.readyState !== 'open') return;
+    const current = this.presentationBarrier;
+    // Reliable duplicate prepares identify the same hide transaction. Starting
+    // two new rAF turns here can starve its ACK under frequent layout retries;
+    // an already acknowledged transaction must also retain its ready planes.
+    if (current && current.barrierId === key.barrierId && current.outputGeneration === key.outputGeneration && current.layoutEpoch === key.layoutEpoch) return;
+    // The serial is monotonic within the current peer/attempt (disconnect
+    // clears it). A delayed old transaction cannot replace its newer barrier.
+    if (current && BigInt(key.barrierId) < BigInt(current.barrierId)) return;
     this.hideVideoPlanes(); for (const plane of this.videoPlanes.values()) plane.metadataRetries = 0; this.presentationBarrier = key; this.presentationBarrierAcknowledged = false;
     this.afterPresentationHidden(channel, () => {
       if (this.presentationBackend === 'canvas' || this.presentationBarrier !== key || !barrierMatchesLayout(key, this.layout)) return;
@@ -324,12 +355,12 @@ export class RemoteTransport {
   private hideVideoPlane(renderer: PlaneRenderer) {
     const plane = this.videoPlanes.get(renderer);
     if (!plane) return;
-    plane.clip.style.opacity = '0'; plane.ready = false; plane.rtp = undefined; plane.stats.resetObservation();
+    plane.clip.style.opacity = '0'; plane.ready = false; plane.rtp = undefined; plane.pendingObservation = undefined; plane.observationSequence++; plane.stats.resetObservation();
     this.viewPresentations.delete(renderer.view.id); renderer.ready(false);
   }
   private hideVideoPlanes() {
     for (const renderer of this.videoPlanes.keys()) this.hideVideoPlane(renderer);
-    this.queuedInput = []; this.pendingFocus = null;
+    this.queuedInput = []; this.cancelPendingFocus();
   }
   private detachVideoPlane(renderer: PlaneRenderer) {
     const plane = this.videoPlanes.get(renderer);
@@ -358,7 +389,7 @@ export class RemoteTransport {
       if (!this.videoPlanes.has(renderer)) return;
       this.hideVideoPlane(renderer); this.positionVideoPlane(renderer); this.requestPresentationRefresh();
     });
-    const plane: VideoPlane = { video, track: this.processorTrack, clip, observer, ready: false, stats: new VideoCompositorStats(), metadataRetries: 0 };
+    const plane: VideoPlane = { video, track: this.processorTrack, clip, observer, ready: false, stats: new VideoCompositorStats(), metadataRetries: 0, observationSequence: 0 };
     this.videoPlanes.set(renderer, plane); observer.observe(canvas); observer.observe(parent); this.positionVideoPlane(renderer);
     const peer = this.peer, attempt = this.attempt;
     const receive = (_now: number, metadata: VideoFrameCallbackMetadata) => {
@@ -383,17 +414,48 @@ export class RemoteTransport {
     return true;
   }
   private scheduleVideoMetadataRefresh() {
-    if (this.presentationBackend !== 'video' || this.videoMetadataRefreshTimer || ![...this.videoPlanes.values()].some(plane => !plane.ready && plane.metadataRetries < 3)) return;
+    // Narrow layouts retain mounted viewports for hidden Windows. Their old
+    // receivers stay hidden, but cannot consume retries or fail current planes.
+    const waitingPlanes = () => [...this.videoPlanes].filter(([renderer, plane]) =>
+      this.rendererCurrent(renderer) && !renderer.view.stale && !plane.ready).map(([, plane]) => plane);
+    if (this.presentationBackend !== 'video' || this.videoMetadataRefreshTimer || !waitingPlanes().length) return;
     const attempt = this.attempt;
     this.videoMetadataRefreshTimer = setTimeout(() => {
       this.videoMetadataRefreshTimer = undefined;
       if (attempt !== this.attempt || this.presentationBackend !== 'video') return;
-      const waiting = [...this.videoPlanes.values()].filter(plane => !plane.ready && plane.metadataRetries < 3);
+      const waiting = waitingPlanes();
       if (!waiting.length) return;
+      if (waiting.some(plane => plane.metadataRetries >= 3)) { this.fallbackPresentation('video-frame-metadata-timeout'); return; }
       for (const plane of waiting) plane.metadataRetries++;
       this.requestPresentationRefresh();
       this.scheduleVideoMetadataRefresh();
     }, Math.max(100, 1010 - (performance.now() - this.mediaRefreshAt)));
+  }
+  private videoObservationCurrent(renderer: PlaneRenderer, plane: VideoPlane, observation: VideoObservation) {
+    return this.presentationBackend === 'video' && this.videoPlanes.get(renderer) === plane && plane.pendingObservation === observation &&
+      plane.observationSequence === observation.sequence && this.peer === observation.peer && this.attempt === observation.attempt &&
+      this.processorTrack === observation.track && plane.track === observation.track && this.presentationBarrier === observation.barrier &&
+      this.presentationBarrierAcknowledged && barrierMatchesLayout(observation.barrier, this.layout) &&
+      document.visibilityState === 'visible' && this.rendererCurrent(renderer) && planeMatchesLayout(observation.identity, this.layout) &&
+      samePlane(observation.identity.view, renderer.view) && !renderer.view.stale &&
+      plane.video.videoWidth === this.layout?.width && plane.video.videoHeight === this.layout.height;
+  }
+  private matchPendingVideoObservations() {
+    for (const [renderer, plane] of this.videoPlanes) {
+      const observation = plane.pendingObservation;
+      if (!observation || !this.videoObservationCurrent(renderer, plane, observation)) continue;
+      const epoch = this.frameGate.epochFor(observation.rtp);
+      if (epoch === undefined) continue;
+      if (epoch !== observation.barrier.layoutEpoch || !this.positionVideoPlane(renderer)) { this.hideVideoPlane(renderer); continue; }
+      plane.pendingObservation = undefined; plane.metadataRetries = 0;
+      // Endpoint's ACK barrier guarantees stable geometry for every published
+      // frame in this interval. This recovers layout authorization, not the
+      // autonomous element's current RTP or a new compositor observation.
+      plane.ready = true; plane.rtp = undefined; plane.clip.style.opacity = '1';
+      this.latency.paint(observation.rtp, epoch, observation.at, observation.wall);
+      this.reconnect.connected(); this.markConnection('firstVideoCompositor');
+      renderer.ready(true); this.flushFocusedInput(); this.frameListeners.forEach(listener => listener());
+    }
   }
   private observeVideoPlane(renderer: PlaneRenderer, plane: VideoPlane, metadata: VideoFrameCallbackMetadata) {
     const at = performance.now(), rtp = (metadata as VideoFrameCallbackMetadata & { rtpTimestamp?: number }).rtpTimestamp;
@@ -401,6 +463,7 @@ export class RemoteTransport {
     const epoch = validRtp ? this.frameGate.epochFor(rtp) : undefined;
     this.markConnection('firstDecodedFrame');
     this.presentation.video(at, validRtp ? rtp : undefined, this.layout?.epoch, epoch, metadata);
+    plane.pendingObservation = undefined; plane.observationSequence++;
     const sameBarrier = this.presentationBarrierAcknowledged && this.presentationBarrier && barrierMatchesLayout(this.presentationBarrier, this.layout) &&
       document.visibilityState === 'visible' && this.rendererCurrent(renderer) && !renderer.view.stale &&
       plane.video.videoWidth === this.layout?.width && plane.video.videoHeight === this.layout.height;
@@ -414,12 +477,15 @@ export class RemoteTransport {
       // barrier. Retain an already authorized view when only signaling is late,
       // but don't attach a stale RTP identity to the autonomous video's pixels.
       if (epoch !== undefined) this.hideVideoPlane(renderer);
-      else { plane.stats.observe(at, metadata.presentedFrames, plane.ready); plane.rtp = undefined; }
+      else {
+        plane.stats.observe(at, metadata.presentedFrames, plane.ready); plane.rtp = undefined;
+        plane.pendingObservation = { sequence: plane.observationSequence, barrier: this.presentationBarrier!, peer: this.peer!, track: plane.track, attempt: this.attempt,
+          identity: { view: { ...renderer.view }, layoutEpoch: renderer.layoutEpoch, layoutGeneration: renderer.layoutGeneration }, rtp: rtp!, at, wall: Date.now() };
+      }
       this.scheduleVideoMetadataRefresh();
       return;
     }
-    // Authorization comes from THIS element's real callback, never another
-    // (possibly hidden) video. Late metadata is only considered on a new rVFC.
+    // Exact current-RTP reports require THIS element's real callback.
     plane.stats.observe(at, metadata.presentedFrames, plane.ready);
     plane.metadataRetries = 0; plane.rtp = rtp; plane.ready = true; plane.clip.style.opacity = '1';
     this.frameGate.observe(rtp); this.displayedRtp = rtp; this.displayedEpoch = epoch;
@@ -601,7 +667,7 @@ export class RemoteTransport {
         void video.play().catch(() => { if (this.peer === peer && this.video === video) this.update({ error: '视频播放被浏览器阻止，请重新连接。' }); });
       };
       this.bindChannel(peer.createDataChannel('remotekit', { ordered: true }));
-      peer.ondatachannel = event => this.bindChannel(event.channel);
+      peer.ondatachannel = event => { if (this.peer === peer && this.attempt === attempt) this.bindChannel(event.channel); };
       if (this.controlRpc && !this.diagnosticHttp) {
         this.markConnection('receiveProbeStart');
         if (!this.productReceiveSelection) this.productReceiveSelection = await selectProductReceiveProfile(navigator.userAgent, codecs);
@@ -647,7 +713,7 @@ export class RemoteTransport {
       negotiating = false;
       if (attempt !== this.attempt) return;
       this.mediaFeedback.start();
-      this.timer = setInterval(() => { void this.readStats(peer); }, this.controlRpc ? 1000 : 1500);
+      this.timer = setInterval(() => { this.sampleEndpointClock(); void this.readStats(peer); }, this.controlRpc ? 1000 : 1500);
     } catch (error) {
       if (attempt !== this.attempt) return;
       const trace = this.connectionAttempts[this.connectionAttempts.length - 1]; if (trace) { trace.error = error instanceof Error ? error.message : String(error); this.markConnection('failed'); }
@@ -746,8 +812,11 @@ export class RemoteTransport {
       if (this.signaling) this.signaling.processorFallbackReason = error instanceof Error ? error.message : String(error);
       this.stopProcessorPump(); this.activeFrameSource = 'video'; this.frameGate.observe(undefined);
       this.displayedRtp = undefined; this.displayedEpoch = undefined;
-      this.video.srcObject = new MediaStream([this.processorTrack]); this.startFramePump(this.peer);
-      void this.video.play().catch(() => this.connectionFailed('Video playback failed')); return;
+      const video = this.video, peer = this.peer, attempt = this.attempt, track = this.processorTrack;
+      video.srcObject = new MediaStream([track]); this.startFramePump(peer);
+      void video.play().catch(() => {
+        if (this.peer === peer && this.attempt === attempt && this.video === video && this.processorTrack === track && this.activeFrameSource === 'video') this.connectionFailed('Video playback failed');
+      }); return;
     }
     this.profileProcessor('error', { reason: error instanceof Error ? error.message : String(error) });
     this.frameGate.observe(undefined); this.pendingSnapshotRtp = undefined;
@@ -921,17 +990,31 @@ export class RemoteTransport {
     const surface = this.layout?.views.find(view => view.id === pending.view);
     if (pending.acknowledged && surface && surface.session === pending.session && surface.instance === pending.instance && surface.document === pending.document && this.layout?.generation === pending.generation && this.layout.epoch === pending.epoch) { this.pendingFocus = null; if (pending.focused) for (const event of pending.events) this.sendInput(surface, event); }
   }
+  private cancelPendingFocus(requestId = this.pendingFocus?.requestId) {
+    const pending = this.pendingFocus;
+    if (!pending || pending.requestId !== requestId) return false;
+    clearTimeout(this.focusTimer); this.focusTimer = undefined;
+    if (this.inputFocus.get(pending.view)?.identity === requestId) this.inputFocus.delete(pending.view);
+    this.pendingFocus = null;
+    return true;
+  }
   private bindChannel(channel: RTCDataChannel) {
+    if (channel !== this.channel) { this.endpointClockProbe.reset(); this.latency.reset(); }
     this.channel = channel;
     channel.bufferedAmountLowThreshold = 64 * 1024;
     channel.onbufferedamountlow = () => { if (this.channel === channel) this.drainInput(); };
-    channel.onopen = () => { if (this.channel === channel) { this.markConnection('dataChannelOpen'); this.negotiatePresentation(channel); this.update({ channel: '已连接' }); } };
+    channel.onopen = () => { if (this.channel === channel) { this.sampleEndpointClock(); this.flushProductActions(); this.markConnection('dataChannelOpen'); this.negotiatePresentation(channel); this.update({ channel: '已连接' }); } };
     channel.onclose = () => { if (this.channel === channel) this.connectionFailed('输入通道已关闭'); };
     channel.onerror = () => { if (this.channel === channel) this.connectionFailed('输入通道出现错误'); };
     channel.onmessage = event => {
       if (this.channel !== channel) return;
       try {
         const message = JSON.parse(String(event.data));
+        if (message.type === 'input.editable') { if (this.mobileEditing.receive(message, this.layout?.views ?? [])) this.notify(); return; }
+        if (message.type === 'input.capabilities') this.clientGestures = message.clientGestures === 1;
+        if (message.type === 'clock.pong') { this.endpointClockProbe.pong(message, performance.now(), Date.now()); return; }
+        if(this.files.handle(message))return;
+        if(message.type==='product.result' && message.version===1) { const entry=this.productPending.get(message.operationId);if(entry && entry.operation.operationGeneration===message.operationGeneration) {clearTimeout(entry.timer);this.productPending.delete(message.operationId);entry.resolve(message.result ?? {operationId:message.operationId,operationGeneration:message.operationGeneration,status:'rejected',error:String(message.error??'操作被拒绝')});} }
         if (message.type === 'presentation.mode') {
           if (message.version !== 1 || !['video', 'canvas'].includes(message.backend)) this.fallbackPresentation('invalid-presentation-mode');
           else if (this.presentationBackend === 'pending' && message.backend === 'video') {
@@ -946,13 +1029,14 @@ export class RemoteTransport {
           else this.preparePresentation(key, channel);
         }
         if (message.type === 'layout' && Array.isArray(message.views)) {
+          if (message.clientGestures !== undefined) this.clientGestures = message.clientGestures === 1;
           if(!this.layout||this.layout.epoch!==message.epoch||this.layout.generation!==message.generation) {
             this.sharedRenderer?.clear(); this.hideVideoPlanes();
             this.presentationBarrierAcknowledged = false;
           }
           this.markConnection('firstLayout');
           if (this.activeFrameSource === 'track-processor' && this.layout && (this.layout.epoch !== message.epoch || this.layout.generation !== message.generation || this.layout.width !== message.width || this.layout.height !== message.height || this.layout.views.length !== message.views.length || this.layout.views.some(view => !message.views.some((next: Surface) => samePlane(view, next))))) { this.closePendingProcessorFrame('layout-change'); this.closeLatestProcessorFrame(); this.frameGate.observe(undefined); }
-          this.layout = message;
+          this.layout = message; this.mobileEditing.reconcile(this.layout!.views);
           this.syncViewports();
           for (const [id, plane] of this.paintedPlanes) if (!planeMatchesLayout(plane.identity, this.layout)) { this.paintedPlanes.delete(id); this.viewPresentations.delete(id); }
           for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) { this.hideVideoPlane(renderer); renderer.ready(false); }
@@ -961,21 +1045,26 @@ export class RemoteTransport {
           this.authorizeFrame();
           const pending = this.pendingFocus;
           const surface = this.layout?.views.find(view => view.id === pending?.view);
-          if (pending && (!surface || surface.session !== pending.session || surface.instance !== pending.instance || surface.document !== pending.document || this.layout?.generation !== pending.generation || this.layout?.epoch !== pending.epoch)) this.pendingFocus = null;
+          if (pending && (!surface || surface.session !== pending.session || surface.instance !== pending.instance || surface.document !== pending.document || this.layout?.generation !== pending.generation || this.layout?.epoch !== pending.epoch)) this.cancelPendingFocus(pending.requestId);
           this.flushFocusedInput();
           this.notify();
         }
-        if (message.type === 'frame') { this.latency.record(message.rtpTimestamp, message.layoutEpoch, message); const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); if (message.layoutEpoch === this.layout?.epoch) this.scheduleVideoMetadataRefresh(); if (this.activeFrameSource === 'track-processor') this.profileProcessor('metadata', { rtp: message.rtpTimestamp, epoch: message.layoutEpoch }); this.authorizeFrame(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
+        if (message.type === 'frame') { this.latency.record(message.rtpTimestamp, message.layoutEpoch, message); const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); this.matchPendingVideoObservations(); if (message.layoutEpoch === this.layout?.epoch) this.scheduleVideoMetadataRefresh(); if (this.activeFrameSource === 'track-processor') this.profileProcessor('metadata', { rtp: message.rtpTimestamp, epoch: message.layoutEpoch }); this.authorizeFrame(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
         if (message.type === 'stats') this.update({ endpoint: message });
         if (message.type === 'input.result' || message.type === 'focus') {
+          if (message.type === 'input.result') {
+            const sequence = String(message.clientSequence), sent = this.sentInput.get(sequence);
+            this.sentInput.delete(sequence);
+            if (sent) for (const listener of this.inputResultListeners) listener({ ...sent, sequence, ok: message.ok === true, error: message.error, touchState: message.touchState === 'processed' || message.touchState === 'terminal-invalidated' ? message.touchState : undefined, touchSequenceId: typeof message.touchSequenceId === 'string' ? message.touchSequenceId : undefined });
+          }
           this.inputResults.push({ at: performance.now(), ...message }); if (this.inputResults.length > 128) this.inputResults.shift();
           if (message.type === 'input.result' && message.ok === false) this.update({ error: String(message.error ?? '远程输入被拒绝') });
           if (message.type === 'focus' && this.layout) {
             const pending = this.pendingFocus, token = message.token;
             const view = pending && this.layout.views.find(view => view.id === pending.view && view.session === pending.session && view.instance === pending.instance && view.document === pending.document);
             const matches = pending && view && message.focusRequestId === pending.requestId && message.layoutEpoch === pending.epoch && this.layout.epoch === pending.epoch && this.layout.generation === pending.generation;
-            if (matches && message.ok === false) { this.pendingFocus = null; this.update({ error: String(message.error ?? '远程焦点请求被拒绝') }); }
-            if (matches && message.ok && token && token.view === pending.view && token.session === pending.session && token.instance === pending.instance && token.document === pending.document && typeof token.focus === 'string') { view.focus = token.focus; const focus = this.inputFocus.get(view.id); if (focus?.identity === pending.requestId) focus.token = token.focus; pending.acknowledged = true; this.flushFocusedInput(); }
+            if (matches && message.ok === false) { this.cancelPendingFocus(pending.requestId); this.update({ error: String(message.error ?? '远程焦点请求被拒绝') }); }
+            if (matches && message.ok && token && token.view === pending.view && token.session === pending.session && token.instance === pending.instance && token.document === pending.document && typeof token.focus === 'string') { clearTimeout(this.focusTimer); this.focusTimer = undefined; view.focus = token.focus; const focus = this.inputFocus.get(view.id); if (focus?.identity === pending.requestId) focus.token = token.focus; pending.acknowledged = true; this.mobileEditing.reconcile(this.layout.views); this.flushFocusedInput(); this.notify(); }
           }
         }
         if (message.type === 'error') this.update({ error: String(message.message ?? 'Endpoint 返回错误') });
@@ -983,22 +1072,22 @@ export class RemoteTransport {
     };
   }
   sendInput(surface: Surface, event: Record<string, unknown>) {
-    const terminalTouch = event.type === 'touch' && (event.action === 'cancel' || event.action === 'end');
-    if (event.type === 'touch' && event.inputIdentity !== undefined && event.inputIdentity !== this.inputIdentity(surface)) { this.touchInputStats.dropped++; return false; }
+    const terminalTouch = (event.type === 'touch' || event.type === 'gesture') && (event.action === 'cancel' || event.action === 'end' || event.action === 'momentumEnd');
+    if ((event.type === 'touch' || event.type === 'gesture') && event.inputIdentity !== undefined && event.inputIdentity !== this.inputIdentity(surface)) { this.touchInputStats.dropped++; return false; }
     if (this.channel?.readyState !== 'open' || !this.layout || !terminalTouch && !this.canInput(surface.id)) { this.traceInput('blocked', surface, event, this.channel?.readyState !== 'open' ? 'channel' : 'unmatched-or-unpainted-frame'); return false; }
-    if (this.pendingFocus?.view === surface.id) { if (!this.pendingFocus.focused) { this.traceInput('blocked', surface, event, 'blur-pending'); return false; } const events = this.pendingFocus.events, merged = events.length ? mergeTouchMoves(events[events.length - 1], event) : undefined; if (merged) { events[events.length - 1] = merged; this.touchInputStats.merged++; return true; } if (events.length < (terminalTouch ? 128 : 112)) { events.push(event); this.traceInput('queued-focus', surface, event); return true; } this.traceInput('blocked', surface, event, 'focus-queue-full'); this.touchInputStats.dropped++; return false; }
+    if (this.pendingFocus?.view === surface.id) { if (!this.pendingFocus.focused) { this.traceInput('blocked', surface, event, 'blur-pending'); return false; } const events = this.pendingFocus.events, merged = events.length ? (mergeTouchMoves(events[events.length - 1], event) ?? mergeGestureMomentum(events[events.length - 1], event)) : undefined; if (merged) { events[events.length - 1] = merged; this.touchInputStats.merged++; return true; } if (events.length < (terminalTouch ? 128 : 112)) { events.push(event); this.traceInput('queued-focus', surface, event); return true; } this.traceInput('blocked', surface, event, 'focus-queue-full'); this.touchInputStats.dropped++; return false; }
     const current = this.layout.views.find(view => view.id === surface.id);
     if (!current || !samePlane(current, surface)) { this.traceInput('blocked', surface, event, 'stale-surface'); return false; }
     if (event.type === 'touch') { if (event.action === 'start' && event.sampleElapsedUs === 0) { if (event.clockMode === 'source') this.touchInputStats.sourceGestures++; else this.touchInputStats.arrivalFallbackGestures++; } if (event.action === 'cancel') this.touchInputStats.cancelled++; }
     const queued = { surface: { ...current }, event, epoch: this.layout.epoch, generation: this.layout.generation };
     const previous = this.queuedInput[this.queuedInput.length - 1];
-    const merged = previous && previous.surface.id === current.id && previous.surface.focus === current.focus && previous.epoch === queued.epoch && previous.generation === queued.generation ? mergeTouchMoves(previous.event, event) : undefined;
+    const merged = previous && previous.surface.id === current.id && previous.surface.focus === current.focus && previous.epoch === queued.epoch && previous.generation === queued.generation ? (mergeTouchMoves(previous.event, event) ?? mergeGestureMomentum(previous.event, event)) : undefined;
     if (merged) { previous.event = merged; this.touchInputStats.merged++; }
     else {
       // A bounded backlog reserves terminal events by discarding obsolete move
       // packets, never start/end/cancel. Recent move history remains in batches.
       if (this.queuedInput.length >= (terminalTouch ? 128 : 112)) {
-        const expendable = this.queuedInput.findIndex(item => item.event.type === 'touch' && item.event.action === 'move');
+        const expendable = this.queuedInput.findIndex(item => item.event.type === 'touch' && item.event.action === 'move' && item.event.gestureMode !== 'client-v1');
         if (expendable >= 0) { this.queuedInput.splice(expendable, 1); this.touchInputStats.dropped++; }
         else { this.touchInputStats.dropped++; return false; }
       }
@@ -1014,20 +1103,26 @@ export class RemoteTransport {
       if (!current || !samePlane(current, item.surface) || current.focus !== item.surface.focus || this.layout.epoch !== item.epoch || this.layout.generation !== item.generation) { this.queuedInput.shift(); this.touchInputStats.dropped++; continue; }
       if (!this.canInput(current.id)) break;
       this.queuedInput.shift();
-      this.channel.send(JSON.stringify({ type: 'input', view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, outputGeneration: item.generation, layoutEpoch: item.epoch, sequence: String(++this.sequence), event: item.event }));
+      const sequence = String(++this.sequence);
+      this.sentInput.set(sequence, { surface: { ...current }, identity: this.inputIdentity(current), event: item.event });
+      while (this.sentInput.size > 256) this.sentInput.delete(this.sentInput.keys().next().value!);
+      this.channel.send(JSON.stringify({ type: 'input', view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, outputGeneration: item.generation, layoutEpoch: item.epoch, sequence, event: item.event }));
       this.traceInput('sent', current, item.event);
     }
     if (this.queuedInput.length) this.inputDrainTimer = setTimeout(() => this.drainInput(), 10);
   }
   focus(surface: Surface, focused: boolean) {
+    if (!focused) { this.mobileEditing.clear(); this.notify(); }
     if (this.channel?.readyState !== 'open' || !this.layout || !this.canInput(surface.id)) return;
     const current = this.layout.views.find(view => view.id === surface.id);
     if (!current || !samePlane(current, surface)) return;
     const pending = this.pendingFocus;
     if (pending && pending.view === current.id && pending.session === current.session && pending.instance === current.instance && pending.document === current.document && pending.epoch === this.layout.epoch && pending.generation === this.layout.generation && pending.focused === focused) return;
+    this.cancelPendingFocus();
     const requestId = `${this.attempt}:${++this.focusSequence}`;
     this.inputFocus.set(current.id, { token: current.focus, identity: requestId, focused });
     this.pendingFocus = { requestId, acknowledged: false, focused, view: current.id, session: current.session, token: current.focus, instance: current.instance, document: current.document, generation: this.layout.generation, epoch: this.layout.epoch, events: [] };
+    this.focusTimer = setTimeout(() => { if (this.pendingFocus?.requestId === requestId && !this.pendingFocus.acknowledged && this.cancelPendingFocus(requestId)) this.update({ error: '远程焦点请求超时' }); }, 2000);
     this.channel.send(JSON.stringify({ type: 'focus', focusRequestId: requestId, view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, layoutEpoch: this.layout.epoch, focused }));
   }
   private async readStats(peer: RTCPeerConnection) {
@@ -1082,17 +1177,24 @@ export class RemoteTransport {
     const rpc = this.controlRpc, attempt = this.attempt;
     if (!rpc || this.diagnosticHttp || peer !== this.peer) return;
     const now = performance.now();
-    if (!this.clockReading && now - this.clockAt > 5000) {
-      this.clockReading = true; this.clockAt = now; const wall = Date.now();
+    this.sampleEndpointClock();
+    const wall = Date.now(), ping = this.controlClockProbe.begin(now, wall);
+    if (ping) {
       void rpc('clock.ping', { clientTime: wall }).then(value => {
-        if (attempt === this.attempt && peer === this.peer) this.latency.calibrate(now, wall, performance.now(), Date.now(), (value as { serverTime: number }).serverTime);
-      }).catch(() => {}).finally(() => { if (attempt === this.attempt) this.clockReading = false; });
+        if (attempt === this.attempt && peer === this.peer) this.controlClockProbe.complete(ping.requestId, performance.now(), Date.now(), (value as { serverTime: number }).serverTime);
+      }).catch(() => {});
     }
     if (this.feedbackReading) return;
-    const report = this.latency.report(now, Date.now(), document.visibilityState === 'visible');
+    const report = this.latency.report(now, Date.now(), document.visibilityState === 'visible', this.controlClock);
     if (!report) return;
     this.update({ presentationEstimate: report }); this.feedbackReading = true;
     void rpc('feedback', { ...report, displayHzEstimate: this.displayHzEstimate }).catch(() => {}).finally(() => { if (attempt === this.attempt) this.feedbackReading = false; });
+  }
+  private sampleEndpointClock() {
+    const channel = this.channel;
+    if (!channel || channel.readyState !== 'open' || channel.bufferedAmount > 65536) return;
+    const ping = this.endpointClockProbe.begin(performance.now(), Date.now());
+    if (ping) { try { channel.send(JSON.stringify(ping)); } catch { /* The next bounded sample retries if the channel remains open. */ } }
   }
   private refreshNetworkStats(peer: RTCPeerConnection) {
     const connectionId = this.connectionId;
@@ -1110,6 +1212,7 @@ export class RemoteTransport {
     this.closeLocal();
   }
   private closeLocal() {
+    this.mobileEditing.reset();
     this.audio.detach();
     clearTimeout(this.videoMetadataRefreshTimer); this.videoMetadataRefreshTimer = undefined;
     clearTimeout(this.presentationNegotiationTimer); this.presentationNegotiationTimer = undefined;
@@ -1121,7 +1224,7 @@ export class RemoteTransport {
     this.sharedRenderer?.dispose();this.sharedRenderer=undefined;this.mediaRefreshAt=-Infinity;
     clearTimeout(this.inputDrainTimer); this.inputDrainTimer = undefined; this.queuedInput = []; this.inputFocus.clear();
     this.signalAttemptId = undefined; this.remoteSignalConnection = undefined; this.remoteDescriptionReady = false; this.remoteIce = []; this.localIce = []; this.iceDelivery = Promise.resolve(); this.localIceDelivery = Promise.resolve();
-    this.attempt++; this.latency.reset(); this.clockReading = false; this.clockAt = -Infinity; this.feedbackReading = false; this.processorTrack = undefined; this.displayHzEstimate = undefined;
+    this.attempt++; this.sentInput.clear(); this.latency.reset(); this.endpointClockProbe.reset(); this.controlClockProbe.reset(); this.feedbackReading = false; this.processorTrack = undefined; this.displayHzEstimate = undefined;
     this.stopProcessorPump();
     this.mediaFeedback.stop(); this.statsReadingPeer = undefined; this.networkRead = undefined; this.videoPresentedFrames = undefined;
     if (this.frameCallback !== undefined) this.video.cancelVideoFrameCallback?.(this.frameCallback);
@@ -1134,8 +1237,9 @@ export class RemoteTransport {
     this.endpointGeneration = undefined;
     if (this.connectionId) { void this.rtcRequest('rtc.close', { connectionId: this.connectionId }).catch(() => {}); this.connectionId = undefined; }
     clearInterval(this.timer);
+    this.files.disconnect();
     const peer = this.peer; this.peer = null; this.channel = null; peer?.close();
-    this.video.pause(); this.video.srcObject = null; this.video.remove?.(); this.layout = null;
+    this.video.pause(); this.video.srcObject = null; this.video.remove?.(); this.layout = null; this.clientGestures = false;
     this.pendingFocus = null;
     this.diagnostics = { connection: '未连接', channel: '未连接' }; this.notify();
   }

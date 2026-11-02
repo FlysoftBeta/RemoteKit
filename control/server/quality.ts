@@ -34,7 +34,7 @@ export class QualityController {
   }
   snapshot(workspace: ProductWorkspace, viewport?: ViewerViewport, now = Date.now(), manual = false, applied: AppliedMediaPolicy | null = null): ProductQuality {
     const preset = presets[workspace.settings.qualityPreference], scale = workspace.settings.clientScaleOverride ?? viewport?.devicePixelRatio ?? 1;
-    const visible = viewport?.windows.filter(w => w.visible && workspace.windows.some(window => window.id === w.windowId && !!window.activeTabId) && (workspace.layoutMode !== 'focused' || w.windowId === workspace.activeWindowId)) ?? [];
+    const visible = viewport?.windows.filter(w => w.visible && workspace.windows.some(window => window.id === w.windowId && !!window.activeTabId && !workspace.tabs.some(tab => tab.id === window.activeTabId && tab.kind === 'start')) && (workspace.layoutMode !== 'focused' || w.windowId === workspace.activeWindowId)) ?? [];
     const area = visible.reduce((total, w) => total + w.width * w.height, 0), areaBase = workspace.settings.qualityPreference === 'quality' ? 1 : area ? Math.min(1, Math.sqrt(preset.pixels / (area * scale * scale))) : 1;
     let base = areaBase, resourceLimitation: string | null = null;
     if (!manual) {

@@ -19,6 +19,13 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
+def copy_endpoint(source, binary, streaming):
+    """Normalize CLI overrides to the executable path used by package launchers."""
+    target = binary / ('endpoint_service.exe' if streaming else 'endpoint_client.exe')
+    shutil.copy2(source, target)
+    return target
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--chromium-root', type=Path, default=Path(r'C:\src\chromium\src'))
@@ -100,7 +107,7 @@ def main():
         target = binary / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-    shutil.copy2(endpoint, binary / endpoint.name)
+    copy_endpoint(endpoint, binary, streaming)
     if streaming:
         vpl = endpoint.parent / 'libvpl.dll'
         if not vpl.is_file(): raise FileNotFoundError('Build endpoint Release dispatcher: ' + str(vpl))

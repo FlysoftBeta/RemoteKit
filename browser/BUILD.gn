@@ -26,8 +26,18 @@ template("browser_executable") {
     "compat.h",
     "compat_renderer.cc",
     "compat_renderer.h",
+    "client_gesture_bridge.cc",
+    "client_gesture_bridge.h",
+    "client_gesture_packet.cc",
+    "client_gesture_packet.h",
+    "client_input_timing.h",
+    "client_touch_retirement.h",
     "control_server.cc",
     "control_server.h",
+    "control_response.cc",
+    "control_response.h",
+    "file_chooser_accept.cc",
+    "file_chooser_accept.h",
     "devtools.cc",
     "devtools.h",
     "gpu_atlas.cc",
@@ -37,14 +47,18 @@ template("browser_executable") {
     "main.cc",
     "main_delegate.cc",
     "main_delegate.h",
+    "navigation_error_page.h",
     "navigation_state.cc",
     "navigation_state.h",
+    "navigation_operations.h",
     "offscreen_host.cc",
     "offscreen_host.h",
     "page_requests.cc",
     "page_requests.h",
     "profile_services.cc",
     "profile_services.h",
+    "profile_network_state.cc",
+    "profile_network_state.h",
     "webview.cc",
     "webview.h",
   ]
@@ -59,6 +73,10 @@ template("browser_executable") {
     "//build/win:default_exe_manifest",
     "//components/download/public/common:public",
     "//components/embedder_support:user_agent",
+    "//components/headless/clipboard",
+    "//components/os_crypt/async/browser",
+    "//components/os_crypt/async/browser:dpapi_key_provider",
+    "//components/prefs",
     "//components/input",
     "//components/services/quarantine",
     "//components/services/quarantine/public/mojom",
@@ -91,6 +109,8 @@ template("browser_executable") {
     "//ui/display",
     "//ui/gfx",
     "//ui/events/platform",
+    "//ui/events/blink",
+    "//ui/events:gesture_detection",
     "//ui/views",
     "//ui/views/controls/webview",
     "//ui/wm",
@@ -113,6 +133,13 @@ browser_executable("remotekit_browser_demo") {
   demo = true
 }
 
+executable("remotekit_control_payload_probe") {
+  testonly = true
+  sources = [ "control_payload_probe.cc", "control_response.cc", "file_chooser_accept.cc" ]
+  include_dirs = [ "//remotekit" ]
+  deps = [ "//base", "//net" ]
+}
+
 executable("remotekit_capture_render_rate_probe") {
   testonly = true
   sources = [ "capture_render_rate_probe.cc" ]
@@ -121,6 +148,81 @@ executable("remotekit_capture_render_rate_probe") {
     "//components/viz/common",
     "//components/viz/service",
     "//mojo/core/embedder",
+  ]
+}
+
+executable("remotekit_capture_delivery_probe") {
+  testonly = true
+  sources = [ "capture_delivery_probe.cc" ]
+  deps = [
+    "//base",
+    "//components/viz/host",
+    "//components/viz/service",
+    "//media",
+    "//media/capture/mojom:video_capture_buffer",
+    "//mojo/core/embedder",
+    "//mojo/public/cpp/bindings",
+    "//services/viz/privileged/mojom/compositing",
+    "//ui/gfx",
+  ]
+}
+
+executable("remotekit_begin_frame_probe") {
+  testonly = true
+  sources = [ "begin_frame_probe.cc" ]
+  deps = [
+    "//base",
+    "//components/viz/common",
+    "//components/viz/service",
+    "//gpu/command_buffer/service",
+    "//mojo/core/embedder",
+    "//services/viz/privileged/mojom/compositing",
+  ]
+}
+
+executable("remotekit_profile_isolation_probe") {
+  testonly = true
+  sources = [
+    "profile_isolation_probe.cc",
+    "profile_network_state.cc",
+    "profile_network_state.h",
+  ]
+  include_dirs = [ "//remotekit" ]
+  deps = [
+    "//base",
+    "//components/headless/clipboard",
+    "//components/os_crypt/async/browser",
+    "//components/os_crypt/async/browser:dpapi_key_provider",
+    "//components/prefs",
+    "//mojo/core/embedder",
+    "//mojo/public/cpp/bindings",
+    "//services/network/public/cpp",
+    "//services/network/public/mojom",
+    "//ui/base/clipboard",
+  ]
+}
+
+executable("remotekit_scroll_handoff_probe") {
+  testonly = true
+  defines = [ "INSIDE_BLINK" ]
+  sources = [ "scroll_handoff_probe.cc" ]
+  include_dirs = [ "//remotekit" ]
+  deps = [ "//base", "//cc", "//third_party/blink/public:blink" ]
+}
+
+executable("remotekit_client_gesture_probe") {
+  testonly = true
+  # Includes the portable Endpoint model, like the production embedder.
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
+  sources = [ "client_gesture_probe.cc", "client_gesture_packet.cc", "client_gesture_packet.h", "client_input_timing.h", "client_touch_retirement.h" ]
+  include_dirs = [ "//remotekit", "//remotekit/endpoint/include" ]
+  deps = [
+    "//base",
+    "//components/input",
+    "//third_party/blink/public:blink",
+    "//ui/events:gesture_detection",
+    "//ui/events:velocity_tracker",
+    "//ui/events/blink",
   ]
 }
 

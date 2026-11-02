@@ -41,6 +41,36 @@ void EncoderWorker::Error(const std::string& error) {
  failed_=true;std::lock_guard lock(stats_->mutex);stats_->error=error;
  fprintf(stderr,"encoder %llu: %s\n",encoder_,error.c_str());
 }
+bool EncoderWorker::RetainUnsafeInputs(Job* additional) {
+ if(!hardware_ || hardware_->CanReleaseInputs())return false;
+ // Frame callbacks represent pool leases, independently of COM lifetime.
+ // This owner is transferred to the failed backend's process-lifetime store;
+ // no callback is invoked and no source/surface can be recycled on timeout.
+ struct RetainedInputs {
+  std::vector<Job> jobs;
+  std::vector<ComPtr<ID3D11Texture2D>> surfaces,sources;
+ };
+ auto retained=std::make_shared<RetainedInputs>();
+ retained->surfaces=surfaces_;
+ for(auto& [cookie,job]:inflight_) {
+  retained->jobs.push_back(job);
+  ComPtr<ID3D11Texture2D> source;
+  source.Attach(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture));
+  retained->sources.push_back(std::move(source));
+  --stats_->inflight;++stats_->error_drops;++stats_->dropped;
+  remotekit::TailRefreshLease::Finish(job.frame,false);
+  if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
+ }
+ inflight_.clear();
+ if(additional) {
+  retained->jobs.push_back(*additional);
+  ComPtr<ID3D11Texture2D> source;
+  source.Attach(static_cast<ID3D11Texture2D*>(additional->frame.d3d11_texture));
+  retained->sources.push_back(std::move(source));
+ }
+ hardware_->HoldInputsUntilProcessExit(std::move(retained));
+ return true;
+}
 bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  Stop(); // WebRTC may configure an existing encoder after a size transition.
  {std::lock_guard lock(stats_->mutex);stats_->applied_target_usage.reset();stats_->requested_target_usage=0;}
@@ -253,14 +283,18 @@ void EncoderWorker::Run() {
    if(status!=CodecResult::accepted) {
     // Submit errors may follow partial driver submission. Close the backend
     // before releasing this job, just as Run's inflight cancellation does.
+    const bool retained=RetainUnsafeInputs(&job);
     hardware_.reset();
     ++stats_->error_drops;
     remotekit::TailRefreshLease::Finish(job.frame,false);
     RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="hardware_submit_error";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
     if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
     ++stats_->dropped;
-    job.frame.release(job.frame.release_context,job.frame.frame_id);
-    static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();Error(error);break;
+    if(!retained) {
+     job.frame.release(job.frame.release_context,job.frame.frame_id);
+     static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
+    }
+    Error(error);break;
    }
    free_.pop_front();inflight_.emplace(job.cookie,job);++stats_->inflight;++stats_->submitted;if(key)++stats_->keyframes_submitted;
   }
@@ -277,8 +311,9 @@ void EncoderWorker::Run() {
   for(auto& unit:completed)Complete(unit);
   if(!drained && !error.empty())Error(error);
  }
- // Destroy is the hardware cancellation boundary before returning every held
- // lease, including error paths and queued jobs never submitted to hardware.
+ // A backend without a proven cancellation boundary keeps unresolved leases
+ // with the quarantined session. Healthy backends close before lease release.
+ RetainUnsafeInputs();
  hardware_.reset();
  for(auto& [cookie,job]:inflight_) {
   --stats_->inflight;if(failed_)++stats_->error_drops;else ++stats_->cancelled_drops;

@@ -16,7 +16,7 @@
 
 Browser使用固定Chromium GN构建，不装配Chrome Browser/TabStripModel/BrowserView；Endpoint用独立CMake/Ninja，不包含Chromium私有头。SDK以C ABI连接Mojo及libwebrtc，跨DLL不传C++运行时对象。独立endpoint_service是默认入口，旧Browser harness/native client仅显式demo目标保留。
 
-Control启动Endpoint并以JSONL管理；Endpoint持有Browser本地Mojo连接。网络用户只通过已认证Control/RTC会话进入，不把Session ID当凭据。详细接口见[串流协议](streaming-protocol.md)、[本地Browser协议](control-protocol.md)、[SDK](sdk.md)。
+默认单机包由Control启动Endpoint并以JSONL管理；远端模式由独立Endpoint主动建立认证WSS管理连接。Control与Endpoint不要求共享文件系统或时钟，管理断线不销毁已有Session/RTC。Endpoint持有Browser本地Mojo连接。网络用户只通过已认证Control/RTC会话进入，不把Session ID当凭据。详细接口见[串流协议](streaming-protocol.md)、[本地Browser协议](control-protocol.md)、[SDK](sdk.md)。
 
 ## 产品状态、生命周期与恢复
 
@@ -58,7 +58,9 @@ Endpoint使用oneVPL异步H264或显式NVENC，libwebrtc负责网络控制与pac
 
 Browser本地高精度pacer驱动external BeginFrame，每host最多一个未ACK tick；过期tick合并，不向Endpoint逐帧索取刷新。静态按需出帧，Endpoint空闲后做一次尾IDR，不无限重复。源预算结合显示/网络反馈，Client队列及编码队列有界。
 
-输入经DataChannel进入Endpoint，校验Session/peer、页面完整token和输出代次；连接内客户端序号与Session持续Browser序号分层，重登录不会回退Browser序号。焦点确认先于排队输入，键鼠/IME/touch保序，移动可合并。Browser使用实际focused widget及OOPIF路由，触控沿官方ACK/gesture路径。
+输入经DataChannel进入Endpoint，校验Session/peer、页面完整token和输出代次；连接内客户端序号与Session持续Browser序号分层，重登录不会回退Browser序号。焦点确认先于排队输入，键鼠/IME/touch保序，移动只在不丢语义时合并。Client-v1触控由Client计算候选手势与完整惯性，Browser保留官方逐包ACK、preventDefault和touch-action裁决及OOPIF路由；不并行运行两套默认手势识别，见[Client手势](client-gestures.zh-CN.md)。
+
+常规产品动作亦经当前RTC送Endpoint，再由Control唯一提交器受理、持久化和对账。操作收据与乐观界面不是第二份产品真相；受理、运行、提交、拒绝和结果未知分开，未知操作不自动重放。空起始页可以没有源渲染需求，但保留Session数据通道，新增网页不因此重建连接。
 
 坐标按Client CSS、letterbox、编码矩形、mediaScale/DPR转换到viewport DIP，再到widget/screen。IME的composition/commit/cancel/finish使用UTF-16；完整replacement range/span、逐字符候选几何仍有扩展空间。
 

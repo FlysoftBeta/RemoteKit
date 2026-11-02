@@ -22,6 +22,7 @@
 #include "remotekit/browser/harness.h"
 #include "remotekit/browser/webview.h"
 #include "remotekit/browser/browser_context.h"
+#include "remotekit/browser/service_input_policy.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -78,14 +79,16 @@ class BrowserClient final : public content::ContentBrowserClient {
   std::string GetProduct() override { return embedder_support::GetProductAndVersion(); }
   blink::UserAgentMetadata GetUserAgentMetadata() override { return ChromeUserAgentMetadata(); }
   std::string GetAcceptLangs(content::BrowserContext*) override { return "en-US,en"; }
-  void ConfigureNetworkContextParams(content::BrowserContext*,
-                                     bool,
-                                     const base::FilePath&,
+  void ConfigureNetworkContextParams(content::BrowserContext* context,
+                                     bool in_memory,
+                                     const base::FilePath& relative_partition_path,
                                      network::mojom::NetworkContextParams* params,
                                      cert_verifier::mojom::CertVerifierCreationParams*) override {
     params->user_agent = ChromeUserAgent();
     params->accept_language = "en-US,en";
     params->enable_zstd = true;
+    static_cast<BrowserContext*>(context)->ConfigureNetworkContext(
+        in_memory, relative_partition_path, params);
   }
 };
 }  // namespace
@@ -104,6 +107,7 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   // Service input uses logical metrics, independent of this host's monitor and
   // native touch preferences. The explicit demo keeps its native host policy.
   command.AppendSwitch("remotekit-service-input");
+  ConfigureServiceScrollPolicy(command);
 #endif
   if (command.HasSwitch("gpu-output")) {
     // This shown, nonzero Aura host is clipped out of the endpoint window.

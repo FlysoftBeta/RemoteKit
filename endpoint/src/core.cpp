@@ -44,6 +44,15 @@ Status ValidateInput(const InputPayload& p) {
         else if constexpr (std::is_same_v<T, WheelInput>)
           return Finite(v.x, v.y) && Finite(v.delta_x, v.delta_y);
         else if constexpr (std::is_same_v<T, TouchInput>) {
+          if (v.gestures.size() > 8 || (!v.client_gestures && !v.gestures.empty()) ||
+              (v.client_gestures && !v.clock)) return false;
+          for (const auto& g : v.gestures)
+            if (g.type < TouchInput::Gesture::Type::tap_down || g.type > TouchInput::Gesture::Type::fling_cancel ||
+                !Finite(g.x, g.y) || !Finite(g.delta_x, g.delta_y) ||
+                !Finite(g.velocity_x, g.velocity_y) || !std::isfinite(g.scale) || g.scale <= 0 ||
+                std::abs(g.x) > 1e7 || std::abs(g.y) > 1e7 || std::abs(g.delta_x) > 1e7 ||
+                std::abs(g.delta_y) > 1e7 || std::abs(g.velocity_x) > 1e7 || std::abs(g.velocity_y) > 1e7 || g.scale > 100)
+              return false;
           if (v.samples.size() > 32 || (!v.samples.empty() && (!v.clock || v.action != TouchInput::Action::move)))
             return false;
           if (v.clock && (v.clock->sequence_id.empty() || v.clock->sequence_id.size() > 128 ||
@@ -69,7 +78,12 @@ Status ValidateInput(const InputPayload& p) {
                 t.pressure > 1 || !ids.insert(t.id).second)
               return false;
           return true;
-        } else if constexpr (std::is_same_v<T, KeyInput>)
+        } else if constexpr (std::is_same_v<T, GestureInput>)
+          return v.action >= GestureInput::Action::momentum && v.action <= GestureInput::Action::cancel &&
+                 !v.sequence_id.empty() && v.sequence_id.size() <= 128 && v.elapsed_us >= 0 &&
+                 v.elapsed_us <= 86400000000LL && Finite(v.cumulative_x, v.cumulative_y) &&
+                 std::abs(v.cumulative_x) <= 1e7 && std::abs(v.cumulative_y) <= 1e7;
+        else if constexpr (std::is_same_v<T, KeyInput>)
           return v.action >= KeyInput::Action::down && v.action <= KeyInput::Action::character &&
                  (v.action != KeyInput::Action::character || !v.text.empty()) &&
                  v.text.size() <= 4 && v.unmodified_text.size() <= 4 && Utf16(v.text) &&

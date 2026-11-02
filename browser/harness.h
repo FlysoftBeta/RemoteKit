@@ -6,6 +6,8 @@ class HarnessMainParts final : public content::BrowserMainParts {
  public:
   HarnessMainParts();
   ~HarnessMainParts() override;
+  void PostCreateMainMessageLoop() override;
+  int PostCreateThreads() override;
   int PreMainMessageLoopRun() override;
   void WillRunMainMessageLoop(std::unique_ptr<base::RunLoop>& run_loop) override;
   void PostMainMessageLoopRun() override;

@@ -1,6 +1,37 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { RemoteTransport, type ControlRpc } from '../client/transport';
+import {readFileSync} from 'node:fs';
+import { requireAcceptedReceipt, type ProductActionHandler } from '../client/product-operations';
+import type { OperationReceipt } from '../shared/product';
+
+for (const status of ['applying', 'committed', 'unknown'] as const)
+test(`product action ${status} wire is an execution receipt without a workspace`, async t => {
+  environment(t);
+  const transport = new RemoteTransport();
+  t.after(() => transport.disconnect());
+  const sent: unknown[] = [];
+  const channel: any = { readyState: 'open', bufferedAmount: 0, send(value: string) { sent.push(JSON.parse(value)); }, close() { this.readyState = 'closed'; } };
+  (transport as any).bindChannel(channel);
+  const receipt: OperationReceipt = {
+    operationId: 'forward-operation', operationGeneration: 'generation-1', status,
+    ...(status === 'applying' ? { application: { status: 'pending' as const, reason: 'navigation_pending' } } : {}),
+    ...(status === 'committed' ? { revision: 12 } : {}),
+  };
+  const action: ProductActionHandler = async command => requireAcceptedReceipt(await transport.productAction({
+    operationId: receipt.operationId, operationGeneration: receipt.operationGeneration, action: command,
+  }));
+  const pending = action({ type: 'tab.command', tabId: 'tab-1', command: 'forward' });
+  channel.onmessage({ data: JSON.stringify({ type: 'product.result', version: 1, operationId: receipt.operationId, operationGeneration: receipt.operationGeneration, result: receipt }) });
+  assert.deepEqual(await pending, receipt);
+  assert.equal('state' in receipt, false);
+  assert.equal(sent.length, 1, 'pending or unknown receipt must not replay the action');
+});
+
+test('receipt submission rejects only explicit rejected/expired outcomes', () => {
+  for (const status of ['rejected', 'expired'] as const)
+    assert.throws(() => requireAcceptedReceipt({ operationId: 'operation', operationGeneration: 'generation', status, error: 'explicit rejection' }), /explicit rejection/);
+});
 
 function environment(t: TestContext) {
   const values: Record<string, unknown> = {
@@ -26,6 +57,57 @@ function environment(t: TestContext) {
   }
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected HTTP fallback'); });
 }
+
+test('Native forwarded timeout wire preserves unknown receipt without Client replay', async t => {
+  environment(t);
+  // The Native DirectServices CPU test compares its actual timeout output to
+  // this same fixture, so this exercises the complete cross-language contract.
+  const wire=JSON.parse(readFileSync(new URL('../../endpoint/tests/fixtures/product-action-timeout.json',import.meta.url),'utf8'));
+  const transport=new RemoteTransport();t.after(()=>transport.disconnect());
+  const sent:any[]=[],channel:any={readyState:'open',bufferedAmount:0,send(value:string){sent.push(JSON.parse(value));},close(){this.readyState='closed';}};
+  (transport as any).bindChannel(channel);
+  const pending=transport.productAction({operationId:wire.operationId,operationGeneration:wire.operationGeneration,action:{type:'window.create'}});
+  channel.onmessage({data:JSON.stringify(wire)});
+  assert.deepEqual(await pending,wire.result);
+  assert.equal(sent.filter(message=>message.type==='product.action').length,1);
+  assert.equal((transport as any).productPending.size,0);
+});
+
+test('transport separates Endpoint DC clock from Control RPC and expires pending probes across replacement', async t => {
+  environment(t);
+  let now = 0;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.method(Date, 'now', () => 1000 + now);
+  const transport = new RemoteTransport(); t.after(() => transport.disconnect());
+  const state = transport as any;
+  const replies: ((value: unknown) => void)[] = [];
+  transport.setControlRpc(async method => method === 'clock.ping' ? new Promise(resolve => replies.push(resolve)) : {});
+  const peer = { close() {} }; state.peer = peer;
+  const sent: any[] = [];
+  const channel = () => ({readyState:'open',bufferedAmount:0,send(value: string) { sent.push(JSON.parse(value)); }} as any);
+  const old = channel(); state.bindChannel(old);
+  state.productionFeedback(peer);
+  assert.equal(sent[0].type,'clock.ping'); assert.equal(replies.length,1);
+  now = 10;
+  old.onmessage({data:JSON.stringify({...sent[0],type:'clock.pong',serverTimeMs:705,serverMonotonicMs:500})});
+  assert.equal(state.latency.endpointClock.mapping(now,1010).wall,710);
+  assert.equal(state.controlClock.mapping(now,1010),undefined);
+  // A hung Control RPC cannot block bounded resampling.
+  now = 5000; state.productionFeedback(peer); assert.equal(replies.length,2);
+  now = 5010; replies[0]({serverTime:1505}); await Promise.resolve(); await Promise.resolve();
+  assert.equal(state.controlClock.mapping(now,6010),undefined);
+  replies[1]({serverTime:6505}); await Promise.resolve(); await Promise.resolve();
+  assert.equal(state.controlClock.mapping(now,6010).wall,6510);
+  const replacement = channel(); state.bindChannel(replacement);
+  assert.equal(state.latency.endpointClock.mapping(now,6010),undefined);
+  old.onmessage({data:JSON.stringify({...sent[1],type:'clock.pong',serverTimeMs:5705,serverMonotonicMs:5500})});
+  assert.equal(state.latency.endpointClock.mapping(now,6010),undefined);
+  state.sampleEndpointClock();
+  const fresh = sent[sent.length-1];
+  now = 5020;
+  replacement.onmessage({data:JSON.stringify({...fresh,type:'clock.pong',serverTimeMs:5715,serverMonotonicMs:5510})});
+  assert.equal(state.latency.endpointClock.mapping(now,6020).wall,5720);
+});
 
 test('product offer and disconnect use injected RPC and preserve SDP diagnostics', async t => {
   environment(t);
@@ -152,4 +234,20 @@ test('failed automatic level4.2 negotiation downgrades once and keeps original S
   assert.equal(previous.originalOfferSdp, sdp);
   assert.match(String(previous.effectiveOfferSdp), /42e02a/);
   transport.disconnect();
+});
+
+
+test('start-page actions wait in memory for data-only RTC and first navigation preserves the same peer/channel',async t=>{
+  environment(t);const transport=new RemoteTransport();t.after(()=>transport.disconnect());
+  const sent:any[]=[],channel:any={readyState:'connecting',bufferedAmount:0,send(value:string){sent.push(JSON.parse(value));},close(){this.readyState='closed';}};
+  (transport as any).bindChannel(channel);
+  const first={operationId:'12345678-1234-4234-8234-123456789abc',operationGeneration:'generation',action:{type:'window.create' as const}};
+  const pending=transport.productAction(first);assert.equal(sent.length,0);
+  channel.readyState='open';channel.onopen();const wire=sent.find(message=>message.type==='product.action');assert.equal(wire.operationId,first.operationId);assert.equal(wire.version,1);
+  channel.onmessage({data:JSON.stringify({type:'product.result',version:1,operationId:first.operationId,operationGeneration:first.operationGeneration,result:{...first,action:undefined,status:'committed',revision:1}})});
+  assert.equal((await pending).status,'committed');
+  const peer=(transport as any).peer,next={...first,operationId:'22345678-1234-4234-8234-123456789abc',action:{type:'tab.navigate' as const,tabId:'tab',url:'https://example.test/'}};
+  const navigation=transport.productAction(next);assert.equal((transport as any).channel,channel);assert.equal((transport as any).peer,peer);
+  channel.onmessage({data:JSON.stringify({type:'product.result',version:1,operationId:next.operationId,operationGeneration:next.operationGeneration,result:{operationId:next.operationId,operationGeneration:next.operationGeneration,status:'applying'}})});
+  assert.equal((await navigation).status,'applying');assert.equal(sent.filter(message=>message.type==='product.action').length,2);
 });

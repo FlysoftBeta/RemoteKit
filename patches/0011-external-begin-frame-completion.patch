@@ -1,0 +1,169 @@
+diff --git a/components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc b/components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
+index ce2b4d708e..4c10bbea77 100644
+--- a/components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
++++ b/components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
+@@ -7,6 +7,7 @@
+ #include <utility>
+ 
+ #include "base/check_is_test.h"
++#include "base/check_op.h"
+ #include "base/notreached.h"
+ #include "components/viz/service/frame_sinks/frame_sink_manager_impl.h"
+ #include "mojo/public/cpp/bindings/message.h"
+@@ -43,6 +44,8 @@ void ExternalBeginFrameSourceMojo::IssueExternalBeginFrame(
+     return;
+   }
+   original_frame_id_ = args.frame_id;
++  ++request_ordinal_;
++  display_finished_current_frame_ = false;
+ 
+   OnBeginFrame(args);
+ 
+@@ -85,7 +88,7 @@ void ExternalBeginFrameSourceMojo::OnFrameSinkDidBeginFrame(
+     const FrameSinkId& sink_id,
+     const BeginFrameArgs& args) {
+   if (!original_frame_id_ ||
+-      args.frame_id.source_id != original_frame_id_->source_id) {
++      args.frame_id != *original_frame_id_) {
+     return;
+   }
+   pending_frame_sinks_.insert(sink_id);
+@@ -95,7 +98,7 @@ void ExternalBeginFrameSourceMojo::OnFrameSinkDidFinishFrame(
+     const FrameSinkId& sink_id,
+     const BeginFrameArgs& args) {
+   if (!original_frame_id_ ||
+-      args.frame_id.source_id != original_frame_id_->source_id) {
++      args.frame_id != *original_frame_id_) {
+     return;
+   }
+   pending_frame_sinks_.erase(sink_id);
+@@ -112,7 +115,11 @@ void ExternalBeginFrameSourceMojo::MaybeProduceFrameCallback() {
+ 
+   if (pending_ack_) {
+     DispatchFrameCallback(*pending_ack_);
+-    pending_ack_.reset();
++    return;
++  }
++  if (retired_frame_callbacks_.size() >= kMaxRetiredFrameCallbacks) {
++    // Keep this request in flight rather than forgetting proof for an old
++    // display completion. GPU availability or disconnect resolves the wait.
+     return;
+   }
+   // If there aren't pending surfaces and the root frame is not missing,
+@@ -140,6 +147,23 @@ void ExternalBeginFrameSourceMojo::MaybeProduceFrameCallback() {
+ 
+ void ExternalBeginFrameSourceMojo::DispatchFrameCallback(
+     const BeginFrameAck& ack) {
++  CHECK(original_frame_id_ && ack.frame_id == *original_frame_id_);
++  const BeginFrameAck completed_ack = ack;
++  if (!display_finished_current_frame_) {
++    CHECK_LT(retired_frame_callbacks_.size(), kMaxRetiredFrameCallbacks);
++    CHECK(retired_frame_callbacks_
++              .emplace(*original_frame_id_, request_ordinal_)
++              .second);
++  }
++  // Detach this request before copy-request cancellation or callback delivery
++  // can reenter us. Late sink notifications cannot repopulate its state, and
++  // dispatching an old callback cannot clear a new request's pending ACK.
++  auto callback = std::move(pending_frame_callback_);
++  original_frame_id_.reset();
++  pending_ack_.reset();
++  // Full-pipeline requests already have no pending sinks here. The optional
++  // non-waiting mode also retires its sink bookkeeping with this request.
++  pending_frame_sinks_.clear();
+   // If there are pending copy output requests that have not been fulfilled,
+   // cancel them, as they won't be served till the next frame. This prevents
+   // the client for waiting for them indefinitely.
+@@ -150,15 +174,23 @@ void ExternalBeginFrameSourceMojo::DispatchFrameCallback(
+   // as this may result in two overlapping frames being sent, which is not
+   // supported with full pipeline mode.
+   last_begin_frame_args_ = BeginFrameArgs();
+-  std::move(pending_frame_callback_).Run(ack);
++  std::move(callback).Run(completed_ack);
+ }
+ 
+ void ExternalBeginFrameSourceMojo::OnDisplayDidFinishFrame(
+     const BeginFrameId& frame_id,
+     DisplaySchedulerDrawResult result) {
+-  if (!pending_frame_callback_) {
++  if (retired_frame_callbacks_.erase(frame_id)) {
++    // A root-missing early NAK may precede the display deadline. In particular,
++    // resuming a GPU-deferred request first ends the previous display interval.
++    // That old completion must not acknowledge or change the new request.
+     return;
+   }
++  CHECK(pending_frame_callback_ && original_frame_id_ &&
++        frame_id == *original_frame_id_)
++      << " completion=" << frame_id.ToString()
++      << " current="
++      << (original_frame_id_ ? original_frame_id_->ToString() : "none");
+ 
+   if (result == DisplaySchedulerDrawResult::kDrawnLate ||
+       result == DisplaySchedulerDrawResult::kMayDrawLate) {
+@@ -167,9 +199,29 @@ void ExternalBeginFrameSourceMojo::OnDisplayDidFinishFrame(
+ 
+   bool has_damage = (result == DisplaySchedulerDrawResult::kDrawn);
+   BeginFrameAck ack(frame_id.source_id, frame_id.sequence_number, has_damage);
++  display_finished_current_frame_ = true;
++  // DisplayScheduler ends an old interval before starting/finishing a newer
++  // one. Once this interval finishes, older early-NAK requests that were
++  // overwritten while GPU-deferred can no longer produce a first completion.
++  for (auto it = retired_frame_callbacks_.begin();
++       it != retired_frame_callbacks_.end();) {
++    if (it->second < request_ordinal_) {
++      it = retired_frame_callbacks_.erase(it);
++    } else {
++      ++it;
++    }
++  }
+ 
+   if (wait_for_all_frame_sinks_ && !pending_frame_sinks_.empty()) {
+-    CHECK(!pending_ack_);
++    CHECK(!pending_ack_)
++        << " incoming=" << frame_id.ToString()
++        << " pending="
++        << (pending_ack_ ? pending_ack_->frame_id.ToString() : "none")
++        << " original="
++        << (original_frame_id_ ? original_frame_id_->ToString() : "none")
++        << " last_delivered=" << last_begin_frame_args_.frame_id.ToString()
++        << " pending_sinks=" << pending_frame_sinks_.size()
++        << " result=" << static_cast<int>(result);
+     pending_ack_ = ack;
+     return;
+   }
+diff --git a/components/viz/service/frame_sinks/external_begin_frame_source_mojo.h b/components/viz/service/frame_sinks/external_begin_frame_source_mojo.h
+index b2bf9b90c2..f1935450c4 100644
+--- a/components/viz/service/frame_sinks/external_begin_frame_source_mojo.h
++++ b/components/viz/service/frame_sinks/external_begin_frame_source_mojo.h
+@@ -8,6 +8,7 @@
+ #include <optional>
+ 
+ #include "base/containers/flat_set.h"
++#include "base/containers/flat_map.h"
+ #include "base/memory/raw_ptr.h"
+ #include "components/viz/common/display/display_scheduler_draw_result.h"
+ #include "components/viz/common/frame_sinks/begin_frame_args.h"
+@@ -72,6 +73,7 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
+   }
+ 
+  private:
++  friend class ExternalBeginFrameSourceMojoTestApi;
+   // ExternalBeginFrameSourceClient implementation.
+   void OnNeedsBeginFrames(bool needs_begin_frames) override;
+   void SetPreferredInterval(base::TimeDelta interval) override;
+@@ -110,6 +112,15 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
+   // issued. MaybeProduceFrameCallback() also builds its "display won't draw"
+   // nak from this.
+   std::optional<BeginFrameId> original_frame_id_;
++  uint64_t request_ordinal_ = 0;
++  bool display_finished_current_frame_ = false;
++
++  // Exact requests whose callback completed before their display interval.
++  // GPU-busy deferral can replace requests without ever scheduling them, so
++  // these are reclaimed when a newer display interval actually finishes.
++  // A full ledger disables early NAKs until display completion makes room.
++  static constexpr size_t kMaxRetiredFrameCallbacks = 8;
++  base::flat_map<BeginFrameId, uint64_t> retired_frame_callbacks_;
+ 
+   const bool wait_for_all_frame_sinks_;
+ 

@@ -1,0 +1,217 @@
+diff --git a/components/input/input_router.h b/components/input/input_router.h
+index 7484a2afb6..1fec58ce8c 100644
+--- a/components/input/input_router.h
++++ b/components/input/input_router.h
+@@ -95,6 +95,9 @@ class InputRouter {
+   // Return the currently active touch-action.
+   virtual std::optional<cc::TouchAction> ActiveTouchAction() = 0;
+ 
++  // Embedder client momentum retains this sequence's assessed action after UP.
++  virtual void SetClientMomentumActive(bool active) = 0;
++
+   virtual void SetForceEnableZoom(bool enabled) = 0;
+ 
+   // Create and bind a new host channel.
+diff --git a/components/input/input_router_impl.cc b/components/input/input_router_impl.cc
+index 51baeda2c2..850eb4bc34 100644
+--- a/components/input/input_router_impl.cc
++++ b/components/input/input_router_impl.cc
+@@ -344,6 +344,10 @@ std::optional<cc::TouchAction> InputRouterImpl::AllowedTouchAction() {
+   return touch_action_filter_.allowed_touch_action();
+ }
+ 
++void InputRouterImpl::SetClientMomentumActive(bool active) {
++  touch_action_filter_.SetClientMomentumActive(active);
++}
++
+ std::optional<cc::TouchAction> InputRouterImpl::ActiveTouchAction() {
+   return touch_action_filter_.active_touch_action();
+ }
+diff --git a/components/input/input_router_impl.h b/components/input/input_router_impl.h
+index 016e12288e..5f8121922d 100644
+--- a/components/input/input_router_impl.h
++++ b/components/input/input_router_impl.h
+@@ -91,6 +91,7 @@ class COMPONENT_EXPORT(INPUT) InputRouterImpl
+   void SetForceEnableZoom(bool enabled) override;
+   std::optional<cc::TouchAction> AllowedTouchAction() override;
+   std::optional<cc::TouchAction> ActiveTouchAction() override;
++  void SetClientMomentumActive(bool active) override;
+   mojo::PendingRemote<blink::mojom::WidgetInputHandlerHost> BindNewHost(
+       scoped_refptr<base::SequencedTaskRunner> task_runner) override;
+   void StopFling() override;
+diff --git a/components/input/mock_input_router.h b/components/input/mock_input_router.h
+index 09a098a663..955b265eeb 100644
+--- a/components/input/mock_input_router.h
++++ b/components/input/mock_input_router.h
+@@ -50,6 +50,7 @@ class MockInputRouter : public InputRouter {
+   void SetDeviceScaleFactor(float device_scale_factor) override {}
+   std::optional<cc::TouchAction> AllowedTouchAction() override;
+   std::optional<cc::TouchAction> ActiveTouchAction() override;
++  void SetClientMomentumActive(bool active) override {}
+   void SetForceEnableZoom(bool enabled) override {}
+   mojo::PendingRemote<blink::mojom::WidgetInputHandlerHost> BindNewHost(
+       scoped_refptr<base::SequencedTaskRunner> task_runner) override;
+diff --git a/components/input/render_widget_host_input_event_router.cc b/components/input/render_widget_host_input_event_router.cc
+index c8e5f07465..8ab6b93a34 100644
+--- a/components/input/render_widget_host_input_event_router.cc
++++ b/components/input/render_widget_host_input_event_router.cc
+@@ -202,8 +202,14 @@ void TouchEventAckQueue::ProcessAckedTouchEvents() {
+         ack_queue_.front().ack_result;
+     base::WeakPtr<RenderWidgetHostViewInput> root_view =
+         ack_queue_.front().root_view;
++    auto target_view = ack_queue_.front().target_view;
+     ack_queue_.pop_front();
+ 
++    const bool handled_by_client = client_->AckClientTouch(
++        root_view.get(), touch_event.event, ack_result, target_view.get());
++    if (!weak_client) return;
++    if (handled_by_client) continue;
++
+     bool handled_by_emulator = false;
+     if (weak_touch_emulator) {
+       handled_by_emulator = weak_touch_emulator->HandleTouchEventAck(
+@@ -942,6 +948,42 @@ unsigned CountChangedTouchPoints(const blink::WebTouchEvent& event) {
+ 
+ // Any time a touch start event is handled/consumed/default prevented it is
+ // removed from the gesture map, because it will never create a gesture.
++bool RenderWidgetHostInputEventRouter::RegisterClientTouch(
++    RenderWidgetHostViewInput* root, uint32_t id, ClientTouchAck callback) {
++  if (!root || !id || client_touch_acks_.size() >= 512) return false;
++  return client_touch_acks_.emplace(
++      id, ClientTouchRegistration{root->GetInputWeakPtr(), std::move(callback)}).second;
++}
++
++bool RenderWidgetHostInputEventRouter::AckClientTouch(
++    RenderWidgetHostViewInput* root, const blink::WebTouchEvent& event,
++    blink::mojom::InputEventResultState result, RenderWidgetHostViewInput* target) {
++  auto it = client_touch_acks_.find(event.unique_touch_event_id);
++  if (it == client_touch_acks_.end()) return false;
++  // A null root is valid after destruction; the registered ID is still ours.
++  if (root && it->second.root.get() != root) return false;
++  auto callback = std::move(it->second.callback);
++  client_touch_acks_.erase(it);
++  std::move(callback).Run(event, result, target);
++  return true;
++}
++
++bool RenderWidgetHostInputEventRouter::RouteClientGestureEvent(
++    RenderWidgetHostViewInput* root, const blink::WebGestureEvent& event,
++    uint32_t owner_id, RenderWidgetHostViewInput* expected_target) {
++  if (!root || !IsViewInMap(root)) return false;
++  if (event.GetType() == blink::WebInputEvent::Type::kGestureTapDown) {
++    auto it = touchscreen_gesture_target_map_.find(event.unique_touch_event_id);
++    if (it == touchscreen_gesture_target_map_.end() || it->second.get() != expected_target) return false;
++    client_gesture_owner_id_ = owner_id;
++  } else if (client_gesture_owner_id_ != owner_id ||
++             touchscreen_gesture_target_.get() != expected_target) {
++    return false;
++  }
++  RouteGestureEvent(root, &event, ui::LatencyInfo());
++  return true;
++}
++
+ void RenderWidgetHostInputEventRouter::OnHandledTouchStartOrFirstTouchMove(
+     uint32_t unique_touch_event_id) {
+   // unique_touch_event_id of 0 implies a gesture not created by a touch.
+@@ -1812,6 +1854,8 @@ void RenderWidgetHostInputEventRouter::DispatchTouchscreenGestureEvent(
+   // there is no WebGestureEvent equivalent for EventType::kGestureBegin.
+   const bool is_gesture_start =
+       gesture_event.GetType() == blink::WebInputEvent::Type::kGestureTapDown;
++  if (is_gesture_start && gesture_event.unique_touch_event_id != client_gesture_owner_id_)
++    client_gesture_owner_id_ = 0;
+ 
+   std::optional<gfx::PointF> fallback_target_location;
+ 
+@@ -2174,6 +2218,7 @@ void RenderWidgetHostInputEventRouter::SetTouchscreenGestureTarget(
+ }
+ 
+ void RenderWidgetHostInputEventRouter::ClearTouchscreenGestureTarget() {
++  client_gesture_owner_id_ = 0;
+   SetTouchscreenGestureTarget(nullptr, false, false);
+   touchscreen_gesture_event_debug_queue_.clear();
+ }
+diff --git a/components/input/render_widget_host_input_event_router.h b/components/input/render_widget_host_input_event_router.h
+index a7d8d96d06..53c1d81bf8 100644
+--- a/components/input/render_widget_host_input_event_router.h
++++ b/components/input/render_widget_host_input_event_router.h
+@@ -13,6 +13,7 @@
+ 
+ #include "base/component_export.h"
+ #include "base/gtest_prod_util.h"
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/ref_counted.h"
+ #include "base/memory/weak_ptr.h"
+@@ -140,6 +141,20 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+   void RouteGestureEvent(RenderWidgetHostViewInput* root_view,
+                          const blink::WebGestureEvent* event,
+                          const ui::LatencyInfo& latency);
++  // Embedder-owned raw touch IDs only; retained until canonical ACK even if
++  // the weak callback owner goes away, so these never enter an Aura recognizer.
++  using ClientTouchAck = base::OnceCallback<void(
++      const blink::WebTouchEvent&, blink::mojom::InputEventResultState, RenderWidgetHostViewInput*)>;
++  bool RegisterClientTouch(RenderWidgetHostViewInput* root, uint32_t id,
++                           ClientTouchAck callback);
++  bool AckClientTouch(RenderWidgetHostViewInput* root,
++                      const blink::WebTouchEvent& event,
++                      blink::mojom::InputEventResultState result,
++                      RenderWidgetHostViewInput* target);
++  // Reject missing TapDown bindings instead of the legacy synchronous re-hit-test.
++  bool RouteClientGestureEvent(RenderWidgetHostViewInput* root,
++                               const blink::WebGestureEvent& event,
++                               uint32_t owner_id, RenderWidgetHostViewInput* expected_target);
+   void OnHandledTouchStartOrFirstTouchMove(uint32_t unique_touch_event_id);
+   void ProcessAckedTouchEvent(const TouchEventWithLatencyInfo& event,
+                               blink::mojom::InputEventResultState ack_result,
+@@ -537,6 +552,12 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+   bool events_being_flushed_ = false;
+ 
+   raw_ptr<Delegate> delegate_;
++  struct ClientTouchRegistration {
++    base::WeakPtr<RenderWidgetHostViewInput> root;
++    ClientTouchAck callback;
++  };
++  std::map<uint32_t, ClientTouchRegistration> client_touch_acks_;
++  uint32_t client_gesture_owner_id_{};
+   std::unique_ptr<TouchEventAckQueue> touch_event_ack_queue_;
+ 
+   // The coordinates that are determined by the renderer process on MouseDown
+diff --git a/components/input/touch_action_filter.cc b/components/input/touch_action_filter.cc
+index c7dccfdc38..48377ea24e 100644
+--- a/components/input/touch_action_filter.cc
++++ b/components/input/touch_action_filter.cc
+@@ -344,7 +344,13 @@ void TouchActionFilter::DecreaseActiveTouches() {
+   num_of_active_touches_--;
+ }
+ 
++void TouchActionFilter::SetClientMomentumActive(bool active) {
++  client_momentum_active_ = active;
++  if (!active) ReportAndResetTouchAction();
++}
++
+ void TouchActionFilter::ReportAndResetTouchAction() {
++  if (client_momentum_active_) return;
+   if (num_of_active_touches_ <= 0) {
+     ResetTouchAction();
+     allow_cursor_control_ = true;
+diff --git a/components/input/touch_action_filter.h b/components/input/touch_action_filter.h
+index 0274c0878d..708bea6bbc 100644
+--- a/components/input/touch_action_filter.h
++++ b/components/input/touch_action_filter.h
+@@ -59,6 +59,7 @@ class COMPONENT_EXPORT(INPUT) TouchActionFilter {
+   // compositor allowed touch action is or is not equivalent to the allowed
+   // touch action.
+   void ReportAndResetTouchAction();
++  void SetClientMomentumActive(bool active);
+ 
+   // Called when a set-compositor-allowed-touch-action message is received from
+   // the renderer for a touch start event that is currently in flight.
+@@ -136,6 +137,8 @@ class COMPONENT_EXPORT(INPUT) TouchActionFilter {
+   // before GSE.
+   bool gesture_sequence_in_progress_ = false;
+ 
++  bool client_momentum_active_{false};
++
+   bool has_deferred_events_ = false;
+ 
+   // True if scroll gestures are allowed to be used for cursor control. We set

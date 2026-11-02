@@ -15,6 +15,12 @@
 #include "remotekit/coordinate_readiness.hpp"
 #include "remotekit/input_sequence.hpp"
 #include "remotekit/presentation_barrier.hpp"
+#include "remotekit/control_reliability.hpp"
+#include "remotekit/dc_services.hpp"
+#include "remotekit/dc_file_services.hpp"
+#include "remotekit/navigation_export.hpp"
+#include "control_transport.hpp"
+#include <functional>
 #include <charconv>
 #include <json.hpp>
 #include <windows.h>
@@ -41,6 +47,8 @@ using Json=nlohmann::json;
 using namespace remotekit::media;
 namespace fs=std::filesystem;
 namespace {
+std::function<void(std::string)> management_output=[](std::string bytes){std::cout<<bytes<<'\n'<<std::flush;};
+std::function<bool(std::string)> management_action=[](std::string bytes){management_output(std::move(bytes));return bool(std::cout);};
 std::string Env(const char* key,std::string fallback={}) {const char* v=std::getenv(key);return v?v:fallback;}
 fs::path Utf8Path(const std::string& value){return fs::u8path(value);}
 std::string Utf8(const fs::path& path){auto v=path.u8string();return {reinterpret_cast<const char*>(v.data()),v.size()};}
@@ -87,6 +95,7 @@ size_t DecodedSize(const std::string& text) {
  return size;
 }
 struct Options {
+ std::string control_url,node_id;
  fs::path browser,data,browser_trace_directory;
  std::string encoder="qsv",browser_enable_features,browser_disable_features,browser_direct_composition="auto",browser_host_scale="auto",browser_render_host="offscreen";EncoderSettings encoding;
  uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096,browser_render_fps=0;
@@ -105,7 +114,9 @@ struct Options {
   for(int i=1;i<argc;++i){std::string arg=argv[i];auto equal=arg.find('=');
    if(equal==std::string::npos)throw std::runtime_error("arguments require --name=value");
    auto key=arg.substr(0,equal),value=arg.substr(equal+1);
-   if(key=="--browser")browser=Utf8Path(value);else if(key=="--data-path")data=Utf8Path(value);
+   if(key=="--control-url")control_url=value;
+   else if(key=="--node-id")node_id=value;
+   else if(key=="--browser")browser=Utf8Path(value);else if(key=="--data-path")data=Utf8Path(value);
    else if(key=="--browser-enable-features")browser_enable_features=value;
    else if(key=="--browser-disable-features")browser_disable_features=value;
    else if(key=="--browser-direct-composition"){
@@ -187,12 +198,16 @@ struct Options {
 };
 struct Session {
  Sdk& sdk;Options options;std::string tenant,id;fs::path directory;
- HANDLE process=nullptr,job=nullptr;std::atomic<uint64_t> control{0};int request_id=0;
+ HANDLE process=nullptr,job=nullptr;std::atomic<uint64_t> control{0},client_gestures_control{0};uint64_t request_id=0;
  bool producer_stop_pending=false;
  bool process_in_job=false;
  std::string browser_incarnation,process_incarnation;
  remotekit::FileUploadStore file_uploads;
- std::mutex rpc_mutex;
+ std::mutex file_store_mutex;
+ remotekit::DcFileServices file_services;
+ struct FileOwner {remotekit::DcFileServices::Job job;int64_t touched;};
+ std::map<std::string,FileOwner> file_owners; // file worker only.
+ std::timed_mutex rpc_mutex;
  std::map<std::string,Json> desired;
  int atlas_width=1920,atlas_height=1080;float atlas_scale=1;
  AtlasPool pool;std::thread media_thread;std::atomic<bool> stop_media{false};
@@ -221,6 +236,9 @@ struct Session {
  std::atomic<uint64_t> input_rejected{0},input_coalesced{0};
  std::atomic<uint64_t> input_busy_retries{0},input_busy_exhausted{0};
  Json layout;std::atomic<bool> data_open{false};
+ remotekit::ReliableControlOutbox control_outbox;
+ remotekit::DirectServices direct_services;
+ std::optional<remotekit::PresentationBarrier::Key> layout_prepare;
  Json site_preferences=Json::object();
  std::mutex media_policy_mutex;Json requested_media_policy=nullptr;
  std::atomic<uint32_t> policy_fps{0},policy_bitrate{0},policy_max{0};
@@ -262,6 +280,8 @@ struct Session {
  remotekit::MediaSampling sampling;
  std::shared_ptr<ServerTrace> trace;
  std::map<std::string,std::string> recovery_revisions;
+ remotekit::NavigationExport navigation_export;
+ bool export_turn=false;
  struct Recovery {
   std::string phase="load",error,transfer;
   Json saved;
@@ -287,8 +307,10 @@ struct Session {
    reconciled_closed=desired.erase(event.at("viewId").get<std::string>())!=0 || reconciled_closed;
   if(reconciled_closed)Save();
   budget_thread=std::thread([this]{BudgetLoop();});
+  file_services.Start([this](const auto& job){return DirectFileCommand(job);},[this]{SweepDirectFiles();});
  }
  ~Session(){
+  file_services.Bind(0);file_services.Stop();
   StopBudget();
   try{Stop();}catch(...){fprintf(stderr,"session shutdown unfinished; atlas resources retained\n");}
   // Final OS handle cleanup is not proof of process exit. AtlasPool retains
@@ -318,23 +340,34 @@ struct Session {
    }
    observed_closed.insert(view);
   }
+  navigation_export.Forget(view);
   recoveries.erase(view);recovery_revisions.erase(view);fs::remove(directory/"recovery"/(view+".json"));
  }
  void AckClosed(const Json& views) {
   if(!views.empty())Rpc({{"method","view.closed.ack"},{"session",id},{"views",views},{"browserIncarnation",browser_incarnation}});
  }
- Json Rpc(Json command) {
-  std::lock_guard lock(rpc_mutex);
+ Json Rpc(Json command,bool require_ok=true,uint64_t expected_control=0,uint32_t timeout_ms=10000,int64_t request_deadline=0) {
+  std::unique_lock lock(rpc_mutex,std::defer_lock);
+  if(request_deadline) {
+   const auto remaining=request_deadline-QpcNow();
+   if(remaining<=0 || !lock.try_lock_for(std::chrono::microseconds(std::max<int64_t>(1,remaining*1000000/QpcFrequency()))))
+    throw std::runtime_error("touch_terminal_timeout");
+   const auto active=request_deadline-QpcNow();
+   if(active<=0)throw std::runtime_error("touch_terminal_timeout");
+   timeout_ms=static_cast<uint32_t>(std::max<int64_t>(1,active*1000/QpcFrequency()));
+  } else lock.lock();
+  if(expected_control && control.load()!=expected_control)throw std::runtime_error("stale_file_browser");
   if(!control)throw std::runtime_error("browser control unavailable");
-  command["version"]=1;command["id"]=++request_id;
-  std::string encoded=command.dump();std::vector<char> response(1024*1024);size_t count=0;
-  int status=sdk.remotekit_sdk_control_request(control,encoded.data(),encoded.size(),response.data(),response.size(),&count,10000);
-  if(status!=0){control=0;throw std::runtime_error("browser request transport "+std::to_string(status)+
-    " method="+command.value("method",std::string())+" "+ProcessDiagnostic()+
-    " browser_log="+Utf8(directory/"browser.log"));}
-  Json result=Json::parse(response.data(),response.data()+count);
-  if(!result.value("ok",false))throw std::runtime_error("browser: "+result.value("error",std::string("command failed")));
-  return result;
+  auto result=remotekit::BrowserRpc(command,request_id,[&](const std::string& encoded,std::vector<char>& response,size_t& count){
+   const int status=sdk.remotekit_sdk_control_request(control,encoded.data(),encoded.size(),response.data(),response.size(),&count,timeout_ms);
+   if(status!=0){control=0;throw std::runtime_error("browser request transport "+std::to_string(status)+
+     " method="+command.value("method",std::string())+" "+ProcessDiagnostic()+
+     " browser_log="+Utf8(directory/"browser.log"));}
+   return status;
+  });
+  if(command.value("method",std::string())=="snapshot")
+   client_gestures_control=result.value("clientGestures",Json())==1?control.load():0;
+  return require_ok?remotekit::RequireBrowserOk(std::move(result)):std::move(result);
  }
  bool Alive() const{return process&&WaitForSingleObject(process,0)==WAIT_TIMEOUT;}
  bool ProducerExited() const{return process&&WaitForSingleObject(process,0)==WAIT_OBJECT_0;}
@@ -356,7 +389,7 @@ struct Session {
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)))throw std::runtime_error("job limits failed");
   std::string channel="RemoteKit.service."+std::to_string(GetCurrentProcessId())+"."+id+"."+std::to_string(QpcNow());
-  browser_incarnation=NewIncarnation();
+  client_gestures_control=0;browser_incarnation=NewIncarnation();
   std::wstring command=Quote(options.browser.wstring());
   auto append=[&](std::wstring arg){command+=L" "+Quote(arg);};
   append(L"--control-channel="+std::wstring(channel.begin(),channel.end()));
@@ -420,8 +453,9 @@ struct Session {
     " attempts="+std::to_string(attempts)+" browser_log="+Utf8(directory/"browser.log"));
   fprintf(stderr,"session %s browser pid %lu\n",id.c_str(),GetProcessId(process));
   observed_closed.clear();
-  recovery_revisions.clear();recoveries.clear();recovery_cursor.clear();
+  navigation_export.Clear();recovery_revisions.clear();recoveries.clear();recovery_cursor.clear();
   Rpc({{"method","session.sitePreferences"},{"session",id},{"sites",site_preferences}});
+  BrowserSnapshot();
   if(!desired.empty()) {
    // Hidden construction never requires the previous/final atlas to fit an
    // intermediate set of specs. One transaction applies the complete layout.
@@ -523,6 +557,10 @@ struct Session {
    throw;
   }
  }
+ static void NavigationOperation(Json& target,const Json& source) {
+  for(const auto* key:{"operationId","operationGeneration","operationSequence"})
+   if(source.contains(key))target[key]=source[key];
+ }
  Json CreateView(const Json& config,bool recovering=false) {
   auto view=ViewId(config);auto device=config.value("device",Json::object());
   std::string mode=device.is_object()?device.value("mode",std::string("desktop")):std::string("desktop");
@@ -532,6 +570,7 @@ struct Session {
   if(!recovering && config.value("method",std::string())=="view.adopt") {
    request["method"]="view.adopt";request["provisionalId"]=Required(config,"provisionalId");
   }
+  if(!recovering)NavigationOperation(request,config);
   if(device.contains("deviceScaleFactor"))request["device_scale_factor"]=device["deviceScaleFactor"];
   if(recovering && fs::exists(directory/"recovery"/(view+".json")))request["visible"]=false;
   auto result=Rpc(request);
@@ -547,7 +586,7 @@ struct Session {
  Json RecoverySnapshot() const {
   Json views=Json::object();bool pending=false;
   for(const auto& [view,recovery]:recoveries){views[view]=RecoveryStatus(recovery);pending|=recovery.Pending();}
-  return {{"pending",pending},{"views",std::move(views)}};
+  return {{"pending",pending},{"views",std::move(views)},{"exportPending",navigation_export.Pending()}};
  }
  bool CancelRecovery(const std::string& view) {
   auto found=recoveries.find(view);if(found==recoveries.end())return false;
@@ -562,6 +601,12 @@ struct Session {
  // Called only by the JSONL dispatcher. One phase/one selected view per turn;
  // never sleep or poll inside a phase. Media/input workers do not own this map.
  void MaintainRecovery() {
+  // Alternate with restore/reconciliation so neither bulk direction starves
+  // another Session or the normal JSONL dispatcher.
+  export_turn=!export_turn;
+  if(export_turn && navigation_export.Pending() && Alive() && control && !producer_stop_pending) {
+   MaintainNavigationExport();return;
+  }
   if(reconciliation_pending && Alive() && control && !producer_stop_pending && QpcNow()>=next_reconciliation) {
    try{ReconcileOutput();}catch(const std::exception& error){fprintf(stderr,"session %s reconciliation: %s\n",id.c_str(),error.what());}
    return;
@@ -638,23 +683,25 @@ struct Session {
   }
  }
  void CaptureNavigation(const Json& browser_view) {
-  if(!browser_view.contains("navigationRevision")||browser_view.value("loading",false)||browser_view.value("pending",false))return;
-  const std::string view=browser_view.at("view"),revision=browser_view.at("navigationRevision");
-  if(Recovering(view) || recovery_revisions[view]==revision)return;
+  const auto view=browser_view.at("view").get<std::string>();
+  const auto revision=browser_view.value("navigationRevision",std::string());
+  const auto saved=recovery_revisions.find(view);
+  navigation_export.Observe(browser_view,browser_incarnation,
+    desired.contains(view) && !Recovering(view) && (saved==recovery_revisions.end() || saved->second!=revision));
+ }
+ void MaintainNavigationExport() {
   try {
-   auto begin=Rpc({{"method","navigation.export.begin"},{"session",id},{"view",view}});
-   auto transfer=begin.at("transfer");uint64_t size=std::stoull(begin.at("size").get<std::string>()),offset=0;
-   Json chunks=Json::array();
-   while(offset<size) {
-    const auto count=std::min<uint64_t>(size-offset,256*1024);
-    auto chunk=Rpc({{"method","navigation.export.chunk"},{"session",id},{"view",view},
-      {"transfer",transfer},{"offset",std::to_string(offset)},{"length",count}});
-    if(DecodedSize(chunk.at("data").get<std::string>())!=count)throw std::runtime_error("navigation export chunk length mismatch");
-    chunks.push_back({{"data",chunk.at("data")},{"bytes",count}});offset+=count;
-   }
-   Rpc({{"method","navigation.transfer.cancel"},{"session",id},{"view",view},{"transfer",transfer}});
-   SaveJson(directory/"recovery"/(view+".json"),{{"size",std::to_string(size)},{"chunks",chunks},{"navigationRevision",begin.at("navigationRevision")}});
-   recovery_revisions[view]=begin.at("navigationRevision").get<std::string>();
+   navigation_export.Tick(browser_incarnation,[&](const std::string& view)->Json {
+    const auto snapshot=BrowserSnapshot();
+    for(const auto& session:snapshot.at("sessions"))for(const auto& item:session.at("views"))
+     if(item.value("view",std::string())==view && desired.contains(view) && !Recovering(view))return item;
+    return nullptr;
+   },[&](Json command){command["session"]=id;return Rpc(std::move(command));},
+   [](const std::string& data){return DecodedSize(data);},
+   [&](const std::string& view,const Json& saved){
+    SaveJson(directory/"recovery"/(view+".json"),saved);
+    recovery_revisions[view]=saved.at("navigationRevision").get<std::string>();
+   });
   }catch(const std::exception& error){fprintf(stderr,"navigation save: %s\n",error.what());}
  }
  remotekit::AdaptiveFps::Counters AdaptiveCounters() const {
@@ -798,12 +845,16 @@ struct Session {
   value["atlasReadyGateDeferredFrames"]=pool.ready_gate_deferred_frames();
   value["lastTailAfterSourceMs"]=age>0?Json(age):Json(nullptr);return value;
  }
+ Json RtcSnapshot() const {
+  const bool active=peer.load()!=0;
+  return {{"active",active},{"connectionId",active?Json(connection):Json(nullptr)}};
+ }
  Json InactiveSnapshot() {
   // Only a signaled process handle proves producer exit. Retire its GPU state
   // through the existing stop boundary; observing a Session never launches it.
   if(ProducerExited())Stop();
   return {{"sessionId",id},{"browserPid",0},{"views",Json::array()},
-   {"pendingPopups",Json::array()},{"events",durable_events},{"running",false},{"browserIncarnation",nullptr},{"stats",Stats()},{"recovery",RecoverySnapshot()}};
+   {"pendingPopups",Json::array()},{"events",durable_events},{"running",false},{"browserIncarnation",nullptr},{"rtc",RtcSnapshot()},{"stats",Stats()},{"recovery",RecoverySnapshot()}};
  }
  Json Snapshot(bool output_diagnostics=false) {
   if(!Alive() || producer_stop_pending)return InactiveSnapshot();
@@ -841,7 +892,7 @@ struct Session {
   }
   return {{"sessionId",id},{"browserPid",process?GetProcessId(process):0},{"views",views},
    {"pendingPopups",snapshot.at("sessions").at(0).value("pendingPopups",Json::array())},
-   {"events",durable_events},{"running",true},{"browserIncarnation",browser_incarnation},{"stats",Stats()},{"recovery",RecoverySnapshot()},{"outputDiagnostics",std::move(output_status)}};
+   {"events",durable_events},{"running",true},{"browserIncarnation",browser_incarnation},{"rtc",RtcSnapshot()},{"stats",Stats()},{"recovery",RecoverySnapshot()},{"outputDiagnostics",std::move(output_status)}};
   }catch(...) {
    // A producer can exit between the liveness check and any snapshot RPC.
    // Preserve desired views and confirmed events; an exit is not window.close.
@@ -863,12 +914,12 @@ struct Session {
   }
  }
  bool Stop() {
-  recoveries.clear();recovery_cursor.clear();recovery_revisions.clear();reconciliation_pending=false;
+  navigation_export.Clear();recoveries.clear();recovery_cursor.clear();recovery_revisions.clear();reconciliation_pending=false;
   has_visible_output=false;
   browser_incarnation.clear();
   producer_stop_pending=process || job;
   ClosePeer();
-  if(control){sdk.remotekit_sdk_control_close(control);control=0;}
+  {std::lock_guard lock(rpc_mutex);if(control){sdk.remotekit_sdk_control_close(control);control=0;}}
   // Keep the job/process identity until this exact process is confirmed gone.
   // Closing the job first would lose the retry identity after a stop timeout.
   if(job && !TerminateJobObject(job,0))
@@ -878,7 +929,7 @@ struct Session {
     fprintf(stderr,"unassigned producer termination failed (Windows=%lu); retaining exact process\n",GetLastError());
    const auto exited=WaitForSingleObject(process,5000);
    if(exited==WAIT_OBJECT_0) {
-    file_uploads.ConfirmBrowserStopped(process_incarnation);process_incarnation.clear();
+    {std::lock_guard lock(file_store_mutex);file_uploads.ConfirmBrowserStopped(process_incarnation);}process_incarnation.clear();
     // A crash may leave the last mapping status Running. Preserve confirmed
     // producer termination on retained generations before closing its handle.
     std::string error;
@@ -900,6 +951,7 @@ struct Session {
  static void EventCallback(void* context,uint64_t peer,uint32_t type,const void* bytes,size_t size,
                            const char* auxiliary,int32_t value) {
   auto* self=static_cast<Session*>(context);
+  if(type==REMOTEKIT_RTC_DATA && (peer!=self->peer.load() || size>65536))return;
   Event event{type,std::string(static_cast<const char*>(bytes?bytes:""),size),auxiliary?auxiliary:"",value,peer};
   if(peer==self->peer.load()) {
    if(type==REMOTEKIT_RTC_SDP_ANSWER)self->MarkConnection(ConnectionPhase::answer);
@@ -910,6 +962,10 @@ struct Session {
   }
   if(type==REMOTEKIT_RTC_DATA) {
    auto message=Json::parse(event.bytes,nullptr,false);
+   if(message.is_object() && message.value("type",Json())=="files.request") {
+    if(value==0 && remotekit::FileRequestEnvelope(message,size))self->file_services.Admit(peer,message);
+    return;
+   }
     if(message.is_object() && message.value("type",Json())=="media.refresh") {
      if(peer==self->peer.load() && size<=256) {
       const auto now=QpcNow();auto previous=self->last_media_refresh_qpc.load();
@@ -1030,11 +1086,63 @@ struct Session {
  }
  void Send(const Json& message) {
   auto handle=peer.load();if(!handle||!data_open)return;
-  auto encoded=message.dump();sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+  FlushControl();
+  control_outbox.Transient(handle,message.dump(),[&](const std::string& encoded){
+   return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+  },message.value("type",std::string())=="frame" || message.value("type",std::string())=="stats");
  }
- void SendPrepare(const remotekit::PresentationBarrier::Key& key) {
-  Send({{"type","presentation.prepare"},{"version",1},{"barrierId",std::to_string(key.barrier)},
-        {"outputGeneration",std::to_string(key.generation)},{"layoutEpoch",std::to_string(key.epoch)}});
+ void FlushControl() {
+  const auto handle=peer.load();if(!handle || !data_open)return;
+  control_outbox.Flush(handle,[&](const std::string& encoded){
+   return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+  });
+  // Layout and prepare always have admission priority over service replies.
+  control_outbox.Transient(handle,std::string(),[&](const std::string&){
+   direct_services.Flush(handle,[&](const std::string& encoded){
+    return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+   });return 0;
+  });
+  control_outbox.Transient(handle,std::string(),[&](const std::string&){
+   file_services.Flush(handle,[&](const std::string& encoded){return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);});return 0;
+  });
+ }
+ bool ServiceMessage(const Event& event) {
+  if(event.value!=0 || event.peer!=peer.load())return false;
+  const auto message=Json::parse(event.bytes,nullptr,false);
+  if(!message.is_object())return false;
+  const auto type=message.value("type",Json());
+  if(type=="files.request") {
+   if(remotekit::FileRequestEnvelope(message,event.bytes.size()))file_services.Admit(event.peer,message);
+   return true;
+  }
+  if(type=="clock.ping") {
+   if(event.bytes.size()>512 || message.value("version",Json())!=1 ||
+      !message.contains("requestId") || !remotekit::BoundedServiceId(message["requestId"]))return true;
+   LARGE_INTEGER before{},after{};FILETIME utc{};
+   QueryPerformanceCounter(&before);GetSystemTimePreciseAsFileTime(&utc);QueryPerformanceCounter(&after);
+   ULARGE_INTEGER ticks{};ticks.LowPart=utc.dwLowDateTime;ticks.HighPart=utc.dwHighDateTime;
+   Send({{"type","clock.pong"},{"version",1},{"requestId",message["requestId"]},
+    {"serverTimeMs",double(ticks.QuadPart-116444736000000000ULL)/10000.0},
+    {"serverMonotonicMs",1000.0*(before.QuadPart+(after.QuadPart-before.QuadPart)/2)/QpcFrequency()}});
+   return true;
+  }
+  if(type!="product.action")return false;
+  if(!remotekit::ProductActionEnvelope(message,event.bytes.size()))return true;
+  if(!direct_services.Admit(event.peer,message,1000.0*QpcNow()/QpcFrequency()))
+   Send({{"type","product.result"},{"version",1},{"operationId",message["operationId"]},
+    {"connectionId",connection},{"operationGeneration",message["operationGeneration"]},{"ok",false},{"error","endpoint_backpressure"}});
+  return true;
+ }
+ void QueueLayout(const Json& mode=Json()) {
+  Json prepare;
+  if(layout_prepare && !layout.empty()) {
+   const auto& key=*layout_prepare;
+   prepare={{"type","presentation.prepare"},{"version",1},{"barrierId",std::to_string(key.barrier)},
+            {"outputGeneration",std::to_string(key.generation)},{"layoutEpoch",std::to_string(key.epoch)}};
+  }
+  control_outbox.Replace(peer.load(),mode.is_null()?std::string():mode.dump(),
+    layout.empty()?std::string():layout.dump(),prepare.is_null()?std::string():prepare.dump());
+  FlushControl();
  }
  static bool PresentationNumber(const Json& message,const char* field,uint64_t& result) {
   const auto found=message.find(field);if(found==message.end() || !found->is_string())return false;
@@ -1052,16 +1160,17 @@ struct Session {
   if(type=="media.presentation") {
    const auto backend=message.value("backend",Json());
    if(backend!="video" && backend!="canvas")return true;
-   const auto key=presentation.Mode(event.peer,backend=="video");
+   layout_prepare=presentation.Mode(event.peer,backend=="video");
    // Mode() installs the gate before any video support confirmation leaves.
-   Send({{"type","presentation.mode"},{"version",1},{"backend",backend}});
-   if(!layout.empty()) {Send(layout);if(key)SendPrepare(*key);}
+   QueueLayout({{"type","presentation.mode"},{"version",1},{"backend",backend}});
    if(backend=="canvas")refresh_connected=true;
   } else {
    remotekit::PresentationBarrier::Key key;
    if(PresentationNumber(message,"barrierId",key.barrier) &&
       PresentationNumber(message,"outputGeneration",key.generation) &&
-      PresentationNumber(message,"layoutEpoch",key.epoch) && presentation.Ready(event.peer,key))refresh_connected=true;
+      PresentationNumber(message,"layoutEpoch",key.epoch) && presentation.Ready(event.peer,key)) {
+    layout_prepare.reset();refresh_connected=true;
+   }
   }
   return true;
  }
@@ -1075,7 +1184,11 @@ struct Session {
   media_feedback.Bind(peer.load(),next.at("epoch").get<std::string>(),next.at("generation").get<std::string>(),std::move(feedback_views));
   for(const auto& view:next.at("views"))ready[view.at("id").get<std::string>()]=!view.value("stale",false);
   coordinate_readiness.Set(epoch,std::move(ready));
-  layout=std::move(next);Send(layout);if(prepare)SendPrepare(*prepare);
+  // Layout() returns no new key for an identical epoch. Preserve the current
+  // key so a repeated transaction retries the same idempotent barrier.
+  if(prepare)layout_prepare=prepare;
+  next=remotekit::LayoutCapabilities(std::move(next),control.load()!=0 && client_gestures_control.load()==control.load());
+  layout=std::move(next);QueueLayout();
  }
  void InvalidateLayout(const char* reason) {
   current_geometry=std::string("invalid:")+reason;
@@ -1144,7 +1257,7 @@ struct Session {
   }
   if(type=="input" && command.contains("event") && command["event"].is_object()) {
    const auto event_type=command["event"].value("type",std::string());
-   if((event_type=="mouse"||event_type=="wheel"||event_type=="touch") &&
+   if((event_type=="mouse"||event_type=="wheel"||event_type=="touch"||event_type=="gesture") &&
       !coordinate_readiness.Allows(command.value("view",std::string()),request_epoch)) {
     ++input_rejected;ReplyInput({{"ok",false},{"error","view_not_ready"}},request);return;
    }
@@ -1159,22 +1272,27 @@ struct Session {
   // This connection is already bound to this Session by authenticated Control.
   // The browser validates membership and all token/sequence/output generations.
    try {
-    auto reply=Rpc(command);
-    // Browser BUSY is explicitly pre-admission. Keep this sequence and the
-    // serial input worker until accepted or bounded failure; accepted async
-    // TouchInjectionStatus failures must never replay the gesture.
+    // Only Browser's pre-admission BUSY is retryable. Keep the exact browser
+    // sequence; an accepted asynchronous injection is never replayed.
+    const auto input_control=control.load();
     const auto deadline=QpcNow()+QpcFrequency()/4;
-    unsigned retries=0;
-    while(type=="input" && !reply.value("ok",false) && reply.value("code",0)==6) {
-     if(retries>=50 || QpcNow()>=deadline){++input_busy_exhausted;break;}
-     if(stop_input || event.peer!=peer.load() || request_epoch!=layout_epoch.load()) {
-      reply={{"ok",false},{"error","input_identity_changed"}};break;
+    auto reply=type=="input"?remotekit::RetryBrowserInput(command,
+      [&](const Json& request){return Rpc(request,false,input_control);},
+      [&]{return !stop_input && event.peer==peer.load() && request_epoch==layout_epoch.load();},
+      [&]{return QpcNow()>=deadline;},
+      []{std::this_thread::sleep_for(std::chrono::milliseconds(5));},
+      [&]{++input_busy_retries;},[&]{++input_busy_exhausted;}):Rpc(command,false);
+    if(type=="input" && reply.value("ok",false) && command.contains("event")) {
+     const auto& raw=command["event"];
+     if(raw.value("type",std::string())=="touch" && raw.value("gestureMode",std::string())=="client-v1" &&
+        (raw.value("action",std::string())=="end" || raw.value("action",std::string())=="cancel")) {
+      const auto terminal_deadline=QpcNow()+2*QpcFrequency();
+      reply=remotekit::AwaitTouchTerminal(std::move(reply),command,
+       [&](const Json& query,int64_t remaining){return Rpc(query,false,input_control,static_cast<uint32_t>(std::max<int64_t>(1,remaining*1000/QpcFrequency())),terminal_deadline);},
+       [&]{return !stop_input && event.peer==peer.load() && request_epoch==layout_epoch.load() && control.load()==input_control;},
+       [&]{return terminal_deadline-QpcNow();},
+       []{std::this_thread::sleep_for(std::chrono::milliseconds(5));});
      }
-     std::this_thread::sleep_for(std::chrono::milliseconds(5));
-     if(stop_input || event.peer!=peer.load() || request_epoch!=layout_epoch.load()) {
-      reply={{"ok",false},{"error","input_identity_changed"}};break;
-     }
-     ++retries;++input_busy_retries;reply=Rpc(command);
     }
     if(type=="input")reply["browserSequence"]=command["sequence"];
     ReplyInput(std::move(reply),request);
@@ -1268,12 +1386,13 @@ struct Session {
      const bool opened=event.value==1;
      if(opened&&!data_open.exchange(opened))refresh_connected=true;
      if(!opened)data_open=false;
-     if(data_open&&!layout.empty())Send(layout);
+     if(data_open){QueueLayout();direct_services.RefreshEditable();}
     } else if(event.type==REMOTEKIT_RTC_DATA) {
-     try{if(!PresentationMessage(event))QueueInput(event);}catch(const std::exception& error){++input_rejected;Send({{"type","input.result"},{"ok",false},{"error",error.what()}});}
+     try{if(!ServiceMessage(event) && !PresentationMessage(event))QueueInput(event);}catch(const std::exception& error){++input_rejected;Send({{"type","input.result"},{"ok",false},{"error",error.what()}});}
     }
     else if(event.type==REMOTEKIT_RTC_ERROR)fprintf(stderr,"RTC %s: %s\n",id.c_str(),event.bytes.c_str());
    }
+   FlushControl();
    if(!rtc_connected) {
     std::unique_lock lock(event_mutex);
     event_wake.wait_for(lock,std::chrono::milliseconds(20),[&]{return stop_media||!events.empty();});
@@ -1321,6 +1440,7 @@ struct Session {
     fprintf(stderr,"session %s media: %s\n",id.c_str(),error.c_str());break;
    }
    const auto current_metadata=output_suspended?remotekit::SharedAtlasFrame{}:pool.LatestMetadata();
+   direct_services.Editable(peer.load(),current_metadata);
    if(current_metadata.generation) {
     try {RecomputeCodecCeiling(current_metadata.width_pixels,current_metadata.height_pixels);sampling_fps=policy_fps.load()?policy_fps.load():options.encoding.fps;}
     catch(const std::exception& failure) {if(frame.release)frame.release(frame.release_context,frame.frame_id);std::lock_guard lock(stats->mutex);stats->error=failure.what();break;}
@@ -1329,7 +1449,8 @@ struct Session {
     if(current_geometry!="invalid:no-visible-views")InvalidateLayout("no-visible-views");
    }
    if(current_metadata.generation) {
-    auto next=Layout(current_metadata);const auto epoch=ObserveLayout(current_metadata);next["epoch"]=std::to_string(epoch);
+    auto next=remotekit::LayoutCapabilities(Layout(current_metadata),control.load()!=0 && client_gestures_control.load()==control.load());
+    const auto epoch=ObserveLayout(current_metadata);next["epoch"]=std::to_string(epoch);
     if(next!=layout)PublishLayout(std::move(next),epoch);
    }
    const auto handle=peer.load();const auto now=QpcNow();const double now_ms=1000.0*now/QpcFrequency();
@@ -1457,7 +1578,7 @@ struct Session {
   uint64_t handle=0;
   if(sdk.remotekit_rtc_create(&config,&handle)!=0)throw std::runtime_error("RTC create failed");
   if(policy_fps && sdk.remotekit_rtc_set_media_policy(handle,policy_bitrate,policy_max,policy_fps)!=0){sdk.remotekit_rtc_close(handle);throw std::runtime_error("RTC media policy rejected");}
-  receive_level=0;refresh_connected=false;presentation.Bind(handle);peer=handle;input_sequence.Bind(handle);stop_media=false;data_open=false;layout=Json();
+  receive_level=0;refresh_connected=false;presentation.Bind(handle);control_outbox.Bind(handle);direct_services.Bind(handle,connection);file_services.Bind(handle,connection);layout_prepare.reset();peer=handle;input_sequence.Bind(handle);stop_media=false;data_open=false;layout=Json();
   last_media_refresh_qpc=0;
   if(options.rtc_playout_max_ms>=0) {
    const int status=sdk.remotekit_rtc_set_playout_delay(handle,0,options.rtc_playout_max_ms);
@@ -1497,6 +1618,10 @@ struct Session {
  }
  // Only the dispatcher writes JSONL. SDK callback threads never write stdout.
  void FlushSignals() {
+  direct_services.DispatchPending(peer.load(),1000.0*QpcNow()/QpcFrequency(),[&](const Json& message){
+   return management_action(Json({{"event","client.action"},{"tenantId",tenant},{"connectionId",connection},
+    {"operationGeneration",message["operationGeneration"]},{"operationId",message["operationId"]},{"action",message["action"]}}).dump());
+  });
   std::deque<Event> pending;
   {std::lock_guard lock(signal_mutex);pending.swap(signal_events);}
   for(const auto& event:pending) {
@@ -1507,10 +1632,11 @@ struct Session {
    else if(event.type==REMOTEKIT_RTC_ICE_COMPLETE)signal={{"type","complete"}};
    else if(event.type==REMOTEKIT_RTC_ERROR)signal={{"type","error"},{"message",event.bytes}};
    else continue;
-   std::cout<<Json({{"event","rtc.signal"},{"tenantId",tenant},{"connectionId",connection},{"signal",signal}}).dump()<<'\n'<<std::flush;
+   management_output(Json({{"event","rtc.signal"},{"tenantId",tenant},{"connectionId",connection},{"signal",signal}}).dump());
   }
  }
  void ClosePeer() {
+  file_services.Bind(0);
   const bool had_audio=audio_ring.IsOpen();
   stop_audio=true;
   if(audio_thread.joinable())audio_thread.join();
@@ -1522,6 +1648,7 @@ struct Session {
   stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();
   rtc_connected=false;
   presentation.Bind(0);
+  control_outbox.Bind(0);direct_services.Bind(0);layout_prepare.reset();
   InvalidateLayout("rtc-closed");
   {std::lock_guard lock(input_mutex);input_queue.clear();input_sequence.Bind(0);}
   auto handle=peer.exchange(0);
@@ -1575,6 +1702,114 @@ struct Session {
   });
  }
  using FileBinding=remotekit::FileUploadStore::Binding;
+ using FileJob=remotekit::DcFileServices::Job;
+ void RequireFileJob(const FileJob& job) {
+  if(!file_services.Current(job))throw std::runtime_error("file_transfer_interrupted");
+ }
+ Json DirectFileRpc(const FileJob& job,const char* method,Json additions=Json::object()) {
+  RequireFileJob(job);
+  Json command={{"method",method},{"session",id},{"view",job.binding.view},{"instance",job.binding.instance},
+   {"document",job.binding.document},{"request",job.binding.request}};
+  command.update(additions);return Rpc(std::move(command),true,job.control);
+ }
+ void SweepDirectFiles() {
+  const auto now=QpcNow();
+  for(auto it=file_owners.begin();it!=file_owners.end();) {
+   if(file_services.Current(it->second.job) && now-it->second.touched<QpcFrequency()*15*60){++it;continue;}
+   {std::lock_guard lock(file_store_mutex);file_uploads.Cancel(it->first);}
+   it=file_owners.erase(it);
+  }
+ }
+ static uint64_t FileUnsigned(const Json& value) {
+  if(!value.is_number_unsigned() && (!value.is_number_integer() || value.get<int64_t>()<0))throw std::runtime_error("invalid_file_integer");
+  return value.get<uint64_t>();
+ }
+ Json DirectFileState(const FileJob& job,const std::string& upload) {
+  RequireFileJob(job);
+  std::vector<uint64_t> offsets;
+  {std::lock_guard lock(file_store_mutex);const auto* batch=file_uploads.Find(upload);
+   if(!batch || !(batch->binding==job.binding))throw std::runtime_error("unknown_file_upload");
+   offsets=file_uploads.Offsets(upload,job.binding);
+   if(batch->state==remotekit::FileUploadStore::State::selected)return {{"uploadId",upload},{"state","selected"},{"offsets",offsets}};
+  }
+  auto status=DirectFileRpc(job,"page.fileStatus");const auto state=status.value("state",std::string("unknown"));
+  {std::lock_guard lock(file_store_mutex);
+   if(file_uploads.Find(upload)) {
+    if(state=="selected")file_uploads.MarkSelected(upload);
+    else if(state=="cancelled")file_uploads.DiscardUnselected(upload);
+   }
+  }
+  if(state=="cancelled")file_owners.erase(upload);
+  return {{"uploadId",upload},{"state",state},{"offsets",offsets}};
+ }
+ Json DirectFileCommand(const FileJob& job) {
+  RequireFileJob(job);
+  const auto method=Required(job.message,"method");const auto& params=job.message.at("params");
+  if(method=="begin") {
+   if(DirectFileRpc(job,"page.fileStatus").value("state",std::string())!="pending")throw std::runtime_error("file_request_not_pending");
+   const auto& values=params.at("files");if(!values.is_array() || values.empty() || values.size()>64)throw std::runtime_error("invalid_file_count");
+   std::vector<remotekit::FileUploadStore::Spec> specs;
+   for(const auto& value:values)specs.push_back({Required(value,"name"),value.value("type",std::string()),FileUnsigned(value.at("size"))});
+   std::lock_guard lock(file_store_mutex);RequireFileJob(job);
+   if(const auto* existing=file_uploads.FindBinding(job.binding)) {
+    const auto owner=file_owners.find(existing->id);
+    if(owner==file_owners.end() || owner->second.job.peer!=job.peer || owner->second.job.epoch!=job.epoch)throw std::runtime_error("file_upload_owned_by_other_peer");
+   }
+   const auto& batch=file_uploads.BeginOrResume(job.binding,specs);file_owners[batch.id]={job,QpcNow()};
+   return {{"uploadId",batch.id},{"offsets",file_uploads.Offsets(batch.id,job.binding)}};
+  }
+  if(method=="cancel") {
+   std::string upload=params.value("uploadId",std::string());
+   {std::lock_guard lock(file_store_mutex);
+    if(!upload.empty()) {
+     const auto* batch=file_uploads.Find(upload);
+     if(batch && !(batch->binding==job.binding))throw std::runtime_error("unknown_file_upload");
+    } else if(const auto* batch=file_uploads.FindBinding(job.binding))upload=batch->id;
+   }
+   const auto status=DirectFileRpc(job,"page.fileStatus");auto state=status.value("state",std::string("unknown"));
+   if(state=="pending" || state=="validating") {
+    DirectFileRpc(job,"page.reply",{{"file_only",true},{"accept",false}});
+    state=DirectFileRpc(job,"page.fileStatus").value("state",std::string("unknown"));
+   }
+   if(state=="selected" || state=="cancelled") {
+    std::lock_guard lock(file_store_mutex);
+    if(!upload.empty() && file_uploads.Find(upload)) {
+     if(state=="selected")file_uploads.MarkSelected(upload);else file_uploads.DiscardUnselected(upload);
+    }
+   }
+   if(state=="cancelled" && !upload.empty())file_owners.erase(upload);
+   if(state!="selected" && state!="cancelled")state="validating";
+   return {{"state",state}};
+  }
+  const auto upload=Required(params,"uploadId");
+  const auto owner=file_owners.find(upload);
+  if(owner==file_owners.end() || owner->second.job.peer!=job.peer || owner->second.job.epoch!=job.epoch || !(owner->second.job.binding==job.binding))
+   throw std::runtime_error("file_upload_owned_by_other_peer");
+  owner->second.touched=QpcNow();
+  if(method=="chunk") {
+   const auto bytes=remotekit::DecodeFileChunk(params.at("data"));
+   const auto index=FileUnsigned(params.at("fileIndex")),offset=FileUnsigned(params.at("offset"));
+   if(index>63)throw std::runtime_error("invalid_file_index");
+   std::lock_guard lock(file_store_mutex);RequireFileJob(job);
+   return {{"offset",file_uploads.Write(upload,job.binding,static_cast<size_t>(index),offset,bytes)}};
+  }
+  if(method=="status")return DirectFileState(job,upload);
+  if(method!="commit")throw std::runtime_error("unknown_file_upload_method");
+  bool submitted=false;
+  {std::lock_guard lock(file_store_mutex);const auto* batch=file_uploads.Find(upload);
+   if(!batch || !(batch->binding==job.binding))throw std::runtime_error("unknown_file_upload");
+   submitted=batch->state==remotekit::FileUploadStore::State::submitted || batch->state==remotekit::FileUploadStore::State::selected;
+  }
+  if(submitted)return DirectFileState(job,upload); // Never replay a Browser callback after an uncertain submit.
+  if(DirectFileRpc(job,"page.fileStatus").value("state",std::string())!="pending")throw std::runtime_error("file_request_not_pending");
+  Json files=Json::array();
+  {std::lock_guard lock(file_store_mutex);RequireFileJob(job);const auto& batch=file_uploads.Seal(upload,job.binding);
+   for(const auto& file:batch.files)files.push_back({{"path",Utf8(file.path)},{"displayName",file.name}});
+   file_uploads.MarkSubmitted(upload);
+  }
+  DirectFileRpc(job,"page.reply",{{"file_only",true},{"accept",true},{"files",files}});
+  return DirectFileState(job,upload);
+ }
  FileBinding ParseFileBinding(const Json& value) {
   return {Required(value,"browserIncarnation"),Required(value,"view"),Required(value,"instance"),Required(value,"document"),Required(value,"request")};
  }
@@ -1585,25 +1820,40 @@ struct Session {
     {"document",binding.document},{"request",binding.request}};
  }
  Json FileStatus(const std::string& upload,const FileBinding& binding) {
-  const auto* batch=file_uploads.Find(upload);
-  if(!batch || !(batch->binding==binding))throw std::runtime_error("unknown_file_upload");
-  if(batch->state==remotekit::FileUploadStore::State::selected)
-   return {{"uploadId",upload},{"state","selected"},{"pending",false},{"selected",true}};
+  {std::lock_guard lock(file_store_mutex);const auto* batch=file_uploads.Find(upload);
+   if(!batch || !(batch->binding==binding))throw std::runtime_error("unknown_file_upload");
+   if(batch->state==remotekit::FileUploadStore::State::selected)
+    return {{"uploadId",upload},{"state","selected"},{"pending",false},{"selected",true}};
+  }
   auto status=Rpc(FileBrowserCommand(binding,"page.fileStatus"));
   const auto state=status.value("state",std::string("unknown"));
-  if(state=="selected")file_uploads.MarkSelected(upload);
-  else if(state=="cancelled")file_uploads.DiscardUnselected(upload);
+  {std::lock_guard lock(file_store_mutex);if(file_uploads.Find(upload)) {
+   if(state=="selected")file_uploads.MarkSelected(upload);
+   else if(state=="cancelled")file_uploads.DiscardUnselected(upload);
+  }}
   Json result={{"uploadId",upload},{"state",state},{"pending",state=="pending" || state=="validating"},{"selected",state=="selected"}};
   if(status.contains("error"))result["error"]=status["error"];
   return result;
  }
  Json FileCommand(const std::string& method,const Json& request) {
-  if(method=="session.files.revoke") {file_uploads.RevokeUncommitted();return {{"accepted",true}};}
+  if(method=="session.files.authorize") {
+   std::map<std::string,FileBinding> bindings;const auto& requests=request.at("requests");
+   if(!requests.is_array() || requests.size()>64)throw std::runtime_error("invalid_file_authorization_count");
+   for(const auto& item:requests) {
+    const auto token=Required(item,"id");if(token.size()>128)throw std::runtime_error("invalid_file_request_id");
+    const auto binding=ParseFileBinding(item.at("binding"));
+    if(binding.browser_incarnation!=browser_incarnation || !desired.contains(binding.view))throw std::runtime_error("stale_file_request_target");
+    if(!bindings.emplace(token,binding).second)throw std::runtime_error("duplicate_file_authorization");
+   }
+   file_services.Authorize(Required(request,"connectionId"),control.load(),bindings);return {{"accepted",true}};
+  }
+  if(method=="session.files.revoke") {file_services.RevokeAuthorization();std::lock_guard lock(file_store_mutex);file_uploads.RevokeUncommitted();return {{"accepted",true}};}
   if(method=="session.files.cancel") {
    const auto upload=request.value("uploadId",std::string());
    if(request.value("cancelRequest",false)) {
     const auto binding=ParseFileBinding(request.at("binding"));
-    if(!upload.empty()) {
+    bool known=false;{std::lock_guard lock(file_store_mutex);known=!upload.empty() && file_uploads.Find(upload);}
+    if(known) {
      const auto status=FileStatus(upload,binding);
      if(status.value("state",std::string())=="selected" || status.value("state",std::string())=="cancelled")return status;
     }
@@ -1613,14 +1863,20 @@ struct Session {
      auto command=FileBrowserCommand(binding,"page.reply");command["file_only"]=true;command["accept"]=false;
      Rpc(command);
     }
-    if(!upload.empty())return FileStatus(upload,binding);
+    {std::lock_guard lock(file_store_mutex);file_uploads.CancelBinding(binding);}
+    {std::lock_guard lock(file_store_mutex);known=!upload.empty() && file_uploads.Find(upload);}
+    if(known)return FileStatus(upload,binding);
     status=Rpc(FileBrowserCommand(binding,"page.fileStatus"));
     return {{"accepted",true},{"state",status.value("state",std::string("unknown"))}};
    }
-   if(upload.empty()){file_uploads.RevokeUncommitted();return {{"accepted",true}};}
-   const auto* batch=file_uploads.Find(upload);
-   if(!batch)return {{"accepted",true},{"state","cancelled"}};
-   if(!file_uploads.Cancel(upload))return FileStatus(upload,batch->binding);
+   if(upload.empty()){std::lock_guard lock(file_store_mutex);file_uploads.RevokeUncommitted();return {{"accepted",true}};}
+   std::optional<FileBinding> pending;
+   {std::lock_guard lock(file_store_mutex);const auto* batch=file_uploads.Find(upload);
+    if(!batch)return {{"accepted",true},{"state","cancelled"}};
+    const auto binding=batch->binding;
+    if(!file_uploads.Cancel(upload))pending=binding;
+   }
+   if(pending)return FileStatus(upload,*pending);
    return {{"accepted",true},{"state","cancelled"}};
   }
   const auto binding=ParseFileBinding(request.at("binding"));
@@ -1635,23 +1891,27 @@ struct Session {
        (!value.at("size").is_number_integer() || value.at("size").get<int64_t>()<0))throw std::runtime_error("invalid_file_size");
     specs.push_back({Required(value,"name"),value.value("type",std::string()),value.at("size").get<uint64_t>()});
    }
-   const auto& batch=file_uploads.Begin(binding,specs);Json files=Json::array();
+   std::lock_guard lock(file_store_mutex);const auto& batch=file_uploads.BeginOrResume(binding,specs);Json files=Json::array();
    for(const auto& file:batch.files)files.push_back({{"ticket",file.ticket},{"path",Utf8(file.path)}});
    return {{"uploadId",batch.id},{"files",files}};
   }
   const auto upload=Required(request,"uploadId");
   if(method=="session.files.status")return FileStatus(upload,binding);
   if(method!="session.files.commit")throw std::runtime_error("unknown_file_upload_method");
-  const auto* existing=file_uploads.Find(upload);
-  if(!existing || !(existing->binding==binding))throw std::runtime_error("unknown_file_upload");
-  if(existing->state==remotekit::FileUploadStore::State::submitted || existing->state==remotekit::FileUploadStore::State::selected)
-   return FileStatus(upload,binding);
+  bool submitted=false;
+  {std::lock_guard lock(file_store_mutex);const auto* existing=file_uploads.Find(upload);
+   if(!existing || !(existing->binding==binding))throw std::runtime_error("unknown_file_upload");
+   submitted=existing->state==remotekit::FileUploadStore::State::submitted || existing->state==remotekit::FileUploadStore::State::selected;
+  }
+  if(submitted)return FileStatus(upload,binding);
   if(Rpc(FileBrowserCommand(binding,"page.fileStatus")).value("state",std::string())!="pending")
    throw std::runtime_error("file_request_not_pending");
-  const auto& batch=file_uploads.Seal(upload,binding);Json files=Json::array();
-  for(const auto& file:batch.files)files.push_back({{"path",Utf8(file.path)},{"displayName",file.name}});
+  Json files=Json::array();
+  {std::lock_guard lock(file_store_mutex);const auto& batch=file_uploads.Seal(upload,binding);
+   for(const auto& file:batch.files)files.push_back({{"path",Utf8(file.path)},{"displayName",file.name}});
+   file_uploads.MarkSubmitted(upload); // An RPC timeout can occur after Browser received these paths.
+  }
   auto command=FileBrowserCommand(binding,"page.reply");command["file_only"]=true;command["accept"]=true;command["files"]=files;
-  file_uploads.MarkSubmitted(upload); // An RPC timeout can occur after Browser received these paths.
   Rpc(command);
   return FileStatus(upload,binding);
  }
@@ -1701,6 +1961,17 @@ struct Session {
    site_preferences=sites;SaveJson(directory/"site-preferences.json",site_preferences);
    return {{"accepted",true},{"applied",Alive()&&control!=0}};
   }
+  if(method=="rtc.actionResult") {
+   if(request.value("connectionId",std::string())!=connection || !peer.load())return {{"accepted",false}};
+   if(!request.contains("operationId") || !remotekit::BoundedServiceId(request["operationId"],36) ||
+      !request.contains("operationGeneration") || !remotekit::BoundedServiceId(request["operationGeneration"]) ||
+      !request.contains("ok") || !request["ok"].is_boolean())throw std::runtime_error("invalid action result");
+   Json result={{"connectionId",connection},{"operationId",request["operationId"]},
+    {"operationGeneration",request["operationGeneration"]},{"ok",request["ok"]}};
+   if(request.contains("result"))result["result"]=request["result"];
+   if(request.contains("error"))result["error"]=request["error"];
+   const bool accepted=direct_services.Result(peer.load(),result);event_wake.notify_one();return {{"accepted",accepted}};
+  }
   if(method=="rtc.offer")return Offer(request);
   if(method=="rtc.close") {
    if(request.value("connectionId",std::string())==connection)ClosePeer();
@@ -1713,6 +1984,13 @@ struct Session {
    if(sdk.remotekit_rtc_add_ice(peer.load(),mid.c_str(),ice.value("sdpMLineIndex",0),candidate.data(),candidate.size())!=0)
     throw std::runtime_error("ICE candidate rejected");
    return Json::object();
+  }
+  if(method=="view.navigation.ack") {
+   if(!Alive() || !control || producer_stop_pending ||
+      request.value("browserIncarnation",std::string())!=browser_incarnation)
+    throw std::runtime_error("stale_browser_incarnation");
+   Json command={{"method","navigation.ack"},{"session",id},{"view",ViewId(request)}};
+   NavigationOperation(command,request);return Rpc(command);
   }
   const bool page_reply=method=="view.page.reply" || method=="view.close.reply";
   if(page_reply && (!Alive() || !control || producer_stop_pending || browser_incarnation.empty() ||
@@ -1778,7 +2056,8 @@ struct Session {
          {"url",desired.at(view).value("url",std::string("about:blank"))}});
     fs::remove(directory/"recovery"/(view+".json"));ReconcileOutput();
    }
-   return Rpc({{"method","page.command"},{"session",id},{"view",view},{"action",action}});
+   Json command={{"method","page.command"},{"session",id},{"view",view},{"action",action}};
+   NavigationOperation(command,request);return Rpc(command);
   }
   if(method=="view.lifecycle") {
    const auto action=Required(request,"action");
@@ -1788,8 +2067,10 @@ struct Session {
   }
   if(method=="view.navigate") {
    const auto url=Required(request,"url");
+   navigation_export.Forget(view);
    const bool cancelled=CancelRecovery(view);
-   auto result=Rpc({{"method",cancelled?"view.recreate":"navigate"},{"session",id},{"view",view},{"url",url}});
+   Json command={{"method",cancelled?"view.recreate":"navigate"},{"session",id},{"view",view},{"url",url}};
+   NavigationOperation(command,request);auto result=Rpc(command);
    fs::remove(directory/"recovery"/(view+".json"));recovery_revisions.erase(view);
    if(desired.contains(view)){desired[view]["url"]=request["url"];Save();}
    if(cancelled)ReconcileOutput();
@@ -1808,22 +2089,23 @@ struct Session {
 // progress. The reader owns only its queue; Session state stays on dispatcher.
 class ServiceRequests {
  std::mutex mutex_;std::condition_variable wake_;std::deque<std::string> queue_;
- bool stopping_=false,eof_=false;std::thread reader_;
+ bool stopping_=false,eof_=false;size_t queued_bytes_=0;std::thread reader_;
  public:
- ServiceRequests():reader_([this]{
+ ServiceRequests(bool enabled=true) {if(enabled)reader_=std::thread([this]{
   std::string line;
-  while(std::getline(std::cin,line)) {
+  while(remotekit::ReadServiceLine(std::cin,line)) {
    std::unique_lock lock(mutex_);
-   wake_.wait(lock,[&]{return stopping_||queue_.size()<256;});
+   wake_.wait(lock,[&]{return stopping_||(queue_.size()<256 && queued_bytes_+line.size()<=4*1024*1024);});
    if(stopping_)break;
-   queue_.push_back(std::move(line));wake_.notify_all();
+   queued_bytes_+=line.size();queue_.push_back(std::move(line));wake_.notify_all();
   }
   {std::lock_guard lock(mutex_);eof_=true;}wake_.notify_all();
- }){}
+ });}
  ~ServiceRequests() {
   {std::lock_guard lock(mutex_);stopping_=true;}wake_.notify_all();
   // Cancel a synchronous stdin pipe read on shutdown. Repeating closes the
   // small race between the reader checking stopping_ and entering ReadFile.
+  if(!reader_.joinable())return;
   while(WaitForSingleObject(reader_.native_handle(),20)==WAIT_TIMEOUT)
    CancelSynchronousIo(reader_.native_handle());
   reader_.join();
@@ -1833,7 +2115,7 @@ class ServiceRequests {
   wake_.wait_for(lock,std::chrono::milliseconds(20),[&]{return eof_||!queue_.empty();});
   eof=eof_&&queue_.empty();
   if(queue_.empty())return false;
-  line=std::move(queue_.front());queue_.pop_front();wake_.notify_all();return true;
+  line=std::move(queue_.front());queued_bytes_-=line.size();queue_.pop_front();wake_.notify_all();return true;
  }
 };
 }
@@ -1844,17 +2126,27 @@ int main(int argc,char** argv) {
   Options options;options.Parse(argc,argv);fs::create_directories(options.data);
   Sdk sdk;sdk.Open(options.browser.parent_path()/"remotekit_sdk.dll");
   auto registry=LoadJson(options.data/"sessions.json",{{"next",1},{"tenants",Json::object()}});
+  std::unique_ptr<remotekit::ControlTransport> remote;
+  if(!options.control_url.empty()) {
+   remote=std::make_unique<remotekit::ControlTransport>(options.control_url,options.node_id,Env("REMOTEKIT_ENDPOINT_TOKEN"));
+   management_output=[&](std::string bytes){remote->Send(std::move(bytes));};
+   management_action=[&](std::string bytes){return remote->TrySend(std::move(bytes));};
+  } else if(!options.node_id.empty())throw std::runtime_error("--node-id requires --control-url");
   std::map<std::string,std::unique_ptr<Session>> sessions;
-  ServiceRequests requests;std::string maintenance_cursor,line;
+  ServiceRequests requests(!remote);std::string maintenance_cursor,line;
   while(true) {
-   bool eof=false;const bool received=requests.Next(line,eof);if(eof)break;
+   bool eof=false;uint64_t generation=0;
+   const bool received=remote?remote->Next(line,generation):requests.Next(line,eof);if(eof)break;
    if(received) {
-   if(line.size()>1024*1024){std::cout<<Json({{"id",nullptr},{"ok",false},{"error","request exceeds 1 MiB"}}).dump()<<'\n'<<std::flush;continue;}
+   if(remote&&!remote->Current(generation))continue;
+   auto reply=[&](const Json& message){if(remote)remote->Send(message.dump(),generation);else management_output(message.dump());};
+   if(line.size()>1024*1024){reply({{"id",nullptr},{"ok",false},{"error","request exceeds 1 MiB"}});continue;}
    Json request=Json::parse(line,nullptr,false),response={{"id",request.is_object()?request.value("id",Json(nullptr)):Json(nullptr)}};
    bool shutdown=false;
    try {
     if(!request.is_object())throw std::runtime_error("invalid JSON request");
     auto method=Required(request,"method");
+    if(method=="__oversized_request")throw std::runtime_error("request exceeds 1 MiB");
     if(method=="shutdown"){sessions.clear();response["result"]={{"closed",true}};shutdown=true;}
     else {
      auto tenant=Required(request,"tenantId");
@@ -1871,7 +2163,7 @@ int main(int argc,char** argv) {
     }
     response["ok"]=true;
    }catch(const std::exception& error){response["ok"]=false;response["error"]=error.what();fprintf(stderr,"endpoint: %s\n",error.what());}
-   std::cout<<response.dump()<<'\n'<<std::flush;if(shutdown)break;
+   reply(response);if(shutdown)break;
    }
     for(auto& [tenant,session]:sessions)session->FlushSignals();
     // Round-robin Sessions even when no more JSONL calls arrive. A single

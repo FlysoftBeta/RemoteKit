@@ -14,13 +14,15 @@ Endpoint独立音频线程消费音频环，通过SDK的AudioSource送入Opus，
 
 Browser真正的RunFileChooser请求经Control的fileRequests呈现自定义dialog，最终回填Chromium FileSelectListener。它不是对网页input.files的脚本赋值。请求身份包含Session、Browser incarnation、WebView实例与文档；客户端只看到不透明请求ID。
 
-流程为WS `files.begin` → 按ticket进行HTTP流式上传 → WS `files.commit`。上传到`/api/files/{ticket}`，请求体为原始文件字节；HTTP完成只表示传输完成，页面选择成功要等Browser异步确认。提交状态可幂等查询，结果不明时重试同一uploadId。取消调用`files.cancel`，旧请求不能被新页面复用。
+正式Viewer经当前RTC发送`files.request`的begin/chunk/commit/cancel/status，响应为`files.result`。chunk最多16KiB字节的base64、携带fileIndex/offset，客户端最多四个在途；Endpoint实际写入后才确认offset。重复同内容/同offset幂等，不同内容冲突拒绝。传输完成不等于选择成功，commit仍等待Browser异步确认；未知结果查询同uploadId，不重复调用选择器。旧HTTP/WS入口仅保留兼容检查，正式Viewer不通过它们上传。
 
-HTTP检查cookie、Origin、当前Viewer租约和ticket身份。Endpoint检查真实待处理请求，托管Session内的随机暂存路径；Control在同机写入这些文件，不把路径发给客户端。网页File.name保留用户文件名，磁盘路径由服务端生成。accept是浏览器选择提示；目录上传尚不支持。
+Control按当前请求与租约给Endpoint下发不透明ID的授权绑定，Endpoint再检查真实待处理请求、当前peer与文档身份。文件worker属于Session，独立有界队列不阻塞媒体；路径及字节只由Endpoint管理，不要求Control访问其文件系统。网页File.name保留用户文件名，磁盘路径由Endpoint随机生成，不在回复或异常中暴露。accept是浏览器选择提示；目录上传尚不支持。
 
 每文件256MiB、每批512MiB/64个、每Session1GiB/4096个文件。声明配额在上传前预留，重启后结合实际文件核算。无法识别的旧目录不作为可随意删除的缓存。
 
-断线、接管或取消撤销未提交ticket并清理暂存；原网页请求可在新Viewer重现。已选择或结果未知的文件保留到确认对应Browser incarnation退出，供网页延迟读取。页面导航不是文件引用释放的证明。
+文件选择提示按MIME/扩展名语义导出：最多64项，每项最多256个UTF-8字节，整个accept JSON数组最多16KiB。无效、超长及超预算项省略并标记`accept_types_omitted`；Control透传`acceptTypesOmitted`，Viewer显示“文件类型列表过长，显示所有文件”并撤下本地picker的accept限制，避免把不完整提示当成完整允许列表。正常列表保持原提示；这些限制不改变原生pending请求、选择完成身份、上传字节或网页自己的校验，也不自动取消请求。
+
+断线、接管或取消撤销未提交授权并清理暂存；原网页请求可在新Viewer重现。丢begin回复按相同binding返回原draft，取消即使draft已因中断撤销仍能幂等取消原生请求。已选择或结果未知的文件保留到确认对应Browser incarnation退出，供网页延迟读取。页面导航不是文件引用释放的证明；当前不承诺跨peer自动续传。
 
 ## 拍照
 

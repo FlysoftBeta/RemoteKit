@@ -1,4 +1,5 @@
 #include "browser/compat_renderer.h"
+#include "browser/navigation_error_page.h"
 
 #include <string>
 #include <utility>
@@ -11,8 +12,10 @@
 #include "content/public/renderer/render_frame.h"
 #include "content/public/renderer/render_frame_observer.h"
 #include "gin/converter.h"
+#include "net/base/net_errors.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include "third_party/blink/public/platform/web_string.h"
+#include "third_party/blink/public/platform/web_url_error.h"
 #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
 #include "third_party/blink/public/web/web_settings.h"
 #include "third_party/blink/public/web/web_view.h"
@@ -203,5 +206,20 @@ void CompatRendererClient::WebViewCreated(blink::WebView* view, bool, const url:
 }
 void CompatRendererClient::RenderFrameCreated(content::RenderFrame* render_frame) {
   new CompatFrameObserver(render_frame);
+}
+
+void CompatRendererClient::PrepareErrorPage(
+    content::RenderFrame*,
+    const blink::WebURLError& error,
+    const std::string&,
+    content::mojom::AlternativeErrorPageOverrideInfoPtr,
+    std::string* error_html) {
+  // A null output means Chromium already supplied the error document. Do not
+  // replace it or navigate again: retry stays in the normal toolbar/POST path.
+  if (error_html && error_html->empty()) {
+    *error_html = BuildNavigationErrorHtml(
+        error.url().GetString().Utf8(), error.reason(),
+        error.reason() < 0 ? net::ErrorToString(error.reason()) : "UNKNOWN_ERROR");
+  }
 }
 }  // namespace remotekit::browser

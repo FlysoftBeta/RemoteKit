@@ -10,7 +10,7 @@ export interface InternalFileRequest extends FileRequest { binding: FileBinding 
 export class FileUploadError extends Error { constructor(readonly status: number, message: string) { super(message); } }
 interface Entry {
   tenant: string; lease: string; authentication: string; request: InternalFileRequest;
-  id: string; submitted: boolean; result?: FileUploadResult;
+  id: string; submitted: boolean; result?: FileUploadResult; draftAborted?: boolean; aborted?: Promise<void>;
   files: { ticket: string; path: string; size: number; state: 'pending' | 'writing' | 'complete'; stream?: Readable }[];
 }
 /** The Endpoint owns filesystem lifetime. Control owns authenticated streaming. */
@@ -27,7 +27,7 @@ export class FileUploads {
     const request = this.resolve(tenant, params.requestId);
     if (!request || request.state !== 'pending') throw new FileUploadError(409, '文件选择请求已失效');
     const specs = this.validateSpecs(params.files, request.multiple);
-    const previous = [...this.uploads.values()].find(entry => entry.tenant === tenant && entry.request.id === request.id && !entry.result);
+    const previous = [...this.uploads.values()].find(entry => entry.tenant === tenant && entry.request.id === request.id && !entry.result && !entry.draftAborted);
     if (previous?.submitted) throw new FileUploadError(409, '文件正在确认，请继续等待');
     if (previous) await this.abort(previous);
     const allocated = await this.endpoint.request('session.files.begin', tenant, { binding: request.binding, files: specs });
@@ -89,6 +89,7 @@ export class FileUploads {
     if (!params || Object.keys(params).some(k => k !== 'uploadId')) throw new FileUploadError(400, '无效的文件提交');
     const entry = this.owned(tenant, lease, authentication, params.uploadId);
     if (entry.result) return entry.result;
+    if (entry.draftAborted) throw new FileUploadError(409, '文件发送已中止，请重新选择');
     if (!entry.submitted && entry.files.some(file => file.state !== 'complete')) throw new FileUploadError(409, '文件尚未发送完成');
     // Once submission may have reached Browser, failures are uncertain. Query
     // this same opaque batch again, never replay a fresh chooser reply.
@@ -110,16 +111,30 @@ export class FileUploads {
     if (entry && entry.request.id !== params.requestId) throw new FileUploadError(409, '文件请求不匹配');
     if (entry?.result) return entry.result;
     if (!request && !entry) throw new FileUploadError(409, '文件选择请求已失效');
+    // A failed HTTP stream may already have retired its Endpoint batch. Keep
+    // its authenticated binding receipt and cancel the chooser by that identity.
+    if (entry && !entry.submitted) await this.abort(entry);
     if (entry) for (const file of entry.files) file.stream?.destroy(new FileUploadError(409, '发送已取消'));
-    const result = await this.endpoint.request('session.files.cancel', tenant, { ...(entry ? { uploadId: entry.id } : {}), binding: (request ?? entry!.request).binding, cancelRequest: true });
+    const result = await this.endpoint.request('session.files.cancel', tenant, { ...(entry && !entry.draftAborted ? { uploadId: entry.id } : {}), binding: (request ?? entry!.request).binding, cancelRequest: true });
     if (entry) return this.result(entry, result);
     return result?.state === 'selected' ? { state: 'selected' } : result?.state === 'cancelled' ? { state: 'cancelled' } : { state: 'validating' };
   }
   private removeTickets(entry: Entry) { for (const file of entry.files) this.tickets.delete(file.ticket); }
-  private async abort(entry: Entry) {
+  private abort(entry: Entry): Promise<void> {
     this.removeTickets(entry);
     for (const file of entry.files) file.stream?.destroy();
-    if (!entry.submitted) { this.uploads.delete(entry.id); await this.endpoint.request('session.files.cancel', entry.tenant, { uploadId: entry.id }).catch(() => {}); }
+    if (entry.submitted) return Promise.resolve();
+    // Retain a bounded, lease/auth-bound receipt: transport failure does not
+    // mean the native file chooser was cancelled.
+    entry.draftAborted = true;
+    if (!entry.aborted) {
+      entry.aborted = this.endpoint.request('session.files.cancel', entry.tenant, { uploadId: entry.id }).then(() => {}, () => {
+        entry.aborted = undefined; // A later cancel/retry must retry cleanup.
+      });
+      const retired = [...this.uploads.values()].filter(item => item.tenant === entry.tenant && (item.draftAborted || item.result));
+      for (const old of retired.slice(0, Math.max(0, retired.length - 64))) this.uploads.delete(old.id);
+    }
+    return entry.aborted ?? Promise.resolve();
   }
   async revoke(tenant: string, lease: string) {
     for (const entry of [...this.uploads.values()]) if (entry.tenant === tenant && entry.lease === lease) { await this.abort(entry); this.uploads.delete(entry.id); }

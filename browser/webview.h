@@ -13,6 +13,8 @@
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "base/values.h"
+#include "browser/navigation_operations.h"
+#include "browser/client_touch_retirement.h"
 #include "content/public/browser/devtools_agent_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents.h"
@@ -39,6 +41,7 @@ class WebTouchEvent;
 namespace remotekit::browser {
 class NavigationState;
 class OffscreenHost;
+class ClientGestureBridge;
 
 // UI-sequence-only execution adapter. BrowserContext and Endpoint outlive this.
 // Unload restore retains complete committed history/PageState and same-process
@@ -61,7 +64,13 @@ class WebView final : public content::WebContentsObserver,
   OffscreenHost* offscreen_host() const { return offscreen_host_.get(); }
   SessionId session_id() const { return session_; }
   WebViewId view_id() const { return view_; }
-  Status Navigate(const GURL&);
+  Status Navigate(const GURL&, const base::DictValue* operation = nullptr);
+  Status NavigationCommand(const base::DictValue&);
+  Status AcknowledgeNavigation(const base::DictValue&);
+  base::ListValue NavigationOperationSnapshot() const;
+  std::optional<Status> ExistingNavigationOperation(const GURL&, const base::DictValue&);
+  NavigationOperations ReleaseNavigationOperations();
+  void RestoreNavigationOperations(NavigationOperations operations);
   Status SetVisible(bool);
   Status Focus(bool);
   void SetNativeFocusEnabled(bool enabled);
@@ -79,6 +88,14 @@ class WebView final : public content::WebContentsObserver,
   // A first touch start resolves its OOPIF target asynchronously. All remote
   // input is busy during that resolution; callers must retry rejected input.
   Status TouchInjectionStatus() const;
+  bool TouchProcessingPending() const {
+    return touch_hit_test_pending_ || touch_cleanup_pending_ || touch_pending_callbacks_;
+  }
+  std::string ClientTouchSequence() const;
+  void RefreshClientTouchOwner();
+  bool ClientTouchRetired(const InputToken& token, const std::string& sequence) const {
+    return retired_client_touches_.Contains(token, sequence);
+  }
   // UI-sequence diagnostic snapshot; absent fields mean no current native view
   // or submitted frame. Reads cached state without requesting frame reports.
   base::DictValue CompositorDiagnostics() const;
@@ -103,6 +120,8 @@ class WebView final : public content::WebContentsObserver,
   void NavigationEntryChanged(const content::EntryChangedDetails&) override;
   void NavigationListPruned(const content::PrunedDetails&) override;
   void DidStartNavigation(content::NavigationHandle*) override;
+  void DidRedirectNavigation(content::NavigationHandle*) override;
+  void BeforeUnloadDialogCancelled() override;
   void ReadyToCommitNavigation(content::NavigationHandle*) override;
   void RenderViewReady() override;
   void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
@@ -130,6 +149,7 @@ class WebView final : public content::WebContentsObserver,
   Status PrepareTouchClock(const TouchInput&);
   Status SendTouchEvent(const blink::WebTouchEvent&);
   void OnTouchProcessed(std::uint64_t);
+  void OnClientTouchProcessed(bool);
   void FinishTouchCleanup(std::uint64_t);
   void PrepareKeyboardTarget(content::RenderWidgetHostImpl*);
   bool KeyboardTargetAlive() const;
@@ -145,6 +165,9 @@ class WebView final : public content::WebContentsObserver,
   void OnDiscarded(std::uint64_t generation);
   void StartLifecycleTimer();
   Status BuildTouchState(const TouchInput&, std::map<std::uint32_t, TouchPoint>*) const;
+  Status RunNavigation(const std::string& action, const GURL&, const base::DictValue*);
+  void BindNavigation(content::NavigationHandle*, bool started);
+  void PollNavigationOperations();
 
   content::BrowserContext* context_;
   Endpoint* endpoint_;
@@ -152,6 +175,10 @@ class WebView final : public content::WebContentsObserver,
   WebViewId view_;
   std::unique_ptr<content::WebContents> contents_;
   std::uint64_t navigation_revision_ = 1;
+  NavigationOperations navigation_operations_;
+  std::optional<NavigationOperations::Identity> issuing_navigation_;
+  std::map<std::int64_t, base::WeakPtr<content::NavigationHandle>> navigation_handles_;
+  base::RepeatingTimer navigation_operation_timer_;
   const bool use_offscreen_host_;
   std::unique_ptr<OffscreenHost> offscreen_host_;
   bool render_demand_ = false;
@@ -181,6 +208,11 @@ class WebView final : public content::WebContentsObserver,
   // This is the WebContents' shared emulator, not an adapter-owned emulator.
   // Claim it only while disabled, and never change it while CDP is attached.
   base::WeakPtr<input::TouchEmulator> touch_emulator_;
+  scoped_refptr<ClientGestureBridge> client_gesture_bridge_;
+  ClientTouchRetirement retired_client_touches_;
+  std::optional<InputToken> client_touch_token_;
+  std::string client_touch_sequence_;
+  bool client_touch_mode_{};
   base::WeakPtr<content::RenderWidgetHostViewBase> touch_target_view_;
   base::WeakPtr<content::RenderFrameHostImpl> touch_target_frame_;
   std::optional<blink::DocumentToken> touch_target_document_;

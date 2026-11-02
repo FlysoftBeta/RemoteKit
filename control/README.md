@@ -1,6 +1,6 @@
 # RemoteKit Control
 
-Control保存用户的窗口、标签页、站点UA和设置；Endpoint Session/Browser保存网页执行与恢复数据。媒体和输入直接走Client↔Endpoint WebRTC，产品操作和信令走已鉴权WebSocket。完整职责及操作流程见[控制面设计](../docs/control-plane.zh-CN.md)，接口见[串流协议](../docs/streaming-protocol.md)。
+Control保存用户的窗口、标签页、站点UA和设置；Endpoint Session/Browser保存网页执行与恢复数据。媒体、输入、文件和产品操作请求走Client↔Endpoint WebRTC，产品操作由Endpoint转交Control执行并保存收据；已鉴权WebSocket负责Client与Control的状态同步和信令。完整职责及操作流程见[控制面设计](../docs/control-plane.zh-CN.md)，接口见[串流协议](../docs/streaming-protocol.md)。
 
 ## 开发与运行
 
@@ -22,11 +22,15 @@ npm run client
 | REMOTEKIT_CONTROL_ORIGINS | 允许的完整Origin，逗号分隔 |
 | REMOTEKIT_CONTROL_DB | SQLite文件 |
 | REMOTEKIT_ENDPOINT / REMOTEKIT_ENDPOINT_ARGS | Endpoint可执行文件与JSON参数数组 |
+| REMOTEKIT_ENDPOINT_NODE_ID / REMOTEKIT_ENDPOINT_TOKEN | 配置一个远端Native节点ID及独立管理Bearer密钥；设置NODE_ID后不启动本地Endpoint |
+| REMOTEKIT_ENDPOINT_TLS_PROXY=1 | 网关位于本机TLS反向代理后；仅接受loopback代理且X-Forwarded-Proto=https |
 | REMOTEKIT_HTTPS_KEY / REMOTEKIT_HTTPS_CERT | 成对配置TLS私钥/证书 |
 | REMOTEKIT_METRICS_DIR | metrics输出目录 |
 | REMOTEKIT_DIAGNOSTICS=1 | 显式开启隔离测试入口，正式包默认关闭 |
 
 局域网部署同时配置监听地址、正确Origin和TLS；浏览器能力会受安全上下文影响。不要把实验配置、凭据或本机Profile放入客户端持久存储。
+
+远端节点主动连接固定`/api/endpoint` WebSocket路径，使用受信证书HTTPS/WSS；可以由本机反向代理终止TLS并开启上述代理配置。loopback明文仅供开发。节点管理鉴权独立于Viewer Origin和用户账号；没有配置NODE_ID时不开放节点注册。当前Control只绑定一个配置节点，不提供多节点调度。管理连接替换/断线立即失败挂起请求，不自动重放变更；重新握手触发snapshot对账。Control停止仅断开远端管理连接，不发送shutdown销毁节点的Session/RTC；默认单包仍启动并管理本地Endpoint进程。
 
 ## 验证与诊断
 

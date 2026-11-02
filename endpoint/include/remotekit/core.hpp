@@ -116,6 +116,21 @@ struct TouchInput {
   };
   std::optional<Clock> clock;
   std::vector<Sample> samples;
+  struct Gesture {
+    enum class Type { tap_down, tap_cancel, tap, scroll_begin, scroll_update, scroll_end,
+                      pinch_begin, pinch_update, pinch_end, fling_start, fling_cancel };
+    Type type{};
+    double x{}, y{}, delta_x{}, delta_y{}, scale{1}, velocity_x{}, velocity_y{};
+  };
+  bool client_gestures{};
+  std::vector<Gesture> gestures;
+};
+struct GestureInput {
+  enum class Action { momentum, momentum_end, cancel };
+  Action action{};
+  std::string sequence_id;
+  std::int64_t elapsed_us{};
+  double cumulative_x{}, cumulative_y{};
 };
 struct ImeSet {
   std::u16string text;
@@ -127,7 +142,7 @@ struct ImeCommit {
 struct ImeCancel {};
 struct ImeFinish {};
 using InputPayload = std::
-    variant<KeyInput, MouseInput, WheelInput, TouchInput, ImeSet, ImeCommit, ImeCancel, ImeFinish>;
+    variant<KeyInput, MouseInput, WheelInput, TouchInput, GestureInput, ImeSet, ImeCommit, ImeCancel, ImeFinish>;
 struct InputEvent {
   InputToken token;
   std::uint64_t sequence{};

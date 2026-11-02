@@ -30,6 +30,7 @@ export class SharedPlaneRenderer {
   private targets: SharedPlaneTarget[] = [];
   private originalOpacity = new Map<HTMLCanvasElement,string>();
   private observer?: ResizeObserver;
+  private recoveryObserver?: ResizeObserver;
   private raf?: number;
   private failed = false;
   private disposed = false;
@@ -42,8 +43,25 @@ export class SharedPlaneRenderer {
   }
   private visibilityChanged=()=>{if(document.visibilityState==='hidden')this.clear();else this.options.onResume?.();};
   private geometryChanged=()=>{
-    if(this.raf!==undefined||!this.frame||!this.gl)return;
-    this.raf=requestAnimationFrame(()=>{this.raf=undefined;const frame=this.frame;if(!frame||!this.options.isCurrent(frame)){this.clear();return;}try{const result=this.drawTexture(frame,this.targets,false,0);if(result){this.counts.redraws++;this.options.onRedraw(result);}}catch(error){this.fail(error,true);}});
+    if(this.raf!==undefined||this.failed||this.disposed)return;
+    this.raf=requestAnimationFrame(()=>{
+      this.raf=undefined;const frame=this.frame;
+      if(!frame||!this.gl){this.options.onResume?.();return;}
+      if(!this.options.isCurrent(frame)){this.clear();return;}
+      try{
+        const result=this.drawTexture(frame,this.targets,false,0);
+        if(result){this.counts.redraws++;this.options.onRedraw(result);return;}
+        const targets=this.targets;
+        this.clear();this.counts.fallbackReason='geometry-budget-or-hidden';
+        this.options.onFailure('geometry-budget-or-hidden');
+        // Keep observing the actual content bounds after retiring the backing:
+        // a static CSS resize can become eligible again without a window event.
+        if(!this.frame&&!this.failed&&!this.disposed&&typeof ResizeObserver==='function'){
+          this.recoveryObserver?.disconnect();this.recoveryObserver=new ResizeObserver(this.geometryChanged);
+          for(const target of targets)this.recoveryObserver.observe(target.canvas);
+        }
+      }catch(error){this.fail(error,true);}
+    });
   };
   private ensureContext() {
     if(this.gl)return;
@@ -82,6 +100,7 @@ export class SharedPlaneRenderer {
       const result=this.drawTexture(frame,targets,true,performance.now()-start,geometry);
       if(!result){this.clear();this.counts.fallbackReason='geometry-budget-or-hidden';return;}
       this.frame=frame;this.targets=[...targets];this.counts.frames++;
+      this.recoveryObserver?.disconnect();this.recoveryObserver=undefined;
       return result;
     }catch(error){this.fail(error,false);return;}
   }
@@ -119,5 +138,5 @@ export class SharedPlaneRenderer {
     if(gl){gl.deleteTexture(this.texture??null);gl.deleteBuffer(this.buffer??null);gl.deleteProgram(this.program??null);gl.getExtension('WEBGL_lose_context')?.loseContext();}
     this.texture=undefined;this.buffer=undefined;this.program=undefined;canvas?.remove();this.counts.width=0;this.counts.height=0;
   }
-  dispose(){this.disposed=true;this.clear();window.removeEventListener('resize',this.geometryChanged);window.removeEventListener('scroll',this.geometryChanged,true);document.removeEventListener('visibilitychange',this.visibilityChanged);}
+  dispose(){this.disposed=true;this.recoveryObserver?.disconnect();this.recoveryObserver=undefined;this.clear();window.removeEventListener('resize',this.geometryChanged);window.removeEventListener('scroll',this.geometryChanged,true);document.removeEventListener('visibilitychange',this.visibilityChanged);}
 }

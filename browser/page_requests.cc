@@ -1,4 +1,5 @@
 #include "browser/page_requests.h"
+#include "browser/file_chooser_accept.h"
 
 #include <cmath>
 #include <limits>
@@ -355,13 +356,9 @@ void PageRequests::RunFileChooser(content::RenderFrameHost* frame,
   request->data.Set("multiple", params.mode == Mode::kOpenMultiple);
   request->data.Set("need_local_path", params.need_local_path);
   request->data.Set("origin", frame ? Clip(frame->GetLastCommittedOrigin().Serialize()) : "");
-  base::ListValue accepts;
-  for (const auto& type : params.accept_types) {
-    if (accepts.size() == kLimit)
-      break;
-    accepts.Append(Text(type));
-  }
-  request->data.Set("accept_types", std::move(accepts));
+  auto accepts = ExportFileChooserAcceptHints(params.accept_types);
+  request->data.Set("accept_types", std::move(accepts.types));
+  request->data.Set("accept_types_omitted", accepts.omitted);
   Add(std::move(request));
 }
 void PageRequests::EnumerateDirectory(content::WebContents*,

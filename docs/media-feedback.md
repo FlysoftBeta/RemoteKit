@@ -16,9 +16,9 @@ Endpoint校验当前peer、单调seq、代次、有限值和边界，过量反�
 
 SDK在原capture_qpc仍有效时用QPC↔系统UTC配对生成captureWallTimeMs、captureMonotonicMs、captureClockUncertaintyMs和sourceCaptureId，随真实wire RTP/epoch元数据送Client。SDK内部重映射的capture_time_us不是Unix时间，不能直接相减。无有效capture就省略，不能用纹理ready或编码时间冒充。
 
-Client通过Control clock.ping校准双方wall offset；当前Control和Endpoint在同机。以匹配wire RTP/epoch的video compositor回调观察或canvas回退的JS提交计算采集完成→呈现估算。两种终点按后端区分；未知RTP元数据不生成样本。重复sourceCaptureId（包括idle尾帧）、隐藏、陈旧请求、wall/monotonic跳变、过期校准或总不确定度>25ms不进入策略。
+Client通过当前RTC的clock.ping/pong独立校准Endpoint wall/monotonic，用于采集延迟与触控源时起点。Control的clock.ping是另一个校准域，只用于产品反馈新鲜度；两台机器的wall不能混用。两域都有当前连接nonce、单在途请求、超时与跳变检查。以匹配wire RTP/epoch的video compositor回调观察或canvas回退的JS提交计算采集完成→呈现估算。晚metadata保留原观察时刻，不把消息到达当作呈现。重复sourceCaptureId（包括idle尾帧）、隐藏、陈旧请求、wall/monotonic跳变、过期校准或总不确定度>25ms不进入策略。
 
-每2秒窗口通过WS feedback送p95、sampleCount、windowMs、sequence、sourceCaptureId、sampledAtServerMs、visible、latencySource='capture-end-to-paint'及clockUncertaintyMs，可附displayHzEstimate。Control再次检查范围、去重和新鲜度。
+每2秒窗口通过WS feedback送p95、sampleCount、windowMs、sequence、sourceCaptureId、sampledAtControlMs、visible、latencySource='capture-end-to-paint'及clockUncertaintyMs，可附displayHzEstimate。兼容字段sampledAtServerMs同样只映射Control wall；clockUncertaintyMs描述Endpoint采集到Client观察的映射，不冒用Control校准精度。Control再次检查范围、去重和新鲜度；Control校准缺失只暂停产品反馈，不阻断正常呈现与输入。
 
 连续3个有效窗口>300ms时分辨率倍率乘0.8，调整冷却5秒；<150ms连续健康30秒逐级恢复。ClientScale与面积预算决定基础倍率，Browser DPR范围0.5–4。实际码率/FPS/编码尺寸受硬件、协商及网络约束，requested/applied分开报告。受控自动化不运行这套产品策略。
 

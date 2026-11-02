@@ -18,6 +18,10 @@
 - 每站点平板设置只改变UA/CH，不模拟viewport；放更多菜单。设置统一在更多→设置。质量选择只保留优先高画质、自动、优先流畅；Client Scale默认Viewer DPR，可override。设置存Control，客户端只持久化用户token。
 - 首个正式注册用户为管理员；管理员面板管理服务器级注册口令。口令只用于后续注册，账号密码独立，设置由Control持久化，客户端不保存或回显口令。
 - Client直接与Endpoint建立H264 WebRTC及DataChannel输入；鉴权、信令、产品状态由Control管理，Viewer↔Control使用WebSocket。支持键鼠、文本、IME与触控。
+- Endpoint是可与Control分机部署的Native算力节点，Browser是其组件；当前每Tenant一个Browser进程、单Profile，保留多Profile余量。不能把Control与Endpoint共享路径、时钟或进程的现状当成架构要求。
+- Client与Endpoint的常规数据统一经WebRTC，包含音视频、输入、浏览器操作及文件数据；resize、focus、导航不得随意销毁连接。Control与Client同步既要即时操作反馈，也要最终状态一致，客户端不持久化产品状态。
+- 常见触摸手势由Client计算，页面消费或自定义触摸保留passthrough，不能绕过touch-action/preventDefault。移动键盘跟随远端编辑焦点弹隐，IME composition绑定正确文档；软键盘引起的尺寸变化保持内容位置并严守新旧布局输入门禁。
+- 提供可选择搜索引擎及简易起始页；与独立Window、服务端设置和默认video路径保持一致。
 - 开启Control Memory Saver策略。Viewer断线决定产品visible=false及回收资格；RTC连接独立决定渲染/编码需求，不反向把hidden页面显示出来。
 - Rectangle Packing把多个可见平面合为视频atlas；必须处理DPR、DIP、编码采样比例、letterbox、screen坐标与旧布局输入门禁。
 - Endpoint用独立CMake/Ninja，Mojo/libwebrtc纳入SDK边界；跨DLL不传C++ STL/libc++/Abseil/Chromium对象。oneVPL异步H264与NVENC均在范围内。新增音频目标必须是Chromium播放输出target，不用系统hook/capture。旧内置demo仅由显式构建目标包含。

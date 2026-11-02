@@ -102,3 +102,29 @@ test('octet HTTP route requires cookie and Origin and writes a bound ticket with
   assert.equal((await fetch(url,{method:'POST',headers,body:'abc'})).status,204);
   assert.equal((await fetch(url,{method:'POST',headers,body:'abc'})).status,409);
 });
+
+test('stream failure preserves owned binding so abort followed by cancel reaches the native chooser', async t => {
+  const f = await fixture(t), begin = await f.manager.begin('tenant', 'lease', 'authentication', { requestId: f.request.id, files: [spec()] });
+  await assert.rejects(f.manager.stream('tenant', 'authentication', begin.files[0].ticket, Readable.from(['a'])), /不完整/);
+  await assert.rejects(f.manager.cancel('tenant', 'lease', 'authentication', { requestId: f.request.id, uploadId: 'unknown-id' }), /不存在/);
+  assert.deepEqual(await f.manager.cancel('tenant', 'lease', 'authentication', { requestId: f.request.id, uploadId: begin.uploadId }), { state: 'cancelled' });
+  const nativeCancel = f.calls.find(c => c.method === 'session.files.cancel' && c.args.cancelRequest);
+  assert.deepEqual(nativeCancel?.args.binding, f.request.binding);
+  assert.equal(nativeCancel?.args.uploadId, undefined);
+  const count = f.calls.length;
+  assert.deepEqual(await f.manager.cancel('tenant', 'lease', 'authentication', { requestId: f.request.id, uploadId: begin.uploadId }), { state: 'cancelled' });
+  assert.equal(f.calls.length, count);
+});
+
+test('cancel retries unknown native result after draft retirement and rejects mismatched binding', async t => {
+  const f = await fixture(t), begin = await f.manager.begin('tenant', 'lease', 'authentication', { requestId: f.request.id, files: [spec()] });
+  const endpoint = (f.manager as any).endpoint, original = endpoint.request.bind(endpoint);
+  let first = true;
+  endpoint.request = async (method: string, tenant: string, args: any) => {
+    if (method === 'session.files.cancel' && args.cancelRequest && first) { first = false; throw new Error('reply lost'); }
+    return original(method, tenant, args);
+  };
+  await assert.rejects(f.manager.cancel('tenant', 'lease', 'authentication', { requestId: 'different', uploadId: begin.uploadId }), /不匹配/);
+  await assert.rejects(f.manager.cancel('tenant', 'lease', 'authentication', { requestId: f.request.id, uploadId: begin.uploadId }), /reply lost/);
+  assert.deepEqual(await f.manager.cancel('tenant', 'lease', 'authentication', { requestId: f.request.id, uploadId: begin.uploadId }), { state: 'cancelled' });
+});

@@ -178,6 +178,19 @@ button:focus-visible,
 .remote-viewport canvas.no-frame {
   visibility: hidden;
 }
+.remote-viewport.resize-waiting .remote-video-plane {
+  visibility: hidden !important;
+}
+.remote-open-keyboard.MuiButton-root {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 3;
+  min-width: 0;
+  padding: 2px 8px;
+  background: #ffffffed;
+  box-shadow: 0 1px 4px #0003;
+}
 .shared-plane-canvas {
   position: fixed;
   pointer-events: none;
@@ -374,3 +387,15 @@ button:focus-visible,
     animation: none !important;
   }
 }
+
+.start-page { position:absolute; inset:0; overflow:auto; display:flex; flex-direction:column; align-items:center; padding:32px 24px; background:#f2f4f7; }
+.start-page::before { content:""; flex:1 0 16px; }
+.start-page::after { content:""; flex:2 0 32px; }
+.start-page-body { width:100%; max-width:520px; flex:0 0 auto; }
+.start-page .start-page-title { font-size:28px; font-weight:600; margin-bottom:24px; }
+.start-page-form { display:flex; align-items:center; width:100%; min-width:0; height:48px; padding-left:14px; border:1px solid #dde2e8; border-radius:12px; background:#fff; }
+.start-page-form:focus-within { border-color:#245db5; box-shadow:0 0 0 1px #245db5; }
+.start-page-form .MuiInputBase-root { flex:1; min-width:0; margin-left:10px; }
+.start-page-form .MuiIconButton-root { width:44px; height:44px; flex-shrink:0; }
+.start-page .start-page-hint { margin-top:10px; font-size:12px; }
+.start-page .start-page-error { margin-top:10px; font-size:14px; overflow-wrap:anywhere; }

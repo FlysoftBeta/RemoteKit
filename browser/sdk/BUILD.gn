@@ -27,3 +27,21 @@ shared_library("remotekit_sdk") {
   ]
   write_runtime_deps = "$root_out_dir/remotekit_sdk.runtime_deps"
 }
+
+# CPU-only regression probe calls the production implementation with real local
+# Mojo pipes; it does not start Chromium ContentMain or require GPU hardware.
+executable("remotekit_sdk_control_lifetime_probe") {
+  testonly = true
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
+  sources = [ "control_channel_lifetime_probe.cc" ]
+  defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
+  deps = [
+    "//base",
+    "//mojo/core/embedder",
+    "//mojo/public/cpp/platform",
+    "//mojo/public/cpp/system",
+    "//third_party/webrtc_overrides:webrtc_component",
+    "//ui/events",
+    "//ui/events:dom_keycode_converter",
+  ]
+}

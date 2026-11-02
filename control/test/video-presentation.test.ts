@@ -82,6 +82,7 @@ test('video negotiation hides across two rAF turns; only latest full barrier can
   s.message({ type: 'presentation.prepare', ...key }); s.raf();
   assert.equal(s.sent.some(message => message.type === 'presentation.ready'), false);
   s.message({ type: 'presentation.prepare', ...key, barrierId: '10000000000000002' }); s.raf();
+  s.message({ type: 'presentation.prepare', ...key });
   assert.equal(s.sent.some(message => message.type === 'presentation.ready'), false); s.raf();
   assert.deepEqual(s.sent.filter(message => message.type === 'presentation.ready'), [{ type: 'presentation.ready', ...key, barrierId: '10000000000000002' }]);
   assert.deepEqual(s.ready, [false, false]);
@@ -91,7 +92,8 @@ test('each video needs its own matched RTP before input, without canvas copies o
   const s = environment(t); s.message({ type: 'presentation.mode', version: 1, backend: 'video' }); s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
   const [a, b] = s.videos.slice(1); s.metadata(10); a.frame(10);
   assert.deepEqual(s.ready, [true, false]); assert.equal(s.internal.canInput('1'), true); assert.equal(s.internal.canInput('2'), false);
-  b.frame(11); s.metadata(11); assert.deepEqual(s.ready, [true, false], 'late metadata alone cannot authorize a video');
+  s.metadata(11); assert.deepEqual(s.ready, [true, false], 'metadata without this element observation cannot authorize it');
+  b.frame(11);
   b.frame(11, 2); assert.deepEqual(s.ready, [true, true]);
   for (const video of [a, b]) {
     assert.deepEqual(video.srcObject.tracks, [s.track]); assert.equal((video as any).controls, false); assert.equal((video as any).disablePictureInPicture, true);
@@ -100,6 +102,25 @@ test('each video needs its own matched RTP before input, without canvas copies o
   assert.equal(s.canvases.reduce((count, canvas) => count + canvas.draws, 0), 0);
   assert.equal(s.transport.presentationDiagnostics.rendering.atlasSnapshotCopies, 0);
   assert.equal(s.transport.presentationDiagnostics.processor.read, 0);
+});
+
+test('duplicate layout/prepare transactions cannot starve hidden ACK or revoke ready videos', t => {
+  const s = environment(t); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  const repeat = () => { s.message(layout); s.message({ type: 'presentation.prepare', ...key }); };
+  repeat();
+  // Model repeated 4ms server polling between foreground compositor turns.
+  for (let i = 0; i < 20; i++) repeat();
+  s.raf();
+  assert.equal(s.sent.some(message => message.type === 'presentation.ready'), false);
+  for (let i = 0; i < 20; i++) repeat();
+  s.raf();
+  assert.deepEqual(s.sent.filter(message => message.type === 'presentation.ready'), [{ type: 'presentation.ready', ...key }]);
+  s.metadata(10); s.videos[1].frame(10); s.videos[2].frame(10);
+  assert.deepEqual(s.ready, [true, true]);
+  for (let i = 0; i < 20; i++) repeat();
+  s.raf(); s.raf();
+  assert.deepEqual(s.ready, [true, true]);
+  assert.equal(s.sent.filter(message => message.type === 'presentation.ready').length, 1);
 });
 
 test('viewport focus-only layouts preserve media authorization and queued drag/wheel input', t => {
@@ -148,6 +169,7 @@ test('viewport registrations survive RTC replacement while old receiver callback
   s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
   const oldVideo = s.videos[1], oldCallback = oldVideo.callback!;
   s.metadata(10); oldVideo.frame(10); assert.equal(s.ready[0], true);
+  s.videos[2].frame(99);
   s.transport.disconnect(); assert.deepEqual(s.ready, [false, false]); assert.equal(oldVideo.srcObject, null);
   const track = { kind: 'video', id: 'replacement' };
   s.internal.peer = { close() {} }; s.internal.processorTrack = track;
@@ -155,21 +177,87 @@ test('viewport registrations survive RTC replacement while old receiver callback
   s.message(layout); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
   const freshVideo = s.videos[3]; assert.deepEqual(freshVideo.srcObject.tracks, [track]);
+  s.metadata(99); assert.deepEqual(s.ready, [false, false], 'old peer pending observation is retired');
   s.metadata(20); oldCallback(performance.now(), { rtpTimestamp: 20, presentedFrames: 1 });
   assert.deepEqual(s.ready, [false, false]);
   freshVideo.frame(20); assert.deepEqual(s.ready, [true, false]);
 });
 
-test('same-barrier late metadata retains authorized display; initial static miss schedules bounded fresh frames', t => {
+test('split to narrow retains hidden receivers without timing out current video; return requires own fresh frame', t => {
+  const s = environment(t, true); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  const [a, b] = s.videos.slice(1); s.metadata(10); a.frame(10); b.frame(10);
+  const narrow = { ...layout, epoch: '21', views: [{ ...second }] };
+  const narrowKey = { ...key, barrierId: '10000000000000002', layoutEpoch: '21' };
+  s.message(narrow); s.message({ type: 'presentation.prepare', ...narrowKey }); s.raf(); s.raf();
+  // A metadata refresh is already pending when this element's own frame arrives.
+  s.metadata(11, '21'); const pendingTimer = s.timers[s.timers.length - 1]; b.frame(11);
+  assert.deepEqual(s.ready, [false, true]);
+  assert.equal(s.internal.canInput('1'), false); assert.equal(s.internal.canInput('2'), true);
+  for (let retries = 0; retries < 4; retries++) {
+    pendingTimer(); s.metadata(12 + retries, '21');
+    s.internal.scheduleVideoMetadataRefresh();
+  }
+  assert.equal(s.internal.presentationBackend, 'video');
+  assert.equal(s.internal.videoPlanes.size, 2); assert.equal(a.removed, false); assert.ok(a.srcObject);
+  assert.equal([...s.internal.videoPlanes.values()][0].metadataRetries, 0);
+  assert.equal(s.transport.presentationDiagnostics.rendering.atlasSnapshotCopies, 0);
+  assert.equal(s.canvases.reduce((sum, canvas) => sum + canvas.draws, 0), 0);
+
+  s.message({ ...layout, epoch: '22' }); s.metadata(20, '22'); a.frame(20); b.frame(20);
+  assert.deepEqual(s.ready, [false, false], 'return cannot reuse prior barrier or current frames before ACK');
+  s.message({ type: 'presentation.prepare', ...key, barrierId: '10000000000000003', layoutEpoch: '22' }); s.raf(); s.raf();
+  b.frame(20); assert.deepEqual(s.ready, [false, true], 'another video cannot authorize returning Window');
+  a.frame(10); assert.deepEqual(s.ready, [false, true], 'returning video rejects its old layout RTP');
+  a.frame(20); assert.deepEqual(s.ready, [true, true]);
+  assert.equal(s.videos.length, 3, 'layout changes retain both original video identities');
+});
+
+test('static late metadata recovers own layout and input without inventing current RTP or compositor samples', t => {
   const s = environment(t); s.message({ type: 'presentation.mode', version: 1, backend: 'video' }); s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
   const [a, b] = s.videos.slice(1); s.metadata(10); a.frame(10); a.frame(11, 6);
   assert.equal(s.ready[0], true); assert.equal(s.internal.canInput('1'), true); assert.equal(s.transport.getPresentedPlane('1', 10), undefined);
-  b.frame(12); const before = s.timers.length; s.metadata(12);
-  assert.equal(s.ready[1], false); assert.ok(s.timers.length >= before);
-  for (let i = 1; i < 6; i++) s.timers[i]?.();
-  assert.ok([...s.internal.videoPlanes.values()].every((plane: any) => plane.metadataRetries <= 3));
-  b.frame(12, 3); assert.equal(s.ready[1], true);
+  let reported = 0; s.transport.subscribePresentedFrames(() => reported++);
+  const paints: any[] = []; s.internal.latency.paint = (...values: any[]) => paints.push(values);
+  b.frame(12); const plane = [...s.internal.videoPlanes.values()][1] as any;
+  const observation = plane.pendingObservation, callbacks = plane.stats.callbacks, frames = plane.stats.frames;
+  s.metadata(12);
+  assert.equal(s.ready[1], true); assert.equal(s.internal.canInput('2'), true);
+  assert.equal(s.transport.sendInput(second, { type: 'wheel', dy: -120 }), true);
+  assert.equal(s.sent[s.sent.length - 1].type, 'input'); assert.equal(reported, 0);
+  assert.equal(s.transport.getPresentedPlane('2', 12), undefined); assert.equal(s.transport.getLastPresentation('2'), undefined);
+  assert.equal(plane.stats.callbacks, callbacks); assert.equal(plane.stats.frames, frames);
+  assert.deepEqual(paints, [[12, '20', observation.at, observation.wall]]);
+  for (let rtp = 13; rtp < 18; rtp++) { b.frame(rtp, rtp); s.metadata(rtp); assert.equal(s.ready[1], true); }
+  assert.equal(reported, 0, 'continuous metadata-late frames do not emit fabricated compositor events');
   s.message({ ...layout, epoch: '21' }); assert.deepEqual(s.ready, [false, false]);
+});
+
+test('latest own observation wins; old candidate, hidden and replacement barriers cannot authorize', t => {
+  const s = environment(t, true); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  const [a, b] = s.videos.slice(1);
+  a.frame(30); a.frame(31); s.metadata(30); assert.deepEqual(s.ready, [false, false]);
+  s.metadata(31); assert.deepEqual(s.ready, [true, false]);
+  b.frame(32); s.document.visibilityState = 'hidden'; s.listeners.get('visibilitychange')!();
+  s.metadata(32); assert.deepEqual(s.ready, [false, false]);
+  s.document.visibilityState = 'visible'; s.listeners.get('visibilitychange')!(); s.metadata(32);
+  assert.deepEqual(s.ready, [false, false], 'foreground requires a fresh own observation');
+  a.frame(33); s.message({ type: 'presentation.prepare', ...key, barrierId: '10000000000000002' });
+  s.raf(); s.raf(); s.metadata(33); assert.deepEqual(s.ready, [false, false]);
+  a.frame(34); s.message({ ...layout, epoch: '21', generation: '13' }); s.metadata(34);
+  assert.deepEqual(s.ready, [false, false]);
+});
+
+test('unmatched static observations have a bounded explicit canvas fallback without RTC replacement', t => {
+  const s = environment(t); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  const peer = s.internal.peer; s.videos[1].frame(80);
+  for (let retries = 0; retries < 4; retries++) s.timers[s.timers.length - 1]!();
+  assert.equal(s.internal.presentationBackend, 'canvas'); assert.equal(s.internal.peer, peer);
+  assert.equal(s.transport.presentationDiagnostics.rendering.backendReason, 'video-frame-metadata-timeout');
+  assert.deepEqual(s.ready, [false, false]); s.raf(); s.raf();
+  assert.equal(s.sent.some(message => message.type === 'media.presentation' && message.backend === 'canvas'), true);
 });
 
 test('hidden pages hold ACK; returning visible requires two new turns; fallback hides before canvas mode', t => {
@@ -210,4 +298,20 @@ test('late fallback play rejection cannot fail a replacement peer or attempt', a
   s.internal.fallbackPresentation('test-failure'); s.raf(); s.raf();
   rejectPlay(new Error('current playback failure')); await Promise.resolve();
   assert.equal(failed, 1, 'a current playback rejection still fails the connection');
+});
+
+test('processor failure playback rejection is scoped to peer, attempt, receiver and track', async t => {
+  const s = environment(t), receiver = s.videos[0];
+  let rejectPlay: (error: Error) => void = () => {}, failed = 0;
+  receiver.play = () => new Promise<void>((_resolve, reject) => { rejectPlay = reject; });
+  s.internal.connectionFailed = () => { failed++; };
+  const begin = () => { s.internal.receiverVideo = receiver; s.internal.processorFailed(new Error('processor failed')); };
+  begin(); s.internal.attempt++; rejectPlay(new Error('old attempt')); await Promise.resolve();
+  begin(); s.internal.peer = { close() {} }; rejectPlay(new Error('old peer')); await Promise.resolve();
+  begin(); s.internal.receiverVideo = Object.create(receiver); rejectPlay(new Error('old receiver')); await Promise.resolve();
+  begin(); s.internal.processorTrack = { kind: 'video' }; rejectPlay(new Error('old track')); await Promise.resolve();
+  assert.equal(failed, 0);
+  begin(); rejectPlay(new Error('current playback failure')); await Promise.resolve(); assert.equal(failed, 1);
+  begin(); s.transport.disconnect(); rejectPlay(new Error('disconnected playback')); await Promise.resolve();
+  assert.equal(failed, 1);
 });

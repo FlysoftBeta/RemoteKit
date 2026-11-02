@@ -41,10 +41,12 @@ class EncoderWorker {
   void Keyframe();
   void Stop();
  private:
+  friend struct EncoderWorkerTestAccess;
   struct Job {remotekit_rtc_frame frame{};bool key=false;uint64_t cookie=0;int64_t enqueued_qpc=0,submitted_qpc=0;uint32_t surface=0;};
   void Run();
   void Complete(AccessUnit&);
   void Error(const std::string&);
+  bool RetainUnsafeInputs(Job* additional=nullptr);
   Sdk& sdk_;uint64_t encoder_;
  uint32_t nominal_fps_=0;bool fixed_rate_fps_=false;
   ComPtr<ID3D11Device> device_;std::string mode_;EncoderSettings settings_;

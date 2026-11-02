@@ -1,0 +1,33 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=5"><title>Client gesture contract fixture</title>
+<style>
+html,body{margin:0;font:16px system-ui}body{height:9000px;background:repeating-linear-gradient(#eef6ff 0 98px,#527498 98px 100px)}
+header{position:fixed;top:4px;left:6px;pointer-events:none;z-index:2;background:white}#tap{position:fixed;left:25px;top:70px;width:200px;height:100px}
+.box{position:fixed;box-sizing:border-box;width:220px;height:220px;border:3px solid #345;background:white;overflow:auto}.tall{width:2200px;height:4000px;background:repeating-linear-gradient(35deg,#fff 0 45px,#afc 45px 50px)}
+#nested{left:260px;top:55px}#action{left:500px;top:55px}#custom{left:740px;top:55px}#child{left:260px;top:310px;width:460px;height:260px}#tight{position:absolute;left:100px;top:80px;width:110px;height:130px;touch-action:none;background:#fbb}
+</style>
+<header id="label"></header><button id="tap">Tap real click</button><div id="nested" class="box"><div class="tall">Nested scroll</div></div><div id="action" class="box"><div class="tall">CSS action</div><div id="tight">Second finger none</div></div><div id="custom" class="box"><div class="tall">Custom touch handler</div></div><iframe id="child" class="box"></iframe>
+<script>
+(()=>{
+const p=new URL(location).searchParams,id=p.get('case')||'unset',child=p.has('child'),action=p.get('action')||'auto',block=p.get('block')||'',endpoint=location.protocol+'//127.0.0.1:'+location.port;
+document.querySelector('#label').textContent=id+' / '+action+' / '+block;
+document.querySelector('#action').style.touchAction=action;
+document.querySelector('#tight').hidden=!p.has('tight');
+if(child){document.querySelectorAll('.box,#tap').forEach(e=>e.remove());document.querySelector('header').textContent='Cross-site child '+id;}else document.querySelector('#child').src=location.protocol+'//localhost:'+location.port+'/?child=1&case='+encodeURIComponent(id)+'&action='+encodeURIComponent(action)+(p.has('live')?'&live=1':'');
+const events=[],frames=[],counts={};let clicks=0,firstMove=false,until=0,queued=false;
+const positions=()=>({rootX:scrollX,rootY:scrollY,nestedX:document.querySelector('#nested')?.scrollLeft||0,nestedY:document.querySelector('#nested')?.scrollTop||0,actionX:document.querySelector('#action')?.scrollLeft||0,actionY:document.querySelector('#action')?.scrollTop||0,customX:document.querySelector('#custom')?.scrollLeft||0,customY:document.querySelector('#custom')?.scrollTop||0});
+const snapshot=()=>({id,child,href:location.href,origin:location.origin,action,block,at:performance.now(),timeOrigin:performance.timeOrigin,wall:Date.now(),positions:positions(),pageScale:visualViewport?.scale||1,viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio},counts,clicks,events,frames});
+const post=()=>fetch(endpoint+'/telemetry',{method:'POST',mode:'cors',headers:{'Content-Type':'application/json'},body:JSON.stringify(snapshot())}).catch(()=>{});
+function frame(){frames.push({at:performance.now(),...positions(),pageScale:visualViewport?.scale||1});if(frames.length>500)frames.shift();if(performance.now()<until)requestAnimationFrame(frame);else{queued=false;post();}}
+function active(){until=performance.now()+2700;if(!queued){queued=true;requestAnimationFrame(frame);}}
+for(const type of ['pointerdown','pointermove','pointerup','pointercancel','touchstart','touchmove','touchend','touchcancel','click','scroll'])document.addEventListener(type,e=>{counts[type]=(counts[type]||0)+1;const t=e.changedTouches?.[0]||e;events.push({type,target:e.target.id||e.target.tagName,ts:e.timeStamp,at:performance.now(),x:t.clientX,y:t.clientY,pointerId:e.pointerId,touches:e.touches?.length,cancelable:e.cancelable,defaultPrevented:e.defaultPrevented});if(events.length>600)events.shift();active();if(type==='touchstart')firstMove=false;if(type==='touchend'||type==='touchcancel'){post();setTimeout(post,3000);}},{capture:true,passive:true});
+document.querySelector('#tap')?.addEventListener('click',()=>{clicks++;post();});
+document.querySelector('#custom')?.addEventListener('touchstart',e=>{if(block==='start'){e.preventDefault();events.push({type:'handler-preventDefault',source:'touchstart',defaultPrevented:e.defaultPrevented,at:performance.now()});}},{passive:false});
+document.querySelector('#custom')?.addEventListener('touchmove',e=>{if(block==='everymove'||block==='firstmove'&&!firstMove){e.preventDefault();firstMove=true;events.push({type:'handler-preventDefault',source:'touchmove',defaultPrevented:e.defaultPrevented,at:performance.now()});}},{passive:false});
+// The retirement test waits for actual child ownership before deleting it. Opt-in
+// telemetry observes the DOM after dispatch without changing event consumption.
+if(p.has('live'))for(const type of ['touchstart','touchmove'])document.addEventListener(type,()=>setTimeout(post,30),{passive:true});
+window.addEventListener('message',e=>{if(e.data?.type==='qa-remove-child')document.querySelector('#child')?.remove();});
+if(!child)setInterval(()=>fetch('/command?id='+encodeURIComponent(id)).then(r=>r.json()).then(commands=>{for(const command of commands)if(command.type==='remove-child'){document.querySelector('#child')?.remove();events.push({type:'fixture-remove-child',at:performance.now()});post();}}).catch(()=>{}),100);
+post();setTimeout(post,500);window.gestureFixture={snapshot,post};
+})();
+</script>

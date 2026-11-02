@@ -2,6 +2,7 @@
 #include "remotekit/browser/audio_target.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <map>
 #include <set>
@@ -15,9 +16,14 @@
 #include "base/strings/string_split.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/current_thread.h"
 #include "base/timer/timer.h"
 #include "base/unguessable_token.h"
 #include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/browser_task_traits.h"
+#include "content/public/browser/browser_thread.h"
+#include "components/headless/clipboard/headless_clipboard.h"
+#include "ui/base/clipboard/clipboard.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
@@ -50,6 +56,22 @@
 namespace remotekit::browser {
 static_assert(static_cast<int>(Error::busy) == protocol::kBusyError);
 namespace {
+#if !defined(REMOTEKIT_DEMO_HARNESS)
+// Keep the IO clipboard installed until the IO loop itself is destroyed, so
+// late Chromium teardown cannot lazily recreate the Windows clipboard.
+class ServiceIoClipboard final : public base::CurrentThread::DestructionObserver {
+ public:
+  ServiceIoClipboard() {
+    headless::SetHeadlessClipboardForCurrentThread();
+    base::CurrentThread::Get()->AddDestructionObserver(this);
+  }
+  void WillDestroyCurrentMessageLoop() override {
+    ui::Clipboard::DestroyClipboardForCurrentThread();
+    base::CurrentThread::Get()->RemoveDestructionObserver(this);
+    delete this;
+  }
+};
+#endif
 class HarnessViewsDelegate final : public views::ViewsDelegate {
  public:
   void OnBeforeWidgetInit(views::Widget::InitParams* params,
@@ -73,7 +95,14 @@ class WindowObserver final : public views::WidgetObserver {
 }  // namespace
 
 struct HarnessMainParts::State {
-  ~State() { pending_popups.clear(); }
+  ~State() {
+    // PostMainMessageLoopRun also runs after a partial PreMain startup failure.
+    // Contexts must never be left to implicit member destruction order.
+    CHECK(pending_popups.empty());
+    CHECK(contents.empty());
+    CHECK(contexts.empty());
+  }
+  bool shutting_down = false;
   wm::WMState wm_state;
   std::unique_ptr<display::Screen> screen;
   HarnessViewsDelegate views_delegate;
@@ -118,7 +147,7 @@ struct HarnessMainParts::State {
         native_views[i]->SetBounds(rect.x, rect.y, rect.width, rect.height);
         native_views[i]->SetVisible(visible);
       }
-      contents[i]->SetVisible(visible);
+      CHECK(contents[i]->SetVisible(visible));
       placements.emplace_back(rect.x, rect.y, rect.width, rect.height);
       contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
     }
@@ -189,6 +218,7 @@ struct HarnessMainParts::State {
   void WirePopups(PageRequests* requests, SessionId session, WebViewId opener) {
     requests->SetPopupHandler([this, session, opener](std::unique_ptr<content::WebContents> page,
         const GURL& url, WindowOpenDisposition disposition, bool gesture) -> content::WebContents* {
+      if (shutting_down) return nullptr;
       PrunePopups();
       if (pending_popups.size() >= 16 || !gesture) return nullptr;
       const auto key = base::UnguessableToken::Create().ToString();
@@ -285,6 +315,7 @@ struct HarnessMainParts::State {
     output->SetViews(std::move(views));
   }
   void OnControlClosed() {
+    if (shutting_down) return;
     if (offscreen) output_enabled = false;
     for (const auto& adapter : contents) adapter->SetRenderDemand(false, output_fps);
     if (output)
@@ -298,6 +329,8 @@ struct HarnessMainParts::State {
 
   void OnWindowClosed() {
     widget = nullptr;
+    root = nullptr;
+    native_views.clear();
     if (quit)
       quit.Run();
   }
@@ -433,6 +466,16 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     }
     const auto dimensions = AtlasAllocationDimensions(next_width, next_height, next_scale, next_alignment);
     if (!dimensions) return error("atlas_resource_budget_exceeded");
+    // Validate the whole batch before changing geometry, focus/input tokens or
+    // product visibility. A persistent view is not necessarily resident/live.
+    for (size_t i = 0; i < contents.size(); ++i) {
+      const auto& adapter = contents[i];
+      const auto* model = endpoint.FindWebView(adapter->session_id(), adapter->view_id());
+      if (!model) return error("view_missing");
+      if (next_specs[i].visible && (!adapter->contents() || adapter->lifecycle_uncertain() ||
+          model->actual != Residency::live || model->pending))
+        return error("restore_required_before_show");
+    }
     const bool layout_changed = logical_width != next_width || logical_height != next_height ||
                                 output_scale != next_scale || specs != next_specs;
     // Every rejection above leaves both specs and output configuration intact.
@@ -575,6 +618,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           if (output) compositor.Set("capture", output->CaptureStatus(view_id));
           value.Set("compositor", std::move(compositor));
           value.Set("navigationRevision", base::NumberToString(adapter->navigation_revision()));
+          value.Set("navigationOperations", adapter->NavigationOperationSnapshot());
           value.Set("visible", specs[i].visible);
           value.Set("lifecycle_uncertain", adapter->lifecycle_uncertain());
           auto discard = CanDiscard(i);
@@ -632,6 +676,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     }
     reply.Set("ok", true);
     reply.Set("sessions", std::move(list));
+    reply.Set("clientGestures", 1);
     return reply;
   }
   if (*method == "session.sitePreferences") {
@@ -689,10 +734,15 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       if (adopting) return error("view_id_already_exists");
       if (contents[i]->session_id() != session || specs[i] != spec)
         return error("view_id_configuration_conflict");
+      if (request.Find("operationId")) {
+        const auto status = contents[i]->Navigate(GURL(spec.url), &request);
+        if (!status) return error(status.message);
+      }
       reply.Set("ok", true);
       reply.Set("accepted", true);
       reply.Set("completed", true);
       reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+      if (request.Find("operationId")) reply.Set("completed", false);
       return reply;
     }
     if (contents.size() >= kSharedAtlasMaxViews) return error("view_limit_reached");
@@ -728,7 +778,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     specs = std::move(next);
     ApplyLayout(layout.value);
     contents.back()->SetVisible(spec.visible);
-    auto navigated = adopting ? Status{} : contents.back()->Navigate(GURL(spec.url));
+    auto navigated = adopting ? Status{} : contents.back()->Navigate(GURL(spec.url), &request);
     if (!navigated) {
       RemoveView(contents.size() - 1);
       return error(navigated.message);
@@ -741,6 +791,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     reply.Set("accepted", true);
     reply.Set("completed", true);
     reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+    if (request.Find("operationId")) reply.Set("completed", false);
     return reply;
   }
   if (*method == "view.close") {
@@ -783,6 +834,11 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         page_requests[index]->close_state() == "closed") return error("view_closing");
     const auto* url = request.FindString("url");
     if (!url || !GURL(*url).is_valid()) return error("invalid_url");
+    if (const auto existing = adapter.ExistingNavigationOperation(GURL(*url), request)) {
+      if (!*existing) return error(existing->message);
+      reply.Set("ok", true); reply.Set("accepted", true);
+      reply.Set("token", TokenValue(endpoint.Token(session, view).value)); return reply;
+    }
     transfers.erase(view);
     if (output) output->StopView(view);
     paused_output.insert(view); UpdateOutput();
@@ -791,9 +847,11 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     const auto profile = endpoint.FindWebView(session, view)->profile;
     const auto owner = std::ranges::find(profiles, profile);
     if (owner == profiles.end()) return error("profile_missing");
+    auto navigation_operations = contents[index]->ReleaseNavigationOperations();
     contents[index].reset();
     endpoint.ResetWebView(session, view);
     contents[index] = std::make_unique<WebView>(contexts[owner - profiles.begin()].get(), &endpoint, session, view, offscreen);
+    contents[index]->RestoreNavigationOperations(std::move(navigation_operations));
     contents[index]->SetNativeFocusEnabled(demo && !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
     contents[index]->ConfigureDevice(specs[index].width, specs[index].height, specs[index].tablet, PageScale(specs[index]), !demo);
     page_requests[index] = std::make_unique<PageRequests>();
@@ -801,7 +859,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     WirePopups(page_requests[index].get(), session, view);
     if (native_views[index]) native_views[index]->SetWebContents(contents[index]->contents());
     contents[index]->SetVisible(specs[index].visible);
-    const auto status = contents[index]->Navigate(GURL(*url));
+    const auto status = contents[index]->Navigate(GURL(*url), &request);
     paused_output.erase(view); UpdateOutput();
     reply.Set("ok", static_cast<bool>(status)); reply.Set("accepted", static_cast<bool>(status));
     reply.Set("token", TokenValue(endpoint.Token(session, view).value)); return reply;
@@ -877,6 +935,19 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       auto result = page_requests[index]->FileStatus(*key);
       result.Set("version", 1); result.Set("id", id); return result;
     }
+    if (*method == "page.command") {
+      const auto* action = request.FindString("action");
+      if (action && (*action == "back" || *action == "forward" ||
+                     *action == "reload" || *action == "stop")) {
+        auto status = adapter.NavigationCommand(request);
+        auto result = reply.Clone();
+        result.Set("ok", static_cast<bool>(status));
+        result.Set("accepted", static_cast<bool>(status));
+        result.Set("state", "submitted");
+        if (!status) result.Set("error", status.message);
+        return result;
+      }
+    }
     auto result = *method == "page.requests"
                       ? page_requests[index]->Snapshot()
                       : (*method == "page.reply" ? page_requests[index]->Reply(request)
@@ -890,6 +961,12 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   if (page_requests[index]->close_state() == "closing")
     return error("view_closing");
   if (method->starts_with("navigation.")) {
+    if (*method == "navigation.ack") {
+      const auto status = adapter.AcknowledgeNavigation(request);
+      if (!status) return error(status.message);
+      reply.Set("ok", true);
+      return reply;
+    }
     auto token = endpoint.Token(session, view).value;
     if (*method == "navigation.export.begin") {
       auto saved = adapter.ExportNavigation();
@@ -980,6 +1057,47 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     return reply;
   }
   Status status{Error::unsupported, "unsupported_method"};
+  if (*method == "input.touchStatus") {
+    const auto* sequence = request.FindString("sequenceId");
+    if (!sequence || sequence->empty()) {
+      reply.Set("state", "terminal-unconfirmed");
+      reply.Set("pending", false);
+      return error("stale_touch_sequence");
+    }
+    const auto current = endpoint.Token(session, view).value;
+    for (auto [key, expected] : {std::pair{"instance", current.instance},
+         std::pair{"document", current.document}, std::pair{"focus", current.focus}}) {
+      uint64_t value = 0;
+      if (!ReadId(request, key, &value) || value != expected) {
+        reply.Set("state", "terminal-unconfirmed");
+        reply.Set("pending", false);
+        return error("stale_touch_status_target");
+      }
+    }
+    adapter.RefreshClientTouchOwner();
+    if (adapter.ClientTouchRetired(current, *sequence)) {
+      reply.Set("state", "terminal-invalidated");
+      reply.Set("touchState", "terminal-invalidated");
+      reply.Set("sequenceId", *sequence);
+      reply.Set("touchSequenceId", *sequence);
+      reply.Set("pending", false);
+      return error("touch_owner_invalidated");
+    }
+    if (*sequence != adapter.ClientTouchSequence()) {
+      reply.Set("state", "terminal-unconfirmed");
+      reply.Set("pending", false);
+      return error("stale_touch_sequence");
+    }
+    status = adapter.TouchInjectionStatus();
+    reply.Set("ok", static_cast<bool>(status));
+    reply.Set("pending", adapter.TouchProcessingPending());
+    reply.Set("state", !status && status.error != Error::busy ? "terminal-unconfirmed" :
+              adapter.TouchProcessingPending() ? "pending" : "processed");
+    reply.Set("sequenceId", *sequence);
+    reply.Set("code", static_cast<int>(status.error));
+    if (!status) reply.Set("error", status.message);
+    return reply;
+  }
   if (*method == "focus") {
     if (!demo && !request.Find("focus")) return error("focus_token_required");
     const auto current = endpoint.Token(session, view).value;
@@ -1018,7 +1136,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     const auto* url = request.FindString("url");
     if (!url)
       return error("url_required");
-    status = adapter.Navigate(GURL(*url));
+    status = adapter.Navigate(GURL(*url), &request);
   } else if (*method == "lifecycle") {
     const auto* action = request.FindString("action");
     if (!action)
@@ -1129,6 +1247,35 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       if (!action || !points || points->size() > 16)
         return error("invalid_touch");
       TouchInput touch;
+      if (const auto* mode = event->FindString("gestureMode")) {
+        if (*mode != "client-v1" && *mode != "legacy") return error("invalid_gesture_mode");
+        touch.client_gestures = *mode == "client-v1";
+      }
+      const auto* candidates = event->FindList("gestures");
+      if ((touch.client_gestures && !candidates) || (candidates && (!touch.client_gestures || candidates->size() > 8)))
+        return error("invalid_gestures");
+      if (candidates) for (const auto& candidate : *candidates) {
+        const auto* g = candidate.GetIfDict();
+        const auto* kind = g ? g->FindString("type") : nullptr;
+        const auto x = g ? Number(*g, "x") : std::nullopt, y = g ? Number(*g, "y") : std::nullopt;
+        if (!kind || !x || !y) return error("invalid_gesture");
+        static constexpr std::array<const char*, 11> names = {"tapDown", "tapCancel", "tap", "scrollBegin", "scrollUpdate", "scrollEnd",
+          "pinchBegin", "pinchUpdate", "pinchEnd", "flingStart", "flingCancel"};
+        int candidate_index = 0;
+        while (candidate_index != 11 && *kind != names[candidate_index]) ++candidate_index;
+        if (candidate_index == 11) return error("invalid_gesture_type");
+        for (const auto* field : {"deltaX", "deltaY", "scale", "velocityX", "velocityY"})
+          if (g->contains(field) && !Number(*g, field)) return error("invalid_gesture_number");
+        if ((candidate_index == 3 || candidate_index == 4) && (!Number(*g, "deltaX") || !Number(*g, "deltaY")))
+          return error("missing_gesture_delta");
+        if (candidate_index == 7 && !Number(*g, "scale")) return error("missing_gesture_scale");
+        if (candidate_index == 9 && (!Number(*g, "velocityX") || !Number(*g, "velocityY")))
+          return error("missing_gesture_velocity");
+        touch.gestures.push_back({static_cast<TouchInput::Gesture::Type>(candidate_index), *x, *y,
+          Number(*g, "deltaX").value_or(0), Number(*g, "deltaY").value_or(0), Number(*g, "scale").value_or(1),
+          Number(*g, "velocityX").value_or(0), Number(*g, "velocityY").value_or(0)});
+      }
+
       if (*action == "start")
         touch.action = TouchInput::Action::start;
       else if (*action == "move")
@@ -1185,6 +1332,20 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         touch.points.push_back({static_cast<uint32_t>(*point_id), *x, *y, *pressure});
       }
       input.payload = std::move(touch);
+    } else if (*type == "gesture") {
+      const auto* mode = event->FindString("gestureMode");
+      const auto* action = event->FindString("action");
+      const auto* sequence = event->FindString("sequenceId");
+      const auto elapsed = Number(*event, "sampleElapsedUs"), x = Number(*event, "cumulativeX"), y = Number(*event, "cumulativeY");
+      if (!mode || *mode != "client-v1" || !action || !sequence || !elapsed || !x || !y ||
+          *elapsed < 0 || *elapsed > 86400000000.0 || std::floor(*elapsed) != *elapsed)
+        return error("invalid_momentum");
+      GestureInput::Action kind;
+      if (*action == "momentum") kind = GestureInput::Action::momentum;
+      else if (*action == "momentumEnd") kind = GestureInput::Action::momentum_end;
+      else if (*action == "cancel") kind = GestureInput::Action::cancel;
+      else return error("invalid_momentum_action");
+      input.payload = GestureInput{kind, *sequence, static_cast<int64_t>(*elapsed), *x, *y};
     } else if (*type == "mouse") {
       const auto* action = event->FindString("action");
       const auto x = Number(*event, "x"), y = Number(*event, "y");
@@ -1220,6 +1381,15 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     } else
       return error("unsupported_input_type");
     status = adapter.DispatchInput(input);
+    if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
+      reply.Set("touchPending", adapter.TouchProcessingPending());
+      reply.Set("touchSequenceId", touch->clock ? touch->clock->sequence_id : std::string());
+      if (status.error == Error::stale &&
+          status.message == "Client touch owner explicitly invalidated") {
+        reply.Set("touchState", "terminal-invalidated");
+        reply.Set("touchPending", false);
+      }
+    }
   }
   reply.Set("ok", static_cast<bool>(status));
   reply.Set("code", static_cast<int>(status.error));
@@ -1232,6 +1402,20 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
 
 HarnessMainParts::HarnessMainParts() = default;
 HarnessMainParts::~HarnessMainParts() = default;
+void HarnessMainParts::PostCreateMainMessageLoop() {
+#if !defined(REMOTEKIT_DEMO_HARNESS)
+  // Install before content's thread/service startup. Content owns and destroys
+  // this UI-thread clipboard after browser teardown (BrowserMainLoop dtor).
+  headless::SetHeadlessClipboardForCurrentThread();
+#endif
+}
+int HarnessMainParts::PostCreateThreads() {
+#if !defined(REMOTEKIT_DEMO_HARNESS)
+  CHECK(content::GetIOThreadTaskRunner({})->PostTask(
+      FROM_HERE, base::BindOnce([] { new ServiceIoClipboard; })));
+#endif
+  return 0;
+}
 int HarnessMainParts::PreMainMessageLoopRun() {
   LOG(INFO) << "RemoteKit startup PreMain entered";
   state_ = std::make_unique<State>();
@@ -1425,13 +1609,38 @@ void HarnessMainParts::WillRunMainMessageLoop(std::unique_ptr<base::RunLoop>& ru
   state_->quit = run_loop->QuitClosure();
 }
 void HarnessMainParts::PostMainMessageLoopRun() {
-  state_->control.reset();
+  if (!state_) return;
+  state_->shutting_down = true;
+  state_->quit.Reset();
+  // Stop producers and invalidate page callbacks before destroying consumers.
   state_->output_timer.Stop();
+  state_->control.reset();
   state_->output.reset();
+  for (auto& request : state_->page_requests) {
+    request->SetPopupHandler({});
+    request->Bind(nullptr);
+  }
+  for (auto& [key, popup] : state_->pending_popups) {
+    if (popup.requests) {
+      popup.requests->SetPopupHandler({});
+      popup.requests->Bind(nullptr);
+      popup.requests.reset();
+    }
+  }
   state_->page_requests.clear();
+  state_->pending_popups.clear();
   StopDevTools();
   if (state_->widget)
-    state_->widget->CloseNow();
+    for (auto& view : state_->native_views)
+      if (view) view->SetWebContents(nullptr);
+  state_->native_views.clear();
+  if (state_->widget && state_->observer)
+    state_->widget->RemoveObserver(state_->observer.get());
+  state_->observer.reset();
+  auto* widget = state_->widget.get();
+  state_->widget = nullptr;
+  state_->root = nullptr;
+  if (widget) widget->CloseNow();
   state_->window_delegate.reset();
   state_->contents.clear();
   // Offscreen compositor teardown can make sync Mojo calls. Run the deferred

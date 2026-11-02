@@ -37,4 +37,22 @@ test('rapid A to B to A ignores old ACK and rejects mismatched epoch or identity
 
 test('matched rejected focus drops queued input and reports the rejection', () => {
   const { transport, a, sent, ack } = setup(); transport.focus(a, true); transport.sendInput(a, { type: 'ime_commit', text: 'reject' }); ack(sent[0], { ok: false, error: 'stale_focus' }); assert.equal(sent.length, 1); assert.equal(transport.diagnostics.error, 'stale_focus');
+  transport.ensureInputFocus(a); assert.equal(sent.length, 2); assert.notEqual(sent[1].focusRequestId, sent[0].focusRequestId);
+  ack(sent[0], { ok: false }); transport.ensureInputFocus(a); assert.equal(sent.length, 2, 'old rejection preserves the new pending request');
+  ack(sent[1]); transport.ensureInputFocus(a); assert.equal(sent.length, 2, 'successful ACK preserves established focus');
+});
+
+test('focus timeout revokes only its own optimistic identity and permits a new request', t => {
+  const timers: (() => void)[] = [];
+  t.mock.method(globalThis, 'setTimeout', ((callback: () => void) => { timers.push(callback); return timers.length; }) as any);
+  t.mock.method(globalThis, 'clearTimeout', (() => {}) as any);
+  const { transport, a, b, sent, ack } = setup();
+  transport.ensureInputFocus(a); transport.sendInput(a, { type: 'ime_commit', text: 'expired' });
+  timers[0](); transport.ensureInputFocus(a); assert.equal(sent.length, 2);
+  assert.notEqual(sent[0].focusRequestId, sent[1].focusRequestId);
+  timers[0](); transport.ensureInputFocus(a); assert.equal(sent.length, 2, 'old timeout leaves new request intact');
+  ack(sent[1]); timers[1](); transport.ensureInputFocus(a); assert.equal(sent.length, 2, 'queued old timeout cannot revoke ACK');
+  transport.focus(b, true); const old = timers[timers.length - 1]!;
+  transport.focus(a, true); old(); transport.ensureInputFocus(a); assert.equal(sent.length, 4);
+  ack(sent[3]); assert.equal(sent.some(message => message.type === 'input'), false, 'expired queued input is discarded');
 });

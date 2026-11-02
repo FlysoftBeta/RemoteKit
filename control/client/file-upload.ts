@@ -1,6 +1,8 @@
-import type { FileUploadBegin, FileUploadResult } from '../shared/product';
+import type { FileUploadResult } from '../shared/product';
+export interface DcFileBegin { uploadId: string; offsets: number[] }
 export interface FileRpc {
-    begin(requestId: string, files: File[]): Promise<FileUploadBegin>;
+    begin(requestId: string, files: File[]): Promise<DcFileBegin>;
+    upload(uploadId: string, fileIndex: number, file: File, offset: number, signal: AbortSignal, progress: (bytes: number) => void): Promise<void>;
     commit(uploadId: string): Promise<FileUploadResult>;
     cancel(requestId: string, uploadId?: string): Promise<FileUploadResult>;
 }

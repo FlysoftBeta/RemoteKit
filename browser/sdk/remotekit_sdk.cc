@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
 #include <limits>
 #include <map>
 #include <memory>
@@ -43,6 +44,8 @@
 
 namespace {
 struct ControlChannel {
+  std::mutex request_lock;
+  std::atomic<bool> closed{false};
   mojo::IsolatedConnection connection;
   mojo::ScopedMessagePipeHandle pipe;
 };
@@ -53,7 +56,10 @@ struct SDKState {
   std::unique_ptr<base::AtExitManager> at_exit;
   std::unique_ptr<base::Thread> io_thread;
   std::unique_ptr<mojo::core::ScopedIPCSupport> ipc_support;
-  std::map<uint64_t, std::unique_ptr<ControlChannel>> channels;
+  std::map<uint64_t, std::shared_ptr<ControlChannel>> channels;
+  std::condition_variable idle;
+  size_t operations = 0;
+  bool stopping = false;
   uint64_t next_handle = 1;
   bool stopped = false;
   bool owns_thread_pool = false;
@@ -63,6 +69,43 @@ struct SDKState {
 SDKState& State() {
   static base::NoDestructor<SDKState> state;
   return *state;
+}
+// Declare before operation-owned Mojo objects: their destruction must finish
+// before the last lease permits shutdown to tear down Mojo and base.
+class OperationLease {
+ public:
+  OperationLease() {
+    auto& state = State();
+    std::lock_guard lock(state.lock);
+    if (state.at_exit && !state.stopping && !state.stopped) {
+      ++state.operations;
+      acquired_ = true;
+    }
+  }
+  ~OperationLease() {
+    if (!acquired_)
+      return;
+    auto& state = State();
+    std::lock_guard lock(state.lock);
+    if (--state.operations == 0)
+      state.idle.notify_all();
+  }
+  explicit operator bool() const { return acquired_; }
+  OperationLease(const OperationLease&) = delete;
+  OperationLease& operator=(const OperationLease&) = delete;
+
+ private:
+  bool acquired_ = false;
+};
+
+void RetireChannel(uint64_t handle, const std::shared_ptr<ControlChannel>& channel) {
+  channel->closed.store(true, std::memory_order_release);
+  auto& state = State();
+  std::lock_guard lock(state.lock);
+  // Handles are never reused; keep the comparison explicit for ownership.
+  const auto found = state.channels.find(handle);
+  if (found != state.channels.end() && found->second == channel)
+    state.channels.erase(found);
 }
 constexpr size_t kMaxMessageSize = 1024 * 1024;
 void RunPoolLifecycle(SDKState& state, bool start) {
@@ -88,7 +131,7 @@ void RunPoolLifecycle(SDKState& state, bool start) {
 int RemoteKitSdkBeginRtc() {
   auto& state = State();
   std::lock_guard lock(state.lock);
-  if (!state.at_exit || state.stopped) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!state.at_exit || state.stopped || state.stopping) return REMOTEKIT_SDK_INVALID_STATE;
   ++state.rtc_peers;
   return REMOTEKIT_SDK_OK;
 }
@@ -105,7 +148,7 @@ uint32_t remotekit_sdk_abi_version(void) {
 int remotekit_sdk_initialize(void) {
   auto& state = State();
   std::lock_guard<std::mutex> lock(state.lock);
-  if (state.stopped)
+  if (state.stopped || state.stopping)
     return REMOTEKIT_SDK_INVALID_STATE;
   if (state.at_exit)
     return REMOTEKIT_SDK_OK;
@@ -134,12 +177,22 @@ int remotekit_sdk_initialize(void) {
 
 int remotekit_sdk_shutdown(void) {
   auto& state = State();
-  std::lock_guard<std::mutex> lock(state.lock);
-  if (!state.at_exit)
+  std::unique_lock lock(state.lock);
+  if (!state.at_exit || state.stopping)
     return REMOTEKIT_SDK_INVALID_STATE;
   if (state.rtc_peers)
     return REMOTEKIT_SDK_INVALID_STATE;
-  state.channels.clear();
+  state.stopping = true;
+  for (auto& [id, channel] : state.channels)
+    channel->closed.store(true, std::memory_order_release);
+  auto channels = std::move(state.channels);
+  lock.unlock();
+  // In-flight calls keep their channel alive and observe cancellation in the
+  // receive loop. No thread closes a pipe while another is reading/writing it.
+  channels.clear();
+  lock.lock();
+  state.idle.wait(lock, [&] { return state.operations == 0; });
+  lock.unlock();
   state.ipc_support.reset();
   if (state.owns_thread_pool) {
     RunPoolLifecycle(state, false);
@@ -148,6 +201,7 @@ int remotekit_sdk_shutdown(void) {
   state.io_thread->Stop();
   state.io_thread.reset();
   mojo::core::ShutDown();
+  lock.lock();
   state.at_exit.reset();
   state.stopped = true;
   return REMOTEKIT_SDK_OK;
@@ -169,9 +223,8 @@ int remotekit_sdk_mojo_roundtrip(const void* input,
   // capacity. All subsequent comparison/copy operations remain bounded spans.
   const auto input_bytes = UNSAFE_BUFFERS(base::span(static_cast<const uint8_t*>(input), size));
   auto output_bytes = UNSAFE_BUFFERS(base::span(static_cast<uint8_t*>(output), size));
-  auto& state = State();
-  std::lock_guard<std::mutex> lock(state.lock);
-  if (!state.at_exit)
+  OperationLease lease;
+  if (!lease)
     return REMOTEKIT_SDK_INVALID_STATE;
   mojo::ScopedMessagePipeHandle first;
   mojo::ScopedMessagePipeHandle second;
@@ -209,9 +262,8 @@ int remotekit_sdk_mojo_roundtrip(const void* input,
 int remotekit_sdk_webrtc_time_millis(int64_t* value) {
   if (!value)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
-  auto& state = State();
-  std::lock_guard<std::mutex> lock(state.lock);
-  if (!state.at_exit)
+  OperationLease lease;
+  if (!lease)
     return REMOTEKIT_SDK_INVALID_STATE;
   *value = webrtc::TimeMillis();
   return REMOTEKIT_SDK_OK;
@@ -238,18 +290,21 @@ int remotekit_sdk_control_connect(const char* name_utf8, uint64_t* handle) {
   if (length == 0 || length > 128)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   const auto name = UNSAFE_BUFFERS(std::string_view(name_utf8, length));
-  auto& state = State();
-  std::lock_guard<std::mutex> lock(state.lock);
-  if (!state.at_exit || state.next_handle == 0)
+  OperationLease lease;
+  if (!lease)
     return REMOTEKIT_SDK_INVALID_STATE;
+  auto& state = State();
   auto endpoint = mojo::NamedPlatformChannel::ConnectToServer(
       mojo::NamedPlatformChannel::ServerNameFromUTF8(name));
   if (!endpoint.is_valid())
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
-  auto channel = std::make_unique<ControlChannel>();
+  auto channel = std::make_shared<ControlChannel>();
   channel->pipe = channel->connection.Connect(std::move(endpoint));
   if (!channel->pipe.is_valid())
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  std::lock_guard lock(state.lock);
+  if (state.stopping || state.next_handle == 0)
+    return REMOTEKIT_SDK_INVALID_STATE;
   const uint64_t id = state.next_handle++;
   state.channels.emplace(id, std::move(channel));
   *handle = id;
@@ -265,13 +320,23 @@ int remotekit_sdk_control_request(uint64_t handle,
                                   uint32_t timeout_ms) {
   if (output_size)
     *output_size = 0;
-  auto& state = State();
-  std::lock_guard<std::mutex> lock(state.lock);
-  const auto found = state.channels.find(handle);
-  if (!state.at_exit || found == state.channels.end())
+  OperationLease lease;
+  if (!lease)
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  std::shared_ptr<ControlChannel> channel;
+  {
+    auto& state = State();
+    std::lock_guard lock(state.lock);
+    const auto found = state.channels.find(handle);
+    if (state.stopping || found == state.channels.end())
+      return REMOTEKIT_SDK_CHANNEL_CLOSED;
+    channel = found->second;
+  }
+  std::lock_guard request_lock(channel->request_lock);
+  if (channel->closed.load(std::memory_order_acquire))
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
   const auto fail = [&](int status) {
-    state.channels.erase(found);
+    RetireChannel(handle, channel);
     return status;
   };
   if (!output_size || size > kMaxMessageSize || (size && !input) || (capacity && !output) ||
@@ -279,13 +344,15 @@ int remotekit_sdk_control_request(uint64_t handle,
     return fail(REMOTEKIT_SDK_INVALID_ARGUMENT);
   }
   const base::TimeTicks deadline = base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
-  const auto pipe = found->second->pipe.get();
+  const auto pipe = channel->pipe.get();
   if (mojo::WriteMessageRaw(pipe, input, size, nullptr, 0, MOJO_WRITE_MESSAGE_FLAG_NONE) !=
       MOJO_RESULT_OK) {
     return fail(REMOTEKIT_SDK_CHANNEL_CLOSED);
   }
   std::vector<uint8_t> response;
   for (;;) {
+    if (channel->closed.load(std::memory_order_acquire))
+      return REMOTEKIT_SDK_CHANNEL_CLOSED;
     if (base::TimeTicks::Now() >= deadline)
       return fail(REMOTEKIT_SDK_TIMEOUT);
     const MojoResult result =
@@ -311,9 +378,21 @@ int remotekit_sdk_control_request(uint64_t handle,
 }
 
 int remotekit_sdk_control_close(uint64_t handle) {
-  auto& state = State();
-  std::lock_guard<std::mutex> lock(state.lock);
-  return state.channels.erase(handle) ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_CHANNEL_CLOSED;
+  OperationLease lease;
+  if (!lease)
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  std::shared_ptr<ControlChannel> channel;
+  {
+    auto& state = State();
+    std::lock_guard lock(state.lock);
+    const auto found = state.channels.find(handle);
+    if (found == state.channels.end())
+      return REMOTEKIT_SDK_CHANNEL_CLOSED;
+    channel = std::move(found->second);
+    channel->closed.store(true, std::memory_order_release);
+    state.channels.erase(found);
+  }
+  return REMOTEKIT_SDK_OK;
 }
 
 namespace {
@@ -440,7 +519,7 @@ int ExchangeJson(uint64_t handle,
                  std::optional<base::DictValue>* reply) {
   std::vector<uint8_t> response(kMaxMessageSize);
   size_t size = 0;
-  // Do not hold State().lock here: control_request owns the existing SDK lock.
+  // control_request serializes the exchange on this channel only.
   int status = remotekit_sdk_control_request(handle, request.data(), request.size(),
                                              response.data(), response.size(), &size, timeout_ms);
   if (status != REMOTEKIT_SDK_OK)
@@ -475,6 +554,9 @@ int Command(uint64_t handle,
             size_t size,
             uint32_t timeout_ms,
             remotekit_sdk_token* token) {
+  OperationLease lease;
+  if (!lease)
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
   if (token)
     *token = {};
   if (!json || !size || size > kMaxMessageSize || !timeout_ms || timeout_ms > 30000)
@@ -579,6 +661,9 @@ int remotekit_sdk_control_open_atlas(uint64_t handle,
   if (consumer_pid != GetCurrentProcessId() || fps < 1 || fps > 120 || !timeout_ms ||
       timeout_ms > 30000)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  OperationLease lease;
+  if (!lease)
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
   const auto deadline = base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
   bool opening = true;
   for (;;) {

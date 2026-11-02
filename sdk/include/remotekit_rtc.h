@@ -123,7 +123,7 @@ REMOTEKIT_SDK_API int remotekit_rtc_set_remote_description(uint64_t peer,
 REMOTEKIT_SDK_API int remotekit_rtc_add_ice(uint64_t peer, const char* mid,
     int32_t mline, const char* candidate, size_t size);
 /* Effective H264 constrained-baseline/mode1 sending limit: minimum of parsed
- * remote receive level and this SDK's local level51, or zero if no receiving
+ * remote receive level and this SDK's local level52, or zero if no receiving
  * format is present. Read after ICE_COMPLETE for this offer. */
 REMOTEKIT_SDK_API int remotekit_rtc_get_receive_level(uint64_t peer,
                                                     uint32_t* level_idc);

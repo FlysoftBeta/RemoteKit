@@ -14,7 +14,10 @@ Host flow: `CreateSession`, `AddProfile`, `CreateWebView`, `SetFocus`, `Token`,
 then `AcceptInput(authenticated_session, event)`. Input has a strictly increasing,
 nonzero per-view sequence, retained across document/instance changes. Accepted
 input is validated only; the host still needs to dispatch it to the browser.
-All input requires focus; pointer focus acquisition must precede dispatch.
+Input requires focus except button-free mouse move/leave used for hover. Hover
+still requires the current session/view token and increasing sequence; it does
+not acquire focus. Button, wheel, keyboard and touch dispatch must follow focus
+acquisition.
 
 `RequestLifecycle` updates desired state and returns a request generation. Execute
 the browser operation externally and report its outcome with `CompleteLifecycle`.

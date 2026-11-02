@@ -24,7 +24,11 @@ Viewer在页面启动时预热并缓存接收能力探测，鉴权不等待探�
 
 ## 操作、对账与恢复
 
-每Tenant操作串行。Control先保存产品意图，再调用Endpoint，实际状态通过快照和WS更新；接受导航或恢复不等于页面已完成。周期对账只在值变化时配置页面，避免周期性打断输出和输入。
+每Tenant产品提交串行。Client先显示内存pending投影，常规动作经RTC到Endpoint再交Control；Control校验当前connection/Viewer租约，持久化operation收据与意图，实际状态通过snapshot/WS更新。产品提交和对应收据在同一SQLite事务；重复ID返回原收据，不同payload复用ID拒绝。操作受理、Native运行、提交、拒绝、结果未知分别表示，不将导航RPC成功当页面已完成。
+
+state带serverIncarnation与单调snapshotSequence，独立于workspace.revision；运行态变化不会被等workspace revision的旧响应覆盖。WS snapshot为产品权威，DC结果只更新相应pending资格，不直接覆盖workspace。新Viewer不继承旧端内存pending，按Control权威状态恢复；已受理旧操作可完成，但迟到结果不投新peer。
+
+导航保存operationId/operationGeneration/内部单调operationSequence及上一确认状态，Native回报精确navigationOperations终态后才结算；beforeunload取消不靠loading=false猜测。未知执行不自动重放；目标明确关闭或Browser incarnation退役时可标记unknown已解除执行资格，仍不伪称原操作成功。收据有界、换代后旧ID明确expired；见[导航操作](navigation-operations.zh-CN.md)。周期对账只在值变化时配置页面，避免打断输出与输入；未确认导航不能被普通ensure重复执行。
 
 在线恢复顺序是下发完整站点规则和媒体策略、确保Session、再恢复/创建所需WebView。Endpoint优先使用内部导航恢复数据；没有可用数据时才使用Control持有的有限地址信息。Control不保存或解释PageState。恢复由定时状态机分步推进，不在session.ensure逐页等待；恢复期间Control保留产品URL/导航意图，显示restoring，不把中间about:blank写回产品状态。Browser navigationRevision覆盖同文档history和PageState变化，Endpoint按导出revision更新恢复文件。
 
@@ -58,7 +62,9 @@ tablet UA按HTTP(S) origin保存。首次导航、redirect、history、reload和
 
 实际帧率受显示/网络反馈，编码尺寸与码率还受接收端H264能力和WebRTC拥塞控制。根据可见CSS面积与ClientScale计算统一缩放因子，Browser DPR在0.5–4内；viewport DIP不因质量档改变。连续3个有效反馈窗口估算延迟>300ms降至当前倍率的0.8，调整冷却5秒；<150ms健康30秒后逐级恢复。静态重复、隐藏、无效/过期时钟不触发。
 
-生产估算起点是源采集完成；video终点为匹配真实RTP/epoch的compositor回调观察，canvas回退终点为JS提交。它不是Pixel marker E2E，也不是物理屏幕点亮。具体映射、置信度和独立媒体反馈见[媒体反馈](media-feedback.md)。受控自动化采用manual模式，显式配置，不运行产品自动质量策略。
+生产估算起点是源采集完成；video终点为匹配真实RTP/epoch的compositor回调观察，canvas回退终点为JS提交。Client独立校准Endpoint采集时钟与Control产品新鲜度时钟，允许分机运行。它不是Pixel marker E2E，也不是物理屏幕点亮。具体映射、置信度和独立媒体反馈见[媒体反馈](media-feedback.md)。受控自动化采用manual模式，显式配置，不运行产品自动质量策略。
+
+搜索引擎偏好统一保存Control，地址栏和简易起始页使用同一URL/搜索解析。显式kind=start的Tab由Viewer本地显示，不建立远程页面渲染需求；真实about:blank或popup不因此被覆盖。首个网页导航直接创建目标，不插入伪造Browser历史；空起始页仍保留RTC数据通道。
 
 ## 代码入口与验证
 

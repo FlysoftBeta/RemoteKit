@@ -7,7 +7,8 @@ Chromium, libc++, Abseil, or WebRTC C++ types cross the boundary.
 The SDK provides a local binary Mojo message-pipe roundtrip, isolated named-channel
 JSON control of the browser process, and WebRTC PeerConnection/SDP/ICE/DataChannel
 through `remotekit_rtc.h`. A custom H.264 encoder factory calls endpoint-owned
-hardware encoders through C callbacks. Audio capture and playback are not enabled.
+hardware encoders through C callbacks. Browser playback-target PCM is submitted
+through the audio export and sent as Opus; this is not system audio capture.
 
 The Windows client also uses worker-thread `control_open_atlas` and
 `control_command_token` helpers. Atlas setup returns caller-owned mapping,
@@ -17,6 +18,10 @@ Frame polling and GPU waits do not call Mojo. `BUSY` means an operation was not
 accepted; retry only with the same valid token/sequence within a deadline.
 Windows scan-code and DomKey helpers retain the native layout. The caller keeps
 the DLL loaded until SDK shutdown and the caller thread's TLS cleanup finish.
+The registry lock covers lookup and lifecycle changes only. Each control channel
+serializes its own requests; an operation lease keeps the channel alive while
+close cancels pending work and shutdown drains active operations. A slow channel
+does not hold the registry lock across its transport wait.
 
 From the repository root, apply the patch manifest and build/export the SDK:
 
@@ -73,12 +78,15 @@ named-pipe timeout; all control calls belong on a worker thread, never a UI thre
 
 `control_request` exchanges one raw message each way, with a 1 MiB limit and an
 active-request timeout of 1..30000ms. The browser validates JSON and UTF-8. Calls
-are serialized; use one SDK caller thread. If a request fails for any reason on a
-valid channel, including timeout or an undersized response buffer, the SDK closes
+on the same channel are serialized; different channels can use separate worker
+threads. A transport failure on a valid channel, including timeout or an undersized response buffer, closes
 and invalidates that handle. Reconnect before retrying. BUFFER_TOO_SMALL reports
 the required size but discards that connection, preventing an old reply from
 being mistaken for the response to another request. Successful replies are not
-NUL-terminated.
+NUL-terminated. A structured Browser application rejection (`ok:false`) is still
+a successful transport exchange and does not invalidate the channel. Browser
+responses exceeding the protocol budget return a bounded `response_too_large`
+application error instead of intentionally breaking a healthy connection.
 
 Verified on official Chromium `157.0.8103.15`, x64 component build: GN shared
 library linked successfully, exporter copied the full runtime manifest, and an

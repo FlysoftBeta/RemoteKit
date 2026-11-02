@@ -2,8 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Alert, Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, LinearProgress, Typography, useMediaQuery } from '@mui/material';
 import { Close, DeleteOutline, InsertDriveFileOutlined, CameraAltOutlined } from '@mui/icons-material';
 import type { FileRequest } from '../shared/product';
-import { cameraFormat, mergeSelection, combineSelection, validateSelection } from './file-selection';
-import { uploadFile, type FileRpc } from './file-upload';
+import { cameraFormat, fileChooserAccept, mergeSelection, combineSelection, validateSelection } from './file-selection';
+import { type FileRpc } from './file-upload';
 import { CameraCapture } from './camera-capture';
 import type { CameraCandidate } from './camera-candidates';
 export function FileChooserDialog({ request, online, rpc }: {
@@ -15,8 +15,11 @@ export function FileChooserDialog({ request, online, rpc }: {
     const [files, setFiles] = useState<File[]>([]), [error, setError] = useState(''), [busy, setBusy] = useState(false), [waiting, setWaiting] = useState(request.state === 'validating'), [sent, setSent] = useState(0);
     const [camera, setCamera] = useState<'off' | 'opening' | 'preview' | 'capturing'>('off'), [candidates, setCandidates] = useState<CameraCandidate[]>([]), [selected, setSelected] = useState<number[]>([]), [zoom, setZoom] = useState<number | null>(null);
     const input = useRef<HTMLInputElement>(null), video = useRef<HTMLVideoElement>(null), stream = useRef<MediaStream | null>(null), capture = useRef(new CameraCapture()), controller = useRef<AbortController | null>(null), uploadId = useRef<string | undefined>(undefined), generation = useRef(0), mounted = useRef(true), cameraGeneration = useRef(0);
-    const format = cameraFormat(request.accept);
+    const accept = fileChooserAccept(request);
+    const format = cameraFormat(accept);
     const commitPending = useRef(false);
+    const [confirmation, setConfirmation] = useState<'commit' | 'cancel' | null>(null);
+    const cancelling = useRef(false);
     const stopCamera = () => { cameraGeneration.current++; stream.current?.getTracks().forEach(track => track.stop()); stream.current = null; if (video.current)
         video.current.srcObject = null; capture.current.cancel(); setCamera('off'); };
     useEffect(() => {
@@ -95,6 +98,8 @@ export function FileChooserDialog({ request, online, rpc }: {
         }
     };
     const cancel = async () => {
+        if (cancelling.current || !online) return;
+        cancelling.current = true;
         stopCamera();
         generation.current++;
         controller.current?.abort();
@@ -104,9 +109,10 @@ export function FileChooserDialog({ request, online, rpc }: {
             const result = await rpc.cancel(request.id, uploadId.current);
             if (!mounted.current)
                 return;
+            setConfirmation(result.state === 'validating' ? 'cancel' : null);
             if (result.state === 'validating') {
                 setWaiting(true);
-                setError('文件已在验证，正在等待页面确认');
+                setError('正在确认页面是否已取消文件选择');
             }
             else if (result.state === 'selected') {
                 setWaiting(true);
@@ -124,6 +130,7 @@ export function FileChooserDialog({ request, online, rpc }: {
                 setError('暂时无法取消，请重试');
         }
         finally {
+            cancelling.current = false;
             if (mounted.current)
                 setBusy(false);
         }
@@ -151,11 +158,11 @@ export function FileChooserDialog({ request, online, rpc }: {
                     return;
                 }
                 uploadId.current = begin.uploadId;
-                if (begin.files.length !== selection.length)
+                if (begin.offsets.length !== selection.length)
                     throw new Error('上传文件数量不一致');
                 let completed = 0;
                 for (let i = 0; i < selection.length; i++) {
-                    await uploadFile(begin.files[i].url, selection[i], abort.signal, bytes => { if (valid())
+                    await rpc.upload(begin.uploadId, i, selection[i], begin.offsets[i], abort.signal, bytes => { if (valid())
                         setSent(completed + bytes); });
                     completed += selection[i].size;
                     if (!valid())
@@ -166,9 +173,9 @@ export function FileChooserDialog({ request, online, rpc }: {
             const result = await rpc.commit(uploadId.current!);
             if (!valid())
                 return;
-            setWaiting(result.state !== 'cancelled');
-            if (result.state === 'cancelled')
-                throw new Error('文件选择已取消');
+            setConfirmation(result.state === 'validating' ? 'commit' : null);
+            setWaiting(true);
+            if (result.state === 'cancelled') setError('文件选择已取消');
         }
         catch (e) {
             if (valid()) {
@@ -182,31 +189,42 @@ export function FileChooserDialog({ request, online, rpc }: {
             }
         }
     };
-    // Commit is idempotent. Poll only for asynchronous Browser validation of this upload.
-    useEffect(() => { if (!waiting || !uploadId.current || !online)
-        return; let active = true, timer: ReturnType<typeof setTimeout>; const poll = async () => { try {
-        const result = await rpc.commit(uploadId.current!);
-        if (!active)
-            return;
-        if (result.state === 'validating')
-            timer = setTimeout(poll, 500);
-        else if (result.state === 'cancelled') {
-            setWaiting(false);
-            setError('文件选择已取消');
-        }
-    }
-    catch {
-        if (active)
-            setError('无法确认文件状态，请恢复连接后重试');
-    } }; timer = setTimeout(poll, 500); return () => { active = false; clearTimeout(timer); }; }, [waiting, online, rpc]);
+    // Retry the same uncertain operation. Cancel confirmation must never poll
+    // commit after its transport batch has already been retired.
+    useEffect(() => {
+        if (!confirmation || !online) return;
+        let active = true, timer: ReturnType<typeof setTimeout>;
+        const poll = async () => {
+            try {
+                const result = confirmation === 'cancel'
+                    ? await rpc.cancel(request.id, uploadId.current)
+                    : await rpc.commit(uploadId.current!);
+                if (!active) return;
+                if (result.state === 'validating') timer = setTimeout(poll, 500);
+                else {
+                    setConfirmation(null);
+                    setWaiting(true);
+                    if (result.state === 'cancelled') setError('文件选择已取消');
+                }
+            } catch {
+                if (active) {
+                    setError('无法确认文件状态，正在重试');
+                    timer = setTimeout(poll, 1000);
+                }
+            }
+        };
+        timer = setTimeout(poll, 500);
+        return () => { active = false; clearTimeout(timer); };
+    }, [confirmation, online, rpc, request.id]);
     const total = allFiles().reduce((sum, f) => sum + f.size, 0);
     return <Dialog open fullWidth maxWidth="sm" fullScreen={narrow} onClose={online ? () => void cancel() : undefined} aria-labelledby="file-chooser-title" aria-describedby="file-chooser-origin">
     <DialogTitle id="file-chooser-title" sx={{ pr: 7 }}>选择文件<IconButton aria-label="取消文件选择" disabled={!online} onClick={() => void cancel()} sx={{ position: 'absolute', right: 8, top: 8, minWidth: 44, minHeight: 44 }}><Close /></IconButton></DialogTitle>
     <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
       <Typography id="file-chooser-origin" variant="body2" color="text.secondary" sx={{ overflowWrap: 'anywhere' }}>{request.origin}</Typography>
       {error && <Alert severity="warning">{error}</Alert>}
+      {request.acceptTypesOmitted && <Typography variant="caption">文件类型列表过长，显示所有文件</Typography>}
       {!waiting && <>
-        <input hidden ref={input} type="file" accept={request.accept.join(',')} multiple={request.multiple} onChange={event => { const chosen=Array.from(event.target.files??[]);setFiles(previous => mergeSelection(previous, chosen, request.multiple)); event.target.value = ''; if (!request.multiple)
+        <input hidden ref={input} type="file" accept={accept.length ? accept.join(',') : undefined} multiple={request.multiple} onChange={event => { const chosen=Array.from(event.target.files??[]);setFiles(previous => mergeSelection(previous, chosen, request.multiple)); event.target.value = ''; if (!request.multiple)
             setSelected([]); setError(''); }}/>
         {camera === 'off' ? <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}><Button disabled={busy || !online || commitPending.current} onClick={() => input.current?.click()}>从设备选择</Button><Button startIcon={<CameraAltOutlined />} disabled={busy || !online || commitPending.current || !format} onClick={() => void openCamera()}>{candidates.length ? '重新拍照' : '摄像头拍照'}</Button>{!format && <Typography variant="caption">此页面不接受支持的照片格式</Typography>}</Box> : <Box>
           <video ref={video} muted playsInline style={{ width: '100%', maxHeight: '40vh', objectFit: 'contain', background: '#111' }}/>

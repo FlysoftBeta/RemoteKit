@@ -43,6 +43,11 @@ class HardwareEncoder {
   virtual CodecResult Poll(uint32_t timeout_ms,AccessUnit&,std::string& error)=0;
   virtual bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error,uint32_t maximum=0)=0;
   virtual bool Drain(std::vector<AccessUnit>&,std::string& error)=0;
+  // A failed asynchronous backend may have no bounded cancellation primitive.
+  // The worker transfers every unresolved source/pool lease before destruction;
+  // the backend retains this owner with its session until process exit.
+  virtual bool CanReleaseInputs() const { return true; }
+  virtual void HoldInputsUntilProcessExit(std::shared_ptr<void>) {}
   virtual const char* Name() const=0;
   virtual EncoderInput InputFormat() const { return EncoderInput::nv12; }
   virtual std::optional<QsvLowPowerInfo> LowPowerInfo() const { return {}; }

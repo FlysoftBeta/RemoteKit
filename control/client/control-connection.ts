@@ -1,3 +1,4 @@
+import { snapshotNewer } from './product-operations';
 import type {
   ProductState,
   SocketMessage,
@@ -9,6 +10,7 @@ export type ConnectionStatus =
   "connecting" | "online" | "reconnecting" | "failed" | "revoked" | "expired";
 export class ControlConnection {
   readonly lifecycle: { startedAt: number; marks: Record<string, number>; error?: string }[] = [];
+  private latestState:ProductState|null=null;
   private socket?: WebSocket;
   private stopped = false;
   private attempts = 0;
@@ -42,6 +44,7 @@ export class ControlConnection {
       `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/socket`,
     );
     this.socket = ws;
+    let snapshotIncarnation:string|undefined;
     ws.onopen = () => mark('open');
     ws.onmessage = (event) => {
       if (ws !== this.socket || this.stopped) return;
@@ -54,10 +57,13 @@ export class ControlConnection {
       if (message.type === 'rtc.signal') {
         this.signal(message);
       } else if (message.type === "state") {
+        if(snapshotIncarnation && message.state.serverIncarnation!==snapshotIncarnation)return;
+        if(!snapshotNewer(message.state,this.latestState))return;
+        snapshotIncarnation=message.state.serverIncarnation;
         mark('firstState');
         this.attempts = 0;
         this.status("online");
-        this.state(message.state);
+        if(snapshotNewer(message.state,this.latestState)){this.latestState=message.state;this.state(message.state);}
       } else if (message.type === "lease") {
         this.status(message.reason === "logout" ? "expired" : "revoked");
         this.close();
@@ -102,7 +108,7 @@ export class ControlConnection {
     ws.onerror = () => {};
   }
   private retry() {
-    if (this.stopped) return;
+    if (this.stopped || this.socket) return;
     if (++this.attempts > 5) {
       this.status("failed");
       return;

@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   Box,
-  Button,
   Checkbox,
   CircularProgress,
   Divider,
@@ -37,7 +36,10 @@ import type {
 import { RemoteTransport } from "./transport";
 import { RemoteViewport } from "./remote-viewport";
 import type { Action } from "./product-dialogs";
+import { StartPage } from './start-page';
+import { SEARCH_ENGINES } from '../shared/product';
 import { AudioControls } from './audio-controls';
+import { visibleContentBounds } from './viewport-transition';
 import type { AudioChannels } from './audio-output';
 export function Tool({
   title,
@@ -99,7 +101,7 @@ export function WindowFrame({
   const tabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
     active = tabs.find((t) => t.id === win.activeTabId),
     focused = state.workspace.activeWindowId === win.id;
-  const [address, setAddress] = useState(active?.url ?? ""),
+  const [address, setAddress] = useState(active?.kind === 'start' ? "" : active?.url ?? ""),
     [busy, setBusy] = useState(false),
     [menu, setMenu] = useState<HTMLElement | null>(null),
     [switcher, setSwitcher] = useState<HTMLElement | null>(null),
@@ -112,7 +114,7 @@ export function WindowFrame({
     content = useRef<HTMLDivElement>(null),
     strip = useRef<HTMLDivElement>(null);
   const addressDirty = useRef(false),
-    previousTab = useRef(active?.id);
+    previousTab = useRef(active?.id), composing = useRef(false);
   const run = (command: Parameters<Action>[0]) => {
     if (!online) return;
     setBusy(true);
@@ -124,8 +126,8 @@ export function WindowFrame({
     if (previousTab.current !== active?.id) addressDirty.current = false;
     previousTab.current = active?.id;
     if (!addressDirty.current)
-      setAddress(active?.pendingUrl ?? active?.url ?? "");
-  }, [active?.id, active?.url, active?.pendingUrl]);
+      setAddress(active?.kind === 'start' ? "" : active?.pendingUrl ?? active?.url ?? "");
+  }, [active?.id, active?.url, active?.pendingUrl, active?.kind]);
   useEffect(() => {
     if (focusAddress === win.id) {
       input.current?.focus();
@@ -154,13 +156,12 @@ export function WindowFrame({
     strip.current
       ?.querySelector('[aria-selected="true"]')
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    if (active?.url === "about:blank") input.current?.focus();
   }, [active?.id]);
   useEffect(() => {
     const node = content.current;
     if (!node) return;
     const measure = () => {
-      const rect = node.getBoundingClientRect();
+      const rect = visibleContentBounds(node.getBoundingClientRect(), window.visualViewport);
       if (!rect.width || !rect.height) return;
       onGeometry(
         win.id,
@@ -171,10 +172,12 @@ export function WindowFrame({
     const observer = new ResizeObserver(measure);
     observer.observe(node);
     window.visualViewport?.addEventListener("resize", measure);
+    window.visualViewport?.addEventListener("scroll", measure);
     measure();
     return () => {
       observer.disconnect();
       window.visualViewport?.removeEventListener("resize", measure);
+      window.visualViewport?.removeEventListener("scroll", measure);
     };
   }, [win.id, onGeometry]);
   let origin = "";
@@ -187,12 +190,25 @@ export function WindowFrame({
     if (!focused && online)
       void action({ type: "window.activate", windowId: win.id }).catch(report);
   };
-  const navigate = () => {
-    if (!address.trim()) return;
+  const submit = async (value: string) => {
+    if (!online || !value.trim()) return;
+    // Release the draft before dispatch so the pending projection and any WS
+    // snapshot arriving before the receipt can update the canonical address.
     addressDirty.current = false;
-    if (active)
-      run({ type: "tab.navigate", tabId: active.id, url: address.trim() });
-    else run({ type: "tab.create", windowId: win.id, url: address.trim() });
+    setAddress(value.trim());
+    try {
+      await action(active ? { type: 'tab.navigate', tabId: active.id, url: value.trim() } : { type: 'tab.create', windowId: win.id, url: value.trim() });
+    } catch (failure) {
+      addressDirty.current = true;
+      throw failure;
+    }
+  };
+  const createStartTab = () => {
+    if (!online || busy) return;
+    setBusy(true);
+    void action({ type: 'tab.create', windowId: win.id }).then(() => {
+      if (window.matchMedia('(pointer: fine)').matches) { input.current?.focus(); input.current?.select(); }
+    }).catch(report).finally(() => setBusy(false));
   };
   return (
     <section
@@ -268,7 +284,7 @@ export function WindowFrame({
         <Tool
           title="新建标签页"
           disabled={!online || busy}
-          onClick={() => run({ type: "tab.create", windowId: win.id })}
+          onClick={createStartTab}
         >
           <Add fontSize="small" />
         </Tool>
@@ -333,30 +349,34 @@ export function WindowFrame({
           className="address-form"
           onSubmit={(e) => {
             e.preventDefault();
-            navigate();
-            input.current?.blur();
+            if (composing.current || busy || !online || !address.trim()) return;
+            setBusy(true);
+            void submit(address).then(() => input.current?.blur()).catch(report).finally(() => setBusy(false));
           }}
         >
           <Language fontSize="small" />
           <InputBase
             inputRef={input}
             fullWidth
-            placeholder="输入网址"
+            placeholder="搜索或输入网址"
             inputProps={{
-              "aria-label": "网址",
+              "aria-label": "搜索或输入网址",
               autoComplete: "off",
               spellCheck: false,
             }}
             value={address}
-            disabled={!online}
+            disabled={!online || busy}
             onChange={(e) => {
               addressDirty.current = true;
               setAddress(e.target.value);
             }}
+            onCompositionStart={() => { composing.current = true; }}
+            onCompositionEnd={() => { composing.current = false; }}
             onKeyDown={(e) => {
+              if (e.key === "Enter" && (composing.current || e.nativeEvent.isComposing || e.keyCode === 229)) e.preventDefault();
               if (e.key === "Escape") {
                 addressDirty.current = false;
-                setAddress(active?.url ?? "");
+                setAddress(active?.kind === 'start' ? "" : active?.url ?? "");
                 input.current?.blur();
               }
             }}
@@ -367,7 +387,9 @@ export function WindowFrame({
         </Tool>
       </div>
       <div className="window-content" ref={content}>
-        {active ? (
+        {!active || active.kind === 'start' ? (
+          <StartPage key={active?.id ?? 'empty'} engineLabel={SEARCH_ENGINES.find(engine => engine.value === state.workspace.settings.searchEngine)?.label ?? 'Google'} online={online} onSubmit={submit} />
+        ) : (
           <>
             <RemoteViewport
               key={active.id}
@@ -393,16 +415,6 @@ export function WindowFrame({
               )
             )}
           </>
-        ) : (
-          <div className="workspace-empty">
-            <Typography variant="h6">打开一个网页</Typography>
-            <Button
-              disabled={!online || busy}
-              onClick={() => run({ type: "tab.create", windowId: win.id })}
-            >
-              新建标签页
-            </Button>
-          </div>
         )}
       </div>
       <Popover anchorEl={menu} open={!!menu} onClose={() => setMenu(null)} slotProps={{ paper: { sx: { width: 360, maxWidth: 'calc(100vw - 24px)' } } }}>
@@ -411,7 +423,7 @@ export function WindowFrame({
           disabled={!online}
           onClick={() => {
             setMenu(null);
-            run({ type: "tab.create", windowId: win.id });
+            createStartTab();
           }}
         >
           新建标签页
@@ -480,7 +492,7 @@ export function WindowFrame({
               tabId: active?.id,
             })
               .then((result) => {
-                if ((result as { application?: unknown }).application)
+                if (result.application)
                   report(new Error("设置已保存，下次加载生效"));
               })
               .catch(report)
@@ -588,7 +600,7 @@ export function WindowFrame({
         <MenuItem
           disabled={!online}
           onClick={() => {
-            if (tabMenu) run({ type: "window.create", url: tabMenu.tab.url });
+            if (tabMenu) run({ type: "window.create", url: tabMenu.tab.kind === 'start' ? undefined : tabMenu.tab.url });
             setTabMenu(null);
           }}
         >
@@ -637,6 +649,16 @@ export function WindowDivider({
     after: number;
   } | null>(null);
   const divider = useRef<HTMLDivElement>(null);
+  const weights = useRef({ before: before.weight, after: after.weight });
+  weights.current = { before: before.weight, after: after.weight };
+  const revision = useRef(0);
+  const restoreWeights = () => {
+    const previous = divider.current?.previousElementSibling as HTMLElement | null;
+    const next = divider.current?.nextElementSibling as HTMLElement | null;
+    if (previous) previous.style.flexGrow = String(weights.current.before);
+    if (next) next.style.flexGrow = String(weights.current.after);
+  };
+  useEffect(() => { if (!drag.current) restoreWeights(); }, [before.weight, after.weight]);
   const clampRatio = (ratio: number, width?: number) => {
     const available =
       width ??
@@ -648,6 +670,7 @@ export function WindowDivider({
     return Math.max(minimum, Math.min(1 - minimum, ratio));
   };
   const change = (ratio: number) => {
+    const attempt = ++revision.current;
     const sum = before.weight + after.weight,
       next = clampRatio(ratio);
     void action({
@@ -662,7 +685,7 @@ export function WindowDivider({
               ? sum * (1 - next)
               : w.weight,
       })),
-    }).catch(report);
+    }).catch(error => { if (revision.current === attempt) restoreWeights(); report(error); });
   };
   return (
     <div
@@ -722,7 +745,10 @@ export function WindowDivider({
       }}
       onPointerCancel={() => {
         drag.current = null;
+        ++revision.current;
+        restoreWeights();
       }}
+      onLostPointerCapture={() => { if (drag.current) { drag.current = null; ++revision.current; restoreWeights(); } }}
     />
   );
 }

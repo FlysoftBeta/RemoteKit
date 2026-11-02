@@ -1,15 +1,18 @@
+import type { ProductOperation } from '../shared/product';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 
 export interface RtcSignal { tenantId: string; connectionId: string; signal: { type: 'answer'; sdp: string } | { type: 'ice'; candidate: { candidate: string; sdpMid: string; sdpMLineIndex: number } } | { type: 'complete' } | { type: 'error'; message: string } }
-export interface Endpoint { request(method: string, tenantId: string, args?: Record<string, unknown>): Promise<any>; onSignal?(listener: (event: RtcSignal) => void): () => void }
+export type ClientActionEvent = ProductOperation & {tenantId:string;connectionId:string};
+export interface Endpoint { onClientAction?(listener:(event:ClientActionEvent)=>void):()=>void; request(method: string, tenantId: string, args?: Record<string, unknown>): Promise<any>; onSignal?(listener: (event: RtcSignal) => void): () => void }
 export class EndpointProcess extends EventEmitter implements Endpoint {
   private child?: ChildProcessWithoutNullStreams;
   private pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private stopped = false;
   private retry?: NodeJS.Timeout;
   constructor(private command: string, private args: string[] = [], private diagnosticLoopback = false) { super(); }
+  onClientAction(listener:(event:ClientActionEvent)=>void) { this.on('client.action',listener);return ()=>{this.off('client.action',listener);}; }
   onSignal(listener: (event: RtcSignal) => void) { this.on('rtc.signal', listener); return () => this.off('rtc.signal', listener); }
   start() {
     if (this.child || this.stopped) return;
@@ -26,6 +29,7 @@ export class EndpointProcess extends EventEmitter implements Endpoint {
         const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
         try {
           const response = JSON.parse(line);
+          if (response.event === 'client.action') { this.emit('client.action',response);continue; }
           if (response.event === 'rtc.signal') { this.emit('rtc.signal', response); continue; }
           const entry = this.pending.get(response.id);
           if (!entry) continue;
