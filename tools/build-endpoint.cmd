@@ -31,7 +31,7 @@ if "%~1"=="encoder-smoke" (
 if "%~1"=="verify-media" (
   set "RK_BUILD=%RK_ROOT%\build\endpoint-package"
   set "RK_PACKAGE_ARGS=-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON"
-  set "RK_TARGET=--target endpoint_service endpoint_client endpoint_encoder_smoke endpoint_tests endpoint_audio_ring_tests endpoint_file_upload_tests endpoint_input_sequence_tests endpoint_capture_clock_tests endpoint_media_feedback_tests endpoint_encoder_stats_tests endpoint_adaptive_fps_tests endpoint_shared_lease_retirement_tests endpoint_atlas_publication_tests endpoint_atlas_plan_tests"
+  set "RK_TARGET=--target endpoint_service endpoint_client endpoint_encoder_smoke endpoint_tests endpoint_audio_ring_tests endpoint_file_upload_tests endpoint_presentation_barrier_tests endpoint_input_sequence_tests endpoint_capture_clock_tests endpoint_media_feedback_tests endpoint_encoder_stats_tests endpoint_adaptive_fps_tests endpoint_shared_lease_retirement_tests endpoint_atlas_publication_tests endpoint_atlas_plan_tests"
 )
 set "RK_PYTHON=C:\src\depot_tools\python3.bat"
 if defined REMOTEKIT_PYTHON set "RK_PYTHON=%REMOTEKIT_PYTHON%"

@@ -35,7 +35,7 @@
     {
       "id": "capture-to-atlas",
       "path": "0007-capture-to-atlas.patch",
-      "sha256": "123f00fe254e66fa27223a6783798a9c023ab2a559922f89ddb3db2f07e57144"
+      "sha256": "13f87884bfe09d841f86cbb218ac8a17ceda83841bff8db90e685b791a0b7d10"
     },
     {
       "id": "touch-injection-dispatch-result",

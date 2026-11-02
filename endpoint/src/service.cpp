@@ -14,6 +14,8 @@
 #include "remotekit/atlas_plan.hpp"
 #include "remotekit/coordinate_readiness.hpp"
 #include "remotekit/input_sequence.hpp"
+#include "remotekit/presentation_barrier.hpp"
+#include <charconv>
 #include <json.hpp>
 #include <windows.h>
 #include <mmsystem.h>
@@ -232,6 +234,7 @@ struct Session {
  std::string current_geometry;
  std::map<std::pair<uint64_t,uint64_t>,uint64_t> publication_epochs;
  std::atomic<uint64_t> layout_epoch{0};
+ remotekit::PresentationBarrier presentation;
  std::atomic<uint32_t> receive_level{0};
  enum class ConnectionPhase : size_t {answer,first_candidate,gather_complete,connected,data_open,output_open_start,output_open_end,source_frame,submit,encoder_configure_start,encoder_configure_end,encoded,count};
  std::atomic<int64_t> connection_started_qpc{0};
@@ -802,7 +805,7 @@ struct Session {
   return {{"sessionId",id},{"browserPid",0},{"views",Json::array()},
    {"pendingPopups",Json::array()},{"events",durable_events},{"running",false},{"browserIncarnation",nullptr},{"stats",Stats()},{"recovery",RecoverySnapshot()}};
  }
- Json Snapshot() {
+ Json Snapshot(bool output_diagnostics=false) {
   if(!Alive() || producer_stop_pending)return InactiveSnapshot();
   try {
   auto snapshot=BrowserSnapshot();Json views=Json::array(),closed_acks=Json::array();bool removed=false;
@@ -829,9 +832,16 @@ struct Session {
   }
   if(removed)RefitOutput();
   AckClosed(closed_acks);
+  // Explicit, read-only diagnostic sampling; routine Control snapshots do not
+  // add an output RPC. Preserve the normal snapshot if output is unavailable.
+  Json output_status;
+  if(output_diagnostics) {
+   try{output_status=Rpc({{"method","output.status"}});}
+   catch(...){output_status={{"ok",false},{"error","output_status_unavailable"}};}
+  }
   return {{"sessionId",id},{"browserPid",process?GetProcessId(process):0},{"views",views},
    {"pendingPopups",snapshot.at("sessions").at(0).value("pendingPopups",Json::array())},
-   {"events",durable_events},{"running",true},{"browserIncarnation",browser_incarnation},{"stats",Stats()},{"recovery",RecoverySnapshot()}};
+   {"events",durable_events},{"running",true},{"browserIncarnation",browser_incarnation},{"stats",Stats()},{"recovery",RecoverySnapshot()},{"outputDiagnostics",std::move(output_status)}};
   }catch(...) {
    // A producer can exit between the liveness check and any snapshot RPC.
    // Preserve desired views and confirmed events; an exit is not window.close.
@@ -946,7 +956,10 @@ struct Session {
        std::lock_guard event_lock(self->event_mutex);
        if(self->events.size()<1024)self->events.push_back(Event{0x10000,message.dump(),"",0,encoder_peer});
        self->event_wake.notify_one();
-      },self->trace,encoder_peer));return 0;
+      },self->trace,encoder_peer,
+      [self,encoder_peer](const remotekit_rtc_frame& source,bool keyframe,const std::function<bool()>& send) {
+       return self->presentation.Send(encoder_peer,source.layout_epoch,keyframe,send);
+      }));return 0;
  }
  static int ConfigureEncoder(void* context,uint64_t encoder,const remotekit_rtc_encoder_config* config) {
   auto* self=static_cast<Session*>(context);std::lock_guard lock(self->encoder_mutex);
@@ -1019,14 +1032,50 @@ struct Session {
   auto handle=peer.load();if(!handle||!data_open)return;
   auto encoded=message.dump();sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
  }
+ void SendPrepare(const remotekit::PresentationBarrier::Key& key) {
+  Send({{"type","presentation.prepare"},{"version",1},{"barrierId",std::to_string(key.barrier)},
+        {"outputGeneration",std::to_string(key.generation)},{"layoutEpoch",std::to_string(key.epoch)}});
+ }
+ static bool PresentationNumber(const Json& message,const char* field,uint64_t& result) {
+  const auto found=message.find(field);if(found==message.end() || !found->is_string())return false;
+  const auto& value=found->get_ref<const std::string&>();
+  if(value.empty() || (value.size()>1 && value[0]=='0'))return false;
+  const auto parsed=std::from_chars(value.data(),value.data()+value.size(),result);
+  return parsed.ec==std::errc{} && parsed.ptr==value.data()+value.size();
+ }
+ bool PresentationMessage(const Event& event) {
+  const auto message=Json::parse(event.bytes,nullptr,false);
+  if(!message.is_object())return false;
+  const auto type=message.value("type",Json());
+  if(type!="media.presentation" && type!="presentation.ready")return false;
+  if(event.bytes.size()>512 || message.value("version",Json())!=1)return true;
+  if(type=="media.presentation") {
+   const auto backend=message.value("backend",Json());
+   if(backend!="video" && backend!="canvas")return true;
+   const auto key=presentation.Mode(event.peer,backend=="video");
+   // Mode() installs the gate before any video support confirmation leaves.
+   Send({{"type","presentation.mode"},{"version",1},{"backend",backend}});
+   if(!layout.empty()) {Send(layout);if(key)SendPrepare(*key);}
+   if(backend=="canvas")refresh_connected=true;
+  } else {
+   remotekit::PresentationBarrier::Key key;
+   if(PresentationNumber(message,"barrierId",key.barrier) &&
+      PresentationNumber(message,"outputGeneration",key.generation) &&
+      PresentationNumber(message,"layoutEpoch",key.epoch) && presentation.Ready(event.peer,key))refresh_connected=true;
+  }
+  return true;
+ }
  void PublishLayout(Json next,uint64_t epoch) {
+  // Serialize replacement with the last encoded publication, including old
+  // hardware jobs already in flight. Metadata is sent only after gate closure.
+  const auto prepare=presentation.Layout(std::stoull(next.at("generation").get<std::string>()),epoch);
   std::map<std::string,bool> ready;
   std::set<std::string> feedback_views;
   for(const auto& view:next.at("views"))feedback_views.insert(view.at("id").get<std::string>());
   media_feedback.Bind(peer.load(),next.at("epoch").get<std::string>(),next.at("generation").get<std::string>(),std::move(feedback_views));
   for(const auto& view:next.at("views"))ready[view.at("id").get<std::string>()]=!view.value("stale",false);
   coordinate_readiness.Set(epoch,std::move(ready));
-  layout=std::move(next);Send(layout);
+  layout=std::move(next);Send(layout);if(prepare)SendPrepare(*prepare);
  }
  void InvalidateLayout(const char* reason) {
   current_geometry=std::string("invalid:")+reason;
@@ -1221,7 +1270,7 @@ struct Session {
      if(!opened)data_open=false;
      if(data_open&&!layout.empty())Send(layout);
     } else if(event.type==REMOTEKIT_RTC_DATA) {
-     try{QueueInput(event);}catch(const std::exception& error){++input_rejected;Send({{"type","input.result"},{"ok",false},{"error",error.what()}});}
+     try{if(!PresentationMessage(event))QueueInput(event);}catch(const std::exception& error){++input_rejected;Send({{"type","input.result"},{"ok",false},{"error",error.what()}});}
     }
     else if(event.type==REMOTEKIT_RTC_ERROR)fprintf(stderr,"RTC %s: %s\n",id.c_str(),event.bytes.c_str());
    }
@@ -1334,15 +1383,15 @@ struct Session {
      } else {stream_started=true;pending_latest=false;if(cadence_limited)next_codec_submit_qpc=QpcNow()+(QpcFrequency()+sampling_fps-1)/sampling_fps;}
      }
    } else if(handle && receive_level.load() && latest.release &&
-              cadence_due && (!stream_started || pending_latest || refresh_connected.load() || tail_ready)) {
+              cadence_due && latest.layout_epoch==layout_epoch.load() &&
+              (!stream_started || pending_latest || refresh_connected.load() || tail_ready)) {
     const bool tail=tail_ready;
     const bool refresh=refresh_connected.exchange(false);
      if(tail || refresh || !stream_started) {std::lock_guard lock(encoder_mutex);for(auto& [encoder,worker]:encoders)worker->Keyframe();}
     auto repeat=latest;
-    sampling=remotekit::FitH264Sampling(current_metadata.width_pixels,current_metadata.height_pixels,
-                                      SamplingFps(),receive_level.load(),options.max_encode_width,options.max_encode_height);
-    if(sampling.width){repeat.width=sampling.width;repeat.height=sampling.height;}
-    repeat.layout_epoch=FrameEpoch(current_metadata);
+    // latest already carries the encoded dimensions and epoch of its actual
+    // texture. LatestMetadata may describe a newer publication whose copy or
+    // ready fence has not completed; never relabel an older texture with it.
     if(tail) {
      tail_attempt=std::make_shared<remotekit::TailIdrAttempt>();
      next_tail_attempt_ms=now_ms+tail_retry_ms;
@@ -1408,7 +1457,7 @@ struct Session {
   uint64_t handle=0;
   if(sdk.remotekit_rtc_create(&config,&handle)!=0)throw std::runtime_error("RTC create failed");
   if(policy_fps && sdk.remotekit_rtc_set_media_policy(handle,policy_bitrate,policy_max,policy_fps)!=0){sdk.remotekit_rtc_close(handle);throw std::runtime_error("RTC media policy rejected");}
-  receive_level=0;refresh_connected=false;peer=handle;input_sequence.Bind(handle);stop_media=false;data_open=false;layout=Json();
+  receive_level=0;refresh_connected=false;presentation.Bind(handle);peer=handle;input_sequence.Bind(handle);stop_media=false;data_open=false;layout=Json();
   last_media_refresh_qpc=0;
   if(options.rtc_playout_max_ms>=0) {
    const int status=sdk.remotekit_rtc_set_playout_delay(handle,0,options.rtc_playout_max_ms);
@@ -1472,6 +1521,7 @@ struct Session {
   stop_input=true;input_wake.notify_all();if(input_thread.joinable())input_thread.join();
   stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();
   rtc_connected=false;
+  presentation.Bind(0);
   InvalidateLayout("rtc-closed");
   {std::lock_guard lock(input_mutex);input_queue.clear();input_sequence.Bind(0);}
   auto handle=peer.exchange(0);
@@ -1609,7 +1659,7 @@ struct Session {
   const auto method=Required(request,"method");
   if(method.starts_with("session.files."))return FileCommand(method,request);
   if(method=="session.ensure"){Start();return {{"sessionId",id},{"browserPid",GetProcessId(process)},{"running",true},{"accepted",true},{"browserIncarnation",browser_incarnation},{"recovery",RecoverySnapshot()}};}
-  if(method=="session.snapshot")return Snapshot();
+  if(method=="session.snapshot")return Snapshot(request.value("outputDiagnostics",false));
   if(method=="session.events.ack") {
    const auto ids=request.at("eventIds");
    if(!ids.is_array() || ids.size()>256)throw std::runtime_error("invalid event ids");

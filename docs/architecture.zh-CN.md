@@ -44,6 +44,8 @@ Control默认回收隐藏120秒且Browser canDiscard允许的页。Browser以实
 
 不旋转MaxRects把可见平面排入atlas，含padding。viewport为DIP，页面DPR决定实际backing，atlas/编码像素及mediaScale另记；命中排除padding和letterbox。产品内容区尺寸来自Viewer，不把平板UA变成固定viewport模拟。
 
+正式Viewer默认协商video呈现，各可见Window的video共享同一接收track；客户端内容bounds决定目标布局，atlas仅决定源裁剪。Endpoint在编码结果真正发布前建立布局屏障，等Client隐藏旧画面并确认后，以当前布局关键帧恢复。每个video自身匹配真实RTP/epoch后才恢复输入。稳态不增加逐帧握手，不运行额外MSTP/canvas绘制；能力或协议失败保留canvas回退，详见[串流协议](streaming-protocol.md)。
+
 已验证的单plane/DPR1路径由Viz直接写三个拥有CSI的共享目标；不满足条件时使用既有捕获/桥接路径。Endpoint在兼容QSV/external/depth1时直接租用BGRA槽，其他模式使用自有cache。NV12转换和异步编码持有各自真实资源租约，不能用COM引用替代防覆盖协议。
 
 两个完成域必须独立正确：源capture lease保护Viz资源，共享输出槽由consumed保护。真实GPU写完才ready，真实读完才可复用。CPU发布、copy返回、BeginFrame ACK、device loss的UINT64_MAX都不是完成证明。固定三槽及有界队列提供背压；详细状态和退役规则见[GPU输出](gpu-output.zh-CN.md)。
@@ -60,7 +62,7 @@ Browser本地高精度pacer驱动external BeginFrame，每host最多一个未ACK
 
 坐标按Client CSS、letterbox、编码矩形、mediaScale/DPR转换到viewport DIP，再到widget/screen。IME的composition/commit/cancel/finish使用UTF-16；完整replacement range/span、逐字符候选几何仍有扩展空间。
 
-Stats区分源、采集、编码、解码及实际canvas提交。生产采集完成→paint估算使用QPC/UTC与Client时钟校准，排除静态重复和低置信度；Pixel marker带CRC作端到端实验，两者不混称。分段p95不可直接相加，见[测量设施](streaming-experiments.zh-CN.md)。
+Stats区分源、采集、编码、解码、video compositor提交观察及canvas JS提交；rVFC回调次数不代表显示FPS。生产采集完成→呈现估算使用QPC/UTC与Client时钟校准，排除静态重复和低置信度；Pixel marker带CRC作端到端实验，两者不混称，也都不证明物理屏幕点亮。分段p95不可直接相加，见[测量设施](streaming-experiments.zh-CN.md)。
 
 ## 页面能力与保留目标
 

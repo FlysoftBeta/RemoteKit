@@ -30,4 +30,4 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py --kind demo
 
 ## 本轮交付顺序
 
-先上传收尾后的第一版，再进行Astra代码审查和必要修复；有改动则重新构建上传。上传流程见[上传说明](upload/README.md)，凭据不写入日志、文档或发布包。最终报告附版本、检查结果、包hash与取件码。
+此前两阶段全库审查交付已于2026-11-02完成。后续新增功能按实际修改完成验证、root审阅与本地提交，再由新的发布代理构建、校验并上传，不自动重复全库审查或历史性能矩阵。仅本次默认video发布优先上传，GitHub推送尽力而为；长期commit/push约定不变。上传流程见[上传说明](upload/README.md)，凭据不写入日志、文档或发布包。最终报告附版本、检查结果、包hash、取件码与新Viewer截图。

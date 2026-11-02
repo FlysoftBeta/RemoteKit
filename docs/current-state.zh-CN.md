@@ -32,13 +32,23 @@ Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/�
 
 现代接收端按能力选择H264 5.2/5.1/4.2；Chrome89保留4.2兼容。高画质取消固定4K面积缩放，优先viewport×ClientScale完整尺寸。实际5.2 source/encoded/decoded均3856×2176（含atlas边距），内容canvas3840×2160、mediaScale1。受控5.1仍保持该尺寸，名义50FPS对应有效29FPS上限，3秒实际解码约27.55FPS；源、采集与编码预算一致。自动档保持帧率优先。
 
-多个合格平面自动使用共享WebGL纹理与画布，单平面/Chrome89或失败回退2D。同流四平面对照中，客户端CPU约1.217→0.418核、3D约25.94%→10.59%，绘制58.60→59.97FPS；该对照编码1980×1110，不能当完整4K性能。集成后已验证四窗2912×1632不下采样、真实可见ROI的Marker CRC、静态非等比缩放、上下文丢失和单次刷新恢复。Stats区分绘制/解码FPS、呈现后端、队列等待和分辨率限制。
+canvas回退保留多合格平面共享WebGL纹理与画布，单平面/Chrome89或失败使用2D。此前同流四平面对照中，客户端CPU约1.217→0.418核、3D约25.94%→10.59%，绘制58.60→59.97FPS；该对照编码1980×1110，不能当完整4K性能。原canvas集成已验证四窗2912×1632不下采样、真实可见ROI的Marker CRC、静态非等比缩放、上下文丢失和单次刷新恢复。默认video的新证据见下文。
 
 本批统一Browser/SDK增量构建、Endpoint九套CPU测试、Control全148项及生产构建/smoke通过。细节见[共享呈现联调](../develop/docs/shared-presentation-runtime.md)、[候选对照](../develop/docs/viewer-presentation-candidates.md)及[连接画质实现](../develop/docs/connection-quality-implementation.md)。
 
 标签页加载spinner已修复：原通用span规则把MUI图标当标题扩宽并裁切。标题样式现独立，桌面与390px窄屏实测图标均13×13px，旋转中心稳定、加载结束正常消失；见[视觉检查](../develop/docs/loading-spinner-runtime-qa.md)。
 
-video+clip-path已完成固定1936×816/50FPS、157接收端的四组对照。单video接收CPU约0.291核、3D计数0%，WebGL为0.343核/11.50%；双video未见解码负载翻倍。源/解码均约50FPS，video未显示呈现帧率优势。它值得保留为低3D成本候选，但动态布局换代和输入对应还需媒体生命周期设计，产品继续使用canvas。该组没有复现用户Chrome138的12FPS，新增stats帮助区分源预算与接收呈现瓶颈。见[对照记录](../develop/docs/video-clip-evaluation.md)。
+此前video+clip-path固定1936×816/50FPS、157接收端四组对照中，单video接收CPU约0.291核、3D计数0%，WebGL为0.343核/11.50%；双video未见解码负载翻倍。源/解码均约50FPS，没有呈现帧率优势，也未复现用户Chrome138的12FPS。该历史实验不代表正式默认video的运行结果，见[对照记录](../develop/docs/video-clip-evaluation.md)。
+
+## 默认video实现批次
+
+正式Viewer已接入默认video协商，每个可见平面共享接收track并独立验证RTP/epoch。客户端内容bounds决定目标布局，服务端atlas只用于源裁剪；video关闭controls、画中画、远程播放与额外媒体交互，声音保留独立管线。默认不启动MSTP/canvas绘制，能力或协议失败保留canvas回退。
+
+Endpoint在真正编码结果发送处设布局屏障，覆盖旧inflight结果；客户端隐藏video、撤销输入ready并跨两rAF确认后，当前布局首个成功关键帧才放行。静态重发保持实际纹理epoch/尺寸，不能给旧纹理套新布局。统计区分video compositor计数增量和canvas JS提交，rVFC回调数不当显示FPS。
+
+Native Debug/Release增量构建、12套CPU及Control179项、类型检查、生产构建/smoke已通过，包含后台切换期间canvas回退动作恢复及旧play Promise拒绝隔离。89/157正式video单窗/split、bounds与输入、resize、157 DPR2、重连、实际音频PCM及文件共存已通过；默认MSTP/viewport draw计数均为0。同尺寸1456×832 atlas的双窗权重交换使A/B源位置真正互换，客户端仍各自正确裁剪。
+
+真实检查发现并修复一次静态resize空layout的源码原因：Viz失败capture未结算Oracle pending，导致无damage的刷新一直被拒绝。0007现统一恰一次结算成功/失败交付；Browser与小测试目标已增量构建，3个直接调用真实交付/Oracle的CPU回归通过，patchset hash与隔离撤回/重放通过。修复后原split→focused→静态首metadata延迟→1100→390序列在2秒内恢复epoch28/gen10和video ready；本次运行未自然触发GPU取消，取消机制由CPU注入回归验证。此前3次诊断未复现不算修复证据。完整记录及截图见[默认video运行QA](../develop/docs/default-video-runtime-qa.md)。
 
 触控保留客户端采样时间与有界历史，服务端不再用包到达间隔估计手势；0008区分同步完成回调与真正派发拒绝，0009修复无屏幕时零PPI导致的惯性失效。服务构建固定逻辑PPI96与generic-desktop手势配置，客户端DPR和媒体帧率预算独立，native demo保留宿主适配。最终正常/途中70ms停顿/抬手100ms延迟三组滚动为502/501/502 DIP，均有约404–418ms惯性、零拒绝；嵌套滚动、OOPIF、touch-action/preventDefault、取消和DPR2坐标另有真实检查。新增Chromium unit用例未单独构建content_unittests，运行证据来自实际生产链路。见[可复用检查入口](touch-source-qa.md)与[触控运行记录](../develop/docs/touch-source-runtime-qa.md)。
 
@@ -71,7 +81,7 @@ Browser/SDK已增量构建，Endpoint11套CPU通过；最终Control171项、类�
 
 ## 发布与入口
 
-待完成的新要求：用户在c379f6c上传前选择默认video呈现，布局来自客户端bounds，关闭原生媒体入口。旧发布已停止，尚未生成或上传本批包；实现计划见[默认video计划](../develop/docs/default-video-plan.md)，新对话从[完整交接](../develop/docs/HANDOFF-2026-11-02-default-video.zh-CN.md)接续。仅本次允许GitHub推送尽力而为，优先完成包上传；长期提交推送约定不变。
+当前批次在音频/上传实现之上接入默认video，已完成上述构建与功能验收，按最终本地提交生成新的streaming包。此前c379f6c未发布，旧取件码不属于本批。实现契约见[默认video计划](../develop/docs/default-video-plan.md)，起始状态见[完整交接](../develop/docs/HANDOFF-2026-11-02-default-video.zh-CN.md)。仅本次允许GitHub推送尽力而为，优先完成包上传；长期提交推送约定不变。
 
 串流包包含Browser、Endpoint、Node及Control生产runtime，完整解压后运行run.cmd。打包执行smoke、逐文件manifest与ZIP校验，不携带开发Profile、数据、凭据或PDB；smoke覆盖服务启动与管理，媒体功能依据对应真实运行报告。版本、取件码与最终hash记录在本机develop/tmp的release delivery文件，并随交付回复提供。先前Astra全链审查和有界修复已完成，后续新增功能按实际范围验证发布。
 

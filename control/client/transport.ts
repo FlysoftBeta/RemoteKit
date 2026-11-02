@@ -1,3 +1,4 @@
+import { barrierMatchesLayout, configurePresentationVideo, presentationBarrier, videoPlaneGeometry, VideoCompositorStats, type PresentationBarrier } from './video-presentation';
 import { CaptureLatency } from './capture-latency';
 import { ViewerAudioOutput, stereoOpusOffer } from './audio-output';
 import { mergeTouchMoves } from './touch-input';
@@ -15,6 +16,7 @@ import { SharedPlaneRenderer, type SharedFrame, type SharedPlaneResult } from '.
 export type ControlRpc = (method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback', params: unknown) => Promise<unknown>;
 
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
+interface VideoPlane { video: HTMLVideoElement; clip: HTMLDivElement; observer: ResizeObserver; callback?: number; ready: boolean; rtp?: number; stats: VideoCompositorStats; metadataRetries: number }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource; shared?: boolean }
 export type FrameSource = 'video' | 'track-processor';
 interface ProcessorFrameOwner { frame: VideoFrame; rtp: number; source: ProcessorSource; readAt: number; sourceTimestamp: number }
@@ -76,7 +78,20 @@ export class RemoteTransport {
   private processorFallback = false;
   private displayHzEstimate?: number;
   private processorTrack?: MediaStreamTrack;
-  setControlRpc(callback: ControlRpc) { this.controlRpc = callback; this.diagnosticHttp = false; this.processorFallback = true; this.processorScheduler = 'fifo2'; this.frameSource = typeof (globalThis as any).MediaStreamTrackProcessor === 'function' && !/Chrome\/89\./.test(navigator.userAgent) ? 'track-processor' : 'video'; }
+  private preferVideoPresentation = false;
+  private presentationBackend: 'pending' | 'video' | 'canvas' = 'canvas';
+  private presentationFallbackReason?: string;
+  private presentationNegotiationTimer?: ReturnType<typeof setTimeout>;
+  private presentationBarrier?: PresentationBarrier;
+  private presentationBarrierAcknowledged = false;
+  private presentationAckRaf?: number;
+  private presentationAckSerial = 0;
+  private pendingPresentationAction?: { channel: RTCDataChannel; action: () => void };
+  private videoPlanes = new Map<PlaneRenderer, VideoPlane>();
+  private presentationVisibility?: () => void;
+  private videoMetadataRefreshTimer?: ReturnType<typeof setTimeout>;
+
+  setControlRpc(callback: ControlRpc) { this.controlRpc = callback; this.diagnosticHttp = false; this.processorFallback = true; this.processorScheduler = 'fifo2'; this.frameSource = 'video'; this.preferVideoPresentation = true; }
   enableDiagnosticHttp() { this.processorFallback = false; this.diagnosticHttp = true; this.controlRpc = undefined; }
   private rtcRequest<T>(method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback', params: unknown): Promise<T> {
     if (this.controlRpc) return this.controlRpc(method, params) as Promise<T>;
@@ -161,7 +176,7 @@ export class RemoteTransport {
     const percentile=(values:number[])=>{const sorted=[...values].sort((a,b)=>a-b);return {samples:sorted.length,p50:sorted.length?sorted[Math.ceil(sorted.length*.5)-1]:null,p95:sorted.length?sorted[Math.ceil(sorted.length*.95)-1]:null};};
     const eligible=[...this.renderers].filter(r=>this.rendererCurrent(r)&&!r.view.stale);
     const backendReason=this.sharedRenderer?.backend==='shared-webgl'?'multiple-planes':eligible.length<2?'single-or-no-eligible-plane':/(?:Chrome|Chromium)\/89\./.test(navigator.userAgent)?'chrome89-compatible-2d':typeof WebGL2RenderingContext!=='function'?'webgl2-unavailable':new Set(eligible.map(r=>r.view.id)).size!==eligible.length?'duplicate-plane':this.sharedRenderer?.counts.fallbackReason??'waiting-for-shared-frame';
-    return {backend:this.sharedRenderer?.backend??'canvas-2d',backendReason,frameSource:this.activeFrameSource,frameSourceFallbackReason:this.signaling?.processorFallbackReason as string|undefined,visibility:globalThis.document?.visibilityState,shared:{...this.sharedRenderer?.counts},plane2dDraws:this.plane2dDraws,atlasSnapshotCopies:this.routing.snapshotFrames,mediaRefreshRequests:this.mediaRefreshRequests,scheduling:{metadataMissingAtRead:this.presentationFlow.metadataMissingAtRead,metadataBlockedSchedules:this.presentationFlow.metadataBlockedSchedules,drops:{...this.presentationFlow.drops},readToAuthorizeMs:percentile(this.presentationFlow.readToAuthorize),rafWaitMs:percentile(this.presentationFlow.rafWait)}};
+    return {backend:this.presentationBackend === 'video' ? 'video' : this.presentationBackend === 'pending' ? 'video-negotiating' : this.sharedRenderer?.backend??'canvas-2d',backendReason:this.presentationFallbackReason ?? (this.presentationBackend === 'video' ? 'negotiated-video' : backendReason),videoCompositorByView:Object.fromEntries([...this.videoPlanes].map(([renderer, plane])=>[renderer.view.id,plane.stats.snapshot(performance.now())])),frameSource:this.activeFrameSource,frameSourceFallbackReason:this.signaling?.processorFallbackReason as string|undefined,visibility:globalThis.document?.visibilityState,shared:{...this.sharedRenderer?.counts},plane2dDraws:this.plane2dDraws,atlasSnapshotCopies:this.routing.snapshotFrames,mediaRefreshRequests:this.mediaRefreshRequests,scheduling:{metadataMissingAtRead:this.presentationFlow.metadataMissingAtRead,metadataBlockedSchedules:this.presentationFlow.metadataBlockedSchedules,drops:{...this.presentationFlow.drops},readToAuthorizeMs:percentile(this.presentationFlow.readToAuthorize),rafWaitMs:percentile(this.presentationFlow.rafWait)}};
   }
   private routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {} as Record<string, number>, skippedRenderer: {} as Record<string, number> };
   private frameGate = new FrameEpochGate();
@@ -172,11 +187,11 @@ export class RemoteTransport {
   private presentation = new PresentationDiagnostics();
   readonly encodedFrameSamples: { at: number; rtpTimestamp: number; layoutEpoch: string; encodedBytes?: number; keyframe?: boolean }[] = [];
   get presentationDiagnostics() { return this.getPresentationDiagnostics(); }
-  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { rendering:this.getRenderingDiagnostics(), touchInput:{...this.touchInputStats}, paintVersion: 'plane-source-v3', frameSource: this.activeFrameSource, processor: this.getProcessorDiagnostics(), presentationRouting: { mode: this.presentationMode, ...this.routing, fallback: { ...this.routing.fallback }, skippedRenderer: { ...this.routing.skippedRenderer } }, selectedViewId: this.selectedViewId, callbackRegistration: this.activeFrameSource === 'video' ? 'after-work' : 'not-applicable', encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples, processorProfile: this.processorProfileSnapshot() } : {}) }; }
-  resetPresentationDiagnostics() { this.sharedRenderer?.resetDiagnostics();this.presentationFlow={metadataMissingAtRead:0,metadataBlockedSchedules:0,drops:{},readToAuthorize:[],rafWait:[]};this.plane2dDraws=0;this.mediaRefreshRequests=0;this.processorEvents = []; this.processorEventCursor = 0; this.processorEventCount = 0; this.processorCounts = { total: undefined, discarded: undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: this.processorCounts.width, height: this.processorCounts.height }; this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
+  getPresentationDiagnostics(raw = false) { const sizes = this.encodedFrameSamples.flatMap(frame => frame.encodedBytes === undefined ? [] : [frame.encodedBytes]).sort((a, b) => a - b); return { rendering:this.getRenderingDiagnostics(), touchInput:{...this.touchInputStats}, paintVersion: 'plane-source-v3', frameSource: this.activeFrameSource, processor: this.getProcessorDiagnostics(), presentationRouting: { mode: this.presentationMode, ...this.routing, fallback: { ...this.routing.fallback }, skippedRenderer: { ...this.routing.skippedRenderer } }, selectedViewId: this.selectedViewId, callbackRegistration: this.activeFrameSource === 'video' ? 'after-work' : 'not-applicable', presentationEndpoint: this.presentationBackend === 'video' ? 'video-compositor-observation' : 'canvas-js-submit', encodedFrameBytes: { measured: sizes.length, p95: sizes.length ? sizes[Math.ceil(sizes.length * .95) - 1] : null, max: sizes.length ? sizes[sizes.length - 1] : null, keyframeMeasured: this.encodedFrameSamples.filter(frame => frame.keyframe !== undefined).length, keyframes: this.encodedFrameSamples.some(frame => frame.keyframe !== undefined) ? this.encodedFrameSamples.filter(frame => frame.keyframe === true).length : null }, ...this.presentation.snapshot(raw), ...(raw ? { encodedFrameSamples: this.encodedFrameSamples, processorProfile: this.processorProfileSnapshot() } : {}) }; }
+  resetPresentationDiagnostics() { for (const plane of this.videoPlanes.values()) plane.stats = new VideoCompositorStats(); this.sharedRenderer?.resetDiagnostics();this.presentationFlow={metadataMissingAtRead:0,metadataBlockedSchedules:0,drops:{},readToAuthorize:[],rafWait:[]};this.plane2dDraws=0;this.mediaRefreshRequests=0;this.processorEvents = []; this.processorEventCursor = 0; this.processorEventCount = 0; this.processorCounts = { total: undefined, discarded: undefined, read: 0, invalid: 0, closed: 0, stale: 0, authorized: 0, rafCallbacks: 0, rafAdmitted: 0, replaced: 0, ownerClosed: 0, canvas: 0, width: this.processorCounts.width, height: this.processorCounts.height }; this.presentation = new PresentationDiagnostics(); this.encodedFrameSamples.length = 0; this.routing = { directFrames: 0, snapshotFrames: 0, retainedPlaneRedraws: 0, fallback: {}, skippedRenderer: {} }; }
   recordClientRaf(at: number) { this.presentation.clientRaf(at); }
   recordPresentationCost(name: string, at: number, durationMs: number, view: string | null = null) { this.presentation.cost(name, at, durationMs, view); }
-  get displayReady() { return this.frameGate.ready && this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout?.epoch; }
+  get displayReady() { if (this.presentationBackend === 'video') return [...this.videoPlanes].some(([renderer, plane]) => plane.ready && this.rendererCurrent(renderer)); if (this.presentationBackend === 'pending') return false; return this.frameGate.ready && this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout?.epoch; }
   get presentedFrame() { return this.displayReady ? { rtpTimestamp: this.displayedRtp, layoutEpoch: this.displayedEpoch } : null; }
   layout: Layout | null = null;
   diagnostics: Diagnostics = { connection: '未连接', channel: '未连接' };
@@ -216,16 +231,213 @@ export class RemoteTransport {
   private manualRestart = false;
   private createReceiverVideo() {
     const video = document.createElement('video');
-    video.autoplay = true; video.muted = true; video.playsInline = true;
+    configurePresentationVideo(video);
     return video;
+  }
+  private cancelPresentationAck(preserveAction = false) {
+    if (!preserveAction) this.pendingPresentationAction = undefined;
+    this.presentationAckSerial++;
+    if (this.presentationAckRaf !== undefined) cancelAnimationFrame(this.presentationAckRaf);
+    this.presentationAckRaf = undefined;
+  }
+  private afterPresentationHidden(channel: RTCDataChannel, action: () => void) {
+    this.cancelPresentationAck();
+    this.pendingPresentationAction = { channel, action };
+    const serial = this.presentationAckSerial, attempt = this.attempt;
+    const current = () => this.channel === channel && channel.readyState === 'open' && attempt === this.attempt && serial === this.presentationAckSerial;
+    this.presentationAckRaf = requestAnimationFrame(() => {
+      if (!current()) return;
+      this.presentationAckRaf = requestAnimationFrame(() => {
+        this.presentationAckRaf = undefined;
+        if (!current()) return;
+        // A hidden document may stop rAF indefinitely. Never release the gate
+        // using a timer; resume still needs two foreground compositor turns.
+        if (document.visibilityState !== 'visible') { this.afterPresentationHidden(channel, action); return; }
+        this.pendingPresentationAction = undefined;
+        action();
+      });
+    });
+  }
+  private preparePresentation(key: PresentationBarrier, channel: RTCDataChannel) {
+    this.hideVideoPlanes(); for (const plane of this.videoPlanes.values()) plane.metadataRetries = 0; this.presentationBarrier = key; this.presentationBarrierAcknowledged = false;
+    this.afterPresentationHidden(channel, () => {
+      if (this.presentationBackend === 'canvas' || this.presentationBarrier !== key || !barrierMatchesLayout(key, this.layout)) return;
+      this.presentationBarrierAcknowledged = true;
+      channel.send(JSON.stringify({ type: 'presentation.ready', ...key }));
+    });
+  }
+  private negotiatePresentation(channel: RTCDataChannel) {
+    if (!this.preferVideoPresentation) return;
+    if (!this.presentationVisibility) {
+      this.presentationVisibility = () => {
+        this.hideVideoPlanes();
+        if (document.visibilityState !== 'visible') this.cancelPresentationAck(true);
+        else {
+          const pending = this.pendingPresentationAction;
+          if (pending) this.afterPresentationHidden(pending.channel, pending.action);
+          else if (this.presentationBarrier && !this.presentationBarrierAcknowledged) this.preparePresentation(this.presentationBarrier, channel);
+          this.requestPresentationRefresh();
+        }
+      };
+      document.addEventListener('visibilitychange', this.presentationVisibility);
+    }
+    if (typeof this.video.requestVideoFrameCallback !== 'function' || typeof ResizeObserver !== 'function') {
+      this.fallbackPresentation('video-capability-unavailable'); return;
+    }
+    channel.send(JSON.stringify({ type: 'media.presentation', version: 1, backend: 'video' }));
+    this.presentationNegotiationTimer = setTimeout(() => {
+      if (this.channel === channel && this.presentationBackend === 'pending') this.fallbackPresentation('presentation-protocol-unavailable');
+    }, 1500);
+  }
+  private fallbackPresentation(reason: string) {
+    this.hideVideoPlanes(); clearTimeout(this.presentationNegotiationTimer);
+    this.presentationFallbackReason = reason; this.presentationBarrier = undefined; this.presentationBarrierAcknowledged = false;
+    this.presentationBackend = 'canvas';
+    this.frameGate.observe(undefined); this.displayedRtp = undefined; this.displayedEpoch = undefined;
+    this.viewPresentations.clear(); this.paintedPlanes.clear();
+    for (const renderer of this.videoPlanes.keys()) this.detachVideoPlane(renderer);
+    const channel = this.channel;
+    if (!channel || channel.readyState !== 'open') return;
+    this.afterPresentationHidden(channel, () => {
+      channel.send(JSON.stringify({ type: 'media.presentation', version: 1, backend: 'canvas' }));
+      const peer = this.peer, track = this.processorTrack;
+      if (peer && track) {
+        this.activeFrameSource = typeof (globalThis as any).MediaStreamTrackProcessor === 'function' && !/Chrome\/89\./.test(navigator.userAgent) ? 'track-processor' : 'video';
+        if (this.activeFrameSource === 'track-processor') this.startProcessorPump(peer, track);
+        else {
+          const video = this.video, attempt = this.attempt;
+          video.srcObject = new MediaStream([track]); this.startFramePump(peer);
+          void video.play().catch(() => {
+            if (this.peer === peer && this.attempt === attempt && this.video === video) this.connectionFailed('Video playback failed');
+          });
+        }
+      }
+      this.notify();
+    });
+  }
+  private videoPlaneFor(viewId: string) {
+    for (const [renderer, plane] of this.videoPlanes) if (renderer.view.id === viewId && this.rendererCurrent(renderer)) return { renderer, plane };
+    return undefined;
+  }
+  private hideVideoPlane(renderer: PlaneRenderer) {
+    const plane = this.videoPlanes.get(renderer);
+    if (!plane) return;
+    plane.clip.style.opacity = '0'; plane.ready = false; plane.rtp = undefined; plane.stats.resetObservation();
+    this.viewPresentations.delete(renderer.view.id); renderer.ready(false);
+  }
+  private hideVideoPlanes() {
+    for (const renderer of this.videoPlanes.keys()) this.hideVideoPlane(renderer);
+    this.queuedInput = []; this.pendingFocus = null;
+  }
+  private detachVideoPlane(renderer: PlaneRenderer) {
+    const plane = this.videoPlanes.get(renderer);
+    if (!plane) return;
+    this.hideVideoPlane(renderer); this.videoPlanes.delete(renderer);
+    plane.observer.disconnect();
+    if (plane.callback !== undefined) plane.video.cancelVideoFrameCallback?.(plane.callback);
+    plane.video.pause(); plane.video.srcObject = null; plane.clip.remove();
+    renderer.canvas.style.opacity = ''; renderer.canvas.removeAttribute('data-video-input');
+  }
+  private attachVideoPlane(renderer: PlaneRenderer) {
+    if (this.videoPlanes.has(renderer) || !this.processorTrack || !this.peer || !this.rendererCurrent(renderer) || !this.layout) return;
+    const canvas = renderer.canvas, parent = canvas.parentElement;
+    if (!parent) return;
+    const video = this.createReceiverVideo(), clip = document.createElement('div');
+    clip.className = 'remote-video-plane'; clip.setAttribute('aria-hidden', 'true');
+    Object.assign(clip.style, { position: 'absolute', overflow: 'hidden', pointerEvents: 'none', opacity: '0' });
+    Object.assign(video.style, { position: 'absolute', maxWidth: 'none', maxHeight: 'none', objectFit: 'fill', pointerEvents: 'none' });
+    clip.append(video); parent.insertBefore(clip, canvas);
+    canvas.width = renderer.view.width; canvas.height = renderer.view.height;
+    canvas.style.opacity = '0'; canvas.setAttribute('data-video-input', 'true');
+    const observer = new ResizeObserver(() => {
+      if (!this.videoPlanes.has(renderer)) return;
+      this.hideVideoPlane(renderer); this.positionVideoPlane(renderer); this.requestPresentationRefresh();
+    });
+    const plane: VideoPlane = { video, clip, observer, ready: false, stats: new VideoCompositorStats(), metadataRetries: 0 };
+    this.videoPlanes.set(renderer, plane); observer.observe(canvas); observer.observe(parent); this.positionVideoPlane(renderer);
+    const peer = this.peer, attempt = this.attempt;
+    const receive = (_now: number, metadata: VideoFrameCallbackMetadata) => {
+      if (this.peer !== peer || this.attempt !== attempt || this.videoPlanes.get(renderer) !== plane || this.presentationBackend !== 'video') return;
+      try { this.observeVideoPlane(renderer, plane, metadata); }
+      finally { if (this.peer === peer && this.videoPlanes.get(renderer) === plane && this.presentationBackend === 'video') plane.callback = video.requestVideoFrameCallback(receive); }
+    };
+    plane.callback = video.requestVideoFrameCallback(receive);
+    video.srcObject = new MediaStream([this.processorTrack]);
+    void video.play().catch(() => { if (this.videoPlanes.get(renderer) === plane) this.fallbackPresentation('video-playback-failed'); });
+    // Static sources need one fresh frame for a newly mounted video element.
+    this.requestPresentationRefresh();
+  }
+  private positionVideoPlane(renderer: PlaneRenderer) {
+    const plane = this.videoPlanes.get(renderer), layout = this.layout, parent = renderer.canvas.parentElement;
+    if (!plane || !layout || !parent || !this.rendererCurrent(renderer)) return false;
+    const bounds = renderer.canvas.getBoundingClientRect(), container = parent.getBoundingClientRect();
+    const geometry = videoPlaneGeometry(renderer.view, layout, bounds);
+    if (!geometry) return false;
+    Object.assign(plane.clip.style, { left: `${bounds.left - container.left}px`, top: `${bounds.top - container.top}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
+    for (const [name, value] of Object.entries(geometry)) plane.video.style.setProperty(name, `${value}px`);
+    return true;
+  }
+  private scheduleVideoMetadataRefresh() {
+    if (this.presentationBackend !== 'video' || this.videoMetadataRefreshTimer || ![...this.videoPlanes.values()].some(plane => !plane.ready && plane.metadataRetries < 3)) return;
+    const attempt = this.attempt;
+    this.videoMetadataRefreshTimer = setTimeout(() => {
+      this.videoMetadataRefreshTimer = undefined;
+      if (attempt !== this.attempt || this.presentationBackend !== 'video') return;
+      const waiting = [...this.videoPlanes.values()].filter(plane => !plane.ready && plane.metadataRetries < 3);
+      if (!waiting.length) return;
+      for (const plane of waiting) plane.metadataRetries++;
+      this.requestPresentationRefresh();
+      this.scheduleVideoMetadataRefresh();
+    }, Math.max(100, 1010 - (performance.now() - this.mediaRefreshAt)));
+  }
+  private observeVideoPlane(renderer: PlaneRenderer, plane: VideoPlane, metadata: VideoFrameCallbackMetadata) {
+    const at = performance.now(), rtp = (metadata as VideoFrameCallbackMetadata & { rtpTimestamp?: number }).rtpTimestamp;
+    const validRtp = Number.isInteger(rtp) && rtp! >= 0 && rtp! <= 0xffffffff;
+    const epoch = validRtp ? this.frameGate.epochFor(rtp) : undefined;
+    this.markConnection('firstDecodedFrame');
+    this.presentation.video(at, validRtp ? rtp : undefined, this.layout?.epoch, epoch, metadata);
+    const sameBarrier = this.presentationBarrierAcknowledged && this.presentationBarrier && barrierMatchesLayout(this.presentationBarrier, this.layout) &&
+      document.visibilityState === 'visible' && this.rendererCurrent(renderer) && !renderer.view.stale &&
+      plane.video.videoWidth === this.layout?.width && plane.video.videoHeight === this.layout.height;
+    if (!sameBarrier || !validRtp || !this.positionVideoPlane(renderer)) {
+      this.hideVideoPlane(renderer);
+      if (!validRtp) this.fallbackPresentation('video-rtp-metadata-unavailable');
+      return;
+    }
+    if (epoch !== this.layout?.epoch) {
+      // The Endpoint gate prevents a different layout entering this stable
+      // barrier. Retain an already authorized view when only signaling is late,
+      // but don't attach a stale RTP identity to the autonomous video's pixels.
+      if (epoch !== undefined) this.hideVideoPlane(renderer);
+      else { plane.stats.observe(at, metadata.presentedFrames, plane.ready); plane.rtp = undefined; }
+      this.scheduleVideoMetadataRefresh();
+      return;
+    }
+    // Authorization comes from THIS element's real callback, never another
+    // (possibly hidden) video. Late metadata is only considered on a new rVFC.
+    plane.stats.observe(at, metadata.presentedFrames, plane.ready);
+    plane.metadataRetries = 0; plane.rtp = rtp; plane.ready = true; plane.clip.style.opacity = '1';
+    this.frameGate.observe(rtp); this.displayedRtp = rtp; this.displayedEpoch = epoch;
+    this.authorizedAt = at; this.presentation.authorize(at, rtp!, epoch!); this.reconnect.connected();
+    this.markConnection('firstVideoCompositor');
+    const old = this.viewPresentations.get(renderer.view.id);
+    if (old?.rtpTimestamp !== rtp || old?.layoutEpoch !== epoch) {
+      const frame: CanvasPresentation = { viewId: renderer.view.id, rtpTimestamp: rtp!, layoutEpoch: epoch!, paintedAt: at, paintedWallTime: Date.now(), authorizedAt: at };
+      this.viewPresentations.set(renderer.view.id, frame);
+      this.latency.paint(rtp!, epoch!, at, frame.paintedWallTime);
+      this.presentedListeners.forEach(listener => listener(frame));
+    }
+    renderer.ready(true); this.flushFocusedInput();
+    this.frameListeners.forEach(listener => listener());
   }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   subscribeFrames = (listener: () => void) => { this.frameListeners.add(listener); return () => { this.frameListeners.delete(listener); }; };
   registerPlane(identity: PlaneIdentity, canvas: HTMLCanvasElement, ready: (ready: boolean) => void) {
     const renderer: PlaneRenderer = { ...identity, view: { ...identity.view }, canvas, ready };
     this.renderers.add(renderer);
+    if (this.presentationBackend === 'video') this.attachVideoPlane(renderer);
     const cached = this.paintedPlanes.get(identity.view.id);
-    if (this.rendererCurrent(renderer) && this.displayReady) {
+    if (this.presentationBackend === 'canvas' && this.rendererCurrent(renderer) && this.displayReady) {
       if (this.sharedRenderer?.backend==='shared-webgl')this.redrawCurrentPresentation();
       else if (this.activeFrameSource === 'track-processor' && this.latestProcessorFrame) this.paintPlane(renderer,this.latestProcessorFrame.frame,identity.view,'plane-frame');
       else if (this.displayFrame) this.paintPlane(renderer,this.displayFrame,identity.view,'atlas');
@@ -235,12 +447,19 @@ export class RemoteTransport {
         if (this.paintPlane(renderer, cached.canvas, { x: 0, y: 0, width: identity.view.width, height: identity.view.height }, 'plane') && copiesBitmap) this.routing.retainedPlaneRedraws++;
       }
     }
-    return () => { this.renderers.delete(renderer);if(this.sharedRenderer?.backend==='shared-webgl'){this.sharedRenderer.clear();if(!this.redrawCurrentPresentation())this.requestPresentationRefresh();} };
+    return () => { this.detachVideoPlane(renderer); this.renderers.delete(renderer);if(this.sharedRenderer?.backend==='shared-webgl'){this.sharedRenderer.clear();if(!this.redrawCurrentPresentation())this.requestPresentationRefresh();} };
   }
   subscribePresentedFrames = (listener: (frame: CanvasPresentation) => void) => { this.presentedListeners.add(listener); return () => { this.presentedListeners.delete(listener); }; };
-  getLastPresentation(viewId: string) { const frame = this.viewPresentations.get(viewId), plane = this.paintedPlanes.get(viewId); return frame?.layoutEpoch === this.layout?.epoch && plane && planeMatchesLayout(plane.identity, this.layout) ? frame : undefined; }
+  getLastPresentation(viewId: string) { if (this.presentationBackend === 'video') return this.videoPlaneFor(viewId)?.plane.ready && this.videoPlaneFor(viewId)?.plane.rtp === this.viewPresentations.get(viewId)?.rtpTimestamp ? this.viewPresentations.get(viewId) : undefined; const frame = this.viewPresentations.get(viewId), plane = this.paintedPlanes.get(viewId); return frame?.layoutEpoch === this.layout?.epoch && plane && planeMatchesLayout(plane.identity, this.layout) ? frame : undefined; }
   getPaintedFrame(viewId: string, rtpTimestamp: number) { const frame = this.getLastPresentation(viewId); return frame?.rtpTimestamp === rtpTimestamp && this.displayedRtp === rtpTimestamp && this.displayReady ? this.displayFrame : undefined; }
   getPresentedPlane(viewId: string, rtpTimestamp: number): PresentedPlaneSource | undefined {
+    if (this.presentationBackend === 'video') {
+      const current = this.videoPlaneFor(viewId), layout = this.layout;
+      if (!current || !current.plane.ready || current.plane.rtp !== rtpTimestamp || !layout) return undefined;
+      const view = current.renderer.view;
+      return { image: current.plane.video, sourceRect: { x: view.x, y: view.y, width: view.width, height: view.height }, kind: 'atlas', viewId,
+        rtpTimestamp, layoutEpoch: layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1) };
+    }
     const plane = this.paintedPlanes.get(viewId), frame = this.getLastPresentation(viewId);
     return this.displayReady && this.displayedRtp === rtpTimestamp && frame?.rtpTimestamp === rtpTimestamp && plane && (!plane.shared||this.sharedRenderer?.isVisible(plane.source.image as HTMLCanvasElement)) && [...this.renderers].some(renderer => renderer.canvas === plane.canvas && renderer.view.id === viewId && this.rendererCurrent(renderer)) ? plane.source : undefined;
   }
@@ -255,7 +474,7 @@ export class RemoteTransport {
     this.flushFocusedInput();
     if (isNewFrame) { if (this.dispatchingPaint) this.pendingPresentations.push(frame); else this.presentedListeners.forEach(listener => listener(frame)); }
   }
-  private canInput(viewId: string) { return this.displayReady && this.displayedRtp !== undefined && !!this.getPresentedPlane(viewId, this.displayedRtp); }
+  private canInput(viewId: string) { if (this.presentationBackend === 'pending') return false; if (this.presentationBackend === 'video') return !!this.videoPlaneFor(viewId)?.plane.ready; return this.displayReady && this.displayedRtp !== undefined && !!this.getPresentedPlane(viewId, this.displayedRtp); }
   private notify() { this.listeners.forEach(listener => listener()); }
   private update(change: Partial<Diagnostics>) { this.diagnostics = { ...this.diagnostics, ...change }; this.notify(); }
   setMarkerStats(report: { inputToObservedMs: { p50: number | null; p95: number | null }; renderToObservedMs: { p50: number | null; p95: number | null }; samples: unknown[]; markerSampleHz?: number | null }) {
@@ -301,7 +520,8 @@ export class RemoteTransport {
     let negotiating = false;
     this.update({ connection: '正在连接', error: undefined });
     try {
-      this.activeFrameSource = this.frameSource;
+      this.presentationBackend = this.preferVideoPresentation ? 'pending' : 'canvas';
+      this.activeFrameSource = this.preferVideoPresentation ? 'video' : this.frameSource;
       if (this.activeFrameSource === 'track-processor' && this.presentationMode !== 'snapshot') throw new Error('track-processor 接收路径只支持 snapshot 呈现。');
       const peer = new RTCPeerConnection({ bundlePolicy: 'max-bundle', rtcpMuxPolicy: 'require' });
       peer.onicecandidate = event => {
@@ -333,7 +553,10 @@ export class RemoteTransport {
         if (event.track.kind === 'audio') { this.audio.attach(event.track); return; }
         this.markConnection('track');
         if (this.activeFrameSource === 'track-processor') { this.processorTrack = event.track; this.startProcessorPump(peer, event.track); return; }
-        video.srcObject = event.streams[0] ?? new MediaStream([event.track]);
+        this.processorTrack = event.track;
+        if (this.presentationBackend === 'video') { for (const renderer of this.renderers) this.attachVideoPlane(renderer); return; }
+        if (this.presentationBackend === 'pending') return;
+        video.srcObject = new MediaStream([event.track]);
         this.startFramePump(peer);
         void video.play().catch(() => { if (this.peer === peer && this.video === video) this.update({ error: '视频播放被浏览器阻止，请重新连接。' }); });
       };
@@ -583,6 +806,7 @@ export class RemoteTransport {
     this.frameCallback = video.requestVideoFrameCallback(receive);
   }
   private authorizeFrame() {
+    if (this.presentationBackend !== 'canvas') return;
     if (this.activeFrameSource === 'track-processor') { this.scheduleProcessorPresentation(); return; }
     if (!this.frameGate.ready || !this.layout || this.pendingSnapshotRtp !== this.frameGate.rtpTimestamp || this.pendingFrame.width !== this.layout.width || this.pendingFrame.height !== this.layout.height) return;
     if (this.displayedRtp === this.frameGate.rtpTimestamp && this.displayedEpoch === this.layout.epoch) return;
@@ -661,20 +885,36 @@ export class RemoteTransport {
     this.channel = channel;
     channel.bufferedAmountLowThreshold = 64 * 1024;
     channel.onbufferedamountlow = () => { if (this.channel === channel) this.drainInput(); };
-    channel.onopen = () => { if (this.channel === channel) { this.markConnection('dataChannelOpen'); this.update({ channel: '已连接' }); } };
+    channel.onopen = () => { if (this.channel === channel) { this.markConnection('dataChannelOpen'); this.negotiatePresentation(channel); this.update({ channel: '已连接' }); } };
     channel.onclose = () => { if (this.channel === channel) this.connectionFailed('输入通道已关闭'); };
     channel.onerror = () => { if (this.channel === channel) this.connectionFailed('输入通道出现错误'); };
     channel.onmessage = event => {
       if (this.channel !== channel) return;
       try {
         const message = JSON.parse(String(event.data));
+        if (message.type === 'presentation.mode') {
+          if (message.version !== 1 || !['video', 'canvas'].includes(message.backend)) this.fallbackPresentation('invalid-presentation-mode');
+          else if (this.presentationBackend === 'pending' && message.backend === 'video') {
+            clearTimeout(this.presentationNegotiationTimer); this.presentationBackend = 'video';
+            for (const renderer of this.renderers) this.attachVideoPlane(renderer);
+            this.notify();
+          } else if (message.backend === 'canvas' && this.presentationBackend !== 'canvas') this.fallbackPresentation('endpoint-canvas-mode');
+        }
+        if (message.type === 'presentation.prepare' && this.presentationBackend !== 'canvas') {
+          const key = presentationBarrier(message);
+          if (!key || !barrierMatchesLayout(key, this.layout)) this.fallbackPresentation('invalid-presentation-barrier');
+          else this.preparePresentation(key, channel);
+        }
         if (message.type === 'layout' && Array.isArray(message.views)) {
-          if(!this.layout||this.layout.epoch!==message.epoch||this.layout.generation!==message.generation)this.sharedRenderer?.clear();
+          if(!this.layout||this.layout.epoch!==message.epoch||this.layout.generation!==message.generation) {
+            this.sharedRenderer?.clear(); this.hideVideoPlanes();
+            this.presentationBarrierAcknowledged = false;
+          }
           this.markConnection('firstLayout');
           if (this.activeFrameSource === 'track-processor' && this.layout && (this.layout.epoch !== message.epoch || this.layout.generation !== message.generation || this.layout.width !== message.width || this.layout.height !== message.height || this.layout.views.length !== message.views.length || this.layout.views.some(view => !message.views.some((next: Surface) => samePlane(view, next))))) { this.closePendingProcessorFrame('layout-change'); this.closeLatestProcessorFrame(); this.frameGate.observe(undefined); }
           this.layout = message;
           for (const [id, plane] of this.paintedPlanes) if (!planeMatchesLayout(plane.identity, this.layout)) { this.paintedPlanes.delete(id); this.viewPresentations.delete(id); }
-          for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) renderer.ready(false);
+          for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) { this.hideVideoPlane(renderer); renderer.ready(false); }
           if (![...this.paintedPlanes.values()].some(plane => planeMatchesLayout(plane.identity, this.layout))) this.directEpochReady = undefined;
           this.frameGate.setEpoch(message.epoch);
           this.authorizeFrame();
@@ -684,7 +924,7 @@ export class RemoteTransport {
           this.flushFocusedInput();
           this.notify();
         }
-        if (message.type === 'frame') { this.latency.record(message.rtpTimestamp, message.layoutEpoch, message); const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); if (this.activeFrameSource === 'track-processor') this.profileProcessor('metadata', { rtp: message.rtpTimestamp, epoch: message.layoutEpoch }); this.authorizeFrame(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
+        if (message.type === 'frame') { this.latency.record(message.rtpTimestamp, message.layoutEpoch, message); const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); if (message.layoutEpoch === this.layout?.epoch) this.scheduleVideoMetadataRefresh(); if (this.activeFrameSource === 'track-processor') this.profileProcessor('metadata', { rtp: message.rtpTimestamp, epoch: message.layoutEpoch }); this.authorizeFrame(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
         if (message.type === 'stats') this.update({ endpoint: message });
         if (message.type === 'input.result' || message.type === 'focus') {
           this.inputResults.push({ at: performance.now(), ...message }); if (this.inputResults.length > 128) this.inputResults.shift();
@@ -774,12 +1014,12 @@ export class RemoteTransport {
         }
         if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) { update.roundTripTime = report.currentRoundTripTime; update.selectedCandidates = { pair: report, local: stats.get(report.localCandidateId), remote: stats.get(report.remoteCandidateId) }; }
       });
-      const paints = this.presentation.paintStatistics(); update.paintFpsByView = Object.fromEntries(Object.entries(paints).map(([id, value]) => [id, value.fps]));
+      const paints = this.presentationBackend === 'video' ? Object.fromEntries([...this.videoPlanes].map(([renderer, plane])=>[renderer.view.id,plane.stats.snapshot(performance.now())])) : this.presentation.paintStatistics(); update.paintFpsByView = Object.fromEntries(Object.entries(paints).map(([id, value]) => [id, value.fps]));
       update.rendering=this.getRenderingDiagnostics();
       update.displayFramesPerSecond = this.selectedViewId ? paints[this.selectedViewId]?.fps : undefined;
       this.update(update);
       if (this.layout && this.channel?.readyState === 'open') {
-        const counts = this.presentation.paintFrameCounts();
+        const counts = this.presentationBackend === 'video' ? new Map([...this.videoPlanes].map(([renderer, plane])=>[renderer.view.id,plane.stats.frames])) : this.presentation.paintFrameCounts();
         const views = new Set([...this.renderers].filter(renderer => {
           if (!this.rendererCurrent(renderer)) return false;
           const rect = renderer.canvas.getBoundingClientRect(), style = getComputedStyle(renderer.canvas);
@@ -830,6 +1070,13 @@ export class RemoteTransport {
   }
   private closeLocal() {
     this.audio.detach();
+    clearTimeout(this.videoMetadataRefreshTimer); this.videoMetadataRefreshTimer = undefined;
+    clearTimeout(this.presentationNegotiationTimer); this.presentationNegotiationTimer = undefined;
+    this.cancelPresentationAck(); this.hideVideoPlanes();
+    for (const renderer of this.videoPlanes.keys()) this.detachVideoPlane(renderer);
+    if (this.presentationVisibility) document.removeEventListener('visibilitychange', this.presentationVisibility);
+    this.presentationVisibility = undefined; this.presentationBarrier = undefined; this.presentationBarrierAcknowledged = false;
+    this.presentationFallbackReason = undefined; this.presentationBackend = 'canvas';
     this.sharedRenderer?.dispose();this.sharedRenderer=undefined;this.mediaRefreshAt=-Infinity;
     clearTimeout(this.inputDrainTimer); this.inputDrainTimer = undefined; this.queuedInput = []; this.inputFocus.clear();
     this.signalAttemptId = undefined; this.remoteSignalConnection = undefined; this.remoteDescriptionReady = false; this.remoteIce = []; this.localIce = []; this.iceDelivery = Promise.resolve(); this.localIceDelivery = Promise.resolve();

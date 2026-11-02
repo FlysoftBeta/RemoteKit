@@ -20,7 +20,7 @@ SQLite迁移保留旧Tab/WebView引用及token。旧匿名身份仍标为legacy�
 
 Viewer在页面启动时预热并缓存接收能力探测，鉴权不等待探测完成。普通产品使用trickle ICE，offer不等待完整候选收集；Endpoint接受协商后异步返回answer和候选，Control按当前租约、连接及尝试标识转发。候选不排在等待answer的Tenant操作后面，其他Tenant也不等待这一协商；接管、退出或取消清除旧绑定。
 
-客户端记录offer、answer、ICE、DataChannel、首次解码与首次canvas绘制；首屏以首次绘制为准。Endpoint阶段使用自己的单调时钟，不将两个进程的时间戳直接相减。网络模拟使用原完整候选收集与relay路径，不能把普通产品trickle耗时套到该路径。
+客户端记录offer、answer、ICE、DataChannel、首次解码与首次呈现；video记录匹配布局后的compositor回调观察，canvas回退记录JS绘制提交，两种终点分开。Endpoint阶段使用自己的单调时钟，不将两个进程的时间戳直接相减。网络模拟使用原完整候选收集与relay路径，不能把普通产品trickle耗时套到该路径。
 
 ## 操作、对账与恢复
 
@@ -58,7 +58,7 @@ tablet UA按HTTP(S) origin保存。首次导航、redirect、history、reload和
 
 实际帧率受显示/网络反馈，编码尺寸与码率还受接收端H264能力和WebRTC拥塞控制。根据可见CSS面积与ClientScale计算统一缩放因子，Browser DPR在0.5–4内；viewport DIP不因质量档改变。连续3个有效反馈窗口估算延迟>300ms降至当前倍率的0.8，调整冷却5秒；<150ms健康30秒后逐级恢复。静态重复、隐藏、无效/过期时钟不触发。
 
-生产估算的终点是canvas提交，起点是源采集完成；它不是Pixel marker E2E。具体映射、置信度和独立媒体反馈见[媒体反馈](media-feedback.md)。受控自动化采用manual模式，显式配置，不运行产品自动质量策略。
+生产估算起点是源采集完成；video终点为匹配真实RTP/epoch的compositor回调观察，canvas回退终点为JS提交。它不是Pixel marker E2E，也不是物理屏幕点亮。具体映射、置信度和独立媒体反馈见[媒体反馈](media-feedback.md)。受控自动化采用manual模式，显式配置，不运行产品自动质量策略。
 
 ## 代码入口与验证
 

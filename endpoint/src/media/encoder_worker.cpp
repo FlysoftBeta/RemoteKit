@@ -33,8 +33,9 @@ nlohmann::json EncoderStats::Snapshot() {
 }
 EncoderWorker::EncoderWorker(Sdk& sdk,uint64_t encoder,ID3D11Device* device,std::string mode,
        EncoderSettings defaults,std::shared_ptr<EncoderStats> stats,std::function<void(uint32_t,uint64_t,size_t,bool,const remotekit_rtc_frame&)> completed,
-       std::shared_ptr<ServerTrace> trace,uint64_t peer):sdk_(sdk),encoder_(encoder),device_(device),
-       mode_(std::move(mode)),settings_(defaults),stats_(std::move(stats)),completed_(std::move(completed)),trace_(std::move(trace)),trace_peer_(peer){}
+       std::shared_ptr<ServerTrace> trace,uint64_t peer,
+       std::function<bool(const remotekit_rtc_frame&,bool,const std::function<bool()>&)> publish):sdk_(sdk),encoder_(encoder),device_(device),
+       mode_(std::move(mode)),settings_(defaults),stats_(std::move(stats)),completed_(std::move(completed)),publish_(std::move(publish)),trace_(std::move(trace)),trace_peer_(peer){}
 EncoderWorker::~EncoderWorker(){Stop();}
 void EncoderWorker::Error(const std::string& error) {
  failed_=true;std::lock_guard lock(stats_->mutex);stats_->error=error;
@@ -151,12 +152,20 @@ void EncoderWorker::Complete(AccessUnit& unit) {
  result.keyframe=unit.keyframe;result.qp=unit.qp;
  uint32_t wire_timestamp=0;
  RK_SERVER_TRACE(trace_,"encoded_begin",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;);
- auto status=sdk_.remotekit_rtc_encoded(encoder_,&result,&wire_timestamp);
+ int status=REMOTEKIT_SDK_BUSY;
+ auto send=[&]{status=sdk_.remotekit_rtc_encoded(encoder_,&result,&wire_timestamp);return status==0;};
+ const bool permitted=publish_?publish_(job.frame,unit.keyframe,send):(send(),true);
+ if(!permitted) {
+  // Hardware Poll has completed: both GPU leases can now follow the normal
+  // release path. Dropped bitstream references require a fresh IDR.
+  keyframe_=true;++stats_->dropped;
+  if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
+ }
  remotekit::TailRefreshLease::Finish(job.frame,status==0 && unit.keyframe);
  RK_SERVER_TRACE(trace_,"encoded_return",TraceIds::Frame(job.frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.status=status;rk_record.bytes=unit.bytes.size();rk_record.ids.wire_known=status==0;rk_record.ids.wire_rtp_timestamp=wire_timestamp;);
  if(status==0 && completed_)completed_(wire_timestamp,job.frame.layout_epoch,unit.bytes.size(),unit.keyframe,job.frame);
- if(status!=0 && status!=REMOTEKIT_SDK_INVALID_STATE)Error("RTC encoded completion failed "+std::to_string(status));
- ++stats_->completed;stats_->bytes+=unit.bytes.size();if(unit.keyframe)++stats_->keyframes_encoded;
+ if(permitted && status!=0 && status!=REMOTEKIT_SDK_INVALID_STATE)Error("RTC encoded completion failed "+std::to_string(status));
+ if(permitted) {++stats_->completed;stats_->bytes+=unit.bytes.size();if(unit.keyframe)++stats_->keyframes_encoded;}
  stats_->last_encode_ms=1000.0*(QpcNow()-job.submitted_qpc)/QpcFrequency();
  job.frame.release(job.frame.release_context,job.frame.frame_id);
  static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();

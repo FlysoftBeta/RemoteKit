@@ -26,6 +26,8 @@ Capture源lease与共享输出槽是两个完成域。fallback中capture资源�
 
 reconfigure、fatal、空内容及暂停立即发新epoch空layout，清Client ready/输入，再按状态关闭/重建输出。正常GPU匿名断连支持有界自动重建，真正fatal保留错误。关闭有等待上限，不能为通过测试伪造consumed。
 
+捕获调度的Oracle计数与GPU完成证明也分开：每次`RecordCapture`对应一次`CompleteCapture`，失败读回、目标换代或进入GPU前取消都必须结算失败。否则pending计数会阻止无新damage的静态刷新，导致resize后一直空layout；失败结算不会发布像素或伪造Fence完成。该修正在0007补丁中统一处理，成功交付与Oracle拒绝也不能双重结算。
+
 ## 几何、节拍和通信
 
 页面DPR、实际backing、atlas像素、编码采样比例分别报告。默认service atlas按16对齐；显式1保留给控制变量。产品窗口尺寸来自真实CSS内容区，设备UA不改变viewport。Client输入要反算DPR/mediaScale/letterbox，并验证layout epoch与实际wire RTP。

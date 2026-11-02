@@ -56,6 +56,12 @@ Sleep降级不重复嵌套；修正版out/rel增量chrome已编译通过，待A/
 填写 SHA-256，并用 `tools/patchset.py` 管理检查、应用和逆序撤回。
 Chromium overlay `//remotekit` 由 `tools/chromium.py` 维护，不属于 tracked patch。
 
+`0007-capture-to-atlas.patch` 同时维护捕获交付的Oracle结算：每次已记录的
+capture在成功、读回失败、目标换代或进入GPU前取消时均恰好CompleteCapture一次。
+失败不发布像素，也不替代GPU Fence；这避免静态resize取消后pending计数阻止
+后续refresh。小目标`capture_to_atlas_pool_unittests`包含直接走真实交付/Oracle的
+取消恢复、成功结算与Oracle拒绝回归，运行结果见本批默认video QA与当前状态。
+
 `0008-touch-injection-dispatch-result.patch` 保留 TouchEmulatorImpl 原有void
 InjectTouchEvent，增加兼容的bool InjectTouchEventWithResult。返回值仅表示事件
 经官方ForwardEmulatedTouchEvent接受派发；原生流排他、无有效start或gesture

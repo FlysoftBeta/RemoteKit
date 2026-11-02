@@ -12,7 +12,7 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
   const adaptive=endpoint?.adaptiveFps as {targetRenderFps?:number;actualAppliedRenderFps?:number;reason?:string;effectiveLimit?:number;displayLimit?:number}|undefined;
   return <div ref={overlay} className="stats-overlay" style={{ maxWidth: 'none', transform: `scale(${scale})`, transformOrigin: 'top right' }} aria-label="串流指标叠层"><div className="stats-overlay-title">LIVE STATS <span>{diagnostics.codec ?? '—'}</span></div><dl>
     <dt title={diagnostics.receiveSelection?.reason}>接收档</dt><dd>{diagnostics.receiveSelection?.profile ?? '—'}</dd>
-    <dt title="每个平面的新帧canvas绘制提交次数；不是物理屏幕刷新率">绘制 FPS</dt><dd>{measured(surface ? diagnostics.paintFpsByView?.[surface.id] : diagnostics.displayFramesPerSecond, 'fps')}</dd>
+    <dt title={diagnostics.rendering?.backend === 'video' ? '每平面video compositor presentedFrames计数变化；不是rVFC回调数或物理屏幕刷新率' : '每个平面的新帧canvas绘制提交次数；不是物理屏幕刷新率'}>{diagnostics.rendering?.backend === 'video' ? '呈现 FPS' : '绘制 FPS'}</dt><dd>{measured(surface ? diagnostics.paintFpsByView?.[surface.id] : diagnostics.displayFramesPerSecond, 'fps')}</dd>
     <dt>解码 FPS</dt><dd>{measured(diagnostics.decodedFramesPerSecond, 'fps')}</dd>
     <dt>呈现后端</dt><dd title={diagnostics.rendering?.backendReason}>{diagnostics.rendering?.backend ?? '—'}</dd>
     <dt title={diagnostics.rendering?.frameSourceFallbackReason}>取帧 / 可见状态</dt><dd>{diagnostics.rendering?.frameSource??'—'} / {diagnostics.rendering?.visibility??'—'}</dd>
@@ -22,7 +22,7 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
     <dt title="读取时metadata尚未匹配 / JS队列丢弃，可能与decode帧窗口不同">Metadata / 队列丢弃</dt><dd>{diagnostics.rendering ? `${diagnostics.rendering.scheduling.metadataMissingAtRead} / ${Object.values(diagnostics.rendering.scheduling.drops).reduce((a,b)=>a+b,0)}` : '—'}</dd>
     <dt>Marker 抽样</dt><dd>{measured(diagnostics.markerSampleHz, 'Hz')}</dd>
     <dt title={diagnostics.marker?.kind === 'input' ? '输入到画面' : '渲染到画面'}>Marker p50 / p95</dt><dd>{diagnostics.marker ? `${measured(diagnostics.marker.p50, 'ms')} / ${measured(diagnostics.marker.p95, 'ms')}` : '—'}</dd>
-    <dt title="采集完成到canvas提交的校准估算，区别于Pixel marker">采集→呈现估算 p95</dt><dd>{measured(diagnostics.presentationEstimate?.presentationLatencyMs, 'ms')}</dd>
+    <dt title={diagnostics.rendering?.backend === 'video' ? '采集完成到匹配RTP的video compositor回调观察；区别于物理屏幕点亮与Pixel marker' : '采集完成到canvas提交的校准估算，区别于Pixel marker'}>采集→呈现估算 p95</dt><dd>{measured(diagnostics.presentationEstimate?.presentationLatencyMs, 'ms')}</dd>
     <dt>估算不确定度</dt><dd>{measured(diagnostics.presentationEstimate?.clockUncertaintyMs, 'ms')}</dd>
     <dt>RTT</dt><dd>{measured(diagnostics.roundTripTime === undefined ? undefined : diagnostics.roundTripTime * 1000, 'ms')}</dd>
     <dt title="从捕获完成时刻计算，不包含捕获本身耗时">捕获完成→纹理就绪</dt><dd>{measured(endpoint?.captureToReadyMs, 'ms')}</dd>
