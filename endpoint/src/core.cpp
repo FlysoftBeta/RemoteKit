@@ -44,6 +44,22 @@ Status ValidateInput(const InputPayload& p) {
         else if constexpr (std::is_same_v<T, WheelInput>)
           return Finite(v.x, v.y) && Finite(v.delta_x, v.delta_y);
         else if constexpr (std::is_same_v<T, TouchInput>) {
+          if (v.samples.size() > 32 || (!v.samples.empty() && (!v.clock || v.action != TouchInput::Action::move)))
+            return false;
+          if (v.clock && (v.clock->sequence_id.empty() || v.clock->sequence_id.size() > 128 ||
+                          v.clock->elapsed_us < 0 || v.clock->elapsed_us > 86400000000LL ||
+                          (v.clock->source && v.clock->start_wall_us <= 0)))
+            return false;
+          std::int64_t previous = -1;
+          for (const auto& sample : v.samples) {
+            if (sample.elapsed_us < previous || sample.elapsed_us > v.clock->elapsed_us || sample.points.empty() || sample.points.size() > 16)
+              return false;
+            previous = sample.elapsed_us;
+            std::set<std::uint32_t> sample_ids;
+            for (const auto& point : sample.points)
+              if (!Finite(point.x, point.y) || !std::isfinite(point.pressure) || point.pressure < 0 || point.pressure > 1 || !sample_ids.insert(point.id).second)
+                return false;
+          }
           std::set<std::uint32_t> ids;
           if (v.action < TouchInput::Action::start || v.action > TouchInput::Action::cancel ||
               (v.points.empty() && v.action != TouchInput::Action::cancel))

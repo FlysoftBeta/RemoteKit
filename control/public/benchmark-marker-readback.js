@@ -40,7 +40,15 @@ export class BenchmarkMarkerReadback {
     // Call NOW, in the paint notification stack, before any await or microtask.
     // Canvas snapshot construction can itself cost main-thread time; record it.
     try {
-      const snapshot = a.createImageBitmap(image, rect.x, rect.y, rect.width, rect.height);
+      let snapshot;
+      if(Object.values(rect).every(Number.isInteger))snapshot=a.createImageBitmap(image,rect.x,rect.y,rect.width,rect.height);
+      else {
+        // Shared presentation may scale X/Y independently during a static CSS resize.
+        // Normalize the real displayed ROI synchronously before the next frame can replace it.
+        const sample=typeof a.OffscreenCanvas==='function'?new a.OffscreenCanvas(256,112):a.document.createElement('canvas');sample.width=256;sample.height=112;
+        const context=sample.getContext('2d');if(!context)throw new Error('Marker ROI normalization unavailable');
+        context.drawImage(image,rect.x,rect.y,rect.width,rect.height,0,0,256,112);snapshot=a.createImageBitmap(sample);
+      }
       job.captureCallMs = a.performance.now() - captureStartedAt;
       Promise.resolve(snapshot).then(bitmap => {
         ++this.stats.bitmapCreated;

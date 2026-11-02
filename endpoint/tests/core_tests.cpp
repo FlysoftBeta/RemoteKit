@@ -2,6 +2,7 @@
 #include <iostream>
 #include <limits>
 #include "remotekit/core.hpp"
+#include "remotekit/touch_clock.hpp"
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
 #include "remotekit/tail_refresh.hpp"
@@ -150,6 +151,19 @@ int main() {
   auto legacy = FitH264Sampling(1928, 1088, 60, 31);
   CHECK(((legacy.width + 15) / 16) * ((legacy.height + 15) / 16) * 60 <= 108000);
   CHECK(FitH264Sampling(1920, 1080, 60, 0).width == 0);
+  auto full_4k = FitH264Sampling(3856,2176,50,52);
+  CHECK(full_4k.width==3856 && full_4k.height==2176 && full_4k.scale==1);
+  auto limited_4k = FitH264Sampling(3856,2176,60,51);
+  auto lower_cadence = FitH264Sampling(3856,2176,50,51);
+  CHECK(lower_cadence.width>limited_4k.width && lower_cadence.scale<1);
+  CHECK(std::string(limited_4k.limitation)=="receiver-level-macroblock-rate");
+  CHECK(PreferredH264FrameRate(3856,2176,50,51,true)==29);
+  CHECK(PreferredH264FrameRate(3856,2176,50,52,true)==50);
+  CHECK(PreferredH264FrameRate(3856,2176,50,51,false)==50);
+  CHECK(PreferredH264FrameRate(3856,2176,50,42,true)==50); // Hard FS cannot be traded for FPS.
+  CHECK(PreferredH264FrameRate(3856,2176,50,51,true,1920,1080)==50);
+  auto preserved_51=FitH264Sampling(3856,2176,PreferredH264FrameRate(3856,2176,50,51,true),51);
+  CHECK(preserved_51.width==3856 && preserved_51.height==2176 && preserved_51.scale==1);
   // Hover is permitted before focus, with the same token/sequence authority.
   Endpoint hover_endpoint;
   const auto hover_session = hover_endpoint.CreateSession("hover").value;
@@ -322,6 +336,27 @@ int main() {
   CHECK(ValidateInput(ImeCancel{}));
   CHECK(ValidateInput(ImeFinish{}));
   CHECK(!ValidateInput(TouchInput{TouchInput::Action::start, {{1, 1, 1, .5}, {1, 2, 2, .5}}}));
+  TouchInput sampled{TouchInput::Action::move, {{1, 1, 1, .5}}};
+  sampled.clock = TouchInput::Clock{"gesture:1", true, 32000, 1700000000000000LL};
+  sampled.samples = {{16000, {{1, 1, 1, .5}}}, {24000, {{1, 1, 2, .5}}}};
+  CHECK(ValidateInput(sampled));
+  sampled.samples[1].elapsed_us = 8000;
+  CHECK(!ValidateInput(sampled));
+  sampled.samples[1].elapsed_us = 40000;
+  CHECK(!ValidateInput(sampled));
+  sampled.samples.clear(); sampled.clock->elapsed_us = -1;
+  CHECK(!ValidateInput(sampled));
+  sampled.clock->elapsed_us = 32000; sampled.clock->sequence_id.clear();
+  CHECK(!ValidateInput(sampled));
+  CHECK(TouchStartAgeUs(1000000, 1010000).value() == 10000);
+  CHECK(!TouchStartAgeUs(1000000, 999000 - 1));
+  CHECK(!TouchStartAgeUs(1000000, 6000001));
+  CHECK(TouchElapsedValid(16000, 32000, 40000, true));
+  CHECK(!TouchElapsedValid(32000, 16000, 40000, true));
+  CHECK(!TouchElapsedValid(16000, 48000, 40000, true));
+  CHECK(TouchElapsedValid(16000, 48000, 40000, false));
+  // Long gestures use monotonic age; there is no wall argument to re-anchor.
+  CHECK(TouchElapsedValid(3600000000LL, 3600016000LL, 3600020000LL, true));
   CHECK(!ValidateInput(WheelInput{0, 0, std::numeric_limits<double>::infinity(), 0, 0}));
   auto fresh = e.Token(s.value, v.value).value;
   CHECK(!e.AcceptInput(s.value, {fresh, 20, ImeSet{u"abc", 0, 9}}));

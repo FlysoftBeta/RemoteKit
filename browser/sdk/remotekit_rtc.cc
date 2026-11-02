@@ -286,9 +286,9 @@ class ExternalEncoder : public webrtc::VideoEncoder {
 };
 
 webrtc::SdpVideoFormat H264Format() {
-  // Level 5.1 allows 1080p60 and larger atlases. Negotiation can lower it;
+  // Level 5.2 permits full 4K60 atlases. Negotiation can lower it;
   // configure receives the negotiated level and endpoint must honor it.
-  return webrtc::SdpVideoFormat("H264", {{"profile-level-id", "42e033"},
+  return webrtc::SdpVideoFormat("H264", {{"profile-level-id", "42e034"},
       {"level-asymmetry-allowed", "1"}, {"packetization-mode", "1"}});
 }
 // PeerConnection builds receive channels even for send-only transceivers and
@@ -784,7 +784,7 @@ int remotekit_rtc_get_receive_level(uint64_t id, uint32_t* level_idc) {
   if (!level_idc) return REMOTEKIT_SDK_INVALID_ARGUMENT;
   *level_idc = 0;
   return WithPeer(id, [&](Peer& peer) {
-    *level_idc = std::min(51u, peer.remote_limits->h264_level.load());
+    *level_idc = std::min(52u, peer.remote_limits->h264_level.load());
     return REMOTEKIT_SDK_OK;
   });
 }

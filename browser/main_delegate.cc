@@ -93,6 +93,9 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
       command.HasSwitch("urls") || command.HasSwitch("parent-window"))
     return 2;
   command.AppendSwitch("gpu-output");
+  // Service input uses logical metrics, independent of this host's monitor and
+  // native touch preferences. The explicit demo keeps its native host policy.
+  command.AppendSwitch("remotekit-service-input");
 #endif
   if (command.HasSwitch("gpu-output")) {
     // This shown, nonzero Aura host is clipped out of the endpoint window.

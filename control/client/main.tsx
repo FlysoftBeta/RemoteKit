@@ -21,6 +21,7 @@ import type {
 } from "../shared/product";
 import { ControlConnection, type ConnectionStatus } from "./control-connection";
 import { RemoteTransport } from "./transport";
+import { selectProductReceiveProfile } from './receive-profile';
 import { request } from "./types";
 import {
   AuthView,
@@ -131,6 +132,7 @@ function Workspace({
     const socket = new ControlConnection(
       (next) => {
         if (!active) return;
+        media.trickleIce = next.viewer.trickleIce === true;
         if (generation.current !== next.endpointGeneration) {
           media.observeEndpointGeneration(next.endpointGeneration);
           generation.current = next.endpointGeneration;
@@ -158,6 +160,7 @@ function Workspace({
         }
         if (next === "expired") expired();
       },
+      signal => media.receiveServerSignal(signal),
     );
     connection.current = socket;
     media.setControlRpc((method, params) =>
@@ -381,6 +384,7 @@ function App() {
   const [user, setUser] = useState<ProductUser | null | undefined>(undefined),
     [notice, setNotice] = useState("");
   useEffect(() => {
+    void selectProductReceiveProfile(navigator.userAgent, RTCRtpReceiver.getCapabilities?.('video')?.codecs);
     try {
       localStorage.removeItem("remotekit.receive-profile");
     } catch {}

@@ -57,6 +57,10 @@ method包括action、viewport、feedback、rtc.offer/ice/close和clock.ping。�
 
 Source atlas可在NV12转换时按接收H264上限等比采样；布局和输入同时带对应比例。支持真实RTP元数据的新客户端使用不可变VideoFrame/fifo2；能力不足退回video。Chrome89保留video路径，其rVFC与drawImage不是原子frame handle；测量不得把它宣称为不可变帧验证。
 
-普通产品探测实际解码能力后选择已验证的H264 level4.2；不支持或协商失败回native，诊断显式选择独立。接收能力上限不会因提高产品码率请求而消失。
+普通产品按接收能力选择H264 level5.2、5.1、4.2或native；探测并行、有总超时且页面内缓存，Chrome89保留4.2兼容路径。编码协商失败可降档，网络超时不会永久降低解码能力。优先高画质以viewport×ClientScale为目标；完整尺寸满足单帧上限、但超过像素速率预算时先降低帧率，自动与流畅档保持帧率优先。实际源/编码尺寸、有效帧率及限制原因由stats报告。
+
+两个以上合格的不可变平面共用一个WebGL画布，每帧上传一次atlas并按各平面矩形绘制；单平面、Chrome89及不支持的情况使用2D路径。上下文丢失恢复2D，静态内容优先重画现有帧；没有可用帧时通过当前peer限频的`media.refresh`请求一次刷新。Marker读取实际可见画布对应ROI，同一RTP的静态重画不增加绘制FPS。
+
+产品信令采用trickle ICE：Endpoint接受offer后异步发`rtc.signal`，Control按Tenant、Viewer租约、connectionId与attemptId路由answer/candidate。早到候选有界排队，取消或接管撤销旧绑定。现有UDP网络模拟和旧诊断接口保留完整ICE收集路径，避免候选旁路网络模拟。连接阶段耗时使用各进程本地单调时钟。
 
 管理员通过已鉴权WS的admin.get取得registrationCredentialConfigured，通过admin.setRegistrationCredential {serverCredential}替换注册口令。两者服务端检查管理员身份与当前lease；配置仅返回是否设置。口令8–256字符，角色与口令不允许由注册请求指定或覆盖；ProductUser.isAdmin表示服务端确定的身份。

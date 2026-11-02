@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
         e.type == REMOTEKIT_RTC_ICE_COMPLETE) {
       if (e.type == REMOTEKIT_RTC_SDP_OFFER) {
         h264 = e.text.find("H264/90000") != std::string::npos &&
-               e.text.find("profile-level-id=42e033") != std::string::npos &&
+               e.text.find("profile-level-id=42e034") != std::string::npos &&
                e.text.find("packetization-mode=1") != std::string::npos;
         if (!tested_recvonly_offer) {
           // Unsupported remote senders are rejected without poisoning this

@@ -18,6 +18,12 @@ export class CaptureLatency {
     if (this.clock && Math.abs(offset - this.clock.offset) > uncertainty + this.clock.uncertainty + 5) { this.reset(); return; }
     this.clock = { offset, uncertainty, at: end, wall: endWall };
   }
+  /** Conservative server-wall time for a captured input sample. Freeze once per gesture. */
+  inputStart(sampleAt: number, now: number, wall: number): number | undefined {
+    const clock = this.clock;
+    if (!clock || ![sampleAt, now, wall].every(Number.isFinite) || sampleAt > now + 1 || now - sampleAt > 5000 || now < clock.at || now - clock.at > 15000 || Math.abs(wall - clock.wall - (now - clock.at)) > 5) return;
+    return Math.floor((wall - (now - sampleAt) + clock.offset - clock.uncertainty) * 1000);
+  }
   record(rtp: number, epoch: string, value: Partial<CaptureTiming>) {
     if (![value.captureWallTimeMs, value.captureMonotonicMs, value.captureClockUncertaintyMs].every(v => typeof v === 'number' && Number.isFinite(v)) || typeof value.sourceCaptureId !== 'string' || !/^\d+$/.test(value.sourceCaptureId) || value.captureClockUncertaintyMs! < 0) return;
     this.frames.set(`${epoch}:${rtp}`, value as CaptureTiming);

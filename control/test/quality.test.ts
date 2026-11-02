@@ -14,6 +14,15 @@ test('three presets share measured CSS area/pixel budget and keep DIP geometry i
   controller.observe({ ...feedback(1, 100, 200), displayHzEstimate: 45 }, 100, true); q = controller.snapshot(state, measured, 100); assert.equal(q.targetFps, 45); assert.equal(q.requested.bitrateKbps, 24000); assert.ok(q.effectiveDpr < 1); assert.equal(measured.windows[0].width, 1920);
 });
 
+test('quality retains requested DPR beyond 4K area until the physical atlas resource bound', () => {
+  const state = workspace(); state.settings.qualityPreference = 'quality';
+  const q = new QualityController().snapshot(state, { devicePixelRatio: 2, windows: [{ windowId: 'w', width: 2560, height: 1440, visible: true }] });
+  assert.equal(q.effectiveDpr, 2); assert.equal(q.baseResolutionFactor, 1);
+  assert.equal(q.requested.preferResolution, true); assert.equal(q.requested.targetFps, 50);
+  state.settings.qualityPreference = 'auto';
+  assert.equal(new QualityController().snapshot(state, viewport).requested.preferResolution, false);
+});
+
 test('three fresh high windows reduce by .8, cooldown holds and 30 healthy seconds restore one step', () => {
   const controller = new QualityController(), state = workspace(); controller.snapshot(state, viewport, 100000);
   for (let i = 1; i <= 2; i++) controller.observe(feedback(i, 100000 + i * 2000), 100000 + i * 2000, true);

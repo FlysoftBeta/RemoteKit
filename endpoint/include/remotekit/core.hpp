@@ -105,6 +105,17 @@ struct TouchInput {
   enum class Action { start, move, end, cancel };
   Action action{};
   std::vector<TouchPoint> points;
+  struct Clock {
+    std::string sequence_id;
+    bool source{};
+    std::int64_t elapsed_us{}, start_wall_us{};
+  };
+  struct Sample {
+    std::int64_t elapsed_us{};
+    std::vector<TouchPoint> points;
+  };
+  std::optional<Clock> clock;
+  std::vector<Sample> samples;
 };
 struct ImeSet {
   std::u16string text;

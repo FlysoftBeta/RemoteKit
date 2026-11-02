@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import type { ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, AppliedMediaPolicy, PendingClose } from '../shared/product';
 import { QualityController } from './quality';
 import type { ControlState, Device } from '../client/types';
-import type { Endpoint } from './endpoint';
+import type { Endpoint, RtcSignal } from './endpoint';
 import { Store } from './store';
 import { LoopbackRelay, rewriteSdp, selectLocalCandidate, type NetworkSimulation } from './network-sim.mjs';
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
@@ -11,6 +11,7 @@ export class Control extends EventEmitter {
   private queues = new Map<string, Promise<unknown>>();
   private errors = new Map<string, string>();
   private connections = new Map<string, string>();
+  private signalBindings = new Map<string, { tenant: string; lease: string; attemptId: string; resolve: (sdp: string) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout>; answered: boolean }>();
   private configurations = new Map<string, string>();
   private ticking = false;
   private endpointGeneration = 0;
@@ -26,7 +27,22 @@ export class Control extends EventEmitter {
   private qualityControllers = new Map<string, QualityController>();
   private actualMediaPolicies = new Map<string, AppliedMediaPolicy>();
   private dialogs = new Map<string, (PageDialog & { viewId: string; requestId: string; browserIncarnation: string; instance: string; document: string })[]>();
-  constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation) { super(); }
+  constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation) {
+    super(); endpoint.onSignal?.(event => this.receiveSignal(event));
+  }
+  private receiveSignal(event: RtcSignal) {
+    const binding = this.signalBindings.get(event.connectionId);
+    if (!binding || binding.tenant !== event.tenantId || this.connections.get(event.tenantId) !== event.connectionId) return;
+    try { this.assertViewer(binding.tenant, binding.lease); } catch { this.clearSignal(event.connectionId); return; }
+    if (event.signal.type === 'answer') { binding.answered = true; clearTimeout(binding.timer); binding.resolve(event.signal.sdp); }
+    else if (event.signal.type === 'error' && !binding.answered) binding.reject(new Error(event.signal.message));
+    else this.emit('rtc.signal', event.tenantId, binding.lease, { type: 'rtc.signal', connectionId: event.connectionId, attemptId: binding.attemptId, signal: event.signal });
+  }
+  private clearSignal(connectionId: string) {
+    const binding = this.signalBindings.get(connectionId); if (!binding) return;
+    clearTimeout(binding.timer); this.signalBindings.delete(connectionId);
+    if (!binding.answered) binding.reject(new Error('媒体协商已取消'));
+  }
   serial<T>(tenant: string, work: () => Promise<T>): Promise<T> {
     const next = (this.queues.get(tenant) ?? Promise.resolve()).catch(() => {}).then(work);
     this.queues.set(tenant, next); void next.finally(() => { if (this.queues.get(tenant) === next) this.queues.delete(tenant); }).catch(() => {});
@@ -96,7 +112,7 @@ export class Control extends EventEmitter {
     } catch (error) { this.errors.set(tenant, error instanceof Error ? error.message : String(error)); throw error; }
   }
   async tick() { if (this.ticking) return; this.ticking = true; try { await Promise.all([...new Set([...this.diagnosticTenants, ...this.viewers.keys(), ...this.started])].map(tenant => this.serial(tenant, () => this.reconcile(tenant)).catch(() => {}))); } finally { this.ticking = false; } }
-  closeRelays() { for (const relay of this.relays.values()) relay.close(); this.relays.clear(); }
+  closeRelays() { for (const id of this.signalBindings.keys()) this.clearSignal(id); for (const relay of this.relays.values()) relay.close(); this.relays.clear(); }
   async reconcileAll() { this.endpointGeneration++; this.closeRelays(); this.connections.clear(); this.configurations.clear(); this.started.clear(); this.transitions.clear(); this.siteApplications.clear(); this.mediaApplications.clear(); this.actualMediaPolicies.clear(); this.dialogs.clear(); for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()])) await this.serial(tenant, async () => { if (this.diagnosticTenants.has(tenant)) { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); } await this.reconcile(tenant); this.push(tenant); }).catch(() => {}); }
   async action(tenant: string, body: any) {
     this.diagnosticTenants.add(tenant);
@@ -146,35 +162,63 @@ export class Control extends EventEmitter {
   }
   async offer(tenant: string, body: any, lease?: string) {
     if (body.type !== 'offer' || typeof body.sdp !== 'string' || body.sdp.length > 900000 || !body.sdp.startsWith('v=0')) throw new ApiError(400, '无效的 SDP offer');
+    const receivedAt = performance.now();
     return this.serial(tenant, async () => {
+      const timings: Record<string, number> = { queueMs: performance.now() - receivedAt };
       if (lease) this.assertViewer(tenant, lease);
       if (!this.diagnosticTenants.has(tenant)) this.qualityController(tenant).resetFeedback();
       await this.reconcile(tenant);
+      timings.reconcileEndMs = performance.now() - receivedAt;
       const previous = this.connections.get(tenant);
-      if (previous) { try { await this.endpoint.request('rtc.close', tenant, { connectionId: previous }); } finally { this.relays.get(previous)?.close(); this.relays.delete(previous); this.connections.delete(tenant); } }
+      if (previous) { this.clearSignal(previous); try { await this.endpoint.request('rtc.close', tenant, { connectionId: previous }); } finally { this.relays.get(previous)?.close(); this.relays.delete(previous); this.connections.delete(tenant); } }
       const connectionId = randomUUID();
       let relay: LoopbackRelay | undefined;
       try {
         let offerSdp = body.sdp;
         if (this.simulation) { relay = await new LoopbackRelay(this.simulation, selectLocalCandidate(offerSdp)).bind(); offerSdp = rewriteSdp(offerSdp, relay.serverAddress); }
-        const answer = await this.endpoint.request('rtc.offer', tenant, { connectionId, sdp: offerSdp });
+        const trickle = body.trickle === true && !!lease && !!this.endpoint.onSignal && !this.simulation;
+        if (body.trickle === true && !trickle) throw new ApiError(400, '当前连接要求完整 ICE 收集');
+        let answer;
+        if (trickle) {
+          if (typeof body.attemptId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(body.attemptId)) throw new ApiError(400, '无效媒体连接尝试');
+          this.connections.set(tenant, connectionId);
+          let resolve!: (sdp: string) => void, reject!: (error: Error) => void;
+          const pending = new Promise<string>((yes, no) => { resolve = yes; reject = no; });
+          // Observe rejection immediately, including cancellation while the acceptance RPC is pending.
+          void pending.catch(() => {});
+          const timer = setTimeout(() => reject(new Error('RTC answer 等待超时')), 15000);
+          this.signalBindings.set(connectionId, { tenant, lease: lease!, attemptId: body.attemptId, resolve, reject, timer, answered: false });
+          const accepted = await this.endpoint.request('rtc.offer', tenant, { connectionId, sdp: offerSdp, trickle: true });
+          timings.endpointAcceptedMs = performance.now() - receivedAt;
+          if (accepted?.accepted !== true || accepted.connectionId !== connectionId) throw new ApiError(502, 'Endpoint未接受媒体协商');
+          answer = { sdp: await pending };
+          timings.answerReadyMs = performance.now() - receivedAt;
+          this.assertViewer(tenant, lease!);
+        } else answer = await this.endpoint.request('rtc.offer', tenant, { connectionId, sdp: offerSdp });
         if (typeof answer?.sdp !== 'string' || !answer.sdp.startsWith('v=0')) throw new ApiError(502, 'Endpoint 未返回有效 answer');
         let answerSdp = answer.sdp;
         if (relay) { relay.setServer(selectLocalCandidate(answerSdp, { requireLoopback: true })); answerSdp = rewriteSdp(answerSdp, relay.clientAddress); this.relays.set(connectionId, relay); }
         this.connections.set(tenant, connectionId);
-        return { type: 'answer', sdp: answerSdp, connectionId, endpointGeneration: this.endpointGeneration, ...(relay ? { networkSimulation: relay.snapshot() } : {}) };
-      } catch (error) { relay?.close(); await this.endpoint.request('rtc.close', tenant, { connectionId }).catch(() => {}); throw error; }
+        return { type: 'answer', sdp: answerSdp, connectionId, endpointGeneration: this.endpointGeneration, negotiationTiming: timings, signalingMode: trickle ? 'trickle' : this.simulation ? 'full-gather-simulation' : 'full-gather-compatibility', ...(relay ? { networkSimulation: relay.snapshot() } : {}) };
+      } catch (error) { this.clearSignal(connectionId); if (this.connections.get(tenant) === connectionId) this.connections.delete(tenant); relay?.close(); await this.endpoint.request('rtc.close', tenant, { connectionId }).catch(() => {}); throw error; }
     });
   }
   async ice(tenant: string, body: any) {
     if (!body.connectionId || this.connections.get(tenant) !== body.connectionId) throw new ApiError(403, '连接不属于当前会话');
     if (this.simulation) throw new ApiError(400, '网络实验使用完整 gathered SDP，拒绝额外 trickle 候选');
+    const binding = this.signalBindings.get(body.connectionId);
+    if (binding && body.attemptId !== binding.attemptId) throw new ApiError(403, '媒体连接尝试已失效');
+    if (!body.candidate || typeof body.candidate.candidate !== 'string' || body.candidate.candidate.length > 16384 || typeof body.candidate.sdpMid !== 'string' || !Number.isInteger(body.candidate.sdpMLineIndex)) throw new ApiError(400, '无效 ICE candidate');
     return this.endpoint.request('rtc.ice', tenant, { connectionId: body.connectionId, candidate: body.candidate });
   }
   async closeRtc(tenant: string, body: any, lease?: string) {
+    if (lease) this.assertViewer(tenant, lease);
+    const owned = this.connections.get(tenant) === body.connectionId;
+    if (owned) this.clearSignal(body.connectionId);
     return this.serial(tenant, async () => {
       if (lease) this.assertViewer(tenant, lease);
-      if (this.connections.get(tenant) !== body.connectionId) throw new ApiError(403, '连接不属于当前会话');
+      if (this.connections.get(tenant) !== body.connectionId) { if (owned) return { closed: true }; throw new ApiError(403, '连接不属于当前会话'); }
+      this.clearSignal(body.connectionId);
       try { await this.endpoint.request('rtc.close', tenant, { connectionId: body.connectionId }); } finally { this.relays.get(body.connectionId)?.close(); this.relays.delete(body.connectionId); this.connections.delete(tenant); } return { closed: true };
     });
   }
@@ -183,7 +227,7 @@ export class Control extends EventEmitter {
     return this.relays.get(body.connectionId)?.snapshot() ?? { enabled: false };
   }
   productState(tenant: string): ProductState {
-    return { user: this.store.userForTenant(tenant)!, workspace: this.store.workspace(tenant), pageDialogs: (this.dialogs.get(tenant) ?? []).map(({ viewId, requestId, browserIncarnation, instance, document, ...dialog }) => dialog), quality: this.qualityFor(tenant), endpointGeneration: this.endpointGeneration, endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant) }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
+    return { user: this.store.userForTenant(tenant)!, workspace: this.store.workspace(tenant), pageDialogs: (this.dialogs.get(tenant) ?? []).map(({ viewId, requestId, browserIncarnation, instance, document, ...dialog }) => dialog), quality: this.qualityFor(tenant), endpointGeneration: this.endpointGeneration, endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant), trickleIce: !!this.endpoint.onSignal && !this.simulation }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
   }
   private push(tenant: string) { this.emit('state', tenant, this.productState(tenant)); }
   private saveProduct(state: ProductWorkspace) { const changed = this.store.saveWorkspace(state); if (changed) this.push(state.tenantId); }
@@ -191,6 +235,7 @@ export class Control extends EventEmitter {
   async attachViewer(tenant: string, id: string, revoke: (reason: 'another-viewer' | 'logout') => void, authentication?: { identity: string; valid: () => boolean }) {
     this.qualityController(tenant).resetConnection();
     const old = this.viewers.get(tenant); this.viewers.set(tenant, { id, revoke, authentication }); old?.revoke('another-viewer');
+    const previous = this.connections.get(tenant); if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
       this.assertViewer(tenant, id); await this.closeMedia(tenant);
       try { await this.reconcileProduct(tenant); } catch { /* State carries Endpoint error; controls still work offline. */ }
@@ -200,6 +245,7 @@ export class Control extends EventEmitter {
   async detachViewer(tenant: string, id: string) {
     if (this.viewers.get(tenant)?.id !== id) return;
     this.viewers.delete(tenant);
+    const previous = this.connections.get(tenant); if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
       // A replacement owns media now; an old close must not hide or close it.
       if (this.viewers.has(tenant)) return;
@@ -210,6 +256,7 @@ export class Control extends EventEmitter {
   async logout(tenant: string, authenticationIdentity: string) { const viewer = this.viewers.get(tenant); if (viewer?.authentication?.identity === authenticationIdentity) { viewer.revoke('logout'); await this.detachViewer(tenant, viewer.id); } }
   private async closeMedia(tenant: string) {
     const previous = this.connections.get(tenant); if (!previous) return;
+    this.clearSignal(previous);
     try { await this.endpoint.request('rtc.close', tenant, { connectionId: previous }); } catch { }
     finally { this.connections.delete(tenant); this.relays.get(previous)?.close(); this.relays.delete(previous); }
   }
@@ -228,9 +275,10 @@ export class Control extends EventEmitter {
     if (method === 'viewport') return this.viewport(tenant, params, lease);
     if (method === 'rtc.offer') return this.offer(tenant, params, lease);
     if (method === 'rtc.close') return this.closeRtc(tenant, params, lease);
+    // Candidate delivery must not queue behind an offer waiting for its answer.
+    if (method === 'rtc.ice') return this.ice(tenant, params);
     return this.serial(tenant, async () => {
       this.assertViewer(tenant, lease);
-      if (method === 'rtc.ice') return this.ice(tenant, params);
       if (method === 'clock.ping') return { serverTime: Date.now(), ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}) };
       if (method === 'feedback') {
         if (this.diagnosticTenants.has(tenant)) return { accepted: false };
@@ -268,6 +316,7 @@ export class Control extends EventEmitter {
       const window = () => { const found = state.windows.find(w => w.id === action.windowId); if (!found) throw new ApiError(404, '窗口不存在'); return found; };
       const createTab = (windowId: string) => { if (state.tabs.length >= 32) throw new ApiError(400, '最多支持32个标签页'); const next: ProductTab = { id: randomUUID(), windowId, webviewId: this.store.viewId(), title: String(action.title ?? '新标签页').slice(0, 120), url: url(action.url ?? 'about:blank') }; state.tabs.push(next); state.windows.find(w => w.id === windowId)!.activeTabId = next.id; state.activeWindowId = windowId; };
       let application: ProductActionResult['application'];
+      const oldQuality = state.settings.qualityPreference;
       switch (action.type) {
         case 'window.create': { if (state.windows.length >= 8) throw new ApiError(400, '最多支持8个窗口'); const id = randomUUID(); state.windows.push({ id, activeTabId: null, weight: 1 }); createTab(id); break; }
         case 'window.activate': state.activeWindowId = window().id; break;
@@ -318,6 +367,9 @@ export class Control extends EventEmitter {
       }
       this.saveProduct(state);
       try { await this.reconcileProduct(tenant); } catch { }
+      if (action.type === 'settings.update' && oldQuality !== state.settings.qualityPreference && this.connections.has(tenant)) {
+        try { await this.endpoint.request('session.mediaPolicy', tenant, { ...this.qualityFor(tenant).requested, refresh: true }); } catch { }
+      }
       if (action.type === 'site.set') {
         const latest = this.store.workspace(tenant), applied = this.siteApplications.get(tenant)?.applied === true;
         if (applied && (!action.tabId || !latest.tabs.find(t => t.id === action.tabId)?.pendingUaReloadOrigin)) application = undefined;

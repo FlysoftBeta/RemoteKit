@@ -151,9 +151,9 @@ async (hostPage) => {
         if (markerReader) {
           // getPresentedPlane(kind=plane) is the actual Viewport HTML canvas.
           // Atlas snapshots and decoder VideoFrames are intentionally rejected.
-          const rect = { x: source.sourceRect.x, y: source.sourceRect.y, width: 256 * source.pixelsPerDip, height: 112 * source.pixelsPerDip };
-          if (!painted || source.kind !== 'plane' || !(source.image instanceof HTMLCanvasElement) || !Object.values(rect).every(Number.isInteger) || rect.x < 0 || rect.y < 0 || rect.x + rect.width > source.image.width || rect.y + rect.height > source.image.height) {
-            markerFailures.push({ ...identity, error: 'worker marker requires an actual painted plane canvas with integral in-bounds ROI' }); return;
+          const rect = { x: source.sourceRect.x, y: source.sourceRect.y, width: 256 * source.pixelsPerDip, height: 112 * (source.pixelsPerDipY ?? source.pixelsPerDip) };
+          if (!painted || source.kind !== 'plane' || !(source.image instanceof HTMLCanvasElement) || !Object.values(rect).every(Number.isFinite) || rect.x < 0 || rect.y < 0 || rect.x + rect.width > source.image.width || rect.y + rect.height > source.image.height) {
+            markerFailures.push({ ...identity, error: 'worker marker requires an actual painted plane canvas with finite in-bounds ROI' }); return;
           }
           const task = markerReader.submit(source.image, rect, identity).then(result => ({ result }), error => ({ error: String(error) }));
           // Snapshot submissions are immediate; consume results in paint order.
@@ -167,7 +167,7 @@ async (hostPage) => {
         }
         const drawStarted = performance.now();
         const pixelsPerDip = source.pixelsPerDip;
-        context.drawImage(source.image, source.sourceRect.x, source.sourceRect.y, 256 * pixelsPerDip, 112 * pixelsPerDip, 0, 0, 256, 112);
+        context.drawImage(source.image, source.sourceRect.x, source.sourceRect.y, 256 * pixelsPerDip, 112 * (source.pixelsPerDipY ?? pixelsPerDip), 0, 0, 256, 112);
         transport.recordPresentationCost?.('markerDraw', drawStarted, performance.now() - drawStarted);
         const readbackStarted = performance.now();
         const pixels = context.getImageData(0, 0, 256, 112);
@@ -260,7 +260,7 @@ async (hostPage) => {
         const legacy = transport.getPresentedPlane ? undefined : transport.getPaintedFrame(view.id, frame.rtpTimestamp);
         const source = transport.getPresentedPlane ? transport.getPresentedPlane(view.id, frame.rtpTimestamp) : legacy && { image: legacy, kind: 'atlas', sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1), rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch };
         if (!source || source.rtpTimestamp !== frame.rtpTimestamp || source.layoutEpoch !== frame.layoutEpoch) throw new Error('Quality source no longer matches current painted RTP');
-        const scale = source.pixelsPerDip;
+        const scale = view.deviceScaleFactor * (view.mediaScale ?? 1);
         const image = document.createElement('canvas');
         // Layout width/height are already encoded pixels; apply no second DPR.
         image.width = view.width; image.height = view.height;

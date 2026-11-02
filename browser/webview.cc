@@ -53,6 +53,7 @@
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
 #include "third_party/blink/public/common/input/web_touch_event.h"
+#include "remotekit/endpoint/include/remotekit/touch_clock.hpp"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/ime/text_input_type.h"
@@ -639,6 +640,10 @@ void WebView::RenderFrameHostChanged(content::RenderFrameHost* old_frame,
 Status WebView::BuildTouchState(const TouchInput& input,
                                 std::map<std::uint32_t, TouchPoint>* next) const {
   *next = PointerTargetAlive() ? touches_ : std::map<std::uint32_t, TouchPoint>{};
+  for (const auto& sample : input.samples)
+    for (const auto& point : sample.points)
+      if (!next->contains(point.id) || !FloatFits(point.x) || !FloatFits(point.y))
+        return Fail(Error::invalid, "Invalid touch history contact");
   for (const auto& point : input.points) {
     if (!FloatFits(point.x) || !FloatFits(point.y))
       return Fail(Error::invalid, "Touch point outside Blink representation");
@@ -658,6 +663,21 @@ Status WebView::BuildTouchState(const TouchInput& input,
 }
 base::DictValue WebView::CompositorDiagnostics() const {
   base::DictValue result;
+  base::DictValue timing;
+  timing.Set("sourceGestures", static_cast<double>(touch_source_gestures_));
+  timing.Set("arrivalFallbackGestures", static_cast<double>(touch_fallback_gestures_));
+  timing.Set("clockRejected", static_cast<double>(touch_clock_rejected_));
+  timing.Set("cancelled", static_cast<double>(touch_cancelled_));
+  timing.Set("samples", static_cast<double>(touch_samples_));
+  timing.Set("lastDispatchWallMs", touch_last_dispatch_wall_ms_);
+  timing.Set("lastSourceAgeMs", touch_last_source_age_ms_);
+#if defined(REMOTEKIT_DEMO_HARNESS)
+  timing.Set("configuration", "current-platform");
+#else
+  timing.Set("configuration", "generic-desktop");
+  timing.Set("logicalPixelsPerInch", 96.0);
+#endif
+  result.Set("touchTiming", std::move(timing));
   if (offscreen_host_) result.Set("renderHost", offscreen_host_->Diagnostics());
   auto* native_view = RootView(contents_.get());
   if (!native_view)
@@ -770,13 +790,19 @@ Status WebView::EnsureTouchEmulator() {
     return Fail(Error::unavailable,
                 "Touch emulator already enabled by another owner; reload required");
   emulator->Enable(input::TouchEmulator::Mode::kInjectingTouchEvents,
+#if defined(REMOTEKIT_DEMO_HARNESS)
                    ui::GestureProviderConfigType::CURRENT_PLATFORM);
+#else
+                   ui::GestureProviderConfigType::GENERIC_DESKTOP);
+#endif
   touch_emulator_ = emulator->GetWeakPtr();
   touch_emulator_owned_ = true;
   return {};
 }
 
 void WebView::CancelTouches(bool deliver) {
+  if (!touches_.empty() || touch_hit_test_pending_) ++touch_cancelled_;
+  touch_clock_.reset();
   ++touch_epoch_;
   touch_hit_test_pending_ = false;
   // A second lifecycle notification must not cancel the drain's deadline or
@@ -876,7 +902,49 @@ void WebView::FinishTouchCleanup(std::uint64_t expected) {
   CancelTouches(false);
 }
 
+Status WebView::PrepareTouchClock(const TouchInput& touch) {
+  const bool first = touch.action == TouchInput::Action::start && touches_.empty();
+  const auto reject = [&]() {
+    ++touch_clock_rejected_;
+    CancelTouches(true);
+    return Fail(Error::invalid, "Invalid touch source clock; sequence cancelled");
+  };
+  if (first) {
+    touch_clock_.reset();
+    if (!touch.clock) { ++touch_fallback_gestures_; return {}; }
+    if (touch.clock->elapsed_us != 0) return reject();
+    touch_clock_ = touch.clock;
+    if (!touch.clock->source) { ++touch_fallback_gestures_; return {}; }
+    // Wall is consulted exactly once. Every subsequent event uses this fixed
+    // monotonic origin, including gestures spanning a system-wall adjustment.
+    const auto now = base::TimeTicks::Now();
+    const auto wall_us = (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
+    const auto age = TouchStartAgeUs(touch.clock->start_wall_us, wall_us);
+    if (!age) return reject();
+    touch_clock_origin_ = now - base::Microseconds(*age);
+    ++touch_source_gestures_;
+    return {};
+  }
+  if (touch_clock_.has_value() != touch.clock.has_value()) return reject();
+  if (!touch.clock) return {};
+  if (touch_clock_->sequence_id != touch.clock->sequence_id || touch_clock_->source != touch.clock->source ||
+      touch_clock_->start_wall_us != touch.clock->start_wall_us || touch.clock->elapsed_us < touch_clock_->elapsed_us)
+    return reject();
+  auto previous = touch_clock_->elapsed_us;
+  for (const auto& sample : touch.samples) {
+    if (sample.elapsed_us < previous) return reject();
+    previous = sample.elapsed_us;
+  }
+  if (!TouchElapsedValid(touch_clock_->elapsed_us, touch.clock->elapsed_us,
+                         (base::TimeTicks::Now() - touch_clock_origin_).InMicroseconds(), touch.clock->source))
+    return reject();
+  touch_clock_->elapsed_us = touch.clock->elapsed_us;
+  return {};
+}
+
 Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token) {
+  auto clock = PrepareTouchClock(touch);
+  if (!clock) return clock;
   if (touch.action == TouchInput::Action::start && touches_.empty()) {
     if (touch_pending_callbacks_)
       return Fail(Error::unavailable, "Previous touch sequence is still being acknowledged");
@@ -959,26 +1027,19 @@ Status WebView::SendTouchEvent(const blink::WebTouchEvent& event) {
   auto ready = EnsureTouchEmulator();
   if (!ready)
     return ready;
-  // No public result distinguishes native-stream exclusion from a synchronous
-  // browser-filtered ACK. Neither is a confirmed injection: fail conservatively
-  // and discard our contact model rather than retaining a fictitious contact.
-  auto completed_inline = std::make_shared<bool>(false);
+  // Canonical ACKs may be synchronous once native scrolling filters redundant
+  // renderer touch delivery. Only an explicit pre-routing rejection is failure;
+  // neither ACK timing nor routing acceptance says whether the page consumed it.
   const auto epoch = touch_ack_epoch_;
   ++touch_pending_callbacks_;
-  static_cast<content::TouchEmulatorImpl*>(touch_emulator_.get())
-      ->InjectTouchEvent(event, touch_target_view_.get(),
-                         base::BindOnce(
-                             [](base::WeakPtr<WebView> self, std::uint64_t expected,
-                                std::shared_ptr<bool> completed) {
-                               *completed = true;
-                               if (self)
-                                 self->OnTouchProcessed(expected);
-                             },
-                             weak_factory_.GetWeakPtr(), epoch, completed_inline));
-  if (*completed_inline) {
+  const bool routed = static_cast<content::TouchEmulatorImpl*>(touch_emulator_.get())
+      ->InjectTouchEventWithResult(event, touch_target_view_.get(),
+                         base::BindOnce(&WebView::OnTouchProcessed,
+                                        weak_factory_.GetWeakPtr(), epoch));
+  if (!routed) {
     CancelTouches(true);
     return Fail(Error::unavailable,
-                "Touch delivery unconfirmed: native touch or browser filtering");
+                "Touch dispatch rejected before routing: native stream or invalid sequence");
   }
   return {};
 }
@@ -996,8 +1057,28 @@ Status WebView::InjectTouches(const TouchInput& touch) {
   auto ready = EnsureTouchEmulator();
   if (!ready)
     return ready;
+  if (!touch.samples.empty()) {
+    TouchInput history = touch;
+    history.samples.clear();
+    for (const auto& sample : touch.samples) {
+      history.points = sample.points;
+      history.clock->elapsed_us = sample.elapsed_us;
+      auto status = InjectTouches(history);
+      if (!status) return status;
+    }
+    history.points = touch.points;
+    history.clock = touch.clock;
+    return InjectTouches(history);
+  }
   const auto emit = [&](Type type, std::optional<std::uint32_t> changed) -> Status {
-    blink::WebTouchEvent event(type, 0, base::TimeTicks::Now());
+    const auto now = base::TimeTicks::Now();
+    const auto sampled = touch.clock && touch.clock->source
+                             ? touch_clock_origin_ + base::Microseconds(touch.clock->elapsed_us)
+                             : now;
+    ++touch_samples_;
+    touch_last_dispatch_wall_ms_ = base::Time::Now().InMillisecondsFSinceUnixEpoch();
+    touch_last_source_age_ms_ = (now - sampled).InMillisecondsF();
+    blink::WebTouchEvent event(type, 0, sampled);
     event.dispatch_type = type == Type::kTouchCancel
                               ? blink::WebInputEvent::DispatchType::kEventNonBlocking
                               : blink::WebInputEvent::DispatchType::kBlocking;
@@ -1021,6 +1102,7 @@ Status WebView::InjectTouches(const TouchInput& touch) {
     return SendTouchEvent(event);
   };
   if (touch.action == TouchInput::Action::cancel) {
+    ++touch_cancelled_;
     // MotionEventWeb requires ALL contacts cancelled in a cancellation event.
     auto status = emit(Type::kTouchCancel, std::nullopt);
     touches_.clear();
@@ -1098,7 +1180,11 @@ Status WebView::DispatchInput(const InputEvent& input) {
     if (existing_emulator && existing_emulator->IsEnabled() &&
         (!touch_emulator_owned_ || touch_emulator_.get() != existing_emulator))
       return Fail(Error::busy, "Touch emulator belongs to another owner; reload may be required");
-    if (touch_pending_callbacks_ + touch->points.size() + 1 > 128 ||
+    std::size_t changed_points = touch->points.size();
+    for (const auto& sample : touch->samples) changed_points += sample.points.size();
+    if (changed_points > 64)
+      return Fail(Error::invalid, "Too many touch history contacts");
+    if (touch_pending_callbacks_ + changed_points + 1 > 128 ||
         (touch->action == TouchInput::Action::start && touches_.empty() &&
          touch_pending_callbacks_))
       return Fail(Error::busy, "Touch ACK queue busy; retry this input with the same sequence");

@@ -16,6 +16,12 @@ Control、Endpoint与Browser的职责分开：Control拥有产品关系与期望
 
 SQLite迁移保留旧Tab/WebView引用及token。旧匿名身份仍标为legacy，专用自动化使用隔离legacy会话；正常新用户通过注册/登录获得独立工作区。当前每用户单活跃Viewer，新连接接管旧连接，旧端停止媒体且不自动争夺。租约绑定token身份，注销/切换账号只撤销同token租约；旧token退出不踢另一个token的活跃Viewer。
 
+## 媒体连接
+
+Viewer在页面启动时预热并缓存接收能力探测，鉴权不等待探测完成。普通产品使用trickle ICE，offer不等待完整候选收集；Endpoint接受协商后异步返回answer和候选，Control按当前租约、连接及尝试标识转发。候选不排在等待answer的Tenant操作后面，其他Tenant也不等待这一协商；接管、退出或取消清除旧绑定。
+
+客户端记录offer、answer、ICE、DataChannel、首次解码与首次canvas绘制；首屏以首次绘制为准。Endpoint阶段使用自己的单调时钟，不将两个进程的时间戳直接相减。网络模拟使用原完整候选收集与relay路径，不能把普通产品trickle耗时套到该路径。
+
 ## 操作、对账与恢复
 
 每Tenant操作串行。Control先保存产品意图，再调用Endpoint，实际状态通过快照和WS更新；接受导航或恢复不等于页面已完成。周期对账只在值变化时配置页面，避免周期性打断输出和输入。

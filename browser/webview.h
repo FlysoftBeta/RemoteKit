@@ -127,6 +127,7 @@ class WebView final : public content::WebContentsObserver,
                      base::WeakPtr<content::RenderWidgetHostViewBase>,
                      std::optional<gfx::PointF>);
   Status InjectTouches(const TouchInput&);
+  Status PrepareTouchClock(const TouchInput&);
   Status SendTouchEvent(const blink::WebTouchEvent&);
   void OnTouchProcessed(std::uint64_t);
   void FinishTouchCleanup(std::uint64_t);
@@ -173,6 +174,10 @@ class WebView final : public content::WebContentsObserver,
   base::RepeatingTimer lifecycle_timer_;
   Completion completion_;
   std::map<std::uint32_t, TouchPoint> touches_;
+  std::optional<TouchInput::Clock> touch_clock_;
+  base::TimeTicks touch_clock_origin_;
+  std::uint64_t touch_source_gestures_{}, touch_fallback_gestures_{}, touch_clock_rejected_{}, touch_cancelled_{}, touch_samples_{};
+  double touch_last_dispatch_wall_ms_{}, touch_last_source_age_ms_{};
   // This is the WebContents' shared emulator, not an adapter-owned emulator.
   // Claim it only while disabled, and never change it while CDP is attached.
   base::WeakPtr<input::TouchEmulator> touch_emulator_;

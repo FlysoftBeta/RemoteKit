@@ -13,6 +13,13 @@ struct Fixture {
   }
 };
 int main() {
+  { // A codec-limited 29FPS request cannot be rounded back up to a 30FPS floor.
+    Fixture f;f.policy=Policy(true,29);f.policy.Reset(0,{});
+    Policy::Feedback sample;sample.seq=1;sample.age_ms=0;sample.visible=true;sample.display_hz=60;
+    f.policy.Step(500,{},sample);CHECK(f.policy.ceiling()==29 && f.policy.target()==29);
+    f.Window(1000,101);CHECK(f.policy.target()<=29);f.policy.Applied(f.policy.target());
+    for(int i=3;i<20;++i){f.Window(i*500);CHECK(f.policy.target()<=29 && f.policy.ceiling()<=29);f.policy.Applied(f.policy.target());}
+  }
   { // Tail publication IDs cannot create activity with the same capture identity.
     Fixture f;f.policy.Reset(0,{});
     for(int n=1;n<=10;++n) {

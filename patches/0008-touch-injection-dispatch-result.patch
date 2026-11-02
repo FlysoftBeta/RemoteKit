@@ -1,0 +1,138 @@
+diff --git a/content/browser/renderer_host/input/touch_emulator_impl.cc b/content/browser/renderer_host/input/touch_emulator_impl.cc
+index 9db810a30d..bf6bb6b71d 100644
+--- a/content/browser/renderer_host/input/touch_emulator_impl.cc
++++ b/content/browser/renderer_host/input/touch_emulator_impl.cc
+@@ -492,6 +492,13 @@ void TouchEmulatorImpl::InjectTouchEvent(
+     const blink::WebTouchEvent& event,
+     input::RenderWidgetHostViewInput* target_view,
+     base::OnceClosure callback) {
++  InjectTouchEventWithResult(event, target_view, std::move(callback));
++}
++
++bool TouchEmulatorImpl::InjectTouchEventWithResult(
++    const blink::WebTouchEvent& event,
++    input::RenderWidgetHostViewInput* target_view,
++    base::OnceClosure callback) {
+   CHECK(IsEnabled() && mode_ == Mode::kInjectingTouchEvents,
+         base::NotFatalUntil::M152);
+   // Injected touch events use the target root view's coordinate space, which
+@@ -499,9 +506,11 @@ void TouchEmulatorImpl::InjectTouchEvent(
+   touch_event_ = event;
+   injected_touch_completion_callbacks_.push(std::move(callback));
+   auto weak_this = weak_ptr_factory_.GetWeakPtr();
+-  if (HandleEmulatedTouchEvent(touch_event_, target_view) && weak_this) {
++  const bool rejected = HandleEmulatedTouchEvent(touch_event_, target_view);
++  if (rejected && weak_this) {
+     OnInjectedTouchCompleted();
+   }
++  return !rejected && weak_this;
+ }
+ 
+ void TouchEmulatorImpl::OnInjectedTouchCompleted() {
+diff --git a/content/browser/renderer_host/input/touch_emulator_impl.h b/content/browser/renderer_host/input/touch_emulator_impl.h
+index a295b34992..4b214bcf96 100644
+--- a/content/browser/renderer_host/input/touch_emulator_impl.h
++++ b/content/browser/renderer_host/input/touch_emulator_impl.h
+@@ -71,6 +71,13 @@ class CONTENT_EXPORT TouchEmulatorImpl : public input::TouchEmulator {
+   void InjectTouchEvent(const blink::WebTouchEvent& event,
+                         input::RenderWidgetHostViewInput* target_view,
+                         base::OnceClosure completion_callback);
++  // Returns true only if the event reached ForwardEmulatedTouchEvent. Its
++  // canonical ACK may complete synchronously; that timing does not imply a
++  // routing rejection or whether the page consumed the event.
++  bool InjectTouchEventWithResult(
++      const blink::WebTouchEvent& event,
++      input::RenderWidgetHostViewInput* target_view,
++      base::OnceClosure completion_callback);
+ 
+   // Cancel any touches, for example, when focus is lost.
+   void CancelTouch();
+diff --git a/content/browser/renderer_host/input/touch_emulator_impl_unittest.cc b/content/browser/renderer_host/input/touch_emulator_impl_unittest.cc
+index 06b1364b0c..8d1ac53006 100644
+--- a/content/browser/renderer_host/input/touch_emulator_impl_unittest.cc
++++ b/content/browser/renderer_host/input/touch_emulator_impl_unittest.cc
+@@ -9,6 +9,7 @@
+ #include <memory>
+ #include <vector>
+ 
++#include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/test/scoped_feature_list.h"
+ #include "base/test/task_environment.h"
+@@ -243,14 +244,20 @@ class TouchEmulatorTest : public testing::Test,
+     return true;
+   }
+ 
+-  void InjectTouchEvent(WebInputEvent::Type type,
+-                        WebTouchPoint::State state,
+-                        int x,
+-                        int y) {
++  bool InjectTouchEvent(WebInputEvent::Type type,
++                       WebTouchPoint::State state,
++                       int x,
++                       int y,
++                       bool* completed = nullptr) {
+     last_mouse_x_ = x;
+     last_mouse_y_ = y;
+     WebTouchEvent event = MakeTouchEvent(type, state, x, y);
+-    emulator()->InjectTouchEvent(event, nullptr, base::OnceClosure());
++    base::OnceClosure completion;
++    if (completed) {
++      completion = base::BindOnce([](bool* value) { *value = true; }, completed);
++    }
++    return emulator()->InjectTouchEventWithResult(event, nullptr,
++                                                  std::move(completion));
+   }
+ 
+   void AckOldestTouchEvent() {
+@@ -641,6 +648,50 @@ TEST_F(TouchEmulatorTest, InjectingTouchEventsMode) {
+   EXPECT_EQ("TouchEnd GestureScrollEnd", ExpectedEvents());
+ }
+ 
++TEST_F(TouchEmulatorTest, InjectionResultAcceptsSynchronousAck) {
++  emulator()->Enable(input::TouchEmulator::Mode::kInjectingTouchEvents,
++                     ui::GestureProviderConfigType::GENERIC_MOBILE);
++  bool completed = false;
++  EXPECT_TRUE(InjectTouchEvent(WebInputEvent::Type::kTouchStart,
++                             WebTouchPoint::State::kStatePressed, 100, 200, &completed));
++  EXPECT_TRUE(completed);
++  EXPECT_EQ("TouchStart GestureTapDown", ExpectedEvents());
++  completed = false;
++  EXPECT_TRUE(InjectTouchEvent(WebInputEvent::Type::kTouchMove,
++                             WebTouchPoint::State::kStateMoved, 200, 200, &completed));
++  EXPECT_TRUE(completed);
++  EXPECT_EQ("TouchMove GestureTapCancel GestureScrollBegin GestureScrollUpdate",
++            ExpectedEvents());
++  EXPECT_TRUE(InjectTouchEvent(WebInputEvent::Type::kTouchEnd,
++                             WebTouchPoint::State::kStateReleased, 200, 200));
++  EXPECT_EQ("TouchEnd GestureScrollEnd", ExpectedEvents());
++}
++
++TEST_F(TouchEmulatorTest, InjectionResultRejectsNativeStreamExclusion) {
++  emulator()->Enable(input::TouchEmulator::Mode::kInjectingTouchEvents,
++                     ui::GestureProviderConfigType::GENERIC_MOBILE);
++  EXPECT_TRUE(TouchStart(10, 10, true));
++  bool completed = false;
++  EXPECT_FALSE(InjectTouchEvent(WebInputEvent::Type::kTouchStart,
++                              WebTouchPoint::State::kStatePressed, 100, 200, &completed));
++  EXPECT_TRUE(completed);
++  EXPECT_EQ("", ExpectedEvents());
++  EXPECT_FALSE(InjectTouchEvent(WebInputEvent::Type::kTouchEnd,
++                              WebTouchPoint::State::kStateReleased, 100, 200));
++  EXPECT_EQ("", ExpectedEvents());
++  EXPECT_TRUE(TouchEnd(10, 10, true));
++}
++
++TEST_F(TouchEmulatorTest, InjectionResultRejectsMissingStart) {
++  emulator()->Enable(input::TouchEmulator::Mode::kInjectingTouchEvents,
++                     ui::GestureProviderConfigType::GENERIC_MOBILE);
++  bool completed = false;
++  EXPECT_FALSE(InjectTouchEvent(WebInputEvent::Type::kTouchMove,
++                              WebTouchPoint::State::kStateMoved, 100, 200, &completed));
++  EXPECT_TRUE(completed);
++  EXPECT_EQ("", ExpectedEvents());
++}
++
+ class TouchEmulatorCompensationTest : public TouchEmulatorTest {
+  public:
+   void SetUp() override {

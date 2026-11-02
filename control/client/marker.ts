@@ -32,7 +32,7 @@ export class MarkerMeasurement {
   private read(frameCallback: boolean, frame?: CanvasPresentation) {
     const video = this.video as HTMLVideoElement & { webkitDecodedFrameCount?: number };
     if (!frameCallback) { const count = video.webkitDecodedFrameCount ?? this.options.decodedFrames?.(); if (count === undefined || count === this.decodedFrames) return; this.decodedFrames = count; }
-    const surface = this.surface(); if (!surface || video.readyState < 2) return;
+    const surface = this.surface(); if (!surface || !this.options.planeSource && video.readyState < 2) return;
     const plane = this.options.planeSource?.(frame);
     if (this.options.planeSource && (!plane || !frame || plane.rtpTimestamp !== frame.rtpTimestamp || plane.layoutEpoch !== frame.layoutEpoch || plane.viewId !== frame.viewId)) return;
     const source = plane?.image ?? video;
@@ -44,7 +44,7 @@ export class MarkerMeasurement {
     this.readCount++; this.firstRead ??= observedAt; this.lastRead = observedAt;
     const context = this.canvas.getContext('2d', { willReadFrequently: true } as CanvasRenderingContext2DSettings)!;
     try {
-      const region = plane ? { x: plane.sourceRect.x, y: plane.sourceRect.y, width: MARKER_WIDTH * plane.pixelsPerDip, height: MARKER_HEIGHT * plane.pixelsPerDip } : markerSourceRect(surface, MARKER_WIDTH, MARKER_HEIGHT);
+      const region = plane ? { x: plane.sourceRect.x, y: plane.sourceRect.y, width: MARKER_WIDTH * plane.pixelsPerDip, height: MARKER_HEIGHT * (plane.pixelsPerDipY ?? plane.pixelsPerDip) } : markerSourceRect(surface, MARKER_WIDTH, MARKER_HEIGHT);
       let started = performance.now();
       context.drawImage(source, region.x, region.y, region.width, region.height, 0, 0, MARKER_WIDTH, MARKER_HEIGHT);
       this.options.recordCost?.('markerDraw', started, performance.now() - started); started = performance.now();

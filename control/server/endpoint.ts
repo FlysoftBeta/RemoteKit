@@ -2,13 +2,15 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 
-export interface Endpoint { request(method: string, tenantId: string, args?: Record<string, unknown>): Promise<any> }
+export interface RtcSignal { tenantId: string; connectionId: string; signal: { type: 'answer'; sdp: string } | { type: 'ice'; candidate: { candidate: string; sdpMid: string; sdpMLineIndex: number } } | { type: 'complete' } | { type: 'error'; message: string } }
+export interface Endpoint { request(method: string, tenantId: string, args?: Record<string, unknown>): Promise<any>; onSignal?(listener: (event: RtcSignal) => void): () => void }
 export class EndpointProcess extends EventEmitter implements Endpoint {
   private child?: ChildProcessWithoutNullStreams;
   private pending = new Map<string, { resolve: (value: any) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private stopped = false;
   private retry?: NodeJS.Timeout;
   constructor(private command: string, private args: string[] = [], private diagnosticLoopback = false) { super(); }
+  onSignal(listener: (event: RtcSignal) => void) { this.on('rtc.signal', listener); return () => this.off('rtc.signal', listener); }
   start() {
     if (this.child || this.stopped) return;
     const child = spawn(this.command, this.args, { windowsHide: true, stdio: 'pipe', env: this.diagnosticLoopback ? { ...process.env, REMOTEKIT_RTC_LOOPBACK_TEST: '1' } : undefined });
@@ -23,7 +25,9 @@ export class EndpointProcess extends EventEmitter implements Endpoint {
       while ((end = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
         try {
-          const response = JSON.parse(line); const entry = this.pending.get(response.id);
+          const response = JSON.parse(line);
+          if (response.event === 'rtc.signal') { this.emit('rtc.signal', response); continue; }
+          const entry = this.pending.get(response.id);
           if (!entry) continue;
           clearTimeout(entry.timer); this.pending.delete(response.id);
           if (response.ok) entry.resolve(response.result);

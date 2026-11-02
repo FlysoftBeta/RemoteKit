@@ -63,6 +63,8 @@ export function createHttp(control: Control, options: { origins: string[]; clien
   const send = (ws: WebSocket, message: unknown) => { if (ws.readyState === WebSocket.OPEN) { if (ws.bufferedAmount > 2 * 1024 * 1024) ws.terminate(); else ws.send(JSON.stringify(message)); } };
   const push = (tenant: string, state: ProductState) => { for (const [ws, peer] of peers) if (peer.tenant === tenant) send(ws, { type: 'state', revision: state.workspace.revision, state }); };
   control.on('state', push);
+  const signal = (tenant: string, lease: string, message: unknown) => { for (const [ws, peer] of peers) if (peer.tenant === tenant && peer.lease === lease) send(ws, message); };
+  control.on('rtc.signal', signal);
   server.on('upgrade', (req, socket, head) => {
     try {
       if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/api/socket') throw new ApiError(404, '接口不存在'); checkOrigin(req);

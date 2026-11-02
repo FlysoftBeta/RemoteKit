@@ -56,6 +56,22 @@ Sleep降级不重复嵌套；修正版out/rel增量chrome已编译通过，待A/
 填写 SHA-256，并用 `tools/patchset.py` 管理检查、应用和逆序撤回。
 Chromium overlay `//remotekit` 由 `tools/chromium.py` 维护，不属于 tracked patch。
 
+`0008-touch-injection-dispatch-result.patch` 保留 TouchEmulatorImpl 原有void
+InjectTouchEvent，增加兼容的bool InjectTouchEventWithResult。返回值仅表示事件
+经官方ForwardEmulatedTouchEvent接受派发；原生流排他、无有效start或gesture
+provider拒绝仍返回false。canonical ACK可能同步到达，完成时机不能视为失败，
+派发接受也不等于页面消费。补丁不改变touch-action、preventDefault、gesture策略
+或ACK路由；含同步ACK、native排他与缺失start的官方unit分支测试。
+
+`0009-headless-fling-physical-metrics.patch` 使FlingScheduler在服务内部marker
+`remotekit-service-input`下固定使用官方kDefaultPixelsPerInch(96)逻辑PPI，
+不读取宿主物理屏幕PPI。marker由服务构建自动附加，非UI或可调数值设置；
+native demo不附加marker，Windows正常物理PPI保持原值，仅无效轴回退96。
+这避免离屏Screen缺物理尺寸时默认惯性曲线使用0 PPI，也使服务输入不随主机
+监视器变化；不把96改写页面DPR、不全局关闭新曲线。配套服务WebView选固定
+GENERIC_DESKTOP触摸配置，demo仍CURRENT_PLATFORM。含服务固定逻辑PPI、
+正常物理PPI保留、逐轴零/负值及NaN/Inf回退的官方unit用例。
+
 新补丁可用正式工具生成，例如：
 
 ```

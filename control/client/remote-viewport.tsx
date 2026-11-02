@@ -3,6 +3,7 @@ import { Button } from "@mui/material";
 import { RemoteTransport } from "./transport";
 import { keyIdentity, mouseButtonModifiers } from "./keys";
 import { StatsOverlay } from "./stats-overlay";
+import { TouchInput, pointerSampleTime, mergeTouchMoves, type TouchPacket } from "./touch-input";
 import {
   clientPointToDip,
   pointerPointToDip,
@@ -49,7 +50,7 @@ export function RemoteViewport({
     y: number;
   } | null>(null);
   const heldKeys = useRef(new Map<string, Record<string, unknown>>());
-  const touches = useRef(new Map<number, { x: number; y: number }>());
+  const touches = useRef(new TouchInput());
   const surface = transport.layout?.views.find((view) => view.id === viewId);
   const layoutEpoch = transport.layout?.epoch,
     layoutGeneration = transport.layout?.generation;
@@ -67,7 +68,13 @@ export function RemoteViewport({
     );
   }, [transport, surface, layoutEpoch, layoutGeneration]);
   const send = (event: Record<string, unknown>) => {
-    if (surface && frameReady) transport.sendInput(surface, event);
+    return !!(surface && (frameReady || event.type === 'touch' && event.action === 'cancel') && transport.sendInput(surface, event));
+  };
+  const cancelTouches = () => {
+    const ids = touches.current.contactIds;
+    const cancelled = touches.current.cancel();
+    if (cancelled) send(cancelled);
+    for (const id of ids) if (canvas.current?.hasPointerCapture(id)) canvas.current.releasePointerCapture(id);
   };
   const releaseInput = () => {
     for (const event of heldKeys.current.values())
@@ -88,16 +95,7 @@ export function RemoteViewport({
         canvas.current.releasePointerCapture(held.pointerId);
       mouseCapture.current = null;
     }
-    for (const [id, point] of touches.current) {
-      send({
-        type: "touch",
-        action: "cancel",
-        points: [{ id, ...point, pressure: 0 }],
-      });
-      if (canvas.current?.hasPointerCapture(id))
-        canvas.current.releasePointerCapture(id);
-    }
-    touches.current.clear();
+    cancelTouches();
     if (composing.current) {
       send({ type: "ime_commit", text: editor.current?.value ?? "" });
       composing.current = false;
@@ -107,6 +105,8 @@ export function RemoteViewport({
   };
   const releaseRef = useRef(releaseInput);
   releaseRef.current = releaseInput;
+  const cancelRef = useRef(cancelTouches); cancelRef.current = cancelTouches;
+  useEffect(() => { cancelRef.current(); }, [layoutEpoch, layoutGeneration, surface?.instance, surface?.document]);
   useEffect(() => {
     const blur = () => releaseRef.current();
     window.addEventListener("blur", blur);
@@ -138,6 +138,7 @@ export function RemoteViewport({
     action: PointerAction,
   ) => {
     const captured = event.currentTarget.hasPointerCapture(event.pointerId);
+    if (event.pointerType === "touch" && action === "cancel") { cancelTouches(); return; }
     const identity = `${surface?.session}:${surface?.id}:${surface?.instance}:${surface?.document}:${layoutGeneration}:${layoutEpoch}`;
     const pressed =
       mouseCapture.current?.pointerId === event.pointerId &&
@@ -151,6 +152,7 @@ export function RemoteViewport({
         mouseCapture.current = null;
     };
     if (!surface || !frameReady) {
+      if (event.pointerType === "touch") cancelTouches();
       release();
       return;
     }
@@ -162,7 +164,7 @@ export function RemoteViewport({
         transport.selectedViewId = viewId;
         onFocus?.();
         editor.current?.focus({ preventScroll: true });
-        transport.focus(surface, true);
+        transport.ensureInputFocus(surface);
         event.currentTarget.setPointerCapture(event.pointerId);
         if (event.pointerType !== "touch")
           mouseCapture.current = {
@@ -177,23 +179,24 @@ export function RemoteViewport({
         pressed.y = position.y;
       }
       if (event.pointerType === "touch") {
-        if (action === "down" || action === "move")
-          touches.current.set(event.pointerId, position);
-        else touches.current.delete(event.pointerId);
-        send({
-          type: "touch",
-          action: (
-            {
-              down: "start",
-              up: "end",
-              move: "move",
-              cancel: "cancel",
-            } as Record<string, string>
-          )[action],
-          points: [
-            { id: event.pointerId, ...position, pressure: event.pressure },
-          ],
-        });
+        const touchIdentity = transport.inputIdentity(surface);
+        if (!touches.current.matches(touchIdentity)) { cancelTouches(); release(); return; }
+        const now = performance.now(), native = event.nativeEvent;
+        const history = action === "move" && typeof native.getCoalescedEvents === "function" ? native.getCoalescedEvents() : [];
+        const samples = [...history.slice(-32), native];
+        let packet: TouchPacket | undefined, previousTime = -Infinity;
+        for (const sample of samples) {
+          const at = pointerSampleTime(sample.timeStamp, now, performance.timeOrigin);
+          if (at === undefined) { cancelTouches(); release(); return; }
+          if (at <= previousTime) continue;
+          previousTime = at;
+          const p = point(sample, action, captured || action === "down");
+          if (!p) continue;
+          const next = touches.current.sample(touchIdentity, action === "down" ? "start" : action === "up" ? "end" : "move", { id: event.pointerId, ...p, pressure: sample.pressure }, at, action === "down" ? transport.touchStartWall(at) : undefined);
+          if (next) packet = packet ? mergeTouchMoves(packet, next) ?? next : next;
+          else if (touches.current.contactIds.length) { cancelTouches(); release(); return; }
+        }
+        if (packet && !send(packet)) cancelTouches();
       } else if (action !== "cancel" || pressed)
         send({
           type: "mouse",
@@ -250,6 +253,7 @@ export function RemoteViewport({
         onPointerMove={(event) => pointer(event, "move")}
         onPointerUp={(event) => pointer(event, "up")}
         onPointerCancel={(event) => pointer(event, "cancel")}
+        onLostPointerCapture={(event) => { if (event.pointerType === "touch" && touches.current.contactIds.includes(event.pointerId)) cancelTouches(); }}
         onPointerLeave={(event) => {
           if (event.pointerType !== "touch") pointer(event, "leave");
         }}

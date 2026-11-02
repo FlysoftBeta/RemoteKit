@@ -36,6 +36,16 @@
       "id": "capture-to-atlas",
       "path": "0007-capture-to-atlas.patch",
       "sha256": "123f00fe254e66fa27223a6783798a9c023ab2a559922f89ddb3db2f07e57144"
+    },
+    {
+      "id": "touch-injection-dispatch-result",
+      "path": "0008-touch-injection-dispatch-result.patch",
+      "sha256": "9b339df08086930cf7773bd99245f0ae291ed4ab33a78622de5ba02063d69a92"
+    },
+    {
+      "id": "headless-fling-physical-metrics",
+      "path": "0009-headless-fling-physical-metrics.patch",
+      "sha256": "21d00764d6710cba498c76ee5d909fec6e56762a08cbda7fe3859da3c4610bd5"
     }
   ]
 }

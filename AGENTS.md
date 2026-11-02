@@ -23,6 +23,7 @@
 - Endpoint用独立CMake/Ninja，Mojo/libwebrtc纳入SDK边界；跨DLL不传C++ STL/libc++/Abseil/Chromium对象。oneVPL异步H264与NVENC均在范围内，音频本轮不做。旧内置demo仅由显式构建目标包含。
 - 实际GPU Fence保护读写与复用；CPU发布位、提交返回或持有HANDLE不能假装完成。browser↔endpoint正常帧不增加逐帧ready/present/release消息；Chromium内部IPC和Endpoint↔Client媒体元数据是不同边界。
 - 保留Views/Aura功能适配是允许的；服务渲染目标为离屏，不需要本地屏幕Present。不要把无页面HWND说成整个Chromium进程零HWND。
+- 服务串流与输入的关键参数尽量独立于宿主系统设置，避免服务器显示器、DPI、刷新率或RDP改变行为；客户端DPR/刷新能力和产品媒体策略仍作为适配输入。具体固定值与实现方式放正式架构文档，不固化为用户要求。
 - 保留Chrome89支持。性能环境为UHD630、RTT10ms、24–48Mbps；用户把重载目标从4调到3，再允许2租户，接受新版Chromium模拟刷新验收。目标实际动态canvas≥50FPS、Pixel marker p95≤100ms；静态低FPS正常。
 - 用户要求单次idle尾IDR、显示/网络自适应FPS、背压、高码率换编码速度、高精度计时，以及>300ms延迟时分辨率/DPR适配。受控实验关闭自动调节，使用独立无交互测试页和下放配置；保留细粒度GPU/延迟profile，淘汰无效旋钮并集中归档。
 

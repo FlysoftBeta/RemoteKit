@@ -14,6 +14,8 @@ export interface PresentedPlaneSource {
   encodedWidth: number;
   encodedHeight: number;
   pixelsPerDip: number;
+  /** Present only when the displayed ROI's vertical scale differs from its horizontal scale. */
+  pixelsPerDipY?: number;
 }
 export type PresentationMode = 'snapshot' | 'single-plane-direct';
 

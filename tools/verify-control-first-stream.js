@@ -17,7 +17,7 @@ async (hostPage) => {
       const view = t.layout?.views[0], frame = view && t.getLastPresentation(view.id);
       const legacy = !t.getPresentedPlane && frame && t.getPaintedFrame(view.id, frame.rtpTimestamp);
       const source = frame && (t.getPresentedPlane ? t.getPresentedPlane(view.id, frame.rtpTimestamp) : legacy && { image: legacy, sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1), rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch });
-      if (source && source.rtpTimestamp === frame.rtpTimestamp && source.layoutEpoch === frame.layoutEpoch) { const scale = source.pixelsPerDip; ctx.drawImage(source.image, source.sourceRect.x, source.sourceRect.y, 256 * scale, 112 * scale, 0, 0, 256, 112); const marker = decodeMarker(ctx.getImageData(0, 0, 256, 112)); if (marker && (expected === null || marker.stimulus === expected)) return marker; }
+      if (source && source.rtpTimestamp === frame.rtpTimestamp && source.layoutEpoch === frame.layoutEpoch) { const scale = source.pixelsPerDip; ctx.drawImage(source.image, source.sourceRect.x, source.sourceRect.y, 256 * scale, 112 * (source.pixelsPerDipY ?? scale), 0, 0, 256, 112); const marker = decodeMarker(ctx.getImageData(0, 0, 256, 112)); if (marker && (expected === null || marker.stimulus === expected)) return marker; }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
     return null;

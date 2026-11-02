@@ -60,15 +60,61 @@ test('only the verified desktop Chrome build defaults to 4.2 and saved choices t
   assert.equal(chooseReceiveProfile(ua.replace('Chrome/89.0.4389.90', 'Chrome/157.0.0.0'), 'chrome89-h264-51'), 'native');
 });
 import { selectProductReceiveProfile } from '../client/receive-profile';
-test('product level4.2 requires real decoder and matching RTP codec capability', async () => {
+test('product prefers decoder-probed level5.2 and falls back to verified level4.2', async () => {
   const codecs = [{ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' }];
-  let count = 0;
-  const supported = async (config: { codec: string; codedWidth: number; codedHeight: number }) => { count++; assert.deepEqual(config, { codec: 'avc1.42e02a', codedWidth: 1936, codedHeight: 1088 }); return { supported: true }; };
+  const probed: string[] = [];
+  const supported = async (config: { codec: string; codedWidth: number; codedHeight: number }) => { probed.push(config.codec); return { supported: config.codec === 'avc1.42e02a' }; };
   assert.equal((await selectProductReceiveProfile('Chrome/157.0', codecs, supported)).profile, 'h264-level42-experimental');
+  assert.deepEqual(probed, ['avc1.42e034', 'avc1.42e033', 'avc1.42e02a']);
+  assert.equal((await selectProductReceiveProfile('Chrome/157.0', codecs, async config => { assert.deepEqual(config, { codec: 'avc1.42e034', codedWidth: 3856, codedHeight: 2176 }); return { supported: true }; })).profile, 'h264-level52');
   assert.equal((await selectProductReceiveProfile('Chrome/157.0', [], supported)).profile, 'native');
   assert.equal((await selectProductReceiveProfile('Chrome/157.0', codecs, undefined)).profile, 'native');
   assert.equal((await selectProductReceiveProfile('Chrome/157.0', codecs, async () => ({ supported: false }))).profile, 'native');
   assert.match((await selectProductReceiveProfile('Chrome/157.0', codecs, async () => { throw new Error('unsupported'); })).reason, /failed/);
-  assert.equal((await selectProductReceiveProfile('Chrome/89.0.4389.90', codecs, supported)).profile, 'chrome89-h264-42');
-  assert.equal(count, 1);
+  assert.equal((await selectProductReceiveProfile('HeadlessChrome/89.0.4389.90', codecs, supported)).profile, 'chrome89-h264-42');
+  assert.equal(probed.length, 3);
+});
+test('level5.2 rewrites only validated H264 mode1 payloads', () => {
+  const codecs = [{ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' }];
+  const offer = 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 108\r\na=rtpmap:108 H264/90000\r\na=fmtp:108 packetization-mode=1;profile-level-id=42e01f\r\n';
+  assert.match(configureReceiveOffer(offer, 'h264-level52', 'Chrome/157.0', codecs).sdp, /profile-level-id=42e034/);
+  assert.throws(() => configureReceiveOffer(offer, 'h264-level52', 'Chrome/157.0', []), /支持 H.264/);
+});
+
+test('level5.1 can be chosen by positive decoder evidence when level5.2 is unavailable', async () => {
+  const codecs = [{ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' }];
+  const selection = await selectProductReceiveProfile('Chrome/157.0', codecs, async configuration => ({ supported: configuration.codec === 'avc1.42e033' }));
+  assert.equal(selection.profile, 'h264-level51'); assert.match(selection.reason, /29fps/);
+  const offer = 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 108\r\na=rtpmap:108 H264/90000\r\na=fmtp:108 packetization-mode=1;profile-level-id=42e01f\r\n';
+  assert.match(configureReceiveOffer(offer, selection.profile, 'Chrome/157.0', codecs).sdp, /profile-level-id=42e033/);
+});
+
+test('without WebCodecs, MediaCapabilities probes legal WebRTC H264 configurations before native fallback', async t => {
+  const old = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const requests: MediaDecodingConfiguration[] = [];
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaCapabilities: { decodingInfo: async (configuration: MediaDecodingConfiguration) => {
+    requests.push(configuration); assert.equal(configuration.type, 'webrtc');
+    assert.match(configuration.video!.contentType, /^video\/H264;level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e0/);
+    assert.equal(configuration.video!.framerate, configuration.video!.contentType.endsWith('42e033') ? 29 : 60);
+    return { supported: configuration.video!.contentType.endsWith('42e02a') };
+  } } } });
+  t.after(() => { if (old) Object.defineProperty(globalThis, 'navigator', old); else Reflect.deleteProperty(globalThis, 'navigator'); });
+  const codecs = [{ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' }];
+  const result = await selectProductReceiveProfile('Version/17 Safari/605.1.15', codecs, undefined);
+  assert.equal(result.profile, 'h264-level42-experimental'); assert.match(result.reason, /MediaCapabilities WebRTC/);
+  assert.deepEqual(requests.map(request => [request.video!.width, request.video!.height]), [[3856, 2176], [3856, 2176], [1936, 1088]]);
+});
+
+test('production capability probes run in parallel and share page-local in-flight and completed results', async t => {
+  const old = Object.getOwnPropertyDescriptor(globalThis, 'VideoDecoder');
+  const pending: { configuration: { codec: string }; resolve: (value: { supported: boolean }) => void }[] = [];
+  Object.defineProperty(globalThis, 'VideoDecoder', { configurable: true, value: { isConfigSupported: (configuration: { codec: string }) => new Promise(resolve => pending.push({ configuration, resolve })) } });
+  t.after(() => { if (old) Object.defineProperty(globalThis, 'VideoDecoder', old); else Reflect.deleteProperty(globalThis, 'VideoDecoder'); });
+  const codecs = [{ mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' }];
+  const first = selectProductReceiveProfile('cache-test/1', codecs), second = selectProductReceiveProfile('cache-test/1', codecs);
+  await Promise.resolve(); assert.equal(pending.length, 3);
+  pending.forEach(work => work.resolve({ supported: work.configuration.codec.endsWith('2a') }));
+  assert.equal((await first).profile, 'h264-level42-experimental'); assert.equal((await second).profile, 'h264-level42-experimental');
+  assert.equal((await selectProductReceiveProfile('cache-test/1', codecs)).profile, 'h264-level42-experimental');
+  assert.equal(pending.length, 3); assert.ok((await first).probeDurationMs! >= 0);
 });

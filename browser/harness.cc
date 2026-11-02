@@ -1121,6 +1121,41 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         touch.action = TouchInput::Action::cancel;
       else
         return error("invalid_touch_action");
+      if (const auto* mode = event->FindString("clockMode")) {
+        const auto* sequence = event->FindString("sequenceId");
+        const auto elapsed = Number(*event, "sampleElapsedUs");
+        const auto wall = Number(*event, "startServerWallUs");
+        if (!sequence || sequence->empty() || sequence->size() > 128 || !elapsed ||
+            *elapsed < 0 || *elapsed > 86400000000.0 || std::floor(*elapsed) != *elapsed ||
+            (*mode != "source" && *mode != "arrival-fallback") ||
+            (*mode == "source" && (!wall || *wall <= 0 || *wall > 9007199254740991.0 || std::floor(*wall) != *wall)) ||
+            (*mode == "arrival-fallback" && wall))
+          return error("invalid_touch_clock");
+        touch.clock = TouchInput::Clock{*sequence, *mode == "source", static_cast<int64_t>(*elapsed),
+                                       wall ? static_cast<int64_t>(*wall) : 0};
+      } else if (event->contains("sequenceId") || event->contains("sampleElapsedUs") || event->contains("startServerWallUs"))
+        return error("incomplete_touch_clock");
+      if (const auto* samples = event->FindList("samples")) {
+        if (!touch.clock || touch.action != TouchInput::Action::move || samples->size() > 32)
+          return error("invalid_touch_samples");
+        for (const auto& sample : *samples) {
+          const auto* dict = sample.GetIfDict();
+          const auto elapsed = dict ? Number(*dict, "sampleElapsedUs") : std::nullopt;
+          const auto* changed = dict ? dict->FindList("points") : nullptr;
+          if (!elapsed || *elapsed < 0 || *elapsed > touch.clock->elapsed_us || std::floor(*elapsed) != *elapsed || !changed || changed->empty() || changed->size() > 16)
+            return error("invalid_touch_sample");
+          TouchInput::Sample value{static_cast<int64_t>(*elapsed), {}};
+          for (const auto& point : *changed) {
+            const auto* point_dict = point.GetIfDict();
+            if (!point_dict) return error("invalid_touch_sample_point");
+            const auto contact_id = point_dict->FindInt("id");
+            const auto x = Number(*point_dict, "x"), y = Number(*point_dict, "y"), pressure = Number(*point_dict, "pressure");
+            if (!contact_id || *contact_id < 0 || !x || !y || !pressure) return error("invalid_touch_sample_point");
+            value.points.push_back({static_cast<uint32_t>(*contact_id), *x, *y, *pressure});
+          }
+          touch.samples.push_back(std::move(value));
+        }
+      }
       for (const auto& point : *points) {
         const auto* dict = point.GetIfDict();
         if (!dict)

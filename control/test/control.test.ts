@@ -90,6 +90,7 @@ test('HTTP cookie isolation, origin checks and offer/ICE tenant binding', async 
     const answer = await (await post(a.cookie, '/api/rtc/offer', { type: 'offer', sdp: 'v=0\r\n' })).json() as any;
     assert.equal(answer.type, 'answer'); assert.equal(endpoint.calls.find(call => call.method === 'rtc.offer')?.tenant, a.state.tenantId);
     assert.equal((await post(b.cookie, '/api/rtc/ice', { connectionId: answer.connectionId, candidate: {} })).status, 403);
-    assert.equal((await post(a.cookie, '/api/rtc/ice', { connectionId: answer.connectionId, candidate: {} })).status, 200);
+    assert.equal((await post(a.cookie, '/api/rtc/ice', { connectionId: answer.connectionId, candidate: {} })).status, 400);
+    assert.equal((await post(a.cookie, '/api/rtc/ice', { connectionId: answer.connectionId, candidate: { candidate: 'candidate:1 1 udp 1 127.0.0.1 9999 typ host', sdpMid: '0', sdpMLineIndex: 0 } })).status, 200);
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); store.db.close(); }
 });

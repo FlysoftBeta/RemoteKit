@@ -2,11 +2,13 @@ import type {
   ProductState,
   SocketMessage,
   SocketMethods,
+  RtcServerSignal,
 } from "../shared/product";
 
 export type ConnectionStatus =
   "connecting" | "online" | "reconnecting" | "failed" | "revoked" | "expired";
 export class ControlConnection {
+  readonly lifecycle: { startedAt: number; marks: Record<string, number>; error?: string }[] = [];
   private socket?: WebSocket;
   private stopped = false;
   private attempts = 0;
@@ -23,6 +25,7 @@ export class ControlConnection {
   constructor(
     private state: (state: ProductState) => void,
     private status: (status: ConnectionStatus) => void,
+    private signal: (signal: RtcServerSignal) => void = () => {},
   ) {}
   connect() {
     if (
@@ -32,10 +35,14 @@ export class ControlConnection {
     )
       return;
     this.status(this.attempts ? "reconnecting" : "connecting");
+    const trace = { startedAt: performance.now(), marks: {} as Record<string, number>, error: undefined as string | undefined };
+    this.lifecycle.push(trace); if (this.lifecycle.length > 4) this.lifecycle.shift();
+    const mark = (name: string) => { if (trace.marks[name] === undefined) trace.marks[name] = performance.now() - trace.startedAt; };
     const ws = new WebSocket(
       `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/api/socket`,
     );
     this.socket = ws;
+    ws.onopen = () => mark('open');
     ws.onmessage = (event) => {
       if (ws !== this.socket || this.stopped) return;
       let message: SocketMessage;
@@ -44,7 +51,10 @@ export class ControlConnection {
       } catch {
         return;
       }
-      if (message.type === "state") {
+      if (message.type === 'rtc.signal') {
+        this.signal(message);
+      } else if (message.type === "state") {
+        mark('firstState');
         this.attempts = 0;
         this.status("online");
         this.state(message.state);
@@ -67,6 +77,7 @@ export class ControlConnection {
     };
     ws.onclose = (event) => {
       if (ws !== this.socket) return;
+      mark('closed'); trace.error = `${event.code}`;
       this.socket = undefined;
       this.rejectPending();
       if (this.stopped) return;

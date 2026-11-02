@@ -55,6 +55,14 @@ modifiers 使用 Blink WebInputEvent 位：Shift=1、Ctrl=2、Alt=4、Meta=8；�
 
 `touch` 携带 action(start/move/end/cancel) 和 points，每点包括 id/x/y/pressure。points 是本次改变的 contacts，最多16点。adapter 使用官方 TouchEmulator、首次 start 的异步 OOPIF hit-test 与最终 ACK，生成滚动/缩放 gesture。解析目标或取消收尾期间，所有输入在 AcceptInput 前返回 busy(code=6)；SDK helper 映射为 BUSY(8)，可在原 token/sequence 下有界重试，token 变化则丢弃。受理后的异步失败不允许重放，读取 snapshot 的 touch 状态。CDP 附加期间远程 touch 拒绝，native/injected touch 按官方规则互斥。
 
+Viewer touch 另携带 `sequenceId`、`clockMode`（`source` / `arrival-fallback`）、`sampleElapsedUs`；source模式还携带整条手势固定的 `startServerWallUs`。首down将PointerEvent.timeStamp规范化到客户端performance单调轴，以clock.ping校准的offset减uncertainty得到保守服务端wall起点；Browser仅在首down配对NowWall/NowTicks，后续严格按源采样elapsed推进，不逐包按抵达时间重锚。首down允许最多5秒年龄和1ms未来误差，elapsed非负、单调、最多24小时；同手势的时钟模式、sequenceId和起点不能变更，失效会取消已有序列。校准缺失/过期时整手势显式arrival-fallback并统计，不中途切换时钟。旧无clock协议继续兼容。
+
+move可另带最多32条 `samples:[{sampleElapsedUs,points}]` 历史，顶层points/elapsed是最后采样；历史保序且不晚于顶层，一批累计改变触点最多64个。Viewer feature-detect getCoalescedEvents，Chrome89缺失时仍支持单采样；相邻move批量保留最近采样轨迹和最后位置，不跨start/end/cancel、手势或目标身份合并。失焦、lostpointercapture和pointercancel发送一次整序列cancel；触控序列绑定连接、Session、view、instance、document、focus及输出/layout身份。终止包可有界排队等待匹配画面，真正发送仍遵守现有旧epoch输入门禁。背压队列为终止事件保留容量。
+
+Endpoint生产输入队列对明确 `ok=false,code=6` 的受理前busy，以同一Browser sequence串行重试，5ms间隔、最多50次/250ms预算；peer/epoch改变立即停止，不重放受理后的异步结果。服务端stats提供inputBusyRetries/inputBusyExhausted；Browser compositor diagnostics的touchTiming区分source/fallback手势、时钟拒绝、取消、采样数、dispatch wall及源采样年龄。此路径仍由Chromium决定网页touch-action/preventDefault、OOPIF目标和原生滚动/惯性，源采样时钟贯通不等于全部gesture移至客户端。
+
+派发接受与页面消费分开：TouchEmulator兼容扩展返回值仅确认到达官方ForwardEmulatedTouchEvent，canonical ACK同步完成也可能是正常滚动优化，不能据此取消序列。原生流排他和无效序列仍拒绝。服务构建自动附加内部marker，FlingScheduler固定使用官方96逻辑PPI，TouchEmulator使用固定GENERIC_DESKTOP配置，不读取宿主显示器PPI或平台touch偏好；没有新增UI或调节参数。页面DPR仍由Client Scale/资源策略控制，刷新仍由Client及媒体策略控制，96不改写DPR。显式native demo不附加marker，保持CURRENT_PLATFORM与正常真实物理PPI（无效轴仍安全回退96）。官方injecting模式既有longpress/showpress timeout禁用不因源时钟贯通而成为完整长按实现，本轮未扩展该策略。
+
 重复序号、旧文档/实例/焦点 token、跨 Session 的 view 都被拒绝。失焦、生命周期转换或执行实例失效后应先获取新状态。
 
 Fence client 的 input 另外携带 output_generation，必须匹配当前输出；focus 可携带 instance/document，避免旧点击聚焦新文档。没有这些可选字段的手工管理命令仍按逻辑 WebView 操作。

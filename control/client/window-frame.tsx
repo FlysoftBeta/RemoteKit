@@ -238,13 +238,13 @@ export function WindowFrame({
                 }}
               >
                 {tab.loading ? (
-                  <CircularProgress size={13} />
+                  <CircularProgress className="tab-loading-indicator" size={13} />
                 ) : tab.residency && tab.residency !== "live" ? (
                   <BedtimeOutlined fontSize="inherit" />
                 ) : (
                   <Language fontSize="inherit" />
                 )}
-                <span>{tab.title || "新标签页"}{state.pageDialogs?.some(d => d.tabId === tab.id) && <span aria-label="页面等待处理对话框"> ●</span>}</span>
+                <span className="tab-title">{tab.title || "新标签页"}{state.pageDialogs?.some(d => d.tabId === tab.id) && <span aria-label="页面等待处理对话框"> ●</span>}</span>
               </button>
               <IconButton
                 className="tab-close"

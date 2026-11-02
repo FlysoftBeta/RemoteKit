@@ -23,9 +23,19 @@ function setup(options = {}) {
     },
   };
   const reader = new BenchmarkMarkerReadback({ api, ...options });
-  return { reader, captures, bitmaps, timers, get worker() { return worker; }, setCapture(fn: any) { capture = fn; } };
+  return { reader, api, captures, bitmaps, timers, get worker() { return worker; }, setCapture(fn: any) { capture = fn; } };
 }
 const rect = { x: 0, y: 0, width: 256, height: 112 };
+
+test('fractional displayed ROI is normalized in the paint stack before taking its immutable bitmap',async()=>{
+  const s=setup(),draws:any[]=[];let normalized:any;
+  s.api.OffscreenCanvas=class {width:number;height:number;constructor(width:number,height:number){this.width=width;this.height=height;normalized=this;}getContext(){return {drawImage:(...args:any[])=>draws.push(args)}}};
+  await s.reader.start();const image={},roi={x:40,y:20,width:256.5,height:118.75},identity={rtp:17,epoch:'2'};
+  const job=s.reader.submit(image,roi,identity);
+  assert.deepEqual(draws,[[image,40,20,256.5,118.75,0,0,256,112]]);assert.deepEqual(s.captures,[[normalized]]);
+  await Promise.resolve();const sent=s.worker.sent[0];s.worker.onmessage({data:{id:sent.id,marker:{frameId:3},bitmapClosed:true,costs:{}}});
+  const result=await job;assert.deepEqual(result.sourceRect,roi);assert.deepEqual(result.identity,identity);s.reader.close();
+});
 test('snapshot is called in submission stack, preserves paint identity and closes worker ownership', async () => {
   const s = setup(); await s.reader.start();
   const canvas = {}, identity = { rtp: 42, epoch: '3', observedWall: 123, observedAt: 7 };

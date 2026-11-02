@@ -14,7 +14,11 @@ inline H264RateBudget H264RateLimits(uint32_t level) {
  for(auto& value:limits)if(value.level<=level)result=&value;
  return result?H264RateBudget{result->kbps*1000,result->cpb_kbits/8}:H264RateBudget{};
 }
-struct MediaSampling {uint32_t width=0,height=0;double scale=0;};
+struct MediaSampling {
+ uint32_t width=0,height=0;double scale=0;
+ uint32_t level=0,fps=0,max_frame_macroblocks=0,max_macroblocks_per_second=0;
+ const char* limitation="unknown";
+};
 // ITU-T H.264 Table A-1, also used by WebRTC H264SupportedLevel. Input
 // dimensions remain the original atlas; this only selects encoder sampling.
 inline MediaSampling FitH264Sampling(uint32_t width,uint32_t height,uint32_t fps,uint32_t level,
@@ -40,10 +44,31 @@ inline MediaSampling FitH264Sampling(uint32_t width,uint32_t height,uint32_t fps
    const double uniform=std::min(double(w)/width,double(h)/height);
    w=std::min(w,std::max(2u,static_cast<uint32_t>(std::lround(width*uniform/2))*2));
    h=std::min(h,std::max(2u,static_cast<uint32_t>(std::lround(height*uniform/2))*2));
-   return {w,h,std::min(double(w)/width,double(h)/height)};
+   const auto actual_scale=std::min(double(w)/width,double(h)/height);
+   const char* reason="none";
+   if(actual_scale<.999999) {
+    const auto codec_scale=std::sqrt(double(budget)*256/pixels);
+    if(double(max_width)/width<codec_scale || double(max_height)/height<codec_scale)reason="encoder-axis-limit";
+    else if(axis/width<codec_scale || axis/height<codec_scale)reason="receiver-level-axis-limit";
+    else reason=cap->mbps/fps<cap->fs?"receiver-level-macroblock-rate":"receiver-level-frame-size";
+   }
+   return {w,h,actual_scale,level,fps,cap->fs,cap->mbps,reason};
   }
   scale*=0.995;
  }
  return {};
+}
+// Resolution-first can trade cadence only when the original atlas fits the
+// codec's hard frame-size/axis limits. A lower FPS cannot remove those limits.
+inline uint32_t PreferredH264FrameRate(uint32_t width,uint32_t height,uint32_t requested_fps,
+                                      uint32_t level,bool prefer_resolution,
+                                      uint32_t max_width=4096,uint32_t max_height=4096) {
+ if(!prefer_resolution || !requested_fps)return requested_fps;
+ const auto full=FitH264Sampling(width,height,1,level,max_width,max_height);
+ if(!full.width || full.scale<.999999)return requested_fps;
+ const uint64_t macroblocks=uint64_t((width+15)/16)*((height+15)/16);
+ if(!macroblocks)return requested_fps;
+ const auto allowed=static_cast<uint32_t>(full.max_macroblocks_per_second/macroblocks);
+ return allowed?std::min(requested_fps,allowed):requested_fps;
 }
 }

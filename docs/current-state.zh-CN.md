@@ -22,17 +22,29 @@
 | SDK/网络 | 真正libwebrtc PeerConnection/SDP/ICE/DTLS/SCTP、native纹理租约、wire RTP；每Session运行媒体策略保留拥塞控制 |
 | 测量设施 | 有界Browser/SDK/Endpoint trace、GPU pass计时、ETW/引擎占用、分块metrics校验、真实paint/CRC与时钟置信度；固定实验独立于产品策略 |
 
-Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/窄屏、UA、popup、dialog、质量/ClientScale、120秒memory saver、WS断线/接管。生产能力探测已使157选择level4.2，真实双窗完整尺寸首帧通过；Chrome89保留兼容video路径。报告：[产品运行QA](../develop/docs/product-runtime-qa.md)。原生Windows输入法完整候选窗行为不能由协议composition检查替代。
-
-首版506c45e发布检查：Control全套104项、生产构建与smoke通过；Endpoint收束后8项CPU suites、SDK2项通过，Browser/SDK/Endpoint增量构建通过。最终ZIP的559个文件hash全部匹配，包内普通注册/鉴权WS/Browser启动smoke通过；最终包smoke未另测RTC媒体。
+Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/窄屏、UA、popup、dialog、质量/ClientScale、120秒memory saver、WS断线/接管。Chrome89保留兼容video路径；新版接收能力与共享呈现验证见下文。原产品报告：[产品运行QA](../develop/docs/product-runtime-qa.md)。原生Windows输入法完整候选窗行为不能由协议composition检查替代。
 
 注册管理新增批次：首个正式账号为管理员，更多→管理员面板配置后续注册口令；旧数据库迁移最早正式用户，诊断账号不参与。Control全122项、类型检查、生产构建与smoke通过。Sol实际验证首注管理员、设置/错误/正确口令、普通用户入口隔离及独立登录；390×844窄屏无溢出，管理面板保存前中后内容区不变。账号密码和注册口令独立，配置只保存加盐hash。
+
+## Viewer连接与画质改进
+
+普通产品改为trickle ICE，能力探测预热并缓存；模拟网络保留原完整收集与relay路径。真实本机4K检查中，冷源首canvas约1019.8ms、已运行源重连约368.6ms，ICE分别124.2/85.5ms。冷源从首次尝试打开输出到成功约561.7ms（含viewport/可见性准备），编码器配置约160.5ms；这些是单次功能检查，不是旧新版平均耗时对照。
+
+现代接收端按能力选择H264 5.2/5.1/4.2；Chrome89保留4.2兼容。高画质取消固定4K面积缩放，优先viewport×ClientScale完整尺寸。实际5.2 source/encoded/decoded均3856×2176（含atlas边距），内容canvas3840×2160、mediaScale1。受控5.1仍保持该尺寸，名义50FPS对应有效29FPS上限，3秒实际解码约27.55FPS；源、采集与编码预算一致。自动档保持帧率优先。
+
+多个合格平面自动使用共享WebGL纹理与画布，单平面/Chrome89或失败回退2D。同流四平面对照中，客户端CPU约1.217→0.418核、3D约25.94%→10.59%，绘制58.60→59.97FPS；该对照编码1980×1110，不能当完整4K性能。集成后已验证四窗2912×1632不下采样、真实可见ROI的Marker CRC、静态非等比缩放、上下文丢失和单次刷新恢复。Stats区分绘制/解码FPS、呈现后端、队列等待和分辨率限制。
+
+本批统一Browser/SDK增量构建、Endpoint九套CPU测试、Control全148项及生产构建/smoke通过。细节见[共享呈现联调](../develop/docs/shared-presentation-runtime.md)、[候选对照](../develop/docs/viewer-presentation-candidates.md)及[连接画质实现](../develop/docs/connection-quality-implementation.md)。
+
+标签页加载spinner已修复：原通用span规则把MUI图标当标题扩宽并裁切。标题样式现独立，桌面与390px窄屏实测图标均13×13px，旋转中心稳定、加载结束正常消失；见[视觉检查](../develop/docs/loading-spinner-runtime-qa.md)。
+
+触控保留客户端采样时间与有界历史，服务端不再用包到达间隔估计手势；0008区分同步完成回调与真正派发拒绝，0009修复无屏幕时零PPI导致的惯性失效。服务构建固定逻辑PPI96与generic-desktop手势配置，客户端DPR和媒体帧率预算独立，native demo保留宿主适配。最终正常/途中70ms停顿/抬手100ms延迟三组滚动为502/501/502 DIP，均有约404–418ms惯性、零拒绝；嵌套滚动、OOPIF、touch-action/preventDefault、取消和DPR2坐标另有真实检查。新增Chromium unit用例未单独构建content_unittests，运行证据来自实际生产链路。见[可复用检查入口](touch-source-qa.md)与[触控运行记录](../develop/docs/touch-source-runtime-qa.md)。
 
 ## 当前默认与资源规则
 
 服务端每页无页面HWND的Aura离屏宿主，不走屏幕Present；进程仍有Chromium辅助SingletonHwnd。产品默认启用已验证捕获优化，unsupported几何走明确fallback。Browser↔Endpoint稳态没有逐帧Mojo；真实GPU完成与三槽租约不因重建/故障而放宽。
 
-默认service针对UHD630选择QSV；显式encoder=auto保留copy和NVENC回退，显式NVENC仍支持。普通客户端探测解码能力后选择level4.2，失败回native；高码率请求不能超越接收协商或网络上限。更多状态归属与流程见[系统设计](architecture.zh-CN.md)、[Control设计](control-plane.zh-CN.md)、[GPU输出](gpu-output.zh-CN.md)。
+默认service针对UHD630选择QSV；显式encoder=auto保留copy和NVENC回退，显式NVENC仍支持。普通客户端按实际能力选择接收level；高码率请求不能超越接收协商或网络上限。更多状态归属与流程见[系统设计](architecture.zh-CN.md)、[Control设计](control-plane.zh-CN.md)、[GPU输出](gpu-output.zh-CN.md)。
 
 ## 审查修复
 
@@ -41,12 +53,12 @@ Sol已实际检查Chrome89与157的MUI/H264/输入、用户隔离、多Window/�
 ## 保留差距
 
 
-- 每Session当前一个Profile；跨Browser sessionStorage、完整IME replacement/span、原生popup widget合成/命中覆盖，以及目录上传、认证/证书、跨端剪贴板、PDF/打印等仍是保留差距。
+- 每Session当前一个Profile；跨Browser sessionStorage、完整IME replacement/span、原生popup widget合成/命中覆盖，以及目录上传、认证/证书、跨端剪贴板、PDF/打印等仍是保留差距。官方注入触摸路径关闭了原生longpress/showpress定时器，原生长按功能尚未补齐。
 - 本机无NVIDIA硬件，NVENC只有编译/接口边界检查；音频不在本轮。
 - 生产capture-end→paint是带时钟置信度的估算；Pixel marker测量及物理屏幕点亮是不同终点。
 
 ## 发布与入口
 
-首版506c45e已构建并上传。Astra完成全链审查与有界修复复核；修复后的Control117项、生产构建/smoke及原生恢复/几何回归通过，审查修复版按打包/上传流程交付；取件码与最终hash保存在本机发布delivery记录并随交付回复提供。发布包不携带开发Profile、数据或凭据。首版交付记录位于develop/tmp/release-506c45e-delivery.json。
+串流包包含Browser、Endpoint、Node及Control生产runtime，完整解压后运行run.cmd。打包执行smoke、逐文件manifest与ZIP校验，不携带开发Profile、数据、凭据或PDB；smoke覆盖服务启动与管理，媒体功能依据对应真实运行报告。版本、取件码与最终hash记录在本机develop/tmp的release delivery文件，并随交付回复提供。先前Astra全链审查和有界修复已完成，后续新增功能按实际范围验证发布。
 
 [构建运行](../README.md) · [Control](../control/README.md) · [打包](packaging.zh-CN.md) · [接口](streaming-protocol.md) · [SDK](sdk.md) · [历史选项归档](experiments-archive.zh-CN.md)

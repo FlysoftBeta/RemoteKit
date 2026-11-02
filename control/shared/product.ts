@@ -7,11 +7,11 @@ export interface ProductWindow { id: string; activeTabId: string | null; weight:
 export interface PendingClose { id: string; windowId?: string; requestId?: string; nativeRequestId?: string; browserIncarnation?: string; instance?: string; document?: string; awaiting?: boolean }
 export interface ProductWorkspace { schemaVersion: 2; tenantId: string; revision: number; tabs: ProductTab[]; windows: ProductWindow[]; activeWindowId: string | null; layoutMode: 'side-by-side' | 'focused'; settings: ProductSettings; sites: Record<string, { tabletUa: boolean }>; pendingClose?: PendingClose | null; pendingWindowCloseId?: string | null }
 export interface PageDialog { id: string; tabId: string; windowId: string; kind: 'alert' | 'confirm' | 'prompt' | 'beforeunload'; message: string; defaultPrompt: string; origin: string; isReload?: boolean }
-export interface MediaPolicy { targetFps: number; bitrateKbps: number; maxBitrateKbps: number; adaptive: boolean }
-export interface AppliedMediaPolicy { targetFps: number | null; bitrateKbps: number | null; maxBitrateKbps: number | null; adaptive: boolean }
+export interface MediaPolicy { targetFps: number; bitrateKbps: number; maxBitrateKbps: number; adaptive: boolean; preferResolution?: boolean }
+export interface AppliedMediaPolicy { targetFps: number | null; bitrateKbps: number | null; maxBitrateKbps: number | null; adaptive: boolean; codecTargetFps?: number | null; fpsLimitation?: string; preferResolution?: boolean }
 export interface ProductFeedback { sequence: number; sourceCaptureId: string; sampledAtServerMs: number; visible: boolean; presentationLatencyMs: number; latencySource: 'capture-end-to-paint'; clockUncertaintyMs: number; sampleCount: number; windowMs: number; displayHzEstimate?: number }
 export interface ProductQuality { resourceLimitation: string | null; mode: 'product' | 'manual'; preference: ProductSettings['qualityPreference']; clientScale: number; baseResolutionFactor: number; adaptiveResolutionFactor: number; effectiveDpr: number; pixelBudget: number; targetFps: number; requested: MediaPolicy; applied: AppliedMediaPolicy | null; estimatedLatencyMs: number | null; clockUncertaintyMs: number | null; feedbackStatus: 'unknown' | 'valid' | 'stale'; reason: string }
-export interface ProductState { user: ProductUser; workspace: ProductWorkspace; pageDialogs: PageDialog[]; quality: ProductQuality; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
+export interface ProductState { user: ProductUser; workspace: ProductWorkspace; pageDialogs: PageDialog[]; quality: ProductQuality; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean; trickleIce?: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
 export type ProductAction =
   | { type: 'window.create'; url?: string; title?: string }
   | { type: 'window.activate' | 'window.close'; windowId: string }
@@ -34,10 +34,11 @@ export interface SocketMethods {
   action: { params: ProductAction; result: ProductActionResult };
   viewport: { params: ViewerViewport; result: ProductState };
   feedback: { params: ProductFeedback; result: { accepted: boolean } };
-  'rtc.offer': { params: { type: 'offer'; sdp: string }; result: { type: 'answer'; sdp: string; connectionId: string; endpointGeneration: number } };
-  'rtc.ice': { params: { connectionId: string; candidate: unknown }; result: unknown };
+  'rtc.offer': { params: { type: 'offer'; sdp: string; trickle?: boolean; attemptId?: string }; result: { type: 'answer'; sdp: string; connectionId: string; endpointGeneration: number; signalingMode?: string } };
+  'rtc.ice': { params: { connectionId: string; candidate: unknown; attemptId?: string }; result: unknown };
   'rtc.close': { params: { connectionId: string }; result: { closed: boolean } };
   'clock.ping': { params: { clientTime?: number }; result: { serverTime: number; clientTime?: number } };
 }
 export type SocketRequest = { [K in keyof SocketMethods]: { id: string; method: K; params: SocketMethods[K]['params'] } }[keyof SocketMethods];
-export type SocketMessage = { type: 'state'; revision: number; state: ProductState } | { type: 'result'; id: string; result: unknown } | { type: 'error'; id: string; error: { code: number; message: string } } | { type: 'lease'; status: 'revoked'; reason: 'another-viewer' | 'logout' };
+export type RtcServerSignal = { type: 'rtc.signal'; connectionId: string; attemptId: string; signal: { type: 'ice'; candidate: RTCIceCandidateInit } | { type: 'complete' } | { type: 'error'; message: string } };
+export type SocketMessage = RtcServerSignal | { type: 'state'; revision: number; state: ProductState } | { type: 'result'; id: string; result: unknown } | { type: 'error'; id: string; error: { code: number; message: string } } | { type: 'lease'; status: 'revoked'; reason: 'another-viewer' | 'logout' };

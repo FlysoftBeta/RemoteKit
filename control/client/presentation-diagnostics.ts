@@ -16,7 +16,7 @@ export class PresentationDiagnostics {
   private rvfc: Values[] = []; private raf: Values[] = []; private metadata: Values[] = []; private matches: Values[] = []; private misses: Values[] = [];
   private paints: Values[] = [];
   private paintCounts = new Map<string, { frames: number; redraws: number; firstAt: number; lastAt: number }>();
-  private costs: Record<string, Values[]> = { videoCallbackTotal: [], frameMessageTotal: [], videoSnapshot: [], processorSnapshot: [], viewportDraw: [], markerDraw: [], markerReadback: [], markerDecode: [] };
+  private costs: Record<string, Values[]> = { videoCallbackTotal: [], frameMessageTotal: [], videoSnapshot: [], processorSnapshot: [], viewportDraw: [], sharedUpload: [], sharedDraw: [], markerDraw: [], markerReadback: [], markerDecode: [] };
   video(at: number, rtp: number | undefined, epoch: string | undefined, knownEpoch: string | undefined, info: { presentedFrames?: number; expectedDisplayTime?: number; presentationTime?: number; receiveTime?: number; decoded?: number }) {
     this.rawRvfcCount++; this.presentedFrames = info.presentedFrames; this.decodedFrames = info.decoded;
     if (this.pending && this.pending.rtp !== rtp) { const old = this.observed.get(this.pending.rtp); if (old?.outcome === 'pending') { old.outcome = 'missed'; this.missed++; push(this.misses, [at, this.pending.rtp, at - this.pending.at]); } }
