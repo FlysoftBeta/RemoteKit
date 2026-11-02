@@ -320,13 +320,26 @@ struct Session {
   command["version"]=1;command["id"]=++request_id;
   std::string encoded=command.dump();std::vector<char> response(1024*1024);size_t count=0;
   int status=sdk.remotekit_sdk_control_request(control,encoded.data(),encoded.size(),response.data(),response.size(),&count,10000);
-  if(status!=0){control=0;throw std::runtime_error("browser request transport "+std::to_string(status));}
+  if(status!=0){control=0;throw std::runtime_error("browser request transport "+std::to_string(status)+
+    " method="+command.value("method",std::string())+" "+ProcessDiagnostic()+
+    " browser_log="+Utf8(directory/"browser.log"));}
   Json result=Json::parse(response.data(),response.data()+count);
   if(!result.value("ok",false))throw std::runtime_error("browser: "+result.value("error",std::string("command failed")));
   return result;
  }
  bool Alive() const{return process&&WaitForSingleObject(process,0)==WAIT_TIMEOUT;}
  bool ProducerExited() const{return process&&WaitForSingleObject(process,0)==WAIT_OBJECT_0;}
+ std::string ProcessDiagnostic() const {
+  if(!process)return "process=absent";
+  std::ostringstream detail;detail<<"pid="<<GetProcessId(process);
+  const auto wait=WaitForSingleObject(process,0);
+  detail<<" process="<<(wait==WAIT_TIMEOUT?"running":wait==WAIT_OBJECT_0?"exited":"query-failed");
+  if(wait==WAIT_FAILED)detail<<" wait_windows="<<GetLastError();
+  DWORD code=0;
+  if(GetExitCodeProcess(process,&code))detail<<" exit_code=0x"<<std::hex<<code;
+  else detail<<" exit_query_windows="<<GetLastError();
+  return detail.str();
+ }
  void Start() {
   if(!producer_stop_pending && Alive()&&control)return;
   if(!Stop())throw std::runtime_error("previous browser termination unfinished; retry the retained producer before restart");
@@ -365,19 +378,28 @@ struct Session {
   if(!CreateProcessW(options.browser.c_str(),command.data(),nullptr,nullptr,FALSE,CREATE_SUSPENDED|CREATE_NO_WINDOW,
        nullptr,options.browser.parent_path().c_str(),&startup,&info))throw std::runtime_error("browser launch Windows "+std::to_string(GetLastError()));
   process=info.hProcess;
-  if(!AssignProcessToJobObject(job,process)||ResumeThread(info.hThread)==DWORD(-1)) {
-   CloseHandle(info.hThread);throw std::runtime_error("browser job/start failed");
+  if(!AssignProcessToJobObject(job,process)) {
+   const auto error=GetLastError();CloseHandle(info.hThread);
+   throw std::runtime_error("browser job assignment Windows "+std::to_string(error)+" "+ProcessDiagnostic());
+  }
+  if(ResumeThread(info.hThread)==DWORD(-1)) {
+   const auto error=GetLastError();CloseHandle(info.hThread);
+   throw std::runtime_error("browser resume Windows "+std::to_string(error)+" "+ProcessDiagnostic());
   }
   CloseHandle(info.hThread);
-  auto deadline=QpcNow()+QpcFrequency()*15;
-  int status=1;
+  fprintf(stderr,"session %s browser launched pid %lu browser_log=%s\n",id.c_str(),GetProcessId(process),Utf8(directory/"browser.log").c_str());
+  const auto started=QpcNow(),deadline=started+QpcFrequency()*15;
+  int status=1;unsigned attempts=0;
   while(Alive()&&QpcNow()<deadline) {
    uint64_t connected_control=0;
+   ++attempts;
    status=sdk.remotekit_sdk_control_connect(channel.c_str(),&connected_control);
    if(status==0)control=connected_control;
    if(status==0)break;std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
-  if(status!=0||!control)throw std::runtime_error("browser control connect failed "+std::to_string(status));
+  if(status!=0||!control)throw std::runtime_error("browser control connect failed "+std::to_string(status)+
+    " "+ProcessDiagnostic()+" elapsed_ms="+std::to_string((QpcNow()-started)*1000/QpcFrequency())+
+    " attempts="+std::to_string(attempts)+" browser_log="+Utf8(directory/"browser.log"));
   fprintf(stderr,"session %s browser pid %lu\n",id.c_str(),GetProcessId(process));
   observed_closed.clear();
   recovery_revisions.clear();recoveries.clear();recovery_cursor.clear();
