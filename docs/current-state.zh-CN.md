@@ -71,7 +71,7 @@ Browser/SDK已增量构建，Endpoint11套CPU通过；最终Control171项、类�
 
 ## 发布与入口
 
-待完成的新要求：用户在c379f6c上传前选择默认video呈现，布局来自客户端bounds，关闭原生媒体入口。旧发布已停止，尚未生成或上传本批包；实现计划见[默认video计划](../develop/docs/default-video-plan.md)。仅本次允许GitHub推送尽力而为，优先完成包上传；长期提交推送约定不变。
+待完成的新要求：用户在c379f6c上传前选择默认video呈现，布局来自客户端bounds，关闭原生媒体入口。旧发布已停止，尚未生成或上传本批包；实现计划见[默认video计划](../develop/docs/default-video-plan.md)，新对话从[完整交接](../develop/docs/HANDOFF-2026-11-02-default-video.zh-CN.md)接续。仅本次允许GitHub推送尽力而为，优先完成包上传；长期提交推送约定不变。
 
 串流包包含Browser、Endpoint、Node及Control生产runtime，完整解压后运行run.cmd。打包执行smoke、逐文件manifest与ZIP校验，不携带开发Profile、数据、凭据或PDB；smoke覆盖服务启动与管理，媒体功能依据对应真实运行报告。版本、取件码与最终hash记录在本机develop/tmp的release delivery文件，并随交付回复提供。先前Astra全链审查和有界修复已完成，后续新增功能按实际范围验证发布。
 
