@@ -2,11 +2,17 @@
 
 更新：2026-11-03。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。只复用out/dev、out/rel增量构建，继续支持Chrome89。
 
-**当前架构重构批次已发布：包版本1e13f11，取件码353287。** 产品提交14859f6及发布工具提交1e13f11均已推送。六模块审计、独立集成复审、规定范围的功能验收和包内真实WebRTC检查完成；上一发布4de343c/354383不是本批包。具体证据见[问题清单](../develop/docs/open-issues.md)、[本轮契约](../develop/docs/robustness-contract-20261103.md)。
+**当前发布为11299d9回环崩溃修复包，取件码467761。** 已提交推送并完成新包独立验证及上传。旧1e13f11/353287存在发布后实际崩溃，不能视为本修复版。
 
-## 2026-11-03发布后严重回归（处理中）
+## 2026-11-03发布后崩溃修复
 
-用户在本地回环使用353287包时发现数秒断连、网页状态重置。实际包Browser日志确认重复音频服务`enable_remote_client_support_`致命断言及Viz当前帧同步完成断言，伴随Browser重新启动；不能把STUN候选发送错误当作唯一原因。此前功能检查未覆盖这些触发路径，已发布包不能据此前结果视为稳定版本。音频放置配置与Viz同步admission已修复，增量构建、生产路径CPU正反例通过；89/157播放前10次、播放中1次真实枚举与双声道PCM通过；主动RTC/ViewerWS断开后页面nonce和未提交文本保留，几何不变时滚动精确保持。约271秒Browser PID/incarnation不变、仅一次启动、无FATAL/CHECK。ViewerWS按现有租约重建RTC，不等于Browser重建。尚未生成修复包。详见[真实运行报告](../develop/docs/loopback-crash-runtime-qa-20261103.md)及[构建报告](../develop/docs/loopback-hotfix-build-20261103.md)。Native IPC超时后同Browser重附着仍为独立缺口，未在本次两处崩溃修复中解决。
+用户在本地回环使用旧包时发现数秒断连、网页重置。实际Browser日志确认音频服务`enable_remote_client_support_`断言及Viz当前帧同步完成断言，导致原生进程退出；STUN候选发送错误不是这些崩溃的解释。
+
+正式Browser现将音频feature配置与自定义进程内AudioManager归属对齐。Viz在广播BeginFrame前安装完整请求，并在接纳阶段结束后才允许终态回调；保留未知/重复完成CHECK与实际Fence边界。增量构建、生产路径CPU正反例通过，11补丁可逆重放通过。
+
+89/157播放前10次、播放中1次真实设备枚举及双声道PCM通过。主动RTC/ViewerWS断开后页面nonce与未提交文本保留；相同几何下滚动精确保持，157第一次视口取整变化时差0.187744CSSpx。约271秒Browser PID/incarnation不变、仅一次启动、无FATAL/CHECK。两版实际Google、resize及导航通过。ViewerWS按现有租约重建RTC，不等于Browser重建。详见[真实运行](../develop/docs/loopback-crash-runtime-qa-20261103.md)、[构建证据](../develop/docs/loopback-hotfix-build-20261103.md)与[问题清单](../develop/docs/open-issues.md)。
+
+Native IPC超时后同Browser重附着仍是独立缺口，未在本次两处崩溃修复中解决；跨进程重启也不能恢复网页JS堆。测试中首次点击播放未生效等失败尝试保留在报告，不宣称所有输入边缘已覆盖。
 
 ## 当前架构与实现
 
@@ -51,12 +57,12 @@
 
 ## 本次发布
 
-root本地提交后由全新Sol按[打包](packaging.zh-CN.md)与[上传](upload/README.md)执行。新包`RemoteKit-win-x64-streaming-qsv-nvenc-20261103-034122.zip`，462549473 bytes，manifest基线`1e13f119df92f6477588fce1946034490d3c65a7`且source clean；2026-11-03 03:44（UTC+8）上传，取件码**353287**，[本次下载链接](https://airportal.cn/353287/WCrXhtcznc)，上传有效期24小时。
+新包`RemoteKit-win-x64-streaming-qsv-nvenc-20261103-221813.zip`，462549523 bytes，manifest版本`11299d9211ba8c2a266465e195904109a04437cb`且source clean；2026-11-03 22:22（UTC+8）实际上传成功。取件码**467761**，[下载链接](https://airportal.cn/467761/ojJvgTbRL9)，有效24小时、可下载2次、无密码。
 
-SHA256：`78692bab3f9993a5aabb4d1e6dbfbfe915cc3c7f9acfc8cf24442a0b40c0b08e`。
+SHA256：`0699efcb56288d0dea734c256cf2b2c37f41d261ef298441694352723aa2e79c`。
 
-本次包startup smoke、560项manifest文件hash、ZIP CRC与内部hash、102项无PDB SDK运行依赖和关键源产物hash通过。包内Node生产server/Endpoint/Browser的host-managed实际检查通过RTC DC建窗、导航、video、点击及wheel；Browser实际路径属于新包，MSTP/draw/WS产品动作均0，无pageerror。CLI startup与这次真实产品检查分开记录，已修旧WS action smoke及Python代码页遮蔽错误的问题。
+560项文件manifest hash、ZIP CRC/内部hash及102项无PDB SDK依赖通过。CLI startup与包内host-managed实际WebRTC检查分别记录；包内Node/Endpoint/Browser真实建窗导航、默认video、点击/文本/wheel、播放前10次及播放中1次枚举、双声道decoded PCM通过。Browser身份保持、一次启动、无FATAL/CHECK；MSTP/draw/WS产品动作均0。包内Browser SHA256为`dc6351322e7b934d2c4d7e172d158cce06b6157227787e360f259fa3c712b501`。
 
-完整解压运行run.cmd。包内不含开发Profile、数据、凭据、日志或PDB；测试服务和contexts均已关闭。完整本机交付记录为`develop/tmp/release-1e13f11-delivery.json`，包内实景为`develop/tmp/release-1e13f11-product-qa/packaged-viewer.png`；桌面/起始页/设置/窄屏图见Viewer运行报告。
+完整记录`develop/tmp/release-11299d9-delivery.json`，包内实景`develop/tmp/release-11299d9-product-qa/packaged-viewer.png`，89/157实际Google截图见`develop/tmp/loopback-crash-qa/`。发布代理已查看截图并关闭自有服务、contexts和端口。包不含开发Profile、数据、凭据、日志或PDB；更新程序时保留原data，勿让两个实例同时使用同一数据目录。
 
 [系统架构](architecture.zh-CN.md) · [Control](control-plane.zh-CN.md) · [协议](streaming-protocol.md) · [输入](client-gestures.zh-CN.md) · [导航](navigation-operations.zh-CN.md) · [GPU](gpu-output.zh-CN.md) · [音频与文件](audio-and-files.zh-CN.md)
