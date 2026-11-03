@@ -4,6 +4,12 @@
 
 2026-11-03进度：产品重构14859f6及工具修正1e13f11已提交推送，新streaming包通过startup、包内WebRTC操作、逐文件/ZIP校验后上传。跨机管理、DC常规操作/文件、收据同步、独立时钟、移动编辑/Client手势的契约和证据见[本轮架构记录](robustness-contract-20261103.md)。下列问题按对应源码、CPU和真实证据关闭；实体设备与尚未装配能力仍见当前状态，不能宣称整个浏览器无任何缺口。
 
+## 467761新回归（未关闭）
+
+- **V6 回退原因误报：** 截图canvas-2d/track-processor；unknown backendReason被叠层统一标成GL初始化失败。已在源码拆分Video首因与canvas后端原因，293项Control/生产构建及独立157实际能力回退标签检查通过，待发布。实际截图首因缺日志且用户无法再现，保持未知。
+- **V7 hidden回退预算：** metadata watchdog未检查页面visibility及屏障完成，后台等待可能消耗失败预算。生产transport定向测试先证实后台/未ACK计时错误，已限制前台且屏障完成、有效bounds后才计预算；21项定向及全293项通过。实际headless标签切换未产生hidden，真实后台行为仍未覆盖，不能据此认定截图原因。
+- **F5 当前请求为空时Viz完成：** 221813包Browser日志22:26:30.603，frame source2/seq5而current=none，GPU随后重启。源码发现MISSED与正常scheduler-client交付可重复接纳当前帧。0012按有效完整ID与不可变frame_time幂等接纳，保留原Mojo CHECK/Fence；增量、正向生命周期、12补丁可逆及89/157正常运行无新fatal通过，待发布。
+
 ## 发布后阻断项（2026-11-03 06:54日志）
 
 11299d9修复包已实际上传：[467761](https://airportal.cn/467761/ojJvgTbRL9)。新包560文件及ZIP校验通过，包内实际WebRTC、设备枚举与双声道PCM再次通过，Browser身份稳定、无FATAL/CHECK。完整交付记录见当前状态；旧353287不能当修复包。

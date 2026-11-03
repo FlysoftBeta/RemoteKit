@@ -56,6 +56,11 @@
       "id": "external-begin-frame-completion",
       "path": "0011-external-begin-frame-completion.patch",
       "sha256": "d1045e1e20327d0f1361753d45622729df39d9ec0177784b88108916ee99b40c"
+    },
+    {
+      "id": "scheduler-begin-frame-admission",
+      "path": "0012-scheduler-begin-frame-admission.patch",
+      "sha256": "994d0b5dd044fd49fa09f2d783a0443345aeb870c24494d208ebd33b7ecbd274"
     }
   ]
 }

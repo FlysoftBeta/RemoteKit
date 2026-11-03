@@ -256,8 +256,66 @@ test('unmatched static observations have a bounded explicit canvas fallback with
   for (let retries = 0; retries < 4; retries++) s.timers[s.timers.length - 1]!();
   assert.equal(s.internal.presentationBackend, 'canvas'); assert.equal(s.internal.peer, peer);
   assert.equal(s.transport.presentationDiagnostics.rendering.backendReason, 'video-frame-metadata-timeout');
+  assert.equal(s.transport.presentationDiagnostics.rendering.presentationFallbackReason, 'video-frame-metadata-timeout');
+  assert.equal(s.transport.presentationDiagnostics.rendering.canvasBackendReason, 'chrome89-compatible-2d');
   assert.deepEqual(s.ready, [false, false]); s.raf(); s.raf();
   assert.equal(s.sent.some(message => message.type === 'media.presentation' && message.backend === 'canvas'), true);
+});
+
+test('presentation fallback preserves the first cause independently of the canvas backend', t => {
+  const s = environment(t);
+  s.internal.fallbackPresentation('video-playback-failed');
+  s.internal.fallbackPresentation('invalid-presentation-mode');
+  const rendering = s.transport.presentationDiagnostics.rendering;
+  assert.equal(rendering.backendReason, 'video-playback-failed');
+  assert.equal(rendering.presentationFallbackReason, 'video-playback-failed');
+  assert.equal(rendering.canvasBackendReason, 'chrome89-compatible-2d');
+  s.transport.disconnect();
+  assert.equal(s.transport.presentationDiagnostics.rendering.presentationFallbackReason, undefined);
+});
+
+test('hidden time at the metadata retry edge cannot cause canvas fallback; resume starts a fresh budget', t => {
+  const s = environment(t); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  s.videos[1].frame(80);
+  for (let retries = 0; retries < 3; retries++) s.timers[s.internal.videoMetadataRefreshTimer - 1]();
+  s.document.visibilityState = 'hidden'; s.listeners.get('visibilitychange')!();
+  for (let tick = 0; tick < 5; tick++) {
+    const timer = s.internal.videoMetadataRefreshTimer;
+    if (timer !== undefined) s.timers[timer - 1]();
+  }
+  assert.equal(s.internal.presentationBackend, 'video');
+  assert.equal(s.internal.videoMetadataRefreshTimer, undefined);
+  assert.equal([...s.internal.videoPlanes.values()].every((plane: any) => plane.metadataRetries === 0), true);
+  s.document.visibilityState = 'visible'; s.listeners.get('visibilitychange')!();
+  assert.deepEqual(s.ready, [false, false], 'foreground cannot authorize retained pixels');
+  assert.notEqual(s.internal.videoMetadataRefreshTimer, undefined);
+  for (let retries = 0; retries < 3; retries++) {
+    s.timers[s.internal.videoMetadataRefreshTimer - 1]();
+    assert.equal(s.internal.presentationBackend, 'video');
+  }
+  s.timers[s.internal.videoMetadataRefreshTimer - 1]();
+  assert.equal(s.internal.presentationFallbackReason, 'video-frame-metadata-timeout');
+});
+
+test('metadata watchdog waits for the current barrier ACK and positive client bounds', t => {
+  const s = environment(t, true); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.metadata(80);
+  assert.equal(s.internal.videoMetadataRefreshTimer, undefined, 'pending hide/ACK is not a metadata failure');
+  s.raf(); assert.equal(s.internal.videoMetadataRefreshTimer, undefined);
+  s.raf(); assert.notEqual(s.internal.videoMetadataRefreshTimer, undefined);
+  const next = { ...layout, epoch: '21' };
+  s.message(next);
+  assert.equal(s.internal.videoMetadataRefreshTimer, undefined, 'layout invalidation cancels the old budget');
+  s.canvases.forEach(canvas => canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 0, height: 0 }));
+  s.message({ type: 'presentation.prepare', ...key, barrierId: '10000000000000002', layoutEpoch: '21' });
+  s.raf(); s.raf(); s.metadata(81, '21');
+  assert.equal(s.internal.videoMetadataRefreshTimer, undefined, 'zero client area cannot consume retries');
+  s.canvases.forEach(canvas => canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 320, height: 180 }));
+  s.internal.scheduleVideoMetadataRefresh();
+  assert.notEqual(s.internal.videoMetadataRefreshTimer, undefined, 'restored bounds resume bounded observation');
+  s.videos[1].frame(80); assert.deepEqual(s.ready, [false, false], 'the old epoch stays blocked');
+  s.videos[1].frame(81); assert.deepEqual(s.ready, [true, false]);
 });
 
 test('hidden pages hold ACK; returning visible requires two new turns; fallback hides before canvas mode', t => {

@@ -4,6 +4,14 @@
 
 **当前发布为11299d9回环崩溃修复包，取件码467761。** 已提交推送并完成新包独立验证及上传。旧1e13f11/353287存在发布后实际崩溃，不能视为本修复版。
 
+## 467761后续修复（源码验收完成，待发布）
+
+用户截图canvas-2d/track-processor的原始回退原因仍未知，用户已无法再现。已修统计区把未知Video原因误报成GL初始化失败的问题：保留首因，分别展示Video回退和canvas后端原因。另由生产transport测试证实hidden/未完成ACK时会错误消耗metadata重试预算，已限制为前台、当前已ACK屏障、有效平面/bounds才计时；隐藏与布局过渡清预算，恢复仍需新帧授权。
+
+467761包22:26:30.603日志另有Viz完成时current=none及GPU重启。0012修复Scheduler对相同有效frame ID/frame_time的重复接纳，保留Mojo完成检查和实际Fence边界；不能将该原生故障冒称截图原因。
+
+Control293项、类型/生产构建、5组正常原生生命周期、12补丁可逆重放通过。89/157实际Google→Wikipedia、表单、独立Window开关、split及1100/390/1440尺寸转换保持RTC/原有媒体身份与video，MSTP/draw0；主组142/63秒无FATAL/CHECK/GPU退出。独立实际能力回退正确显示新原因。真实整个Viewer hidden未能由headless产生，只有定向transport证据；89初始Wiki空白截图原因未确认，独立短补验取得内容，均明确留档。见[运行报告](../develop/docs/video-lifecycle-runtime-qa-20261103.md)、[构建与hash](../develop/docs/video-lifecycle-build-20261103.md)。0012位于components_viz_service.dll，不能只替换Browser EXE。
+
 ## 2026-11-03发布后崩溃修复
 
 用户在本地回环使用旧包时发现数秒断连、网页重置。实际Browser日志确认音频服务`enable_remote_client_support_`断言及Viz当前帧同步完成断言，导致原生进程退出；STUN候选发送错误不是这些崩溃的解释。

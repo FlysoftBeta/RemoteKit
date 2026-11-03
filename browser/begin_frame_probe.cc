@@ -90,7 +90,11 @@ class Scheduler : public viz::DisplayScheduler {
     SetDamageTracker(damage);
   }
   // Tests explicitly fire deadlines; all production transition logic runs.
-  void ScheduleBeginFrameDeadline() override {}
+  void ScheduleBeginFrameDeadline() override { ++deadline_schedules; }
+  void Admit(const viz::BeginFrameArgs& args) {
+    OnBeginFrameContinuation(args);
+  }
+  unsigned deadline_schedules = 0;
   bool active() const { return inside_begin_frame_deadline_interval_; }
   void Finish() {
     if (!missed_begin_frame_task_.IsCancelled())
@@ -172,6 +176,51 @@ struct Fixture {
   uint64_t serial = 0;
   unsigned acks = 0;
 };
+
+// Positive admission contract: alternate delivery types retain one immutable
+// frame identity, while the next identity receives its own deadline/completion.
+void SchedulerIdempotentAdmission() {
+  Fixture f;
+  auto a = f.Args();
+  auto missed_a = a;
+  missed_a.type = viz::BeginFrameArgs::MISSED;
+  const auto initial_schedules = f.scheduler.deadline_schedules;
+  f.scheduler.Admit(missed_a);
+  CHECK(f.scheduler.active());
+  CHECK_EQ(f.scheduler.deadline_schedules, initial_schedules + 1);
+  f.scheduler.Admit(a);
+  CHECK(f.scheduler.active());
+  CHECK(f.client.finished.empty());
+  CHECK_EQ(f.scheduler.deadline_schedules, initial_schedules + 1);
+  f.scheduler.Finish();
+  f.Expect({a});
+
+  // Completion does not make the same current identity a new interval.
+  const auto completed_schedules = f.scheduler.deadline_schedules;
+  f.scheduler.Admit(a);
+  CHECK(!f.scheduler.active());
+  CHECK_EQ(f.scheduler.deadline_schedules, completed_schedules);
+  f.Expect({a});
+
+  auto b = f.Args();
+  f.scheduler.Admit(b);
+  CHECK(f.scheduler.active());
+  CHECK_EQ(f.scheduler.deadline_schedules, completed_schedules + 1);
+  auto missed_b = b;
+  missed_b.type = viz::BeginFrameArgs::MISSED;
+  f.scheduler.Admit(missed_b);
+  CHECK(f.scheduler.active());
+  CHECK_EQ(f.scheduler.deadline_schedules, completed_schedules + 1);
+  f.Expect({a});
+  auto c = f.Args();
+  f.scheduler.Admit(c);
+  CHECK(f.scheduler.active());
+  CHECK_EQ(f.scheduler.deadline_schedules, completed_schedules + 2);
+  f.Expect({a, b});
+  f.scheduler.Finish();
+  f.Expect({a, b, c});
+  std::cout << "scheduler idempotent admission passed\n";
+}
 
 // The scheduler case above establishes this completion ordering. Exercise the
 // corresponding real Mojo source state independently, without a GPU/Display.
@@ -389,6 +438,10 @@ int main(int argc, char** argv) {
   base::FeatureList::SetInstance(std::move(features));
   base::SingleThreadTaskExecutor tasks;
   const auto* command = base::CommandLine::ForCurrentProcess();
+  if (command->HasSwitch("scheduler-admission")) {
+    SchedulerIdempotentAdmission();
+    return 0;
+  }
   if (command->HasSwitch("mojo-sync") || command->HasSwitch("mojo-sync-fast") ||
       command->HasSwitch("mojo-sync-duplicate") ||
       command->HasSwitch("mojo-pending-duplicate")) {
