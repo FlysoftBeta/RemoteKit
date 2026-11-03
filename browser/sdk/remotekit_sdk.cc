@@ -891,7 +891,6 @@ bool Pending(const base::DictValue& reply) {
 void LogRenderOpenFailure(bool opening, const base::DictValue& reply,
                           std::string_view fallback) {
   constexpr std::string_view kKnownErrors[] = {
-      "invalid_output_fps",
       "output_gpu_fault_sealed",
       "consumer_pid_required",
       "output_not_open",

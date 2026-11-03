@@ -246,7 +246,7 @@ void EncoderWorker::Run() {
     ++stats_->dropped;
     if(!converter_.SafeToRelease()) {
       // An unconfirmed VP read cannot return a surface lease to the producer.
-      // AtlasPool then retains its state until process/device teardown.
+      // RenderSlots then retains its state until process/device teardown.
       auto* retained=new Job(job);(void)retained;
       surfaces_[job.surface]->AddRef();
       error+="; GPU leases retained until process exit";
