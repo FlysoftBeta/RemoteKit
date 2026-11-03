@@ -9,13 +9,13 @@ test('exact epoch pairing, bounded clock and idle dedup', () => { const v=setup(
 test('hidden, expired, reset, uncertain and wall jump observations never trigger policy', () => { for(const mode of ['hidden','expired','reset','uncertain','jump']) { const v=setup(); v.record(1,'a',{...frame('1'),captureClockUncertaintyMs: mode==='uncertain'?26:1}); v.paint(1,'a',100,mode==='jump'?1200:1000); if(mode==='reset')v.reset(); assert.equal(v.report(mode==='expired'?16000:2100,mode==='expired'?16900:3000, mode!=='hidden', controlClock()),undefined); }});
 test('source clock discontinuity discards prior window', () => { const v=setup();v.record(1,'a',frame('1'));v.paint(1,'a',100,1000);v.record(2,'a',{...frame('2'),captureMonotonicMs:900});v.paint(2,'a',200,1100);assert.equal(v.report(2200,3100, true, controlClock()),undefined); });
 
-import { QualityController } from '../server/quality';
+import { QualityState } from '../server/quality';
 test('clock resets preserve channel sequence and the next healthy window is immediately accepted', () => {
   for (const mode of ['explicit', 'client-wall', 'offset', 'source-clock']) {
-    const v = setup(), quality = new QualityController();
+    const v = setup(), quality = new QualityState();
     v.record(1, 'a', frame('1')); v.paint(1, 'a', 100, 1000);
     const first = v.report(2100, 3000, true, controlClock())!;
-    assert.equal(quality.observe(first, first.sampledAtServerMs, true, 2100), true);
+    assert.equal(quality.observe(first, first.sampledAtServerMs, true), true);
     if (mode === 'explicit') v.reset();
     if (mode === 'client-wall') { v.record(2, 'a', frame('2')); v.paint(2, 'a', 3000, 4900); }
     if (mode === 'offset') v.calibrate(3000, 3900, 3010, 3910, 5005);
@@ -26,7 +26,7 @@ test('clock resets preserve channel sequence and the next healthy window is imme
     v.paint(3, 'a', 5200, 6100);
     const next = v.report(7200, 8100, true, controlClock())!;
     assert.equal(next.sequence, first.sequence + 1, mode);
-    assert.equal(quality.observe(next, next.sampledAtServerMs, true, 7200), true, mode);
+    assert.equal(quality.observe(next, next.sampledAtServerMs, true), true, mode);
   }
 });
 test('measurement reset retains source deduplication across clock recalibration', () => {

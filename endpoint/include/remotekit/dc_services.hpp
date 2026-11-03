@@ -1,5 +1,5 @@
 #pragma once
-#include "remotekit/shared_atlas.h"
+#include "remotekit/shared_render_slots.h"
 #include <json.hpp>
 #include <algorithm>
 #include <cmath>

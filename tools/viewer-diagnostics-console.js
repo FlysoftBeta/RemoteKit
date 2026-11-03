@@ -25,9 +25,8 @@
     planes: Object.values(presentation.canvasPaintByView ?? {}).map(plane => pick(plane, ['frames', 'redraws', 'fps'])),
     processor: pick(presentation.processor, ['read', 'invalid', 'stale', 'authorized', 'rafCallbacks', 'rafAdmitted', 'replaced', 'width', 'height', 'scheduler', 'scheduling']),
     metadata: pick(presentation.epoch, ['matched', 'missed', 'unknownAtVideo', 'wrongEpochAtVideo', 'missingRtp', 'metadataCount', 'lateMetadataForMissed']),
-    source: pick(endpoint, ['sourceWidth', 'sourceHeight', 'encodedWidth', 'encodedHeight', 'mediaScale', 'negotiatedReceiveLevel', 'samplingFpsBudget', 'resolutionLimitation', 'sourceFrameIntervalMs']),
-    policy: { requested: pick(endpoint.mediaPolicy?.requested, ['targetFps', 'preferResolution']), applied: pick(endpoint.mediaPolicy?.applied, ['targetFps', 'codecTargetFps', 'fpsLimitation']) },
-    adaptive: pick(endpoint.adaptiveFps, ['enabled', 'requestedLimit', 'effectiveLimit', 'targetRenderFps', 'actualAppliedRenderFps', 'reason', 'displayLimit', 'feedbackAgeMs']),
+    source: pick(endpoint, ['sourceWidth', 'sourceHeight', 'encodedWidth', 'encodedHeight', 'mediaScale', 'negotiatedReceiveLevel', 'samplingFpsBudget', 'resolutionLimitation', 'sourceFrameIntervalMs', 'gccTargetBitrate', 'gccTargetFps', 'queueFullDrops']),
+    policy: { requested: pick(endpoint.mediaPolicy?.requested, ['degradationPreference', 'maxFps']), applied: pick(endpoint.mediaPolicy?.applied, ['degradationPreference', 'maxFps']) },
     feedback: pick(endpoint, ['feedbackVisible', 'feedbackRafSamples', 'feedbackDisplayHzEstimate', 'feedbackAgeMs', 'feedbackWindowMs', 'feedbackDecodedFrames', 'feedbackVideoFrames']),
   };
   const text = JSON.stringify(output, null, 2);

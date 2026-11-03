@@ -2,7 +2,7 @@
 
 Windows 上的多租户 Chromium content embedder、独立 CMake/Ninja Endpoint 与浏览器串流工作区。
 
-[当前能力](docs/current-state.zh-CN.md) · [架构](docs/architecture.zh-CN.md) · [Control](control/README.md) · [测量与实验](docs/streaming-experiments.zh-CN.md)
+[当前能力](docs/current-state.zh-CN.md) · [架构](docs/architecture.zh-CN.md) · [渲染](docs/rendering.zh-CN.md) · [Control](control/README.md) · [测量与实验](docs/streaming-experiments.zh-CN.md)
 
 ## 构建
 
@@ -40,10 +40,10 @@ browser/SDK路径、账号设置、站点UA与诊断说明见 [Control README](c
 ```powershell
 python3 tools/chromium.py build --target remotekit_browser_demo
 tools\build-endpoint.cmd package-demo
-build\endpoint-package\endpoint\endpoint_client.exe --browser=C:\src\chromium\src\out\dev\remotekit_browser_demo.exe --sessions=2
+build\endpoint-package\endpoint\endpoint_client.exe --browser=C:\src\chromium\src\out\dev\remotekit_browser_demo.exe --sessions=2 --presentation=native
 ```
 
-`--urls=URL1|URL2` 指定页面，PowerShell中将整个参数加单引号。默认 Fence atlas，`--presentation=native` 是显式 HWND 对照，不作失败回退。SDK DLL/runtime与browser放在一起。
+`--urls=URL1|URL2` 指定页面，PowerShell中将整个参数加单引号。demo使用显式`--presentation=native` HWND对照；其fence模式明确拒绝，正式streaming通过新OSR/Fence路径工作，不作失败回退。SDK DLL/runtime与browser放在一起。
 
 ## 打包与检查
 

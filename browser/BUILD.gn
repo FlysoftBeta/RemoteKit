@@ -40,8 +40,11 @@ template("browser_executable") {
     "file_chooser_accept.h",
     "devtools.cc",
     "devtools.h",
-    "gpu_atlas.cc",
-    "gpu_atlas.h",
+    "osr_renderer.cc",
+    "osr_renderer.h",
+    "osr_wake_state.h",
+    "render_channel.cc",
+    "render_channel.h",
     "harness.cc",
     "harness.h",
     "main.cc",
@@ -91,8 +94,6 @@ template("browser_executable") {
     "//content/public/renderer",
     "//gin",
     "//media",
-    "//media/capture/mojom:video_capture_buffer",
-    "//media/capture/mojom:video_capture_types",
     "//mojo/public/cpp/bindings",
     "//mojo/public/cpp/platform",
     "//mojo/public/cpp/system",
@@ -120,6 +121,7 @@ template("browser_executable") {
   data_deps = [ "//tools/v8_context_snapshot" ]
   libs = [
     "d3d11.lib",
+    "d3dcompiler.lib",
     "dxgi.lib",
   ]
 }
@@ -138,33 +140,6 @@ executable("remotekit_control_payload_probe") {
   sources = [ "control_payload_probe.cc", "control_response.cc", "file_chooser_accept.cc" ]
   include_dirs = [ "//remotekit" ]
   deps = [ "//base", "//net" ]
-}
-
-executable("remotekit_capture_render_rate_probe") {
-  testonly = true
-  sources = [ "capture_render_rate_probe.cc" ]
-  deps = [
-    "//base",
-    "//components/viz/common",
-    "//components/viz/service",
-    "//mojo/core/embedder",
-  ]
-}
-
-executable("remotekit_capture_delivery_probe") {
-  testonly = true
-  sources = [ "capture_delivery_probe.cc" ]
-  deps = [
-    "//base",
-    "//components/viz/host",
-    "//components/viz/service",
-    "//media",
-    "//media/capture/mojom:video_capture_buffer",
-    "//mojo/core/embedder",
-    "//mojo/public/cpp/bindings",
-    "//services/viz/privileged/mojom/compositing",
-    "//ui/gfx",
-  ]
 }
 
 executable("remotekit_begin_frame_probe") {

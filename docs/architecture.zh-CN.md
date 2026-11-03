@@ -8,7 +8,7 @@
 |---|---|
 | Control | 用户、Window/tab、地址意图、设置、鉴权、Viewer租约、信令、对账与Memory Saver策略 |
 | Endpoint | Tenant→Session、Browser进程与恢复文件、GPU消费/转换、编码、WebRTC、输入校验与路由 |
-| Browser | 独立content embedder、Profile/WebContents、页面/输入/生命周期/恢复、离屏采集与源资源 |
+| Browser | 独立content embedder、Profile/WebContents、页面/输入/生命周期/恢复、OSR绘制与atlas合成 |
 | Chromium服务 | Renderer、网络、Viz/GPU及已有网页运行基础设施 |
 | Client | MUI工作区、实际内容区观测、直接WebRTC接收/输入、呈现与指标 |
 
@@ -46,25 +46,25 @@ Control默认对持续安全隐藏30秒的页面冻结，120秒丢弃；在线�
 
 正式Viewer默认协商video呈现，各可见Window的video共享同一接收track；客户端内容bounds决定目标布局，atlas仅决定源裁剪。Endpoint在编码结果真正发布前建立布局屏障，等Client隐藏旧画面并确认后，以当前布局关键帧恢复。每个video自身匹配真实RTP/epoch后才恢复输入。稳态不增加逐帧握手，不运行额外MSTP/canvas绘制；能力或协议失败保留canvas回退，详见[串流协议](streaming-protocol.md)。
 
-已验证的单plane/DPR1路径由Viz直接写三个拥有CSI的共享目标；不满足条件时使用既有捕获/桥接路径。Endpoint在兼容QSV/external/depth1时直接租用BGRA槽，其他模式使用自有cache。NV12转换和异步编码持有各自真实资源租约，不能用COM引用替代防覆盖协议。
+新路径使用专用Viz OSR OutputDevice直接绘制每plane共享BGRA目标，Browser按当前布局GPU合成为Endpoint指定的atlas Slot。旧capture、CopyOutput及桥接fallback已删除。NV12转换和异步编码持有真实资源租约，不能用COM引用替代防覆盖协议；新路径验收状态见[当前状态](current-state.zh-CN.md)。
 
-两个完成域必须独立正确：源capture lease保护Viz资源，共享输出槽由consumed保护。真实GPU写完才ready，真实读完才可复用。CPU发布、copy返回、BeginFrame ACK、device loss的UINT64_MAX都不是完成证明。固定三槽及有界队列提供背压；详细状态和退役规则见[GPU输出](gpu-output.zh-CN.md)。
+plane绘制与atlas合成通过实际GPU Fence排序；每Slot独立ready/consumed Fence保护写入、读取及编码租约。当前最大容量四槽，活动深度有界调整，缩减不抢占在途Slot。CPU发布、提交返回、BeginFrame ACK、device loss的UINT64_MAX都不是完成证明。详细状态和退役规则见[Comp / Rend](rendering.zh-CN.md)。
 
-browser↔Endpoint没有逐帧ready/present/release Mojo。共享内存目前只承载一致元数据与布局，不传像素；这是实现选择，不是用户要求必须使用。Chromium内部IPC及Endpoint↔Client帧元数据属于不同边界。
+Endpoint Comp通过专用异步Mojo向Browser Rend发送带代次、Slot、Value的Begin。Rend返回Reject或Signal该Slot的真实GPU Fence，成功没有逐帧ready/present/release Mojo。共享内存只承载一致元数据与布局，不传像素。换代Stop/Stopped屏障证明请求终结，不代替GPU完成；Chromium内部IPC及Endpoint↔Client帧元数据属于不同边界。
 
-Endpoint使用oneVPL异步H264或显式NVENC，libwebrtc负责网络控制与pacing。目标部署UHD630默认QSV TU7/LPON/VBR/depth1、高码率及16像素atlas对齐；显式auto/NVENC保留。产品媒体策略按Session更新，实际码率继续服从WebRTC拥塞控制，普通rate Reset不重开序列。
+Endpoint使用oneVPL异步H264或显式NVENC，libwebrtc负责拥塞控制及媒体适配。质量三档只对应DegradationPreference；原生AdaptFrame决定缩放/丢帧，SetRates驱动硬件码率与帧率。QSV纯码率Reset保持序列，改变帧率时更新VUI时基并请求关键帧。协商与硬件上限仍有效。
 
 ## 节拍、输入与测量
 
-Browser本地高精度pacer驱动external BeginFrame，每host最多一个未ACK tick；过期tick合并，不向Endpoint逐帧索取刷新。静态按需出帧，Endpoint空闲后做一次尾IDR，不无限重复。源预算结合显示/网络反馈，Client队列及编码队列有界。
+Endpoint Comp拥有节拍，依据客户端能力、WebRTC限制与Slot压力发送Begin，Browser只按请求经BeginFrameSource驱动root。每root保持Chromium顺序interval，多Slot可同时处于渲染、GPU与编码阶段。静态空闲后只做一次尾IDR，同内容刷新不生成新内容身份。
 
 输入经DataChannel进入Endpoint，校验Session/peer、页面完整token和输出代次；连接内客户端序号与Session持续Browser序号分层，重登录不会回退Browser序号。焦点确认先于排队输入，键鼠/IME/touch保序，移动只在不丢语义时合并。Client-v1触控由Client计算候选手势与完整惯性，Browser保留官方逐包ACK、preventDefault和touch-action裁决及OOPIF路由；不并行运行两套默认手势识别，见[Client手势](client-gestures.zh-CN.md)。
 
 常规产品动作亦经当前RTC送Endpoint，再由Control唯一提交器受理、持久化和对账。操作收据与乐观界面不是第二份产品真相；受理、运行、提交、拒绝和结果未知分开，未知操作不自动重放。空起始页可以没有源渲染需求，但保留Session数据通道，新增网页不因此重建连接。
 
-坐标按Client CSS、letterbox、编码矩形、mediaScale/DPR转换到viewport DIP，再到widget/screen。IME的composition/commit/cancel/finish使用UTF-16；完整replacement range/span、逐字符候选几何仍有扩展空间。
+坐标按Client CSS、letterbox、编码矩形、各轴mediaScaleX/Y与DPR转换到viewport DIP，再到widget/screen，覆盖WebRTC尺寸对齐的轴向取整差异。IME的composition/commit/cancel/finish使用UTF-16；完整replacement range/span、逐字符候选几何仍有扩展空间。
 
-Stats区分源、采集、编码、解码、video compositor提交观察及canvas JS提交；rVFC回调次数不代表显示FPS。生产采集完成→呈现估算使用QPC/UTC与Client时钟校准，排除静态重复和低置信度；Pixel marker带CRC作端到端实验，两者不混称，也都不证明物理屏幕点亮。分段p95不可直接相加，见[测量设施](streaming-experiments.zh-CN.md)。
+Stats区分源提交、实际Fence完成观察、编码、解码、video compositor提交观察及canvas JS提交；rVFC回调次数不代表显示FPS。有效源完成时间存在时，呈现估算使用QPC/UTC与Client时钟校准，排除静态重复和低置信度；新OSR路径目前缺此时间戳，相应样本省略。Pixel marker带CRC可独立作端到端实验，两者不混称，也都不证明物理屏幕点亮。分段p95不可直接相加，见[测量设施](streaming-experiments.zh-CN.md)。
 
 ## 页面能力与保留目标
 

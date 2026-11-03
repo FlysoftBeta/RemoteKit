@@ -58,6 +58,29 @@ function environment(t: TestContext) {
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('Unexpected HTTP fallback'); });
 }
 
+test('receivers configure zero playout target on transceiver creation and again on track delivery', async t => {
+  environment(t);
+  const initial: { jitterBufferTarget: number }[] = [];
+  t.mock.method(RTCPeerConnection.prototype, 'addTransceiver', () => {
+    const receiver = { jitterBufferTarget: 100 }; initial.push(receiver);
+    return { receiver } as unknown as RTCRtpTransceiver;
+  });
+  const transport = new RemoteTransport(); t.after(() => transport.disconnect());
+  transport.setControlRpc(async method => method === 'rtc.offer' ? { type: 'answer', sdp: 'v=0\r\n', connectionId: 'p' } : { closed: true });
+  await transport.connect();
+  assert.deepEqual(initial.map(receiver => receiver.jitterBufferTarget), [0, 0]);
+  const peer = (transport as any).peer as RTCPeerConnection;
+  const receiver = { playoutDelayHint: .5 };
+  // Pending video presentation returns before attaching a real MediaStream.
+  (transport as any).presentationBackend = 'pending';
+  peer.ontrack!({ track: { kind: 'video' }, receiver } as unknown as RTCTrackEvent);
+  assert.equal(receiver.playoutDelayHint, 0);
+  assert.equal('jitterBufferTarget' in receiver, false);
+  assert.equal(transport.diagnostics.receiverPlayout?.video?.jitterBufferTargetSupported, false);
+  assert.equal(transport.diagnostics.receiverPlayout?.video?.playoutDelayHint, 0);
+  transport.disconnect();
+});
+
 test('Native forwarded timeout wire preserves unknown receipt without Client replay', async t => {
   environment(t);
   // The Native DirectServices CPU test compares its actual timeout output to

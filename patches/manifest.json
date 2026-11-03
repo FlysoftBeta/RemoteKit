@@ -3,39 +3,14 @@
   "base_revision": "1aa07b638799e59656559ae6c6649d4b197f555e",
   "patches": [
     {
-      "id": "bounded-capture-pending",
-      "path": "0001-bounded-capture-pending.patch",
-      "sha256": "6d8bf4e9efd793fee458bc1f5ac7de33f9eeac08beeb85b620216579f0aaedc3"
-    },
-    {
-      "id": "copy-output-profile",
-      "path": "0002-copy-output-profile.patch",
-      "sha256": "38a0b40c733f33a31492424d0f78d3d41d2bb280e7c95a2cb0ffbbc2563b1758"
-    },
-    {
       "id": "offscreen-root",
       "path": "0003-offscreen-root.patch",
       "sha256": "311c58f1928bade950dfe91cc86f67eabfc303e60c7465bdf3eaab602097f6b8"
     },
     {
-      "id": "capture-render-rate",
-      "path": "0004-capture-render-rate.patch",
-      "sha256": "a06da420c6fea610d56ee19eee5e6018c0355cd54d86f721fde51852b36e805e"
-    },
-    {
-      "id": "synthetic-vsync-deadline",
-      "path": "0005-synthetic-vsync-deadline.patch",
-      "sha256": "f90452cb86b58970f4162a1eb8c350f99f0d33f28c45b1992c3a099f8e345ebd"
-    },
-    {
       "id": "continuous-video-frame-callbacks",
       "path": "0006-continuous-video-frame-callbacks.patch",
       "sha256": "3b3630da6e53ed8d5d852e3a0ea7b9235c08f00baba009d0cd262184fe6261d7"
-    },
-    {
-      "id": "capture-to-atlas",
-      "path": "0007-capture-to-atlas.patch",
-      "sha256": "684d9d19f42c6aad4ab3004dcda2ded2ea826c93ace6ad86462fac2fb4bb2be1"
     },
     {
       "id": "touch-injection-dispatch-result",
@@ -53,14 +28,14 @@
       "sha256": "c2c306c4ef5cc08f031d136aa010e73f9977aa6c759371429a513c342c091c30"
     },
     {
-      "id": "external-begin-frame-completion",
-      "path": "0011-external-begin-frame-completion.patch",
-      "sha256": "d1045e1e20327d0f1361753d45622729df39d9ec0177784b88108916ee99b40c"
+      "id": "remotekit-osr-output",
+      "path": "0013-remotekit-osr-output.patch",
+      "sha256": "862f7fcd754e336387a13f872f497acaba8256aefa65866ba1336c1c9d4aa2fa"
     },
     {
-      "id": "scheduler-begin-frame-admission",
-      "path": "0012-scheduler-begin-frame-admission.patch",
-      "sha256": "994d0b5dd044fd49fa09f2d783a0443345aeb870c24494d208ebd33b7ecbd274"
+      "id": "webrtc-screenshare-adaptation",
+      "path": "0014-webrtc-screenshare-adaptation.patch",
+      "sha256": "678bcd7c6a48a6c1754b25e36857554f4963a816e8cbceebb05ca06847eaecc6"
     }
   ]
 }

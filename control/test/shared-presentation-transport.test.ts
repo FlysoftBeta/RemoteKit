@@ -24,3 +24,18 @@ test('fallback without a retained source requests current-peer media refresh onc
   i.mediaRefreshAt=-Infinity;i.peer=null;i.sharedFallback();assert.equal(sent.length,1,'A retired peer must not send to its old channel');
   i.peer={};i.latestProcessorFrame={frame:{}};i.displayedEpoch='stale';i.sharedFallback();assert.equal(sent.length,2,'A stale frame asks the current peer for a real new frame');
 });
+
+test('shared display ROI combines its own X/Y canvas sampling with exact adapted axes', t => {
+  const { internal: i } = environment(t);
+  const view = { id: 'a', session: 's', instance: 'i', document: 'd', focus: 'f', x: 0, y: 0,
+    width: 640, height: 360, deviceScaleFactor: 2, mediaScale: .495, mediaScaleX: .5, mediaScaleY: .495 };
+  i.layout.views = [view];
+  const canvas = { isConnected: true }, shared = {};
+  i.renderers.add({ view, canvas, layoutEpoch: 'e', layoutGeneration: 'g', ready() {} });
+  i.sharedRenderer = { isVisible: () => true };
+  i.commitShared({ canvas: shared, frame: { layout: i.layout, rtpTimestamp: 7 },
+    regions: new Map([['a', { x: 12, y: 24, width: 320, height: 90 }]]), uploadMs: 1, drawMs: 1 });
+  const source = i.paintedPlanes.get('a').source;
+  assert.equal(source.pixelsPerDip, .5); assert.equal(source.pixelsPerDipY, .2475);
+  assert.deepEqual(source.sourceRect, { x: 12, y: 24, width: 320, height: 90 });
+});

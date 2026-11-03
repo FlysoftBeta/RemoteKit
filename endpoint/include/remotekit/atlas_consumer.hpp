@@ -9,16 +9,16 @@
 #include <cstdint>
 #include <memory>
 #include <string>
-#include "remotekit/shared_atlas.h"
+#include "remotekit/shared_render_slots.h"
 
 namespace remotekit {
 
 // Open takes ownership of every non-null handle, including on failure.
 struct AtlasConsumerSetup {
   HANDLE mapping = nullptr;
-  HANDLE ready_fence = nullptr;
-  HANDLE consumed_fence = nullptr;
-  std::array<HANDLE, 3> textures{};
+  std::array<HANDLE, kRenderSlotCount> ready_fences{};
+  std::array<HANDLE, kRenderSlotCount> consumed_fences{};
+  std::array<HANDLE, kRenderSlotCount> textures{};
   LUID adapter_luid{};
   std::uint64_t generation = 0;
   std::uint32_t width = 0;
@@ -44,6 +44,11 @@ class AtlasConsumer {
 
   bool Open(HWND window, AtlasConsumerSetup setup);
   AtlasPollResult PollAndPresent();
+  // Demo intentionally uses only slot zero, with one bounded request at a time.
+  bool Begin(std::uint64_t value);
+  void Reject(std::uint64_t value);
+  std::uint64_t ReadyValue() const;
+  std::uint64_t ConsumedValue() const;
   bool Resize();
   void RequestRepaint();
   AtlasContentRect GetContentRect() const;

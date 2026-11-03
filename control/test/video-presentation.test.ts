@@ -104,6 +104,19 @@ test('each video needs its own matched RTP before input, without canvas copies o
   assert.equal(s.transport.presentationDiagnostics.processor.read, 0);
 });
 
+test('video readback exposes both sampling axes while changed axes retire the old input plane', t => {
+  const s = environment(t, true), adapted = { ...first, mediaScale: .495, mediaScaleX: .5, mediaScaleY: .495 };
+  s.message({ ...layout, views: [adapted, second] });
+  s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  s.metadata(10); s.videos[1].frame(10);
+  const source = s.transport.getPresentedPlane('1', 10)!;
+  assert.equal(source.pixelsPerDip, 1); assert.equal(source.pixelsPerDipY, .99);
+  assert.deepEqual(source.sourceRect, { x: 4, y: 4, width: 640, height: 480 });
+  assert.equal(s.transport.sendInput(first, { type: 'wheel', x: 10, y: 10, dy: -120 }), false);
+  assert.equal(s.internal.canInput('1'), true);
+});
+
 test('duplicate layout/prepare transactions cannot starve hidden ACK or revoke ready videos', t => {
   const s = environment(t); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   const repeat = () => { s.message(layout); s.message({ type: 'presentation.prepare', ...key }); };

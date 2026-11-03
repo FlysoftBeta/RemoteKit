@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import type { RemoteTransport } from './transport';
 import type { Surface } from './types';
-import { FREEZE_MAX_MS, ViewportTransition, visibleContentBounds, sameViewportBounds } from './viewport-transition';
+import { FREEZE_MAX_MS, ViewportTransition, visibleContentBounds, sameViewportBounds, surfaceMatchesViewport } from './viewport-transition';
 
 /** A single bounded ROI copy during a visual viewport transaction, never a frame backend. */
 export function useViewportTransition(host: RefObject<HTMLElement | null>, transport: RemoteTransport, viewId: string, surface: Surface | undefined, frameReady: boolean, owner: string | undefined) {
@@ -81,8 +81,7 @@ export function useViewportTransition(host: RefObject<HTMLElement | null>, trans
   useLayoutEffect(() => {
     const state = transition.current, desired = state.desired, layout = transport.layout;
     if (!owner || !surface || !frameReady || !layout || !desired || !host.current) return;
-    const scale = surface.deviceScaleFactor * (surface.mediaScale ?? 1);
-    if (Math.abs(surface.width / scale - Math.round(desired.width)) > 1 || Math.abs(surface.height / scale - Math.round(desired.height)) > 1) return;
+    if (!surfaceMatchesViewport(surface, desired)) return;
     if (attempted.current && performance.now() - lastVisualAt.current < 120) return;
     state.ready(owner, `${layout.generation}:${layout.epoch}`, desired);
     if (!state.freeze) { disposeBitmap(); attempted.current = false; setWaiting(false); }

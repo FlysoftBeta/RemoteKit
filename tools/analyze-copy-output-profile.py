@@ -1,4 +1,4 @@
-"""Join opt-in CopyOutput events; elapsed is a flush batch, not pure-copy GPU time."""
+"""Historical capture-path evidence only; not a validator for render slots. Join opt-in CopyOutput events; elapsed is a flush batch, not pure-copy GPU time."""
 import argparse
 import collections
 import json

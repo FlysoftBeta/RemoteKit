@@ -28,3 +28,17 @@ test('unknown presentation fallback retains the actual reason', () => {
   assert.match(html, />future-video-failure</);
   assert.doesNotMatch(html, /GL 初始化失败/);
 });
+
+test('media diagnostics distinguish GCC targets, display ceiling and compatibility playout hint', () => {
+  const diagnostics: Diagnostics = { connection: '已连接', channel: '已连接',
+    receiverPlayout: { video: { jitterBufferTargetSupported: false, jitterBufferTarget: null, playoutDelayHintSupported: true, playoutDelayHint: 0 } },
+    endpoint: { gccTargetFps: 42, gccTargetBitrate: 12000000, queueFullDrops: 3, appliedFps: 240,
+      mediaPolicy: { requested: { degradationPreference: 'balanced', maxFps: 60 }, applied: { degradationPreference: 'balanced', maxFps: 60 } } },
+  };
+  const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
+  assert.match(html, /GCC 目标 FPS<\/dt><dd>42.0 fps/);
+  assert.match(html, /GCC 目标码率<\/dt><dd>12.00 Mbps/);
+  assert.match(html, /编码队列满丢帧<\/dt><dd>3/);
+  assert.match(html, /60 \/ 60/); assert.match(html, /balanced/);
+  assert.match(html, /兼容 hint 0 s/); assert.doesNotMatch(html, /240/);
+});

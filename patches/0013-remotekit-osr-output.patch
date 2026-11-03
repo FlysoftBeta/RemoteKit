@@ -1,0 +1,1529 @@
+diff --git a/components/viz/service/BUILD.gn b/components/viz/service/BUILD.gn
+index 42fc3926fd..3aee88d8e7 100644
+--- a/components/viz/service/BUILD.gn
++++ b/components/viz/service/BUILD.gn
+@@ -480,6 +480,7 @@ viz_component("service") {
+   }
+ 
+   if (is_win) {
++    sources += [ "display_embedder/skia_output_device_remotekit.cc", "display_embedder/skia_output_device_remotekit.h" ]
+     sources += [
+       "display/dc_layer_overlay.cc",
+       "display/dc_layer_overlay.h",
+diff --git a/components/viz/service/display/display.cc b/components/viz/service/display/display.cc
+index 57fee59c6d..55706e0c55 100644
+--- a/components/viz/service/display/display.cc
++++ b/components/viz/service/display/display.cc
+@@ -585,6 +585,8 @@ void Display::InitializeRenderer() {
+       overlay_processor_->NeedsSurfaceDamageRectList(), extra_pass_option,
+       prevent_merging_surfaces_to_root_pass);
+ 
++  aggregator_->set_remotekit_full_content(
++      output_surface_->capabilities().remotekit_output);
+   aggregator_->set_output_is_secure(output_is_secure_);
+   aggregator_->SetDisplayColorSpaces(display_color_spaces_);
+   aggregator_->SetMaxRenderTargetSize(
+@@ -798,6 +800,12 @@ bool Display::DrawAndSwap(const DrawAndSwapParams& params) {
+     return false;
+   }
+ 
++  // Dedicated OSR output has no implicit backbuffer or native presentation.
++  if (output_surface_->capabilities().remotekit_output &&
++      !remotekit_frame_active_) {
++    return false;
++  }
++
+   int64_t display_trace_id = base::trace_event::GetNextGlobalTraceId();
+   TRACE_EVENT(
+       "viz,benchmark,graphics.pipeline", "Graphics.Pipeline",
+@@ -955,6 +963,12 @@ bool Display::DrawAndSwap(const DrawAndSwapParams& params) {
+     TRACE_EVENT_INSTANT("viz", "Size mismatch.");
+ 
+   bool should_draw = have_copy_requests || (have_damage && size_matches);
++  if (remotekit_frame_active_ && should_draw) {
++    // Demand remains based on source damage. Once needed, every rotating OSR
++    // target must receive all pixels, including previously undamaged regions.
++    last_render_pass.damage_rect = last_render_pass.output_rect;
++    frame.surface_damage_rect_list_.push_back(last_render_pass.damage_rect);
++  }
+   client_->DisplayWillDrawAndSwap(should_draw, &frame.render_pass_list);
+ 
+   std::optional<base::ElapsedTimer> draw_timer;
+@@ -984,6 +998,7 @@ bool Display::DrawAndSwap(const DrawAndSwapParams& params) {
+     draw_timer.emplace();
+     overlay_processor_->SetFrameSequenceNumber(frame_sequence_number_);
+     overlay_processor_->SetIsPageFullscreen(frame.page_fullscreen_mode);
++    remotekit_frame_drawn_ |= remotekit_frame_active_;
+     renderer_->DrawFrame(&frame.render_pass_list, device_scale_factor_,
+                          current_surface_size, display_color_spaces_,
+                          std::move(frame.surface_damage_rect_list_),
+@@ -1195,7 +1210,8 @@ void Display::DidReceiveSwapBuffersAck(gpu::SwapBuffersCompleteParams params,
+         data->set_display_trace_id(params.swap_trace_id);
+       });
+ 
+-  // Buffers being recreated require full damage. The frame is expected to be sent again.
++  // Buffers being recreated require full damage. The frame is expected to be
++  // sent again.
+   if (params.swap_response.result ==
+       gfx::SwapResult::SWAP_NAK_RECREATE_BUFFERS) {
+     aggregator_->SetFullDamageForSurface(current_surface_id_);
+@@ -1454,6 +1470,62 @@ void Display::SoftwareDeviceUpdatedCALayerParams(
+     client_->DisplayDidReceiveCALayerParams(std::move(ca_layer_params));
+ }
+ 
++void Display::ConfigureRemoteKitOutput(
++    mojom::RemoteKitOutputConfigPtr config,
++    base::OnceCallback<void(bool)> callback) {
++#if BUILDFLAG(IS_WIN)
++  if (skia_output_surface_ && output_surface_->capabilities().remotekit_output &&
++      !remotekit_frame_active_) {
++    // This Windows-only device uses the independent GpuService compositor GPU
++    // task runner, not Android WebView's draw-scoped GPU thread. Configuration
++    // must complete before the first Draw; retaining it until Draw deadlocks
++    // the Browser waiting for this callback. Authorize only this OSR boundary.
++    gpu::ScopedAllowScheduleGpuTask allow_schedule_gpu_task;
++    // A replacement pool has no initialized content even when the page itself
++    // is static. The lease gate prevents drawing before the next admitted Begin.
++    aggregator_->SetFullDamageForSurface(current_surface_id_);
++    damage_tracker_->SetRootSurfaceDamaged();
++    skia_output_surface_->ConfigureRemoteKitOutput(std::move(config),
++                                                   std::move(callback));
++    return;
++  }
++#endif
++  std::move(callback).Run(false);
++}
++
++void Display::BeginRemoteKitFrame(
++    mojom::RemoteKitFrameTokenPtr token,
++    base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback) {
++  CHECK(!remotekit_frame_active_);
++#if BUILDFLAG(IS_WIN)
++  if (skia_output_surface_ && output_surface_->capabilities().remotekit_output) {
++    // The Windows OSR GPU runner is independently available. Queue selection on
++    // the existing FIFO before any renderer work from this BeginFrame interval.
++    gpu::ScopedAllowScheduleGpuTask allow_schedule_gpu_task;
++    remotekit_frame_active_ = true;
++    remotekit_frame_drawn_ = false;
++    skia_output_surface_->BeginRemoteKitFrame(std::move(token),
++                                              std::move(callback));
++    return;
++  }
++#endif
++  std::move(callback).Run(mojom::RemoteKitFrameResult::New(
++      std::move(token), mojom::RemoteKitFrameStatus::kNotReady));
++}
++
++void Display::FinishRemoteKitFrame() {
++#if BUILDFLAG(IS_WIN)
++  if (remotekit_frame_active_ && skia_output_surface_ &&
++      output_surface_->capabilities().remotekit_output) {
++    // No-draw retirement must run without a future Draw, on the same Windows
++    // OSR GPU FIFO after this interval's rendering/submit work.
++    gpu::ScopedAllowScheduleGpuTask allow_schedule_gpu_task;
++    remotekit_frame_active_ = false;
++    skia_output_surface_->FinishRemoteKitFrame(remotekit_frame_drawn_);
++  }
++#endif
++}
++
+ void Display::ForceImmediateDrawAndSwapIfPossible() {
+   if (scheduler_)
+     scheduler_->ForceImmediateSwapIfPossible();
+diff --git a/components/viz/service/display/display.h b/components/viz/service/display/display.h
+index b2a30770d6..ba140e6701 100644
+--- a/components/viz/service/display/display.h
++++ b/components/viz/service/display/display.h
+@@ -38,6 +38,7 @@
+ #include "components/viz/service/surfaces/surface_manager.h"
+ #include "components/viz/service/viz_service_export.h"
+ #include "services/viz/privileged/mojom/compositing/display_private.mojom-shared.h"
++#include "services/viz/privileged/mojom/compositing/remotekit_output.mojom.h"
+ #include "ui/gfx/display_color_spaces.h"
+ #include "ui/gfx/overlay_transform.h"
+ #include "ui/gfx/swap_result.h"
+@@ -56,7 +57,7 @@ class ScopedAllowScheduleGpuTask;
+ struct SwapBuffersCompleteParams;
+ class SharedImageManager;
+ class Scheduler;
+-}
++}  // namespace gpu
+ 
+ namespace viz {
+ class DirectRenderer;
+@@ -189,6 +190,13 @@ class VIZ_SERVICE_EXPORT Display : public DisplaySchedulerClient,
+     return output_surface_->capabilities().resize_based_on_root_surface;
+   }
+ 
++  void ConfigureRemoteKitOutput(mojom::RemoteKitOutputConfigPtr config,
++                                base::OnceCallback<void(bool)> callback);
++  void BeginRemoteKitFrame(
++      mojom::RemoteKitFrameTokenPtr token,
++      base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback);
++  void FinishRemoteKitFrame();
++
+   void ForceImmediateDrawAndSwapIfPossible();
+   void SetNeedsOneBeginFrame(const BeginFrameArgs& args);
+ 
+@@ -359,6 +367,8 @@ class VIZ_SERVICE_EXPORT Display : public DisplaySchedulerClient,
+   int pending_swaps_ = 0;
+ 
+   uint64_t frame_sequence_number_ = 0;
++  bool remotekit_frame_active_ = false;
++  bool remotekit_frame_drawn_ = false;
+ };
+ 
+ }  // namespace viz
+diff --git a/components/viz/service/display/display_scheduler.cc b/components/viz/service/display/display_scheduler.cc
+index d3a2bf969c..d45180e392 100644
+--- a/components/viz/service/display/display_scheduler.cc
++++ b/components/viz/service/display/display_scheduler.cc
+@@ -459,6 +459,17 @@ bool DisplayScheduler::OnBeginFrame(const BeginFrameArgs& args) {
+ }
+ 
+ void DisplayScheduler::OnBeginFrameContinuation(const BeginFrameArgs& args) {
++  // Observer registration may deliver MISSED before scheduler-client delivery
++  // of the same frame. Admit that identity only once, including after its
++  // deadline has finished. frame_time is unchanged by delivery or scheduling;
++  // type and deadline are not.
++  if (current_begin_frame_args_.IsValid() && args.IsValid() &&
++      args.frame_id.IsSequenceValid() &&
++      args.frame_id == current_begin_frame_args_.frame_id &&
++      args.frame_time == current_begin_frame_args_.frame_time) {
++    return;
++  }
++
+   // If we get another BeginFrame before the previous deadline,
+   // synchronously trigger the previous deadline before progressing.
+   if (inside_begin_frame_deadline_interval_) {
+diff --git a/components/viz/service/display/output_surface.h b/components/viz/service/display/output_surface.h
+index 53b4128837..c5bf249611 100644
+--- a/components/viz/service/display/output_surface.h
++++ b/components/viz/service/display/output_surface.h
+@@ -92,6 +92,7 @@ class VIZ_SERVICE_EXPORT OutputSurface {
+     int number_of_buffers = 0;
+     // Whether this output surface renders to the default OpenGL zero
+     // framebuffer or to an offscreen framebuffer.
++    bool remotekit_output = false;
+     bool uses_default_gl_framebuffer = true;
+     // Where (0,0) is on this OutputSurface.
+     gfx::SurfaceOrigin output_surface_origin = gfx::SurfaceOrigin::kBottomLeft;
+diff --git a/components/viz/service/display/skia_output_surface.cc b/components/viz/service/display/skia_output_surface.cc
+index 5c02fc1729..6880d683da 100644
+--- a/components/viz/service/display/skia_output_surface.cc
++++ b/components/viz/service/display/skia_output_surface.cc
+@@ -14,4 +14,16 @@ SkiaOutputSurface* SkiaOutputSurface::AsSkiaOutputSurface() {
+   return this;
+ }
+ 
++void SkiaOutputSurface::ConfigureRemoteKitOutput(
++    mojom::RemoteKitOutputConfigPtr config, base::OnceCallback<void(bool)> callback) {
++  std::move(callback).Run(false);
++}
++void SkiaOutputSurface::BeginRemoteKitFrame(
++    mojom::RemoteKitFrameTokenPtr token,
++    base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback) {
++  std::move(callback).Run(mojom::RemoteKitFrameResult::New(
++      std::move(token), mojom::RemoteKitFrameStatus::kNotReady));
++}
++void SkiaOutputSurface::FinishRemoteKitFrame(bool drawn) {}
++
+ }  // namespace viz
+diff --git a/components/viz/service/display/skia_output_surface.h b/components/viz/service/display/skia_output_surface.h
+index bb27efcce6..0a6bba0fd7 100644
+--- a/components/viz/service/display/skia_output_surface.h
++++ b/components/viz/service/display/skia_output_surface.h
+@@ -5,6 +5,8 @@
+ #ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_SKIA_OUTPUT_SURFACE_H_
+ #define COMPONENTS_VIZ_SERVICE_DISPLAY_SKIA_OUTPUT_SURFACE_H_
+ 
++#include "services/viz/privileged/mojom/compositing/remotekit_output.mojom.h"
++
+ #include <memory>
+ #include <string>
+ #include <string_view>
+@@ -61,6 +63,14 @@ class VIZ_SERVICE_EXPORT SkiaOutputSurface : public OutputSurface,
+ 
+   ~SkiaOutputSurface() override;
+ 
++  virtual void ConfigureRemoteKitOutput(
++      mojom::RemoteKitOutputConfigPtr config,
++      base::OnceCallback<void(bool)> callback);
++  virtual void BeginRemoteKitFrame(
++      mojom::RemoteKitFrameTokenPtr token,
++      base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback);
++  virtual void FinishRemoteKitFrame(bool drawn);
++
+   SkiaOutputSurface* AsSkiaOutputSurface() override;
+ 
+   // Begin painting the current frame. This method will create a
+diff --git a/components/viz/service/display/surface_aggregator.cc b/components/viz/service/display/surface_aggregator.cc
+index d5116fa02c..eee62307d4 100644
+--- a/components/viz/service/display/surface_aggregator.cc
++++ b/components/viz/service/display/surface_aggregator.cc
+@@ -2281,6 +2281,14 @@ AggregatedFrame SurfaceAggregator::Aggregate(
+   // |root_damage_rect_| is used to restrict aggregating quads only if they
+   // intersect this area.
+   root_damage_rect_.Union(target_damage);
++  if (remotekit_full_content_) {
++    // All intermediate passes must contain the full root contribution because
++    // the selected output texture may have unrelated previous contents. The
++    // root pass damage is restored to source demand below, before returning.
++    root_damage_rect_.Union(
++        cc::MathUtil::MapEnclosedRectWith2dAxisAlignedTransform(
++            root_surface_transform_, gfx::Rect(viewport_bounds)));
++  }
+ 
+   // Changing color usage will cause the renderer to reshape the output surface,
+   // therefore the renderer might expand the damage to the whole frame. The
+diff --git a/components/viz/service/display/surface_aggregator.h b/components/viz/service/display/surface_aggregator.h
+index aef13e755f..bd902fbc84 100644
+--- a/components/viz/service/display/surface_aggregator.h
++++ b/components/viz/service/display/surface_aggregator.h
+@@ -108,6 +108,11 @@ class VIZ_SERVICE_EXPORT SurfaceAggregator : public SurfaceObserver {
+   void SetFullDamageForSurface(const SurfaceId& surface_id);
+   void set_output_is_secure(bool secure) { output_is_secure_ = secure; }
+   void set_take_copy_requests(bool value) { take_copy_requests_ = value; }
++  // Retain complete render-pass content for independently rotating targets.
++  // The root damage returned to Display still reflects actual source demand.
++  void set_remotekit_full_content(bool value) {
++    remotekit_full_content_ = value;
++  }
+ 
+   // Set the color spaces for the created RenderPasses, which is propagated
+   // to the output surface.
+@@ -361,6 +366,7 @@ class VIZ_SERVICE_EXPORT SurfaceAggregator : public SurfaceObserver {
+ 
+   // Whether |CopyOutputRequests| should be moved over to the aggregated frame.
+   bool take_copy_requests_ = true;
++  bool remotekit_full_content_ = false;
+ 
+   // The color space for the root render pass. If this is different from its
+   // blending color space (e.g. for HDR), then a final render pass to convert
+diff --git a/components/viz/service/display_embedder/skia_output_surface_impl.cc b/components/viz/service/display_embedder/skia_output_surface_impl.cc
+index 1ce7523906..7738c1a161 100644
+--- a/components/viz/service/display_embedder/skia_output_surface_impl.cc
++++ b/components/viz/service/display_embedder/skia_output_surface_impl.cc
+@@ -21,6 +21,7 @@
+ #include "base/observer_list.h"
+ #include "base/strings/stringprintf.h"
+ #include "base/synchronization/waitable_event.h"
++#include "base/task/bind_post_task.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/threading/sequence_local_storage_slot.h"
+ #include "base/threading/thread_restrictions.h"
+@@ -1303,6 +1304,31 @@ void SkiaOutputSurfaceImpl::AddChildWindowToBrowser(
+   client_->AddChildWindowToBrowser(child_window);
+ }
+ 
++void SkiaOutputSurfaceImpl::ConfigureRemoteKitOutput(
++    mojom::RemoteKitOutputConfigPtr config, base::OnceCallback<void(bool)> callback) {
++  EnqueueGpuTask(base::BindOnce(&SkiaOutputSurfaceImplOnGpu::ConfigureRemoteKitOutput,
++      base::Unretained(impl_on_gpu_.get()), std::move(config),
++      base::BindPostTaskToCurrentDefault(std::move(callback))), {},
++      /*make_current=*/true, /*need_framebuffer=*/false);
++  FlushGpuTasks(SyncMode::kNoWait);
++}
++
++void SkiaOutputSurfaceImpl::BeginRemoteKitFrame(
++    mojom::RemoteKitFrameTokenPtr token, base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback) {
++  EnqueueGpuTask(base::BindOnce(&SkiaOutputSurfaceImplOnGpu::BeginRemoteKitFrame,
++      base::Unretained(impl_on_gpu_.get()), std::move(token),
++      base::BindPostTaskToCurrentDefault(std::move(callback))), {},
++      /*make_current=*/true, /*need_framebuffer=*/false);
++  FlushGpuTasks(SyncMode::kNoWait);
++}
++
++void SkiaOutputSurfaceImpl::FinishRemoteKitFrame(bool drawn) {
++  EnqueueGpuTask(base::BindOnce(&SkiaOutputSurfaceImplOnGpu::FinishRemoteKitFrame,
++      base::Unretained(impl_on_gpu_.get()), drawn), {},
++      /*make_current=*/true, /*need_framebuffer=*/false);
++  FlushGpuTasks(SyncMode::kNoWait);
++}
++
+ void SkiaOutputSurfaceImpl::ScheduleGpuTaskForTesting(
+     base::OnceClosure callback,
+     std::vector<gpu::SyncToken> sync_tokens) {
+diff --git a/components/viz/service/display_embedder/skia_output_surface_impl.h b/components/viz/service/display_embedder/skia_output_surface_impl.h
+index 0b3c4b1105..8860b82dbe 100644
+--- a/components/viz/service/display_embedder/skia_output_surface_impl.h
++++ b/components/viz/service/display_embedder/skia_output_surface_impl.h
+@@ -90,6 +90,14 @@ class VIZ_SERVICE_EXPORT SkiaOutputSurfaceImpl : public SkiaOutputSurface {
+       DisplayCompositorMemoryAndTaskController* display_controller,
+       const RendererSettings& renderer_settings,
+       const DebugRendererSettings* debug_settings);
++  void ConfigureRemoteKitOutput(
++      mojom::RemoteKitOutputConfigPtr config,
++      base::OnceCallback<void(bool)> callback) override;
++  void BeginRemoteKitFrame(
++      mojom::RemoteKitFrameTokenPtr token,
++      base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback) override;
++  void FinishRemoteKitFrame(bool drawn) override;
++
+   ~SkiaOutputSurfaceImpl() override;
+ 
+   SkiaOutputSurfaceImpl(const SkiaOutputSurfaceImpl&) = delete;
+diff --git a/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc b/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc
+index 635c2fad93..897e9bc78f 100644
+--- a/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc
++++ b/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.cc
+@@ -144,6 +144,10 @@
+ #include "components/viz/service/display_embedder/output_presenter_fuchsia.h"
+ #endif
+ 
++#if BUILDFLAG(IS_WIN)
++#include "components/viz/service/display_embedder/skia_output_device_remotekit.h"
++#endif
++
+ namespace viz {
+ 
+ namespace {
+@@ -484,6 +488,20 @@ void SkiaOutputSurfaceImplOnGpu::FinishPaintCurrentFrame(
+     return;
+   }
+ 
++#if BUILDFLAG(IS_WIN)
++  if (is_remotekit_output_ &&
++      !static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())->PreparePaint()) {
++    // A resize can overtake the Browser's grant. No root commands have touched
++    // the old target, so reject this frame without poisoning the GL context.
++    draw_render_pass_failed_ = true;
++    if (on_finished)
++      std::move(on_finished).Run();
++    if (return_release_fence_cb)
++      std::move(return_release_fence_cb).Run(gfx::GpuFenceHandle());
++    return;
++  }
++#endif
++
+   // We do not reset scoped_output_device_paint_ after drawing the ddl until
+   // SwapBuffers() is called, because we may need access to output_sk_surface()
+   // for CopyOutput().
+@@ -1656,6 +1674,11 @@ void SkiaOutputSurfaceImplOnGpu::CopyOutput(
+   }
+ 
+   bool from_framebuffer = mailbox.IsZero();
++  if (is_remotekit_output_ && from_framebuffer && !scoped_output_device_paint_) {
++    // A stale resize grant can reject root painting before this queued request.
++    // Dropping the request reports an empty result without reading an old target.
++    return;
++  }
+   DCHECK(scoped_output_device_paint_ || !from_framebuffer);
+ 
+   SkSurface* surface;
+@@ -1969,7 +1992,46 @@ bool SkiaOutputSurfaceImplOnGpu::Initialize() {
+   return true;
+ }
+ 
++void SkiaOutputSurfaceImplOnGpu::ConfigureRemoteKitOutput(
++    mojom::RemoteKitOutputConfigPtr config, base::OnceCallback<void(bool)> callback) {
++#if BUILDFLAG(IS_WIN)
++  if (is_remotekit_output_) {
++    std::move(callback).Run(static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())->Configure(std::move(config)));
++    return;
++  }
++#endif
++  std::move(callback).Run(false);
++}
++void SkiaOutputSurfaceImplOnGpu::BeginRemoteKitFrame(
++    mojom::RemoteKitFrameTokenPtr token,
++    base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback) {
++#if BUILDFLAG(IS_WIN)
++  if (is_remotekit_output_) {
++    static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())->BeginFrame(std::move(token), std::move(callback));
++    return;
++  }
++#endif
++  std::move(callback).Run(mojom::RemoteKitFrameResult::New(std::move(token), mojom::RemoteKitFrameStatus::kNotReady));
++}
++void SkiaOutputSurfaceImplOnGpu::FinishRemoteKitFrame(bool drawn) {
++#if BUILDFLAG(IS_WIN)
++  if (is_remotekit_output_)
++    static_cast<SkiaOutputDeviceRemoteKit*>(output_device_.get())->FinishFrame(drawn);
++#endif
++}
++
+ bool SkiaOutputSurfaceImplOnGpu::InitializeForGL() {
++#if BUILDFLAG(IS_WIN)
++  static BASE_FEATURE(kRemoteKitOsrOutput, base::FEATURE_DISABLED_BY_DEFAULT);
++  if (dependency_->IsOffscreen() && base::FeatureList::IsEnabled(kRemoteKitOsrOutput)) {
++    is_remotekit_output_ = true;
++    output_device_ = std::make_unique<SkiaOutputDeviceRemoteKit>(
++        context_state_, shared_image_factory_.get(),
++        shared_image_representation_factory_.get(),
++        shared_gpu_deps_->memory_tracker(), GetDidSwapBuffersCompleteCallback());
++    return true;
++  }
++#endif
+   if (dependency_->IsOffscreen()) {
+     output_device_ = std::make_unique<SkiaOutputDeviceOffscreen>(
+         context_state_, gfx::SurfaceOrigin::kTopLeft,
+@@ -2277,6 +2339,9 @@ void SkiaOutputSurfaceImplOnGpu::SwapBuffersInternal(
+   // content.
+   bool skip_present = draw_render_pass_failed_;
+   draw_render_pass_failed_ = false;
++  if (skip_present) {
++    FinishRemoteKitFrame(false);
++  }
+ 
+   if (!skip_present && frame) {
+     if (presenter_) {
+@@ -2513,6 +2578,7 @@ void SkiaOutputSurfaceImplOnGpu::MarkContextLost(ContextLostReason reason) {
+   }
+ 
+   context_state_->MarkContextLost();
++  FinishRemoteKitFrame(false);
+   if (context_lost_callback_) {
+     PostTaskToClientThread(std::move(context_lost_callback_));
+   }
+diff --git a/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.h b/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.h
+index fe15099502..a3e6fd38b0 100644
+--- a/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.h
++++ b/components/viz/service/display_embedder/skia_output_surface_impl_on_gpu.h
+@@ -5,6 +5,8 @@
+ #ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SKIA_OUTPUT_SURFACE_IMPL_ON_GPU_H_
+ #define COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SKIA_OUTPUT_SURFACE_IMPL_ON_GPU_H_
+ 
++#include "services/viz/privileged/mojom/compositing/remotekit_output.mojom.h"
++
+ #include <memory>
+ #include <optional>
+ #include <string>
+@@ -144,6 +146,14 @@ class SkiaOutputSurfaceImplOnGpu
+   SkiaOutputSurfaceImplOnGpu& operator=(const SkiaOutputSurfaceImplOnGpu&) =
+       delete;
+ 
++  void ConfigureRemoteKitOutput(
++      mojom::RemoteKitOutputConfigPtr config,
++      base::OnceCallback<void(bool)> callback);
++  void BeginRemoteKitFrame(
++      mojom::RemoteKitFrameTokenPtr token,
++      base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)> callback);
++  void FinishRemoteKitFrame(bool drawn);
++
+   ~SkiaOutputSurfaceImplOnGpu() override;
+ 
+   gpu::CommandBufferId command_buffer_id() const {
+@@ -509,6 +519,7 @@ class SkiaOutputSurfaceImplOnGpu
+   const raw_ptr<SkiaOutputSurfaceDependency> dependency_;
+   raw_ptr<gpu::DisplayCompositorMemoryAndTaskControllerOnGpu> shared_gpu_deps_;
+   scoped_refptr<gpu::gles2::FeatureInfo> feature_info_;
++  bool is_remotekit_output_ = false;
+   std::unique_ptr<gpu::SharedImageFactory> shared_image_factory_;
+   std::unique_ptr<gpu::SharedImageRepresentationFactory>
+       shared_image_representation_factory_;
+diff --git a/components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc b/components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
+index ce2b4d708e..27a4bf8440 100644
+--- a/components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
++++ b/components/viz/service/frame_sinks/external_begin_frame_source_mojo.cc
+@@ -7,6 +7,8 @@
+ #include <utility>
+ 
+ #include "base/check_is_test.h"
++#include "base/check_op.h"
++#include "base/functional/bind.h"
+ #include "base/notreached.h"
+ #include "components/viz/service/frame_sinks/frame_sink_manager_impl.h"
+ #include "mojo/public/cpp/bindings/message.h"
+@@ -34,29 +36,114 @@ ExternalBeginFrameSourceMojo::~ExternalBeginFrameSourceMojo() {
+   CHECK(!display_);
+ }
+ 
++void ExternalBeginFrameSourceMojo::IssueRemoteKitBeginFrame(
++    const BeginFrameArgs& args,
++    mojom::RemoteKitFrameTokenPtr token,
++    IssueRemoteKitBeginFrameCallback callback) {
++  if (remotekit_callback_ || pending_frame_callback_ ||
++      !pending_frame_sinks_.empty()) {
++    mojo::ReportBadMessage("Got overlapping RemoteKit begin frame");
++    return;
++  }
++  if (!display_) {
++    std::move(callback).Run(mojom::RemoteKitFrameResult::New(
++        std::move(token), mojom::RemoteKitFrameStatus::kNotReady));
++    return;
++  }
++  remotekit_callback_ = std::move(callback);
++  remotekit_token_ = token.Clone();
++  remotekit_interval_finished_ = false;
++  remotekit_root_missing_ = display_->IsRootFrameMissing();
++  display_->BeginRemoteKitFrame(
++      std::move(token),
++      base::BindOnce(&ExternalBeginFrameSourceMojo::OnRemoteKitResult,
++                     weak_factory_.GetWeakPtr()));
++  IssueBeginFrame(
++      args,
++      base::BindOnce(&ExternalBeginFrameSourceMojo::OnRemoteKitIntervalFinished,
++                     weak_factory_.GetWeakPtr()));
++}
++
++void ExternalBeginFrameSourceMojo::OnRemoteKitIntervalFinished(
++    const BeginFrameAck&) {
++  remotekit_interval_finished_ = true;
++  if (display_) {
++    display_->FinishRemoteKitFrame();
++  }
++  MaybeCompleteRemoteKitFrame();
++}
++
++void ExternalBeginFrameSourceMojo::OnRemoteKitResult(
++    mojom::RemoteKitFrameResultPtr result) {
++  CHECK(remotekit_callback_ && !remotekit_result_ && result && result->token);
++  CHECK_EQ(result->token->generation, remotekit_token_->generation);
++  CHECK_EQ(result->token->slot, remotekit_token_->slot);
++  CHECK_EQ(result->token->value, remotekit_token_->value);
++  CHECK_EQ(result->token->target_index, remotekit_token_->target_index);
++  remotekit_result_ = std::move(result);
++  MaybeCompleteRemoteKitFrame();
++}
++
++void ExternalBeginFrameSourceMojo::MaybeCompleteRemoteKitFrame() {
++  if (!remotekit_interval_finished_ || !remotekit_result_) {
++    return;
++  }
++  auto callback = std::move(remotekit_callback_);
++  auto result = std::move(remotekit_result_);
++  if (remotekit_root_missing_ &&
++      result->status == mojom::RemoteKitFrameStatus::kIdle) {
++    result->status = mojom::RemoteKitFrameStatus::kNotReady;
++  }
++  remotekit_token_.reset();
++  remotekit_interval_finished_ = false;
++  std::move(callback).Run(std::move(result));
++}
++
+ void ExternalBeginFrameSourceMojo::IssueExternalBeginFrame(
+     const BeginFrameArgs& args,
+     base::OnceCallback<void(const BeginFrameAck&)> callback) {
++  if (remotekit_callback_) {
++    mojo::ReportBadMessage("Got external begin frame during RemoteKit frame");
++    return;
++  }
++  IssueBeginFrame(args, std::move(callback));
++}
++
++void ExternalBeginFrameSourceMojo::IssueBeginFrame(
++    const BeginFrameArgs& args,
++    base::OnceCallback<void(const BeginFrameAck&)> callback) {
+   if (pending_frame_callback_ ||
+       (wait_for_all_frame_sinks_ && !pending_frame_sinks_.empty())) {
+     mojo::ReportBadMessage("Got overlapping IssueExternalBeginFrame");
+     return;
+   }
+   original_frame_id_ = args.frame_id;
++  ++request_ordinal_;
++  display_finished_current_frame_ = false;
++  pending_frame_callback_ = std::move(callback);
++  admitting_frame_ = true;
+ 
+   OnBeginFrame(args);
+ 
+-  pending_frame_callback_ = std::move(callback);
+-
+   if (!display_) {
+     CHECK_IS_TEST();
++    admitting_frame_ = false;
++    if (pending_ack_) {
++      MaybeProduceFrameCallback();
++    }
+     return;
+   }
+ 
+   // Ensure that Display will receive the BeginFrame (as a missed one), even if
+-  // it doesn't currently need it. This way, we ensure that
+-  // `OnDisplayDidFinishFrame()` will be called for this BeginFrame.
+-  display_->SetNeedsOneBeginFrame(args);
++  // it doesn't currently need it. A synchronous completion during observer
++  // delivery already satisfies this; do not schedule that completed ID again.
++  if (!display_finished_current_frame_) {
++    display_->SetNeedsOneBeginFrame(args);
++  }
++  // Observer delivery and SetNeedsOneBeginFrame can complete the display or
++  // finish one sink before another sink registers. Keep the request armed,
++  // but don't deliver its callback until admission has fully unwound.
++  admitting_frame_ = false;
+   MaybeProduceFrameCallback();
+ }
+ 
+@@ -84,8 +171,7 @@ void ExternalBeginFrameSourceMojo::OnDestroyedCompositorFrameSink(
+ void ExternalBeginFrameSourceMojo::OnFrameSinkDidBeginFrame(
+     const FrameSinkId& sink_id,
+     const BeginFrameArgs& args) {
+-  if (!original_frame_id_ ||
+-      args.frame_id.source_id != original_frame_id_->source_id) {
++  if (!original_frame_id_ || args.frame_id != *original_frame_id_) {
+     return;
+   }
+   pending_frame_sinks_.insert(sink_id);
+@@ -94,8 +180,7 @@ void ExternalBeginFrameSourceMojo::OnFrameSinkDidBeginFrame(
+ void ExternalBeginFrameSourceMojo::OnFrameSinkDidFinishFrame(
+     const FrameSinkId& sink_id,
+     const BeginFrameArgs& args) {
+-  if (!original_frame_id_ ||
+-      args.frame_id.source_id != original_frame_id_->source_id) {
++  if (!original_frame_id_ || args.frame_id != *original_frame_id_) {
+     return;
+   }
+   pending_frame_sinks_.erase(sink_id);
+@@ -103,7 +188,7 @@ void ExternalBeginFrameSourceMojo::OnFrameSinkDidFinishFrame(
+ }
+ 
+ void ExternalBeginFrameSourceMojo::MaybeProduceFrameCallback() {
+-  if (!pending_frame_sinks_.empty()) {
++  if (admitting_frame_) {
+     return;
+   }
+   if (!pending_frame_callback_) {
+@@ -111,8 +196,23 @@ void ExternalBeginFrameSourceMojo::MaybeProduceFrameCallback() {
+   }
+ 
+   if (pending_ack_) {
++    if (wait_for_all_frame_sinks_ && !pending_frame_sinks_.empty()) {
++      return;
++    }
+     DispatchFrameCallback(*pending_ack_);
+-    pending_ack_.reset();
++    return;
++  }
++  if (!pending_frame_sinks_.empty()) {
++    return;
++  }
++  // A RemoteKit lease cannot be retired before its display interval: a late
++  // draw must never write a target after FinishRemoteKitFrame(false).
++  if (remotekit_callback_) {
++    return;
++  }
++  if (retired_frame_callbacks_.size() >= kMaxRetiredFrameCallbacks) {
++    // Keep this request in flight rather than forgetting proof for an old
++    // display completion. GPU availability or disconnect resolves the wait.
+     return;
+   }
+   // If there aren't pending surfaces and the root frame is not missing,
+@@ -140,6 +240,23 @@ void ExternalBeginFrameSourceMojo::MaybeProduceFrameCallback() {
+ 
+ void ExternalBeginFrameSourceMojo::DispatchFrameCallback(
+     const BeginFrameAck& ack) {
++  CHECK(original_frame_id_ && ack.frame_id == *original_frame_id_);
++  const BeginFrameAck completed_ack = ack;
++  if (!display_finished_current_frame_) {
++    CHECK_LT(retired_frame_callbacks_.size(), kMaxRetiredFrameCallbacks);
++    CHECK(
++        retired_frame_callbacks_.emplace(*original_frame_id_, request_ordinal_)
++            .second);
++  }
++  // Detach this request before copy-request cancellation or callback delivery
++  // can reenter us. Late sink notifications cannot repopulate its state, and
++  // dispatching an old callback cannot clear a new request's pending ACK.
++  auto callback = std::move(pending_frame_callback_);
++  original_frame_id_.reset();
++  pending_ack_.reset();
++  // Full-pipeline requests already have no pending sinks here. The optional
++  // non-waiting mode also retires its sink bookkeeping with this request.
++  pending_frame_sinks_.clear();
+   // If there are pending copy output requests that have not been fulfilled,
+   // cancel them, as they won't be served till the next frame. This prevents
+   // the client for waiting for them indefinitely.
+@@ -150,15 +267,24 @@ void ExternalBeginFrameSourceMojo::DispatchFrameCallback(
+   // as this may result in two overlapping frames being sent, which is not
+   // supported with full pipeline mode.
+   last_begin_frame_args_ = BeginFrameArgs();
+-  std::move(pending_frame_callback_).Run(ack);
++  std::move(callback).Run(completed_ack);
+ }
+ 
+ void ExternalBeginFrameSourceMojo::OnDisplayDidFinishFrame(
+     const BeginFrameId& frame_id,
+     DisplaySchedulerDrawResult result) {
+-  if (!pending_frame_callback_) {
++  if (retired_frame_callbacks_.erase(frame_id)) {
++    // A root-missing early NAK may precede the display deadline. In particular,
++    // resuming a GPU-deferred request first ends the previous display interval.
++    // That old completion must not acknowledge or change the new request.
+     return;
+   }
++  CHECK(pending_frame_callback_ && original_frame_id_ &&
++        frame_id == *original_frame_id_)
++      << " completion=" << frame_id.ToString() << " current="
++      << (original_frame_id_ ? original_frame_id_->ToString() : "none");
++  CHECK(!display_finished_current_frame_)
++      << " duplicate completion=" << frame_id.ToString();
+ 
+   if (result == DisplaySchedulerDrawResult::kDrawnLate ||
+       result == DisplaySchedulerDrawResult::kMayDrawLate) {
+@@ -167,9 +293,29 @@ void ExternalBeginFrameSourceMojo::OnDisplayDidFinishFrame(
+ 
+   bool has_damage = (result == DisplaySchedulerDrawResult::kDrawn);
+   BeginFrameAck ack(frame_id.source_id, frame_id.sequence_number, has_damage);
++  display_finished_current_frame_ = true;
++  // DisplayScheduler ends an old interval before starting/finishing a newer
++  // one. Once this interval finishes, older early-NAK requests that were
++  // overwritten while GPU-deferred can no longer produce a first completion.
++  for (auto it = retired_frame_callbacks_.begin();
++       it != retired_frame_callbacks_.end();) {
++    if (it->second < request_ordinal_) {
++      it = retired_frame_callbacks_.erase(it);
++    } else {
++      ++it;
++    }
++  }
+ 
+-  if (wait_for_all_frame_sinks_ && !pending_frame_sinks_.empty()) {
+-    CHECK(!pending_ack_);
++  if (admitting_frame_ ||
++      (wait_for_all_frame_sinks_ && !pending_frame_sinks_.empty())) {
++    CHECK(!pending_ack_)
++        << " incoming=" << frame_id.ToString() << " pending="
++        << (pending_ack_ ? pending_ack_->frame_id.ToString() : "none")
++        << " original="
++        << (original_frame_id_ ? original_frame_id_->ToString() : "none")
++        << " last_delivered=" << last_begin_frame_args_.frame_id.ToString()
++        << " pending_sinks=" << pending_frame_sinks_.size()
++        << " result=" << static_cast<int>(result);
+     pending_ack_ = ack;
+     return;
+   }
+@@ -180,6 +326,19 @@ void ExternalBeginFrameSourceMojo::OnDisplayDestroyed() {
+   // As part of destruction, we are automatically removed as a display
+   // observer. No need to call RemoveObserver.
+   display_ = nullptr;
++  if (remotekit_callback_) {
++    // A disconnected display no longer provides a usable target lease.
++    auto callback = std::move(remotekit_callback_);
++    auto token = std::move(remotekit_token_);
++    remotekit_result_.reset();
++    pending_frame_callback_.Reset();
++    original_frame_id_.reset();
++    pending_ack_.reset();
++    pending_frame_sinks_.clear();
++    weak_factory_.InvalidateWeakPtrs();
++    std::move(callback).Run(mojom::RemoteKitFrameResult::New(
++        std::move(token), mojom::RemoteKitFrameStatus::kLost));
++  }
+ }
+ 
+ void ExternalBeginFrameSourceMojo::SetDisplay(Display* display) {
+diff --git a/components/viz/service/frame_sinks/external_begin_frame_source_mojo.h b/components/viz/service/frame_sinks/external_begin_frame_source_mojo.h
+index b2bf9b90c2..e389738386 100644
+--- a/components/viz/service/frame_sinks/external_begin_frame_source_mojo.h
++++ b/components/viz/service/frame_sinks/external_begin_frame_source_mojo.h
+@@ -7,8 +7,10 @@
+ 
+ #include <optional>
+ 
++#include "base/containers/flat_map.h"
+ #include "base/containers/flat_set.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
+ #include "components/viz/common/display/display_scheduler_draw_result.h"
+ #include "components/viz/common/frame_sinks/begin_frame_args.h"
+ #include "components/viz/common/frame_sinks/begin_frame_source.h"
+@@ -51,6 +53,10 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
+   ~ExternalBeginFrameSourceMojo() override;
+ 
+   // mojom::ExternalBeginFrameController implementation.
++  void IssueRemoteKitBeginFrame(
++      const BeginFrameArgs& args,
++      mojom::RemoteKitFrameTokenPtr token,
++      IssueRemoteKitBeginFrameCallback callback) override;
+   void IssueExternalBeginFrame(
+       const BeginFrameArgs& args,
+       base::OnceCallback<void(const BeginFrameAck&)> callback) override;
+@@ -72,6 +78,7 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
+   }
+ 
+  private:
++  friend class ExternalBeginFrameSourceMojoTestApi;
+   // ExternalBeginFrameSourceClient implementation.
+   void OnNeedsBeginFrames(bool needs_begin_frames) override;
+   void SetPreferredInterval(base::TimeDelta interval) override;
+@@ -89,6 +96,11 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
+   void OnFrameSinkDidFinishFrame(const FrameSinkId& frame_sink_id,
+                                  const BeginFrameArgs& args) override;
+ 
++  void IssueBeginFrame(const BeginFrameArgs& args,
++                       base::OnceCallback<void(const BeginFrameAck&)> callback);
++  void OnRemoteKitIntervalFinished(const BeginFrameAck& ack);
++  void OnRemoteKitResult(mojom::RemoteKitFrameResultPtr result);
++  void MaybeCompleteRemoteKitFrame();
+   void MaybeProduceFrameCallback();
+   void DispatchFrameCallback(const BeginFrameAck& ack);
+ 
+@@ -100,6 +112,12 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
+   // the callback is listed before the receiver is enough to guarantee this.
+   base::OnceCallback<void(const BeginFrameAck& ack)> pending_frame_callback_;
+ 
++  IssueRemoteKitBeginFrameCallback remotekit_callback_;
++  mojom::RemoteKitFrameTokenPtr remotekit_token_;
++  mojom::RemoteKitFrameResultPtr remotekit_result_;
++  bool remotekit_interval_finished_ = false;
++  bool remotekit_root_missing_ = false;
++
+   mojo::AssociatedReceiver<mojom::ExternalBeginFrameController> receiver_;
+   mojo::AssociatedRemote<mojom::ExternalBeginFrameControllerClient>
+       remote_client_;
+@@ -110,12 +128,24 @@ class VIZ_SERVICE_EXPORT ExternalBeginFrameSourceMojo
+   // issued. MaybeProduceFrameCallback() also builds its "display won't draw"
+   // nak from this.
+   std::optional<BeginFrameId> original_frame_id_;
++  uint64_t request_ordinal_ = 0;
++  bool display_finished_current_frame_ = false;
++  // No terminal callback may run during source/display observer admission.
++  bool admitting_frame_ = false;
++
++  // Exact requests whose callback completed before their display interval.
++  // GPU-busy deferral can replace requests without ever scheduling them, so
++  // these are reclaimed when a newer display interval actually finishes.
++  // A full ledger disables early NAKs until display completion makes room.
++  static constexpr size_t kMaxRetiredFrameCallbacks = 8;
++  base::flat_map<BeginFrameId, uint64_t> retired_frame_callbacks_;
+ 
+   const bool wait_for_all_frame_sinks_;
+ 
+   base::flat_set<FrameSinkId> pending_frame_sinks_;
+   std::optional<BeginFrameAck> pending_ack_;
+   raw_ptr<Display> display_ = nullptr;
++  base::WeakPtrFactory<ExternalBeginFrameSourceMojo> weak_factory_{this};
+ };
+ 
+ }  // namespace viz
+diff --git a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
+index a7b0672402..74e9fe562d 100644
+--- a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
++++ b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.cc
+@@ -466,6 +466,12 @@ void RootCompositorFrameSinkImpl::UpdateVSyncParameters() {
+     external_begin_frame_source_->SetPreferredInterval(interval);
+ }
+ 
++void RootCompositorFrameSinkImpl::ConfigureRemoteKitOutput(
++    mojom::RemoteKitOutputConfigPtr config,
++    ConfigureRemoteKitOutputCallback callback) {
++  display_->ConfigureRemoteKitOutput(std::move(config), std::move(callback));
++}
++
+ void RootCompositorFrameSinkImpl::ForceImmediateDrawAndSwapIfPossible() {
+   display_->ForceImmediateDrawAndSwapIfPossible();
+ }
+diff --git a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.h b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.h
+index 347b3d2952..e1d3d50548 100644
+--- a/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.h
++++ b/components/viz/service/frame_sinks/root_compositor_frame_sink_impl.h
+@@ -74,6 +74,9 @@ class VIZ_SERVICE_EXPORT RootCompositorFrameSinkImpl
+   const SurfaceId& CurrentSurfaceId() const;
+ 
+   // mojom::DisplayPrivate:
++  void ConfigureRemoteKitOutput(
++      mojom::RemoteKitOutputConfigPtr config,
++      ConfigureRemoteKitOutputCallback callback) override;
+   void SetDisplayVisible(mojom::DisplayVisibility visibility) override;
+   void Resize(const gfx::Size& size) override;
+   void SetDisplayColorMatrix(const gfx::Transform& color_matrix) override;
+diff --git a/services/viz/privileged/mojom/compositing/BUILD.gn b/services/viz/privileged/mojom/compositing/BUILD.gn
+index 28b52bb68a..2228cf00dc 100644
+--- a/services/viz/privileged/mojom/compositing/BUILD.gn
++++ b/services/viz/privileged/mojom/compositing/BUILD.gn
+@@ -24,6 +24,7 @@ mojom("compositing") {
+     "layered_window_updater.mojom",
+     "overlay_strategy.mojom",
+     "renderer_settings.mojom",
++    "remotekit_output.mojom",
+     "vsync_parameter_observer.mojom",
+   ]
+ 
+diff --git a/services/viz/privileged/mojom/compositing/display_private.mojom b/services/viz/privileged/mojom/compositing/display_private.mojom
+index 94528f0b45..09e27b9d9c 100644
+--- a/services/viz/privileged/mojom/compositing/display_private.mojom
++++ b/services/viz/privileged/mojom/compositing/display_private.mojom
+@@ -4,6 +4,8 @@
+ 
+ module viz.mojom;
+ 
++import "services/viz/privileged/mojom/compositing/remotekit_output.mojom";
++
+ import "gpu/ipc/common/context_result.mojom";
+ import "gpu/ipc/common/surface_handle.mojom";
+ import "mojo/public/mojom/base/time.mojom";
+@@ -45,6 +47,8 @@ enum DisplayVisibility {
+ 
+ // The DisplayPrivate is used by privileged clients to talk to Display.
+ interface DisplayPrivate {
++  ConfigureRemoteKitOutput(RemoteKitOutputConfig config) => (bool success);
++
+   SetDisplayVisible(DisplayVisibility visibility);
+ 
+   // Resizes the display.
+diff --git a/services/viz/privileged/mojom/compositing/external_begin_frame_controller.mojom b/services/viz/privileged/mojom/compositing/external_begin_frame_controller.mojom
+index e556db266e..2cb00d6539 100644
+--- a/services/viz/privileged/mojom/compositing/external_begin_frame_controller.mojom
++++ b/services/viz/privileged/mojom/compositing/external_begin_frame_controller.mojom
+@@ -4,11 +4,16 @@
+ 
+ module viz.mojom;
+ 
++import "services/viz/privileged/mojom/compositing/remotekit_output.mojom";
++
+ import "mojo/public/mojom/base/time.mojom";
+ import "services/viz/public/mojom/compositing/begin_frame_args.mojom";
+ 
+ // Exposes a way to manually issue BeginFrames to a Display.
+ interface ExternalBeginFrameController {
++  IssueRemoteKitBeginFrame(BeginFrameArgs args, RemoteKitFrameToken token)
++      => (RemoteKitFrameResult result);
++
+   // Request a frame. The callback is invoked when frame has either been
+   // produced or can not be produced at this time.
+   // This is only used for headless on desktop and Android XR compositor.
+diff --git a/ui/compositor/compositor.cc b/ui/compositor/compositor.cc
+index 9849318dc2..dadcd02961 100644
+--- a/ui/compositor/compositor.cc
++++ b/ui/compositor/compositor.cc
+@@ -4,6 +4,8 @@
+ 
+ #include "ui/compositor/compositor.h"
+ 
++#include "services/viz/privileged/mojom/compositing/remotekit_output.mojom.h"
++
+ #include <stddef.h>
+ 
+ #include <algorithm>
+@@ -382,6 +384,30 @@ void Compositor::SetLayerTreeFrameSink(
+   MaybeUpdateObserveBeginFrame();
+ }
+ 
++void Compositor::ConfigureRemoteKitOutput(
++    viz::mojom::RemoteKitOutputConfigPtr config,
++    base::OnceCallback<void(bool)> callback) {
++  if (!display_private_) {
++    std::move(callback).Run(false);
++    return;
++  }
++  display_private_->ConfigureRemoteKitOutput(std::move(config),
++                                             std::move(callback));
++}
++
++void Compositor::IssueRemoteKitBeginFrame(
++    const viz::BeginFrameArgs& args,
++    viz::mojom::RemoteKitFrameTokenPtr token,
++    base::OnceCallback<void(viz::mojom::RemoteKitFrameResultPtr)> callback) {
++  if (!external_begin_frame_controller_) {
++    std::move(callback).Run(viz::mojom::RemoteKitFrameResult::New(
++        std::move(token), viz::mojom::RemoteKitFrameStatus::kNotReady));
++    return;
++  }
++  external_begin_frame_controller_->IssueRemoteKitBeginFrame(
++      args, std::move(token), std::move(callback));
++}
++
+ void Compositor::SetExternalBeginFrameController(
+     mojo::AssociatedRemote<viz::mojom::ExternalBeginFrameController>
+         external_begin_frame_controller) {
+diff --git a/ui/compositor/compositor.h b/ui/compositor/compositor.h
+index 8a8a9d14d5..072bbba2f5 100644
+--- a/ui/compositor/compositor.h
++++ b/ui/compositor/compositor.h
+@@ -181,6 +181,13 @@ class COMPOSITOR_EXPORT Compositor
+   void SetLayerTreeFrameSink(
+       std::unique_ptr<cc::LayerTreeFrameSink> surface,
+       mojo::AssociatedRemote<viz::mojom::DisplayPrivate> display_private);
++  void ConfigureRemoteKitOutput(viz::mojom::RemoteKitOutputConfigPtr config,
++                                base::OnceCallback<void(bool)> callback);
++  void IssueRemoteKitBeginFrame(
++      const viz::BeginFrameArgs& args,
++      viz::mojom::RemoteKitFrameTokenPtr token,
++      base::OnceCallback<void(viz::mojom::RemoteKitFrameResultPtr)> callback);
++
+   void SetExternalBeginFrameController(
+       mojo::AssociatedRemote<viz::mojom::ExternalBeginFrameController>
+           external_begin_frame_controller);
+diff --git a/components/viz/service/display_embedder/skia_output_device_remotekit.h b/components/viz/service/display_embedder/skia_output_device_remotekit.h
+new file mode 100644
+--- /dev/null
++++ b/components/viz/service/display_embedder/skia_output_device_remotekit.h
+@@ -0,0 +1,88 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SKIA_OUTPUT_DEVICE_REMOTEKIT_H_
++#define COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SKIA_OUTPUT_DEVICE_REMOTEKIT_H_
++
++#include <d3d11_4.h>
++#include <wrl/client.h>
++
++#include "components/viz/service/display_embedder/skia_output_device.h"
++#include "gpu/command_buffer/service/shared_image/shared_image_representation.h"
++#include "services/viz/privileged/mojom/compositing/remotekit_output.mojom.h"
++
++namespace gpu {
++class SharedImageFactory;
++class SharedImageRepresentationFactory;
++}  // namespace gpu
++
++namespace viz {
++
++// An offscreen output device whose root SkSurface is the Browser-owned shared
++// DXGI target itself. The Browser grants exclusive write ownership per token;
++// it must wait for the consumer fence before granting that target again.
++class VIZ_SERVICE_EXPORT SkiaOutputDeviceRemoteKit final
++    : public SkiaOutputDevice {
++ public:
++  using FrameCallback =
++      base::OnceCallback<void(mojom::RemoteKitFrameResultPtr)>;
++
++  SkiaOutputDeviceRemoteKit(
++      scoped_refptr<gpu::SharedContextState> context_state,
++      gpu::SharedImageFactory* shared_image_factory,
++      gpu::SharedImageRepresentationFactory* representation_factory,
++      scoped_refptr<gpu::MemoryTracker> memory_tracker,
++      DidSwapBufferCompleteCallback did_swap_buffer_complete_callback);
++  ~SkiaOutputDeviceRemoteKit() override;
++
++  bool Configure(mojom::RemoteKitOutputConfigPtr config);
++  void BeginFrame(mojom::RemoteKitFrameTokenPtr token, FrameCallback callback);
++  // Called for a frame which did not paint. Drawn frames normally finish in
++  // EndPaint after Submit; true is valid only after both operations completed.
++  void FinishFrame(bool drawn);
++
++  // Reject a stale resize grant before any target write, without losing GL.
++  bool PreparePaint();
++  bool Reshape(const ReshapeParams& params) override;
++  void Submit(scoped_refptr<gpu::SharedContextState> context_state,
++              bool sync_cpu,
++              base::OnceClosure callback) override;
++  void Present(const std::optional<gfx::Rect>& update_rect,
++               BufferPresentedCallback feedback,
++               OutputSurfaceFrame frame) override;
++
++ protected:
++  SkSurface* BeginPaint(
++      std::vector<GrBackendSemaphore>* end_semaphores) override;
++  void EndPaint() override;
++
++ private:
++  struct Target;
++  void Complete(mojom::RemoteKitFrameStatus status);
++  void ClearTargets();
++
++  scoped_refptr<gpu::SharedContextState> context_state_;
++  const raw_ptr<gpu::SharedImageFactory> shared_image_factory_;
++  const raw_ptr<gpu::SharedImageRepresentationFactory> representation_factory_;
++  Microsoft::WRL::ComPtr<ID3D11Device5> device_;
++  Microsoft::WRL::ComPtr<ID3D11DeviceContext4> immediate_context_;
++  std::vector<std::unique_ptr<Target>> targets_;
++  std::vector<Microsoft::WRL::ComPtr<ID3D11Fence>> ready_fences_;
++  std::vector<uint64_t> last_values_;
++  std::vector<uint64_t> last_signaled_values_;
++  uint64_t generation_ = 0;
++  gfx::Size target_size_;
++  gfx::Size reshape_size_;
++  mojom::RemoteKitFrameTokenPtr token_;
++  FrameCallback callback_;
++  std::unique_ptr<gpu::SkiaImageRepresentation::ScopedWriteAccess> write_access_;
++  bool painted_ = false;
++  bool submitted_ = false;
++  bool has_submitted_content_ = false;
++  bool lost_ = false;
++};
++
++}  // namespace viz
++
++#endif  // COMPONENTS_VIZ_SERVICE_DISPLAY_EMBEDDER_SKIA_OUTPUT_DEVICE_REMOTEKIT_H_
+diff --git a/components/viz/service/display_embedder/skia_output_device_remotekit.cc b/components/viz/service/display_embedder/skia_output_device_remotekit.cc
+new file mode 100644
+--- /dev/null
++++ b/components/viz/service/display_embedder/skia_output_device_remotekit.cc
+@@ -0,0 +1,354 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/viz/service/display_embedder/skia_output_device_remotekit.h"
++
++#include <dxgi1_2.h>
++
++#include <limits>
++#include <utility>
++
++#include "base/check_op.h"
++#include "gpu/command_buffer/common/shared_image_info.h"
++#include "gpu/command_buffer/service/shared_context_state.h"
++#include "gpu/command_buffer/service/shared_image/shared_image_factory.h"
++#include "mojo/public/cpp/platform/platform_handle.h"
++#include "third_party/skia/include/core/SkSurface.h"
++#include "third_party/skia/include/gpu/ganesh/GrDirectContext.h"
++#include "ui/gl/gl_angle_util_win.h"
++
++namespace viz {
++namespace {
++constexpr size_t kMaximumTargets = 5;
++
++uint64_t PackLuid(const LUID& luid) {
++  return (static_cast<uint64_t>(static_cast<uint32_t>(luid.HighPart)) << 32) |
++         luid.LowPart;
++}
++}  // namespace
++
++struct SkiaOutputDeviceRemoteKit::Target {
++  gpu::Mailbox mailbox;
++  std::unique_ptr<gpu::SkiaImageRepresentation> representation;
++};
++
++SkiaOutputDeviceRemoteKit::SkiaOutputDeviceRemoteKit(
++    scoped_refptr<gpu::SharedContextState> context_state,
++    gpu::SharedImageFactory* shared_image_factory,
++    gpu::SharedImageRepresentationFactory* representation_factory,
++    scoped_refptr<gpu::MemoryTracker> memory_tracker,
++    DidSwapBufferCompleteCallback did_swap_buffer_complete_callback)
++    : SkiaOutputDevice(context_state->gr_context(),
++                       nullptr,
++                       std::move(memory_tracker),
++                       std::move(did_swap_buffer_complete_callback)),
++      context_state_(std::move(context_state)),
++      shared_image_factory_(shared_image_factory),
++      representation_factory_(representation_factory) {
++  capabilities_.remotekit_output = true;
++  capabilities_.uses_default_gl_framebuffer = false;
++  capabilities_.output_surface_origin = gfx::SurfaceOrigin::kTopLeft;
++  // Each token can select a different target: incremental root rendering would
++  // preserve pixels belonging to an older frame in that target.
++  capabilities_.supports_post_sub_buffer = false;
++  capabilities_.sk_color_type_map[SinglePlaneFormat::kRGBA_8888] =
++      kBGRA_8888_SkColorType;
++  capabilities_.sk_color_type_map[SinglePlaneFormat::kRGBX_8888] =
++      kBGRA_8888_SkColorType;
++  capabilities_.sk_color_type_map[SinglePlaneFormat::kBGRA_8888] =
++      kBGRA_8888_SkColorType;
++  capabilities_.sk_color_type_map[SinglePlaneFormat::kBGRX_8888] =
++      kBGRA_8888_SkColorType;
++}
++
++SkiaOutputDeviceRemoteKit::~SkiaOutputDeviceRemoteKit() {
++  write_access_.reset();
++  Complete(mojom::RemoteKitFrameStatus::kLost);
++  ClearTargets();
++}
++
++void SkiaOutputDeviceRemoteKit::ClearTargets() {
++  for (auto& target : targets_) {
++    target->representation.reset();
++    shared_image_factory_->DestroySharedImage(target->mailbox);
++  }
++  targets_.clear();
++  ready_fences_.clear();
++  last_values_.clear();
++  last_signaled_values_.clear();
++  generation_ = 0;
++}
++
++bool SkiaOutputDeviceRemoteKit::Configure(
++    mojom::RemoteKitOutputConfigPtr config) {
++  if (token_ || write_access_ || !config || config->generation == 0 ||
++      config->generation <= generation_ || config->size.IsEmpty() ||
++      config->targets.empty() || config->targets.size() > kMaximumTargets ||
++      config->ready_fences.size() != config->targets.size() ||
++      !context_state_->GrContextIsGL() || !context_state_->gr_context() ||
++      context_state_->context_lost()) {
++    return false;
++  }
++  auto angle_device = gl::QueryD3D11DeviceObjectFromANGLE();
++  Microsoft::WRL::ComPtr<ID3D11Device5> device;
++  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
++  Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
++  DXGI_ADAPTER_DESC adapter_desc = {};
++  if (!angle_device || FAILED(angle_device.As(&device)) ||
++      FAILED(angle_device.As(&dxgi_device)) ||
++      FAILED(dxgi_device->GetAdapter(&adapter)) ||
++      FAILED(adapter->GetDesc(&adapter_desc)) ||
++      PackLuid(adapter_desc.AdapterLuid) != config->adapter_luid) {
++    return false;
++  }
++  Microsoft::WRL::ComPtr<ID3D11DeviceContext> immediate;
++  Microsoft::WRL::ComPtr<ID3D11DeviceContext4> context;
++  device->GetImmediateContext(&immediate);
++  if (!immediate || FAILED(immediate.As(&context))) {
++    return false;
++  }
++
++  std::vector<Microsoft::WRL::ComPtr<ID3D11Fence>> fences;
++  for (auto& platform_handle : config->ready_fences) {
++    Microsoft::WRL::ComPtr<ID3D11Fence> fence;
++    if (!platform_handle.is_valid() ||
++        FAILED(device->OpenSharedFence(platform_handle.GetHandle().Get(),
++                                      IID_PPV_ARGS(&fence))) ||
++        fence->GetCompletedValue() == std::numeric_limits<uint64_t>::max()) {
++      return false;
++    }
++    fences.push_back(std::move(fence));
++  }
++  // Validate all resource descriptors before replacing the previous generation.
++  for (const auto& handle : config->targets) {
++    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
++    if (handle.type != gfx::DXGI_SHARED_HANDLE ||
++        !handle.dxgi_handle().IsValid() ||
++        FAILED(device->OpenSharedResource1(handle.dxgi_handle().buffer_handle(),
++                                          IID_PPV_ARGS(&texture)))) {
++      return false;
++    }
++    D3D11_TEXTURE2D_DESC desc = {};
++    texture->GetDesc(&desc);
++    if (desc.Width != static_cast<UINT>(config->size.width()) ||
++        desc.Height != static_cast<UINT>(config->size.height()) ||
++        desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.ArraySize != 1 ||
++        desc.MipLevels != 1 || desc.SampleDesc.Count != 1 ||
++        desc.Usage != D3D11_USAGE_DEFAULT ||
++        !(desc.BindFlags & D3D11_BIND_RENDER_TARGET) ||
++        !(desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) ||
++        !(desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE) ||
++        (desc.MiscFlags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)) {
++      return false;
++    }
++  }
++
++  // Reconfiguration must not retire a target while this device's submitted
++  // rendering is still using it. Idle tokens consume last_values_ but do not
++  // queue a signal, so only compare values actually signaled on the GPU.
++  for (size_t i = 0; i < ready_fences_.size(); ++i) {
++    const uint64_t completed = ready_fences_[i]->GetCompletedValue();
++    if (completed == std::numeric_limits<uint64_t>::max()) {
++      lost_ = true;
++      return false;
++    }
++    if (completed < last_signaled_values_[i]) {
++      return false;
++    }
++  }
++  ClearTargets();
++  device_ = std::move(device);
++  immediate_context_ = std::move(context);
++  target_size_ = config->size;
++  for (auto& handle : config->targets) {
++    auto target = std::make_unique<Target>();
++    target->mailbox = gpu::Mailbox::Generate();
++    gpu::SharedImageInfo info(
++        SinglePlaneFormat::kBGRA_8888, target_size_,
++        gfx::ColorSpace::CreateSRGB(), kTopLeft_GrSurfaceOrigin,
++        kPremul_SkAlphaType,
++        gpu::SHARED_IMAGE_USAGE_DISPLAY_WRITE |
++            gpu::SHARED_IMAGE_USAGE_DISPLAY_READ,
++        "RemoteKitRootTarget");
++    if (!shared_image_factory_->CreateSharedImage(target->mailbox, info,
++                                                 std::move(handle))) {
++      ClearTargets();
++      lost_ = true;
++      return false;
++    }
++    target->representation =
++        representation_factory_->ProduceSkia(target->mailbox, context_state_);
++    targets_.push_back(std::move(target));
++    if (!targets_.back()->representation) {
++      ClearTargets();
++      lost_ = true;
++      return false;
++    }
++  }
++  ready_fences_ = std::move(fences);
++  last_values_.reserve(ready_fences_.size());
++  for (const auto& fence : ready_fences_) {
++    last_values_.push_back(fence->GetCompletedValue());
++  }
++  last_signaled_values_.assign(ready_fences_.size(), 0);
++  generation_ = config->generation;
++  has_submitted_content_ = false;
++  lost_ = false;
++  return true;
++}
++
++void SkiaOutputDeviceRemoteKit::BeginFrame(
++    mojom::RemoteKitFrameTokenPtr token,
++    FrameCallback callback) {
++  if (!token || token_ || lost_ || context_state_->context_lost() ||
++      token->generation != generation_ ||
++      token->target_index >= targets_.size() ||
++      token->value == 0 ||
++      token->value == std::numeric_limits<uint64_t>::max() ||
++      token->value <= last_values_[token->target_index]) {
++    std::move(callback).Run(mojom::RemoteKitFrameResult::New(
++        std::move(token), lost_ || context_state_->context_lost()
++                              ? mojom::RemoteKitFrameStatus::kLost
++                              : mojom::RemoteKitFrameStatus::kNotReady));
++    return;
++  }
++  // Consume the value even on an idle frame, preventing replay of a grant.
++  last_values_[token->target_index] = token->value;
++  token_ = std::move(token);
++  callback_ = std::move(callback);
++  painted_ = false;
++  submitted_ = false;
++}
++
++bool SkiaOutputDeviceRemoteKit::PreparePaint() {
++  if (lost_ || context_state_->context_lost()) {
++    Complete(mojom::RemoteKitFrameStatus::kLost);
++    return false;
++  }
++  if (!token_ || reshape_size_ != target_size_) {
++    Complete(mojom::RemoteKitFrameStatus::kNotReady);
++    return false;
++  }
++  return true;
++}
++
++bool SkiaOutputDeviceRemoteKit::Reshape(const ReshapeParams& params) {
++  if (params.transform != gfx::OVERLAY_TRANSFORM_NONE ||
++      params.GfxSize().IsEmpty() || params.sample_count != 1 ||
++      params.image_info.colorType() != kBGRA_8888_SkColorType) {
++    return false;
++  }
++  reshape_size_ = params.GfxSize();
++  return true;
++}
++
++SkSurface* SkiaOutputDeviceRemoteKit::BeginPaint(
++    std::vector<GrBackendSemaphore>* end_semaphores) {
++  if (!token_ || lost_ || context_state_->context_lost() || write_access_ ||
++      reshape_size_ != target_size_) {
++    Complete(mojom::RemoteKitFrameStatus::kLost);
++    return nullptr;
++  }
++  std::vector<GrBackendSemaphore> begin_semaphores;
++  auto& representation = targets_[token_->target_index]->representation;
++  write_access_ = representation->BeginScopedWriteAccess(
++      1, SkSurfaceProps(), gfx::Rect(target_size_), &begin_semaphores,
++      end_semaphores, gpu::SharedImageRepresentation::AllowUnclearedAccess::kYes);
++  if (!write_access_ || !write_access_->surface() ||
++      (!begin_semaphores.empty() &&
++       !write_access_->surface()->wait(begin_semaphores.size(),
++                                       begin_semaphores.data(), false))) {
++    write_access_.reset();
++    Complete(mojom::RemoteKitFrameStatus::kLost);
++    return nullptr;
++  }
++  painted_ = true;
++  return write_access_->surface();
++}
++
++void SkiaOutputDeviceRemoteKit::Submit(
++    scoped_refptr<gpu::SharedContextState> context_state,
++    bool sync_cpu,
++    base::OnceClosure callback) {
++  CHECK_EQ(context_state.get(), context_state_.get());
++  if (write_access_) {
++    write_access_->ApplyBackendSurfaceEndState();
++  }
++  submitted_ = !context_state_->context_lost() &&
++               context_state_->gr_context()->submit(
++                   sync_cpu ? GrSyncCpu::kYes : GrSyncCpu::kNo);
++  // PostSubmit destroys ScopedPaint, invoking EndPaint below only after the
++  // Ganesh command stream has been submitted to the ANGLE immediate context.
++  std::move(callback).Run();
++}
++
++void SkiaOutputDeviceRemoteKit::EndPaint() {
++  if (write_access_ && token_ && submitted_) {
++    targets_[token_->target_index]->representation->SetCleared();
++  }
++  write_access_.reset();
++  FinishFrame(true);
++}
++
++void SkiaOutputDeviceRemoteKit::FinishFrame(bool drawn) {
++  if (!token_) {
++    return;
++  }
++  if (lost_ || context_state_->context_lost()) {
++    Complete(mojom::RemoteKitFrameStatus::kLost);
++    return;
++  }
++  if (!drawn && !painted_ && !write_access_) {
++    const bool has_current_content =
++        has_submitted_content_ && !targets_.empty() &&
++        !target_size_.IsEmpty() && reshape_size_ == target_size_;
++    Complete(has_current_content ? mojom::RemoteKitFrameStatus::kIdle
++                                 : mojom::RemoteKitFrameStatus::kNotReady);
++    return;
++  }
++  if (!drawn || !painted_ || !submitted_ || write_access_ ||
++      context_state_->context_lost() ||
++      FAILED(device_->GetDeviceRemovedReason()) ||
++      FAILED(immediate_context_->Signal(ready_fences_[token_->target_index].Get(),
++                                         token_->value))) {
++    lost_ = true;
++    Complete(mojom::RemoteKitFrameStatus::kLost);
++    return;
++  }
++  // This submits a REAL GPU fence on the same D3D11 immediate context ANGLE
++  // used to render. kSubmitted means queued, not completed; the consumer must
++  // GPU-wait on this fence/value before touching the target.
++  last_signaled_values_[token_->target_index] = token_->value;
++  immediate_context_->Flush();
++  if (FAILED(device_->GetDeviceRemovedReason())) {
++    lost_ = true;
++    Complete(mojom::RemoteKitFrameStatus::kLost);
++    return;
++  }
++  has_submitted_content_ = true;
++  Complete(mojom::RemoteKitFrameStatus::kSubmitted);
++}
++
++void SkiaOutputDeviceRemoteKit::Complete(mojom::RemoteKitFrameStatus status) {
++  if (!callback_) {
++    return;
++  }
++  auto result = mojom::RemoteKitFrameResult::New(std::move(token_), status);
++  auto callback = std::move(callback_);
++  std::move(callback).Run(std::move(result));
++}
++
++void SkiaOutputDeviceRemoteKit::Present(
++    const std::optional<gfx::Rect>& update_rect,
++    BufferPresentedCallback feedback,
++    OutputSurfaceFrame frame) {
++  // Viz swap accounting only: no HWND, swapchain, or OS presentation.
++  StartSwapBuffers(std::move(feedback));
++  FinishSwapBuffers(
++      gfx::SwapCompletionResult(lost_ ? gfx::SwapResult::SWAP_FAILED
++                                      : gfx::SwapResult::SWAP_ACK),
++      reshape_size_, std::move(frame));
++}
++
++}  // namespace viz
+diff --git a/services/viz/privileged/mojom/compositing/remotekit_output.mojom b/services/viz/privileged/mojom/compositing/remotekit_output.mojom
+new file mode 100644
+--- /dev/null
++++ b/services/viz/privileged/mojom/compositing/remotekit_output.mojom
+@@ -0,0 +1,36 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++module viz.mojom;
++
++import "ui/gfx/geometry/mojom/geometry.mojom";
++import "ui/gfx/mojom/buffer_types.mojom";
++
++struct RemoteKitOutputConfig {
++  uint64 generation;
++  uint64 adapter_luid;
++  gfx.mojom.Size size;
++  array<gfx.mojom.GpuMemoryBufferHandle> targets;
++  array<handle<platform>> ready_fences;
++};
++
++struct RemoteKitFrameToken {
++  uint64 generation;
++  uint32 slot;
++  uint64 value;
++  uint32 target_index;
++};
++
++enum RemoteKitFrameStatus {
++  // The GPU signal has been queued, not necessarily completed.
++  kSubmitted,
++  kIdle,
++  kNotReady,
++  kLost,
++};
++
++struct RemoteKitFrameResult {
++  RemoteKitFrameToken token;
++  RemoteKitFrameStatus status;
++};

@@ -2,6 +2,7 @@
 #include "remotekit/sampling.hpp"
 #include "remotekit/tail_refresh.hpp"
 #include <chrono>
+#include <utility>
 namespace remotekit::media {
 nlohmann::json EncoderStats::Snapshot() {
  std::lock_guard lock(mutex);
@@ -16,14 +17,14 @@ nlohmann::json EncoderStats::Snapshot() {
  return {{"qsvLowPower",low_power},{"senderRtcStats",sender_rtc_stats},{"encoder",backend},{"encodeSubmitted",submitted.load()},{"encodeCompleted",completed.load()},
          {"encodedBytes",bytes.load()},{"encodeDropped",dropped.load()},
          {"encodePending",pending.load()},{"encodeInflight",inflight.load()},
-         {"pendingReplaced",pending_replaced.load()},{"hardwareBusy",hardware_busy.load()},
+         {"queueFullDrops",queue_full_drops.load()},{"hardwareBusy",hardware_busy.load()},
          {"pausedDrops",paused_drops.load()},{"errorDrops",error_drops.load()},
          {"inactiveDrops",inactive_drops.load()},{"cancelledDrops",cancelled_drops.load()},
          {"queueWaitUs",queue_wait_us.load()},{"queueWaitSamples",queue_wait_samples.load()},
          {"rateUpdates",rate_updates.load()},{"keyframeRequests",keyframe_requests.load()},
          {"keyframesSubmitted",keyframes_submitted.load()},{"keyframesEncoded",keyframes_encoded.load()},
          {"lastEncodeMs",completed.load()?nlohmann::json(last_encode_ms.load()):nlohmann::json(nullptr)},
-         {"lastRequestedBitrate",requested_bitrate},{"lastRequestedFps",requested_fps},
+         {"gccTargetBitrate",gcc_target_bitrate},{"gccTargetFps",gcc_target_fps},
          {"requestedTargetUsage",requested_target_usage? nlohmann::json(requested_target_usage):nlohmann::json(nullptr)},
          {"appliedTargetUsage",applied_target_usage? nlohmann::json(*applied_target_usage):nlohmann::json(nullptr)},
          {"appliedBitrate",applied_bitrate? nlohmann::json(applied_bitrate):nlohmann::json(nullptr)},
@@ -79,6 +80,9 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  settings_.bitrate=config.bitrate_bps?config.bitrate_bps:settings_.bitrate;
  settings_.max_bitrate=config.max_bitrate_bps?config.max_bitrate_bps:settings_.max_bitrate;
  settings_.level_idc=config.h264_level_idc;
+ fps_limit_=remotekit::H264FrameRateLimit(settings_.width,settings_.height,settings_.level_idc);
+ if(!fps_limit_){Error("encoder dimensions/level have no legal H264 frame rate");return false;}
+ settings_.fps=std::min(settings_.fps,fps_limit_);
  const auto level_budget=remotekit::H264RateLimits(settings_.level_idc);
  if(level_budget.bitrate_bps) {
   settings_.max_bitrate=std::min(settings_.max_bitrate,level_budget.bitrate_bps);
@@ -92,7 +96,7 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  defaults(mode_!="nvenc");
  {std::lock_guard lock(stats_->mutex);stats_->requested_target_usage=settings_.target_usage;}
  std::string error;
- hardware_=mode_=="nvenc"?CreateNvencEncoder():CreateQsvEncoder();
+ hardware_=hardware_factory_?hardware_factory_():(mode_=="nvenc"?CreateNvencEncoder():CreateQsvEncoder());
  hardware_->SetTrace(trace_,encoder_);converter_.SetTrace(trace_);
  if(!hardware_->Configure(device_.Get(),settings_,error)) {
   {std::lock_guard lock(stats_->mutex);stats_->qsv_low_power=hardware_->LowPowerInfo();}
@@ -113,11 +117,10 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  {std::lock_guard lock(stats_->mutex);stats_->backend=hardware_->Name();stats_->error.clear();
   if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;
   auto actual=hardware_->ActualSettings();stats_->applied_bitrate=actual.bitrate;stats_->applied_max_bitrate=actual.max_bitrate;stats_->applied_fps=actual.fps;
-  stats_->actual_level=actual.level_idc;stats_->requested_bitrate=settings_.bitrate;stats_->requested_fps=settings_.fps;
+  stats_->actual_level=actual.level_idc;stats_->gcc_target_bitrate=0;stats_->gcc_target_fps=0;
   stats_->requested_target_usage=settings_.target_usage;
   if(std::string(hardware_->Name())=="qsv")stats_->applied_target_usage=actual.target_usage;}
- nominal_fps_=settings_.fps;fixed_rate_fps_=std::string(hardware_->Name())=="qsv";
- applied_max_=settings_.max_bitrate;applied_bitrate_=settings_.bitrate;applied_fps_=settings_.fps;cc_bitrate_=settings_.bitrate;cc_fps_=settings_.fps;bitrate_=0;fps_=0;paused_=false;
+ rate_limit_=settings_.max_bitrate;pending_rates_.reset();retained_frames_=0;paused_=false;keyframe_=true;
  stopping_=false;failed_=false;configured_=true;
  thread_=std::thread([this]{Run();});return true;
 }
@@ -130,44 +133,29 @@ bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame,bool keyframe) {
   else ++stats_->paused_drops;
   ++stats_->dropped;return false;
  }
- if(!queue_.empty()) {
-  auto previous=queue_.front();queue_.pop_front();
-  --stats_->pending;++stats_->pending_replaced;
-  remotekit::TailRefreshLease::Finish(previous.frame,false);
-  RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(previous.frame,true),rk_record.reason="pending_replaced";rk_record.cookie=previous.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;);
-  keyframe=keyframe||previous.key;
-  previous.frame.release(previous.frame.release_context,previous.frame.frame_id);
-  static_cast<ID3D11Texture2D*>(previous.frame.d3d11_texture)->Release();
-  if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,previous.frame.rtp_timestamp);
-  ++stats_->dropped;
+ // Slots bound the entire accepted FIFO, including GPU work in flight.
+ // Refuse overload; replacing an older frame would conceal producer backlog.
+ if(retained_frames_>=kFrameCapacity) {
+  ++stats_->queue_full_drops;++stats_->dropped;
+  RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(frame,true),rk_record.reason="queue_full";rk_record.encoder=encoder_;rk_record.peer=trace_peer_;);
+  return false;
  }
  Job job;job.frame=frame;job.key=keyframe;job.cookie=++cookie_;job.enqueued_qpc=QpcNow();
  // Hold both COM lifetime and the distinct atlas-pool slot lease.
  static_cast<ID3D11Texture2D*>(frame.d3d11_texture)->AddRef();
  frame.retain(frame.release_context,frame.frame_id);
- queue_.push_back(job);++stats_->pending;
+ queue_.push_back(job);++stats_->pending;++retained_frames_;
  RK_SERVER_TRACE(trace_,"worker_enqueue",TraceIds::Frame(frame,true),rk_record.cookie=job.cookie;rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.queue=static_cast<int>(queue_.size()););
  wake_.notify_one();return true;
 }
-void EncoderWorker::Policy(uint32_t bitrate,uint32_t maximum,uint32_t fps) {
- policy_bitrate_=bitrate;policy_max_=maximum;policy_fps_=fps;
- if(cc_bitrate_)Rates(cc_bitrate_,cc_fps_);
-}
-void EncoderWorker::Rates(uint32_t bitrate,uint32_t fps){
- cc_bitrate_=bitrate;cc_fps_=fps;
- if(policy_bitrate_)bitrate=std::min(bitrate,policy_bitrate_.load());
- if(policy_max_)bitrate=std::min(bitrate,policy_max_.load());
- if(policy_fps_)fps=std::min(fps,policy_fps_.load());
- {std::lock_guard lock(stats_->mutex);stats_->requested_bitrate=bitrate;stats_->requested_fps=fps;}
- if(!bitrate){paused_=true;return;}
- paused_=false;
- // oneVPL consumes integer kbps; identical effective rates need no reset.
- const auto level_max=remotekit::H264RateLimits(settings_.level_idc).bitrate_bps;
- const auto maximum=policy_max_.load()?policy_max_.load():settings_.max_bitrate;
- bitrate=std::max(1000u,std::min(level_max?std::min(maximum,level_max):maximum,bitrate)/1000*1000);
- fps=fixed_rate_fps_?nominal_fps_:std::max(1u,fps);
- if(bitrate==applied_bitrate_.load()/1000*1000 && fps==applied_fps_.load() && maximum==applied_max_.load())return;
- bitrate_=bitrate;fps_=fps;wake_.notify_one();
+void EncoderWorker::Rates(uint32_t bitrate,uint32_t fps) {
+ std::lock_guard lock(mutex_);
+ {std::lock_guard stats_lock(stats_->mutex);stats_->gcc_target_bitrate=bitrate;stats_->gcc_target_fps=fps;}
+ const bool paused=!bitrate || !fps;
+ if(paused_.exchange(paused) && !paused)keyframe_=true;
+ // Preserve GCC's target pair. Only the configured/negotiated ceiling is
+ // applied by Run; a zero target pauses rather than inventing a minimum rate.
+ pending_rates_=RateUpdate{bitrate,fps};wake_.notify_one();
 }
 void EncoderWorker::Keyframe(){++stats_->keyframe_requests;keyframe_=true;wake_.notify_one();}
 void EncoderWorker::Complete(AccessUnit& unit) {
@@ -199,6 +187,7 @@ void EncoderWorker::Complete(AccessUnit& unit) {
  stats_->last_encode_ms=1000.0*(QpcNow()-job.submitted_qpc)/QpcFrequency();
  job.frame.release(job.frame.release_context,job.frame.frame_id);
  static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
+ --retained_frames_;
 }
 void EncoderWorker::Run() {
  while(true) {
@@ -207,24 +196,33 @@ void EncoderWorker::Run() {
    if(!stopping_ && queue_.empty() && inflight_.empty())wake_.wait_for(lock,std::chrono::milliseconds(5));
    if(stopping_||failed_)break;
   }
-  const auto rate=inflight_.empty()?bitrate_.exchange(0):0;
-  const auto fps=rate?fps_.exchange(0):0;
-  if(rate && inflight_.empty()) {
+  std::optional<RateUpdate> rates;
+  {
+   std::lock_guard lock(mutex_);
+   if(inflight_.empty())rates=std::exchange(pending_rates_,std::nullopt);
+   if(paused_) {
+    for(auto& job:queue_) {
+     remotekit::TailRefreshLease::Finish(job.frame,false);
+     if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
+     job.frame.release(job.frame.release_context,job.frame.frame_id);
+     static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
+     --stats_->pending;--retained_frames_;++stats_->paused_drops;++stats_->dropped;
+    }
+    queue_.clear();
+   }
+  }
+  if(rates && rates->bitrate && rates->fps &&
+     (std::min(rates->bitrate,rate_limit_)!=settings_.bitrate || std::min(rates->fps,fps_limit_)!=settings_.fps)) {
    std::string error;
-   const auto maximum=policy_max_.load()?policy_max_.load():settings_.max_bitrate;
-   const auto limit=remotekit::H264RateLimits(settings_.level_idc).bitrate_bps;
-   const auto effective_max=limit?std::min(maximum,limit):maximum;
-   const auto effective_rate=std::min(rate,effective_max);
-   auto effective_fps=fps?fps:settings_.fps;
-   if(!fixed_rate_fps_ && policy_fps_)effective_fps=std::min(effective_fps,policy_fps_.load());
-   if(!hardware_->SetRates(effective_rate,effective_fps,error,effective_max)){
+   const auto effective_rate=std::min(rates->bitrate,rate_limit_);
+   const auto effective_fps=std::min(rates->fps,fps_limit_);
+   if(!hardware_->SetRates(effective_rate,effective_fps,error,rate_limit_)) {
     {std::lock_guard lock(stats_->mutex);if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
     Error(error);break;
    }
    ++stats_->rate_updates;
    if(hardware_->TakeKeyframeRequest())keyframe_=true;
    settings_.bitrate=effective_rate;settings_.fps=effective_fps;
-   applied_max_=effective_max;applied_bitrate_=effective_rate;applied_fps_=settings_.fps;
    {std::lock_guard lock(stats_->mutex);auto actual=hardware_->ActualSettings();
     stats_->applied_bitrate=actual.bitrate;stats_->applied_max_bitrate=actual.max_bitrate;stats_->applied_fps=actual.fps;stats_->actual_level=actual.level_idc;
     if(std::string(hardware_->Name())=="qsv")stats_->applied_target_usage=actual.target_usage;
@@ -232,9 +230,9 @@ void EncoderWorker::Run() {
   }
   // Fill the hardware queue before waiting for completion, preserving real
   // async_depth 2/4 behavior. A bounded host queue drops rather than growing.
-  while(!free_.empty() && !bitrate_.load()) {
+  while(!free_.empty() && !paused_) {
    Job job;
-   {std::lock_guard lock(mutex_);if(queue_.empty()||stopping_)break;job=queue_.front();queue_.pop_front();--stats_->pending;}
+   {std::lock_guard lock(mutex_);if(queue_.empty()||stopping_||paused_||pending_rates_)break;job=queue_.front();queue_.pop_front();--stats_->pending;}
    const auto dequeued=QpcNow();
    stats_->queue_wait_us+=static_cast<uint64_t>(1000000.0*std::max<int64_t>(0,dequeued-job.enqueued_qpc)/QpcFrequency());
    ++stats_->queue_wait_samples;
@@ -266,18 +264,9 @@ void EncoderWorker::Run() {
    if(status==CodecResult::busy) {
     ++stats_->hardware_busy;
     if(key)keyframe_=true;
-    bool replaced=false;
-    {std::lock_guard lock(mutex_);
-     if(queue_.empty()){job.enqueued_qpc=QpcNow();queue_.push_back(job);++stats_->pending;}
-     else {queue_.front().key=queue_.front().key||key;replaced=true;}}
-    if(replaced) {
-     ++stats_->pending_replaced;
-     remotekit::TailRefreshLease::Finish(job.frame,false);
-     if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
-     RK_SERVER_TRACE(trace_,"worker_drop",TraceIds::Frame(job.frame,true),rk_record.reason="busy_replaced";rk_record.cookie=job.cookie;rk_record.encoder=encoder_;);
-     ++stats_->dropped;job.frame.release(job.frame.release_context,job.frame.frame_id);
-     static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
-    }
+    // BUSY did not consume the input. Retry this same oldest job before
+    // later frames, retaining its original queue age and GPU lease.
+    {std::lock_guard lock(mutex_);queue_.push_front(job);++stats_->pending;}
     break;
    }
    if(status!=CodecResult::accepted) {
@@ -340,6 +329,6 @@ void EncoderWorker::Run() {
 void EncoderWorker::Stop() {
  {std::lock_guard lock(mutex_);stopping_=true;}
  wake_.notify_all();if(thread_.joinable())thread_.join();
- configured_=false;hardware_.reset();surfaces_.clear();free_.clear();
+ configured_=false;hardware_.reset();surfaces_.clear();free_.clear();retained_frames_=0;
 }
 }

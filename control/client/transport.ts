@@ -1,3 +1,4 @@
+import { surfacePixelScale } from './coordinates';
 import { DcFileClient } from './dc-file-client';
 import { barrierMatchesLayout, configurePresentationVideo, presentationBarrier, videoPlaneGeometry, VideoCompositorStats, type PresentationBarrier } from './video-presentation';
 import { CaptureLatency } from './capture-latency';
@@ -11,6 +12,7 @@ import { ReconnectPolicy } from './reconnect';
 import { PresentationDiagnostics } from './presentation-diagnostics';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource, type PresentationMode, type PixelRect } from './plane-source';
 import { MediaFeedbackSampler } from './media-feedback';
+import { configureReceiverPlayout } from './receiver-playout';
 import { createTrackProcessor, processorRtpTimestamp, type TrackProcessor, type ProcessorVideoFrame } from './track-processor';
 import type { ProductOperation, OperationReceipt, RtcServerSignal } from '../shared/product';
 import { SharedPlaneRenderer, type SharedFrame, type SharedPlaneResult } from './shared-plane-renderer';
@@ -179,8 +181,7 @@ export class RemoteTransport {
     const paintedAt=performance.now(),wall=Date.now();
     for(const renderer of this.renderers){const rect=result.regions.get(renderer.view.id);if(!rect||!this.rendererCurrent(renderer)||renderer.view.stale)continue;
       const view=renderer.view;
-      const scale=view.deviceScaleFactor*(view.mediaScale??1);
-      const source:PresentedPlaneSource={image:result.canvas,sourceRect:rect,kind:'plane',viewId:view.id,rtpTimestamp:result.frame.rtpTimestamp,layoutEpoch:result.frame.layout.epoch,encodedWidth:view.width,encodedHeight:view.height,pixelsPerDip:scale*rect.width/view.width,pixelsPerDipY:scale*rect.height/view.height};
+      const source:PresentedPlaneSource={image:result.canvas,sourceRect:rect,kind:'plane',viewId:view.id,rtpTimestamp:result.frame.rtpTimestamp,layoutEpoch:result.frame.layout.epoch,encodedWidth:view.width,encodedHeight:view.height,pixelsPerDip:surfacePixelScale(view)*rect.width/view.width,pixelsPerDipY:surfacePixelScale(view,'y')*rect.height/view.height};
       this.paintedPlanes.set(view.id,{identity:{view:{...view},layoutEpoch:result.frame.layout.epoch,layoutGeneration:result.frame.layout.generation},canvas:renderer.canvas,source,shared:true});
       this.reportPresented(view.id,result.frame.rtpTimestamp,paintedAt,wall);renderer.ready(true);
     }
@@ -575,7 +576,7 @@ export class RemoteTransport {
       if (!current || !current.plane.ready || current.plane.rtp !== rtpTimestamp || !layout) return undefined;
       const view = current.renderer.view;
       return { image: current.plane.video, sourceRect: { x: view.x, y: view.y, width: view.width, height: view.height }, kind: 'atlas', viewId,
-        rtpTimestamp, layoutEpoch: layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1) };
+        rtpTimestamp, layoutEpoch: layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: surfacePixelScale(view), pixelsPerDipY: surfacePixelScale(view, 'y') };
     }
     const plane = this.paintedPlanes.get(viewId), frame = this.getLastPresentation(viewId);
     return this.displayReady && this.displayedRtp === rtpTimestamp && frame?.rtpTimestamp === rtpTimestamp && plane && (!plane.shared||this.sharedRenderer?.isVisible(plane.source.image as HTMLCanvasElement)) && [...this.renderers].some(renderer => renderer.canvas === plane.canvas && renderer.view.id === viewId && this.rendererCurrent(renderer)) ? plane.source : undefined;
@@ -594,6 +595,10 @@ export class RemoteTransport {
   private canInput(viewId: string) { if (this.presentationBackend === 'pending') return false; if (this.presentationBackend === 'video') return !!this.videoPlaneFor(viewId)?.plane.ready; return this.displayReady && this.displayedRtp !== undefined && !!this.getPresentedPlane(viewId, this.displayedRtp); }
   private notify() { this.listeners.forEach(listener => listener()); }
   private update(change: Partial<Diagnostics>) { this.diagnostics = { ...this.diagnostics, ...change }; this.notify(); }
+  private configureReceiver(receiver: RTCRtpReceiver | undefined, kind: string) {
+    if (!receiver || (kind !== 'video' && kind !== 'audio')) return;
+    this.update({ receiverPlayout: { ...this.diagnostics.receiverPlayout, [kind]: configureReceiverPlayout(receiver) } });
+  }
   setMarkerStats(report: { inputToObservedMs: { p50: number | null; p95: number | null }; renderToObservedMs: { p50: number | null; p95: number | null }; samples: unknown[]; markerSampleHz?: number | null }) {
     const input = report.inputToObservedMs; const render = report.renderToObservedMs;
     const measured = input.p50 !== null ? input : render; const kind = input.p50 !== null ? 'input' : 'render';
@@ -655,7 +660,8 @@ export class RemoteTransport {
       const video = this.createReceiverVideo(); this.receiverVideo = video;
       this.peer = peer;
       const transceiver = peer.addTransceiver('video', { direction: 'recvonly' });
-      peer.addTransceiver('audio', { direction: 'recvonly' });
+      this.configureReceiver(transceiver.receiver, 'video');
+      this.configureReceiver(peer.addTransceiver('audio', { direction: 'recvonly' }).receiver, 'audio');
       const codecs = RTCRtpReceiver.getCapabilities?.('video')?.codecs;
       if (codecs && typeof transceiver.setCodecPreferences === 'function') transceiver.setCodecPreferences([...codecs.filter(codec => codec.mimeType.toLowerCase() === 'video/h264'), ...codecs.filter(codec => codec.mimeType.toLowerCase() !== 'video/h264')]);
       peer.onconnectionstatechange = () => {
@@ -667,6 +673,7 @@ export class RemoteTransport {
       };
       peer.ontrack = event => {
         if (this.peer !== peer || this.video !== video) return;
+        this.configureReceiver(event.receiver, event.track.kind);
         if (event.track.kind === 'audio') { this.audio.attach(event.track); return; }
         this.markConnection('track');
         if (this.activeFrameSource === 'track-processor') { this.processorTrack = event.track; this.startProcessorPump(peer, event.track); return; }
@@ -988,7 +995,7 @@ export class RemoteTransport {
     this.plane2dDraws++;
     if (kind === 'plane-frame') this.profileProcessor('paint', { rtp: this.displayedRtp, epoch: this.layout.epoch, view: view.id, paintStartedAt: start, paintEndedAt: paintedAt });
     this.presentation.cost('viewportDraw', start, paintedAt - start, view.id);
-    const source: PresentedPlaneSource = { image: kind === 'atlas' ? image : node, sourceRect: kind === 'atlas' ? { x: view.x, y: view.y, width: view.width, height: view.height } : { x: 0, y: 0, width: view.width, height: view.height }, kind: kind === 'plane-frame' ? 'plane' : kind, viewId: view.id, rtpTimestamp: this.displayedRtp, layoutEpoch: this.layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1) };
+    const source: PresentedPlaneSource = { image: kind === 'atlas' ? image : node, sourceRect: kind === 'atlas' ? { x: view.x, y: view.y, width: view.width, height: view.height } : { x: 0, y: 0, width: view.width, height: view.height }, kind: kind === 'plane-frame' ? 'plane' : kind, viewId: view.id, rtpTimestamp: this.displayedRtp, layoutEpoch: this.layout.epoch, encodedWidth: view.width, encodedHeight: view.height, pixelsPerDip: surfacePixelScale(view), pixelsPerDipY: surfacePixelScale(view, 'y') };
     this.paintedPlanes.set(view.id, { identity: { view: { ...view }, layoutEpoch: this.layout.epoch, layoutGeneration: this.layout.generation }, canvas: node, source });
     if (kind === 'atlas') this.directEpochReady = this.layout.epoch;
     this.reportPresented(view.id, this.displayedRtp, paintedAt, paintedWallTime);

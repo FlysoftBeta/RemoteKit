@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { RemoteTransport } from '../client/transport';
 import type { CanvasPresentation, Layout, Surface } from '../client/types';
+import { samePlane, planeMatchesLayout } from '../client/plane-source';
 
 class Canvas {
   width = 0; height = 0; isConnected = true;
@@ -50,6 +51,19 @@ test('snapshot source keeps atlas crop and encoded dimensions without applying D
   assert.equal(source.kind, 'atlas'); assert.deepEqual(source.sourceRect, { x: 4, y: 4, width: 640, height: 480 });
   assert.equal(source.encodedWidth, 640); assert.equal(source.pixelsPerDip, 2); assert.equal(node.width, 640);
   assert.equal(node.draws.length, 1); assert.equal(paints.length, 1); assert.equal(t.presentationDiagnostics.presentationRouting.directFrames, 0);
+});
+
+test('presentation keeps independent sampling axes and invalidates changed plane geometry', () => {
+  const { t, view, layout, message, register, metadata, frame } = setup();
+  const adapted = { ...view, mediaScale: .495, mediaScaleX: .5, mediaScaleY: .495 };
+  message({ ...layout, views: [adapted] }); register(new Canvas(), adapted); metadata(10); frame(10);
+  const source = t.getPresentedPlane(view.id, 10)!;
+  assert.equal(source.pixelsPerDip, 1); assert.equal(source.pixelsPerDipY, .99);
+  assert.deepEqual(source.sourceRect, { x: 4, y: 4, width: 640, height: 480 });
+  assert.ok(samePlane(adapted, { ...adapted, mediaScale: .1 }));
+  assert.equal(samePlane(adapted, { ...adapted, mediaScaleY: .5 }), false);
+  assert.equal(planeMatchesLayout({ view: { ...adapted, mediaScaleX: .49 }, layoutEpoch: layout.epoch, layoutGeneration: layout.generation }, t.layout), false);
+  assert.ok(samePlane({ ...view, mediaScale: .5 }, { ...view, mediaScaleX: .5, mediaScaleY: .5 }));
 });
 
 test('direct path follows an initial snapshot and exposes a plane rather than a stale atlas', () => {

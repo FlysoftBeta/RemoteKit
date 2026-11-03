@@ -1,45 +1,35 @@
-# Windows GPU atlas与资源寿命
+# Windows OSR GPU输出与资源寿命
 
-服务端无页面HWND，Aura/null-widget compositor直接合成离屏内容。Browser本地external BeginFrame只负责调度；没有屏幕Present，也不把调度ACK当GPU完成。
+新实现遵循[Comp / Rend契约](rendering.zh-CN.md)。编译、CPU检查与硬件运行状态分别见[当前状态](current-state.zh-CN.md)，旧capture实验不能作为新路径验收。
 
-## 当前路径
+## 渲染与合成
 
-| 阶段 | 路径及所有权 |
-|---|---|
-| 捕获 | 单plane/DPR1等满足条件时，Viz直接写三个拥有CSI的共享atlas目标；不支持的几何使用官方capture/桥接fallback |
-| 发布 | 真实GPU finished后才发布可读帧，Browser signal ready；布局/序号通过共享元数据传递 |
-| 消费 | QSV/external/depth1的auto输入租用共享BGRA；显式auto encoder及其他不兼容组合用copy/cache |
-| 转换与编码 | D3D11 NV12转换、oneVPL异步或NVENC各保留真实lease；硬件完成后释放 |
-| 归还 | 只有实际GPU读者完成、租约释放且对应consumed/done证明成立，producer才复用槽 |
+每WebContents保持独立Aura/null-widget compositor。Endpoint选择空闲Slot发Begin，Browser经BeginFrameSource驱动root；Browser查询Fence的定时任务只退役资源，不产生Begin。
 
-Fallback可能包含capture→staging→共享槽copy；single-plane优化可减少中间阶段。它与直接Viz写共享目标是不同路径，不能用配置名称替代实际stats。两个端点使用同adapter LUID。
+专用SkiaOutputDeviceRemoteKit通过DXGI SharedImage直接绘制plane目标，目标选择先于paint，轮换目标保留完整画面。无Capture、CopyOutput桥接或本地屏幕Present。每plane最多五个目标，最新内容与合成读租约分别保护，不能覆盖仍被读取的目标。
 
-固定三个输出槽，满时合并/跳过，不无限排队。共享输入不能因编码器异步返回就提前释放；COM引用只保留对象，不防止池覆盖。静态保留最后有效内容，尾IDR最多一次；多plane仅对当前有效布局授权。
+Skia Submit及EndPaint之后，ANGLE实际D3D11 context4在对应目标Fence上Signal。Browser合成context先Wait各plane Fence，再按atlas矩形缩放拼接并清除padding，最后Signal指定Slot的ready Fence。设备必须同adapter LUID。
 
-## 完成与故障
+## Slot与编码租约
 
-Capture源lease与共享输出槽是两个完成域。fallback中capture资源须等桥接GPU读取完成再归还；输出槽须等Endpoint完成读取。直接目标在新的绑定/池代次建立新的纹理，不能把旧写入复用到新geometry。
+输出最多四个Slot，各有独立纹理、ready/consumed Fence和seqlock帧记录。全局快照只描述布局。metadata先发布，再排真实Signal；CPU发布不是GPU完成。
 
-共享映射ABI为`endpoint/include/remotekit/shared_atlas.h`的version2；用seqlock发布一致布局和时间戳，不存像素。ready/consumed值保护实际GPU操作，CPU发布位、提交返回、保留HANDLE及Fence的UINT64_MAX都不代替完成。
+Comp核对generation/slot/value与真实ready完成，按请求value顺序交付。SDK Native buffer和硬件编码器分别持有租约；最后租约结束后Endpoint排consumed Signal，实际完成才可复用。其他Slot的高Fence值不能释放它。
 
-按generation独立退役，健康代可以结束而不被另一未完成代阻塞。已经观察过的同State等值真实完成证明可以复用，未知更高终点不能放行。GPU失效与Browser进程实际退出是不同证明；退出清理绑定真实进程对象，不靠可复用PID。
+内容frame_id与Slot Value分开：force重拷静态内容保留内容身份，请求Value仍变化。尾帧重新取得合法Slot，不永久持有latest租约堵住深度1。
 
-reconfigure、fatal、空内容及暂停立即发新epoch空layout，清Client ready/输入，再按状态关闭/重建输出。正常GPU匿名断连支持有界自动重建，真正fatal保留错误。关闭有等待上限，不能为通过测试伪造consumed。
+## 停止与错误
 
-捕获调度的Oracle计数与GPU完成证明也分开：每次`RecordCapture`对应一次`CompleteCapture`，失败读回、目标换代或进入GPU前取消都必须结算失败。否则pending计数会阻止无新damage的静态刷新，导致resize后一直空layout；失败结算不会发布像素或伪造Fence完成。该修正在0007补丁中统一处理，成功交付与Oracle拒绝也不能双重结算。
+Control与render使用不同pipe，control关闭回复不证明Begin已处理。render同FIFO的Stop/Stopped确保之前请求都有Reject或已经排Signal。Endpoint处理前序Reject后关闭通道；成功请求仍等GPU及编码租约。
 
-正常Stop/销毁与帧交付分属不同Mojo pipe。0007的host在停止atlas consumer时，将尚未派发的receiver交给独立drainer，保留并排空队列，对从未前递给Browser消费者的帧显式`Done`。这些帧只在producer实际GPU finished后才会进入`OnFrameCaptured`，drainer不读写或发布像素，因此没有提前越过GPU写完成。已经前递的lease仍等原来的真实consumed Fence；未知delivery断开仍封存池并报fatal。Viz处理Stop后发送`OnStopped`并关闭consumer remote，或capturer销毁/transport断开后销毁drainer；无响应Viz下不设定时假Done。排空之前消息可持有texture handle等资源，排空后drainer只保留pipe，不持有GpuAtlas State或Endpoint。生产路径CPU回归目标为`remotekit_capture_delivery_probe`；源码修复的构建与真实导航验收结果另行记录。
+Stopped不代替Fence。超时、未知断链或失败提交不得伪造Reject/consumed。旧generation独立保留；device removal的UINT64_MAX是故障，不是正常完成值。正常host销毁也必须保留仍有GPU写入的backing。
 
-0011保护ExternalBeginFrameSourceMojo的调度请求归属：early NAK可能先结束A的控制回调，A的Display interval却在GPU恢复B时才结束。迟到的A不能写入B的pending ACK或修改B的sink集合。实现按完整frame ID保存最多8条明确退役记录，满时保持当前请求等待真实调度完成；内部admission序号仅用于回收已有记录，不能据此接受未知ACK。回调前先分离旧状态，防止重入的新请求被旧调用尾部清理；未知、未来及当前请求重复完成仍保留检查。0011也在通知observer前安装完整请求，并延迟终态回调至接纳阶段结束，避免同步完成观察到半初始化状态。0012进一步在DisplayScheduler continuation排空旧deadline之前，按当前有效完整frame ID与不可变frame_time幂等接纳；MISSED与正常交付不会为同一帧开启两次interval。不同身份沿原路径处理，未扩大Mojo未知完成容忍集合。这些是调度生命周期保护，不释放纹理租约，也不构成GPU Fence完成证明。
+NVENC任务/EOS保留有界等待与隔离，未知完成保留实际输入资源。当前无NVIDIA硬件，CPU/编译证据不代替NVENC运行。
 
-NVENC任务及EOS有5秒完成等待截止；无法证明GPU完成时，将编码器和实际输入资源留在进程级有界隔离区，禁止后续复用，不伪造consumed。隔离后的NVENC新建会明确失败，需Endpoint重启；正常关闭仍使用厂商API，其内部耗时不能由这些CPU测试保证。当前机器没有NVIDIA硬件，本轮证据限于生产等待/资源持有helper与故障注入。
+## 几何与测量
 
-## 几何、节拍和通信
+页面DPR、DIP、plane实际pixel、atlas矩形与编码采样分别记录。WebRTC只缩放完整atlas，mediaScaleX/Y传播轴向取整，布局/输入/marker/caret使用对应比例。换代经过Client屏障，旧编码结果不能使用新布局身份。
 
-页面DPR、实际backing、atlas像素、编码采样比例分别报告。默认service atlas按16对齐；显式1保留给控制变量。产品窗口尺寸来自真实CSS内容区，设备UA不改变viewport。Client输入要反算DPR/mediaScale/letterbox，并验证layout epoch与实际wire RTP。
+新路径暂以capture_time_us=0表示未测完成时戳，不以提交、Flush或ACK伪装GPU完成；对应延迟样本省略。Pixel marker、编码时间和客户端呈现可独立测量。
 
-Browser内部捕获和Renderer/Viz/GPU IPC照常存在；browser↔Endpoint仅建立、配置、输入和资源重建走Mojo，没有逐帧ready/present/release。Client帧元数据随WebRTC DataChannel，是另一边界。
-
-Fence保证顺序，不消除排队。capture begin→end包括请求、GPU工作和完成观察；本项目capture_time采用end，capture-end→ready不包括此前捕获阶段。GPU实际执行、CPU等待、编码和呈现分别计量，见[测量](streaming-experiments.zh-CN.md)。
-
-UHD630实际链路已验证；NVENC本机无NVIDIA硬件证据。原生demo独立构建，不能用它的窗口呈现结果覆盖服务离屏路径。[当前状态](current-state.zh-CN.md)集中列验收与限制。
+显式原生demo保留native窗口呈现；旧capture fence demo不再支持，不自动回退。正式streaming包使用新OSR/Fence路径。

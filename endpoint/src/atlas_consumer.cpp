@@ -13,7 +13,7 @@
 #include <utility>
 
 // The shared-memory ABI lives outside the C++ endpoint model.
-#include "remotekit/shared_atlas.h"
+#include "remotekit/shared_render_slots.h"
 
 namespace remotekit {
 namespace {
@@ -27,10 +27,9 @@ void CloseSetup(AtlasConsumerSetup& setup) {
   }
   if (setup.mapping)
     CloseHandle(std::exchange(setup.mapping, nullptr));
-  if (setup.ready_fence)
-    CloseHandle(std::exchange(setup.ready_fence, nullptr));
-  if (setup.consumed_fence)
-    CloseHandle(std::exchange(setup.consumed_fence, nullptr));
+  for (auto& handles : {&setup.ready_fences, &setup.consumed_fences})
+    for (auto& handle : *handles)
+      if (handle) CloseHandle(std::exchange(handle, nullptr));
 }
 
 constexpr char kShader[] = R"(
@@ -55,17 +54,19 @@ struct AtlasConsumer::Impl {
   ComPtr<ID3D11DeviceContext4> context;
   ComPtr<IDXGISwapChain1> swapchain;
   ComPtr<ID3D11RenderTargetView> target;
-  std::array<ComPtr<ID3D11Texture2D>, 3> textures;
+  std::array<ComPtr<ID3D11Texture2D>, kRenderSlotCount> textures;
   ComPtr<ID3D11Texture2D> cache;
   ComPtr<ID3D11ShaderResourceView> cache_view;
-  ComPtr<ID3D11Fence> ready;
-  ComPtr<ID3D11Fence> consumed;
+  std::array<ComPtr<ID3D11Fence>, kRenderSlotCount> ready;
+  std::array<ComPtr<ID3D11Fence>, kRenderSlotCount> consumed;
+  std::uint64_t pending = 0, ready_value = 0, consumed_value = 0;
   ComPtr<ID3D11VertexShader> vertex_shader;
   ComPtr<ID3D11PixelShader> pixel_shader;
   ComPtr<ID3D11SamplerState> sampler;
   HANDLE completion_event = nullptr;
   std::uint64_t last_frame = 0;
-  std::uint64_t last_read = 0;
+  // This demo activates only slot zero; this value never retires another slot.
+  std::uint64_t slot_read_value = 0;
   UINT client_width = 0;
   UINT client_height = 0;
   bool failed = false;
@@ -93,23 +94,23 @@ struct AtlasConsumer::Impl {
     // removal result proves its submitted reads can no longer execute.
     if (device && FAILED(device->GetDeviceRemovedReason()))
       return true;
-    if (!context || !consumed)
+    if (!context || !consumed[0])
       return true;
     if (read_without_signal) {
       return Fail(L"GPU read has no completion signal; resources retained until device removal");
     }
-    if (!last_read)
+    if (!slot_read_value)
       return true;
-    const auto completed = consumed->GetCompletedValue();
+    const auto completed = consumed[0]->GetCompletedValue();
     if (completed == std::numeric_limits<UINT64>::max()) {
       return Fail(L"Atlas device removed while waiting for reads; fence value is invalid");
     }
-    if (completed >= last_read)
+    if (completed >= slot_read_value)
       return true;
     if (!allow_wait)
       return false;
     ResetEvent(completion_event);
-    HRESULT hr = consumed->SetEventOnCompletion(last_read, completion_event);
+    HRESULT hr = consumed[0]->SetEventOnCompletion(slot_read_value, completion_event);
     if (FAILED(hr)) {
       return Fail(L"Unable to wait for atlas GPU reads; resources retained", hr);
     }
@@ -121,8 +122,8 @@ struct AtlasConsumer::Impl {
     }
     if (device && FAILED(device->GetDeviceRemovedReason()))
       return true;
-    const auto after_wait = consumed->GetCompletedValue();
-    if (after_wait == std::numeric_limits<UINT64>::max() || after_wait < last_read)
+    const auto after_wait = consumed[0]->GetCompletedValue();
+    if (after_wait == std::numeric_limits<UINT64>::max() || after_wait < slot_read_value)
       return Fail(
           L"Atlas read completion event did not prove a valid completed fence; resources retained");
     return true;
@@ -140,8 +141,9 @@ struct AtlasConsumer::Impl {
     sampler.Reset();
     pixel_shader.Reset();
     vertex_shader.Reset();
-    ready.Reset();
-    consumed.Reset();
+    for (auto& fence : ready) fence.Reset();
+    for (auto& fence : consumed) fence.Reset();
+    pending = ready_value = consumed_value = 0;
     context.Reset();
     device.Reset();
     if (mapping)
@@ -151,7 +153,7 @@ struct AtlasConsumer::Impl {
     CloseSetup(setup);
     window = nullptr;
     content = {};
-    last_read = 0;
+    slot_read_value = 0;
     last_frame = 0;
     client_width = client_height = 0;
     read_without_signal = false;
@@ -215,7 +217,7 @@ struct AtlasConsumer::Impl {
     window = hwnd;
     failed = false;
     error.clear();
-    if (!IsWindow(hwnd) || !setup.mapping || !setup.ready_fence || !setup.consumed_fence ||
+    if (!IsWindow(hwnd) || !setup.mapping || !setup.ready_fences[0] || !setup.consumed_fences[0] ||
         !setup.generation || !setup.width || !setup.height)
       return Fail(L"Invalid atlas setup");
     for (HANDLE handle : setup.textures)
@@ -239,12 +241,14 @@ struct AtlasConsumer::Impl {
       return Fail(L"Hardware D3D11 device creation failed", hr);
     if (FAILED(hr = base_device.As(&device)) || FAILED(hr = base_context.As(&context)))
       return Fail(L"D3D11.4 shared fences are unsupported", hr);
-    hr = device->OpenSharedFence(setup.ready_fence, IID_PPV_ARGS(&ready));
-    if (FAILED(hr))
-      return Fail(L"Shared ready fence import failed", hr);
-    hr = device->OpenSharedFence(setup.consumed_fence, IID_PPV_ARGS(&consumed));
-    if (FAILED(hr))
-      return Fail(L"Shared consumed fence import failed", hr);
+    for (std::size_t i = 0; i < ready.size(); ++i) {
+      if (!setup.ready_fences[i] || !setup.consumed_fences[i])
+        return Fail(L"Missing per-slot fence handle");
+      hr = device->OpenSharedFence(setup.ready_fences[i], IID_PPV_ARGS(&ready[i]));
+      if (FAILED(hr)) return Fail(L"Shared ready fence import failed", hr);
+      hr = device->OpenSharedFence(setup.consumed_fences[i], IID_PPV_ARGS(&consumed[i]));
+      if (FAILED(hr)) return Fail(L"Shared consumed fence import failed", hr);
+    }
     for (std::size_t i = 0; i < textures.size(); ++i) {
       hr = device->OpenSharedResource1(setup.textures[i], IID_PPV_ARGS(&textures[i]));
       if (FAILED(hr))
@@ -321,12 +325,12 @@ struct AtlasConsumer::Impl {
 bool AtlasConsumer::Impl::MapMetadata() {
   // InterlockedCompareExchange64 requires writable pages even for an atomic read.
   mapping = MapViewOfFile(setup.mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0,
-                          sizeof(SharedAtlasMapping));
+                          sizeof(SharedRenderMapping));
   if (!mapping)
     return Fail(L"Atlas metadata mapping failed");
-  const auto* header = static_cast<const SharedAtlasMapping*>(mapping);
-  if (header->magic != kSharedAtlasMagic || header->version != kSharedAtlasVersion ||
-      header->mapping_size != sizeof(SharedAtlasMapping))
+  const auto* header = static_cast<const SharedRenderMapping*>(mapping);
+  if (header->magic != kSharedRenderMagic || header->version != kSharedRenderVersion ||
+      header->mapping_size != sizeof(SharedRenderMapping))
     return Fail(L"Unsupported atlas metadata ABI");
   return true;
 }
@@ -343,99 +347,84 @@ AtlasPollResult AtlasConsumer::Impl::Poll() {
     Fail(L"Atlas consumer device removed", hr);
     return AtlasPollResult::error;
   }
-  auto* header = static_cast<SharedAtlasMapping*>(const_cast<void*>(mapping));
-  auto* sequence = reinterpret_cast<volatile LONG64*>(&header->publication_sequence);
-  SharedAtlasFrame frame{};
-  bool stable = false;
+  auto* mapping_header = static_cast<SharedRenderMapping*>(const_cast<void*>(mapping));
+  auto* layout_sequence = reinterpret_cast<volatile LONG64*>(&mapping_header->publication_sequence);
+  SharedAtlasFrame layout{};
+  bool layout_stable = false;
   for (int attempt = 0; attempt < 3; ++attempt) {
-    const LONG64 before = InterlockedCompareExchange64(sequence, 0, 0);
-    if (before & 1)
-      continue;
-    std::memcpy(&frame, &header->frame, sizeof(frame));
+    const auto before = InterlockedCompareExchange64(layout_sequence, 0, 0);
+    if (before & 1) continue;
+    std::memcpy(&layout, &mapping_header->latest_layout, sizeof(layout));
     MemoryBarrier();
-    if (before == InterlockedCompareExchange64(sequence, 0, 0)) {
-      stable = true;
-      break;
+    if (before == InterlockedCompareExchange64(layout_sequence, 0, 0)) {
+      layout_stable = true; break;
     }
   }
-  if (!stable)
-    return AtlasPollResult::idle;
-  if (frame.status == SharedAtlasStatus::kStarting)
-    return AtlasPollResult::idle;
-  if (frame.status != SharedAtlasStatus::kRunning) {
-    Fail(frame.status == SharedAtlasStatus::kDeviceLost
-             ? L"Atlas producer device lost"
-             : L"Atlas producer stopped or metadata status invalid");
+  if (layout_stable && layout.status != SharedAtlasStatus::kStarting &&
+      (layout.status != SharedAtlasStatus::kRunning || layout.generation != setup.generation ||
+       layout.width_pixels != setup.width || layout.height_pixels != setup.height)) {
+    Fail(L"Render output stopped or requires a new resource generation");
     return AtlasPollResult::error;
   }
-  if (frame.generation != setup.generation || frame.width_pixels != setup.width ||
-      frame.height_pixels != setup.height) {
-    Fail(L"Atlas generation or dimensions changed; new setup and resource import required");
-    return AtlasPollResult::error;
-  }
-  if (frame.slot >= textures.size() || !frame.frame_id || !frame.ready_fence_value ||
-      frame.ready_fence_value == std::numeric_limits<UINT64>::max() ||
-      frame.view_count > kSharedAtlasMaxViews) {
-    Fail(L"Invalid atlas publication");
-    return AtlasPollResult::error;
-  }
-  for (std::uint32_t i = 0; i < frame.view_count; ++i) {
-    const auto& view = frame.views[i];
-    if (!std::isfinite(view.atlas_pixels_per_dip) || view.atlas_pixels_per_dip <= 0 ||
-        !std::isfinite(view.page_device_scale_factor) || view.page_device_scale_factor <= 0) {
-      Fail(L"Invalid atlas view scale");
+  if (pending && !ready_value) {
+    const auto completed = ready[0]->GetCompletedValue();
+    if (completed == std::numeric_limits<UINT64>::max()) {
+      Fail(L"Invalid ready fence completion");
       return AtlasPollResult::error;
     }
-  }
-  if (frame.frame_id < last_frame ||
-      (frame.frame_id == last_frame &&
-       (frame.ready_fence_value != last_read || frame.slot != last_snapshot.slot))) {
-    Fail(L"Atlas publication frame/fence regressed or changed an already consumed slot");
-    return AtlasPollResult::error;
-  }
-  if (frame.frame_id > last_frame) {
-    if (frame.ready_fence_value <= last_read) {
-      Fail(L"Atlas publication fence did not advance");
-      return AtlasPollResult::error;
-    }
-    // Cache is private to this immediate context. Reading producer slots ends
-    // after this GPU copy, so repaint never accesses an already released slot.
-    ID3D11ShaderResourceView* empty = nullptr;
-    context->PSSetShaderResources(0, 1, &empty);
-    hr = context->Wait(ready.Get(), frame.ready_fence_value);
-    if (FAILED(hr)) {
-      Fail(L"Atlas ready-fence GPU wait failed", hr);
-      return AtlasPollResult::error;
-    }
-    read_without_signal = true;
-    context->CopyResource(cache.Get(), textures[frame.slot].Get());
-    hr = context->Signal(consumed.Get(), frame.ready_fence_value);
-    if (FAILED(hr)) {
+    if (completed >= pending) {
+      auto* header = static_cast<SharedRenderMapping*>(const_cast<void*>(mapping));
+      auto& slot = header->slots[0];
+      auto* sequence = reinterpret_cast<volatile LONG64*>(&slot.publication_sequence);
+      SharedAtlasFrame frame{};
+      bool stable = false;
+      for (int attempt = 0; attempt < 3; ++attempt) {
+        const LONG64 before = InterlockedCompareExchange64(sequence, 0, 0);
+        if (before & 1) continue;
+        std::memcpy(&frame, &slot.frame, sizeof(frame));
+        MemoryBarrier();
+        if (before == InterlockedCompareExchange64(sequence, 0, 0)) { stable = true; break; }
+      }
+      if (!stable) return AtlasPollResult::idle;
+      if (frame.generation != setup.generation || frame.slot != 0 ||
+          frame.ready_fence_value != pending || !frame.frame_id ||
+          frame.width_pixels != setup.width || frame.height_pixels != setup.height ||
+          frame.status != SharedAtlasStatus::kRunning || frame.view_count > kSharedAtlasMaxViews) {
+        Fail(L"Render slot metadata does not match the completed request");
+        return AtlasPollResult::error;
+      }
+      for (std::uint32_t i = 0; i < frame.view_count; ++i) {
+        const auto& view = frame.views[i];
+        if (!std::isfinite(view.atlas_pixels_per_dip) || view.atlas_pixels_per_dip <= 0 ||
+            !std::isfinite(view.page_device_scale_factor) || view.page_device_scale_factor <= 0) {
+          Fail(L"Invalid render view scale"); return AtlasPollResult::error;
+        }
+      }
+      ID3D11ShaderResourceView* empty = nullptr;
+      context->PSSetShaderResources(0, 1, &empty);
+      hr = context->Wait(ready[0].Get(), pending);
+      if (FAILED(hr)) { Fail(L"Ready fence GPU wait failed", hr); return AtlasPollResult::error; }
+      read_without_signal = true;
+      context->CopyResource(cache.Get(), textures[0].Get());
+      hr = context->Signal(consumed[0].Get(), pending);
+      if (FAILED(hr)) {
+        context->Flush(); Fail(L"Consumed GPU signal failed; resources retained", hr);
+        return AtlasPollResult::error;
+      }
+      read_without_signal = false;
+      slot_read_value = ready_value = pending;
+      last_frame = frame.frame_id;
+      last_snapshot = frame;
+      repaint = true;
       context->Flush();
-      Fail(L"Atlas consumed-fence GPU signal failed; imported resources retained", hr);
-      return AtlasPollResult::error;
     }
-    read_without_signal = false;
-    last_read = frame.ready_fence_value;
-    last_frame = frame.frame_id;
-    last_snapshot = frame;
-    repaint = true;
-    context->Flush();
-  } else {
-    // Source leases/old slots were already released after the cache copy.
-    // Metadata-only stale/IME updates must never reread that producer slot.
-    bool placeholder_changed = frame.view_count != last_snapshot.view_count;
-    for (std::uint32_t i = 0; i < frame.view_count && !placeholder_changed; ++i) {
-      const auto& before = last_snapshot.views[i];
-      const auto& after = frame.views[i];
-      placeholder_changed =
-          before.webview_id != after.webview_id ||
-          ((before.reserved ^ after.reserved) & kSharedAtlasViewStale) != 0 ||
-          before.x_pixels != after.x_pixels || before.y_pixels != after.y_pixels ||
-          before.width_pixels != after.width_pixels || before.height_pixels != after.height_pixels;
+  }
+  if (pending && ready_value) {
+    const auto done = consumed[0]->GetCompletedValue();
+    if (done == std::numeric_limits<UINT64>::max()) {
+      Fail(L"Invalid consumed fence completion"); return AtlasPollResult::error;
     }
-    last_snapshot = frame;
-    repaint |= placeholder_changed;
+    if (done >= pending) { consumed_value = pending; pending = 0; }
   }
   if (!repaint || !last_frame || !client_width || !client_height)
     return AtlasPollResult::idle;
@@ -542,6 +531,17 @@ bool AtlasConsumer::Close() {
   impl_->failed = false;
   return true;
 }
+bool AtlasConsumer::Begin(std::uint64_t value) {
+  if (!value || impl_->pending || impl_->failed) return false;
+  impl_->pending = value;
+  impl_->ready_value = impl_->consumed_value = 0;
+  return true;
+}
+void AtlasConsumer::Reject(std::uint64_t value) {
+  if (impl_->pending == value && !impl_->ready_value) impl_->pending = 0;
+}
+std::uint64_t AtlasConsumer::ReadyValue() const { return impl_->ready_value; }
+std::uint64_t AtlasConsumer::ConsumedValue() const { return impl_->consumed_value; }
 bool AtlasConsumer::Resize() {
   return impl_->Resize();
 }

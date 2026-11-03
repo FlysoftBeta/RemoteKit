@@ -2,13 +2,23 @@
 
 由root维护。最新已发布基线11299d9，取件码467761；本批逐模块审阅、重构和规定范围新增路径验证已完成，不重复历史性能组。旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
+## Comp / Rend重构（2026-11-04，功能验收完成）
+
+- RENDER-1：Comp Slot Begin、Reject/真实Fence、FIFO Stop/Stopped及Idle/Wake已实现。迟到Begin清除Idle证明、跨通道关闭未排空及多出口未退休已修复；CPU及157/89真实组通过，单次尾IDR/Wake正确，29个旧代全部退休，无unknown GPU retention。
+- RENDER-2：专用OSR OutputDevice与多plane GPU合成已构建并在UHD630通过首帧、双Window画面/输入、resize/focus/导航检查；默认video且组内RTC/track/video身份保持，无FATAL/CHECK/GPU退出。
+- RTC-1：WebRTC原生source adaptation、screenshare BALANCED/scaler、SetRates到QSV时基及三档映射已实现；旧网络/DPR策略删除。实际质量热切换、QSV时基Reset后持续解码通过。短限速组GCC目标下降和部分恢复已观测，但未触发网络尺寸变化；10秒恢复未回基线。驱动192次正status5及目标码率改写仍为已记录硬件限制，不宣称请求值等于实际线上码率。
+- RTC-2：157标准jitterBufferTarget与89兼容playoutDelayHint均实际读回0；89无标准属性。两版DPR/布局及ROI输入验收通过。
+- DELIVERY：源码阶段已验收，待root提交推送、包内检查及上传取件码；按最新指示上传，不重复旧性能矩阵。
+
+前三次实际首帧组分别发现并修复：Browser残留output.open旧fps前置；第二IsolatedConnection在Chromium157 ipcz替换原Control；Windows真OSR配置缺少合法GPU调度scope。现在render MessagePipe通过原Control成功describe一次转交，token一次claim；0013仅在Windows真OSR的Display Configure/Begin/Finish使用现有ScopedAllowScheduleGpuTask，保留全局DCHECK及普通路径。对应生产probe/增量构建及第四次157/89功能组通过，前三次失败现场完整保留于[运行记录](comp-rend-runtime-20261103.md)。
+
 2026-11-03进度：产品重构14859f6及工具修正1e13f11已提交推送，新streaming包通过startup、包内WebRTC操作、逐文件/ZIP校验后上传。跨机管理、DC常规操作/文件、收据同步、独立时钟、移动编辑/Client手势的契约和证据见[本轮架构记录](robustness-contract-20261103.md)。下列问题按对应源码、CPU和真实证据关闭；实体设备与尚未装配能力仍见当前状态，不能宣称整个浏览器无任何缺口。
 
-## 467761新回归（未关闭）
+## 467761新回归（70e4243源码修复；按用户要求仅测试、不发布）
 
-- **V6 回退原因误报：** 截图canvas-2d/track-processor；unknown backendReason被叠层统一标成GL初始化失败。已在源码拆分Video首因与canvas后端原因，293项Control/生产构建及独立157实际能力回退标签检查通过，待发布。实际截图首因缺日志且用户无法再现，保持未知。
+- **V6 回退原因误报：** 截图canvas-2d/track-processor；unknown backendReason被叠层统一标成GL初始化失败。已在源码拆分Video首因与canvas后端原因，293项Control/生产构建及独立157实际能力回退标签检查通过，本次不发布。实际截图首因缺日志且用户无法再现，保持未知。
 - **V7 hidden回退预算：** metadata watchdog未检查页面visibility及屏障完成，后台等待可能消耗失败预算。生产transport定向测试先证实后台/未ACK计时错误，已限制前台且屏障完成、有效bounds后才计预算；21项定向及全293项通过。实际headless标签切换未产生hidden，真实后台行为仍未覆盖，不能据此认定截图原因。
-- **F5 当前请求为空时Viz完成：** 221813包Browser日志22:26:30.603，frame source2/seq5而current=none，GPU随后重启。源码发现MISSED与正常scheduler-client交付可重复接纳当前帧。0012按有效完整ID与不可变frame_time幂等接纳，保留原Mojo CHECK/Fence；增量、正向生命周期、12补丁可逆及89/157正常运行无新fatal通过，待发布。
+- **F5 当前请求为空时Viz完成：** 221813包Browser日志22:26:30.603，frame source2/seq5而current=none，GPU随后重启。源码发现MISSED与正常scheduler-client交付可重复接纳当前帧。0012按有效完整ID与不可变frame_time幂等接纳，保留原Mojo CHECK/Fence；增量、正向生命周期、12补丁可逆及89/157正常运行无新fatal通过，本次不发布。
 
 ## 发布后阻断项（2026-11-03 06:54日志）
 

@@ -188,18 +188,54 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
   } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
 });
 
-test('product media policy precedes ensure, feedback is isolated and diagnostics remain manual', async () => {
+test('product media policy precedes ensure, feedback only updates diagnostics and diagnostics remain manual', async () => {
   const { store, endpoint, control, user } = await fixture(); const originalNow = Date.now;
   try {
     await control.attachViewer(user.tenantId, 'lease', () => {}); const firstPolicy = endpoint.calls.findIndex(c => c.method === 'session.mediaPolicy'), firstEnsure = endpoint.calls.findIndex(c => c.method === 'session.ensure'); assert.ok(firstPolicy >= 0 && firstPolicy < firstEnsure);
     const ws = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease')).state.workspace;
     await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: ws.windows[0].id, width: 800, height: 600, visible: true }] });
+    endpoint.calls = [];
     let now = originalNow(); Date.now = () => now;
     for (let sequence = 1; sequence <= 3; sequence++) { now += 2000; const result: any = await control.viewerRequest(user.tenantId, 'lease', 'feedback', { sequence, sourceCaptureId: String(sequence), sampledAtServerMs: now, visible: true, presentationLatencyMs: 400, latencySource: 'capture-end-to-paint', clockUncertaintyMs: 2, sampleCount: 50, windowMs: 2000 }); assert.equal(result.accepted, true); }
-    assert.equal(control.productState(user.tenantId).quality.adaptiveResolutionFactor, .8); assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, .8);
-    const other = await store.register('quality-other', 'password123', 'test-registration'); assert.equal(control.productState(other.tenantId).quality.adaptiveResolutionFactor, 1);
+    assert.equal(control.productState(user.tenantId).quality.effectiveDpr, 1); assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, 1); assert.equal(endpoint.calls.length, 0); assert.equal(control.productState(user.tenantId).quality.estimatedLatencyMs, 400);
+    const other = await store.register('quality-other', 'password123', 'test-registration'); assert.equal(control.productState(other.tenantId).quality.estimatedLatencyMs, null);
     const diag = store.session().tenantId; await control.action(diag, { type: 'tab.create', url: 'about:blank' }); endpoint.calls = []; await control.tick(); assert.ok(!endpoint.calls.some(c => c.tenant === diag && c.method === 'session.mediaPolicy')); assert.equal(control.productState(diag).quality.mode, 'manual');
   } finally { Date.now = originalNow; await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+test('quality preference updates only WebRTC degradation policy while client display and DPR stay independent', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  try {
+    await control.attachViewer(user.tenantId, 'lease', () => {});
+    const ws = (await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease')).state.workspace;
+    await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 2, refreshHz: 120, windows: [{ windowId: ws.windows[0].id, width: 800, height: 600, visible: true }] });
+    for (const [qualityPreference, degradationPreference] of [['quality', 'maintain-resolution'], ['auto', 'balanced'], ['smooth', 'maintain-framerate']] as const) {
+      endpoint.calls = [];
+      const result = await control.productAction(user.tenantId, { type: 'settings.update', settings: { qualityPreference } }, 'lease');
+      assert.deepEqual(result.state.quality.requested, { degradationPreference, maxFps: 120 });
+      assert.equal(result.state.quality.effectiveDpr, 2);
+      assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, 2);
+      const policies = endpoint.calls.filter(call => call.method === 'session.mediaPolicy');
+      assert.ok(policies.length > 0); for (const policy of policies) assert.deepEqual(policy.args, { degradationPreference, maxFps: 120 });
+      assert.ok(!endpoint.calls.some(call => call.method === 'session.rtc.close' || call.method === 'view.resize'));
+    }
+  } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+test('explicit no-peer media policy clears the previous applied diagnostic', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  const request = endpoint.request.bind(endpoint);
+  let applied: { degradationPreference: string; maxFps: number } | null = { degradationPreference: 'balanced', maxFps: 60 };
+  endpoint.request = async (method, tenant, args) => {
+    const result = await request(method, tenant, args);
+    return method === 'session.snapshot' ? { ...result, stats: { mediaPolicy: { applied } } } : result;
+  };
+  try {
+    await control.attachViewer(user.tenantId, 'lease', () => {});
+    assert.deepEqual(control.productState(user.tenantId).quality.applied, applied);
+    applied = null; await control.tick();
+    assert.equal(control.productState(user.tenantId).quality.applied, null);
+  } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
 });
 
 test('offline observation never restarts a lost Browser or recreates missing views, including maintenance race', async () => {

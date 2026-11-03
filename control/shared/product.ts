@@ -14,10 +14,11 @@ export interface FileRequest { id: string; tabId: string; windowId: string; orig
 export interface UploadFileSpec { name: string; size: number; type: string }
 export interface FileUploadBegin { uploadId: string; files: { ticket: string; url: string }[] }
 export interface FileUploadResult { state: 'selected' | 'validating' | 'cancelled' }
-export interface MediaPolicy { targetFps: number; bitrateKbps: number; maxBitrateKbps: number; adaptive: boolean; preferResolution?: boolean }
-export interface AppliedMediaPolicy { targetFps: number | null; bitrateKbps: number | null; maxBitrateKbps: number | null; adaptive: boolean; codecTargetFps?: number | null; fpsLimitation?: string; preferResolution?: boolean }
+export type DegradationPreference = 'maintain-resolution' | 'balanced' | 'maintain-framerate';
+export interface MediaPolicy { degradationPreference: DegradationPreference; maxFps: number }
+export interface AppliedMediaPolicy { degradationPreference: DegradationPreference; maxFps: number }
 export interface ProductFeedback { sequence: number; sourceCaptureId: string; sampledAtServerMs: number; visible: boolean; presentationLatencyMs: number; latencySource: 'capture-end-to-paint'; clockUncertaintyMs: number; sampleCount: number; windowMs: number; displayHzEstimate?: number }
-export interface ProductQuality { resourceLimitation: string | null; mode: 'product' | 'manual'; preference: ProductSettings['qualityPreference']; clientScale: number; baseResolutionFactor: number; adaptiveResolutionFactor: number; effectiveDpr: number; pixelBudget: number; targetFps: number; requested: MediaPolicy; applied: AppliedMediaPolicy | null; estimatedLatencyMs: number | null; clockUncertaintyMs: number | null; feedbackStatus: 'unknown' | 'valid' | 'stale'; reason: string }
+export interface ProductQuality { resourceLimitation: string | null; mode: 'product' | 'manual'; preference: ProductSettings['qualityPreference']; clientScale: number; effectiveDpr: number; requested: MediaPolicy; applied: AppliedMediaPolicy | null; estimatedLatencyMs: number | null; clockUncertaintyMs: number | null; feedbackStatus: 'unknown' | 'valid' | 'stale'; reason: string }
 export interface ProductState { operationReceipts?:OperationReceipt[]; serverIncarnation?: string; snapshotSequence?: number; operationGeneration?: string; user: ProductUser; workspace: ProductWorkspace; pageDialogs: PageDialog[]; fileRequests: FileRequest[]; quality: ProductQuality; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean; trickleIce?: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
 export type ProductAction =
   | { type: 'window.create'; url?: string; title?: string }

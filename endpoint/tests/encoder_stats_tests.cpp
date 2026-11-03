@@ -8,18 +8,20 @@
 int main() {
   remotekit::media::EncoderStats stats;
   auto zero=stats.Snapshot();
-  for(const char* key:{"encodePending","encodeInflight","pendingReplaced","hardwareBusy","pausedDrops","errorDrops",
+  for(const char* key:{"encodePending","encodeInflight","queueFullDrops","hardwareBusy","pausedDrops","errorDrops",
                        "inactiveDrops","cancelledDrops","queueWaitUs","queueWaitSamples"})CHECK(zero[key]==0);
   CHECK(zero["lastEncodeMs"].is_null());
+  CHECK(zero["gccTargetBitrate"]==0 && zero["gccTargetFps"]==0);
+  CHECK(!zero.contains("lastRequestedBitrate") && !zero.contains("pendingReplaced"));
   CHECK(zero["requestedTargetUsage"].is_null() && zero["appliedTargetUsage"].is_null());
   stats.requested_target_usage=7;stats.applied_target_usage=6;
-  stats.pending=1;stats.inflight=4;stats.pending_replaced=2;stats.hardware_busy=3;
+  stats.pending=1;stats.inflight=4;stats.queue_full_drops=2;stats.hardware_busy=3;
   stats.paused_drops=5;stats.error_drops=6;stats.inactive_drops=7;stats.cancelled_drops=8;
   stats.queue_wait_us=std::numeric_limits<uint64_t>::max();stats.queue_wait_samples=9;
   auto sample=stats.Snapshot();
   CHECK(sample["requestedTargetUsage"]==7 && sample["appliedTargetUsage"]==6);
   CHECK(sample["encodePending"]==1 && sample["encodeInflight"]==4);
-  CHECK(sample["pendingReplaced"]==2 && sample["hardwareBusy"]==3);
+  CHECK(sample["queueFullDrops"]==2 && sample["hardwareBusy"]==3);
   CHECK(sample["pausedDrops"]==5 && sample["errorDrops"]==6 && sample["inactiveDrops"]==7 && sample["cancelledDrops"]==8);
   CHECK(sample["queueWaitUs"].get<uint64_t>()==std::numeric_limits<uint64_t>::max() && sample["queueWaitSamples"]==9);
   CHECK(sample["encodeDropped"]==0); // Busy observations are not silently folded into drop totals.

@@ -244,20 +244,18 @@ void WebView::AttachOffscreenHost() {
   offscreen_host_ = std::make_unique<OffscreenHost>(contents_.get(),
       gfx::Size(std::max(1, viewport_width_ ? viewport_width_ : 480),
                 std::max(1, viewport_height_ ? viewport_height_ : 360)));
-  offscreen_host_->SetRenderDemand(render_demand_ && visible_, render_fps_);
+  offscreen_host_->SetRenderDemand(render_demand_ && visible_);
 }
 void WebView::DropContents() {
   auto host = std::move(offscreen_host_);
   if (host) host->Detach();
   contents_.reset();
-  if (host)
-    base::SingleThreadTaskRunner::GetCurrentDefault()->DeleteSoon(FROM_HERE, std::move(host));
+  OffscreenHost::Retire(std::move(host));
 }
-void WebView::SetRenderDemand(bool enabled, uint32_t fps) {
+void WebView::SetRenderDemand(bool enabled) {
   render_demand_ = enabled;
-  render_fps_ = fps;
   if (!use_offscreen_host_) return;
-  if (offscreen_host_) offscreen_host_->SetRenderDemand(enabled && visible_, fps);
+  if (offscreen_host_) offscreen_host_->SetRenderDemand(enabled && visible_);
 }
 void WebView::OverridePreferences(content::WebContents* contents,
                                    blink::web_pref::WebPreferences* prefs) {
@@ -626,7 +624,7 @@ Status WebView::SetVisible(bool visible) {
       return status;
   }
   visible_ = visible;
-  if (offscreen_host_) offscreen_host_->SetRenderDemand(visible && render_demand_, render_fps_);
+  if (offscreen_host_) offscreen_host_->SetRenderDemand(visible && render_demand_);
   if (visible)
     contents_->WasShown();
   else
@@ -913,7 +911,7 @@ base::DictValue WebView::CompositorDiagnostics() const {
   const float native_scale = native_view->GetDeviceScaleFactor();
   if (std::isfinite(native_scale) && native_scale > 0)
     result.Set("nativeDeviceScaleFactor", native_scale);
-  result.Set("captureScaleOverride", native_view->GetScaleOverrideForCapture());
+  result.Set("pageBackingScaleOverride", native_view->GetScaleOverrideForCapture());
   if (auto* screen = display::Screen::Get()) {
     auto* window = native_view->GetNativeView();
     const auto display = window ? screen->GetDisplayNearestView(window)

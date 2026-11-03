@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ClockDomain, ClockProbe } from '../client/clock-domain';
 import { CaptureLatency } from '../client/capture-latency';
-import { QualityController } from '../server/quality';
+import { QualityState } from '../server/quality';
 
 test('independent Control +500ms and Endpoint -300ms retain true 100ms latency and Control freshness', () => {
   const latency = new CaptureLatency(), control = new ClockDomain();
@@ -18,7 +18,7 @@ test('independent Control +500ms and Endpoint -300ms retain true 100ms latency a
   assert.equal(report.clockUncertaintyMs, 7);
   assert.equal(report.sampledAtControlMs, 3700);
   assert.equal(report.sampledAtServerMs, 3700);
-  assert.equal(new QualityController().observe(report, 3700, true, 2200), true);
+  assert.equal(new QualityState().observe(report, 3700, true), true);
   assert.equal(latency.inputStart(2100, 2200, 3200), 2794000);
 });
 

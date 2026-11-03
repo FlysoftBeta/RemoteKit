@@ -49,7 +49,7 @@ export function planAtlas(input:AtlasItem[],scale:number,alignment=16) {
   return best;
 }
 const dprCache = new Map<string, number>();
-/** Resource safety is separate from the product pixel budget; DIP stays intact. */
+/** The physical atlas allocation bound may reduce DPR; DIP stays intact. */
 export function feasibleDpr(items:AtlasItem[],requested:number) {
   const ceiling=Math.max(.5,Math.min(4,requested));
   const key=JSON.stringify([ceiling,items.map(({width,height})=>({width,height})).sort((a,b)=>b.width-a.width||b.height-a.height)]);

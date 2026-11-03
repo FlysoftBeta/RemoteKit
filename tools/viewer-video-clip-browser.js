@@ -20,14 +20,12 @@ async(hostPage)=>{
     const take=()=>run.page.evaluate(async()=>{const t=baseline.transport();return{at:performance.now(),wall:Date.now(),candidate:videoClip.snapshot(),quality:baseline.state.quality,receiveProfile:t.receiveProfile,productReceiveSelection:t.productReceiveSelection,endpoint:t.diagnostics.endpoint,encodedFrameSamples:[...t.encodedFrameSamples],presentation:t.getPresentationDiagnostics(),stats:Array.from((await t.peer.getStats()).values())};});
     await run.page.evaluate(()=>videoClip.reset());const before=await take();
     if(before.candidate.layout.width!==1936||before.candidate.layout.height!==816)throw Error('Actual coded layout is not the preregistered 1936x816; adjust fixture BEFORE timing');
-    if(before.quality.applied?.adaptive!==false||before.quality.applied?.targetFps!==50)throw Error('Fixture media policy must actually be fixed 50FPS/adaptive=false');
+    if(before.quality.applied?.maxFps!==50)throw Error('Fixture media policy must actually have maxFps=50');
     if(mode.startsWith('video')&&before.candidate.videos.some(v=>v.paused||v.readyState<2||v.width!==1936||v.height!==816))throw Error('Direct video is not playing the same actual coded size');
     if(mode.startsWith('video')&&(!before.candidate.isolation.processorStopped||before.candidate.isolation.processorActive||before.candidate.isolation.productionVideoAttached))throw Error('Direct video still has a competing production consumer');
     await run.page.waitForTimeout(ms);const after=await take();
     await run.page.screenshot({path:root+'/'+name+'.png'});
-    // applied.bitrateKbps is the encoder's BWE rate update, not the fixed
-    // render-cadence policy. Keep its raw values for the report.
-    const fixed=q=>JSON.stringify({preference:q.preference,dpr:q.effectiveDpr,requested:q.requested,applied:q.applied&&{adaptive:q.applied.adaptive,targetFps:q.applied.targetFps,codecTargetFps:q.applied.codecTargetFps,maxBitrateKbps:q.applied.maxBitrateKbps,preferResolution:q.applied.preferResolution,fpsLimitation:q.applied.fpsLimitation}});
+    const fixed=q=>JSON.stringify({preference:q.preference,dpr:q.effectiveDpr,requested:q.requested,applied:q.applied&&{degradationPreference:q.applied.degradationPreference,maxFps:q.applied.maxFps}});
     const invalid=[];
     if(after.candidate.stale)invalid.push('layout-or-source-changed');
     if(fixed(before.quality)!==fixed(after.quality))invalid.push('quality-policy-changed');

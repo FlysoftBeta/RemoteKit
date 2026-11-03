@@ -21,18 +21,21 @@ void Responses() {
   const auto original = base::WriteJson(reply);
   std::string wire;
   int writes = 0;
+  bool original_reply = false;
   const auto writer = base::BindRepeating(
-      [](std::string* output, int* write_count, std::string_view encoded) {
+      [](std::string* output, int* write_count, bool* original,
+         std::string_view encoded, bool is_original) {
         *output = encoded;
         ++*write_count;
+        *original = is_original;
         return true;
-      }, base::Unretained(&wire), base::Unretained(&writes));
+      }, base::Unretained(&wire), base::Unretained(&writes), base::Unretained(&original_reply));
   CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
-  CHECK(original && wire == *original && writes == 1);
+  CHECK(original && wire == *original && writes == 1 && original_reply);
   reply.Set("data", std::string(1024 * 1024, 'x'));
   // Success here is the same return tested before ControlServer closes its pipe.
   CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
-  CHECK(writes == 2 && wire.size() < 512);
+  CHECK(writes == 2 && wire.size() < 512 && !original_reply);
   const auto error = base::JSONReader::ReadDict(wire, base::JSON_PARSE_RFC);
   CHECK(error && error->FindInt("id") == 73 && error->FindInt("version") == 1);
   CHECK(error->FindBool("ok") == false);
@@ -44,10 +47,51 @@ void Responses() {
   request.Set("id", 74);
   reply.Set("id", 74);
   CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
-  CHECK(writes == 3 && wire == *base::WriteJson(reply));
+  CHECK(writes == 3 && wire == *base::WriteJson(reply) && original_reply);
   // Actual failed writes still take the transport failure path.
   CHECK(!remotekit::browser::WriteControlResponse(request, reply,
-      base::BindRepeating([](std::string_view) { return false; })));
+      base::BindRepeating([](std::string_view, bool) { return false; })));
+}
+void RenderEndpointResponses() {
+  base::DictValue request;
+  request.Set("method", "output.describe");
+  base::DictValue reply;
+  reply.Set("ok", true);
+  reply.Set("render_channel", "opaque-token");
+  int attachments = 0;
+  const auto writer = base::BindRepeating(
+      [](const base::DictValue* request, const base::DictValue* reply, int* count,
+         std::string_view, bool original_reply) {
+        if (remotekit::browser::ShouldAttachRenderEndpoint(*request, *reply, original_reply))
+          ++*count;
+        return true;
+      }, base::Unretained(&request), base::Unretained(&reply), base::Unretained(&attachments));
+  CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
+  CHECK(attachments == 1);
+  // The original object still claims success/token, but the actual serialized
+  // reply is the bounded error fallback and must never export its endpoint.
+  reply.Set("data", std::string(1024 * 1024, 'x'));
+  CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
+  CHECK(attachments == 1);
+  reply.Remove("data");
+  reply.Set("error", "endpoint_already_delivered");
+  CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
+  CHECK(attachments == 1);
+  reply.Remove("error");
+  reply.Set("ok", false);
+  CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
+  CHECK(attachments == 1);
+  reply.Set("ok", true);
+  reply.Remove("render_channel");
+  CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
+  CHECK(attachments == 1);
+  reply.Set("render_channel", "opaque-token");
+  request.Set("method", "output.open");
+  CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
+  CHECK(attachments == 1);
+  request.Set("method", "output.describe");
+  CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
+  CHECK(attachments == 2);
 }
 void AcceptHints() {
   using remotekit::browser::ExportFileChooserAcceptHints;
@@ -79,6 +123,7 @@ void AcceptHints() {
 int main() {
   base::AtExitManager at_exit;
   Responses();
+  RenderEndpointResponses();
   AcceptHints();
   std::puts("control payload CPU probe passed");
   return 0;

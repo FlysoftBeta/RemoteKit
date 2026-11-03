@@ -56,17 +56,17 @@ alert/confirm/prompt和导航beforeunload是临时pageDialogs。对话身份绑�
 
 tablet UA按HTTP(S) origin保存。首次导航、redirect、history、reload和restore选择UA/Client Hints；子frame继承所在页面身份。它不改变viewport、touch或pointer特征。保存规则后先确认Browser已应用再刷新当前页，其他同站点页下次导航生效；用户可取消导航beforeunload。
 
-质量只有三档，初始策略如下；这些是实现选择，不是固定用户要求：
+质量三档只选择WebRTC原生降级偏好：
 
-| 偏好 | 可见源像素预算 | FPS上限 | 目标/上限码率 |
-|---|---:|---:|---:|
-| 优先高画质 | 3840×2160 | 50 | 44/48Mbps |
-| 自动 | 1920×1080 | 52 | 36/44Mbps |
-| 优先流畅 | 1600×900 | 60 | 24/36Mbps |
+| 偏好 | DegradationPreference |
+|---|---|
+| 优先高画质 | MAINTAIN_RESOLUTION |
+| 自动 | BALANCED |
+| 优先流畅 | MAINTAIN_FRAMERATE |
 
-实际帧率受显示/网络反馈，编码尺寸与码率还受接收端H264能力和WebRTC拥塞控制。根据可见CSS面积与ClientScale计算统一缩放因子，Browser DPR在0.5–4内；viewport DIP不因质量档改变。连续3个有效反馈窗口估算延迟>300ms降至当前倍率的0.8，调整冷却5秒；<150ms健康30秒后逐级恢复。静态重复、隐藏、无效/过期时钟不触发。
+Control发送`{degradationPreference,maxFps}`；maxFps来自显式Viewer刷新能力，未知默认60。没有三档码率、像素预算、FPS预设，也没有基于延迟的DPR控制器。Client Scale默认Viewer DPR，可显式override；只有实际atlas可分配硬限制会约束DPR。网络缩放只改变编码采样，页面DIP与DPR保持。
 
-生产估算起点是源采集完成；video终点为匹配真实RTP/epoch的compositor回调观察，canvas回退终点为JS提交。Client独立校准Endpoint采集时钟与Control产品新鲜度时钟，允许分机运行。它不是Pixel marker E2E，也不是物理屏幕点亮。具体映射、置信度和独立媒体反馈见[媒体反馈](media-feedback.md)。受控自动化采用manual模式，显式配置，不运行产品自动质量策略。
+反馈只保留诊断，不再触发DPR/码率对账。只有有效源完成时戳才计算呈现估算；新OSR路径未测得完成时戳时省略该样本。video终点是匹配真实RTP/epoch的compositor回调，canvas终点是JS提交，均不是物理屏幕点亮。独立时钟与置信度见[媒体反馈](media-feedback.md)。诊断manual模式不绕过WebRTC拥塞控制。
 
 搜索引擎偏好统一保存Control，地址栏和简易起始页使用同一URL/搜索解析。显式kind=start的Tab由Viewer本地显示，不建立远程页面渲染需求；真实about:blank或popup不因此被覆盖。首个网页导航直接创建目标，不插入伪造Browser历史；空起始页仍保留RTC数据通道。
 

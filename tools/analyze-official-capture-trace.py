@@ -1,4 +1,4 @@
-"""Inspect Chromium's own legacy-JSON startup trace, without inventing GPU timings."""
+"""Historical capture-path evidence only; not a validator for render slots. Inspect Chromium's own legacy-JSON startup trace, without inventing GPU timings."""
 import argparse
 import collections
 import json

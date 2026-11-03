@@ -3,16 +3,35 @@
 #include <cmath>
 #include <cstdint>
 namespace remotekit {
+// ITU-T H.264 Table A-1, baseline profile. Level 1b uses the SDK value 9.
+// Rate, frame-size and macroblock-rate limits share one source of truth.
+struct H264LevelLimit {uint32_t level,mbps,fs,kbps,cpb_kbits;};
+inline const H264LevelLimit* FindH264LevelLimit(uint32_t level) {
+ static constexpr H264LevelLimit limits[]={
+  {9,1485,99,128,350},{10,1485,99,64,175},{11,3000,396,192,500},
+  {12,6000,396,384,1000},{13,11880,396,768,2000},{20,11880,396,2000,2000},
+  {21,19800,792,4000,4000},{22,20250,1620,4000,4000},{30,40500,1620,10000,10000},
+  {31,108000,3600,14000,14000},{32,216000,5120,20000,20000},
+  {40,245760,8192,20000,25000},{41,245760,8192,50000,62500},
+  {42,522240,8704,50000,62500},{50,589824,22080,135000,135000},
+  {51,983040,36864,240000,240000},{52,2073600,36864,240000,240000}};
+ for(const auto& value:limits)if(value.level==level)return &value;
+ return nullptr;
+}
 struct H264RateBudget {uint32_t bitrate_bps=0,cpb_kb=0;};
 inline H264RateBudget H264RateLimits(uint32_t level) {
- struct Limit {uint32_t level,kbps,cpb_kbits;};
- constexpr Limit limits[]={{9,128,350},{10,64,175},{11,192,500},{12,384,1000},{13,768,2000},
-  {20,2000,2000},{21,4000,4000},{22,4000,4000},{30,10000,10000},{31,14000,14000},
-  {32,20000,20000},{40,20000,25000},{41,50000,62500},{42,50000,62500},
-  {50,135000,135000},{51,240000,240000},{52,240000,240000}};
- const Limit* result=nullptr;
- for(auto& value:limits)if(value.level<=level)result=&value;
- return result?H264RateBudget{result->kbps*1000,result->cpb_kbits/8}:H264RateBudget{};
+ const auto* cap=FindH264LevelLimit(level);
+ return cap?H264RateBudget{cap->kbps*1000,cap->cpb_kbits/8}:H264RateBudget{};
+}
+// Maximum integer frame rate at these actual coded dimensions. This does not
+// resize or select a network rate. Zero means no legal frame rate/dimensions.
+inline uint32_t H264FrameRateLimit(uint32_t width,uint32_t height,uint32_t level) {
+ const auto* cap=FindH264LevelLimit(level);
+ if(!cap || !width || !height)return 0;
+ const uint64_t mb_width=(uint64_t(width)+15)/16,mb_height=(uint64_t(height)+15)/16;
+ const uint64_t frame_mbs=mb_width*mb_height;
+ if(frame_mbs>cap->fs || mb_width*mb_width>8ull*cap->fs || mb_height*mb_height>8ull*cap->fs)return 0;
+ return static_cast<uint32_t>(cap->mbps/frame_mbs);
 }
 struct MediaSampling {
  uint32_t width=0,height=0;double scale=0;
@@ -23,14 +42,8 @@ struct MediaSampling {
 // dimensions remain the original atlas; this only selects encoder sampling.
 inline MediaSampling FitH264Sampling(uint32_t width,uint32_t height,uint32_t fps,uint32_t level,
                                      uint32_t max_width=4096,uint32_t max_height=4096) {
- struct Limit {uint32_t level,mbps,fs;};
- constexpr Limit limits[]={{9,1485,99},{10,1485,99},{11,3000,396},{12,6000,396},{13,11880,396},
-  {20,11880,396},{21,19800,792},{22,20250,1620},{30,40500,1620},{31,108000,3600},
-  {32,216000,5120},{40,245760,8192},{41,245760,8192},{42,522240,8704},
-  {50,589824,22080},{51,983040,36864},{52,2073600,36864}};
  if(!width||!height||!fps||!level)return {};
- const Limit* cap=nullptr;
- for(auto& limit:limits)if(limit.level<=level)cap=&limit;
+ const auto* cap=FindH264LevelLimit(level);
  if(!cap)return {};
  const uint64_t budget=std::min<uint64_t>(cap->fs,cap->mbps/fps);
  if(!budget)return {};
@@ -57,18 +70,5 @@ inline MediaSampling FitH264Sampling(uint32_t width,uint32_t height,uint32_t fps
   scale*=0.995;
  }
  return {};
-}
-// Resolution-first can trade cadence only when the original atlas fits the
-// codec's hard frame-size/axis limits. A lower FPS cannot remove those limits.
-inline uint32_t PreferredH264FrameRate(uint32_t width,uint32_t height,uint32_t requested_fps,
-                                      uint32_t level,bool prefer_resolution,
-                                      uint32_t max_width=4096,uint32_t max_height=4096) {
- if(!prefer_resolution || !requested_fps)return requested_fps;
- const auto full=FitH264Sampling(width,height,1,level,max_width,max_height);
- if(!full.width || full.scale<.999999)return requested_fps;
- const uint64_t macroblocks=uint64_t((width+15)/16)*((height+15)/16);
- if(!macroblocks)return requested_fps;
- const auto allowed=static_cast<uint32_t>(full.max_macroblocks_per_second/macroblocks);
- return allowed?std::min(requested_fps,allowed):requested_fps;
 }
 }

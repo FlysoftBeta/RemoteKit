@@ -6,7 +6,7 @@ import { resolveNavigation } from './navigation';
 import { SEARCH_ENGINES, FILE_LIMITS } from '../shared/product';
 import { FileUploads, FileUploadError, type InternalFileRequest, type UploadLimits } from './file-uploads';
 import type { Readable } from 'node:stream';
-import { QualityController } from './quality';
+import { QualityState } from './quality';
 import type { ControlState, Device } from '../client/types';
 import type { Endpoint, RtcSignal } from './endpoint';
 import { Store } from './store';
@@ -33,14 +33,14 @@ export class Control extends EventEmitter {
   private mediaGeneration(tenant: string) { return this.tenantEndpointGenerations.get(tenant) ?? this.endpointGeneration; }
   private relays = new Map<string, LoopbackRelay>();
   private diagnosticTenants = new Set<string>();
-  private viewers = new Map<string, { id: string; authentication?: { identity: string; valid: () => boolean }; revoke: (reason: 'another-viewer' | 'logout') => void; viewport?: ViewerViewport; feedback?: Record<string, unknown> }>();
+  private viewers = new Map<string, { id: string; authentication?: { identity: string; valid: () => boolean }; revoke: (reason: 'another-viewer' | 'logout') => void; viewport?: ViewerViewport }>();
   private lastViewports = new Map<string, ViewerViewport>();
   private started = new Set<string>();
   private backgroundPolicy = new BackgroundPolicy();
   private transitions = new Map<string, { action: string; at: number }>();
   private siteApplications = new Map<string, { encoded: string; applied: boolean; browserPid?: number }>();
   private mediaApplications = new Map<string, { encoded: string; applied: boolean; browserPid?: number }>();
-  private qualityControllers = new Map<string, QualityController>();
+  private qualityStates = new Map<string, QualityState>();
   private actualMediaPolicies = new Map<string, AppliedMediaPolicy>();
   private dialogs = new Map<string, (PageDialog & { viewId: string; requestId: string; browserIncarnation: string; instance: string; document: string })[]>();
   private browserIncarnations=new Map<string,string>();
@@ -223,7 +223,7 @@ export class Control extends EventEmitter {
     return this.serial(tenant, async () => {
       const timings: Record<string, number> = { queueMs: performance.now() - receivedAt };
       if (lease) this.assertViewer(tenant, lease);
-      if (!this.diagnosticTenants.has(tenant)) this.qualityController(tenant).resetFeedback();
+      if (!this.diagnosticTenants.has(tenant)) this.qualityState(tenant).resetFeedback();
       await this.reconcile(tenant);
       timings.reconcileEndMs = performance.now() - receivedAt;
       const previous = this.connections.get(tenant);
@@ -296,7 +296,7 @@ export class Control extends EventEmitter {
   private saveProduct(state: ProductWorkspace) { const operation = this.applyingOperations.get(state.tenantId); if (operation) { this.store.saveOperation(state, operation); this.push(state.tenantId); } else { const changed = this.store.saveWorkspace(state); if (changed) this.push(state.tenantId); } }
   assertViewer(tenant: string, lease: string) { const viewer = this.viewers.get(tenant); if (viewer?.id !== lease) throw new ApiError(409, '此窗口已由另一个 Viewer 接管'); if (viewer.authentication && !viewer.authentication.valid()) throw new ApiError(401, '登录已过期'); }
   async attachViewer(tenant: string, id: string, revoke: (reason: 'another-viewer' | 'logout') => void, authentication?: { identity: string; valid: () => boolean }) {
-    this.qualityController(tenant).resetConnection();
+    this.qualityState(tenant).resetFeedback();
     const old = this.viewers.get(tenant); this.viewers.set(tenant, { id, revoke, authentication }); old?.revoke('another-viewer');
     const previous = this.connections.get(tenant); if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
@@ -359,11 +359,9 @@ export class Control extends EventEmitter {
       if (method === 'clock.ping') return { serverTime: Date.now(), ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}) };
       if (method === 'feedback') {
         if (this.diagnosticTenants.has(tenant)) return { accepted: false };
-        this.qualityFor(tenant);
         const state = this.store.workspace(tenant), viewport = this.viewers.get(tenant)?.viewport;
         const visible = !!viewport?.windows.some(region => region.visible && state.windows.some(window => window.id === region.windowId && !!window.activeTabId && !state.tabs.some(tab => tab.id === window.activeTabId && tab.kind === 'start')) && (state.layoutMode !== 'focused' || region.windowId === state.activeWindowId));
-        const accepted = this.qualityController(tenant).observe(params, Date.now(), visible, performance.now());
-        if (accepted) { this.viewers.get(tenant)!.feedback = params; try { await this.reconcileProduct(tenant); } catch { } }
+        const accepted = this.qualityState(tenant).observe(params, Date.now(), visible);
         this.push(tenant); return { accepted };
       }
       throw new ApiError(400, '未知 WebSocket 方法');
@@ -376,8 +374,8 @@ export class Control extends EventEmitter {
       if (typeof body.devicePixelRatio !== 'number' || !Number.isFinite(body.devicePixelRatio) || body.devicePixelRatio < .5 || body.devicePixelRatio > 4 || !Array.isArray(body.windows) || body.windows.length > 8 || (body.refreshHz !== undefined && (!Number.isFinite(body.refreshHz) || body.refreshHz < 1 || body.refreshHz > 500))) throw new ApiError(400, '无效的显示区域');
       const ids = new Set<string>();
       for (const w of body.windows) { if (!w || ids.has(w.windowId) || !state.windows.some(item => item.id === w.windowId) || typeof w.visible !== 'boolean' || !Number.isInteger(w.width) || !Number.isInteger(w.height) || w.width < 1 || w.height < 1 || w.width > 8192 || w.height > 8192) throw new ApiError(400, '无效的窗口显示区域'); ids.add(w.windowId); }
-      // Preflight cannot mutate the live controller or replace a valid viewport.
-      const feasibility = new QualityController().snapshot(state, body);
+      // Preflight cannot mutate live observations or replace a valid viewport.
+      const feasibility = new QualityState().snapshot(state, body);
       if (feasibility.resourceLimitation) throw new ApiError(400, feasibility.resourceLimitation);
       this.viewers.get(tenant)!.viewport = { devicePixelRatio: body.devicePixelRatio, refreshHz: body.refreshHz, windows: body.windows.map((w: any) => ({ windowId: w.windowId, width: w.width, height: w.height, visible: w.visible })) };
       this.lastViewports.set(tenant, this.viewers.get(tenant)!.viewport!);
@@ -433,7 +431,6 @@ export class Control extends EventEmitter {
       const navigationUrl = (value: unknown) => { try { return resolveNavigation(value, state.settings.searchEngine); } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : '无效网址或搜索内容'); } };
       const createTab = (windowId: string) => { if (state.tabs.length >= 32) throw new ApiError(400, '最多支持32个标签页'); const next: ProductTab = { id: randomUUID(), windowId, webviewId: this.store.viewId(), title: String(action.title ?? '新标签页').slice(0, 120), kind: action.url === undefined ? 'start' : 'remote', url: action.url === undefined ? '' : navigationUrl(action.url) }; state.tabs.push(next); state.windows.find(w => w.id === windowId)!.activeTabId = next.id; state.activeWindowId = windowId; };
       let application: ProductActionResult['application'];
-      const oldQuality = state.settings.qualityPreference;
       switch (action.type) {
         case 'window.create': { if (state.windows.length >= 8) throw new ApiError(400, '最多支持8个窗口'); const id = randomUUID(); state.windows.push({ id, activeTabId: null, weight: 1 }); createTab(id); break; }
         case 'window.activate': state.activeWindowId = window().id; break;
@@ -510,9 +507,6 @@ export class Control extends EventEmitter {
       if(operation && !['tab.navigate','tab.command'].includes(action.type) && !closePending){operation.status='committed';if(application)operation.application=application;}
       this.saveProduct(state);
       try { await this.reconcileProduct(tenant); } catch { }
-      if (action.type === 'settings.update' && oldQuality !== state.settings.qualityPreference && this.connections.has(tenant)) {
-        try { await this.endpoint.request('session.mediaPolicy', tenant, { ...this.qualityFor(tenant).requested, refresh: true }); } catch { }
-      }
       if (action.type === 'site.set') {
         const latest = this.store.workspace(tenant), applied = this.siteApplications.get(tenant)?.applied === true;
         if (applied && (!action.tabId || !latest.tabs.find(t => t.id === action.tabId)?.pendingUaReloadOrigin)) application = undefined;
@@ -590,7 +584,9 @@ export class Control extends EventEmitter {
         nav.status='unknown';nav.resolved=true;tab.kind=nav.previousKind;tab.url=nav.previousUrl;if(tab.kind==='start')tab.loading=false;delete tab.pendingUrl;
         const saved=this.store.operation(tenant,nav.operationId);if(saved && !['committed','rejected'].includes(saved.receipt.status)){saved.receipt.status='unknown';saved.receipt.resolved=true;saved.receipt.resolution='target-retired';saved.receipt.error='原页面实例已结束，导航执行结果未知';delete saved.receipt.application;this.store.saveOperation(state,saved.receipt);}
       }}
-      if (snapshot.stats?.mediaPolicy?.applied) this.actualMediaPolicies.set(tenant, snapshot.stats.mediaPolicy.applied);
+      const appliedPolicy = snapshot.stats?.mediaPolicy?.applied;
+      if (appliedPolicy === null) this.actualMediaPolicies.delete(tenant);
+      else if (appliedPolicy) this.actualMediaPolicies.set(tenant, appliedPolicy);
       const closedViews = await this.consumeClosedEvents(state, snapshot);
       if (!this.viewers.has(tenant)) { await this.observeOffline(tenant); return; }
       await this.observePopups(state, snapshot);
@@ -738,8 +734,8 @@ export class Control extends EventEmitter {
     this.transitions.set(key, { action, at: Date.now() });
     if (action === 'freeze') this.backgroundPolicy.freezeRequested(key);
   }
-  private qualityController(tenant: string) { let controller = this.qualityControllers.get(tenant); if (!controller) this.qualityControllers.set(tenant, controller = new QualityController()); return controller; }
-  private qualityFor(tenant: string, workspace = this.store.workspace(tenant)) { return this.qualityController(tenant).snapshot(workspace, this.viewers.get(tenant)?.viewport ?? this.lastViewports.get(tenant), Date.now(), this.diagnosticTenants.has(tenant), this.actualMediaPolicies.get(tenant) ?? null); }
+  private qualityState(tenant: string) { let state = this.qualityStates.get(tenant); if (!state) this.qualityStates.set(tenant, state = new QualityState()); return state; }
+  private qualityFor(tenant: string, workspace = this.store.workspace(tenant)) { return this.qualityState(tenant).snapshot(workspace, this.viewers.get(tenant)?.viewport ?? this.lastViewports.get(tenant), Date.now(), this.diagnosticTenants.has(tenant), this.actualMediaPolicies.get(tenant) ?? null); }
   private async applyMedia(tenant: string, force = false, browserPid?: number) {
     const requested = this.qualityFor(tenant).requested, encoded = JSON.stringify(requested), previous = this.mediaApplications.get(tenant);
     if (!force && previous?.encoded === encoded && previous.applied) return;

@@ -75,20 +75,81 @@ struct remotekit_sdk_token {
   uint64_t session, view, instance, document, focus;
 };
 
-struct remotekit_sdk_atlas_setup {
+#define REMOTEKIT_SDK_ABI_VERSION 2
+#define REMOTEKIT_SDK_RENDER_SLOT_COUNT 4
+struct remotekit_sdk_render_setup {
   uint32_t struct_size, width, height, mapping_size;
-  uint64_t generation, mapping_handle, ready_fence_handle, consumed_fence_handle;
-  uint64_t texture_handles[3];
+  uint64_t generation, mapping_handle;
+  uint64_t ready_fence_handles[4], consumed_fence_handles[4], texture_handles[4];
   uint32_t adapter_luid_low;
   int32_t adapter_luid_high;
+  char render_channel[129];
 };
+struct remotekit_sdk_render_identity {
+  uint64_t generation, value;
+  uint32_t slot, reserved;
+};
+struct remotekit_sdk_render_request {
+  uint64_t generation, value;
+  uint32_t slot, interval_us, force;
+};
+enum remotekit_sdk_render_event_type {
+  REMOTEKIT_SDK_RENDER_REJECT = 1, REMOTEKIT_SDK_RENDER_FATAL = 2,
+  REMOTEKIT_SDK_RENDER_STOPPED = 3, REMOTEKIT_SDK_RENDER_WAKE = 4
+};
+enum remotekit_sdk_render_reject_reason {
+  REMOTEKIT_SDK_RENDER_IDLE = 1, REMOTEKIT_SDK_RENDER_NOT_READY = 2,
+  REMOTEKIT_SDK_RENDER_STALE_GENERATION = 3, REMOTEKIT_SDK_RENDER_REJECT_STOPPED = 4
+};
+struct remotekit_sdk_render_event {
+  uint32_t struct_size, type, reason, reserved;
+  uint64_t generation, value;
+  uint32_t slot, reserved2;
+};
+typedef void (*remotekit_sdk_render_callback)(void* context,
+    const struct remotekit_sdk_render_event* event);
+/* Claim the opaque one-use setup.render_channel token from a successful
+ * open_render on this SDK's original live Control connection. No OS named pipe
+ * or additional process link is opened. Control owns at most one unclaimed
+ * endpoint: new open, close, retire or shutdown closes it. A claimed render pipe
+ * has its own lifetime and remains owned until render_close.
+ * Dedicated asynchronous channel. Callback runs on an SDK worker. It must not
+ * call close/shutdown; dispatch those to another thread. render_begin only
+ * enqueues a one-way request and does not imply acceptance/GPU completion.
+ * At most one outstanding Begin per slot; BUSY leaves the request unsent.
+ * Caller owns slot scheduling and fence waits.
+ * Values start at 1 and strictly increase across all slots for this connection.
+ * Fatal means retire the channel/generation; it never authorizes slot reuse.
+ * WAKE is low-frequency idle demand, carrying the last Idle Reject identity.
+ * It is neither a request terminal event nor GPU completion and clears no pending
+ * request. Duplicate Wake is ignored; no Wake callback is delivered after Stop.
+ * close is a callback barrier. No callback may run after it returns. */
+REMOTEKIT_SDK_API int remotekit_sdk_render_connect(const char* name_utf8,
+    remotekit_sdk_render_callback callback, void* context, uint64_t* handle);
+REMOTEKIT_SDK_API int remotekit_sdk_render_begin(uint64_t handle,
+    const struct remotekit_sdk_render_request* begin);
+/* Local bookkeeping only; sends no IPC. Call after the matching slot ready
+ * Fence actually completes. Reject clears its matching outstanding request
+ * automatically. Unknown identities return DATA_MISMATCH. This releases no GPU
+ * resource: slot reuse still requires encoder leases and consumed Fence. */
+REMOTEKIT_SDK_API int remotekit_sdk_render_observe_signal(uint64_t handle,
+    const struct remotekit_sdk_render_identity* identity);
+/* Generation FIFO barrier, not a per-frame success notification. Sends Stop
+ * once; same-generation repeats are idempotent. A successful stop forbids later
+ * Begin calls. STOPPED callback follows all prior Reject callbacks and means
+ * every prior Begin has a Reject or a GPU Signal queued. It does not prove GPU
+ * completion; observe_signal still requires the matching real Fence.
+ * Drain Stop/Stopped and actual fences before closing the pool/channel. */
+REMOTEKIT_SDK_API int remotekit_sdk_render_stop(uint64_t handle, uint64_t generation);
+/* Local callback barrier only. Does not send Stop or release GPU resources. */
+REMOTEKIT_SDK_API int remotekit_sdk_render_close(uint64_t handle);
 
 /* Worker-only helpers over control_request. JSON remains UTF-8 bytes with an
  * explicit length; the caller supplies the complete version/id envelope.
  * command returns OK iff the decoded reply has boolean ok=true. BUSY means the
  * browser did not accept the operation; retry only within the same valid token
  * and sequence, with a bounded deadline. Resource
- * handles in ignored replies are closed; use open_atlas to acquire resources.
+ * handles in ignored replies are closed; use open_render to acquire resources.
  * command_token first zeroes token, then copies a valid reply.token even when
  * reply.ok=false (DATA_MISMATCH), allowing a caller to refresh focus generation.
  * A missing token leaves zeroes. Malformed tokens return DATA_MISMATCH.
@@ -102,20 +163,16 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_command_token(uint64_t handle,
                                                           size_t size,
                                                           uint32_t timeout_ms,
                                                           struct remotekit_sdk_token* token);
-/* Initialize setup.struct_size=sizeof(setup). consumer_pid must equal this
- * process's PID, fps is 1..120, timeout_ms is 1..30000. Opens then polls every
- * 10ms within one timeout budget. The worker may block; never call on UI.
- * All six nonzero Windows handles in a successful result are caller-owned and
- * must each be closed exactly once with CloseHandle. Failure with a valid-size
- * setup leaves its resource fields zero and closes any decoded reply handles.
- * Binary mapping layout is SharedAtlasMapping version 1, three texture slots.
- * Resource issuance is not cancelled in the browser by a local polling timeout.
- * As with raw calls, time queued behind other SDK callers is not bounded. */
-REMOTEKIT_SDK_API int remotekit_sdk_control_open_atlas(uint64_t handle,
-                                                       uint32_t consumer_pid,
-                                                       uint32_t fps,
-                                                       struct remotekit_sdk_atlas_setup* setup,
-                                                       uint32_t timeout_ms);
+/* Initialize struct_size. consumer_pid must be this process, timeout 1..30000.
+ * Opens then polls describe within one budget. All 13 returned Windows handles
+ * are caller-owned. Mapping is SharedRenderMapping v1. Endpoint owns pacing.
+ * A successful describe must attach exactly one empty Mojo message pipe. SDK
+ * retains that endpoint under the original Control connection until one-use
+ * render_connect claims its opaque token. Failure closes all reply attachments
+ * and all decoded Windows resource handles; raw control rejects attachments. */
+REMOTEKIT_SDK_API int remotekit_sdk_control_open_render(uint64_t handle,
+    uint32_t consumer_pid, struct remotekit_sdk_render_setup* setup,
+    uint32_t timeout_ms);
 /* Windows set-1 native scan code: ordinary 0x00xx, E0-prefixed 0xE0xx
  * (e.g. right Control 0xE01D), not a virtual-key or raw LPARAM. For ordinary
  * keyboard LPARAMs combine bits 16..23 with 0xE000 when extended bit 24 is set.

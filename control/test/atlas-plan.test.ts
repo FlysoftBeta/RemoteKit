@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { planAtlas, feasibleDpr } from '../server/atlas-plan';
-import { QualityController } from '../server/quality';
+import { QualityState } from '../server/quality';
 import { emptyWorkspace } from '../server/store';
 test('TS and C++ share exact packing/allocation fixtures', () => {
   for(const line of readFileSync(new URL('../../protocol/atlas-plan-fixtures.txt',import.meta.url),'utf8').split(/\r?\n/)) {
@@ -15,6 +15,6 @@ test('TS and C++ share exact packing/allocation fixtures', () => {
 test('axis constraints lower real DPR without shrinking DIP; minimum failure is explicit',()=>{
   const state=emptyWorkspace('t');state.settings.qualityPreference='quality';state.windows=[{id:'w',activeTabId:'t',weight:1}];
   const viewport={devicePixelRatio:4,windows:[{windowId:'w',width:8192,height:400,visible:true}]};
-  const quality=new QualityController().snapshot(state,viewport);assert.ok(quality.effectiveDpr<1);assert.ok(planAtlas(viewport.windows,quality.effectiveDpr));assert.equal(viewport.windows[0].width,8192);
+  const quality=new QualityState().snapshot(state,viewport);assert.ok(quality.effectiveDpr<1);assert.ok(planAtlas(viewport.windows,quality.effectiveDpr));assert.equal(viewport.windows[0].width,8192);
   assert.throws(()=>feasibleDpr([{width:8192,height:8192},{width:8192,height:8192}],.5),/minimum DPR/);
 });

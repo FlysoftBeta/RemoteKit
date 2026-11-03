@@ -1,0 +1,105 @@
+diff --git a/third_party/webrtc/common_video/h264/h264_bitstream_parser.h b/third_party/webrtc/common_video/h264/h264_bitstream_parser.h
+index 810b91c..a748def 100644
+--- a/third_party/webrtc/common_video/h264/h264_bitstream_parser.h
++++ b/third_party/webrtc/common_video/h264/h264_bitstream_parser.h
+@@ -19,6 +19,7 @@
+ #include "api/video_codecs/bitstream_parser.h"
+ #include "common_video/h264/pps_parser.h"
+ #include "common_video/h264/sps_parser.h"
++#include "rtc_base/system/rtc_export.h"
+ 
+ namespace webrtc {
+ 
+@@ -28,7 +29,7 @@ namespace webrtc {
+ // TODO(pbos): If/when this gets used on the receiver side CHECKs must be
+ // removed and gracefully abort as we have no control over receive-side
+ // bitstreams.
+-class H264BitstreamParser : public BitstreamParser {
++class RTC_EXPORT H264BitstreamParser : public BitstreamParser {
+  public:
+   H264BitstreamParser();
+   ~H264BitstreamParser() override;
+diff --git a/third_party/webrtc/experiments/field_trials.py b/third_party/webrtc/experiments/field_trials.py
+index aeda3d7..362ffc3 100755
+--- a/third_party/webrtc/experiments/field_trials.py
++++ b/third_party/webrtc/experiments/field_trials.py
+@@ -763,6 +763,9 @@ POLICY_EXEMPT_FIELD_TRIALS: FrozenSet[FieldTrial] = frozenset([
+     FieldTrial('WebRTC-QpParsingKillSwitch',
+                42222690,
+                date(2024, 4, 1)),
++    FieldTrial('WebRTC-RemoteKit-ScreenshareAdaptation',
++               NO_BUG,
++               INDEFINITE),
+     FieldTrial('WebRTC-RtcEventLogKillSwitch',
+                42222210,
+                INDEFINITE),
+@@ -890,7 +893,7 @@ POLICY_EXEMPT_FIELD_TRIALS: FrozenSet[FieldTrial] = frozenset([
+ ])  # yapf: disable
+ 
+ POLICY_EXEMPT_FIELD_TRIALS_DIGEST: str = \
+-    'c896c26970b042620c2ccc9b337aa2c958e9705c'
++    '864a5fd0e0c8cba511a89c2b668d1c5a7545eb55'
+ 
+ REGISTERED_FIELD_TRIALS: FrozenSet[FieldTrial] = ACTIVE_FIELD_TRIALS.union(
+     POLICY_EXEMPT_FIELD_TRIALS)
+diff --git a/third_party/webrtc/media/engine/webrtc_video_engine.cc b/third_party/webrtc/media/engine/webrtc_video_engine.cc
+index 15f6fd7..b4c4db9 100644
+--- a/third_party/webrtc/media/engine/webrtc_video_engine.cc
++++ b/third_party/webrtc/media/engine/webrtc_video_engine.cc
+@@ -2513,7 +2513,9 @@ WebRtcVideoSendChannel::WebRtcVideoSendStream::CreateVideoEncoderConfig(
+   encoder_config.legacy_conference_mode = parameters_.conference_mode;
+ 
+   encoder_config.is_quality_scaling_allowed =
+-      !disable_automatic_resize_ && !is_screencast &&
++      !disable_automatic_resize_ &&
++      (!is_screencast || env_.field_trials().IsEnabled(
++                            "WebRTC-RemoteKit-ScreenshareAdaptation")) &&
+       (parameters_.config.rtp.ssrcs.size() == 1 ||
+        NumActiveStreams(rtp_parameters_) == 1);
+ 
+diff --git a/third_party/webrtc/video/video_stream_encoder.cc b/third_party/webrtc/video/video_stream_encoder.cc
+index 18e5dd0..36c6513 100644
+--- a/third_party/webrtc/video/video_stream_encoder.cc
++++ b/third_party/webrtc/video/video_stream_encoder.cc
+@@ -606,10 +606,12 @@ class VideoStreamEncoder::DegradationPreferenceManager
+     : public DegradationPreferenceProvider {
+  public:
+   explicit DegradationPreferenceManager(
+-      VideoStreamAdapter* video_stream_adapter)
++      VideoStreamAdapter* video_stream_adapter,
++      bool allow_screenshare_adaptation)
+       : degradation_preference_(
+             DegradationPreference::MAINTAIN_FRAMERATE_AND_RESOLUTION),
+         is_screenshare_(false),
++        allow_screenshare_adaptation_(allow_screenshare_adaptation),
+         effective_degradation_preference_(
+             DegradationPreference::MAINTAIN_FRAMERATE_AND_RESOLUTION),
+         video_stream_adapter_(video_stream_adapter) {
+@@ -640,7 +642,7 @@ class VideoStreamEncoder::DegradationPreferenceManager
+   void MaybeUpdateEffectiveDegradationPreference()
+       RTC_RUN_ON(&sequence_checker_) {
+     DegradationPreference effective_degradation_preference =
+-        (is_screenshare_ &&
++        (is_screenshare_ && !allow_screenshare_adaptation_ &&
+          degradation_preference_ == DegradationPreference::BALANCED)
+             ? DegradationPreference::MAINTAIN_RESOLUTION
+             : degradation_preference_;
+@@ -656,6 +658,7 @@ class VideoStreamEncoder::DegradationPreferenceManager
+   DegradationPreference degradation_preference_
+       RTC_GUARDED_BY(&sequence_checker_);
+   bool is_screenshare_ RTC_GUARDED_BY(&sequence_checker_);
++  const bool allow_screenshare_adaptation_;
+   DegradationPreference effective_degradation_preference_
+       RTC_GUARDED_BY(&sequence_checker_);
+   VideoStreamAdapter* video_stream_adapter_ RTC_GUARDED_BY(&sequence_checker_);
+@@ -701,7 +704,9 @@ VideoStreamEncoder::VideoStreamEncoder(
+                                                env_.field_trials())),
+       degradation_preference_manager_(
+           std::make_unique<DegradationPreferenceManager>(
+-              video_stream_adapter_.get())),
++              video_stream_adapter_.get(),
++              env_.field_trials().IsEnabled(
++                  "WebRTC-RemoteKit-ScreenshareAdaptation"))),
+       stream_resource_manager_(&input_state_provider_,
+                                encoder_stats_observer,
+                                &env_.clock(),

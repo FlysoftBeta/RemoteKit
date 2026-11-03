@@ -12,13 +12,18 @@ namespace remotekit::browser {
 class ControlServer final {
  public:
   using Handler = base::RepeatingCallback<base::DictValue(const base::DictValue&)>;
-  ControlServer(const std::string& name, Handler handler, base::OnceClosure disconnected = {});
+  using AttachmentProvider = base::RepeatingCallback<mojo::ScopedMessagePipeHandle(
+      const base::DictValue&, const base::DictValue&)>;
+  ControlServer(const std::string& name, Handler handler,
+                AttachmentProvider attachment_provider,
+                base::OnceClosure disconnected = {});
   ~ControlServer();
 
  private:
   void OnReadable(MojoResult result);
   void Close();
   Handler handler_;
+  AttachmentProvider attachment_provider_;
   base::OnceClosure disconnected_;
   std::unique_ptr<mojo::NamedPlatformChannel> channel_;
   mojo::IsolatedConnection connection_;

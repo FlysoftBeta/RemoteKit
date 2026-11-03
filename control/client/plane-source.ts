@@ -1,3 +1,4 @@
+import { surfacePixelScale } from './coordinates';
 import type { Layout, Surface } from './types';
 
 export interface PixelRect { x: number; y: number; width: number; height: number }
@@ -22,7 +23,7 @@ export type PresentationMode = 'snapshot' | 'single-plane-direct';
 export function samePlane(a: Surface, b: Surface) {
   return a.id === b.id && a.session === b.session && a.instance === b.instance && a.document === b.document &&
     a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height &&
-    a.deviceScaleFactor === b.deviceScaleFactor && (a.mediaScale ?? 1) === (b.mediaScale ?? 1) && !!a.stale === !!b.stale;
+    a.deviceScaleFactor === b.deviceScaleFactor && surfacePixelScale(a) === surfacePixelScale(b) && surfacePixelScale(a, 'y') === surfacePixelScale(b, 'y') && !!a.stale === !!b.stale;
 }
 export function planeMatchesLayout(identity: PlaneIdentity, layout: Layout | null) {
   return !!layout && identity.layoutEpoch === layout.epoch && identity.layoutGeneration === layout.generation &&

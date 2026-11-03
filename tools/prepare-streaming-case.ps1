@@ -26,21 +26,9 @@ param(
   [switch]$ResourceProfile,
   [switch]$ServerTrace,
   [switch]$DisableMediaTrace,
-  [switch]$AtlasReadyGate,
-  [switch]$SinglePlaneDirect,
-  [ValidateSet(0,1,2,10)][int]$CaptureMaxPending=0,
   [switch]$OfficialTrace,
-  [switch]$CopyOutputProfile,
-  [Alias('OffscreenRoot')][switch]$CaptureRoot,
-  [switch]$CaptureToAtlas,
   [string]$BrowserEnableFeatures='',
   [string]$BrowserDisableFeatures='',
-  [ValidateRange(0,60)][int]$CaptureRenderFps=0,
-  [ValidateSet('auto','off')][string]$BrowserDirectComposition='auto',
-  [ValidateSet('auto','1')][string]$BrowserHostScale='auto',
-  [ValidateSet('offscreen','window')][string]$BrowserRenderHost='offscreen',
-  [ValidateRange(0,60)][int]$BrowserRenderFps=0,
-  [ValidateSet('off','on')][string]$AdaptiveFps='off',
   [ValidateSet('canvas','compositor')][string]$FixtureKind='canvas',
   [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
   [ValidateSet('video','track-processor')][string]$FrameSource='video',
@@ -53,7 +41,6 @@ param(
   [ValidateSet('native','chrome89-h264-42','chrome89-h264-51','h264-level42-experimental')][string]$ReceiveProfile='chrome89-h264-42',
   [ValidateSet('','auto','on','off')][string]$QsvLowPower='',
   [ValidateSet('external','async')][string]$QsvVpp='external',
-  [ValidateSet('copy','shared')][string]$AtlasInput='copy',
   [ValidateSet(1,16)][int]$AtlasAlignment=1,
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
@@ -68,31 +55,14 @@ if($ClientRefreshHz -ne 0 -and ($ClientMode -ne 'default' -or $DisableClientGpuV
 }
 if(-not (Test-Path -LiteralPath $ClientExecutablePath -PathType Leaf)) {throw "Client executable does not exist: $ClientExecutablePath"}
 $ClientExecutablePath=(Get-Item -LiteralPath $ClientExecutablePath).FullName
-$BrowserDirectComposition=$BrowserDirectComposition.ToLowerInvariant()
-$BrowserHostScale=$BrowserHostScale.ToLowerInvariant()
-$BrowserRenderHost=$BrowserRenderHost.ToLowerInvariant()
 $QsvVpp=$QsvVpp.ToLowerInvariant()
-$AtlasInput=$AtlasInput.ToLowerInvariant()
-if($AtlasInput -eq 'shared' -and ($QsvVpp -ne 'external' -or $AsyncDepth -ne 1)){throw 'AtlasInput shared requires QsvVpp external and AsyncDepth 1'}
 if(-not $PSBoundParameters.ContainsKey('AtlasAlignment')){$AtlasAlignment=if($QsvVpp -eq 'async'){16}else{1}}
 if($QsvVpp -eq 'async' -and $AtlasAlignment -ne 16){throw 'QsvVpp async requires AtlasAlignment 16'}
 if($ServerTrace -and $DisableMediaTrace){throw 'ServerTrace also enables browser trace; use DisableMediaTrace without ServerTrace for the off baseline'}
-if($CopyOutputProfile -and -not $OfficialTrace){throw 'CopyOutputProfile requires OfficialTrace to collect its opt-in events'}
-# Product defaults must be overridden explicitly for controlled false baselines.
-$rkManagedFeatures=@{RemoteKitCaptureRoot=[bool]$CaptureRoot;RemoteKitCaptureToAtlas=[bool]$CaptureToAtlas;RemoteKitSinglePlaneDirect=[bool]$SinglePlaneDirect}
-foreach($rkFeature in $rkManagedFeatures.Keys){
-  if(($BrowserEnableFeatures+','+$BrowserDisableFeatures) -match ('(^|,)'+[regex]::Escape($rkFeature)+'(?=[:,<]|$)')){throw "Use the dedicated switch for $rkFeature, not BrowserEnableFeatures/BrowserDisableFeatures"}
-}
 $rkBrowserFeatures=@()
 $rkBrowserDisabledFeatures=@()
 if($BrowserDisableFeatures){$rkBrowserDisabledFeatures+=$BrowserDisableFeatures}
-foreach($rkFeature in ($rkManagedFeatures.Keys|Sort-Object)){
-  if($rkManagedFeatures[$rkFeature]){$rkBrowserFeatures+=$rkFeature}else{$rkBrowserDisabledFeatures+=$rkFeature}
-}
 if($BrowserEnableFeatures){$rkBrowserFeatures+=$BrowserEnableFeatures}
-if($CaptureMaxPending){$rkBrowserFeatures+="RemoteKitBoundedCapture:max_pending/$CaptureMaxPending"}
-if($CopyOutputProfile){$rkBrowserFeatures+='RemoteKitCopyOutputProfile'}
-if($CaptureRenderFps){$rkBrowserFeatures+="RemoteKitCaptureRenderRate:max_fps/$CaptureRenderFps"}
 $rkBrowserFeaturesText=$rkBrowserFeatures -join ','
 $rkBrowserDisabledFeaturesText=$rkBrowserDisabledFeatures -join ','
 $rkRoot = Split-Path -Parent $PSScriptRoot
@@ -121,11 +91,10 @@ $configuration = @{
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
   clientExecutablePath=$ClientExecutablePath;clientRefreshHz=$ClientRefreshHz;
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
-  atlasReadyGate=[bool]$AtlasReadyGate;presentationMode=$PresentationMode;frameSource=$FrameSource;processorScheduler=$ProcessorScheduler;processorProfile=[bool]$ProcessorProfile;
-  singlePlaneDirect=[bool]$SinglePlaneDirect;
-  captureMaxPending=$CaptureMaxPending;captureRenderFps=$CaptureRenderFps;browserEnableFeatures=$rkBrowserFeaturesText;browserDisableFeatures=$rkBrowserDisabledFeaturesText;copyOutputProfile=[bool]$CopyOutputProfile;
-  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;browserDirectComposition=$BrowserDirectComposition;browserHostScale=$BrowserHostScale;browserRenderHost=$BrowserRenderHost;browserRenderFps=$BrowserRenderFps;adaptiveFps=$AdaptiveFps;captureRoot=[bool]$CaptureRoot;captureToAtlas=[bool]$CaptureToAtlas;
-  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;atlasInput=$AtlasInput;qsvLowPower=$QsvLowPower;atlasAllocationAlignment=$AtlasAlignment;startBitrate=$rkBitrateBps;maxBitrate=$rkMaxBitrateBps;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
+  presentationMode=$PresentationMode;frameSource=$FrameSource;processorScheduler=$ProcessorScheduler;processorProfile=[bool]$ProcessorProfile;
+  browserEnableFeatures=$rkBrowserFeaturesText;browserDisableFeatures=$rkBrowserDisabledFeaturesText;
+  officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;
+  endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;qsvLowPower=$QsvLowPower;atlasAllocationAlignment=$AtlasAlignment;startBitrate=$rkBitrateBps;maxBitrate=$rkMaxBitrateBps;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};
   network=@{enabled=$false;scope='same-machine unshaped cadence diagnostic'}
 }
 if ($DownlinkMbps) {
@@ -169,12 +138,9 @@ foreach ($asset in Get-ChildItem -LiteralPath (Join-Path $rkRoot 'control/dist/c
 $fingerprints | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $caseRoot 'fingerprints.json')
 $env:REMOTEKIT_ENDPOINT = Join-Path $caseRoot 'bin/endpoint_service.exe'
 $rkEndpointArguments = @(
-  '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe', "--data-path=$caseRoot/sessions", "--browser-direct-composition=$BrowserDirectComposition", "--browser-host-scale=$BrowserHostScale", "--browser-render-host=$BrowserRenderHost",
-  "--browser-render-fps=$BrowserRenderFps",
-  "--adaptive-fps=$AdaptiveFps",
+  '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe', "--data-path=$caseRoot/sessions",
   '--encoder=qsv','--fps=60',"--bitrate=$rkBitrateBps","--max-bitrate=$rkMaxBitrateBps",
   "--qsv-vpp=$QsvVpp", "--atlas-alignment=$AtlasAlignment",
-  "--atlas-input=$AtlasInput",
   "--async-depth=$AsyncDepth", "--target-usage=$TargetUsage", "--buffer-ms=$BufferMs", "--rate-control=$RateControl", "--idle-idr-ms=$IdleIdrMs"
 )
 if($rkBrowserFeaturesText){
@@ -196,7 +162,6 @@ $env:REMOTEKIT_CONTROL_DB = Join-Path $caseRoot 'control.db'
 $env:REMOTEKIT_METRICS_DIR = Join-Path $caseRoot 'metrics'
 $env:REMOTEKIT_MEDIA_TRACE = if($DisableMediaTrace){$null}else{Join-Path $caseRoot 'browser-trace'}
 $env:REMOTEKIT_SERVER_TRACE = if($ServerTrace){Join-Path $caseRoot 'server-trace'}else{$null}
-$env:REMOTEKIT_ATLAS_READY_GATE = if($AtlasReadyGate){'1'}else{$null}
 $env:REMOTEKIT_NETWORK_SIM = if ($DownlinkMbps) { ConvertTo-Json -Compress -InputObject @{oneWayDelayMs=5;downlinkMbps=$DownlinkMbps;uplinkMbps=1000;maxQueueBytes=300000;maxQueueDelayMs=100} } else { 'off' }
 $env:REMOTEKIT_RTC_LOOPBACK_TEST = if ($DownlinkMbps) { '1' } else { '0' }
 $env:REMOTEKIT_GPU_POLL = if ($PreciseBrowserPoll) { 'precise' } else { 'default' }

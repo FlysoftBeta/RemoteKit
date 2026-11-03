@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define REMOTEKIT_RTC_ABI_VERSION 2u
+#define REMOTEKIT_RTC_ABI_VERSION 3u
 enum remotekit_rtc_event_type {
   REMOTEKIT_RTC_SDP_OFFER = 1, REMOTEKIT_RTC_SDP_ANSWER = 2,
   REMOTEKIT_RTC_ICE = 3, REMOTEKIT_RTC_STATE = 4,
@@ -110,10 +110,31 @@ REMOTEKIT_SDK_API int remotekit_rtc_sample_clock(
 REMOTEKIT_SDK_API int remotekit_rtc_create(const struct remotekit_rtc_options*,
                                          uint64_t* peer);
 REMOTEKIT_SDK_API int remotekit_rtc_close(uint64_t peer);
-/* Update sender ceilings without replacing the peer or encoder sequence.
- * WebRTC congestion control remains authoritative below these limits. */
-REMOTEKIT_SDK_API int remotekit_rtc_set_media_policy(uint64_t peer,
-    uint32_t target_bitrate_bps,uint32_t max_bitrate_bps,uint32_t target_fps);
+enum remotekit_rtc_degradation_preference {
+  REMOTEKIT_RTC_MAINTAIN_RESOLUTION = 0,
+  REMOTEKIT_RTC_BALANCED = 1,
+  REMOTEKIT_RTC_MAINTAIN_FRAMERATE = 2
+};
+/* Updates only the video sender in place. GCC owns the encoded bitrate. */
+REMOTEKIT_SDK_API int remotekit_rtc_set_degradation_preference(uint64_t peer,
+    uint32_t preference);
+/* Client display/capture capability ceiling, 1..240fps, independent of quality. */
+REMOTEKIT_SDK_API int remotekit_rtc_set_source_max_fps(uint64_t peer, uint32_t fps);
+struct remotekit_rtc_adaptation {
+  uint32_t struct_size, width, height, drop;
+  uint32_t max_fps; /* official source restriction, 0 = unlimited; also on drop */
+};
+/* Calls WebRTC's source adapter exactly once before selecting a native frame.
+ * Always pass the original full atlas dimensions, never an adapted size.
+ * timestamp_us is an increasing SDK monotonic media time, including refreshes.
+ * drop=1 sets width/height=0 and transfers no texture/lease obligation.
+ * Otherwise scale the full atlas to exactly width/height (alignment rounding
+ * may slightly change its aspect), install the matching layout barrier, then
+ * submit that selected texture. No arbitrary crop is supported. Submit does
+ * not run adaptation a second time. */
+REMOTEKIT_SDK_API int remotekit_rtc_adapt_frame(uint64_t peer,
+    uint32_t source_width, uint32_t source_height, int64_t timestamp_us,
+    struct remotekit_rtc_adaptation* adaptation);
 REMOTEKIT_SDK_API int remotekit_rtc_create_offer(uint64_t peer);
 /* offer=1 applies remote offer and emits local answer; offer=0 applies answer.
  * Send-only SDK: remote media must be recvonly/inactive. Audio requires

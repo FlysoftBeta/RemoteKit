@@ -10,11 +10,16 @@ through `remotekit_rtc.h`. A custom H.264 encoder factory calls endpoint-owned
 hardware encoders through C callbacks. Browser playback-target PCM is submitted
 through the audio export and sent as Opus; this is not system audio capture.
 
-The Windows client also uses worker-thread `control_open_atlas` and
-`control_command_token` helpers. Atlas setup returns caller-owned mapping,
-ready/consumed fence, and three texture handles, already duplicated into this
-process. The mapping ABI is exported as `include/remotekit/shared_atlas.h`.
-Frame polling and GPU waits do not call Mojo. `BUSY` means an operation was not
+The worker-thread `control_open_render` helper returns a caller-owned mapping,
+four texture handles, four ready fences, four consumed fences and a dedicated
+render endpoint token. Windows handles are duplicated into the consumer process.
+The successful describe reply transfers one Mojo message-pipe endpoint over the
+existing control connection. A second IsolatedConnection between the same process
+pair would replace the first link and must not be created.
+`include/remotekit/shared_render_slots.h` defines independent per-slot metadata.
+The compositor sends asynchronous Begin requests carrying generation/slot/value;
+the renderer sends Reject or signals the real per-slot GPU fence. Successful frames
+have no ready/present/release IPC. Metadata alone never proves GPU completion. `BUSY` means an operation was not
 accepted; retry only with the same valid token/sequence within a deadline.
 Windows scan-code and DomKey helpers retain the native layout. The caller keeps
 the DLL loaded until SDK shutdown and the caller thread's TLS cleanup finish.
@@ -88,17 +93,41 @@ a successful transport exchange and does not invalidate the channel. Browser
 responses exceeding the protocol budget return a bounded `response_too_large`
 application error instead of intentionally breaking a healthy connection.
 
-Verified on official Chromium `157.0.8103.15`, x64 component build: GN shared
-library linked successfully, exporter copied the full runtime manifest, and an
-independent MSVC 19.51 CMake consumer linked and passed CTest (1/1). Only the pure
-C SDK header was included by the consumer.
+The original control-only ABI was verified on Chromium `157.0.8103.15` with an
+independent MSVC C consumer. That historical result does not validate the new
+render or RTC ABIs; current build and runtime evidence is recorded in
+[current state](current-state.zh-CN.md).
 
 ## Streaming ownership
 
-The RTC interface uses ABI version 2; the original control SDK remains version 1.
-RTC creation rejects a mismatched ABI. Shared atlas metadata is also version 2
-(`SharedAtlasView` 112 bytes, mapping 7296 bytes), separating page DPR from atlas
-pixels per DIP. Rebuild browser, SDK and endpoint together when updating these interfaces.
+The RTC interface is ABI version 3 and the control/render SDK is ABI version 2.
+Creation rejects mismatched ABIs. SharedRenderMapping is version 1, 36224 bytes,
+with four independent slots (7232 bytes each); SharedAtlasView remains 112 bytes.
+Page DPR and atlas pixels per DIP stay separate. Rebuild Browser, SDK and Endpoint together.
+
+`render_connect` claims the dedicated asynchronous endpoint using the opaque
+`render_channel` token; this field is not an OS channel name. The SDK retains at
+most one unclaimed endpoint per control channel. A new open, control retirement
+or SDK shutdown closes an unclaimed endpoint; a token can be claimed only once.
+Once claimed, the render pipe has its own Stop/close lifecycle. At most one Begin per
+slot may remain outstanding. A matching Reject ends its request; after observing
+the matching real ready fence, the compositor calls `render_observe_signal` for
+local SDK bookkeeping only. That call sends no IPC and does not release encoder
+leases or make a slot reusable.
+
+An Idle Reject stops normal Begin admission after the renderer's last accepted
+content is submitted. Later Chromium frame demand produces one Wake carrying
+the latest Idle identity. A delayed Begin does not acknowledge Wake and must not
+erase that identity. The SDK rejects unknown Wake identities and ignores exact
+duplicates; Wake neither completes a request nor releases a slot. Stop suppresses
+later Wake delivery. Explicit tail-IDR and refresh requests may use force Begin.
+
+For retirement, `render_stop(generation)` is ordered behind prior Begin messages.
+The renderer sends Stopped only after those requests have been rejected or their
+GPU signals have been queued. Reject callbacks precede Stopped on the same FIFO.
+Only then may normal shutdown close the channel; successful requests still wait
+for their actual GPU and encoder completion. `render_close` is a callback barrier,
+not a GPU-completion proof. Close all render channels and peers before SDK shutdown.
 
 The endpoint submits an immutable D3D11 texture with a frame lease. Successful
 submission transfers one release obligation to the SDK; failure leaves it with
@@ -125,8 +154,7 @@ RTP playout-delay extension. Both limits must be multiples of 10 ms, with
 `0 <= min <= max <= 40950`. The default is unset. `-1,-1` is a no-op only before
 an explicit configuration; cancelling afterwards returns `INVALID_STATE` and
 keeps the request. Recreate the peer to restore default receiver behavior.
-Updating an explicit pair remains supported. This additive export keeps ABI 2;
-the updated endpoint requires an SDK containing it. Statistics report the
+Updating an explicit pair remains supported; the current endpoint requires this export. Statistics report the
 requested limits, not a measured end-to-end delay guarantee.
 
 The reliable ordered DataChannel is named `remotekit`. Client messages and
@@ -137,6 +165,6 @@ Runtime and hardware validation results are maintained in [current state](curren
 
 `remotekit_rtc_submit_audio(peer, pcm, frames, generation, sequence, sample_index, first_sample_qpc, discontinuity)` is an additive audio export. It accepts interleaved S16 stereo at 48 kHz, 480 frames per block, on a dedicated audio thread. PCM is copied during the call; success means accepted, not remotely played. Generation and sample index preserve the source timeline, and the first sample uses local QPC. Audio is negotiated only for a receiving client; video-only peers remain supported. The updated Endpoint requires the corresponding SDK export. See [audio ownership and lifecycle](audio-and-files.zh-CN.md).
 
-`remotekit_rtc_set_media_policy(peer, target_bps, max_bps, fps)` is an additive export. It adjusts sender limits without resetting congestion-control start bitrate. Repeating the same policy is a no-op; an FPS-only change does not reset bandwidth estimation. Endpoint reports requested and actually applied policy separately; missing exports return explicit unsupported behavior.
+`remotekit_rtc_set_degradation_preference` changes only the video sender's native WebRTC preference in place; `remotekit_rtc_set_source_max_fps` applies a client capability limit. The old product bitrate/FPS preset API is removed. `remotekit_rtc_adapt_frame` runs upstream AdaptFrame with the original atlas size and increasing SDK monotonic time. It returns drop, exact output dimensions and the official max_fps restriction (0 means unrestricted), without taking a texture lease. On a selected frame the caller establishes the matching layout barrier and scales the full atlas; submit does not adapt twice. Axis alignment rounding is represented by separate X/Y media scales. GCC SetRates remains authoritative for encoder rates. Screenshare identity is retained; a RemoteKit-only field trial enables upstream balanced/quality adaptation, and the official H264 parser supplies QP when hardware reports -1.
 
-Capture metadata is mapped from the original QPC timestamp to wall time before the SDK changes timestamp domains. `captureWallTimeMs`, `captureMonotonicMs`, `captureClockUncertaintyMs`, and decimal `sourceCaptureId` are optional and paired with actual wire RTP/epoch. Missing capture time is omitted, never replaced by ready/encode time. This does not change frame ABI or add Browser–Endpoint frame IPC. See [feedback timing](media-feedback.md).
+Capture metadata is mapped from the original QPC timestamp to wall time before the SDK changes timestamp domains. `captureWallTimeMs`, `captureMonotonicMs`, `captureClockUncertaintyMs`, and decimal `sourceCaptureId` are optional and paired with actual wire RTP/epoch. Missing capture time is omitted, never replaced by ready/encode time. The new OSR path currently reports no measured completion timestamp; do not reuse capture-path latency results. See [feedback timing](media-feedback.md).

@@ -3,10 +3,16 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
+
+#include "base/functional/callback.h"
 
 #include "base/memory/weak_ptr.h"
-#include "base/timer/timer.h"
 #include "base/values.h"
+#include "components/viz/common/frame_sinks/begin_frame_args.h"
+#include "mojo/public/cpp/bindings/associated_receiver_set.h"
+#include "services/viz/privileged/mojom/compositing/external_begin_frame_controller.mojom.h"
+#include "ui/compositor/compositor.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/events/platform/platform_event_dispatcher.h"
 
@@ -25,15 +31,33 @@ std::unique_ptr<display::Screen> CreateOffscreenScreen();
 
 // One WebContents, one virtual Aura root. No native page window is created.
 class OffscreenHost final : public aura::WindowTreeHost,
-                            public ui::PlatformEventDispatcher {
+                            public ui::PlatformEventDispatcher,
+                            public ui::ExternalBeginFrameControllerClientFactory,
+                            public viz::mojom::ExternalBeginFrameControllerClient {
  public:
   explicit OffscreenHost(content::WebContents* contents, const gfx::Size& viewport);
   ~OffscreenHost() override;
   void SetViewport(const gfx::Size& viewport);
-  void SetRenderDemand(bool enabled, uint32_t fps);
+  void SetOutputScale(float scale);
+  void SetRenderDemand(bool enabled);
+  void SetNeedsBeginFrameCallback(base::RepeatingClosure callback);
+  viz::BeginFrameArgs CreateBeginFrameArgs(base::TimeTicks now, base::TimeDelta interval);
+  bool needs_begin_frames() const { return needs_begin_frames_; }
+  bool begin_frame_demand_known() const { return begin_frame_demand_known_; }
+  uint64_t begin_frame_binding_epoch() const { return begin_frame_binding_epoch_; }
+  bool rebound_with_unretired_gpu_work() const { return rebound_with_unretired_gpu_work_; }
+  mojo::PendingAssociatedRemote<viz::mojom::ExternalBeginFrameControllerClient>
+  CreateExternalBeginFrameControllerClient() override;
+  void SetNeedsBeginFrame(bool needs_begin_frames) override;
+  void SetPreferredInterval(base::TimeDelta interval) override;
+  void NeedsBeginFrameWithId(int64_t display_id, bool needs_begin_frames) override;
   void Detach();
+  void AddGpuRetirementProbe(base::RepeatingCallback<bool()> probe);
+  bool CanDestroyGpuOutput();
+  static void Retire(std::unique_ptr<OffscreenHost> host);
   void ClearFocus();
   base::DictValue Diagnostics() const;
+  base::WeakPtr<OffscreenHost> GetWeakPtr() { return weak_factory_.GetWeakPtr(); }
 
   bool CanDispatchEvent(const ui::PlatformEvent& event) override;
   uint32_t DispatchEvent(const ui::PlatformEvent& event) override;
@@ -55,25 +79,23 @@ class OffscreenHost final : public aura::WindowTreeHost,
   void OnCursorVisibilityChangedNative(bool show) override;
 
  private:
-  void Tick();
-  void ArmDeadline();
-  void OnCoarseWake();
-  void MaybeIssueFrame();
-  void OnAck(uint64_t generation, uint64_t sequence, const viz::BeginFrameAck& ack);
   gfx::Rect bounds_;
-  const uint64_t source_id_;
+  gfx::Size viewport_;
+  float output_scale_ = 1.f;
   raw_ptr<aura::Window> content_window_ = nullptr;
   std::unique_ptr<aura::client::FocusClient> focus_client_;
   std::unique_ptr<aura::client::WindowParentingClient> parenting_client_;
   std::unique_ptr<ui::InputMethod> minimal_input_method_;
-  base::DeadlineTimer timer_;
-  base::TimeDelta interval_ = base::Hertz(60);
-  base::TimeTicks next_deadline_;
-  uint32_t configured_fps_ = 60;
-  bool enabled_ = false, pending_ = false, tick_due_ = false;
-  uint64_t generation_ = 1, sequence_ = 0, sent_ = 0, acked_ = 0;
-  uint64_t merged_ = 0, aborted_ = 0;
-  uint64_t coarse_wakes_ = 0, skipped_ticks_ = 0;
+  const uint64_t begin_frame_source_id_;
+  uint64_t begin_frame_sequence_ = 0, begin_frame_binding_epoch_ = 0;
+  bool enabled_ = false;
+  bool needs_begin_frames_ = false, begin_frame_demand_known_ = false;
+  bool rebound_with_unretired_gpu_work_ = false;
+  base::TimeDelta preferred_interval_;
+  base::RepeatingClosure needs_begin_frame_callback_;
+  mojo::AssociatedReceiverSet<viz::mojom::ExternalBeginFrameControllerClient>
+      begin_frame_receivers_;
+  std::vector<base::RepeatingCallback<bool()>> gpu_retirement_probes_;
   base::WeakPtrFactory<OffscreenHost> weak_factory_{this};
 };
 }  // namespace remotekit::browser

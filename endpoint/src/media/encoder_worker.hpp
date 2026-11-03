@@ -15,7 +15,7 @@ struct EncoderStats {
  std::atomic<uint64_t> submitted{0},completed{0},bytes{0},dropped{0};
  std::atomic<double> last_encode_ms{0};
  std::atomic<uint64_t> rate_updates{0},keyframe_requests{0},keyframes_submitted{0},keyframes_encoded{0};
- std::atomic<uint64_t> pending{0},inflight{0},pending_replaced{0},hardware_busy{0};
+ std::atomic<uint64_t> pending{0},inflight{0},queue_full_drops{0},hardware_busy{0};
  std::atomic<uint64_t> paused_drops{0},error_drops{0},inactive_drops{0},cancelled_drops{0};
  std::atomic<uint64_t> queue_wait_us{0},queue_wait_samples{0};
  std::mutex mutex;std::string backend,error;
@@ -23,7 +23,7 @@ struct EncoderStats {
  std::optional<QsvLowPowerInfo> qsv_low_power;
  std::optional<uint32_t> applied_target_usage;
  uint32_t requested_target_usage=0;
- uint32_t requested_bitrate=0,requested_fps=0,applied_bitrate=0,applied_max_bitrate=0,applied_fps=0,actual_level=0;
+ uint32_t gcc_target_bitrate=0,gcc_target_fps=0,applied_bitrate=0,applied_max_bitrate=0,applied_fps=0,actual_level=0;
  nlohmann::json Snapshot();
 };
 class EncoderWorker {
@@ -37,7 +37,6 @@ class EncoderWorker {
   bool Configure(const remotekit_rtc_encoder_config&);
   bool Enqueue(const remotekit_rtc_frame&,bool keyframe);
   void Rates(uint32_t bitrate,uint32_t fps);
-  void Policy(uint32_t bitrate,uint32_t maximum,uint32_t fps);
   void Keyframe();
   void Stop();
  private:
@@ -48,7 +47,6 @@ class EncoderWorker {
   void Error(const std::string&);
   bool RetainUnsafeInputs(Job* additional=nullptr);
   Sdk& sdk_;uint64_t encoder_;
- uint32_t nominal_fps_=0;bool fixed_rate_fps_=false;
   ComPtr<ID3D11Device> device_;std::string mode_;EncoderSettings settings_;
   std::shared_ptr<EncoderStats> stats_;
   std::function<void(uint32_t,uint64_t,size_t,bool,const remotekit_rtc_frame&)> completed_;
@@ -65,8 +63,12 @@ class EncoderWorker {
   std::mutex mutex_;std::condition_variable wake_;
   std::thread thread_;bool stopping_=false,configured_=false;std::atomic<bool> failed_{false};
   std::atomic<bool> keyframe_{true},paused_{false};
-  uint32_t cc_bitrate_=0,cc_fps_=0;
-  std::atomic<uint32_t> policy_bitrate_{0},policy_max_{0},policy_fps_{0};
-  std::atomic<uint32_t> bitrate_{0},fps_{0},applied_bitrate_{0},applied_fps_{0},applied_max_{0};
+  struct RateUpdate {uint32_t bitrate=0,fps=0;};
+  std::optional<RateUpdate> pending_rates_; // Protected by mutex_, including the pair.
+  std::function<std::unique_ptr<HardwareEncoder>()> hardware_factory_; // Optional backend injection.
+  uint32_t fps_limit_=0;
+  uint32_t rate_limit_=0; // Immutable configured/negotiated ceiling while running.
+  std::atomic<uint32_t> retained_frames_{0};
+  static constexpr uint32_t kFrameCapacity=4;
 };
 }

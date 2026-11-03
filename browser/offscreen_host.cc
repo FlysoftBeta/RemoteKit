@@ -1,18 +1,18 @@
 #include "remotekit/browser/offscreen_host.h"
 
 #include <algorithm>
+#include <cmath>
+#include <map>
 
 #include "base/check.h"
+#include "base/no_destructor.h"
 #include "base/functional/bind.h"
+#include "base/timer/timer.h"
+#include "base/strings/string_number_conversions.h"
+#include "components/viz/common/frame_sinks/begin_frame_source.h"
 #include "base/observer_list.h"
 #include "base/scoped_observation.h"
-#include "base/strings/string_number_conversions.h"
-#include "base/task/single_thread_task_runner.h"
-#include "base/task/task_features.h"
-#include "components/viz/common/frame_sinks/begin_frame_args.h"
-#include "components/viz/common/frame_sinks/begin_frame_source.h"
 #include "content/public/browser/web_contents.h"
-#include "mojo/public/cpp/bindings/callback_helpers.h"
 #include "ui/aura/client/focus_change_observer.h"
 #include "ui/aura/client/focus_client.h"
 #include "ui/aura/client/window_parenting_client.h"
@@ -26,7 +26,39 @@
 
 namespace remotekit::browser {
 namespace {
-uint64_t g_begin_frame_sequence = 0;  // UI sequence, unique across page hosts.
+// UI-sequence service display metrics; never inherit a monitor/RDP DPI.
+std::map<aura::Window*, float>& OutputScales() {
+  static base::NoDestructor<std::map<aura::Window*, float>> scales;
+  return *scales;
+}
+float OutputScale(aura::Window* window) {
+  if (!window) return 1.f;
+  auto it = OutputScales().find(window->GetRootWindow());
+  return it == OutputScales().end() ? 1.f : it->second;
+}
+
+// A self-held retiree is intentionally sealed if GPU completion is unknown.
+// Destroying a queued task or the WebView owner cannot release its compositor.
+class RetiredHost final : public std::enable_shared_from_this<RetiredHost> {
+ public:
+  explicit RetiredHost(std::unique_ptr<OffscreenHost> host) : host_(std::move(host)) {}
+  void Start() {
+    keepalive_ = shared_from_this();
+    timer_.Start(FROM_HERE, base::Milliseconds(2),
+                 base::BindRepeating(&RetiredHost::Poll, base::Unretained(this)));
+  }
+ private:
+  void Poll() {
+    auto protect = shared_from_this();
+    if (!host_->CanDestroyGpuOutput()) return;
+    timer_.Stop();
+    host_.reset();
+    keepalive_.reset();
+  }
+  std::unique_ptr<OffscreenHost> host_;
+  base::RepeatingTimer timer_;
+  std::shared_ptr<RetiredHost> keepalive_;
+};
 
 class ServiceScreen final : public display::ScreenBase {
  public:
@@ -40,8 +72,13 @@ class ServiceScreen final : public display::ScreenBase {
   gfx::NativeWindow GetWindowAtScreenPoint(const gfx::Point&) override { return nullptr; }
   gfx::NativeWindow GetLocalProcessWindowAtPoint(const gfx::Point&,
       const std::set<gfx::NativeWindow>&) override { return nullptr; }
-  display::Display GetDisplayNearestWindow(gfx::NativeWindow) const override {
-    return GetPrimaryDisplay();
+  display::Display GetDisplayNearestWindow(gfx::NativeWindow window) const override {
+    auto result = GetPrimaryDisplay();
+    result.set_device_scale_factor(OutputScale(window));
+    return result;
+  }
+  std::optional<float> GetPreferredScaleFactorForWindow(gfx::NativeWindow window) const override {
+    return OutputScale(window);
   }
   bool IsHeadless() const override { return true; }
 };
@@ -98,16 +135,14 @@ std::unique_ptr<display::Screen> CreateOffscreenScreen() {
 
 OffscreenHost::OffscreenHost(content::WebContents* contents,
                            const gfx::Size& viewport)
-    : source_id_(viz::StubBeginFrameSource().source_id()) {
-  // Allocate in the browser's non-restartable source domain. Viz uses its
-  // positive GPU-host restart id. A shared kManualSourceId makes Viz's global
-  // frame-sink observer mistake another page host's pending frames for ours.
+    : begin_frame_source_id_(viz::StubBeginFrameSource().source_id()) {
   SetNativeWindowOcclusionEnabled(false);
   // InputMethodMinimal is abstract on Windows (native IME/locale hooks).
   // Use the same no-native-IME implementation as the official headless factory.
   minimal_input_method_ = std::make_unique<ui::MockInputMethod>(this);
   SetSharedInputMethod(minimal_input_method_.get());
   CreateCompositor(false, true);
+  compositor()->SetExternalBeginFrameControllerClientFactory(this);
   OnAcceleratedWidgetAvailable();
   focus_client_ = std::make_unique<FocusClient>();
   aura::client::SetFocusClient(window(), focus_client_.get());
@@ -125,36 +160,42 @@ OffscreenHost::OffscreenHost(content::WebContents* contents,
 OffscreenHost::~OffscreenHost() {
   Detach();
   parenting_client_.reset();
+  OutputScales().erase(window());
   DestroyCompositor();
   DestroyDispatcher();
   SetSharedInputMethod(nullptr);
 }
 
 void OffscreenHost::SetViewport(const gfx::Size& viewport) {
+  viewport_ = viewport;
   if (content_window_) content_window_->SetBounds(gfx::Rect(viewport));
-  SetBoundsInPixels(gfx::Rect(viewport));
+  SetBoundsInPixels(gfx::Rect(gfx::Size(std::lround(viewport.width() * output_scale_),
+                                     std::lround(viewport.height() * output_scale_))));
 }
 
-void OffscreenHost::SetRenderDemand(bool enabled, uint32_t fps) {
-  const auto interval = base::Hertz(std::clamp(fps, 1u, 120u));
-  if (enabled_ == enabled && interval_ == interval) return;
+void OffscreenHost::SetOutputScale(float scale) {
+  if (!std::isfinite(scale) || scale <= 0 || output_scale_ == scale) return;
+  output_scale_ = scale;
+  OutputScales()[window()] = scale;
+  const auto old_bounds = bounds_;
+  SetViewport(viewport_);
+  // Even unchanged rounded pixel dimensions can carry a different DSF.
+  if (bounds_ == old_bounds) OnHostResizedInPixels(bounds_.size());
+}
+
+void OffscreenHost::SetRenderDemand(bool enabled) {
+  if (enabled_ == enabled) return;
   enabled_ = enabled;
-  configured_fps_ = std::clamp(fps, 1u, 120u);
-  interval_ = interval;
-  timer_.Stop();
+  // Endpoint Begin admission is the only render clock. Visibility expresses
+  // product demand and never creates a second, autonomous BeginFrame source.
   compositor()->SetVisible(enabled);
-  if (!enabled) { tick_due_ = false; return; }
-  // Establish a new phase on demand/fps changes. The first frame refreshes
-  // immediately; subsequent ticks stay on this absolute phase.
-  next_deadline_ = base::TimeTicks::Now() + interval_;
-  tick_due_ = true;
-  MaybeIssueFrame();
-  ArmDeadline();
 }
 
 void OffscreenHost::Detach() {
+  needs_begin_frame_callback_.Reset();
+  begin_frame_receivers_.Clear();
+  compositor()->SetExternalBeginFrameControllerClientFactory(nullptr);
   enabled_ = false;
-  timer_.Stop();
   weak_factory_.InvalidateWeakPtrs();
   ClearFocus();
   if (content_window_) {
@@ -164,103 +205,82 @@ void OffscreenHost::Detach() {
   }
 }
 
+viz::BeginFrameArgs OffscreenHost::CreateBeginFrameArgs(base::TimeTicks now,
+                                                       base::TimeDelta interval) {
+  return viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE, begin_frame_source_id_,
+      ++begin_frame_sequence_, now, now + interval, interval, viz::BeginFrameArgs::NORMAL);
+}
+
+void OffscreenHost::SetNeedsBeginFrameCallback(base::RepeatingClosure callback) {
+  needs_begin_frame_callback_ = std::move(callback);
+}
+
+mojo::PendingAssociatedRemote<viz::mojom::ExternalBeginFrameControllerClient>
+OffscreenHost::CreateExternalBeginFrameControllerClient() {
+  begin_frame_receivers_.Clear();
+  begin_frame_demand_known_ = false;
+  needs_begin_frames_ = false;
+  mojo::PendingAssociatedRemote<viz::mojom::ExternalBeginFrameControllerClient> remote;
+  begin_frame_receivers_.Add(this, remote.InitWithNewEndpointAndPassReceiver());
+  ++begin_frame_binding_epoch_;
+  // This list spans all renderer generations that ever configured this host.
+  // Readiness is observed without pruning: a currently idle pool may be used
+  // again later and must remain registered for the host's final retirement.
+  if (begin_frame_binding_epoch_ > 1)
+    for (auto& probe : gpu_retirement_probes_)
+      if (!probe.Run()) rebound_with_unretired_gpu_work_ = true;
+  if (begin_frame_binding_epoch_ > 1 && needs_begin_frame_callback_)
+    needs_begin_frame_callback_.Run();
+  return remote;
+}
+
+void OffscreenHost::SetNeedsBeginFrame(bool needs_begin_frames) {
+  const bool changed = !begin_frame_demand_known_ || needs_begin_frames_ != needs_begin_frames;
+  begin_frame_demand_known_ = true;
+  needs_begin_frames_ = needs_begin_frames;
+  if (changed && needs_begin_frame_callback_) needs_begin_frame_callback_.Run();
+}
+
+void OffscreenHost::NeedsBeginFrameWithId(int64_t display_id, bool needs_begin_frames) {
+  SetNeedsBeginFrame(needs_begin_frames);
+}
+
+void OffscreenHost::SetPreferredInterval(base::TimeDelta interval) {
+  // The official producer preference is diagnostic. Endpoint remains the only
+  // admission clock; a preference update never issues a BeginFrame here.
+  preferred_interval_ = interval;
+}
+
+void OffscreenHost::AddGpuRetirementProbe(base::RepeatingCallback<bool()> probe) {
+  std::erase_if(gpu_retirement_probes_, [](auto& old) { return old.Run(); });
+  gpu_retirement_probes_.push_back(std::move(probe));
+}
+
+bool OffscreenHost::CanDestroyGpuOutput() {
+  std::erase_if(gpu_retirement_probes_, [](auto& probe) { return probe.Run(); });
+  return gpu_retirement_probes_.empty();
+}
+
+void OffscreenHost::Retire(std::unique_ptr<OffscreenHost> host) {
+  if (!host) return;
+  host->Detach();
+  std::make_shared<RetiredHost>(std::move(host))->Start();
+}
+
 void OffscreenHost::ClearFocus() { focus_client_->FocusWindow(nullptr); }
-
-void OffscreenHost::ArmDeadline() {
-  if (!enabled_) return;
-  const auto remaining = next_deadline_ - base::TimeTicks::Now();
-  const auto maximum = base::kMaxPreciseDelay.Get();
-  if (maximum <= base::Microseconds(1)) {
-    // An override can disable precision altogether. Keep one cancellable
-    // coarse task instead of repeatedly pre-waking at the same deadline.
-    timer_.Start(FROM_HERE, next_deadline_, this, &OffscreenHost::Tick,
-                 base::subtle::DelayPolicy::kFlexibleNoSooner);
-    return;
-  }
-  // The scheduler downgrades precise delays >= maximum. Default 36ms gives
-  // a 32ms precise window; smaller configured thresholds retain a margin too.
-  const auto window = std::min(base::Milliseconds(32),
-      maximum - std::max(base::Microseconds(1),
-                        std::min(base::Milliseconds(4), maximum / 2)));
-  if (remaining > window) {
-    timer_.Start(FROM_HERE, next_deadline_ - window, this,
-                 &OffscreenHost::OnCoarseWake,
-                 base::subtle::DelayPolicy::kFlexibleNoSooner);
-  } else {
-    timer_.Start(FROM_HERE, next_deadline_, this, &OffscreenHost::Tick,
-                 base::subtle::DelayPolicy::kPrecise);
-  }
-}
-
-void OffscreenHost::OnCoarseWake() {
-  ++coarse_wakes_;
-  ArmDeadline();  // A pre-wake never issues a BeginFrame.
-}
-
-void OffscreenHost::Tick() {
-  if (!enabled_) return;
-  const auto now = base::TimeTicks::Now();
-  if (now < next_deadline_) { ArmDeadline(); return; }
-  const int64_t missed = (now - next_deadline_).IntDiv(interval_);
-  skipped_ticks_ += missed;
-  next_deadline_ += interval_ * (missed + 1);
-  tick_due_ = true;
-  if (pending_) ++merged_;
-  else MaybeIssueFrame();
-  ArmDeadline();  // Skip obsolete phase slots; never replay them in a burst.
-}
-
-void OffscreenHost::MaybeIssueFrame() {
-  if (!enabled_ || pending_ || !tick_due_) return;
-  tick_due_ = false;
-  pending_ = true;
-  sequence_ = ++g_begin_frame_sequence;
-  ++sent_;
-  const auto now = base::TimeTicks::Now();
-  auto args = viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE,
-      source_id_, sequence_, now, now + interval_,
-      interval_, viz::BeginFrameArgs::NORMAL);
-  compositor()->IssueExternalBeginFrame(args,
-      mojo::WrapCallbackWithDefaultInvokeIfNotRun(
-          base::BindOnce(&OffscreenHost::OnAck, weak_factory_.GetWeakPtr(),
-                         generation_, sequence_), viz::BeginFrameAck()));
-}
-
-void OffscreenHost::OnAck(uint64_t generation, uint64_t sequence,
-                          const viz::BeginFrameAck& ack) {
-  if (!pending_ || generation != generation_ || sequence != sequence_) return;
-  pending_ = false;
-  if (ack.frame_id.source_id != source_id_ ||
-      ack.frame_id.sequence_number != sequence) {
-    // Controller disconnection cancels only pacer admission, never a GPU lease.
-    ++generation_;
-    ++aborted_;
-    tick_due_ = false;
-    return;  // Retry on the next timer tick, avoiding a disconnected-pipe loop.
-  }
-  ++acked_;
-  if (enabled_ && tick_due_)
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(&OffscreenHost::MaybeIssueFrame, weak_factory_.GetWeakPtr()));
-}
 
 base::DictValue OffscreenHost::Diagnostics() const {
   return base::DictValue().Set("kind", "offscreen-aura")
       .Set("nativePageWindow", false).Set("acceleratedWidgetNull", true)
       .Set("hostDeviceScaleFactor", device_scale_factor())
       .Set("hostWidthPixels", bounds_.width()).Set("hostHeightPixels", bounds_.height())
-      .Set("enabled", enabled_).Set("pendingBeginFrame", pending_)
-      .Set("pacerFps", interval_.ToHz()).Set("controllerGeneration", base::NumberToString(generation_))
-      .Set("configuredFps", static_cast<int>(configured_fps_))
-      .Set("sampleTimeTicksUs", base::NumberToString(base::TimeTicks::Now().since_origin().InMicroseconds()))
-      .Set("timerKind", "absolute-deadline")
-      .Set("maxPreciseDelayUs", base::NumberToString(base::kMaxPreciseDelay.Get().InMicroseconds()))
-      .Set("coarseWakes", base::NumberToString(coarse_wakes_))
-      .Set("skippedPhaseTicks", base::NumberToString(skipped_ticks_))
-      .Set("beginFrameSourceId", base::NumberToString(source_id_))
-      .Set("lastSequence", base::NumberToString(sequence_)).Set("sent", base::NumberToString(sent_))
-      .Set("acked", base::NumberToString(acked_)).Set("merged", base::NumberToString(merged_))
-      .Set("cancelled", base::NumberToString(aborted_));
+      .Set("enabled", enabled_).Set("renderClock", "endpoint-begin-frame-source")
+      .Set("needsBeginFrames", needs_begin_frames_)
+      .Set("beginFrameDemandKnown", begin_frame_demand_known_)
+      .Set("beginFrameSourceId", base::NumberToString(begin_frame_source_id_))
+      .Set("beginFrameSequence", base::NumberToString(begin_frame_sequence_))
+      .Set("beginFrameBindingEpoch", base::NumberToString(begin_frame_binding_epoch_))
+      .Set("preferredIntervalUs", static_cast<double>(preferred_interval_.InMicroseconds()));
 }
 
 bool OffscreenHost::CanDispatchEvent(const ui::PlatformEvent&) { return false; }

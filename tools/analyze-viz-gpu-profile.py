@@ -1,4 +1,4 @@
-"""Join opt-in Viz paint flush GPU timings, without summing overlapping scopes."""
+"""Historical capture-path evidence only; not a validator for render slots. Join opt-in Viz paint flush GPU timings, without summing overlapping scopes."""
 import argparse
 import collections
 import importlib.util

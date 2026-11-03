@@ -51,15 +51,21 @@ def main():
     parser.add_argument('--chromium-root', type=Path, default=Path(r'C:\src\chromium\src'))
     parser.add_argument('--out', choices=['dev', 'rel'], default='dev')
     parser.add_argument('--kind', choices=['streaming', 'demo'], default='streaming')
-    parser.add_argument('--presentation', choices=['fence', 'native'], default='fence')
+    parser.add_argument('--presentation', choices=['fence', 'native'], default=None)
     parser.add_argument('--destination', type=Path, default=ROOT / 'develop/tmp')
     parser.add_argument('--endpoint', type=Path)
     parser.add_argument('--node', type=Path)
     parser.add_argument('--smoke', action='store_true', help='Validate streaming startup/auth/Endpoint management before archiving; real Viewer RTC product/media checks remain required')
     args = parser.parse_args()
+    streaming = args.kind == 'streaming'
+    if args.presentation is None:
+        args.presentation = 'fence' if streaming else 'native'
+    if not streaming and args.presentation == 'fence':
+        parser.error('fence presentation is unsupported for the native demo')
+    if streaming and args.presentation != 'fence':
+        parser.error('streaming requires fence presentation; native fallback is unsupported')
     chromium = args.chromium_root.resolve()
     output = chromium / 'out' / args.out
-    streaming = args.kind == 'streaming'
     browser_name = 'remotekit_browser.exe' if streaming else 'remotekit_browser_demo.exe'
     browser_target = '//remotekit/browser:' + browser_name.removesuffix('.exe')
     endpoint = (args.endpoint or ROOT / 'build/endpoint-package/endpoint' /
@@ -175,21 +181,9 @@ def main():
         'if not "%~1"=="" set "RK_URLS=%~1"\n'
         '"%RK_ROOT%bin\\endpoint_client.exe" "--browser=%RK_ROOT%bin\\remotekit_browser_demo.exe" '
         '"--data-path=%RK_ROOT%data" --sessions=2 ' + launch_presentation + ' "--urls=%RK_URLS%"\n', encoding='utf-8')
-    if args.presentation == 'fence':
-        (package / 'run-native.cmd').write_text((package / 'run.cmd').read_text(encoding='utf-8')
-            .replace('--presentation=fence', '--presentation=native'), encoding='utf-8')
     scope = (
-        'This build captures Views/Aura content into a browser-owned three-slot shared GPU atlas.\n'
-        'D3D11 shared ready/consumed fences protect writes and reads. Shared memory publishes frame metadata.\n'
-        'Browser-to-endpoint Mojo is used for setup/configuration, not steady-state frame ready/present/release.\n'
-        'The endpoint copies each consumed atlas into its own GPU cache before releasing the source slot.\n'
-        'No encoder, audio pipeline or WebRTC transport is connected. Chromium internal frame IPC remains.\n'
-        'A nonzero native Aura capture host remains inside the browser; this is not an Aura-free embedder.\n'
-        'There is no automatic native fallback. run-native.cmd explicitly selects the HWND comparison path.\n'
-        'Hardware capture and cross-process rendering have not been runtime-tested for this package.\n'
-        if args.presentation == 'fence' else
         'This build displays native Views/Aura HWND content; its launchers select --presentation=native.\n'
-        'It does not exercise the shared GPU atlas/fence backend. Chromium internal frame IPC remains.\n')
+        'It does not exercise the shared GPU render-slot/fence backend. Chromium internal frame IPC remains.\n')
     (package / 'README.txt').write_text(
         'RemoteKit Windows x64 ' + backend + ' demo\n\n'
         'Extract the entire ZIP to a writable folder, then double-click run.cmd.\n'
@@ -219,7 +213,7 @@ def main():
             'The service defaults to Intel QSV; NVIDIA NVENC can be explicitly selected on compatible hardware.\n'
             'This package includes Node and the Control production dependencies; no build tools are required.\n'
             'Data is created in data/. Diagnostic metrics, when enabled, are written in metrics/.\n'
-            'Quality, frame rate and bitrate are managed by Control from the Viewer quality preference.\n'
+            'Control stores the Viewer degradation preference; WebRTC controls media adaptation and encoder rates.\n'
             'Endpoint overrides can be appended to run.cmd, for example: run.cmd --encoder=nvenc\n'
             'Arguments use --name=value; quote arguments containing spaces.\n'
             'Hardware smoke and stream measurements are reported separately from this package creation.\n', encoding='utf-8')
@@ -251,8 +245,11 @@ def main():
         'chromium_revision': subprocess.check_output(
             ['git', 'rev-parse', 'HEAD'], cwd=chromium, text=True).strip(),
         'args_gn_sha256': digest(output / 'args.gn'), 'architecture': 'x64',
-        'presentation_backend': backend, 'shared_fence_output_implemented': streaming or args.presentation == 'fence',
-        'browser_endpoint_per_frame_control_messages': False,
+        'presentation_backend': backend, 'shared_fence_output_implemented': streaming,
+        'browser_endpoint_render_protocol': 'slot-begin-reject-fence-v1' if streaming else 'native-demo',
+        'browser_endpoint_per_frame_begin_ipc': streaming,
+        'browser_endpoint_per_frame_reject_ipc': streaming,
+        'browser_endpoint_per_frame_success_ipc': False,
         'endpoint_client_frame_metadata': streaming, 'chromium_internal_frame_ipc': True,
         'endpoint_configuration': 'Release', 'browser_configuration': args.out,
         'runtime_launched': bool(validation and validation.get('passed')),

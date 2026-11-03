@@ -1,11 +1,11 @@
 import type { Surface } from './types';
 export type PointerAction = 'down' | 'move' | 'up' | 'cancel' | 'leave';
-export const surfacePixelScale = (surface: Pick<Surface, 'deviceScaleFactor' | 'mediaScale'>) => surface.deviceScaleFactor * (surface.mediaScale ?? 1);
+export const surfacePixelScale = (surface: Pick<Surface, 'deviceScaleFactor' | 'mediaScale' | 'mediaScaleX' | 'mediaScaleY'>, axis: 'x' | 'y' = 'x') => surface.deviceScaleFactor * ((axis === 'x' ? surface.mediaScaleX : surface.mediaScaleY) ?? surface.mediaScale ?? 1);
+export const surfaceDipSize = (surface: Surface) => ({ width: surface.width / surfacePixelScale(surface), height: surface.height / surfacePixelScale(surface, 'y') });
 export function clientPointToDip(surface: Surface, rect: { left: number; top: number; width: number; height: number }, clientX: number, clientY: number, outside: 'reject' | 'clamp' | 'allow' = 'reject') {
-  const scale = surfacePixelScale(surface);
-  const widthDip = surface.width / scale, heightDip = surface.height / scale;
-  if (![rect.left, rect.top, rect.width, rect.height, clientX, clientY, scale, widthDip, heightDip].every(Number.isFinite) ||
-      rect.width <= 0 || rect.height <= 0 || scale <= 0 || widthDip <= 0 || heightDip <= 0) return null;
+  const { width: widthDip, height: heightDip } = surfaceDipSize(surface);
+  if (![rect.left, rect.top, rect.width, rect.height, clientX, clientY, widthDip, heightDip].every(Number.isFinite) ||
+      rect.width <= 0 || rect.height <= 0 || widthDip <= 0 || heightDip <= 0) return null;
   let x = (clientX - rect.left) / rect.width, y = (clientY - rect.top) / rect.height;
   if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
   if (outside === 'clamp') {
@@ -20,4 +20,8 @@ export function pointerPointToDip(surface: Surface, rect: { left: number; top: n
   const outside = action === 'leave' ? 'clamp' : captured && (action === 'move' || action === 'up' || action === 'cancel') ? 'allow' : 'reject';
   return clientPointToDip(surface, rect, clientX, clientY, outside);
 }
-export function markerSourceRect(surface: Surface, widthDip = 256, heightDip = 112) { const scale = surfacePixelScale(surface); return { x: surface.x, y: surface.y, width: widthDip * scale, height: heightDip * scale }; }
+export function markerSourceRect(surface: Surface, widthDip = 256, heightDip = 112) { return { x: surface.x, y: surface.y, width: widthDip * surfacePixelScale(surface), height: heightDip * surfacePixelScale(surface, 'y') }; }
+export function wheelDeltaToDip(surface: Surface, deltaX: number, deltaY: number, deltaMode: number) {
+  const size = surfaceDipSize(surface);
+  return { x: deltaX * (deltaMode === 1 ? 16 : deltaMode === 2 ? size.width : 1), y: deltaY * (deltaMode === 1 ? 16 : deltaMode === 2 ? size.height : 1) };
+}

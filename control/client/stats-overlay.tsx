@@ -8,9 +8,8 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
   const overlay = useRef<HTMLDivElement>(null), [scale, setScale] = useState(1);
   useEffect(() => { const node = overlay.current, parent = node?.parentElement; if (!node || !parent) return; const resize = () => setScale(Math.max(.1, Math.min(1, (parent.clientWidth - 24) / node.offsetWidth, (parent.clientHeight - 24) / node.offsetHeight))); const observer = new ResizeObserver(resize); observer.observe(parent); observer.observe(node); resize(); return () => observer.disconnect(); }, []);
   const endpoint = diagnostics.endpoint;
-  const mediaPolicy=endpoint?.mediaPolicy as {requested?:{targetFps?:number};applied?:{targetFps?:number;codecTargetFps?:number;fpsLimitation?:string}}|undefined;
+  const mediaPolicy=endpoint?.mediaPolicy as {requested?:{maxFps?:number;degradationPreference?:string};applied?:{maxFps?:number;degradationPreference?:string}}|undefined;
   const sender = endpoint?.senderRtcStats as { selectedPair?: { availableOutgoingBitrate?: number } } | undefined;
-  const adaptive=endpoint?.adaptiveFps as {targetRenderFps?:number;actualAppliedRenderFps?:number;reason?:string;effectiveLimit?:number;displayLimit?:number}|undefined;
   return <div ref={overlay} className="stats-overlay" style={{ maxWidth: 'none', transform: `scale(${scale})`, transformOrigin: 'top right' }} aria-label="串流指标叠层"><div className="stats-overlay-title">LIVE STATS <span>{diagnostics.codec ?? '—'}</span></div><dl>
     <dt title={diagnostics.receiveSelection?.reason}>接收档</dt><dd>{diagnostics.receiveSelection?.profile ?? '—'}</dd>
     <dt title={diagnostics.rendering?.backend === 'video' ? '每平面video compositor presentedFrames计数变化；不是rVFC回调数或物理屏幕刷新率' : '每个平面的新帧canvas绘制提交次数；不是物理屏幕刷新率'}>{diagnostics.rendering?.backend === 'video' ? '呈现 FPS' : '绘制 FPS'}</dt><dd>{measured(surface ? diagnostics.paintFpsByView?.[surface.id] : diagnostics.displayFramesPerSecond, 'fps')}</dd>
@@ -35,12 +34,14 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
     <dt>编码器</dt><dd>{typeof endpoint?.encoder === 'string' && endpoint.encoder ? endpoint.encoder : '—'}</dd>
     <dt>Source</dt><dd>{typeof endpoint?.sourceWidth === 'number' && typeof endpoint?.sourceHeight === 'number' ? `${endpoint.sourceWidth}×${endpoint.sourceHeight}` : '—'}</dd>
     <dt>Encoded</dt><dd>{diagnostics.videoWidth && diagnostics.videoHeight ? `${diagnostics.videoWidth}×${diagnostics.videoHeight}` : '—'}</dd>
-    <dt>媒体采样</dt><dd>{measured(surface ? surface.mediaScale ?? 1 : endpoint?.mediaScale, '×', 3)}</dd>
+    <dt>媒体采样 X / Y</dt><dd>{measured(surface ? surface.mediaScaleX ?? surface.mediaScale ?? 1 : endpoint?.mediaScaleX ?? endpoint?.mediaScale, '×', 3)} / {measured(surface ? surface.mediaScaleY ?? surface.mediaScale ?? 1 : endpoint?.mediaScaleY ?? endpoint?.mediaScale, '×', 3)}</dd>
     <dt>分辨率限制</dt><dd title={`${endpoint?.resolutionLimitation ?? '—'}；协商level ${endpoint?.negotiatedReceiveLevel ?? '—'}；采样FPS预算 ${endpoint?.samplingFpsBudget ?? '—'}`}>{typeof endpoint?.resolutionLimitation === 'string' ? resolutionReason[endpoint.resolutionLimitation]??endpoint.resolutionLimitation : '—'}</dd>
-    <dt title={mediaPolicy?.applied?.fpsLimitation}>编码 FPS 上限</dt><dd>{measured(mediaPolicy?.applied?.codecTargetFps,'fps')}</dd>
-    <dt title="产品请求 / 当前自适应生效预算；实际绘制与解码见上方">请求 / 生效 FPS</dt><dd>{mediaPolicy ? `${mediaPolicy.requested?.targetFps??'—'} / ${mediaPolicy.applied?.targetFps??'—'}` : '—'}</dd>
-    <dt title="Browser 源渲染预算目标 / 已确认应用，不是客户端绘制FPS">源渲染预算</dt><dd>{adaptive ? `${adaptive.targetRenderFps??'—'} / ${adaptive.actualAppliedRenderFps??'—'}`:'—'}</dd>
-    <dt>自适应原因</dt><dd>{adaptive?.reason??'—'}</dd>
+    <dt title="WebRTC拥塞控制给编码器的目标帧率；不是硬件时基或实际输出FPS">GCC 目标 FPS</dt><dd>{measured(endpoint?.gccTargetFps,'fps')}</dd>
+    <dt>GCC 目标码率</dt><dd>{measured(typeof endpoint?.gccTargetBitrate === 'number' ? endpoint.gccTargetBitrate / 1000000 : undefined, 'Mbps', 2)}</dd>
+    <dt>编码队列满丢帧</dt><dd>{typeof endpoint?.queueFullDrops === 'number' ? endpoint.queueFullDrops : '—'}</dd>
+    <dt title="客户端显示上限 / Endpoint应用上限；实际绘制与解码见上方">请求 / 生效 FPS 上限</dt><dd>{mediaPolicy ? `${mediaPolicy.requested?.maxFps??'—'} / ${mediaPolicy.applied?.maxFps??'—'}` : '—'}</dd>
+    <dt>WebRTC 降级偏好</dt><dd>{mediaPolicy?.applied?.degradationPreference??mediaPolicy?.requested?.degradationPreference??'—'}</dd>
+    <dt title="标准jitterBufferTarget；Chrome89仅支持兼容hint时单独标识">视频接收缓冲目标</dt><dd>{diagnostics.receiverPlayout?.video?.jitterBufferTarget===0 ? '0 ms' : diagnostics.receiverPlayout?.video?.playoutDelayHint===0 ? '兼容 hint 0 s' : '不可用'}</dd>
     <dt title="前台RAF回调节拍估计，不等于物理刷新率；可能受负载或遮挡影响">反馈 RAF 节拍</dt><dd>{measured(endpoint?.feedbackDisplayHzEstimate,'Hz')} / {typeof endpoint?.feedbackRafSamples==='number'?endpoint.feedbackRafSamples:'—'}</dd>
     <dt title="反馈样本距离Endpoint收到的时间">反馈年龄</dt><dd>{measured(endpoint?.feedbackAgeMs,'ms')}</dd>
     <dt>源帧间隔</dt><dd>{measured(endpoint?.sourceFrameIntervalMs,'ms')}</dd>

@@ -23,6 +23,37 @@ struct TrackedTexture final : ID3D11Texture2D {
   UINT STDMETHODCALLTYPE GetEvictionPriority() override { return 0; }
   void STDMETHODCALLTYPE GetDesc(D3D11_TEXTURE2D_DESC* desc) override { *desc = {}; }
 };
+// Exercises the production Configure/Run path with only the hardware replaced.
+struct RateState {
+  std::mutex mutex;std::condition_variable changed;
+  EncoderSettings configured;
+  unsigned configurations=0;
+  std::vector<std::pair<uint32_t,uint32_t>> rates;
+  void Wait(size_t count) {
+    std::unique_lock lock(mutex);
+    CHECK(changed.wait_for(lock,2s,[&]{return rates.size()>=count;}));
+  }
+};
+class RateBackend final : public HardwareEncoder {
+  std::shared_ptr<RateState> state_;EncoderSettings settings_;
+ public:
+  explicit RateBackend(std::shared_ptr<RateState> state):state_(std::move(state)){}
+  bool Configure(ID3D11Device*,const EncoderSettings& settings,std::string&) override {
+    settings_=settings;
+    std::lock_guard lock(state_->mutex);state_->configured=settings;++state_->configurations;return true;
+  }
+  EncoderInput InputFormat() const override {return EncoderInput::bgra;}
+  const char* Name() const override {return "rate-mock";}
+  EncoderSettings ActualSettings() const override {return settings_;}
+  CodecResult Submit(ID3D11Texture2D*,bool,uint64_t,std::string&) override {return CodecResult::error;}
+  CodecResult Poll(uint32_t,AccessUnit&,std::string&) override {return CodecResult::pending;}
+  bool SetRates(uint32_t bitrate,uint32_t fps,std::string&,uint32_t maximum) override {
+    CHECK(bitrate && fps);settings_.bitrate=bitrate;settings_.fps=fps;settings_.max_bitrate=maximum;
+    {std::lock_guard lock(state_->mutex);state_->rates.emplace_back(bitrate,fps);}
+    state_->changed.notify_all();return true;
+  }
+  bool Drain(std::vector<AccessUnit>&,std::string&) override {return true;}
+};
 struct Driver {
   std::chrono::steady_clock::time_point time{};
   HANDLE completion = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -163,6 +194,57 @@ void EosMustActuallyComplete() {
 }  // namespace
 namespace remotekit::media {
 struct EncoderWorkerTestAccess {
+  static void H264ConfigureAndGccRates() {
+    Sdk sdk;auto stats=std::make_shared<EncoderStats>();auto state=std::make_shared<RateState>();
+    EncoderWorker worker(sdk,1,nullptr,"nvenc",{},stats,{});
+    worker.hardware_factory_=[state]{return std::make_unique<RateBackend>(state);};
+    remotekit_rtc_encoder_config config{};config.struct_size=sizeof(config);
+    config.width=4096;config.height=4096;config.h264_level_idc=51;config.fps=120;
+    CHECK(!worker.Configure(config));CHECK(state->configurations==0);
+    CHECK(stats->Snapshot()["error"]=="encoder dimensions/level have no legal H264 frame rate");
+    config.width=1936;config.height=1088;config.h264_level_idc=42;
+    CHECK(worker.Configure(config));
+    CHECK(state->configurations==1 && state->configured.fps==63);
+    CHECK(stats->Snapshot()["appliedFps"]==63);
+    worker.Rates(1234567,120);state->Wait(1);
+    CHECK(stats->Snapshot()["gccTargetFps"]==120);
+    worker.Rates(1234567,60);state->Wait(2);
+    worker.keyframe_=false;
+    worker.Rates(0,120);CHECK(worker.paused_);
+    worker.Rates(1234567,120);CHECK(worker.keyframe_);state->Wait(3);
+    worker.Stop();
+    std::lock_guard lock(state->mutex);
+    CHECK(state->rates.size()==3);
+    CHECK(state->rates[0].first==1234567 && state->rates[0].second==63);
+    CHECK(state->rates[1].first==1234567 && state->rates[1].second==60);
+    CHECK(state->rates[2].first==1234567 && state->rates[2].second==63);
+  }
+  static void FifoAndGccRates() {
+    Sdk sdk;auto stats=std::make_shared<EncoderStats>();
+    EncoderWorker worker(sdk,1,nullptr,"nvenc",{},stats,{});
+    worker.configured_=true;
+    TrackedTexture texture;int leases=0;
+    remotekit_rtc_frame frame{};frame.d3d11_texture=&texture;frame.release_context=&leases;
+    frame.retain=[](void* context,uint64_t){++*static_cast<int*>(context);};
+    frame.release=[](void* context,uint64_t){--*static_cast<int*>(context);};
+    for(uint64_t id=1;id<=4;++id){frame.frame_id=id;CHECK(worker.Enqueue(frame,id==2));}
+    frame.frame_id=5;CHECK(!worker.Enqueue(frame,false));
+    CHECK(worker.queue_.size()==4 && stats->queue_full_drops==1 && stats->dropped==1);
+    CHECK(leases==4 && texture.refs==5);
+    uint64_t id=1;for(const auto& job:worker.queue_)CHECK(job.frame.frame_id==id++);
+    CHECK(worker.queue_[1].key && !worker.queue_[0].key);
+    worker.keyframe_=false;
+    worker.Rates(0,60);CHECK(worker.paused_ && worker.pending_rates_->bitrate==0);
+    CHECK(!worker.Enqueue(frame,false) && stats->paused_drops==1);
+    worker.Rates(1234567,27);
+    CHECK(!worker.paused_ && worker.keyframe_);
+    CHECK(worker.pending_rates_->bitrate==1234567 && worker.pending_rates_->fps==27);
+    auto snapshot=stats->Snapshot();
+    CHECK(snapshot["gccTargetBitrate"]==1234567 && snapshot["gccTargetFps"]==27);
+    // Retire through production Run's never-submitted cleanup, without a GPU.
+    worker.stopping_=true;worker.Run();worker.Stop();
+    CHECK(leases==0 && texture.refs==1 && stats->pending==0);
+  }
   static void Retire(EncoderWorker& worker, std::unique_ptr<HardwareEncoder> encoder, int& releases) {
     worker.hardware_ = std::move(encoder);
     auto* first = new TrackedTexture;
@@ -201,6 +283,8 @@ int main() {
   int releases = 0; Sdk sdk; auto stats = std::make_shared<EncoderStats>();
   EncoderWorker worker(sdk, 1, nullptr, "nvenc", {}, stats, {});
   EncoderWorkerTestAccess::Retire(worker, std::move(encoder), releases);
+  EncoderWorkerTestAccess::FifoAndGccRates();
+  EncoderWorkerTestAccess::H264ConfigureAndGccRates();
   worker.Stop(); worker.Stop();
   CHECK(releases == 0 && driver.destroys == 0);
   std::cout << "NVENC production Poll/Drain/Worker retirement CPU tests passed (no GPU)\n";

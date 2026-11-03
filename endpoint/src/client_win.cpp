@@ -146,11 +146,7 @@ BOOL CALLBACK ResizeChild(HWND child, LPARAM param) {
   if (GetParent(child) == parent) {
     RECT bounds{};
     GetClientRect(parent, &bounds);
-    auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(parent, GWLP_USERDATA));
-    // Keep the nonzero native capture host shown outside the client's visible
-    // area. Its pixels are never the endpoint's presentation in Fence mode.
-    const int x = app && app->gpu ? -std::max(1L, bounds.right) * 2 : 0;
-    MoveWindow(child, x, 0, bounds.right, bounds.bottom, TRUE);
+    MoveWindow(child, 0, 0, bounds.right, bounds.bottom, TRUE);
   }
   return TRUE;
 }
@@ -235,6 +231,10 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lpa
 }
 
 bool StartBrowser(HWND window, const Options& options, App& app) {
+  // Native child presentation has no OSR output. The service owns the supported
+  // OffscreenHost initialization; this demo does not create that object graph.
+  if (app.gpu)
+    return false;
   app.job = CreateJobObjectW(nullptr, nullptr);
   if (!app.job)
     return false;
@@ -245,10 +245,6 @@ bool StartBrowser(HWND window, const Options& options, App& app) {
   std::wstring command = Quote(options.browser);
   auto append = [&](const std::wstring& arg) { command += L" " + Quote(arg); };
   append(L"--parent-window=" + std::to_wstring(reinterpret_cast<uintptr_t>(window)));
-  if (app.gpu) {
-    append(L"--gpu-output");
-    append(L"--control-channel=" + std::wstring(app.channel.begin(), app.channel.end()));
-  }
   append(L"--remote-debugging-port=0");
   if (!options.data_path.empty())
     append(L"--data-path=" + options.data_path);
@@ -301,6 +297,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   }
   App app;
   app.gpu = options.presentation == L"fence";
+  if (app.gpu) {
+    constexpr wchar_t message[] =
+        L"Fence presentation is unsupported by the native demo. "
+        L"The OSR renderer requires the Endpoint service OffscreenHost. "
+        L"Use the streaming runtime, or explicitly select --presentation=native.";
+    OutputDebugStringW(message);
+    MessageBoxW(nullptr, message, L"Endpoint client — unsupported presentation", MB_OK | MB_ICONERROR);
+    return 2;
+  }
   app.channel =
       "RemoteKit-" + std::to_string(GetCurrentProcessId()) + "-" + std::to_string(GetTickCount64());
   WNDCLASSW wc{};

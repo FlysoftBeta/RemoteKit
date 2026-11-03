@@ -92,14 +92,15 @@ double WindowScale(HWND window) {
   const UINT dpi = GetDpiForWindow(window);
   return static_cast<double>(dpi ? dpi : 96) / 96.0;
 }
-void CloseSetupHandles(remotekit_sdk_atlas_setup& setup) {
+void CloseSetupHandles(remotekit_sdk_render_setup& setup) {
   for (auto& value : setup.texture_handles)
     if (value)
       CloseHandle(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(value, 0))));
-  for (auto* value :
-       {&setup.mapping_handle, &setup.ready_fence_handle, &setup.consumed_fence_handle})
-    if (*value)
-      CloseHandle(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(*value, 0))));
+  for (auto* handles : {&setup.ready_fence_handles, &setup.consumed_fence_handles})
+    for (auto& value : *handles)
+      if (value) CloseHandle(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(value, 0))));
+  if (setup.mapping_handle)
+    CloseHandle(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(setup.mapping_handle, 0))));
   setup = {};
 }
 }  // namespace
@@ -127,8 +128,17 @@ struct AtlasClient::Impl {
                 worker_generation = 0;
   unsigned gpu_rebuilds = 0;
   std::chrono::steady_clock::time_point drain_started;
-  remotekit_sdk_atlas_setup setup{};
+  remotekit_sdk_render_setup setup{};
   std::wstring worker_error, error;
+  std::deque<remotekit_sdk_render_event> render_events;
+  std::deque<std::pair<std::uint64_t, bool>> render_updates;
+  std::uint64_t ui_ready_value = 0, ui_consumed_value = 0;
+  static void RenderEvent(void* context, const remotekit_sdk_render_event* event) {
+    auto& self = *static_cast<Impl*>(context);
+    std::lock_guard lock(self.mutex);
+    self.render_events.push_back(*event);
+    self.wake.notify_one();
+  }
   Target focused, captured, touch_target;
   std::map<UINT32, Target> touches;
   wchar_t high_surrogate = 0;
@@ -416,8 +426,12 @@ struct AtlasClient::Impl {
         GetProcAddress(module, "remotekit_sdk_control_connect"));
     auto close = reinterpret_cast<decltype(&remotekit_sdk_control_close)>(
         GetProcAddress(module, "remotekit_sdk_control_close"));
-    auto open = reinterpret_cast<decltype(&remotekit_sdk_control_open_atlas)>(
-        GetProcAddress(module, "remotekit_sdk_control_open_atlas"));
+    auto open = reinterpret_cast<decltype(&remotekit_sdk_control_open_render)>(
+        GetProcAddress(module, "remotekit_sdk_control_open_render"));
+    auto render_connect = reinterpret_cast<decltype(&remotekit_sdk_render_connect)>(GetProcAddress(module, "remotekit_sdk_render_connect"));
+    auto render_begin = reinterpret_cast<decltype(&remotekit_sdk_render_begin)>(GetProcAddress(module, "remotekit_sdk_render_begin"));
+    auto render_observe = reinterpret_cast<decltype(&remotekit_sdk_render_observe_signal)>(GetProcAddress(module, "remotekit_sdk_render_observe_signal"));
+    auto render_close = reinterpret_cast<decltype(&remotekit_sdk_render_close)>(GetProcAddress(module, "remotekit_sdk_render_close"));
     auto command = reinterpret_cast<decltype(&remotekit_sdk_control_command_token)>(
         GetProcAddress(module, "remotekit_sdk_control_command_token"));
     auto dom_code = reinterpret_cast<decltype(&remotekit_sdk_windows_dom_code)>(
@@ -426,8 +440,8 @@ struct AtlasClient::Impl {
     auto dom_key =
         reinterpret_cast<DomKeyFunction>(GetProcAddress(module, "remotekit_sdk_windows_dom_key"));
     if (!initialize || !shutdown || !connect || !close || !open || !command || !dom_code ||
-        !dom_key) {
-      SetWorkerError(L"RemoteKit SDK does not support shared atlas");
+        !dom_key || !render_connect || !render_begin || !render_observe || !render_close) {
+      SetWorkerError(L"RemoteKit SDK does not support render slots");
       FreeLibrary(std::exchange(sdk_module, nullptr));
       return;
     }
@@ -484,7 +498,19 @@ struct AtlasClient::Impl {
                                std::to_string(token.document) + "\",\"focused\":false");
       return result == REMOTEKIT_SDK_DATA_MISMATCH ? REMOTEKIT_SDK_OK : result;
     };
+    std::uint64_t render_handle = 0, render_value = 0, outstanding = 0;
+    bool observed = false;
+    auto next_begin = std::chrono::steady_clock::now();
+    auto request_started = next_begin;
     auto create_output = [&](bool rebuild) {
+      if (render_handle) render_close(std::exchange(render_handle, 0));
+      outstanding = 0;
+      observed = false;
+      {
+        std::lock_guard lock(mutex);
+        render_events.clear(); render_updates.clear();
+        ui_ready_value = ui_consumed_value = 0;
+      }
       double scale;
       bool enabled;
       std::uint64_t revision;
@@ -497,10 +523,7 @@ struct AtlasClient::Impl {
         }
       }
       {
-        // The producer may need a real first capture to allocate resources.
-        // A minimized client defers opening rather than timing out an open
-        // that can never receive its first frame. Once open is in flight,
-        // later disabled configuration remains queued until that handshake.
+        // Defer opening while minimized; opening only describes OSR resources.
         std::unique_lock lock(mutex);
         wake.wait(lock,[&] { return stopping || desired_enabled; });
         if(stopping) return false;
@@ -518,9 +541,9 @@ struct AtlasClient::Impl {
         SetWorkerError(L"output.configure failed (SDK " + std::to_wstring(status) + L")");
         return false;
       }
-      remotekit_sdk_atlas_setup local{};
+      remotekit_sdk_render_setup local{};
       local.struct_size = sizeof(local);
-      status = open(handle, GetCurrentProcessId(), 30, &local, 10000);
+      status = open(handle, GetCurrentProcessId(), &local, 10000);
       if (status != REMOTEKIT_SDK_OK) {
         if (status == REMOTEKIT_SDK_DATA_MISMATCH) {
           std::lock_guard lock(mutex);
@@ -540,6 +563,13 @@ struct AtlasClient::Impl {
         SetWorkerError(L"Atlas resource generation did not advance");
         return false;
       }
+      status = render_connect(local.render_channel, &Impl::RenderEvent, this, &render_handle);
+      if (status != REMOTEKIT_SDK_OK) {
+        CloseSetupHandles(local);
+        SetWorkerError(L"Render channel connection failed (SDK " + std::to_wstring(status) + L")");
+        return false;
+      }
+      render_value = 0;
       active_generation = last_generation = local.generation;
       tokens.clear();
       remote_focus.reset();
@@ -563,12 +593,55 @@ struct AtlasClient::Impl {
     };
     bool running = create_output(false);
     while (running && status == REMOTEKIT_SDK_OK) {
+      // Depth one demo scheduler. Ready observation clears SDK bookkeeping;
+      // only the actual consumed fence allows the next Begin.
+      std::deque<remotekit_sdk_render_event> events;
+      std::uint64_t ready_value = 0, consumed_value = 0;
+      bool may_begin = false;
+      {
+        std::lock_guard lock(mutex);
+        events.swap(render_events);
+        ready_value = ui_ready_value; consumed_value = ui_consumed_value;
+        may_begin = ui_attached && enabled_applied && desired_enabled && !restart_pending && !stopping;
+      }
+      for (const auto& event : events) {
+        if (event.type == REMOTEKIT_SDK_RENDER_FATAL || event.generation != active_generation ||
+            event.slot != 0 || event.value != outstanding || observed) {
+          SetWorkerError(L"Render channel fatal or mismatched terminal identity");
+          running = false; break;
+        }
+        if (event.type != REMOTEKIT_SDK_RENDER_REJECT) {
+          SetWorkerError(L"Unknown render channel event"); running = false; break;
+        }
+        { std::lock_guard lock(mutex); render_updates.emplace_back(outstanding, true); }
+        outstanding = 0;
+      }
+      if (!running) break;
+      if (outstanding && ready_value == outstanding && !observed) {
+        remotekit_sdk_render_identity identity{active_generation, outstanding, 0, 0};
+        status = render_observe(render_handle, &identity);
+        if (status != REMOTEKIT_SDK_OK) { SetWorkerError(L"Render signal identity mismatch"); break; }
+        observed = true;
+      }
+      if (outstanding && observed && consumed_value == outstanding) outstanding = 0;
+      auto now = std::chrono::steady_clock::now();
+      if (outstanding && now - request_started > std::chrono::seconds(3)) {
+        SetWorkerError(L"Render slot did not complete within 3 seconds; stopped without fallback"); break;
+      }
+      if (!outstanding && may_begin && now >= next_begin) {
+        outstanding = ++render_value; observed = false; request_started = now;
+        next_begin = now + std::chrono::microseconds(33333);
+        { std::lock_guard lock(mutex); render_updates.emplace_back(outstanding, false); }
+        remotekit_sdk_render_request request{active_generation, outstanding, 0, 33333, 0};
+        status = render_begin(render_handle, &request);
+        if (status != REMOTEKIT_SDK_OK) { SetWorkerError(L"Render Begin failed; stopped without fallback"); break; }
+      }
       Task task;
       bool rebuild = false, configure = false, should_blur = false, enabled = true;
       {
         std::unique_lock lock(mutex);
-        wake.wait(lock, [&] {
-          return stopping || blur_pending || (restart_pending && restart_ready) ||
+        wake.wait_for(lock, std::chrono::milliseconds(4), [&] {
+          return stopping || !render_events.empty() || blur_pending || (restart_pending && restart_ready) ||
                  (configure_pending && !restart_pending) || (accept_input && !tasks.empty());
         });
         if (stopping)
@@ -721,6 +794,7 @@ struct AtlasClient::Impl {
       else if (status != REMOTEKIT_SDK_OK && !busy_deadline)
         SetWorkerError(L"RemoteKit control channel failed; reconnect is disabled");
     }
+    if (render_handle) render_close(std::exchange(render_handle, 0));
     // No SDK call is made from the UI thread, including teardown.
     if (status == REMOTEKIT_SDK_OK) {
       const int blurred = blur();
@@ -793,7 +867,7 @@ void AtlasClient::SetOutputEnabled(bool enabled) {
 }
 void AtlasClient::Poll() {
   auto& p = *impl_;
-  remotekit_sdk_atlas_setup setup{};
+  remotekit_sdk_render_setup setup{};
   bool have = false, open_failure = false, restart_pending = false, enabled_applied = false;
   std::uint64_t setup_revision = 0, current_revision = 0;
   int failed_status = 0;
@@ -854,10 +928,11 @@ void AtlasClient::Poll() {
     }
     AtlasConsumerSetup native;
     native.mapping = reinterpret_cast<HANDLE>(setup.mapping_handle);
-    native.ready_fence = reinterpret_cast<HANDLE>(setup.ready_fence_handle);
-    native.consumed_fence = reinterpret_cast<HANDLE>(setup.consumed_fence_handle);
-    for (int i = 0; i < 3; ++i)
+    for (std::size_t i = 0; i < kRenderSlotCount; ++i) {
+      native.ready_fences[i] = reinterpret_cast<HANDLE>(setup.ready_fence_handles[i]);
+      native.consumed_fences[i] = reinterpret_cast<HANDLE>(setup.consumed_fence_handles[i]);
       native.textures[i] = reinterpret_cast<HANDLE>(setup.texture_handles[i]);
+    }
     native.adapter_luid = {setup.adapter_luid_low, setup.adapter_luid_high};
     native.generation = setup.generation;
     native.width = setup.width;
@@ -875,9 +950,25 @@ void AtlasClient::Poll() {
       p.accept_input = enabled_applied && !p.restart_pending;
     }
   }
-  if (p.attached && enabled_applied && p.consumer.PollAndPresent() == AtlasPollResult::error) {
+  if (p.attached) {
+    std::deque<std::pair<std::uint64_t, bool>> updates;
+    { std::lock_guard lock(p.mutex); updates.swap(p.render_updates); }
+    for (const auto& [value, reject] : updates) {
+      if (reject) p.consumer.Reject(value);
+      else if (!p.consumer.Begin(value)) {
+        p.Stop(L"Demo render slot already has an outstanding request"); return;
+      }
+    }
+  }
+  if (p.attached && p.consumer.PollAndPresent() == AtlasPollResult::error) {
     p.BeginRestart(true, p.consumer.LastError());
     return;
+  }
+  if (p.attached) {
+    std::lock_guard lock(p.mutex);
+    p.ui_ready_value = p.consumer.ReadyValue();
+    p.ui_consumed_value = p.consumer.ConsumedValue();
+    p.wake.notify_one();
   }
   if (p.attached && enabled_applied)
     p.UpdateImeGeometry();

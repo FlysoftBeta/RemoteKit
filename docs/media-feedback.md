@@ -1,27 +1,29 @@
-# 媒体反馈、时钟与自适应
+# 媒体反馈、时钟与WebRTC适配
 
-有两条反馈链，各司其职；都不增加browser↔Endpoint逐帧IPC。
+网络适配由WebRTC负责。Control与Endpoint保留诊断，不再运行延迟降DPR、质量码率预设或独立网络分辨率控制器。
 
-## DataChannel源预算反馈
+## 控制路径
 
-Client约每1500ms发送layout绑定的media.feedback，包含连接内seq、outputGeneration/layoutEpoch、document可见性、实际窗口长度、RAF样本/刷新估计、解码/丢帧/plane新帧增量及可用RTT。
+质量三档对应MAINTAIN_RESOLUTION、BALANCED、MAINTAIN_FRAMERATE。Control策略只有degradationPreference和客户端maxFps。SDK保持screenshare身份，仅为RemoteKit开启原生screenshare平衡/质量适配门禁，算法与阈值保持上游实现。
 
-Endpoint校验当前peer、单调seq、代次、有限值和边界，过量反馈合并为最新，不挤占输入队列。缺测省略，不以0代替。plane帧数不相加冒充视频FPS，同帧重绘不计；静态低FPS不直接判压力。显示Hz估计是回调能力，不是物理面板测量。
+Endpoint每次fresh/force帧提交前调用SDK原生AdaptFrame，以原始atlas尺寸取得丢帧、编码尺寸及max_fps，再建立匹配布局屏障。GPU缩放完整atlas，X/Y比例分别传播，不裁plane或修改页面DPR。
 
-默认video的plane帧数使用各video可见期间`presentedFrames`增量，不使用rVFC回调次数；canvas回退使用JS新帧提交数。布局屏障和隐藏时撤销观察基线，不把隐藏期间帧数补进前台统计。
+SetRates提供硬件目标码率/FPS。Comp根据Slot占用、客户端能力及WebRTC限制发送Begin。观察输入FPS不是永久源上限，slot空闲时可恢复到官方限制；零码率暂停，恢复请求关键帧。配置及H264上限只是能力边界。
 
-源策略在用户媒体targetFps上限内调度，按值变化更新本地BeginFrame/发布预算。网络码率仍由WebRTC拥塞控制；媒体策略设置上限，不反复重置start bitrate或强制高最低码率。
+## DataChannel诊断
 
-## WS产品质量反馈
+Client约每1500ms发送layout绑定的media.feedback，包括seq、generation/epoch、visibility、窗口长度、显示回调能力、解码/丢帧及plane新帧增量。Endpoint核对peer、序号、代次和有限值，过量反馈合并，不挤占输入。
 
-SDK在原capture_qpc仍有效时用QPC↔系统UTC配对生成captureWallTimeMs、captureMonotonicMs、captureClockUncertaintyMs和sourceCaptureId，随真实wire RTP/epoch元数据送Client。SDK内部重映射的capture_time_us不是Unix时间，不能直接相减。无有效capture就省略，不能用纹理ready或编码时间冒充。
+缺测省略；多个plane计数不相加当物理解码FPS，静态低FPS不直接判压力。video使用可见期间presentedFrames增量，canvas使用JS新帧提交数；隐藏/屏障撤销基线。这些反馈不自行调整网络码率、DPR或分辨率。
 
-Client通过当前RTC的clock.ping/pong独立校准Endpoint wall/monotonic，用于采集延迟与触控源时起点。Control的clock.ping是另一个校准域，只用于产品反馈新鲜度；两台机器的wall不能混用。两域都有当前连接nonce、单在途请求、超时与跳变检查。以匹配wire RTP/epoch的video compositor回调观察或canvas回退的JS提交计算采集完成→呈现估算。晚metadata保留原观察时刻，不把消息到达当作呈现。重复sourceCaptureId（包括idle尾帧）、隐藏、陈旧请求、wall/monotonic跳变、过期校准或总不确定度>25ms不进入策略。
+## 完成时戳与呈现估算
 
-每2秒窗口通过WS feedback送p95、sampleCount、windowMs、sequence、sourceCaptureId、sampledAtControlMs、visible、latencySource='capture-end-to-paint'及clockUncertaintyMs，可附displayHzEstimate。兼容字段sampledAtServerMs同样只映射Control wall；clockUncertaintyMs描述Endpoint采集到Client观察的映射，不冒用Control校准精度。Control再次检查范围、去重和新鲜度；Control校准缺失只暂停产品反馈，不阻断正常呈现与输入。
+只有有效原始源完成QPC才生成captureWallTimeMs、captureMonotonicMs、captureClockUncertaintyMs及sourceCaptureId，与真实wire RTP/epoch配对。新OSR暂未测完成时戳，capture_time_us=0；提交、ready查询和编码时刻不能补作采集时间。
 
-连续3个有效窗口>300ms时分辨率倍率乘0.8，调整冷却5秒；<150ms连续健康30秒逐级恢复。ClientScale与面积预算决定基础倍率，Browser DPR范围0.5–4。实际码率/FPS/编码尺寸受硬件、协商及网络约束，requested/applied分开报告。受控自动化不运行这套产品策略。
+Client分别校准Endpoint媒体时钟与Control产品新鲜度时钟，不混用机器wall。过期、跳变、不确定度超限、隐藏及重复内容样本排除。WS feedback仍可报告p95/窗口/sequence等诊断，但不触发质量对账。
 
-Stats显示估算及不确定度；Pixel marker带CRC的render/input端到端值独立显示。协议保留`capture-end-to-paint`名称以兼容现有反馈校验，其实际终点由呈现后端解释；不含此前渲染/捕获等待，drawImage返回和rVFC观察都不是物理屏幕点亮。分段p95不能相加。
+兼容名称capture-end-to-paint的终点为video compositor回调或canvas JS提交，不是物理屏幕点亮，也不含此前渲染等待。缺有效源时戳不产生样本，分段p95不可相加。
 
-同一反馈对象的sequence终生单调。时钟或测量reset只丢弃校准/样本，保留序号与已见源帧身份，避免服务端等待旧序号追平或把静态尾帧重新计样。
+receiver支持jitterBufferTarget时设0；Chrome89仅在可用时设playoutDelayHint=0。分别报告能力，不把兼容hint或RTP playout-delay扩展说成标准属性已生效。
+
+反馈sequence终生单调；时钟reset只清校准/样本，保留序号及已见内容身份。

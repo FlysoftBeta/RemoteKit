@@ -110,8 +110,7 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   ConfigureServiceScrollPolicy(command);
 #endif
   if (command.HasSwitch("gpu-output")) {
-    // This shown, nonzero Aura host is clipped out of the endpoint window.
-    // Output demand, rather than native HWND occlusion, controls its capture.
+    // Service Aura roots are offscreen; product visibility controls demand.
     command.AppendSwitch("disable-backgrounding-occluded-windows");
     std::string disabled = command.GetSwitchValueASCII("disable-features");
     if (!disabled.empty())
@@ -130,7 +129,7 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
     enabled += ",";
   enabled += features::kWebContentsDiscard.name;
 #if !defined(REMOTEKIT_DEMO_HARNESS)
-  enabled += ",RemoteKitCaptureRoot,RemoteKitCaptureToAtlas,RemoteKitSinglePlaneDirect";
+  enabled += ",RemoteKitOsrOutput";
 #endif
   command.AppendSwitchASCII("enable-features", enabled);
   logging::LoggingSettings settings;

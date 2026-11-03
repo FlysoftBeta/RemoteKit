@@ -19,7 +19,7 @@
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents.h"
 #include "remotekit/core.hpp"
-#include "remotekit/shared_atlas.h"
+#include "remotekit/shared_render_slots.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 #include "ui/gfx/geometry/point_f.h"
 #include "url/gurl.h"
@@ -79,7 +79,7 @@ class WebView final : public content::WebContentsObserver,
   // Service rendering follows page DPR; demo rendering follows native DPI.
   // Also called from the existing output timer to notice host-DPI changes.
   void RefreshBackingScale();
-  void SetRenderDemand(bool enabled, uint32_t fps);
+  void SetRenderDemand(bool enabled);
   void InvalidateLayoutInput();
   static void OverridePreferences(content::WebContents*, blink::web_pref::WebPreferences*);
   SharedAtlasTextInput TextInputState() const;
@@ -182,7 +182,6 @@ class WebView final : public content::WebContentsObserver,
   const bool use_offscreen_host_;
   std::unique_ptr<OffscreenHost> offscreen_host_;
   bool render_demand_ = false;
-  uint32_t render_fps_ = 60;
   int viewport_width_ = 0, viewport_height_ = 0;
   bool tablet_ = false;
   float device_scale_ = 1;

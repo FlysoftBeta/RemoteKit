@@ -7,7 +7,6 @@
 #include "remotekit/idle_idr.hpp"
 #include "remotekit/tail_refresh.hpp"
 #include "remotekit/atlas_dimensions.hpp"
-#include "remotekit/capture_geometry.hpp"
 #include "remotekit/coordinate_readiness.hpp"
 using namespace remotekit;
 #define CHECK(x)                                                       \
@@ -85,22 +84,6 @@ int main() {
   CHECK(!AtlasAllocationDimensions(8192,16,1.25f,16));
   CHECK(!AtlasAllocationDimensions(16,16,std::numeric_limits<float>::quiet_NaN(),16));
   CHECK(!AtlasAllocationDimensions(16,16,1,8));
-  CaptureGeometryWait geometry;
-  geometry.Bind(1);
-  CHECK(geometry.Defer(100));
-  auto refresh = geometry.QueueRefresh(); CHECK(refresh && *refresh == 1);
-  CHECK(!geometry.QueueRefresh()); // Coalesce requests until the posted task runs.
-  CHECK(geometry.Defer(1900100) && !geometry.TimedOut(1999999));
-  CHECK(!geometry.Defer(2000100) && geometry.TimedOut(2000100));
-  CHECK(!geometry.Match(2000100)); // A late frame cannot extend the deadline.
-  geometry.Bind(2); CHECK(geometry.Defer(0)); auto old_refresh = geometry.QueueRefresh();
-  geometry.Stop(); CHECK(!geometry.TakeRefresh(*old_refresh, 1));
-  geometry.Bind(3); CHECK(geometry.Defer(50)); auto new_refresh = geometry.QueueRefresh();
-  CHECK(!geometry.TakeRefresh(*old_refresh, 60)); CHECK(geometry.TakeRefresh(*new_refresh, 60));
-  CHECK(geometry.Match(100)); CHECK(!geometry.Defer(101)); CHECK(!geometry.QueueRefresh());
-  CHECK(!geometry.TimedOut(9000000));
-  geometry.Bind(4); CHECK(geometry.Defer(1000));
-  CHECK(geometry.TimedOut(2001000)); // Poll can expire the window without another frame.
   CoordinateReadiness readiness;
   readiness.Set(7, {{"1", true}, {"2", false}});
   CHECK(readiness.Allows("1", 7) && !readiness.Allows("2", 7));
@@ -141,6 +124,21 @@ int main() {
   CHECK(!no_capture_clock.Observe(1,1,0,1000) && !no_capture_clock.TailDue(1000));
   CHECK(no_capture_clock.Observe(1,2,0,3000) && no_capture_clock.TailDue(3150));
   CHECK(H264RateLimits(31).bitrate_bps == 14000000 && H264RateLimits(31).cpb_kb == 1750);
+  CHECK(H264FrameRateLimit(1936,1088,42)==63);
+  CHECK(H264FrameRateLimit(1937,1088,42)==62); // Ceil each dimension to macroblocks.
+  CHECK(H264FrameRateLimit(1920,1080,42)==64);
+  CHECK(H264FrameRateLimit(4096,2160,51)==28);
+  CHECK(H264FrameRateLimit(4096,2304,51)==26); // Exactly MaxFS.
+  CHECK(H264FrameRateLimit(4096,2305,51)==0);
+  CHECK(H264FrameRateLimit(4096,4096,52)==0);
+  CHECK(H264FrameRateLimit(16,16,52)==2073600);
+  CHECK(H264FrameRateLimit(8192,16,51)==1920); // Codec limit, independent of the hardware 4096 cap.
+  CHECK(H264FrameRateLimit(8688,16,51)==1810); // 543 MB: 543^2 <= 8 * MaxFS.
+  CHECK(H264FrameRateLimit(8689,16,51)==0); // Ceil to 544 MB exceeds the Table A-1 axis bound.
+  CHECK(H264FrameRateLimit(16,8689,51)==0);
+  CHECK(H264FrameRateLimit(0,1080,42)==0 && H264FrameRateLimit(1920,0,42)==0);
+  CHECK(H264FrameRateLimit(1936,1088,0)==0 && H264FrameRateLimit(1936,1088,43)==0);
+  CHECK(H264FrameRateLimit(UINT32_MAX,UINT32_MAX,52)==0); // No ceil overflow.
   auto full = FitH264Sampling(1928, 1088, 60, 42);
   CHECK(full.width == 1928 && full.height == 1088 && full.scale == 1);
   auto explicit_size = FitH264Sampling(3840, 2160, 60, 51, 1920, 1080);
@@ -157,13 +155,6 @@ int main() {
   auto lower_cadence = FitH264Sampling(3856,2176,50,51);
   CHECK(lower_cadence.width>limited_4k.width && lower_cadence.scale<1);
   CHECK(std::string(limited_4k.limitation)=="receiver-level-macroblock-rate");
-  CHECK(PreferredH264FrameRate(3856,2176,50,51,true)==29);
-  CHECK(PreferredH264FrameRate(3856,2176,50,52,true)==50);
-  CHECK(PreferredH264FrameRate(3856,2176,50,51,false)==50);
-  CHECK(PreferredH264FrameRate(3856,2176,50,42,true)==50); // Hard FS cannot be traded for FPS.
-  CHECK(PreferredH264FrameRate(3856,2176,50,51,true,1920,1080)==50);
-  auto preserved_51=FitH264Sampling(3856,2176,PreferredH264FrameRate(3856,2176,50,51,true),51);
-  CHECK(preserved_51.width==3856 && preserved_51.height==2176 && preserved_51.scale==1);
   // Hover is permitted before focus, with the same token/sequence authority.
   Endpoint hover_endpoint;
   const auto hover_session = hover_endpoint.CreateSession("hover").value;

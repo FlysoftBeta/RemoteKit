@@ -31,7 +31,7 @@
 #include "remotekit/browser/browser_context.h"
 #include "remotekit/browser/control_server.h"
 #include "remotekit/browser/devtools.h"
-#include "remotekit/browser/gpu_atlas.h"
+#include "remotekit/browser/osr_renderer.h"
 #include "remotekit/browser/page_requests.h"
 #include "remotekit/browser/offscreen_host.h"
 #include "remotekit/browser/webview.h"
@@ -238,15 +238,13 @@ struct HarnessMainParts::State {
   std::vector<std::unique_ptr<WebView>> contents;
   std::vector<raw_ptr<views::WebView>> native_views;
   std::unique_ptr<ControlServer> control;
-  std::unique_ptr<GpuAtlas> output;
+  std::unique_ptr<OsrRenderer> output;
   base::RepeatingTimer output_timer;
   std::vector<gfx::Rect> placements;
   std::set<WebViewId> paused_output;
   float output_scale = 1;
   uint32_t allocation_alignment = 1;
   bool output_enabled = true;
-  uint32_t output_fps = 30;
-  uint32_t render_fps = 0;  // Zero follows output fps; never changes capture/encode.
   int logical_width = 0, logical_height = 0;
   uint32_t output_width = 0, output_height = 0;
   uint64_t output_generation = 0;
@@ -275,15 +273,16 @@ struct HarnessMainParts::State {
   void UpdateOutput() {
     for (size_t i = 0; i < contents.size(); ++i) {
       const auto& adapter = contents[i];
+      if (adapter->offscreen_host()) adapter->offscreen_host()->SetOutputScale(output_scale);
       adapter->RefreshBackingScale();
       const auto* model = endpoint.FindWebView(adapter->session_id(), adapter->view_id());
       adapter->SetRenderDemand(output && output_enabled && specs[i].visible &&
           model && model->actual == Residency::live && !model->pending &&
-          !paused_output.contains(adapter->view_id()), render_fps ? render_fps : output_fps);
+          !paused_output.contains(adapter->view_id()));
     }
     if (!output)
       return;
-    std::vector<GpuAtlas::View> views;
+    std::vector<OsrRenderer::View> views;
     for (size_t i = 0; i < contents.size(); ++i) {
       if (!specs[i].visible) continue;
       const auto& adapter = *contents[i];
@@ -292,7 +291,7 @@ struct HarnessMainParts::State {
       if (!token || !model)
         continue;
       const auto& p = placements[i];
-      GpuAtlas::View view;
+      OsrRenderer::View view;
       view.metadata.session_id = token.value.session;
       view.metadata.webview_id = token.value.view;
       view.metadata.instance_generation = token.value.instance;
@@ -307,17 +306,27 @@ struct HarnessMainParts::State {
       view.metadata.text_input = adapter.TextInputState();
       view.contents = adapter.contents();
       view.offscreen_host = adapter.offscreen_host();
-      view.capture_enabled = adapter.contents() && model->actual == Residency::live &&
+      view.render_enabled = adapter.contents() && model->actual == Residency::live &&
                              !model->pending && output_enabled &&
                              !paused_output.contains(adapter.view_id());
       views.push_back(std::move(view));
     }
     output->SetViews(std::move(views));
   }
+  mojo::ScopedMessagePipeHandle TakeControlAttachment(const base::DictValue& request,
+                                                     const base::DictValue& reply) {
+    uint64_t pid = 0;
+    const auto* token = reply.FindString("render_channel");
+    const auto* pid_text = request.FindString("consumer_pid");
+    if (!output || !token || !pid_text || !base::StringToUint64(*pid_text, &pid) ||
+        !pid || pid > UINT32_MAX)
+      return {};
+    return output->TakeRenderEndpoint(*token, static_cast<uint32_t>(pid));
+  }
   void OnControlClosed() {
     if (shutting_down) return;
     if (offscreen) output_enabled = false;
-    for (const auto& adapter : contents) adapter->SetRenderDemand(false, output_fps);
+    for (const auto& adapter : contents) adapter->SetRenderDemand(false);
     if (output)
       output->Stop();
     for (size_t i = 0; i < contents.size(); ++i) {
@@ -433,8 +442,6 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     auto next_scale = output_scale;
     auto next_alignment = allocation_alignment;
     auto next_enabled = output_enabled;
-    auto next_fps = output_fps;
-    auto next_render_fps = render_fps;
     if (request.Find("device_scale")) {
       if (!scale || !std::isfinite(*scale) || *scale < 0.5 || *scale > 4)
         return error("invalid_device_scale");
@@ -453,16 +460,6 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       if (!value->is_bool())
         return error("enabled_boolean_required");
       next_enabled = value->GetBool();
-    }
-    if (const auto* value = request.Find("fps")) {
-      if (!value->is_int() || value->GetInt() < 1 || value->GetInt() > 120)
-        return error("invalid_output_fps");
-      next_fps = value->GetInt();
-    }
-    if (const auto* value = request.Find("render_fps")) {
-      if (!value->is_int() || value->GetInt() < 0 || value->GetInt() > 60)
-        return error("invalid_render_fps");
-      next_render_fps = value->GetInt();
     }
     const auto dimensions = AtlasAllocationDimensions(next_width, next_height, next_scale, next_alignment);
     if (!dimensions) return error("atlas_resource_budget_exceeded");
@@ -486,12 +483,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     for (size_t i = 0; i < contents.size(); ++i)
       contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
     output_enabled = next_enabled;
-    output_fps = next_fps;
-    render_fps = next_render_fps;
     output_width = dimensions->width;
     output_height = dimensions->height;
-    if (output)
-      output->SetFps(output_fps);
     if (layout_changed) {
       if (root) root->SetPreferredSize(gfx::Size(logical_width, logical_height));
       if (widget) widget->SetSize(gfx::Size(logical_width, logical_height));
@@ -509,13 +502,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (!ReadId(request, "consumer_pid", &pid) || pid > UINT32_MAX)
       return error("consumer_pid_required");
     if (*method == "output.open") {
-      const auto fps = request.FindInt("fps");
-      if (!fps || *fps < 1 || *fps > 120)
-        return error("invalid_output_fps");
+      if (OsrRenderer::IsGpuFaultSealed()) return error("output_gpu_fault_sealed");
       if (!output)
-        output = std::make_unique<GpuAtlas>(output_width, output_height, ++output_generation);
-      output_fps = *fps;
-      output->SetFps(output_fps);
+        output = std::make_unique<OsrRenderer>(output_width, output_height, ++output_generation);
       UpdateOutput();
       reply.Set("ok", true);
       reply.Set("accepted", true);
@@ -543,8 +532,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     return reply;
   }
   if (*method == "output.close") {
-    if (output)
+    if (output) {
       output->Stop();
+    }
     output.reset();
     UpdateOutput();
     reply.Set("ok", true);
@@ -615,7 +605,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           value.Set("device", specs[i].tablet ? "tablet" : "desktop");
           value.Set("deviceScaleFactor", PageScale(specs[i]));
           auto compositor = adapter->CompositorDiagnostics();
-          if (output) compositor.Set("capture", output->CaptureStatus(view_id));
+          if (output) compositor.Set("osr", output->RenderStatus(view_id));
           value.Set("compositor", std::move(compositor));
           value.Set("navigationRevision", base::NumberToString(adapter->navigation_revision()));
           value.Set("navigationOperations", adapter->NavigationOperationSnapshot());
@@ -1425,12 +1415,19 @@ int HarnessMainParts::PreMainMessageLoopRun() {
 #endif
   const auto host_mode = command.GetSwitchValueASCII("remotekit-render-host");
   if (!host_mode.empty() && host_mode != "offscreen" && host_mode != "window") return 2;
-  state_->offscreen = !state_->demo && host_mode != "window";
+#if !defined(REMOTEKIT_DEMO_HARNESS)
+  if (host_mode == "window") {
+    LOG(ERROR) << "Native window render host is unsupported by the service Browser";
+    return 2;
+  }
+  state_->offscreen = true;
+#else
+  state_->offscreen = false;
+#endif
   if (state_->offscreen) {
     CHECK(!display::Screen::HasScreen());
     state_->screen = CreateOffscreenScreen();
     display::Screen::SetScreenInstance(state_->screen.get());
-    state_->output_fps = 60;
   } else if (!display::Screen::HasScreen()) {
     state_->screen = views::CreateDesktopScreen();
   }
@@ -1600,6 +1597,7 @@ int HarnessMainParts::PreMainMessageLoopRun() {
     state_->control = std::make_unique<ControlServer>(
         command.GetSwitchValueASCII("control-channel"),
         base::BindRepeating(&State::HandleControl, base::Unretained(state_.get())),
+        base::BindRepeating(&State::TakeControlAttachment, base::Unretained(state_.get())),
         base::BindOnce(&State::OnControlClosed, base::Unretained(state_.get())));
     LOG(INFO) << "RemoteKit startup control ready";
   }

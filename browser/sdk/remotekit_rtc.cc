@@ -36,6 +36,8 @@
 #include "third_party/webrtc/api/enable_media.h"
 #include "third_party/webrtc/api/environment/environment_factory.h"
 #include "third_party/webrtc/api/jsep.h"
+#include "third_party/webrtc/api/field_trials_view.h"
+#include "third_party/webrtc/common_video/h264/h264_bitstream_parser.h"
 #include "third_party/webrtc/api/make_ref_counted.h"
 #include "third_party/webrtc/api/peer_connection_interface.h"
 #include "third_party/webrtc/api/rtp_transceiver_interface.h"
@@ -66,6 +68,23 @@ void RemoteKitSdkEndRtc();
 namespace {
 #include "remotekit/browser/sdk/rtc_silent_audio.h"
 #include "remotekit/browser/sdk/rtc_trace.h"
+
+// Keep Chromium's environment trials and enable only our screenshare policy
+// gate. The WebRTC resource algorithms and their thresholds remain upstream.
+class RemoteKitFieldTrials final : public webrtc::FieldTrialsView {
+ public:
+  explicit RemoteKitFieldTrials(std::unique_ptr<webrtc::FieldTrialsView> fallback)
+      : fallback_(std::move(fallback)) {}
+  std::string Lookup(absl::string_view key) const override {
+    if (key == "WebRTC-RemoteKit-ScreenshareAdaptation") return "Enabled";
+    return fallback_->Lookup(key);
+  }
+  std::unique_ptr<webrtc::FieldTrialsView> CreateCopy() const override {
+    return std::make_unique<RemoteKitFieldTrials>(fallback_->CreateCopy());
+  }
+ private:
+  std::unique_ptr<webrtc::FieldTrialsView> fallback_;
+};
 
 constexpr size_t kMaxMessage = 1024 * 1024;
 constexpr size_t kMaxAccessUnit = 32 * 1024 * 1024;
@@ -142,12 +161,32 @@ class TextureBuffer : public webrtc::VideoFrameBuffer {
 class TextureSource : public webrtc::AdaptedVideoTrackSource {
  public:
   TextureSource(std::shared_ptr<LeaseTracker> tracker, std::function<void()> refresh)
-      : tracker_(std::move(tracker)), refresh_(std::move(refresh)) {}
+      : webrtc::AdaptedVideoTrackSource(2),
+        tracker_(std::move(tracker)), refresh_(std::move(refresh)) {}
   SourceState state() const override { return kLive; }
   bool remote() const override { return false; }
   bool is_screencast() const override { return true; }
   std::optional<bool> needs_denoising() const override { return false; }
   void RequestRefreshFrame() override { refresh_(); }
+  remotekit_rtc_adaptation Adapt(int width, int height, int64_t timestamp_us) {
+    remotekit_rtc_adaptation result{sizeof(result), 0, 0, 1, 0};
+    const float max_fps = video_adapter()->GetMaxFramerate();
+    if (std::isfinite(max_fps) &&
+        static_cast<double>(max_fps) < static_cast<double>(std::numeric_limits<int>::max()))
+      result.max_fps = static_cast<uint32_t>(std::max(1.0f, std::floor(max_fps)));
+    int out_width = 0, out_height = 0, crop_width = 0, crop_height = 0;
+    int crop_x = 0, crop_y = 0;
+    if (AdaptFrame(width, height, timestamp_us, &out_width, &out_height,
+                   &crop_width, &crop_height, &crop_x, &crop_y)) {
+      // Atlas coordinates describe every pixel. The adapter's alignment-only
+      // crop is not applied to the atlas: scale its full bounds to the selected
+      // dimensions, preserving every plane including the right/bottom edge.
+      result.width = out_width;
+      result.height = out_height;
+      result.drop = 0;
+    }
+    return result;
+  }
   void Submit(const remotekit_rtc_frame& input, int64_t media_timestamp_us) {
     OnFrame(webrtc::VideoFrame::Builder()
         .set_video_frame_buffer(webrtc::make_ref_counted<TextureBuffer>(input, tracker_))
@@ -168,6 +207,7 @@ struct EncoderState {
   webrtc::EncodedImageCallback* callback = nullptr;
   bool active = true;
   bool logged_sps = false;
+  webrtc::H264BitstreamParser qp_parser;
   std::shared_ptr<RequestedPlayoutDelay> playout_delay;
   std::shared_ptr<SdkTrace> trace;
 };
@@ -238,6 +278,7 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     if (configured == 0) {
       std::lock_guard lock(state_->mutex);
       state_->logged_sps = false;
+      state_->qp_parser = webrtc::H264BitstreamParser();
     }
     return configured == 0 ? WEBRTC_VIDEO_CODEC_OK : WEBRTC_VIDEO_CODEC_ERROR;
   }
@@ -298,6 +339,10 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     info.supports_native_handle = true;
     info.is_hardware_accelerated = true;
     info.has_trusted_rate_controller = true;
+    // Same H264 QP thresholds as WebRTC's official H264EncoderImpl. QP is
+    // parsed from Annex B when the hardware callback cannot provide it.
+    info.scaling_settings = ScalingSettings(24, 37);
+    info.is_qp_trusted = true;
     info.requested_resolution_alignment = 2;
     info.apply_alignment_to_all_simulcast_layers = true;
     return info;
@@ -382,6 +427,7 @@ class Peer : public webrtc::PeerConnectionObserver,
       source = nullptr;
       audio_source = nullptr;
       audio_sender = nullptr;
+      video_sender = nullptr;
       factory = nullptr;
     });
     if (signaling) signaling->Stop();
@@ -450,13 +496,13 @@ class Peer : public webrtc::PeerConnectionObserver,
   std::atomic<bool> stats_pending{false};
   bool signaling_started = false;
   bool winsock_started = false;
-  int64_t last_media_timestamp_us = 0;
+  int64_t last_media_timestamp_us = 0, last_adaptation_timestamp_us = -1;
   std::unique_ptr<webrtc::Thread> network, signaling;
   scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory;
   scoped_refptr<webrtc::PeerConnectionInterface> pc;
   scoped_refptr<TextureSource> source;
   scoped_refptr<PageAudioSource> audio_source;
-  scoped_refptr<webrtc::RtpSenderInterface> audio_sender;
+  scoped_refptr<webrtc::RtpSenderInterface> audio_sender, video_sender;
   remotekit::AudioTimeline audio_timeline;
   uint64_t audio_clock_generation = 0, audio_origin_sample = 0;
   int64_t audio_origin_capture_ms = 0;
@@ -642,7 +688,9 @@ int Peer::Start() {
   signaling_started = signaling->Start();
   if (!signaling_started) return REMOTEKIT_SDK_INVALID_STATE;
   return signaling->BlockingCall([this] {
-    auto env = webrtc::CreateEnvironment();
+    auto default_env = webrtc::CreateEnvironment();
+    auto env = webrtc::CreateEnvironment(std::make_unique<RemoteKitFieldTrials>(
+        default_env.field_trials().CreateCopy()));
     webrtc::PeerConnectionFactoryDependencies deps;
     deps.env = env;
     deps.network_thread = network.get();
@@ -687,6 +735,7 @@ int Peer::Start() {
     auto added = pc->AddTrack(track, {"remotekit"});
     if (!added.ok()) return REMOTEKIT_SDK_INVALID_STATE;
     auto sender = added.MoveValue();
+    video_sender = sender;
     for (auto& transceiver : pc->GetTransceivers()) {
       if (transceiver->sender() == sender && !transceiver->SetDirectionWithError(
           webrtc::RtpTransceiverDirection::kSendOnly).ok())
@@ -698,7 +747,7 @@ int Peer::Start() {
       encoding.num_temporal_layers = 1;
       if (options.max_bitrate_bps) encoding.max_bitrate_bps = options.max_bitrate_bps;
     }
-    parameters.degradation_preference = webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+    parameters.degradation_preference = webrtc::DegradationPreference::BALANCED;
     if (!sender->SetParameters(parameters).ok()) return REMOTEKIT_SDK_INVALID_STATE;
     webrtc::BitrateSettings bitrate;
     if (options.min_bitrate_bps) bitrate.min_bitrate_bps = options.min_bitrate_bps;
@@ -960,23 +1009,49 @@ int remotekit_rtc_send_data(uint64_t id, const void* data, size_t size, int bina
     return p.data->Send(buffer) ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_BUSY;
   });
 }
-int remotekit_rtc_set_media_policy(uint64_t id,uint32_t target,uint32_t maximum,uint32_t fps) {
-  if(target<100000 || target>50000000 || maximum<target || maximum>60000000 || fps<1 || fps>60)
+std::optional<webrtc::DegradationPreference> DegradationPreference(uint32_t preference) {
+  switch (preference) {
+    case REMOTEKIT_RTC_MAINTAIN_RESOLUTION: return webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+    case REMOTEKIT_RTC_BALANCED: return webrtc::DegradationPreference::BALANCED;
+    case REMOTEKIT_RTC_MAINTAIN_FRAMERATE: return webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+    default: return std::nullopt;
+  }
+}
+int remotekit_rtc_set_degradation_preference(uint64_t id, uint32_t preference) {
+  const auto value = DegradationPreference(preference);
+  if (!value) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  return WithPeer(id, [&](Peer& peer) {
+    if (!peer.video_sender) return REMOTEKIT_SDK_INVALID_STATE;
+    auto parameters = peer.video_sender->GetParameters();
+    parameters.degradation_preference = *value;
+    return peer.video_sender->SetParameters(parameters).ok() ?
+        REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+  });
+}
+int remotekit_rtc_set_source_max_fps(uint64_t id, uint32_t fps) {
+  if (fps < 1 || fps > 240) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  return WithPeer(id, [&](Peer& peer) {
+    if (!peer.video_sender) return REMOTEKIT_SDK_INVALID_STATE;
+    auto parameters = peer.video_sender->GetParameters();
+    for (auto& encoding : parameters.encodings) encoding.max_framerate = double(fps);
+    return peer.video_sender->SetParameters(parameters).ok() ?
+        REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+  });
+}
+int remotekit_rtc_adapt_frame(uint64_t id, uint32_t width, uint32_t height,
+    int64_t timestamp_us, remotekit_rtc_adaptation* adaptation) {
+  if (!adaptation || adaptation->struct_size != sizeof(*adaptation) ||
+      !width || !height || width > 16384 || height > 16384 ||
+      (width & 1) || (height & 1) || timestamp_us < 0 ||
+      timestamp_us > std::numeric_limits<int64_t>::max() / 1000)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
-  return WithPeer(id,[&](Peer& peer) {
-    for(auto& sender:peer.pc->GetSenders()) {
-      auto parameters=sender->GetParameters();
-      for(auto& encoding:parameters.encodings) {encoding.max_bitrate_bps=maximum;encoding.max_framerate=double(fps);}
-      if(!sender->SetParameters(parameters).ok())return REMOTEKIT_SDK_INVALID_STATE;
-    }
-    // Runtime policy must not restart the bandwidth estimator. The requested
-    // target is used at peer creation; only the ceiling changes here.
-    if(peer.options.max_bitrate_bps!=maximum) {
-      webrtc::BitrateSettings bitrate;bitrate.max_bitrate_bps=maximum;
-      bitrate.min_bitrate_bps=std::min(500000u,target);
-      if(!peer.pc->SetBitrate(bitrate).ok())return REMOTEKIT_SDK_INVALID_STATE;
-      peer.options.max_bitrate_bps=maximum;
-    }
+  *adaptation = {sizeof(*adaptation), 0, 0, 1, 0};
+  return WithPeer(id, [&](Peer& peer) {
+    if (!peer.source) return REMOTEKIT_SDK_INVALID_STATE;
+    if (timestamp_us <= peer.last_adaptation_timestamp_us)
+      return REMOTEKIT_SDK_INVALID_ARGUMENT;
+    peer.last_adaptation_timestamp_us = timestamp_us;
+    *adaptation = peer.source->Adapt(width, height, timestamp_us);
     return REMOTEKIT_SDK_OK;
   });
 }
@@ -1055,7 +1130,10 @@ int remotekit_rtc_encoded(uint64_t id, const remotekit_rtc_encoded_frame* frame,
   image.capture_time_ms_ = frame->capture_time_us / 1000;
   image._frameType = frame->keyframe ? webrtc::VideoFrameType::kVideoFrameKey :
                                      webrtc::VideoFrameType::kVideoFrameDelta;
-  image.qp_ = frame->qp;
+  // Maintain SPS/PPS state even when this AU already has a hardware QP.
+  s->qp_parser.ParseBitstream(std::span<const uint8_t>(
+      static_cast<const uint8_t*>(frame->annex_b), frame->size));
+  image.qp_ = frame->qp >= 0 ? frame->qp : s->qp_parser.GetLastSliceQp().value_or(-1);
   image.content_type_ = webrtc::VideoContentType::SCREENSHARE;
   const uint64_t requested_playout = s->playout_delay->packed.load();
   if (requested_playout != UINT64_MAX) {

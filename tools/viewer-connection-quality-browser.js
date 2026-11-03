@@ -37,7 +37,7 @@ async (hostPage) => {
       if (!t.displayReady || !e || e.error || !t.layout?.views.length || !t.diagnostics.framesDecoded) return false;
       if (level && e.negotiatedReceiveLevel !== level) return false;
       if (full && (e.mediaScale !== 1 || e.sourceWidth !== e.encodedWidth || e.sourceHeight !== e.encodedHeight)) return false;
-      if (codecFps && e.mediaPolicy?.applied?.codecTargetFps !== codecFps) return false;
+      if (codecFps && e.gccTargetFps !== codecFps) return false;
       return Array.from(document.querySelectorAll('.remote-viewport canvas')).every(c => c.width > 0 && c.height > 0 && getComputedStyle(c).visibility !== 'hidden');
     }, { full, level, codecFps }, { timeout: 20000 });
     return run.qualitySnapshot();

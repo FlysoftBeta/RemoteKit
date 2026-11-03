@@ -11,5 +11,8 @@ namespace remotekit::browser {
 bool WriteControlResponse(
     const base::DictValue& request,
     const base::DictValue& reply,
-    const base::RepeatingCallback<bool(std::string_view)>& write);
+    const base::RepeatingCallback<bool(std::string_view, bool original_reply)>& write);
+// The serialized fallback never carries endpoints from the application reply.
+bool ShouldAttachRenderEndpoint(const base::DictValue& request,
+                                const base::DictValue& reply, bool original_reply);
 }  // namespace remotekit::browser

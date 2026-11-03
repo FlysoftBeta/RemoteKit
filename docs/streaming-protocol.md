@@ -11,7 +11,7 @@
 | session.ensure | 显式启动/取得Session，幂等；accepted不等待导航恢复完成，返回browserIncarnation/recovery |
 | session.snapshot | 只读运行状态、live views、stats、pendingPopups和未确认events；不启动Browser |
 | session.sitePreferences | 完整origin规则表；未启动时缓存，启动前应用；返回accepted/applied |
-| session.mediaPolicy | targetFps/bitrateKbps/maxBitrateKbps/adaptive；每Session独立缓存，requested与真实applied分开 |
+| session.mediaPolicy | degradationPreference/maxFps；三档仅映射WebRTC偏好，每Session独立缓存，requested与实际applied分开 |
 | session.events.ack | eventIds；自然关闭事件在产品状态持久化后确认 |
 | view.ensure / view.configure | 稳定viewId、URL/viewport/device/visible；configure可带requireRunning防离线维护拉起Browser |
 | view.lifecycle | viewId、discard/restore；accepted/pending/completed分开，可带requireRunning |
@@ -54,7 +54,7 @@ method包括viewport、feedback、rtc.offer/ice/close、clock.ping、operation.s
 - frame：实际wire RTP、layoutEpoch、编码信息；可附captureWallTimeMs、captureMonotonicMs、captureClockUncertaintyMs、sourceCaptureId。无有效采集时间则省略。
 - focus：请求ID、页面完整身份和布局代次；确认必须匹配当前请求后才能放行排队输入。
 - input：完整Session/view/instance/document/focus、outputGeneration/layoutEpoch、连接内sequence及事件。Endpoint先拒绝旧peer和连接内重复/倒退，再分配Session持续递增的Browser sequence；回执区分clientSequence/browserSequence，重登录无需客户端持久化计数。
-- media.feedback：布局绑定的显示/解码/丢帧等观察，供Endpoint源预算控制。
+- media.feedback：布局绑定的显示/解码/丢帧诊断，不独立决定网络码率、DPR或分辨率。
 - media.presentation：`{version:1,backend:"video"|"canvas"}`协商呈现后端；Endpoint建立发送屏障后回复同版本的`presentation.mode`。
 - presentation.prepare：`{version:1,barrierId,outputGeneration,layoutEpoch}`，三个身份均为十进制字符串，紧随对应layout。Client隐藏所有video、撤销输入ready，跨两次前台rAF后以`presentation.ready`返回同一完整key；旧peer/旧key不能放行。
 - product.action/result：version=1，operationId、operationGeneration与action/receipt。Endpoint校验当前peer后经管理连接交Control唯一产品提交器；收据区分accepted/applying/committed/rejected/unknown/expired。Control分配内部单调operationSequence给Native执行去重，不把UUID generation当数值。超时已转发的操作返回unknown并查询，不能改ID重做。导航终态见[导航操作](navigation-operations.zh-CN.md)。
@@ -79,7 +79,7 @@ Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更�
 
 静态首帧metadata晚到可匹配同元素自己的最新观察，但必须保持相同已确认屏障、track、attempt和文档身份；恢复布局资格不能假称当前像素仍是该RTP，也不能增加呈现计数。仅在文档前台、当前完整布局屏障已ACK、平面current/nonstale且客户端bounds为正时，才累计无安全匹配的重试预算并有界回退canvas。隐藏或布局过渡清除预算；恢复后重新等待本元素新帧，不复用旧ready。统计分别显示连接首次Video回退原因和canvas后端选择原因，未知原因保留原文，不统一冒充GL失败。移动visualViewport过渡允许一次有界旧ROI冻结图，固定旧位置且撤销输入；新布局ready后移除，文档/连接变化立即作废。这种一次copy与稳态video逐帧呈现分开计数。
 
-Source atlas可在NV12转换时按接收H264上限等比采样；布局和输入同时带对应比例。canvas回退按能力使用不可变VideoFrame/fifo2或video快照；Chrome89保留兼容，其rVFC与drawImage不是原子frame handle，不能宣称为不可变帧验证。
+Source atlas由WebRTC原生AdaptFrame决定采样，并满足接收H264硬上限；NV12转换缩放完整atlas，mediaScaleX/Y分别用于布局、ROI及输入。canvas回退按能力使用不可变VideoFrame/fifo2或video快照；Chrome89保留兼容，其rVFC与drawImage不是原子frame handle，不能宣称为不可变帧验证。
 
 普通产品按接收能力选择H264 level5.2、5.1、4.2或native；探测并行、有总超时且页面内缓存，Chrome89保留4.2兼容路径。编码协商失败可降档，网络超时不会永久降低解码能力。优先高画质以viewport×ClientScale为目标；完整尺寸满足单帧上限、但超过像素速率预算时先降低帧率，自动与流畅档保持帧率优先。实际源/编码尺寸、有效帧率及限制原因由stats报告。
 

@@ -1,3 +1,5 @@
+import type { Surface } from './types';
+import { surfaceDipSize } from './coordinates';
 export interface ViewportBounds { left: number; top: number; width: number; height: number }
 export interface VisualBounds { offsetLeft: number; offsetTop: number; width: number; height: number }
 export function visibleContentBounds(content: ViewportBounds, visual?: VisualBounds | null): ViewportBounds {
@@ -33,4 +35,11 @@ export class ViewportTransition {
     if (this.confirmed?.owner !== owner) this.confirmed = undefined;
   }
   clear() { this.freeze = undefined; this.confirmed = undefined; this.desired = undefined; }
+}
+
+/** New media is eligible only when both sampling axes match the requested DIP. */
+export function surfaceMatchesViewport(surface: Surface, bounds: Pick<ViewportBounds, 'width' | 'height'>) {
+  const size = surfaceDipSize(surface);
+  return [size.width, size.height, bounds.width, bounds.height].every(Number.isFinite) && size.width > 0 && size.height > 0 &&
+    Math.abs(size.width - Math.round(bounds.width)) <= 1 && Math.abs(size.height - Math.round(bounds.height)) <= 1;
 }

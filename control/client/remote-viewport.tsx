@@ -13,7 +13,7 @@ import type { Surface } from './types';
 import {
   clientPointToDip,
   pointerPointToDip,
-  surfacePixelScale,
+  wheelDeltaToDip,
   type PointerAction,
 } from "./coordinates";
 
@@ -432,8 +432,8 @@ export function RemoteViewport({
     // with a native listener, and establish the same input lease as a click.
     event.preventDefault();
     transport.ensureInputFocus(surface);
-    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? surface.height / surfacePixelScale(surface) : 1;
-    send({ type: 'wheel', ...position, dx: -event.deltaX * unit, dy: -event.deltaY * unit, modifiers: modifiers(event) });
+    const delta = wheelDeltaToDip(surface, event.deltaX, event.deltaY, event.deltaMode);
+    send({ type: 'wheel', ...position, dx: -delta.x, dy: -delta.y, modifiers: modifiers(event) });
   };
   useEffect(() => {
     const node = canvas.current;

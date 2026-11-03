@@ -13,6 +13,7 @@
 #include <deque>
 #include <map>
 #include <thread>
+#include <utility>
 namespace remotekit::media {
 namespace {
 using Microsoft::WRL::ComPtr;
@@ -62,7 +63,7 @@ class Qsv final : public HardwareEncoder {
   std::string deferred_error_;
   EncoderSettings settings_;
   QsvLowPowerInfo low_power_;
-  bool initialized_=false;
+  bool initialized_=false,keyframe_requested_=false;
   mfxU16 allocated_buffer_kb_=0;
   static bool Status(mfxStatus status,const char* operation,std::string& error) {
     if (status>=0) return true;
@@ -272,6 +273,7 @@ class Qsv final : public HardwareEncoder {
     if(loader_) MFXUnload(loader_);
   }
   const char* Name() const override {return "qsv";}
+  bool TakeKeyframeRequest() override {return std::exchange(keyframe_requested_,false);}
   EncoderInput InputFormat() const override {return settings_.qsv_async_vpp?EncoderInput::bgra:EncoderInput::nv12;}
   EncoderSettings ActualSettings() const override {
     auto value=settings_;value.width=params_.mfx.FrameInfo.CropW;value.height=params_.mfx.FrameInfo.CropH;
@@ -516,29 +518,33 @@ class Qsv final : public HardwareEncoder {
     jobs_.erase(found);packets_.pop_front();return CodecResult::ready;
   }
   bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error,uint32_t maximum=0) override {
-    (void)fps; // WebRTC reports observed input cadence, not a new BRC timebase.
+    if(!bitrate || !fps) {error="QSV invalid rate update";return false;}
     if(!jobs_.empty()||!packets_.empty()) {error="QSV rate reset requires drained queue";return false;}
     const auto previous_max=settings_.max_bitrate;
     if(maximum)settings_.max_bitrate=maximum;
     bitrate=std::min(bitrate,settings_.max_bitrate);
-    if(bitrate/1000==settings_.bitrate/1000 && previous_max==settings_.max_bitrate)return true;
+    const bool cadence_changed=fps!=settings_.fps;
+    if(bitrate/1000==settings_.bitrate/1000 && previous_max==settings_.max_bitrate && !cadence_changed)return true;
+    if(cadence_changed && !VppEmpty(error))return false;
     auto next=params_;
+    next.mfx.FrameInfo.FrameRateExtN=fps;next.mfx.FrameInfo.FrameRateExtD=1;
     next.mfx.TargetKbps=static_cast<mfxU16>(std::max(1u,bitrate/1000));
     next.mfx.MaxKbps=static_cast<mfxU16>(std::max(1u,(settings_.vbr?settings_.max_bitrate:bitrate)/1000));
     next.mfx.BufferSizeInKB=allocated_buffer_kb_;
     mfxExtEncoderResetOption reset{};
     reset.Header.BufferId=MFX_EXTBUFF_ENCODER_RESET_OPTION;reset.Header.BufferSz=sizeof(reset);
-    reset.StartNewSequence=MFX_CODINGOPTION_OFF;
+    // A changed H264 VUI/HRD timebase needs a new sequence. Pure bitrate
+    // changes retain the existing sequence and do not manufacture an IDR.
+    reset.StartNewSequence=cadence_changed?MFX_CODINGOPTION_ON:MFX_CODINGOPTION_OFF;
     std::array<mfxExtBuffer*,4> reset_extensions={extensions_[0],extensions_[1],extensions_[2],reinterpret_cast<mfxExtBuffer*>(&reset)};
     next.ExtParam=reset_extensions.data();next.NumExtParam=static_cast<mfxU16>(reset_extensions.size());
     RK_SERVER_TRACE(trace_,"mfx_reset_begin",TraceIds{},rk_record.encoder=trace_encoder_;);
     const auto status=MFXVideoENCODE_Reset(session_,&next);
     RK_SERVER_TRACE(trace_,"mfx_reset_return",TraceIds{},rk_record.encoder=trace_encoder_;rk_record.status=status;);
-    // A driver rejecting no-new-sequence Reset must be diagnosed explicitly;
-    // silently reinitializing here would turn every BWE change into an IDR.
-    if(!Status(status,"MFX bitrate-only Reset StartNewSequence=OFF",error))return false;
+    if(!Status(status,"MFX rate Reset",error))return false;
     next.ExtParam=extensions_.data();next.NumExtParam=static_cast<mfxU16>(extensions_.size());
-    params_=next;settings_.bitrate=bitrate;
+    params_=next;settings_.bitrate=bitrate;settings_.fps=fps;
+    if(cadence_changed)keyframe_requested_=true;
     RK_SERVER_TRACE(trace_,"mfx_get_params_begin",TraceIds{},rk_record.encoder=trace_encoder_;);
     const auto get_status=MFXVideoENCODE_GetVideoParam(session_,&params_);
     RK_SERVER_TRACE(trace_,"mfx_get_params_return",TraceIds{},rk_record.encoder=trace_encoder_;rk_record.status=get_status;);
@@ -548,12 +554,23 @@ class Qsv final : public HardwareEncoder {
     if(settings_.qsv_low_power&&params_.mfx.LowPower!=settings_.qsv_low_power) {
       error="QSV rate update changed explicit LowPower value";return false;
     }
+    if(params_.mfx.FrameInfo.FrameRateExtN!=fps*params_.mfx.FrameInfo.FrameRateExtD) {
+      error="QSV rate update did not apply requested frame rate";return false;
+    }
+    if(cadence_changed && vpp_initialized_) {
+      auto next_vpp=vpp_params_;
+      next_vpp.vpp.In.FrameRateExtN=fps;next_vpp.vpp.In.FrameRateExtD=1;
+      next_vpp.vpp.Out.FrameRateExtN=fps;next_vpp.vpp.Out.FrameRateExtD=1;
+      if(!Exact(MFXVideoVPP_Reset(session_,&next_vpp),"MFX VPP frame rate Reset",error))return false;
+      vpp_params_=next_vpp;
+      for(auto& output:vpp_outputs_)output->surface.Info=vpp_params_.vpp.Out;
+    }
     if(!CheckSignal(error))return false;
     if(params_.mfx.CodecLevel>settings_.level_idc) {
       error="QSV rate update exceeded negotiated H264 level";return false;
     }
-    fprintf(stderr,"QSV bitrate Reset: requested=%u actual=%u nominalFps=%u/%u newSequence=OFF status=%d\n",
-      bitrate,params_.mfx.TargetKbps*1000u,params_.mfx.FrameInfo.FrameRateExtN,params_.mfx.FrameInfo.FrameRateExtD,status);
+    fprintf(stderr,"QSV rate Reset: requested=%u actual=%u fps=%u/%u newSequence=%s status=%d\n",
+      bitrate,params_.mfx.TargetKbps*1000u,params_.mfx.FrameInfo.FrameRateExtN,params_.mfx.FrameInfo.FrameRateExtD,cadence_changed?"ON":"OFF",status);
     return true;
   }
   bool Drain(std::vector<AccessUnit>& result,std::string& error) override {
