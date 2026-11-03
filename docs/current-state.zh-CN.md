@@ -4,6 +4,8 @@
 
 **当前发布为11299d9回环崩溃修复包，取件码467761。** 已提交推送并完成新包独立验证及上传。旧1e13f11/353287存在发布后实际崩溃，不能视为本修复版。
 
+Chromium tab active/inactive 的静态调用链已核对：基础后台调度/进程优先级由 content visibility 驱动，Chrome PM另有投票、冻结与回收策略；焦点不等于可见性。见[Contents API对照](chromium-tab-activity.zh-CN.md)。本次仅调查文档，未改运行策略或新增运行验收。
+
 ## 467761后续修复（源码验收完成，待发布）
 
 用户截图canvas-2d/track-processor的原始回退原因仍未知，用户已无法再现。已修统计区把未知Video原因误报成GL初始化失败的问题：保留首因，分别展示Video回退和canvas后端原因。另由生产transport测试证实hidden/未完成ACK时会错误消耗metadata重试预算，已限制为前台、当前已ACK屏障、有效平面/bounds才计时；隐藏与布局过渡清预算，恢复仍需新帧授权。
