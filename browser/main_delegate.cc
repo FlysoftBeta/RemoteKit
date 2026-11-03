@@ -117,6 +117,12 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
     if (!disabled.empty())
       disabled += ",";
     disabled += "CalculateNativeWinOcclusion";
+#if !defined(REMOTEKIT_DEMO_HARNESS)
+    // Our AudioManager owns the in-process playback target. Device monitoring
+    // also routes by this feature, so it must match the actual service placement.
+    disabled += ",";
+    disabled += features::kAudioServiceOutOfProcess.name;
+#endif
     command.AppendSwitchASCII("disable-features", disabled);
   }
   std::string enabled = command.GetSwitchValueASCII("enable-features");

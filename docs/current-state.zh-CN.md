@@ -4,6 +4,10 @@
 
 **当前架构重构批次已发布：包版本1e13f11，取件码353287。** 产品提交14859f6及发布工具提交1e13f11均已推送。六模块审计、独立集成复审、规定范围的功能验收和包内真实WebRTC检查完成；上一发布4de343c/354383不是本批包。具体证据见[问题清单](../develop/docs/open-issues.md)、[本轮契约](../develop/docs/robustness-contract-20261103.md)。
 
+## 2026-11-03发布后严重回归（处理中）
+
+用户在本地回环使用353287包时发现数秒断连、网页状态重置。实际包Browser日志确认重复音频服务`enable_remote_client_support_`致命断言及Viz当前帧同步完成断言，伴随Browser重新启动；不能把STUN候选发送错误当作唯一原因。此前功能检查未覆盖这些触发路径，已发布包不能据此前结果视为稳定版本。音频放置配置与Viz同步admission已修复，增量构建、生产路径CPU正反例通过；89/157播放前10次、播放中1次真实枚举与双声道PCM通过；主动RTC/ViewerWS断开后页面nonce和未提交文本保留，几何不变时滚动精确保持。约271秒Browser PID/incarnation不变、仅一次启动、无FATAL/CHECK。ViewerWS按现有租约重建RTC，不等于Browser重建。尚未生成修复包。详见[真实运行报告](../develop/docs/loopback-crash-runtime-qa-20261103.md)及[构建报告](../develop/docs/loopback-hotfix-build-20261103.md)。Native IPC超时后同Browser重附着仍为独立缺口，未在本次两处崩溃修复中解决。
+
 ## 当前架构与实现
 
 - Control是产品状态真相，持有用户、独立Window/tab、设置及有限Endpoint引用。Client只持久化token，内存维护pending操作投影，通过WS快照及持久操作收据收敛。

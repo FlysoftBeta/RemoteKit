@@ -4,6 +4,14 @@
 
 2026-11-03进度：产品重构14859f6及工具修正1e13f11已提交推送，新streaming包通过startup、包内WebRTC操作、逐文件/ZIP校验后上传。跨机管理、DC常规操作/文件、收据同步、独立时钟、移动编辑/Client手势的契约和证据见[本轮架构记录](robustness-contract-20261103.md)。下列问题按对应源码、CPU和真实证据关闭；实体设备与尚未装配能力仍见当前状态，不能宣称整个浏览器无任何缺口。
 
+## 发布后阻断项（2026-11-03 06:54日志）
+
+- **A1 音频服务设备枚举致命退出：源码验收通过，待新包。** 自定义AudioManager实际强制进程内服务，但默认AudioServiceOutOfProcess feature仍使Windows设备监听走远程DeviceNotifier，触发断言。已修正式Browser服务放置配置的一致性并完成增量构建；89/157播放前10次及播放中1次实际枚举、Viewer双声道PCM通过，Browser未重启。
+- **F4 Viz同步当前帧完成致命退出：源码验收通过，待新包。** IssueExternalBeginFrame先广播再安装callback，当前frame ID匹配但callback为空；旧0011仅覆盖退役完成。已先安装事务并在接纳阶段延迟终态派发；真实production source同步完成/sink注册/重入正例通过，6项负例保持CHECK。89/157真实resize/导航及Google页运行通过，约271秒仅一次Browser启动，无FATAL/CHECK。
+- **L1 RPC故障到Browser重建边界：独立缺口保留。** 纯RTC断开路径不直接Stop Browser，但SDK请求非零会清control，随后Start可终止仍存活Browser。已确认普通业务ok:false不触发，SDK传输超时会退役通道，Browser当前为一次性监听；需要独立的同incarnation重附着契约，不能直接重用失效handle或重放未知mutation。本次实际故障有明确致命退出证据；该独立问题保留，未将修复两处崩溃声称为IPC恢复已完善。
+
+证据：[构建/原生probe](loopback-hotfix-build-20261103.md)、[89/157真实运行](loopback-crash-runtime-qa-20261103.md)。后者保留首次点击播放未生效、QA错误关闭码和几何取整等失败尝试，不能称所有输入边缘都已覆盖。
+
 ## 本批运行发现与待验收项
 
 | 项目 | 当前证据与进度 |

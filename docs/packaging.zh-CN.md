@@ -18,7 +18,7 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke
 
 manifest.json记录源码基线、构建参数、backend和逐文件SHA-256；ZIP另有.sha256。打包工具拒绝凭据、Profile、数据、PDB和构建输入。--smoke在包外创建临时数据，检查包内Node/生产静态资源、注册首管理员、鉴权WS状态、SQLite和时钟接口，并确认WS不能绕过WebRTC提交产品动作。此CLI检查不再通过旧WS action创建窗口，runtime_validation明确标记未测试RTC媒体；不能称其已验证Browser页面或产品DataChannel。
 
-正式发布还必须对本次实际包执行host-managed Playwright产品检查：使用包内Node/Endpoint/Browser、独立临时data与端口，真实注册/登录、建立WebRTC、通过产品UI创建Window并导航受控页面，检查默认video与真实点击/滚动，核对Browser进程来自包内路径；关闭本次自有服务后再上传。此步骤补足包内产品/Browser链路，不重复源码阶段已通过的全功能或性能矩阵。分别记录CLI启动检查、包内WebRTC产品检查和既有功能QA，不把三者混为一项。
+正式发布还必须对本次实际包执行host-managed Playwright产品检查：使用包内Node/Endpoint/Browser、独立临时data与端口，真实注册/登录、建立WebRTC、通过产品UI创建Window并导航受控页面，检查默认video与真实点击/滚动，核对Browser进程来自包内路径；关闭本次自有服务后再上传。此步骤补足包内产品/Browser链路，不重复源码阶段已通过的全功能或性能矩阵。2026-11-03音频/Viz崩溃修复包还须在包内Browser实际执行设备枚举（包含首次播放前），确认Browser身份保持、无对应fatal；源码阶段结果不能代替此包内检查。分别记录CLI启动检查、包内WebRTC产品检查和既有功能QA，不把三者混为一项。
 
 ## 原生对照包
 

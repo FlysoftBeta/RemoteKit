@@ -13,6 +13,7 @@
 #include "base/memory/raw_ptr.h"
 #include "base/task/single_thread_task_executor.h"
 #include "base/test/allow_check_is_test_for_testing.h"
+#include "base/test/bind.h"
 #include "base/time/time.h"
 #include "base/unguessable_token.h"
 #include "components/viz/common/frame_sinks/begin_frame_source.h"
@@ -50,6 +51,25 @@ namespace {
 class SourceClient : public viz::ExternalBeginFrameSourceClient {
  public:
   void OnNeedsBeginFrames(bool) override {}
+};
+
+class AdmissionObserver : public viz::BeginFrameObserverBase {
+ public:
+  explicit AdmissionObserver(
+      base::RepeatingCallback<void(const viz::BeginFrameArgs&)> action)
+      : action_(std::move(action)) {}
+  void OnBeginFrameSourcePausedChanged(bool) override {}
+  bool delivering = false;
+
+ private:
+  bool OnBeginFrameDerivedImpl(const viz::BeginFrameArgs& args) override {
+    CHECK(!delivering);
+    delivering = true;
+    action_.Run(args);
+    delivering = false;
+    return true;
+  }
+  base::RepeatingCallback<void(const viz::BeginFrameArgs&)> action_;
 };
 
 class Damage : public viz::DisplayDamageTracker {
@@ -282,6 +302,82 @@ void MojoStaleCompletion() {
   manager.UnregisterBeginFrameSource(&fast_source);
   std::cout << "real Mojo source retired-frame completion passed\n";
 }
+
+// Deliver current-frame completion from inside the real source's observer
+// fanout, before IssueExternalBeginFrame returns. Previously the request ID
+// was installed here but its callback was still null, exactly the released
+// crash. Sink notifications around this completion also test admission order.
+void MojoSynchronousAdmission(bool wait_for_sinks) {
+  base::test::AllowCheckIsTestForTesting();
+  mojo::core::Init();
+  viz::FrameSinkManagerImpl manager(
+      viz::FrameSinkManagerImpl::InitParams(nullptr));
+  const viz::FrameSinkId root(1, 1), later(2, 2);
+  manager.RegisterFrameSinkId(root, false);
+  mojo::AssociatedRemote<viz::mojom::ExternalBeginFrameController> controller;
+  viz::ExternalBeginFrameSourceMojo source(
+      &manager, controller.BindNewEndpointAndPassDedicatedReceiver(),
+      mojo::NullAssociatedRemote(), viz::BeginFrameSource::kNotRestartableId,
+      wait_for_sinks);
+  manager.RegisterBeginFrameSource(&source, root);
+  auto& display = static_cast<viz::DisplayObserver&>(source);
+  const auto now = base::TimeTicks::Now();
+  auto args = [&](uint64_t sequence) {
+    const auto time = now + base::Milliseconds(20) * sequence;
+    return viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE, 321, sequence,
+        time, time + base::Milliseconds(20), base::Milliseconds(20),
+        viz::BeginFrameArgs::NORMAL);
+  };
+  const auto a = args(5), b = args(6);
+  unsigned callbacks = 0;
+  auto action = base::BindLambdaForTesting([&](const viz::BeginFrameArgs& incoming) {
+    CHECK_EQ(callbacks, 0u);
+    if (incoming.frame_id == a.frame_id) {
+      manager.DidBeginFrame(root, incoming);
+      manager.DidFinishFrame(root, incoming);
+      CHECK_EQ(callbacks, 0u);  // Temporarily empty is not admission finished.
+    }
+    display.OnDisplayDidFinishFrame(incoming.frame_id,
+                                    viz::DisplaySchedulerDrawResult::kDrawn);
+    CHECK_EQ(callbacks, 0u);
+    if (base::CommandLine::ForCurrentProcess()->HasSwitch("mojo-sync-duplicate"))
+      display.OnDisplayDidFinishFrame(incoming.frame_id,
+                                      viz::DisplaySchedulerDrawResult::kDrawn);
+    if (incoming.frame_id == a.frame_id) {
+      // This sink only registers after the display has already completed.
+      static_cast<viz::FrameSinkObserver&>(source)
+          .OnFrameSinkDidBeginFrame(later, incoming);
+    }
+  });
+  AdmissionObserver observer(action);
+  source.AddObserver(&observer);
+  source.IssueExternalBeginFrame(a, base::BindLambdaForTesting([&](const viz::BeginFrameAck& ack) {
+    CHECK(!observer.delivering);
+    CHECK(ack.frame_id == a.frame_id && ack.has_damage);
+    CHECK_EQ(callbacks, 0u);
+    // Callback reentry is safe only after the old fanout has fully unwound.
+    source.IssueExternalBeginFrame(b, base::BindLambdaForTesting([&](const viz::BeginFrameAck& next) {
+      CHECK(!observer.delivering);
+      CHECK(next.frame_id == b.frame_id && next.has_damage);
+      ++callbacks;
+    }));
+    ++callbacks;
+  }));
+  if (wait_for_sinks) {
+    CHECK_EQ(callbacks, 0u);
+    CHECK_EQ(source.pending_frame_sinks_for_testing().size(), 1u);
+    if (base::CommandLine::ForCurrentProcess()->HasSwitch("mojo-pending-duplicate"))
+      display.OnDisplayDidFinishFrame(a.frame_id,
+                                      viz::DisplaySchedulerDrawResult::kDrawn);
+    static_cast<viz::FrameSinkObserver&>(source).OnFrameSinkDidFinishFrame(later, a);
+  }
+  CHECK_EQ(callbacks, 2u);
+  CHECK(source.pending_frame_sinks_for_testing().empty());
+  CHECK(!source.original_frame_id_for_testing());
+  source.RemoveObserver(&observer);
+  manager.UnregisterBeginFrameSource(&source);
+  std::cout << "real Mojo synchronous admission passed wait=" << wait_for_sinks << '\n';
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -293,6 +389,12 @@ int main(int argc, char** argv) {
   base::FeatureList::SetInstance(std::move(features));
   base::SingleThreadTaskExecutor tasks;
   const auto* command = base::CommandLine::ForCurrentProcess();
+  if (command->HasSwitch("mojo-sync") || command->HasSwitch("mojo-sync-fast") ||
+      command->HasSwitch("mojo-sync-duplicate") ||
+      command->HasSwitch("mojo-pending-duplicate")) {
+    MojoSynchronousAdmission(!command->HasSwitch("mojo-sync-fast"));
+    return 0;
+  }
   if (command->HasSwitch("mojo-stale") || command->HasSwitch("mojo-duplicate") ||
       command->HasSwitch("mojo-foreign") || command->HasSwitch("mojo-future") ||
       command->HasSwitch("mojo-unproven-old")) {

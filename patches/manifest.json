@@ -55,7 +55,7 @@
     {
       "id": "external-begin-frame-completion",
       "path": "0011-external-begin-frame-completion.patch",
-      "sha256": "8fd2d7b8783dcd112f5049996cc40b8ce8e0814c5fad75e3b2e53b1141fd093e"
+      "sha256": "d1045e1e20327d0f1361753d45622729df39d9ec0177784b88108916ee99b40c"
     }
   ]
 }
