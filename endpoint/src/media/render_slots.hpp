@@ -26,6 +26,8 @@ class RenderSlots {
  bool Begin(uint32_t interval_us,bool force,std::string&,bool* sent=nullptr);
  void Pressure(bool encoder_backlog);
  bool HasCapacity()const;
+ // Borrowed by the owner thread until the next Open or Close.
+ HANDLE EventHandle()const;
  Result Poll(remotekit_rtc_frame&,SharedAtlasFrame&,std::string&);
  SharedAtlasFrame LatestMetadata()const;
  ID3D11Device5* Device()const;

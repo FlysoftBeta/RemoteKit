@@ -2,6 +2,11 @@
 
 由root维护。最新已发布源码94cd174，取件码352318；Comp/Rend重构及规定范围新增路径验证已完成，不重复历史性能组。旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
+## Wake优先发帧（2026-11-04，源码完成，未打包上传）
+
+- RENDER-3：旧实现只在轮询发现Wake时清除deadline，SDK callback不能中断Comp的timer等待，且未发送成功的Begin也会推进一个帧间隔。现以每代独立Windows事件唤醒Comp，入队/Signal与出队/Reset共用锁；输出暂停时不等待未消费的事件，旧代事件不唤醒当前代。合法Wake的优先请求保留到Begin实际发送，Slot占满或SDK_BUSY不会消耗它，Stop/换代取消，零码率/FPS及产品可见性门禁保持。
+- 验证：Endpoint Release增量构建通过；生产CompBeginSchedule/CompPacing和RenderEventQueue两项CTest通过，覆盖提前到期、Slot饱和/BUSY、发送后周期、零rate/Stop/旧代，以及实际Windows事件对长timer的唤醒、预先Signal、drain后重新入队和代隔离。没有真实GPU/浏览器复验或毫秒延迟测量；按本次要求不打包上传。
+
 ## Comp / Rend重构（2026-11-04，已交付352318）
 
 - RENDER-1：Comp Slot Begin、Reject/真实Fence、FIFO Stop/Stopped及Idle/Wake已实现。迟到Begin清除Idle证明、跨通道关闭未排空及多出口未退休已修复；CPU及157/89真实组通过，单次尾IDR/Wake正确，29个旧代全部退休，无unknown GPU retention。

@@ -1196,7 +1196,12 @@ struct Session {
   if(!pace_timer){std::lock_guard lock(stats->mutex);stats->error="high resolution Comp timer unavailable";return;}
   struct TimerCloser {HANDLE value;~TimerCloser(){CloseHandle(value);}} timer_closer{pace_timer};
   uint64_t observed_wakes=pool.Stats().wakes;
-  int64_t last_stats=QpcNow(),next_begin=0;uint32_t official_max_fps=240,codec_max_fps=240;remotekit::CompCadence cadence;
+  remotekit::CompBeginSchedule begin_schedule;
+  auto observe_wake=[&]{
+   const auto wakes=pool.Stats().wakes;
+   if(wakes!=observed_wakes){observed_wakes=wakes;begin_schedule.Wake();}
+  };
+  int64_t last_stats=QpcNow();uint32_t official_max_fps=240,codec_max_fps=240;remotekit::CompCadence cadence;
   uint64_t previous_encoded=stats->completed.load(),previous_bytes=stats->bytes.load(),previous_copies=pool.copied_frames();
   uint64_t previous_delivered=pool.delivered_frames();
   bool stream_started=false;remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
@@ -1226,7 +1231,7 @@ struct Session {
      if(connected!=rtc_connected.exchange(connected)) {
       if(tail_attempt)tail_attempt->CancelWaiting();
       tail_attempt.reset();
-      stream_started=false;next_tail_attempt_ms=0;next_begin=0;
+      stream_started=false;next_tail_attempt_ms=0;begin_schedule.Reset();
       InvalidateLayout(connected?"rtc-resuming":"rtc-disconnected");
       try {
        if(connected) {OpenOutput();refresh_connected=true;}
@@ -1262,13 +1267,13 @@ struct Session {
    }
    remotekit_rtc_frame frame{};remotekit::SharedAtlasFrame metadata{};std::string error;
    auto result=output_suspended?RenderSlots::Result::idle:pool.Poll(frame,metadata,error);
-   const auto wakes=pool.Stats().wakes;if(wakes!=observed_wakes){observed_wakes=wakes;next_begin=0;}
+   observe_wake();
    if(first_source && result==RenderSlots::Result::ready){MarkConnection(ConnectionPhase::source_frame);first_source=false;}
    if(result==RenderSlots::Result::reconfigure) {
     InvalidateLayout("reconfigure");
     if(tail_attempt)tail_attempt->CancelWaiting();
     tail_attempt.reset();
-    stream_started=false;next_tail_attempt_ms=0;next_begin=0;
+    stream_started=false;next_tail_attempt_ms=0;begin_schedule.Reset();
     idle=remotekit::IdleIdrPolicy(options.idle_idr_ms);
     effective_idle_ms=idle.delay_ms();source_interval_ms=0;last_tail_age_ms=0;
     try {
@@ -1316,7 +1321,7 @@ struct Session {
     if(state!=State::source_wait && state!=State::encoding)tail_attempt.reset();
    }
    const bool tail_ready=idle.TailDue(now_ms)&&!tail_attempt&&now_ms>=next_tail_attempt_ms;
-   if(!output_suspended && comp_bitrate.load() && sampling_fps && now>=next_begin) {
+   if(!output_suspended && comp_bitrate.load() && sampling_fps && begin_schedule.Due(now)) {
     const auto interval=static_cast<uint32_t>((1000000ull+sampling_fps-1)/sampling_fps);
     pool.Pressure(stats->pending.load()>1);
     bool sent=false;const bool force_tail=tail_ready&&tail_begins<3;
@@ -1325,7 +1330,9 @@ struct Session {
      {std::lock_guard lock(stats->mutex);stats->error=error;}InvalidateLayout("render-begin-failed");break;
     }
     if(sent&&force_tail)++tail_begins;
-    next_begin=now+std::max<int64_t>(1,QpcFrequency()/sampling_fps);
+    // Begin can drain a Wake queued after Poll. A sent Begin satisfies it.
+    observe_wake();
+    begin_schedule.Attempted(now,std::max<int64_t>(1,QpcFrequency()/sampling_fps),sent);
    }
    if(result==RenderSlots::Result::ready) {
     consecutive_reconfigures=0;
@@ -1412,11 +1419,13 @@ struct Session {
     report["clockUncertaintyUs"]=pool.clock_uncertainty_us();
     Send(report);last_stats=now;
    }
-   const auto remaining=next_begin>QpcNow()?next_begin-QpcNow():0;
+   const auto remaining=std::max<int64_t>(0,begin_schedule.deadline()-QpcNow());
    const auto wait_us=std::min<int64_t>(1000,remaining?std::max<int64_t>(1,remaining*1000000/QpcFrequency()):1000);
    LARGE_INTEGER due{};due.QuadPart=-wait_us*10;
-   if(!SetWaitableTimerEx(pace_timer,&due,0,nullptr,nullptr,nullptr,0) || WaitForSingleObject(pace_timer,2)==WAIT_FAILED){
-    std::lock_guard lock(stats->mutex);stats->error="Comp high resolution timer failed";break;
+   const HANDLE wait_handles[]={pace_timer,output_suspended?nullptr:pool.EventHandle()};
+   if(!SetWaitableTimerEx(pace_timer,&due,0,nullptr,nullptr,nullptr,0) ||
+      WaitForMultipleObjects(wait_handles[1]?2:1,wait_handles,FALSE,2)==WAIT_FAILED){
+    std::lock_guard lock(stats->mutex);stats->error="Comp pacing wait failed";break;
    }
   }
  }

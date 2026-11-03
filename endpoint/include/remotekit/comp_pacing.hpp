@@ -4,6 +4,24 @@
 #include <cstdint>
 #include <optional>
 namespace remotekit {
+class CompBeginSchedule {
+ public:
+  void Reset() { deadline_ = 0; wake_pending_ = false; }
+  void Wake() { deadline_ = 0; wake_pending_ = true; }
+  bool Due(int64_t now) const { return now >= deadline_; }
+  int64_t deadline() const { return deadline_; }
+
+  void Attempted(int64_t now, int64_t interval, bool sent) {
+    if (wake_pending_ && !sent) return;
+    deadline_ = now + interval;
+    wake_pending_ = false;
+  }
+
+ private:
+  int64_t deadline_ = 0;
+  bool wake_pending_ = false;
+};
+
 // Owner-thread ledger. A sent Begin remains occupied until Reject, or until
 // ready and the final consumer lease and consumed GPU signal have completed.
 class CompCadence {

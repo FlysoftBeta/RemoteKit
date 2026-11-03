@@ -28,7 +28,7 @@
 - 音频播放配置按整个Viewer统一并由Control保存：更多菜单紧凑放左右声道多选Switch与“不播放”（清空选择）。
 - Viewer默认使用video呈现。显示布局来自客户端内容bounds，atlas矩形用于裁剪；不启用原生controls、画中画和多余媒体功能。新路径必须保持布局/输入对应正确，不能把实验原型直接当成已完成的产品实现。
 - 网页文件上传使用自定义dialog，支持设备文件和摄像头拍照。拍照用摄像头feature而非capture input；从短时间序列挑选几张清晰照片，并限制并发/内存，避免端侧卡顿。客户端、远程处理或WASM按实验证据取舍，不把候选方案固化为要求。
-- 实际GPU Fence保护读写与复用；CPU发布位、提交返回或持有HANDLE不能假装完成。Browser↔Endpoint采用Comp主动Slot Begin、Rend Reject或GPU Fence Signal，均绑定Slot Value并允许多个请求在途；成功帧不增加ready/present/release消息。Chromium内部IPC和Endpoint↔Client媒体元数据是不同边界。
+- 实际GPU Fence保护读写与复用；CPU发布位、提交返回或持有HANDLE不能假装完成。Browser↔Endpoint采用Comp主动Slot Begin、Rend Reject或GPU Fence Signal，均绑定Slot Value并允许多个请求在途；成功帧不增加ready/present/release消息。Rend主动Wake后Comp应尽快申请新帧，仍遵守Slot租约、背压及媒体暂停门禁。Chromium内部IPC和Endpoint↔Client媒体元数据是不同边界。
 - 保留Views/Aura功能适配是允许的；服务渲染目标为离屏，不需要本地屏幕Present。不要把无页面HWND说成整个Chromium进程零HWND。
 - 服务串流与输入的关键参数尽量独立于宿主系统设置，避免服务器显示器、DPI、刷新率或RDP改变行为；客户端DPR/刷新能力和产品媒体策略仍作为适配输入。具体固定值与实现方式放正式架构文档，不固化为用户要求。
 - 保留Chrome89支持。性能环境为UHD630、RTT10ms、24–48Mbps；用户把重载目标从4调到3，再允许2租户，接受新版Chromium模拟刷新验收。目标实际动态canvas≥50FPS、Pixel marker p95≤100ms；静态低FPS正常。

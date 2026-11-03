@@ -28,6 +28,8 @@ Idle Reject要求最后已接受内容已提交，且没有尚未合入atlas的�
 
 Idle停止常规Begin；Chromium的实际后续BeginFrame需求通过一次Wake状态事件恢复Comp。Wake绑定最后Idle Reject的完整身份，不是成功帧通知，不释放Slot。仍有rAF等后续渲染需求但本次没有像素更新时不能误报停止驱动。显式刷新及尾IDR可申请force Begin，Stop之后不再唤醒。
 
+合法Wake使Comp尽快发起下一帧：事件到达可中断Comp的定时等待，处理后清除旧帧期限。若Slot仍被占用或SDK暂忙，保留这次优先请求，直到成功发送Begin再恢复正常帧间隔。RTC、产品可见性、输出暂停、WebRTC零码率/FPS及Slot租约门禁仍生效；Stop或换代取消旧请求。事件仅唤醒Comp线程，不代表GPU完成。
+
 ## WebRTC与几何
 
 优先高画质、自动、优先流畅分别映射`MAINTAIN_RESOLUTION`、`BALANCED`、`MAINTAIN_FRAMERATE`。这三个选项不再附带不同DPR、像素预算、目标码率或FPS预设。

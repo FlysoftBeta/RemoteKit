@@ -1,9 +1,8 @@
 #include "render_slots.hpp"
+#include "render_event_queue.hpp"
 #include "remotekit/comp_pacing.hpp"
 #include <atomic>
 #include <cstring>
-#include <mutex>
-#include <deque>
 #include <cmath>
 namespace remotekit::media {
 namespace {
@@ -18,13 +17,13 @@ struct RenderSlots::State {
  remotekit_sdk_render_setup setup{};Sdk* sdk=nullptr;uint64_t channel=0;
  SharedRenderMapping* mapping=nullptr;ComPtr<ID3D11Device5> device;ComPtr<ID3D11DeviceContext4> context;
  std::array<Slot,4> slots;CompPacing pacing;uint64_t next_cookie=0;
- std::mutex events_mutex;std::deque<remotekit_sdk_render_event> events;
+ RenderEventQueue events;
  StatsSnapshot* counters=nullptr;bool unknown_counted=false;
  bool fatal=false,untracked=false,closing=false,producer_exited=false,stop_requested=false,stop_confirmed=false;std::string failure;SharedAtlasFrame latest{};
  std::shared_ptr<ServerTrace> trace;
  TraceIds Ids(const Slot& slot)const{TraceIds ids;ids.frame_id=slot.cookie;ids.source_frame_id=slot.metadata.frame_id;ids.generation=setup.generation;ids.capture_time_us=slot.metadata.capture_time_us;return ids;}
  std::optional<double> capture_ready_ms;remotekit_rtc_clock_sample clock{};
- static void Event(void* ptr,const remotekit_sdk_render_event* event){auto* s=static_cast<State*>(ptr);std::lock_guard lock(s->events_mutex);s->events.push_back(*event);}
+ static void Event(void* ptr,const remotekit_sdk_render_event* event){static_cast<State*>(ptr)->events.Push(*event);}
  static void Retain(void* ptr,uint64_t cookie){auto* slot=static_cast<Slot*>(ptr);if(slot->cookie==cookie)slot->refs.fetch_add(1);}
  static void Release(void* ptr,uint64_t cookie){auto* slot=static_cast<Slot*>(ptr);if(slot->cookie==cookie)slot->refs.fetch_sub(1);}
  void CloseChannel(){if(channel){sdk->remotekit_sdk_render_close(channel);channel=0;}}
@@ -35,7 +34,7 @@ struct RenderSlots::State {
   else {fatal=true;failure="render Stop send failed; unresolved requests retained";CloseChannel();}
  }
  bool Advance(std::string& error){
-  std::deque<remotekit_sdk_render_event> incoming;{std::lock_guard lock(events_mutex);incoming.swap(events);}
+  auto incoming=events.Drain();
   for(auto& e:incoming){if(e.type!=REMOTEKIT_SDK_RENDER_FATAL && e.generation!=setup.generation)continue;
    if(e.type==REMOTEKIT_SDK_RENDER_REJECT){if(!pacing.Reject({e.generation,e.value,e.slot})){fatal=true;failure="render Reject identity mismatch";}
     else {if(e.reason==REMOTEKIT_SDK_RENDER_IDLE){++counters->rejectIdle;if(pacing.IdleRejected({e.generation,e.value,e.slot}))++counters->idleEntries;}else if(e.reason==REMOTEKIT_SDK_RENDER_NOT_READY)++counters->rejectNotReady;else if(e.reason==REMOTEKIT_SDK_RENDER_REJECT_STOPPED)++counters->rejectStopped;
@@ -85,6 +84,7 @@ void RenderSlots::Reap(){PublishGuard publish{*this};for(auto it=retired_.begin(
 bool RenderSlots::Open(remotekit_sdk_render_setup setup,Sdk& sdk,std::string& error){PublishGuard publish{*this};
  Reap();if(state_){state_->RequestStop();retired_.push_back(std::move(state_));}
  auto s=std::make_shared<State>();s->setup=setup;s->sdk=&sdk;s->counters=&counters_;s->clock=clock_;s->trace=trace_;state_=s;
+ if(!s->events.handle()){error="render event creation failed";return false;}
  if(setup.struct_size!=sizeof(setup)||!setup.generation||!setup.width||!setup.height||setup.mapping_size!=sizeof(SharedRenderMapping)){error="render setup ABI mismatch";return false;}
  LUID luid{setup.adapter_luid_low,setup.adapter_luid_high};
  if(device_ && (adapter_.LowPart!=luid.LowPart||adapter_.HighPart!=luid.HighPart)){error="render adapter changed; peer rebuild required";return false;}
@@ -104,6 +104,7 @@ bool RenderSlots::Begin(uint32_t interval,bool force,std::string& error,bool* se
  if(result!=0){s.pacing.Reject(*id);if(result!=REMOTEKIT_SDK_BUSY){error="render Begin send failed "+std::to_string(result);return false;}}else {++counters_.begins;if(sent)*sent=true;RK_SERVER_TRACE(s.trace,"render_begin",(TraceIds{0,0,id->generation,0,0}),rk_record.slot=id->slot;rk_record.fence=id->value;rk_record.reason=force?"force":"cadence";);}return true;
 }
 bool RenderSlots::HasCapacity()const{return state_&&state_->pacing.occupied()<state_->pacing.depth();}
+HANDLE RenderSlots::EventHandle()const{return state_?state_->events.handle():nullptr;}
 void RenderSlots::Pressure(bool backlog){PublishGuard publish{*this};if(state_)state_->pacing.Pressure(backlog,state_->pacing.occupied()>=state_->pacing.depth());}
 RenderSlots::Result RenderSlots::Poll(remotekit_rtc_frame& frame,SharedAtlasFrame& metadata,std::string& error){PublishGuard publish{*this};Reap();if(!state_)return Result::idle;auto& s=*state_;
  if(!s.Advance(error))return Result::error;

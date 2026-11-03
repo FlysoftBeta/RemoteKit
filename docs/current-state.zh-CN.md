@@ -4,6 +4,8 @@
 
 ## 当前交付
 
+源码新增Rend Wake优先发帧：当前代渲染事件可唤醒Comp的定时等待；合法Wake清除旧期限，Slot饱和或SDK暂忙时保留优先请求，成功发送Begin后恢复正常帧间隔。Endpoint Release增量与Comp节拍、Windows队列事件两项定向检查通过；本次没有重跑真实GPU/浏览器或测量唤醒延迟，按用户要求未打包上传。下面的352318包不含此增量。
+
 Comp / Rend重构已完成并上传。发布源码`94cd1740148dda41f5609eb604bbd2d9d669fee3`，取件码[352318](https://airportal.cn/352318/RGG7EQ9ZwD)。上传完成于2026-11-04 00:50（Asia/Singapore），界面显示有效24小时、可下载2次、无密码。
 
 包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-004705.zip`，462555599 bytes，SHA256 `3eb873b833d8e7a958726861187f190a35a8c12c8ef6b4e2dce28db4c3dc0117`。manifest记录干净源码，560文件逐项hash、ZIP CRC/hash、CLI启动检查及独立包内产品检查均通过。实际包内注册/注销/登录、UI建窗与导航、H264默认video、可信点击/滚动、播放前设备枚举及媒体身份保持通过；加载Node/Endpoint/Browser/SDK/Viz路径和hash已核对，无FATAL/CHECK/GPU退出，自有进程已清理。[交付记录](../develop/docs/comp-rend-delivery-20261104.md)。
@@ -19,7 +21,7 @@ Chrome157/DPR2与Chrome89/DPR1真实通过默认video首帧、双Window画面及
 - Endpoint Comp选择空闲Slot，异步发送带generation/slot/value的Begin；Browser Rend返回Reject，或在实际GPU队列Signal对应Slot ready Fence。最多四个atlas Slot，活动深度按压力变化，允许多个请求在途。成功帧没有ready/present/release IPC。
 - 每WebContents独立Aura root，经BeginFrameSource驱动专用Viz OSR OutputDevice，直接绘制共享BGRA目标；Browser在GPU上合成各plane为请求指定的atlas Slot。旧Capture/CopyOutput生产路径、旧自治节拍及桥接fallback删除，不需要本地屏幕Present。
 - 每Slot独立ready/consumed Fence及元数据。必须观察真实ready后才编码；SDK、转换和硬件编码租约全部结束，且consumed实际完成后才能复用。Stop/Stopped仅证明有序请求排空；未完成GPU工作继续保留。
-- Idle只在最后有效内容已提交、后续渲染需求停止时返回；后续Chromium需求通过绑定最后Idle身份的Wake恢复。已在途的晚到Begin不能清除唤醒证明。单次尾IDR通过force Begin取得合法Slot。
+- Idle只在最后有效内容已提交、后续渲染需求停止时返回；后续Chromium需求通过绑定最后Idle身份的Wake恢复并优先安排新帧，遵守原有媒体门禁和Slot背压。已在途的晚到Begin不能清除唤醒证明。单次尾IDR通过force Begin取得合法Slot。
 - 三档质量分别映射WebRTC的MAINTAIN_RESOLUTION、BALANCED、MAINTAIN_FRAMERATE。官方source adaptation选择缩放/丢帧，SetRates驱动硬件码率与帧率；删除自制延迟阈值、DPR因子和码率/FPS预设。Comp另外遵守客户端、编码器及协商H264的硬能力上限。
 - 媒体适配缩放完整atlas，页面DIP和Client Scale不随网络改变。X/Y对齐取整分别进入ROI、输入与caret转换；尺寸变化保持旧布局输入门禁及新布局首帧屏障。
 - 实际receiver设置jitterBufferTarget=0；Chrome89仅在标准属性缺失时使用可用的playoutDelayHint=0，能力与读回分别报告。
