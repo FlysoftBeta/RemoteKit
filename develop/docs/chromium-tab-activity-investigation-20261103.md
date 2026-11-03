@@ -1,6 +1,6 @@
 # Chromium tab 激活、后台行为与 content API
 
-调查日期：2026-11-03。基于本机 Chromium 157.0.8103.15，基线 `1aa07b638799e59656559ae6c6649d4b197f555e`，以及 RemoteKit 当前源码。本文是静态调用链调查，没有执行新的运行实验，也不代表修改了后台策略。
+调查日期：2026-11-03。基于本机 Chromium 157.0.8103.15，基线 `1aa07b638799e59656559ae6c6649d4b197f555e`，以及调查时RemoteKit 70e4243附近的源码快照。本文为过程证据；其中旧Capture路径不代表后续Comp/Rend实现。当前运行策略见正式[Control设计](../../docs/control-plane.zh-CN.md#可见性与memory-saver)。
 
 ## 结论与状态映射
 
@@ -73,8 +73,14 @@ renderer 接收状态后也调整主线程 scheduler，部分 feature 还调整 
 - `browser/gpu_atlas.cc:452` 当前捕获使用 `stay_hidden=false`。`browser/harness.cc:285` 只把产品 visible 的 view 加入输出，`Capture::Stop`（`gpu_atlas.cc:87`）释放捕获计数。正常操作先 `SetVisible(false)`，之后 `ApplyLayout/UpdateOutput` 才删除 capture；同一同步操作内短暂保留 Page-visible 例外，释放后重新计算 visibility。因此正常隐藏路径会撤掉该捕获例外；本次没有据此发现“后台永久 visible”的已证实 bug，也未新增运行证据。
 - `browser/main_delegate.cc:115` 关闭宿主原生窗口遮挡引起的后台化及 `CalculateNativeWinOcclusion`，用于隔离服务器屏幕状态；这不等于关闭产品 `WasHidden()`、Blink timer 节流或全部 renderer 后台优先级。
 - 当前 Browser 未装配 Chrome Performance Manager，未显式调用 `SetPriorityOverride`。基础 content 后台机制仍生效；Chrome 额外投票策略不会因此自动存在。
-- Control 的隐藏计时与 Memory Saver 属于自身产品策略，见 [Control 可见性与 Memory Saver](control-plane.zh-CN.md#可见性与memory-saver)。多个独立 Window 同时显示时，其中页面应保持 visible，只有接收输入的目标获得 focus；不能把未聚焦 Window 的可见页面当作后台 tab。
+- Control 的隐藏计时与 Memory Saver 属于自身产品策略，见 [Control 可见性与 Memory Saver](../../docs/control-plane.zh-CN.md#可见性与memory-saver)。多个独立 Window 同时显示时，其中页面应保持 visible，只有接收输入的目标获得 focus；不能把未聚焦 Window 的可见页面当作后台 tab。
 
 适配方向是继续让 Control 决定产品 visible/focus/residency，Browser 映射 content API。若希望补齐 Chrome 的媒体/加载等优先级例外，应单独定义并验证进程聚合策略；不要引入 Browser/TabStripModel 产品对象图，也不要直接按 tab 焦点调用进程级 override。
 
 公开 API 可在线核对 [Chromium WebContents 声明](https://chromium.googlesource.com/chromium/src/+/main/content/public/browser/web_contents.h)；本文细节以以上固定本机版本为准。
+
+## Memory Saver accounting取舍
+
+固定157的`memory_saver_mode_policy.cc:150`、`:220`、`:233`采用隐藏计时、LiveTicks排除睡眠、重访保护及资格复查：三档等待6/4/2小时，重访超过5/15/15次不再启动timer。它不是通用的每tab内存/CPU加权算法。Blink CPUTimeBudgetPool属于页面调度；FreezingPolicy的CPU/私有内存采样和MemoryCoordinator的缓存限额是另两类机制。
+
+本次采用分层生命周期、单调时钟、保护资格复查；保留远程服务120秒回收尺度，增加30秒安全冻结。未照搬Chrome小时级计时及会使高频重访页面长期不回收的累计重访保护，也未为缺少可靠测量数据的Control增加RSS评分。安全窗口从保护条件解除后重新累计，避免后台音频或导航刚结束就丢弃。长观察间断重置是保守处理，不等同于精确复刻LiveTicks的睡眠扣除。

@@ -38,7 +38,11 @@ state带serverIncarnation与单调snapshotSequence，独立于workspace.revision
 
 产品visible由活跃Viewer连接、实际显示Window及其中activeTab决定。Viewer断线设false。RTC状态只控制渲染/编码需求；不能把hidden页面反向WasShown。设置Dialog覆盖显示，不改变远程viewport。
 
-默认对隐藏120秒且Browser canDiscard允许的页发discard。Browser检查媒体、设备、导航、关联页面、输入锁、beforeunload等实时条件，执行时再次检查。恢复等待actual=live且pending=false再显示；状态不确定或失败保留原因，不伪装完成。恢复数据不经过Client。
+隐藏通过content可见性触发Blink后台调度及renderer进程优先级计算；进程内其他可见页面或媒体等可保留高优先级，焦点不作为隐藏信号。多个Window同时显示时，各自页面保持visible。
+
+Memory Saver默认开启。在线与Viewer断线共用后台策略：持续安全隐藏30秒发freeze，累计安全隐藏120秒发discard，冻结后继续计时；重新可见先恢复。安全资格使用Browser canDiscard，媒体、采集、导航、页面请求、关闭或恢复等保护会清空计时；策略自身freeze的pending阶段暂停累计。计时使用Control本地单调时钟，绑定Browser incarnation与执行实例；缺失对象、重新显示、关闭设置及超过15秒的观察间断均清空，不把宿主休眠或长时间失联当成持续安全闲置。计时不持久化，不跨机传绝对时间。
+
+Browser执行freeze/discard时再次检查资格，包含媒体、设备、导航、关联页面、输入锁、beforeunload和页面请求等实时条件，避免自动冻结取消新到达的页面对话。恢复等待actual=live且pending=false再显示；状态不确定或失败保留原因，不伪装完成。恢复数据不经过Client。普通无beforeunload的表单编辑尚无独立保护，不能宣称完整复制Chrome回收资格。
 
 ## 新窗口与页面请求
 

@@ -24,7 +24,7 @@ Control保存产品真相，Endpoint Session/Browser保存Chromium专用恢复�
 
 产品visible、焦点、渲染需求、保留执行实例是不同状态。Viewer WS断开使visible=false；RTC不可用停止渲染/编码，不改产品visible。源输出故障/重建/暂停以新epoch空layout撤销Client旧ready，恢复后匹配新帧才允许输入。
 
-Control默认回收隐藏120秒且Browser canDiscard允许的页。Browser以实时媒体/设备/导航/锁/关联页面/输入/请求等完整守卫决定能否执行，并等待真实renderer完成。accepted、pending、actual、last_lifecycle分开；失败/超时不能冒充完成。相关联的活跃Contents可能阻止单页回收。
+Control默认对持续安全隐藏30秒的页面冻结，120秒丢弃；在线与Viewer断线共用单调时钟计时及Browser canDiscard资格，保护条件、实例替换或长观察间断清空计时。基础后台调度及进程优先级由content visibility驱动，多个可见Window不因失焦降为hidden。Browser执行点复查实时媒体/设备/导航/锁/关联页面/输入/请求等守卫，并等待真实renderer完成。accepted、pending、actual、last_lifecycle分开；失败/超时不能冒充完成。相关联的活跃Contents可能阻止单页回收，详细规则见[Control设计](control-plane.zh-CN.md#可见性与memory-saver)。
 
 | 操作 | 实际行为 |
 |---|---|

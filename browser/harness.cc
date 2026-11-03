@@ -1152,7 +1152,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       operation = Lifecycle::discard;
     if (!operation)
       return error("unknown_lifecycle_action");
-    if (*operation == Lifecycle::discard) {
+    if (*operation == Lifecycle::discard || *operation == Lifecycle::freeze) {
       const auto allowed = CanDiscard(index);
       if (!allowed) return error(allowed.message);
     }

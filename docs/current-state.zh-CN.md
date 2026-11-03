@@ -4,7 +4,7 @@
 
 **当前发布为11299d9回环崩溃修复包，取件码467761。** 已提交推送并完成新包独立验证及上传。旧1e13f11/353287存在发布后实际崩溃，不能视为本修复版。
 
-Chromium tab active/inactive 的静态调用链已核对：基础后台调度/进程优先级由 content visibility 驱动，Chrome PM另有投票、冻结与回收策略；焦点不等于可见性。见[Contents API对照](chromium-tab-activity.zh-CN.md)。本次仅调查文档，未改运行策略或新增运行验收。
+后台策略由Control统一维护：content visibility提供基础节流及renderer进程优先级；Memory Saver对持续安全隐藏页面30秒冻结、120秒丢弃，重新可见走恢复。保护条件、执行实例替换及长观察间断清空单调计时；Native执行点复查资格。规则见[Control设计](control-plane.zh-CN.md#可见性与memory-saver)。
 
 ## 467761后续修复（源码验收完成，待发布）
 

@@ -2061,7 +2061,7 @@ struct Session {
   }
   if(method=="view.lifecycle") {
    const auto action=Required(request,"action");
-   if(action!="discard" && action!="restore")throw std::runtime_error("unsupported lifecycle action");
+   if(action!="discard" && action!="freeze" && action!="restore")throw std::runtime_error("unsupported lifecycle action");
    if(Recovering(view))return {{"accepted",true},{"pending",true},{"completed",false},{"recovery",RecoveryStatus(recoveries.at(view))}};
    return Rpc({{"method","lifecycle"},{"session",id},{"view",view},{"action",action}});
   }

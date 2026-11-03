@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { BackgroundPolicy } from './background-policy';
 import type { ProductOperation, OperationReceipt, ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, AppliedMediaPolicy, PendingClose } from '../shared/product';
 import { resolveNavigation } from './navigation';
 import { SEARCH_ENGINES, FILE_LIMITS } from '../shared/product';
@@ -35,7 +36,7 @@ export class Control extends EventEmitter {
   private viewers = new Map<string, { id: string; authentication?: { identity: string; valid: () => boolean }; revoke: (reason: 'another-viewer' | 'logout') => void; viewport?: ViewerViewport; feedback?: Record<string, unknown> }>();
   private lastViewports = new Map<string, ViewerViewport>();
   private started = new Set<string>();
-  private hiddenSince = new Map<string, number>();
+  private backgroundPolicy = new BackgroundPolicy();
   private transitions = new Map<string, { action: string; at: number }>();
   private siteApplications = new Map<string, { encoded: string; applied: boolean; browserPid?: number }>();
   private mediaApplications = new Map<string, { encoded: string; applied: boolean; browserPid?: number }>();
@@ -169,7 +170,7 @@ export class Control extends EventEmitter {
       });
     }
   }
-  async reconcileAll() { this.endpointGeneration = Math.max(this.endpointGeneration, ...this.tenantEndpointGenerations.values()) + 1; this.tenantEndpointGenerations.clear(); this.pendingRtcChecks.clear(); this.closeRelays(); this.connections.clear(); this.connectionLeases.clear(); this.fileAuthorizations.clear(); this.configurations.clear(); this.started.clear(); this.transitions.clear(); this.siteApplications.clear(); this.mediaApplications.clear(); this.actualMediaPolicies.clear(); this.dialogs.clear(); for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()])) await this.serial(tenant, async () => { if (this.diagnosticTenants.has(tenant)) { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); } await this.reconcile(tenant); this.push(tenant); }).catch(() => {}); }
+  async reconcileAll() { this.endpointGeneration = Math.max(this.endpointGeneration, ...this.tenantEndpointGenerations.values()) + 1; this.tenantEndpointGenerations.clear(); this.pendingRtcChecks.clear(); this.closeRelays(); this.connections.clear(); this.connectionLeases.clear(); this.fileAuthorizations.clear(); this.configurations.clear(); this.started.clear(); this.transitions.clear(); this.backgroundPolicy.clear(); this.siteApplications.clear(); this.mediaApplications.clear(); this.actualMediaPolicies.clear(); this.dialogs.clear(); for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()])) await this.serial(tenant, async () => { if (this.diagnosticTenants.has(tenant)) { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); } await this.reconcile(tenant); this.push(tenant); }).catch(() => {}); }
   async action(tenant: string, body: any) {
     this.diagnosticTenants.add(tenant);
     return this.serial(tenant, async () => {
@@ -519,7 +520,7 @@ export class Control extends EventEmitter {
       }
       this.push(tenant); return { state: this.productState(tenant), ...(application ? { application } : {}) };
   }
-  private removeProductTab(state: ProductWorkspace, tab: ProductTab) { state.tabs = state.tabs.filter(t => t.id !== tab.id); const w = state.windows.find(w => w.id === tab.windowId); if (w?.activeTabId === tab.id) w.activeTabId = state.tabs.find(t => t.windowId === w.id)?.id ?? null; if (state.pendingClose?.id === tab.id) state.pendingClose = null; this.hiddenSince.delete(state.tenantId + '/' + tab.webviewId); }
+  private removeProductTab(state: ProductWorkspace, tab: ProductTab) { state.tabs = state.tabs.filter(t => t.id !== tab.id); const w = state.windows.find(w => w.id === tab.windowId); if (w?.activeTabId === tab.id) w.activeTabId = state.tabs.find(t => t.windowId === w.id)?.id ?? null; if (state.pendingClose?.id === tab.id) state.pendingClose = null; this.backgroundPolicy.forget(state.tenantId + '/' + tab.webviewId); this.transitions.delete(state.tenantId + '/' + tab.webviewId); }
   private pendingClose(id: string, result: any, windowId?: string): PendingClose {
     if (typeof result.browserIncarnation !== 'string' || !result.browserIncarnation || result.instance === undefined || result.document === undefined) throw new ApiError(409, 'Endpoint关闭请求缺少页面身份');
     const nativeRequestId = result.requestId === undefined ? undefined : String(result.requestId);
@@ -583,6 +584,7 @@ export class Control extends EventEmitter {
       // Native source/encoder application may finish after views or RTC exist.
       // Accepted policy is cached before their creation; stats retain unknown actuals.
       const snapshot = await this.endpoint.request('session.snapshot', tenant), state = this.store.workspace(tenant), actual: any[] = Array.isArray(snapshot?.views) ? snapshot.views : [];
+      this.backgroundPolicy.retain(tenant, new Set(snapshot.running === false || resourceLimitation ? [] : actual.filter(v => state.tabs.some(t => t.webviewId === String(v.viewId ?? v.view ?? v.id))).map(v => String(v.viewId ?? v.view ?? v.id))));
       if(typeof snapshot.browserIncarnation==='string')this.browserIncarnations.set(tenant,snapshot.browserIncarnation);
       for(const tab of state.tabs){const nav=tab.navigation;if(nav && !nav.resolved && ['applying','unknown'].includes(nav.status) && nav.browserIncarnation && (snapshot.running===false || typeof snapshot.browserIncarnation==='string' && snapshot.browserIncarnation!==nav.browserIncarnation)){
         nav.status='unknown';nav.resolved=true;tab.kind=nav.previousKind;tab.url=nav.previousUrl;if(tab.kind==='start')tab.loading=false;delete tab.pendingUrl;
@@ -656,7 +658,7 @@ export class Control extends EventEmitter {
       for (const t of state.tabs.filter(tab => tab.kind === 'start')) {
         const current=actual.find(v=>String(v.viewId??v.view??v.id)===t.webviewId),key=tenant+'/'+t.webviewId;
         if(!current){this.configurations.delete(key);continue;}
-        if(!this.hiddenSince.has(key))this.hiddenSince.set(key,Date.now());
+        this.backgroundPolicy.forget(key);
         const config={viewId:t.webviewId,visible:false,requireRunning:true},encoded=JSON.stringify(config);
         if(current.visible===true || current.visible!==false && this.configurations.get(key)!==encoded) {
           this.configurations.delete(key);
@@ -670,12 +672,12 @@ export class Control extends EventEmitter {
         if (!this.viewers.has(tenant)) { await this.observeOffline(tenant); return; }
         const current = actual.find(v => String(v.viewId ?? v.view ?? v.id) === t.webviewId), key = tenant + '/' + t.webviewId, visible = wanted(t), region = viewport?.windows.find(w => w.windowId === t.windowId), dpr = this.qualityFor(tenant, state).effectiveDpr;
         if (t.popup?.status === 'failed') continue;
-        if (visible) this.hiddenSince.delete(key); else if (!this.hiddenSince.has(key)) this.hiddenSince.set(key, Date.now());
+        if (visible) this.backgroundPolicy.forget(key);
         const actualState = current?.actual ?? 0, recovering = current?.recovery?.pending === true;
         let readyToShow = actualState === 0 && !current?.pending;
         if (visible && actualState !== 0 && !current?.pending) {
           const attempt = this.transitions.get(key); if (!attempt || attempt.action !== 'restore' || Date.now() - attempt.at > 12000) { await this.endpoint.request('view.lifecycle', tenant, { viewId: t.webviewId, action: 'restore' }); this.transitions.set(key, { action: 'restore', at: Date.now() }); } readyToShow = false;
-        } else if (readyToShow) this.transitions.delete(key);
+        } else if (readyToShow && this.transitions.get(key)?.action === 'restore') this.transitions.delete(key);
         // Endpoint hides the recovering WebContents while retaining this desired
         // visibility for its final recovery step. Do not persist a temporary hide.
         const config = { viewId: t.webviewId, width: region?.width ?? 1440, height: region?.height ?? 900, device: { mode: 'desktop', deviceScaleFactor: dpr }, visible: visible && (recovering || readyToShow) };
@@ -700,9 +702,7 @@ export class Control extends EventEmitter {
           if (current && new URL(t.url).origin === requestedOrigin) await this.endpoint.request('view.command', tenant, { viewId: t.webviewId, command: 'reload' });
           delete t.pendingUaReloadOrigin; this.saveProduct(state);
         }
-        if (!visible && state.settings.memorySaverEnabled && current?.canDiscard === true && !current.pending && actualState === 0 && !current.audible && !current.captured && !current.pending_close && !current.pageRequests?.pending?.length && current.close_state !== 'closing' && state.pendingClose?.id !== t.id && state.pendingWindowCloseId !== t.windowId && Date.now() - this.hiddenSince.get(key)! >= 120000) {
-          const attempt = this.transitions.get(key); if (!attempt || attempt.action !== 'discard' || Date.now() - attempt.at > 12000) { await this.endpoint.request('view.lifecycle', tenant, { viewId: t.webviewId, action: 'discard' }); this.transitions.set(key, { action: 'discard', at: Date.now() }); }
-        }
+        await this.maintainBackgroundTab(state, t, current, visible, snapshot.browserIncarnation);
       }
       for (const v of actual) { const viewId = String(v.viewId ?? v.view ?? v.id); if (!state.tabs.some(t => t.webviewId === viewId) && !v.provisional && !closedViews.has(viewId)) await this.endpoint.request('view.close', tenant, { viewId, force: true, orphan: true }); }
       if (resourceLimitation) {
@@ -714,20 +714,29 @@ export class Control extends EventEmitter {
   private async observeOffline(tenant: string) {
     // Snapshot is read-only. Maintenance must never revive a missing Browser/view.
     const snapshot = await this.endpoint.request('session.snapshot', tenant), state = this.store.workspace(tenant);
+    this.backgroundPolicy.retain(tenant, new Set(snapshot.running === false ? [] : (snapshot.views ?? []).filter((v: any) => state.tabs.some(t => t.webviewId === String(v.viewId ?? v.view ?? v.id))).map((v: any) => String(v.viewId ?? v.view ?? v.id))));
     await this.consumeClosedEvents(state, snapshot); this.dialogs.delete(tenant); this.fileRequests.delete(tenant); this.uploads.retireMissing(tenant, new Set());
     if (state.pendingClose) { const tab = state.tabs.find(t => t.id === state.pendingClose?.id); this.observePendingClose(state, snapshot, (snapshot.views ?? []).find((v: any) => String(v.viewId ?? v.view ?? v.id) === tab?.webviewId)); this.saveProduct(state); }
     if (snapshot.running === false) { this.started.delete(tenant); this.siteApplications.delete(tenant); this.mediaApplications.delete(tenant); this.actualMediaPolicies.delete(tenant); this.push(tenant); return; }
     for (const tab of state.tabs) {
       const current = (snapshot.views ?? []).find((view: any) => String(view.viewId ?? view.view ?? view.id) === tab.webviewId);
       if (!current) continue;
-      const key = tenant + '/' + tab.webviewId; if (!this.hiddenSince.has(key)) this.hiddenSince.set(key, Date.now());
+      const key = tenant + '/' + tab.webviewId;
       if (current.visible !== false) { await this.endpoint.request('view.configure', tenant, { viewId: tab.webviewId, visible: false, requireRunning: true }); this.configurations.delete(key); }
-      if (state.settings.memorySaverEnabled && current.canDiscard === true && !current.pending && current.actual === 0 && !current.audible && !current.captured && !current.pending_close && !current.pageRequests?.pending?.length && current.close_state !== 'closing' && state.pendingClose?.id !== tab.id && state.pendingWindowCloseId !== tab.windowId && Date.now() - this.hiddenSince.get(key)! >= 120000) {
-        const attempt = this.transitions.get(key);
-        if (!attempt || attempt.action !== 'discard' || Date.now() - attempt.at > 12000) { await this.endpoint.request('view.lifecycle', tenant, { viewId: tab.webviewId, action: 'discard', requireRunning: true }); this.transitions.set(key, { action: 'discard', at: Date.now() }); }
-      }
+      await this.maintainBackgroundTab(state, tab, current, false, snapshot.browserIncarnation);
     }
     const previousError = this.errors.delete(tenant); if (previousError) this.push(tenant);
+  }
+  private async maintainBackgroundTab(state: ProductWorkspace, tab: ProductTab, current: any, visible: boolean, browserIncarnation: unknown) {
+    const tenant = state.tenantId, key = tenant + '/' + tab.webviewId;
+    const action = this.backgroundPolicy.action(key, state.settings.memorySaverEnabled, visible,
+      tab.kind === 'start' || !!tab.popup && tab.popup.status !== 'adopted' || state.pendingClose?.id === tab.id || state.pendingWindowCloseId === tab.windowId, current, browserIncarnation);
+    if (!action) return;
+    const attempt = this.transitions.get(key);
+    if (attempt?.action === action && Date.now() - attempt.at <= 12000) return;
+    await this.endpoint.request('view.lifecycle', tenant, { viewId: tab.webviewId, action, requireRunning: true });
+    this.transitions.set(key, { action, at: Date.now() });
+    if (action === 'freeze') this.backgroundPolicy.freezeRequested(key);
   }
   private qualityController(tenant: string) { let controller = this.qualityControllers.get(tenant); if (!controller) this.qualityControllers.set(tenant, controller = new QualityController()); return controller; }
   private qualityFor(tenant: string, workspace = this.store.workspace(tenant)) { return this.qualityController(tenant).snapshot(workspace, this.viewers.get(tenant)?.viewport ?? this.lastViewports.get(tenant), Date.now(), this.diagnosticTenants.has(tenant), this.actualMediaPolicies.get(tenant) ?? null); }
