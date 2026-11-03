@@ -4,7 +4,9 @@
 
 ## 当前交付
 
-Comp / Rend重构已完成源码构建及Chrome157/89真实功能验收，正在提交与制作发布包。用户最新要求完成后上传并返回取件码；此前“仅本地包”要求已被替代。目前尚未生成或上传新架构包。
+Comp / Rend重构已完成并上传。发布源码`94cd1740148dda41f5609eb604bbd2d9d669fee3`，取件码[352318](https://airportal.cn/352318/RGG7EQ9ZwD)。上传完成于2026-11-04 00:50（Asia/Singapore），界面显示有效24小时、可下载2次、无密码。
+
+包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-004705.zip`，462555599 bytes，SHA256 `3eb873b833d8e7a958726861187f190a35a8c12c8ef6b4e2dce28db4c3dc0117`。manifest记录干净源码，560文件逐项hash、ZIP CRC/hash、CLI启动检查及独立包内产品检查均通过。实际包内注册/注销/登录、UI建窗与导航、H264默认video、可信点击/滚动、播放前设备枚举及媒体身份保持通过；加载Node/Endpoint/Browser/SDK/Viz路径和hash已核对，无FATAL/CHECK/GPU退出，自有进程已清理。[交付记录](../develop/docs/comp-rend-delivery-20261104.md)。
 
 Browser/SDK四目标及Endpoint Release已构建成功；Endpoint15项CPU测试与后续H264/生命周期定向检查、Slot/Wake编译期probe、WebRTC adaptation与3组BeginFrame probe通过。SDK195项导出依赖、4个公开头及import lib与实际消费者hash匹配；外部SDK/RTC/audio smoke 3/3通过，RTC smoke包含D3D纹理。
 
@@ -37,7 +39,7 @@ Memory Saver由Control维护：Viewer断线决定产品hidden与回收资格，R
 
 ## 已发布与重构前证据
 
-最新已上传版本仍为`11299d9`，取件码467761，旧包名`RemoteKit-win-x64-streaming-qsv-nvenc-20261103-221813.zip`，462549523 bytes。SHA256：`0699efcb56288d0dea734c256cf2b2c37f41d261ef298441694352723aa2e79c`。它修复音频设备枚举和Viz同步完成致命退出；560项manifest/ZIP及包内真实WebRTC操作、设备枚举和双声道PCM通过。[发布后修复运行](../develop/docs/loopback-crash-runtime-qa-20261103.md) · [构建](../develop/docs/loopback-hotfix-build-20261103.md)。
+重构前已上传版本`11299d9`，取件码467761，旧包名`RemoteKit-win-x64-streaming-qsv-nvenc-20261103-221813.zip`，462549523 bytes。SHA256：`0699efcb56288d0dea734c256cf2b2c37f41d261ef298441694352723aa2e79c`。它修复音频设备枚举和Viz同步完成致命退出；560项manifest/ZIP及包内真实WebRTC操作、设备枚举和双声道PCM通过。[发布后修复运行](../develop/docs/loopback-crash-runtime-qa-20261103.md) · [构建](../develop/docs/loopback-hotfix-build-20261103.md)。
 
 其后的`70e4243`已提交推送，按当时要求仅测试、未上传。修复Video回退原因误报、hidden/未ACK期间metadata重试预算，以及Viz相同frame ID重复接纳。Control293项、增量编译、12补丁可逆及89/157功能组通过；真实整个Viewer hidden未由headless产生，截图原始回退原因仍未知。该本地包另通过560项manifest/ZIP及包内注册、导航、点击/输入/wheel/resize、10次设备枚举和双声道PCM；无fatal、媒体身份保持、MSTP/draw0。证据`develop/tmp/release-70e4243-product-qa/test-summary.json`，详见[运行](../develop/docs/video-lifecycle-runtime-qa-20261103.md)与[构建](../develop/docs/video-lifecycle-build-20261103.md)。这些均属于重构前路径。
 

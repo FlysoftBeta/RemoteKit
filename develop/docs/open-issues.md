@@ -1,14 +1,14 @@
 # 当前问题与收尾记录
 
-由root维护。最新已发布基线11299d9，取件码467761；本批逐模块审阅、重构和规定范围新增路径验证已完成，不重复历史性能组。旧全库审查依据见[审查报告](post-release-astra-review.md)。
+由root维护。最新已发布源码94cd174，取件码352318；Comp/Rend重构及规定范围新增路径验证已完成，不重复历史性能组。旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
-## Comp / Rend重构（2026-11-04，功能验收完成）
+## Comp / Rend重构（2026-11-04，已交付352318）
 
 - RENDER-1：Comp Slot Begin、Reject/真实Fence、FIFO Stop/Stopped及Idle/Wake已实现。迟到Begin清除Idle证明、跨通道关闭未排空及多出口未退休已修复；CPU及157/89真实组通过，单次尾IDR/Wake正确，29个旧代全部退休，无unknown GPU retention。
 - RENDER-2：专用OSR OutputDevice与多plane GPU合成已构建并在UHD630通过首帧、双Window画面/输入、resize/focus/导航检查；默认video且组内RTC/track/video身份保持，无FATAL/CHECK/GPU退出。
 - RTC-1：WebRTC原生source adaptation、screenshare BALANCED/scaler、SetRates到QSV时基及三档映射已实现；旧网络/DPR策略删除。实际质量热切换、QSV时基Reset后持续解码通过。短限速组GCC目标下降和部分恢复已观测，但未触发网络尺寸变化；10秒恢复未回基线。驱动192次正status5及目标码率改写仍为已记录硬件限制，不宣称请求值等于实际线上码率。
 - RTC-2：157标准jitterBufferTarget与89兼容playoutDelayHint均实际读回0；89无标准属性。两版DPR/布局及ROI输入验收通过。
-- DELIVERY：源码阶段已验收，待root提交推送、包内检查及上传取件码；按最新指示上传，不重复旧性能矩阵。
+- DELIVERY：源码94cd174已提交推送；最终包560项manifest/ZIP、启动smoke及独立包内真实产品检查通过，已上传[352318](https://airportal.cn/352318/RGG7EQ9ZwD)。两处遗留诊断字串/注释清理后完成必要增量及SDK3项smoke；前一54ae4c2临时包未发布。详见[交付记录](comp-rend-delivery-20261104.md)，未重复旧性能矩阵。
 
 前三次实际首帧组分别发现并修复：Browser残留output.open旧fps前置；第二IsolatedConnection在Chromium157 ipcz替换原Control；Windows真OSR配置缺少合法GPU调度scope。现在render MessagePipe通过原Control成功describe一次转交，token一次claim；0013仅在Windows真OSR的Display Configure/Begin/Finish使用现有ScopedAllowScheduleGpuTask，保留全局DCHECK及普通路径。对应生产probe/增量构建及第四次157/89功能组通过，前三次失败现场完整保留于[运行记录](comp-rend-runtime-20261103.md)。
 
