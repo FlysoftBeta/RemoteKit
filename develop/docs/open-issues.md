@@ -2,7 +2,8 @@
 
 ## 移动端低RTT卡顿与诊断（2026-11-04，已交付761470）
 
-- MOBILE-LAG（待定位）：UD710、Brave138、惯性滚动截图中RTT15ms，接收缓冲均值303.2ms，末包到Video提交p95 335.5ms，解码45.2FPS而提交29.1FPS。低RTT/高带宽估计不能排除帧到达抖动或重传，单次截图也不能证明硬件解码瓶颈。新增接收组帧/目标缓冲、音频缓冲、RTX以及逐帧呈现时序，等待实际设备连续包；不宣称已修复。[调查](mobile-receiver-diagnostics-20261104.md)。
+- MOBILE-LAG（待定位）：UD710、Brave138、惯性滚动截图中RTT15ms，接收缓冲均值303.2ms，末包到Video提交p95 335.5ms，解码45.2FPS而提交29.1FPS。低RTT/高带宽估计不能排除帧到达抖动或重传，单次截图也不能证明硬件解码瓶颈。新增接收组帧/目标缓冲、音频缓冲、RTX以及逐帧呈现时序，已收到实际连续包，结果见下项MOBILE-PACER；不宣称已修复。[调查](mobile-receiver-diagnostics-20261104.md)。
+- MOBILE-PACER（已获现场证据，修复待实验）：用户34.9秒实际包前段发送包平均排队1.3–1.8秒，后段另有接收末包后积压，解码均值12.6ms。发送NACK/PLI/RTX均无增量，Client丢包0/RTX包占0.67%（可能含RTX格式填充）。SDK可信码率控制声明关闭WebRTC超量丢帧保护，实际存在编码产出高于分配的窗口；QSV整数FPS变化触发新序列/IDR是另一放大候选。优先验证单因素可信声明，不能用原桌面性能结果代替实体场景。[分析](ud710-diagnostic-analysis-20261104.md)。
 - DIAGNOSTIC-COLLECTION：按用户指定设置内开始、悬浮停止，Control保存tar.zst并返回ID。已接入授权和断线/锁屏中止、完成文件原子发布及重启查询。CPU定向、生产构建和157/89真实H.264收集/归档流程通过，媒体连接保持；157另通过Control重启后查询原ID。强制终止Control时未归档的内存样本可能丢失；已完成文件无自动保留期。[契约](../../docs/diagnostic-collection.md) · [运行](mobile-diagnostic-runtime-20261104.md)。
 - DIAGNOSTIC-DELIVERY：用户重新授权上传，以干净dd6d850打包，包内启动与571个ZIP文件hash/CRC通过，包含此前全屏增量；21:13:04（北京时间）上传成功，取件码[761470](https://airportal.cn/761470/EXGZc1IoQx)。[交付](mobile-diagnostic-delivery-20261104.md)。
 

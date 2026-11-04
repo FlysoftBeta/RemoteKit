@@ -6,6 +6,8 @@
 
 用户UD710/Brave138惯性滚动截图显示RTT15ms，但接收缓冲均值303ms、末包到提交p95约336ms，解码45FPS而提交29FPS。尚不能排除网络或确认唯一瓶颈。新增同窗重传占比、组帧/处理/缓冲目标、音频缓冲与解码器观测；支持设置内开始诊断、悬浮停止、服务端tar.zst归档和客户端显示ID。包记录Client、Control、Endpoint/Browser的可用指标、逐帧时序、时钟、缺测及终止原因；不会把诊断设施当成卡顿已修复。[诊断流程](diagnostic-collection.md) · [现场与口径](../develop/docs/mobile-receiver-diagnostics-20261104.md)。
 
+现已收到实体设备34.9秒诊断：前段实测发送包排队均值约1.3–1.8秒，之后另有接收末包到提交数百毫秒积压；解码均值12.6ms，不能将主要秒级延迟归因于纯解码。发现SDK可信码率控制声明与现场编码超发矛盾，QSV帧率变化/关键帧突发及音频同步仍需受控验证。本次只分析数据与源码，尚未修改媒体或宣称修复。[实际诊断分析](../develop/docs/ud710-diagnostic-analysis-20261104.md)。
+
 定向模型/协议测试与Control生产构建、启动smoke通过；157/89真实H.264中设置开始→悬浮停止→服务端归档/ID显示通过，两组媒体连接保持，tar.zst解压核对包含真实收发及逐帧RTP关联数据。157另通过Control重启后同账户查询原ID；桌面无头与隔离mDNS配置的范围见[运行记录](../develop/docs/mobile-diagnostic-runtime-20261104.md)。未改原生编码或拥塞控制策略，未重跑性能矩阵，实体平板待采样。
 
 用户重新授权上传后，以干净源码`dd6d850`打包；571个ZIP文件CRC/逐项hash、关键构建产物一致性及包内启动检查通过。2026-11-04 21:13:04（北京时间）上传成功，取件码[761470](https://airportal.cn/761470/EXGZc1IoQx)，有效24小时、2次、无密码。包名`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-205438.zip`，505528984 bytes，SHA256 `519c4a178bd4343f181425d76c84bfa3433734618c571d427a4afc11b5ea19a0`。[交付记录](../develop/docs/mobile-diagnostic-delivery-20261104.md)。
