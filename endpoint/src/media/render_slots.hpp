@@ -22,7 +22,7 @@ class RenderSlots {
  enum class Result {idle,ready,reconfigure,error};
  void SetTrace(std::shared_ptr<ServerTrace> trace){trace_=std::move(trace);}
  void SetClock(const remotekit_rtc_clock_sample& sample){clock_=sample;}
- bool Open(remotekit_sdk_render_setup,Sdk&,LUID,ID3D11Device5*,ID3D11DeviceContext4*,std::string&);
+ bool Open(remotekit_sdk_render_setup,uint32_t producer_pid,Sdk&,LUID,ID3D11Device5*,ID3D11DeviceContext4*,std::string&);
  bool Begin(uint32_t interval_us,bool force,std::string&,bool* sent=nullptr);
  void Pressure(bool encoder_backlog);
  bool HasCapacity()const;
@@ -49,5 +49,7 @@ class RenderSlots {
  struct PublishGuard {RenderSlots& owner;~PublishGuard(){owner.PublishStats();}};
  StatsSnapshot counters_,published_;mutable std::mutex stats_mutex_;
  remotekit_rtc_clock_sample clock_{};std::shared_ptr<ServerTrace> trace_;std::atomic<uint64_t> delivered_{0};
+ // Media source identity remains unique across render generations.
+ uint64_t next_cookie_=0;
 };
 }

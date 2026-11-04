@@ -23,9 +23,14 @@ export type ControlRpc = (method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock
 interface InputRequest { surface: Surface; identity: string; event: Record<string, unknown> }
 interface QueuedInput extends InputRequest { epoch: string; generation: string; requiresTerminalState: boolean }
 export interface InputResult extends InputRequest { sequence: string; ok: boolean; error?: string; touchState?: 'accepted-pending' | 'processed' | 'terminal-invalidated' | 'terminal-unconfirmed' | 'rejected'; touchSequenceId?: string }
-export interface InputDelivery extends InputRequest { phase: 'queued' | 'submitted' | 'discarded' | 'unconfirmed'; sequence?: string; reason?: string }
-interface TerminalInput extends InputRequest { requiresTerminalState: boolean; pending: boolean; retries: number; timer?: ReturnType<typeof setTimeout> }
+export interface InputDelivery extends InputRequest { phase: 'queued' | 'submitted' | 'discarded' | 'unconfirmed'; sequence?: string; reason?: string; layoutEpoch?: string; authorization?: number }
+export interface TouchRetireLease { surface: Surface; identity: string; layoutEpoch: string; authorization?: number }
+interface TerminalInput extends InputRequest { requiresTerminalState: boolean; pending: boolean; retries: number; timer?: ReturnType<typeof setTimeout>; retirement?: boolean }
 const terminalQueryDelays = [250, 500, 1000, 2000];
+function counterDelta(current: unknown, previous?: number) {
+  return typeof current === 'number' && typeof previous === 'number' && Number.isFinite(current - previous) && current >= previous
+    ? current - previous : undefined;
+}
 function tracksTerminal(event: Record<string, unknown>) {
   return event.type === 'touch' && (event.gestureMode === 'client-v1' || event.gestureMode === 'legacy') &&
     typeof event.sequenceId === 'string' && (event.action === 'end' || event.action === 'cancel');
@@ -34,7 +39,7 @@ function tracksTerminal(event: Record<string, unknown>) {
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
 interface ViewportRegistration { viewId: string; canvas: HTMLCanvasElement; ready: (ready: boolean) => void; renderer?: PlaneRenderer; remove?: () => void }
 interface VideoObservation { sequence: number; barrier: PresentationBarrier; peer: RTCPeerConnection; track: MediaStreamTrack; attempt: number; identity: PlaneIdentity; rtp: number; at: number; wall: number }
-interface VideoPlane { video: HTMLVideoElement; track: MediaStreamTrack; clip: HTMLDivElement; observer: ResizeObserver; callback?: number; ready: boolean; rtp?: number; stats: VideoCompositorStats; metadataRetries: number; observationSequence: number; pendingObservation?: VideoObservation }
+interface VideoPlane { video: HTMLVideoElement; track: MediaStreamTrack; clip: HTMLDivElement; observer: ResizeObserver; callback?: number; ready: boolean; rtp?: number; stats: VideoCompositorStats; metadataRetries: number; observationSequence: number; pendingObservation?: VideoObservation; geometry?: number[] }
 interface PaintedPlane { identity: PlaneIdentity; canvas: HTMLCanvasElement; source: PresentedPlaneSource; shared?: boolean }
 export type FrameSource = 'video' | 'track-processor';
 interface ProcessorFrameOwner { frame: VideoFrame; rtp: number; source: ProcessorSource; readAt: number; sourceTimestamp: number }
@@ -313,7 +318,7 @@ export class RemoteTransport {
   private dispatchingPaint = false;
   private authorizedAt = 0;
   selectedViewId: string | undefined;
-  private lastInboundSample: { timestamp: number; bytes: number; frames?: number } | undefined;
+  private lastInboundSample: { id: string; timestamp: number; bytes: number; frames?: number; emitted?: number; jitterDelay?: number; decodeTime?: number; framesDropped?: number } | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
   private statsReadingPeer: RTCPeerConnection | undefined;
   private networkRead: { peer: RTCPeerConnection; connectionId: string } | undefined;
@@ -483,8 +488,12 @@ export class RemoteTransport {
     const peer = this.peer, attempt = this.attempt;
     const receive = (_now: number, metadata: VideoFrameCallbackMetadata) => {
       if (this.peer !== peer || this.attempt !== attempt || this.videoPlanes.get(renderer) !== plane || this.presentationBackend !== 'video') return;
+      const at = performance.now();
       try { this.observeVideoPlane(renderer, plane, metadata); }
-      finally { if (this.peer === peer && this.videoPlanes.get(renderer) === plane && this.presentationBackend === 'video') plane.callback = video.requestVideoFrameCallback(receive); }
+      finally {
+        this.presentation.cost('videoCallbackTotal', at, performance.now() - at, renderer.view.id);
+        if (this.peer === peer && this.videoPlanes.get(renderer) === plane && this.presentationBackend === 'video') plane.callback = video.requestVideoFrameCallback(receive);
+      }
     };
     plane.callback = video.requestVideoFrameCallback(receive);
     video.srcObject = new MediaStream([this.processorTrack]);
@@ -499,7 +508,11 @@ export class RemoteTransport {
     const bounds = renderer.canvas.getBoundingClientRect(), container = parent.getBoundingClientRect();
     const geometry = videoPlaneGeometry(renderer.view, layout, bounds);
     if (!geometry) return false;
-    Object.assign(plane.clip.style, { left: `${bounds.left - container.left}px`, top: `${bounds.top - container.top}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
+    const left = bounds.left - container.left, top = bounds.top - container.top;
+    const position = [left, top, bounds.width, bounds.height, geometry.left, geometry.top, geometry.width, geometry.height];
+    if (position.every((value, index) => value === plane.geometry?.[index])) return true;
+    plane.geometry = position;
+    Object.assign(plane.clip.style, { left: `${left}px`, top: `${top}px`, width: `${bounds.width}px`, height: `${bounds.height}px` });
     for (const [name, value] of Object.entries(geometry)) plane.video.style.setProperty(name, `${value}px`);
     return true;
   }
@@ -547,10 +560,16 @@ export class RemoteTransport {
       // Endpoint's ACK barrier guarantees stable geometry for every published
       // frame in this interval. This recovers layout authorization, not the
       // autonomous element's current RTP or a new compositor observation.
-      plane.ready = true; plane.rtp = undefined; plane.clip.style.opacity = '1';
+      const wasReady = plane.ready;
+      plane.ready = true; plane.rtp = undefined;
+      if (!wasReady) {
+        plane.stats.resetObservation();
+        plane.clip.style.opacity = '1';
+      }
       this.latency.paint(observation.rtp, epoch, observation.at, observation.wall);
       this.reconnect.connected(); this.markConnection('firstVideoCompositor');
-      renderer.ready(true); this.flushFocusedInput(); this.frameListeners.forEach(listener => listener());
+      if (!wasReady) renderer.ready(true);
+      this.flushFocusedInput(); this.frameListeners.forEach(listener => listener());
     }
   }
   private observeVideoPlane(renderer: PlaneRenderer, plane: VideoPlane, metadata: VideoFrameCallbackMetadata) {
@@ -558,7 +577,7 @@ export class RemoteTransport {
     const validRtp = Number.isInteger(rtp) && rtp! >= 0 && rtp! <= 0xffffffff;
     const epoch = validRtp ? this.frameGate.epochFor(rtp) : undefined;
     this.markConnection('firstDecodedFrame');
-    this.presentation.video(at, validRtp ? rtp : undefined, this.layout?.epoch, epoch, metadata);
+    this.presentation.video(at, validRtp ? rtp : undefined, this.layout?.epoch, epoch, metadata, renderer.view.id);
     plane.pendingObservation = undefined; plane.observationSequence++;
     const sameBarrier = this.presentationBarrierAcknowledged && this.presentationBarrier && barrierMatchesLayout(this.presentationBarrier, this.layout) &&
       document.visibilityState === 'visible' && this.rendererCurrent(renderer) && !renderer.view.stale &&
@@ -574,7 +593,7 @@ export class RemoteTransport {
       // but don't attach a stale RTP identity to the autonomous video's pixels.
       if (epoch !== undefined) this.hideVideoPlane(renderer);
       else {
-        plane.stats.observe(at, metadata.presentedFrames, plane.ready); plane.rtp = undefined;
+        plane.stats.observe(at, metadata.presentedFrames, plane.ready, metadata); plane.rtp = undefined;
         plane.pendingObservation = { sequence: plane.observationSequence, barrier: this.presentationBarrier!, peer: this.peer!, track: plane.track, attempt: this.attempt,
           identity: { view: { ...renderer.view }, layoutEpoch: renderer.layoutEpoch, layoutGeneration: renderer.layoutGeneration }, rtp: rtp!, at, wall: Date.now() };
       }
@@ -582,8 +601,10 @@ export class RemoteTransport {
       return;
     }
     // Exact current-RTP reports require THIS element's real callback.
-    plane.stats.observe(at, metadata.presentedFrames, plane.ready);
-    plane.metadataRetries = 0; plane.rtp = rtp; plane.ready = true; plane.clip.style.opacity = '1';
+    const wasReady = plane.ready;
+    plane.stats.observe(at, metadata.presentedFrames, wasReady, metadata);
+    plane.metadataRetries = 0; plane.rtp = rtp; plane.ready = true;
+    if (!wasReady) plane.clip.style.opacity = '1';
     this.frameGate.observe(rtp); this.displayedRtp = rtp; this.displayedEpoch = epoch;
     this.authorizedAt = at; this.presentation.authorize(at, rtp!, epoch!); this.reconnect.connected();
     this.markConnection('firstVideoCompositor');
@@ -594,7 +615,8 @@ export class RemoteTransport {
       this.latency.paint(rtp!, epoch!, at, frame.paintedWallTime);
       this.presentedListeners.forEach(listener => listener(frame));
     }
-    renderer.ready(true); this.flushFocusedInput();
+    if (!wasReady) renderer.ready(true);
+    this.flushFocusedInput();
     this.frameListeners.forEach(listener => listener());
   }
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
@@ -1104,9 +1126,9 @@ export class RemoteTransport {
     for (const item of pending.events) this.queuedInput.push({ ...item, surface: { ...surface } });
     this.drainInput();
   }
-  private reportInputDelivery(request: InputRequest, phase: InputDelivery['phase'], sequence?: string, reason?: string) {
+  private reportInputDelivery(request: InputRequest & { epoch?: string }, phase: InputDelivery['phase'], sequence?: string, reason?: string) {
     if (request.event.type !== 'touch' && request.event.type !== 'gesture') return;
-    const delivery = { phase, surface: request.surface, identity: request.identity, event: request.event, sequence, reason };
+    const delivery = { phase, surface: request.surface, identity: request.identity, event: request.event, sequence, reason, layoutEpoch: request.epoch, authorization: this.peerAuthEpoch };
     queueMicrotask(() => this.inputDeliveryListeners.forEach(listener => listener(delivery)));
   }
   private discardQueuedInput(reason: string, staleOnly = false) {
@@ -1136,8 +1158,13 @@ export class RemoteTransport {
     for (const entry of this.terminalInput.values()) clearTimeout(entry.timer);
     this.terminalInput.clear();
   }
+  private reservedTerminalInput() {
+    return this.terminalInput.size + this.queuedInput.filter(item => tracksTerminal(item.event)).length +
+      (this.pendingFocus?.events.filter(item => tracksTerminal(item.event)).length ?? 0);
+  }
   private pruneTerminalInput() {
     for (const [sequence, entry] of this.terminalInput) {
+      if (entry.retirement) continue;
       const view = this.layout?.views.find(view => view.id === entry.surface.id);
       if (view && this.inputIdentity(view) === entry.identity) continue;
       clearTimeout(entry.timer);
@@ -1179,6 +1206,26 @@ export class RemoteTransport {
     }
     return true;
   }
+  touchRetirementCurrent(lease: TouchRetireLease) {
+    return !this.productLocked && this.peerAuthEpoch !== 0 && this.peerAuthEpoch === lease.authorization &&
+      lease.identity.startsWith(`${this.attempt}:`);
+  }
+  retireTouch(lease: TouchRetireLease, event: Record<string, unknown>) {
+    const channel = this.channel;
+    if (!this.touchRetirementCurrent(lease) || channel?.readyState !== 'open' || channel.bufferedAmount > 256 * 1024 ||
+        !this.layout || this.layout.epoch === lease.layoutEpoch || event.type !== 'touch' ||
+        event.gestureMode !== 'client-v1' || event.action !== 'cancel' || typeof event.sequenceId !== 'string' ||
+        this.reservedTerminalInput() >= 64) return false;
+    const { id: view, session, instance, document, focus } = lease.surface;
+    const sequence = String(++this.sequence);
+    try {
+      this.sendChannel(channel, { type: 'input.touchRetire', view, session, instance, document, focus, layoutEpoch: lease.layoutEpoch, sequence, sequenceId: event.sequenceId });
+    } catch { return false; }
+    const entry = { surface: lease.surface, identity: lease.identity, event, requiresTerminalState: true, pending: false, retries: 0, retirement: true };
+    this.terminalInput.set(sequence, entry);
+    this.scheduleTerminalQuery(sequence, entry);
+    return true;
+  }
   private receiveInputResult(message: Record<string, unknown>) {
     const sequence = String(message.clientSequence);
     const terminal = this.terminalInput.get(sequence);
@@ -1204,6 +1251,15 @@ export class RemoteTransport {
       }
     } else {
       this.sentInput.delete(sequence);
+    }
+    if (touchState === 'terminal-invalidated' || touchState === 'processed' && terminal?.requiresTerminalState) {
+      // An exact settled sequence also retires previous timed-out attempts.
+      // Their mutations are never replayed, and their timers need no more reads.
+      for (const [otherSequence, request] of this.terminalInput) {
+        if (request.identity !== sent.identity || request.event.sequenceId !== touchSequenceId) continue;
+        clearTimeout(request.timer);
+        this.terminalInput.delete(otherSequence);
+      }
     }
     const error = typeof message.error === 'string' ? message.error : undefined;
     for (const listener of this.inputResultListeners) listener({ surface: sent.surface, identity: sent.identity, event: sent.event, sequence, ok, error, touchState, touchSequenceId });
@@ -1307,10 +1363,8 @@ export class RemoteTransport {
     const pending = this.pendingFocus?.view === surface.id ? this.pendingFocus : undefined;
     if (pending && !pending.focused) { this.traceInput('blocked', surface, event, 'blur-pending'); return false; }
     if (tracksTerminal(event) || event.type === 'touch' && event.action === 'start') {
-      const reserved = this.terminalInput.size + this.queuedInput.filter(item => tracksTerminal(item.event)).length +
-        (this.pendingFocus?.events.filter(item => tracksTerminal(item.event)).length ?? 0);
       const capacity = event.action === 'cancel' ? 64 : event.action === 'end' ? 56 : 48;
-      if (reserved >= capacity) {
+      if (this.reservedTerminalInput() >= capacity) {
         this.traceInput('blocked', surface, event, 'terminal-capacity');
         this.touchInputStats.dropped++;
         return false;
@@ -1409,28 +1463,62 @@ export class RemoteTransport {
     if (peer !== this.peer || this.statsReadingPeer === peer) return;
     this.statsReadingPeer = peer;
     try {
+      // Snapshot video counters at the getStats request edge. Use the same
+      // polling windows for rates rather than the rolling rVFC diagnostic FPS.
+      const at = performance.now();
+      const videoWindows = [...this.videoPlanes].map(([renderer, plane]) => ({
+        renderer, plane, counters: plane.stats, revision: plane.stats.observationRevision,
+        window: plane.stats.sampleWindow(at, plane.ready && this.rendererCurrent(renderer), plane.video.getVideoPlaybackQuality?.()),
+        timing: plane.stats.timing(at),
+      }));
       const stats = await peer.getStats();
       if (peer !== this.peer) return;
-      const update: Partial<Diagnostics> = {};
+      const update: Partial<Diagnostics> = { decodedFramesPerSecond: undefined, receiveBitrateBps: undefined, receiverVideoTiming: undefined, roundTripTime: undefined, selectedCandidates: undefined };
       let inboundCounters: { decodedFrames?: number; packetsLost?: number; framesDropped?: number } = {};
+      let selectedPairId: string | undefined;
+      let nominatedPair: RTCIceCandidatePairStats | undefined;
       stats.forEach(report => {
         if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) {
           inboundCounters = { decodedFrames: report.framesDecoded, packetsLost: report.packetsLost, framesDropped: report.framesDropped };
           update.framesDecoded = report.framesDecoded; update.framesPerSecond = report.framesPerSecond; update.bytesReceived = report.bytesReceived;
           if (typeof report.timestamp === 'number' && typeof report.bytesReceived === 'number') {
-            const previous = this.lastInboundSample;
+            const previous = this.lastInboundSample?.id === report.id ? this.lastInboundSample : undefined;
             if (previous && report.timestamp > previous.timestamp && report.bytesReceived >= previous.bytes) update.receiveBitrateBps = (report.bytesReceived - previous.bytes) * 8000 / (report.timestamp - previous.timestamp);
             if (previous?.frames !== undefined && typeof report.framesDecoded === 'number' && report.timestamp > previous.timestamp && report.framesDecoded >= previous.frames) update.decodedFramesPerSecond = (report.framesDecoded - previous.frames) * 1000 / (report.timestamp - previous.timestamp);
-            else if (typeof report.framesPerSecond === 'number') update.decodedFramesPerSecond = report.framesPerSecond;
-            this.lastInboundSample = { timestamp: report.timestamp, bytes: report.bytesReceived, frames: report.framesDecoded };
+            if (previous && report.timestamp > previous.timestamp) {
+              const decoded = counterDelta(report.framesDecoded, previous.frames);
+              const emitted = counterDelta(report.jitterBufferEmittedCount, previous.emitted);
+              const jitter = counterDelta(report.jitterBufferDelay, previous.jitterDelay);
+              const decode = counterDelta(report.totalDecodeTime, previous.decodeTime);
+              update.receiverVideoTiming = {
+                jitterBufferMeanMs: emitted && jitter !== undefined ? jitter * 1000 / emitted : undefined,
+                decodeMeanMs: decoded && decode !== undefined ? decode * 1000 / decoded : undefined,
+                droppedFrames: counterDelta(report.framesDropped, previous.framesDropped),
+              };
+            }
+            this.lastInboundSample = { id: report.id, timestamp: report.timestamp, bytes: report.bytesReceived, frames: report.framesDecoded,
+              emitted: report.jitterBufferEmittedCount, jitterDelay: report.jitterBufferDelay, decodeTime: report.totalDecodeTime, framesDropped: report.framesDropped };
           }
           update.videoWidth = this.activeFrameSource === 'track-processor' ? this.processorCounts.width || undefined : report.frameWidth;
           update.videoHeight = this.activeFrameSource === 'track-processor' ? this.processorCounts.height || undefined : report.frameHeight;
           if (report.codecId) update.codec = stats.get(report.codecId)?.mimeType;
         }
-        if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) { update.roundTripTime = report.currentRoundTripTime; update.selectedCandidates = { pair: report, local: stats.get(report.localCandidateId), remote: stats.get(report.remoteCandidateId) }; }
+        if (report.type === 'transport' && report.selectedCandidatePairId) selectedPairId = report.selectedCandidatePairId;
+        if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) nominatedPair ??= report;
       });
-      const paints = this.presentationBackend === 'video' ? Object.fromEntries([...this.videoPlanes].map(([renderer, plane])=>[renderer.view.id,plane.stats.snapshot(performance.now())])) : this.presentation.paintStatistics(); update.paintFpsByView = Object.fromEntries(Object.entries(paints).map(([id, value]) => [id, value.fps]));
+      const pair = (selectedPairId ? stats.get(selectedPairId) as RTCIceCandidatePairStats | undefined : undefined) ?? nominatedPair;
+      if (pair) {
+        update.roundTripTime = pair.currentRoundTripTime;
+        update.selectedCandidates = { pair, local: stats.get(pair.localCandidateId), remote: stats.get(pair.remoteCandidateId) };
+      }
+      const currentVideos = videoWindows.filter(({ renderer, plane, counters, revision }) =>
+        this.videoPlanes.get(renderer) === plane && plane.ready && this.rendererCurrent(renderer) &&
+        plane.stats === counters && counters.observationRevision === revision);
+      const paints = this.presentationBackend === 'video' ? Object.fromEntries(currentVideos.map(({ renderer, window }) => [renderer.view.id, window])) : this.presentation.paintStatistics();
+      update.paintFpsByView = Object.fromEntries(Object.entries(paints).map(([id, value]) => [id, value?.fps]));
+      update.videoTimingByView = Object.fromEntries(currentVideos.map(({ renderer, timing, window }) =>
+        [renderer.view.id, { callbackFps: window?.callbackFps, videoElementFps: window?.videoElementFps,
+          videoElementDrops: window?.videoElementDrops, ...timing }]));
       update.rendering=this.getRenderingDiagnostics();
       update.displayFramesPerSecond = this.selectedViewId ? paints[this.selectedViewId]?.fps : undefined;
       this.update(update);

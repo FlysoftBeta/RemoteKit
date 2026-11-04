@@ -11,8 +11,8 @@ export function touchTerminalResult(owner: TouchOwner, result: InputResult, curr
       result.surface.instance !== owner.surface.instance || result.surface.document !== owner.surface.document ||
       result.event.type !== 'touch' || result.event.sequenceId !== owner.packet.sequenceId) return;
   if (!result.ok && result.touchState === 'terminal-invalidated' && result.touchSequenceId === owner.packet.sequenceId) return 'invalidated';
-  if (!result.ok || result.event !== owner.packet ||
+  if (!result.ok ||
       (result.event.action !== 'cancel' && (result.event.action !== 'end' || contactCount !== 0))) return;
   if (result.touchState === 'processed' && result.touchSequenceId === owner.packet.sequenceId) return 'processed';
-  if (!result.touchState && owner.packet.gestureMode !== 'client-v1') return 'processed';
+  if (!result.touchState && result.event === owner.packet && owner.packet.gestureMode !== 'client-v1') return 'processed';
 }

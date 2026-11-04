@@ -27,35 +27,45 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
                                     const std::vector<TouchInput::Gesture>& candidates,
                                     int64_t source_elapsed_us) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
-  if (stopped_ || !router_ || !root_ || !target_)
+  if (stopped_ || !router_ || !root_ || !target_ || !router_->IsViewInMap(root_.get()))
     return {Error::stale, "Client touch owner lost"};
   if (pending_.size() >= 128) return {Error::busy, "Client touch ACK queue full"};
   event.unique_touch_event_id = ui::GetNextTouchEventId();
-  if (!first_id_) {
-    first_id_ = event.unique_touch_event_id;
-    if (!event.IsTouchSequenceStart()) return {Error::invalid, "Missing first client touch"};
-  }
-  if (!candidate_state_.Accept(candidates, event.unique_touch_event_id == first_id_,
-                               event.IsTouchSequenceEnd(), event.touches_length))
+  if (!first_id_ && !event.IsTouchSequenceStart())
+    return {Error::invalid, "Missing first client touch"};
+  const auto first_id = first_id_ ? first_id_ : event.unique_touch_event_id;
+  auto candidate_state = candidate_state_;
+  if (!candidate_state.Accept(candidates, !first_id_, event.IsTouchSequenceEnd(),
+                              event.touches_length))
     return {Error::invalid, "Invalid client gesture candidate order"};
-  if (!source_time_.Raw(source_elapsed_us, event.IsTouchSequenceEnd()))
+  auto source_time = source_time_;
+  if (!source_time.Raw(source_elapsed_us, event.IsTouchSequenceEnd()))
     return {Error::invalid, "Invalid client raw source time"};
-  event.moved_beyond_slop_region = candidate_state_.moved();
+  event.moved_beyond_slop_region = candidate_state.moved();
   content::MotionEventWeb motion(event);
-  auto packet = MakeClientGesturePacket(motion, candidates, first_id_);
-  for (const auto& candidate : candidates)
-    if (candidate.type == TouchInput::Gesture::Type::fling_start) fling_pending_ = true;
+  auto packet = MakeClientGesturePacket(motion, candidates, first_id);
   if (!router_->RegisterClientTouch(root_.get(), event.unique_touch_event_id,
       base::BindOnce(&ClientGestureBridge::Ack, weak_factory_.GetWeakPtr())))
     return {Error::busy, "Client touch router registrations full"};
   pending_.insert(event.unique_touch_event_id);
   auto weak = weak_factory_.GetWeakPtr();
   if (filter_.OnGesturePacket(packet) != ui::TouchDispositionGestureFilter::SUCCESS) {
-    // Registration remains a tombstone until the real raw ACK is delivered.
-    Cancel(false);
+    router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
+    pending_.erase(event.unique_touch_event_id);
     return {Error::invalid, "Invalid client gesture packet order"};
   }
-  if (!weak) return {Error::stale, "Client touch owner destroyed"};
+  if (!weak || stopped_ || !router_ || !root_ || !target_ ||
+      !router_->IsViewInMap(root_.get())) {
+    if (router_)
+      router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
+    pending_.erase(event.unique_touch_event_id);
+    return {Error::stale, "Client touch owner destroyed"};
+  }
+  first_id_ = first_id;
+  candidate_state_ = candidate_state;
+  source_time_ = source_time;
+  for (const auto& candidate : candidates)
+    if (candidate.type == TouchInput::Gesture::Type::fling_start) fling_pending_ = true;
   timeout_.Start(FROM_HERE, base::Seconds(2),
                  base::BindOnce(&ClientGestureBridge::Timeout, weak));
   // OnGesturePacket can synchronously release a preceding packet's repair.

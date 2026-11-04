@@ -28,13 +28,17 @@ Control默认对持续安全隐藏30秒的页面冻结，120秒丢弃；在线�
 
 | 操作 | 实际行为 |
 |---|---|
-| freeze | SetPageFrozen及renderer ACK |
+| freeze | 向当前活跃RVH发送冻结请求，等待各请求的精确renderer ACK |
 | discard | 保留WebContents/controller，官方Discard；恢复LoadIfNecessary并等待非错误主frame commit |
 | unload | 保存导航关联后销毁执行实例，保留逻辑WebView |
 | restore | 为原WebView恢复/重建实例、应用配置，完成后才可见 |
 | close | 正常beforeunload确认后移除逻辑页；与回收不同 |
 
 导航恢复保留history、选中索引和renderer已报告PageState，绑定格式/Chromium版本/Session/Profile。同BrowserContext卸载可保留sessionStorage namespace；跨Browser的sessionStorage尚未恢复。PageState不恢复任意DOM、JS heap或网络连接。POST与不可恢复上传不自动重放。
+
+冻结期间发生导航或保护条件变化时，先排空已发送且仍属于当前页面的冻结请求，再逐RVH确认解冻；这次冻结以失败结束，但保留live实例和JS堆。解冻不受“页面必须空闲”的冻结资格限制。ACK绑定请求序号、RVH弱引用和PageBroadcast连接代次，旧响应不能证明新请求完成。
+
+真实超时、生命周期期间renderer退出或已冻结renderer退出仍标记uncertain。Control持久记录同Browser incarnation、生命周期代次的恢复阶段，先以精确guard卸载，再只在当前可见时恢复。Browser卸载前验证预转换导航checkpoint可自动恢复；POST等先拒绝。回执丢失时只观察精确快照，不重复破坏性请求或旧导航；无法确认则显示标签页错误并允许关闭后重新打开。导航导出跳过pending/uncertain，保留上次完整文件。
 
 在线对账先同步站点规则/媒体策略，再ensure和恢复页面；缺失对象用有限产品地址重建。离线snapshot不启动Browser，离线维护带requireRunning消除检查后退出的竞态。自然关闭以持久事件/ACK区分，不按普通missing重建。完整产品流程见[Control设计](control-plane.zh-CN.md)。
 

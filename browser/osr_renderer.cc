@@ -2,6 +2,7 @@
 #include "remotekit/browser/offscreen_host.h"
 #include "remotekit/browser/render_channel.h"
 #include "remotekit/browser/osr_wake_state.h"
+#include "remotekit/core.hpp"
 
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
@@ -21,11 +22,17 @@
 
 #include "base/check.h"
 #include "base/command_line.h"
+#include "base/environment.h"
+#include "base/files/file_util.h"
+#include "base/json/json_writer.h"
+#include "base/logging.h"
+#include "base/process/process_handle.h"
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/sequence_checker.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/thread_pool.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "base/unguessable_token.h"
@@ -47,6 +54,102 @@ constexpr char kUseAdapterLuid[] = "use-adapter-luid";
 bool g_osr_fault_sealed = false;  // Unknown GPU work forbids later generations.
 uint64_t g_plane_generation = 0;  // UI sequence, survives output generation replacement.
 std::string Number(uint64_t value) { return base::NumberToString(value); }
+// The writer owns only diagnostic samples, never State or GPU resources.
+class OsrTrace {
+ public:
+  explicit OsrTrace(uint64_t generation) : generation_(generation) {
+    auto path = base::Environment::Create()->GetVar("REMOTEKIT_MEDIA_TRACE");
+    if (!path || path->empty()) return;
+    LARGE_INTEGER frequency{};
+    if (!QueryPerformanceFrequency(&frequency)) return;
+    frequency_ = frequency.QuadPart;
+    directory_ = base::FilePath::FromUTF8Unsafe(*path);
+    events_.reserve(kCapacity);
+  }
+
+  void Add(const char* stage, const RenderIdentity& id,
+           uint64_t view = 0, int detail = 0, const InputEvent* input = nullptr) {
+    if (directory_.empty()) return;
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    Event event{stage, now.QuadPart, id.value, id.slot, view, detail};
+    if (input) {
+      event.browser_sequence = input->sequence;
+      event.token = input->token;
+    }
+    if (written_ < kCapacity) {
+      events_.push_back(event);
+    } else {
+      events_[written_ % kCapacity] = event;
+    }
+    ++written_;
+  }
+
+  void Save() {
+    if (directory_.empty() || !written_) return;
+    base::ThreadPool::PostTask(
+        FROM_HERE, {base::MayBlock(), base::TaskShutdownBehavior::BLOCK_SHUTDOWN},
+        base::BindOnce(&Write, std::exchange(directory_, base::FilePath()),
+                       std::move(events_), written_, generation_, frequency_));
+  }
+
+ private:
+  static constexpr size_t kCapacity = 32768;
+  struct Event {
+    const char* stage;
+    int64_t qpc;
+    uint64_t value;
+    uint32_t slot;
+    uint64_t view;
+    int detail;
+    uint64_t browser_sequence = 0;
+    InputToken token{};
+  };
+
+  static void Write(base::FilePath directory, std::vector<Event> events,
+                    uint64_t written, uint64_t generation, int64_t frequency) {
+    const auto pid = base::GetCurrentProcId();
+    base::ListValue rows;
+    for (uint64_t index = written - events.size(); index < written; ++index) {
+      const auto& event = events[index % kCapacity];
+      auto row = base::DictValue()
+          .Set("stage", event.stage)
+          .Set("qpc", base::NumberToString(event.qpc))
+          .Set("fence", Number(event.value))
+          .Set("slot", static_cast<int>(event.slot))
+          .Set("view", Number(event.view))
+          .Set("detail", event.detail);
+      if (event.browser_sequence) {
+        row.Set("browser_sequence", Number(event.browser_sequence));
+        row.Set("view", Number(event.token.view));
+        row.Set("instance", Number(event.token.instance));
+        row.Set("document", Number(event.token.document));
+        row.Set("focus", Number(event.token.focus));
+      }
+      rows.Append(std::move(row));
+    }
+    auto document = base::DictValue()
+        .Set("schema", "remotekit-osr-trace-v1")
+        .Set("pid", static_cast<int>(pid))
+        .Set("generation", Number(generation))
+        .Set("qpc_frequency", base::NumberToString(frequency))
+        .Set("records_overwritten", Number(written - events.size()))
+        .Set("events", std::move(rows));
+    auto bytes = base::WriteJson(document);
+    if (!bytes || !base::CreateDirectory(directory) ||
+        !base::WriteFile(directory.AppendASCII("osr-" + Number(pid) + "-" +
+                                               Number(generation) + ".json"), *bytes)) {
+      LOG(ERROR) << "Cannot save RemoteKit OSR trace";
+    }
+  }
+
+  const uint64_t generation_;
+  base::FilePath directory_;
+  int64_t frequency_ = 0;
+  uint64_t written_ = 0;
+  std::vector<Event> events_;
+};
+
 std::optional<LUID> ParseAdapterLuid(std::string_view value) {
   const size_t comma = value.find(',');
   if (comma == std::string::npos)
@@ -149,7 +252,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
   };
 
   State(uint32_t width, uint32_t height, uint64_t generation)
-      : width_(width), height_(height), generation_(generation) {
+      : width_(width), height_(height), generation_(generation), trace_(generation) {
     if (g_osr_fault_sealed) { Fatal("previous OSR GPU fault remains sealed"); return; }
     if (!width || !height || width > 16384 || height > 16384 || !generation) {
       Fatal("invalid OSR dimensions/generation"); return;
@@ -194,6 +297,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
   }
   ~State() {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
+    trace_.Save();
     if (mapping_) UnmapViewOfFile(mapping_.get());
   }
   void Start() {
@@ -449,6 +553,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
     wake_proof_.ObserveBegin(begin);
     slot.reserved = true;
     queue_.push_back(begin);
+    trace_.Add("rend_begin", begin.identity, 0, static_cast<int>(queue_.size()));
     if (queue_.size() + (work_ ? 1 : 0) > kRenderSlotCount) {
       Fatal("OSR Begin capacity exceeded"); return;
     }
@@ -457,6 +562,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
   void Reject(const RenderBegin& begin, RenderRejectReason reason) {
     if (begin.identity.generation == generation_ && begin.identity.slot < slots_.size())
       slots_[begin.identity.slot].reserved = false;
+    trace_.Add("rend_reject", begin.identity, 0, static_cast<int>(reason));
     if (channel_) channel_->Reject(begin.identity, reason);
   }
   void Pump() {
@@ -465,6 +571,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
     work->begin = queue_.front(); queue_.pop_front();
     work->revision = revision_;
     work_ = work;
+    trace_.Add("rend_pump", work->begin.identity);
     bool ready = true;
     for (auto id : order_) {
       auto plane = planes_.at(id);
@@ -501,6 +608,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
       token->value = work->begin.identity.value;
       token->target_index = target_index;
       const auto args = plane.host->CreateBeginFrameArgs(now, interval);
+      trace_.Add("rend_plane_issue", work->begin.identity, read.metadata.webview_id);
       plane.host->compositor()->IssueRemoteKitBeginFrame(args, std::move(token),
           base::BindOnce(&State::PlaneResult, shared_from_this(), work, index, target,
                          static_cast<uint32_t>(target_index)));
@@ -513,6 +621,8 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
                    viz::mojom::RemoteKitFrameResultPtr result) {
     if (work_ != work) return;  // Confirmed device removal retired this work.
     auto& read = work->reads[index];
+    trace_.Add("rend_plane_result", work->begin.identity, read.metadata.webview_id,
+               result ? static_cast<int>(result->status) : -1);
     if (!result || !result->token ||
         result->token->generation != read.plane->generation ||
         result->token->slot != work->begin.identity.slot ||
@@ -586,6 +696,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
       }
       slot.reads.clear();
     }
+    trace_.Add("rend_atlas_begin", work->begin.identity);
     slot.read_value = work->begin.identity.value;
     ID3D11RenderTargetView* rtv = slot.rtv.Get();
     context_->OMSetRenderTargets(1, &rtv, nullptr);
@@ -634,10 +745,12 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
     auto& publication = base::span(mapping_->slots)[frame.slot];
     Publish(reinterpret_cast<volatile LONG64*>(&publication.publication_sequence),
             &publication.frame, frame);
+    trace_.Add("rend_atlas_signal_call", work->begin.identity);
     if (FAILED(context_->Signal(slot.ready.Get(), work->begin.identity.value))) {
       Fatal("OSR atlas GPU Signal failed"); return;
     }
     context_->Flush();
+    trace_.Add("rend_atlas_flush_return", work->begin.identity);
     slot.last_value = work->begin.identity.value;
     slot.reserved = false;
     latest_frame_ = frame;
@@ -768,6 +881,9 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
   void Fatal(std::string error) {
     if (failed_) return;
     failed_ = true; error_ = std::move(error);
+    LOG(ERROR) << "RemoteKit OSR generation " << generation_ << ": " << error_;
+    if (work_) trace_.Add("rend_fatal", work_->begin.identity);
+    trace_.Save();
     g_osr_fault_sealed = true;
     status_ = SharedAtlasStatus::kFailed;
     PublishLayout();
@@ -792,6 +908,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
     // This FIFO acknowledgement proves admission has drained, never that GPU
     // writes/Endpoint reads completed. The State still owns every fence lease.
     stopped_sent_ = true;
+    trace_.Save();
     if (channel_) channel_->Stopped(generation_);
   }
   void Stop() {
@@ -931,6 +1048,9 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
         .Set("submitted", Number(submitted_)).Set("rejected", Number(rejected_))
         .Set("pending", int(queue_.size() + (work_ ? 1 : 0)));
   }
+  void TraceInput(const char* stage, const InputEvent& input, int status) {
+    trace_.Add(stage, {}, 0, status, &input);
+  }
   base::DictValue RenderStatus(uint64_t id) const {
     auto it = planes_.find(id);
     if (it == planes_.end()) return Failure("unknown OSR plane");
@@ -943,6 +1063,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
  private:
   const uint32_t width_, height_;
   const uint64_t generation_;
+  OsrTrace trace_;
   uint64_t revision_ = 1,
            published_revision_ = 0, frame_id_ = 0, submitted_ = 0, rejected_ = 0;
   bool failed_ = false, stopping_ = false, issuing_ = false;
@@ -986,5 +1107,8 @@ mojo::ScopedMessagePipeHandle OsrRenderer::TakeRenderEndpoint(std::string_view t
 }
 base::DictValue OsrRenderer::Status() const { return state_->Status(); }
 base::DictValue OsrRenderer::RenderStatus(uint64_t id) const { return state_->RenderStatus(id); }
+void OsrRenderer::TraceInput(const char* stage, const InputEvent& input, int status) {
+  state_->TraceInput(stage, input, status);
+}
 void OsrRenderer::Stop() { state_->Stop(); }
 }  // namespace remotekit::browser

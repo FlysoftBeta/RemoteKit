@@ -34,8 +34,12 @@ test('transport feedback is independent of delayed/failed relay HTTP and disconn
     return new Promise<Response>((resolve, reject) => { network.push({ resolve: body => resolve({ ok: true, json: async () => body } as Response), reject }); });
   });
   const flush = () => new Promise<void>(resolve => setImmediate(resolve));
-  let decoded = 100, closed = false, pending: (() => void) | undefined;
-  const reports = () => new Map([['video', { type: 'inbound-rtp', kind: 'video', timestamp: now, framesDecoded: decoded, bytesReceived: decoded * 100 }], ['pair', { type: 'candidate-pair', state: 'succeeded', nominated: true, currentRoundTripTime: .01 }]]);
+  let decoded = 100, closed = false, pending: (() => void) | undefined, inboundId = 'video';
+  const reports = () => new Map([
+    [inboundId, { id: inboundId, type: 'inbound-rtp', kind: 'video', timestamp: now, framesDecoded: decoded, bytesReceived: decoded * 100,
+      jitterBufferEmittedCount: decoded, jitterBufferDelay: decoded / 100, totalDecodeTime: decoded / 1000 }],
+    ['pair', { type: 'candidate-pair', state: 'succeeded', nominated: true, currentRoundTripTime: .01 }],
+  ]);
   const peer = { getStats: async () => reports(), close: () => { closed = true; } } as unknown as RTCPeerConnection;
   connected.peer = peer;
   connected.connectionId = 'connection-1'; transport.diagnostics.networkSimulation = { enabled: true };
@@ -56,13 +60,19 @@ test('transport feedback is independent of delayed/failed relay HTTP and disconn
   assert.equal(network.length, 1); // A slow diagnostic does not accumulate parallel HTTP requests.
   assert.equal(sent[1].decodedFrames, 75); assert.equal(sent[1].videoFrames, 60);
   assert.equal('packetsLost' in sent[1], false); assert.equal('framesDropped' in sent[1], false);
+  assert.equal(transport.diagnostics.decodedFramesPerSecond, 50);
+  assert.equal(transport.diagnostics.receiverVideoTiming?.jitterBufferMeanMs, 10);
+  assert.ok(Math.abs(transport.diagnostics.receiverVideoTiming!.decodeMeanMs! - 1) < 1e-9);
+  assert.equal(transport.diagnostics.receiverVideoTiming?.droppedFrames, undefined);
   now = 3200; network[0].resolve({ enabled: true, observation: 'delayed' }); await flush();
   assert.equal(transport.diagnostics.networkSimulation?.observation, 'delayed');
   decoded = 200; now = 4500; await connected.readStats(peer);
   assert.equal(sent[2].windowMs, 1500); assert.equal(sent[2].decodedFrames, 25); assert.equal(network.length, 2);
   network[1].reject(new Error('relay unavailable')); await flush();
-  decoded = 225; now = 6000; await connected.readStats(peer);
+  decoded = 225; now = 6000; inboundId = 'video-replacement'; await connected.readStats(peer);
   assert.equal(sent[3].windowMs, 1500); assert.equal(sent[3].decodedFrames, 25); assert.equal(network.length, 3);
+  assert.equal(transport.diagnostics.decodedFramesPerSecond, undefined);
+  assert.equal(transport.diagnostics.receiverVideoTiming, undefined);
   assert.equal(transport.diagnostics.networkSimulation?.observation, 'delayed');
   // A getStats completion from the old peer must never restart observation or send.
   peer.getStats = () => new Promise(resolve => { pending = () => resolve(reports() as unknown as RTCStatsReport); });

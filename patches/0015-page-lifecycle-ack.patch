@@ -1,0 +1,66 @@
+diff --git a/content/browser/renderer_host/page_lifecycle_state_manager.h b/content/browser/renderer_host/page_lifecycle_state_manager.h
+--- a/content/browser/renderer_host/page_lifecycle_state_manager.h
++++ b/content/browser/renderer_host/page_lifecycle_state_manager.h
+@@ -41,6 +41,9 @@
+   ~PageLifecycleStateManager();
+ 
+   void SetIsFrozen(bool frozen);
++  // Sends an ordered update even when |frozen| already matches. Runs
++  // |acknowledged| only after the renderer applies this specific update.
++  bool SetIsFrozenWithAck(bool frozen, base::OnceClosure acknowledged);
+   void SetFrameTreeVisibility(
+       blink::mojom::PageVisibilityState visibility_state);
+   void SetIsInBackForwardCache(
+diff --git a/content/browser/renderer_host/page_lifecycle_state_manager.cc b/content/browser/renderer_host/page_lifecycle_state_manager.cc
+--- a/content/browser/renderer_host/page_lifecycle_state_manager.cc
++++ b/content/browser/renderer_host/page_lifecycle_state_manager.cc
+@@ -72,6 +72,19 @@
+ 
+   SendUpdatesToRendererIfNeeded(
+       /*page_restore_params=*/nullptr, base::NullCallback());
++}
++
++bool PageLifecycleStateManager::SetIsFrozenWithAck(
++    bool frozen,
++    base::OnceClosure acknowledged) {
++  const auto& page_broadcast =
++      render_view_host_impl_->GetAssociatedPageBroadcast();
++  if (!page_broadcast || !page_broadcast.is_connected())
++    return false;
++
++  frozen_explicitly_ = frozen;
++  SendUpdatesToRendererIfNeeded(nullptr, std::move(acknowledged));
++  return true;
+ }
+ 
+ void PageLifecycleStateManager::SetFrameTreeVisibility(
+diff --git a/content/browser/renderer_host/render_view_host_impl.h b/content/browser/renderer_host/render_view_host_impl.h
+--- a/content/browser/renderer_host/render_view_host_impl.h
++++ b/content/browser/renderer_host/render_view_host_impl.h
+@@ -301,6 +301,7 @@
+   // renderers hosting frames in the frame tree.
+   const mojo::AssociatedRemote<blink::mojom::PageBroadcast>&
+   GetAssociatedPageBroadcast();
++  uint64_t page_broadcast_generation() const { return page_broadcast_generation_; }
+ 
+   // Prepares the renderer page to leave the back-forward cache by disabling
+   // Javascript eviction. |done_cb| is called upon receipt of the
+@@ -428,6 +429,7 @@
+       will_send_web_preferences_callback_for_testing_;
+ 
+   mojo::AssociatedRemote<blink::mojom::PageBroadcast> page_broadcast_;
++  uint64_t page_broadcast_generation_ = 0;
+ 
+   raw_ptr<FrameTree> frame_tree_;
+ 
+diff --git a/content/browser/renderer_host/render_view_host_impl.cc b/content/browser/renderer_host/render_view_host_impl.cc
+--- a/content/browser/renderer_host/render_view_host_impl.cc
++++ b/content/browser/renderer_host/render_view_host_impl.cc
+@@ -877,6 +877,7 @@
+     mojo::PendingAssociatedRemote<blink::mojom::PageBroadcast> page_broadcast) {
+   page_broadcast_.reset();
+   page_broadcast_.Bind(std::move(page_broadcast));
++  ++page_broadcast_generation_;
+ }
+ 
+ const mojo::AssociatedRemote<blink::mojom::PageBroadcast>&

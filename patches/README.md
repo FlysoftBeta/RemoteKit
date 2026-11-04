@@ -11,6 +11,7 @@
 | 0010-client-gesture-arbitration | touch-action/preventDefault与逐包ACK仲裁 |
 | 0013-remotekit-osr-output | 专用OSR、完整token、Begin到GPU顺序、完整画面、真实ANGLE Fence，整合旧0011/12完成保护 |
 | 0014-webrtc-screenshare-adaptation | RemoteKit专属screenshare适配门禁与H264 parser组件导出 |
+| 0015-page-lifecycle-ack | 页面冻结和解冻的原生回执与 renderer 连接代次 |
 
 0013由RemoteKitOsrOutput显式启用，直接绘制导入DXGI SharedImage。目标选择先于paint，Skia结束后在ANGLE实际context排Signal。CPU interval和GPU提交结果共同结束内部请求，提交不冒充GPU完成。普通Chrome不启用后端。
 

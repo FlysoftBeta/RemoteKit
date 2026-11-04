@@ -547,6 +547,7 @@ export class Control extends EventEmitter {
         case 'tab.move': { const t = tab(), target = window(), old = state.windows.find(w => w.id === t.windowId)!; t.windowId = target.id; if (old.activeTabId === t.id) old.activeTabId = state.tabs.find(item => item.windowId === old.id)?.id ?? null; target.activeTabId = t.id; state.activeWindowId = target.id; break; }
         case 'tab.navigate': {
           const t=tab(),address=navigationUrl(action.url),previousKind=t.kind??'remote',operation=this.applyingOperations.get(tenant);
+          if (t.lifecycleRecovery || t.lifecycleRecoveryError) throw new ApiError(409, t.lifecycleRecoveryError ?? '页面正在恢复');
           if(operation)t.navigation={operationId:operation.operationId,operationGeneration:operation.operationGeneration,status:'applying',browserIncarnation:this.browserIncarnations.get(tenant),previousUrl:t.url,previousKind};
           t.pendingUrl=address;if(operation)t.kind='remote';this.saveProduct(state);
           const metadata=operation?{operationId:operation.operationId,operationGeneration:operation.operationGeneration,operationSequence:operation.operationSequence}:{};
@@ -561,6 +562,7 @@ export class Control extends EventEmitter {
         }
         case 'tab.command': {
           const t=tab();if(!['back','forward','reload','stop'].includes(action.command))throw new ApiError(400,'未知导航命令');if(t.kind==='start')break;
+          if (t.lifecycleRecovery || t.lifecycleRecoveryError) throw new ApiError(409, t.lifecycleRecoveryError ?? '页面正在恢复');
           const operation=this.applyingOperations.get(tenant);
           // Stop owns a command receipt, not a document navigation. Retain the
           // pending navigation's original rollback state until its own result.
@@ -719,7 +721,7 @@ export class Control extends EventEmitter {
       if (state.pendingClose) this.observePendingClose(state, snapshot, actual.find(v => String(v.viewId ?? v.view ?? v.id) === state.tabs.find(t => t.id === state.pendingClose?.id)?.webviewId));
       for (const t of [...state.tabs]) {
         const current = actual.find(v => String(v.viewId ?? v.view ?? v.id) === t.webviewId);
-        if (!current) continue;
+        if (!current) { this.observeLifecycleRecovery(state, t, current, snapshot.browserIncarnation); continue; }
         if(t.navigation && !t.navigation.resolved && ['applying','unknown'].includes(t.navigation.status)) {
           const nav=t.navigation,terminal=(current.navigationOperations??[]).find((entry:any)=>entry.operationId===nav.operationId && entry.operationGeneration===nav.operationGeneration && ['committed','cancelled','failed','superseded'].includes(entry.state));
           if(terminal) {
@@ -751,13 +753,14 @@ export class Control extends EventEmitter {
         if (current.close_state === 'closed') { this.removeProductTab(state, t); continue; }
         // Recovery uses an initial blank WebContents, then imports/restores history.
         // Its intermediate URL/title/history are not a new product navigation.
-        const recovering = current.recovery?.pending === true;
+        const lifecycleBlocked = this.observeLifecycleRecovery(state, t, current, snapshot.browserIncarnation);
+        const recovering = current.recovery?.pending === true || lifecycleBlocked;
         if (!recovering) {
           for (const key of ['title', 'loading', 'canGoBack', 'canGoForward'] as const) if (typeof current[key] === (key === 'title' ? 'string' : 'boolean')) (t as any)[key] = key === 'title' ? current[key].slice(0, 120) : current[key];
           if ((!t.navigation || t.navigation.resolved || !['applying','unknown'].includes(t.navigation.status)) && typeof current.url === 'string' && /^(https?:\/\/|about:blank$)/.test(current.url) && (!t.pendingUrl || current.url === t.pendingUrl)) { t.url = current.url; delete t.pendingUrl; }
         }
         if (Number.isInteger(current.actual) && current.actual >= 0 && current.actual <= 3) t.residency = (['live', 'frozen', 'discarded', 'unloaded'] as const)[current.actual];
-        t.restoring = recovering || !!current.pending && current.desired === 0;
+        t.restoring = !t.lifecycleRecoveryError && (recovering || !!current.pending && current.desired === 0);
       }
       await this.continueWindowClose(state);
       for(const pending of this.store.pendingOperations(tenant)) {
@@ -795,13 +798,14 @@ export class Control extends EventEmitter {
         if (t.popup?.status === 'failed') continue;
         if (visible) this.backgroundPolicy.forget(key);
         const actualState = current?.actual ?? 0, recovering = current?.recovery?.pending === true;
-        let readyToShow = actualState === 0 && !current?.pending;
-        if (visible && actualState !== 0 && !current?.pending) {
+        const lifecycleBlocked = current?.lifecycle_uncertain === true || !!t.lifecycleRecovery || !!t.lifecycleRecoveryError;
+        let readyToShow = !lifecycleBlocked && actualState === 0 && !current?.pending;
+        if (!lifecycleBlocked && visible && actualState !== 0 && !current?.pending) {
           const attempt = this.transitions.get(key); if (!attempt || attempt.action !== 'restore' || Date.now() - attempt.at > 12000) { await this.endpoint.request('view.lifecycle', tenant, { viewId: t.webviewId, action: 'restore' }); this.transitions.set(key, { action: 'restore', at: Date.now() }); } readyToShow = false;
         } else if (readyToShow && this.transitions.get(key)?.action === 'restore') this.transitions.delete(key);
         // Endpoint hides the recovering WebContents while retaining this desired
         // visibility for its final recovery step. Do not persist a temporary hide.
-        const config = { viewId: t.webviewId, width: region?.width ?? 1440, height: region?.height ?? 900, device: { mode: 'desktop', deviceScaleFactor: dpr }, visible: visible && (recovering || readyToShow) };
+        const config = { viewId: t.webviewId, width: region?.width ?? 1440, height: region?.height ?? 900, device: { mode: 'desktop', deviceScaleFactor: dpr }, visible: !lifecycleBlocked && visible && (recovering || readyToShow) };
         const encoded = JSON.stringify(config);
         if (!current && t.popup?.status === 'pending') {
           try {
@@ -815,9 +819,14 @@ export class Control extends EventEmitter {
           }
           continue;
         }
-        if (!current && t.navigation && !t.navigation.resolved && ['applying','unknown'].includes(t.navigation.status)) continue;
+        if (!current && (lifecycleBlocked || t.navigation && !t.navigation.resolved && ['applying','unknown'].includes(t.navigation.status))) continue;
         if (!current) { await this.endpoint.request('view.ensure', tenant, { ...config, url: t.pendingUrl ?? t.url }); this.configurations.set(key, encoded); }
-        else if (this.configurations.get(key) !== encoded || !recovering && current.visible !== undefined && current.visible !== config.visible) { await this.endpoint.request('view.configure', tenant, config); this.configurations.set(key, encoded); }
+        else if (this.configurations.get(key) !== encoded || !recovering && current.visible !== undefined && current.visible !== config.visible) { await this.endpoint.request('view.configure', tenant, lifecycleBlocked ? { ...config, requireRunning: true } : config); this.configurations.set(key, encoded); }
+        if (lifecycleBlocked) {
+          await this.advanceLifecycleRecovery(state, t, current, snapshot.browserIncarnation,
+            visible && viewer === this.viewers.get(tenant) && !viewer?.security?.locked);
+          continue;
+        }
         if (t.pendingUaReloadOrigin && readyToShow) {
           const requestedOrigin = t.pendingUaReloadOrigin;
           if (current && new URL(t.url).origin === requestedOrigin) await this.endpoint.request('view.command', tenant, { viewId: t.webviewId, command: 'reload' });
@@ -841,12 +850,118 @@ export class Control extends EventEmitter {
     if (snapshot.running === false) { this.started.delete(tenant); this.siteApplications.delete(tenant); this.mediaApplications.delete(tenant); this.actualMediaPolicies.delete(tenant); this.push(tenant); return; }
     for (const tab of state.tabs) {
       const current = (snapshot.views ?? []).find((view: any) => String(view.viewId ?? view.view ?? view.id) === tab.webviewId);
+      const lifecycleBlocked = this.observeLifecycleRecovery(state, tab, current, snapshot.browserIncarnation);
       if (!current) continue;
       const key = tenant + '/' + tab.webviewId;
       if (current.visible !== false) { await this.endpoint.request('view.configure', tenant, { viewId: tab.webviewId, visible: false, requireRunning: true }); this.configurations.delete(key); }
-      await this.maintainBackgroundTab(state, tab, current, false, snapshot.browserIncarnation);
+      if (lifecycleBlocked) await this.advanceLifecycleRecovery(state, tab, current, snapshot.browserIncarnation, false);
+      else await this.maintainBackgroundTab(state, tab, current, false, snapshot.browserIncarnation);
     }
+    this.saveProduct(state);
     const previousError = this.errors.delete(tenant); if (previousError) this.push(tenant);
+  }
+  private observeLifecycleRecovery(state: ProductWorkspace, tab: ProductTab, current: any, browserIncarnation: unknown) {
+    const recovery = tab.lifecycleRecovery;
+    if (recovery && typeof browserIncarnation === 'string' && browserIncarnation && recovery.browserIncarnation !== browserIncarnation) {
+      delete tab.lifecycleRecovery;
+      delete tab.lifecycleRecoveryError;
+      delete tab.pendingUrl;
+      tab.restoring = false;
+      return current?.lifecycle_uncertain === true;
+    }
+    if (!recovery) {
+      if (tab.lifecycleRecoveryError && current?.lifecycle_uncertain === false && current.actual === 0 && current.pending === false) {
+        delete tab.lifecycleRecoveryError;
+        delete tab.pendingUrl;
+      }
+      return current?.lifecycle_uncertain === true || !!tab.lifecycleRecoveryError;
+    }
+    const last = current?.last_lifecycle;
+    // Native reserves exactly the next generation after checking the guard.
+    // The same proof works when a response was lost or Control restarted.
+    const expected = (BigInt(recovery.generation) + 1n).toString();
+    const completed = (generation: string, action: number, actual: number) =>
+      browserIncarnation === recovery.browserIncarnation &&
+      current?.lifecycle_generation === generation && current.pending === false && current.lifecycle_uncertain === false &&
+      last?.generation === generation && last.succeeded === true && last.action === action && current.actual === actual;
+    if (recovery.phase === 'unload' && completed(expected, 2, 3)) {
+      tab.lifecycleRecovery = { ...recovery, phase: 'unloaded', generation: expected };
+      delete tab.lifecycleRecoveryError;
+    } else if (recovery.phase === 'unloaded' && completed(recovery.generation, 2, 3)) {
+      delete tab.lifecycleRecoveryError;
+    } else if (recovery.phase === 'restore' && completed(expected, 3, 0)) {
+      delete tab.lifecycleRecovery;
+      delete tab.lifecycleRecoveryError;
+      return false;
+    } else if (!tab.lifecycleRecoveryError) {
+      if (!current) tab.lifecycleRecoveryError = '无法确认原页面实例，请关闭此标签页后重新打开';
+      else if (recovery.phase !== 'unloaded' && browserIncarnation === recovery.browserIncarnation &&
+          current.lifecycle_generation === expected && current.pending === false && last?.generation === expected &&
+          last.succeeded === false && last.action === (recovery.phase === 'unload' ? 2 : 3)) {
+        tab.lifecycleRecoveryError = this.lifecycleError(last.detail);
+      } else if (recovery.phase === 'unloaded' || Date.now() - recovery.submittedAt > 15000) {
+        tab.lifecycleRecoveryError = '无法确认页面恢复结果，请关闭此标签页后重新打开';
+      }
+    }
+    if (tab.lifecycleRecovery?.phase === 'unloaded' && this.viewers.has(state.tenantId)) this.retireLifecycleNavigation(state, tab);
+    return true;
+  }
+  private retireLifecycleNavigation(state: ProductWorkspace, tab: ProductTab) {
+    const nav = tab.navigation;
+    delete tab.pendingUrl;
+    if (!nav || nav.resolved || !['applying', 'unknown'].includes(nav.status)) return;
+    nav.status = 'unknown';
+    nav.resolved = true;
+    tab.kind = nav.previousKind;
+    tab.url = nav.previousUrl;
+    if (tab.kind === 'start') tab.loading = false;
+    const saved = this.store.operation(state.tenantId, nav.operationId);
+    if (!saved || ['committed', 'rejected'].includes(saved.receipt.status)) return;
+    saved.receipt.status = 'unknown';
+    saved.receipt.resolved = true;
+    saved.receipt.resolution = 'target-retired';
+    saved.receipt.error = '原页面实例已结束，导航执行结果未知';
+    delete saved.receipt.application;
+    this.store.saveOperation(state, saved.receipt);
+  }
+  private lifecycleError(error: unknown) {
+    const detail = error instanceof Error ? error.message : typeof error === 'string' ? error : '';
+    return detail ? `页面恢复未确认（${detail.slice(0, 240)}），请关闭此标签页后重新打开` : '页面恢复未确认，请关闭此标签页后重新打开';
+  }
+  private async advanceLifecycleRecovery(state: ProductWorkspace, tab: ProductTab, current: any, browserIncarnation: unknown, visible: boolean) {
+    if (!current || current.pending !== false || current.recovery?.pending === true ||
+        current.close_state === 'closing' || current.close_state === 'closed' || tab.kind === 'start' ||
+        state.pendingClose?.id === tab.id || state.pendingWindowCloseId === tab.windowId) return;
+    const previous = tab.lifecycleRecovery;
+    if (previous && tab.lifecycleRecoveryError) return;
+    const action = previous ? 'restore' : 'unload';
+    if (previous
+      ? previous.phase !== 'unloaded' || !visible || previous.browserIncarnation !== browserIncarnation ||
+        previous.generation !== current.lifecycle_generation || current.actual !== 3 || current.lifecycle_uncertain !== false
+      : current.lifecycle_uncertain !== true) return;
+    const generation = current.lifecycle_generation;
+    if (typeof browserIncarnation !== 'string' || !browserIncarnation || typeof generation !== 'string' || !/^\d{1,20}$/.test(generation)) {
+      tab.lifecycleRecoveryError = '页面恢复缺少实例标识，请关闭此标签页后重新打开';
+      tab.restoring = false;
+      this.saveProduct(state);
+      return;
+    }
+    // Record the mutation before it can leave Control. Future ticks observe
+    // only, including across Control restart or an ambiguous transport error.
+    delete tab.lifecycleRecoveryError;
+    tab.lifecycleRecovery = { browserIncarnation, generation, phase: action, submittedAt: Date.now() };
+    tab.restoring = true;
+    this.saveProduct(state);
+    try {
+      const result = await this.endpoint.request('view.lifecycle', state.tenantId, {
+        viewId: tab.webviewId, action, requireRunning: true, browserIncarnation, lifecycleGeneration: generation,
+      });
+      if (result?.accepted !== true) throw new Error('Endpoint 未确认请求');
+    } catch (error) {
+      tab.lifecycleRecoveryError = this.lifecycleError(error);
+      tab.restoring = false;
+      this.saveProduct(state);
+    }
   }
   private async maintainBackgroundTab(state: ProductWorkspace, tab: ProductTab, current: any, visible: boolean, browserIncarnation: unknown) {
     const tenant = state.tenantId, key = tenant + '/' + tab.webviewId;

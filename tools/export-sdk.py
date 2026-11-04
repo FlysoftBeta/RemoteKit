@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 import shutil
 import struct
@@ -98,7 +99,7 @@ def main():
     (destination / "manifest.json").write_text(json.dumps({
         **metadata,
         "abi_version": 2,
-        "rtc_abi_version": 3,
+        "rtc_abi_version": int(re.search(r"^#define REMOTEKIT_RTC_ABI_VERSION (\d+)u?$", rtc_header.read_text(encoding="utf-8"), re.MULTILINE).group(1)),
         "public_headers": ["remotekit_sdk.h", "remotekit_rtc.h",
                            "remotekit/shared_render_slots.h", "protocol/render_slots.h"],
         "gn_target": "//remotekit/browser/sdk:remotekit_sdk",

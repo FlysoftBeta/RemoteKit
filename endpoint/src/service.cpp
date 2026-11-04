@@ -104,7 +104,9 @@ struct Options {
  uint32_t idle_idr_ms=150,max_encode_width=4096,max_encode_height=4096;
  uint32_t atlas_allocation_alignment=16;
  bool qsv_low_power_explicit=false;
- int32_t rtc_playout_max_ms=-1;
+ // Request WebRTC low-latency playout with room for video composition pacing.
+ // The explicit -1 override leaves the RTP extension unset.
+ int32_t rtc_playout_max_ms=50;
  Options() {
   wchar_t executable[32768]{};GetModuleFileNameW(nullptr,executable,32768);
   browser=Utf8Path(Env("REMOTEKIT_BROWSER",Utf8(fs::path(executable).parent_path()/"remotekit_browser.exe")));
@@ -254,7 +256,7 @@ struct Session {
  std::atomic<uint32_t> comp_bitrate{1},comp_fps{60};
  std::mutex encoder_mutex;std::map<uint64_t,std::unique_ptr<EncoderWorker>> encoders;
  std::optional<StreamingAdapter> streaming_adapter;
- struct Event{uint32_t type;std::string bytes,auxiliary;int32_t value;uint64_t peer;uint64_t authorization=0;};
+ struct Event{uint32_t type;std::string bytes,auxiliary;int32_t value;uint64_t peer;uint64_t authorization=0;const char* input_rejection=nullptr;uint64_t trace_input_sequence=0;};
  bool ProductCurrent(const Event& event) const {return event.peer==peer.load() && authorization.Current(event.authorization);}
  std::mutex event_mutex;std::condition_variable event_wake;std::deque<Event> events;
  std::mutex signal_mutex;std::string answer,rtc_error;bool ice_complete=false;
@@ -382,15 +384,28 @@ struct Session {
  }
  Json Rpc(Json command,bool require_ok=true,uint64_t expected_control=0,uint32_t timeout_ms=10000,
           bool opportunistic=false,const std::function<bool()>& admitted={}) {
+  uint64_t trace_sequence=0;
+  if(trace && command.value("method",Json())=="input")
+   PresentationNumber(command,"sequence",trace_sequence);
+  DWORD control_pid=0;
+  const auto trace_rpc=[&](const char* stage,int status=0) {
+   if(!trace_sequence)return;
+   RK_SERVER_TRACE(trace,stage,TraceIds{},rk_record.browser_sequence=trace_sequence;rk_record.status=status;rk_record.producer_pid=control_pid;);
+  };
+  trace_rpc("input_rpc_lock_wait");
   std::unique_lock lock(rpc_mutex,std::defer_lock);
    if(opportunistic) {
     if(!lock.try_lock())return nullptr;
   } else lock.lock();
+  if(trace_sequence)control_pid=GetProcessId(process);
+  trace_rpc("input_rpc_lock_acquired");
   if(admitted && !admitted())throw std::runtime_error("authorization_changed");
   if(expected_control && control.load()!=expected_control)throw std::runtime_error("stale_file_browser");
   if(!control)throw std::runtime_error("browser control unavailable");
   auto result=remotekit::BrowserRpc(command,request_id,[&](const std::string& encoded,std::vector<char>& response,size_t& count){
+   trace_rpc("input_rpc_sdk_call");
    const int status=sdk.remotekit_sdk_control_request(control,encoded.data(),encoded.size(),response.data(),response.size(),&count,timeout_ms);
+   trace_rpc("input_rpc_sdk_return",status);
    if(status!=0){
     control=0;
     const auto error="browser request transport "+std::to_string(status)+
@@ -927,6 +942,7 @@ struct Session {
  static void EventCallback(void* context,uint64_t peer,uint32_t type,const void* bytes,size_t size,
                            const char* auxiliary,int32_t value) {
   auto* self=static_cast<Session*>(context);
+  const auto rtc_received=type==REMOTEKIT_RTC_DATA && self->trace?QpcNow():0;
   if(type==REMOTEKIT_RTC_AUTH_DATA_STATE) {
    self->raw_camera.State(peer,value==1);
    self->WakeCamera();
@@ -960,6 +976,15 @@ struct Session {
    }
    if(!self->ProductCurrent(event) &&
       (!message.is_object() || message.value("type",Json())!="media.presentation"))return;
+   if(rtc_received && message.is_object() && message.value("type",Json())=="input" &&
+      PresentationNumber(message,"sequence",event.trace_input_sequence)) {
+    RK_SERVER_TRACE(self->trace,"input_dc_received",TraceIds{},
+      rk_record.qpc=rtc_received;rk_record.peer=peer;rk_record.client_sequence=event.trace_input_sequence;
+      PresentationNumber(message,"view",rk_record.view);
+      PresentationNumber(message,"instance",rk_record.instance);
+      PresentationNumber(message,"document",rk_record.document);
+      PresentationNumber(message,"focus",rk_record.focus););
+   }
    if(message.is_object() && message.value("type",Json())=="files.request") {
     std::lock_guard admission(self->admission_mutex);
     if(self->ProductCurrent(event) && value==0 && remotekit::FileRequestEnvelope(message,size))
@@ -989,7 +1014,15 @@ struct Session {
     else if(type==REMOTEKIT_RTC_ERROR)self->rtc_error=event.bytes;
    self->signal_wake.notify_all();
   }
-  {std::lock_guard lock(self->event_mutex);if(self->events.size()<1024)self->events.push_back(std::move(event));}
+  {
+   std::lock_guard lock(self->event_mutex);
+   if(event.trace_input_sequence) {
+    RK_SERVER_TRACE(self->trace,"input_comp_queue",TraceIds{},
+      rk_record.peer=peer;rk_record.client_sequence=event.trace_input_sequence;
+      rk_record.queue=static_cast<int>(self->events.size());rk_record.status=self->events.size()>=1024;);
+   }
+   if(self->events.size()<1024)self->events.push_back(std::move(event));
+  }
   self->event_wake.notify_all();
  }
  static int CreateEncoder(void* context,uint64_t encoder_peer,uint64_t encoder) {
@@ -1086,7 +1119,7 @@ struct Session {
   capture_clock_uncertainty_ms=pool.clock_uncertainty_us()/1000;
   const auto& adapter=*streaming_adapter;
   std::string error;
-  if(!pool.Open(setup,sdk,adapter.luid,adapter.device.Get(),adapter.context.Get(),error))
+  if(!pool.Open(setup,GetProcessId(process),sdk,adapter.luid,adapter.device.Get(),adapter.context.Get(),error))
    throw std::runtime_error(error+" expected_adapter="+AdapterLuid(adapter.luid)+
       " render_adapter="+AdapterLuid({setup.adapter_luid_low,setup.adapter_luid_high}));
   MarkConnection(ConnectionPhase::output_open_end);
@@ -1269,17 +1302,57 @@ struct Session {
   Send(reply,stamp);
  }
  static std::string ClientTouchSequence(const Json& request) {
+   if(request.value("type",std::string())=="input.touchRetire")
+    return request.value("sequenceId",std::string());
    const auto raw=request.find("event");
    if(raw==request.end() || !raw->is_object() || raw->value("type",std::string())!="touch" ||
       raw->value("gestureMode",std::string())!="client-v1")return {};
    return raw->value("sequenceId",std::string());
  }
- void RejectInput(const char* error,const Json& request,uint64_t stamp) {
+ static std::string ClientTouchTerminal(const Json& request) {
+   const auto sequence=ClientTouchSequence(request);
+   if(sequence.empty() || sequence.size()>128)return {};
+   const auto client_sequence=request.value("sequence",std::string());
+   if(client_sequence.empty() || client_sequence.size()>20)return {};
+   if(request.value("type",std::string())=="input.touchRetire")return sequence;
+   const auto action=request.at("event").value("action",std::string());
+   if(action!="end" && action!="cancel")return {};
+   return sequence;
+ }
+ remotekit::TouchTerminalReceipt* ReserveTouchTerminal(
+     remotekit::TouchTerminalReceipts& terminals,const Event& event,
+     const Json& request,const std::string& sequence,uint64_t input_control) {
+   remotekit::TouchTerminalReceipt candidate;
+   candidate.peer=event.peer;candidate.authorization=event.authorization;candidate.control=input_control;
+   candidate.client_sequence=request.value("sequence",std::string());candidate.sequence=sequence;
+   candidate.query={{"method","input.touchStatus"},{"sequenceId",sequence}};
+   for(const auto* key:{"session","view","instance","document","focus"})
+    if(request.contains(key))candidate.query[key]=request[key];
+   return terminals.Reserve(std::move(candidate));
+ }
+ void RejectInput(const char* error,const Json& request,const Event& event,
+                  remotekit::TouchTerminalReceipts* terminals=nullptr) {
+   ++input_rejected;
+   if(terminals) {
+    const auto sequence=ClientTouchTerminal(request);
+    if(!sequence.empty()) {
+     const auto client_sequence=request.value("sequence",std::string());
+     // A stale duplicate may never overwrite the original request's receipt.
+     if(terminals->Find(event.peer,event.authorization,client_sequence,sequence))return;
+     remotekit::TouchTerminalReceipt rejection;
+     rejection.peer=event.peer;rejection.authorization=event.authorization;
+     rejection.client_sequence=client_sequence;rejection.sequence=sequence;
+     if(auto* receipt=terminals->Reserve(std::move(rejection))) {
+      receipt->Finish("rejected",false,error);
+      return;
+     }
+    }
+   }
    Json reply={{"ok",false},{"error",error}};
    if(const auto sequence=ClientTouchSequence(request);!sequence.empty()) {
     reply["touchState"]="rejected";reply["touchSequenceId"]=sequence;
    }
-   ++input_rejected;ReplyInput(std::move(reply),request,stamp);
+   ReplyInput(std::move(reply),request,event.authorization);
  }
  void PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt) {
    const auto current=[&]{return peer.load()==receipt.peer && authorization.Current(receipt.authorization) &&
@@ -1326,29 +1399,59 @@ struct Session {
                       {"touchSequenceId",sequence}},command,event.authorization);
     return;
    }
-  if(type!="input"&&type!="focus")return;
+  if(type!="input"&&type!="focus"&&type!="input.touchRetire")return;
   const auto request=command;
-   if(!admitted()) {RejectInput("input_not_authorized",request,event.authorization);return;}
+  if(event.input_rejection) {RejectInput(event.input_rejection,request,event,&terminals);return;}
+  if(type=="input.touchRetire") {
+   const auto sequence=ClientTouchTerminal(request);
+   uint64_t old_epoch=0, token_id=0;
+   if(sequence.empty() || !PresentationNumber(request,"layoutEpoch",old_epoch) ||
+      old_epoch>=layout_epoch.load() || request.value("session",std::string())!=id ||
+      !PresentationNumber(request,"view",token_id) || !PresentationNumber(request,"instance",token_id) ||
+      !PresentationNumber(request,"document",token_id) || !PresentationNumber(request,"focus",token_id)) {
+    RejectInput("invalid_touch_retirement_identity",request,event,&terminals);return;
+   }
+   const auto input_control=control.load();
+   auto* receipt=ReserveTouchTerminal(terminals,event,request,sequence,input_control);
+   if(!receipt){RejectInput("touch_terminal_queue_busy",request,event);return;}
+   auto retire=receipt->query;
+   retire["method"]="input.touchRetire";
+   // This command has no coordinates and only operates on the exact old
+   // Browser owner. Keep the normal coordinate/keyframe gates below.
+   const auto current=[&]{return ProductCurrent(event) && input_control==control.load();};
+   try {
+    const auto reply=Rpc(retire,false,input_control,10000,0,current);
+    if(!current())receipt->Finish("terminal-unconfirmed",false,"touch_terminal_identity_changed");
+    else if(!remotekit::ApplyTouchTerminalStatus(*receipt,reply))receipt->Accept(QpcNow(),2*QpcFrequency());
+   } catch(const std::exception& error) {receipt->Finish("terminal-unconfirmed",false,error.what());}
+   return;
+  }
+   if(!admitted()) {RejectInput("input_not_authorized",request,event,&terminals);return;}
   const auto request_epoch=layout_epoch.load();
   if(command.value("layoutEpoch",std::string())!=std::to_string(request_epoch)) {
-    RejectInput("stale_layout_epoch",request,event.authorization);return;
+    RejectInput("stale_layout_epoch",request,event,&terminals);return;
   }
   command.erase("layoutEpoch");command.erase("focusRequestId");
   if(command.value("session",std::string())!=id) {
-    RejectInput("wrong_session",request,event.authorization);return;
+    RejectInput("wrong_session",request,event,&terminals);return;
   }
   if(type=="input" && command.contains("event") && command["event"].is_object()) {
    const auto event_type=command["event"].value("type",std::string());
    if((event_type=="mouse"||event_type=="wheel"||event_type=="touch"||event_type=="gesture") &&
       !coordinate_readiness.Allows(command.value("view",std::string()),request_epoch)) {
-     RejectInput("view_not_ready",request,event.authorization);return;
+     RejectInput("view_not_ready",request,event,&terminals);return;
    }
   }
   command["method"]=type;command.erase("type");
   if(type=="input") {
    const auto sequence=input_sequence.NextBrowser();
-    if(!sequence){RejectInput("input_sequence_exhausted",request,event.authorization);return;}
+    if(!sequence){RejectInput("input_sequence_exhausted",request,event,&terminals);return;}
    command["sequence"]=std::to_string(*sequence);
+   if(event.trace_input_sequence) {
+    RK_SERVER_TRACE(trace,"input_browser_assigned",TraceIds{},
+      rk_record.peer=event.peer;rk_record.client_sequence=event.trace_input_sequence;
+      rk_record.browser_sequence=*sequence;);
+   }
   }
   if(command.contains("outputGeneration")){command["output_generation"]=command["outputGeneration"];command.erase("outputGeneration");}
   // This connection is already bound to this Session by authenticated Control.
@@ -1359,14 +1462,8 @@ struct Session {
    if(!touch_sequence.empty()) {
     const auto action=request.at("event").value("action",std::string());
     if(action=="end" || action=="cancel") {
-     remotekit::TouchTerminalReceipt candidate;
-     candidate.peer=event.peer;candidate.authorization=event.authorization;candidate.control=input_control;
-     candidate.client_sequence=request.value("sequence",std::string());candidate.sequence=touch_sequence;
-     candidate.query={{"method","input.touchStatus"},{"sequenceId",touch_sequence}};
-     for(const auto* key:{"session","view","instance","document","focus"})
-      if(command.contains(key))candidate.query[key]=command[key];
-     receipt=terminals.Reserve(std::move(candidate));
-     if(!receipt){RejectInput("touch_terminal_queue_busy",request,event.authorization);return;}
+     receipt=ReserveTouchTerminal(terminals,event,request,touch_sequence,input_control);
+     if(!receipt){RejectInput("touch_terminal_queue_busy",request,event);return;}
     }
    }
    try {
@@ -1379,19 +1476,21 @@ struct Session {
       [&]{return QpcNow()>=deadline;},
       []{std::this_thread::sleep_for(std::chrono::milliseconds(5));},
       [&]{++input_busy_retries;},[&]{++input_busy_exhausted;}):Rpc(command,false,0,10000,0,admitted);
+     const auto invalidated=reply.value("touchState",std::string())=="terminal-invalidated" &&
+                            reply.value("touchSequenceId",std::string())==touch_sequence;
+     if(receipt && !invalidated && reply.value("touchTerminal",false) &&
+        (reply.value("ok",false) || reply.value("inputAdmitted",false))) {
+      if(reply.value("touchSequenceId",std::string())==touch_sequence)receipt->Accept(QpcNow(),2*QpcFrequency());
+      else receipt->Finish("terminal-unconfirmed",false,"touch_terminal_identity_mismatch");
+      return;
+     }
      if(!touch_sequence.empty() && !reply.value("ok",false)) {
-      const auto state=reply.value("touchState",std::string())=="terminal-invalidated" &&
-                       reply.value("touchSequenceId",std::string())==touch_sequence?"terminal-invalidated":
+      const auto state=invalidated?"terminal-invalidated":
                        reply.value("inputAdmitted",false)?"terminal-unconfirmed":"rejected";
       if(receipt) {receipt->Finish(state,false,reply.value("error",std::string()));return;}
       reply["touchState"]=state;reply["touchSequenceId"]=touch_sequence;
      }
      if(receipt) {
-      if(reply.value("touchTerminal",false)) {
-       if(reply.value("touchSequenceId",std::string())==touch_sequence)receipt->Accept(QpcNow(),2*QpcFrequency());
-       else receipt->Finish("terminal-unconfirmed",false,"touch_terminal_identity_mismatch");
-       return;
-      }
       terminals.Remove(receipt);receipt=nullptr;
     }
     if(type=="input")reply["browserSequence"]=command["sequence"];
@@ -1409,18 +1508,33 @@ struct Session {
  void QueueInput(const Event& event) {
   std::lock_guard lock(input_mutex);
    if(!ProductCurrent(event) || event.value!=0)return;
+  if(event.trace_input_sequence) {
+   RK_SERVER_TRACE(trace,"input_comp_dequeue",TraceIds{},
+     rk_record.peer=event.peer;rk_record.client_sequence=event.trace_input_sequence;);
+  }
   auto parsed=Json::parse(event.bytes,nullptr,false);
    if(!parsed.is_object())return;
-   if(parsed.value("type",std::string())!="input.touchStatus" &&
+   const auto reject=[&](const char* error) {
+    // Keep a bounded spill area for terminal rejections when the normal input
+    // backlog is full. The worker retains the result across SDK BUSY.
+    if(input_queue.size()<256+remotekit::TouchTerminalReceipts::kCapacity &&
+       !ClientTouchTerminal(parsed).empty()) {
+     input_queue.push_back(event);
+     input_queue.back().input_rejection=error;
+     input_wake.notify_one();
+    } else RejectInput(error,parsed,event);
+   };
+   const auto type=parsed.value("type",std::string());
+   if(type!="input.touchStatus" && type!="input.touchRetire" &&
       input_authorization.load()!=event.authorization) {
-    RejectInput("input_not_authorized",parsed,event.authorization);return;
+    reject("input_not_authorized");return;
    }
   // Validate arrival order before move coalescing can replace a newer packet.
   // The Browser keeps its independent Session counter across RTC reconnects.
-  if(parsed.is_object() && parsed.value("type",Json())=="input" &&
+  if((type=="input" || type=="input.touchRetire") &&
      (!parsed.contains("sequence") || !parsed["sequence"].is_string() ||
       !input_sequence.Admit(event.peer,parsed["sequence"].get<std::string>()))) {
-    RejectInput("stale_client_sequence",parsed,event.authorization);return;
+    reject("stale_client_sequence");return;
   }
   bool move=!parsed.is_discarded()&&parsed.value("type",std::string())=="input"&&parsed.contains("event")&&
     parsed["event"].value("type",std::string())=="mouse"&&parsed["event"].value("action",std::string())=="move";
@@ -1433,7 +1547,12 @@ struct Session {
    }
   }
   if(input_queue.size()>=256) {
-    RejectInput("input_queue_busy",parsed,event.authorization);return;
+    reject("input_queue_busy");return;
+  }
+  if(event.trace_input_sequence) {
+   RK_SERVER_TRACE(trace,"input_worker_queue",TraceIds{},
+     rk_record.peer=event.peer;rk_record.client_sequence=event.trace_input_sequence;
+     rk_record.queue=static_cast<int>(input_queue.size()););
   }
   input_queue.push_back(event);input_wake.notify_one();
  }
@@ -1453,6 +1572,10 @@ struct Session {
     return peer.load()==receipt.peer && authorization.Current(receipt.authorization);
    });
    if(event) {
+    if(event->trace_input_sequence) {
+     RK_SERVER_TRACE(trace,"input_worker_begin",TraceIds{},
+       rk_record.peer=event->peer;rk_record.client_sequence=event->trace_input_sequence;);
+    }
     try{HandleData(*event,terminals);}catch(const std::exception& error){++input_rejected;if(ProductCurrent(*event))ReplyInput({{"ok",false},{"error",error.what()}},Json::parse(event->bytes,nullptr,false),event->authorization);}
    }
    // One due status read per input turn. A pending sequence does not hold
@@ -1659,7 +1782,10 @@ struct Session {
     }
     remotekit_rtc_adaptation adapted{};adapted.struct_size=sizeof(adapted);
     const auto stamp=pool.MonotonicMicros();
+    const auto adapt_begin=trace?QpcNow():0;
     const auto adaptation_status=handle&&stamp?sdk.remotekit_rtc_adapt_frame(handle,metadata.width_pixels,metadata.height_pixels,stamp,&adapted):REMOTEKIT_SDK_INVALID_STATE;
+    RK_SERVER_TRACE(trace,"comp_adapt_begin",TraceIds::Frame(frame),rk_record.qpc=adapt_begin;rk_record.peer=handle;);
+    RK_SERVER_TRACE(trace,"comp_adapt_return",TraceIds::Frame(frame),rk_record.status=adaptation_status;rk_record.peer=handle;rk_record.reason=adapted.drop?"drop":"keep";);
     if(adaptation_status==0)official_max_fps=adapted.max_fps?adapted.max_fps:240;
     {std::lock_guard lock(comp_diagnostics_mutex);auto& d=comp_diagnostics;
      if(handle&&stamp)++d.adaptRequests;if(adaptation_status==0&&adapted.drop)++d.adaptDrops;else if(adaptation_status!=0)++d.adaptErrors;
@@ -2356,7 +2482,13 @@ struct Session {
   if(page_reply && (!Alive() || !control || producer_stop_pending || browser_incarnation.empty() ||
      request.value("browserIncarnation",std::string())!=browser_incarnation))
    throw std::runtime_error("stale_browser_incarnation");
-  const bool require_running=page_reply || ((method=="view.configure" || method=="view.lifecycle") && request.value("requireRunning",false));
+  const bool lifecycle=method=="view.lifecycle";
+  const bool guarded_lifecycle=lifecycle && (request.contains("lifecycleGeneration") ||
+    request.value("action",std::string())=="unload");
+  if(guarded_lifecycle && (!request.value("requireRunning",false) ||
+     request.value("browserIncarnation",std::string())!=browser_incarnation || browser_incarnation.empty()))
+   throw std::runtime_error("stale_lifecycle_recovery");
+  const bool require_running=page_reply || ((method=="view.configure" || lifecycle) && request.value("requireRunning",false));
   if(require_running) {
    if(!Alive() || !control || producer_stop_pending)throw std::runtime_error("browser not running; guarded maintenance cannot start it");
   } else Start();
@@ -2421,9 +2553,15 @@ struct Session {
   }
   if(method=="view.lifecycle") {
    const auto action=Required(request,"action");
-   if(action!="discard" && action!="freeze" && action!="restore")throw std::runtime_error("unsupported lifecycle action");
-   if(Recovering(view))return {{"accepted",true},{"pending",true},{"completed",false},{"recovery",RecoveryStatus(recoveries.at(view))}};
-   return Rpc({{"method","lifecycle"},{"session",id},{"view",view},{"action",action}});
+   if(guarded_lifecycle && action!="unload" && action!="restore")throw std::runtime_error("unsupported guarded lifecycle action");
+   if(action!="discard" && action!="freeze" && action!="restore" && action!="unload")throw std::runtime_error("unsupported lifecycle action");
+   if(Recovering(view)) {
+    if(guarded_lifecycle)throw std::runtime_error("navigation_recovery_pending");
+    return {{"accepted",true},{"pending",true},{"completed",false},{"recovery",RecoveryStatus(recoveries.at(view))}};
+   }
+   Json command={{"method","lifecycle"},{"session",id},{"view",view},{"action",action}};
+   if(guarded_lifecycle)command["expected_lifecycle_generation"]=Required(request,"lifecycleGeneration");
+   return Rpc(std::move(command));
   }
   if(method=="view.navigate") {
    const auto url=Required(request,"url");

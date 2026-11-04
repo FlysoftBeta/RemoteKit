@@ -1,7 +1,7 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Button } from "@mui/material";
 import { KeyboardHideOutlined, KeyboardOutlined } from "@mui/icons-material";
-import { RemoteTransport, type InputDelivery, type InputResult } from "./transport";
+import { RemoteTransport, type InputDelivery, type InputResult, type TouchRetireLease } from "./transport";
 import { keyIdentity, mouseButtonModifiers } from "./keys";
 import { StatsOverlay } from "./stats-overlay";
 import { TouchInput, pointerSampleTime, type TouchPacket } from "./touch-input";
@@ -31,9 +31,15 @@ const modifiers = (event: {
   (Number(event.metaKey) << 3);
 
 interface ViewportTouchOwner extends TouchOwner {
-  sentRaw: boolean;
+  start: TouchPacket;
+  submissions: number;
+  lease?: TouchRetireLease;
+  retiring?: boolean;
+  cleanupAttempts: number;
   terminal?: 'queued' | 'submitted' | 'accepted-pending' | 'unconfirmed' | 'cleanup';
 }
+
+const touchCleanupDelays = [100, 250, 500];
 
 export function RemoteViewport({
   transport,
@@ -224,12 +230,26 @@ export function RemoteViewport({
     setTouchNotice(undefined);
     releaseTouchCaptures(ids);
   };
+  const scheduleTouchCleanup = (owner: ViewportTouchOwner, notice: 'cleanup' | 'unconfirmed') => {
+    clearTimeout(cancelTimer.current);
+    const delay = owner.packet.gestureMode === 'client-v1' ? touchCleanupDelays[owner.cleanupAttempts] : undefined;
+    if (delay === undefined) { setTouchNotice(notice); return; }
+    ++owner.cleanupAttempts;
+    const packet = owner.packet;
+    cancelTimer.current = setTimeout(() => {
+      if (touchOwner.current !== owner || owner.packet !== packet) return;
+      owner.terminal = 'cleanup';
+      cancelTouches();
+    }, delay);
+  };
   const cancelTouches = () => {
     stopMomentum();
     const owner = touchOwner.current;
     if (!owner) return;
     const current = transport.layout?.views.find(view => view.id === owner.surface.id);
-    if (!current || transport.inputIdentity(current) !== owner.identity) { clearTouchOwner(owner, true); return; }
+    const retirement = owner.retiring ? owner.lease : undefined;
+    if (retirement ? !transport.touchRetirementCurrent(retirement)
+        : !current || transport.inputIdentity(current) !== owner.identity) { clearTouchOwner(owner, true); return; }
     if (owner.terminal && owner.terminal !== 'cleanup') return;
     const ids = touches.current.contactIds;
     const cancelled = touches.current.cancel() ?? {
@@ -243,15 +263,16 @@ export function RemoteViewport({
     const retry = () => {
       if (touchOwner.current !== owner || owner.terminal !== 'cleanup') return;
       const view = transport.layout?.views.find(view => view.id === owner.surface.id);
-      if (!view || transport.inputIdentity(view) !== owner.identity) { clearTouchOwner(owner, true); return; }
-      if (transport.sendInput(view, cancelled)) {
-        owner.terminal = 'queued';
+      if (retirement ? !transport.touchRetirementCurrent(retirement)
+          : !view || transport.inputIdentity(view) !== owner.identity) { clearTouchOwner(owner, true); return; }
+      if (retirement ? transport.retireTouch(retirement, cancelled) : transport.sendInput(view!, cancelled)) {
+        owner.terminal = retirement ? 'submitted' : 'queued';
         touches.current.accepted(cancelled);
         setTouchNotice(undefined);
         return;
       }
       if (performance.now() - started < 250) cancelTimer.current = setTimeout(retry, 10);
-      else setTouchNotice('cleanup');
+      else scheduleTouchCleanup(owner, 'cleanup');
     };
     retry();
     releaseTouchCaptures(ids);
@@ -288,7 +309,18 @@ export function RemoteViewport({
     const current = transport.layout?.views.find(view => view.id === viewId);
     const identity = current && transport.inputIdentity(current);
     const owner = touchOwner.current;
-    if (owner && owner.identity !== identity) clearTouchOwner(owner, true);
+    if (owner && owner.identity !== identity) {
+      const lease = owner.lease;
+      if (lease && transport.layout && transport.layout.epoch !== lease.layoutEpoch &&
+          transport.touchRetirementCurrent(lease)) {
+        if (!owner.retiring) {
+          owner.retiring = true;
+          owner.terminal = 'cleanup';
+          owner.cleanupAttempts = 0;
+          cancelTouches();
+        }
+      } else clearTouchOwner(owner, true);
+    }
     const momentum = momentumOwner.current;
     if (momentum && momentum.identity !== identity) {
       if (momentum.frame !== undefined) cancelAnimationFrame(momentum.frame);
@@ -338,17 +370,24 @@ export function RemoteViewport({
     const owner = touchOwner.current;
     if (!owner || result.identity !== owner.identity || result.event.type !== 'touch' || result.event.sequenceId !== owner.packet.sequenceId) return;
     const current = transport.layout?.views.find(view => view.id === owner.surface.id);
-    if (!current || transport.inputIdentity(current) !== owner.identity) return;
-    const terminal = touchTerminalResult(owner, result, transport.inputIdentity(current), touches.current.contactIds.length);
+    const identity = owner.retiring && owner.lease && transport.touchRetirementCurrent(owner.lease)
+      ? owner.identity : current && transport.inputIdentity(current);
+    if (identity !== owner.identity) return;
+    const terminal = touchTerminalResult(owner, result, identity, touches.current.contactIds.length);
     if (terminal) {
       clearTouchOwner(owner, terminal === 'invalidated');
+      return;
+    }
+    if (!result.ok && result.touchState === 'rejected' && result.event === owner.start &&
+        (owner.packet === owner.start || owner.retiring && owner.submissions === 1)) {
+      clearTouchOwner(owner, true);
       return;
     }
     if (result.event === owner.packet && owner.terminal) {
       if (result.touchState === 'accepted-pending' && owner.terminal !== 'unconfirmed') owner.terminal = 'accepted-pending';
       if (result.touchState === 'rejected') {
         owner.terminal = 'cleanup';
-        if (result.event.action === 'cancel') setTouchNotice('cleanup');
+        if (result.event.action === 'cancel') scheduleTouchCleanup(owner, 'cleanup');
         else cancelTouches();
       }
       return;
@@ -361,22 +400,26 @@ export function RemoteViewport({
     const owner = touchOwner.current;
     if (!owner || delivery.event.type !== 'touch' || delivery.identity !== owner.identity || delivery.event.sequenceId !== owner.packet.sequenceId) return;
     if (delivery.phase === 'submitted') {
-      owner.sentRaw = true;
+      ++owner.submissions;
+      if (delivery.layoutEpoch && delivery.event.gestureMode === 'client-v1') {
+        owner.surface = delivery.surface;
+        owner.lease = { surface: delivery.surface, identity: delivery.identity, layoutEpoch: delivery.layoutEpoch, authorization: delivery.authorization };
+      }
       if (delivery.event === owner.packet && owner.terminal === 'queued') owner.terminal = 'submitted';
     }
     if (delivery.phase === 'discarded') {
       syncTouchOwner();
-      if (touchOwner.current !== owner) return;
-      if (!owner.sentRaw && delivery.event.action === 'start') { clearTouchOwner(owner, true); return; }
+      if (touchOwner.current !== owner || owner.retiring) return;
+      if (!owner.submissions && delivery.event.action === 'start') { clearTouchOwner(owner, true); return; }
       if (delivery.event === owner.packet && owner.terminal === 'queued') {
         owner.terminal = 'cleanup';
-        if (delivery.event.action === 'cancel') { setTouchNotice('cleanup'); return; }
+        if (delivery.event.action === 'cancel') { scheduleTouchCleanup(owner, 'cleanup'); return; }
       }
       if (!owner.terminal || owner.terminal === 'cleanup') cancelTouches();
     }
     if (delivery.phase === 'unconfirmed' && delivery.event === owner.packet && owner.terminal) {
       owner.terminal = 'unconfirmed';
-      setTouchNotice('unconfirmed');
+      scheduleTouchCleanup(owner, 'unconfirmed');
     }
   };
   useEffect(() => transport.subscribeInputDelivery(delivery => deliveryRef.current(delivery)), [transport]);
@@ -389,6 +432,7 @@ export function RemoteViewport({
       window.removeEventListener("blur", blur);
       document.removeEventListener('visibilitychange', visibility);
       releaseRef.current();
+      clearTimeout(cancelTimer.current);
     };
   }, []);
   const point = (
@@ -482,7 +526,7 @@ export function RemoteViewport({
           const next = touches.current.sample(touchIdentity, action === "down" ? "start" : action === "up" ? "end" : "move", { id: event.pointerId, ...p, pressure: sample.pressure }, at, action === "down" ? transport.touchStartWall(at) : undefined, transport.clientGestures);
           if (next) {
             const existing = touchOwner.current;
-            const owner = existing ?? { surface: { ...surface }, identity: touchIdentity, packet: next, sentRaw: false };
+            const owner = existing ?? { surface: { ...surface }, identity: touchIdentity, start: next, packet: next, submissions: 0, cleanupAttempts: 0 };
             touchOwner.current = owner;
             const terminal = next.action === 'end' && touches.current.contactIds.length === 0;
             if (!send(next, next.action === 'end' ? { touchTerminal: terminal } : undefined)) {
@@ -662,6 +706,10 @@ export function RemoteViewport({
           const owner = touchOwner.current;
           if (owner && transport.retryTouchTerminal(owner.identity, owner.packet.sequenceId)) setTouchNotice('confirming');
         }}>重试确认</Button>}
+        {touchNotice === 'unconfirmed' && touchOwner.current?.packet.gestureMode === 'client-v1' && <Button size="small" onPointerDown={event => event.preventDefault()} onClick={() => {
+          const owner = touchOwner.current;
+          if (owner) { owner.terminal = 'cleanup'; cancelTouches(); }
+        }}>重试结束</Button>}
       </div>}
       {(!frameReady || resize.waiting) && !resize.frozen && (!resize.keyboard || transport.diagnostics.connection === "连接失败") && (
         <div className="page-overlay" role="status">

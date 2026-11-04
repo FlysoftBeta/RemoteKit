@@ -260,6 +260,9 @@ int main() {
   CHECK(freeze);
   auto state = e.FindWebView(s.value, v.value);
   CHECK(state->actual == Residency::live && state->desired == Residency::frozen && state->pending);
+  const auto before_freeze_commit = e.Token(s.value, v.value).value;
+  CHECK(e.CommitDocument(s.value, v.value));
+  CHECK(e.Token(s.value, v.value).value.document == before_freeze_commit.document + 1);
   CHECK(e.RequestLifecycle(s.value, v.value, Lifecycle::unload).status.error == Error::busy);
   CHECK(!e.AcceptInput(s.value, {e.Token(s.value, v.value).value, 4, KeyInput{}}));
   CHECK(!e.CompleteLifecycle(b.value, freeze.value, true));
@@ -268,6 +271,9 @@ int main() {
   CHECK(e.CompleteLifecycle(s.value, freeze.value, true).error == Error::stale);
   auto restore = e.RequestLifecycle(s.value, v.value, Lifecycle::restore);
   CHECK(restore);
+  const auto before_thaw_commit = e.Token(s.value, v.value).value;
+  CHECK(e.CommitDocument(s.value, v.value));
+  CHECK(e.Token(s.value, v.value).value.document == before_thaw_commit.document + 1);
   CHECK(e.CompleteLifecycle(s.value, restore.value, false));
   CHECK(e.FindWebView(s.value, v.value)->desired == Residency::live &&
         e.FindWebView(s.value, v.value)->actual == Residency::frozen);
@@ -276,6 +282,7 @@ int main() {
   auto before = e.Token(s.value, v.value).value;
   auto discard = e.RequestLifecycle(s.value, v.value, Lifecycle::discard);
   CHECK(discard);
+  CHECK(!e.CommitDocument(s.value, v.value));
   CHECK(e.CompleteLifecycle(s.value, discard.value, true));
   CHECK(e.FindWebView(s.value, v.value)->profile == p.value);
   CHECK(e.Token(s.value, v.value).value.instance > before.instance);

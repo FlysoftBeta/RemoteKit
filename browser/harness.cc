@@ -1047,12 +1047,12 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     return reply;
   }
   Status status{Error::unsupported, "unsupported_method"};
-  if (*method == "input.touchStatus") {
+  if (*method == "input.touchStatus" || *method == "input.touchRetire") {
     const auto* sequence = request.FindString("sequenceId");
     InputToken owner{session, view};
     reply.Set("state", "terminal-unconfirmed");
     reply.Set("pending", false);
-    if (!sequence || sequence->empty() ||
+    if (!sequence || sequence->empty() || sequence->size() > 128 ||
         !ReadId(request, "instance", &owner.instance) ||
         !ReadId(request, "document", &owner.document) ||
         !ReadId(request, "focus", &owner.focus))
@@ -1060,7 +1060,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     reply.Set("sequenceId", *sequence);
     adapter.RefreshClientTouchOwner();
     using State = ClientTouchRetirement::State;
-    const auto completion = adapter.ClientTouchStatus(owner, *sequence);
+    const auto completion = *method == "input.touchRetire"
+                                ? adapter.RetireClientTouch(owner, *sequence)
+                                : adapter.ClientTouchStatus(owner, *sequence);
     if (completion == State::invalidated) {
       reply.Set("state", "terminal-invalidated");
       return error("touch_owner_invalidated");
@@ -1130,6 +1132,24 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       operation = Lifecycle::discard;
     if (!operation)
       return error("unknown_lifecycle_action");
+    const bool guarded = request.Find("expected_lifecycle_generation") != nullptr;
+    const bool recover_uncertain = guarded && *operation == Lifecycle::unload;
+    if (guarded) {
+      uint64_t generation = 0;
+      const auto* model = endpoint.FindWebView(session, view);
+      if (!ReadId(request, "expected_lifecycle_generation", &generation) ||
+          !model || model->lifecycle_generation != generation || model->pending ||
+          page_requests[index]->close_state() == "closing" ||
+          page_requests[index]->close_state() == "closed")
+        return error("stale_lifecycle_recovery");
+      if (recover_uncertain) {
+        const auto allowed = adapter.CanRecoverLifecycle();
+        if (!allowed) return error(allowed.message);
+      } else if (*operation != Lifecycle::restore || model->actual != Residency::unloaded ||
+                 adapter.lifecycle_uncertain()) {
+        return error("stale_lifecycle_recovery");
+      }
+    }
     if (*operation == Lifecycle::discard || *operation == Lifecycle::freeze) {
       const auto allowed = CanDiscard(index);
       if (!allowed) return error(allowed.message);
@@ -1143,7 +1163,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (*operation == Lifecycle::unload && native_views[index])
       native_views[index]->SetWebContents(nullptr);
     page_requests[index]->Bind(nullptr);
-    status = adapter.RequestLifecycle(*operation);
+    status = adapter.RequestLifecycle(*operation, {}, recover_uncertain);
     page_requests[index]->Bind(adapter.contents());
     if (native_views[index]) native_views[index]->SetWebContents(adapter.contents());
     paused_output.erase(view);
@@ -1365,7 +1385,10 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     } else
       return error("unsupported_input_type");
     bool input_admitted = false;
+    if (output) output->TraceInput("input_browser_dispatch", input);
     status = adapter.DispatchInput(input, &input_admitted);
+    if (output) output->TraceInput("input_browser_dispatch_return", input,
+                                   static_cast<int>(status.error));
     if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
       reply.Set("touchPending", adapter.TouchProcessingPending());
       reply.Set("touchSequenceId", touch->clock ? touch->clock->sequence_id : std::string());
@@ -1374,8 +1397,10 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           (touch->action == TouchInput::Action::end || touch->action == TouchInput::Action::cancel))
         reply.Set("touchTerminal", adapter.ClientTouchStatus(input.token, touch->clock->sequence_id) !=
                                        ClientTouchRetirement::State::unknown);
-      if (status.error == Error::stale &&
-          status.message == "Client touch owner explicitly invalidated") {
+      if (!status && touch->client_gestures && touch->clock &&
+          (input_admitted || (status.error == Error::stale &&
+                              status.message == "Client touch owner explicitly invalidated")) &&
+          adapter.ClientTouchRetired(input.token, touch->clock->sequence_id)) {
         reply.Set("touchState", "terminal-invalidated");
         reply.Set("touchPending", false);
       }

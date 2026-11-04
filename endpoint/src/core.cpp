@@ -200,8 +200,12 @@ Status Endpoint::CommitDocument(SessionId s, WebViewId id) {
   auto v = MutableView(s, id);
   if (!v)
     return Fail(Error::not_found, "WebView not found in session");
-  if (v->actual != Residency::live || v->pending)
-    return Fail(Error::unavailable, "WebView is not live");
+  // A renderer can commit during freeze/thaw. Preserve the new document's
+  // identity while the pending lifecycle request continues to gate input.
+  if ((v->actual != Residency::live && v->actual != Residency::frozen) ||
+      (v->pending && v->pending->action != Lifecycle::freeze &&
+       !(v->pending->action == Lifecycle::restore && v->actual == Residency::frozen)))
+    return Fail(Error::unavailable, "WebView does not have a live document");
   ++v->document;
   return {};
 }

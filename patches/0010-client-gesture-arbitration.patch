@@ -52,7 +52,7 @@ index 09a098a663..955b265eeb 100644
    mojo::PendingRemote<blink::mojom::WidgetInputHandlerHost> BindNewHost(
        scoped_refptr<base::SequencedTaskRunner> task_runner) override;
 diff --git a/components/input/render_widget_host_input_event_router.cc b/components/input/render_widget_host_input_event_router.cc
-index c8e5f07465..8ab6b93a34 100644
+index c8e5f07465..8cb2dff912 100644
 --- a/components/input/render_widget_host_input_event_router.cc
 +++ b/components/input/render_widget_host_input_event_router.cc
 @@ -202,8 +202,14 @@ void TouchEventAckQueue::ProcessAckedTouchEvents() {
@@ -70,7 +70,7 @@ index c8e5f07465..8ab6b93a34 100644
      bool handled_by_emulator = false;
      if (weak_touch_emulator) {
        handled_by_emulator = weak_touch_emulator->HandleTouchEventAck(
-@@ -942,6 +948,42 @@ unsigned CountChangedTouchPoints(const blink::WebTouchEvent& event) {
+@@ -942,6 +948,49 @@ unsigned CountChangedTouchPoints(const blink::WebTouchEvent& event) {
  
  // Any time a touch start event is handled/consumed/default prevented it is
  // removed from the gesture map, because it will never create a gesture.
@@ -79,6 +79,13 @@ index c8e5f07465..8ab6b93a34 100644
 +  if (!root || !id || client_touch_acks_.size() >= 512) return false;
 +  return client_touch_acks_.emplace(
 +      id, ClientTouchRegistration{root->GetInputWeakPtr(), std::move(callback)}).second;
++}
++
++void RenderWidgetHostInputEventRouter::WithdrawUnroutedClientTouch(
++    RenderWidgetHostViewInput* root, uint32_t id) {
++  auto it = client_touch_acks_.find(id);
++  if (it != client_touch_acks_.end() && it->second.root.get() == root)
++    client_touch_acks_.erase(it);
 +}
 +
 +bool RenderWidgetHostInputEventRouter::AckClientTouch(
@@ -113,7 +120,7 @@ index c8e5f07465..8ab6b93a34 100644
  void RenderWidgetHostInputEventRouter::OnHandledTouchStartOrFirstTouchMove(
      uint32_t unique_touch_event_id) {
    // unique_touch_event_id of 0 implies a gesture not created by a touch.
-@@ -1812,6 +1854,8 @@ void RenderWidgetHostInputEventRouter::DispatchTouchscreenGestureEvent(
+@@ -1812,6 +1861,8 @@ void RenderWidgetHostInputEventRouter::DispatchTouchscreenGestureEvent(
    // there is no WebGestureEvent equivalent for EventType::kGestureBegin.
    const bool is_gesture_start =
        gesture_event.GetType() == blink::WebInputEvent::Type::kGestureTapDown;
@@ -122,7 +129,7 @@ index c8e5f07465..8ab6b93a34 100644
  
    std::optional<gfx::PointF> fallback_target_location;
  
-@@ -2174,6 +2218,7 @@ void RenderWidgetHostInputEventRouter::SetTouchscreenGestureTarget(
+@@ -2174,6 +2225,7 @@ void RenderWidgetHostInputEventRouter::SetTouchscreenGestureTarget(
  }
  
  void RenderWidgetHostInputEventRouter::ClearTouchscreenGestureTarget() {
@@ -131,7 +138,7 @@ index c8e5f07465..8ab6b93a34 100644
    touchscreen_gesture_event_debug_queue_.clear();
  }
 diff --git a/components/input/render_widget_host_input_event_router.h b/components/input/render_widget_host_input_event_router.h
-index a7d8d96d06..53c1d81bf8 100644
+index a7d8d96d06..e63ef35e4a 100644
 --- a/components/input/render_widget_host_input_event_router.h
 +++ b/components/input/render_widget_host_input_event_router.h
 @@ -13,6 +13,7 @@
@@ -142,7 +149,7 @@ index a7d8d96d06..53c1d81bf8 100644
  #include "base/memory/raw_ptr.h"
  #include "base/memory/ref_counted.h"
  #include "base/memory/weak_ptr.h"
-@@ -140,6 +141,20 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+@@ -140,6 +141,22 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
    void RouteGestureEvent(RenderWidgetHostViewInput* root_view,
                           const blink::WebGestureEvent* event,
                           const ui::LatencyInfo& latency);
@@ -152,6 +159,8 @@ index a7d8d96d06..53c1d81bf8 100644
 +      const blink::WebTouchEvent&, blink::mojom::InputEventResultState, RenderWidgetHostViewInput*)>;
 +  bool RegisterClientTouch(RenderWidgetHostViewInput* root, uint32_t id,
 +                           ClientTouchAck callback);
++  // Only valid before the raw event is handed to RouteTouchEvent.
++  void WithdrawUnroutedClientTouch(RenderWidgetHostViewInput* root, uint32_t id);
 +  bool AckClientTouch(RenderWidgetHostViewInput* root,
 +                      const blink::WebTouchEvent& event,
 +                      blink::mojom::InputEventResultState result,
@@ -163,7 +172,7 @@ index a7d8d96d06..53c1d81bf8 100644
    void OnHandledTouchStartOrFirstTouchMove(uint32_t unique_touch_event_id);
    void ProcessAckedTouchEvent(const TouchEventWithLatencyInfo& event,
                                blink::mojom::InputEventResultState ack_result,
-@@ -537,6 +552,12 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
+@@ -537,6 +554,12 @@ class COMPONENT_EXPORT(INPUT) RenderWidgetHostInputEventRouter final
    bool events_being_flushed_ = false;
  
    raw_ptr<Delegate> delegate_;

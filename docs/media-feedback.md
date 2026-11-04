@@ -16,6 +16,8 @@ Client约每1500ms发送layout绑定的media.feedback，包括seq、generation/e
 
 缺测省略；多个plane计数不相加当物理解码FPS，静态低FPS不直接判压力。video使用可见期间presentedFrames增量，canvas使用JS新帧提交数；隐藏/屏障撤销基线。这些反馈不自行调整网络码率、DPR或分辨率。
 
+Stats同轮采集RTC解码、各video元素收帧/丢帧、compositor提交与rVFC回调，区分四种计数。有效静态窗口显示0，计数器倒退或布局门禁变化重新建立基线。浏览器提供时显示末包receiveTime→presentationTime、提交→实际回调、预计显示超期，以及RTC累计差分的jitterBufferDelay与totalDecodeTime均值。缺字段不填0；旧capture/copy路径空白项不再进入当前叠层。视频提交和预计显示都不是物理屏幕扫描完成。
+
 ## 完成时戳与呈现估算
 
 只有有效原始源完成QPC才生成captureWallTimeMs、captureMonotonicMs、captureClockUncertaintyMs及sourceCaptureId，与真实wire RTP/epoch配对。新OSR暂未测完成时戳，capture_time_us=0；提交、ready查询和编码时刻不能补作采集时间。
@@ -25,5 +27,7 @@ Client分别校准Endpoint媒体时钟与Control产品新鲜度时钟，不混�
 兼容名称capture-end-to-paint的终点为video compositor回调或canvas JS提交，不是物理屏幕点亮，也不含此前渲染等待。缺有效源时戳不产生样本，分段p95不可相加。
 
 receiver支持jitterBufferTarget时设0；Chrome89仅在可用时设playoutDelayHint=0。分别报告能力，不把兼容hint或RTP playout-delay扩展说成标准属性已生效。
+
+Endpoint默认另请求RTP playout-delay min0/max50ms，使支持的接收端使用WebRTC原生低延迟呈现策略，保留有界合成队列。`--rtc-playout-max-ms=-1`可在创建peer前显式保持未设置，合法非负10ms整数倍可覆盖默认。该值是best-effort请求，不是实际缓冲或端到端50ms保证；jitterBufferTarget=0也不取消解码、抖动或音视频同步所需等待。GCC、原生媒体适配和三档降级偏好保持原职责。
 
 反馈sequence终生单调；时钟reset只清校准/样本，保留序号及已见内容身份。

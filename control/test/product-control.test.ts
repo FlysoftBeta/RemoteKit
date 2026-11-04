@@ -19,6 +19,7 @@ class ProductEndpoint implements Endpoint {
   running = false; browserPid = 10; failSites = false; failAck = false; loseAdoptReply = false;
   popups: any[] = []; events: any[] = []; onAdopt?: (args: any) => void;
   stopBeforeMaintenance = false; loseEnsureReply = false;
+  guardedLifecycle?: (view: any, args: any) => Record<string, unknown>;
   async request(method: string, tenant: string, args: any = {}) {
     this.calls.push({ method, tenant, args }); let views = this.views.get(tenant); if (!views) this.views.set(tenant, views = new Map());
     if (method === 'session.sitePreferences') { if (this.failSites) throw new Error('UA apply failed'); return { accepted: true, applied: this.running }; }
@@ -39,7 +40,7 @@ class ProductEndpoint implements Endpoint {
     if (method === 'view.navigate') Object.assign(views.get(args.viewId)!, { url: args.url });
     if (method === 'view.configure') Object.assign(views.get(args.viewId)!, args);
     if (method === 'view.page.reply') { const v = views.get(args.viewId)!; if (String(v.instance) !== args.instance || String(v.document) !== args.document) throw new Error('stale_page_request'); v.pageRequests.pending = v.pageRequests.pending.filter((p: any) => p.request !== args.requestId); return { accepted: true, browser: { ok: true, state: 'resolved' } }; }
-    if (method === 'view.lifecycle') { const v = views.get(args.viewId)!; if (args.action === 'restore') { v.pending = true; v.desired = 0; } else v.actual = 2; return { accepted: true, completed: false, pending: true, lifecycleGeneration: '1' }; }
+    if (method === 'view.lifecycle') { const v = views.get(args.viewId)!; if (args.lifecycleGeneration !== undefined && this.guardedLifecycle) return this.guardedLifecycle(v, args); if (args.action === 'restore') { v.pending = true; v.desired = 0; } else v.actual = 2; return { accepted: true, completed: false, pending: true, lifecycleGeneration: '1' }; }
     if (method === 'view.close') { if (this.pending && !args.force) return { pending: true, requestId: 'close-1', browserIncarnation: 'browser-' + this.browserPid, instance: String(views.get(args.viewId).instance), document: String(views.get(args.viewId).document) }; views.delete(args.viewId); return { closed: true }; }
     if (method === 'view.close.reply') { if (args.accept) views.get(args.viewId).close_state = 'closed'; return { accepted: true, browser: { ok: true } }; }
     if (method === 'rtc.offer') return { sdp: 'v=0\r\n' };
@@ -109,6 +110,105 @@ test('memory saver uses hidden age and canDiscard; activating a discarded page w
     await control.tick(); assert.equal(view.visible, false); view.actual = 0; view.pending = false; await control.tick(); assert.equal(view.visible, true);
     await control.detachViewer(user.tenantId, 'lease'); assert.equal(view.visible, false); assert.equal(view.width, 1200); assert.equal(view.height, 800);
   } finally { store.db.close(); }
+});
+
+async function uncertainTab() {
+  const f = await fixture(), tenant = f.user.tenantId;
+  await f.control.attachViewer(tenant, 'lease', () => {});
+  const { workspace } = (await f.control.productAction(tenant, { type: 'window.create', url: 'https://saved.test/' }, 'lease')).state;
+  const tab = workspace.tabs[0], window = workspace.windows[0];
+  const viewport = { devicePixelRatio: 1, windows: [{ windowId: window.id, width: 1200, height: 800, visible: true }] };
+  await f.control.viewerRequest(tenant, 'lease', 'viewport', viewport);
+  const view = f.endpoint.views.get(tenant)!.get(tab.webviewId);
+  Object.assign(view, { lifecycle_uncertain: true, lifecycle_generation: '41', last_lifecycle: { generation: '41', action: 0, succeeded: false } });
+  const tabState = () => f.store.workspace(tenant).tabs[0];
+  const lifecycleCalls = () => f.endpoint.calls.filter(call => call.method === 'view.lifecycle').map(call => call.args);
+  return { ...f, tenant, tab, view, viewport, tabState, lifecycleCalls };
+}
+
+test('uncertain recovery uses matching unload and restore snapshot evidence after both replies are lost', async () => {
+  const f = await uncertainTab();
+  try {
+    f.endpoint.guardedLifecycle = (view, args) => {
+      assert.equal(view.visible, false);
+      if (args.action === 'unload') Object.assign(view, {
+        actual: 3, instance: '2', pending: false, lifecycle_uncertain: false, lifecycle_generation: '42',
+        last_lifecycle: { generation: '42', action: 2, succeeded: true },
+      });
+      else Object.assign(view, { pending: true, desired: 0, lifecycle_generation: '43', url: 'about:blank' });
+      throw new Error('lifecycle response lost');
+    };
+    f.endpoint.calls = [];
+    await f.control.tick();
+    assert.equal(f.tabState().lifecycleRecovery?.phase, 'unload');
+    assert.equal(f.view.visible, false);
+    assert.deepEqual(f.lifecycleCalls(), [{ viewId: f.tab.webviewId, action: 'unload', requireRunning: true, browserIncarnation: 'browser-10', lifecycleGeneration: '41' }]);
+    f.view.last_lifecycle.generation = '40';
+    await f.control.tick();
+    assert.equal(f.lifecycleCalls().length, 1);
+    f.view.last_lifecycle.generation = '42';
+    await f.control.tick();
+    assert.equal(f.tabState().lifecycleRecovery?.phase, 'restore');
+    assert.deepEqual(f.lifecycleCalls()[1], { viewId: f.tab.webviewId, action: 'restore', requireRunning: true, browserIncarnation: 'browser-10', lifecycleGeneration: '42' });
+    await f.control.tick();
+    assert.equal(f.tabState().url, 'https://saved.test/');
+    assert.equal(f.lifecycleCalls().length, 2);
+    Object.assign(f.view, {
+      actual: 0, pending: false, url: 'https://saved.test/',
+      last_lifecycle: { generation: '43', action: 3, succeeded: true },
+    });
+    await f.control.tick();
+    assert.equal(f.view.visible, true);
+    assert.equal(f.tabState().lifecycleRecovery, undefined);
+    assert.equal(f.tabState().lifecycleRecoveryError, undefined);
+    assert.equal(f.endpoint.calls.some(c => c.method === 'view.navigate' || c.method === 'view.ensure'), false);
+  } finally { await f.control.close(); f.store.db.close(); }
+});
+
+test('unconfirmed unload survives Control restart and is retired on Browser incarnation change', async () => {
+  const f = await uncertainTab();
+  let control = f.control;
+  try {
+    f.endpoint.guardedLifecycle = () => { throw new Error('lifecycle response lost'); };
+    const workspace = f.store.workspace(f.tenant);
+    workspace.tabs[0].pendingUrl = 'https://unconfirmed.test/';
+    f.store.saveWorkspace(workspace);
+    await control.tick();
+    await control.close();
+    control = new Control(f.store, f.endpoint);
+    await control.attachViewer(f.tenant, 'new-lease', () => {});
+    await control.viewerRequest(f.tenant, 'new-lease', 'viewport', f.viewport);
+    await control.tick();
+    assert.equal(f.lifecycleCalls().length, 1);
+    assert.equal(f.tabState().lifecycleRecovery?.generation, '41');
+    assert.match(f.tabState().lifecycleRecoveryError!, /response lost/);
+    f.endpoint.browserPid++;
+    f.endpoint.views.get(f.tenant)!.clear();
+    await control.tick();
+    assert.equal(f.lifecycleCalls().length, 1);
+    assert.equal(f.tabState().lifecycleRecovery, undefined);
+    assert.equal(f.tabState().lifecycleRecoveryError, undefined);
+    assert.equal(f.endpoint.views.get(f.tenant)!.get(f.tab.webviewId).url, 'https://saved.test/');
+  } finally { await control.close(); f.store.db.close(); }
+});
+
+test('unsafe POST checkpoint leaves an explicit tab error and never repeats unload or restores', async () => {
+  const f = await uncertainTab();
+  try {
+    f.endpoint.guardedLifecycle = () => { throw new Error('POST requires repost confirmation'); };
+    f.endpoint.calls = [];
+    await f.control.tick();
+    const revision = f.store.workspace(f.tenant).revision;
+    await f.control.tick();
+    assert.equal(f.store.workspace(f.tenant).revision, revision);
+    assert.deepEqual(f.lifecycleCalls().map(c => c.action), ['unload']);
+    assert.equal(f.view.actual, 0);
+    assert.equal(f.view.visible, false);
+    assert.match(f.tabState().lifecycleRecoveryError!, /POST requires repost confirmation/);
+    await f.control.productAction(f.tenant, { type: 'tab.close', tabId: f.tab.id }, 'lease');
+    await f.control.productAction(f.tenant, { type: 'window.create', url: 'https://saved.test/' }, 'lease');
+    assert.equal(f.tabState().lifecycleRecoveryError, undefined);
+  } finally { await f.control.close(); f.store.db.close(); }
 });
 
 test('showStats defaults on migration and old v2 settings, persists as a boolean and rejects other values', async () => {

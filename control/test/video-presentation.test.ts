@@ -78,6 +78,32 @@ test('video FPS and feedback count compositor deltas rather than rVFC callback c
   assert.deepEqual(stats.snapshot(1100), { callbacks: 5, frames: 15, fps: 50 });
 });
 
+test('poll windows distinguish compositor submissions, callbacks and element drops across idle and hide', () => {
+  const stats = new VideoCompositorStats();
+  stats.observe(0, 10, false);
+  assert.equal(stats.sampleWindow(100, true, { totalVideoFrames: 15, droppedVideoFrames: 3 }), undefined);
+  stats.observe(1000, 55, true);
+  assert.deepEqual(stats.sampleWindow(1100, true, { totalVideoFrames: 65, droppedVideoFrames: 8 }),
+    { fps: 45, callbackFps: 1, videoElementFps: 50, videoElementDrops: 5 });
+  assert.deepEqual(stats.sampleWindow(2100, true, { totalVideoFrames: 65, droppedVideoFrames: 8 }),
+    { fps: 0, callbackFps: 0, videoElementFps: 0, videoElementDrops: 0 });
+  stats.resetObservation();
+  stats.observe(2400, 160, false);
+  assert.equal(stats.sampleWindow(3100, true), undefined, 'a new visibility interval establishes its own baseline');
+});
+
+test('video timing reports only locally measured samples inside the observation window', () => {
+  const stats = new VideoCompositorStats();
+  stats.observe(0, 10, false);
+  stats.observe(120, 11, true, { receiveTime: 50, presentationTime: 110, expectedDisplayTime: 130, processingDuration: .002 });
+  stats.observe(250, 12, true, { presentationTime: 240, expectedDisplayTime: 245 });
+  assert.deepEqual(stats.timing(250), {
+    receiveToSubmit: { samples: 1, p95: 60 }, submitToCallback: { samples: 2, p95: 10 },
+    expectedDisplayLateness: { samples: 2, p95: 5 }, processing: { samples: 1, p95: 2 },
+  });
+  assert.equal(stats.timing(1300).submitToCallback, undefined);
+});
+
 test('video negotiation hides across two rAF turns; only latest full barrier can ACK', t => {
   const s = environment(t); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key }); s.raf();

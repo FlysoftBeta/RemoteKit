@@ -31,6 +31,7 @@ class BrowserContext;
 class WebContents;
 class RenderWidgetHostImpl;
 class RenderFrameHostImpl;
+class RenderViewHostImpl;
 class RenderWidgetHostViewBase;
 }  // namespace content
 namespace blink::web_pref { struct WebPreferences; }
@@ -100,6 +101,7 @@ class WebView final : public content::WebContentsObserver,
     return retired_client_touches_.Find(token, sequence);
   }
   void RefreshClientTouchOwner();
+  ClientTouchRetirement::State RetireClientTouch(const InputToken&, const std::string& sequence);
   bool ClientTouchRetired(const InputToken& token, const std::string& sequence) const {
     return retired_client_touches_.Contains(token, sequence);
   }
@@ -116,7 +118,8 @@ class WebView final : public content::WebContentsObserver,
   // for accepted operations (possibly synchronously). Rejected requests never
   // invoke it. Renderer ack/poll and navigation completion have a 10s bound.
   // A timeout leaves browser state uncertain: only unload is then allowed.
-  Status RequestLifecycle(Lifecycle, Completion = {});
+  Status RequestLifecycle(Lifecycle, Completion = {}, bool recover_uncertain = false);
+  Status CanRecoverLifecycle() const;
   // Read-only eligibility. Execution repeats this guard on the UI sequence.
   Status CanDiscard() const;
 
@@ -169,10 +172,17 @@ class WebView final : public content::WebContentsObserver,
   void ReleaseHeldKeys(bool deliver);
   void ReleasePointer(bool deliver);
   void RememberPointerTarget();
-  enum class PendingKind { none, freeze, thaw, discard, restore_unloaded, restore_discarded };
-  Status FinishLifecycle(bool success, Status);
+  enum class PendingKind { none, freeze, thaw, cancel_freeze, discard, restore_unloaded, restore_discarded };
+  struct LifecycleView {
+    base::WeakPtr<content::RenderViewHostImpl> host;
+    std::uint64_t broadcast_generation;
+    std::uint64_t request;
+    bool acknowledged = false;
+  };
+  Status FinishLifecycle(bool success, Status, bool uncertain = true);
   Status CheckQuiescent() const;
-  bool AllPageViewsAcknowledged(bool frozen) const;
+  bool UpdateLifecycleViews(bool frozen);
+  void OnLifecycleViewAcknowledged(base::WeakPtr<content::RenderViewHostImpl>, std::uint64_t request);
   void PollLifecycle();
   void OnDiscarded(std::uint64_t generation);
   void StartLifecycleTimer();
@@ -206,6 +216,9 @@ class WebView final : public content::WebContentsObserver,
   std::optional<LifecycleRequest> lifecycle_request_;
   PendingKind pending_kind_{PendingKind::none};
   bool lifecycle_uncertain_{false};
+  bool freeze_cancelled_{false};
+  std::uint64_t lifecycle_view_request_ = 0;
+  std::map<content::RenderViewHostImpl*, LifecycleView> lifecycle_views_;
   bool discard_acknowledged_{false};
   std::int64_t restore_navigation_{-1};
   base::TimeTicks lifecycle_deadline_;

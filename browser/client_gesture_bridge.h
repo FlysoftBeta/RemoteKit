@@ -28,6 +28,7 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
                   int64_t source_elapsed_us);
   base::TimeTicks NativeTimestamp(base::TimeTicks sampled);
   Status Momentum(const GestureInput&);
+  bool has_routed_raw() const { return first_id_ != 0; }
   void Cancel(bool deliver);
   void ForwardGestureEvent(const ui::GestureEventData&) override;
   const std::string& sequence() const { return sequence_; }

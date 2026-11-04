@@ -25,7 +25,7 @@
     {
       "id": "client-gesture-arbitration",
       "path": "0010-client-gesture-arbitration.patch",
-      "sha256": "c2c306c4ef5cc08f031d136aa010e73f9977aa6c759371429a513c342c091c30"
+      "sha256": "16df2524ba35d9b7c8cac410480efe2de69f28ad483b95da1c7118bd7d8b42c0"
     },
     {
       "id": "remotekit-osr-output",
@@ -36,6 +36,11 @@
       "id": "webrtc-screenshare-adaptation",
       "path": "0014-webrtc-screenshare-adaptation.patch",
       "sha256": "678bcd7c6a48a6c1754b25e36857554f4963a816e8cbceebb05ca06847eaecc6"
+    },
+    {
+      "id": "page-lifecycle-ack",
+      "path": "0015-page-lifecycle-ack.patch",
+      "sha256": "64ad2cd1e7bd0effb5ba50cee59a0cb98319a0cad5031c30147e3fedc4edbe9c"
     }
   ]
 }

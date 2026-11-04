@@ -26,6 +26,8 @@ struct TraceRecord {
  const char* event="",*reason=nullptr;TraceIds ids;
  int64_t qpc=0,qpc_before=0,qpc_after=0,clock_frequency=0;
  uint64_t peer=0,encoder=0,cookie=0,fence=0,completed_fence=0,bytes=0,wall_filetime=0;
+ uint64_t client_sequence=0,browser_sequence=0,view=0,instance=0,document=0,focus=0;
+ uint32_t producer_pid=0,bitrate_bps=0,fps=0;
  int status=0,pending=-1,leased=-1,queue=-1,inflight=-1,slot=-1,refs=-1;
  int consistent=-1,high_resolution=-1;
 };
@@ -79,6 +81,9 @@ class ServerTrace {
    // Zero is a valid RTP timestamp; include both on relevant encode records.
    if(i.rtp_known)value["rtp_timestamp"]=i.rtp_timestamp;
    if(i.wire_known)value["wire_rtp_timestamp"]=i.wire_rtp_timestamp;
+   add("producer_pid",r.producer_pid);add("bitrate_bps",r.bitrate_bps);add("fps",r.fps);
+   add("client_sequence",r.client_sequence);add("browser_sequence",r.browser_sequence);
+   add("view",r.view);add("instance",r.instance);add("document",r.document);add("focus",r.focus);
    add("peer",r.peer);add("encoder",r.encoder);add("cookie",r.cookie);add("fence",r.fence);
    add("completed_fence",r.completed_fence);add("bytes",r.bytes);
    if(r.reason)value["reason"]=r.reason;

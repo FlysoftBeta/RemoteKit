@@ -225,7 +225,7 @@ def main():
         (package / 'README.txt').write_text(
             'RemoteKit Windows hardware streaming package\n\n'
             'Extract everything to a writable folder and run run.cmd. Open http://127.0.0.1:3001 in Chrome.\n'
-            'The initial screen is black. Press Up Up Down Down Left Right Left Right, or click the corresponding\n'
+            'The initial screen is blank white. Press Up Up Down Down Left Right Left Right, or click the corresponding\n'
             'top, bottom, left, and right areas in that order, to reveal the account sign-in form.\n'
             'The first registered account becomes administrator without a server credential.\n'
             'Open More > Administrator panel and set the server registration credential before creating other accounts.\n'

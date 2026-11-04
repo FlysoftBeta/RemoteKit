@@ -14,6 +14,9 @@
 namespace content {
 class WebContents;
 }
+namespace remotekit {
+struct InputEvent;
+}
 namespace remotekit::browser {
 class OffscreenHost;
 
@@ -40,6 +43,7 @@ class OsrRenderer final {
   mojo::ScopedMessagePipeHandle TakeRenderEndpoint(std::string_view token, uint32_t consumer_pid);
   base::DictValue Status() const;
   base::DictValue RenderStatus(uint64_t webview_id) const;
+  void TraceInput(const char* stage, const InputEvent& input, int status = 0);
   // Nonblocking. Submitted source reads are retained asynchronously until GPU
   // completion or confirmed device removal, including after this owner dies.
   void Stop();

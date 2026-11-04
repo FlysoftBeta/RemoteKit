@@ -26,20 +26,23 @@ SDK 的同步 request 应从工作线程调用；超时、输出缓冲不足和�
 | visible | session、view、visible | 显隐意图 |
 | navigate | session、view、url | 导航已发起，不等于提交成功 |
 | input | 完整 token、sequence、event | 校验并投递到当前 widget |
+| input.touchStatus / input.touchRetire | 原session/view/instance/document/focus、sequenceId | 查询原终止状态；retire只清理精确旧owner，不接纳新坐标 |
 | lifecycle | session、view、action | accepted 区分受理；snapshot 观察实际完成 |
 | page.requests / page.reply / page.command | session、view，加 request/accept 或 action | 页面 pending/events、回复与编辑/导航/find/zoom 命令 |
 | profile.permissions / profile.downloads | session、view、command 对象 | Profile 权限规则或下载状态/操作 |
-| output.open / output.describe | consumer_pid，open 加 fps | accepted 后 describe 取得本代六个共享句柄 |
-| output.configure / output.status / output.close | width、height（DIP）、device_scale、allocation_alignment（1或16，默认1）、enabled、fps、render_fps，可选 | 配置、状态或关闭；尺寸/scale/alignment变化需关闭并重建输出；仅调整fps/render_fps可在输出打开时调用 |
+| output.open / output.describe | consumer_pid | accepted 后 describe 取得本代Slot纹理/Fence、映射及一次性render pipe；见Comp/Rend契约 |
+| output.configure / output.status / output.close | width、height（DIP）、device_scale、allocation_alignment（1或16，默认1）、enabled、viewConfigs，可选 | 配置、状态或停止输出；尺寸/scale/alignment/viewConfigs变化需先关闭旧输出 |
 | navigation.export.begin / navigation.import.begin | session、view；import 加 size | 创建导航状态分块传输 |
 | navigation.export.chunk / navigation.import.chunk / navigation.import.commit / navigation.transfer.cancel | session、view、transfer，加 offset/length/data | 导航 opaque 状态分块传输 |
 | shutdown | 无 | 受理正常退出 |
 
-`allocation_alignment` 只改变 GPU atlas 的物理分配，不改变网页 viewport/DPR、DIP 排布或 plane 像素矩形。实际宽高先由 `ceil(DIP × device_scale)` 得到，再按 `max(2, allocation_alignment)` 向上对齐；默认1保留既有偶数取整，16用于QSV异步VPP。对齐后仍须满足单边8192像素、总计16777216像素上限，超出返回 `atlas_resource_budget_exceeded`。`output.configure` 返回实际 `width_pixels/height_pixels/allocation_alignment`，`output.status` 也给出 alignment；共享纹理、共享帧元数据和媒体采样使用同一实际宽高，不把padding伪装为原始尺寸。仅发送 `fps/render_fps` 不改变alignment或输出代次。
+`allocation_alignment` 只改变 GPU atlas 的物理分配，不改变网页 viewport/DPR、DIP 排布或 plane 像素矩形。实际宽高先由 `ceil(DIP × device_scale)` 得到，再按 `max(2, allocation_alignment)` 向上对齐；默认1保留既有偶数取整，16用于QSV异步VPP。对齐后仍须满足单边8192像素、总计16777216像素上限，超出返回 `atlas_resource_budget_exceeded`。`output.configure` 返回实际 `width_pixels/height_pixels/allocation_alignment`，`output.status` 也给出 alignment；共享纹理、共享帧元数据和媒体采样使用同一实际宽高，不把padding伪装为原始尺寸。节拍由Comp的Begin与WebRTC SetRates管理，旧`fps/render_fps`控制字段不再使用。
 
 Endpoint 参数 `--qsv-vpp=external|async` 默认 external。async 必须显式选择 `--encoder=qsv`，不进行NVENC/auto回退；`--atlas-alignment=1|16` 默认随模式为1/16，async显式选择1会报错。可用 external+16 与 async+16 做同物理尺寸对照，stats 的 `qsvVpp/atlasAllocationAlignment` 报告选项，`sourceAtlasWidth/sourceAtlasHeight` 报告实际资源尺寸。实验准备工具对应参数为 `-QsvVpp external|async -AtlasAlignment 1|16`。
 
 `actual/desired` 数值：0 live、1 frozen、2 discarded、3 unloaded。snapshot 包含 lifecycle_generation、last_lifecycle(succeeded/detail)、lifecycle_uncertain、touch_code/touch_detail，以及加载、发声、采集、renderer PID 和页面请求数。PID 可能被多个 WebView 共享，不能作为单页资源用量。unload/restore 保持 WebView ID，执行实例代次会改变。
+
+uncertain恢复的lifecycle请求带`expected_lifecycle_generation`，Browser执行点核对无pending、非关闭及精确代次。guarded unload先验证保存的导航checkpoint，guarded restore只接纳已unloaded状态。普通freeze竞争通过精确ACK后解冻退出，不进入此破坏性恢复路径。
 
 输入示例：
 

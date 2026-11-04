@@ -25,6 +25,7 @@ class NavigationExport {
  std::string cursor_;
  static std::optional<Identity> Identify(const Json& view,const std::string& incarnation) {
   if(!view.contains("navigationRevision") || view.value("loading",false) || view.value("pending",false) ||
+     view.value("lifecycle_uncertain",false) ||
      view.value("close_state",std::string())=="closed" || view.value("close_state",std::string())=="closing")return {};
   return Identity{incarnation,view.value("instance",std::string()),view.value("document",std::string()),view.at("navigationRevision")};
  }

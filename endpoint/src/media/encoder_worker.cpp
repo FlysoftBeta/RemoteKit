@@ -155,7 +155,9 @@ void EncoderWorker::Rates(uint32_t bitrate,uint32_t fps) {
  if(paused_.exchange(paused) && !paused)keyframe_=true;
  // Preserve GCC's target pair. Only the configured/negotiated ceiling is
  // applied by Run; a zero target pauses rather than inventing a minimum rate.
- pending_rates_=RateUpdate{bitrate,fps};wake_.notify_one();
+ pending_rates_=RateUpdate{bitrate,fps};
+ RK_SERVER_TRACE(trace_,"worker_rates_requested",TraceIds{},rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.bitrate_bps=bitrate;rk_record.fps=fps;rk_record.inflight=stats_->inflight.load();rk_record.queue=static_cast<int>(queue_.size()););
+ wake_.notify_one();
 }
 void EncoderWorker::Keyframe(){++stats_->keyframe_requests;keyframe_=true;wake_.notify_one();}
 void EncoderWorker::Complete(AccessUnit& unit) {
@@ -216,7 +218,10 @@ void EncoderWorker::Run() {
    std::string error;
    const auto effective_rate=std::min(rates->bitrate,rate_limit_);
    const auto effective_fps=std::min(rates->fps,fps_limit_);
-   if(!hardware_->SetRates(effective_rate,effective_fps,error,rate_limit_)) {
+   RK_SERVER_TRACE(trace_,"worker_set_rates_begin",TraceIds{},rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.bitrate_bps=effective_rate;rk_record.fps=effective_fps;rk_record.queue=stats_->pending.load(););
+   const bool applied=hardware_->SetRates(effective_rate,effective_fps,error,rate_limit_);
+   RK_SERVER_TRACE(trace_,"worker_set_rates_return",TraceIds{},rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.status=applied?0:1;);
+   if(!applied) {
     {std::lock_guard lock(stats_->mutex);if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
     Error(error);break;
    }

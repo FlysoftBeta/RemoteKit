@@ -14,7 +14,7 @@
 | session.mediaPolicy | degradationPreference/maxFps；三档仅映射WebRTC偏好，每Session独立缓存，requested与实际applied分开 |
 | session.events.ack | eventIds；自然关闭事件在产品状态持久化后确认 |
 | view.ensure / view.configure | 稳定viewId、URL/viewport/device/visible；configure可带requireRunning防离线维护拉起Browser |
-| view.lifecycle | viewId、discard/restore；accepted/pending/completed分开，可带requireRunning |
+| view.lifecycle | viewId、freeze/discard/restore；uncertain恢复使用guarded unload/restore；accepted/pending/completed分开 |
 | view.navigate / view.command | 地址或back/forward/reload/stop |
 | view.close / view.close.reply | 正常关闭/确认；回复带browserIncarnation、instance、document和原requestId，只能命中原beforeunload；force用于明确清理 |
 | view.adopt | provisionalId、产品分配的viewId及配置；收养真实WebContents，重复同绑定幂等 |
@@ -26,7 +26,9 @@
 
 内部诊断可在`session.snapshot`显式传`outputDiagnostics:true`，取得Browser现有`output.status`的本代捕获、发布、租约与Fence状态；普通snapshot不增加该RPC。查询失败只在诊断字段返回`output_status_unavailable`，不把健康Session误报为退出。
 
-snapshot view的actual/desired为0 live、1 frozen、2 discarded、3 unloaded；包含pending、lifecycle_generation、last_lifecycle、canDiscard/discardBlockReason。不能从accepted推断renderer已完成。异步恢复时recovery={pending,phase,error}记录Endpoint任务；browserPending/browserDesired保留Browser观察值，投影pending不会把中间空页当作恢复完成。
+snapshot view的actual/desired为0 live、1 frozen、2 discarded、3 unloaded；包含pending、lifecycle_generation、last_lifecycle、lifecycle_uncertain、canDiscard/discardBlockReason。不能从accepted推断renderer已完成。异步恢复时recovery={pending,phase,error}记录Endpoint任务；browserPending/browserDesired保留Browser观察值，投影pending不会把中间空页当作恢复完成。
+
+uncertain恢复的`view.lifecycle`要求`requireRunning:true`、当前`browserIncarnation`及字符串`lifecycleGeneration`。unload仅在无pending、未关闭、精确代次且有可自动恢复checkpoint时执行；restore只接受同实例下确证unloaded的新代次。Control发送前持久记录阶段，回执丢失只从精确快照收敛，不重发未知mutation。
 
 ## Client↔Control
 

@@ -4,9 +4,19 @@
 
 ## 当前交付
 
+152167后生命周期、触控及OSR延迟修复已完成源码和范围内验收，待本轮构建上传。以下取件码仍为原发布包，不包含这些修改。[本轮完整记录](../develop/docs/osr-latency-investigation-20261104.md) · [问题清单](../develop/docs/open-issues.md)。
+
 站点兼容设置、键盘与触控确认修复已发布，功能源码`4bf43b8b5cd72aab14a38f8dd2409a7b3005f97f`已推送。取件码[152167](https://airportal.cn/152167/lxM1Fft5Xz)，2026-11-04 11:25:42（Asia/Shanghai）上传成功，有效24小时、可下载2次、无密码。
 
 包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-111144.zip`，504955936 bytes，SHA256 `3eb1522597e445fed97e4d772592c2c5e348bd77cb9e828e043b73bfec0be186`。manifest为干净源码，571项文件/ZIP及11项人脸资产校验通过；包内启动、隔离Chrome157真实H264键盘/触控全组及同peer/双DC检查通过。[交付记录](../develop/docs/keyboard-touch-compat-delivery-20261104.md)。新包保留此前Comp选卡、5分钟默认空闲锁定与纯白锁屏；包内README初始屏颜色仍有旧black文案，已登记待修正。
+
+## 生命周期、触控与延迟（本轮验收完成，待发布）
+
+本轮后续修复：freeze导航竞争通过逐RVH精确ACK后解冻，保留JS堆；真实未知和frozen renderer退出按incarnation/代次守护卸载恢复，导出跳过pending/uncertain。触控增加未路由撤回、精确已完成账本、早拒绝可靠回执与跨布局零坐标旧owner退役。157真实回执丢失/双指/尺寸换代/旧owner重复请求通过，媒体身份保持；89默认video/可信touch终止通过。CPU/构建及真实证据见[生命周期](../develop/docs/osr-lifecycle-runtime-20261104.md)、[触控与Stats](../develop/docs/touch-terminal-runtime-20261104.md)。
+
+Stats按同窗区分解码、元素收帧/丢帧、compositor与rVFC，接入实际接收/解码/提交耗时，删除旧capture空白项。OSR/Input/编码新探针按精确身份关联。原生RTP playout默认0/50ms：同条件none窗口提交55.48→57.87FPS、丢帧58/1172→9/1170、末包→提交p95 78.5→50.4ms；sync45 marker p95 115→92ms。Worker独立组18/18输入回显、marker p95 99ms，首击focus ACK27ms；输入总尾延迟未证明同幅改善，约1秒未复现。实际ICE RTT约17–19ms，非物理scanout。[分段及测量边界](../develop/docs/osr-profile-runtime-20261104.md)。
+
+Windows真实完成同UHD630/LUID的显示输出0→1及1→0，两组PID/peer/track保持、H264持续，无FATAL/CHECK/dump；输出移除后观测12.869秒，未做物理拔插。[显示会话证据](../develop/docs/osr-display-runtime-20261104.md)。
 
 ## 网页兼容设置、键盘与触控（已交付152167）
 

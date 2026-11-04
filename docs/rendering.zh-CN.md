@@ -42,6 +42,8 @@ H264 level的帧尺寸、宏块吞吐率和码率上限属于接收能力约束�
 
 Viewer对实际receiver设置`jitterBufferTarget=0`。Chrome89缺少标准属性时使用可用的兼容hint，并明确记录能力；不能把hint或RTP playout-delay扩展描述成标准属性已生效。
 
+Endpoint默认请求RTP playout min0/max50ms，保留原生有界video合成算法以减少接收等待与解码后丢帧；显式`--rtc-playout-max-ms=-1`保留未设置的对照行为。这不是固定端到端期限或新的码率/DPR控制器，实际缓冲、解码及video丢帧分别报告。Chrome89兼容与新OSR video对照依据见当前状态。
+
 ## 换代、错误与测量
 
 resize、停止、断链和GPU故障停止接纳旧代请求。旧资源只有在相应读写Fence完成或真实device removal等有效证明下才释放；无法证明的GPU操作保留隔离，不能发普通Reject后立刻复用。
@@ -53,3 +55,5 @@ Stop/Stopped与Begin/Reject共用有序render通道。Control关闭只停止产�
 RenderChannel在所有者销毁时撤销断开回调，再关闭watcher和pipe；不能从成员析构重入已释放最后一个shared引用的OSR状态。存活通道的显式关闭及实际对端断开仍各通知一次。该边界同时适用于锁屏暂停输出及普通渲染代次退休。
 
 提交时刻不能冒称GPU完成时刻。只有实际Fence完成观察可作为render完成时间；未知时间省略延迟样本。GPU执行、完成观察、编码、网络和呈现分别计量，旧capture路径的历史指标不作为新OSR路径证据。
+
+显式设置`REMOTEKIT_MEDIA_TRACE`可采每代有界OSR环形记录：Begin接纳/排队、各plane请求/返回、atlas合成、Signal调用与Flush返回，以及Browser输入派发前后。Stop/Fatal后异步落盘，正常关闭等待写完；记录覆盖数量显式报告。`REMOTEKIT_SERVER_TRACE`记录Comp实际Fence观察、AdaptFrame、SDK提交、编码队列/VPP/硬件完成、SetRates与实际wire RTP，以及Endpoint输入接收/排队/RPC锁等待。用Browser PID、generation、slot、value关联渲染请求；Endpoint frame cookie在代次之间保持唯一。Signal调用和plane回调仍不是GPU完成时间，不把缺失的GPU时间戳补造成capture-end。

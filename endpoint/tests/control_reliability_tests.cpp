@@ -108,17 +108,24 @@ void IncrementalExport() {
  }
  CHECK(other_session_commands==3);f.Tick();CHECK(f.writes==1 && f.cancel==1);
  CHECK(f.saved.at("chunks").size()==3 && !f.exporter.Pending());
- // Navigation, close, Browser incarnation and instance changes each cancel,
+ // Navigation, close, Browser incarnation, instance and lifecycle changes each cancel,
  // preserving the last atomically committed recovery state.
- for(int scenario=0;scenario<4;++scenario) {
+ for(int scenario=0;scenario<6;++scenario) {
   ExportFixture cancelled;cancelled.Observe();cancelled.Tick();cancelled.Tick();
   if(scenario==0)cancelled.current["navigationRevision"]="8";
   if(scenario==1)cancelled.current=nullptr;
   if(scenario==2)cancelled.incarnation="browser2";
   if(scenario==3)cancelled.current["instance"]="4";
+  if(scenario==4)cancelled.current["pending"]=true;
+  if(scenario==5)cancelled.current["lifecycle_uncertain"]=true;
   cancelled.Tick();CHECK(cancelled.cancel==1 && cancelled.chunks==1 && cancelled.writes==0);
   CHECK(cancelled.saved.contains("previous"));
  }
+ ExportFixture uncertain;uncertain.current["lifecycle_uncertain"]=true;
+ uncertain.Observe();uncertain.Tick();CHECK(uncertain.begin==0 && !uncertain.exporter.Pending());
+ uncertain.current["lifecycle_uncertain"]=false;
+ uncertain.Observe();for(int i=0;i<5;++i)uncertain.Tick();
+ CHECK(uncertain.begin==1 && uncertain.writes==1);
  ExportFixture forgotten;forgotten.Observe();forgotten.Tick();forgotten.exporter.Forget("1");forgotten.Tick();
  CHECK(forgotten.cancel==1 && forgotten.writes==0);
  ExportFixture failed;failed.Observe();for(int i=0;i<4;++i)failed.Tick();failed.disk_fail=true;
@@ -186,6 +193,24 @@ void TouchTerminal() {
   CHECK(sent[1].at("touchState")=="terminal-invalidated" && sent[1].at("clientSequence")=="1");
   CHECK(sent[2].at("touchState")=="accepted-pending" && sent[2].at("clientSequence")=="2");
   CHECK(sent[3].at("touchState")=="processed" && sent[3].at("clientSequence")=="2");
+
+  // A pre-admission rejection is recoverable across SDK BUSY and a lost
+  // reply, without creating an acceptance or invoking Browser input.
+  auto* early=receipts.Reserve(make(3));
+  CHECK(early);
+  early->Finish("rejected",false,"input_queue_busy");
+  sdk_busy=true;
+  receipts.Flush(send);
+  CHECK(sent.size()==4 && early->Busy());
+  sdk_busy=false;
+  receipts.Flush(send);
+  CHECK(sent.size()==5 && !early->Busy());
+  auto* queried=receipts.Find(10,20,"3","physical-3");
+  CHECK(queried==early);
+  queried->send_result=true;
+  receipts.Flush(send);
+  CHECK(sent.size()==6 && sent[4]==sent[5]);
+  CHECK(sent[5].at("touchState")=="rejected" && sent[5].at("error")=="input_queue_busy");
 
   TouchTerminalReceipts full;
   for(size_t index=0;index<full.kCapacity;++index) {

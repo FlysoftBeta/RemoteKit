@@ -225,6 +225,86 @@ test('ordinary partial release succeeds without a status query or releasing the 
   assert.equal(touchTerminalResult({identity,surface,packet:end},results[0],identity,1),undefined);
 });
 
+test('exact cleanup settles a lost terminal and a late original result cannot clear the next touch',t=>{
+  const {transport,surface,sent,channel}=setup(t), identity=transport.inputIdentity(surface);
+  const touch=new TouchInput('cleanup');
+  const results: InputResult[]=[];
+  transport.subscribeInputResults(result=>results.push(result));
+  const receive=(clientSequence:string,touchSequenceId:string,touchState:string,ok:boolean)=>
+    channel.onmessage({data:JSON.stringify({type:'input.result',clientSequence,touchSequenceId,touchState,ok})});
+  for(let index=0;index<50;++index) {
+    const start=touch.sample(identity,'start',point(0),index*10,undefined,true)!;
+    assert.equal(transport.sendInput(surface,start),true);
+    const end=touch.sample(identity,'end',point(0),index*10+1)!;
+    assert.equal(transport.sendInput(surface,end,{touchTerminal:true}),true);
+    const original=sent[sent.length-1].sequence;
+    touch.accepted(end);
+    receive(original,end.sequenceId,'terminal-unconfirmed',false);
+    const cancel={...end,action:'cancel' as const,points:[],gestures:[]};
+    assert.equal(transport.sendInput(surface,cancel),true);
+    const cleanup=sent[sent.length-1].sequence;
+    const owner={identity,surface,packet:cancel};
+    assert.equal(touchTerminalResult(owner,results[results.length-1],identity,0),undefined);
+    receive(cleanup,'wrong-owner','processed',true);
+    assert.equal(results[results.length-1]?.touchState,'terminal-unconfirmed');
+    receive(index%2===0?cleanup:original,end.sequenceId,'processed',true);
+    assert.equal(touchTerminalResult(owner,results[results.length-1],identity,0),'processed');
+    assert.equal(transport.retryTouchTerminal(identity,end.sequenceId),false);
+    const count=results.length;
+    receive(index%2===0?original:cleanup,end.sequenceId,'processed',true);
+    assert.equal(results.length,count);
+  }
+  assert.deepEqual(sent.map(message=>message.event.action).slice(-3),['start','end','cancel']);
+});
+
+test('layout replacement retires only a submitted touch with its acknowledged focus token',async t=>{
+  t.mock.timers.enable({apis:['setTimeout']});
+  const {transport,surface,sent,channel,setReady}=setup(t);
+  const receive=(message:object)=>channel.onmessage({data:JSON.stringify(message)});
+  const layout=(epoch:string)=>receive({type:'layout',generation:'1',epoch,width:640,height:480,views:[{...surface}]});
+  const deliveries: InputDelivery[]=[];
+  const results: InputResult[]=[];
+  transport.subscribeInputDelivery(delivery=>deliveries.push(delivery));
+  transport.subscribeInputResults(result=>results.push(result));
+
+  transport.ensureInputFocus(surface);
+  let current=transport.layout!.views[0];
+  const start=(id:string)=>({type:'touch',action:'start',gestureMode:'client-v1',sequenceId:id,inputIdentity:transport.inputIdentity(current)});
+  assert.equal(transport.sendInput(current,start('never-submitted')),true);
+  layout('3');
+  await Promise.resolve();
+  assert.deepEqual(deliveries.map(delivery=>delivery.phase),['queued','discarded']);
+  assert.deepEqual(sent.map(message=>message.type),['focus']);
+
+  current=transport.layout!.views[0];
+  transport.ensureInputFocus(current);
+  const focus=sent[sent.length-1];
+  assert.equal(transport.sendInput(current,start('lost-original-start')),true);
+  receive({type:'focus',focusRequestId:focus.focusRequestId,layoutEpoch:'3',ok:true,token:{view:current.id,session:current.session,instance:current.instance,document:current.document,focus:'8'}});
+  await Promise.resolve();
+  const submitted=deliveries[deliveries.length-1];
+  assert.equal(submitted.phase,'submitted');
+  assert.equal(submitted.surface.focus,'8');
+  const lease={surface:submitted.surface,identity:submitted.identity,layoutEpoch:submitted.layoutEpoch!,authorization:submitted.authorization};
+  const cancel={...submitted.event,action:'cancel',points:[]};
+  assert.equal(transport.retireTouch(lease,cancel),false); // requires a replacement epoch
+  setReady(false);
+  layout('4'); // same output generation, different sampling/layout epoch
+  assert.equal(transport.sendInput(current,{...submitted.event,action:'move'}),false);
+  assert.equal(transport.retireTouch(lease,cancel),true); // no coordinate paint required
+  const request=sent[sent.length-1];
+  assert.deepEqual(request,{type:'input.touchRetire',view:'1',session:'s',instance:'i',document:'d',focus:'8',layoutEpoch:'3',sequence:request.sequence,sequenceId:'lost-original-start'});
+  receive({type:'input.result',clientSequence:request.sequence,ok:true,touchState:'accepted-pending',touchSequenceId:request.sequenceId});
+  layout('5'); // another layout cannot prune the outstanding retirement receipt
+  t.mock.timers.tick(250);
+  assert.deepEqual(sent[sent.length-1],{type:'input.touchStatus',clientSequence:request.sequence,sequenceId:request.sequenceId});
+  receive({type:'input.result',clientSequence:request.sequence,ok:false,touchState:'terminal-invalidated',touchSequenceId:request.sequenceId});
+  assert.deepEqual(results.map(result=>result.touchState),['accepted-pending','terminal-invalidated']);
+  assert.equal(results[1].identity,lease.identity);
+  assert.equal(results[1].surface.focus,'8');
+  assert.equal(transport.retryTouchTerminal(lease.identity,request.sequenceId),false);
+});
+
 test('focus timeout and rejected focus explicitly discard queued events with original identity',async t=>{
   t.mock.timers.enable({apis:['setTimeout']});
   const {transport,surface,sent,channel}=setup(t);

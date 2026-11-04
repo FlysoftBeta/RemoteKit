@@ -18,24 +18,64 @@ export function videoPlaneGeometry(view: Surface, layout: Layout, bounds: { widt
   return { width: layout.width * sx, height: layout.height * sy, left: -view.x * sx, top: -view.y * sy };
 }
 
-/** These are compositor counter deltas, never the number of JS callbacks. */
+type VideoTiming = Pick<VideoFrameCallbackMetadata, 'presentationTime' | 'expectedDisplayTime'> & {
+  receiveTime?: number;
+  processingDuration?: number;
+};
+const duration = (end?: number, start?: number) =>
+  typeof end === 'number' && typeof start === 'number' && Number.isFinite(end - start) && end >= start ? end - start : undefined;
+const timingPercentile = (samples: (number | undefined)[]) => {
+  const sorted = samples.filter((value): value is number => value !== undefined).sort((a, b) => a - b);
+  return sorted.length ? { samples: sorted.length, p95: sorted[Math.ceil(sorted.length * .95) - 1] } : undefined;
+};
+
+/** Tracks compositor submissions, JS callbacks and element counters separately. */
 export class VideoCompositorStats {
   private previous?: { at: number; frames: number };
-  private samples: { at: number; start: number; frames: number }[] = [];
+  private samples: { at: number; start: number; frames: number; receiveToSubmit?: number; submitToCallback?: number; expectedDisplayLateness?: number; processing?: number }[] = [];
   frames = 0;
   callbacks = 0;
-  observe(at: number, frames: unknown, visible: boolean) {
+  observationRevision = 0;
+  private windowStart?: { at: number; frames: number; callbacks: number; quality?: Pick<VideoPlaybackQuality, 'totalVideoFrames' | 'droppedVideoFrames'> };
+  observe(at: number, frames: unknown, visible: boolean, timing?: VideoTiming) {
     this.callbacks++;
-    if (typeof frames !== 'number' || !Number.isInteger(frames) || frames < 0) { this.previous = undefined; return; }
+    if (typeof frames !== 'number' || !Number.isInteger(frames) || frames < 0) { this.resetObservation(); return; }
+    if (this.previous && frames < this.previous.frames) this.resetObservation();
     const old = this.previous;
     this.previous = { at, frames };
-    if (visible && old && at > old.at && frames >= old.frames) {
+    if (visible && old && at > old.at && frames > old.frames) {
       const delta = frames - old.frames; this.frames += delta;
-      this.samples.push({ at, start: old.at, frames: delta });
+      const processing = timing?.processingDuration;
+      this.samples.push({ at, start: old.at, frames: delta,
+        receiveToSubmit: duration(timing?.presentationTime, timing?.receiveTime),
+        submitToCallback: duration(at, timing?.presentationTime),
+        expectedDisplayLateness: timing ? duration(Math.max(at, timing.expectedDisplayTime), timing.expectedDisplayTime) : undefined,
+        processing: typeof processing === 'number' && Number.isFinite(processing) && processing >= 0 ? processing * 1000 : undefined,
+      });
     }
     this.samples = this.samples.filter(sample => sample.at >= at - 1000).slice(-256);
   }
-  resetObservation() { this.previous = undefined; this.samples = []; }
+  resetObservation() { this.previous = undefined; this.samples = []; this.windowStart = undefined; this.observationRevision++; }
+  sampleWindow(at: number, visible: boolean, quality?: Pick<VideoPlaybackQuality, 'totalVideoFrames' | 'droppedVideoFrames'>) {
+    const previous = this.windowStart;
+    this.windowStart = visible && this.previous ? { at, frames: this.frames, callbacks: this.callbacks, quality } : undefined;
+    if (!this.windowStart || !previous || at <= previous.at) return;
+    const scale = 1000 / (at - previous.at);
+    const total = duration(quality?.totalVideoFrames, previous.quality?.totalVideoFrames);
+    return { fps: (this.frames - previous.frames) * scale, callbackFps: (this.callbacks - previous.callbacks) * scale,
+      videoElementFps: total === undefined ? undefined : total * scale,
+      videoElementDrops: duration(quality?.droppedVideoFrames, previous.quality?.droppedVideoFrames),
+    };
+  }
+  timing(now: number) {
+    const samples = this.samples.filter(sample => sample.at >= now - 1000 && sample.at <= now);
+    return {
+      receiveToSubmit: timingPercentile(samples.map(sample => sample.receiveToSubmit)),
+      submitToCallback: timingPercentile(samples.map(sample => sample.submitToCallback)),
+      expectedDisplayLateness: timingPercentile(samples.map(sample => sample.expectedDisplayLateness)),
+      processing: timingPercentile(samples.map(sample => sample.processing)),
+    };
+  }
   snapshot(now: number) {
     const samples = this.samples.filter(sample => sample.at >= now - 1000), first = samples[0];
     const elapsed = first ? Math.max(now, samples[samples.length - 1].at) - first.start : 0;

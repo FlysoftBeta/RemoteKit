@@ -178,6 +178,11 @@ keeps the request. Recreate the peer to restore default receiver behavior.
 Updating an explicit pair remains supported; the current endpoint requires this export. Statistics report the
 requested limits, not a measured end-to-end delay guarantee.
 
+The SDK itself defaults to unset; the production Endpoint now explicitly
+requests `(0, 50)` ms when creating a peer. Its `--rtc-playout-max-ms=-1`
+override leaves the SDK request unset. Receiver jitter, decoder and A/V sync
+requirements can still add waiting; this is not a 50 ms end-to-end guarantee.
+
 The reliable ordered DataChannel is named `remotekit`. Client messages and
 authorization boundaries are described in [streaming protocol](streaming-protocol.md).
 Runtime and hardware validation results are maintained in [current state](current-state.zh-CN.md).

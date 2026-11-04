@@ -42,3 +42,18 @@ test('media diagnostics distinguish GCC targets, display ceiling and compatibili
   assert.match(html, /60 \/ 60/); assert.match(html, /balanced/);
   assert.match(html, /兼容 hint 0 s/); assert.doesNotMatch(html, /240/);
 });
+
+test('video stats show real receiver intervals without retired capture or canvas rows', () => {
+  const diagnostics: Diagnostics = {
+    connection: '已连接', channel: '已连接', receiverVideoTiming: { jitterBufferMeanMs: 0, decodeMeanMs: 3, droppedFrames: 1 },
+    endpoint: { sourceAtlasWidth: 1296, sourceAtlasHeight: 488 },
+    rendering: { backend: 'video', shared: {}, plane2dDraws: 0, atlasSnapshotCopies: 0, mediaRefreshRequests: 0,
+      scheduling: { metadataMissingAtRead: 0, metadataBlockedSchedules: 0, drops: {},
+        readToAuthorizeMs: { samples: 0, p50: null, p95: null }, rafWaitMs: { samples: 0, p50: null, p95: null } } },
+  };
+  const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
+  assert.match(html, /Video 提交 FPS/);
+  assert.match(html, /接收缓冲均值<\/dt><dd>0.0 ms/);
+  assert.match(html, /1296×488/);
+  assert.doesNotMatch(html, /捕获完成|GPU copy|Metadata \/ 队列|Marker p50|末包→Video/);
+});

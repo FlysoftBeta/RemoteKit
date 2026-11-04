@@ -4,7 +4,13 @@ export interface ProductUser { id: string; username: string; isAdmin: boolean }
 export type SearchEngine = 'google' | 'bing' | 'duckduckgo' | 'baidu';
 export const SEARCH_ENGINES: { value: SearchEngine; label: string }[] = [{ value: 'google', label: 'Google' }, { value: 'bing', label: 'Bing' }, { value: 'duckduckgo', label: 'DuckDuckGo' }, { value: 'baidu', label: '百度' }];
 export interface ProductSettings { searchEngine: SearchEngine; qualityPreference: 'quality' | 'auto' | 'smooth'; clientScaleOverride: number | null; memorySaverEnabled: boolean; showStats: boolean; audioChannels: { left: boolean; right: boolean } }
-export interface ProductTab { navigation?: {resolved?:boolean;browserIncarnation?:string;operationId:string;operationGeneration:string;status:'applying'|'unknown'|'committed'|'rejected';previousUrl:string;previousKind:'start'|'remote'}; kind?: 'start' | 'remote'; id: string; windowId: string; webviewId: string; title: string; url: string; pendingUrl?: string; canGoBack?: boolean; canGoForward?: boolean; loading?: boolean; residency?: 'live' | 'frozen' | 'discarded' | 'unloaded'; restoring?: boolean; pendingUaReloadOrigin?: string; popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: string } }
+export interface LifecycleRecovery {
+  browserIncarnation: string;
+  generation: string;
+  phase: 'unload' | 'unloaded' | 'restore';
+  submittedAt: number;
+}
+export interface ProductTab { navigation?: {resolved?:boolean;browserIncarnation?:string;operationId:string;operationGeneration:string;status:'applying'|'unknown'|'committed'|'rejected';previousUrl:string;previousKind:'start'|'remote'}; kind?: 'start' | 'remote'; id: string; windowId: string; webviewId: string; title: string; url: string; pendingUrl?: string; canGoBack?: boolean; canGoForward?: boolean; loading?: boolean; residency?: 'live' | 'frozen' | 'discarded' | 'unloaded'; restoring?: boolean; lifecycleRecovery?: LifecycleRecovery; lifecycleRecoveryError?: string; pendingUaReloadOrigin?: string; popup?: { provisionalId: string; status: 'pending' | 'adopted' | 'failed'; error?: string } }
 export interface ProductWindow { id: string; activeTabId: string | null; weight: number }
 /** Browser-local request IDs are never exposed as the user confirmation token. */
 export interface PendingClose { id: string; windowId?: string; requestId?: string; nativeRequestId?: string; browserIncarnation?: string; instance?: string; document?: string; awaiting?: boolean }

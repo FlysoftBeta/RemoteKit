@@ -1009,6 +1009,27 @@ void WebView::RefreshClientTouchOwner() {
   }
 }
 
+ClientTouchRetirement::State WebView::RetireClientTouch(
+    const InputToken& token, const std::string& sequence) {
+  using State = ClientTouchRetirement::State;
+  RefreshClientTouchOwner();
+  const auto prior = ClientTouchStatus(token, sequence);
+  if (prior != State::unknown || client_touch_token_ != token ||
+      client_touch_sequence_ != sequence)
+    return prior;
+  auto weak = weak_factory_.GetWeakPtr();
+  if (touch_hit_test_pending_) {
+    // This owner has never routed a raw event.
+    retired_client_touches_.Retire(token, sequence, true);
+    CancelTouches(false);
+  } else if (!touches_.empty() && !touch_owner_lost_ && TouchTargetAlive()) {
+    // Cancel on the latched owner, with its last accepted positions/clock.
+    // This path never remaps an event into the replacement layout.
+    CancelTouches(true);
+  }
+  return weak ? ClientTouchStatus(token, sequence) : State::unknown;
+}
+
 void WebView::DevToolsAgentHostAttached(content::DevToolsAgentHost* host) {
   if (!contents_ || host->GetWebContents() != contents_.get())
     return;
@@ -1292,13 +1313,20 @@ Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token
     client_touch_sequence_ = touch.clock ? touch.clock->sequence_id : std::string();
   }
   auto clock = PrepareTouchClock(touch);
-  if (!clock) return clock;
+  if (!clock) {
+    if (first && touch.client_gestures)
+      retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
+    return clock;
+  }
   if (touch.action == TouchInput::Action::start && touches_.empty()) {
     if (touch_pending_callbacks_)
       return Fail(Error::unavailable, "Previous touch sequence is still being acknowledged");
     auto* root = pointer_root_widget_.get();
-    if (!root || !root->delegate())
+    if (!root || !root->delegate()) {
+      if (touch.client_gestures)
+        retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
       return Fail(Error::unavailable, "Touch hit testing unavailable");
+    }
     touch_hit_test_pending_ = true;
     touch_status_ = {};
     const auto epoch = ++touch_epoch_;
@@ -1307,6 +1335,12 @@ Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token
                                     [](base::WeakPtr<WebView> self, std::uint64_t expected) {
                                       if (!self || self->touch_epoch_ != expected)
                                         return;
+                                      // The first raw event cannot route until
+                                      // this hit test completes.
+                                      if (self->client_touch_token_)
+                                        self->retired_client_touches_.Retire(
+                                            *self->client_touch_token_,
+                                            self->client_touch_sequence_, true);
                                       self->CancelTouches(true);
                                       self->touch_status_ =
                                           Fail(Error::unavailable, "Touch hit test timed out");
@@ -1325,6 +1359,8 @@ Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token
   }
   auto weak = weak_factory_.GetWeakPtr();
   const auto result = InjectTouches(touch);
+  if (weak && !result && touch.action == TouchInput::Action::cancel)
+    CancelTouches(true);
   if (weak) touch_status_ = result;
   return result;
 }
@@ -1338,16 +1374,23 @@ void WebView::OnTouchTarget(std::uint64_t epoch,
     return;
   touch_hit_test_pending_ = false;
   touch_hit_test_timer_.Stop();
+  // A failed initial hit test has never routed a raw touch. Retire only this
+  // requested owner, so a later exact cleanup can recover from a lost reply.
+  const auto reject = [&](Error error, const char* reason) {
+    if (touch.client_gestures)
+      retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
+    touch_status_ = Fail(error, reason);
+  };
   const auto* model = endpoint_->FindWebView(session_, view_);
   if (!PointerTargetAlive() || !input_commit_navigations_.empty() || !model ||
       model->instance != token.instance || model->document != token.document ||
       model->focus_generation != token.focus || !model->focused || model->pending ||
       model->actual != Residency::live) {
-    touch_status_ = Fail(Error::stale, "Touch target resolution crossed a document/focus boundary");
+    reject(Error::stale, "Touch target resolution crossed a document/focus boundary");
     return;
   }
   if (!target || !transformed || target->GetRootView() != pointer_root_view_.get()) {
-    touch_status_ = Fail(Error::unavailable, "No current touch target in this WebView");
+    reject(Error::unavailable, "No current touch target in this WebView");
     return;
   }
   auto* widget = target->GetRenderWidgetHost();
@@ -1358,7 +1401,7 @@ void WebView::OnTouchTarget(std::uint64_t epoch,
       target_frame = static_cast<content::RenderFrameHostImpl*>(frame);
   });
   if (!InputFrameReady(target_frame)) {
-    touch_status_ = Fail(Error::unavailable, "Touch target has no active local-root document");
+    reject(Error::unavailable, "Touch target has no active local-root document");
     return;
   }
   // The router expects root coordinates even when its explicit target is an
@@ -1377,7 +1420,10 @@ void WebView::OnTouchTarget(std::uint64_t epoch,
                             token, touch.clock->sequence_id));
   }
   auto weak = weak_factory_.GetWeakPtr();
+  auto bridge = client_gesture_bridge_;
   const auto result = InjectTouches(touch);
+  if (weak && !result && bridge && !bridge->has_routed_raw())
+    retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
   if (weak) touch_status_ = result;
 }
 
@@ -1504,11 +1550,16 @@ Status WebView::InjectTouches(const TouchInput& touch) {
     // MotionEventWeb requires ALL contacts cancelled in a cancellation event.
     auto status = emit(Type::kTouchCancel, std::nullopt);
     if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
-    touches_.clear();
-    touch_pointer_ids_.clear();
+    if (status || !touch.client_gestures) {
+      touches_.clear();
+      touch_pointer_ids_.clear();
+    }
     return status;
   }
   for (const auto& point : touch.points) {
+    std::optional<TouchPoint> previous;
+    if (touch.client_gestures && touch.action != TouchInput::Action::start)
+      previous = touches_.at(point.id);
     if (touch.action == TouchInput::Action::start) {
       // Android-derived gesture code requires compact pointer IDs <= 31.
       // External IDs remain arbitrary uint32; only this per-sequence map is compact.
@@ -1525,6 +1576,13 @@ Status WebView::InjectTouches(const TouchInput& touch) {
                        point.id);
     if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
     if (!status) {
+      if (touch.client_gestures) {
+        if (previous) touches_[point.id] = *previous;
+        else {
+          touches_.erase(point.id);
+          touch_pointer_ids_.erase(point.id);
+        }
+      }
       CancelTouches(true);
       return status;
     }
@@ -1542,7 +1600,15 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
        blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
        blink::WebInputEvent::kForwardButtonDown));
   RefreshClientTouchOwner();
-  if (touch_hit_test_pending_ || touch_cleanup_pending_)
+  using TouchState = ClientTouchRetirement::State;
+  const auto* incoming_touch = std::get_if<TouchInput>(&input.payload);
+  bool cancel_reads_receipt = false;
+  if (incoming_touch && incoming_touch->client_gestures && incoming_touch->clock &&
+      incoming_touch->action == TouchInput::Action::cancel) {
+    const auto state = ClientTouchStatus(input.token, incoming_touch->clock->sequence_id);
+    cancel_reads_receipt = state == TouchState::pending || state == TouchState::processed;
+  }
+  if (!cancel_reads_receipt && (touch_hit_test_pending_ || touch_cleanup_pending_))
     return Fail(Error::busy, "Resolving/draining touch; retry this input with the same sequence");
   if (!input_commit_navigations_.empty())
     return Fail(Error::unavailable, "Document commit is in progress");
@@ -1585,6 +1651,13 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
       if (touch->action == TouchInput::Action::start &&
           prior != ClientTouchRetirement::State::unknown)
         return Fail(Error::invalid, "Completed or retiring client touch cannot restart");
+      if (cancel_reads_receipt) {
+        // A routed terminal owns the sequence until its canonical ACK. A
+        // second cleanup only observes that receipt, even during cleanup.
+        auto accepted = endpoint_->AcceptInput(session_, input);
+        if (accepted && admitted) *admitted = true;
+        return accepted;
+      }
     }
     if (touch->client_gestures && touch->clock &&
         ClientTouchRetired(input.token, touch->clock->sequence_id)) {
@@ -1596,7 +1669,7 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
     }
     if (touch->client_gestures && touch->clock && client_touch_token_ &&
         (!touches_.empty() || touch->action != TouchInput::Action::start) &&
-        touch->clock->sequence_id != client_touch_sequence_)
+        (*client_touch_token_ != input.token || touch->clock->sequence_id != client_touch_sequence_))
       return Fail(Error::stale, "Client touch sequence does not own the current contacts");
     if (touch_owner_lost_)
       return Fail(Error::unavailable, "Touch ownership became uncertain; reload WebView required");
@@ -1826,27 +1899,65 @@ Status WebView::CanDiscard() const {
   return CaptureNavigationState(*contents_).status;
 }
 
-bool WebView::AllPageViewsAcknowledged(bool frozen) const {
-  if (!contents_ || !contents_->GetPrimaryMainFrame()->IsRenderFrameLive())
+bool WebView::UpdateLifecycleViews(bool frozen) {
+  if (!contents_ || contents_->GetVisibility() != content::Visibility::HIDDEN ||
+      !contents_->GetPrimaryMainFrame() ||
+      !contents_->GetPrimaryMainFrame()->IsRenderFrameLive())
     return false;
   auto* impl = static_cast<content::WebContentsImpl*>(contents_.get());
   bool all = true;
-  std::size_t count = 0;
-  // This is exactly the primary-frame-tree RVH range used by SetPageFrozen,
-  // including the OOPIF processes and any speculative view. Do not infer ack
-  // from the requested flag or from an RFH's broad "active" lifecycle state.
+  const bool draining_freeze = frozen && freeze_cancelled_;
+  std::set<content::RenderViewHostImpl*> current;
+  // The primary FrameTree includes OOPIF and speculative RVHs. A navigation
+  // may replace any of them while a lifecycle request is pending.
   impl->GetPrimaryFrameTree().ForEachRenderViewHost([&](content::RenderViewHostImpl* host) {
-    ++count;
+    current.insert(host);
+    const auto target = lifecycle_views_.find(host);
+    const auto generation = host->page_broadcast_generation();
+    const bool requested = target != lifecycle_views_.end() && target->second.host &&
+                           target->second.broadcast_generation == generation;
+    if (!host->IsRenderViewLive()) {
+      // A retired renderer has no live state to acknowledge. Clear the local
+      // explicit freeze bit on thaw in case this RVH is reused by a new pipe.
+      if (!frozen)
+        host->SetIsFrozen(false);
+      lifecycle_views_.erase(host);
+      return;
+    }
+    if (draining_freeze && !requested) {
+      lifecycle_views_.erase(host);
+      return;
+    }
     auto* manager = host->GetPageLifecycleStateManager();
-    if (!host->IsRenderViewLive() || !manager) {
+    const auto& remote = host->GetAssociatedPageBroadcast();
+    if (!manager || !remote || !remote.is_connected() || manager->IsInBackForwardCache()) {
       all = false;
       return;
     }
-    const auto& acknowledged = manager->last_acknowledged_state();
-    all &= acknowledged.is_frozen == frozen && !acknowledged.is_in_back_forward_cache &&
-           acknowledged.visibility == blink::mojom::PageVisibilityState::kHidden;
+    if (!requested) {
+      const auto request = ++lifecycle_view_request_;
+      auto weak_host = host->GetWeakPtr();
+      lifecycle_views_.insert_or_assign(host, LifecycleView{weak_host, generation, request});
+      if (!manager->SetIsFrozenWithAck(frozen, base::BindOnce(&WebView::OnLifecycleViewAcknowledged,
+              weak_factory_.GetWeakPtr(), std::move(weak_host), request)))
+        lifecycle_views_.erase(host);
+      all = false;
+      return;
+    }
+    all &= target->second.acknowledged;
   });
-  return count > 0 && all;
+  std::erase_if(lifecycle_views_, [&](const auto& target) { return !current.contains(target.first); });
+  return !current.empty() && all;
+}
+
+void WebView::OnLifecycleViewAcknowledged(base::WeakPtr<content::RenderViewHostImpl> host,
+                                         std::uint64_t request) {
+  if (!host)
+    return;
+  const auto target = lifecycle_views_.find(host.get());
+  if (target != lifecycle_views_.end() && target->second.request == request &&
+      target->second.broadcast_generation == host->page_broadcast_generation())
+    target->second.acknowledged = true;
 }
 
 void WebView::StartLifecycleTimer() {
@@ -1855,7 +1966,13 @@ void WebView::StartLifecycleTimer() {
                          base::BindRepeating(&WebView::PollLifecycle, weak_factory_.GetWeakPtr()));
 }
 
-Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
+Status WebView::CanRecoverLifecycle() const {
+  if (lifecycle_request_ || !lifecycle_uncertain_ || !navigation_state_)
+    return Fail(Error::unavailable, "No stable navigation checkpoint for lifecycle recovery");
+  return CheckAutomaticNavigationRestore(*navigation_state_);
+}
+
+Status WebView::RequestLifecycle(Lifecycle action, Completion completion, bool recover_uncertain) {
   if (lifecycle_request_)
     return Fail(Error::busy, "Lifecycle transition pending");
   if (lifecycle_uncertain_ && action != Lifecycle::unload)
@@ -1879,8 +1996,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
   }
   const Residency previous = model->actual;
   PendingKind kind = PendingKind::none;
-  if (action == Lifecycle::freeze || action == Lifecycle::discard ||
-      (action == Lifecycle::restore && previous == Residency::frozen)) {
+  if (action == Lifecycle::freeze || action == Lifecycle::discard) {
     auto guard = CheckQuiescent();
     if (!guard)
       return guard;
@@ -1891,9 +2007,14 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
         return Fail(Error::unavailable, "WebContents is already marked discarded");
       kind = PendingKind::discard;
     } else
-      kind = action == Lifecycle::freeze ? PendingKind::freeze : PendingKind::thaw;
+      kind = PendingKind::freeze;
   } else if (action == Lifecycle::restore) {
-    if (previous == Residency::discarded) {
+    if (previous == Residency::frozen) {
+      if (!contents_ || contents_->IsBeingDestroyed() || contents_->IsCrashed() ||
+          contents_->GetVisibility() != content::Visibility::HIDDEN)
+        return Fail(Error::unavailable, "Thaw requires a hidden WebView with an intact renderer");
+      kind = PendingKind::thaw;
+    } else if (previous == Residency::discarded) {
       if (!contents_ || !contents_->WasDiscarded() || !contents_->GetController().NeedsReload() ||
           contents_->HasUncommittedNavigationInPrimaryMainFrame() ||
           contents_->GetController().GetPendingEntry())
@@ -1918,8 +2039,13 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
     return Fail(Error::invalid, "Unknown lifecycle action");
   // Snapshot before modifying the browser/model. A failed discard/freeze can
   // then be safely unloaded using the last stable complete controller state.
-  if (contents_ && (action == Lifecycle::unload || action == Lifecycle::freeze ||
-                    action == Lifecycle::discard)) {
+  if (recover_uncertain) {
+    // The guarded Harness request has checked that the retained checkpoint is
+    // automatically restorable before detaching output and page requests.
+    if (action != Lifecycle::unload || !lifecycle_uncertain_ || !navigation_state_)
+      return Fail(Error::unavailable, "Lifecycle recovery checkpoint is no longer available");
+  } else if (contents_ && (action == Lifecycle::unload || action == Lifecycle::freeze ||
+                           action == Lifecycle::discard)) {
     auto captured = CaptureNavigationState(*contents_);
     if (captured)
       navigation_state_ = std::make_unique<NavigationState>(std::move(captured.value));
@@ -1950,14 +2076,13 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
   }
   lifecycle_request_ = request.value;
   pending_kind_ = kind;
+  freeze_cancelled_ = false;
   discard_acknowledged_ = false;
   completion_ = std::move(completion);
   restore_navigation_ = -1;
   StartLifecycleTimer();
   if (kind == PendingKind::freeze || kind == PendingKind::thaw) {
-    contents_->SetPageFrozen(kind == PendingKind::freeze);
-    // Even a no-op/previously acknowledged transition is checked by the poll,
-    // never reported complete merely because SetPageFrozen returned.
+    UpdateLifecycleViews(kind == PendingKind::freeze);
     return {};
   }
   if (kind == PendingKind::discard) {
@@ -2004,7 +2129,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
   return {};
 }
 
-Status WebView::FinishLifecycle(bool success, Status status) {
+Status WebView::FinishLifecycle(bool success, Status status, bool uncertain) {
   if (!lifecycle_request_)
     return Fail(Error::stale, "No pending lifecycle operation");
   lifecycle_timer_.Stop();
@@ -2012,10 +2137,12 @@ Status WebView::FinishLifecycle(bool success, Status status) {
       endpoint_->CompleteLifecycle(session_, *lifecycle_request_, success, status.message);
   lifecycle_request_.reset();
   pending_kind_ = PendingKind::none;
+  freeze_cancelled_ = false;
+  lifecycle_views_.clear();
   restore_navigation_ = -1;
   discard_acknowledged_ = false;
   auto callback = std::move(completion_);
-  if (!success || !result)
+  if ((!success && uncertain) || !result)
     lifecycle_uncertain_ = true;
   if (!result)
     status = result;
@@ -2050,13 +2177,25 @@ void WebView::PollLifecycle() {
                          "Lifecycle completion timed out after 10 seconds; unload required"));
     return;
   }
-  if (pending_kind_ == PendingKind::freeze || pending_kind_ == PendingKind::thaw) {
-    auto guard = CheckQuiescent();
-    if (!guard) {
-      FinishLifecycle(false, guard);
+  if (pending_kind_ == PendingKind::freeze) {
+    freeze_cancelled_ |= !CheckQuiescent();
+    if (!UpdateLifecycleViews(true))
+      return;
+    if (!freeze_cancelled_) {
+      FinishLifecycle(true, {});
       return;
     }
-    if (AllPageViewsAcknowledged(pending_kind_ == PendingKind::freeze))
+    // The earlier freeze is now confirmed. Keep input gated until this phase's
+    // own thaw replies arrive, including any renderer views created meanwhile.
+    pending_kind_ = PendingKind::cancel_freeze;
+    lifecycle_views_.clear();
+    StartLifecycleTimer();
+    UpdateLifecycleViews(false);
+  } else if ((pending_kind_ == PendingKind::thaw || pending_kind_ == PendingKind::cancel_freeze) &&
+             UpdateLifecycleViews(false)) {
+    if (pending_kind_ == PendingKind::cancel_freeze)
+      FinishLifecycle(false, Fail(Error::busy, "Freeze cancelled when page became active"), false);
+    else
       FinishLifecycle(true, {});
   }
 }
@@ -2075,6 +2214,12 @@ void WebView::OnDiscarded(std::uint64_t generation) {
 
 void WebView::DidStartNavigation(content::NavigationHandle* navigation) {
   BindNavigation(navigation, true);
+  bool in_primary_page = navigation->IsInPrimaryMainFrame();
+  if (contents_ && contents_->GetPrimaryMainFrame())
+    contents_->GetPrimaryMainFrame()->ForEachRenderFrameHost(
+        [&](content::RenderFrameHost* frame) {
+          in_primary_page |= frame->GetFrameTreeNodeId() == navigation->GetFrameTreeNodeId();
+        });
   if (!navigation->IsSameDocument()) {
     auto* focused = contents_ ? contents_->GetFocusedFrame() : nullptr;
     if (focused && NavigationAffectsFrame(navigation, focused))
@@ -2083,22 +2228,13 @@ void WebView::DidStartNavigation(content::NavigationHandle* navigation) {
       ReleaseKeyboard(false, true);
     // Pointer targets are selected/latched by InputEventRouter (including
     // OOPIFs). End the sequence while the OLD frame tree is still current.
-    bool in_primary_page = false;
-    if (contents_ && contents_->GetPrimaryMainFrame())
-      contents_->GetPrimaryMainFrame()->ForEachRenderFrameHost(
-          [&](content::RenderFrameHost* frame) {
-            in_primary_page |= frame->GetFrameTreeNodeId() == navigation->GetFrameTreeNodeId();
-          });
     if (in_primary_page)
       ReleasePointer(true);
   }
   if (!lifecycle_request_)
     return;
-  if (pending_kind_ == PendingKind::freeze || pending_kind_ == PendingKind::thaw) {
-    FinishLifecycle(false,
-                    Fail(Error::unavailable, "Navigation interrupted lifecycle acknowledgement"));
-    return;
-  }
+  if (pending_kind_ == PendingKind::freeze && in_primary_page)
+    freeze_cancelled_ = true;
   if ((pending_kind_ == PendingKind::restore_discarded ||
        pending_kind_ == PendingKind::restore_unloaded) &&
       navigation->IsInPrimaryMainFrame() && !navigation->IsSameDocument() &&
@@ -2215,6 +2351,10 @@ void WebView::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {
   auto callback = std::move(completion_);
   if (lifecycle_request_)
     FinishLifecycle(false, Fail(Error::unavailable, "Renderer exited during lifecycle transition"));
+  else if (model && model->actual == Residency::frozen)
+    // A frozen renderer can no longer acknowledge thaw. Its pre-freeze
+    // checkpoint remains available to the guarded recovery request.
+    lifecycle_uncertain_ = true;
   endpoint_->InvalidateInstance(session_, view_);
   PostCompletion(std::move(callback),
                  Fail(Error::unavailable, "Renderer exited during lifecycle transition"));

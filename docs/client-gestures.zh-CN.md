@@ -36,6 +36,10 @@ source elapsed与Native事件时间是两个域。前者独立保留，用于原
 
 ## 完成查询与Endpoint集成
 
+raw路由之前若官方packet检查拒绝，撤回该global touch ID的注册并保留此前候选状态；不能留下永远不会得到ACK的登记。初始异步hit-test失败或撤销时，只有证明该owner从未路由raw，才能记录明确invalidated。精确已完成序列的重复cancel只读取原账本；不会再次向网页发raw事件。
+
+Endpoint布局epoch变化不一定更换Browser InputToken，例如完整atlas编码采样调整。Client因此保留实际发送时的旧token与触控序列，通过同peer、同授权代次的`input.touchRetire`清理旧owner。消息只含原`session/view/instance/document/focus`、`layoutEpoch`、递增`sequence`与`sequenceId`，没有坐标。Endpoint要求旧epoch并预留终止收据；Browser只取消精确仍持有的旧owner，或返回既有完成/失效证据。普通坐标输入继续经过当前epoch与新帧门禁。新触控必须等待旧租约确认，不能因布局更换直接丢掉本地owner。
+
 Browser touch RPC成功只表示受理，不能当网页允许默认手势或physical terminal完成。响应附`touchPending`、`touchSequenceId`与`inputAdmitted`；end/cancel的`touchTerminal`由真实raw `IsTouchSequenceEnd()`决定。双指只抬起一指不进入终止等待。Client的terminal提示只是本地计时依据，不能替代Browser判断。
 
 Browser在可能同步回调的raw派发前登记完整InputToken与sequence，真实terminal canonical ACK和前序ACK全部完成后才记录`processed`。固定Chromium的canonical队列按已ACK队首派发。记录最多64项，pending不被历史项挤掉，终态按更新时间保留；超时后仅精确同owner的迟到canonical可恢复完成，target不匹配不授予成功。查询`input.touchStatus`携带原`session/view/instance/document/focus/sequenceId`，优先匹配记录，不把当前focus换代误作旧序列完成。回复含`ok,pending,state,sequenceId`；state为`pending`、`processed`、`terminal-invalidated`或`terminal-unconfirmed`。网页consumed仍可为processed；未知、无target和超时不能假成功。
@@ -44,9 +48,9 @@ Endpoint为终止请求预留有界收据，受理时返回`input.result`的`acc
 
 Viewer可发`{type:"input.touchStatus",clientSequence,sequenceId}`查询当前peer/授权代次自己已提交的原请求。Endpoint从保存的原命令取得token，不接受客户端改绑当前身份；此查询不携带坐标，允许跨布局门禁查询。普通输入仍在入队与派发前检查授权和布局。超时收据可重新查询，processed/invalidated直接补发，未知仍明确未知。
 
-Client区分queued、submitted和最终确认，实际DataChannel发送后才开始有限状态查询；队列丢弃显式反馈，终止记录与普通256项输入历史分开保存。仅匹配原身份/sequence的processed或确切退役证明能释放owner。已受理或未知end不补发cancel；确切未受理时才按原owner尝试收尾。最终仍未知时提供原连接上的“重试确认”，不使用遮挡整页的默认重连提示，键盘及其他控件仍可用。
+Client区分queued、submitted和最终确认，实际DataChannel发送后才开始有限状态查询；队列丢弃显式反馈，终止记录与普通256项输入历史分开保存。仅匹配原身份/sequence的processed或确切退役证明能释放owner。已受理或未知end不重放；清理作为新请求精确绑定旧owner，Browser对正在终止或已经完成的序列只返回原账本，对仍持有的原触点才发canonical cancel。自动清理最多三次，最终仍未知时提供原连接上的“重试确认”和“重试结束”，不使用遮挡整页的默认重连提示，键盘及其他控件仍可用。
 
-只有已拥有触控的target确实失效才记录`terminal-invalidated`，它表示原owner撤销而非输入执行成功；普通cancel仍等canonical ACK。完整attempt、布局、文档及focus身份变化另按规则撤销旧owner，迟到旧回执不能释放新手势。momentum继续保留既有权限仲裁和有界缓冲，不由回执查询重放。
+只有原target确实失效，或精确证明该owner从未路由raw，才记录`terminal-invalidated`；它表示原owner撤销而非输入执行成功。普通cancel仍等canonical ACK。attempt、授权、文档及focus变化按各自退役证据处理；仅布局epoch变化时保留旧owner清理租约，迟到旧回执不能释放新手势。momentum继续保留既有权限仲裁和有界缓冲，不由回执查询重放。
 
 ## 必要验证
 

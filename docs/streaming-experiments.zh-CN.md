@@ -30,10 +30,13 @@
 | analyze-viz-gpu-profile.py | 历史capture路径的GPU pass/flush执行分量；旧插桩已退出生产路径 |
 | analyze-copy-output-profile.py / analyze-official-capture-trace.py | 读取历史capture/CopyOutput证据，不代表新OSR路径具备这些事件 |
 | analyze-streaming-server-trace.py / analyze-streaming-cadence.py | generation/frame/lease、编码与wire RTP、队列与呈现节拍 |
+| osr-video-profile-browser.js | 默认video产品路径的真实输入/像素marker、同窗元素计数和接收各段；通过host-managed Playwright运行 |
 | compare-streaming-quality.ps1 | 同帧静态画质比较 |
 | stop-streaming-case.ps1 | 清理指定case自己创建的进程 |
 
 工具位于tools，不依赖develop中的代码。case的config.json/fingerprints.json、metrics和原始trace放develop/tmp。必须使用独立browser context与诊断用户；正常产品入口不承载实验面板。显式关闭的Source feature通过disable透传，不能仅省略enable就当作关闭。
+
+`analyze-streaming-server-trace.py`区分历史capture与OSR字段。OSR精确关联Browser PID/代/Slot/Value和跨代唯一frame cookie，并输出wire RTP对应的原生阶段；输入按peer、Client序号、Browser序号连接，只记录身份和时间，不记录文本内容。接收侧跨时钟段必须另核时钟误差，同机实验也保留校准证据。默认video的像素读回是侵入式探针，需单列成本并与无marker窗口区别，不能把稀疏marker采样率称为动态FPS。
 
 ## 实验约束
 

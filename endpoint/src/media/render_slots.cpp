@@ -16,7 +16,7 @@ struct RenderSlots::State {
  struct Slot {ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11Fence> ready,consumed;std::atomic<uint32_t> refs{0};uint64_t cookie=0;SharedAtlasFrame metadata{};};
  remotekit_sdk_render_setup setup{};Sdk* sdk=nullptr;uint64_t channel=0;
  SharedRenderMapping* mapping=nullptr;ComPtr<ID3D11Device5> device;ComPtr<ID3D11DeviceContext4> context;
- std::array<Slot,4> slots;CompPacing pacing;uint64_t next_cookie=0;
+ std::array<Slot,4> slots;CompPacing pacing;uint32_t producer_pid=0;
  RenderEventQueue events;
  StatsSnapshot* counters=nullptr;bool unknown_counted=false;
  bool fatal=false,untracked=false,closing=false,producer_exited=false,stop_requested=false,stop_confirmed=false;std::string failure;SharedAtlasFrame latest{};
@@ -38,9 +38,9 @@ struct RenderSlots::State {
   for(auto& e:incoming){if(e.type!=REMOTEKIT_SDK_RENDER_FATAL && e.generation!=setup.generation)continue;
    if(e.type==REMOTEKIT_SDK_RENDER_REJECT){if(!pacing.Reject({e.generation,e.value,e.slot})){fatal=true;failure="render Reject identity mismatch";}
     else {if(e.reason==REMOTEKIT_SDK_RENDER_IDLE){++counters->rejectIdle;if(pacing.IdleRejected({e.generation,e.value,e.slot}))++counters->idleEntries;}else if(e.reason==REMOTEKIT_SDK_RENDER_NOT_READY)++counters->rejectNotReady;else if(e.reason==REMOTEKIT_SDK_RENDER_REJECT_STOPPED)++counters->rejectStopped;
-     RK_SERVER_TRACE(trace,"render_reject",(TraceIds{0,0,e.generation,0,0}),rk_record.slot=e.slot;rk_record.fence=e.value;rk_record.status=e.reason;);}}
+     RK_SERVER_TRACE(trace,"render_reject",(TraceIds{0,0,e.generation,0,0}),rk_record.slot=e.slot;rk_record.fence=e.value;rk_record.status=e.reason;rk_record.producer_pid=producer_pid;);}}
    else if(e.type==REMOTEKIT_SDK_RENDER_WAKE){if(pacing.Wake({e.generation,e.value,e.slot})){++counters->wakes;
-    RK_SERVER_TRACE(trace,"render_wake",(TraceIds{0,0,e.generation,0,0}),rk_record.slot=e.slot;rk_record.fence=e.value;);}}
+    RK_SERVER_TRACE(trace,"render_wake",(TraceIds{0,0,e.generation,0,0}),rk_record.slot=e.slot;rk_record.fence=e.value;rk_record.producer_pid=producer_pid;);}}
    else if(e.type==REMOTEKIT_SDK_RENDER_STOPPED){stop_confirmed=true;++counters->stopConfirmed;RK_SERVER_TRACE(trace,"render_stopped",(TraceIds{0,0,e.generation,0,0}),);CloseChannel();}
    else if(e.type==REMOTEKIT_SDK_RENDER_FATAL){fatal=true;failure="render channel fatal reason="+std::to_string(e.reason);}}
   if(!device || FAILED(device->GetDeviceRemovedReason())){error="render consumer GPU device lost; resources retained";return false;}
@@ -81,10 +81,10 @@ void RenderSlots::Reap(){PublishGuard publish{*this};for(auto it=retired_.begin(
  // observation, then a consumed signal. Retired generations are never skipped.
  for(auto record:s.pacing.slots())if(record.phase==CompPacing::Phase::rendering){auto value=s.slots[record.id.slot].ready?s.slots[record.id.slot].ready->GetCompletedValue():UINT64_MAX;if(value!=UINT64_MAX&&value>=record.id.value){s.pacing.Ready(record.id);++counters_.readyObserved;}}
  s.Advance(error);if(s.Drained()){++counters_.retiredGenerationsCompleted;RK_SERVER_TRACE(s.trace,"render_generation_retired",(TraceIds{0,0,s.setup.generation,0,0}),);it=retired_.erase(it);}else ++it;}}
-bool RenderSlots::Open(remotekit_sdk_render_setup setup,Sdk& sdk,LUID adapter,ID3D11Device5* device,
+bool RenderSlots::Open(remotekit_sdk_render_setup setup,uint32_t producer_pid,Sdk& sdk,LUID adapter,ID3D11Device5* device,
                        ID3D11DeviceContext4* context,std::string& error){PublishGuard publish{*this};
  Reap();if(state_){state_->RequestStop();retired_.push_back(std::move(state_));}
- auto s=std::make_shared<State>();s->setup=setup;s->sdk=&sdk;s->counters=&counters_;s->clock=clock_;s->trace=trace_;state_=s;
+ auto s=std::make_shared<State>();s->setup=setup;s->producer_pid=producer_pid;s->sdk=&sdk;s->counters=&counters_;s->clock=clock_;s->trace=trace_;state_=s;
  if(!s->events.handle()){error="render event creation failed";return false;}
  if(setup.struct_size!=sizeof(setup)||!setup.generation||!setup.width||!setup.height||setup.mapping_size!=sizeof(SharedRenderMapping)){error="render setup ABI mismatch";return false;}
  if(adapter.LowPart!=setup.adapter_luid_low || adapter.HighPart!=setup.adapter_luid_high) {
@@ -101,8 +101,8 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,Sdk& sdk,LUID adapter,ID
 }
 bool RenderSlots::Begin(uint32_t interval,bool force,std::string& error,bool* sent){PublishGuard publish{*this};if(sent)*sent=false;if(!state_||state_->closing)return true;auto& s=*state_;
  if(!s.Advance(error))return false;if(s.fatal){error=s.failure;return false;}auto id=s.pacing.Reserve(force);if(!id)return true;
- remotekit_sdk_render_request begin{id->generation,id->value,id->slot,interval,force?1u:0u};auto result=s.sdk->remotekit_sdk_render_begin(s.channel,&begin);
- if(result!=0){s.pacing.Reject(*id);if(result!=REMOTEKIT_SDK_BUSY){error="render Begin send failed "+std::to_string(result);return false;}}else {++counters_.begins;if(sent)*sent=true;RK_SERVER_TRACE(s.trace,"render_begin",(TraceIds{0,0,id->generation,0,0}),rk_record.slot=id->slot;rk_record.fence=id->value;rk_record.reason=force?"force":"cadence";);}return true;
+ remotekit_sdk_render_request begin{id->generation,id->value,id->slot,interval,force?1u:0u};const auto begin_qpc=s.trace?QpcNow():0;auto result=s.sdk->remotekit_sdk_render_begin(s.channel,&begin);
+ if(result!=0){s.pacing.Reject(*id);if(result!=REMOTEKIT_SDK_BUSY){error="render Begin send failed "+std::to_string(result);return false;}}else {++counters_.begins;if(sent)*sent=true;RK_SERVER_TRACE(s.trace,"render_begin",(TraceIds{0,0,id->generation,0,0}),rk_record.slot=id->slot;rk_record.fence=id->value;rk_record.reason=force?"force":"cadence";rk_record.qpc=begin_qpc;rk_record.producer_pid=s.producer_pid;rk_record.leased=static_cast<int>(s.pacing.occupied()););}return true;
 }
 bool RenderSlots::HasCapacity()const{return state_&&state_->pacing.occupied()<state_->pacing.depth();}
 HANDLE RenderSlots::EventHandle()const{return state_?state_->events.handle():nullptr;}
@@ -124,10 +124,10 @@ RenderSlots::Result RenderSlots::Poll(remotekit_rtc_frame& frame,SharedAtlasFram
   for(uint32_t i=0;i<value.view_count;++i){auto& v=value.views[i];if(!std::isfinite(v.atlas_pixels_per_dip)||v.atlas_pixels_per_dip<=0||!std::isfinite(v.page_device_scale_factor)||v.page_device_scale_factor<=0||v.x_pixels<0||v.y_pixels<0||uint64_t(v.x_pixels)+v.width_pixels>s.setup.width||uint64_t(v.y_pixels)+v.height_pixels>s.setup.height){error="render slot layout invalid";return Result::error;}}
   remotekit_sdk_render_identity observed{record.id.generation,record.id.value,record.id.slot,0};
   if(s.sdk->remotekit_sdk_render_observe_signal(s.channel,&observed)!=0){error="render signal identity acknowledgement failed";return Result::error;}
-  slot.cookie=++s.next_cookie;slot.metadata=value;slot.refs=1;s.pacing.Ready(record.id);++counters_.readyObserved;
+  slot.cookie=++next_cookie_;slot.metadata=value;slot.refs=1;s.pacing.Ready(record.id);++counters_.readyObserved;
   frame={};frame.struct_size=sizeof(frame);frame.width=s.setup.width;frame.height=s.setup.height;frame.frame_id=slot.cookie;frame.d3d11_texture=slot.texture.Get();frame.qpc_frequency=QpcFrequency();
   if(s.clock.consistent_across_processes&&s.clock.high_resolution&&s.clock.qpc_frequency==QpcFrequency()&&value.capture_time_us>0){const auto midpoint=s.clock.qpc_before+(s.clock.qpc_after-s.clock.qpc_before)/2;auto capture=midpoint+int64_t(double(value.capture_time_us-s.clock.monotonic_us)*QpcFrequency()/1000000.0);if(capture>0&&capture<=QpcNow()){frame.capture_qpc=capture;s.capture_ready_ms=1000.0*(QpcNow()-capture)/QpcFrequency();}}
-  frame.release_context=&slot;frame.retain=State::Retain;frame.release=State::Release;metadata=value;++delivered_;RK_SERVER_TRACE(s.trace,"slot_ready_observed",s.Ids(slot),rk_record.slot=record.id.slot;rk_record.fence=record.id.value;rk_record.completed_fence=ready;);return Result::ready;
+  frame.release_context=&slot;frame.retain=State::Retain;frame.release=State::Release;metadata=value;++delivered_;RK_SERVER_TRACE(s.trace,"slot_ready_observed",s.Ids(slot),rk_record.slot=record.id.slot;rk_record.fence=record.id.value;rk_record.completed_fence=ready;rk_record.producer_pid=s.producer_pid;);return Result::ready;
  }return Result::idle;
 }
 SharedAtlasFrame RenderSlots::LatestMetadata()const{return state_?state_->latest:SharedAtlasFrame{};}

@@ -2,6 +2,16 @@
 
 由root维护。最新已发布源码4bf43b8，取件码[152167](https://airportal.cn/152167/lxM1Fft5Xz)，包含站点手动键盘、视口平移不重配及触控确认恢复，并保留此前键盘/尺寸过渡、Comp选卡与锁定调整。不重复历史性能组；旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
+## 152167 后生命周期、触控与延迟（2026-11-04，修复验收，待发布）
+
+- LIFE-2：已修逐RVH、绑定代次的真实ACK，冻结竞争确证后解冻保留JS堆；真正未知使用guarded unload→restore闭环，不重放未知导航。真实Browser同文档/慢跨站导航竞争、10秒超时/迟到ACK、稳定frozen renderer退出与恢复通过。导航导出跳过pending/uncertain。Control持久恢复/丢回执/restart/POST拒绝模型通过。[运行](osr-lifecycle-runtime-20261104.md)。
+- TOUCH-5：已补精确账本、未路由撤回、早拒绝可靠回执及零坐标旧owner retirement。157真实双指部分抬起、屏蔽end回执后的查询/cleanup恢复、按住期间编码布局变化、重复旧retire不取消新触控通过，同peer/DC/video/track保持。普通坐标门禁不变；全tsc和24项touch测试通过。[运行与工具误判](touch-terminal-runtime-20261104.md)。
+- PERF-OSR：已用真实Fence观察、wire RTP和input序号拆清链路，主要等待在receiver；无marker也有真实video丢帧。采用原生RTP min0/max50ms，严格同条件none窗口提交55.48→57.87FPS、丢帧58/1172→9/1170、末包→提交p95 78.5→50.4ms。sync45 marker p95 115→92ms；独立Worker组99ms，首击focus ACK27ms，18/18回显。未复现约1秒，不能宣称已解释用户所有现场；物理scanout未测。89默认video/可信touch兼容通过。[分段、口径与原始数据](osr-profile-runtime-20261104.md)。
+- STATS-2：同窗区分解码、video元素/丢帧、compositor提交和rVFC，删除旧capture空白项，接入实测receiver分段；30项定向、生产构建和实际32项读数/无遮挡截图通过。不能以单次overlay截图代替性能窗口。
+- DISPLAY-2：已实测本用户会话Disc→console和console→Disc，同UHD630/LUID的DXGI输出真实0→1→0。两组Browser/GPU PID及peer/track保持，60/60和25/25健康采样，无FATAL/CHECK/dump；移除后实际观察12.869秒。未复现此前偶发崩溃，未做物理拔插。[显示运行](osr-display-runtime-20261104.md)。
+
+实现、原始证据与实验排程见[本轮记录](osr-latency-investigation-20261104.md)。本节按各自CPU、原生和实际串流范围列验收，不覆盖未测的用户设备与页面负载。
+
 ## 软键盘与尺寸过渡（2026-11-04，修复与运行验收完成）
 
 - KEYBOARD-1：Chrome157真实H264基线中，模拟visualViewport从820逐段缩到625、520，输入代理产生可信focusout/focusin，过渡期间输入丢失，peer/DC/video身份未变。根因链包括reconfigure临时空layout、尚无有效元数据与stale像素被误报inactive，以及Browser布局失效结束composition。原始证据保留在`develop/tmp/keyboard-viewport-qa/baseline157c/keyboard-results.jsonl`，不等同实体软键盘验收。
@@ -15,8 +25,8 @@
 - 构建与CPU：Control333/333及生产smoke、Endpoint19/19、Browser/SDK增量通过。原生probe首轮发现刚完成记录按旧插入顺序过早淘汰，production ledger修正为按状态更新时间保留后原断言通过。[边界](keyboard-touch-compat-contract-20261104.md) · [构建](keyboard-touch-compat-build-20261104.md)。
 - 真实157-run2/89-run3均通过新菜单/manual键盘单次提交、offset不改变远端DIP/epoch、可信双指部分抬起及远端滚动。屏蔽2250ms终止回执后各经四次原请求查询约3.75秒恢复，无重放、无重连提示，媒体身份保持。三次失败为弹层退出时序及新版Playwright调用89缺少API，原证据保留；Sol检查两版各6张截图无阻塞问题，实体移动键盘及更窄屏幕仍待验收。[运行记录](keyboard-touch-compat-runtime-20261104.md)。
 - 571项包文件/ZIP、11项人脸资产、启动smoke及包内157同一套真实键盘触控回归通过，已上传152167。首包因MCP预检文件使manifest标dirty未发布，同功能源码清理自有临时输出后重打干净包。[交付记录](keyboard-touch-compat-delivery-20261104.md)。
-- TOUCH-EDGE：`ClientGestureBridge::Dispatch`在注册canonical回调后、raw实际路由前若官方gesture packet校验拒绝，现有注册项可能等待不会到来的raw ACK。代码审查已定位，未证实与本轮有效输入报警有关；本轮不扩展Chromium注册撤回补丁。后续需独立负例与受管注册撤回契约，不能将未知ACK记作完成。
-- PACKAGE-DOC：`tools/package-runtime.py`生成的README仍写初始屏为black，产品实际已为纯白。发布验证时发现，既定上传包未为这句遗留说明重打；下次更新打包说明时修正，不影响键盘/触控功能。
+- TOUCH-EDGE：原152167中raw路由前官方packet拒绝可留下canonical注册；本轮TOUCH-5已加入仅未路由注册撤回和候选状态回滚，受管0010及原生构建/probe通过，未知ACK仍不算完成。
+- PACKAGE-DOC：本轮已将包内README初始屏black改为blank white，并修SDK导出manifest从实际公共头读取RTC ABI（4），避免旧硬编码3。待本轮包验证。
 
 ## 高级认证（2026-11-04，已交付316234）
 

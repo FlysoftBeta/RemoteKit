@@ -423,6 +423,10 @@ export function WindowFrame({
               <div className="page-overlay" role="alert">
                 {active.popup.error || "未能打开此页面"}
               </div>
+            ) : active.lifecycleRecoveryError ? (
+              <div className="page-overlay" role="alert">
+                {active.lifecycleRecoveryError}
+              </div>
             ) : (
               (active.restoring ||
                 (active.residency && active.residency !== "live")) && (
