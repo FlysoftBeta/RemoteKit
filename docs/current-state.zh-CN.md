@@ -2,17 +2,19 @@
 
 更新：2026-11-04。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
-## 最新增量（移动端卡顿诊断，未上传）
+## 最新交付（移动端卡顿诊断与全屏，761470）
 
 用户UD710/Brave138惯性滚动截图显示RTT15ms，但接收缓冲均值303ms、末包到提交p95约336ms，解码45FPS而提交29FPS。尚不能排除网络或确认唯一瓶颈。新增同窗重传占比、组帧/处理/缓冲目标、音频缓冲与解码器观测；支持设置内开始诊断、悬浮停止、服务端tar.zst归档和客户端显示ID。包记录Client、Control、Endpoint/Browser的可用指标、逐帧时序、时钟、缺测及终止原因；不会把诊断设施当成卡顿已修复。[诊断流程](diagnostic-collection.md) · [现场与口径](../develop/docs/mobile-receiver-diagnostics-20261104.md)。
 
-定向模型/协议测试与Control生产构建、启动smoke通过；157/89真实H.264中设置开始→悬浮停止→服务端归档/ID显示通过，两组媒体连接保持，tar.zst解压核对包含真实收发及逐帧RTP关联数据。157另通过Control重启后同账户查询原ID；桌面无头与隔离mDNS配置的范围见[运行记录](../develop/docs/mobile-diagnostic-runtime-20261104.md)。未改原生编码或拥塞控制策略，未重跑性能矩阵，实体平板待采样。本批未打包上传；306244不含此增量。
+定向模型/协议测试与Control生产构建、启动smoke通过；157/89真实H.264中设置开始→悬浮停止→服务端归档/ID显示通过，两组媒体连接保持，tar.zst解压核对包含真实收发及逐帧RTP关联数据。157另通过Control重启后同账户查询原ID；桌面无头与隔离mDNS配置的范围见[运行记录](../develop/docs/mobile-diagnostic-runtime-20261104.md)。未改原生编码或拥塞控制策略，未重跑性能矩阵，实体平板待采样。
 
-## 最新增量（Viewer自动全屏与内部网页全屏，未上传）
+用户重新授权上传后，以干净源码`dd6d850`打包；571个ZIP文件CRC/逐项hash、关键构建产物一致性及包内启动检查通过。2026-11-04 21:13:04（北京时间）上传成功，取件码[761470](https://airportal.cn/761470/EXGZc1IoQx)，有效24小时、2次、无密码。包名`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-205438.zip`，505528984 bytes，SHA256 `519c4a178bd4343f181425d76c84bfa3433734618c571d427a4afc11b5ea19a0`。[交付记录](../develop/docs/mobile-diagnostic-delivery-20261104.md)。
+
+## 同包增量（Viewer自动全屏与内部网页全屏）
 
 设置新增“打开或激活时全屏”，默认关闭并由Control持久保存。打开或回到Viewer时尝试外层全屏，浏览器手势限制导致失败则等待可信交互；主动退出后不立即抢回。远端网页Fullscreen API只使内容铺满整个Client，隐藏外壳与其他Window，不请求Client原生全屏；悬浮按钮、Esc或网页自身可退出。当前状态快照绑定Browser incarnation/instance/document，导航及连接生命周期清理或重新对账，沿用现有RTC与布局输入门禁。[契约](control-plane.zh-CN.md#viewer与网页全屏)。
 
-Browser/SDK、Endpoint Release与Control生产构建通过，Endpoint定向CTest 1/1、Control定向69项通过。157/89真实H.264内部全屏、输入命中、网页退出、悬浮退出及导航恢复通过，157另通过Esc；同组peer/track/DC保持。89通过外层设置重载读回、无手势拒绝与可信交互重试成功。157外层确认hook在可信交互时调用API，但浏览器返回`TypeError: not granted`，未验证原生全屏成功。回前台事件使用合成focus/blur，实体移动设备未验收。证据见[运行记录](../develop/docs/fullscreen-runtime-20261104.md)与[构建记录](../develop/docs/fullscreen-build-20261104.md)。用户取消本次上传，未生成发布包；下述306244不包含此增量。
+Browser/SDK、Endpoint Release与Control生产构建通过，Endpoint定向CTest 1/1、Control定向69项通过。157/89真实H.264内部全屏、输入命中、网页退出、悬浮退出及导航恢复通过，157另通过Esc；同组peer/track/DC保持。89通过外层设置重载读回、无手势拒绝与可信交互重试成功。157外层确认hook在可信交互时调用API，但浏览器返回`TypeError: not granted`，未验证原生全屏成功。回前台事件使用合成focus/blur，实体移动设备未验收。证据见[运行记录](../develop/docs/fullscreen-runtime-20261104.md)与[构建记录](../develop/docs/fullscreen-build-20261104.md)。最初取消单独上传，现已随761470交付；下述306244不包含此增量。
 
 ## 最近交付（平板拍照与彩色扫描，306244）
 

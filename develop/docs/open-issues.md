@@ -1,13 +1,14 @@
 # 当前问题与收尾记录
 
-## 移动端低RTT卡顿与诊断（2026-11-04，未上传）
+## 移动端低RTT卡顿与诊断（2026-11-04，已交付761470）
 
 - MOBILE-LAG（待定位）：UD710、Brave138、惯性滚动截图中RTT15ms，接收缓冲均值303.2ms，末包到Video提交p95 335.5ms，解码45.2FPS而提交29.1FPS。低RTT/高带宽估计不能排除帧到达抖动或重传，单次截图也不能证明硬件解码瓶颈。新增接收组帧/目标缓冲、音频缓冲、RTX以及逐帧呈现时序，等待实际设备连续包；不宣称已修复。[调查](mobile-receiver-diagnostics-20261104.md)。
 - DIAGNOSTIC-COLLECTION：按用户指定设置内开始、悬浮停止，Control保存tar.zst并返回ID。已接入授权和断线/锁屏中止、完成文件原子发布及重启查询。CPU定向、生产构建和157/89真实H.264收集/归档流程通过，媒体连接保持；157另通过Control重启后查询原ID。强制终止Control时未归档的内存样本可能丢失；已完成文件无自动保留期。[契约](../../docs/diagnostic-collection.md) · [运行](mobile-diagnostic-runtime-20261104.md)。
+- DIAGNOSTIC-DELIVERY：用户重新授权上传，以干净dd6d850打包，包内启动与571个ZIP文件hash/CRC通过，包含此前全屏增量；21:13:04（北京时间）上传成功，取件码[761470](https://airportal.cn/761470/EXGZc1IoQx)。[交付](mobile-diagnostic-delivery-20261104.md)。
 
-## Viewer与内部网页全屏（2026-11-04，未上传）
+## Viewer与内部网页全屏（2026-11-04，随761470交付）
 
-- FULLSCREEN：Control持久化自动外层全屏开关；内部网页全屏铺满Client且不调用外层Fullscreen API，按实例/文档快照恢复，支持悬浮退出与Esc。157/89真实内部链路通过，89外层真实成功。157的可信交互重试已发生，但原生API返回`TypeError: not granted`；本环境未验证外层成功，不以89结果覆盖。返回前台用合成focus/blur触发，实体移动设备待验收。用户取消本次上传。[运行记录](fullscreen-runtime-20261104.md)。
+- FULLSCREEN：Control持久化自动外层全屏开关；内部网页全屏铺满Client且不调用外层Fullscreen API，按实例/文档快照恢复，支持悬浮退出与Esc。157/89真实内部链路通过，89外层真实成功。157的可信交互重试已发生，但原生API返回`TypeError: not granted`；本环境未验证外层成功，不以89结果覆盖。返回前台用合成focus/blur触发，实体移动设备待验收。原取消独立上传，现随761470交付。[运行记录](fullscreen-runtime-20261104.md)。
 
 ## 快速拍照与彩色扫描修订（2026-11-04，已交付306244）
 
