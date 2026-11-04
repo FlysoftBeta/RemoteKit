@@ -47,7 +47,9 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
     endpoint: { request: async (method: string, tenant: string, options: unknown) => {
       assert.equal(method, 'session.snapshot'); assert.deepEqual(options, { outputDiagnostics: true }); snapshots.push(tenant);
       return { running: true, browserIncarnation: 'sensitive-id', rtc: { active: true, connectionId: 'sensitive-connection' },
-        stats: { comp: { begins: 7 }, decoderImplementation: 'password-from-page', senderRtcStats: { outbound: [{ kind: 'video', packetsSent: 3, token: 99 }] } },
+        stats: { comp: { begins: 7 }, decoderImplementation: 'password-from-page', senderRtcStats: { outbound: [
+          { kind: 'video', packetsSent: 3, token: 99 }, { kind: 'audio', packetsSent: 12, bytesSent: 345, token: 88 },
+        ] } },
         views: [{ width: 1920, title: 'sensitive-title', url: 'https://secret.invalid', compositor: { osr: { kind: 'custom-osr', enabled: true } } }],
         outputDiagnostics: { ok: true, output: { kind: 'osr-renderer', submitted: '10', generation: '500' } } };
     } },
@@ -126,6 +128,9 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   assert.deepEqual(archived.presentation, data.presentation);
   const endpoint = JSON.parse(files.get('endpoint.jsonl')!).data;
   assert.equal(endpoint.stats.comp.begins, 7);
+  assert.deepEqual(endpoint.stats.senderRtcStats.outbound, [
+    { kind: 'video', packetsSent: 3 }, { kind: 'audio', packetsSent: 12, bytesSent: 345 },
+  ]);
   assert.equal(endpoint.browserOutput.submitted, '10');
   assert.equal(endpoint.views[0].compositor.osr.enabled, true);
   assert.doesNotMatch([...files.values()].join(''), /sensitive-|secret\.invalid|password-from-page|rtcid|"sdp"|"token"/);

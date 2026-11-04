@@ -641,8 +641,9 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
     base::ListValue outbound;
     std::string transport_id;
     for (const auto* stream : report->GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>()) {
-      if (stream->kind.value_or("") != "video") continue;
-      if (transport_id.empty()) transport_id = stream->transport_id.value_or("");
+      const auto kind = stream->kind.value_or("");
+      if (kind != "video" && kind != "audio") continue;
+      if (transport_id.empty() || kind == "video") transport_id = stream->transport_id.value_or("");
       auto row = base::DictValue().Set("id", stream->id());
       PutStat(row, "ssrc", stream->ssrc);
       PutStat(row, "kind", stream->kind);

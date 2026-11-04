@@ -16,6 +16,8 @@ const [playwright, viewer, endpoint, browser, output, listenPort = '33785', scen
 assert([playwright, viewer, endpoint, browser, output].every(Boolean), 'Expected Playwright, Viewer, Endpoint, Browser and output paths');
 const scenarioModule = scenarioPath && await import(pathToFileURL(resolve(scenarioPath)).href);
 const scenario = scenarioModule ? scenarioModule.createScenario() : undefined;
+const receiverAudio = scenarioModule?.receiverAudio ?? 'recvonly';
+assert(['recvonly', 'inactive'].includes(receiverAudio), 'Invalid experiment audio direction');
 const { chromium } = createRequire(import.meta.url)(resolve(playwright));
 const root = fileURLToPath(new URL('../', import.meta.url));
 const run = resolve(output);
@@ -131,7 +133,7 @@ try {
   page = context.pages()[0] ?? await context.newPage();
   page.setDefaultTimeout(5000);
 
-  await page.addInitScript(() => {
+  await page.addInitScript(({receiverAudio}) => {
     const probe = window.diagnosticQA = {peers:[], channels:[], replies:[], exposedEarly:false};
     const ids = new WeakMap();
     let nextId = 0;
@@ -150,6 +152,12 @@ try {
         const channel = super.createDataChannel(...args);
         probe.channels.push(channel);
         return channel;
+      }
+      addTransceiver(trackOrKind, init) {
+        // Experiment-only negotiation isolation; muting a media element does
+        // not remove its RTP stream or WebRTC synchronization relationship.
+        return super.addTransceiver(trackOrKind, trackOrKind === 'audio' && receiverAudio === 'inactive'
+          ? {...init, direction:'inactive'} : init);
       }
     };
     const NativeSocket = WebSocket;
@@ -193,12 +201,15 @@ try {
       return {
         peer:id(peer), count:probe.peers.length, connected:peer?.connectionState,
         tracks:peer?.getReceivers().map(receiver => id(receiver.track)),
+        transceivers:peer?.getTransceivers().map(transceiver => ({
+          kind:transceiver.receiver.track.kind, direction:transceiver.currentDirection,
+        })),
         channels:probe.channels.map(channel => [id(channel), channel.label, channel.readyState]),
         videoReady:[...document.querySelectorAll('.remote-video-plane video')].some(video => video.videoWidth > 0),
         codecs,
       };
     };
-  });
+  }, {receiverAudio});
   const downloads = [];
   page.on('download', download => downloads.push(download.suggestedFilename()));
   const cdp = await context.newCDPSession(page);
@@ -392,6 +403,7 @@ try {
     assert(matchedRtpFrames.length > 0, 'No presented frame with receive time and matching RTP metadata');
   assert(sender, 'No real outbound video counters in Endpoint samples');
   assert(outputStats, 'No Browser output and Endpoint encode stats');
+  if (scenario?.validateArchive) await scenario.validateArchive({client, endpointSamples, log});
   assert.deepEqual(downloads, []);
   if (process.env.REMOTEKIT_QA_DIAGNOSTICS_RESTART === '1') {
     await page.goto('about:blank');

@@ -32,6 +32,8 @@ Stats同轮采集RTC解码、各video元素收帧/丢帧、compositor提交与rV
 
 重传包占比为 `ΔretransmittedPacketsReceived / ΔpacketsReceived`，发送端对应 `Sent` 字段，分母包含重传包；字节占比同理。NACK是反馈计数，不是重传包数。只有字段齐备、窗口连续、计数有效且分母大于零才产生占比；RTP丢包累计值可能因迟到包下修，保留带符号差分。发送端使用Endpoint自身采样时间，重复缓存报告不产生伪速率。`totalPacketSendDelay`记录发送前累计等待，不单独证明网络单向耗时或纯pacer耗时。
 
+SDK发送统计的outbound同时保留audio/video，便于验证音频是否真正产生RTP；Viewer视频叠层仍只使用video项，选中链路优先取video transport。播放静音不等于取消音频协商，不能据此排除音视频同步影响。
+
 低RTT不能排除帧到达抖动、重传或组帧等待；带宽估计也不能代替连续的实际包时序。用户现场可通过[设置内诊断收集](diagnostic-collection.md)生成服务端tar.zst诊断包，不再从Stats下载JSON。
 
 Video是唯一串流呈现后端。缺少首帧或当前RTP元数据时，保持门禁并在原连接上限频请求刷新；能力、协议或播放错误单独报告，不回退Canvas。解码FPS、接收码率是窗口增量，0不代表连接从未接收过视频；编码耗时也不表示对应码流已经发布。

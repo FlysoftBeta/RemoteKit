@@ -2,11 +2,17 @@
 
 更新：2026-11-04。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
+## 后续实验准备（尚未计时）
+
+已准备固定视频条件下audio recvonly/inactive串行对照，补齐SDK音频发送统计，加入CRC16及VideoFrame时间戳核对的稀疏marker、输入hash锁定和拒绝缺测规则。CPU/归档定向检查及SDK构建、smoke通过；尚无本组性能结论。硬件单帧大小限制仍是下一候选，未改变生产码控。本地d275b28成品不包含此诊断扩展；其上传已按用户指令终止。[实验条件与执行](../develop/docs/ud710-av-experiment-20261104.md)。
+
 ## 最新本地修复（QSV时基与发送积压）
 
 已用UHD630/QSV、1936×816、24Mbps/基础RTT10ms串行复现并比较。恢复WebRTC超发保护，QSV不再随每次观测FPS波动重配：持续明显降低才更新名义时基，恢复时一次回到Configure上限；原生网络适配、VBR及码率保持原职责。固定60FPS和BRC-only两条候选因低FPS画质退化均已撤回。Stats把错误的“GCC目标FPS”改为“输入FPS估计”；占位window/tab确认前禁用导航输入，防止身份替换时丢失草稿。
 
 原版→最终本地首段发送队列均值72→39ms、窗口峰270→167ms，稀疏页面marker到video提交p95 463→282ms，提交44.56→44.79FPS；第二段marker p95 276→211ms，提交45.11→43.38FPS。全组QSV新序列17→4、尾IDR3/3完成。低FPS停稳画质恢复接近原版。接收缓冲仍波动、100ms目标未达到，不能将桌面结果当UD710/Brave138生产验收。SDK/Endpoint/Control定向构建检查、真实QSV smoke和Chrome89静态首帧/活动停止/resize同连接验证通过。[完整实验与范围](../develop/docs/ud710-local-repro-20261104.md)。
+
+干净d275b28本地包`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-224459.zip`通过清单/ZIP/产物匹配和包内启动检查。23:19:43按用户要求在82%终止上传，没有取件码，不再重传。[本地包及停止记录](../develop/docs/ud710-cadence-delivery-20261104.md)。
 
 ## 上一交付（移动端卡顿诊断与全屏，761470）
 

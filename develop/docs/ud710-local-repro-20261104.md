@@ -157,3 +157,11 @@ SDK增量构建、导出及实际D3D纹理RTC smoke通过；Endpoint Release构�
 新增标签尚在乐观占位ID时，WindowFrame可能因正式ID到达而被重建。两次失败库仅有window.create收据、无tab.navigate，截图地址已空且无警告；初始新建按钮本身要求RTC已就绪，所以先前单纯怀疑DC未打开不充分。最终在占位window/tab确认前禁用地址栏和起始页搜索，显示创建提示，不引入跨身份操作队列；SSR定向检查覆盖占位、确认、断线、空窗和文件标签。实际导航根因没有历史focus追踪，保留为与证据一致的竞态修复。
 
 Chrome89.0.4389.90最终功能组 `develop/tmp/ud710-cadence-chrome89-functional/` 通过静态首帧、2/15Hz活动与停止、诊断归档和尺寸切换。resize后解码182→187，编码1936×816→1136×624；同peer、两条接收track和两个DataChannel保持。未使用旧全量性能矩阵。最初临时89 driver因新Playwright的checkVisibility不兼容失败，改用CDP输入后首帧通过，但带autofocus输入的旧fixture未满足严格单次idle断言；该失败不记为通过，后改用本次无交互fixture完成上述功能范围。
+
+### 后续方案的判别条件（尚未执行）
+
+本次去抖是有收益的局部修复，不能把减少QSV重配当成消除接收积压。优先用最终版本、相同视频/relay/页面条件串行比较有音频与真正无音频流两组；只设置播放器muted不足以隔离同步，必须用协商/收发计数确认音频条件。对比发送排队、组帧、视频与音频实际/目标缓冲、解码、末包到提交以及帧冻结，发送负载不同或源节拍不同不能归因为同步。上传期间不进行延迟benchmark。
+
+若移除音频未改善视频接收等待，就转向视频组帧/解码调度和呈现积压；若改善，再定位音频缓冲及同步目标，不能直接删除产品音频能力。发送侧后续候选须同时减少IDR突发并保持2/15Hz停稳质量，不重走已经失败的直接固定60FPS方案。进一步端到端验收应采用带校验的marker和明确帧关联，当前稀疏无CRC采样只作为本地近似比较。
+
+发送侧另可验证oneVPL的`MaxFrameSizeI/P`与`LowDelayBRC`，当前实现未设置这些选项。它们用于约束帧大小及码控容差，不能只凭API存在认定UHD630驱动生效；须Query/GetVideoParam与实际AU大小双重核对，并检查编码耗时及低FPS画质。码率仍由WebRTC决定，不引入按延迟自调码率的控制器。参见[Intel编码结构说明](https://intel.github.io/libvpl/latest/API_ref/VPL_structs_encode.html)。24Mbps发送300KB本身约需100ms，这说明只减少新序列次数还不足以约束单帧尾延迟。

@@ -131,7 +131,9 @@ for (let index = 0; index < phases.length - 1; ++index) {
   const last = present.at(-1);
   const markers = new Map();
   for (const frame of present) {
-    if (frame.marker && !markers.has(frame.marker.value)) markers.set(frame.marker.value, frame.marker.delay);
+    if (!frame.marker) continue;
+    const key = `${frame.marker.sequence ?? ''}:${frame.marker.value}`;
+    if (!markers.has(key)) markers.set(key, frame.marker.delay);
   }
   const firstNewMarker = name.startsWith('phase-motion') &&
     present.find(frame => frame.marker && ((wall - frame.marker.value) | 0) <= 0);
@@ -140,14 +142,24 @@ for (let index = 0; index < phases.length - 1; ++index) {
   summaries[name] = {
     durationMs:end - wall,
     callbacks:present.length,
+    callbackGapMs:distribution(present.slice(1).map((frame, index) => frame.now - present[index].now)),
+    videoFreezeCountObserved:finite(delta(client[0]?.data.rtc.inboundVideo ?? {}, client.at(-1)?.data.rtc.inboundVideo ?? {}, 'freezeCount')),
+    videoFreezeDurationObservedMs:finite(delta(client[0]?.data.rtc.inboundVideo ?? {}, client.at(-1)?.data.rtc.inboundVideo ?? {}, 'totalFreezesDuration') * 1000),
     compositorFps:finite(first ? (last.presentedFrames - first.presentedFrames + 1) * 1000 / (end - wall) : 0),
     receiveToSubmitMs:byField(present, frame => frame.presentationTime - frame.receiveTime),
     firstObservedNewMarkerMs:firstNewMarker ? finite(timeOrigin + firstNewMarker.presentationTime - wall) : undefined,
     markerToSubmitMs:distribution([...markers.values()]),
     decodeMs:byField(present, frame => frame.processingDuration * 1000),
+    probeDurationMs:byField(present, frame => frame.probeDurationMs),
+    frameAssociationDeltaUs:byField(present.filter(frame => frame.marker), frame => frame.snapshotDeltaUs),
     rttMs:byField(client, row => row.data.rtc.selectedPair?.currentRoundTripTime * 1000),
     videoBufferWindowMeanMs:byField(client, row => row.data.media.video?.jitterBufferMeanMs),
     audioBufferWindowMeanMs:byField(client, row => row.data.media.audio?.jitterBufferMeanMs),
+    videoTargetBufferWindowMeanMs:byField(client, row => row.data.media.video?.jitterBufferTargetMeanMs),
+    videoMinimumBufferWindowMeanMs:byField(client, row => row.data.media.video?.jitterBufferMinimumMeanMs),
+    audioTargetBufferWindowMeanMs:byField(client, row => row.data.media.audio?.jitterBufferTargetMeanMs),
+    videoAssemblyWindowMeanMs:byField(client, row => row.data.media.video?.assemblyMeanMs),
+    videoProcessingWindowMeanMs:byField(client, row => row.data.media.video?.processingMeanMs),
     senderQueuePacketWeightedMs:finite(sum(sendWithDelay.map(row => row.delayMs)) / sum(sendWithDelay.map(row => row.packets))),
     senderQueueWindowMeanMs:byField(send, row => row.queueMeanMs),
     actualEncodedMbps:byField(send, row => row.encodedMbps),
@@ -175,6 +187,9 @@ const qsvInitializations = [...endpointLog.matchAll(/^QSV actual: (\d+)x(\d+).* 
   }));
 const lastEndpoint = endpoint.at(-1).data.stats;
 const summary = {
+  experiment:stages.get('experiment'),
+  markerValidation:stages.get('marker-validation'),
+  audioValidation:stages.get('audio-validation'),
   atlas:dims,
   browser:manifest.environment,
   settings:entries.get('control.jsonl').at(-1)?.workspace?.settings,

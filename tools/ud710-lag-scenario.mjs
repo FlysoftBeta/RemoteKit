@@ -16,7 +16,8 @@ export const controlEnvironment = {
   REMOTEKIT_RTC_LOOPBACK_TEST:'1',
 };
 
-const stimulus = `<!doctype html><meta charset="utf-8"><title>UD710 controlled scroll</title>
+export function createScrollStimulus({markerWidth = 224, markerHeight = 32, markerScript} = {}) {
+  return `<!doctype html><meta charset="utf-8"><title>UD710 controlled scroll</title>
 <style>
   body { margin:0; overflow:hidden; background:#f0ece9; font:18px Arial; }
   main { height:100vh; overflow:auto; scrollbar-width:none; }
@@ -26,7 +27,7 @@ const stimulus = `<!doctype html><meta charset="utf-8"><title>UD710 controlled s
   canvas { position:fixed; inset:0; pointer-events:none; }
 </style>
 <main><section><h1>RemoteKit scroll stimulus</h1><article></article></section></main>
-<canvas width="224" height="32"></canvas>
+<canvas width="${markerWidth}" height="${markerHeight}"></canvas>
 <script>
   const scroller = document.querySelector('main');
   const grid = document.querySelector('article');
@@ -42,7 +43,7 @@ const stimulus = `<!doctype html><meta charset="utf-8"><title>UD710 controlled s
   const ctx = document.querySelector('canvas').getContext('2d');
   let active = false;
   let motionStart = 0;
-  function marker() {
+  ${markerScript ?? `function marker() {
     const time = Date.now() >>> 0;
     ctx.fillStyle = 'white';
     ctx.fillRect(0, 0, 224, 32);
@@ -53,7 +54,7 @@ const stimulus = `<!doctype html><meta charset="utf-8"><title>UD710 controlled s
       const y = Math.floor(bit / 16) * 16;
       ctx.fillRect(x, y, 14, 16);
     }
-  }
+  }`}
   function animate(t) {
     if (!active) return;
     const elapsed = t - motionStart;
@@ -79,6 +80,8 @@ const stimulus = `<!doctype html><meta charset="utf-8"><title>UD710 controlled s
     }
   })();
 </script>`;
+}
+const stimulus = createScrollStimulus();
 
 export async function start({page}) {
   await page.evaluate(() => {
@@ -113,7 +116,7 @@ export async function start({page}) {
   });
 }
 
-export function createScenario() {
+export function createScenario(options = {}) {
   let motion = false;
   const waiting = new Set();
   function setMotion(active) {
@@ -134,10 +137,10 @@ export function createScenario() {
         return;
       }
       response.setHeader('Content-Type', 'text/html; charset=utf-8');
-      response.end(stimulus);
+      response.end(options.stimulus ?? stimulus);
     },
 
-    start,
+    start:options.start ?? start,
 
     async measure({read, log, sleep}) {
       const offset = await read('diagnosticQA.lagClockOffset()');
@@ -157,7 +160,8 @@ export function createScenario() {
       await log('frame-raw', await read(`({
         dims:diagnosticQA.lagDims,
         timeOrigin:performance.timeOrigin,
-        frames:diagnosticQA.lagFrames
+        frames:diagnosticQA.lagFrames,
+        probe:diagnosticQA.lagProbe
       })`));
     },
   };
