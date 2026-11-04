@@ -43,6 +43,10 @@ if (mode === 'prepare') {
   assert(Number.isInteger(listenPort) && listenPort >= 1024 && listenPort < 65535);
   const paths = {playwright:resolve(playwright), viewer:resolve(viewer), endpoint:resolve(endpoint), browser:resolve(browser)};
   const outputRoot = resolve(output);
+  const probe = process.env.REMOTEKIT_QA_UD710_PROBE ?? 'checked';
+  const order = (process.env.REMOTEKIT_QA_UD710_ORDER ?? 'on,off').split(',');
+  assert(['checked', 'metadata-only'].includes(probe));
+  assert(order.length === 2 && order.includes('on') && order.includes('off'));
   const inputs = [...new Set([
     ...Object.values(paths), join(dirname(paths.browser), 'remotekit_sdk.dll'),
     ...await tree(join(root, 'control/dist')),
@@ -52,7 +56,7 @@ if (mode === 'prepare') {
   const files = [];
   for (const path of inputs) files.push({path, sha256:await hash(path)});
   const plan = {schema:1, createdAt:new Date().toISOString(), root, paths, outputRoot, port:listenPort,
-    order:['on', 'off'], stimulusSeconds:[30, 22, 5, 13], files,
+    order, probe, stimulusSeconds:[30, 22, 5, 13], files,
     scope:'One serial screening pair; fixed VBR, viewport, relay and checked marker. No production/UD710 or physical scanout acceptance.'};
   // Refuse to overwrite an existing experiment or its evidence.
   await mkdir(outputRoot);
@@ -64,7 +68,8 @@ if (mode === 'prepare') {
   const plan = JSON.parse(await readFile(resolve(args[0]), 'utf8'));
   assert.equal(plan.schema, 1);
   assert.equal(resolve(plan.root), resolve(root), 'Prepared workspace changed');
-  assert.deepEqual(plan.order, ['on', 'off']);
+  assert(plan.order.length === 2 && plan.order.includes('on') && plan.order.includes('off'));
+  assert(['checked', 'metadata-only'].includes(plan.probe ?? 'checked'));
   await mkdir(join(root, 'develop/tmp'), {recursive:true});
   const lockPath = join(root, 'develop/tmp/ud710-benchmark.lock');
   const lock = await open(lockPath, 'wx');
@@ -77,6 +82,7 @@ if (mode === 'prepare') {
         plan.paths.viewer, plan.paths.endpoint, plan.paths.browser, output, String(plan.port),
         join(root, 'tools/ud710-av-scenario.mjs')], {
         REMOTEKIT_QA_HEADLESS:'1', REMOTEKIT_QA_UD710_AUDIO:audio, REMOTEKIT_QA_UD710_RATE_CONTROL:'vbr',
+        REMOTEKIT_QA_UD710_PROBE:plan.probe ?? 'checked',
         REMOTEKIT_QA_DIAGNOSTICS_RESTART:'0',
       });
       await invoke([join(root, 'tools/analyze-ud710-lag.mjs'), output]);

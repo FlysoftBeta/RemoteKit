@@ -12,11 +12,13 @@ assert(['on', 'off'].includes(audio), 'Set REMOTEKIT_QA_UD710_AUDIO=on or off');
 assert(!process.env.REMOTEKIT_QA_UD710_RATE_CONTROL || process.env.REMOTEKIT_QA_UD710_RATE_CONTROL === 'vbr',
   'The audio isolation experiment requires the VBR baseline');
 export const receiverAudio = audio === 'on' ? 'recvonly' : 'inactive';
+const probeMode = process.env.REMOTEKIT_QA_UD710_PROBE ?? 'checked';
+assert(['checked', 'metadata-only'].includes(probeMode), 'Invalid marker probe mode');
 
-function installProbe(createCodec) {
+function installProbe(createCodec, checked) {
   const codec = createCodec();
   const video = document.querySelector('.remote-video-plane video');
-  if (!video || typeof VideoFrame !== 'function' || !video.requestVideoFrameCallback)
+  if (!video || (checked && typeof VideoFrame !== 'function') || !video.requestVideoFrameCallback)
     throw Error('The checked marker experiment requires VideoFrame and rVFC');
   const canvas = document.createElement('canvas');
   canvas.width = codec.width;
@@ -26,11 +28,11 @@ function installProbe(createCodec) {
   probe.lagFrames = [];
   probe.lagDims = [video.videoWidth, video.videoHeight];
   probe.lagClockOffset = () => Date.now() - (performance.timeOrigin + performance.now());
-  probe.lagProbe = {version:'crc16-frame-timestamp-v1', every:4, attempted:0, valid:0, rejected:{}};
+  probe.lagProbe = {version:checked ? 'crc16-frame-timestamp-v1' : 'metadata-only', every:4, attempted:0, valid:0, rejected:{}};
   const reject = reason => probe.lagProbe.rejected[reason] = (probe.lagProbe.rejected[reason] ?? 0) + 1;
   function record(now, data) {
     const row = {now, ...data, marker:null};
-    if (probe.lagFrames.length % probe.lagProbe.every === 0) {
+    if (checked && probe.lagFrames.length % probe.lagProbe.every === 0) {
       const began = performance.now();
       probe.lagProbe.attempted++;
       let snapshot;
@@ -112,17 +114,18 @@ export function createScenario() {
     const state = await page.evaluate(() => window.diagnosticQA.media());
     assert.deepEqual(state.transceivers.filter(row => row.kind === 'audio').map(row => row.direction), [receiverAudio],
       'Audio negotiation does not match the selected experiment');
-    await page.evaluate(`(${installProbe.toString()})(${createMarkerCodec.toString()})`);
+    await page.evaluate(`(${installProbe.toString()})(${createMarkerCodec.toString()}, ${probeMode === 'checked'})`);
   }});
   return {
     ...base,
     async measure(context) {
-      await context.log('experiment', {name:'audio-isolation', audio, receiverAudio, markerVersion:'crc16-frame-timestamp-v1'});
+      await context.log('experiment', {name:'audio-isolation', audio, receiverAudio, probeMode, markerVersion:'crc16-frame-timestamp-v1'});
       await base.measure(context);
       const probe = await context.read('diagnosticQA.lagProbe');
       await context.log('marker-validation', probe);
-      assert(probe.valid >= 100 && probe.valid / probe.attempted >= .8,
+      if (probeMode === 'checked') assert(probe.valid >= 100 && probe.valid / probe.attempted >= .8,
         'Insufficient checked marker coverage; this run cannot establish marker latency');
+      else assert.equal(probe.attempted, 0, 'Metadata-only control performed pixel reads');
     },
     async validateArchive({client, endpointSamples, log}) {
       const evidence = validateAudioEvidence(client, endpointSamples, audio);

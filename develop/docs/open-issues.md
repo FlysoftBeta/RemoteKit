@@ -4,7 +4,7 @@
 
 - MOBILE-LAG（待定位）：UD710、Brave138、惯性滚动截图中RTT15ms，接收缓冲均值303.2ms，末包到Video提交p95 335.5ms，解码45.2FPS而提交29.1FPS。低RTT/高带宽估计不能排除帧到达抖动或重传，单次截图也不能证明硬件解码瓶颈。新增接收组帧/目标缓冲、音频缓冲、RTX以及逐帧呈现时序，已收到实际连续包，结果见下项MOBILE-PACER；不宣称已修复。[调查](mobile-receiver-diagnostics-20261104.md)。
 - MOBILE-PACER（本地改善，生产待验）：实体包发送排队1.3–1.8秒，后续另有接收积压。本地复现低RTT下发送窗口270ms；仅撤销可信码控声明效果不充分。最终恢复原生超发保护，并对QSV观测FPS去抖、真实时基变化才新序列；新序列17→4，首段发送均值72→39ms、marker p95 463→282ms，低FPS停稳画质接近原版。CBR、固定60FPS和BRC-only实验均未采用。接收侧尾延迟、100ms目标和UD710生产网络仍未解决/验收；maxFps上调不一定触发新Configure，名义恢复上限仍是最近配置值。[本地实验](ud710-local-repro-20261104.md) · [实体分析](ud710-diagnostic-analysis-20261104.md)。
-- MOBILE-AV-ISOLATION（准备完成，待实际运行）：增加audio recvonly/inactive同条件串行对照、音频发送计数及CRC/VideoFrame时间关联探针，定向检查通过。尚未判断音频同步是否导致接收积压；硬件单帧预算只列为下一候选。[准备与门槛](ud710-av-experiment-20261104.md)。
+- MOBILE-AV-ISOLATION（四组已测，根因仍未确认）：首对有音频接收p95 270/90ms、无音频45/44ms，反序无读回仅50/61ms对44/48ms；不能认定音频为唯一根因。Viewer RAF约32Hz、解码54–57FPS，旧组RAF约53Hz，提交FPS不能跨组直接比较。QSV固定I150KB/P100KB限制在60FPS读回保留、2FPS清零，未进入产品。[实际结果](ud710-av-results-20261104.md)。
 - DIAGNOSTIC-COLLECTION：按用户指定设置内开始、悬浮停止，Control保存tar.zst并返回ID。已接入授权和断线/锁屏中止、完成文件原子发布及重启查询。CPU定向、生产构建和157/89真实H.264收集/归档流程通过，媒体连接保持；157另通过Control重启后查询原ID。强制终止Control时未归档的内存样本可能丢失；已完成文件无自动保留期。[契约](../../docs/diagnostic-collection.md) · [运行](mobile-diagnostic-runtime-20261104.md)。
 - DIAGNOSTIC-DELIVERY：用户重新授权上传，以干净dd6d850打包，包内启动与571个ZIP文件hash/CRC通过，包含此前全屏增量；21:13:04（北京时间）上传成功，取件码[761470](https://airportal.cn/761470/EXGZc1IoQx)。[交付](mobile-diagnostic-delivery-20261104.md)。
 

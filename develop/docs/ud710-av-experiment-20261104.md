@@ -1,6 +1,6 @@
 # UD710后续实验准备：音频同步与单帧突发
 
-状态：实验设施准备与定向检查，尚无这组A/B性能结果。本地包仍是`d275b28`，其上传已按用户要求终止；本次新增音频统计和实验工具不混入该成品，也不沿用旧marker结果作为新探针验收。
+状态：已完成首对及反序无像素读回复核，结果见[实际记录](ud710-av-results-20261104.md)。本地包仍是`d275b28`，其上传已按用户要求终止；本次新增音频统计和实验工具不混入该成品，也不沿用旧marker结果作为新探针验收。
 
 ## 第一组：真正移除音频流
 
@@ -28,14 +28,16 @@ node tools/ud710-av-experiment.mjs run <新输出目录>/plan.json
 
 prepare锁定Viewer、Endpoint、Browser、SDK、Control构建文件及实验脚本的SHA256。每组开始前重新核对，不覆盖旧输出；运行器使用独占实验锁并等待上一组完全退出。异常立即停止，不把下一组补跑成完整配对。输出包含原始tar.zst、逐帧探针、每组comparison.json及配对汇总。这里的锁只约束本运行器，不能自动排除其他人工启动的负载。
 
+prepare时可设置`REMOTEKIT_QA_UD710_PROBE=metadata-only`及`REMOTEKIT_QA_UD710_ORDER=off,on`，将反序及不读像素条件锁入计划；默认checked和on,off。无读回组保持同一远端CRC图案，只关闭Viewer像素读回，不生成marker延迟结论。
+
 判别时同时比较发送排队/编码量/源FPS/RTT和接收的组帧、处理、解码、音视频实际/目标/最低缓冲、末包到提交、冻结及marker分布。发送条件不相当不能归因为音频同步。若on/off差异明显且发送条件相当，再做针对性反序复核；一次固定顺序对照只作为筛查。无改善则转查视频接收/解码调度与呈现等待，不删除产品音频能力。
 
 ## 第二组候选：硬件单帧预算
 
-尚未实现硬件候选或开始测量。先确认第一组是否能解释接收等待，再单独Query/Init/GetVideoParam验证UHD630驱动对`MaxFrameSizeI/P`和`LowDelayBRC`的支持，核对实际AU大小；API存在不代表该驱动接受。采用与基线相同WebRTC码率目标，候选只改变硬件帧大小约束，保留现有时基策略。至少同时检查关键帧突发、编码耗时和2/15Hz停稳细字，避免用画质退化换出漂亮的延迟数字。
+已有独立Query/Init/GetVideoParam探针及实际六组合结果：60FPS保留150KB/100KB限制，2FPS清零，因此固定限制候选暂不进入产品。尚未进行实际AU与画质测量；API存在不代表该驱动在所有配置接受。后续采用与基线相同WebRTC码率目标，候选只改变硬件帧大小约束，保留现有时基策略。至少同时检查关键帧突发、编码耗时和2/15Hz停稳细字，避免用画质退化换出漂亮的延迟数字。
 
 ## 已做检查的范围
 
 marker标准CRC向量、每个单bit损坏、灰色单元拒绝、音频条件与缺测拒绝、旧/新fixture脚本编译共4项CPU检查通过。Control服务端tar.zst保留音频计数且继续清理非诊断字段的2项测试通过。SDK已增量编译并导出；音频SDP/ABI/timeline和真实纹理RTC smoke通过。没有以这些检查替代真实音频A/B、VideoFrame时间关联或硬件单帧预算验收。
 
-准备好的本机计划为`develop/tmp/ud710-av-prepared-v2/plan.json`（仅prepare，无运行目录），SDK SHA256 `289e6e3a3ae774994d27599eec756f1fc4c08e0e81f33e94ac30ecd530186026`；Endpoint保持已测`eababcfe52eac4b0d15e003be4d8ff808df5d20dfc7ca6c1fa6d1108519d2e67`。首份plan因分析器增加冻结计数而过期，保留并由hash检查拒绝，不使用。旧最终组归档经扩展分析器重算成功，仅验证兼容性，没有重跑性能组。
+本机首对计划为`develop/tmp/ud710-av-prepared-v2/plan.json`，现已完成运行；SDK SHA256 `289e6e3a3ae774994d27599eec756f1fc4c08e0e81f33e94ac30ecd530186026`；Endpoint保持已测`eababcfe52eac4b0d15e003be4d8ff808df5d20dfc7ca6c1fa6d1108519d2e67`。首份plan因分析器增加冻结计数而过期，保留并由hash检查拒绝，不使用。旧最终组归档经扩展分析器重算成功，仅验证兼容性，没有重跑旧性能组。
