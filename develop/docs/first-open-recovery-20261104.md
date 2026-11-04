@@ -19,3 +19,9 @@ Client 96项定向测试、TypeScript及Control生产构建/startup smoke通过�
 最终Endpoint SHA256 `5f77386930137dbcd5d0070a580f7014a62d377b770d7d1c6a4d7e07ce8b4131`；Control主bundle `index-BjH88IME.js` SHA256 `fd179e63840986324ed2354dbd51c7f82f360c4bc9e30b2228092b58536ec7c6`。Browser/SDK沿用861200对应构建，未修改Chromium补丁。日志位于`develop/tmp/first-open-native-build/`及`develop/tmp/video-only-control-build.log`。
 
 用户截图本身不够确定是哪一步丢帧，不将代码风险直接宣称为现场故障的唯一根因。自然运行未复现原始持续白屏；旧版错误切换后端则已受控复现，最终同场景通过。
+
+## 本地交付
+
+功能源码`3a5df079c29b9c729d6965c3df7a76609f10883a`已推送。用户明确要求无需上传；AirPortal停在上传前确认页后关闭，没有提交文件或取得新取件码。
+
+本地包位于`develop/tmp/video-only-delivery-20261104/RemoteKit-win-x64-streaming-qsv-nvenc-20261104-152327.zip`，504962837字节，SHA256 `ead107b6a451d1c4b15b75e0d2c770700db9ff0833dcd14818bef7e22dc41a70`。manifest为干净源码；571项清单、572个ZIP文件的CRC/SHA与11项人脸资产通过。包内启动smoke与独立Chrome157实际QSV/H264 Video、可信触控start/end、accepted-pending→processed通过，peer/DC/video/stream保持。日志没有FATAL/CHECK/GPU退出，自有测试进程均已关闭。包与证据不提交Git。

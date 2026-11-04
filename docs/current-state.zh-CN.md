@@ -4,9 +4,9 @@
 
 ## 当前交付
 
-本轮冷启动补帧与Video-only清理已完成，待新包上传。生产Canvas/MSTP/WebGL回退已移除；保留尺寸过渡快照、拍照和测试读回。96项Client定向、4项Endpoint定向、增量构建及生产smoke通过；157正常冷启动、首次ACK延迟4.5秒、Chrome89已保存静态页均在单peer/单视频轨道上恢复Video，成功后补帧计数停止。[修复范围](../develop/docs/first-open-recovery-20261104.md) · [真实运行](../develop/docs/osr-first-open-runtime-20261104.md)。以下861200仍为此前包。
+冷启动补帧与Video-only清理已完成，源码`3a5df079c29b9c729d6965c3df7a76609f10883a`已推送；用户明确取消本轮上传。生产Canvas/MSTP/WebGL回退已移除；保留尺寸过渡快照、拍照和测试读回。96项Client定向、4项Endpoint定向、增量构建及生产smoke通过；157正常冷启动、首次ACK延迟4.5秒、Chrome89已保存静态页均在单peer/单视频轨道上恢复Video，成功后补帧计数停止。本地包另通过清单/CRC及实际H264/QSV触控检查。[修复与本地包](../develop/docs/first-open-recovery-20261104.md) · [真实运行](../develop/docs/osr-first-open-runtime-20261104.md)。以下861200仍为此前已上传包，不含本轮修改。
 
-生命周期、触控及OSR延迟修复已发布，功能源码`433655ddca7d7e44eb44f847a8c46ba0bc352675`已推送。[本轮完整记录](../develop/docs/osr-latency-investigation-20261104.md) · [问题清单](../develop/docs/open-issues.md)。
+此前生命周期、触控及OSR延迟修复已发布，包内功能源码为`433655ddca7d7e44eb44f847a8c46ba0bc352675`。[该批完整记录](../develop/docs/osr-latency-investigation-20261104.md) · [问题清单](../develop/docs/open-issues.md)。
 
 取件码[861200](https://airportal.cn/861200/YnupKqRq8U)，2026-11-04 14:46:48（UTC+8）上传成功，有效24小时、可下载2次、无密码。
 
