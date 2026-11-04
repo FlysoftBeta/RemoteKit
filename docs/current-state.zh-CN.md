@@ -2,25 +2,21 @@
 
 更新：2026-11-04。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
-## 当前修订
+## 最近交付（平板拍照与彩色扫描，306244）
 
 用户实用反馈否定162141的拍照布局和三层流程：横屏快门难触达、取景被挤小、采样与上传串行造成等待、扫描依赖完整页边并丢色。现已重做全屏覆盖取景/侧边快门、相机配置和连续拍摄，取消独立检查照片页，拍后在紧凑文件篮strip中处理；只保留普通照片/文档扫描，扫描合并几何与保色增强。原图不经串流视频codec，临时小图经Endpoint增量评分，最多1秒/20个不同帧，质量够用提前停止；最终上传保留帧PNG。
 
-本轮Endpoint与Control构建、4项原生文件测试及Client/Control定向检查通过。157完整RTC与Native FileList链路、最终Control窄组、三种平板尺寸/DPR2触控模拟通过；89完整组在活跃远页条件下通过。清晰合成样例两帧提前停止，软糊样例19个不同帧、UI约1秒解锁。四份彩色扫描RTC输出与Native探针一致。正在打包，尚未上传。实体Android平板、物理摄像头和手持效果未验收。[当前契约](camera-pipeline-contract.md) · [运行记录](../develop/docs/camera-flow-qa-20261104.md) · [构建](../develop/docs/camera-flow-build-20261104.md)。
+本轮Endpoint与Control构建、4项原生文件测试及Client/Control定向检查通过。157完整RTC与Native FileList链路、最终Control窄组、三种平板尺寸/DPR2触控模拟通过；89完整组在活跃远页条件下通过。清晰合成样例两帧提前停止，软糊样例19个不同帧、UI约1秒解锁。四份彩色扫描RTC输出与Native探针一致。源码`3e7ad7a`已推送，干净成品通过清单/ZIP/人脸资产检查和实际包内H.264/文件篮窄组。实体Android平板、物理摄像头和手持效果未验收。[交付记录](../develop/docs/camera-flow-delivery-20261104.md) · [当前契约](camera-pipeline-contract.md) · [运行记录](../develop/docs/camera-flow-qa-20261104.md) · [构建](../develop/docs/camera-flow-build-20261104.md)。
+
+取件码[306244](https://airportal.cn/306244/AYeXJ2MWCd)，2026-11-04 20:01:28（UTC+8）上传成功，有效24小时、可下载2次、无密码。包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-194030.zip`，505509847 bytes，SHA256 `db7871c74d87332292897d4dbb37a390455a8f2ab59ec1496c1ec0946b5d651a`。
 
 部分页/阴影/弱字和彩色样例已做Native对照；UVDoc虽改善行弧，实测会丢失部分入镜页的边缘内容，本批不接入。书页展平、严重截断透视尚未解决，硬阴影可有窄光晕。另发现89静态页1FPS时QSV重建实际level50超过协商42导致画面停止，原有重建修复未覆盖此情形，本轮未修改媒体路径。[Native记录](../develop/docs/photo-pipeline-native-20261104.md) · [模型实验](../develop/docs/document-unwarp-eval-20261104.md) · [问题清单](../develop/docs/open-issues.md)。
 
-## 最近交付（162141，本轮修订尚未包含）
+## 文件库与此前版本
 
-文件篮、我的文件与Endpoint照片处理已完成并上传，功能源码`7ab9b62bf078052fc47fee7eb8889b08eab4f08b`已推送，干净源码包通过核验及真实运行。图片为主使用横向卡片，整卡拖拽、点击展开菜单；普通文件明显居多时默认列表，手柄排序且操作按钮直接可用，可手动切换。157/89已实测鼠标、触屏横滑/长按、键盘、取消与版本冲突回滚；最终包157整组及宽图contain、候选预览和390px窄屏视觉复核通过。[交付记录](../develop/docs/file-library-delivery-20261104.md) · [构建](../develop/docs/file-library-build-20261104.md) · [运行与视觉](../develop/docs/file-library-qa-20261104.md) · [正式契约](file-library-contract.md)。
+本包继续包含162141的文件篮、独立“我的文件”tab、时间排序/分组、图片整卡拖拽和文件列表手柄、输入框锚定、单选/多选与原生终态确认后消费，以及Session内hash文件存储。此前157/89的FileList字节/顺序、分组、缩略图重载和授权换代证据见[上一版交付](../develop/docs/file-library-delivery-20261104.md)及[运行记录](../develop/docs/file-library-qa-20261104.md)，旧拍照流程由本轮替代。QSV Reset -14后的同session重建来自该版，原硬件和解锁证据见[定位记录](../develop/docs/file-unlock-investigation-20261104.md)；它未覆盖本轮发现的level超限情形。
 
-取件码[162141](https://airportal.cn/162141/wiVzM0mMmp)，2026-11-04 17:33:57（UTC+8）上传成功，有效24小时、可下载2次、无密码。包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-170701.zip`，505436504 bytes，SHA256 `2da620a88e72d12f9f5881687f96373020bb64d4577f7fe51c262201e8cafa0c`。570项清单、571个ZIP文件及11项人脸资产校验通过。
-
-拍照为全屏连续采集，由Endpoint OpenCV评分与近重复过滤，仅质量接近且画面有实质差异时要求选候选；支持指定位置重拍、移除、矫正/扫描和保留原图。文件与照片共用有序文件篮；单选需明确选一项，多选按篮子顺序交付。原生selection ID确认后才归档并出篮。更多→我的文件是独立tab，按时间排列、可分组/上传/删除/加入篮子。Control持有元数据，Endpoint按Session内SHA-256存储，字节和按需缩略图走既有RTC。主框架可见input锚定紧凑选择器，失效、隐藏或子框架回退Dialog。
-
-配套Browser/SDK、Endpoint及Control生产构建通过，Endpoint四项文件定向CTest通过。157/89实测原生FileList字节/顺序、分组/消费、合成摄像头连续采集/不确定候选/后处理、刷新后真实缩略图、动态anchor撤销和授权换代。实体摄像头、运动与复杂光照仍待验收。验收期间发现QSV在高码率1FPS下Reset -14导致编码停止，现于排空后在同session/device重新初始化编码组件；独立UHD630低帧率序列与async VPP、修后两版解锁恢复均通过。[定位](../develop/docs/file-unlock-investigation-20261104.md) · [问题清单](../develop/docs/open-issues.md)。
-
-此前冷启动补帧与Video-only清理源码`3a5df07`已推送，当时用户取消上传；本次新包包含它。96项Client与4项Endpoint定向、157正常/ACK延迟冷启动及89静态页恢复通过。[该批修复与本地包](../develop/docs/first-open-recovery-20261104.md) · [真实运行](../develop/docs/osr-first-open-runtime-20261104.md)。此前已上传的[861200](https://airportal.cn/861200/YnupKqRq8U)仅包含源码`433655d`的生命周期、触控与OSR延迟修复，不能代替本次文件功能或Video-only版本。[此前交付记录](../develop/docs/osr-lifecycle-delivery-20261104.md)。
+本包也包含`3a5df07`的冷启动补帧与Video-only清理。该批96项Client与4项Endpoint定向、157正常/ACK延迟冷启动及89静态页恢复通过，证据不代替本轮新故障的复验。[修复记录](../develop/docs/first-open-recovery-20261104.md) · [实际运行](../develop/docs/osr-first-open-runtime-20261104.md)。
 
 ## 生命周期、触控与延迟（已交付861200）
 

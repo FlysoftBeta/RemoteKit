@@ -25,3 +25,7 @@
 Chrome 89 静态远页组 `camera-flow-89-5` 通过排序、Native FileList、取景和两方向 PNG 像素。清晰样例各两帧，软糊样例 UI 解锁约 1008 ms、19 帧。随后在 390px 静态页重配置和跨文档选择退役期间，QSV 从 2 FPS 转至 1 FPS 时 Reset -14，重建出的实际 level 50 超过协商 level 42，编码停止。RTC peer 与 DataChannel 仍连接，media.refresh 多次未恢复。该媒体故障单独登记。
 
 最终 Control 的 Chrome 89 活跃远页组 `camera-flow-89-active-2` 通过完整功能回归。运行器选项 `REMOTEKIT_QA_ACTIVE_FIXTURE=1` 使远端测试页的 24×24 标记每 80 ms 变化，从而避开上述 1 FPS 静态路径。清晰样例各两帧，软糊样例采 19 个不同源帧，UI 解锁约 1009 ms，最后一个样本在 burst begin 后约 965 ms 发送。真实 Endpoint 返回两个不同的候选，候选选择继续执行 scan，文件选择、授权换代与缩略图重载通过。该组验证活跃远页条件下的 Chrome 89 文件功能，静态 1 FPS 恢复仍未通过。
+
+## 最终成品运行
+
+源码 `3e7ad7ac6ea2f9d2b639111dedaaafa97d264d73` 的 `RemoteKit-win-x64-streaming-qsv-nvenc-20261104-194030` 通过 Chromium 157 窄组，证据在 `develop/tmp/camera-flow-package-157-final`。运行器调用成品 Node 执行 `run.cmd` 所用的原样 `run-control.cjs`，使用隔离数据根及指向成品 bin、control 的目录连接。Windows 进程树确认 Endpoint 和 Browser 可执行文件，Endpoint 的已载入模块确认 SDK DLL，路径解析核对 Node 与 Control server 均来自同一成品。实收 H.264，191px 空间仍锚定，更多与候选展开上限分别为 360px、560px，档案相机角标随真实归档从 2 变为 3，篮子保持 1 项。测试进程均已退出。

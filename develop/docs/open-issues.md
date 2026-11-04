@@ -1,11 +1,12 @@
 # 当前问题与收尾记录
 
-## 快速拍照与彩色扫描修订（2026-11-04，功能验收完成、待发布）
+## 快速拍照与彩色扫描修订（2026-11-04，已交付306244）
 
 - CAMERA-FLOW：162141横屏仍底部快门、contain小取景和独立检查照片页被用户否定。已改为全屏cover/同源裁剪、横屏右侧快门、相机模式与连续拍摄、文件篮内候选/重拍；简易态strip+发送/添加/更多三图标。157完整、最终窄组及DPR2平板触控模拟通过，89活跃远页组通过。三种平板尺寸取景铺满、横屏右侧快门；strip实测148px。实体Android相机/手持体验未测。[运行记录](camera-flow-qa-20261104.md)。
 - CAMERA-SPEED：旧版逐帧JPEG压缩、所有整图逐块stop-and-wait上传后再排名。新路径只送512分析图，Endpoint按帧反馈保留/早停，采样≤1s/20个不同帧，最终保留帧PNG且4块窗口上传。实际设备帧率、可用像素和采样帧数须报告，不能把上限当硬件保证。
 - SCAN-COLOR：扫描统一几何与保色增强，完整可信页透视、正文方向deskew或保持原几何；无四边不失败、不猜裁。Native合成弱字/彩字/阴影与2公开实拍通过保全检查，硬阴影仍可见窄光晕，弯书脊未展平。UVDoc改善行弧但截边标记8→1/0，故不接本批。[Native](photo-pipeline-native-20261104.md) · [UVDoc](document-unwarp-eval-20261104.md)。
 - QSV-LOW-FPS-LEVEL（待修）：89静态远页组 `camera-flow-89-5` 在390px布局和文档选择退役期间，400×768编码器由2FPS降至1FPS、Reset返回-14；重建实际level50超出协商42而停止编码。peer/DC仍连接，media.refresh未恢复。原FILE-UNLOCK修复只解决Reset失败后的重建，未保证此驱动配置仍符合协商level。本轮相机改动未涉及媒体代码，89剩余功能在24×24变化的活跃远页复验通过，不计为静态恢复通过。证据：`develop/tmp/camera-flow-89-5/control.stderr.log`，后续媒体任务处理。
+- CAMERA-DELIVERY：源码`3e7ad7a`已推送，干净包清单/CRC/hash及包内真实H.264窄组通过。20:01:28（UTC+8）上传成功，取件码[306244](https://airportal.cn/306244/AYeXJ2MWCd)，24小时/2次/无密码。[交付记录](camera-flow-delivery-20261104.md)。
 
 ## 文件库、文件篮与Endpoint拍照（2026-11-04，已交付162141）
 
