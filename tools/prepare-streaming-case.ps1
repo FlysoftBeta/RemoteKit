@@ -8,7 +8,6 @@ param(
   [int]$Tenants = 1,
   [switch]$DisableClientGpuVsync,
   [switch]$PreciseBrowserPoll,
-  [switch]$VisibleVideoPreview,
   [ValidateSet(1,2,4)][int]$AsyncDepth = 1,
   [ValidateRange(1,7)][int]$TargetUsage = 4,
   [ValidateSet('cbr','vbr')][string]$RateControl = 'cbr',
@@ -30,10 +29,6 @@ param(
   [string]$BrowserEnableFeatures='',
   [string]$BrowserDisableFeatures='',
   [ValidateSet('canvas','compositor')][string]$FixtureKind='canvas',
-  [ValidateSet('snapshot','single-plane-direct')][string]$PresentationMode='snapshot',
-  [ValidateSet('video','track-processor')][string]$FrameSource='video',
-  [ValidateSet('latest1','fifo2')][string]$ProcessorScheduler='latest1',
-  [switch]$ProcessorProfile,
   [switch]$DisableClientRafProbe,
   [ValidateSet('default','software','unlimited')][string]$ClientMode='default',
   [string]$ClientExecutablePath='C:/src/tmp/chrome89-google/app/chrome.exe',
@@ -45,7 +40,6 @@ param(
   [ValidateRange(-1,40950)][ValidateScript({$_ -eq -1 -or $_ % 10 -eq 0})][int]$RtcPlayoutMaxMs=-1
 )
 $ErrorActionPreference = 'Stop'
-if($FrameSource -eq 'track-processor' -and $PresentationMode -ne 'snapshot'){throw 'track-processor requires snapshot presentation'}
 if($BitrateMbps -gt $MaxBitrateMbps){throw 'BitrateMbps must not exceed MaxBitrateMbps'}
 $QsvLowPower=$QsvLowPower.ToLowerInvariant()
 $rkBitrateBps=[uint32][Math]::Round($BitrateMbps*1000000)
@@ -83,7 +77,6 @@ $configuration = @{
   id=$Name; origin='http://127.0.0.1:3001'; fixtureOrigin='http://127.0.0.1:3013';
   tenants=$Tenants; width=$Width; height=$Height; dpr=1; mode=$FixtureMode;
   warmupMs=5000; sampleMs=20000; receiveProfile=$ReceiveProfile; automaticQualityPolicy=$false;
-  requirePaint=$true; paintVersion='event-driven-v2'; visibleVideoPreview=[bool]$VisibleVideoPreview;
   inputIntervalMs=$InputIntervalMs;markerReadback=$MarkerReadback;
   honorClientTimerResolution=[bool]$HonorClientTimerResolution;
   timerPolicyTool=(Join-Path $rkRoot 'tools/probe-chrome-timer-policy.ps1'); timerPolicyOutput=(Join-Path $caseRoot 'timer-policy.json');
@@ -91,7 +84,6 @@ $configuration = @{
   resourceProfile=[bool]$ResourceProfile; observeClientRaf=(-not [bool]$DisableClientRafProbe);clientMode=$ClientMode;
   clientExecutablePath=$ClientExecutablePath;clientRefreshHz=$ClientRefreshHz;
   serverTrace=[bool]$ServerTrace;browserTrace=(-not [bool]$DisableMediaTrace);
-  presentationMode=$PresentationMode;frameSource=$FrameSource;processorScheduler=$ProcessorScheduler;processorProfile=[bool]$ProcessorProfile;
   browserEnableFeatures=$rkBrowserFeaturesText;browserDisableFeatures=$rkBrowserDisabledFeaturesText;
   officialTrace=[bool]$OfficialTrace;fixtureKind=$FixtureKind;
   endpoint=@{build='Release';asyncDepth=$AsyncDepth;targetUsage=$TargetUsage;rateControl=$RateControl;qsvVpp=$QsvVpp;qsvLowPower=$QsvLowPower;atlasAllocationAlignment=$AtlasAlignment;startBitrate=$rkBitrateBps;maxBitrate=$rkMaxBitrateBps;bufferMs=$BufferMs;idleIdrMs=$IdleIdrMs;rtcPlayoutDelayRequested=@{minMs=$(if($RtcPlayoutMaxMs -ge 0){0}else{-1});maxMs=$RtcPlayoutMaxMs}};

@@ -102,11 +102,12 @@ export function useViewportTransition(
       }
       setStyle({ inset: 'auto', left: bounds.left - content.left, top: bounds.top - content.top, width: bounds.width, height: bounds.height });
     };
-    const observer = new ResizeObserver(measure); observer.observe(parent);
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : undefined;
+    observer?.observe(parent);
     window.visualViewport?.addEventListener('resize', measure);
     if (!inViewer) window.visualViewport?.addEventListener('scroll', measure);
     measure();
-    return () => { observer.disconnect(); window.visualViewport?.removeEventListener('resize', measure); if (!inViewer) window.visualViewport?.removeEventListener('scroll', measure); clearTimeout(settleTimer.current); disposeBitmap(); };
+    return () => { observer?.disconnect(); window.visualViewport?.removeEventListener('resize', measure); if (!inViewer) window.visualViewport?.removeEventListener('scroll', measure); clearTimeout(settleTimer.current); disposeBitmap(); };
   }, [host, transport, viewId, owner, editor]);
   useLayoutEffect(() => {
     const state = transition.current, desired = state.desired, layout = transport.layout;

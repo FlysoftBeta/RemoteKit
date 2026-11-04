@@ -711,7 +711,12 @@ export function RemoteViewport({
           if (owner) { owner.terminal = 'cleanup'; cancelTouches(); }
         }}>重试结束</Button>}
       </div>}
-      {(!frameReady || resize.waiting) && !resize.frozen && (!resize.keyboard || transport.diagnostics.connection === "连接失败") && (
+      {transport.presentationError ? (
+        <div className="page-overlay" role="alert">
+          {transport.presentationError}
+          {transport.canRetryPresentation && <Button sx={{ pointerEvents: 'auto' }} onClick={() => transport.retryPresentation()}>重试视频</Button>}
+        </div>
+      ) : (!frameReady || resize.waiting) && !resize.frozen && (!resize.keyboard || transport.diagnostics.connection === "连接失败") && (
         <div className="page-overlay" role="status">
           {transport.diagnostics.connection === "已连接"
             ? "正在恢复页面…"

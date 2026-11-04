@@ -1,4 +1,4 @@
-// Read-only DevTools helper for the ordinary f1b2638 Viewer. No network, SDP,
+// Read-only DevTools helper for the ordinary Viewer. No network, SDP,
 // cookies, tokens, URLs, page text, input identities or server paths are exported.
 (() => {
   let transport;
@@ -18,12 +18,10 @@
   const diagnostics = transport.diagnostics, endpoint = diagnostics.endpoint ?? {}, presentation = transport.getPresentationDiagnostics();
   const output = {
     ua: navigator.userAgent, visibility: document.visibilityState,
-    frameSource: presentation.frameSource,
-    processorFallbackReason: transport.signaling?.processorFallbackReason,
+    presentationEndpoint: presentation.presentationEndpoint,
     receiver: pick(diagnostics, ['displayFramesPerSecond', 'decodedFramesPerSecond', 'videoWidth', 'videoHeight', 'receiveBitrateBps', 'roundTripTime']),
-    rendering: { ...pick(presentation.rendering, ['backend', 'backendReason', 'plane2dDraws', 'atlasSnapshotCopies']), shared: pick(presentation.rendering?.shared, ['uploads', 'planeDraws', 'failures', 'fallbackReason']) },
-    planes: Object.values(presentation.canvasPaintByView ?? {}).map(plane => pick(plane, ['frames', 'redraws', 'fps'])),
-    processor: pick(presentation.processor, ['read', 'invalid', 'stale', 'authorized', 'rafCallbacks', 'rafAdmitted', 'replaced', 'width', 'height', 'scheduler', 'scheduling']),
+    rendering: pick(presentation.rendering, ['backend', 'backendReason', 'freezeCopies', 'mediaRefreshRequests']),
+    planes: Object.values(presentation.rendering.videoCompositorByView).map(plane => pick(plane, ['frames', 'callbacks', 'fps'])),
     metadata: pick(presentation.epoch, ['matched', 'missed', 'unknownAtVideo', 'wrongEpochAtVideo', 'missingRtp', 'metadataCount', 'lateMetadataForMissed']),
     source: pick(endpoint, ['sourceWidth', 'sourceHeight', 'encodedWidth', 'encodedHeight', 'mediaScale', 'negotiatedReceiveLevel', 'samplingFpsBudget', 'resolutionLimitation', 'sourceFrameIntervalMs', 'gccTargetBitrate', 'gccTargetFps', 'queueFullDrops']),
     policy: { requested: pick(endpoint.mediaPolicy?.requested, ['degradationPreference', 'maxFps']), applied: pick(endpoint.mediaPolicy?.applied, ['degradationPreference', 'maxFps']) },

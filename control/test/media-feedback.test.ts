@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MediaFeedbackSampler, type FeedbackCounters } from '../client/media-feedback';
-import { PresentationDiagnostics } from '../client/presentation-diagnostics';
 
 function harness() {
   let now = 0, visible = true, id = 0, removed = 0;
@@ -33,17 +32,13 @@ test('feedback measures foreground RAF independently and requires reliable count
   assert.equal('displayHzEstimate' in second, false); assert.equal('roundTripTimeMs' in second, false);
 });
 
-test('split planes count only fresh canvas frames and remain separate from video counts', () => {
-  const h = harness(), paints = new PresentationDiagnostics(); h.sampler.start();
-  paints.paint(1, 'main', 100, 'e1', 0, true); paints.paint(2, 'split', 100, 'e1', 0, true);
-  const snapshot = () => counters({ videoFrames: 10, planes: ['main', 'split'].map(view => ({ view, frames: paints.paintFrameCounts().get(view) })) });
-  h.time(1500); h.sampler.sample(snapshot());
-  paints.paint(1600, 'main', 101, 'e1', 1599, true); paints.paint(1601, 'split', 101, 'e1', 1599, true);
-  paints.paint(1700, 'main', 101, 'e1', 1599, false);
-  h.time(3000); const report = h.sampler.sample({ ...snapshot(), videoFrames: 11 });
-  assert.deepEqual(report?.planes, [{ view: 'main', frames: 1 }, { view: 'split', frames: 1 }]);
+test('split planes preserve independent compositor counts and receiver frame deltas', () => {
+  const h = harness(); h.sampler.start();
+  h.time(1500); h.sampler.sample(counters({ videoFrames: 10, planes: [{ view: 'main', frames: 4 }, { view: 'split', frames: 8 }] }));
+  h.time(3000); const report = h.sampler.sample(counters({ videoFrames: 11, planes: [{ view: 'main', frames: 5 }, { view: 'split', frames: 10 }] }));
+  assert.deepEqual(report?.planes, [{ view: 'main', frames: 1 }, { view: 'split', frames: 2 }]);
   assert.equal(report?.videoFrames, 1);
-  h.time(4500); const changed = h.sampler.sample(counters({ planes: [{ view: 'split', frames: 3 }, { view: 'new', frames: 1 }] }));
+  h.time(4500); const changed = h.sampler.sample(counters({ planes: [{ view: 'split', frames: 11 }, { view: 'new', frames: 1 }] }));
   assert.deepEqual(changed?.planes, [{ view: 'split', frames: 1 }, { view: 'new' }]);
 });
 

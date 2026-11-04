@@ -14,7 +14,10 @@ async (hostPage) => {
       presentation: t.getPresentationDiagnostics(),
       inbound: stats.filter(s => s.type === 'inbound-rtp' && (s.kind === 'video' || s.mediaType === 'video')),
       codecs: stats.filter(s => s.type === 'codec'),
-      canvases: Array.from(document.querySelectorAll('.remote-viewport canvas')).map(c => ({ width: c.width, height: c.height, cssWidth: c.getBoundingClientRect().width, cssHeight: c.getBoundingClientRect().height })),
+      videoPlanes: [...t.videoPlanes].map(([renderer, plane]) => ({
+        viewId: renderer.view.id, ready: plane.ready, width: plane.video.videoWidth, height: plane.video.videoHeight,
+        cssWidth: plane.clip.getBoundingClientRect().width, cssHeight: plane.clip.getBoundingClientRect().height,
+      })),
       events: baseline.events,
     };
   });
@@ -38,7 +41,7 @@ async (hostPage) => {
       if (level && e.negotiatedReceiveLevel !== level) return false;
       if (full && (e.mediaScale !== 1 || e.sourceWidth !== e.encodedWidth || e.sourceHeight !== e.encodedHeight)) return false;
       if (codecFps && e.gccTargetFps !== codecFps) return false;
-      return Array.from(document.querySelectorAll('.remote-viewport canvas')).every(c => c.width > 0 && c.height > 0 && getComputedStyle(c).visibility !== 'hidden');
+      return t.layout.views.every(view => !!t.getLastPresentation(view.id));
     }, { full, level, codecFps }, { timeout: 20000 });
     return run.qualitySnapshot();
   };
@@ -55,7 +58,7 @@ async (hostPage) => {
       if (!response.ok) throw Error('quality evidence write ' + response.status);
     }, report);
     const e = after.diagnostics.endpoint;
-    return { name, source: [e?.sourceWidth, e?.sourceHeight], encoded: [e?.encodedWidth, e?.encodedHeight], inbound: after.inbound.map(i => [i.frameWidth, i.frameHeight]), canvases: after.canvases, mediaScale: e?.mediaScale, level: e?.negotiatedReceiveLevel, samplingFps: e?.samplingFpsBudget, requested: e?.mediaPolicy?.requested, applied: e?.mediaPolicy?.applied, encodedFps: report.encodedFps, decodedFps: report.decodedFps, connectionAttempts: after.connectionAttempts, controlTiming: after.controlTiming, endpointTiming: e?.connectionTimingMs, endpointTimingOrigin: e?.connectionTimingOrigin, probeDurationMs: after.diagnostics.receiveSelection?.probeDurationMs, error: e?.error };
+    return { name, source: [e?.sourceWidth, e?.sourceHeight], encoded: [e?.encodedWidth, e?.encodedHeight], inbound: after.inbound.map(i => [i.frameWidth, i.frameHeight]), videoPlanes: after.videoPlanes, mediaScale: e?.mediaScale, level: e?.negotiatedReceiveLevel, samplingFps: e?.samplingFpsBudget, requested: e?.mediaPolicy?.requested, applied: e?.mediaPolicy?.applied, encodedFps: report.encodedFps, decodedFps: report.decodedFps, connectionAttempts: after.connectionAttempts, controlTiming: after.controlTiming, endpointTiming: e?.connectionTimingMs, endpointTimingOrigin: e?.connectionTimingOrigin, probeDurationMs: after.diagnostics.receiveSelection?.probeDurationMs, error: e?.error };
   };
   return { ready: true, viewport: page.viewportSize() };
 }

@@ -2,6 +2,8 @@
 // only the CONFIG literal in a temporary copy for each bounded experiment.
 async (hostPage) => {
   const config = /* CONFIG */ { id: 'pilot', origin: 'http://127.0.0.1:3001', tenants: 1, width: 1280, height: 720, dpr: 1, mode: 'animation', warmupMs: 5000, sampleMs: 20000, receiveProfile: 'chrome89-h264-42', endpoint: {}, network: {} };
+  const retired = ['presentationMode', 'frameSource', 'processorScheduler', 'processorProfile', 'visibleVideoPreview', 'requirePaint'].filter(key => key in config);
+  if (retired.length) throw new Error(`Archived canvas benchmark options: ${retired.join(', ')}. Generate a new video case.`);
   const flags = ['--no-first-run', '--no-default-browser-check', '--disable-features=WebRtcHideLocalIpsWithMdns,CalculateNativeWinOcclusion', '--autoplay-policy=no-user-gesture-required', '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows', ...(config.clientExtraFlags ?? [])];
   const clientExecutablePath = config.clientExecutablePath ?? 'C:/src/tmp/chrome89-google/app/chrome.exe';
   const browser = await hostPage.context().browser().browserType().launch({ executablePath: clientExecutablePath, headless: false, args: flags });
@@ -25,19 +27,9 @@ async (hostPage) => {
         await action({ type: 'device.set', device: { mode: 'desktop', width: config.width, height: config.height, deviceScaleFactor: config.dpr } });
         await action({ type: 'tab.create', title: `Benchmark ${config.id}/${index}`, url: `${config.fixtureOrigin || config.origin}/test-pattern.html?mode=${encodeURIComponent(config.mode)}&fps=60&probeRun=${encodeURIComponent(config.id + '-' + index)}${config.captureQuality ? '&quality=1&stopAfter=8000' : ''}` });
         const transport = window.remotekitDiagnostics.transport;
-        window.remotekitDiagnostics.configure({
-          presentationMode: config.presentationMode,
-          frameSource: config.frameSource ?? 'video',
-          processorScheduler: config.processorScheduler ?? 'latest1',
-          processorProfile: config.processorProfile === true,
-          receiveProfile: config.receiveProfile,
-        });
+        window.remotekitDiagnostics.configure({ receiveProfile: config.receiveProfile });
         await window.remotekitDiagnostics.refresh();
         await transport.connect();
-        if (config.visibleVideoPreview) {
-          Object.assign(transport.video.style, { position: 'fixed', top: '70px', right: '12px', width: '160px', height: '90px', opacity: '1', zIndex: '2147483647', pointerEvents: 'none', display: 'block', visibility: 'visible' });
-          document.body.appendChild(transport.video);
-        }
         window.rkBenchmarkReceivers = (transport.peer?.getReceivers() ?? []).filter(receiver => receiver.track?.kind === 'video').map(receiver => {
           const supported = 'playoutDelayHint' in receiver;
           const result = { supported, original: supported ? receiver.playoutDelayHint : null, requestedMs: config.playoutDelayHintMs ?? null };
@@ -90,34 +82,35 @@ async (hostPage) => {
       if (!['sync', 'worker'].includes(markerReadbackMode)) throw new Error('Unknown markerReadback mode');
       const markerReader = markerReadbackMode === 'worker'
         ? await new (await import('/benchmark-marker-readback.js')).BenchmarkMarkerReadback().start() : null;
-      if (markerReader && !transport.subscribePresentedFrames) throw new Error('worker marker requires actual plane paint instrumentation');
       const markerJobs = [], markerFailures = [];
       let markerCompletion = Promise.resolve();
       const markerCanvas = document.createElement('canvas'); markerCanvas.width = 256; markerCanvas.height = 112;
       const context = markerCanvas.getContext('2d');
-      const samples = [], presentations = [], paintedFrames = [], rtcSamples = [], inputSamples = [], inputTimeouts = [], clientRaf = [], rawVideoFrames = [], inputs = new Map();
-      const hasPaint = typeof transport.subscribePresentedFrames === 'function';
-      if (config.requirePaint && !hasPaint) throw new Error('This case requires Viewport paint instrumentation');
+      const samples = [], videoObservations = [], rtcSamples = [], inputSamples = [], inputTimeouts = [], clientRaf = [], rawVideoFrames = [], inputs = new Map();
+      const measuredView = transport.layout.views[0].id;
+      const currentSource = () => {
+        const frame = transport.getLastPresentation(measuredView);
+        return frame && transport.getPresentedPlane(measuredView, frame.rtpTimestamp);
+      };
+      const video = currentSource()?.image;
+      if (!(video instanceof HTMLVideoElement) || transport.presentationDiagnostics.presentationEndpoint !== 'video-compositor-observation') {
+        throw new Error('Video benchmark requires an authorized HTML video plane');
+      }
       let observing = true, rafId, videoCallbackId;
       const raf = now => { if (!observing) return; clientRaf.push(now); rafId = requestAnimationFrame(raf); };
       if (config.observeClientRaf !== false) rafId = requestAnimationFrame(raf);
-      if ((config.frameSource ?? 'video') === 'video' && transport.video.requestVideoFrameCallback) {
-        const videoFrame = (now, metadata) => { if (!observing) return; rawVideoFrames.push({ now, ...metadata }); videoCallbackId = transport.video.requestVideoFrameCallback(videoFrame); };
-        videoCallbackId = transport.video.requestVideoFrameCallback(videoFrame);
-      }
-      let previousFrame, previousRtp, previousPaintRtp, lastMarkerAt = -Infinity, invalid = 0, skipped = 0, missingPaintSnapshot = 0;
+      const videoFrame = (now, metadata) => {
+        if (!observing) return;
+        rawVideoFrames.push({ now, ...metadata });
+        videoCallbackId = video.requestVideoFrameCallback(videoFrame);
+      };
+      videoCallbackId = video.requestVideoFrameCallback(videoFrame);
+      let previousFrame, lastMarkerAt = -Infinity, invalid = 0, skipped = 0, missingVideoSource = 0;
       const started = performance.now(), startedWall = Date.now();
       const clockSample = { performanceBefore: started, wallTime: startedWall, performanceAfter: performance.now() };
       const visibility = [{ at: started, value: document.visibilityState }];
       const visibilityChanged = () => visibility.push({ at: performance.now(), value: document.visibilityState });
       document.addEventListener('visibilitychange', visibilityChanged);
-      const recordAuthorized = () => {
-        const rtp = transport.presentedFrame?.rtpTimestamp;
-        if (rtp !== undefined && rtp !== previousRtp) {
-          presentations.push({ observedAt: performance.now(), rtp, epoch: transport.presentedFrame?.layoutEpoch ?? null });
-          previousRtp = rtp;
-        }
-      };
       const acceptMarker = (marker, identity, extra = {}) => {
         const { observedAt, observedWall, rtp, epoch, sourceKind } = identity;
         if (!marker) { ++invalid; return; }
@@ -130,33 +123,23 @@ async (hostPage) => {
         const sent = inputs.get(marker.stimulus);
         if (sent !== undefined) { inputSamples.push({ sequence: marker.stimulus, delayMs: observedAt - sent, observedAt, frameId: marker.frameId }); inputs.delete(marker.stimulus); }
       };
-      const read = painted => {
-        const view = transport.layout?.views[0];
-        if (!view || !transport.displayReady) return;
-        if (painted && String(painted.viewId) !== String(view.id)) return;
-        const observedAt = painted?.paintedAt ?? performance.now(), observedWall = painted?.paintedWallTime ?? Date.now();
+      const read = frame => {
+        if (frame.viewId !== measuredView) return;
+        const { rtpTimestamp: rtp, layoutEpoch: epoch, paintedAt: observedAt, paintedWallTime: observedWall } = frame;
         for (const [sequence, sentAt] of inputs) if (observedAt - sentAt > 2000) { inputTimeouts.push({ sequence, ageMs: observedAt - sentAt }); inputs.delete(sequence); }
-        const rtp = painted?.rtpTimestamp ?? transport.presentedFrame?.rtpTimestamp ?? null;
-        const epoch = painted?.layoutEpoch ?? transport.presentedFrame?.layoutEpoch ?? null;
-        if (painted && rtp !== previousPaintRtp) {
-          paintedFrames.push({ observedAt, rtp, epoch, authorizedAt: painted.authorizedAt });
-          previousPaintRtp = rtp;
-        }
+        videoObservations.push({ observedAt, rtp, epoch, authorizedAt: frame.authorizedAt });
         if (config.markerHz === 0 || (config.markerHz > 0 && observedAt - lastMarkerAt < 1000 / config.markerHz && !inputs.size)) return;
+        const source = transport.getPresentedPlane(measuredView, rtp);
+        if (!source || source.layoutEpoch !== epoch || !(source.image instanceof HTMLVideoElement)) { ++missingVideoSource; return; }
         lastMarkerAt = observedAt;
-        const legacy = transport.getPresentedPlane ? undefined : (painted ? transport.getPaintedFrame(view.id, rtp) : transport.displayFrame);
-        const source = transport.getPresentedPlane ? transport.getPresentedPlane(view.id, rtp) : legacy && { image: legacy, kind: 'atlas', sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1), rtpTimestamp: rtp, layoutEpoch: epoch };
-        if (!source || source.rtpTimestamp !== rtp || source.layoutEpoch !== epoch) { ++missingPaintSnapshot; return; }
-        const identity = { observedAt, observedWall, paintedAt: observedAt, paintedWallTime: observedWall, rtp, epoch, sourceKind: source.kind ?? 'atlas' };
+        const identity = { observedAt, observedWall, rtp, epoch, sourceKind: 'video' };
         if (markerReader) {
-          // getPresentedPlane(kind=plane) is the actual Viewport HTML canvas.
-          // Atlas snapshots and decoder VideoFrames are intentionally rejected.
           const rect = { x: source.sourceRect.x, y: source.sourceRect.y, width: 256 * source.pixelsPerDip, height: 112 * (source.pixelsPerDipY ?? source.pixelsPerDip) };
-          if (!painted || source.kind !== 'plane' || !(source.image instanceof HTMLCanvasElement) || !Object.values(rect).every(Number.isFinite) || rect.x < 0 || rect.y < 0 || rect.x + rect.width > source.image.width || rect.y + rect.height > source.image.height) {
-            markerFailures.push({ ...identity, error: 'worker marker requires an actual painted plane canvas with finite in-bounds ROI' }); return;
+          if (!Object.values(rect).every(Number.isFinite) || rect.x < 0 || rect.y < 0 || rect.x + rect.width > source.image.videoWidth || rect.y + rect.height > source.image.videoHeight) {
+            markerFailures.push({ ...identity, error: 'worker marker requires a finite in-bounds video ROI' }); return;
           }
           const task = markerReader.submit(source.image, rect, identity).then(result => ({ result }), error => ({ error: String(error) }));
-          // Snapshot submissions are immediate; consume results in paint order.
+          // Capture synchronously and consume worker results in observation order.
           markerCompletion = markerCompletion.then(async () => {
             const { result, error } = await task;
             if (error) { markerFailures.push({ ...identity, error }); return; }
@@ -177,8 +160,7 @@ async (hostPage) => {
         transport.recordPresentationCost?.('markerDecode', decodeStarted, performance.now() - decodeStarted);
         acceptMarker(marker, identity);
       };
-      const unsubscribeAuthorized = transport.subscribeFrames(recordAuthorized);
-      const unsubscribe = hasPaint ? transport.subscribePresentedFrames(read) : transport.subscribeFrames(() => read(null));
+      const unsubscribe = transport.subscribePresentedFrames(read);
       const collect = async () => {
         const reports = transport.peer ? Array.from((await transport.peer.getStats()).values()) : [];
         const selectedTransport = reports.find(item => item.type === 'transport' && item.selectedCandidatePairId);
@@ -186,44 +168,50 @@ async (hostPage) => {
           reports.find(item => item.type === 'candidate-pair' && item.state === 'succeeded' && (item.selected || (item.nominated && item.writable)));
         const inbound = reports.find(item => item.type === 'inbound-rtp' && (item.kind === 'video' || item.mediaType === 'video'));
         const codec = inbound && reports.find(item => item.id === inbound.codecId);
-        rtcSamples.push({ at: performance.now(), rtc: inbound ?? null, jitterBufferFieldAvailability: Object.fromEntries(['jitterBufferDelay', 'jitterBufferEmittedCount', 'jitterBufferTargetDelay', 'jitterBufferMinimumDelay'].map(name => [name, name in (inbound ?? {})])), codec: codec ?? null, candidatePair: candidatePair ?? null, endpoint: transport.diagnostics.endpoint ?? null, networkSimulation: transport.diagnostics.networkSimulation ?? null, selectedCandidates: transport.diagnostics.selectedCandidates ?? null, presentation: transport.getPresentationDiagnostics?.() ?? null, displayReady: transport.displayReady, video: { width: transport.video.videoWidth, height: transport.video.videoHeight, decoded: transport.video.webkitDecodedFrameCount }, visibilityState: document.visibilityState });
+        rtcSamples.push({ at: performance.now(), rtc: inbound ?? null, jitterBufferFieldAvailability: Object.fromEntries(['jitterBufferDelay', 'jitterBufferEmittedCount', 'jitterBufferTargetDelay', 'jitterBufferMinimumDelay'].map(name => [name, name in (inbound ?? {})])), codec: codec ?? null, candidatePair: candidatePair ?? null, endpoint: transport.diagnostics.endpoint ?? null, networkSimulation: transport.diagnostics.networkSimulation ?? null, selectedCandidates: transport.diagnostics.selectedCandidates ?? null, presentation: transport.getPresentationDiagnostics?.() ?? null, displayReady: transport.displayReady, video: { width: video.videoWidth, height: video.videoHeight, decoded: video.webkitDecodedFrameCount }, visibilityState: document.visibilityState });
       };
       await collect();
       let tick = 0, polling = false;
       const timer = setInterval(() => { if (!polling) { polling = true; collect().finally(() => { polling = false; }); } }, 1000);
       const stimulus = config.inputIntervalMs === 0 ? undefined : setInterval(() => { const view = transport.layout?.views[0]; if (!view || !transport.displayReady) return; const sequence = (++tick + index * 1000) & 65535; inputs.set(sequence, performance.now()); if (tick === 1) transport.focus(view, true); transport.sendInput(view, { type: 'ime_commit', text: `RK:${sequence};` }); }, config.inputIntervalMs ?? 5000);
       await new Promise(resolve => setTimeout(resolve, config.sampleMs));
-      clearInterval(timer); clearInterval(stimulus); unsubscribe(); unsubscribeAuthorized(); document.removeEventListener('visibilitychange', visibilityChanged);
+      clearInterval(timer); clearInterval(stimulus); unsubscribe(); document.removeEventListener('visibilitychange', visibilityChanged);
       observing = false; cancelAnimationFrame(rafId);
-      if (videoCallbackId !== undefined) transport.video.cancelVideoFrameCallback?.(videoCallbackId);
+      if (videoCallbackId !== undefined) video.cancelVideoFrameCallback?.(videoCallbackId);
       const measurementEnded = performance.now();
       await markerCompletion;
       const markerDrainMs = performance.now() - measurementEnded;
       markerReader?.close();
       await collect();
-      const ended = performance.now();
-      // Worker drain is outside the paint/FPS window, never an E2E endpoint.
-      const elapsedMs = ended - started - (markerReader ? markerDrainMs : 0);
-      const buckets = Array.from({ length: Math.ceil(config.sampleMs / 1000) }, () => 0);
+      const elapsedMs = measurementEnded - started;
+      const buckets = Array.from({ length: Math.ceil(elapsedMs / 1000) }, () => 0);
       for (const sample of samples) { const bucket = Math.floor((sample.observedAt - started) / 1000); if (bucket >= 0 && bucket < buckets.length) ++buckets[bucket]; }
-      const displayBuckets = buckets.map(() => 0);
-      for (const frame of presentations) { const bucket = Math.floor((frame.observedAt - started) / 1000); if (bucket >= 0 && bucket < displayBuckets.length) ++displayBuckets[bucket]; }
-      const paintBuckets = buckets.map(() => 0);
-      for (const frame of paintedFrames) { const bucket = Math.floor((frame.observedAt - started) / 1000); if (bucket >= 0 && bucket < paintBuckets.length) ++paintBuckets[bucket]; }
+      const videoObservationBuckets = buckets.map(() => 0);
+      for (const frame of videoObservations) { const bucket = Math.floor((frame.observedAt - started) / 1000); if (bucket >= 0 && bucket < videoObservationBuckets.length) ++videoObservationBuckets[bucket]; }
       const render = samples.flatMap(sample => sample.renderToObservedMs === null ? [] : [sample.renderToObservedMs]);
       const presentation = transport.presentationDiagnostics ?? null;
       const raw = JSON.stringify(transport.getPresentationDiagnostics?.(true) ?? null);
-      const report = { kind: 'streaming-benchmark', config, clientVersion, tenantIndex: index, flags, timeOrigin: performance.timeOrigin, startedAt: started, startedWall, clockSample, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility, clock: 'same-machine-wall-clock', frameSource: config.frameSource ?? 'video', frameCountStage: hasPaint ? 'viewport-canvas-paint' : 'authorized-snapshot; Viewport paint not measured', observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null, markerSamplesPerSecond: samples.length * 1000 / elapsedMs, markerTimestampMeaning: hasPaint ? 'canvas draw submission time; synchronous same-RTP plane source; CRC completion separate' : 'authorized snapshot; not Viewport paint', authorizedFrameFps: presentations.length * 1000 / elapsedMs, authorizedPerSecondFrames: displayBuckets, displayFps: hasPaint ? paintedFrames.length * 1000 / elapsedMs : null, displayPerSecondFrames: hasPaint ? paintBuckets : null, perSecondFrames: buckets, perSecondFps: percentiles(buckets), renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)), invalid, missingPaintSnapshot, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped, pendingInputs: inputs.size, samples, presentations, paintedFrames, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation };
+      const report = {
+        kind: 'streaming-benchmark', config, clientVersion, tenantIndex: index, flags, timeOrigin: performance.timeOrigin,
+        startedAt: started, startedWall, clockSample, elapsedMs, actualLayout: transport.layout, signaling: transport.signaling, visibility,
+        clock: 'same-machine-wall-clock', frameCountStage: 'video-compositor-observation',
+        markerTimestampMeaning: 'exact-RTP video callback observation; CRC completion recorded separately',
+        videoObservationFps: videoObservations.length * 1000 / elapsedMs, videoObservationPerSecondFrames: videoObservationBuckets,
+        observedFps: config.markerHz === undefined ? samples.length * 1000 / elapsedMs : null,
+        markerSamplesPerSecond: samples.length * 1000 / elapsedMs, perSecondFrames: buckets, perSecondFps: percentiles(buckets),
+        renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(inputSamples.map(sample => sample.delayMs)),
+        invalid, missingVideoSource, skippedMarkerFrames: config.markerHz === undefined ? skipped : null, markerFrameIdGaps: skipped,
+        pendingInputs: inputs.size, samples, videoObservations, inputSamples, rtcSamples, clientRaf, rawVideoFrames, presentation,
+      };
       report.inputTimeouts = inputTimeouts;
       report.markerReadback = { requested: markerReadbackMode, effective: markerReadbackMode, drainMs: markerDrainMs, jobs: markerJobs, failures: markerFailures, ownership: markerReader?.stats ?? null,
         costsMs: Object.fromEntries(['captureCallMs', 'bitmapReadyMs', 'turnaroundMs', 'workerDrawMs', 'workerReadbackMs', 'workerDecodeMs', 'workerTotalMs'].map(name => [name, percentiles(markerJobs.map(job => job.costs[name]))])) };
-      if (markerReader) report.markerTimestampMeaning = 'actual plane canvas draw submission time; immutable bitmap captured in same paint callback; worker CRC completion separate';
       report.inputSampleCount = inputSamples.length;
       report.markerSampleCount = samples.length;
       report.markerExpectedMinimum = markerReader && config.markerHz > 0 ? Math.floor(config.sampleMs * config.markerHz / 1000) : null;
       report.receiverPlayout = window.rkBenchmarkReceivers;
-      const videoRect = transport.video.getBoundingClientRect(), videoStyle = getComputedStyle(transport.video);
-      report.videoElement = { connected: transport.video.isConnected, rect: { x: videoRect.x, y: videoRect.y, width: videoRect.width, height: videoRect.height }, opacity: videoStyle.opacity, display: videoStyle.display, visibility: videoStyle.visibility };
+      const videoRect = video.getBoundingClientRect(), videoStyle = getComputedStyle(video);
+      report.videoElement = { connected: video.isConnected, rect: { x: videoRect.x, y: videoRect.y, width: videoRect.width, height: videoRect.height }, opacity: videoStyle.opacity, display: videoStyle.display, visibility: videoStyle.visibility };
       // Upload only after the measurement has ended. Keep the complete report,
       // including arrays, when it grows beyond Control's 1 MiB request limit.
       const reportText = JSON.stringify(report);
@@ -243,7 +231,7 @@ async (hostPage) => {
           await saveMetrics({ kind: 'benchmark-report-chunk', ...identity, part, text: reportText.slice(part * 200000, (part + 1) * 200000) });
         }
         await saveMetrics({ kind: 'benchmark-report-manifest', ...identity, encoding: 'utf-8', characters: reportText.length, bytes: reportBytes.length, sha256,
-          summary: { displayFps: report.displayFps, authorizedFrameFps: report.authorizedFrameFps, renderToObservedMs: report.renderToObservedMs, markerSampleCount: report.markerSampleCount, invalid: report.invalid, startedWall, elapsedMs } });
+          summary: { videoObservationFps: report.videoObservationFps, renderToObservedMs: report.renderToObservedMs, markerSampleCount: report.markerSampleCount, invalid: report.invalid, startedWall, elapsedMs } });
       }
       const chunks = Math.ceil(raw.length / 200000);
       for (let part = 0; part < chunks; ++part) {
@@ -253,26 +241,24 @@ async (hostPage) => {
       if (markerFailures.length) throw new Error(`worker marker failed ${markerFailures.length} jobs; raw metrics saved`);
       if (report.markerExpectedMinimum !== null && samples.length < report.markerExpectedMinimum) throw new Error(`worker marker has ${samples.length}/${report.markerExpectedMinimum} required CRC-valid samples; raw metrics saved`);
       if (config.markerHz !== 0 && ['animation', 'text'].includes(config.mode) && !samples.length) {
-        throw new Error(`No CRC-valid marker samples: invalid=${invalid}, missingSnapshot=${missingPaintSnapshot}; raw metrics saved`);
+        throw new Error(`No CRC-valid marker samples: invalid=${invalid}, missingVideoSource=${missingVideoSource}; raw metrics saved`);
       }
       if (config.captureQuality) {
-        const view = transport.layout.views[0], frame = transport.presentedFrame;
-        const legacy = transport.getPresentedPlane ? undefined : transport.getPaintedFrame(view.id, frame.rtpTimestamp);
-        const source = transport.getPresentedPlane ? transport.getPresentedPlane(view.id, frame.rtpTimestamp) : legacy && { image: legacy, kind: 'atlas', sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? transport.layout.mediaScale ?? 1), rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch };
-        if (!source || source.rtpTimestamp !== frame.rtpTimestamp || source.layoutEpoch !== frame.layoutEpoch) throw new Error('Quality source no longer matches current painted RTP');
-        const scale = view.deviceScaleFactor * (view.mediaScale ?? 1);
+        const source = currentSource();
+        if (!source) throw new Error('Quality source has no current video RTP observation');
+        const scale = source.pixelsPerDip;
         const image = document.createElement('canvas');
         // Layout width/height are already encoded pixels; apply no second DPR.
-        image.width = view.width; image.height = view.height;
+        image.width = source.encodedWidth; image.height = source.encodedHeight;
         const crop = source.sourceRect;
         image.getContext('2d').drawImage(source.image, crop.x, crop.y, crop.width, crop.height, 0, 0, image.width, image.height);
-        context.drawImage(image, 0, 0, 256 * scale, 112 * scale, 0, 0, 256, 112);
+        context.drawImage(image, 0, 0, 256 * scale, 112 * (source.pixelsPerDipY ?? scale), 0, 0, 256, 112);
         const marker = decodeMarker(context.getImageData(0, 0, 256, 112));
-        const artifact = { kind: 'decoded-reference', run: config.id + '-' + index, marker, rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch, sourceKind: source.kind, sourceRect: crop, pixelsPerDip: scale, width: image.width, height: image.height, capturedAfterMeasurement: true, image: image.toDataURL('image/png') };
+        const artifact = { kind: 'decoded-reference', run: config.id + '-' + index, marker, rtpTimestamp: source.rtpTimestamp, layoutEpoch: source.layoutEpoch, sourceKind: 'video', sourceRect: crop, pixelsPerDip: scale, width: image.width, height: image.height, capturedAfterMeasurement: true, image: image.toDataURL('image/png') };
         const saved = await fetch(`${config.fixtureOrigin}/decoded-artifact?probeRun=${encodeURIComponent(artifact.run)}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-RK-Artifact': config.artifactToken }, body: JSON.stringify(artifact) });
         if (!saved.ok) throw new Error(`Decoded quality artifact upload failed ${saved.status}`);
       }
-      return { tenantIndex: index, observedFps: report.observedFps, authorizedFrameFps: report.authorizedFrameFps, displayFps: report.displayFps, markerSamplesPerSecond: report.markerSamplesPerSecond, renderToObservedMs: report.renderToObservedMs, inputToObservedMs: report.inputToObservedMs, perSecondFrames: buckets, authorizedPerSecondFrames: displayBuckets, invalid, samples: samples.length, visibility, actualLayout: transport.layout, presentation, lastCounters: rtcSamples[rtcSamples.length - 1] };
+      return { tenantIndex: index, observedFps: report.observedFps, videoObservationFps: report.videoObservationFps, markerSamplesPerSecond: report.markerSamplesPerSecond, renderToObservedMs: report.renderToObservedMs, inputToObservedMs: report.inputToObservedMs, perSecondFrames: buckets, videoObservationPerSecondFrames: videoObservationBuckets, invalid, samples: samples.length, visibility, actualLayout: transport.layout, presentation, lastCounters: rtcSamples[rtcSamples.length - 1] };
     }, { config, index, flags, clientVersion })));
     await Promise.all(pages.map(page => page.waitForTimeout(1200)));
     return { id: config.id, browser: browser.version(), clientVersion, config, flags, timerPolicy, results, errors, closeResults };

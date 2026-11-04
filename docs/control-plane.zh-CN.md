@@ -20,7 +20,7 @@ SQLite迁移保留旧Tab/WebView引用及token。旧匿名身份仍标为legacy�
 
 Viewer在页面启动时预热并缓存接收能力探测，鉴权不等待探测完成。普通产品使用trickle ICE，offer不等待完整候选收集；Endpoint接受协商后异步返回answer和候选，Control按当前租约、连接及尝试标识转发。候选不排在等待answer的Tenant操作后面，其他Tenant也不等待这一协商；接管、退出或取消清除旧绑定。
 
-客户端记录offer、answer、ICE、DataChannel、首次解码与首次呈现；video记录匹配布局后的compositor回调观察，canvas回退记录JS绘制提交，两种终点分开。Endpoint阶段使用自己的单调时钟，不将两个进程的时间戳直接相减。网络模拟使用原完整候选收集与relay路径，不能把普通产品trickle耗时套到该路径。
+客户端记录offer、answer、ICE、DataChannel、首次解码与首次呈现；Video记录匹配布局后的compositor回调观察。Endpoint阶段使用自己的单调时钟，不将两个进程的时间戳直接相减。网络模拟使用原完整候选收集与relay路径，不能把普通产品trickle耗时套到该路径。
 
 ## 操作、对账与恢复
 
@@ -68,7 +68,7 @@ alert/confirm/prompt和导航beforeunload是临时pageDialogs。对话身份绑�
 
 Control发送`{degradationPreference,maxFps}`；maxFps来自显式Viewer刷新能力，未知默认60。没有三档码率、像素预算、FPS预设，也没有基于延迟的DPR控制器。Client Scale默认Viewer DPR，可显式override；只有实际atlas可分配硬限制会约束DPR。网络缩放只改变编码采样，页面DIP与DPR保持。
 
-反馈只保留诊断，不再触发DPR/码率对账。只有有效源完成时戳才计算呈现估算；新OSR路径未测得完成时戳时省略该样本。video终点是匹配真实RTP/epoch的compositor回调，canvas终点是JS提交，均不是物理屏幕点亮。独立时钟与置信度见[媒体反馈](media-feedback.md)。诊断manual模式不绕过WebRTC拥塞控制。
+反馈只保留诊断，不再触发DPR/码率对账。只有有效源完成时戳才计算呈现估算；新OSR路径未测得完成时戳时省略该样本。Video终点是匹配真实RTP/epoch的compositor回调，不是物理屏幕点亮。独立时钟与置信度见[媒体反馈](media-feedback.md)。诊断manual模式不绕过WebRTC拥塞控制。
 
 搜索引擎偏好统一保存Control，地址栏和简易起始页使用同一URL/搜索解析。显式kind=start的Tab由Viewer本地显示，不建立远程页面渲染需求；真实about:blank或popup不因此被覆盖。首个网页导航直接创建目标，不插入伪造Browser历史；空起始页仍保留RTC数据通道。
 

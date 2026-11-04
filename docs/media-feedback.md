@@ -10,13 +10,17 @@ Endpoint每次fresh/force帧提交前调用SDK原生AdaptFrame，以原始atlas�
 
 SetRates提供硬件目标码率/FPS。Comp根据Slot占用、客户端能力及WebRTC限制发送Begin。观察输入FPS不是永久源上限，slot空闲时可恢复到官方限制；零码率暂停，恢复请求关键帧。配置及H264上限只是能力边界。
 
+首次呈现和显式刷新不能在SDK接受纹理时视为完成：source可能尚未交给编码器，编码结果也可能被布局屏障拒绝。Comp按peer、授权代次与完整呈现屏障保留刷新请求；只有该请求标记的关键帧通过屏障且SDK编码发布成功，才消费请求。请求合并、单个尝试在途，失败后的强制Begin和重新提交至多每秒一次，仍服从SetRates、Slot背压和可见布局门禁。源等待可以取消，已进入编码的尝试等待实际完成；旧代次结果不能完成新请求。该恢复请求与静态页面的单次idle尾IDR分别记账。
+
 ## DataChannel诊断
 
 Client约每1500ms发送layout绑定的media.feedback，包括seq、generation/epoch、visibility、窗口长度、显示回调能力、解码/丢帧及plane新帧增量。Endpoint核对peer、序号、代次和有限值，过量反馈合并，不挤占输入。
 
-缺测省略；多个plane计数不相加当物理解码FPS，静态低FPS不直接判压力。video使用可见期间presentedFrames增量，canvas使用JS新帧提交数；隐藏/屏障撤销基线。这些反馈不自行调整网络码率、DPR或分辨率。
+缺测省略；多个plane计数不相加当物理解码FPS，静态低FPS不直接判压力。Video使用可见期间presentedFrames增量；隐藏/屏障撤销基线。这些反馈不自行调整网络码率、DPR或分辨率。
 
 Stats同轮采集RTC解码、各video元素收帧/丢帧、compositor提交与rVFC回调，区分四种计数。有效静态窗口显示0，计数器倒退或布局门禁变化重新建立基线。浏览器提供时显示末包receiveTime→presentationTime、提交→实际回调、预计显示超期，以及RTC累计差分的jitterBufferDelay与totalDecodeTime均值。缺字段不填0；旧capture/copy路径空白项不再进入当前叠层。视频提交和预计显示都不是物理屏幕扫描完成。
+
+Video是唯一串流呈现后端。缺少首帧或当前RTP元数据时，保持门禁并在原连接上限频请求刷新；能力、协议或播放错误单独报告，不回退Canvas。解码FPS、接收码率是窗口增量，0不代表连接从未接收过视频；编码耗时也不表示对应码流已经发布。
 
 ## 完成时戳与呈现估算
 
@@ -24,7 +28,7 @@ Stats同轮采集RTC解码、各video元素收帧/丢帧、compositor提交与rV
 
 Client分别校准Endpoint媒体时钟与Control产品新鲜度时钟，不混用机器wall。过期、跳变、不确定度超限、隐藏及重复内容样本排除。WS feedback仍可报告p95/窗口/sequence等诊断，但不触发质量对账。
 
-兼容名称capture-end-to-paint的终点为video compositor回调或canvas JS提交，不是物理屏幕点亮，也不含此前渲染等待。缺有效源时戳不产生样本，分段p95不可相加。
+兼容名称capture-end-to-paint的终点为video compositor回调，不是物理屏幕点亮，也不含此前渲染等待。历史Canvas报告以当时JS提交为终点，不与Video直接混用。缺有效源时戳不产生样本，分段p95不可相加。
 
 receiver支持jitterBufferTarget时设0；Chrome89仅在可用时设playoutDelayHint=0。分别报告能力，不把兼容hint或RTP playout-delay扩展说成标准属性已生效。
 

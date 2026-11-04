@@ -4,34 +4,25 @@ const measured = (value: unknown, suffix: string, digits = 1) => typeof value ==
 const row = (label: string, value: unknown, suffix: string, title?: string, digits = 1) =>
   typeof value === 'number' && Number.isFinite(value) ? <><dt title={title}>{label}</dt><dd>{measured(value, suffix, digits)}</dd></> : null;
 const resolutionReason:Record<string,string>={'none':'无','receiver-level-macroblock-rate':'接收端像素速率','receiver-level-frame-size':'接收端单帧像素','receiver-level-axis-limit':'接收端尺寸上限','encoder-axis-limit':'编码器尺寸上限'};
-const backendReasons:Record<string,string>={'single-or-no-eligible-plane':'单平面 / 等待平面','chrome89-compatible-2d':'Chrome89 兼容','webgl2-unavailable':'WebGL2 不可用','duplicate-plane':'平面重复','geometry-budget-or-hidden':'几何 / 像素预算','waiting-for-shared-frame':'等待共享帧','context-lost':'GL 上下文丢失','texture-upload':'GL 上传失败','draw-submit':'GL 绘制失败','source-texture-limit':'纹理尺寸上限','output-canvas-limit':'画布尺寸上限','resource-allocation':'GL 资源分配失败'};
-const presentationReasons:Record<string,string>={'video-capability-unavailable':'Video 能力不可用','presentation-protocol-unavailable':'呈现协议协商超时','video-playback-failed':'Video 播放失败','video-frame-metadata-timeout':'Video 帧元数据匹配超时','video-rtp-metadata-unavailable':'Video RTP 元数据不可用','invalid-presentation-mode':'呈现模式无效','endpoint-canvas-mode':'Endpoint 选择 Canvas','invalid-presentation-barrier':'呈现布局屏障无效'};
+const presentationReasons:Record<string,string>={'video-capability-unavailable':'Video 能力不可用','presentation-protocol-unavailable':'呈现协议协商超时','video-playback-failed':'Video 播放失败','video-rtp-metadata-unavailable':'Video RTP 元数据不可用','invalid-presentation-mode':'呈现模式无效','invalid-presentation-barrier':'呈现布局屏障无效'};
 export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostics; surface?: Surface }) {
   const overlay = useRef<HTMLDivElement>(null), [scale, setScale] = useState(1);
-  useEffect(() => { const node = overlay.current, parent = node?.parentElement; if (!node || !parent) return; const resize = () => setScale(Math.max(.1, Math.min(1, (parent.clientWidth - 24) / node.offsetWidth, (parent.clientHeight - 24) / node.offsetHeight))); const observer = new ResizeObserver(resize); observer.observe(parent); observer.observe(node); resize(); return () => observer.disconnect(); }, []);
+  useEffect(() => { const node = overlay.current, parent = node?.parentElement; if (!node || !parent || typeof ResizeObserver !== 'function') return; const resize = () => setScale(Math.max(.1, Math.min(1, (parent.clientWidth - 24) / node.offsetWidth, (parent.clientHeight - 24) / node.offsetHeight))); const observer = new ResizeObserver(resize); observer.observe(parent); observer.observe(node); resize(); return () => observer.disconnect(); }, []);
   const endpoint = diagnostics.endpoint;
-  const video = diagnostics.rendering?.backend === 'video';
-  const canvas = diagnostics.rendering?.backend === 'canvas-2d' || diagnostics.rendering?.backend === 'shared-webgl';
   const videoTiming = surface ? diagnostics.videoTimingByView?.[surface.id] : undefined;
   const receiverTiming = diagnostics.receiverVideoTiming;
   const mediaPolicy=endpoint?.mediaPolicy as {requested?:{maxFps?:number;degradationPreference?:string};applied?:{maxFps?:number;degradationPreference?:string}}|undefined;
   const sender = endpoint?.senderRtcStats as { selectedPair?: { availableOutgoingBitrate?: number } } | undefined;
   return <div ref={overlay} className="stats-overlay" style={{ maxWidth: 'none', transform: `scale(${scale})`, transformOrigin: 'top right' }} aria-label="串流指标叠层"><div className="stats-overlay-title">LIVE STATS <span>{diagnostics.codec ?? '—'}</span></div><dl>
     <dt title={diagnostics.receiveSelection?.reason}>接收档</dt><dd>{diagnostics.receiveSelection?.profile ?? '—'}</dd>
-    <dt title={video ? '同轮采样的每平面 video compositor presentedFrames 增量，表示视频帧提交' : '每个平面的新帧 canvas 绘制提交次数'}>{video ? 'Video 提交 FPS' : '绘制 FPS'}</dt><dd>{measured(surface ? diagnostics.paintFpsByView?.[surface.id] : diagnostics.displayFramesPerSecond, 'fps')}</dd>
+    <dt title="同轮采样的每平面 video compositor presentedFrames 增量，表示视频帧提交">Video 提交 FPS</dt><dd>{measured(surface ? diagnostics.paintFpsByView?.[surface.id] : diagnostics.displayFramesPerSecond, 'fps')}</dd>
     <dt title="相邻 WebRTC 入站统计采样的解码帧增量">解码 FPS</dt><dd>{measured(diagnostics.decodedFramesPerSecond, 'fps')}</dd>
     {row('Video 元素收帧 FPS', videoTiming?.videoElementFps, 'fps', '每个 Video 元素的 totalVideoFrames 增量')}
     {row('Video 元素丢帧', videoTiming?.videoElementDrops, '帧', '同轮采样中该 Video 元素的 droppedVideoFrames 增量', 0)}
     {row('rVFC 回调 FPS', videoTiming?.callbackFps, 'fps', '每平面的 JS 回调频率，单次回调可能跨过多个 Video 提交')}
     <dt>呈现后端</dt><dd title={diagnostics.rendering?.backendReason}>{diagnostics.rendering?.backend ?? '—'}</dd>
-    <dt title={diagnostics.rendering?.frameSourceFallbackReason}>取帧 / 可见状态</dt><dd>{diagnostics.rendering?.frameSource??'—'} / {diagnostics.rendering?.visibility??'—'}</dd>
-    {diagnostics.rendering?.presentationFallbackReason&&<><dt>Video 回退</dt><dd title={diagnostics.rendering.presentationFallbackReason}>{presentationReasons[diagnostics.rendering.presentationFallbackReason]??diagnostics.rendering.presentationFallbackReason}</dd></>}
-    {diagnostics.rendering?.backend==='canvas-2d'&&<><dt>2D 原因</dt><dd title={diagnostics.rendering.canvasBackendReason??diagnostics.rendering.backendReason}>{backendReasons[diagnostics.rendering.canvasBackendReason??diagnostics.rendering.backendReason??'']??diagnostics.rendering.canvasBackendReason??diagnostics.rendering.backendReason??'—'}</dd></>}
-    {canvas && diagnostics.rendering && <>
-      <dt title="共享纹理上传 / 2D 平面绘制累计次数">上传 / 2D 绘制</dt><dd>{diagnostics.rendering.shared.uploads ?? 0} / {diagnostics.rendering.plane2dDraws}</dd>
-      {row('读取→授权 p95', diagnostics.rendering.scheduling.readToAuthorizeMs.p95, 'ms', '包含 FIFO 排队和等待 RAF')}
-      <dt title="读取时尚无匹配元数据 / JS 队列丢弃，累计计数">Metadata / 队列丢弃</dt><dd>{diagnostics.rendering.scheduling.metadataMissingAtRead} / {Object.values(diagnostics.rendering.scheduling.drops).reduce((a,b)=>a+b,0)}</dd>
-    </>}
+    <dt>页面可见状态</dt><dd>{diagnostics.rendering?.visibility ?? '—'}</dd>
+    {diagnostics.rendering?.backendReason && <><dt>呈现错误</dt><dd title={diagnostics.rendering.backendReason}>{presentationReasons[diagnostics.rendering.backendReason] ?? diagnostics.rendering.backendReason}</dd></>}
     {row('Marker 抽样', diagnostics.markerSampleHz, 'Hz')}
     {diagnostics.marker && <><dt title={diagnostics.marker.kind === 'input' ? '输入到像素观察' : '渲染到像素观察'}>Marker p50 / p95</dt><dd>{measured(diagnostics.marker.p50, 'ms')} / {measured(diagnostics.marker.p95, 'ms')}</dd></>}
     {row('末包→Video 提交 p95', videoTiming?.receiveToSubmit?.p95, 'ms', '浏览器为同一视频帧提供的末包接收和 compositor 提交时间差')}

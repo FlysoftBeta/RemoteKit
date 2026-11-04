@@ -64,7 +64,7 @@ method包括viewport、feedback、rtc.offer/ice/close、clock.ping、operation.s
 - focus：请求ID、页面完整身份和布局代次；确认必须匹配当前请求后才能放行排队输入。
 - input：完整Session/view/instance/document/focus、outputGeneration/layoutEpoch、连接内sequence及事件。Endpoint先拒绝旧peer和连接内重复/倒退，再分配Session持续递增的Browser sequence；回执区分clientSequence/browserSequence，重登录无需客户端持久化计数。
 - media.feedback：布局绑定的显示/解码/丢帧诊断，不独立决定网络码率、DPR或分辨率。
-- media.presentation：`{version:1,backend:"video"|"canvas"}`协商呈现后端；Endpoint建立发送屏障后回复同版本的`presentation.mode`。
+- media.presentation：`{version:1,backend:"video"}`协商呈现后端；Endpoint建立发送屏障后回复同版本的`presentation.mode`。不接受canvas模式，未完成video协商与当前布局确认时不发布视频码流。
 - presentation.prepare：`{version:1,barrierId,outputGeneration,layoutEpoch}`，三个身份均为十进制字符串，紧随对应layout。Client隐藏所有video、撤销输入ready，跨两次前台rAF后以`presentation.ready`返回同一完整key；旧peer/旧key不能放行。
 - product.action/result：version=1，operationId、operationGeneration与action/receipt。Endpoint校验当前peer后经管理连接交Control唯一产品提交器；收据区分accepted/applying/committed/rejected/unknown/expired。Control分配内部单调operationSequence给Native执行去重，不把UUID generation当数值。超时已转发的操作返回unknown并查询，不能改ID重做。导航终态见[导航操作](navigation-operations.zh-CN.md)。
 - clock.ping/pong：当前peer的requestId、Endpoint serverTimeMs/serverMonotonicMs，不经Control时钟；见[时钟域](media-feedback.md)。
@@ -78,17 +78,17 @@ method包括viewport、feedback、rtc.offer/ice/close、clock.ping、operation.s
 
 客户端只在匹配真实wire RTP与当前layout epoch后呈现/授权输入。空layout、故障、暂停或重建立即撤销旧ready；有新layout但没有匹配帧时不能点击旧画面。重绘同一帧不增加FPS。
 
-正式Viewer优先协商video，每个可见平面使用共享同一接收track的独立video。目标位置与大小来自客户端内容bounds，atlas矩形仅用于源裁剪；输入层使用相同bounds。video静音、内联，无原生controls、画中画、远程播放和媒体交互；声音由独立Viewer音频管线播放。默认路径不运行MSTP读取或canvas绘制，能力/协议失败才恢复canvas。
+正式Viewer只使用video，每个可见平面使用共享同一接收track的独立video。目标位置与大小来自客户端内容bounds，atlas矩形仅用于源裁剪；输入层使用相同bounds。video静音、内联，无原生controls、画中画、远程播放和媒体交互；声音由独立Viewer音频管线播放。MSTP、共享WebGL及2D串流绘制后端已经移除，能力/协议失败明确提示，不自动切换呈现架构。
 
 video模式中的透明canvas只承载既有鼠标、键盘/IME与触控入口（`data-video-input=true`），其DOM存在不表示canvas绘制后端运行。呈现注册以稳定的viewId绑定；focus、同view文档更新或布局代次改变只更新现有renderer的身份与门禁，不因React surface对象变化拆除video。真正移除viewport或接收track/peer变化才更换对应媒体资源。
 
 同一接收track的多个video不是多条H264接收链。固定Chromium157源码中，`VideoReceiveStream2`解码后经`VideoRtpTrackSource`/`VideoBroadcaster`和Blink `MediaStreamVideoTrack`分发同一已解码帧；每个video另有`WebMediaPlayerMS` compositor/sink，并可能执行自己的GPU帧格式转换。精确Chrome89.0.4389.90及其WebRTC revision也确认相同的解码后fanout，见[89源码证据](../develop/docs/chrome89-decode-fanout-20261103.md)。增加平面仍增加呈现资源，不能声称总开销不变，也不能把各元素decoded计数相加当作物理解码次数；源码边界、运行兼容和硬件占用采样是不同证据。
 
-Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更新，覆盖已进入编码器的旧结果。当前peer完整最新ACK只解除等待，当前布局首个成功发送仍须为关键帧。旧epoch结果丢弃并正常结束编码/纹理/尾帧租约；静态重发保留实际纹理身份，不给旧纹理重贴新布局。隐藏页可持续等待，不通过超时强行放行。切canvas解除ACK等待但保留关键帧恢复，未协商的旧canvas客户端保持原行为。
+Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更新，覆盖已进入编码器的旧结果。当前peer完整最新ACK只解除等待，当前布局首个成功发送仍须为关键帧。旧epoch结果丢弃并正常结束编码/纹理/尾帧租约；静态重发保留实际纹理身份，不给旧纹理重贴新布局。隐藏页可持续等待，不通过超时或切换后端放行。未协商的客户端不能接收视频，旧canvas客户端需要更新。
 
 每个video自身首次真实RTP/epoch匹配后才恢复该平面的显示和输入。布局换代、隐藏、重连立即撤销ready；同一已确认布局内晚到的逐帧元数据不改变裁剪关系，不凭未知RTP生成延迟或Marker样本。rVFC是compositor提交观察，不是逐帧拒绝API，也不证明物理屏幕点亮。
 
-静态首帧metadata晚到可匹配同元素自己的最新观察，但必须保持相同已确认屏障、track、attempt和文档身份；恢复布局资格不能假称当前像素仍是该RTP，也不能增加呈现计数。仅在文档前台、当前完整布局屏障已ACK、平面current/nonstale且客户端bounds为正时，才累计无安全匹配的重试预算并有界回退canvas。隐藏或布局过渡清除预算；恢复后重新等待本元素新帧，不复用旧ready。统计分别显示连接首次Video回退原因和canvas后端选择原因，未知原因保留原文，不统一冒充GL失败。
+静态首帧metadata晚到可匹配同元素自己的最新观察，但必须保持相同已确认屏障、track、attempt和文档身份；恢复布局资格不能假称当前像素仍是该RTP，也不能增加呈现计数。文档前台、当前完整布局屏障已ACK、平面current/nonstale且客户端bounds为正时，未取得安全匹配继续限频请求`media.refresh`并保持Video及输入门禁，不因等待超时改走另一后端。隐藏或布局过渡撤销旧观察；恢复后重新等待本元素新帧，不复用旧ready。
 
 尺寸过渡只保留一次有界旧ROI快照，不赋予媒体或输入ready。软键盘遮挡/恢复使用顶部锚定、保持比例并裁剪的peek；普通窗口/分栏布局变化使用最后帧的模糊拉伸动画。快照裁剪在对应Window内容区内，新布局真实ready且匹配最终desired DIP后移除，文档/连接变化立即作废。这种一次copy与稳态video逐帧呈现分开计数。
 
@@ -100,11 +100,11 @@ Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更�
 
 Client暂存编辑事件绑定attempt/session/view/instance/document/target，只有新layout、准确focus token、同target权威editable和新画面屏障都满足后才发送。事件附`editableTarget`，Browser在最终派发前再次检查当前编辑目标；旧节点晚到的commit/cancel不能落到新输入框。真实失焦或target变化清除composition和暂存，失焦自动blur本地输入代理。该编辑连续性不放宽旧layout坐标门禁，也不重建RTC、DataChannel或video。
 
-Source atlas由WebRTC原生AdaptFrame决定采样，并满足接收H264硬上限；NV12转换缩放完整atlas，mediaScaleX/Y分别用于布局、ROI及输入。canvas回退按能力使用不可变VideoFrame/fifo2或video快照；Chrome89保留兼容，其rVFC与drawImage不是原子frame handle，不能宣称为不可变帧验证。
+Source atlas由WebRTC原生AdaptFrame决定采样，并满足接收H264硬上限；NV12转换缩放完整atlas，mediaScaleX/Y分别用于布局、ROI及输入。Chrome89继续使用Video，其rVFC与测试用drawImage不是原子frame handle，不能宣称为不可变帧验证。
 
 普通产品按接收能力选择H264 level5.2、5.1、4.2或native；探测并行、有总超时且页面内缓存，Chrome89保留4.2兼容路径。编码协商失败可降档，网络超时不会永久降低解码能力。优先高画质以viewport×ClientScale为目标；完整尺寸满足单帧上限、但超过像素速率预算时先降低帧率，自动与流畅档保持帧率优先。实际源/编码尺寸、有效帧率及限制原因由stats报告。
 
-canvas回退下，两个以上合格的不可变平面共用一个WebGL画布，每帧上传一次atlas并按各平面矩形绘制；单平面、Chrome89及不支持的情况使用2D路径。上下文丢失恢复2D，静态内容优先重画现有帧；没有可用帧时通过当前peer限频的`media.refresh`请求刷新。video统计使用各平面`presentedFrames`增量，canvas统计使用JS新帧绘制提交；rVFC回调次数不当作显示FPS。Marker像素读取仅用于显式测量，正常video不做逐帧copy。
+video统计使用各平面`presentedFrames`增量，rVFC回调次数不当作显示FPS。Marker像素读取仅用于显式测量，正常video不做逐帧copy。尺寸过渡保留最后一帧的有界模糊快照；该快照、摄像头处理和测试像素读回不属于已移除的Canvas串流后端。
 
 产品信令采用trickle ICE：Endpoint接受offer后异步发`rtc.signal`，Control按Tenant、Viewer租约、connectionId与attemptId路由answer/candidate。早到候选有界排队，取消或接管撤销旧绑定。现有UDP网络模拟和旧诊断接口保留完整ICE收集路径，避免候选旁路网络模拟。连接阶段耗时使用各进程本地单调时钟。
 

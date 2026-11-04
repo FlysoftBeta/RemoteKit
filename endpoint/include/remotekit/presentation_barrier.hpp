@@ -16,15 +16,12 @@ class PresentationBarrier {
     std::lock_guard lock(mutex_);peer_=peer;video_=false;waiting_=false;
     key_={};needs_keyframe_=false;
   }
-  std::optional<Key> Mode(uint64_t peer,bool video,bool restart=false) {
+  std::optional<Key> Video(uint64_t peer,bool restart=false) {
     std::lock_guard lock(mutex_);
     if(!peer || peer!=peer_)return {};
-    if(video && (!video_ || restart)) {key_.barrier=++serial_;waiting_=true;needs_keyframe_=true;}
-    // Switching away from video cancels the ACK wait, but dropped bitstream
-    // dependencies still require a successful current-layout keyframe.
-    if(!video) {waiting_=false;if(restart)needs_keyframe_=true;}
-    video_=video;
-    return video&&waiting_?std::optional<Key>(key_):std::nullopt;
+    if(!video_ || restart) {key_.barrier=++serial_;waiting_=true;needs_keyframe_=true;}
+    video_=true;
+    return waiting_?std::optional<Key>(key_):std::nullopt;
   }
   std::optional<Key> Layout(uint64_t generation,uint64_t epoch) {
     std::lock_guard lock(mutex_);
@@ -41,11 +38,15 @@ class PresentationBarrier {
     if(!peer || peer!=peer_ || !video_ || !waiting_ || key!=key_)return false;
     waiting_=false;return true;
   }
+  std::optional<Key> RefreshKey(uint64_t peer,uint64_t epoch) {
+    std::lock_guard lock(mutex_);
+    if(!peer || peer!=peer_ || !video_ || waiting_ || !key_.generation || !epoch || epoch!=key_.epoch)return {};
+    return key_;
+  }
   template<class Publish> bool Send(uint64_t peer,uint64_t epoch,bool keyframe,Publish publish) {
     std::lock_guard lock(mutex_);
-    if(!peer || peer!=peer_)return false;
-    if(video_ && (waiting_ || !epoch || epoch!=key_.epoch))return false;
-    if(needs_keyframe_ && (!keyframe || !epoch || epoch!=key_.epoch))return false;
+    if(!peer || peer!=peer_ || !video_ || waiting_ || !key_.generation || !epoch || epoch!=key_.epoch)return false;
+    if(needs_keyframe_ && !keyframe)return false;
     if(publish() && keyframe)needs_keyframe_=false;
     return true;
   }

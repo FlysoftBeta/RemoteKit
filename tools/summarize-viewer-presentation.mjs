@@ -10,6 +10,16 @@ const mean=a=>{const values=a.filter(Number.isFinite);return values.length?value
 const result=[];
 for(const [name,c] of cases){if(c.parts.size!==c.total)throw Error('Missing chunks '+name);const report=JSON.parse(Array.from({length:c.total},(_,i)=>{if(!c.parts.has(i))throw Error('Missing index');return c.parts.get(i)}).join(''));await writeFile(resolve(root,name+'.json'),JSON.stringify(report));
  const {before:b,after:a}=report,p=a.candidate,dt=(a.at-b.at)/1000,inbound=x=>x.stats.find(s=>s.type==='inbound-rtp'&&(s.kind==='video'||s.mediaType==='video')),ia=inbound(a),ib=inbound(b);
+ if(a.presentation.presentationEndpoint==='video-compositor-observation'&&a.presentation.rendering.videoCompositorByView){
+   const prior=b.presentation.rendering.videoCompositorByView;
+   const compositorFpsByView=Object.fromEntries(Object.entries(a.presentation.rendering.videoCompositorByView).map(([view,count])=>[
+     view,prior[view]&&count.frames>=prior[view].frames?(count.frames-prior[view].frames)/dt:null,
+   ]));
+   result.push({name,seconds:dt,decodeFps:ia&&ib?(ia.framesDecoded-ib.framesDecoded)/dt:null,compositorFpsByView,
+     layout:a.layout,quality:a.state.workspace.settings.qualityPreference,epoch:a.presentation.epoch});
+   continue;
+ }
+ // Archived canvas and processor schemas are read from saved metrics only.
  if(!p){result.push({name,seconds:dt,decodeFps:(ia.framesDecoded-ib.framesDecoded)/dt,paintFpsByView:Object.fromEntries(Object.entries(a.presentation.canvasPaintByView).map(([view,count])=>[view,(count.frames-(b.presentation.canvasPaintByView[view]?.frames??0))/dt])),frameSource:a.presentation.frameSource,layout:a.layout,quality:a.state.quality,processor:a.presentation.processor,epoch:a.presentation.epoch});continue;}
  let resources=[];const resourceName=name.startsWith('two-')?'two-':'four-';try{resources=(await readFile(resolve(root,resourceName+(p.mode==='2d'?'2d':'webgl')+'-resources.jsonl'),'utf8')).trim().split('\n').map(JSON.parse).filter(s=>s.wall>=ib.timestamp&&s.wall<=ia.timestamp)}catch{}
  const resource={samples:resources.length};for(const role of ['receiver','source','control']){resource[role]={cpuCores:mean(resources.map(s=>{const cpu=s.cpu.filter(x=>x.role===role&&Number.isFinite(x.cores));return cpu.length?cpu.reduce((sum,x)=>sum+x.cores,0):null})),gpu:Object.fromEntries(['3D','VideoDecode','VideoProcessing','Copy'].map(engine=>[engine,mean(resources.map(s=>s.gpu.filter(x=>x.role===role&&x.engine===engine).reduce((sum,x)=>sum+x.percent,0)))]))};}

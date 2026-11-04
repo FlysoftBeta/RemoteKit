@@ -1,20 +1,15 @@
 import { useEffect, useState } from 'react';
 import { MarkerMeasurement } from './marker';
 import { createRoot } from 'react-dom/client';
-import { RemoteTransport, type FrameSource } from './transport';
+import { RemoteTransport } from './transport';
 import { RemoteViewport } from './remote-viewport';
 import { request, type ControlState } from './types';
 import type { ReceiveProfile } from './receive-profile';
-import type { PresentationMode } from './plane-source';
 import './automation.css';
 
 /** Explicit per-run settings. No browser persistence or product quality policy. */
 export interface AutomationConfiguration {
   receiveProfile?: ReceiveProfile;
-  frameSource?: FrameSource;
-  presentationMode?: PresentationMode;
-  processorScheduler?: 'latest1' | 'fifo2';
-  processorProfile?: boolean;
 }
 
 export function mountAutomation(element: HTMLElement, options: { diagnostics?: boolean } = {}) {
@@ -39,10 +34,6 @@ export function mountAutomation(element: HTMLElement, options: { diagnostics?: b
     if ('callbackRegistration' in configuration) throw new Error('callbackRegistration is archived; video uses after-work');
     if (transport.diagnostics.connection !== '未连接') throw new Error('请先断开媒体连接再设置实验配置');
     if (configuration.receiveProfile !== undefined) transport.receiveProfile = configuration.receiveProfile;
-    if (configuration.frameSource !== undefined) transport.frameSource = configuration.frameSource;
-    if (configuration.presentationMode !== undefined) transport.presentationMode = configuration.presentationMode;
-    if (configuration.processorScheduler !== undefined) transport.processorScheduler = configuration.processorScheduler;
-    if (configuration.processorProfile !== undefined) transport.processorProfile = configuration.processorProfile;
   };
   const action = async (body: Record<string, unknown>) => {
     const state = await request<ControlState>('/api/actions', body);

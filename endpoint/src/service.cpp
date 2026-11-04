@@ -15,6 +15,7 @@
 #include "remotekit/coordinate_readiness.hpp"
 #include "remotekit/input_sequence.hpp"
 #include "remotekit/presentation_barrier.hpp"
+#include "remotekit/presentation_refresh.hpp"
 #include "remotekit/control_reliability.hpp"
 #include "remotekit/product_authorization.hpp"
 #include "remotekit/face_auth.hpp"
@@ -303,6 +304,7 @@ struct Session {
  struct CompDiagnostics {
   uint32_t targetFps=0,resumeMaxFps=0,officialMaxFps=0,codecMaxFps=0,sourceWidth=0,sourceHeight=0,encodedWidth=0,encodedHeight=0;
   uint64_t adaptRequests=0,adaptDrops=0,adaptErrors=0,adaptSizeChanges=0;
+  remotekit::PresentationRefresh::Stats refresh;
  };
  std::mutex comp_diagnostics_mutex;CompDiagnostics comp_diagnostics;
  uint32_t sampling_fps=60;
@@ -780,7 +782,9 @@ struct Session {
    {"retiredGenerations",slots.retiredGenerations},{"retiredGenerationsCompleted",slots.retiredGenerationsCompleted},
    {"unknownGpuRetainedGenerations",slots.unknownGpuRetainedGenerations},{"unknownGpuRetentions",slots.unknownGpuRetentions},
    {"targetFps",slots.idle?0:comp.targetFps},{"resumeMaxFps",comp.resumeMaxFps},{"officialMaxFps",comp.officialMaxFps},{"codecMaxFps",comp.codecMaxFps},{"adaptRequests",comp.adaptRequests},
-   {"adaptDrops",comp.adaptDrops},{"adaptErrors",comp.adaptErrors},{"adaptSizeChanges",comp.adaptSizeChanges}};
+   {"adaptDrops",comp.adaptDrops},{"adaptErrors",comp.adaptErrors},{"adaptSizeChanges",comp.adaptSizeChanges},
+   {"presentationRefreshPending",comp.refresh.pending},{"presentationRefreshAttempts",comp.refresh.attempts},
+   {"presentationRefreshForcedBegins",comp.refresh.forced_begins},{"presentationRefreshSuccesses",comp.refresh.successes}};
   value["sourceWidth"]=comp.sourceWidth;value["sourceHeight"]=comp.sourceHeight;
   value["encodedWidth"]=comp.encodedWidth;value["encodedHeight"]=comp.encodedHeight;
   value["configuredIdleIdrMs"]=options.idle_idr_ms;
@@ -1210,18 +1214,16 @@ struct Session {
   if(type!="media.presentation" && type!="presentation.ready")return false;
   if(event.bytes.size()>512 || message.value("version",Json())!=1)return true;
   if(type=="media.presentation") {
-   const auto backend=message.value("backend",Json());
-   if(backend!="video" && backend!="canvas")return true;
+   if(message.value("backend",Json())!="video")return true;
    const bool restart=authorization.Required() && ProductCurrent(event) && message.value("restart",Json())==true;
-   layout_prepare=presentation.Mode(event.peer,backend=="video",restart);
+   layout_prepare=presentation.Video(event.peer,restart);
    if(restart) {
     input_authorization=0;
     control_outbox.Bind(event.peer);
     refresh_connected=true;
    }
    // Mode() installs the gate before any video support confirmation leaves.
-   QueueLayout({{"type","presentation.mode"},{"version",1},{"backend",backend}});
-   if(backend=="canvas")refresh_connected=true;
+   QueueLayout({{"type","presentation.mode"},{"version",1},{"backend","video"}});
   } else {
    remotekit::PresentationBarrier::Key key;
    if(PresentationNumber(message,"barrierId",key.barrier) &&
@@ -1595,7 +1597,8 @@ struct Session {
     std::string error;if(!owner.pool.Close(error))fprintf(stderr,"media exit render drain: %s\n",error.c_str());
    }
   } render_exit{*this,tail_attempt};
-  struct TargetReset {std::mutex& mutex;CompDiagnostics& value;~TargetReset(){std::lock_guard lock(mutex);value.targetFps=0;}} target_reset{comp_diagnostics_mutex,comp_diagnostics};
+  remotekit::PresentationRefresh presentation_refresh;
+  struct TargetReset {std::mutex& mutex;CompDiagnostics& value;~TargetReset(){std::lock_guard lock(mutex);value.targetFps=0;value.refresh.pending=false;}} target_reset{comp_diagnostics_mutex,comp_diagnostics};
   HANDLE pace_timer=CreateWaitableTimerExW(nullptr,nullptr,0x2,TIMER_MODIFY_STATE|SYNCHRONIZE);
   if(!pace_timer){
    InvalidateLayout("comp-timer-unavailable");
@@ -1611,7 +1614,8 @@ struct Session {
   int64_t last_stats=QpcNow();uint32_t official_max_fps=240,codec_max_fps=240;remotekit::CompCadence cadence;
   uint64_t previous_encoded=stats->completed.load(),previous_bytes=stats->bytes.load(),previous_copies=pool.copied_frames();
   uint64_t previous_delivered=pool.delivered_frames();
-  bool stream_started=false;remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
+  remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
+  bool has_current_view=false;
 
   bool first_source=true,first_submit=true;
   unsigned consecutive_reconfigures=0;
@@ -1620,13 +1624,23 @@ struct Session {
   effective_idle_ms=idle.delay_ms();source_interval_ms=0;
   uint64_t active_authorization=authorization.Stamp();
   frame_authorization=active_authorization;
+  auto update_refresh=[&](uint64_t handle,double now_ms) {
+   std::optional<remotekit::PresentationRefresh::Scope> scope;
+   if(has_current_view && !output_suspended && authorization.Current(active_authorization)) {
+    if(auto key=presentation.RefreshKey(handle,layout_epoch.load()))
+     scope=remotekit::PresentationRefresh::Scope{handle,active_authorization,*key};
+   }
+   presentation_refresh.SetScope(scope);
+   if(scope) presentation_refresh.Update(refresh_connected.exchange(false),now_ms);
+  };
   while(!stop_media) {
    const auto stamp=authorization.Stamp();
    if(stamp!=active_authorization) {
     frame_authorization=0;
     if(tail_attempt)tail_attempt->CancelWaiting();
     tail_attempt.reset();
-    stream_started=false;next_tail_attempt_ms=0;begin_schedule.Reset();
+    presentation_refresh.SetScope(std::nullopt);
+    has_current_view=false;next_tail_attempt_ms=0;begin_schedule.Reset();
     InvalidateLayout(stamp?"authorization-resuming":"authorization-locked");
     if(rtc_connected) {
      try {
@@ -1647,7 +1661,7 @@ struct Session {
    }
    sampling_fps=cadence.Update(comp_bitrate.load(),comp_fps.load(),policy_max_fps.load(),std::min(official_max_fps,codec_max_fps),
      pool.HasCapacity(),static_cast<int64_t>(1000000.0*QpcNow()/QpcFrequency()));
-   {std::lock_guard lock(comp_diagnostics_mutex);comp_diagnostics.targetFps=rtc_connected.load()&&authorization.Current(active_authorization)&&!output_suspended.load()?sampling_fps:0;comp_diagnostics.officialMaxFps=official_max_fps;comp_diagnostics.codecMaxFps=codec_max_fps;comp_diagnostics.resumeMaxFps=std::min({policy_max_fps.load(),official_max_fps,codec_max_fps});}
+   {std::lock_guard lock(comp_diagnostics_mutex);comp_diagnostics.targetFps=rtc_connected.load()&&authorization.Current(active_authorization)&&!output_suspended.load()?sampling_fps:0;comp_diagnostics.officialMaxFps=official_max_fps;comp_diagnostics.codecMaxFps=codec_max_fps;comp_diagnostics.resumeMaxFps=std::min({policy_max_fps.load(),official_max_fps,codec_max_fps});comp_diagnostics.refresh=presentation_refresh.Snapshot();}
    std::deque<Event> incoming;
    {std::lock_guard lock(event_mutex);incoming.swap(events);}
    for(auto& event:incoming) {
@@ -1664,7 +1678,8 @@ struct Session {
      if(connected!=rtc_connected.exchange(connected)) {
       if(tail_attempt)tail_attempt->CancelWaiting();
       tail_attempt.reset();
-      stream_started=false;next_tail_attempt_ms=0;begin_schedule.Reset();
+      presentation_refresh.SetScope(std::nullopt);
+      has_current_view=false;next_tail_attempt_ms=0;begin_schedule.Reset();
       InvalidateLayout(connected?"rtc-resuming":"rtc-disconnected");
       try {
        if(connected) {if(authorization.Current(active_authorization))OpenOutput();refresh_connected=true;}
@@ -1713,7 +1728,8 @@ struct Session {
     InvalidateLayout("reconfigure");
     if(tail_attempt)tail_attempt->CancelWaiting();
     tail_attempt.reset();
-    stream_started=false;next_tail_attempt_ms=0;begin_schedule.Reset();
+    presentation_refresh.SetScope(std::nullopt);
+    has_current_view=false;next_tail_attempt_ms=0;begin_schedule.Reset();
     idle=remotekit::IdleIdrPolicy(options.idle_idr_ms);
     effective_idle_ms=idle.delay_ms();source_interval_ms=0;last_tail_age_ms=0;
     try {
@@ -1750,6 +1766,7 @@ struct Session {
     if(current_geometry!="invalid:no-visible-views")InvalidateLayout("no-visible-views");
    }
    const auto handle=peer.load();const auto now=QpcNow();const double now_ms=1000.0*now/QpcFrequency();
+   update_refresh(handle,now_ms);
    if(tail_attempt) {
     using State=remotekit::TailIdrAttempt::State;
     if(now_ms>=next_tail_attempt_ms)tail_attempt->CancelWaiting();
@@ -1759,16 +1776,18 @@ struct Session {
     }
     if(state!=State::source_wait && state!=State::encoding)tail_attempt.reset();
    }
-   const bool tail_ready=idle.TailDue(now_ms)&&!tail_attempt&&now_ms>=next_tail_attempt_ms;
+   const bool tail_ready=idle.TailDue(now_ms)&&!tail_attempt&&now_ms>=next_tail_attempt_ms&&!presentation_refresh.Pending();
    if(!output_suspended && comp_bitrate.load() && sampling_fps && begin_schedule.Due(now)) {
     const auto interval=static_cast<uint32_t>((1000000ull+sampling_fps-1)/sampling_fps);
     pool.Pressure(stats->pending.load()>1);
     bool sent=false;const bool force_tail=tail_ready&&tail_begins<3;
-    if(!pool.Begin(interval,force_tail||refresh_connected.load()||!stream_started,error,&sent)) {
+    const bool force_refresh=result!=RenderSlots::Result::ready&&presentation_refresh.CanForce(now_ms);
+    if(!pool.Begin(interval,force_tail||force_refresh,error,&sent)) {
      if(frame.release)frame.release(frame.release_context,frame.frame_id);
      {std::lock_guard lock(stats->mutex);stats->error=error;}InvalidateLayout("render-begin-failed");break;
     }
     if(sent&&force_tail)++tail_begins;
+    if(sent&&force_refresh)presentation_refresh.Forced(now_ms);
     // Begin can drain a Wake queued after Poll. A sent Begin satisfies it.
     observe_wake();
     begin_schedule.Attempted(now,std::max<int64_t>(1,QpcFrequency()/sampling_fps),sent);
@@ -1819,16 +1838,27 @@ struct Session {
      // No old texture is relabeled using the latest-layout publication.
      auto next=remotekit::LayoutCapabilities(Layout(metadata),control.load()!=0&&client_gestures_control.load()==control.load());
      const auto epoch=ObserveLayout(metadata);next["epoch"]=std::to_string(epoch);
-     if(next!=layout)PublishLayout(std::move(next),epoch);frame.layout_epoch=epoch;
-     const bool refresh=refresh_connected.exchange(false);
-     const bool tail=!fresh && tail_ready;
-     if(tail||refresh||!stream_started){std::lock_guard lock(encoder_mutex);for(auto& [encoder,worker]:encoders)worker->Keyframe();}
-     if(tail){tail_attempt=std::make_shared<remotekit::TailIdrAttempt>();next_tail_attempt_ms=now_ms+tail_retry_ms;
-      auto wrapped=remotekit::TailRefreshLease::Wrap(frame,tail_attempt);frame.release(frame.release_context,frame.frame_id);frame=wrapped;}
+     if(next!=layout) {
+      has_current_view=std::ranges::any_of(next.at("views"),[](const auto& view){return !view.value("stale",false);});
+      PublishLayout(std::move(next),epoch);
+     }
+     frame.layout_epoch=epoch;
+     update_refresh(handle,now_ms);
+     auto attempt=presentation_refresh.TryStart(now_ms,1000.0/sampling_fps);
+     const bool tail=!fresh && tail_ready && !presentation_refresh.Pending();
+     if(tail) {
+      tail_attempt=std::make_shared<remotekit::TailIdrAttempt>();
+      next_tail_attempt_ms=now_ms+tail_retry_ms;
+      attempt=tail_attempt;
+     }
+     if(attempt) {
+      auto wrapped=remotekit::TailRefreshLease::Wrap(frame,std::move(attempt));
+      frame.release(frame.release_context,frame.frame_id);frame=wrapped;
+     }
      if(first_submit){MarkConnection(ConnectionPhase::submit);first_submit=false;}
      const int status=authorization.Current(active_authorization)?sdk.remotekit_rtc_submit_texture(handle,&frame):1;
-     if(status!=0){frame.release(frame.release_context,frame.frame_id);if(refresh)refresh_connected=true;}
-     else {stream_started=true;if(tail)++tail_submissions;}
+     if(status!=0)frame.release(frame.release_context,frame.frame_id);
+     else if(tail)++tail_submissions;
     }
    }
    direct_services.Editable(peer.load(),current_metadata,output_suspended);

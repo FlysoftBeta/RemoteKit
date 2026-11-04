@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { RemoteTransport } from '../client/transport';
 import type { Layout, Surface } from '../client/types';
 import type { MediaFeedbackSampler } from '../client/media-feedback';
-import type { PresentationDiagnostics } from '../client/presentation-diagnostics';
 
 test('transport feedback is independent of delayed/failed relay HTTP and disconnect discards stale completions', { timeout: 2000 }, async t => {
   let now = 0, nextFrame = 0;
@@ -22,8 +21,8 @@ test('transport feedback is independent of delayed/failed relay HTTP and disconn
   t.mock.method(performance, 'now', () => now);
   t.after(() => { for (const [name, original] of originals) { if (original) Object.defineProperty(globalThis, name, original); else delete (globalThis as Record<string, unknown>)[name]; } });
   const transport = new RemoteTransport(); transport.enableDiagnosticHttp();
-  type Internals = { peer: RTCPeerConnection; channel: RTCDataChannel; layout: Layout; videoPresentedFrames: number; connectionId: string;
-    mediaFeedback: MediaFeedbackSampler; presentation: PresentationDiagnostics;
+  type Internals = { peer: RTCPeerConnection; channel: RTCDataChannel; layout: Layout; connectionId: string;
+    mediaFeedback: MediaFeedbackSampler;
     renderers: Set<unknown>; readStats(peer: RTCPeerConnection): Promise<void>; closeLocal(): void };
   const connected = transport as unknown as Internals;
   const sent: Record<string, any>[] = [];
@@ -48,17 +47,15 @@ test('transport feedback is independent of delayed/failed relay HTTP and disconn
   const main = view('main'), split = view('split'), hidden = view('hidden');
   connected.layout = { type: 'layout', epoch: 'e1', generation: 'g1', width: 100, height: 100, views: [main, split, hidden] };
   connected.renderers = new Set([main, split, hidden].map(surface => ({ view: surface, layoutEpoch: 'e1', layoutGeneration: 'g1', ready() {}, canvas: { isConnected: true, getBoundingClientRect: () => ({ width: surface.id === 'hidden' ? 0 : 100, height: 100 }) } })));
-  connected.videoPresentedFrames = 80; connected.mediaFeedback.start();
+  connected.mediaFeedback.start();
   now = 1500; await connected.readStats(peer);
   assert.equal(network.length, 1); // Native feedback did not wait for this unresolved HTTP request.
   assert.deepEqual(sent[0].planes, [{ view: 'main' }, { view: 'split' }]);
   assert.equal('decodedFrames' in sent[0], false); assert.equal(sent[0].roundTripTimeMs, 10);
-  connected.presentation.paint(1600, 'main', 90, 'e1', 1599, true);
-  connected.presentation.paint(1601, 'split', 90, 'e1', 1599, true);
-  decoded = 175; connected.videoPresentedFrames = 140;
+  decoded = 175;
   now = 3000; await connected.readStats(peer);
   assert.equal(network.length, 1); // A slow diagnostic does not accumulate parallel HTTP requests.
-  assert.equal(sent[1].decodedFrames, 75); assert.equal(sent[1].videoFrames, 60);
+  assert.equal(sent[1].decodedFrames, 75); assert.equal('videoFrames' in sent[1], false);
   assert.equal('packetsLost' in sent[1], false); assert.equal('framesDropped' in sent[1], false);
   assert.equal(transport.diagnostics.decodedFramesPerSecond, 50);
   assert.equal(transport.diagnostics.receiverVideoTiming?.jitterBufferMeanMs, 10);

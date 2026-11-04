@@ -7,26 +7,20 @@ import type { Diagnostics } from '../client/types';
 
 function overlay(reason: string) {
   const diagnostics: Diagnostics = { connection: '已连接', channel: '已连接', rendering: {
-    backend: 'canvas-2d', backendReason: reason, presentationFallbackReason: reason,
-    canvasBackendReason: 'single-or-no-eligible-plane', shared: {}, plane2dDraws: 1,
-    atlasSnapshotCopies: 0, mediaRefreshRequests: 0, scheduling: { metadataMissingAtRead: 0,
-      metadataBlockedSchedules: 0, drops: {}, readToAuthorizeMs: { samples: 0, p50: null, p95: null },
-      rafWaitMs: { samples: 0, p50: null, p95: null } },
+    backend: 'unavailable', backendReason: reason, freezeCopies: 0, mediaRefreshRequests: 0,
   } };
   return renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
 }
 
-test('video fallback and canvas choice have separate visible explanations', () => {
-  const html = overlay('video-frame-metadata-timeout');
-  assert.match(html, /Video 帧元数据匹配超时/);
-  assert.match(html, /单平面 \/ 等待平面/);
-  assert.doesNotMatch(html, /GL 初始化失败/);
+test('presentation errors explain why video is unavailable', () => {
+  const html = overlay('video-rtp-metadata-unavailable');
+  assert.match(html, /Video RTP 元数据不可用/);
+  assert.match(html, /unavailable/);
+  assert.doesNotMatch(html, /2D 原因|Video 回退/);
 });
 
-test('unknown presentation fallback retains the actual reason', () => {
-  const html = overlay('future-video-failure');
-  assert.match(html, />future-video-failure</);
-  assert.doesNotMatch(html, /GL 初始化失败/);
+test('unknown presentation errors retain the actual reason', () => {
+  assert.match(overlay('future-video-failure'), />future-video-failure</);
 });
 
 test('media diagnostics distinguish GCC targets, display ceiling and compatibility playout hint', () => {
@@ -47,9 +41,7 @@ test('video stats show real receiver intervals without retired capture or canvas
   const diagnostics: Diagnostics = {
     connection: '已连接', channel: '已连接', receiverVideoTiming: { jitterBufferMeanMs: 0, decodeMeanMs: 3, droppedFrames: 1 },
     endpoint: { sourceAtlasWidth: 1296, sourceAtlasHeight: 488 },
-    rendering: { backend: 'video', shared: {}, plane2dDraws: 0, atlasSnapshotCopies: 0, mediaRefreshRequests: 0,
-      scheduling: { metadataMissingAtRead: 0, metadataBlockedSchedules: 0, drops: {},
-        readToAuthorizeMs: { samples: 0, p50: null, p95: null }, rafWaitMs: { samples: 0, p50: null, p95: null } } },
+    rendering: { backend: 'video', freezeCopies: 0, mediaRefreshRequests: 0 },
   };
   const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
   assert.match(html, /Video 提交 FPS/);

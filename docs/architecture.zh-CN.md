@@ -48,7 +48,7 @@ Control默认对持续安全隐藏30秒的页面冻结，120秒丢弃；在线�
 
 不旋转MaxRects把可见平面排入atlas，含padding。viewport为DIP，页面DPR决定实际backing，atlas/编码像素及mediaScale另记；命中排除padding和letterbox。产品内容区尺寸来自Viewer，不把平板UA变成固定viewport模拟。
 
-正式Viewer默认协商video呈现，各可见Window的video共享同一接收track；客户端内容bounds决定目标布局，atlas仅决定源裁剪。Endpoint在编码结果真正发布前建立布局屏障，等Client隐藏旧画面并确认后，以当前布局关键帧恢复。每个video自身匹配真实RTP/epoch后才恢复输入。稳态不增加逐帧握手，不运行额外MSTP/canvas绘制；能力或协议失败保留canvas回退，详见[串流协议](streaming-protocol.md)。
+正式Viewer统一协商video呈现，各可见Window的video共享同一接收track；客户端内容bounds决定目标布局，atlas仅决定源裁剪。Endpoint在编码结果真正发布前建立布局屏障，等Client隐藏旧画面并确认后，以当前布局关键帧恢复。每个video自身匹配真实RTP/epoch后才恢复输入。稳态不增加逐帧握手，不运行MSTP/canvas串流后端；首帧或元数据迟到在原Video连接上恢复，能力或协议失败明确提示，详见[串流协议](streaming-protocol.md)。
 
 新路径使用专用Viz OSR OutputDevice直接绘制每plane共享BGRA目标，Browser按当前布局GPU合成为Endpoint指定的atlas Slot。旧capture、CopyOutput及桥接fallback已删除。NV12转换和异步编码持有真实资源租约，不能用COM引用替代防覆盖协议；新路径验收状态见[当前状态](current-state.zh-CN.md)。
 
@@ -68,7 +68,7 @@ Endpoint Comp拥有节拍，依据客户端能力、WebRTC限制与Slot压力发
 
 坐标按Client CSS、letterbox、编码矩形、各轴mediaScaleX/Y与DPR转换到viewport DIP，再到widget/screen，覆盖WebRTC尺寸对齐的轴向取整差异。IME的composition/commit/cancel/finish使用UTF-16；完整replacement range/span、逐字符候选几何仍有扩展空间。
 
-Stats区分源提交、实际Fence完成观察、编码、解码、video compositor提交观察及canvas JS提交；rVFC回调次数不代表显示FPS。有效源完成时间存在时，呈现估算使用QPC/UTC与Client时钟校准，排除静态重复和低置信度；新OSR路径目前缺此时间戳，相应样本省略。Pixel marker带CRC可独立作端到端实验，两者不混称，也都不证明物理屏幕点亮。分段p95不可直接相加，见[测量设施](streaming-experiments.zh-CN.md)。
+Stats区分源提交、实际Fence完成观察、编码、解码及video compositor提交观察；rVFC回调次数不代表显示FPS。有效源完成时间存在时，呈现估算使用QPC/UTC与Client时钟校准，排除静态重复和低置信度；新OSR路径目前缺此时间戳，相应样本省略。Pixel marker带CRC可独立作端到端实验，两者不混称，也都不证明物理屏幕点亮。分段p95不可直接相加，见[测量设施](streaming-experiments.zh-CN.md)。
 
 ## 页面能力与保留目标
 

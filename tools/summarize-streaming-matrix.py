@@ -32,7 +32,8 @@ def summarize(folder,summaries,metrics):
  pids=dict(re.findall(r'^session (\d+) browser pid (\d+)$',log,re.MULTILINE));rows=[]
  for record in summaries:
   index=record['tenantIndex'];m=metrics.get(index,{});receiver=record.get('receiver',{})
-  paint_fps,paint_buckets,paint_error=measured_paint_fields(m)
+  is_video_observation=m.get('frameCountStage')=='video-compositor-observation'
+  paint_fps,paint_buckets,paint_error=(None,None,None) if is_video_observation else measured_paint_fields(m)
   endpoint=receiver.get('lastEndpoint',{});samples=m.get('rtcSamples',[]);last=samples[-1] if samples else {}
   views=m.get('actualLayout',{}).get('views',[]);session=str(views[0].get('session','')) if views else ''
   pid=pids.get(session);trace=next((b for b in record.get('browser',[]) if b.get('file','').startswith('browser-'+str(pid)+'-atlas-')),None)
@@ -57,6 +58,7 @@ def summarize(folder,summaries,metrics):
    'atlasPublishFps':trace.get('atlas_publish',{}).get('fps') if trace else None,
    'atlasCopyFps':receiver.get('atlasCopiesPerSecond'),'encodeFps':receiver.get('encodeCompletedPerSecond'),
    'decodeFps':receiver.get('framesDecodedPerSecond'),'paintFps':paint_fps,'paintMeasurementError':paint_error,
+   'videoObservationFps':m.get('videoObservationFps') if is_video_observation else None,
    'renderP50Ms':latency.get('p50'),'renderP95Ms':latency.get('p95'),'renderP99Ms':latency.get('p99'),
    'renderSampleCount':m.get('markerSampleCount'),'invalidMarkers':receiver.get('invalidMarkers'),
    'inputSampleCount':m.get('inputSampleCount'),'inputTimeoutCount':len(m.get('inputTimeouts',[])),
@@ -82,7 +84,7 @@ def summarize(folder,summaries,metrics):
    'jitterFieldsAvailable':last.get('jitterBufferFieldAvailability',{}),
    'markerReadbackP50Ms':costs.get('markerReadback',{}).get('p50'),'markerReadbackP95Ms':costs.get('markerReadback',{}).get('p95'),
    'videoCallbackP50Ms':costs.get('videoCallbackTotal',{}).get('p50'),'videoCallbackP95Ms':costs.get('videoCallbackTotal',{}).get('p95'),
-   'fpsSecondDistribution':{'displayPaint':paint_buckets,'authorized':receiver.get('authorizedPerSecondFrames'),
+   'fpsSecondDistribution':{'displayPaint':paint_buckets,'videoObservation':receiver.get('videoObservationPerSecondFrames'),'authorized':receiver.get('authorizedPerSecondFrames'),
     'atlasCopy':[s.get('endpoint',{}).get('atlasCopyFps') for s in samples],
     'encode':[s.get('endpoint',{}).get('encodedFps') for s in samples],
     'decode':rtc_rate_samples(samples,'framesDecoded'),'source':record.get('source',{}).get('raf',{}).get('perSecondFrames'),
@@ -116,10 +118,10 @@ def main():
  args.output_dir.mkdir(parents=True,exist_ok=True)
  output=args.output_dir/'matrix-layer-check.json';output.write_text(json.dumps(rows,indent=2),encoding='utf-8')
  lines=['# Streaming matrix layers','',
-  '| case | n | source | capture | copy | encode | decode | paint | render p95 ms | CPU p50/p95 | keyframes | PLI/loss Δ | relay drop/maxKB |',
-  '|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|']
+  '| case | n | source | capture | copy | encode | decode | paint | video observations | render p95 ms | CPU p50/p95 | keyframes | PLI/loss Δ | relay drop/maxKB |',
+  '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|']
  for case in sorted({row['case'] for row in rows}):
-  group=[r for r in rows if r['case']==case];fields=['sourceRafFps','captureCallbackFps','atlasCopyFps','encodeFps','decodeFps','paintFps','renderP95Ms']
+  group=[r for r in rows if r['case']==case];fields=['sourceRafFps','captureCallbackFps','atlasCopyFps','encodeFps','decodeFps','paintFps','videoObservationFps','renderP95Ms']
   cells=[span([r[key] for r in group]) for key in fields]
   cpu=span([r['cpuP50'] for r in group])+'/'+span([r['cpuP95'] for r in group]);keys=span([r['encodedKeyframes'] for r in group])
   pli=span([r['receiverPliDelta'] for r in group]);loss=span([r['receiverLostDelta'] for r in group]);drop=span([r['relayDroppedPacketsTotal'] for r in group])

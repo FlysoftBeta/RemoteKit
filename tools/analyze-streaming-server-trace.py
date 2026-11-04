@@ -282,7 +282,8 @@ def analyze(root, profile=None):
             active += delta; peak = max(peak, active)
         raw_native = {int(r['rtpTimestamp']): r for r in report.get('rawVideoFrames', []) if 'rtpTimestamp' in r}
         markers = {int(r['rtp']): r for r in report.get('samples', []) if r.get('rtp') is not None}
-        paints = {int(r['rtp']): r for r in report.get('paintedFrames', []) if r.get('rtp') is not None}
+        observation_stage = 'video_observation' if report.get('frameCountStage') == 'video-compositor-observation' else 'draw_submit'
+        receive_to_observation = f'receive_to_{observation_stage}'
         sdk_rows = sdk.get((int(header['pid']), next((int(r['peer']) for r in rows if 'peer' in r), 0)), [])
         sdk_events = collections.defaultdict(dict)
         sdk_submits = collections.defaultdict(list)
@@ -372,7 +373,7 @@ def analyze(root, profile=None):
                     if 'processingDuration' in native:
                         native_stages['decoder_processing'] = native['processingDuration']*1000
                     if presentation is not None and 'at' in native:
-                        native_stages['compositor_submission_to_rvfc'] = native['at']-presentation
+                        native_stages['compositor_submission_to_rvfc'] = native.get('at', native.get('now'))-presentation
                     row['videoStagesMs'] = native_stages
                     native_presents.append(native_stages)
             if wire not in markers:
@@ -382,15 +383,15 @@ def analyze(root, profile=None):
             origin = report.get('timeOrigin')
             if origin is None: missing['client_time_origin'] += 1
             marker_segments = dict(segments)
-            marker_segments['render_to_draw_submit'] = marker['renderToObservedMs']
-            marker_segments['draw_submit_to_marker_complete'] = marker['markerCompletedAt']-marker['observedAt']
-            marker_segments['receive_to_draw_submit'] = marker['observedAt']-native['receiveTime'] if native and 'receiveTime' in native else None
+            marker_segments[f'render_to_{observation_stage}'] = marker['renderToObservedMs']
+            marker_segments[f'{observation_stage}_to_marker_complete'] = marker['markerCompletedAt']-marker['observedAt']
+            marker_segments[receive_to_observation] = marker['observedAt']-native['receiveTime'] if native and 'receiveTime' in native else None
             render_ms = marker['renderToObservedMs']
-            marker_segments['render_to_receive'] = (render_ms-marker_segments['receive_to_draw_submit']
-                if render_ms is not None and marker_segments['receive_to_draw_submit'] is not None else None)
+            marker_segments['render_to_receive'] = (render_ms-marker_segments[receive_to_observation]
+                if render_ms is not None and marker_segments[receive_to_observation] is not None else None)
             if native:
                 marker_segments['native_processing_duration'] = native.get('processingDuration', 0)*1000 if 'processingDuration' in native else None
-                marker_segments['native_presentation_to_draw_submit'] = marker['observedAt']-native['presentationTime'] if 'presentationTime' in native else None
+                marker_segments[f'native_presentation_to_{observation_stage}'] = marker['observedAt']-native['presentationTime'] if 'presentationTime' in native else None
                 marker_segments['native_receive_to_presentation'] = native['presentationTime']-native['receiveTime'] if 'presentationTime' in native and 'receiveTime' in native else None
                 if marker_segments['native_receive_to_presentation'] is not None and marker_segments['native_processing_duration'] is not None:
                     marker_segments['native_receive_to_presentation_minus_processing'] = marker_segments['native_receive_to_presentation']-marker_segments['native_processing_duration']
@@ -402,7 +403,7 @@ def analyze(root, profile=None):
                     marker_segments['render_to_comp_begin'] = qpc_wall(points['render_begin'])-render_wall
                 marker_segments['encoded_return_to_receive'] = origin+native['receiveTime']-end_wall if native and 'receiveTime' in native else None
                 if marker_segments['encoded_return_to_receive'] is not None and 'capture_end' in points:
-                    marker_segments['closure_error'] = (marker_segments['render_to_capture_end']+segments['capture_end_to_encoded_return']+marker_segments['encoded_return_to_receive']+marker_segments['receive_to_draw_submit']-marker['renderToObservedMs'])
+                    marker_segments['closure_error'] = (marker_segments['render_to_capture_end']+segments['capture_end_to_encoded_return']+marker_segments['encoded_return_to_receive']+marker_segments[receive_to_observation]-marker['renderToObservedMs'])
             row = dict(row, marker=marker, native=native, segmentsMs=marker_segments)
             samples.append(row)
         all_names = set().union(*(r['segmentsMs'].keys() for r in streams+samples))

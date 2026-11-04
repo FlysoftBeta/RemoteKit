@@ -37,7 +37,8 @@ def analyze(case):
                 raise ValueError("Missing raw presentation chunks")
             raw = json.loads("".join(chunk["text"] for chunk in chunks))
             (case/f"presentation-raw-{index}.json").write_text(json.dumps(raw), encoding="utf-8")
-        paint_fps, paint_buckets, paint_error = measured_paint_fields(client)
+        is_video_observation = client.get("frameCountStage") == "video-compositor-observation"
+        paint_fps, paint_buckets, paint_error = (None, None, None) if is_video_observation else measured_paint_fields(client)
         result = {"config": client["config"], "tenantIndex": index,
                   "source": {}, "browser": [], "receiver": {
                       "markerFps": client.get("observedFps"),
@@ -46,6 +47,8 @@ def analyze(case):
                       "displayPaintFps": paint_fps,
                       "displayPerSecondFrames": paint_buckets,
                       "paintMeasurementError": paint_error,
+                      "videoObservationFps": client.get("videoObservationFps") if is_video_observation else None,
+                      "videoObservationPerSecondFrames": client.get("videoObservationPerSecondFrames") if is_video_observation else None,
                       "frameCountStage": client.get("frameCountStage", "authorized-snapshot; not Viewport paint"),
                       "authorizedPerSecondFrames": client.get("authorizedPerSecondFrames", client.get("displayPerSecondFrames")),
                       "markerPerSecondSamples": client["perSecondFrames"],
@@ -88,7 +91,7 @@ def analyze(case):
     (case/"summary.json").write_text(json.dumps(output, indent=2), encoding="utf-8")
     for result in output:
         receiver = result["receiver"]
-        print(json.dumps({"case": case.name, "tenant": result["tenantIndex"], "sourceRafFps": result["source"].get("raf", {}).get("fps"), "rendererRafFps": result["source"].get("raf", {}).get("fps"), "rendererRenderFps": result["source"].get("renders", {}).get("fps"), "decodedFps": receiver.get("framesDecodedPerSecond"), "authorizedRtpFps": receiver["authorizedRtpFps"], "markerFps": receiver["markerFps"], "markerSampleHz": receiver["markerSamplesPerSecond"], "latency": receiver["latency"], "hostLoad": result.get("hostLoad")}, ensure_ascii=False))
+        print(json.dumps({"case": case.name, "tenant": result["tenantIndex"], "sourceRafFps": result["source"].get("raf", {}).get("fps"), "rendererRafFps": result["source"].get("raf", {}).get("fps"), "rendererRenderFps": result["source"].get("renders", {}).get("fps"), "decodedFps": receiver.get("framesDecodedPerSecond"), "authorizedRtpFps": receiver["authorizedRtpFps"], "videoObservationFps": receiver["videoObservationFps"], "markerFps": receiver["markerFps"], "markerSampleHz": receiver["markerSamplesPerSecond"], "latency": receiver["latency"], "hostLoad": result.get("hostLoad")}, ensure_ascii=False))
 
 
 if __name__ == "__main__":

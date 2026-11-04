@@ -12,9 +12,9 @@
 
 ## 指标定义
 
-- 分别记录源render、capture/delivery、encode、decode、独立RTP的实际canvas paint；同帧重绘和静态重复不能充当动态FPS。
-- Pixel marker来自实际接收像素，包含帧号、时间、输入刺激和CRC。当前终点是canvas drawImage提交，不是物理屏幕点亮；GPU/CRC读回完成与成本另记。
-- Worker方式先从真实已绘制canvas取得不可变bitmap，绑定原paint RTP/epoch/时刻，再异步读CRC；任务有界、超时可见、关闭前drain。不得把worker完成时间倒填为paint时间。
+- 分别记录源render、GPU完成观察、encode、decode、Video compositor提交与JS rVFC回调；同帧重绘和静态重复不能充当动态FPS。旧capture/Canvas报告保持原口径，不能套到当前路径。
+- Pixel marker来自实际接收像素，包含帧号、时间、输入刺激和CRC。当前默认Video以compositor回调观察为终点，不是物理屏幕点亮；GPU/CRC读回完成与成本另记。历史Canvas组的终点是drawImage提交。
+- Worker方式从受测Video的实际ROI取得不可变bitmap，绑定当次RTP/epoch/观察时刻，再异步读CRC；Video自身不是不可变帧句柄，需记录取样竞争和CRC失败。任务有界、超时可见、关闭前drain，不得把worker完成时间倒填为呈现时间。
 - 历史capture_time是Chromium capture end；capture begin→end含等待、GPU与完成观察，capture-end→ready不含前段。新OSR路径未取得可靠完成时刻时保留0并省略相应延迟样本；提交时间不能冒充完成时间。阶段p95不能直接相加。
 - 跨机器时钟必须校准并报告不确定度。生产估算与Pixel marker实验分开，见[媒体反馈](media-feedback.md)。
 
@@ -23,7 +23,7 @@
 | 工具 | 用途 |
 |---|---|
 | prepare-streaming-case.ps1 | 隔离目录、固定配置、指纹、专用diagnostics实例与启动参数 |
-| streaming-benchmark.js | /automation配置下放、实际paint/marker采集、完整或分块metrics |
+| streaming-benchmark.js | /automation配置下放、Video提交观察/marker采集、完整或分块metrics |
 | streaming_metrics.py / summarize-streaming-matrix.py | 校验、重组、分组汇总，拒绝未知paint版本 |
 | watch-streaming-resources.ps1 / windows-gpu-counters.cs | 进程与GPU引擎占用，区分3D/Video等 |
 | streaming-etw.ps1 | GPU队列、调度、提交及等待的ETW记录 |
@@ -31,6 +31,7 @@
 | analyze-copy-output-profile.py / analyze-official-capture-trace.py | 读取历史capture/CopyOutput证据，不代表新OSR路径具备这些事件 |
 | analyze-streaming-server-trace.py / analyze-streaming-cadence.py | generation/frame/lease、编码与wire RTP、队列与呈现节拍 |
 | osr-video-profile-browser.js | 默认video产品路径的真实输入/像素marker、同窗元素计数和接收各段；通过host-managed Playwright运行 |
+| osr-first-open-browser.js / osr-video-profile-server.mjs | 静态页面、保存工作区冷启动、首次呈现ACK延迟及同peer恢复检查 |
 | compare-streaming-quality.ps1 | 同帧静态画质比较 |
 | stop-streaming-case.ps1 | 清理指定case自己创建的进程 |
 
@@ -40,7 +41,9 @@
 
 ## 实验约束
 
-固定条件页用于独立测量，产品网络策略已统一交给WebRTC。QSV/TU、协商码率上限、DPR/几何、接收路径/FIFO和仍有效的profile可显式配置；删除的capture及自制适配旋钮不得继续注入。参数定义以工具为准，不把工具默认当产品默认。软件渲染、特殊浏览器flags、关闭marker或额外Profile负载都要记入条件。
+固定条件页用于独立测量，产品网络策略已统一交给WebRTC。QSV/TU、协商码率上限、DPR/几何和仍有效的profile可显式配置；已删除的capture、自制适配、Canvas呈现模式及MSTP/FIFO旋钮不得继续注入。参数定义以工具为准，不把工具默认当产品默认。软件渲染、特殊浏览器flags、关闭marker或额外Profile负载都要记入条件。
+
+Canvas-only呈现原型工具已移除，包括`verify-control-presentation.js`、`viewer-presentation-candidate*.js`及`viewer-video-clip-*`。历史实验结果和Git历史保留；离线分析器可以解析历史格式，不代表生产保留对应后端。
 
 计时GPU组独占资源、不同时CPU构建；只比较可追溯的同条件配对。占用率是引擎工作量，不等于编码耗时；必须结合实际GPU执行/队列和进程归因。资源监控与侵入式trace也分开标记。
 

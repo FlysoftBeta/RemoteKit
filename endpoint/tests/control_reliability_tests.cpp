@@ -65,7 +65,7 @@ void ControlBackpressure() {
  const auto count=sent.size();box.Flush(2,send);CHECK(sent.size()==count);
  box.Replace(2,"mode2","layout3","prepare3");box.Flush(2,send);CHECK(sent.back()=="prepare3");
  // Outbox admission does not release the media gate; only matching ACK does.
- remotekit::PresentationBarrier gate;gate.Bind(2);gate.Mode(2,true);auto key=gate.Layout(3,4);CHECK(key);
+ remotekit::PresentationBarrier gate;gate.Bind(2);gate.Video(2);auto key=gate.Layout(3,4);CHECK(key);
  bool published=false;gate.Send(2,4,true,[&]{published=true;return true;});CHECK(!published);
  CHECK(gate.Ready(2,*key));gate.Send(2,4,true,[&]{published=true;return true;});CHECK(published);
 }

@@ -1,5 +1,5 @@
 import { decodeMarker, MARKER_WIDTH, MARKER_HEIGHT, percentiles } from '../public/marker-codec.js';
-import type { Surface, CanvasPresentation } from './types';
+import type { Surface, VideoPresentation } from './types';
 import { markerSourceRect } from './coordinates';
 import { MarkerSchedule } from './marker-schedule';
 import type { PresentedPlaneSource } from './plane-source';
@@ -20,7 +20,7 @@ export class MarkerMeasurement {
   private schedule: MarkerSchedule;
   private paintCount = 0; private firstPaint?: number; private lastPaint?: number;
   private readCount = 0; private firstRead?: number; private lastRead?: number;
-  constructor(private video: HTMLVideoElement, private surface: () => Surface | undefined, private options: { sameMachineClock: boolean; sampleHz?: number; parameters: Record<string, unknown>; decodedFrames?: () => number | undefined; planeSource?: (frame?: CanvasPresentation) => PresentedPlaneSource | undefined; subscribeFrame?: (listener: (frame: CanvasPresentation) => void) => () => void; recordCost?: (name: string, at: number, durationMs: number) => void }) { this.canvas.width = MARKER_WIDTH; this.canvas.height = MARKER_HEIGHT; this.schedule = new MarkerSchedule(options.sampleHz ?? 10); }
+  constructor(private video: HTMLVideoElement, private surface: () => Surface | undefined, private options: { sameMachineClock: boolean; sampleHz?: number; parameters: Record<string, unknown>; decodedFrames?: () => number | undefined; planeSource?: (frame?: VideoPresentation) => PresentedPlaneSource | undefined; subscribeFrame?: (listener: (frame: VideoPresentation) => void) => () => void; recordCost?: (name: string, at: number, durationMs: number) => void }) { this.canvas.width = MARKER_WIDTH; this.canvas.height = MARKER_HEIGHT; this.schedule = new MarkerSchedule(options.sampleHz ?? 10); }
   start() {
     if (this.running) return; this.running = true;
     if (this.options.subscribeFrame) { this.unsubscribe = this.options.subscribeFrame(frame => this.read(true, frame)); return; }
@@ -29,7 +29,7 @@ export class MarkerMeasurement {
     if (video.requestVideoFrameCallback) this.callback = video.requestVideoFrameCallback(tick); else this.raf = requestAnimationFrame(tick);
   }
   input(sequence: number) { this.inputs.set(sequence & 65535, performance.now()); }
-  private read(frameCallback: boolean, frame?: CanvasPresentation) {
+  private read(frameCallback: boolean, frame?: VideoPresentation) {
     const video = this.video as HTMLVideoElement & { webkitDecodedFrameCount?: number };
     if (!frameCallback) { const count = video.webkitDecodedFrameCount ?? this.options.decodedFrames?.(); if (count === undefined || count === this.decodedFrames) return; this.decodedFrames = count; }
     const surface = this.surface(); if (!surface || !this.options.planeSource && video.readyState < 2) return;
@@ -69,6 +69,6 @@ export class MarkerMeasurement {
     const render = this.samples.flatMap(sample => sample.renderToObservedMs === undefined ? [] : [sample.renderToObservedMs]);
     const input = this.samples.flatMap(sample => sample.inputToObservedMs === undefined ? [] : [sample.inputToObservedMs]);
     const paintSpan = (this.lastPaint ?? 0) - (this.firstPaint ?? 0), readSpan = (this.lastRead ?? 0) - (this.firstRead ?? 0);
-    return { kind: 'received-video-marker', parameters: this.options.parameters, presentationClock: this.options.subscribeFrame ? 'selected-canvas-paint' : 'raw-video-callback', clock: this.options.sameMachineClock ? 'same-machine-wall-clock' : 'client-stimulus-only', elapsedMs, displayFps: paintSpan > 0 ? (this.paintCount - 1) * 1000 / paintSpan : null, paintCount: this.paintCount, markerTargetHz: this.schedule.hz, markerSampleHz: readSpan > 0 ? (this.readCount - 1) * 1000 / readSpan : null, markerReadCount: this.readCount, inputSampling: 'every-presented-frame-while-stimulus-pending', invalid: this.invalid, frameGapsIncludeSubsampling: true, skippedMarkerFrames: this.skipped, pendingStimuli: this.inputs.size, renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(input), samples: this.samples };
+    return { kind: 'received-video-marker', parameters: this.options.parameters, presentationClock: this.options.subscribeFrame ? 'selected-video-compositor-observation' : 'raw-video-callback', clock: this.options.sameMachineClock ? 'same-machine-wall-clock' : 'client-stimulus-only', elapsedMs, displayFps: paintSpan > 0 ? (this.paintCount - 1) * 1000 / paintSpan : null, paintCount: this.paintCount, markerTargetHz: this.schedule.hz, markerSampleHz: readSpan > 0 ? (this.readCount - 1) * 1000 / readSpan : null, markerReadCount: this.readCount, inputSampling: 'every-presented-frame-while-stimulus-pending', invalid: this.invalid, frameGapsIncludeSubsampling: true, skippedMarkerFrames: this.skipped, pendingStimuli: this.inputs.size, renderToObservedMs: percentiles(render), inputToObservedMs: percentiles(input), samples: this.samples };
   }
 }

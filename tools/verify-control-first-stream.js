@@ -15,8 +15,7 @@ async (hostPage) => {
     const c = document.createElement('canvas'); c.width = 256; c.height = 112; const ctx = c.getContext('2d'), deadline = performance.now() + 4000;
     while (performance.now() < deadline) {
       const view = t.layout?.views[0], frame = view && t.getLastPresentation(view.id);
-      const legacy = !t.getPresentedPlane && frame && t.getPaintedFrame(view.id, frame.rtpTimestamp);
-      const source = frame && (t.getPresentedPlane ? t.getPresentedPlane(view.id, frame.rtpTimestamp) : legacy && { image: legacy, sourceRect: view, pixelsPerDip: view.deviceScaleFactor * (view.mediaScale ?? 1), rtpTimestamp: frame.rtpTimestamp, layoutEpoch: frame.layoutEpoch });
+      const source = frame && t.getPresentedPlane(view.id, frame.rtpTimestamp);
       if (source && source.rtpTimestamp === frame.rtpTimestamp && source.layoutEpoch === frame.layoutEpoch) { const scale = source.pixelsPerDip; ctx.drawImage(source.image, source.sourceRect.x, source.sourceRect.y, 256 * scale, 112 * (source.pixelsPerDipY ?? scale), 0, 0, 256, 112); const marker = decodeMarker(ctx.getImageData(0, 0, 256, 112)); if (marker && (expected === null || marker.stimulus === expected)) return marker; }
       await new Promise(resolve => setTimeout(resolve, 20));
     }
@@ -25,17 +24,14 @@ async (hostPage) => {
   try {
     await page.goto(config.origin + '/automation');
     await page.waitForFunction(() => window.remotekitDiagnostics?.state);
-    await page.evaluate(async ({ origin, presentationMode }) => {
+    await page.evaluate(async ({ origin }) => {
       const action = window.remotekitDiagnostics.action;
       await action({ type: 'device.set', device: { mode: 'desktop', width: 1920, height: 1080, deviceScaleFactor: 1 } });
       await action({ type: 'tab.create', url: origin + '/test-pattern.html?mode=animation&fps=60&activationMarker=1', title: 'Pixel marker first stream' });
       const t = window.remotekitDiagnostics.transport; t.receiveProfile = 'chrome89-h264-42';
-      if (presentationMode) { if (!t.registerPlane) throw new Error('Presentation experiment unsupported by this client'); t.presentationMode = presentationMode; }
       window.rkReceiveCapabilities = await t.probeReceiveCapabilities(); await t.connect();
     }, config);
-    // An authorized atlas can arrive before React mounts the product Tab.
-    // Wait for the real plane paint required by input, not displayReady alone.
-    await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport, view = t.layout?.views[0]; return t.video.videoWidth > 0 && view && t.diagnostics.channel === '已连接' && t.displayReady && t.getLastPresentation(view.id) && document.querySelector('.remote-viewport canvas:not(.no-frame)'); }, null, { timeout: 20000 });
+    await page.waitForFunction(() => { const t = window.remotekitDiagnostics.transport, view = t.layout?.views[0]; return view && t.diagnostics.channel === '已连接' && t.getLastPresentation(view.id); }, null, { timeout: 20000 });
     const before = await page.evaluate(() => { const t = window.remotekitDiagnostics.transport, s = t.layout.views[0], r = document.querySelector('.remote-viewport canvas').getBoundingClientRect(), scale = s.deviceScaleFactor * (s.mediaScale ?? 1); return { focus: s.focus, epoch: t.layout.epoch, activeLabel: document.activeElement?.getAttribute('aria-label'), resultCount: t.inputResults.length, point: { x: r.left + 350 / (s.width / scale) * r.width, y: r.top + 30 / (s.height / scale) * r.height } }; });
     await page.mouse.move(before.point.x, before.point.y);
     await page.waitForFunction(count => window.remotekitDiagnostics.transport.inputResults.slice(count).some(result => result.type === 'input.result'), before.resultCount, { timeout: 5000 });
@@ -44,7 +40,7 @@ async (hostPage) => {
     if (hover.replies.some(reply => reply.ok === false) || hover.error) throw new Error('Initial no-button hover was rejected: ' + JSON.stringify(hover));
     if (hover.after.focus !== before.focus || hover.after.epoch !== before.epoch || hover.after.activeLabel !== before.activeLabel) throw new Error('Hover changed focus or layout: ' + JSON.stringify(hover));
     const first = await readMarker(null); await page.evaluate(marker => { window.rkFirstMarker = marker; }, first);
-    if (!first) throw new Error('No CRC-valid marker from the actually painted video plane');
+    if (!first) throw new Error('No CRC-valid marker from the authorized video plane');
     await page.mouse.click(before.point.x, before.point.y);
     const clicked = await readMarker(60001); await page.evaluate(marker => { window.rkClickMarker = marker; }, clicked);
     if (!clicked) throw new Error('No received-video activation marker after the real input-field click');
@@ -52,14 +48,14 @@ async (hostPage) => {
     const response = await readMarker(42); await page.evaluate(marker => { window.rkStimulusMarker = marker; }, response);
     if (!response) throw new Error('No CRC-valid IME stimulus 42 response from received video');
     await page.evaluate(async () => {
-      const video = window.remotekitDiagnostics.transport.video, callbacks = []; window.rkVideoFrameMetadata = { supported: typeof video.requestVideoFrameCallback === 'function', callbacks };
-      if (video.requestVideoFrameCallback) await new Promise(resolve => { let finished = false; const finish = () => { if (!finished) { finished = true; resolve(); } }; setTimeout(finish, 1000); const callback = (now, metadata) => { callbacks.push({ now, keys: Object.keys(metadata), metadata: { ...metadata } }); if (callbacks.length < 3 && !finished) video.requestVideoFrameCallback(callback); else finish(); }; video.requestVideoFrameCallback(callback); });
+      const t = window.remotekitDiagnostics.transport, view = t.layout.views[0], frame = t.getLastPresentation(view.id);
+      const video = frame && t.getPresentedPlane(view.id, frame.rtpTimestamp)?.image, callbacks = []; window.rkVideoFrameMetadata = { supported: typeof video?.requestVideoFrameCallback === 'function', callbacks };
+      if (video?.requestVideoFrameCallback) await new Promise(resolve => { let finished = false; const finish = () => { if (!finished) { finished = true; resolve(); } }; setTimeout(finish, 1000); const callback = (now, metadata) => { callbacks.push({ now, keys: Object.keys(metadata), metadata: { ...metadata } }); if (callbacks.length < 3 && !finished) video.requestVideoFrameCallback(callback); else finish(); }; video.requestVideoFrameCallback(callback); });
     });
     if (pageErrors.length) throw new Error('Client page errors: ' + pageErrors.join('; '));
   } catch (error) { failure = String(error); }
   try {
-    const observed = await page.evaluate(async () => { const t = window.remotekitDiagnostics?.transport; return { diagnostics: t?.diagnostics, layout: t?.layout, displayReady: t?.displayReady, presentedFrame: t?.presentedFrame, presentation: t?.presentationDiagnostics, inputTrace: t?.inputTrace, inputResults: t?.inputResults, hover: window.rkHover, receiveCapabilities: window.rkReceiveCapabilities, signaling: t?.signaling, state: await (await fetch('/api/state')).json(), video: { width: t?.video.videoWidth, height: t?.video.videoHeight, decodedFrames: t?.video.webkitDecodedFrameCount }, reports: t?.peer ? Array.from((await t.peer.getStats()).values()) : [], requestVideoFrameCallback: window.rkVideoFrameMetadata, markerBefore: window.rkFirstMarker, markerAfterClick: window.rkClickMarker, markerAfterStimulus: window.rkStimulusMarker }; });
-    if (!failure && config.presentationMode === 'single-plane-direct' && !(observed.presentation?.presentationRouting?.directFrames > 0)) failure = 'No eligible direct frames were actually painted: ' + JSON.stringify(observed.presentation?.presentationRouting);
+    const observed = await page.evaluate(async () => { const t = window.remotekitDiagnostics?.transport, video = t && [...t.videoPlanes.values()][0]?.video; return { diagnostics: t?.diagnostics, layout: t?.layout, displayReady: t?.displayReady, presentedFrame: t?.presentedFrame, presentation: t?.presentationDiagnostics, inputTrace: t?.inputTrace, inputResults: t?.inputResults, hover: window.rkHover, receiveCapabilities: window.rkReceiveCapabilities, signaling: t?.signaling, state: await (await fetch('/api/state')).json(), video: { width: video?.videoWidth, height: video?.videoHeight, decodedFrames: video?.webkitDecodedFrameCount }, reports: t?.peer ? Array.from((await t.peer.getStats()).values()) : [], requestVideoFrameCallback: window.rkVideoFrameMetadata, markerBefore: window.rkFirstMarker, markerAfterClick: window.rkClickMarker, markerAfterStimulus: window.rkStimulusMarker }; });
     if (!failure && (observed.diagnostics?.error || observed.state.endpointError || observed.inputResults?.some(reply => reply.ok === false))) failure = 'Remote input or endpoint reported an error: ' + JSON.stringify({ error: observed.diagnostics?.error, endpointError: observed.state.endpointError, rejected: observed.inputResults?.filter(reply => reply.ok === false) });
     const report = { kind: 'first-stream-functional-debug', passed: !failure, config, browserVersion: browser.version(), failure, pageErrors, exchanges: await Promise.all(exchanges), ...observed };
     await page.screenshot({ path: config.screenshotPath, fullPage: true });

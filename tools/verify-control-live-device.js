@@ -28,7 +28,7 @@ async hostPage => {
     await ready(count, mode === 'tablet' ? 2 : 1);
   };
   const record = async name => {
-    const result = await page.evaluate(name => { const t = window.remotekitDiagnostics.transport; return { name, layout: t.layout, planes: t.layout.views.map(v => window.rkRead(v.id)), routing: t.presentationDiagnostics.presentationRouting, diagnostics: t.diagnostics, stalePaintViolations: window.rkStalePaintViolations }; }, name);
+    const result = await page.evaluate(name => { const t = window.remotekitDiagnostics.transport; return { name, layout: t.layout, planes: t.layout.views.map(v => window.rkRead(v.id)), rendering: t.presentationDiagnostics.rendering, diagnostics: t.diagnostics, stalePaintViolations: window.rkStalePaintViolations }; }, name);
     if (result.planes.some(p => !p?.marker) || result.diagnostics.error || result.stalePaintViolations.length) throw new Error('Invalid presentation ' + JSON.stringify(result));
     stages.push(result); await page.screenshot({ path: `${config.directory}/${name}.png`, fullPage: true });
   };
@@ -44,19 +44,15 @@ async hostPage => {
       const t = window.remotekitDiagnostics.transport, { decodeMarker } = await import('/marker-codec.js');
       window.rkStalePaintViolations = []; window.rkLayoutTransitions = [];
       t.subscribePresentedFrames(frame => { const v = t.layout?.views.find(v => v.id === frame.viewId); if (v?.stale || frame.layoutEpoch !== t.layout?.epoch) window.rkStalePaintViolations.push({ frame, current: t.layout }); });
-      window.rkRead = id => { const frame = t.getLastPresentation(id), s = frame && t.getPresentedPlane(id, frame.rtpTimestamp); if (!s) return null; const c = document.createElement('canvas'); c.width = 256; c.height = 112; c.getContext('2d').drawImage(s.image, s.sourceRect.x, s.sourceRect.y, 256 * s.pixelsPerDip, 112 * s.pixelsPerDip, 0, 0, 256, 112); return { frame, kind: s.kind, sourceRect: s.sourceRect, marker: decodeMarker(c.getContext('2d').getImageData(0, 0, 256, 112)) }; };
-      window.remotekitDiagnostics.configure({receiveProfile:'chrome89-h264-42',presentationMode:'single-plane-direct',frameSource:'video'});await window.remotekitDiagnostics.refresh();await t.connect();
+      window.rkRead = id => { const frame = t.getLastPresentation(id), s = frame && t.getPresentedPlane(id, frame.rtpTimestamp); if (!s) return null; const c = document.createElement('canvas'); c.width = 256; c.height = 112; c.getContext('2d').drawImage(s.image, s.sourceRect.x, s.sourceRect.y, 256 * s.pixelsPerDip, 112 * (s.pixelsPerDipY ?? s.pixelsPerDip), 0, 0, 256, 112); return { frame, kind: s.kind, sourceRect: s.sourceRect, marker: decodeMarker(c.getContext('2d').getImageData(0, 0, 256, 112)) }; };
+      window.remotekitDiagnostics.configure({receiveProfile:'chrome89-h264-42'});await window.remotekitDiagnostics.refresh();await t.connect();
       window.rkObserveChannel=()=>{const channel=t.channel,receive=channel.onmessage;channel.onmessage=event=>{const m=JSON.parse(String(event.data));receive(event);if(m.type==='layout')window.rkLayoutTransitions.push({epoch:m.epoch,views:m.views.map(v=>({id:v.id,stale:v.stale,document:v.document}))});};};window.rkObserveChannel();
     });
     await ready(1, 1);
     for (const count of [1, 2]) {
       if (count === 2) { await action({ type: 'tab.create', url: config.origin + '/test-pattern.html?mode=static&title=Roundtrip-B' }); await action({ type: 'split.set', id: a }); await ready(2, 1); }
-      for (const path of ['single-plane-direct', 'snapshot']) {
-        await page.evaluate(async path=>{const api=window.remotekitDiagnostics;api.transport.disconnect();api.configure({presentationMode:path});await api.refresh();await api.transport.connect();window.rkObserveChannel();},path);
-        await ready(count,1);
-        await device('tablet', count); await input('tablet', count); await record(`${path}-${count}-tablet`);
-        await device('desktop', count); await input('desktop', count); await record(`${path}-${count}-desktop`);
-      }
+      await device('tablet', count); await input('tablet', count); await record(`video-${count}-tablet`);
+      await device('desktop', count); await input('desktop', count); await record(`video-${count}-desktop`);
     }
     const oldEpoch = stages[0].layout.epoch;
     const rejected = await page.evaluate(async oldEpoch => {

@@ -174,10 +174,10 @@ export function WindowFrame({
         Math.max(1, Math.round(rect.height)),
       );
     };
-    const observer = new ResizeObserver(measure);
-    observer.observe(node);
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : undefined;
+    observer?.observe(node);
     measure();
-    return () => observer.disconnect();
+    return () => observer?.disconnect();
   }, [win.id, onGeometry]);
   let origin = "";
   try {
@@ -428,7 +428,7 @@ export function WindowFrame({
                 {active.lifecycleRecoveryError}
               </div>
             ) : (
-              (active.restoring ||
+              !transport.presentationError && (active.restoring ||
                 (active.residency && active.residency !== "live")) && (
                 <div className="page-overlay" role="status">
                   正在恢复页面…

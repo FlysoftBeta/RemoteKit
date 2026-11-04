@@ -1,5 +1,12 @@
 # 当前问题与收尾记录
 
+## 冷启动首帧与Video-only（2026-11-04，验收通过，待发布）
+
+- FIRST-OPEN：用户确认新包冷启动首次客户端白屏，刷新恢复。自然冷启动本机通过；人为延后呈现ACK 4.5秒复现旧版零RTP时错误回退Canvas，未复现现场持续白屏。新版同条件保持Video，ACK后约84.6ms取得匹配帧，输入门禁和单peer/track保持。
+- VIDEO-ONLY：按用户要求删除生产Canvas、MSTP和共享WebGL呈现后端与旧配置/诊断/实验原型。Endpoint必须收到Video协商和当前布局完整ACK才发布码流。能力/协议/播放错误明确提示；首帧或元数据迟到在原Video连接限频补帧。保留尺寸过渡快照、摄像头与测试读回。
+- REFRESH-COMPLETE：刷新请求按peer/授权/布局/屏障绑定，只有标记的IDR通过屏障并成功发布才完成。源丢弃、发布失败不会消费请求；单请求在途、重试至多每秒一次，旧结果不能完成新请求。定向模型覆盖掉帧/迟到，真实157/89成功后pending=false且计数静止。
+- 验证：Client 96项定向及生产构建/smoke，Endpoint Release增量与4项定向通过。157普通及延迟确认、89冷启动真实H264/QSV通过；本轮没有新增性能矩阵。[修复](first-open-recovery-20261104.md) · [运行](osr-first-open-runtime-20261104.md)。
+
 由root维护。最新已发布源码433655d，取件码[861200](https://airportal.cn/861200/YnupKqRq8U)，包含生命周期恢复、跨布局触控退役、Stats与接收端等待优化，并保留此前站点手动键盘、尺寸过渡、Comp选卡与锁定调整。[包内验收与上传](osr-lifecycle-delivery-20261104.md)。不重复历史性能组；旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
 ## 152167 后生命周期、触控与延迟（2026-11-04，已交付861200）

@@ -18,7 +18,6 @@ export interface PresentedPlaneSource {
   /** Present only when the displayed ROI's vertical scale differs from its horizontal scale. */
   pixelsPerDipY?: number;
 }
-export type PresentationMode = 'snapshot' | 'single-plane-direct';
 
 export function samePlane(a: Surface, b: Surface) {
   return a.id === b.id && a.session === b.session && a.instance === b.instance && a.document === b.document &&

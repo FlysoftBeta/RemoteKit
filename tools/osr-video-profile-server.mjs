@@ -1,6 +1,6 @@
 // Usage: node tools/osr-video-profile-server.mjs --package <unpacked streaming runtime>
 //   --evidence develop/tmp/<new-directory> [--live-build] [--port 33623]
-//   [--viewer <chrome.exe>] [--rtc-playout-max-ms 50]
+//   [--viewer <chrome.exe>] [--rtc-playout-max-ms 50] [--state <previous evidence directory>]
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
@@ -13,7 +13,7 @@ import { parseArgs } from 'node:util';
 const { values: options } = parseArgs({ options: {
   package: { type: 'string' }, evidence: { type: 'string' },
   port: { type: 'string', default: '33623' }, viewer: { type: 'string', default: 'C:/src/chromium/src/out/rel/chrome.exe' },
-  'live-build': { type: 'boolean' }, 'rtc-playout-max-ms': { type: 'string' },
+  'live-build': { type: 'boolean' }, 'rtc-playout-max-ms': { type: 'string' }, state: { type: 'string' },
 } });
 if (!options.package || !options.evidence) throw Error('--package and --evidence are required');
 const port = Number(options.port);
@@ -23,8 +23,12 @@ if (maxPlayout !== undefined && maxPlayout !== '50') throw Error('Only the 50 ms
 const fixturePort = port + 1;
 const root = fileURLToPath(new URL('../', import.meta.url));
 const evidence = resolve(options.evidence);
-const scope = relative(join(root, 'develop', 'tmp'), evidence);
-if (!scope || scope.startsWith('..') || isAbsolute(scope)) throw Error('Use a new directory under develop/tmp');
+const state = options.state ? resolve(options.state) : evidence;
+for (const path of [evidence, state]) {
+  const scope = relative(join(root, 'develop', 'tmp'), path);
+  if (!scope || scope.startsWith('..') || isAbsolute(scope)) throw Error('Use directories under develop/tmp');
+}
+if (options.state) await stat(join(state, 'control.db'));
 const pkg = resolve(options.package);
 const node = join(pkg, 'bin', 'node.exe');
 const viewer = resolve(options.viewer);
@@ -33,6 +37,10 @@ const endpoint = options['live-build'] ? join(root, 'build', 'endpoint-package',
 const browser = options['live-build'] ? resolve('C:/src/chromium/src/out/dev/remotekit_browser.exe') :
   join(pkg, 'bin', 'remotekit_browser.exe');
 const control = join(options['live-build'] ? root : pkg, 'control', 'dist', 'server.mjs');
+const clientRoot = join(dirname(control), 'client');
+const clientIndex = join(clientRoot, 'index.html');
+const clientEntry = (await readFile(clientIndex, 'utf8')).match(/src="\/(assets\/index-[\w-]+\.js)"/)?.[1];
+if (!clientEntry) throw Error('Control client bundle is missing from index.html');
 
 async function fingerprint(path) {
   const hash = createHash('sha256');
@@ -42,7 +50,7 @@ async function fingerprint(path) {
 }
 
 const fingerprints = await Promise.all([
-  node, viewer, endpoint, browser, control,
+  node, viewer, endpoint, browser, control, clientIndex, join(clientRoot, clientEntry),
   join(dirname(browser), 'remotekit_sdk.dll'), join(dirname(browser), 'components_viz_service.dll'),
 ].map(fingerprint));
 await mkdir(dirname(evidence), { recursive: true });
@@ -79,6 +87,11 @@ const server = createServer(async (req, res) => {
     const route = new URL(req.url, 'http://127.0.0.1').pathname;
     if (req.method === 'GET' && route === '/fixture') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(fixture);
+    } else if (req.method === 'GET' && route === '/static-fixture') {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(
+        '<!doctype html><meta charset="utf-8"><title>Static first frame</title>' +
+        '<style>body{margin:0;background:#125b80;color:white;font:32px sans-serif}h1{margin:32px}</style>' +
+        '<h1>Static first frame</h1>');
     } else if (req.method === 'GET' && route === '/marker-codec.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript' }).end(codec);
     } else if (req.method === 'POST' && route === '/shutdown') {
@@ -111,11 +124,11 @@ await new Promise((ready, reject) => {
   server.once('error', reject);
   server.listen(fixturePort, '127.0.0.1', ready);
 });
-const endpointArgs = [`--browser=${browser}`, `--data-path=${join(evidence, 'endpoint')}`];
+const endpointArgs = [`--browser=${browser}`, `--data-path=${join(state, 'endpoint')}`];
 if (maxPlayout) endpointArgs.push(`--rtc-playout-max-ms=${maxPlayout}`);
 const child = spawn(node, [control], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: {
   ...process.env, PORT: String(port), REMOTEKIT_CONTROL_HOST: '127.0.0.1',
-  REMOTEKIT_CONTROL_DB: join(evidence, 'control.db'), REMOTEKIT_METRICS_DIR: join(evidence, 'metrics'),
+  REMOTEKIT_CONTROL_DB: join(state, 'control.db'), REMOTEKIT_METRICS_DIR: join(evidence, 'metrics'),
   REMOTEKIT_SERVER_TRACE: join(evidence, 'server-trace'), REMOTEKIT_MEDIA_TRACE: join(evidence, 'browser-trace'),
   REMOTEKIT_ENDPOINT: endpoint, REMOTEKIT_ENDPOINT_ARGS: JSON.stringify(endpointArgs),
   REMOTEKIT_CONTROL_ORIGINS: `http://127.0.0.1:${port}`,
@@ -147,6 +160,6 @@ process.on('SIGINT', close);
 process.on('SIGTERM', close);
 await writeFile(join(evidence, 'service.json'), JSON.stringify({
   supervisorPid: process.pid, controlPid: child.pid, port, fixturePort, pkg, endpoint, browser, control,
-  endpointArgs, maxPlayout: maxPlayout ?? null, startedUtc: new Date().toISOString(),
+  endpointArgs, state, maxPlayout: maxPlayout ?? null, startedUtc: new Date().toISOString(),
 }, null, 2));
 console.log(`Control port ${port}, fixture port ${fixturePort}, evidence ${evidence}`);
