@@ -22,7 +22,7 @@ class RenderSlots {
  enum class Result {idle,ready,reconfigure,error};
  void SetTrace(std::shared_ptr<ServerTrace> trace){trace_=std::move(trace);}
  void SetClock(const remotekit_rtc_clock_sample& sample){clock_=sample;}
- bool Open(remotekit_sdk_render_setup,Sdk&,std::string&);
+ bool Open(remotekit_sdk_render_setup,Sdk&,LUID,ID3D11Device5*,ID3D11DeviceContext4*,std::string&);
  bool Begin(uint32_t interval_us,bool force,std::string&,bool* sent=nullptr);
  void Pressure(bool encoder_backlog);
  bool HasCapacity()const;
@@ -30,7 +30,6 @@ class RenderSlots {
  HANDLE EventHandle()const;
  Result Poll(remotekit_rtc_frame&,SharedAtlasFrame&,std::string&);
  SharedAtlasFrame LatestMetadata()const;
- ID3D11Device5* Device()const;
  bool Close(std::string&,bool producer_exited=false);
  int64_t MonotonicMicros()const;
  std::optional<double> capture_to_ready_ms()const;
@@ -49,7 +48,6 @@ class RenderSlots {
  void PublishStats();
  struct PublishGuard {RenderSlots& owner;~PublishGuard(){owner.PublishStats();}};
  StatsSnapshot counters_,published_;mutable std::mutex stats_mutex_;
- ComPtr<ID3D11Device5> device_;LUID adapter_{};
  remotekit_rtc_clock_sample clock_{};std::shared_ptr<ServerTrace> trace_;std::atomic<uint64_t> delivered_{0};
 };
 }

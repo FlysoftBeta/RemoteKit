@@ -34,6 +34,8 @@ Chrome157/DPR2与Chrome89/DPR1真实通过默认video首帧、双Window画面及
 
 ## 本次渲染与媒体契约
 
+- 串流Browser启动前由Endpoint Comp探测硬件H.264编码器并固定后端和GPU LUID。Rend按该LUID创建设备，Comp每代导入前核对LUID。Browser/SDK增量构建及Endpoint Release通过。UHD630、Chrome157实测QSV首帧和atlas从1168×752换代至816×560，H.264持续解码，Browser、peer、video track与DataChannel保持，旧代完成退役。NVENC已检查无对应硬件时在启动Browser前失败，实际编码和多GPU选择尚未在本机验收。详见[GPU输出](gpu-output.zh-CN.md)。
+
 - Endpoint Comp选择空闲Slot，异步发送带generation/slot/value的Begin；Browser Rend返回Reject，或在实际GPU队列Signal对应Slot ready Fence。最多四个atlas Slot，活动深度按压力变化，允许多个请求在途。成功帧没有ready/present/release IPC。
 - 每WebContents独立Aura root，经BeginFrameSource驱动专用Viz OSR OutputDevice，直接绘制共享BGRA目标；Browser在GPU上合成各plane为请求指定的atlas Slot。旧Capture/CopyOutput生产路径、旧自治节拍及桥接fallback删除，不需要本地屏幕Present。
 - 每Slot独立ready/consumed Fence及元数据。必须观察真实ready后才编码；SDK、转换和硬件编码租约全部结束，且consumed实际完成后才能复用。Stop/Stopped仅证明有序请求排空；未完成GPU工作继续保留。

@@ -306,7 +306,24 @@ class Qsv final : public HardwareEncoder {
     };
     if(!Status(filter("mfxImplDescription.Impl",MFX_IMPL_TYPE_HARDWARE),"oneVPL hardware filter",error) ||
        !Status(filter("mfxImplDescription.AccelerationMode",MFX_ACCEL_MODE_VIA_D3D11),"oneVPL D3D11 filter",error))return false;
-    if(!Status(MFXCreateSession(loader_,0,&session_),"MFXCreateSession hardware D3D11",error)) return false;
+    ComPtr<IDXGIDevice> dxgi;
+    ComPtr<IDXGIAdapter> adapter;
+    DXGI_ADAPTER_DESC adapter_desc{};
+    if(FAILED(device_.As(&dxgi)) || FAILED(dxgi->GetAdapter(&adapter)) ||
+       FAILED(adapter->GetDesc(&adapter_desc))) {
+      error="QSV D3D11 adapter identity unavailable";return false;
+    }
+    // The dispatcher also synthesizes the extended LUID for legacy Media SDK
+    // implementations on Windows. A session with no matching identity fails.
+    auto adapter_config=MFXCreateConfig(loader_);
+    if(!adapter_config){error="oneVPL adapter filter config unavailable";return false;}
+    mfxVariant adapter_property{};
+    adapter_property.Type=MFX_VARIANT_TYPE_PTR;
+    adapter_property.Data.Ptr=&adapter_desc.AdapterLuid;
+    if(!Status(MFXSetConfigFilterProperty(adapter_config,
+         reinterpret_cast<const mfxU8*>("mfxExtendedDeviceId.DeviceLUID"),adapter_property),
+         "oneVPL adapter LUID filter",error) ||
+       !Status(MFXCreateSession(loader_,0,&session_),"MFXCreateSession hardware D3D11 for adapter",error))return false;
     mfxVersion version{};mfxIMPL implementation{};
     if(!Status(MFXQueryVersion(session_,&version),"MFX version",error) ||
        !Status(MFXQueryIMPL(session_,&implementation),"MFX implementation",error))return false;

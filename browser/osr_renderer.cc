@@ -14,10 +14,13 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "base/check.h"
+#include "base/command_line.h"
 #include "base/containers/span.h"
 #include "base/functional/bind.h"
 #include "base/sequence_checker.h"
@@ -39,9 +42,27 @@ namespace {
 using Microsoft::WRL::ComPtr;
 constexpr uint64_t kRemoved = std::numeric_limits<uint64_t>::max();
 constexpr size_t kPlaneTargets = kRenderSlotCount + 1;
+// Chromium forwards this same switch to ANGLE in the GPU process.
+constexpr char kUseAdapterLuid[] = "use-adapter-luid";
 bool g_osr_fault_sealed = false;  // Unknown GPU work forbids later generations.
 uint64_t g_plane_generation = 0;  // UI sequence, survives output generation replacement.
 std::string Number(uint64_t value) { return base::NumberToString(value); }
+std::optional<LUID> ParseAdapterLuid(std::string_view value) {
+  const size_t comma = value.find(',');
+  if (comma == std::string::npos)
+    return std::nullopt;
+
+  const auto high_part = value.substr(0, comma);
+  const auto low_part = value.substr(comma + 1);
+  int32_t high = 0;
+  uint32_t low = 0;
+  if (high_part.starts_with('+') || low_part.starts_with('+') ||
+      !base::StringToInt(high_part, &high) ||
+      !base::StringToUint(low_part, &low)) {
+    return std::nullopt;
+  }
+  return LUID{low, high};
+}
 base::DictValue Failure(const std::string& error) {
   return base::DictValue().Set("ok", false).Set("error", error);
 }
@@ -143,7 +164,23 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
     mapping_->magic = kSharedRenderMagic;
     mapping_->version = kSharedRenderVersion;
     mapping_->mapping_size = sizeof(SharedRenderMapping);
-    if (!InitializeDevice() || !InitializeShaders()) {
+    const auto* command_line = base::CommandLine::ForCurrentProcess();
+    std::optional<LUID> requested_adapter;
+    if (command_line->HasSwitch(kUseAdapterLuid)) {
+      requested_adapter =
+          ParseAdapterLuid(command_line->GetSwitchValueASCII(kUseAdapterLuid));
+      if (!requested_adapter) {
+        Fatal("invalid OSR adapter LUID");
+        return;
+      }
+    }
+    if (!InitializeDevice(requested_adapter)) {
+      Fatal(requested_adapter
+                ? "OSR hardware D3D11.4 initialization failed for requested adapter LUID"
+                : "OSR hardware D3D11.4 initialization failed");
+      return;
+    }
+    if (!InitializeShaders()) {
       Fatal("OSR hardware D3D11.4/shader initialization failed"); return;
     }
     for (auto& slot : slots_) {
@@ -175,7 +212,7 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
     timer_.Start(FROM_HERE, base::Milliseconds(2),
                  base::BindRepeating(&State::Poll, base::Unretained(this)));
   }
-  bool InitializeDevice() {
+  bool InitializeDevice(const std::optional<LUID>& requested_adapter) {
     ComPtr<IDXGIFactory1> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
     for (UINT i = 0;; ++i) {
@@ -183,6 +220,11 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
       if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
       if (!adapter) break;
       DXGI_ADAPTER_DESC1 desc{};
+      if (requested_adapter &&
+          (desc.AdapterLuid.HighPart != requested_adapter->HighPart ||
+           desc.AdapterLuid.LowPart != requested_adapter->LowPart)) {
+        continue;
+      }
       if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
       ComPtr<ID3D11Device> device;
       ComPtr<ID3D11DeviceContext> context;

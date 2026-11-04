@@ -10,6 +10,8 @@
 
 Skia Submit及EndPaint之后，ANGLE实际D3D11 context4在对应目标Fence上Signal。Browser合成context先Wait各plane Fence，再按atlas矩形缩放拼接并清除padding，最后Signal指定Slot的ready Fence。设备必须同adapter LUID。
 
+串流服务由Endpoint Comp在启动Browser前探测硬件H.264编码器，确定编码后端和DXGI Adapter LUID，并将LUID通过 `--use-adapter-luid=<high>,<low>` 传给Browser。Rend每次创建输出都按指定LUID创建设备，Chromium把同一参数传给GPU进程的ANGLE D3D11。Comp在导入每一代共享资源前核对返回的LUID，Viz也校验绘制设备的LUID。设备不可用或标识不一致时报告错误。同一Browser运行期间固定适配器。
+
 ## Slot与编码租约
 
 输出最多四个Slot，各有独立纹理、ready/consumed Fence和seqlock帧记录。全局快照只描述布局。metadata先发布，再排真实Signal；CPU发布不是GPU完成。

@@ -168,6 +168,53 @@ struct Options {
 
  }
 };
+std::string AdapterLuid(LUID luid) {
+ return std::to_string(luid.HighPart)+","+std::to_string(luid.LowPart);
+}
+struct StreamingAdapter {
+ LUID luid;
+ std::string encoder;
+ ComPtr<ID3D11Device5> device;
+ ComPtr<ID3D11DeviceContext4> context;
+};
+StreamingAdapter SelectStreamingAdapter(Sdk& sdk,const Options& options) {
+ ComPtr<IDXGIFactory1> factory;
+ if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+  throw std::runtime_error("streaming DXGI factory unavailable");
+ const bool qsv_required=options.encoding.qsv_async_vpp ||
+     (options.encoding.qsv_low_power && options.encoding.qsv_low_power_explicit);
+ std::string failures;
+ for(std::string_view backend:{"qsv","nvenc"}) {
+  if(options.encoder!="auto" && options.encoder!=backend)continue;
+  if(backend=="nvenc" && qsv_required)continue;
+  const UINT vendor=backend=="qsv"?0x8086:0x10de;
+  for(UINT index=0;;++index) {
+   ComPtr<IDXGIAdapter1> adapter;
+   const auto enumerated=factory->EnumAdapters1(index,&adapter);
+   if(enumerated==DXGI_ERROR_NOT_FOUND)break;
+   if(FAILED(enumerated))throw std::runtime_error("streaming DXGI adapter enumeration failed");
+   DXGI_ADAPTER_DESC1 desc{};
+   if(FAILED(adapter->GetDesc1(&desc)))throw std::runtime_error("streaming DXGI adapter identity unavailable");
+   if((desc.Flags&DXGI_ADAPTER_FLAG_SOFTWARE) || desc.VendorId!=vendor)continue;
+   StreamingAdapter candidate{desc.AdapterLuid,std::string(backend)};
+   std::string error;
+   if(CreateDevice(&candidate.luid,candidate.device,candidate.context,error)) {
+    const auto probe_stats=std::make_shared<EncoderStats>();
+    // Exercise the same hardware initialization and input-surface setup as RTC.
+    EncoderWorker probe(sdk,0,candidate.device.Get(),candidate.encoder,options.encoding,probe_stats,{},{},0,{});
+    remotekit_rtc_encoder_config config{};
+    config.struct_size=sizeof(config);
+    config.width=std::min(1280u,options.max_encode_width)&~1u;
+    config.height=std::min(720u,options.max_encode_height)&~1u;
+    config.h264_level_idc=options.encoding.level_idc;
+    if(probe.Configure(config))return candidate;
+    error=probe_stats->error;
+   }
+   failures+="; "+candidate.encoder+" "+AdapterLuid(candidate.luid)+": "+error;
+  }
+ }
+ throw std::runtime_error("no hardware H264 streaming adapter for "+options.encoder+failures);
+}
 struct Session {
  Sdk& sdk;Options options;std::string tenant,id;fs::path directory;
  HANDLE process=nullptr,job=nullptr;std::atomic<uint64_t> control{0},client_gestures_control{0};uint64_t request_id=0;
@@ -206,7 +253,7 @@ struct Session {
  remotekit::MediaFeedback media_feedback;
  std::atomic<uint32_t> comp_bitrate{1},comp_fps{60};
  std::mutex encoder_mutex;std::map<uint64_t,std::unique_ptr<EncoderWorker>> encoders;
- ComPtr<ID3D11Device> encoder_device;
+ std::optional<StreamingAdapter> streaming_adapter;
  struct Event{uint32_t type;std::string bytes,auxiliary;int32_t value;uint64_t peer;uint64_t authorization=0;};
  bool ProductCurrent(const Event& event) const {return event.peer==peer.load() && authorization.Current(event.authorization);}
  std::mutex event_mutex;std::condition_variable event_wake;std::deque<Event> events;
@@ -382,6 +429,10 @@ struct Session {
   if(process || job)fprintf(stderr,"session %s browser replacement control=%d stop_pending=%d peer=%llu %s\n",
     id.c_str(),control.load()!=0,producer_stop_pending,peer.load(),ProcessDiagnostic().c_str());
   if(!Stop())throw std::runtime_error("previous browser termination unfinished; retry the retained producer before restart");
+  streaming_adapter=SelectStreamingAdapter(sdk,options);
+  const auto luid=AdapterLuid(streaming_adapter->luid);
+  fprintf(stderr,"session %s selected streaming encoder=%s adapter_luid=%s\n",
+    id.c_str(),streaming_adapter->encoder.c_str(),luid.c_str());
   job=CreateJobObjectW(nullptr,nullptr);if(!job)throw std::runtime_error("CreateJobObject failed");
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if(!SetInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits)))throw std::runtime_error("job limits failed");
@@ -389,6 +440,7 @@ struct Session {
   client_gestures_control=0;browser_incarnation=NewIncarnation();
   std::wstring command=Quote(options.browser.wstring());
   auto append=[&](std::wstring arg){command+=L" "+Quote(arg);};
+  append(L"--use-adapter-luid="+std::wstring(luid.begin(),luid.end()));
   append(L"--control-channel="+std::wstring(channel.begin(),channel.end()));
   append(L"--browser-incarnation="+std::wstring(browser_incarnation.begin(),browser_incarnation.end()));
   append(L"--session-id="+std::wstring(id.begin(),id.end()));
@@ -839,6 +891,7 @@ struct Session {
    CloseHandle(process);process=nullptr;process_in_job=false;
   }
   if(job){CloseHandle(job);job=nullptr;}
+  streaming_adapter.reset();
   producer_stop_pending=false;
   // A new browser may restart its local generation counters at one. Its
   // resources/documents still belong to a new presentation incarnation.
@@ -942,8 +995,10 @@ struct Session {
  }
  static int CreateEncoder(void* context,uint64_t encoder_peer,uint64_t encoder) {
   auto* self=static_cast<Session*>(context);std::lock_guard lock(self->encoder_mutex);
-  self->encoders.emplace(encoder,std::make_unique<EncoderWorker>(self->sdk,encoder,self->encoder_device.Get(),
-         self->options.encoder,self->options.encoding,self->stats,
+  if(!self->streaming_adapter)return 1;
+  const auto& adapter=*self->streaming_adapter;
+  self->encoders.emplace(encoder,std::make_unique<EncoderWorker>(self->sdk,encoder,adapter.device.Get(),
+         adapter.encoder,self->options.encoding,self->stats,
       [self,encoder_peer,first_encoded=true](uint32_t timestamp,uint64_t epoch,size_t encoded_bytes,bool keyframe,const remotekit_rtc_frame& source) mutable {
        const auto stamp=self->frame_authorization.load();
        if(!self->authorization.Current(stamp) || epoch!=self->layout_epoch.load())return;
@@ -1030,8 +1085,11 @@ struct Session {
    throw std::runtime_error("output open SDK "+std::to_string(result));
   }
   capture_clock_uncertainty_ms=pool.clock_uncertainty_us()/1000;
-  std::string error;if(!pool.Open(setup,sdk,error))throw std::runtime_error(error);
-  {std::lock_guard lock(encoder_mutex);encoder_device=pool.Device();}
+  const auto& adapter=*streaming_adapter;
+  std::string error;
+  if(!pool.Open(setup,sdk,adapter.luid,adapter.device.Get(),adapter.context.Get(),error))
+   throw std::runtime_error(error+" expected_adapter="+AdapterLuid(adapter.luid)+
+      " render_adapter="+AdapterLuid({setup.adapter_luid_low,setup.adapter_luid_high}));
   MarkConnection(ConnectionPhase::output_open_end);
  }
  int SendData(uint64_t handle,uint64_t stamp,const std::string& encoded) {

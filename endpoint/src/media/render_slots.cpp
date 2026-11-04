@@ -81,15 +81,16 @@ void RenderSlots::Reap(){PublishGuard publish{*this};for(auto it=retired_.begin(
  // observation, then a consumed signal. Retired generations are never skipped.
  for(auto record:s.pacing.slots())if(record.phase==CompPacing::Phase::rendering){auto value=s.slots[record.id.slot].ready?s.slots[record.id.slot].ready->GetCompletedValue():UINT64_MAX;if(value!=UINT64_MAX&&value>=record.id.value){s.pacing.Ready(record.id);++counters_.readyObserved;}}
  s.Advance(error);if(s.Drained()){++counters_.retiredGenerationsCompleted;RK_SERVER_TRACE(s.trace,"render_generation_retired",(TraceIds{0,0,s.setup.generation,0,0}),);it=retired_.erase(it);}else ++it;}}
-bool RenderSlots::Open(remotekit_sdk_render_setup setup,Sdk& sdk,std::string& error){PublishGuard publish{*this};
+bool RenderSlots::Open(remotekit_sdk_render_setup setup,Sdk& sdk,LUID adapter,ID3D11Device5* device,
+                       ID3D11DeviceContext4* context,std::string& error){PublishGuard publish{*this};
  Reap();if(state_){state_->RequestStop();retired_.push_back(std::move(state_));}
  auto s=std::make_shared<State>();s->setup=setup;s->sdk=&sdk;s->counters=&counters_;s->clock=clock_;s->trace=trace_;state_=s;
  if(!s->events.handle()){error="render event creation failed";return false;}
  if(setup.struct_size!=sizeof(setup)||!setup.generation||!setup.width||!setup.height||setup.mapping_size!=sizeof(SharedRenderMapping)){error="render setup ABI mismatch";return false;}
- LUID luid{setup.adapter_luid_low,setup.adapter_luid_high};
- if(device_ && (adapter_.LowPart!=luid.LowPart||adapter_.HighPart!=luid.HighPart)){error="render adapter changed; peer rebuild required";return false;}
- if(device_){s->device=device_;ComPtr<ID3D11DeviceContext> immediate;device_->GetImmediateContext(&immediate);if(FAILED(immediate.As(&s->context))){error="render context4 unavailable";return false;}}
- else {if(!CreateDevice(&luid,s->device,s->context,error))return false;device_=s->device;adapter_=luid;}
+ if(adapter.LowPart!=setup.adapter_luid_low || adapter.HighPart!=setup.adapter_luid_high) {
+  error="render adapter differs from selected streaming adapter";return false;
+ }
+ s->device=device;s->context=context;
  for(uint32_t i=0;i<4;++i){auto& slot=s->slots[i];if(FAILED(s->device->OpenSharedResource1(reinterpret_cast<HANDLE>(setup.texture_handles[i]),IID_PPV_ARGS(&slot.texture)))||
   FAILED(s->device->OpenSharedFence(reinterpret_cast<HANDLE>(setup.ready_fence_handles[i]),IID_PPV_ARGS(&slot.ready)))||
   FAILED(s->device->OpenSharedFence(reinterpret_cast<HANDLE>(setup.consumed_fence_handles[i]),IID_PPV_ARGS(&slot.consumed)))){error="render slot import failed";return false;}
@@ -130,7 +131,6 @@ RenderSlots::Result RenderSlots::Poll(remotekit_rtc_frame& frame,SharedAtlasFram
  }return Result::idle;
 }
 SharedAtlasFrame RenderSlots::LatestMetadata()const{return state_?state_->latest:SharedAtlasFrame{};}
-ID3D11Device5* RenderSlots::Device()const{return state_?state_->device.Get():nullptr;}
 bool RenderSlots::Close(std::string& error,bool producer_exited){PublishGuard publish{*this};
  if(producer_exited){if(state_)state_->producer_exited=true;for(auto& old:retired_)old->producer_exited=true;}
  if(state_){state_->RequestStop();retired_.push_back(std::move(state_));}
