@@ -51,6 +51,7 @@ class PageRequests final : public content::WebContentsDelegate,
   base::DictValue Command(const base::DictValue& command);
   void CancelAll(const std::string& reason);
   size_t pending_count() const { return pending_.size(); }
+  bool fullscreen() const { return fullscreen_; }
   // Public delegate/observer APIs do not expose widget tooltip updates. A native
   // view/widget hook must forward them here; this method creates no native UI.
   void RequestClose();

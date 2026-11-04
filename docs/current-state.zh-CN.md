@@ -2,6 +2,12 @@
 
 更新：2026-11-04。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
+## 最新增量（Viewer自动全屏与内部网页全屏，未上传）
+
+设置新增“打开或激活时全屏”，默认关闭并由Control持久保存。打开或回到Viewer时尝试外层全屏，浏览器手势限制导致失败则等待可信交互；主动退出后不立即抢回。远端网页Fullscreen API只使内容铺满整个Client，隐藏外壳与其他Window，不请求Client原生全屏；悬浮按钮、Esc或网页自身可退出。当前状态快照绑定Browser incarnation/instance/document，导航及连接生命周期清理或重新对账，沿用现有RTC与布局输入门禁。[契约](control-plane.zh-CN.md#viewer与网页全屏)。
+
+Browser/SDK、Endpoint Release与Control生产构建通过，Endpoint定向CTest 1/1、Control定向69项通过。157/89真实H.264内部全屏、输入命中、网页退出、悬浮退出及导航恢复通过，157另通过Esc；同组peer/track/DC保持。89通过外层设置重载读回、无手势拒绝与可信交互重试成功。157外层确认hook在可信交互时调用API，但浏览器返回`TypeError: not granted`，未验证原生全屏成功。回前台事件使用合成focus/blur，实体移动设备未验收。证据见[运行记录](../develop/docs/fullscreen-runtime-20261104.md)与[构建记录](../develop/docs/fullscreen-build-20261104.md)。用户取消本次上传，未生成发布包；下述306244不包含此增量。
+
 ## 最近交付（平板拍照与彩色扫描，306244）
 
 用户实用反馈否定162141的拍照布局和三层流程：横屏快门难触达、取景被挤小、采样与上传串行造成等待、扫描依赖完整页边并丢色。现已重做全屏覆盖取景/侧边快门、相机配置和连续拍摄，取消独立检查照片页，拍后在紧凑文件篮strip中处理；只保留普通照片/文档扫描，扫描合并几何与保色增强。原图不经串流视频codec，临时小图经Endpoint增量评分，最多1秒/20个不同帧，质量够用提前停止；最终上传保留帧PNG。

@@ -2774,8 +2774,8 @@ struct Session {
    Json command={{"method","navigation.ack"},{"session",id},{"view",ViewId(request)}};
    NavigationOperation(command,request);return Rpc(command);
   }
-  const bool page_reply=method=="view.page.reply" || method=="view.close.reply";
-  if(page_reply && (!Alive() || !control || producer_stop_pending || browser_incarnation.empty() ||
+  const bool guarded_page=method=="view.page.reply" || method=="view.close.reply" || method=="view.page.exitFullscreen";
+  if(guarded_page && (!Alive() || !control || producer_stop_pending || browser_incarnation.empty() ||
      request.value("browserIncarnation",std::string())!=browser_incarnation))
    throw std::runtime_error("stale_browser_incarnation");
   const bool lifecycle=method=="view.lifecycle";
@@ -2784,7 +2784,7 @@ struct Session {
   if(guarded_lifecycle && (!request.value("requireRunning",false) ||
      request.value("browserIncarnation",std::string())!=browser_incarnation || browser_incarnation.empty()))
    throw std::runtime_error("stale_lifecycle_recovery");
-  const bool require_running=page_reply || ((method=="view.configure" || lifecycle) && request.value("requireRunning",false));
+  const bool require_running=guarded_page || ((method=="view.configure" || lifecycle) && request.value("requireRunning",false));
   if(require_running) {
    if(!Alive() || !control || producer_stop_pending)throw std::runtime_error("browser not running; guarded maintenance cannot start it");
   } else Start();
@@ -2835,6 +2835,11 @@ struct Session {
     command["text"]=request["text"];
    }
    return {{"accepted",true},{"browser",Rpc(command)}};
+  }
+  if(method=="view.page.exitFullscreen") {
+   if(!desired.contains(view))throw std::runtime_error("view not found");
+   return Rpc({{"method","page.exitFullscreen"},{"session",id},{"view",view},
+    {"instance",Required(request,"instance")},{"document",Required(request,"document")}});
   }
   if(method=="view.command") {
    const auto action=Required(request,"command");

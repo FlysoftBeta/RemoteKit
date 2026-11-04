@@ -83,6 +83,7 @@ export function WindowFrame({
   onGeometry,
   focusAddress,
   visible,
+  fullscreen,
   audioSaving, audioError, saveAudio,
 }: {
   win: ProductWindow;
@@ -97,6 +98,7 @@ export function WindowFrame({
   onGeometry: (id: string, width: number, height: number) => void;
   focusAddress: string | null;
   visible: boolean;
+  fullscreen: boolean;
   audioSaving:boolean;audioError:string;saveAudio:(channels:AudioChannels)=>void;
 }) {
   const tabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
@@ -136,9 +138,18 @@ export function WindowFrame({
       input.current?.select();
     }
   }, [focusAddress]);
+  const fullscreenWindowId = state.pageFullscreen?.windowId;
+  useEffect(() => {
+    if (!fullscreenWindowId) return;
+    setMenu(null);
+    setTabMenu(null);
+    setSwitcher(null);
+    setSiteMenuOrigin(undefined);
+  }, [fullscreenWindowId]);
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
       if (
+        !fullscreen &&
         focused &&
         !document.querySelector('[role="dialog"][aria-modal="true"]') &&
         (event.ctrlKey || event.metaKey) &&
@@ -153,7 +164,7 @@ export function WindowFrame({
     };
     document.addEventListener("keydown", listener, true);
     return () => document.removeEventListener("keydown", listener, true);
-  }, [focused]);
+  }, [focused, fullscreen]);
   useEffect(() => {
     const bar = strip.current;
     const selected = bar?.querySelector('[aria-selected="true"]')?.closest('.browser-tab');
@@ -412,7 +423,7 @@ export function WindowFrame({
               transport={transport}
               viewId={active.webviewId}
               overlay={state.workspace.settings.showStats ?? false}
-              keyboardActive={online && focused && visible}
+              keyboardActive={online && (focused || fullscreen) && visible}
               manualKeyboard={!!sitePreferences?.manualKeyboard}
               onFocus={activate}
             />

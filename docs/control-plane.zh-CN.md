@@ -52,6 +52,14 @@ pending上限16、30秒超时；关闭/过期对象不会按URL伪装为成功�
 
 alert/confirm/prompt和导航beforeunload是临时pageDialogs。对话身份绑定不可复用的browserIncarnation、view、instance、document和request；回复前刷新检查，Endpoint只向相同运行实例发送，Browser执行点再次校验。关闭确认的公共requestId为完整身份哈希，原生请求号只在服务端保存。后台页显示待处理标记，可见activeTab的请求用MUI Dialog处理。关Tab的beforeunload由pendingClose流程处理，避免重复对话；取消不删Tab；离线或Browser替换取消旧关闭意图并保留Tab。只有明确关闭响应/状态/持久事件才删除，缺页不是关闭证据。
 
+## Viewer与网页全屏
+
+“更多→设置→打开或激活时全屏”控制Viewer所在浏览器的全屏，默认关闭，`autoFullscreen`由Control保存。启用后在打开Viewer、返回前台或重新获得焦点时尝试Fullscreen API；浏览器要求用户手势而拒绝时，等待下一次可信交互重试。用户主动退出后不在同一次激活中自动抢回全屏。客户端不另存此偏好。
+
+远端网页的Fullscreen API独立于上述设置：Browser报告当前全屏状态，Control将其绑定到Browser incarnation、WebView instance与document，以临时`pageFullscreen`状态交给Viewer，不写入产品数据库。Viewer只显示该网页内容并撑满整个Client，隐藏窗口栏和导航栏；不会因此调用本地Fullscreen API。其他Window组件与现有RTC连接保留，可见性和实际内容bounds继续通过既有viewport路径收敛，尺寸换代仍遵守输入门禁。
+
+网页自己退出、Viewer悬浮退出按钮或Esc可结束内部全屏。显式退出携带当前目标身份，Endpoint与Browser复查运行实例及文档；旧文档的退出不能影响新页面。导航、关页、锁定与断线清理显示状态，重新连接依据当前Browser快照恢复。原生状态沿用Control约1.5秒一次的周期对账同步，不是即时推送事件。
+
 ## 站点身份与画质
 
 “更多→网页兼容性处理”按HTTP(S) origin保存平板UA与“不自动弹出键盘”。`site.set`接受`tabletUa`、`manualKeyboard`中至少一个布尔字段，按字段合并，旧记录缺少`manualKeyboard`时默认自动弹出。键盘设置只改变Viewer行为，通过Control持久状态与操作收据收敛，不刷新页面、不下发UA；客户端不持久化这些设置。

@@ -40,6 +40,20 @@ button:focus-visible,
   min-width: 0;
   overflow: hidden;
 }
+.remote-page-fullscreen > .window-workspace {
+  position: absolute;
+  inset: 0;
+}
+.remote-page-fullscreen .tab-bar,
+.remote-page-fullscreen .navigation-bar {
+  display: none;
+}
+.remote-page-fullscreen .remote-fullscreen-exit {
+  position: absolute;
+  top: max(8px, env(safe-area-inset-top));
+  right: max(8px, env(safe-area-inset-right));
+  z-index: 3;
+}
 .window-frame {
   display: flex;
   flex-direction: column;

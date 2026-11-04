@@ -43,6 +43,7 @@ import { UnlockView } from './unlock-view';
 import { SecuritySettings } from './security-settings';
 import { useAuthCamera, type AuthRequest } from './auth-camera';
 import { useAutoLock } from './auth-idle';
+import { useAutoFullscreen } from './use-auto-fullscreen';
 import "./style.css";
 const theme = createTheme({
   palette: {
@@ -89,6 +90,7 @@ function Workspace({
   const state=projectOperations(authoritative,pendingOperations);
   const shell = useRef<HTMLElement>(null);
   const showShell = !!state && !localLock && auth?.locked === false;
+  useAutoFullscreen(showShell && state.workspace.settings.autoFullscreen === true);
   useLayoutEffect(() => {
     const node = shell.current;
     if (!showShell || !node) return;
@@ -187,6 +189,7 @@ function Workspace({
         current.workspace.layoutMode === "side-by-side" &&
         width >=
           Math.max(720, current.workspace.windows.length * 365 - 5);
+      const fullscreenWindowId = current.pageFullscreen?.windowId;
       const params: ViewerViewport = {
         devicePixelRatio: window.devicePixelRatio || 1,
         windows: current.workspace.windows.map((w) => ({
@@ -199,7 +202,7 @@ function Workspace({
           visible:
             document.visibilityState !== "hidden" &&
             current.workspace.tabs.some(t => t.id === w.activeTabId && t.kind !== 'start' && t.kind !== 'files') &&
-            (all || w.id === current.workspace.activeWindowId),
+            (fullscreenWindowId ? w.id === fullscreenWindowId : all || w.id === current.workspace.activeWindowId),
         })),
       };
       const request = ++viewportRequest.current;
@@ -312,6 +315,7 @@ function Workspace({
     state?.workspace.activeWindowId,
     state?.workspace.windows.length,
     state?.workspace.layoutMode,
+    state?.pageFullscreen?.windowId,
     status,
     width,
     sendViewport,
@@ -351,6 +355,28 @@ function Workspace({
   const saveRegistration = useCallback((serverCredential: string) =>
     connection.current!.request("admin.setRegistrationCredential", { serverCredential }), []);
   const productReady = status === 'online' && media.productReady;
+  const fullscreen = state?.pageFullscreen;
+  const fullscreenTarget = fullscreen?.target;
+  const exitingFullscreen = pendingOperations.some(entry =>
+    entry.action.type === 'page.exitFullscreen' && entry.action.target === fullscreenTarget &&
+    (!entry.receipt || ['accepted', 'applying', 'unknown'].includes(entry.receipt.status)));
+  const exitFullscreen = useRef<() => void>(() => {});
+  exitFullscreen.current = () => {
+    if (fullscreenTarget && productReady && !exitingFullscreen)
+      void action({ type: 'page.exitFullscreen', target: fullscreenTarget }).catch(report);
+  };
+  useEffect(() => {
+    if (!fullscreenTarget) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.repeat || event.isComposing ||
+          document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      exitFullscreen.current();
+    };
+    window.addEventListener('keydown', escape, true);
+    return () => window.removeEventListener('keydown', escape, true);
+  }, [fullscreenTarget]);
   const libraryRequest: LibraryRequest = useCallback((method, params) => connection.current!.request(method, params), []);
   const library = useFileLibrary(libraryRequest, media.files, productReady, showShell, auth?.user.id, state?.fileRequests.map(request => request.id) ?? []);
   if (localLock || auth?.locked !== false) return <RevealScreen key={`${auth?.epoch ?? 'connecting'}:${localLock ?? ''}`}>
@@ -361,14 +387,14 @@ function Workspace({
 
   const workspace = state.workspace,
     sideBySide =
-      workspace.layoutMode === "side-by-side" &&
+      !fullscreen && workspace.layoutMode === "side-by-side" &&
       width >= Math.max(720, workspace.windows.length * 365 - 5),
     windows = workspace.windows,
     pending = workspace.pendingClose;
   const foreground = !settings && !admin && !(pending && !pending.awaiting) ? foregroundRequest(state,width) : null;
   const fileRequest = foreground?.kind==='file' ? state.fileRequests.find(request=>request.id===foreground.id) : undefined;
   return (
-    <FileLibraryContext.Provider value={library}><main className="viewer-shell" ref={shell}>
+    <FileLibraryContext.Provider value={library}><main className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}`} ref={shell}>
       {pendingOperations.length>0 && <Alert severity="info" sx={{position:'absolute',top:88,left:'50%',transform:'translateX(-50%)',zIndex:1190}} action={pendingOperations.some(entry=>entry.receipt?.status==='unknown')?<Button onClick={()=>setPendingOperations(entries=>entries.filter(entry=>entry.receipt?.status!=='unknown'))}>以当前工作区为准</Button>:undefined}>{pendingOperations.length} 个操作{pendingOperations.some(entry=>entry.receipt?.status==='unknown')?'结果未知，请核对工作区':'正在同步'}{media.diagnostics.channel!=='已连接'?'，等待数据通道连接':''}</Alert>}
       {productReady && media.audio.state === 'blocked' && (workspace.settings.audioChannels?.left !== false || workspace.settings.audioChannels?.right !== false) && <Button variant="contained" onClick={() => media.audio.resume()} sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}>点击开启声音</Button>}
       {status !== "online" && (
@@ -427,11 +453,16 @@ function Workspace({
               report={report}
               onGeometry={onGeometry}
               focusAddress={focusAddress}
-              visible={sideBySide || w.id === workspace.activeWindowId}
+              visible={fullscreen ? w.id === fullscreen.windowId : sideBySide || w.id === workspace.activeWindowId}
+              fullscreen={fullscreen?.windowId === w.id}
               audioSaving={audioSaving} audioError={audioError} saveAudio={saveAudio}
             />
           </React.Fragment>
         ))}
+        {fullscreen && <Button className="remote-fullscreen-exit" variant="contained" size="small"
+          disabled={!productReady || exitingFullscreen} onClick={() => exitFullscreen.current()}>
+          退出网页全屏
+        </Button>}
         {windows.length === 0 && (
           <div className="workspace-empty">
             <Typography variant="h6">开始浏览</Typography>

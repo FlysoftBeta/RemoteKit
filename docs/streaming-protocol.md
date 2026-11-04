@@ -19,6 +19,7 @@
 | view.close / view.close.reply | 正常关闭/确认；回复带browserIncarnation、instance、document和原requestId，只能命中原beforeunload；force用于明确清理 |
 | view.adopt | provisionalId、产品分配的viewId及配置；收养真实WebContents，重复同绑定幂等 |
 | view.page.reply | viewId/requestId/browserIncarnation/instance/document/accept/text；仅同一运行实例标准dialog，过期拒绝且不启动Browser |
+| view.page.exitFullscreen | viewId/browserIncarnation/instance/document；退出当前文档内部全屏，精确绑定运行实例，过期拒绝且不启动Browser |
 | rtc.offer / rtc.ice / rtc.close | 当前Session与connectionId下的媒体协商/清理 |
 | rtc.authorize | connectionId/epoch/unlocked；锁定保留peer，清退旧权限，恢复必须通过新代门禁 |
 | auth.face.capabilities / begin / status / cancel | Control建立并核对短期人脸挑战；模板仅经管理通道，图像走直接RTC |

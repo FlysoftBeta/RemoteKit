@@ -628,6 +628,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
             value.Set("audible", page->IsCurrentlyAudible());
             value.Set("captured", page->IsBeingCaptured());
             value.Set("crashed", page->IsCrashed());
+            value.Set("fullscreen", page_requests[i]->fullscreen() && !page->IsCrashed());
             std::set<base::ProcessId> pids;
             page->GetPrimaryMainFrame()->ForEachRenderFrameHost(
                 [&](content::RenderFrameHost* frame) {
@@ -970,6 +971,17 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   }
   if (page_requests[index]->close_state() == "closing")
     return error("view_closing");
+  if (*method == "page.exitFullscreen") {
+    const auto token = endpoint.Token(session, view).value;
+    uint64_t instance = 0, document = 0;
+    if (!ReadId(request, "instance", &instance) || !ReadId(request, "document", &document) ||
+        instance != token.instance || document != token.document || !adapter.contents())
+      return error("stale_page_request_target");
+    if (page_requests[index]->fullscreen())
+      adapter.contents()->ExitFullscreen(/*will_cause_resize=*/false);
+    reply.Set("ok", true);
+    return reply;
+  }
   if (method->starts_with("navigation.")) {
     if (*method == "navigation.ack") {
       const auto status = adapter.AcknowledgeNavigation(request);

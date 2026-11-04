@@ -4,7 +4,7 @@ import type { AuthMessage, AuthSocketMethods } from './security';
 export interface ProductUser { id: string; username: string; isAdmin: boolean }
 export type SearchEngine = 'google' | 'bing' | 'duckduckgo' | 'baidu';
 export const SEARCH_ENGINES: { value: SearchEngine; label: string }[] = [{ value: 'google', label: 'Google' }, { value: 'bing', label: 'Bing' }, { value: 'duckduckgo', label: 'DuckDuckGo' }, { value: 'baidu', label: '百度' }];
-export interface ProductSettings { searchEngine: SearchEngine; qualityPreference: 'quality' | 'auto' | 'smooth'; clientScaleOverride: number | null; memorySaverEnabled: boolean; showStats: boolean; audioChannels: { left: boolean; right: boolean } }
+export interface ProductSettings { searchEngine: SearchEngine; qualityPreference: 'quality' | 'auto' | 'smooth'; clientScaleOverride: number | null; memorySaverEnabled: boolean; showStats: boolean; autoFullscreen: boolean; audioChannels: { left: boolean; right: boolean } }
 export interface LifecycleRecovery {
   browserIncarnation: string;
   generation: string;
@@ -35,7 +35,8 @@ export interface MediaPolicy { degradationPreference: DegradationPreference; max
 export interface AppliedMediaPolicy { degradationPreference: DegradationPreference; maxFps: number }
 export interface ProductFeedback { sequence: number; sourceCaptureId: string; sampledAtServerMs: number; visible: boolean; presentationLatencyMs: number; latencySource: 'capture-end-to-paint'; clockUncertaintyMs: number; sampleCount: number; windowMs: number; displayHzEstimate?: number }
 export interface ProductQuality { resourceLimitation: string | null; mode: 'product' | 'manual'; preference: ProductSettings['qualityPreference']; clientScale: number; effectiveDpr: number; requested: MediaPolicy; applied: AppliedMediaPolicy | null; estimatedLatencyMs: number | null; clockUncertaintyMs: number | null; feedbackStatus: 'unknown' | 'valid' | 'stale'; reason: string }
-export interface ProductState { operationReceipts?:OperationReceipt[]; serverIncarnation?: string; snapshotSequence?: number; operationGeneration?: string; user: ProductUser; workspace: ProductWorkspace; pageDialogs: PageDialog[]; fileRequests: FileRequest[]; quality: ProductQuality; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean; trickleIce?: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
+export interface PageFullscreen { tabId: string; windowId: string; target: string }
+export interface ProductState { operationReceipts?:OperationReceipt[]; serverIncarnation?: string; snapshotSequence?: number; operationGeneration?: string; user: ProductUser; workspace: ProductWorkspace; pageFullscreen?: PageFullscreen; pageDialogs: PageDialog[]; fileRequests: FileRequest[]; quality: ProductQuality; endpointGeneration: number; endpointError: string | null; viewer: { connected: boolean; trickleIce?: boolean }; integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean }; constraints: { clientScaleMin: number; clientScaleMax: number } }
 export type ProductAction =
   | { type: 'window.create'; url?: string; title?: string }
   | { type: 'window.activate' | 'window.close'; windowId: string }
@@ -48,6 +49,7 @@ export type ProductAction =
   | { type: 'tab.command'; tabId: string; command: 'back' | 'forward' | 'reload' | 'stop' }
   | { type: 'settings.update'; settings: Partial<ProductSettings> }
   | { type: 'page.reply'; dialogId: string; accept: boolean; text?: string }
+  | { type: 'page.exitFullscreen'; target: string }
   | ({ type: 'site.set'; origin: string; tabId?: string } &
       ({ tabletUa: boolean; manualKeyboard?: boolean } | { tabletUa?: boolean; manualKeyboard: boolean }));
 export interface ViewerViewport { devicePixelRatio: number; refreshHz?: number; windows: { windowId: string; width: number; height: number; visible: boolean }[] }

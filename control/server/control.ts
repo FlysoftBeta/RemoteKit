@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { BackgroundPolicy } from './background-policy';
-import type { ProductOperation, OperationReceipt, ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, FileRequestAnchor, AppliedMediaPolicy, PendingClose } from '../shared/product';
+import type { ProductOperation, OperationReceipt, ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, PageFullscreen, FileRequestAnchor, AppliedMediaPolicy, PendingClose } from '../shared/product';
 import { resolveNavigation } from './navigation';
 import { SEARCH_ENGINES, FILE_LIMITS, isLocalTab } from '../shared/product';
 import { FileLibrary } from './file-library';
@@ -25,6 +25,7 @@ function fileRequestAnchor(value: any, instance: string, document: string): File
   return { x, y, width, height, viewportWidth, viewportHeight, deviceScaleFactor, instance, document, layoutGeneration };
 }
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
+type FullscreenBinding = { page: PageFullscreen; viewId: string; browserIncarnation: string; instance: string; document: string };
 export class Control extends EventEmitter {
   private unsubscribeSignals?:()=>void;
   private unsubscribeActions?:()=>void;
@@ -56,6 +57,7 @@ export class Control extends EventEmitter {
   private qualityStates = new Map<string, QualityState>();
   private actualMediaPolicies = new Map<string, AppliedMediaPolicy>();
   private dialogs = new Map<string, (PageDialog & { viewId: string; requestId: string; browserIncarnation: string; instance: string; document: string })[]>();
+  private pageFullscreen = new Map<string, FullscreenBinding>();
   private browserIncarnations=new Map<string,string>();
   private fileAuthorizations=new Map<string,string>();
   private fileRequests = new Map<string, InternalFileRequest[]>();
@@ -76,6 +78,7 @@ export class Control extends EventEmitter {
       const lease = this.viewers.get(tenant)?.id;
       if (!lease || !this.validSecurity(tenant, viewer)) return;
       this.fileAuthorizations.delete(tenant);
+      if (viewer.locked) this.pageFullscreen.delete(tenant);
       this.qualityState(tenant).resetFeedback();
       void this.serial(tenant, async () => {
         if (!this.validSecurity(tenant, viewer)) return;
@@ -212,7 +215,7 @@ export class Control extends EventEmitter {
       });
     }
   }
-  async reconcileAll() { this.endpointGeneration = Math.max(this.endpointGeneration, ...this.tenantEndpointGenerations.values()) + 1; this.tenantEndpointGenerations.clear(); this.pendingRtcChecks.clear(); this.closeRelays(); this.connections.clear(); for (const [tenant, viewer] of this.viewers) if (viewer.security) this.viewerAuth.forgetPeer(tenant, viewer.security); this.connectionLeases.clear(); this.fileAuthorizations.clear(); this.configurations.clear(); this.started.clear(); this.transitions.clear(); this.backgroundPolicy.clear(); this.siteApplications.clear(); this.mediaApplications.clear(); this.actualMediaPolicies.clear(); this.dialogs.clear(); for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()])) await this.serial(tenant, async () => { if (this.diagnosticTenants.has(tenant)) { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); } const viewer = this.viewers.get(tenant); if (viewer?.security) { this.emit('auth', tenant, viewer.id, this.authState(tenant, viewer.security)); void this.viewerAuth.capabilities(tenant, viewer.security); } await this.reconcile(tenant); this.push(tenant); }).catch(() => {}); }
+  async reconcileAll() { this.endpointGeneration = Math.max(this.endpointGeneration, ...this.tenantEndpointGenerations.values()) + 1; this.tenantEndpointGenerations.clear(); this.pendingRtcChecks.clear(); this.closeRelays(); this.connections.clear(); for (const [tenant, viewer] of this.viewers) if (viewer.security) this.viewerAuth.forgetPeer(tenant, viewer.security); this.connectionLeases.clear(); this.fileAuthorizations.clear(); this.configurations.clear(); this.started.clear(); this.transitions.clear(); this.backgroundPolicy.clear(); this.siteApplications.clear(); this.mediaApplications.clear(); this.actualMediaPolicies.clear(); this.pageFullscreen.clear(); this.dialogs.clear(); for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()])) await this.serial(tenant, async () => { if (this.diagnosticTenants.has(tenant)) { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); } const viewer = this.viewers.get(tenant); if (viewer?.security) { this.emit('auth', tenant, viewer.id, this.authState(tenant, viewer.security)); void this.viewerAuth.capabilities(tenant, viewer.security); } await this.reconcile(tenant); this.push(tenant); }).catch(() => {}); }
   async action(tenant: string, body: any) {
     this.diagnosticTenants.add(tenant);
     return this.serial(tenant, async () => {
@@ -341,7 +344,42 @@ export class Control extends EventEmitter {
   }
   productState(tenant: string): ProductState {
     this.snapshotSequences.set(tenant, (this.snapshotSequences.get(tenant) ?? 0) + 1);
-    return { operationReceipts:this.store.recentOperations(tenant), serverIncarnation: this.serverIncarnation, snapshotSequence: this.snapshotSequences.get(tenant)!, operationGeneration: this.store.operationGeneration(tenant), user: this.store.userForTenant(tenant)!, workspace: this.store.workspace(tenant), pageDialogs: (this.dialogs.get(tenant) ?? []).map(({ viewId, requestId, browserIncarnation, instance, document, ...dialog }) => dialog), fileRequests: (this.fileRequests.get(tenant) ?? []).map(({ binding, ...request }) => request), quality: this.qualityFor(tenant), endpointGeneration: this.mediaGeneration(tenant), endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant), trickleIce: !!this.endpoint.onSignal && !this.simulation }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
+    const workspace = this.store.workspace(tenant);
+    return { operationReceipts:this.store.recentOperations(tenant), serverIncarnation: this.serverIncarnation, snapshotSequence: this.snapshotSequences.get(tenant)!, operationGeneration: this.store.operationGeneration(tenant), user: this.store.userForTenant(tenant)!, workspace, pageFullscreen: this.fullscreenBinding(workspace)?.page, pageDialogs: (this.dialogs.get(tenant) ?? []).map(({ viewId, requestId, browserIncarnation, instance, document, ...dialog }) => dialog), fileRequests: (this.fileRequests.get(tenant) ?? []).map(({ binding, ...request }) => request), quality: this.qualityFor(tenant, workspace), endpointGeneration: this.mediaGeneration(tenant), endpointError: this.errors.get(tenant) ?? null, viewer: { connected: this.viewers.has(tenant), trickleIce: !!this.endpoint.onSignal && !this.simulation }, integrations: { siteUa: true, lifecycle: true, popupAdoption: true }, constraints: { clientScaleMin: .5, clientScaleMax: 4 } };
+  }
+  private fullscreenTabs(workspace: ProductWorkspace) {
+    return workspace.tabs.filter(tab => !isLocalTab(tab) &&
+      workspace.windows.some(window => window.id === tab.windowId && window.activeTabId === tab.id) &&
+      (workspace.layoutMode !== 'focused' || tab.windowId === workspace.activeWindowId));
+  }
+  private fullscreenBinding(workspace: ProductWorkspace) {
+    const viewer = this.viewers.get(workspace.tenantId), binding = this.pageFullscreen.get(workspace.tenantId);
+    if (viewer && !viewer.security?.locked && binding &&
+        this.fullscreenTabs(workspace).some(tab => tab.id === binding.page.tabId && tab.webviewId === binding.viewId && tab.windowId === binding.page.windowId)) return binding;
+  }
+  private observeFullscreen(workspace: ProductWorkspace, snapshot: any, views: any[]) {
+    const tenant = workspace.tenantId, viewer = this.viewers.get(tenant), previous = this.pageFullscreen.get(tenant);
+    const browserIncarnation = snapshot.browserIncarnation;
+    let next: FullscreenBinding | undefined;
+    if (viewer && !viewer.security?.locked && snapshot.running !== false && typeof browserIncarnation === 'string' && browserIncarnation) {
+      const tabs = this.fullscreenTabs(workspace).sort((a, b) => {
+        const priority = (tab: ProductTab) => tab.id === previous?.page.tabId ? 2 : Number(tab.windowId === workspace.activeWindowId);
+        return priority(b) - priority(a);
+      });
+      for (const tab of tabs) {
+        const view = views.find(view => String(view.viewId ?? view.view ?? view.id) === tab.webviewId);
+        if (view?.fullscreen !== true || view.close_state === 'closed' ||
+            (view.visible !== true && tab.windowId !== workspace.activeWindowId && tab.id !== previous?.page.tabId) ||
+            ![view.instance, view.document].every(id => typeof id === 'string' && /^[1-9][0-9]{0,19}$/.test(id))) continue;
+        const { instance, document } = view;
+        const target = createHash('sha256').update(JSON.stringify([browserIncarnation, tab.webviewId, instance, document])).digest('hex');
+        next = { page: { tabId: tab.id, windowId: tab.windowId, target }, viewId: tab.webviewId, browserIncarnation, instance, document };
+        break;
+      }
+    }
+    if (next) this.pageFullscreen.set(tenant, next);
+    else this.pageFullscreen.delete(tenant);
+    return next?.page.target !== previous?.page.target || next?.page.windowId !== previous?.page.windowId;
   }
   private push(tenant: string) { this.emit('state', tenant, this.productState(tenant)); }
   private saveProduct(state: ProductWorkspace) { const operation = this.applyingOperations.get(state.tenantId); if (operation) { this.store.saveOperation(state, operation); this.push(state.tenantId); } else { const changed = this.store.saveWorkspace(state); if (changed) this.push(state.tenantId); } }
@@ -384,6 +422,7 @@ export class Control extends EventEmitter {
     }
     const user = this.store.userForTenant(tenant);
     const security = user && initialUnlocked !== undefined ? this.viewerAuth.create(user, initialUnlocked) : undefined;
+    this.pageFullscreen.delete(tenant);
     this.viewers.set(tenant, { id, revoke, authentication, security });
     old?.revoke('another-viewer');
     if (security) this.emit('auth', tenant, id, this.authState(tenant, security));
@@ -400,6 +439,7 @@ export class Control extends EventEmitter {
     const viewer = this.viewers.get(tenant);
     if (viewer?.id !== id) return;
     this.viewers.delete(tenant);
+    this.pageFullscreen.delete(tenant);
     if (viewer.security) {
       void this.viewerAuth.lock(tenant, viewer.security).catch(() => {});
       this.viewerAuth.forgetPeer(tenant, viewer.security);
@@ -528,7 +568,7 @@ export class Control extends EventEmitter {
       if (operation.operationGeneration!==this.store.operationGeneration(tenant)) return {operationId:operation.operationId,operationGeneration:operation.operationGeneration,status:'expired',error:'操作收据代次已过期'};
       const payload=operationPayload(operation.action), existing=this.store.operation(tenant,operation.operationId);
       if(existing) { if(existing.payload!==payload) throw new ApiError(409,'同一操作ID不能用于不同内容'); return existing.receipt; }
-      const receipt:OperationReceipt={operationId:operation.operationId,operationGeneration:operation.operationGeneration,status:'accepted',...(['tab.navigate','tab.command','tab.close','window.close','page.reply'].includes(operation.action.type)?{browserIncarnation:this.browserIncarnations.get(tenant)}:{})};
+      const receipt:OperationReceipt={operationId:operation.operationId,operationGeneration:operation.operationGeneration,status:'accepted',...(['tab.navigate','tab.command','tab.close','window.close','page.reply','page.exitFullscreen'].includes(operation.action.type)?{browserIncarnation:this.browserIncarnations.get(tenant)}:{})};
       if(!this.store.reserveOperation(tenant,payload,receipt)) { this.push(tenant); return {...receipt,status:'expired',error:'操作收据已轮换，请核对工作区'}; }
       receipt.status='applying';this.store.saveOperation(this.store.workspace(tenant),receipt);this.applyingOperations.set(tenant,receipt);
       try { const result=await this.applyProductAction(tenant,operation.action);if(!['committed','rejected'].includes(receipt.status)){receipt.status=['tab.navigate','tab.command'].includes(operation.action.type) && result.application?'applying':'committed';if(result.application)receipt.application=result.application;
@@ -638,13 +678,22 @@ export class Control extends EventEmitter {
           if (result?.accepted !== true || result?.browser?.ok !== true) throw new ApiError(409, 'Endpoint未确认页面对话回复');
           this.dialogs.set(tenant, (this.dialogs.get(tenant) ?? []).filter(d => d.id !== dialog.id)); this.push(tenant); break;
         }
+        case 'page.exitFullscreen': {
+          const binding = this.fullscreenBinding(state);
+          if (!binding || action.target !== binding.page.target) throw new ApiError(409, '网页全屏已结束或页面已更换');
+          const { viewId, browserIncarnation, instance, document } = binding;
+          await this.endpoint.request('view.page.exitFullscreen', tenant, { viewId, browserIncarnation, instance, document });
+          this.pageFullscreen.delete(tenant);
+          break;
+        }
         case 'settings.update': {
           const value = action.settings;
-          if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['qualityPreference', 'clientScaleOverride', 'memorySaverEnabled', 'showStats','audioChannels','searchEngine'].includes(k))) throw new ApiError(400, '无效的设置');
+          if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(k => !['qualityPreference', 'clientScaleOverride', 'memorySaverEnabled', 'showStats','audioChannels','searchEngine','autoFullscreen'].includes(k))) throw new ApiError(400, '无效的设置');
           if ('searchEngine' in value && !SEARCH_ENGINES.some(engine => engine.value === value.searchEngine)) throw new ApiError(400, '无效的搜索引擎');
           if ('qualityPreference' in value && !['quality', 'auto', 'smooth'].includes(value.qualityPreference)) throw new ApiError(400, '无效的画面质量');
           if ('clientScaleOverride' in value && value.clientScaleOverride !== null && (typeof value.clientScaleOverride !== 'number' || !Number.isFinite(value.clientScaleOverride) || value.clientScaleOverride < .5 || value.clientScaleOverride > 4)) throw new ApiError(400, '显示比例需0.5–4');
           if ('memorySaverEnabled' in value && typeof value.memorySaverEnabled !== 'boolean') throw new ApiError(400, '无效的内存设置');
+          if ('autoFullscreen' in value && typeof value.autoFullscreen !== 'boolean') throw new ApiError(400, '无效的全屏设置');
           if ('audioChannels' in value && (!value.audioChannels || typeof value.audioChannels !== 'object' || Array.isArray(value.audioChannels) || Object.keys(value.audioChannels).length !== 2 || typeof value.audioChannels.left !== 'boolean' || typeof value.audioChannels.right !== 'boolean')) throw new ApiError(400, '声道设置需同时提供左右开关');
           if ('showStats' in value && typeof value.showStats !== 'boolean') throw new ApiError(400, '无效的统计设置'); Object.assign(state.settings, value); break;
         }
@@ -822,7 +871,9 @@ export class Control extends EventEmitter {
         const removed=a.type==='tab.close' && !state.tabs.some(tab=>tab.id===a.tabId) || a.type==='window.close' && !state.windows.some(window=>window.id===a.windowId);
         if(removed){pending.receipt.status='committed';delete pending.receipt.application;this.store.saveOperation(state,pending.receipt);const active=this.applyingOperations.get(tenant);if(active?.operationId===pending.receipt.operationId){active.status='committed';delete active.application;}}
       }
+      const fullscreenChanged = this.observeFullscreen(state, snapshot, actual);
       this.saveProduct(state); this.collectDialogs(tenant, state, snapshot);
+      if (fullscreenChanged) this.push(tenant);
       resourceLimitation = this.qualityFor(tenant, state).resourceLimitation;
       if (snapshot.running === false && !resourceLimitation) throw new Error('Browser已离线，页面保留并等待恢复');
       const viewer = this.viewers.get(tenant), viewport = viewer?.viewport ?? this.lastViewports.get(tenant);
@@ -891,7 +942,7 @@ export class Control extends EventEmitter {
         const changed = this.errors.get(tenant) !== resourceLimitation;
         this.errors.set(tenant, resourceLimitation); if (changed) this.push(tenant);
       } else { const previousError = this.errors.delete(tenant); if (previousError) this.push(tenant); }
-    } catch (error) { this.dialogs.delete(tenant); this.fileRequests.delete(tenant); this.uploads.retireMissing(tenant, new Set()); this.errors.set(tenant, error instanceof Error ? error.message : String(error)); this.push(tenant); throw error; }
+    } catch (error) { this.pageFullscreen.delete(tenant); this.dialogs.delete(tenant); this.fileRequests.delete(tenant); this.uploads.retireMissing(tenant, new Set()); this.errors.set(tenant, error instanceof Error ? error.message : String(error)); this.push(tenant); throw error; }
   }
   private async observeOffline(tenant: string) {
     // Snapshot is read-only. Maintenance must never revive a missing Browser/view.

@@ -31,7 +31,7 @@ inline bool ProductActionEnvelope(const ServiceJson& message,size_t bytes) {
  }
  const auto type=message["action"].value("type",ServiceJson());
  static const char* allowed[]={"window.create","window.activate","window.close","window.layout","tab.create",
-  "tab.activate","tab.close","tab.move","tab.navigate","tab.command","tab.files","settings.update","page.reply","site.set"};
+  "tab.activate","tab.close","tab.move","tab.navigate","tab.command","tab.files","settings.update","page.reply","page.exitFullscreen","site.set"};
  return std::any_of(std::begin(allowed),std::end(allowed),[&](const char* value){return type==value;});
 }
 

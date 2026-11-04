@@ -33,7 +33,11 @@ export function projectOperations(state:ProductState|null, pending:PendingOperat
    case 'tab.close':{const tab=w.tabs.find(t=>t.id===a.tabId);if(tab)tab.title=tab.title.replace(/（待确认）$/,'')+'（待确认）';break;}
    case 'window.close':for(const tab of w.tabs.filter(t=>t.windowId===a.windowId))tab.title=tab.title.replace(/（待确认）$/,'')+'（待确认）';break;
   }
- }return next;
+ }
+ const fullscreen=next.pageFullscreen;
+ if(fullscreen && !w.windows.some(window=>window.id===fullscreen.windowId && window.activeTabId===fullscreen.tabId))
+  delete next.pageFullscreen;
+ return next;
 }
 export function snapshotNewer(next:ProductState,previous:ProductState|null) { if(typeof next.serverIncarnation!=='string' || !next.serverIncarnation || !Number.isSafeInteger(next.snapshotSequence) || next.snapshotSequence!<1)return false;return !previous || next.serverIncarnation!==previous.serverIncarnation || (next.snapshotSequence??0)>(previous.snapshotSequence??-1); }
 

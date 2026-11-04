@@ -40,6 +40,13 @@ class ProductEndpoint implements Endpoint {
     if (method === 'view.navigate') Object.assign(views.get(args.viewId)!, { url: args.url });
     if (method === 'view.configure') Object.assign(views.get(args.viewId)!, args);
     if (method === 'view.page.reply') { const v = views.get(args.viewId)!; if (String(v.instance) !== args.instance || String(v.document) !== args.document) throw new Error('stale_page_request'); v.pageRequests.pending = v.pageRequests.pending.filter((p: any) => p.request !== args.requestId); return { accepted: true, browser: { ok: true, state: 'resolved' } }; }
+    if (method === 'view.page.exitFullscreen') {
+      const view = views.get(args.viewId);
+      if (!view || args.browserIncarnation !== 'browser-' + this.browserPid ||
+          args.instance !== view.instance || args.document !== view.document) throw new Error('stale_page_request_target');
+      view.fullscreen = false;
+      return { ok: true };
+    }
     if (method === 'view.lifecycle') { const v = views.get(args.viewId)!; if (args.lifecycleGeneration !== undefined && this.guardedLifecycle) return this.guardedLifecycle(v, args); if (args.action === 'restore') { v.pending = true; v.desired = 0; } else v.actual = 2; return { accepted: true, completed: false, pending: true, lifecycleGeneration: '1' }; }
     if (method === 'view.close') { if (this.pending && !args.force) return { pending: true, requestId: 'close-1', browserIncarnation: 'browser-' + this.browserPid, instance: String(views.get(args.viewId).instance), document: String(views.get(args.viewId).document) }; views.delete(args.viewId); return { closed: true }; }
     if (method === 'view.close.reply') { if (args.accept) views.get(args.viewId).close_state = 'closed'; return { accepted: true, browser: { ok: true } }; }
@@ -94,6 +101,59 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
     assert.equal(state.workspace.settings.clientScaleOverride, 1.5); assert.ok(endpoint.calls.filter(c => c.method === 'view.configure').every(c => c.args.device.mode === 'desktop'));
     await assert.rejects(control.productAction(user.tenantId, { type: 'settings.update', settings: { clientScaleOverride: 5 } }, 'lease'));
   } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+test('automatic Viewer fullscreen defaults off for old settings and saves an explicit boolean', async () => {
+  const { store, control, user: { tenantId } } = await fixture();
+  try {
+    store.db.prepare('UPDATE user_settings SET data=? WHERE tenant=?').run(JSON.stringify({ searchEngine: 'bing' }), tenantId);
+    assert.equal(store.workspace(tenantId).settings.autoFullscreen, false);
+    await control.attachViewer(tenantId, 'lease', () => {});
+    await control.productAction(tenantId, { type: 'settings.update', settings: { autoFullscreen: true } }, 'lease');
+    await assert.rejects(control.viewerRequest(tenantId, 'lease', 'action',
+      { type: 'settings.update', settings: { autoFullscreen: 'true' } }), /全屏设置/);
+    const attached = await control.attachViewer(tenantId, 'replacement', () => {});
+    assert.equal(attached?.workspace.settings.autoFullscreen, true);
+    assert.equal(attached?.workspace.settings.searchEngine, 'bing');
+  } finally { await control.detachViewer(tenantId, 'replacement'); store.db.close(); }
+});
+
+test('remote page fullscreen follows the live document, with a document-bound exit and reconnect reconciliation', async () => {
+  const { store, endpoint, control, user: { tenantId } } = await fixture();
+  try {
+    await control.attachViewer(tenantId, 'lease', () => {});
+    const { state } = await control.productAction(tenantId, { type: 'window.create', url: 'https://fullscreen.test' }, 'lease');
+    const [tab] = state.workspace.tabs, view = endpoint.views.get(tenantId)!.get(tab.webviewId);
+    const page = () => control.productState(tenantId).pageFullscreen;
+    view.fullscreen = true;
+    await control.tick();
+    const first = page()!;
+    assert.equal(first.tabId, tab.id);
+    assert.equal(first.windowId, tab.windowId);
+    assert.equal(store.workspace(tenantId).settings.autoFullscreen, false);
+    assert.equal('pageFullscreen' in store.workspace(tenantId), false);
+    view.document = '2';
+    await control.tick();
+    const second = page()!;
+    assert.notEqual(second.target, first.target);
+    await assert.rejects(control.productAction(tenantId, { type: 'page.exitFullscreen', target: first.target }, 'lease'), /页面已更换/);
+    assert.equal(endpoint.calls.some(call => call.method === 'view.page.exitFullscreen'), false);
+    await control.detachViewer(tenantId, 'lease');
+    assert.equal(page(), undefined);
+    await control.attachViewer(tenantId, 'replacement', () => {});
+    assert.equal(page()?.target, second.target);
+    await control.productAction(tenantId, { type: 'page.exitFullscreen', target: second.target }, 'replacement');
+    assert.equal(page(), undefined);
+    assert.deepEqual(endpoint.calls.find(call => call.method === 'view.page.exitFullscreen')?.args,
+      { browserIncarnation: 'browser-10', viewId: tab.webviewId, instance: '1', document: '2' });
+    view.fullscreen = true;
+    await control.tick();
+    assert.ok(page());
+    view.fullscreen = false;
+    view.document = '3';
+    await control.tick();
+    assert.equal(page(), undefined);
+  } finally { await control.detachViewer(tenantId, 'replacement'); store.db.close(); }
 });
 
 test('memory saver uses hidden age and canDiscard; activating a discarded page waits for actual live completion', async () => {

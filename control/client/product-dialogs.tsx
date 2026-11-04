@@ -362,6 +362,24 @@ export function SettingsDialog({
             labelPlacement="start"
             control={
               <Switch
+                checked={settings.autoFullscreen}
+                disabled={!online || busy.fullscreen}
+                onChange={(_, checked) =>
+                  void save("fullscreen", { autoFullscreen: checked })
+                }
+              />
+            }
+            label="打开或激活时全屏"
+          />
+          {note("fullscreen")}
+        </div>
+        <Divider />
+        <div className="setting-section">
+          <FormControlLabel
+            className="setting-switch"
+            labelPlacement="start"
+            control={
+              <Switch
                 checked={settings.memorySaverEnabled}
                 disabled={!online || busy.memory}
                 onChange={(_, checked) =>

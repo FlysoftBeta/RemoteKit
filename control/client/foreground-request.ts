@@ -7,7 +7,7 @@ export function foregroundRequest(state: ProductState, width: number): {
     const split = workspace.layoutMode === 'side-by-side' && width >= Math.max(720, workspace.windows.length * 365 - 5);
     const windows = [...workspace.windows].sort((a, b) => Number(b.id === workspace.activeWindowId) - Number(a.id === workspace.activeWindowId));
     for (const window of windows) {
-        if (!split && window.id !== workspace.activeWindowId)
+        if (state.pageFullscreen ? window.id !== state.pageFullscreen.windowId : !split && window.id !== workspace.activeWindowId)
             continue;
         const page = state.pageDialogs?.find(request => request.tabId === window.activeTabId);
         if (page)

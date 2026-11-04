@@ -7,7 +7,7 @@ import type { ControlState } from '../client/types';
 import type { ProductUser, ProductWorkspace, OperationReceipt } from '../shared/product';
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
-export const defaultSettings = () => ({ searchEngine: 'google' as const, qualityPreference: 'auto' as const, clientScaleOverride: null, memorySaverEnabled: true, showStats: false, audioChannels: { left: true, right: true } });
+export const defaultSettings = () => ({ searchEngine: 'google' as const, qualityPreference: 'auto' as const, clientScaleOverride: null, memorySaverEnabled: true, showStats: false, autoFullscreen: false, audioChannels: { left: true, right: true } });
 export function emptyWorkspace(tenantId: string): ProductWorkspace { return { schemaVersion: 2, tenantId, revision: 0, tabs: [], windows: [], activeWindowId: null, layoutMode: 'side-by-side', settings: defaultSettings(), sites: {}, pendingClose: null, pendingWindowCloseId: null }; }
 export function migrateLegacy(state: ControlState): ProductWorkspace {
   const result = emptyWorkspace(state.tenantId), first = randomUUID(), second = randomUUID();
