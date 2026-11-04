@@ -56,7 +56,7 @@ plane绘制与atlas合成通过实际GPU Fence排序；每Slot独立ready/consum
 
 Endpoint Comp通过专用异步Mojo向Browser Rend发送带代次、Slot、Value的Begin。Rend返回Reject或Signal该Slot的真实GPU Fence，成功没有逐帧ready/present/release Mojo。共享内存只承载一致元数据与布局，不传像素。换代Stop/Stopped屏障证明请求终结，不代替GPU完成；Chromium内部IPC及Endpoint↔Client帧元数据属于不同边界。
 
-Endpoint使用oneVPL异步H264或显式NVENC，libwebrtc负责拥塞控制及媒体适配。质量三档只对应DegradationPreference；原生AdaptFrame决定缩放/丢帧，SetRates驱动硬件码率与帧率。QSV纯码率Reset保持序列，改变帧率时更新VUI时基并请求关键帧。协商与硬件上限仍有效。
+Endpoint使用oneVPL异步H264或显式NVENC，libwebrtc负责拥塞控制及媒体适配。质量三档只对应DegradationPreference；原生AdaptFrame决定缩放/丢帧，SetRates提供目标码率与观测输入帧率。QSV对观测帧率去抖，持续低帧率才降低名义时基，恢复时一次回到Configure确定的合法上限；普通码率Reset保持序列，真实时基变化才请求新序列和IDR。Comp节拍、WebRTC源适配、协商与硬件上限仍有效。
 
 ## 节拍、输入与测量
 

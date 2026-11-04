@@ -1,6 +1,7 @@
 #pragma once
 #include <d3d11_4.h>
 #include <cstdint>
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -42,6 +43,10 @@ class HardwareEncoder {
                              std::string& error)=0;
   virtual CodecResult Poll(uint32_t timeout_ms,AccessUnit&,std::string& error)=0;
   virtual bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error,uint32_t maximum=0)=0;
+  // A backend may defer an observed cadence change. The owner replays its
+  // last valid rates at this deadline, only after all encode jobs drain.
+  virtual std::optional<std::chrono::steady_clock::time_point> RateUpdateDeadline() const { return {}; }
+  virtual void CancelPendingRateUpdate() {}
   virtual bool Drain(std::vector<AccessUnit>&,std::string& error)=0;
   // A failed asynchronous backend may have no bounded cancellation primitive.
   // The worker transfers every unresolved source/pool lease before destruction;

@@ -369,7 +369,9 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     info.implementation_name = "RemoteKit external H264";
     info.supports_native_handle = true;
     info.is_hardware_accelerated = true;
-    info.has_trusted_rate_controller = true;
+    // External hardware rate control cannot guarantee fast target tracking.
+    // Keep WebRTC's frame dropper active to protect against overshoot.
+    info.has_trusted_rate_controller = false;
     // Same H264 QP thresholds as WebRTC's official H264EncoderImpl. QP is
     // parsed from Annex B when the hardware callback cannot provide it.
     info.scaling_settings = ScalingSettings(24, 37);

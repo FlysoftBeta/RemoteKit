@@ -30,7 +30,7 @@ test('media diagnostics distinguish GCC targets, display ceiling and compatibili
       mediaPolicy: { requested: { degradationPreference: 'balanced', maxFps: 60 }, applied: { degradationPreference: 'balanced', maxFps: 60 } } },
   };
   const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
-  assert.match(html, /GCC 目标 FPS<\/dt><dd>42.0 fps/);
+  assert.match(html, /输入 FPS 估计<\/dt><dd>42.0 fps/);
   assert.match(html, /GCC 目标码率<\/dt><dd>12.00 Mbps/);
   assert.match(html, /编码队列满丢帧<\/dt><dd>3/);
   assert.match(html, /60 \/ 60/); assert.match(html, /balanced/);

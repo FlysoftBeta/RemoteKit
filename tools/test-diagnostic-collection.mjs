@@ -1,6 +1,6 @@
 /**
  * Real H.264 diagnostic-collection regression on an isolated loopback instance.
- * node tools/test-diagnostic-collection.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port]
+ * node tools/test-diagnostic-collection.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port] [local scenario module]
  */
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
@@ -8,12 +8,14 @@ import { appendFile, mkdir, readFile, readdir } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { zstdDecompressSync } from 'node:zlib';
 import assert from 'node:assert/strict';
 
-const [playwright, viewer, endpoint, browser, output, listenPort = '33785'] = process.argv.slice(2);
+const [playwright, viewer, endpoint, browser, output, listenPort = '33785', scenarioPath] = process.argv.slice(2);
 assert([playwright, viewer, endpoint, browser, output].every(Boolean), 'Expected Playwright, Viewer, Endpoint, Browser and output paths');
+const scenarioModule = scenarioPath && await import(pathToFileURL(resolve(scenarioPath)).href);
+const scenario = scenarioModule ? scenarioModule.createScenario() : undefined;
 const { chromium } = createRequire(import.meta.url)(resolve(playwright));
 const root = fileURLToPath(new URL('../', import.meta.url));
 const run = resolve(output);
@@ -29,6 +31,7 @@ const archiveDirectory = join(run, 'diagnostics');
 let fixtureVisits = 0;
 const fixture = createServer((request, response) => {
   if (request.url === '/') fixtureVisits++;
+  if (scenario) return scenario.fixture(request, response);
   response.setHeader('Content-Type', 'text/html; charset=utf-8');
   response.end(`<!doctype html><meta charset="utf-8"><title>Diagnostic collection fixture</title>
     <style>body { margin:24px; font:16px Arial; background:#d0e5fc; }</style>
@@ -82,7 +85,10 @@ function startControl() {
       REMOTEKIT_DIAGNOSTICS:'0',
       REMOTEKIT_DIAGNOSTICS_DIR:archiveDirectory,
       REMOTEKIT_ENDPOINT:resolve(endpoint),
-      REMOTEKIT_ENDPOINT_ARGS:JSON.stringify(['--browser=' + resolve(browser), '--data-path=' + join(run, 'endpoint')]),
+      REMOTEKIT_ENDPOINT_ARGS:JSON.stringify([
+        '--browser=' + resolve(browser), '--data-path=' + join(run, 'endpoint'), ...(scenarioModule?.endpointArgs ?? []),
+      ]),
+      ...scenarioModule?.controlEnvironment,
     },
   });
   control.stdout.on('data', data => void appendFile(join(run, 'control.stdout.log'), data));
@@ -118,7 +124,7 @@ try {
   }, 'Fresh isolated Control did not start');
   context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
     executablePath:resolve(viewer), headless:process.env.REMOTEKIT_QA_HEADLESS === '1',
-    viewport:{width:1152, height:820}, deviceScaleFactor:1, timeout:15000,
+    viewport:scenarioModule?.viewport ?? {width:1152, height:820}, deviceScaleFactor:1, timeout:15000,
     args:['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required',
       '--disable-features=WebRtcHideLocalIpsWithMdns'],
   });
@@ -166,7 +172,8 @@ try {
       send(data) {
         if (typeof data === 'string' && new URL(this.url).pathname === '/api/socket') {
           const message = JSON.parse(data);
-          if (message.method?.startsWith('diagnostics.')) this.observeDiagnostic(message);
+        if (message.method?.startsWith('diagnostics.')) this.observeDiagnostic(message);
+        if (message.method === 'diagnostics.sample') probe.latestLayout = message.params?.data?.layout;
         }
         return super.send(data);
       }
@@ -264,10 +271,18 @@ try {
   await click('button[type="submit"]', '创建账户');
   await click('button', '新建窗口');
 
-
+  const media = () => read('diagnosticQA.media()');
+  if (scenario) {
+    // The scenario deliberately starts on a blank window. Wait for its initial
+    // connection and channels before sending the first remote navigation.
+    await until(async () => {
+      const state = await media();
+      return state.connected === 'connected' && state.channels.filter(channel => channel[2] === 'open').length === 2;
+    }, 'Scenario could not open its RTC channels');
+  }
   await fill('.address-form input', fixtureOrigin);
   await page.keyboard.press('Enter');
-  const media = () => read('diagnosticQA.media()');
+  if (scenario) await until(() => fixtureVisits > 0, 'Scenario navigation did not reach the fixture');
   const baseline = await until(async () => {
     const state = await media();
     return state.connected === 'connected' && state.channels.filter(channel => channel[2] === 'open').length === 2 &&
@@ -303,9 +318,11 @@ try {
   assert.equal(await read(`document.body.innerText.includes(${JSON.stringify(start.id)})`), false);
   assert.equal(await read(`[...document.querySelectorAll('input')].some(input => input.value === ${JSON.stringify(start.id)})`), false);
   await sameMedia();
-  await page.screenshot({path:join(run, 'collecting.png')});
+  if (scenario) await scenario.start({page});
+  else await page.screenshot({path:join(run, 'collecting.png')});
   await until(() => read("diagnosticQA.replies.filter(reply => reply.method === 'diagnostics.sample' && reply.result?.status === 'collecting').length >= 4"),
     'Expected four accepted live samples');
+  if (scenario) await scenario.measure({read, log, sleep, page, run});
   const preStop = await readdir(archiveDirectory).catch(error => {
     if (error.code !== 'ENOENT') throw error;
     return [];

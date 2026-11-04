@@ -196,13 +196,14 @@ void EncoderWorker::Run() {
   {
    std::unique_lock lock(mutex_);
    if(!stopping_ && queue_.empty() && inflight_.empty())wake_.wait_for(lock,std::chrono::milliseconds(5));
-   if(stopping_||failed_)break;
+   if(stopping_||failed_){hardware_->CancelPendingRateUpdate();break;}
   }
   std::optional<RateUpdate> rates;
   {
    std::lock_guard lock(mutex_);
    if(inflight_.empty())rates=std::exchange(pending_rates_,std::nullopt);
    if(paused_) {
+    hardware_->CancelPendingRateUpdate();
     for(auto& job:queue_) {
      remotekit::TailRefreshLease::Finish(job.frame,false);
      if(sdk_.encoder_drop)sdk_.encoder_drop(encoder_,job.frame.rtp_timestamp);
@@ -213,8 +214,13 @@ void EncoderWorker::Run() {
     queue_.clear();
    }
   }
+  const auto deadline=hardware_->RateUpdateDeadline();
+  const bool deferred_rate_due=!paused_ && inflight_.empty() && deadline &&
+      std::chrono::steady_clock::now()>=*deadline;
+  if(deferred_rate_due && !rates)rates=RateUpdate{settings_.bitrate,settings_.fps};
   if(rates && rates->bitrate && rates->fps &&
-     (std::min(rates->bitrate,rate_limit_)!=settings_.bitrate || std::min(rates->fps,fps_limit_)!=settings_.fps)) {
+     (std::min(rates->bitrate,rate_limit_)!=settings_.bitrate || std::min(rates->fps,fps_limit_)!=settings_.fps ||
+      deferred_rate_due)) {
    std::string error;
    const auto effective_rate=std::min(rates->bitrate,rate_limit_);
    const auto effective_fps=std::min(rates->fps,fps_limit_);

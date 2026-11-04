@@ -1,10 +1,12 @@
 #include "media/gpu_device.hpp"
 #include "media/hardware_encoder.hpp"
 #include <d3d11_4.h>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <deque>
 #include <map>
+#include <thread>
 int main(int argc,char** argv) {
  using namespace remotekit::media;
  std::string error;
@@ -14,6 +16,8 @@ int main(int argc,char** argv) {
  const std::string scenario=argc>3?argv[3]:"";
  const bool steps=scenario=="steps";
  const bool low_fps=scenario=="qsv-low-fps";
+ const bool nvenc=argc>1&&std::string(argv[1])=="nvenc";
+ if(low_fps&&nvenc){fprintf(stderr,"qsv-low-fps requires QSV\n");return 1;}
  if(steps){settings.bitrate=2000000;settings.max_bitrate=40000000;}
  if(argc>4)settings.width=std::stoul(argv[4]);
  if(argc>5)settings.height=std::stoul(argv[5]);
@@ -22,7 +26,7 @@ int main(int argc,char** argv) {
  if(argc>7){const std::string low_power=argv[7];
   if(low_power!="auto"&&low_power!="on"&&low_power!="off"){fprintf(stderr,"QSV LowPower must be auto, on or off\n");return 1;}
   settings.qsv_low_power=low_power=="on"?0x10u:(low_power=="off"?0x20u:0u);
-  if(argc>1&&std::string(argv[1])=="nvenc"&&settings.qsv_low_power){fprintf(stderr,"LowPower is QSV-only\n");return 1;}
+  if(nvenc&&settings.qsv_low_power){fprintf(stderr,"LowPower is QSV-only\n");return 1;}
  }
  if(argc>8){settings.target_usage=std::stoul(argv[8]);
   if(settings.target_usage<1||settings.target_usage>7){fprintf(stderr,"Target usage must be 1..7\n");return 1;}}
@@ -35,8 +39,14 @@ int main(int argc,char** argv) {
   settings.width=1168;settings.height=752;settings.level_idc=52;
   settings.bitrate=45535000;settings.target_usage=7;settings.qsv_low_power=0x10;settings.vbr=true;
  }
- auto encoder=(argc>1&&std::string(argv[1])=="nvenc")?CreateNvencEncoder():CreateQsvEncoder();
+ auto encoder=nvenc?CreateNvencEncoder():CreateQsvEncoder();
  if(!encoder->Configure(device.Get(),settings,error)){fprintf(stderr,"%s\n",error.c_str());return 2;}
+ if(low_fps) {
+  const auto actual=encoder->ActualSettings();
+  if(actual.fps!=settings.fps || !actual.level_idc || actual.level_idc>settings.level_idc) {
+   fprintf(stderr,"unexpected initial QSV fps=%u level=%u\n",actual.fps,actual.level_idc);return 13;
+  }
+ }
  Nv12Converter converter;
  if(!converter.Open(device.Get(),settings.width,settings.height,settings.fps,error)){
   fprintf(stderr,"%s\n",error.c_str());return 3;
@@ -56,24 +66,39 @@ int main(int argc,char** argv) {
  for(uint32_t i=0;i<settings.async_depth;++i)free.push_back(i);
  std::map<uint64_t,uint32_t> inflight;
  uint64_t submitted=0,completed=0,bytes=0;auto started=QpcNow();
- const uint64_t total=low_fps?5:(steps?240:120);
+ const uint64_t total=low_fps?7:(steps?240:120);
  uint64_t phase_end=low_fps?1:(steps?60:total);bool force_key=true;
- uint64_t expected_keyframe=low_fps?1:0;
+ bool expect_idr=true;
+ auto last_input=std::chrono::steady_clock::now();
+ auto first_low_report=last_input;
+ uint32_t input_fps=settings.fps;
  while(completed<total) {
   if(low_fps && completed==phase_end && inflight.empty()) {
-   const uint32_t rates[]={38015000,37770833,38171667,38171667};
-   const uint32_t cadences[]={2,2,1,60};
+   // Report 2 FPS across two half-second input intervals before allowing the
+   // timebase to fall. Recovery starts at 6 FPS and must jump directly to 60.
+   const uint32_t rates[]={settings.bitrate,38015000,38015000,38015000,38015000,38171667};
+   const uint32_t cadences[]={2,2,2,2,6,60};
+   const uint32_t expected_fps[]={settings.fps,settings.fps,2,2,settings.fps,settings.fps};
    const auto step=completed-1;
-   if(!encoder->SetRates(rates[step],cadences[step],error,48000000)) {
+   if(step==2)std::this_thread::sleep_until(first_low_report+std::chrono::seconds(1));
+   const auto previous_fps=encoder->ActualSettings().fps;
+   input_fps=cadences[step];
+   if(!encoder->SetRates(rates[step],input_fps,error,settings.max_bitrate)) {
     fprintf(stderr,"%s\n",error.c_str());return 12;
    }
+   if(step==0)first_low_report=std::chrono::steady_clock::now();
    const auto actual=encoder->ActualSettings();
+   const bool bitrate_changed=rates[step]!=(step?rates[step-1]:settings.bitrate);
+   const bool cadence_changed=expected_fps[step]!=previous_fps;
    force_key=encoder->TakeKeyframeRequest();
-   if(actual.fps!=cadences[step] || (step!=1 && !force_key)) {
-    fprintf(stderr,"missing requested cadence or new sequence\n");return 13;
+   expect_idr=force_key;
+   fprintf(stderr,"QSV low-fps frame=%llu inputFps=%u appliedFps=%u level=%u requestedBps=%u appliedBps=%u recoveryIdr=%d\n",
+    completed+1,input_fps,actual.fps,actual.level_idc,rates[step],actual.bitrate,expect_idr);
+   if(actual.fps!=expected_fps[step] || !actual.level_idc || actual.level_idc>settings.level_idc ||
+      (cadence_changed && !expect_idr) || (!cadence_changed && !bitrate_changed && expect_idr)) {
+    fprintf(stderr,"unexpected QSV timebase, level, or IDR request\n");return 13;
    }
    ++phase_end;
-   expected_keyframe=step!=1?phase_end:0;
   }
   if(steps && completed==phase_end && inflight.empty() && phase_end<total) {
    const uint32_t rate=completed==120?500000:18000000;
@@ -85,6 +110,7 @@ int main(int argc,char** argv) {
    phase_end+=60;
   }
   while(submitted<phase_end&&!free.empty()) {
+   if(low_fps && submitted)std::this_thread::sleep_until(last_input+std::chrono::microseconds(1000000/input_fps));
    auto index=free.front();
    const float color[]={float(submitted%60)/60.f,0.2f,0.4f,1};
    context->ClearRenderTargetView(rtv.Get(),color);
@@ -94,13 +120,17 @@ int main(int argc,char** argv) {
    auto result=encoder->Submit(surfaces[index].Get(),force_key,submitted+1,error);
    if(result==CodecResult::busy)break;
    if(result!=CodecResult::accepted){fprintf(stderr,"%s\n",error.c_str());return 7;}
+   if(low_fps)last_input=std::chrono::steady_clock::now();
    force_key=false;free.pop_front();inflight[++submitted]=index;
   }
   AccessUnit unit;auto result=encoder->Poll(100,unit,error);
   if(result==CodecResult::error){fprintf(stderr,"%s\n",error.c_str());return 8;}
   if(result==CodecResult::ready) {
-   if(unit.frame_cookie==expected_keyframe && !unit.keyframe) {
-    fprintf(stderr,"new QSV sequence did not encode an IDR\n");return 14;
+   if(low_fps) {
+    fprintf(stderr,"QSV low-fps output frame=%llu idr=%d bytes=%zu\n",unit.frame_cookie,unit.keyframe,unit.bytes.size());
+    if(unit.keyframe!=expect_idr || unit.bytes.empty()) {
+     fprintf(stderr,"unexpected QSV access unit after rate update\n");return 14;
+    }
    }
    output.write(reinterpret_cast<const char*>(unit.bytes.data()),unit.bytes.size());bytes+=unit.bytes.size();
    auto found=inflight.find(unit.frame_cookie);

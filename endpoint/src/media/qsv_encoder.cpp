@@ -1,4 +1,5 @@
 #include "hardware_encoder.hpp"
+#include "qsv_cadence_policy.hpp"
 #include "server_trace.hpp"
 #include "remotekit/sampling.hpp"
 #include <vpl/mfxdispatcher.h>
@@ -62,6 +63,7 @@ class Qsv final : public HardwareEncoder {
   bool vpp_initialized_=false;
   std::string deferred_error_;
   EncoderSettings settings_;
+  QsvCadencePolicy cadence_{0};
   QsvLowPowerInfo low_power_;
   bool initialized_=false,keyframe_requested_=false;
   mfxU16 allocated_buffer_kb_=0;
@@ -132,6 +134,9 @@ class Qsv final : public HardwareEncoder {
     return a.FourCC==b.FourCC && a.Width==b.Width && a.Height==b.Height &&
       a.CropX==b.CropX && a.CropY==b.CropY && a.CropW==b.CropW && a.CropH==b.CropH &&
       a.ChromaFormat==b.ChromaFormat && a.PicStruct==b.PicStruct;
+  }
+  static bool MatchesFrameRate(const mfxFrameInfo& frame,uint32_t fps) {
+    return frame.FrameRateExtD && frame.FrameRateExtN==uint64_t{fps}*frame.FrameRateExtD;
   }
   bool VppEmpty(std::string& error) {
     if(!vpp_initialized_ || vpp_outputs_.empty())return true;
@@ -298,7 +303,8 @@ class Qsv final : public HardwareEncoder {
       settings.bitrate=std::min(settings.bitrate,settings.max_bitrate);
     }
     if(session_) {error="QSV already configured";return false;}
-    device_=device;settings_=settings;low_power_.requested=static_cast<int>(settings.qsv_low_power);
+    device_=device;settings_=settings;cadence_=QsvCadencePolicy(settings.fps);
+    low_power_.requested=static_cast<int>(settings.qsv_low_power);
     ComPtr<ID3D10Multithread> multithread;
     if(SUCCEEDED(device_.As(&multithread))) multithread->SetMultithreadProtected(TRUE);
     loader_=MFXLoad();
@@ -400,6 +406,9 @@ class Qsv final : public HardwareEncoder {
     fprintf(stderr,"QSV LowPower: initialized=%d getVideoParamStatus=%d\n",
       low_power_.initialized.value_or(-1),get_status);
     if(!Status(get_status,"MFX GetVideoParam",error))return false;
+    if(!MatchesFrameRate(params_.mfx.FrameInfo,settings.fps)) {
+      error="QSV initialization did not apply configured frame rate";return false;
+    }
     if(settings.qsv_low_power&&params_.mfx.LowPower!=settings.qsv_low_power) {
       error="QSV initialized with a different LowPower value: "+std::to_string(params_.mfx.LowPower);return false;
     }
@@ -547,11 +556,16 @@ class Qsv final : public HardwareEncoder {
     if(task.converted)task.converted->used=false;
     jobs_.erase(found);packets_.pop_front();return CodecResult::ready;
   }
-  bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error,uint32_t maximum=0) override {
-    if(!bitrate || !fps) {error="QSV invalid rate update";return false;}
+  std::optional<std::chrono::steady_clock::time_point> RateUpdateDeadline() const override {
+    return cadence_.Deadline();
+  }
+  void CancelPendingRateUpdate() override { cadence_.Cancel(); }
+  bool SetRates(uint32_t bitrate,uint32_t observed_fps,std::string& error,uint32_t maximum=0) override {
+    if(!bitrate || !observed_fps) {error="QSV invalid rate update";return false;}
     if(!jobs_.empty()||!packets_.empty()) {error="QSV rate reset requires drained queue";return false;}
     const auto next_max=maximum?maximum:settings_.max_bitrate;
     bitrate=std::min(bitrate,next_max);
+    const auto fps=cadence_.Select(settings_.fps,observed_fps,std::chrono::steady_clock::now());
     const bool cadence_changed=fps!=settings_.fps;
     if(bitrate/1000==settings_.bitrate/1000 && next_max==settings_.max_bitrate && !cadence_changed)return true;
     if(cadence_changed && !VppEmpty(error))return false;
@@ -600,7 +614,7 @@ class Qsv final : public HardwareEncoder {
     if(settings_.qsv_low_power&&params_.mfx.LowPower!=settings_.qsv_low_power) {
       error="QSV rate update changed explicit LowPower value";return false;
     }
-    if(params_.mfx.FrameInfo.FrameRateExtN!=fps*params_.mfx.FrameInfo.FrameRateExtD) {
+    if(!MatchesFrameRate(params_.mfx.FrameInfo,fps)) {
       error="QSV rate update did not apply requested frame rate";return false;
     }
     if(cadence_changed && vpp_initialized_) {

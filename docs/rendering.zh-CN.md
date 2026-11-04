@@ -34,7 +34,7 @@ Idle停止常规Begin；Chromium的实际后续BeginFrame需求通过一次Wake�
 
 优先高画质、自动、优先流畅分别映射`MAINTAIN_RESOLUTION`、`BALANCED`、`MAINTAIN_FRAMERATE`。这三个选项不再附带不同DPR、像素预算、目标码率或FPS预设。
 
-GCC的`VideoEncoder::SetRates`控制编码码率与帧率；Comp依据该反馈、客户端能力上限及Slot饱和安排Begin。编码器的实际能力和协商H264上限仍须遵守。WebRTC原生source adaptation决定缩放与丢帧，Endpoint只执行其结果并维护布局屏障；旧延迟阈值、DPR因子与独立网络控制器删除。
+WebRTC的`VideoEncoder::SetRates`提供目标码率与观测输入帧率；Comp依据该反馈、客户端能力上限及Slot饱和安排Begin。QSV对观测帧率去抖，避免短时噪声反复改变名义时基与制造新序列，具体策略见[媒体反馈](media-feedback.md)。编码器的实际能力和协商H264上限仍须遵守。WebRTC原生source adaptation决定缩放与丢帧，Endpoint只执行其结果并维护布局屏障；旧延迟阈值、DPR因子与独立网络控制器删除。
 
 H264 level的帧尺寸、宏块吞吐率和码率上限属于接收能力约束。宏块吞吐率按最终编码尺寸计算FPS硬上限，同时约束Comp与编码器，不能假定WebRTC或驱动会自动保证；诊断分别显示官方限制与codec限制，不以此新增独立网络缩放策略。
 

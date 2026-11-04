@@ -104,6 +104,8 @@ export function WindowFrame({
   const tabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
     active = tabs.find((t) => t.id === win.activeTabId),
     focused = state.workspace.activeWindowId === win.id;
+  const creatingTab = win.id.startsWith('pending-') || !!win.activeTabId?.startsWith('pending-');
+  const navigationReady = online && !creatingTab;
   const [address, setAddress] = useState(active && isLocalTab(active) ? "" : active?.url ?? ""),
     [busy, setBusy] = useState(false),
     [menu, setMenu] = useState<HTMLElement | null>(null),
@@ -217,7 +219,7 @@ export function WindowFrame({
       void action({ type: "window.activate", windowId: win.id }).catch(report);
   };
   const submit = async (value: string) => {
-    if (!online || !value.trim()) return;
+    if (!navigationReady || !value.trim()) return;
     // Release the draft before dispatch so the pending projection and any WS
     // snapshot arriving before the receipt can update the canonical address.
     addressDirty.current = false;
@@ -376,7 +378,7 @@ export function WindowFrame({
           className="address-form"
           onSubmit={(e) => {
             e.preventDefault();
-            if (composing.current || busy || !online || !address.trim()) return;
+            if (composing.current || busy || !navigationReady || !address.trim()) return;
             setBusy(true);
             void submit(address).then(() => input.current?.blur()).catch(report).finally(() => setBusy(false));
           }}
@@ -385,14 +387,14 @@ export function WindowFrame({
           <InputBase
             inputRef={input}
             fullWidth
-            placeholder="搜索或输入网址"
+            placeholder={creatingTab ? "正在创建标签页…" : "搜索或输入网址"}
             inputProps={{
               "aria-label": "搜索或输入网址",
               autoComplete: "off",
               spellCheck: false,
             }}
             value={address}
-            disabled={!online || busy}
+            disabled={!navigationReady || busy}
             onChange={(e) => {
               addressDirty.current = true;
               setAddress(e.target.value);
@@ -415,7 +417,10 @@ export function WindowFrame({
       </div>
       <div className="window-content" ref={content}>
         {active?.kind === 'files' ? <MyFiles key={active.id} visible={visible} /> : !active || active.kind === 'start' ? (
-          <StartPage key={active?.id ?? 'empty'} engineLabel={SEARCH_ENGINES.find(engine => engine.value === state.workspace.settings.searchEngine)?.label ?? 'Google'} online={online} onSubmit={submit} />
+          <>
+            <StartPage key={active?.id ?? 'empty'} engineLabel={SEARCH_ENGINES.find(engine => engine.value === state.workspace.settings.searchEngine)?.label ?? 'Google'} online={navigationReady} onSubmit={submit} />
+            {creatingTab && <div className="page-overlay" role="status">正在创建标签页…</div>}
+          </>
         ) : (
           <>
             <RemoteViewport

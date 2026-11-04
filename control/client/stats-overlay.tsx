@@ -51,7 +51,7 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
     <dt>Encoded</dt><dd>{diagnostics.videoWidth && diagnostics.videoHeight ? `${diagnostics.videoWidth}×${diagnostics.videoHeight}` : '—'}</dd>
     <dt>媒体采样 X / Y</dt><dd>{measured(surface ? surface.mediaScaleX ?? surface.mediaScale ?? 1 : endpoint?.mediaScaleX ?? endpoint?.mediaScale, '×', 3)} / {measured(surface ? surface.mediaScaleY ?? surface.mediaScale ?? 1 : endpoint?.mediaScaleY ?? endpoint?.mediaScale, '×', 3)}</dd>
     <dt>分辨率限制</dt><dd title={`${endpoint?.resolutionLimitation ?? '—'}；协商level ${endpoint?.negotiatedReceiveLevel ?? '—'}；采样FPS预算 ${endpoint?.samplingFpsBudget ?? '—'}`}>{typeof endpoint?.resolutionLimitation === 'string' ? resolutionReason[endpoint.resolutionLimitation]??endpoint.resolutionLimitation : '—'}</dd>
-    <dt title="WebRTC拥塞控制给编码器的目标帧率；不是硬件时基或实际输出FPS">GCC 目标 FPS</dt><dd>{measured(endpoint?.gccTargetFps,'fps')}</dd>
+    <dt title="WebRTC估计的输入帧率，经SetRates传给编码器；不是实际输出FPS">输入 FPS 估计</dt><dd>{measured(endpoint?.gccTargetFps,'fps')}</dd>
     <dt>GCC 目标码率</dt><dd>{measured(typeof endpoint?.gccTargetBitrate === 'number' ? endpoint.gccTargetBitrate / 1000000 : undefined, 'Mbps', 2)}</dd>
     <dt>编码队列满丢帧</dt><dd>{typeof endpoint?.queueFullDrops === 'number' ? endpoint.queueFullDrops : '—'}</dd>
     <dt title="客户端显示上限 / Endpoint应用上限；实际绘制与解码见上方">请求 / 生效 FPS 上限</dt><dd>{mediaPolicy ? `${mediaPolicy.requested?.maxFps??'—'} / ${mediaPolicy.applied?.maxFps??'—'}` : '—'}</dd>

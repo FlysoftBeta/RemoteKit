@@ -2,11 +2,17 @@
 
 更新：2026-11-04。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
-## 最新交付（移动端卡顿诊断与全屏，761470）
+## 最新本地修复（QSV时基与发送积压）
+
+已用UHD630/QSV、1936×816、24Mbps/基础RTT10ms串行复现并比较。恢复WebRTC超发保护，QSV不再随每次观测FPS波动重配：持续明显降低才更新名义时基，恢复时一次回到Configure上限；原生网络适配、VBR及码率保持原职责。固定60FPS和BRC-only两条候选因低FPS画质退化均已撤回。Stats把错误的“GCC目标FPS”改为“输入FPS估计”；占位window/tab确认前禁用导航输入，防止身份替换时丢失草稿。
+
+原版→最终本地首段发送队列均值72→39ms、窗口峰270→167ms，稀疏页面marker到video提交p95 463→282ms，提交44.56→44.79FPS；第二段marker p95 276→211ms，提交45.11→43.38FPS。全组QSV新序列17→4、尾IDR3/3完成。低FPS停稳画质恢复接近原版。接收缓冲仍波动、100ms目标未达到，不能将桌面结果当UD710/Brave138生产验收。SDK/Endpoint/Control定向构建检查、真实QSV smoke和Chrome89静态首帧/活动停止/resize同连接验证通过。[完整实验与范围](../develop/docs/ud710-local-repro-20261104.md)。
+
+## 上一交付（移动端卡顿诊断与全屏，761470）
 
 用户UD710/Brave138惯性滚动截图显示RTT15ms，但接收缓冲均值303ms、末包到提交p95约336ms，解码45FPS而提交29FPS。尚不能排除网络或确认唯一瓶颈。新增同窗重传占比、组帧/处理/缓冲目标、音频缓冲与解码器观测；支持设置内开始诊断、悬浮停止、服务端tar.zst归档和客户端显示ID。包记录Client、Control、Endpoint/Browser的可用指标、逐帧时序、时钟、缺测及终止原因；不会把诊断设施当成卡顿已修复。[诊断流程](diagnostic-collection.md) · [现场与口径](../develop/docs/mobile-receiver-diagnostics-20261104.md)。
 
-现已收到实体设备34.9秒诊断：前段实测发送包排队均值约1.3–1.8秒，之后另有接收末包到提交数百毫秒积压；解码均值12.6ms，不能将主要秒级延迟归因于纯解码。发现SDK可信码率控制声明与现场编码超发矛盾，QSV帧率变化/关键帧突发及音频同步仍需受控验证。本次只分析数据与源码，尚未修改媒体或宣称修复。[实际诊断分析](../develop/docs/ud710-diagnostic-analysis-20261104.md)。
+随后收到实体设备34.9秒诊断：前段实测发送包排队均值约1.3–1.8秒，之后另有接收末包到提交数百毫秒积压；解码均值12.6ms，不能将主要秒级延迟归因于纯解码。发现SDK可信码率控制声明与现场编码超发矛盾，QSV帧率变化/关键帧突发及音频同步进入调查。该次仅分析，后续本地修复见上节。[实际诊断分析](../develop/docs/ud710-diagnostic-analysis-20261104.md)。
 
 定向模型/协议测试与Control生产构建、启动smoke通过；157/89真实H.264中设置开始→悬浮停止→服务端归档/ID显示通过，两组媒体连接保持，tar.zst解压核对包含真实收发及逐帧RTP关联数据。157另通过Control重启后同账户查询原ID；桌面无头与隔离mDNS配置的范围见[运行记录](../develop/docs/mobile-diagnostic-runtime-20261104.md)。未改原生编码或拥塞控制策略，未重跑性能矩阵，实体平板待采样。
 
@@ -94,7 +100,7 @@ Chrome157/DPR2与Chrome89/DPR1真实通过默认video首帧、双Window画面及
 - 每WebContents独立Aura root，经BeginFrameSource驱动专用Viz OSR OutputDevice，直接绘制共享BGRA目标；Browser在GPU上合成各plane为请求指定的atlas Slot。旧Capture/CopyOutput生产路径、旧自治节拍及桥接fallback删除，不需要本地屏幕Present。
 - 每Slot独立ready/consumed Fence及元数据。必须观察真实ready后才编码；SDK、转换和硬件编码租约全部结束，且consumed实际完成后才能复用。Stop/Stopped仅证明有序请求排空；未完成GPU工作继续保留。
 - Idle只在最后有效内容已提交、后续渲染需求停止时返回；后续Chromium需求通过绑定最后Idle身份的Wake恢复并优先安排新帧，遵守原有媒体门禁和Slot背压。已在途的晚到Begin不能清除唤醒证明。单次尾IDR通过force Begin取得合法Slot。
-- 三档质量分别映射WebRTC的MAINTAIN_RESOLUTION、BALANCED、MAINTAIN_FRAMERATE。官方source adaptation选择缩放/丢帧，SetRates驱动硬件码率与帧率；删除自制延迟阈值、DPR因子和码率/FPS预设。Comp另外遵守客户端、编码器及协商H264的硬能力上限。
+- 三档质量分别映射WebRTC的MAINTAIN_RESOLUTION、BALANCED、MAINTAIN_FRAMERATE。官方source adaptation选择缩放/丢帧，SetRates提供目标码率与观测输入FPS；QSV对观测FPS去抖后才重配硬件时基。删除自制延迟阈值、DPR因子和码率/FPS预设。Comp另外遵守客户端、编码器及协商H264的硬能力上限。
 - 媒体适配缩放完整atlas，页面DIP和Client Scale不随网络改变。X/Y对齐取整分别进入ROI、输入与caret转换；尺寸变化保持旧布局输入门禁及新布局首帧屏障。
 - 实际receiver设置jitterBufferTarget=0；Chrome89仅在标准属性缺失时使用可用的playoutDelayHint=0，能力与读回分别报告。
 - SDK控制/渲染ABI为2，当前源码RTC ABI为4，SharedRenderMapping版本2，新增稳定编辑target；旧316234包使用Mapping1，不能与本批混用。高级认证新增独立认证DataChannel与媒体授权接口；旧352318包使用RTC ABI3。Browser、SDK、Endpoint须配套更新。显式native demo仍可独立构建，其fence模式明确Unsupported，不切回旧capture。

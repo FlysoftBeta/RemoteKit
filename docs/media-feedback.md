@@ -8,9 +8,15 @@
 
 Endpoint每次fresh/force帧提交前调用SDK原生AdaptFrame，以原始atlas尺寸取得丢帧、编码尺寸及max_fps，再建立匹配布局屏障。GPU缩放完整atlas，X/Y比例分别传播，不裁plane或修改页面DPR。
 
-SetRates提供硬件目标码率/FPS。Comp根据Slot占用、客户端能力及WebRTC限制发送Begin。观察输入FPS不是永久源上限，slot空闲时可恢复到官方限制；零码率暂停，恢复请求关键帧。配置及H264上限只是能力边界。
+SetRates提供目标码率与WebRTC观测的输入FPS，后者不是独立的GCC帧率上限。Comp根据Slot占用、客户端能力及WebRTC限制发送Begin。观察输入FPS不是永久源上限，slot空闲时可恢复到官方限制；Endpoint收到零码率时暂停，恢复请求关键帧。配置及H264上限只是能力边界。
 
-QSV在已排空任务和VPP输出后更新速率。若Reset返回`MFX_ERR_INCOMPATIBLE_VIDEO_PARAM`（例如高码率降到1FPS需要更大的VBV），在原oneVPL session/device重新Query/Init编码组件，核对几何、色彩、LowPower与协商level，按需扩充VPP输出池并请求IDR。不得因为该状态永久退出编码线程，也不以擅自提高FPS、重建RTC或回退其他呈现后端掩盖失败；其他错误继续明确报告。硬件复现与边界见[低FPS恢复记录](../develop/docs/file-unlock-investigation-20261104.md)。
+外部硬件编码器不声明可信码率控制器，保留WebRTC原生的编码前超发丢帧保护。硬件速率更新成功不等于实际输出已经跟上预算，仍须观测编码字节和发送包排队。编码前丢弃通过纹理引用释放归还租约，首次/布局刷新仅在有效关键帧发布后完成；不能将源码声明修正直接当作端到端延迟改善的证据。
+
+QSV对观测FPS去抖后才改变H.264/VPP名义时基，避免60→59→58等短时波动制造新序列。名义帧率周围的小变化保持原值；观测持续1秒低于当前值80%时，以该窗最大观测值降低时基；超过当前值125%时一次恢复到Configure确定的合法上限。这个策略只处理硬件每帧预算和重配，不改变WebRTC码率、Comp实际源节拍或官方降级限制。单层maxFps上调不保证触发WebRTC Configure，名义上限以最近一次真正Configure为准。
+
+后端报告低帧率窗口的到期时间，EncoderWorker复用既有循环，在在途编码排空后重放最后有效速率；无需WebRTC重复发送相同参数，也不增加定时线程。暂停取消待处理窗口，新反馈优先。实际时基变化仍使用合法的新序列、VPP更新和IDR恢复；普通码率Reset保持序列。初始化和速率更新均校验驱动读回帧率。固定60FPS及BRC-only缺帧提示曾在本机造成低FPS画质回退，未采用，见[对照记录](../develop/docs/ud710-local-repro-20261104.md)。
+
+QSV在已排空编码任务后更新速率，时基变化和重建前确认VPP输出排空。若Reset返回`MFX_ERR_INCOMPATIBLE_VIDEO_PARAM`，在原oneVPL session/device重新Query/Init编码组件，核对几何、时基、色彩、LowPower与协商level，按需扩充VPP输出池并请求IDR。不得因此永久退出编码线程、重建RTC或回退其他呈现后端；其他错误继续明确报告。[旧逐次观测FPS重配路径的低FPS恢复记录](../develop/docs/file-unlock-investigation-20261104.md)保留为历史证据。
 
 首次呈现和显式刷新不能在SDK接受纹理时视为完成：source可能尚未交给编码器，编码结果也可能被布局屏障拒绝。Comp按peer、授权代次与完整呈现屏障保留刷新请求；只有该请求标记的关键帧通过屏障且SDK编码发布成功，才消费请求。请求合并、单个尝试在途，失败后的强制Begin和重新提交至多每秒一次，仍服从SetRates、Slot背压和可见布局门禁。源等待可以取消，已进入编码的尝试等待实际完成；旧代次结果不能完成新请求。该恢复请求与静态页面的单次idle尾IDR分别记账。
 
