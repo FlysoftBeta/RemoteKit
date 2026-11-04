@@ -2,6 +2,12 @@ import type { Surface } from './types';
 import { surfaceDipSize } from './coordinates';
 export interface ViewportBounds { left: number; top: number; width: number; height: number }
 export interface VisualBounds { offsetLeft: number; offsetTop: number; width: number; height: number }
+export interface ViewportMetrics {
+  visual: VisualBounds | undefined;
+  scale: number;
+  layoutWidth: number;
+  layoutHeight: number;
+}
 export function visibleContentBounds(content: ViewportBounds, visual?: VisualBounds | null): ViewportBounds {
   if (!visual) return { ...content };
   const left = Math.max(content.left, visual.offsetLeft), top = Math.max(content.top, visual.offsetTop);
@@ -9,6 +15,51 @@ export function visibleContentBounds(content: ViewportBounds, visual?: VisualBou
 }
 export function sameViewportBounds(a: ViewportBounds, b: ViewportBounds) {
   return Math.abs(a.left - b.left) < .5 && Math.abs(a.top - b.top) < .5 && Math.abs(a.width - b.width) < .5 && Math.abs(a.height - b.height) < .5;
+}
+export function sameViewportSize(a: ViewportBounds, b: ViewportBounds) {
+  return Math.round(a.width) === Math.round(b.width) && Math.round(a.height) === Math.round(b.height);
+}
+export function resizeSnapshotSize(width: number, height: number) {
+  const pixels = width * height;
+  if (!Number.isFinite(pixels) || width <= 0 || height <= 0) return;
+  const scale = Math.min(1, Math.sqrt(FREEZE_MAX_PIXELS / pixels));
+  return { width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)) };
+}
+export class KeyboardViewport {
+  private previous?: ViewportMetrics;
+  private openHeight?: number;
+  get open() { return this.openHeight !== undefined; }
+  measure(metrics: ViewportMetrics, focused: boolean, coarse: boolean) {
+    const previous = this.previous;
+    this.previous = metrics;
+    if (!previous) return false;
+    const visual = metrics.visual, oldVisual = previous.visual;
+    if (Math.abs(previous.layoutWidth - metrics.layoutWidth) >= 1 ||
+        Math.abs((oldVisual?.width ?? previous.layoutWidth) - (visual?.width ?? metrics.layoutWidth)) >= 1 ||
+        Math.abs((oldVisual?.offsetLeft ?? 0) - (visual?.offsetLeft ?? 0)) >= 1 ||
+        metrics.scale <= .98 || metrics.scale >= 1.02) {
+      this.openHeight = undefined;
+      return false;
+    }
+    const visualHeight = visual?.height ?? metrics.layoutHeight;
+    const previousVisualHeight = oldVisual?.height ?? previous.layoutHeight;
+    const height = Math.min(visualHeight, metrics.layoutHeight);
+    const oldHeight = Math.min(previousVisualHeight, previous.layoutHeight);
+    const offsetTop = visual?.offsetTop ?? 0;
+    if (Math.abs(visualHeight - previousVisualHeight) < 1 && Math.abs(offsetTop - (oldVisual?.offsetTop ?? 0)) < 1 &&
+        Math.abs(metrics.layoutHeight - previous.layoutHeight) < 1) return false;
+    if (this.openHeight !== undefined) {
+      if (height >= this.openHeight - 1) this.openHeight = undefined;
+      return true;
+    }
+    const occluded = !!visual && visualHeight + offsetTop < metrics.layoutHeight - 24;
+    if (focused && (occluded || coarse) && oldHeight - height >= 1) {
+      this.openHeight = oldHeight;
+      return true;
+    }
+    return false;
+  }
+  clear() { this.openHeight = this.previous = undefined; }
 }
 export const FREEZE_MAX_PIXELS = 4 * 1024 * 1024;
 export const FREEZE_MAX_MS = 1800;
@@ -22,13 +73,14 @@ export class ViewportTransition {
     this.desired = { ...bounds };
     if (this.freeze) return false; // One bounded copy for the complete keyboard animation.
     const previous = this.confirmed;
-    if (!ready || !previous || previous.owner !== owner || Math.round(previous.bounds.width) === Math.round(bounds.width) && Math.round(previous.bounds.height) === Math.round(bounds.height) || !Number.isFinite(pixels) || pixels <= 0 || pixels > FREEZE_MAX_PIXELS) return false;
+    if (!ready || !previous || previous.owner !== owner || sameViewportSize(previous.bounds, bounds) || !Number.isFinite(pixels) || pixels <= 0 || pixels > FREEZE_MAX_PIXELS) return false;
     this.freeze = { ...previous, bounds: { ...previous.bounds }, expires: now + FREEZE_MAX_MS };
     return true;
   }
   ready(owner: string, layout: string, bounds: ViewportBounds) {
     this.confirmed = { owner, layout, bounds: { ...bounds } };
-    if (this.freeze && (this.freeze.owner !== owner || layout !== this.freeze.layout && (!this.desired || sameViewportBounds(bounds, this.desired)))) this.freeze = undefined;
+    if (this.freeze && (this.freeze.owner !== owner || (!this.desired || sameViewportBounds(bounds, this.desired)) &&
+        (layout !== this.freeze.layout || sameViewportSize(this.freeze.bounds, bounds)))) this.freeze = undefined;
   }
   invalidate(owner: string | undefined, now: number) {
     if (this.freeze && (this.freeze.owner !== owner || now >= this.freeze.expires)) this.freeze = undefined;

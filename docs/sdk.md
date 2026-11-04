@@ -101,8 +101,11 @@ render or RTC ABIs; current build and runtime evidence is recorded in
 ## Streaming ownership
 
 The RTC interface is ABI version 4 and the control/render SDK is ABI version 2.
-Creation rejects mismatched ABIs. SharedRenderMapping is version 1, 36224 bytes,
-with four independent slots (7232 bytes each); SharedAtlasView remains 112 bytes.
+Creation rejects mismatched ABIs. SharedRenderMapping is version 2, 38784 bytes,
+with four independent slots (7744 bytes each); SharedAtlasView is 120 bytes.
+Version 2 adds a stable editable target identity to the 48-byte text-input state,
+independent of the rotating layout/focus input lease. Mapping version and size
+must match; version 1 producers and consumers cannot be mixed with version 2.
 Page DPR and atlas pixels per DIP stay separate. Rebuild Browser, SDK and Endpoint together.
 
 RTC ABI4 adds `auth_required`, `remotekit_rtc_set_media_authorized`, and a

@@ -527,11 +527,11 @@ struct Session {
   if(!plan)throw std::runtime_error("visible source atlas cannot be packed within the aligned 16-megapixel/8192-pixel resource budget");
   return {plan->width,plan->height,plan->scale};
  }
- bool PauseOutput() {
+ bool PauseOutput(bool reconfiguring=false) {
   const bool active=peer.load()!=0;
   const bool had_media_thread=media_thread.joinable();
   if(active||had_media_thread){stop_media=true;event_wake.notify_all();if(media_thread.joinable())media_thread.join();}
-  InvalidateLayout("output-paused");
+  InvalidateLayout(reconfiguring?"reconfigure":"output-paused");
   try{Rpc({{"method","output.close"}});}
   catch(const std::exception& error){fprintf(stderr,"output close unfinished: %s; resources retained until producer stop confirmed\n",error.what());}
   // A joined MediaLoop already ran its render exit barrier. Without an owner
@@ -567,7 +567,7 @@ struct Session {
  }
  void ResumeOutput(bool active) {
   if(!active)return;
-  OpenOutput();layout=Json();stop_media=false;
+  OpenOutput();stop_media=false;
   media_thread=std::thread([this]{MediaLoop();});
  }
  void ReconcileOutput() {
@@ -586,7 +586,9 @@ struct Session {
   bool source_applied=false;
   desired[view]=config;Geometry geometry;
   try{geometry=DesiredGeometry();}catch(...){if(previous.is_null())desired.erase(view);else desired[view]=previous;throw;}
-  const bool active=PauseOutput();
+  const bool reconfiguring=!create && !recovering && !Recovering(view) && !previous.is_null() &&
+    previous.value("visible",false) && config.value("visible",false);
+  const bool active=PauseOutput(reconfiguring);
   try {
    Json result={{"accepted",true},{"completed",true}};
    if(create){result=CreateView(config,recovering);source_applied=true;}
@@ -599,6 +601,7 @@ struct Session {
    // commit the accepted desired state must survive persistence/media failure.
    if(!source_applied){if(previous.is_null())desired.erase(view);else desired[view]=previous;}
    reconciliation_pending=true;next_reconciliation=QpcNow()+QpcFrequency();output_suspended=true;
+   if(reconfiguring)InvalidateLayout("reconfigure-failed");
    {std::lock_guard lock(stats->mutex);stats->error=original;}
    throw;
   }
@@ -1214,13 +1217,18 @@ struct Session {
   // key so a repeated transaction retries the same idempotent barrier.
   if(prepare)layout_prepare=prepare;
   next=remotekit::LayoutCapabilities(std::move(next),control.load()!=0 && client_gestures_control.load()==control.load());
+  if(next.at("generation")!="0" && !layout.empty() && layout.value("reconfiguring",false))
+   direct_services.RefreshEditable();
   layout=std::move(next);QueueLayout();
  }
  void InvalidateLayout(const char* reason) {
   current_geometry=std::string("invalid:")+reason;
   const auto epoch=layout_epoch.fetch_add(1)+1;
-  PublishLayout({{"type","layout"},{"generation","0"},{"width",16},{"height",16},
-    {"mediaScale",1},{"views",Json::array()},{"epoch",std::to_string(epoch)}},epoch);
+  Json invalid={{"type","layout"},{"generation","0"},{"width",16},{"height",16},
+    {"mediaScale",1},{"views",Json::array()},{"epoch",std::to_string(epoch)}};
+  if(std::string_view(reason)=="reconfigure")invalid["reconfiguring"]=true;
+  direct_services.RefreshEditable();
+  PublishLayout(std::move(invalid),epoch);
  }
  Json Layout(const remotekit::SharedAtlasFrame& frame) {
   auto fit=sampling;
@@ -1368,7 +1376,10 @@ struct Session {
   } render_exit{*this,tail_attempt};
   struct TargetReset {std::mutex& mutex;CompDiagnostics& value;~TargetReset(){std::lock_guard lock(mutex);value.targetFps=0;}} target_reset{comp_diagnostics_mutex,comp_diagnostics};
   HANDLE pace_timer=CreateWaitableTimerExW(nullptr,nullptr,0x2,TIMER_MODIFY_STATE|SYNCHRONIZE);
-  if(!pace_timer){std::lock_guard lock(stats->mutex);stats->error="high resolution Comp timer unavailable";return;}
+  if(!pace_timer){
+   InvalidateLayout("comp-timer-unavailable");
+   std::lock_guard lock(stats->mutex);stats->error="high resolution Comp timer unavailable";return;
+  }
   struct TimerCloser {HANDLE value;~TimerCloser(){CloseHandle(value);}} timer_closer{pace_timer};
   uint64_t observed_wakes=pool.Stats().wakes;
   remotekit::CompBeginSchedule begin_schedule;
@@ -1514,7 +1525,6 @@ struct Session {
     fprintf(stderr,"session %s media: %s\n",id.c_str(),error.c_str());break;
    }
    const auto current_metadata=output_suspended?remotekit::SharedAtlasFrame{}:pool.LatestMetadata();
-   direct_services.Editable(peer.load(),current_metadata);
    if(output_suspended) {
     if(current_geometry!="invalid:no-visible-views")InvalidateLayout("no-visible-views");
    }
@@ -1597,6 +1607,7 @@ struct Session {
      else {stream_started=true;if(tail)++tail_submissions;}
     }
    }
+   direct_services.Editable(peer.load(),current_metadata,output_suspended);
    if(now-last_stats>=QpcFrequency()) {
     if(trace)trace->WallClock();
     if(handle && sdk.request_stats)sdk.request_stats(handle);
@@ -1633,6 +1644,7 @@ struct Session {
    const HANDLE wait_handles[]={pace_timer,output_suspended?nullptr:pool.EventHandle()};
    if(!SetWaitableTimerEx(pace_timer,&due,0,nullptr,nullptr,nullptr,0) ||
       WaitForMultipleObjects(wait_handles[1]?2:1,wait_handles,FALSE,2)==WAIT_FAILED){
+    InvalidateLayout("comp-pacing-failed");
     std::lock_guard lock(stats->mutex);stats->error="Comp pacing wait failed";break;
    }
   }

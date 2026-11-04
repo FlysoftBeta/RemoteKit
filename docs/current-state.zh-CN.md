@@ -2,6 +2,14 @@
 
 更新：2026-11-04。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
+## 键盘与尺寸过渡修复（构建与运行已通过）
+
+已修复尺寸重配把未知编辑状态误报失焦、以及布局失效结束composition的路径。Browser保留同一编辑目标的composition，原focus/layout输入租约仍轮换；Client在明确reconfigure期间保留本地键盘，将有界暂存输入绑定稳定target，在新布局/画面和权威编辑状态匹配后交付。真实失焦关闭输入法，旧target事件在Browser最终派发前拒绝。
+
+键盘引起的纵向视口变化使用顶部锚定、保持比例的peek；普通窗口/分栏布局使用最后一帧模糊拉伸。快照保持输入门禁，最多4Mi像素、1.8秒，不计入稳态video帧数。Control生产构建及319项全量测试、最后分类/租约修正的16项定向测试通过；Browser/SDK及Endpoint Release增量构建通过，19项CTest分两轮完成。[构建记录](../develop/docs/keyboard-viewport-build-20261104.md)。
+
+Chrome157修前基线已复现可信focusout及输入丢失；修后157/89真实H264组均通过多段视口变化不失焦、composition持续、单次commit、旧target拒绝、真实失焦关闭输入法、两类过渡及同peer/DC/video/track保持。157本地composition用CDP，89因旧CDP能力缺失使用合成本地事件，远端均为真实Native IME。两版peek及过渡截图已检查；实体Android/iOS软键盘仍待设备验收。[正式回归工具](../tools/test-keyboard-viewport.mjs) · [运行记录](../develop/docs/keyboard-viewport-runtime-20261104.md)。本批待打包发布。
+
 ## 当前交付
 
 锁定行为源码已调整：默认5分钟无操作锁定，切到后台锁定默认开启，锁屏及初始空白背景为纯白。已保存的账号设置继续生效。6项认证/解锁定向测试及Control生产构建、启动smoke通过；未做真实5分钟等待或后台切换复验。本次按要求不打包，以下已发布包不含此调整。
@@ -45,7 +53,7 @@ Chrome157/DPR2与Chrome89/DPR1真实通过默认video首帧、双Window画面及
 - 三档质量分别映射WebRTC的MAINTAIN_RESOLUTION、BALANCED、MAINTAIN_FRAMERATE。官方source adaptation选择缩放/丢帧，SetRates驱动硬件码率与帧率；删除自制延迟阈值、DPR因子和码率/FPS预设。Comp另外遵守客户端、编码器及协商H264的硬能力上限。
 - 媒体适配缩放完整atlas，页面DIP和Client Scale不随网络改变。X/Y对齐取整分别进入ROI、输入与caret转换；尺寸变化保持旧布局输入门禁及新布局首帧屏障。
 - 实际receiver设置jitterBufferTarget=0；Chrome89仅在标准属性缺失时使用可用的playoutDelayHint=0，能力与读回分别报告。
-- SDK控制/渲染ABI为2，当前源码RTC ABI为4，SharedRenderMapping版本1。高级认证新增独立认证DataChannel与媒体授权接口；旧352318包使用RTC ABI3。Browser、SDK、Endpoint须配套更新。显式native demo仍可独立构建，其fence模式明确Unsupported，不切回旧capture。
+- SDK控制/渲染ABI为2，当前源码RTC ABI为4，SharedRenderMapping版本2，新增稳定编辑target；旧316234包使用Mapping1，不能与本批混用。高级认证新增独立认证DataChannel与媒体授权接口；旧352318包使用RTC ABI3。Browser、SDK、Endpoint须配套更新。显式native demo仍可独立构建，其fence模式明确Unsupported，不切回旧capture。
 
 正式细节：[Comp / Rend](rendering.zh-CN.md) · [GPU](gpu-output.zh-CN.md) · [SDK](sdk.md) · [媒体反馈](media-feedback.md)。
 

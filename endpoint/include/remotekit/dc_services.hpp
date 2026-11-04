@@ -88,17 +88,22 @@ class DirectServices {
   auto result=message;result["type"]="product.result";result["version"]=1;
   results_.push_back(result.dump());pending_.erase(found);return true;
  }
- void RefreshEditable() {std::lock_guard lock(mutex_);editable_value_=nullptr;}
- void Editable(uint64_t peer,const SharedAtlasFrame& frame) {
+ void RefreshEditable() {
+  std::lock_guard lock(mutex_);editable_value_=nullptr;editable_.clear();
+ }
+ void Editable(uint64_t peer,const SharedAtlasFrame& frame,bool output_suspended=false) {
   std::lock_guard lock(mutex_);if(!peer || peer!=peer_)return;
+  if(!output_suspended && (!frame.generation ||
+      (frame.status!=SharedAtlasStatus::kStarting && frame.status!=SharedAtlasStatus::kRunning) ||
+      frame.view_count>kSharedAtlasMaxViews))return;
   const SharedAtlasView* selected=nullptr;
-  for(uint32_t i=0;i<std::min(frame.view_count,kSharedAtlasMaxViews);++i) {
+  for(uint32_t i=0;!output_suspended && i<frame.view_count;++i) {
    const auto& view=frame.views[i];
-   if(!(view.reserved&kSharedAtlasViewStale) && (view.text_input.flags&kAtlasTextInputActive)) {
+   if(view.text_input.target_id && (view.text_input.flags&kAtlasTextInputActive)) {
     selected=&view;break;
    }
   }
-  ServiceJson value={{"view",nullptr},{"editable",{{"type",0},{"flags",0},{"active",false},
+  ServiceJson value={{"view",nullptr},{"editable",{{"type",0},{"flags",0},{"active",false},{"target","0"},
    {"selectionStart",0},{"selectionEnd",0},{"compositionStart",0},{"compositionEnd",0},
    {"caretX",0},{"caretY",0},{"caretWidth",0},{"caretHeight",0}}}};
   if(selected) {
@@ -108,6 +113,7 @@ class DirectServices {
     {"focus",std::to_string(view.focus_generation)}};
    auto finite=[](float v){return std::isfinite(v)?v:0.0f;};
    value["editable"]={{"type",input.type},{"flags",input.flags},{"active",true},
+    {"target",std::to_string(input.target_id)},
     {"selectionStart",input.selection_start},{"selectionEnd",input.selection_end},
     {"compositionStart",input.composition_start},{"compositionEnd",input.composition_end},
     {"caretX",finite(input.caret_x)},{"caretY",finite(input.caret_y)},

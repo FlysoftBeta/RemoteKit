@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ViewportTransition, visibleContentBounds, FREEZE_MAX_MS, FREEZE_MAX_PIXELS, surfaceMatchesViewport } from '../client/viewport-transition';
+import { KeyboardViewport, ViewportTransition, resizeSnapshotSize, visibleContentBounds, FREEZE_MAX_MS, FREEZE_MAX_PIXELS, surfaceMatchesViewport } from '../client/viewport-transition';
 const old = { left: 0, top: 80, width: 390, height: 764 }, small = { ...old, height: 364 };
 test('visual viewport offset and size intersect actual content bounds', () => {
   assert.deepEqual(visibleContentBounds(old, { offsetLeft: 10, offsetTop: 100, width: 350, height: 400 }), { left: 10, top: 100, width: 350, height: 400 });
@@ -32,4 +32,35 @@ test('viewport readiness checks both exact sampling axes and rejects old geometr
   assert.equal(surfaceMatchesViewport({ ...surface, mediaScaleX: .495 }, { width: 800, height: 600 }), false);
   assert.equal(surfaceMatchesViewport(surface, { width: 800, height: 500 }), false);
   assert.equal(surfaceMatchesViewport({ ...surface, mediaScaleY: NaN }, { width: 800, height: 600 }), false);
+});
+test('keyboard peek follows vertical occlusion and its release even after editor blur', () => {
+  const keyboard = new KeyboardViewport();
+  const viewport = (height: number, layoutHeight = 844, width = 390) => ({
+    visual: { width, height, offsetLeft: 0, offsetTop: 0 }, scale: 1, layoutWidth: width, layoutHeight,
+  });
+  assert.equal(keyboard.measure(viewport(844), true, false), false);
+  assert.equal(keyboard.measure(viewport(444), true, false), true);
+  assert.equal(keyboard.measure(viewport(844), false, false), true);
+  assert.equal(keyboard.measure(viewport(444), false, true), false);
+  assert.equal(keyboard.measure(viewport(400, 844, 450), true, true), false);
+  assert.equal(keyboard.measure(viewport(350, 350, 450), true, false), false);
+  assert.equal(keyboard.measure(viewport(300, 300, 450), true, true), true);
+  assert.equal(keyboard.measure(viewport(350, 350, 450), false, true), true);
+  assert.equal(keyboard.measure(viewport(350, 300, 450), true, true), true);
+});
+test('CSS content height changes alone use the ordinary preview, even while the keyboard is open', () => {
+  const keyboard = new KeyboardViewport();
+  const viewport = { visual: { width: 390, height: 844, offsetLeft: 0, offsetTop: 0 }, scale: 1, layoutWidth: 390, layoutHeight: 844 };
+  keyboard.measure(viewport, true, true);
+  assert.equal(keyboard.measure({ ...viewport }, true, true), false);
+  const occluded = { ...viewport, visual: { ...viewport.visual, height: 444 } };
+  assert.equal(keyboard.measure(occluded, true, true), true);
+  assert.equal(keyboard.measure({ ...occluded }, true, true), false);
+  assert.equal(keyboard.open, true);
+  assert.equal(keyboard.measure(viewport, false, true), true);
+});
+test('oversized preview downscales within its pixel budget', () => {
+  assert.deepEqual(resizeSnapshotSize(390, 764), { width: 390, height: 764 });
+  assert.deepEqual(resizeSnapshotSize(4096, 4096), { width: 2048, height: 2048 });
+  assert.equal(resizeSnapshotSize(0, 764), undefined);
 });

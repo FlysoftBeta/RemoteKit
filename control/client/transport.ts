@@ -112,6 +112,11 @@ export class RemoteTransport {
   private inputDrainTimer?: ReturnType<typeof setTimeout>;
   private focusTimer?: ReturnType<typeof setTimeout>;
   private inputFocus = new Map<string, { token: string; identity: string; focused: boolean }>();
+  private editingSurfaces: readonly Surface[] = [];
+  editingSurface(viewId: string) {
+    const views = this.layout?.reconfiguring ? this.editingSurfaces : this.layout?.views;
+    return views?.find(view => view.id === viewId);
+  }
   inputIdentity(surface: Surface) { const known = this.inputFocus.get(surface.id); return `${this.attempt}:${surface.session}:${surface.id}:${surface.instance}:${surface.document}:${this.layout?.generation}:${this.layout?.epoch}:${known?.token === surface.focus ? known.identity : surface.focus}`; }
   editingIdentity(surface: Surface) { return `${this.attempt}:${surface.session}:${surface.id}:${surface.instance}:${surface.document}`; }
   private inputResultListeners = new Set<(result: InputResult) => void>();
@@ -1101,7 +1106,11 @@ export class RemoteTransport {
         if (this.peerAuthEpoch !== undefined && (this.peerAuthEpoch === 0 || message.authEpoch !== this.peerAuthEpoch)) return;
         if (message.type === 'clock.pong') { this.endpointClockProbe.pong(message, performance.now(), Date.now()); return; }
         if (this.productLocked) return;
-        if (message.type === 'input.editable') { if (this.mobileEditing.receive(message, this.layout?.views ?? [])) this.notify(); return; }
+        if (message.type === 'input.editable') {
+          const pending = this.layout?.reconfiguring === true;
+          if (this.mobileEditing.receive(message, pending ? this.editingSurfaces : this.layout?.views ?? [], Date.now(), pending)) this.notify();
+          return;
+        }
         if (message.type === 'input.capabilities') this.clientGestures = message.clientGestures === 1;
         if(this.files.handle(message))return;
         if(message.type==='product.result' && message.version===1) { const entry=this.productPending.get(message.operationId);if(entry && entry.operation.operationGeneration===message.operationGeneration) {clearTimeout(entry.timer);this.productPending.delete(message.operationId);entry.resolve(message.result ?? {operationId:message.operationId,operationGeneration:message.operationGeneration,status:'rejected',error:String(message.error??'操作被拒绝')});} }
@@ -1126,7 +1135,18 @@ export class RemoteTransport {
           }
           this.markConnection('firstLayout');
           if (this.activeFrameSource === 'track-processor' && this.layout && (this.layout.epoch !== message.epoch || this.layout.generation !== message.generation || this.layout.width !== message.width || this.layout.height !== message.height || this.layout.views.length !== message.views.length || this.layout.views.some(view => !message.views.some((next: Surface) => samePlane(view, next))))) { this.closePendingProcessorFrame('layout-change'); this.closeLatestProcessorFrame(); this.frameGate.observe(undefined); }
-          this.layout = message; this.mobileEditing.reconcile(this.layout!.views);
+          const reconfiguring = message.reconfiguring === true && message.generation === '0' && !message.views.length;
+          if (reconfiguring) {
+            if (!this.layout?.reconfiguring) {
+              this.editingSurfaces = this.layout?.views ?? [];
+              this.mobileEditing.suspendLayout();
+            }
+          } else {
+            this.editingSurfaces = [];
+            this.mobileEditing.reconcile(message.views);
+            if (message.reconfiguring !== undefined) delete message.reconfiguring;
+          }
+          this.layout = message;
           this.syncViewports();
           for (const [id, plane] of this.paintedPlanes) if (!planeMatchesLayout(plane.identity, this.layout)) { this.paintedPlanes.delete(id); this.viewPresentations.delete(id); }
           for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) { this.hideVideoPlane(renderer); renderer.ready(false); }

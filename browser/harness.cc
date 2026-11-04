@@ -140,8 +140,8 @@ struct HarnessMainParts::State {
     placements.clear();
     for (size_t i = 0; i < contents.size(); ++i) {
       const auto found = std::ranges::find(atlas.placements, contents[i]->view_id(), &Placement::view);
-      contents[i]->InvalidateLayoutInput();
       const bool visible = found != atlas.placements.end();
+      contents[i]->InvalidateLayoutInput(visible);
       const auto rect = visible ? found->content : PixelRect{0, 0, specs[i].width, specs[i].height};
       if (native_views[i]) {
         native_views[i]->SetBounds(rect.x, rect.y, rect.width, rect.height);
@@ -285,7 +285,7 @@ struct HarnessMainParts::State {
     std::vector<OsrRenderer::View> views;
     for (size_t i = 0; i < contents.size(); ++i) {
       if (!specs[i].visible) continue;
-      const auto& adapter = *contents[i];
+      auto& adapter = *contents[i];
       const auto token = endpoint.Token(adapter.session_id(), adapter.view_id());
       const auto* model = endpoint.FindWebView(adapter.session_id(), adapter.view_id());
       if (!token || !model)
@@ -1184,6 +1184,12 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     const auto* type = event ? event->FindString("type") : nullptr;
     if (!type)
       return error("event_type_required");
+    if (event->Find("editableTarget")) {
+      const auto* target = event->FindString("editableTarget");
+      if (!target || !ReadId(*event, "editableTarget", &input.editable_target) ||
+          *target != base::NumberToString(input.editable_target))
+        return error("invalid_editable_target");
+    }
     if (*type == "ime_commit" || *type == "ime_set") {
       const auto* text = event->FindString("text");
       if (!text)

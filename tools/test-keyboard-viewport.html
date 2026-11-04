@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>RemoteKit keyboard viewport fixture</title>
+<style>
+  body { margin: 0; background: #dae6f0; font: 16px Arial, sans-serif; }
+  header { padding: 16px; background: #16365c; color: white; }
+  label { display: inline-flex; flex-direction: column; margin: 4px; }
+  button, input { padding: 8px; font: inherit; }
+  .pattern { height: 72vh; background: repeating-linear-gradient(35deg, #184469 0 25px, #82b4d8 25px 50px, #ecf5ff 50px 75px); }
+</style>
+<header>
+  <button id="tl">Leave editor</button>
+  <label>Field A<input id="text"></label>
+  <label>Field B<input id="second"></label>
+</header>
+<div class="pattern"></div>
+<script>
+  const fields = ['text', 'second'].map(id => document.getElementById(id));
+  const targets = [document.getElementById('tl'), ...fields];
+  const geometry = () => Object.fromEntries(targets.map(target => [target.id, target.getBoundingClientRect().toJSON()]));
+  function report(type, details) {
+    const [text, second] = fields.map(field => field.value);
+    return fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, width: innerWidth, height: innerHeight, geometry: geometry(), text, second, ...details }),
+    }).catch(() => {});
+  }
+  for (const field of fields) {
+    for (const type of ['input', 'compositionstart', 'compositionupdate', 'compositionend', 'focus', 'blur']) {
+      field.addEventListener(type, event => report(type === 'input' ? field.id : type, {
+        field: field.id,
+        data: event.data,
+        selection: [field.selectionStart, field.selectionEnd],
+      }));
+    }
+  }
+  addEventListener('resize', () => report('resize'));
+  report('ready');
+</script>

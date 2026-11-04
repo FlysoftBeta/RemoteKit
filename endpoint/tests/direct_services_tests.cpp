@@ -53,17 +53,41 @@ int main() {
  Check(!services.Admit(1,Action(64),0),"bounded backpressure");
  services.Bind(3);Check(!services.Result(3,reply),"replacement discards routing receipts");
  services.Flush(3,[&](auto){Check(false,"old result cannot migrate");return 0;});
- remotekit::SharedAtlasFrame frame{};frame.view_count=1;
+ remotekit::SharedAtlasFrame frame{};frame.generation=1;frame.view_count=1;
  auto& view=frame.views[0];view.session_id=1;view.webview_id=2;view.instance_generation=3;view.document_generation=4;view.focus_generation=5;
+ view.reserved=remotekit::kSharedAtlasViewStale;
  view.text_input.flags=remotekit::kAtlasTextInputActive;view.text_input.type=1;view.text_input.selection_end=4;
+ view.text_input.target_id=UINT64_MAX;
  services.Editable(3,frame);view.text_input.selection_end=7;services.Editable(3,frame);
  sent.clear();services.Flush(3,[&](auto bytes){sent.push_back(Json::parse(bytes));return 0;});
- Check(sent.size()==1 && sent[0]["editable"]["selectionEnd"]==7,"latest editable coalesces");
+ Check(sent.size()==1 && sent[0]["editable"]["selectionEnd"]==7 && sent[0]["revision"]=="2",
+       "latest editable coalesces while advancing the revision");
  Check(sent[0]["view"]["document"]=="4" && !sent[0].contains("text"),"editable identity without contents");
+ Check(sent[0]["editable"]["active"]==true && sent[0]["editable"]["target"]=="18446744073709551615",
+       "editable authority is available before pixels and preserves uint64 identity");
  services.Editable(3,frame);services.Flush(3,[&](auto){Check(false,"unchanged editable not resent");return 0;});
- services.RefreshEditable();services.Editable(3,frame);services.Flush(3,[&](auto){return 0;});
+ services.RefreshEditable();
+ services.Editable(3,{});
+ auto stopped=frame;stopped.status=remotekit::SharedAtlasStatus::kStopped;
+ services.Editable(3,stopped);
+ services.Flush(3,[&](auto){Check(false,"pending or stopped metadata must not blur");return 0;});
+ frame.generation=2;
+ services.Editable(3,frame);sent.clear();
+ services.Flush(3,[&](auto bytes){sent.push_back(Json::parse(bytes));return 0;});
+ Check(sent.size()==1 && sent[0]["editable"]["target"]=="18446744073709551615" &&
+       sent[0]["revision"]=="3","replacement republishes unchanged editable authority");
+ view.text_input.target_id=12;
+ services.Editable(3,frame);sent.clear();
+ services.Flush(3,[&](auto bytes){sent.push_back(Json::parse(bytes));return 0;});
+ Check(sent.size()==1 && sent[0]["editable"]["target"]=="12" && sent[0]["revision"]=="4",
+       "same document and selection can change editable target");
  frame.view_count=0;services.Editable(3,frame);sent.clear();services.Flush(3,[&](auto bytes){sent.push_back(Json::parse(bytes));return 0;});
- Check(sent.size()==1 && sent[0]["view"].is_null() && sent[0]["editable"]["active"]==false,"no target clears keyboard");
+ Check(sent.size()==1 && sent[0]["view"].is_null() && sent[0]["editable"]["active"]==false &&
+       sent[0]["editable"]["target"]=="0","no target clears keyboard");
+ frame.view_count=1;services.Editable(3,frame);
+ services.Editable(3,frame,true);sent.clear();
+ services.Flush(3,[&](auto bytes){sent.push_back(Json::parse(bytes));return 0;});
+ Check(sent.size()==1 && sent[0]["editable"]["active"]==false,"suspended output clears stale authority");
  std::istringstream input(std::string(1024*1024+32,'a')+"\n{}\n");std::string line;
  Check(remotekit::ReadServiceLine(input,line) && line.size()<100,"oversized line does not accumulate");
  Check(remotekit::ReadServiceLine(input,line) && line=="{}","oversized tail fully discarded");

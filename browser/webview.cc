@@ -236,6 +236,8 @@ void WebView::CreateContents(std::unique_ptr<content::WebContents> adopted) {
   // Creating an emulator only when injecting into an already active native
   // sequence would miss its start and defeat the official mutual exclusion.
   auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
+  if (auto* manager = implementation->GetTextInputManager())
+    text_input_observation_.Observe(manager);
   implementation->GetInputEventRouter();
   implementation->GetTouchEmulator(true);
 }
@@ -247,6 +249,8 @@ void WebView::AttachOffscreenHost() {
   offscreen_host_->SetRenderDemand(render_demand_ && visible_);
 }
 void WebView::DropContents() {
+  text_input_observation_.Reset();
+  editable_target_.reset();
   auto host = std::move(offscreen_host_);
   if (host) host->Detach();
   contents_.reset();
@@ -272,8 +276,22 @@ void WebView::OverridePreferences(content::WebContents* contents,
     prefs->shrinks_viewport_contents_to_fit = true;
   }
 }
-void WebView::InvalidateLayoutInput() {
-  ReleaseKeyboard(true, true);
+void WebView::InvalidateLayoutInput(bool remains_visible) {
+  if (!remains_visible) {
+    ReleaseKeyboard(true, true);
+  } else {
+    const auto* state = UpdateEditableTarget(text_input_observation_.GetSource());
+    const bool preserve = state && KeyboardTargetAlive() &&
+                          keyboard_editable_target_id_ == last_editable_target_id_;
+    // Coordinate tokens and held keys expire with layout. Composition still
+    // belongs to the same editable node and can continue under the new token.
+    ReleaseHeldKeys(true);
+    if (!preserve) {
+      // Chromium tears down the previous editable on focus change. An IME
+      // operation on a shared widget now addresses its new focused element.
+      ReleaseKeyboard(false, false);
+    }
+  }
   ReleasePointer(true);
   endpoint_->InvalidateInput(session_, view_);
 }
@@ -666,6 +684,15 @@ void WebView::ReleaseKeyboard(bool finish_composition, bool deliver) {
       input_widget_->ImeFinishComposingText(false);
     else
       input_widget_->ImeCancelComposition();
+  }
+  ReleaseHeldKeys(deliver);
+  input_widget_.reset();
+  input_frame_.reset();
+  input_document_.reset();
+  keyboard_editable_target_id_ = 0;
+}
+void WebView::ReleaseHeldKeys(bool deliver) {
+  if (deliver) {
     for (const auto& [physical, key] : pressed_keys_) {
       if (!KeyboardTargetAlive())
         break;
@@ -678,9 +705,6 @@ void WebView::ReleaseKeyboard(bool finish_composition, bool deliver) {
     }
   }
   pressed_keys_.clear();
-  input_widget_.reset();
-  input_frame_.reset();
-  input_document_.reset();
 }
 void WebView::PrepareKeyboardTarget(content::RenderWidgetHostImpl* widget) {
   auto* focused = contents_ ? contents_->GetFocusedFrame() : nullptr;
@@ -745,20 +769,41 @@ void WebView::ReleasePointer(bool deliver) {
   pointer_frame_.reset();
   pointer_document_.reset();
 }
-SharedAtlasTextInput WebView::TextInputState() const {
-  SharedAtlasTextInput result{};
+const ui::mojom::TextInputState* WebView::UpdateEditableTarget(content::TextInputManager* manager) {
   const auto* model = endpoint_->FindWebView(session_, view_);
-  if (!model || !model->focused || model->actual != Residency::live || model->pending ||
-      !input_commit_navigations_.empty() || lifecycle_uncertain_)
-    return result;
-  auto* root = RootView(contents_.get());
-  auto* manager = root ? root->GetTextInputManager() : nullptr;
   auto* active = manager ? manager->GetActiveWidget() : nullptr;
-  if (!active || active != FocusedWidget() || !active->GetView())
+  auto* focused = contents_ ? contents_->GetFocusedFrame() : nullptr;
+  const auto* state = active ? manager->GetTextInputState() : nullptr;
+  if (!visible_ || !model || !model->focused || model->actual != Residency::live ||
+      model->pending || !input_commit_navigations_.empty() || lifecycle_uncertain_ ||
+      !active || !active->GetView() || !InputFrameReady(focused) ||
+      active != focused->GetRenderWidgetHost() || !state || !state->node_id ||
+      state->type == ui::TEXT_INPUT_TYPE_NONE) {
+    editable_target_.reset();
+    return nullptr;
+  }
+  auto* frame = static_cast<content::RenderFrameHostImpl*>(focused);
+  const auto document = frame->GetDocumentToken();
+  if (!editable_target_ || editable_target_->widget.get() != active ||
+      editable_target_->frame.get() != frame || editable_target_->document != document ||
+      editable_target_->node_id != state->node_id) {
+    editable_target_ = EditableTarget{active->GetWeakPtr(), frame->GetWeakPtr(),
+                                      document, state->node_id};
+    CHECK(++last_editable_target_id_);
+  }
+  return state;
+}
+void WebView::OnUpdateTextInputStateCalled(content::TextInputManager* manager,
+                                          content::RenderWidgetHostViewBase*, bool) {
+  UpdateEditableTarget(manager);
+}
+SharedAtlasTextInput WebView::TextInputState() {
+  SharedAtlasTextInput result{};
+  auto* manager = text_input_observation_.GetSource();
+  const auto* state = UpdateEditableTarget(manager);
+  if (!state)
     return result;
-  const auto* state = manager->GetTextInputState();
-  if (!state || !state->node_id || state->type == ui::TEXT_INPUT_TYPE_NONE)
-    return result;
+  result.target_id = last_editable_target_id_;
   result.type = static_cast<std::uint32_t>(state->type);
   result.flags = kAtlasTextInputActive;
   if (state->selection.IsValid()) {
@@ -802,6 +847,7 @@ Status WebView::Focus(bool focused) {
                   !RootView(contents_.get())))
     return Fail(Error::unavailable, "Visible renderer view required for focus");
   if (!focused) {
+    editable_target_.reset();
     auto previous = input_widget_;
     const bool could_finish_previous = KeyboardTargetAlive();
     ReleaseKeyboard(true, true);
@@ -837,6 +883,7 @@ void WebView::OnWebContentsFocused(content::RenderWidgetHost*) {
 void WebView::OnWebContentsLostFocus(content::RenderWidgetHost*) {
   if (!native_focus_enabled_)
     return;
+  editable_target_.reset();
   ReleaseKeyboard(true, true);
   ReleasePointer(true);
   endpoint_->SetFocus(session_, view_, false);
@@ -1561,13 +1608,22 @@ Status WebView::DispatchInput(const InputEvent& input) {
       input.payload);
   if (!representable)
     return Fail(Error::invalid, "Input exceeds Blink representation");
+  if (input.editable_target && routed)
+    return Fail(Error::invalid, "Editable target requires keyboard or IME input");
+  std::uint64_t actual_editable_target = 0;
+  if (!routed && UpdateEditableTarget(text_input_observation_.GetSource()))
+    actual_editable_target = last_editable_target_id_;
+  if (input.editable_target && input.editable_target != actual_editable_target)
+    return Fail(Error::stale, "Editable input target changed");
   auto accepted = endpoint_->AcceptInput(session_, input);
   if (!accepted)
     return accepted;
   if (routed)
     RememberPointerTarget();
-  else
+  else {
     PrepareKeyboardTarget(host);
+    keyboard_editable_target_id_ = actual_editable_target;
+  }
   if (const auto* touch = std::get_if<TouchInput>(&input.payload))
     return DispatchTouches(*touch, input.token);
   if (const auto* gesture = std::get_if<GestureInput>(&input.payload)) {
@@ -1907,6 +1963,8 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion) {
                   match_page_backing_);
   visible_ = false;
   auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
+  if (auto* manager = implementation->GetTextInputManager())
+    text_input_observation_.Observe(manager);
   implementation->GetInputEventRouter();
   implementation->GetTouchEmulator(true);
   // DidStartNavigation identifies this controller's selected history restore;

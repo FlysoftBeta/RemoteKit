@@ -2,6 +2,12 @@
 
 由root维护。最新已发布源码ba667bf，取件码[316234](https://airportal.cn/316234/d99cU47GIx)，高级认证与锁屏暴露的RenderChannel生命周期问题已完成规定范围验收。不重复历史性能组；旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
+## 软键盘与尺寸过渡（2026-11-04，修复与运行验收完成）
+
+- KEYBOARD-1：Chrome157真实H264基线中，模拟visualViewport从820逐段缩到625、520，输入代理产生可信focusout/focusin，过渡期间输入丢失，peer/DC/video身份未变。根因链包括reconfigure临时空layout、尚无有效元数据与stale像素被误报inactive，以及Browser布局失效结束composition。原始证据保留在`develop/tmp/keyboard-viewport-qa/baseline157c/keyboard-results.jsonl`，不等同实体软键盘验收。
+- KEYBOARD-1已修复：媒体/坐标布局租约与编辑目标分开，保留原focus/input门禁，以稳定target绑定暂存与最终派发。明确reconfigure保留键盘，真实失焦、换目标/文档、锁定/断链仍撤销。键盘使用顶部保比例peek，普通布局使用最后帧模糊拉伸，旧帧不赋予输入ready。Control319项全量、最终16项定向与生产构建通过；Native构建及19项CTest完成。
+- 157/89修后真实H264组通过不失焦、composition跨resize、恰一次commit、target切换/旧target拒绝、远端blur及媒体身份保持。157本地IME用CDP，89用合成CompositionEvent，远端均为Native。Sol6.1检查两版peek与过渡截图通过；普通动画终点未单独截图。实体移动软键盘仍待验收，交付待完成。[运行证据](keyboard-viewport-runtime-20261104.md)。
+
 ## 高级认证（2026-11-04，已交付316234）
 
 - AUTH-1：空白锁屏、方向序列、密码/PIN及设置、Control/Endpoint产品权限门禁已实现。新Viewer默认锁定，序列仅揭示验证入口；旧输入/操作/媒体工作按授权代次退休。Control314项及后续transport17项、Endpoint19项、SDK/RTC/audio smoke通过。修后157/89核心7项断言均通过，同peer/DC/track锁定和密码/PIN恢复、锁下产品state及媒体截止、过期输入/产品操作拒绝均有实际证据。

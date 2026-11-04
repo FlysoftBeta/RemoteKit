@@ -7,7 +7,7 @@ import { TouchInput, pointerSampleTime, type TouchPacket } from "./touch-input";
 import { touchTerminalResult } from './touch-terminal';
 import { momentumPosition, type MomentumPacket, type MomentumPlan } from './client-gestures';
 import { EditingInput, EDITOR_SENTINEL } from './editing-input';
-import { DeferredEditingInput, editableInputMode, editableOwner, sameEditableView, type EditableView } from './mobile-editing-state';
+import { DeferredEditingInput, editableInputMode } from './mobile-editing-state';
 import { useViewportTransition } from './use-viewport-transition';
 import type { Surface } from './types';
 import {
@@ -70,13 +70,16 @@ export function RemoteViewport({
   const layoutEpoch = transport.layout?.epoch,
     layoutGeneration = transport.layout?.generation;
   const [frameReady, setFrameReady] = useState(false);
-  const editingIdentity = surface && transport.editingIdentity(surface);
-  const remoteEditable = transport.mobileEditing.forView(surface);
-  const remoteOwner = remoteEditable?.view ? editableOwner(remoteEditable.view) : undefined;
+  const editingSurface = transport.editingSurface(viewId);
+  const editingIdentity = editingSurface && transport.editingIdentity(editingSurface);
+  const remoteEditable = transport.mobileEditing.forKeyboard(editingSurface);
+  const editableTarget = remoteEditable?.editable.target;
+  const remoteOwner = editableTarget && editingIdentity ? `${editingIdentity}/${editableTarget}` : undefined;
+  const editorOwner = remoteOwner ?? editingIdentity;
+  const editableReady = !!transport.mobileEditing.forView(surface);
   const previousEditableOwner = useRef<string | undefined>(undefined);
-  const previousEditableView = useRef<EditableView | undefined>(undefined);
   const suppressBlur = useRef(false);
-  const resize = useViewportTransition(viewport, transport, viewId, surface, frameReady, editingIdentity);
+  const resize = useViewportTransition(viewport, transport, viewId, surface, frameReady, editingIdentity, editor, !!remoteEditable);
   const resetEditor = () => { if (editor.current) { editor.current.value = EDITOR_SENTINEL; editor.current.setSelectionRange(1, 1); } };
   useEffect(() => {
     setFrameReady(false);
@@ -84,13 +87,16 @@ export function RemoteViewport({
     return transport.registerViewport(viewId, canvas.current, setFrameReady);
   }, [transport, viewId]);
   const send = (event: Record<string, unknown>) => {
-    return !!(surface && (frameReady && !resize.waiting || event.type === 'touch' && event.action === 'cancel') && transport.sendInput(surface, event));
+    return !!(surface && (frameReady && !resize.blocksInput() || event.type === 'touch' && event.action === 'cancel') && transport.sendInput(surface, event));
   };
-  const editingDeliveryOwner = `${editingIdentity ?? ''}/${remoteOwner ?? 'keyboard-sink'}`;
+  const withEditTarget = (event: Record<string, unknown>) =>
+    editableTarget ? { ...event, editableTarget } : event;
   const sendEdit = (event: Record<string, unknown>) => {
-    if (send(event)) return;
+    const value = withEditTarget(event);
+    const waiting = !frameReady || resize.blocksInput() || !!remoteOwner && !editableReady;
+    if (!waiting && send(value)) return;
     const pending = deferredEditing.current.pending;
-    if (editingIdentity && remoteOwner && (!frameReady || resize.waiting) && deferredEditing.current.enqueue(editingDeliveryOwner, event)) {
+    if (remoteOwner && waiting && deferredEditing.current.enqueue(remoteOwner, value)) {
       if (!pending) {
         clearTimeout(deferredEditingTimer.current);
         deferredEditingTimer.current = setTimeout(() => {
@@ -104,12 +110,12 @@ export function RemoteViewport({
     setEditingError('键盘输入暂未送达，请等待画面恢复后重新输入。');
   };
   useLayoutEffect(() => {
-    if (!frameReady || resize.waiting) return;
+    if (!frameReady || resize.blocksInput() || !editableReady || !remoteOwner) return;
     clearTimeout(deferredEditingTimer.current);
-    for (const event of deferredEditing.current.drain(editingDeliveryOwner)) {
+    for (const event of deferredEditing.current.drain(remoteOwner)) {
       if (!send(event)) { setEditingError('键盘输入暂未送达，请重新输入。'); break; }
     }
-  }, [frameReady, resize.waiting, editingDeliveryOwner]);
+  }, [frameReady, resize.waiting, editableReady, remoteOwner]);
   const stopMomentum = () => {
     const owner = momentumOwner.current;
     if (!owner) return true;
@@ -174,9 +180,9 @@ export function RemoteViewport({
     for (const id of ids) if (canvas.current?.hasPointerCapture(id)) canvas.current.releasePointerCapture(id);
   };
   const releaseInput = () => {
-    const wasOwner = editing.current.matches(editingIdentity);
+    const wasOwner = editing.current.matches(editorOwner);
     for (const event of heldKeys.current.values())
-      if (keyboardOwner.current === editingIdentity) send({ ...event, action: "up", repeat: false, text: '', unmodified_text: '' });
+      if (keyboardOwner.current === editorOwner) send({ ...event, action: "up", repeat: false, text: '', unmodified_text: '' });
     heldKeys.current.clear();
     const held = mouseCapture.current;
     if (held) {
@@ -195,7 +201,7 @@ export function RemoteViewport({
       mouseCapture.current = null;
     }
     cancelTouches();
-    if (editing.current.composing && editing.current.matches(editingIdentity)) send({ type: 'ime_cancel' });
+    if (editing.current.composing && editing.current.matches(editorOwner) && editableReady) send(withEditTarget({ type: 'ime_cancel' }));
     deferredEditing.current.clear(); editing.current.invalidate(); keyboardOwner.current = undefined; resetEditor();
     if (surface && wasOwner) transport.focus(surface, false);
   };
@@ -203,33 +209,30 @@ export function RemoteViewport({
   releaseRef.current = releaseInput;
   const cancelRef = useRef(cancelTouches); cancelRef.current = cancelTouches;
   useEffect(() => { cancelRef.current(); setInputRecoveryRequired(false); }, [layoutEpoch, layoutGeneration, editingIdentity]);
-  useEffect(() => {
-    if (!editing.current.matches(editingIdentity)) {
+  useLayoutEffect(() => {
+    if (!editing.current.matches(editorOwner)) {
       deferredEditing.current.clear();
       editing.current.invalidate(); heldKeys.current.clear(); keyboardOwner.current = undefined; resetEditor();
       // An IME still owned by the previous document must not resume via a late end.
       editor.current?.blur();
     }
   }, [editingIdentity]);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previous = previousEditableOwner.current;
-    const previousView = previousEditableView.current;
     previousEditableOwner.current = remoteOwner;
-    previousEditableView.current = remoteEditable?.view ?? undefined;
     if (previous && previous !== remoteOwner) {
       deferredEditing.current.clear();
-      if (editing.current.composing && editing.current.matches(editingIdentity) && surface && previousView && sameEditableView(surface, previousView)) send({ type: 'ime_cancel' });
       editing.current.invalidate(); heldKeys.current.clear(); keyboardOwner.current = undefined; resetEditor();
       suppressBlur.current = true; editor.current?.blur(); suppressBlur.current = false;
-      if (!remoteOwner && frameReady && window.matchMedia('(pointer: fine)').matches && editor.current) {
+      if (!remoteOwner && frameReady && !resize.keyboardOpen() && window.matchMedia('(pointer: fine)').matches && editor.current) {
         editor.current.inputMode = 'none';
         editor.current.focus({ preventScroll: true });
       }
     }
-    if (remoteOwner && surface && editor.current) {
+    if (remoteOwner && editor.current) {
       editor.current.inputMode = editableInputMode(remoteEditable!.editable.type);
-      editing.current.focus(transport.editingIdentity(surface));
-      keyboardOwner.current = transport.editingIdentity(surface);
+      editing.current.focus(remoteOwner);
+      keyboardOwner.current = remoteOwner;
       // Mobile browsers may require another user activation; the explicit
       // compact keyboard button below always provides that activation.
       editor.current.focus({ preventScroll: true });
@@ -315,7 +318,7 @@ export function RemoteViewport({
       if (mouseCapture.current?.pointerId === event.pointerId)
         mouseCapture.current = null;
     };
-    if (!surface || !frameReady || resize.waiting) {
+    if (!surface || !editorOwner || !frameReady || resize.blocksInput()) {
       if (event.pointerType === "touch") cancelTouches();
       release();
       return;
@@ -327,8 +330,8 @@ export function RemoteViewport({
         event.preventDefault();
         transport.selectedViewId = viewId;
         onFocus?.();
-        editing.current.focus(transport.editingIdentity(surface));
-        keyboardOwner.current = transport.editingIdentity(surface);
+        editing.current.focus(editorOwner);
+        keyboardOwner.current = editorOwner;
         if (!editing.current.composing) resetEditor();
         if (event.pointerType !== 'touch' || remoteEditable) editor.current?.focus({ preventScroll: true });
         transport.ensureInputFocus(surface);
@@ -398,7 +401,7 @@ export function RemoteViewport({
     action: string,
   ) => {
     if (editing.current.composing || event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (!editing.current.matches(editingIdentity)) return;
+    if (!editing.current.matches(editorOwner)) return;
     if (
       event.key === "Tab" ||
       ['Enter', 'Backspace', 'Delete'].includes(event.key) ||
@@ -425,7 +428,7 @@ export function RemoteViewport({
   };
   const wheelRef = useRef<(event: WheelEvent) => void>(() => {});
   wheelRef.current = (event) => {
-    if (!surface || !frameReady || resize.waiting) return;
+    if (!surface || !frameReady || resize.blocksInput()) return;
     const position = point(event);
     if (!position) return;
     // React's delegated wheel listener is passive. Prevent browser scrolling
@@ -447,7 +450,7 @@ export function RemoteViewport({
     if (event.isComposing || editing.current.composing) return;
     const data = phase === 'input' && event.data === null && ['insertText', 'insertFromPaste', 'insertFromDictation'].includes(event.inputType)
       ? editor.current?.value.replace(EDITOR_SENTINEL, '') || null : event.data;
-    const operation = editing.current.edit(editingIdentity, event.inputType, data, performance.now(), phase);
+    const operation = editing.current.edit(editorOwner, event.inputType, data, performance.now(), phase);
     const deferredText = data === null && ['insertText', 'insertFromPaste', 'insertFromDictation'].includes(event.inputType);
     if (phase === 'before' && event.cancelable && !deferredText) event.preventDefault();
     for (const value of operation.events) sendEdit(value);
@@ -489,22 +492,22 @@ export function RemoteViewport({
         autoCapitalize="off"
         autoComplete="off"
         spellCheck={false}
-        onFocus={() => { if (surface && frameReady) { editing.current.focus(transport.editingIdentity(surface)); keyboardOwner.current = transport.editingIdentity(surface); resetEditor(); transport.ensureInputFocus(surface); } }}
+        onFocus={() => { if (surface && editorOwner && frameReady && !resize.blocksInput()) { editing.current.focus(editorOwner); keyboardOwner.current = editorOwner; if (!editing.current.composing) resetEditor(); transport.ensureInputFocus(surface); } }}
         onBlur={() => { if (!suppressBlur.current) releaseInput(); }}
         onKeyDown={(event) => key(event, "down")}
         onKeyUp={(event) => key(event, "up")}
-        onCompositionStart={() => { editing.current.start(editingIdentity); }}
-        onCompositionUpdate={(event) => { const value = editing.current.update(editingIdentity, event.data); if (value) sendEdit(value); }}
+        onCompositionStart={() => { editing.current.start(editorOwner); }}
+        onCompositionUpdate={(event) => { const value = editing.current.update(editorOwner, event.data); if (value) sendEdit(value); }}
         onCompositionEnd={(event) => {
-          const value = editing.current.end(editingIdentity, event.data, performance.now());
+          const value = editing.current.end(editorOwner, event.data, performance.now());
           if (value) sendEdit(value);
           resetEditor();
         }}
       />
-      {remoteEditable && <Button size="small" className="remote-open-keyboard" disabled={!frameReady || resize.waiting} onPointerDown={event => event.preventDefault()} onClick={() => { if (editor.current && surface) { editor.current.inputMode = editableInputMode(remoteEditable.editable.type); editor.current.focus({ preventScroll: true }); transport.ensureInputFocus(surface); } }}>打开键盘</Button>}
+      {remoteEditable && <Button size="small" className="remote-open-keyboard" disabled={!frameReady || resize.waiting} onPointerDown={event => event.preventDefault()} onClick={() => { if (editor.current && surface && !resize.blocksInput()) { editor.current.inputMode = editableInputMode(remoteEditable.editable.type); editor.current.focus({ preventScroll: true }); transport.ensureInputFocus(surface); } }}>打开键盘</Button>}
       {editingError && <div role="status" style={{ position: 'absolute', bottom: 8, left: 8, right: 8, background: '#222', color: '#fff', padding: 8, zIndex: 3 }} onClick={() => setEditingError(undefined)}>{editingError}</div>}
       {inputRecoveryRequired && <div className="page-overlay" role="status">触控结束尚未确认，请重新连接以恢复输入。<Button onClick={() => void transport.connect()}>重新连接</Button></div>}
-      {(!frameReady || resize.waiting) && !resize.frozen && (
+      {(!frameReady || resize.waiting) && !resize.frozen && (!resize.keyboard || transport.diagnostics.connection === "连接失败") && (
         <div className="page-overlay" role="status">
           {transport.diagnostics.connection === "已连接"
             ? "正在恢复页面…"

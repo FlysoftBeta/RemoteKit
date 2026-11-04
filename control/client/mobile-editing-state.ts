@@ -2,15 +2,17 @@ import type { Surface } from './types';
 
 export interface EditableView { session: string; id: string; instance: string; document: string; focus: string }
 export interface RemoteEditable {
-  type: number; flags: number; active: boolean;
+  type: number; flags: number; active: boolean; target: string;
   selectionStart: number; selectionEnd: number; compositionStart: number; compositionEnd: number;
   caretX: number; caretY: number; caretWidth: number; caretHeight: number;
 }
 export interface EditableMessage { type: 'input.editable'; version: 1; revision: string; view: EditableView | null; editable: RemoteEditable }
-export function sameEditableView(a: EditableView, b: EditableView) {
-  return a.session === b.session && a.id === b.id && a.instance === b.instance && a.document === b.document && a.focus === b.focus;
+function sameEditingDocument(a: EditableView, b: EditableView) {
+  return a.session === b.session && a.id === b.id && a.instance === b.instance && a.document === b.document;
 }
-export function editableOwner(view: EditableView) { return JSON.stringify([view.session, view.id, view.instance, view.document, view.focus]); }
+export function sameEditableView(a: EditableView, b: EditableView) {
+  return sameEditingDocument(a, b) && a.focus === b.focus;
+}
 /** ui/base/ime/text_input_type.h in the pinned Chromium SDK. No surrounding text is transferred. */
 export function editableInputMode(type: number): 'none' | 'text' | 'search' | 'email' | 'decimal' | 'tel' | 'url' {
   if (!Number.isInteger(type) || type <= 0 || type > 17) return 'none';
@@ -22,45 +24,60 @@ function validMessage(value: unknown): value is EditableMessage {
   if (v.type !== 'input.editable' || v.version !== 1 || typeof v.revision !== 'string' || !/^(0|[1-9][0-9]{0,19})$/.test(v.revision)) return false;
   if (v.view !== null && (!v.view || !['session', 'id', 'instance', 'document', 'focus'].every(key => typeof v.view![key as keyof EditableView] === 'string'))) return false;
   const e = v.editable;
-  return !!e && typeof e.active === 'boolean' && Number.isInteger(e.type) && e.type >= 0 && e.type <= 17 &&
+  return !!e && typeof e.active === 'boolean' && typeof e.target === 'string' && /^(0|[1-9][0-9]{0,19})$/.test(e.target) &&
+    (e.active ? e.target !== '0' && v.view !== null : e.target === '0') && Number.isInteger(e.type) && e.type >= 0 && e.type <= 17 &&
     Number.isInteger(e.flags) && ['selectionStart', 'selectionEnd', 'compositionStart', 'compositionEnd', 'caretX', 'caretY', 'caretWidth', 'caretHeight'].every(key => Number.isFinite(e[key as keyof RemoteEditable]));
 }
 /** One ordered global editable owner per peer. Layout/media readiness is deliberately separate. */
 export class MobileEditingState {
   private revision?: string;
   private candidate?: { message: EditableMessage; expires: number };
+  private needsFresh = false;
   current?: EditableMessage;
-  receive(value: unknown, views: readonly Surface[], now = Date.now()): boolean {
+  suspendLayout() { this.needsFresh = true; this.candidate = undefined; }
+  receive(value: unknown, views: readonly Surface[], now = Date.now(), reconfiguring = false): boolean {
     if (!validMessage(value)) return false;
     if (this.revision !== undefined && (value.revision.length < this.revision.length || value.revision.length === this.revision.length && value.revision <= this.revision)) return false;
     this.revision = value.revision;
     this.candidate = undefined;
+    const retained = this.current;
     this.current = undefined;
     // Consume the watermark even for a message whose old document is gone.
-    if (value.view && !views.some(view => sameEditableView(view, value.view!))) {
-      if (views.some(view => view.session === value.view!.session && view.id === value.view!.id && view.instance === value.view!.instance && view.document === value.view!.document)) {
+    if (value.view && (reconfiguring || !views.some(view => sameEditableView(view, value.view!)))) {
+      if (views.some(view => sameEditingDocument(view, value.view!))) {
         // focus ACK and editable feedback are independent ordered messages.
         // Retain only the newest candidate briefly, never apply its token.
-        this.candidate = { message: value, expires: now + 1500 };
+        this.candidate = { message: value, expires: reconfiguring ? Infinity : now + 1500 };
+        this.needsFresh = true;
+        if (retained?.view && sameEditingDocument(retained.view, value.view) &&
+            retained.editable.target === value.editable.target && value.editable.active) this.current = retained;
       }
       return true;
     }
-    this.current = value;
+    this.current = value; this.needsFresh = false;
     return true;
   }
   reconcile(views: readonly Surface[], now = Date.now()) {
-    if (this.current?.view && !views.some(view => sameEditableView(view, this.current!.view!))) this.current = undefined;
+    const current = this.current?.view;
+    if (current && !views.some(view => sameEditableView(view, current))) {
+      if (views.some(view => sameEditingDocument(view, current))) this.needsFresh = true;
+      else this.current = undefined;
+    }
     const candidate = this.candidate;
     if (!candidate) return;
     const view = candidate.message.view!;
-    if (now >= candidate.expires || !views.some(next => next.session === view.session && next.id === view.id && next.instance === view.instance && next.document === view.document)) this.candidate = undefined;
-    else if (views.some(next => sameEditableView(next, view))) { this.current = candidate.message; this.candidate = undefined; }
+    if (now >= candidate.expires || !views.some(next => sameEditingDocument(next, view))) this.candidate = undefined;
+    else if (views.some(next => sameEditableView(next, view))) { this.current = candidate.message; this.candidate = undefined; this.needsFresh = false; }
+  }
+  forKeyboard(view: Surface | undefined) {
+    const value = this.current;
+    return view && value?.view && sameEditingDocument(view, value.view) && value.editable.active && editableInputMode(value.editable.type) !== 'none' ? value : undefined;
   }
   forView(view: Surface | undefined) {
-    const value = this.current;
-    return view && value?.view && sameEditableView(view, value.view) && value.editable.active && editableInputMode(value.editable.type) !== 'none' ? value : undefined;
+    const value = this.forKeyboard(view);
+    return !this.needsFresh && view && value?.view && sameEditableView(view, value.view) ? value : undefined;
   }
-  clear() { this.current = undefined; this.candidate = undefined; }
+  clear() { this.current = undefined; this.candidate = undefined; this.needsFresh = false; }
   reset() { this.clear(); this.revision = undefined; }
 }
 

@@ -66,7 +66,7 @@ method包括viewport、feedback、rtc.offer/ice/close、clock.ping、operation.s
 - presentation.prepare：`{version:1,barrierId,outputGeneration,layoutEpoch}`，三个身份均为十进制字符串，紧随对应layout。Client隐藏所有video、撤销输入ready，跨两次前台rAF后以`presentation.ready`返回同一完整key；旧peer/旧key不能放行。
 - product.action/result：version=1，operationId、operationGeneration与action/receipt。Endpoint校验当前peer后经管理连接交Control唯一产品提交器；收据区分accepted/applying/committed/rejected/unknown/expired。Control分配内部单调operationSequence给Native执行去重，不把UUID generation当数值。超时已转发的操作返回unknown并查询，不能改ID重做。导航终态见[导航操作](navigation-operations.zh-CN.md)。
 - clock.ping/pong：当前peer的requestId、Endpoint serverTimeMs/serverMonotonicMs，不经Control时钟；见[时钟域](media-feedback.md)。
-- input.editable：独立revision、完整页面编辑身份及type/flags/selection/composition/caret，不传正文，也不触发布局换代。Client-v1 raw/候选与momentum、terminal确认见[Client手势](client-gestures.zh-CN.md)。
+- input.editable：独立revision、完整页面编辑身份及type/flags/selection/composition/caret，不传正文，也不触发布局换代。`editable.target`是非零十进制编辑目标身份；真实失焦时为`"0"`。target随实际输入节点、frame/document或活动焦点变化，单纯布局租约轮换不改变它。Client-v1 raw/候选与momentum、terminal确认见[Client手势](client-gestures.zh-CN.md)。
 - files.request/result：begin/chunk/commit/cancel/status，当前请求及peer授权、有限字节块与真实offset，见[文件生命周期](audio-and-files.zh-CN.md)。
 - stats：实际测量和状态；未知项保持缺失，不以零冒充。
 
@@ -86,7 +86,13 @@ Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更�
 
 每个video自身首次真实RTP/epoch匹配后才恢复该平面的显示和输入。布局换代、隐藏、重连立即撤销ready；同一已确认布局内晚到的逐帧元数据不改变裁剪关系，不凭未知RTP生成延迟或Marker样本。rVFC是compositor提交观察，不是逐帧拒绝API，也不证明物理屏幕点亮。
 
-静态首帧metadata晚到可匹配同元素自己的最新观察，但必须保持相同已确认屏障、track、attempt和文档身份；恢复布局资格不能假称当前像素仍是该RTP，也不能增加呈现计数。仅在文档前台、当前完整布局屏障已ACK、平面current/nonstale且客户端bounds为正时，才累计无安全匹配的重试预算并有界回退canvas。隐藏或布局过渡清除预算；恢复后重新等待本元素新帧，不复用旧ready。统计分别显示连接首次Video回退原因和canvas后端选择原因，未知原因保留原文，不统一冒充GL失败。移动visualViewport过渡允许一次有界旧ROI冻结图，固定旧位置且撤销输入；新布局ready后移除，文档/连接变化立即作废。这种一次copy与稳态video逐帧呈现分开计数。
+静态首帧metadata晚到可匹配同元素自己的最新观察，但必须保持相同已确认屏障、track、attempt和文档身份；恢复布局资格不能假称当前像素仍是该RTP，也不能增加呈现计数。仅在文档前台、当前完整布局屏障已ACK、平面current/nonstale且客户端bounds为正时，才累计无安全匹配的重试预算并有界回退canvas。隐藏或布局过渡清除预算；恢复后重新等待本元素新帧，不复用旧ready。统计分别显示连接首次Video回退原因和canvas后端选择原因，未知原因保留原文，不统一冒充GL失败。
+
+尺寸过渡只保留一次有界旧ROI快照，不赋予媒体或输入ready。软键盘遮挡/恢复使用顶部锚定、保持比例并裁剪的peek；普通窗口/分栏布局变化使用最后帧的模糊拉伸动画。快照裁剪在对应Window内容区内，新布局真实ready且匹配最终desired DIP后移除，文档/连接变化立即作废。这种一次copy与稳态video逐帧呈现分开计数。
+
+重建渲染资源时，仅`layout.reconfiguring:true`允许Client暂留同一编辑目标的本地键盘与composition；其generation仍为`"0"`、views为空，不可用作输入或画面授权。普通空layout、锁定、断链和文档替换仍硬撤销。Browser保留单纯布局变化下合法目标的composition，同时轮换原focus输入租约并终止旧pointer/held keys。Endpoint从权威latest-layout读取编辑状态：无有效元数据表示未知，不发送假失焦；像素stale不等于编辑目标失效，真实inactive仍即时发布。
+
+Client暂存编辑事件绑定attempt/session/view/instance/document/target，只有新layout、准确focus token、同target权威editable和新画面屏障都满足后才发送。事件附`editableTarget`，Browser在最终派发前再次检查当前编辑目标；旧节点晚到的commit/cancel不能落到新输入框。真实失焦或target变化清除composition和暂存，失焦自动blur本地输入代理。该编辑连续性不放宽旧layout坐标门禁，也不重建RTC、DataChannel或video。
 
 Source atlas由WebRTC原生AdaptFrame决定采样，并满足接收H264硬上限；NV12转换缩放完整atlas，mediaScaleX/Y分别用于布局、ROI及输入。canvas回退按能力使用不可变VideoFrame/fifo2或video快照；Chrome89保留兼容，其rVFC与drawImage不是原子frame handle，不能宣称为不可变帧验证。
 

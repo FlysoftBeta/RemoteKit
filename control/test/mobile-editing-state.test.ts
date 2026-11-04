@@ -4,7 +4,7 @@ import { DeferredEditingInput, MobileEditingState, editableInputMode, type Edita
 import { EditingInput } from '../client/editing-input';
 import type { Surface } from '../client/types';
 const view: Surface = { session: 's', id: 'v', instance: 'i', document: 'd', focus: 'f', x: 0, y: 0, width: 100, height: 100, deviceScaleFactor: 1 };
-const message = (revision: string, surface: Surface | null = view, active = true): EditableMessage => ({ type: 'input.editable', version: 1, revision, view: surface, editable: { type: active ? 1 : 0, active, flags: 0, selectionStart: 0, selectionEnd: 0, compositionStart: -1, compositionEnd: -1, caretX: 0, caretY: 0, caretWidth: 1, caretHeight: 10 } });
+const message = (revision: string, surface: Surface | null = view, active = true, target = active ? '12' : '0'): EditableMessage => ({ type: 'input.editable', version: 1, revision, view: surface, editable: { type: active ? 1 : 0, active, target, flags: 0, selectionStart: 0, selectionEnd: 0, compositionStart: -1, compositionEnd: -1, caretX: 0, caretY: 0, caretWidth: 1, caretHeight: 10 } });
 test('ordered peer editable state rejects old focus/document resurrection and null clears', () => {
   const state = new MobileEditingState();
   assert.equal(state.receive(message('9'), [view]), true);
@@ -17,7 +17,9 @@ test('ordered peer editable state rejects old focus/document resurrection and nu
   assert.equal(state.receive(message('10', next), [next]), false);
   assert.equal(state.receive(message('12', next), [next]), true);
   state.reconcile([{ ...next, focus: 'new-focus' }]);
-  assert.equal(state.current, undefined);
+  assert.equal(state.forView(next), undefined);
+  assert.equal(state.forView({ ...next, focus: 'new-focus' }), undefined);
+  assert.equal(state.forKeyboard({ ...next, focus: 'new-focus' })?.editable.target, '12');
 });
 test('same-document resize keeps composition; blur and document invalidation discard old ends', () => {
   const state = new MobileEditingState(), input = new EditingInput();
@@ -40,7 +42,10 @@ test('Chromium type mapping and malformed feedback never enable a keyboard', () 
 });
 test('early focus feedback is bounded until matching ACK and expires without reopening', () => {
   const state = new MobileEditingState(), next = { ...view, focus: 'next' };
+  state.receive(message('0'), [view], 0);
   state.receive(message('1', next), [view], 0);
+  assert.ok(state.forKeyboard(view));
+  assert.equal(state.forView(view), undefined);
   assert.equal(state.forView(view), undefined);
   state.reconcile([next], 100); assert.ok(state.forView(next));
   state.receive(message('2', view), [next], 200);

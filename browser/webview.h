@@ -10,11 +10,13 @@
 #include <string_view>
 
 #include "base/memory/weak_ptr.h"
+#include "base/scoped_observation.h"
 #include "base/time/time.h"
 #include "base/timer/timer.h"
 #include "base/values.h"
 #include "browser/navigation_operations.h"
 #include "browser/client_touch_retirement.h"
+#include "content/browser/renderer_host/text_input_manager.h"  // nogncheck
 #include "content/public/browser/devtools_agent_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents.h"
@@ -51,7 +53,8 @@ class ClientGestureBridge;
 // Mouse button: 0 none, 1 left, 2 middle, 3 right, 4 back, 5 forward.
 // Touch points describe changed contacts; unchanged active contacts are retained.
 class WebView final : public content::WebContentsObserver,
-                      public content::DevToolsAgentHostObserver {
+                      public content::DevToolsAgentHostObserver,
+                      public content::TextInputManager::Observer {
  public:
   using Completion = std::function<void(Status)>;
   WebView(content::BrowserContext*, Endpoint*, SessionId, WebViewId,
@@ -80,9 +83,9 @@ class WebView final : public content::WebContentsObserver,
   // Also called from the existing output timer to notice host-DPI changes.
   void RefreshBackingScale();
   void SetRenderDemand(bool enabled);
-  void InvalidateLayoutInput();
+  void InvalidateLayoutInput(bool remains_visible);
   static void OverridePreferences(content::WebContents*, blink::web_pref::WebPreferences*);
-  SharedAtlasTextInput TextInputState() const;
+  SharedAtlasTextInput TextInputState();
   Status DispatchInput(const InputEvent&);
   // Acceptance/processing status, never a renderer/JavaScript execution ACK.
   // A first touch start resolves its OOPIF target asynchronously. All remote
@@ -152,9 +155,13 @@ class WebView final : public content::WebContentsObserver,
   void OnClientTouchProcessed(bool);
   void FinishTouchCleanup(std::uint64_t);
   void PrepareKeyboardTarget(content::RenderWidgetHostImpl*);
+  const ui::mojom::TextInputState* UpdateEditableTarget(content::TextInputManager*);
+  void OnUpdateTextInputStateCalled(content::TextInputManager*,
+                                    content::RenderWidgetHostViewBase*, bool) override;
   bool KeyboardTargetAlive() const;
   bool PointerTargetAlive() const;
   void ReleaseKeyboard(bool finish_composition, bool deliver);
+  void ReleaseHeldKeys(bool deliver);
   void ReleasePointer(bool deliver);
   void RememberPointerTarget();
   enum class PendingKind { none, freeze, thaw, discard, restore_unloaded, restore_discarded };
@@ -229,6 +236,17 @@ class WebView final : public content::WebContentsObserver,
   base::WeakPtr<content::RenderWidgetHostImpl> input_widget_;
   base::WeakPtr<content::RenderFrameHostImpl> input_frame_;
   std::optional<blink::DocumentToken> input_document_;
+  struct EditableTarget {
+    base::WeakPtr<content::RenderWidgetHostImpl> widget;
+    base::WeakPtr<content::RenderFrameHostImpl> frame;
+    blink::DocumentToken document;
+    std::int32_t node_id;
+  };
+  std::optional<EditableTarget> editable_target_;
+  std::uint64_t last_editable_target_id_{};
+  std::uint64_t keyboard_editable_target_id_{};
+  base::ScopedObservation<content::TextInputManager, content::TextInputManager::Observer>
+      text_input_observation_{this};
   std::map<std::uint32_t, KeyInput> pressed_keys_;
   base::WeakPtr<content::RenderWidgetHostImpl> pointer_root_widget_;
   base::WeakPtr<content::RenderWidgetHostViewBase> pointer_root_view_;

@@ -191,7 +191,6 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
         Fatal("OSR slot resources allocation failed"); return;
       }
     }
-    PublishLayout();
   }
   ~State() {
     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);

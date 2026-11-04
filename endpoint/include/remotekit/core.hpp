@@ -147,6 +147,7 @@ struct InputEvent {
   InputToken token;
   std::uint64_t sequence{};
   InputPayload payload;
+  std::uint64_t editable_target{};
 };
 Status ValidateInput(const InputPayload&);
 // Wire modifiers use Blink WebInputEvent bit positions, including back/forward.
