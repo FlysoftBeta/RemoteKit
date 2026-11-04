@@ -220,12 +220,12 @@ class OsrRenderer::State : public std::enable_shared_from_this<OsrRenderer::Stat
       if (factory->EnumAdapters1(i, &adapter) == DXGI_ERROR_NOT_FOUND) break;
       if (!adapter) break;
       DXGI_ADAPTER_DESC1 desc{};
+      if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
       if (requested_adapter &&
           (desc.AdapterLuid.HighPart != requested_adapter->HighPart ||
            desc.AdapterLuid.LowPart != requested_adapter->LowPart)) {
         continue;
       }
-      if (FAILED(adapter->GetDesc1(&desc)) || (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
       ComPtr<ID3D11Device> device;
       ComPtr<ID3D11DeviceContext> context;
       constexpr D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
