@@ -8,7 +8,8 @@ export interface ProductTab { navigation?: {resolved?:boolean;browserIncarnation
 export interface ProductWindow { id: string; activeTabId: string | null; weight: number }
 /** Browser-local request IDs are never exposed as the user confirmation token. */
 export interface PendingClose { id: string; windowId?: string; requestId?: string; nativeRequestId?: string; browserIncarnation?: string; instance?: string; document?: string; awaiting?: boolean }
-export interface ProductWorkspace { schemaVersion: 2; tenantId: string; revision: number; tabs: ProductTab[]; windows: ProductWindow[]; activeWindowId: string | null; layoutMode: 'side-by-side' | 'focused'; settings: ProductSettings; sites: Record<string, { tabletUa: boolean }>; pendingClose?: PendingClose | null; pendingWindowCloseId?: string | null }
+export interface SitePreferences { tabletUa: boolean; manualKeyboard?: boolean }
+export interface ProductWorkspace { schemaVersion: 2; tenantId: string; revision: number; tabs: ProductTab[]; windows: ProductWindow[]; activeWindowId: string | null; layoutMode: 'side-by-side' | 'focused'; settings: ProductSettings; sites: Record<string, SitePreferences>; pendingClose?: PendingClose | null; pendingWindowCloseId?: string | null }
 export interface PageDialog { id: string; tabId: string; windowId: string; kind: 'alert' | 'confirm' | 'prompt' | 'beforeunload'; message: string; defaultPrompt: string; origin: string; isReload?: boolean }
 export const FILE_LIMITS = { maxFileBytes: 256 * 1024 * 1024, maxBatchBytes: 512 * 1024 * 1024, maxFiles: 64, sessionBytes: 1024 * 1024 * 1024 } as const;
 export interface FileRequest { id: string; tabId: string; windowId: string; origin: string; multiple: boolean; accept: string[]; acceptTypesOmitted?: boolean; state: 'pending' | 'validating'; limits: { maxFileBytes: number; maxBatchBytes: number; maxFiles: number; sessionBytes: number } }
@@ -32,7 +33,8 @@ export type ProductAction =
   | { type: 'tab.command'; tabId: string; command: 'back' | 'forward' | 'reload' | 'stop' }
   | { type: 'settings.update'; settings: Partial<ProductSettings> }
   | { type: 'page.reply'; dialogId: string; accept: boolean; text?: string }
-  | { type: 'site.set'; origin: string; tabletUa: boolean; tabId?: string };
+  | ({ type: 'site.set'; origin: string; tabId?: string } &
+      ({ tabletUa: boolean; manualKeyboard?: boolean } | { tabletUa?: boolean; manualKeyboard: boolean }));
 export interface ViewerViewport { devicePixelRatio: number; refreshHz?: number; windows: { windowId: string; width: number; height: number; visible: boolean }[] }
 export interface ProductActionResult { state: ProductState; application?: { status: 'pending'; reason: string } }
 export type OperationStatus = 'accepted' | 'applying' | 'committed' | 'rejected' | 'unknown' | 'expired';

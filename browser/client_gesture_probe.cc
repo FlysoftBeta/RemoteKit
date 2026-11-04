@@ -10,6 +10,7 @@
 #include "base/functional/bind.h"
 #include "components/input/touch_action_filter.h"
 #include "third_party/blink/public/common/input/web_gesture_event.h"
+#include "third_party/blink/public/common/input/web_touch_event.h"
 #include "ui/events/gesture_detection/touch_disposition_gesture_filter.h"
 #include "ui/events/blink/blink_event_util.h"
 #include "ui/events/velocity_tracker/motion_event_generic.h"
@@ -37,9 +38,28 @@ void TestClientInputTiming() {
     if (field == 4) ++changed.focus;
     CHECK(!retired.Contains(changed, "destroyed-target"));
   }
-  for (int i = 0; i < 32; ++i) retired.Retire(owner, std::to_string(i), true);
+  using State = remotekit::browser::ClientTouchRetirement::State;
+  retired.Begin(owner, "awaiting-ack");
+  for (size_t i = 0; i < retired.kCapacity; ++i) retired.Retire(owner, std::to_string(i), true);
   CHECK(!retired.Contains(owner, "destroyed-target"));
   CHECK(retired.Contains(owner, "31"));
+  CHECK(retired.Find(owner, "awaiting-ack") == State::pending);
+  retired.Resolve(owner, "awaiting-ack", State::unconfirmed);
+  retired.Resolve(owner, "awaiting-ack", State::processed);
+  retired.Retire(owner, "awaiting-ack", true);
+  auto next_owner = owner;
+  ++next_owner.focus;
+  retired.Begin(next_owner, "awaiting-ack");
+  CHECK(retired.Find(owner, "awaiting-ack") == State::processed);
+  CHECK(retired.Find(next_owner, "awaiting-ack") == State::pending);
+  CHECK(retired.Find(next_owner, "unknown") == State::unknown);
+  blink::WebTouchEvent end(blink::WebInputEvent::Type::kTouchEnd, 0, base::TimeTicks());
+  end.touches_length = 2;
+  end.touches[0].state = blink::WebTouchPoint::State::kStateReleased;
+  end.touches[1].state = blink::WebTouchPoint::State::kStateStationary;
+  CHECK(!end.IsTouchSequenceEnd());
+  end.touches_length = 1;
+  CHECK(end.IsTouchSequenceEnd());
   using remotekit::browser::ClientGestureSourceTime;
   using remotekit::browser::ClientNativeInputClock;
   // The first packet incurred 100ms more transport/queue delay than the next.

@@ -92,8 +92,8 @@ try {
   page.setDefaultTimeout(5000);
   await page.addInitScript(() => {
     const viewport = visualViewport;
-    const nativeHeight = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(viewport), 'height').get;
-    const probe = window.keyboardQA = { height:null, events:[], wire:[], peers:[], channels:[], editPackets:[] };
+    const probe = window.keyboardQA = { viewport:{}, events:[], wire:[], peers:[], channels:[], editPackets:[],
+      touchWire:[], epochs:[], waitingEntries:0, recoveryEntries:0 };
     const ids = new WeakMap();
     let nextId = 0;
     probe.id = value => {
@@ -101,11 +101,30 @@ try {
       if (!ids.has(value)) ids.set(value, ++nextId);
       return ids.get(value);
     };
-    Object.defineProperty(viewport, 'height', { get:() => probe.height ?? nativeHeight.call(viewport) });
+    for (const property of ['width', 'height', 'offsetTop', 'offsetLeft']) {
+      const native = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(viewport), property).get;
+      Object.defineProperty(viewport, property, {get:() => probe.viewport[property] ?? native.call(viewport)});
+    }
     probe.resize = height => {
-      probe.height = height;
+      probe.viewport.height = height;
       viewport.dispatchEvent(new Event('resize'));
     };
+    probe.scroll = (offsetTop, offsetLeft) => {
+      Object.assign(probe.viewport, {offsetTop, offsetLeft});
+      viewport.dispatchEvent(new Event('scroll'));
+    };
+    new MutationObserver(records => {
+      for (const record of records) {
+        if (record.type === 'attributes' && record.target.matches('.remote-viewport') &&
+            record.oldValue?.split(/\s+/).includes('resize-waiting') &&
+            !record.target.classList.contains('resize-waiting')) probe.waitingEntries++;
+        for (const node of record.addedNodes) {
+          if (node.nodeType === 1 && (node.matches('[role=status]') || node.querySelector('[role=status]')) &&
+              node.textContent.includes('触控结束尚未确认')) probe.recoveryEntries++;
+        }
+      }
+      if (document.querySelector('.remote-viewport.resize-waiting')) probe.waitingEntries++;
+    }).observe(document, {subtree:true, childList:true, attributes:true, attributeFilter:['class'], attributeOldValue:true});
     for (const type of ['focusin', 'focusout', 'input', 'compositionstart', 'compositionend']) {
       document.addEventListener(type, event => {
         if (event.target.matches?.('.remote-input')) {
@@ -114,6 +133,21 @@ try {
       }, true);
     }
     const record = (message, direction) => {
+      if (direction === 'in' && message.type === 'layout') {
+        if (probe.epochs[probe.epochs.length - 1] !== message.epoch) probe.epochs.push(message.epoch);
+      }
+      if (direction === 'out' && message.type === 'input.touchStatus') {
+        probe.touchWire.push({type:'query', at:performance.now(), client:message.clientSequence, id:message.sequenceId});
+      }
+      if (direction === 'out' && message.type === 'input' && message.event?.type === 'touch') {
+        const {sequenceId, action, points} = message.event;
+        probe.touchWire.push({type:'input', at:performance.now(), client:message.sequence, id:sequenceId,
+          action, points:points.map(point => point.id)});
+        if (probe.withholdNextEnd && action === 'end') {
+          probe.withholdNextEnd = false;
+          probe.withheld = {client:message.sequence, id:sequenceId, until:performance.now() + 2250};
+        }
+      }
       if (message.type === 'input.result' && probe.staleSent && message.clientSequence === probe.staleSent.sequence) {
         probe.staleReply = {sequence:message.clientSequence, ok:message.ok, error:message.error};
       }
@@ -151,6 +185,26 @@ try {
       createDataChannel(...args) {
         const channel = super.createDataChannel(...args);
         probe.channels.push(channel);
+        // Mask only the production receiver. The browser's native messages still reach the observer.
+        const handler = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'onmessage');
+        Object.defineProperty(channel, 'onmessage', {
+          get() { return handler.get.call(this); },
+          set(receive) {
+            handler.set.call(this, receive && function(event) {
+              let message;
+              try { message = JSON.parse(event.data); } catch {}
+              if (message?.type === 'input.result' && message.touchSequenceId) {
+                const {clientSequence:client, touchSequenceId:id, touchState:state} = message;
+                const at = performance.now();
+                const held = probe.withheld;
+                const masked = state === 'processed' && held?.client === client && held.id === id && at < held.until;
+                probe.touchWire.push({type:'result', at, client, id, state, masked});
+                if (masked) return;
+              }
+              return receive.call(this, event);
+            });
+          },
+        });
         if (channel.label !== 'remotekit-auth') channel.addEventListener('message', event => {
           try { record(JSON.parse(event.data), 'in'); } catch {}
         });
@@ -163,7 +217,8 @@ try {
   const wait = (fn, arg) => page.waitForFunction(fn, arg, {timeout:10000});
   const click = async (css, text) => {
     const point = await (await wait(({css, text}) => {
-      const button = [...document.querySelectorAll(css)].find(el => el.textContent.trim() === text && !el.disabled);
+      const button = [...document.querySelectorAll(css)].find(el => (text === undefined || el.textContent.trim() === text) &&
+        !el.disabled && el.getAttribute('aria-disabled') !== 'true');
       const box = button?.getBoundingClientRect();
       return box?.width && { x:box.x + box.width / 2, y:box.y + box.height / 2 };
     }, {css, text})).jsonValue();
@@ -204,7 +259,9 @@ try {
     const bounds = element => element?.getBoundingClientRect().toJSON() ?? null;
     const overlayStyle = overlay && getComputedStyle(overlay);
     const { id, peers:[peer], channels, wire, events } = keyboardQA;
+    const {epochs, waitingEntries, recoveryEntries} = keyboardQA;
     return {focus:!!editor && document.activeElement === editor, inputMode:editor?.inputMode, viewport:bounds(section),
+      shell:bounds(document.querySelector('.viewer-shell')), scroll:[scrollX, scrollY], epochs, waitingEntries, recoveryEntries,
       waiting:section?.classList.contains('resize-waiting'), video:id(video), stream:id(video?.srcObject), peer:id(peer),
       peerCount:keyboardQA.peers.length, connected:peer?.connectionState, tracks:peer?.getReceivers().map(x => id(x.track)),
       channels:channels.map(x => [id(x), x.readyState]), events:events.slice(-20), wire:wire.slice(-30),
@@ -222,12 +279,17 @@ try {
     }
     throw Error(message);
   };
-  const tap = async target => {
+  const point = async (target, offsetX = 0.5, offsetY = 0.5) => {
     const remote = await observe(event => !!event.geometry?.[target], 'Fixture did not provide geometry');
     const box = remote.geometry[target];
     const {viewport} = await sample();
-    await page.touchscreen.tap(viewport.x + (box.x + box.width / 2) * viewport.width / remote.width,
-      viewport.y + (box.y + box.height / 2) * viewport.height / remote.height);
+    return {x:viewport.x + (box.x + box.width * offsetX) * viewport.width / remote.width,
+      y:viewport.y + (box.y + box.height * offsetY) * viewport.height / remote.height};
+  };
+  const tap = async target => {
+    const {x, y} = await point(target);
+    await wait(({x, y}) => document.elementFromPoint(x, y)?.matches('canvas[data-video-input]'), {x, y});
+    await page.touchscreen.tap(x, y);
   };
   const resize = height => page.evaluate(value => keyboardQA.resize(value), height);
   const text = (field, value) => observe(event => event.type === field && event[field] === value,
@@ -248,19 +310,25 @@ try {
 
   const cdp = await context.newCDPSession(page);
   let localCompositionMode = 'cdp';
-  try {
-    await cdp.send('Input.imeSetComposition', {text:'dur', selectionStart:3, selectionEnd:3});
-  } catch (error) {
-    if (!String(error.message).includes("'Input.imeSetComposition' wasn't found")) throw error;
-    localCompositionMode = 'synthetic-dom';
-    await page.evaluate(() => {
+  const startComposition = async value => {
+    if (localCompositionMode === 'cdp') {
+      try {
+        await cdp.send('Input.imeSetComposition', {text:value, selectionStart:value.length, selectionEnd:value.length});
+        return;
+      } catch (error) {
+        if (!String(error.message).includes("'Input.imeSetComposition' wasn't found")) throw error;
+        localCompositionMode = 'synthetic-dom';
+      }
+    }
+    await page.evaluate(value => {
       const target = document.activeElement;
       if (!target?.classList.contains('remote-input')) throw Error('Remote input is not focused');
-      for (const [type, data] of [['compositionstart', ''], ['compositionupdate', 'dur']]) {
+      for (const [type, data] of [['compositionstart', ''], ['compositionupdate', value]]) {
         target.dispatchEvent(new CompositionEvent(type, {bubbles:true, data}));
       }
-    });
-  }
+    }, value);
+  };
+  await startComposition('dur');
   await log('composition-capability', {localCompositionMode, remoteComposition:'native'});
   await wait(() => keyboardQA.events.some(event => event.type === 'compositionstart'));
   await observe(event => event.type === 'compositionstart' && event.field === 'text', 'Remote composition did not start');
@@ -319,14 +387,40 @@ try {
     editPackets.filter(packet => packet.event.type === 'ime_commit' && packet.event.text === 'during').length === 1 &&
     delivery.at(-1)?.text === 'beforeduringafter', 'Expected exactly one composition commit and end with the final value');
 
+  const resizeCount = () => fixtureEvents.filter(event => event.type === 'resize').length;
+  const beforeOffset = await sample();
+  const remoteResizeCount = resizeCount();
+  assert(beforeOffset.epochs.length > 0, 'No authoritative layout epoch observed');
+  const offsetEvidence = [];
+  const near = (a, b) => Math.abs(a - b) < 1;
+  for (const offset of [8, 16, 0]) {
+    await page.evaluate(offset => keyboardQA.scroll(offset, offset / 2), offset);
+    await pause(150);
+    const moved = await sample();
+    offsetEvidence.push({offset, shell:moved.shell, viewport:moved.viewport, scroll:moved.scroll,
+      epochs:moved.epochs, waitingEntries:moved.waitingEntries, remoteResizeCount:resizeCount()});
+    assert(near(moved.shell.top - beforeOffset.shell.top, offset) &&
+      near(moved.shell.left - beforeOffset.shell.left, offset / 2) &&
+      near(moved.viewport.top - beforeOffset.viewport.top, offset) &&
+      near(moved.viewport.left - beforeOffset.viewport.left, offset / 2) &&
+      near(moved.shell.width, beforeOffset.shell.width) && near(moved.shell.height, beforeOffset.shell.height) &&
+      near(moved.viewport.width, beforeOffset.viewport.width) && near(moved.viewport.height, beforeOffset.viewport.height) &&
+      moved.scroll.every(value => value === 0), 'Visual viewport scroll did not only translate the Viewer shell');
+    assert(moved.focus && identity(before, moved) && !moved.waiting &&
+      moved.waitingEntries === beforeOffset.waitingEntries && resizeCount() === remoteResizeCount &&
+      JSON.stringify(moved.epochs) === JSON.stringify(beforeOffset.epochs),
+    'Visual viewport scroll changed focus, media or remote layout');
+  }
+  await log('visual-viewport-offset-only', offsetEvidence);
+
   await resize(655);
   await pause(60);
   await resize(null);
   await ready();
   const restored = await sample();
   await log('keyboard-restored', restored);
-  assert(restored.focus && identity(before, restored) && Math.abs(restored.viewport.height - before.viewport.height) < 1,
-    'Restoring visual viewport changed focus, size, or media identity');
+  assert(identity(before, restored) && Math.abs(restored.viewport.height - before.viewport.height) < 1,
+    'Restoring visual viewport changed size or media identity');
   const wireStart = await page.evaluate(() => keyboardQA.wire.length);
   await tap('second');
   await wait(({target, start}) => keyboardQA.wire.slice(start).some(event => event.type === 'input.editable' &&
@@ -365,8 +459,195 @@ try {
   const final = await sample();
   await log('ordinary-ready', final);
   assert(identity(before, final) && !final.focus, 'Ordinary resize changed media identity or stole focus');
+
+  const siteSwitches = () => page.evaluate(() => {
+    const menu = document.querySelector('[aria-label="网页兼容性处理"]');
+    return {
+      checks: Object.fromEntries([...menu.querySelectorAll('[role=menuitemcheckbox]')]
+        .map(item => [item.textContent.trim(), item.getAttribute('aria-checked')])),
+      inputs: menu.querySelectorAll('input[type=checkbox]').length,
+    };
+  });
+  const toggleManualKeyboard = async enabled => {
+    await click('button[aria-label="更多"]');
+    await click('[role=menuitem]', '网页兼容性处理');
+    await wait(() => !!document.querySelector('[aria-label="网页兼容性处理"]'));
+    const initial = await siteSwitches();
+    assert(initial.checks['使用平板版网站'] === 'false' && initial.inputs === 2,
+      'Compatibility submenu is missing an independent site switch');
+    assert(initial.checks['不自动弹出键盘'] === String(!enabled), 'Unexpected initial manual keyboard preference');
+    await click('[aria-label="网页兼容性处理"] [role=menuitemcheckbox]', '不自动弹出键盘');
+    await wait(enabled => {
+      const item = [...document.querySelectorAll('[aria-label="网页兼容性处理"] [role=menuitemcheckbox]')]
+        .find(element => element.textContent.trim() === '不自动弹出键盘');
+      return item?.getAttribute('aria-checked') === String(enabled) && item.getAttribute('aria-disabled') !== 'true';
+    }, enabled);
+    assert((await siteSwitches()).checks['使用平板版网站'] === initial.checks['使用平板版网站'],
+      'Manual keyboard switch changed tablet UA');
+    if (enabled) await screenshot('site-compatibility-menu');
+    await page.keyboard.press('Escape');
+    await wait(() => !document.querySelector('.MuiPopover-root'));
+  };
+  const hiddenKeyboard = () => wait(() => !document.activeElement?.classList.contains('remote-input') &&
+    document.querySelector('.remote-open-keyboard')?.textContent.trim() === '显示键盘' &&
+    !document.querySelector('.remote-open-keyboard').disabled);
+  const shownKeyboard = () => wait(() => document.activeElement?.classList.contains('remote-input') &&
+    document.querySelector('.remote-open-keyboard')?.textContent.trim() === '隐藏键盘');
+  const localFocusCount = () => page.evaluate(() => keyboardQA.events.filter(event => event.type === 'focusin').length);
+  const afterFixture = (start, predicate, message) => observe(event => fixtureEvents.indexOf(event) >= start && predicate(event), message);
+  const initialDocument = fixtureEvents.find(event => event.type === 'ready').documentId;
+  await toggleManualKeyboard(true);
+  const manualStart = fixtureEvents.length;
+  await tap('third');
+  await afterFixture(manualStart, event => event.type === 'focus' && event.field === 'third', 'Manual mode did not allow remote focus');
+  await hiddenKeyboard();
+  const manualBefore = await sample();
+  await screenshot('manual-keyboard-hidden');
+  await click('.remote-open-keyboard', '显示键盘');
+  await shownKeyboard();
+  await screenshot('manual-keyboard-shown');
+  await startComposition('manual');
+  await afterFixture(manualStart, event => event.type === 'compositionupdate' && event.field === 'third' && event.data === 'manual',
+    'Native composition did not update before manual hide');
+  await click('.remote-open-keyboard', '隐藏键盘');
+  await hiddenKeyboard();
+  await text('third', 'manual');
+  await afterFixture(manualStart, event => event.type === 'compositionend' && event.field === 'third' && event.data === 'manual',
+    'Manual hide did not finish the original native composition');
+  const focusAfterHide = await localFocusCount();
+  await tap('third');
+  const manualResizeStart = fixtureEvents.length;
+  await resize(640);
+  await ready();
+  await afterFixture(manualResizeStart, event => event.type === 'resize' && event.height < final.viewport.height,
+    'Remote layout did not resize in manual mode');
+  await hiddenKeyboard();
+  await resize(null);
+  await ready();
+  await hiddenKeyboard();
+  const manualRetained = await sample();
+  const currentTarget = state => state.wire.findLast(event => event.type === 'input.editable' && event.editable > 0)?.target;
+  assert(currentTarget(manualBefore) && currentTarget(manualRetained) === currentTarget(manualBefore),
+    'The active editable changed during repeated manual focus and resize');
+  const switchStart = fixtureEvents.length;
+  await tap('second');
+  await afterFixture(switchStart, event => event.type === 'focus' && event.field === 'second', 'Manual mode did not reach a new target');
+  await hiddenKeyboard();
+  assert(await localFocusCount() === focusAfterHide, 'Manual touch or resize reopened the local keyboard after hide');
+  await toggleManualKeyboard(false);
+  const autoStart = fixtureEvents.length;
+  await tap('text');
+  await afterFixture(autoStart, event => event.type === 'focus' && event.field === 'text', 'Auto mode did not reach a new target');
+  // A desktop Viewer can expose a coarse pointer without a physical soft keyboard.
+  await wait(() => document.activeElement?.classList.contains('remote-input') && document.activeElement.inputMode === 'text');
+  await tap('tl');
+  await afterFixture(autoStart, event => event.type === 'blur' && event.field === 'text', 'Auto mode did not observe remote blur');
+  await wait(() => !document.activeElement?.classList.contains('remote-input') && !document.querySelector('.remote-open-keyboard'));
+  const keyboardAfterMenu = await sample();
+  const manualCommits = await page.evaluate(() => keyboardQA.editPackets.filter(packet => packet.event.type === 'ime_commit' &&
+    packet.event.text === 'manual').length);
+  assert(manualCommits === 1 && fixtureEvents.slice(manualStart).filter(event => event.type === 'compositionend' && event.field === 'third').length === 1,
+    'Manual hide should commit the current composition exactly once');
+  assert(fixtureEvents.filter(event => event.type === 'ready').length === 1 &&
+    fixtureEvents.every(event => event.documentId === initialDocument) && identity(before, keyboardAfterMenu),
+  'Manual-only site updates navigated the remote page or changed the peer');
+  await log('manual-keyboard-compatibility', {manualBefore, manualRetained, keyboardAfterMenu, manualCommits, initialDocument});
+
+  const gesture = (type, touchPoints = []) => cdp.send('Input.dispatchTouchEvent', {type, touchPoints});
+  const touchMark = () => page.evaluate(() => keyboardQA.touchWire.length);
+  const touchRecords = mark => page.evaluate(mark => keyboardQA.touchWire.slice(mark), mark);
+  const waitForTerminal = async mark => (await (await wait(mark => {
+    const records = keyboardQA.touchWire.slice(mark);
+    const final = records.filter(event => event.type === 'input' && event.action === 'end').pop();
+    return final && records.some(event => event.type === 'result' && event.state === 'processed' &&
+      !event.masked && event.client === final.client && event.id === final.id) && final;
+  }, mark)).jsonValue());
+  const tapAndWait = async () => {
+    const mark = await touchMark();
+    const start = fixtureEvents.length;
+    await tap('tl');
+    await waitForTerminal(mark);
+    await afterFixture(start, event => event.type === 'click' && event.trusted, 'Touch tap did not deliver a trusted remote click');
+  };
+  await tapAndWait();
+  await tapAndWait();
+
+  const contactsStart = fixtureEvents.length;
+  const multiMark = await touchMark();
+  const finger1 = {...await point('contacts', 0.25), id:1};
+  const finger2 = {...await point('contacts', 0.75), id:2};
+  await gesture('touchStart', [finger1, finger2]);
+  await afterFixture(contactsStart, event => event.type === 'touchstart' && event.trusted && event.active.length === 2,
+    'Two-finger start did not reach the remote fixture');
+  // A populated touchEnd releases the specified contact. The empty final touchEnd releases the rest.
+  await gesture('touchEnd', [finger2]);
+  const partialEnd = await afterFixture(contactsStart, event => event.type === 'touchend' && event.trusted && event.active.length === 1,
+    'Partial release did not preserve one remote touch');
+  await gesture('touchMove', [{...finger1, y:finger1.y + 24}]);
+  const remainingMove = await afterFixture(contactsStart, event => event.type === 'touchmove' && event.trusted &&
+    event.active.length === 1 && event.changed[0] === partialEnd.active[0], 'Remaining contact did not deliver a remote move');
+  await gesture('touchEnd');
+  await afterFixture(contactsStart, event => event.type === 'touchend' && event.trusted && event.active.length === 0 &&
+    event.changed[0] === remainingMove.changed[0], 'Final release did not end the remote touch');
+  await waitForTerminal(multiMark);
+  const multiWire = (await touchRecords(multiMark)).filter(event => event.type === 'input');
+  assert(JSON.stringify(multiWire.map(event => event.action)) === JSON.stringify(['start', 'start', 'end', 'move', 'end']) &&
+    new Set(multiWire.map(event => event.id)).size === 1 &&
+    multiWire[2].points[0] === multiWire[1].points[0] &&
+    multiWire[3].points[0] === multiWire[0].points[0] && multiWire[4].points[0] === multiWire[0].points[0],
+    'Viewer wire did not retain one gesture through partial release and final end');
+  await log('two-finger-partial-release', {partialEnd, remainingMove, multiWire});
+
+  const dragMark = await touchMark();
+  const dragStart = fixtureEvents.length;
+  const drag = {...await point('scroll', 0.65, 0.23), id:1};
+  await gesture('touchStart', [drag]);
+  for (const delta of [25, 50, 75, 100, 125, 150]) {
+    await pause(16);
+    await gesture('touchMove', [{...drag, y:drag.y - delta}]);
+  }
+  await pause(130);
+  await gesture('touchEnd');
+  await waitForTerminal(dragMark);
+  const remoteScroll = await afterFixture(dragStart, event => event.type === 'scroll' && event.scrollY > 30,
+    'Trusted remote drag did not scroll the fixture');
+  await tapAndWait();
+  await log('remote-touch-scroll', {remoteScroll, wire:await touchRecords(dragMark)});
+
+  const recoveryMark = await touchMark();
+  await page.evaluate(() => { keyboardQA.withholdNextEnd = true; });
+  const clickStart = fixtureEvents.length;
+  await tap('tl');
+  await afterFixture(clickStart, event => event.type === 'click' && event.trusted, 'Touch with a masked receipt did not execute remotely');
+  const recovered = await waitForTerminal(recoveryMark);
+  const recoveryWire = await touchRecords(recoveryMark);
+  const masked = recoveryWire.find(event => event.type === 'result' && event.client === recovered.client &&
+    event.id === recovered.id && event.masked);
+  const delivered = recoveryWire.find(event => event.type === 'result' && event.client === recovered.client &&
+    event.id === recovered.id && event.state === 'processed' && !event.masked);
+  assert(masked && delivered && delivered.at - recovered.at >= 2250 &&
+    recoveryWire.some(event => event.type === 'query' && event.client === recovered.client &&
+      event.id === recovered.id && event.at > masked.at && event.at < delivered.at),
+  'Masked native terminal result was not recovered through a matching read-only touch status request');
+  assert(JSON.stringify(recoveryWire.filter(event => event.type === 'input' && event.id === recovered.id)
+    .map(event => event.action)) === JSON.stringify(['start', 'end']) &&
+    fixtureEvents.slice(clickStart).filter(event => event.type === 'click').length === 1,
+  'Recovery replayed the terminal input or duplicated its effect');
+  await tapAndWait();
+  const afterTouch = await sample();
+  assert(identity(before, afterTouch) && afterTouch.recoveryEntries === 0 &&
+    afterTouch.scroll.every(value => value === 0) &&
+    !await page.evaluate(() => document.body.textContent.includes('触控结束尚未确认')),
+    'Touch handling introduced a reconnect prompt, lost the original peer, or scrolled the Viewer');
+  await log('touch-status-recovery', {recoveryWire, afterTouch});
 } catch (error) {
   await log('failure', {message:error.message, stack:error.stack});
+  if (page) {
+    const probe = await page.evaluate(() => window.keyboardQA &&
+      ({touchWire:keyboardQA.touchWire, epochs:keyboardQA.epochs, waitingEntries:keyboardQA.waitingEntries,
+        recoveryEntries:keyboardQA.recoveryEntries, wire:keyboardQA.wire.slice(-60)})).catch(() => undefined);
+    if (probe) await log('failure-probe', probe);
+  }
   await page?.screenshot({path:join(run, 'failure.png'), timeout:3000}).catch(() => {});
   process.exitCode = 1;
 } finally {

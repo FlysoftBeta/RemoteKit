@@ -1049,43 +1049,31 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   Status status{Error::unsupported, "unsupported_method"};
   if (*method == "input.touchStatus") {
     const auto* sequence = request.FindString("sequenceId");
-    if (!sequence || sequence->empty()) {
-      reply.Set("state", "terminal-unconfirmed");
-      reply.Set("pending", false);
-      return error("stale_touch_sequence");
-    }
-    const auto current = endpoint.Token(session, view).value;
-    for (auto [key, expected] : {std::pair{"instance", current.instance},
-         std::pair{"document", current.document}, std::pair{"focus", current.focus}}) {
-      uint64_t value = 0;
-      if (!ReadId(request, key, &value) || value != expected) {
-        reply.Set("state", "terminal-unconfirmed");
-        reply.Set("pending", false);
-        return error("stale_touch_status_target");
-      }
-    }
+    InputToken owner{session, view};
+    reply.Set("state", "terminal-unconfirmed");
+    reply.Set("pending", false);
+    if (!sequence || sequence->empty() ||
+        !ReadId(request, "instance", &owner.instance) ||
+        !ReadId(request, "document", &owner.document) ||
+        !ReadId(request, "focus", &owner.focus))
+      return error("invalid_touch_status_identity");
+    reply.Set("sequenceId", *sequence);
     adapter.RefreshClientTouchOwner();
-    if (adapter.ClientTouchRetired(current, *sequence)) {
+    using State = ClientTouchRetirement::State;
+    const auto completion = adapter.ClientTouchStatus(owner, *sequence);
+    if (completion == State::invalidated) {
       reply.Set("state", "terminal-invalidated");
-      reply.Set("touchState", "terminal-invalidated");
-      reply.Set("sequenceId", *sequence);
-      reply.Set("touchSequenceId", *sequence);
-      reply.Set("pending", false);
       return error("touch_owner_invalidated");
     }
-    if (*sequence != adapter.ClientTouchSequence()) {
-      reply.Set("state", "terminal-unconfirmed");
-      reply.Set("pending", false);
-      return error("stale_touch_sequence");
+    if (completion == State::pending) {
+      reply.Set("state", "pending");
+      reply.Set("pending", true);
+      return error("touch_terminal_pending");
     }
-    status = adapter.TouchInjectionStatus();
-    reply.Set("ok", static_cast<bool>(status));
-    reply.Set("pending", adapter.TouchProcessingPending());
-    reply.Set("state", !status && status.error != Error::busy ? "terminal-unconfirmed" :
-              adapter.TouchProcessingPending() ? "pending" : "processed");
-    reply.Set("sequenceId", *sequence);
-    reply.Set("code", static_cast<int>(status.error));
-    if (!status) reply.Set("error", status.message);
+    if (completion != State::processed)
+      return error("touch_terminal_unconfirmed");
+    reply.Set("state", "processed");
+    reply.Set("ok", true);
     return reply;
   }
   if (*method == "focus") {
@@ -1376,10 +1364,16 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
                                  static_cast<uint32_t>(event->FindInt("modifiers").value_or(0))};
     } else
       return error("unsupported_input_type");
-    status = adapter.DispatchInput(input);
+    bool input_admitted = false;
+    status = adapter.DispatchInput(input, &input_admitted);
     if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
       reply.Set("touchPending", adapter.TouchProcessingPending());
       reply.Set("touchSequenceId", touch->clock ? touch->clock->sequence_id : std::string());
+      reply.Set("inputAdmitted", input_admitted);
+      if (touch->client_gestures && touch->clock &&
+          (touch->action == TouchInput::Action::end || touch->action == TouchInput::Action::cancel))
+        reply.Set("touchTerminal", adapter.ClientTouchStatus(input.token, touch->clock->sequence_id) !=
+                                       ClientTouchRetirement::State::unknown);
       if (status.error == Error::stale &&
           status.message == "Client touch owner explicitly invalidated") {
         reply.Set("touchState", "terminal-invalidated");

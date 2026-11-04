@@ -28,7 +28,9 @@ export function resizeSnapshotSize(width: number, height: number) {
 export class KeyboardViewport {
   private previous?: ViewportMetrics;
   private openHeight?: number;
+  private restores = 0;
   get open() { return this.openHeight !== undefined; }
+  get restoreCount() { return this.restores; }
   measure(metrics: ViewportMetrics, focused: boolean, coarse: boolean) {
     const previous = this.previous;
     this.previous = metrics;
@@ -36,7 +38,6 @@ export class KeyboardViewport {
     const visual = metrics.visual, oldVisual = previous.visual;
     if (Math.abs(previous.layoutWidth - metrics.layoutWidth) >= 1 ||
         Math.abs((oldVisual?.width ?? previous.layoutWidth) - (visual?.width ?? metrics.layoutWidth)) >= 1 ||
-        Math.abs((oldVisual?.offsetLeft ?? 0) - (visual?.offsetLeft ?? 0)) >= 1 ||
         metrics.scale <= .98 || metrics.scale >= 1.02) {
       this.openHeight = undefined;
       return false;
@@ -45,14 +46,16 @@ export class KeyboardViewport {
     const previousVisualHeight = oldVisual?.height ?? previous.layoutHeight;
     const height = Math.min(visualHeight, metrics.layoutHeight);
     const oldHeight = Math.min(previousVisualHeight, previous.layoutHeight);
-    const offsetTop = visual?.offsetTop ?? 0;
-    if (Math.abs(visualHeight - previousVisualHeight) < 1 && Math.abs(offsetTop - (oldVisual?.offsetTop ?? 0)) < 1 &&
+    if (Math.abs(visualHeight - previousVisualHeight) < 1 &&
         Math.abs(metrics.layoutHeight - previous.layoutHeight) < 1) return false;
     if (this.openHeight !== undefined) {
-      if (height >= this.openHeight - 1) this.openHeight = undefined;
+      if (height >= this.openHeight - 1) {
+        this.openHeight = undefined;
+        ++this.restores;
+      }
       return true;
     }
-    const occluded = !!visual && visualHeight + offsetTop < metrics.layoutHeight - 24;
+    const occluded = !!visual && visualHeight < metrics.layoutHeight - 24;
     if (focused && (occluded || coarse) && oldHeight - height >= 1) {
       this.openHeight = oldHeight;
       return true;

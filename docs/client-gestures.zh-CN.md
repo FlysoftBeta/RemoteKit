@@ -36,11 +36,17 @@ source elapsed与Native事件时间是两个域。前者独立保留，用于原
 
 ## 完成查询与Endpoint集成
 
-Browser touch RPC成功只表示受理；附`touchPending`与`touchSequenceId`，不能当网页允许默认手势或physical terminal完成。Endpoint对client-v1最后end/cancel受理后，用同一原身份查询`input.touchStatus`，不要重发已经受理的input。
+Browser touch RPC成功只表示受理，不能当网页允许默认手势或physical terminal完成。响应附`touchPending`、`touchSequenceId`与`inputAdmitted`；end/cancel的`touchTerminal`由真实raw `IsTouchSequenceEnd()`决定。双指只抬起一指不进入终止等待。Client的terminal提示只是本地计时依据，不能替代Browser判断。
 
-查询需要`session/view/instance/document/focus/sequenceId`。回复含`ok,pending,state,code,sequenceId`；state为`pending`（等canonical ACK）、`processed`（这些raw ACK已处理）、`terminal-invalidated`（存在精确目标退役证明）或`terminal-unconfirmed`（超时、未知sequence或查询身份已经改变，不能证明完成）。网页consumed仍是processed，并非输入注入失败。无target或超时不能返回假成功。旧sequence不会查询到新sequence的完成。Endpoint在input worker内以2秒预算poll，过期明确失败，不把队列受理改写为完成。momentum进度可在许可前到达并被有界缓冲。
+Browser在可能同步回调的raw派发前登记完整InputToken与sequence，真实terminal canonical ACK和前序ACK全部完成后才记录`processed`。固定Chromium的canonical队列按已ACK队首派发。记录最多64项，pending不被历史项挤掉，终态按更新时间保留；超时后仅精确同owner的迟到canonical可恢复完成，target不匹配不授予成功。查询`input.touchStatus`携带原`session/view/instance/document/focus/sequenceId`，优先匹配记录，不把当前focus换代误作旧序列完成。回复含`ok,pending,state,sequenceId`；state为`pending`、`processed`、`terminal-invalidated`或`terminal-unconfirmed`。网页consumed仍可为processed；未知、无target和超时不能假成功。
 
-Browser只在已拥有触控的target确实失效时记录退役，最多保留32项精确InputToken与sequence。已退役move/end/cancel仍通过既有输入身份/序号门禁，随后返回`ok:false,touchState:terminal-invalidated,touchSequenceId`，表示未再投递而非已执行。普通cancel受理且target仍有效时不会因此退役，仍等待canonical ACK。Client只依据原sentInput关联的attempt/布局/focus身份、surface及同一sequence清理旧contacts、timer与momentum；迟到旧回执不能释放新owner。布局/文档自身换代另按身份规则撤销旧owner，不把一条未知失败升级成退役证明。
+Endpoint为终止请求预留有界收据，受理时返回`input.result`的`accepted-pending`，以原`clientSequence`和`touchSequenceId`关联后续终态。每轮普通输入之间最多推进一项到期查询，使用2秒查询预算，不同步sleep等待整段终止过程。64项收据保留未发通知和活动查询；SDK BUSY时原序重试，布局事务优先。明确派发前拒绝标为`rejected`，已受理或传输结果未知不能按未投递重放。
+
+Viewer可发`{type:"input.touchStatus",clientSequence,sequenceId}`查询当前peer/授权代次自己已提交的原请求。Endpoint从保存的原命令取得token，不接受客户端改绑当前身份；此查询不携带坐标，允许跨布局门禁查询。普通输入仍在入队与派发前检查授权和布局。超时收据可重新查询，processed/invalidated直接补发，未知仍明确未知。
+
+Client区分queued、submitted和最终确认，实际DataChannel发送后才开始有限状态查询；队列丢弃显式反馈，终止记录与普通256项输入历史分开保存。仅匹配原身份/sequence的processed或确切退役证明能释放owner。已受理或未知end不补发cancel；确切未受理时才按原owner尝试收尾。最终仍未知时提供原连接上的“重试确认”，不使用遮挡整页的默认重连提示，键盘及其他控件仍可用。
+
+只有已拥有触控的target确实失效才记录`terminal-invalidated`，它表示原owner撤销而非输入执行成功；普通cancel仍等canonical ACK。完整attempt、布局、文档及focus身份变化另按规则撤销旧owner，迟到旧回执不能释放新手势。momentum继续保留既有权限仲裁和有界缓冲，不由回执查询重放。
 
 ## 必要验证
 

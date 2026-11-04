@@ -533,6 +533,7 @@ export class Control extends EventEmitter {
       const navigationUrl = (value: unknown) => { try { return resolveNavigation(value, state.settings.searchEngine); } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : '无效网址或搜索内容'); } };
       const createTab = (windowId: string) => { if (state.tabs.length >= 32) throw new ApiError(400, '最多支持32个标签页'); const next: ProductTab = { id: randomUUID(), windowId, webviewId: this.store.viewId(), title: String(action.title ?? '新标签页').slice(0, 120), kind: action.url === undefined ? 'start' : 'remote', url: action.url === undefined ? '' : navigationUrl(action.url) }; state.tabs.push(next); state.windows.find(w => w.id === windowId)!.activeTabId = next.id; state.activeWindowId = windowId; };
       let application: ProductActionResult['application'];
+      let siteUaChanged = false;
       switch (action.type) {
         case 'window.create': { if (state.windows.length >= 8) throw new ApiError(400, '最多支持8个窗口'); const id = randomUUID(); state.windows.push({ id, activeTabId: null, weight: 1 }); createTab(id); break; }
         case 'window.activate': state.activeWindowId = window().id; break;
@@ -595,12 +596,32 @@ export class Control extends EventEmitter {
         }
         case 'site.set': {
           let origin: string; try { const parsed = new URL(action.origin); if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.origin.length > 2048) throw new Error(); origin = parsed.origin; } catch { throw new ApiError(400, '站点需有效HTTP(S) origin，最长2048字符'); }
-          if (typeof action.tabletUa !== 'boolean') throw new ApiError(400, '无效的站点设置');
-          if (action.tabId && new URL(tab().url).origin !== origin) throw new ApiError(400, '标签页不属于该站点');
+          const hasTabletUa = Object.prototype.hasOwnProperty.call(action, 'tabletUa');
+          const hasManualKeyboard = Object.prototype.hasOwnProperty.call(action, 'manualKeyboard');
+          if ((!hasTabletUa && !hasManualKeyboard) ||
+              (hasTabletUa && typeof action.tabletUa !== 'boolean') ||
+              (hasManualKeyboard && typeof action.manualKeyboard !== 'boolean') ||
+              Object.keys(action).some(key => !['type', 'origin', 'tabId', 'tabletUa', 'manualKeyboard'].includes(key))) {
+            throw new ApiError(400, '无效的站点设置');
+          }
+          let target: ProductTab | undefined;
+          if (action.tabId !== undefined) {
+            target = tab();
+            if (!URL.canParse(target.url) || new URL(target.url).origin !== origin) throw new ApiError(400, '标签页不属于该站点');
+          }
           if (!(origin in state.sites) && Object.keys(state.sites).length >= 4096) throw new ApiError(400, '站点设置已达上限');
-          state.sites[origin] = { tabletUa: action.tabletUa };
-          if (action.tabId) tab().pendingUaReloadOrigin = origin;
-          application = { status: 'pending', reason: '设置已保存，正在应用站点身份' }; break;
+          const previous = state.sites[origin] ?? { tabletUa: false };
+          siteUaChanged = hasTabletUa && previous.tabletUa !== action.tabletUa;
+          state.sites[origin] = {
+            ...previous,
+            ...(hasTabletUa ? { tabletUa: action.tabletUa } : {}),
+            ...(hasManualKeyboard ? { manualKeyboard: action.manualKeyboard } : {}),
+          };
+          if (siteUaChanged) {
+            if (target) target.pendingUaReloadOrigin = origin;
+            application = { status: 'pending', reason: '设置已保存，正在应用站点身份' };
+          }
+          break;
         }
         default: throw new ApiError(400, '未知产品操作');
       }
@@ -608,8 +629,10 @@ export class Control extends EventEmitter {
       const closePending=action.type==='tab.close' && !action.cancel && state.tabs.some(tab=>tab.id===action.tabId) || action.type==='window.close' && state.windows.some(window=>window.id===action.windowId);
       if(operation && !['tab.navigate','tab.command'].includes(action.type) && !closePending){operation.status='committed';if(application)operation.application=application;}
       this.saveProduct(state);
-      try { await this.reconcileProduct(tenant); } catch { }
-      if (action.type === 'site.set') {
+      if (action.type !== 'site.set' || siteUaChanged) {
+        try { await this.reconcileProduct(tenant); } catch { }
+      }
+      if (siteUaChanged) {
         const latest = this.store.workspace(tenant), applied = this.siteApplications.get(tenant)?.applied === true;
         if (applied && (!action.tabId || !latest.tabs.find(t => t.id === action.tabId)?.pendingUaReloadOrigin)) application = undefined;
         else application = { status: 'pending', reason: '设置已保存，应用成功后刷新当前页；其他页面下次加载生效' };
@@ -886,10 +909,13 @@ export class Control extends EventEmitter {
     catch (error) { if (error instanceof FileUploadError) throw new ApiError(error.status, error.message); throw error; }
   }
   private async applySites(tenant: string, state: ProductWorkspace, force = false, browserPid?: number) {
-    const encoded = JSON.stringify(state.sites), previous = this.siteApplications.get(tenant);
+    const sites = Object.fromEntries(Object.keys(state.sites).sort()
+      .filter(origin => state.sites[origin].tabletUa)
+      .map(origin => [origin, { tabletUa: true }]));
+    const encoded = JSON.stringify(sites), previous = this.siteApplications.get(tenant);
     if (!force && previous?.encoded === encoded && previous.applied) return;
     this.siteApplications.set(tenant, { encoded, applied: false, browserPid });
-    const result = await this.endpoint.request('session.sitePreferences', tenant, { sites: state.sites });
+    const result = await this.endpoint.request('session.sitePreferences', tenant, { sites });
     if (result?.accepted !== true) throw new Error('Endpoint未接受站点身份设置');
     this.siteApplications.set(tenant, { encoded, applied: result.applied === true, browserPid });
   }

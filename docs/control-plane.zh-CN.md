@@ -54,7 +54,9 @@ alert/confirm/prompt和导航beforeunload是临时pageDialogs。对话身份绑�
 
 ## 站点身份与画质
 
-tablet UA按HTTP(S) origin保存。首次导航、redirect、history、reload和restore选择UA/Client Hints；子frame继承所在页面身份。它不改变viewport、touch或pointer特征。保存规则后先确认Browser已应用再刷新当前页，其他同站点页下次导航生效；用户可取消导航beforeunload。
+“更多→网页兼容性处理”按HTTP(S) origin保存平板UA与“不自动弹出键盘”。`site.set`接受`tabletUa`、`manualKeyboard`中至少一个布尔字段，按字段合并，旧记录缺少`manualKeyboard`时默认自动弹出。键盘设置只改变Viewer行为，通过Control持久状态与操作收据收敛，不刷新页面、不下发UA；客户端不持久化这些设置。
+
+首次导航、redirect、history、reload和restore选择UA/Client Hints；子frame继承所在页面身份。平板UA不改变viewport、touch或pointer特征。只有实际UA变化才需确认Browser已应用并刷新当前页，其他同站点页下次导航生效；用户可取消导航beforeunload。下发Browser的完整站点映射仅含UA规则，不混入Viewer键盘设置。
 
 质量三档只选择WebRTC原生降级偏好：
 

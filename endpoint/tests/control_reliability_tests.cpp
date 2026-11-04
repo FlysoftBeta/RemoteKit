@@ -132,32 +132,77 @@ void IncrementalExport() {
  multiple.Tick();CHECK(multiple.begin==1 && !multiple.exporter.Pending());
 }
 void TouchTerminal() {
- const Json accepted={{"ok",true},{"touchPending",true},{"touchSequenceId","physical-7"}};
- const Json command={{"session","1"},{"view","2"},{"instance","3"},{"document","4"},{"focus","5"},{"sequence","99"}};
- for(int scenario=0;scenario<8;++scenario) {
-  int calls=0,waits=0,budget=20;bool current=true;
-  auto result=remotekit::AwaitTouchTerminal(accepted,command,[&](const Json& query,int remaining)->Json {
-   CHECK(query.at("method")=="input.touchStatus" && !query.contains("sequence"));
-   CHECK(query.at("sequenceId")=="physical-7" && query.at("document")=="4" && remaining>0);
-   ++calls;
-   if(scenario==1)return {{"ok",false},{"pending",false},{"state","terminal-invalidated"},{"sequenceId","physical-7"}};
-   if(scenario==6)return {{"ok",false},{"pending",false},{"state","terminal-invalidated"},{"sequenceId","different-owner"}};
-   if(scenario==7)return {{"ok",false},{"pending",false},{"state","terminal-unconfirmed"},{"error","stale_touch_sequence"}};
-   if(scenario==2)return {{"ok",false},{"pending",true},{"state","pending"}};
-   if(scenario==3)current=false;
-   if(scenario==5){budget=0;return {{"ok",true},{"pending",false},{"state","processed"}};}
-   if(calls==1)return {{"ok",false},{"pending",true},{"state","pending"}};
-   return {{"ok",true},{"pending",false},{"state","processed"}}; // Page consumption is still processed.
-  },[&]{return scenario!=4 && current;},[&]{return budget;},[&]{++waits;budget-=10;});
-  CHECK(result.value("ok",false)==(scenario==0));
-  if(scenario==0)CHECK(calls==2 && waits==1 && result.at("touchPending")==false);
-  if(scenario==1)CHECK(calls==1 && waits==0 && result.at("touchState")=="terminal-invalidated" && result.at("touchSequenceId")=="physical-7");
-  if(scenario>=2)CHECK(result.value("state",std::string())=="terminal-unconfirmed" && !result.contains("touchState"));
-  if(scenario==2)CHECK(calls==2 && result.at("error")=="touch_terminal_timeout");
-  if(scenario==3)CHECK(calls==1 && waits==0);
-  if(scenario==4)CHECK(calls==0);
-  if(scenario==5)CHECK(calls==1 && result.at("error")=="touch_terminal_timeout");
- }
+  using remotekit::TouchTerminalReceipt;
+  using remotekit::TouchTerminalReceipts;
+  const auto make=[](int sequence) {
+   TouchTerminalReceipt receipt;
+   receipt.peer=10;receipt.authorization=20;receipt.control=30;
+   receipt.client_sequence=std::to_string(sequence);
+   receipt.sequence="physical-"+receipt.client_sequence;
+   receipt.query={{"method","input.touchStatus"},{"sequenceId",receipt.sequence},{"focus","5"}};
+   return receipt;
+  };
+  const auto status=[](const char* state,const std::string& sequence,bool ok=false) {
+   return Json{{"state",state},{"sequenceId",sequence},{"ok",ok}};
+  };
+  TouchTerminalReceipts receipts;
+  auto* old=receipts.Reserve(make(1));
+  CHECK(old && !receipts.HasNotices()); // Space reserved before dispatch.
+  old->Accept(100,200);
+  CHECK(receipts.Due(100)==old);
+  CHECK(!remotekit::ApplyTouchTerminalStatus(*old,status("pending",old->sequence)));
+  old->due=105;
+  // A pending native status yields to later dispatch and other due queries.
+  auto* next=receipts.Reserve(make(2));
+  next->Accept(101,200);
+  CHECK(receipts.Due(101)==next);
+  CHECK(remotekit::ApplyTouchTerminalStatus(*next,status("processed",next->sequence,true)));
+  CHECK(!receipts.Due(104));
+  CHECK(receipts.Due(105)==old);
+  CHECK(receipts.Find(10,20,"1","physical-1")==old);
+  CHECK(!receipts.Find(11,20,"1","physical-1"));
+  CHECK(!receipts.Find(10,21,"1","physical-1"));
+  CHECK(!receipts.Find(10,20,"1","physical-2"));
+  CHECK(remotekit::ApplyTouchTerminalStatus(*old,status("processed",next->sequence,true)));
+  CHECK(old->result.at("touchState")=="terminal-unconfirmed");
+  CHECK(!old->result.at("ok").get<bool>());
+  old->Schedule(106,200);
+  CHECK(remotekit::ApplyTouchTerminalStatus(*old,status("terminal-invalidated",old->sequence)));
+  CHECK(old->result.at("touchState")=="terminal-invalidated");
+  CHECK(!old->result.at("ok").get<bool>());
+
+  std::vector<Json> sent;
+  bool sdk_busy=true;
+  const auto send=[&](const auto&,const Json& message){
+   if(sdk_busy)return false;
+   sent.push_back(message);return true;
+  };
+  receipts.Flush(send);
+  CHECK(sent.empty() && receipts.HasNotices());
+  sdk_busy=false;
+  receipts.Flush(send);
+  CHECK(sent.size()==4 && !receipts.Busy());
+  CHECK(sent[0].at("touchState")=="accepted-pending" && sent[0].at("clientSequence")=="1");
+  CHECK(sent[1].at("touchState")=="terminal-invalidated" && sent[1].at("clientSequence")=="1");
+  CHECK(sent[2].at("touchState")=="accepted-pending" && sent[2].at("clientSequence")=="2");
+  CHECK(sent[3].at("touchState")=="processed" && sent[3].at("clientSequence")=="2");
+
+  TouchTerminalReceipts full;
+  for(size_t index=0;index<full.kCapacity;++index) {
+   auto* entry=full.Reserve(make(static_cast<int>(index)));
+   CHECK(entry);
+   entry->Accept(1,200);
+  }
+  CHECK(!full.Reserve(make(65)));
+  auto* first=full.Find(10,20,"0","physical-0");
+  CHECK(first);
+  first->Finish("terminal-unconfirmed",false,"touch_terminal_timeout");
+  CHECK(!full.Reserve(make(65))); // Never discard an unsent result.
+  full.Flush(send);
+  CHECK(full.Reserve(make(65)));
+  CHECK(!full.Find(10,20,"0","physical-0"));
+  full.Prune([](const auto& entry){return entry.authorization==21;});
+  CHECK(!full.Busy() && !full.Find(10,20,"1","physical-1"));
 }
 void OversizedBrowserReplyIsApplicationError() {
  uint64_t serial=72;

@@ -41,11 +41,14 @@ export function useViewportTransition(
   useEffect(() => {
     const node = host.current, parent = node?.parentElement;
     if (!node || !parent) return;
+    // The product shell already lays out inside the visual viewport.
+    // Standalone automation mounts outside that shell.
+    const inViewer = parent.classList.contains('window-content');
     const measure = () => {
       const content = parent.getBoundingClientRect();
       const viewport = window.visualViewport;
       const visual = viewport && { width: viewport.width, height: viewport.height, offsetLeft: viewport.offsetLeft, offsetTop: viewport.offsetTop };
-      const bounds = visibleContentBounds(content, visual);
+      const bounds = inViewer ? content : visibleContentBounds(content, visual);
       const state = transition.current, current = latest.current;
       const changed = !!state.desired && !sameViewportSize(state.desired, bounds);
       const focused = current.editable && !!editor.current && document.activeElement === editor.current;
@@ -101,9 +104,9 @@ export function useViewportTransition(
     };
     const observer = new ResizeObserver(measure); observer.observe(parent);
     window.visualViewport?.addEventListener('resize', measure);
-    window.visualViewport?.addEventListener('scroll', measure);
+    if (!inViewer) window.visualViewport?.addEventListener('scroll', measure);
     measure();
-    return () => { observer.disconnect(); window.visualViewport?.removeEventListener('resize', measure); window.visualViewport?.removeEventListener('scroll', measure); clearTimeout(settleTimer.current); disposeBitmap(); };
+    return () => { observer.disconnect(); window.visualViewport?.removeEventListener('resize', measure); if (!inViewer) window.visualViewport?.removeEventListener('scroll', measure); clearTimeout(settleTimer.current); disposeBitmap(); };
   }, [host, transport, viewId, owner, editor]);
   useLayoutEffect(() => {
     const state = transition.current, desired = state.desired, layout = transport.layout;
@@ -116,5 +119,5 @@ export function useViewportTransition(
       setWaiting(false); setKeyboard(false);
     }
   }, [frameReady, owner, surface, transport.layout?.epoch, transport.layout?.generation, style, settled]);
-  return { style, frozen, waiting, keyboard, blocksInput: () => inputBlocked.current, keyboardOpen: () => keyboardViewport.current.open };
+  return { style, frozen, waiting, keyboard, blocksInput: () => inputBlocked.current, keyboardOpen: () => keyboardViewport.current.open, keyboardRestoreCount: () => keyboardViewport.current.restoreCount };
 }

@@ -13,7 +13,7 @@ ClientGestureBridge::ClientGestureBridge(
     input::RenderWidgetHostInputEventRouter* router,
     input::RenderWidgetHostViewInput* root, input::RenderWidgetHostViewInput* target,
     std::string sequence, base::TimeTicks origin,
-    base::RepeatingCallback<void(bool)> processed)
+    base::RepeatingCallback<void(ClientTouchAckState, bool, bool)> processed)
     : router_(router->GetWeakPtr()), root_(root->GetInputWeakPtr()),
       target_(target->GetInputWeakPtr()), sequence_(std::move(sequence)),
       origin_(origin), processed_(std::move(processed)),
@@ -85,7 +85,8 @@ void ClientGestureBridge::Ack(const blink::WebTouchEvent& event,
   if (pending_.empty() && !momentum_) timeout_.Stop();
   CompleteClientTouchAck(event.IsTouchSequenceEnd(), fling_pending_, momentum_,
       base::BindOnce(&ClientGestureBridge::EndMomentum, weak),
-      base::BindOnce(processed_, alive));
+      base::BindOnce(processed_, alive ? ClientTouchAckState::canonical : ClientTouchAckState::target_mismatch,
+                     event.IsTouchSequenceEnd(), pending_.empty()));
 }
 
 base::TimeTicks ClientGestureBridge::NativeTimestamp(base::TimeTicks sampled) {
@@ -194,6 +195,6 @@ void ClientGestureBridge::Cancel(bool deliver) {
 void ClientGestureBridge::Timeout() {
   const bool raw_pending = !pending_.empty();
   Cancel(true);
-  if (raw_pending) processed_.Run(false);
+  if (raw_pending) processed_.Run(ClientTouchAckState::timeout, false, false);
 }
 }  // namespace remotekit::browser

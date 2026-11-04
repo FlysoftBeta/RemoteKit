@@ -380,15 +380,11 @@ struct Session {
  void AckClosed(const Json& views) {
   if(!views.empty())Rpc({{"method","view.closed.ack"},{"session",id},{"views",views},{"browserIncarnation",browser_incarnation}});
  }
- Json Rpc(Json command,bool require_ok=true,uint64_t expected_control=0,uint32_t timeout_ms=10000,int64_t request_deadline=0,const std::function<bool()>& admitted={}) {
+ Json Rpc(Json command,bool require_ok=true,uint64_t expected_control=0,uint32_t timeout_ms=10000,
+          bool opportunistic=false,const std::function<bool()>& admitted={}) {
   std::unique_lock lock(rpc_mutex,std::defer_lock);
-  if(request_deadline) {
-   const auto remaining=request_deadline-QpcNow();
-   if(remaining<=0 || !lock.try_lock_for(std::chrono::microseconds(std::max<int64_t>(1,remaining*1000000/QpcFrequency()))))
-    throw std::runtime_error("touch_terminal_timeout");
-   const auto active=request_deadline-QpcNow();
-   if(active<=0)throw std::runtime_error("touch_terminal_timeout");
-   timeout_ms=static_cast<uint32_t>(std::max<int64_t>(1,active*1000/QpcFrequency()));
+   if(opportunistic) {
+    if(!lock.try_lock())return nullptr;
   } else lock.lock();
   if(admitted && !admitted())throw std::runtime_error("authorization_changed");
   if(expected_control && control.load()!=expected_control)throw std::runtime_error("stale_file_browser");
@@ -1267,44 +1263,115 @@ struct Session {
    reply["layoutEpoch"]=request.value("layoutEpoch",Json());
   } else if(request.is_object() && request.contains("sequence")) {
    reply["clientSequence"]=request["sequence"];
+   } else if(request.is_object() && request.contains("clientSequence")) {
+    reply["clientSequence"]=request["clientSequence"];
   }
   Send(reply,stamp);
  }
- void HandleData(const Event& event) {
+ static std::string ClientTouchSequence(const Json& request) {
+   const auto raw=request.find("event");
+   if(raw==request.end() || !raw->is_object() || raw->value("type",std::string())!="touch" ||
+      raw->value("gestureMode",std::string())!="client-v1")return {};
+   return raw->value("sequenceId",std::string());
+ }
+ void RejectInput(const char* error,const Json& request,uint64_t stamp) {
+   Json reply={{"ok",false},{"error",error}};
+   if(const auto sequence=ClientTouchSequence(request);!sequence.empty()) {
+    reply["touchState"]="rejected";reply["touchSequenceId"]=sequence;
+   }
+   ++input_rejected;ReplyInput(std::move(reply),request,stamp);
+ }
+ void PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt) {
+   const auto current=[&]{return peer.load()==receipt.peer && authorization.Current(receipt.authorization) &&
+                                control.load()==receipt.control;};
+   const auto now=QpcNow();
+   if(!current() || now>=receipt.deadline) {
+    receipt.Finish("terminal-unconfirmed",false,!current()?"touch_terminal_identity_changed":"touch_terminal_timeout");
+    return;
+   }
+   try {
+    const auto status=Rpc(receipt.query,false,receipt.control,10000,true,current);
+    if(!current())receipt.Finish("terminal-unconfirmed",false,"touch_terminal_identity_changed");
+    else if(status.is_null() || !remotekit::ApplyTouchTerminalStatus(receipt,status))
+     receipt.due=QpcNow()+QpcFrequency()/200;
+   } catch(const std::exception& error) {receipt.Finish("terminal-unconfirmed",false,error.what());}
+ }
+ void FlushTouchTerminals(remotekit::TouchTerminalReceipts& terminals) {
+   FlushControl();
+   terminals.Flush([&](const auto& receipt,const Json& message) {
+    bool sent=false;
+    control_outbox.Transient(receipt.peer,message.dump(),[&](const std::string& encoded) {
+     sent=peer.load()==receipt.peer && data_open && frame_authorization.load()==receipt.authorization &&
+          SendData(receipt.peer,receipt.authorization,encoded)==0;
+    });
+    return sent;
+   });
+ }
+ void HandleData(const Event& event,remotekit::TouchTerminalReceipts& terminals) {
   const auto admitted=[&]{return ProductCurrent(event) && input_authorization.load()==event.authorization;};
-  if(event.value!=0 || !admitted())return;
+   if(event.value!=0 || !ProductCurrent(event))return;
   auto command=Json::parse(event.bytes,nullptr,false);if(command.is_discarded()||!command.is_object())return;
   auto type=command.value("type",std::string());
+   if(type=="input.touchStatus") {
+    const auto client_sequence=command.value("clientSequence",std::string());
+    const auto sequence=command.value("sequenceId",std::string());
+    if(client_sequence.empty() || client_sequence.size()>20 || sequence.empty() || sequence.size()>128)return;
+    if(auto* receipt=terminals.Find(event.peer,event.authorization,client_sequence,sequence)) {
+     const auto state=receipt->result.is_object()?receipt->result.value("touchState",std::string()):std::string();
+     if(receipt->polling)receipt->send_acceptance=receipt->acceptance.is_object();
+     else if(state=="terminal-unconfirmed" && receipt->control==control.load())
+      receipt->Schedule(QpcNow(),2*QpcFrequency());
+     else receipt->send_result=true;
+    } else ReplyInput({{"ok",false},{"error","unknown_touch_terminal"},{"touchState","terminal-unconfirmed"},
+                      {"touchSequenceId",sequence}},command,event.authorization);
+    return;
+   }
   if(type!="input"&&type!="focus")return;
   const auto request=command;
+   if(!admitted()) {RejectInput("input_not_authorized",request,event.authorization);return;}
   const auto request_epoch=layout_epoch.load();
   if(command.value("layoutEpoch",std::string())!=std::to_string(request_epoch)) {
-   ++input_rejected;ReplyInput({{"ok",false},{"error","stale_layout_epoch"}},request,event.authorization);return;
+    RejectInput("stale_layout_epoch",request,event.authorization);return;
   }
   command.erase("layoutEpoch");command.erase("focusRequestId");
   if(command.value("session",std::string())!=id) {
-   ++input_rejected;ReplyInput({{"ok",false},{"error","wrong_session"}},request,event.authorization);return;
+    RejectInput("wrong_session",request,event.authorization);return;
   }
   if(type=="input" && command.contains("event") && command["event"].is_object()) {
    const auto event_type=command["event"].value("type",std::string());
    if((event_type=="mouse"||event_type=="wheel"||event_type=="touch"||event_type=="gesture") &&
       !coordinate_readiness.Allows(command.value("view",std::string()),request_epoch)) {
-    ++input_rejected;ReplyInput({{"ok",false},{"error","view_not_ready"}},request,event.authorization);return;
+     RejectInput("view_not_ready",request,event.authorization);return;
    }
   }
   command["method"]=type;command.erase("type");
   if(type=="input") {
    const auto sequence=input_sequence.NextBrowser();
-   if(!sequence){++input_rejected;ReplyInput({{"ok",false},{"error","input_sequence_exhausted"}},request,event.authorization);return;}
+    if(!sequence){RejectInput("input_sequence_exhausted",request,event.authorization);return;}
    command["sequence"]=std::to_string(*sequence);
   }
   if(command.contains("outputGeneration")){command["output_generation"]=command["outputGeneration"];command.erase("outputGeneration");}
   // This connection is already bound to this Session by authenticated Control.
   // The browser validates membership and all token/sequence/output generations.
+   const auto input_control=control.load();
+   const auto touch_sequence=ClientTouchSequence(request);
+   remotekit::TouchTerminalReceipt* receipt=nullptr;
+   if(!touch_sequence.empty()) {
+    const auto action=request.at("event").value("action",std::string());
+    if(action=="end" || action=="cancel") {
+     remotekit::TouchTerminalReceipt candidate;
+     candidate.peer=event.peer;candidate.authorization=event.authorization;candidate.control=input_control;
+     candidate.client_sequence=request.value("sequence",std::string());candidate.sequence=touch_sequence;
+     candidate.query={{"method","input.touchStatus"},{"sequenceId",touch_sequence}};
+     for(const auto* key:{"session","view","instance","document","focus"})
+      if(command.contains(key))candidate.query[key]=command[key];
+     receipt=terminals.Reserve(std::move(candidate));
+     if(!receipt){RejectInput("touch_terminal_queue_busy",request,event.authorization);return;}
+    }
+   }
    try {
     // Only Browser's pre-admission BUSY is retryable. Keep the exact browser
     // sequence; an accepted asynchronous injection is never replayed.
-    const auto input_control=control.load();
     const auto deadline=QpcNow()+QpcFrequency()/4;
     auto reply=type=="input"?remotekit::RetryBrowserInput(command,
       [&](const Json& request){return Rpc(request,false,input_control,10000,0,admitted);},
@@ -1312,33 +1379,48 @@ struct Session {
       [&]{return QpcNow()>=deadline;},
       []{std::this_thread::sleep_for(std::chrono::milliseconds(5));},
       [&]{++input_busy_retries;},[&]{++input_busy_exhausted;}):Rpc(command,false,0,10000,0,admitted);
-    if(type=="input" && reply.value("ok",false) && command.contains("event")) {
-     const auto& raw=command["event"];
-     if(raw.value("type",std::string())=="touch" && raw.value("gestureMode",std::string())=="client-v1" &&
-        (raw.value("action",std::string())=="end" || raw.value("action",std::string())=="cancel")) {
-      const auto terminal_deadline=QpcNow()+2*QpcFrequency();
-      reply=remotekit::AwaitTouchTerminal(std::move(reply),command,
-       [&](const Json& query,int64_t remaining){return Rpc(query,false,input_control,static_cast<uint32_t>(std::max<int64_t>(1,remaining*1000/QpcFrequency())),terminal_deadline,admitted);},
-       [&]{return !stop_input && admitted() && request_epoch==layout_epoch.load() && control.load()==input_control;},
-       [&]{return terminal_deadline-QpcNow();},
-       []{std::this_thread::sleep_for(std::chrono::milliseconds(5));});
+     if(!touch_sequence.empty() && !reply.value("ok",false)) {
+      const auto state=reply.value("touchState",std::string())=="terminal-invalidated" &&
+                       reply.value("touchSequenceId",std::string())==touch_sequence?"terminal-invalidated":
+                       reply.value("inputAdmitted",false)?"terminal-unconfirmed":"rejected";
+      if(receipt) {receipt->Finish(state,false,reply.value("error",std::string()));return;}
+      reply["touchState"]=state;reply["touchSequenceId"]=touch_sequence;
      }
+     if(receipt) {
+      if(reply.value("touchTerminal",false)) {
+       if(reply.value("touchSequenceId",std::string())==touch_sequence)receipt->Accept(QpcNow(),2*QpcFrequency());
+       else receipt->Finish("terminal-unconfirmed",false,"touch_terminal_identity_mismatch");
+       return;
+      }
+      terminals.Remove(receipt);receipt=nullptr;
     }
     if(type=="input")reply["browserSequence"]=command["sequence"];
     if(admitted())ReplyInput(std::move(reply),request,event.authorization);
    }
-  catch(const std::exception& error){if(admitted())ReplyInput({{"ok",false},{"error",error.what()}},request,event.authorization);}
+   catch(const std::exception& error) {
+    if(receipt)receipt->Finish("terminal-unconfirmed",false,error.what());
+    else if(admitted()) {
+     Json reply={{"ok",false},{"error",error.what()}};
+     if(!touch_sequence.empty()){reply["touchState"]="terminal-unconfirmed";reply["touchSequenceId"]=touch_sequence;}
+     ReplyInput(std::move(reply),request,event.authorization);
+    }
+   }
  }
  void QueueInput(const Event& event) {
   std::lock_guard lock(input_mutex);
-  if(!ProductCurrent(event) || input_authorization.load()!=event.authorization || event.value!=0)return;
+   if(!ProductCurrent(event) || event.value!=0)return;
   auto parsed=Json::parse(event.bytes,nullptr,false);
+   if(!parsed.is_object())return;
+   if(parsed.value("type",std::string())!="input.touchStatus" &&
+      input_authorization.load()!=event.authorization) {
+    RejectInput("input_not_authorized",parsed,event.authorization);return;
+   }
   // Validate arrival order before move coalescing can replace a newer packet.
   // The Browser keeps its independent Session counter across RTC reconnects.
   if(parsed.is_object() && parsed.value("type",Json())=="input" &&
      (!parsed.contains("sequence") || !parsed["sequence"].is_string() ||
       !input_sequence.Admit(event.peer,parsed["sequence"].get<std::string>()))) {
-   ++input_rejected;ReplyInput({{"ok",false},{"error","stale_client_sequence"}},parsed,event.authorization);return;
+    RejectInput("stale_client_sequence",parsed,event.authorization);return;
   }
   bool move=!parsed.is_discarded()&&parsed.value("type",std::string())=="input"&&parsed.contains("event")&&
     parsed["event"].value("type",std::string())=="mouse"&&parsed["event"].value("action",std::string())=="move";
@@ -1351,16 +1433,32 @@ struct Session {
    }
   }
   if(input_queue.size()>=256) {
-   ++input_rejected;ReplyInput({{"ok",false},{"error","input_queue_busy"}},parsed,event.authorization);return;
+    RejectInput("input_queue_busy",parsed,event.authorization);return;
   }
   input_queue.push_back(event);input_wake.notify_one();
  }
  void InputLoop() {
+  remotekit::TouchTerminalReceipts terminals;
   while(true) {
-   Event event;
-   {std::unique_lock lock(input_mutex);input_wake.wait(lock,[&]{return stop_input||!input_queue.empty();});
-    if(stop_input)break;event=std::move(input_queue.front());input_queue.pop_front();}
-   try{HandleData(event);}catch(const std::exception& error){++input_rejected;if(ProductCurrent(event))ReplyInput({{"ok",false},{"error",error.what()}},Json::parse(event.bytes,nullptr,false),event.authorization);}
+   std::optional<Event> event;
+   {
+    std::unique_lock lock(input_mutex);
+    const auto ready=[&]{return stop_input || !input_queue.empty();};
+    if(terminals.Busy())input_wake.wait_for(lock,std::chrono::milliseconds(5),ready);
+    else input_wake.wait(lock,ready);
+    if(stop_input)break;
+    if(!input_queue.empty()){event=std::move(input_queue.front());input_queue.pop_front();}
+   }
+   terminals.Prune([&](const auto& receipt){
+    return peer.load()==receipt.peer && authorization.Current(receipt.authorization);
+   });
+   if(event) {
+    try{HandleData(*event,terminals);}catch(const std::exception& error){++input_rejected;if(ProductCurrent(*event))ReplyInput({{"ok",false},{"error",error.what()}},Json::parse(event->bytes,nullptr,false),event->authorization);}
+   }
+   // One due status read per input turn. A pending sequence does not hold
+   // dispatch while waiting for its next query.
+   if(auto* receipt=terminals.Due(QpcNow()))PollTouchTerminal(*receipt);
+   if(terminals.HasNotices())FlushTouchTerminals(terminals);
   }
  }
  void MediaLoop() {

@@ -8,13 +8,17 @@
 
 包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-091638.zip`，504941930 bytes，SHA256 `618ef0d6cfe8530fc19ef8e41708adb39c1eb2d90fbb5955f6851a6a130a8d40`。manifest为干净源码，571项文件/ZIP及11项人脸资产校验通过，包内启动、实际H264、锁定/PIN恢复与同peer/双DC检查通过。[交付记录](../develop/docs/keyboard-viewport-delivery-20261104.md)。
 
-## 键盘与尺寸过渡修复（构建与运行已通过）
+## 网页兼容设置、键盘与触控（当前源码已验收，发布中）
 
-已修复尺寸重配把未知编辑状态误报失焦、以及布局失效结束composition的路径。Browser保留同一编辑目标的composition，原focus/layout输入租约仍轮换；Client在明确reconfigure期间保留本地键盘，将有界暂存输入绑定稳定target，在新布局/画面和权威编辑状态匹配后交付。真实失焦关闭输入法，旧target事件在Browser最终派发前拒绝。
+更多菜单改为“网页兼容性处理”子菜单，按站点保存平板UA与“不自动弹出键盘”。键盘设置不刷新页面；悬浮按钮显示/隐藏本地键盘，手动隐藏完成同目标组合文本一次，真实远端失焦关闭输入法。同一目标的重复状态与resize不会重新弹出手动隐藏的键盘。
 
-键盘引起的纵向视口变化使用顶部锚定、保持比例的peek；普通窗口/分栏布局使用最后一帧模糊拉伸。快照保持输入门禁，最多4Mi像素、1.8秒，不计入稳态video帧数。Control生产构建及319项全量测试、最后分类/租约修正的16项定向测试通过；Browser/SDK及Endpoint Release增量构建通过，19项CTest分两轮完成。[构建记录](../develop/docs/keyboard-viewport-build-20261104.md)。
+Viewer外壳按visualViewport宽高布局，offset只移动，不改变远端DIP。内容真实大小变化继续保持键盘顶部保比例peek与普通布局最后帧模糊拉伸。沿用稳定编辑target、临时reconfigure保留及有界暂存，原focus/layout和新帧输入门禁不放宽。快照最多4Mi像素、1.8秒，不计入稳态video帧数。
 
-Chrome157修前基线已复现可信focusout及输入丢失；修后157/89真实H264组均通过多段视口变化不失焦、composition持续、单次commit、旧target拒绝、真实失焦关闭输入法、两类过渡及同peer/DC/video/track保持。157本地composition用CDP，89因旧CDP能力缺失使用合成本地事件，远端均为真实Native IME。两版peek及过渡截图已检查；实体Android/iOS软键盘仍待设备验收。[正式回归工具](../tools/test-keyboard-viewport.mjs) · [运行记录](../develop/docs/keyboard-viewport-runtime-20261104.md)。
+Browser依据真正最后触点登记精确终止账本；Endpoint异步跟进canonical ACK，关键回执遇到SDK BUSY保留重发；Client从实际发送开始有限查询，使用原请求恢复，已受理end不重放。双指部分抬起不阻塞全部输入。未知结果仍不授予新触控资格，但改为原连接上的确认重试，键盘和其他控件可用，不默认要求重连。
+
+Control333/333及生产构建、Endpoint19/19、Browser/SDK增量通过。原生probe首轮发现刚完成记录会被过早淘汰，修复后原断言通过。157/89真实H264组通过菜单、手动键盘、composition跨resize与单次提交、旧target拒绝、远端blur、偏移不重配、可信双指部分抬起和远端滚动。屏蔽终止回执2250ms后，两组约3.75秒以只读查询恢复，无重复输入，peer/双DC/video/track保持。Sol检查两版各6张截图，无阻塞视觉问题。89本地composition为合成事件、远端均为Native；实体移动键盘仍待验收。
+
+[构建](../develop/docs/keyboard-touch-compat-build-20261104.md) · [运行与失败尝试](../develop/docs/keyboard-touch-compat-runtime-20261104.md) · [正式回归工具](../tools/test-keyboard-viewport.mjs) · [此前137959证据](../develop/docs/keyboard-viewport-runtime-20261104.md)。
 
 ## 高级认证与此前交付证据
 

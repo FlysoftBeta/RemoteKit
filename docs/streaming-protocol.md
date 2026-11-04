@@ -90,6 +90,10 @@ Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更�
 
 尺寸过渡只保留一次有界旧ROI快照，不赋予媒体或输入ready。软键盘遮挡/恢复使用顶部锚定、保持比例并裁剪的peek；普通窗口/分栏布局变化使用最后帧的模糊拉伸动画。快照裁剪在对应Window内容区内，新布局真实ready且匹配最终desired DIP后移除，文档/连接变化立即作废。这种一次copy与稳态video逐帧呈现分开计数。
 
+产品Viewer外壳固定在visualViewport内，宽高决定真实布局，offsetTop/Left只移动外壳。远端DIP取Window内容区实际大小；可视区域平移不提交resize、不启动新的输入屏障。输入代理锚在内容区顶部，标签切换只滚动本地标签条。独立自动化入口没有产品外壳时仍使用显式可视裁剪。
+
+站点`manualKeyboard`控制是否自动聚焦本地软键盘代理，不改变远端编辑目标。当前有效Window有编辑目标时提供“显示键盘／隐藏键盘”悬浮按钮；隐藏后同一目标的状态刷新或resize不得重弹。手动隐藏优先采用本地compositionend，未收到时以同目标最后组合文本完成一次提交；目标/文档失效则取消旧输入。真实远端失焦关闭本地输入法，站点偏好存Control。
+
 重建渲染资源时，仅`layout.reconfiguring:true`允许Client暂留同一编辑目标的本地键盘与composition；其generation仍为`"0"`、views为空，不可用作输入或画面授权。普通空layout、锁定、断链和文档替换仍硬撤销。Browser保留单纯布局变化下合法目标的composition，同时轮换原focus输入租约并终止旧pointer/held keys。Endpoint从权威latest-layout读取编辑状态：无有效元数据表示未知，不发送假失焦；像素stale不等于编辑目标失效，真实inactive仍即时发布。
 
 Client暂存编辑事件绑定attempt/session/view/instance/document/target，只有新layout、准确focus token、同target权威editable和新画面屏障都满足后才发送。事件附`editableTarget`，Browser在最终派发前再次检查当前编辑目标；旧节点晚到的commit/cancel不能落到新输入框。真实失焦或target变化清除composition和暂存，失焦自动blur本地输入代理。该编辑连续性不放宽旧layout坐标门禁，也不重建RTC、DataChannel或video。

@@ -1002,9 +1002,6 @@ Status WebView::TouchInjectionStatus() const {
     return {Error::none, "Submitted to Chromium; input processing pending, execution unconfirmed"};
   return touch_status_;
 }
-std::string WebView::ClientTouchSequence() const {
-  return client_gesture_bridge_ ? client_gesture_bridge_->sequence() : std::string();
-}
 void WebView::RefreshClientTouchOwner() {
   if (client_gesture_bridge_ && !TouchTargetAlive()) {
     CancelTouches(false);
@@ -1078,9 +1075,15 @@ Status WebView::EnsureTouchEmulator() {
 
 void WebView::CancelTouches(bool deliver) {
   auto weak_self = weak_factory_.GetWeakPtr();
+  const bool invalidated = !TouchTargetAlive();
   if (client_touch_token_)
-    retired_client_touches_.Retire(*client_touch_token_, client_touch_sequence_, !TouchTargetAlive());
+    retired_client_touches_.Retire(*client_touch_token_, client_touch_sequence_, invalidated);
   if (client_gesture_bridge_) {
+    if (invalidated) {
+      touch_pending_callbacks_ = 0;
+      touch_cleanup_pending_ = false;
+      touch_owner_lost_ = false;
+    }
     if (touch_cleanup_pending_) return;
     if (deliver && TouchTargetAlive() && !touches_.empty()) {
       TouchInput cancel;
@@ -1192,16 +1195,26 @@ void WebView::OnTouchProcessed(std::uint64_t expected) {
   }
 }
 
-void WebView::OnClientTouchProcessed(bool alive) {
-  if (touch_pending_callbacks_) --touch_pending_callbacks_;
-  if (!alive) {
+void WebView::OnClientTouchProcessed(InputToken token, const std::string& sequence,
+                                     ClientTouchAckState ack, bool terminal, bool drained) {
+  if (client_touch_token_ != token || client_touch_sequence_ != sequence) return;
+  using State = ClientTouchRetirement::State;
+  if (ack != ClientTouchAckState::timeout && touch_pending_callbacks_)
+    --touch_pending_callbacks_;
+  if (ack != ClientTouchAckState::canonical) {
     const bool invalidated = !TouchTargetAlive();
-    if (client_touch_token_)
-      retired_client_touches_.Retire(*client_touch_token_, client_touch_sequence_, invalidated);
+    if (ack == ClientTouchAckState::target_mismatch) client_touch_ack_mismatch_ = true;
+    if (invalidated) retired_client_touches_.Retire(token, sequence, true);
+    else retired_client_touches_.Resolve(token, sequence, State::unconfirmed);
     touch_owner_lost_ = !invalidated;
-    touch_pending_callbacks_ = 0;
     touch_status_ = Fail(Error::stale, "Client touch owner/ACK invalidated");
     if (invalidated) CancelTouches(false);
+  } else if (terminal && drained && !touch_pending_callbacks_ && !client_touch_ack_mismatch_) {
+    retired_client_touches_.Resolve(token, sequence, State::processed);
+    if (ClientTouchStatus(token, sequence) == State::processed) {
+      touch_owner_lost_ = false;
+      touch_status_ = {};
+    }
   }
   if (touch_cleanup_pending_ && !touch_pending_callbacks_) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
@@ -1274,6 +1287,7 @@ Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token
       touch_emulator_.reset();
     }
     client_touch_mode_ = touch.client_gestures;
+    client_touch_ack_mismatch_ = false;
     client_touch_token_ = touch.client_gestures ? std::optional<InputToken>(token) : std::nullopt;
     client_touch_sequence_ = touch.clock ? touch.clock->sequence_id : std::string();
   }
@@ -1359,7 +1373,8 @@ void WebView::OnTouchTarget(std::uint64_t epoch,
     client_gesture_bridge_ = base::MakeRefCounted<ClientGestureBridge>(
         pointer_root_widget_->GetInputEventRouter(), pointer_root_view_.get(),
         touch_target_view_.get(), touch.clock->sequence_id, touch_clock_origin_,
-        base::BindRepeating(&WebView::OnClientTouchProcessed, weak_factory_.GetWeakPtr()));
+        base::BindRepeating(&WebView::OnClientTouchProcessed, weak_factory_.GetWeakPtr(),
+                            token, touch.clock->sequence_id));
   }
   auto weak = weak_factory_.GetWeakPtr();
   const auto result = InjectTouches(touch);
@@ -1468,10 +1483,18 @@ Status WebView::InjectTouches(const TouchInput& touch) {
         gesture.x += touch_root_offset_x_;
         gesture.y += touch_root_offset_y_;
       }
+      const auto terminal_owner = event.IsTouchSequenceEnd() ? client_touch_token_ : std::nullopt;
+      const auto terminal_sequence = terminal_owner ? client_touch_sequence_ : std::string();
+      if (terminal_owner) retired_client_touches_.Begin(*terminal_owner, terminal_sequence);
       ++touch_pending_callbacks_;
       auto result = client_gesture_bridge_->Dispatch(event, gestures, touch.clock->elapsed_us);
       if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
-      if (!result && touch_pending_callbacks_) --touch_pending_callbacks_;
+      if (!result) {
+        if (touch_pending_callbacks_) --touch_pending_callbacks_;
+        if (terminal_owner)
+          retired_client_touches_.Resolve(*terminal_owner, terminal_sequence,
+                                          ClientTouchRetirement::State::unconfirmed);
+      }
       return result;
     }
     return SendTouchEvent(event);
@@ -1512,7 +1535,8 @@ Status WebView::InjectTouches(const TouchInput& touch) {
   }
   return {};
 }
-Status WebView::DispatchInput(const InputEvent& input) {
+Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
+  if (admitted) *admitted = false;
   static_assert(kMouseButtonModifiers ==
       (blink::WebInputEvent::kLeftButtonDown | blink::WebInputEvent::kMiddleButtonDown |
        blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
@@ -1556,6 +1580,12 @@ Status WebView::DispatchInput(const InputEvent& input) {
     return Fail(Error::unavailable, "Mouse wheel phase handling unavailable");
   std::map<std::uint32_t, TouchPoint> next_touches;
   if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
+    if (touch->client_gestures && touch->clock) {
+      const auto prior = ClientTouchStatus(input.token, touch->clock->sequence_id);
+      if (touch->action == TouchInput::Action::start &&
+          prior != ClientTouchRetirement::State::unknown)
+        return Fail(Error::invalid, "Completed or retiring client touch cannot restart");
+    }
     if (touch->client_gestures && touch->clock &&
         ClientTouchRetired(input.token, touch->clock->sequence_id)) {
       auto accepted = endpoint_->AcceptInput(session_, input);
@@ -1618,6 +1648,7 @@ Status WebView::DispatchInput(const InputEvent& input) {
   auto accepted = endpoint_->AcceptInput(session_, input);
   if (!accepted)
     return accepted;
+  if (admitted) *admitted = true;
   if (routed)
     RememberPointerTarget();
   else {

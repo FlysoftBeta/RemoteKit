@@ -20,7 +20,16 @@ import { SharedPlaneRenderer, type SharedFrame, type SharedPlaneResult } from '.
 import { MobileEditingState } from './mobile-editing-state';
 
 export type ControlRpc = (method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback', params: unknown) => Promise<unknown>;
-export interface InputResult { sequence: string; surface: Surface; identity: string; event: Record<string, unknown>; ok: boolean; error?: string; touchState?: 'processed' | 'terminal-invalidated'; touchSequenceId?: string }
+interface InputRequest { surface: Surface; identity: string; event: Record<string, unknown> }
+interface QueuedInput extends InputRequest { epoch: string; generation: string; requiresTerminalState: boolean }
+export interface InputResult extends InputRequest { sequence: string; ok: boolean; error?: string; touchState?: 'accepted-pending' | 'processed' | 'terminal-invalidated' | 'terminal-unconfirmed' | 'rejected'; touchSequenceId?: string }
+export interface InputDelivery extends InputRequest { phase: 'queued' | 'submitted' | 'discarded' | 'unconfirmed'; sequence?: string; reason?: string }
+interface TerminalInput extends InputRequest { requiresTerminalState: boolean; pending: boolean; retries: number; timer?: ReturnType<typeof setTimeout> }
+const terminalQueryDelays = [250, 500, 1000, 2000];
+function tracksTerminal(event: Record<string, unknown>) {
+  return event.type === 'touch' && (event.gestureMode === 'client-v1' || event.gestureMode === 'legacy') &&
+    typeof event.sequenceId === 'string' && (event.action === 'end' || event.action === 'cancel');
+}
 
 interface PlaneRenderer extends PlaneIdentity { canvas: HTMLCanvasElement; ready: (ready: boolean) => void }
 interface ViewportRegistration { viewId: string; canvas: HTMLCanvasElement; ready: (ready: boolean) => void; renderer?: PlaneRenderer; remove?: () => void }
@@ -71,10 +80,11 @@ export class RemoteTransport {
       return;
     }
     this.mobileEditing.reset();
-    this.cancelPendingFocus();
+    this.cancelPendingFocus(undefined, 'authorization-change');
     this.inputFocus.clear();
-    this.queuedInput = [];
+    this.discardQueuedInput('authorization-change');
     this.sentInput.clear();
+    this.clearTerminalInput();
     this.files.disconnect();
     this.layout = null;
     this.clientGestures = false;
@@ -97,6 +107,7 @@ export class RemoteTransport {
       entry.reject(Object.assign(new Error('浏览器已锁定'), { operationSent: entry.sent }));
     }
     this.productPending.clear();
+    this.notify();
   }
   private productPending = new Map<string,{operation:ProductOperation;resolve:(receipt:OperationReceipt)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>;sent:boolean}>();
   productAction(operation:ProductOperation):Promise<OperationReceipt> {
@@ -108,7 +119,7 @@ export class RemoteTransport {
   readonly audio = new ViewerAudioOutput(() => this.notify());
   readonly touchInputStats = { queued: 0, merged: 0, dropped: 0, cancelled: 0, sourceGestures: 0, arrivalFallbackGestures: 0 };
   clientGestures = false;
-  private queuedInput: { surface: Surface; event: Record<string, unknown>; epoch: string; generation: string }[] = [];
+  private queuedInput: QueuedInput[] = [];
   private inputDrainTimer?: ReturnType<typeof setTimeout>;
   private focusTimer?: ReturnType<typeof setTimeout>;
   private inputFocus = new Map<string, { token: string; identity: string; focused: boolean }>();
@@ -120,8 +131,11 @@ export class RemoteTransport {
   inputIdentity(surface: Surface) { const known = this.inputFocus.get(surface.id); return `${this.attempt}:${surface.session}:${surface.id}:${surface.instance}:${surface.document}:${this.layout?.generation}:${this.layout?.epoch}:${known?.token === surface.focus ? known.identity : surface.focus}`; }
   editingIdentity(surface: Surface) { return `${this.attempt}:${surface.session}:${surface.id}:${surface.instance}:${surface.document}`; }
   private inputResultListeners = new Set<(result: InputResult) => void>();
-  private sentInput = new Map<string, { surface: Surface; identity: string; event: Record<string, unknown> }>();
+  private inputDeliveryListeners = new Set<(result: InputDelivery) => void>();
+  private sentInput = new Map<string, InputRequest>();
+  private terminalInput = new Map<string, TerminalInput>();
   subscribeInputResults(listener: (result: InputResult) => void) { this.inputResultListeners.add(listener); return () => { this.inputResultListeners.delete(listener); }; }
+  subscribeInputDelivery(listener: (delivery: InputDelivery) => void) { this.inputDeliveryListeners.add(listener); return () => { this.inputDeliveryListeners.delete(listener); }; }
   ensureInputFocus(surface: Surface) { const known = this.inputFocus.get(surface.id); if (known?.focused && known.token === surface.focus) return; this.focus(surface, true); }
   touchStartWall(sampleAt: number) { return this.latency.inputStart(sampleAt, performance.now(), Date.now()); }
   trickleIce = false;
@@ -314,7 +328,7 @@ export class RemoteTransport {
   readonly inputResults: Record<string, unknown>[] = [];
   private traceInput(phase: string, surface: Surface, event: Record<string, unknown>, reason?: string) { this.inputTrace.push({ at: performance.now(), phase, view: surface.id, eventType: event.type, action: event.action, reason, epoch: this.layout?.epoch, ...(event.type === 'touch' ? { sourceClock: event.clockMode, sampleElapsedUs: event.sampleElapsedUs, touchSequenceId: event.sequenceId } : {}) }); if (this.inputTrace.length > 128) this.inputTrace.shift(); }
   private focusSequence = 0n;
-  private pendingFocus: { requestId: string; acknowledged: boolean; focused: boolean; view: string; session: string; token: string; instance: string; document: string; generation: string; epoch: string; events: Record<string, unknown>[] } | null = null;
+  private pendingFocus: { requestId: string; acknowledged: boolean; focused: boolean; view: string; session: string; token: string; instance: string; document: string; generation: string; epoch: string; events: QueuedInput[] } | null = null;
   private attempt = 0;
   private connectionId: string | undefined;
   private endpointGeneration: number | undefined;
@@ -436,7 +450,6 @@ export class RemoteTransport {
     clearTimeout(this.videoMetadataRefreshTimer); this.videoMetadataRefreshTimer = undefined;
     for (const plane of this.videoPlanes.values()) plane.metadataRetries = 0;
     for (const renderer of this.videoPlanes.keys()) this.hideVideoPlane(renderer);
-    this.queuedInput = []; this.cancelPendingFocus();
   }
   private detachVideoPlane(renderer: PlaneRenderer) {
     const plane = this.videoPlanes.get(renderer);
@@ -1081,15 +1094,120 @@ export class RemoteTransport {
     const pending = this.pendingFocus;
     if (!pending || !this.canInput(pending.view)) return;
     const surface = this.layout?.views.find(view => view.id === pending.view);
-    if (pending.acknowledged && surface && surface.session === pending.session && surface.instance === pending.instance && surface.document === pending.document && this.layout?.generation === pending.generation && this.layout.epoch === pending.epoch) { this.pendingFocus = null; if (pending.focused) for (const event of pending.events) this.sendInput(surface, event); }
+    if (!pending.acknowledged || !surface || surface.session !== pending.session || surface.instance !== pending.instance || surface.document !== pending.document || this.layout?.generation !== pending.generation || this.layout.epoch !== pending.epoch) return;
+    if (this.inputFocus.get(pending.view)?.token !== surface.focus) {
+      this.cancelPendingFocus(pending.requestId);
+      return;
+    }
+    this.pendingFocus = null;
+    if (!pending.focused) return;
+    for (const item of pending.events) this.queuedInput.push({ ...item, surface: { ...surface } });
+    this.drainInput();
   }
-  private cancelPendingFocus(requestId = this.pendingFocus?.requestId) {
+  private reportInputDelivery(request: InputRequest, phase: InputDelivery['phase'], sequence?: string, reason?: string) {
+    if (request.event.type !== 'touch' && request.event.type !== 'gesture') return;
+    const delivery = { phase, surface: request.surface, identity: request.identity, event: request.event, sequence, reason };
+    queueMicrotask(() => this.inputDeliveryListeners.forEach(listener => listener(delivery)));
+  }
+  private discardQueuedInput(reason: string, staleOnly = false) {
+    this.queuedInput = this.queuedInput.filter(item => {
+      if (staleOnly && this.queuedInputCurrent(item)) return true;
+      this.touchInputStats.dropped++;
+      this.reportInputDelivery(item, 'discarded', undefined, reason);
+      return false;
+    });
+  }
+  private queuedInputCurrent(item: QueuedInput) {
+    const current = this.layout?.views.find(view => view.id === item.surface.id);
+    if (current && samePlane(current, item.surface) && current.focus === item.surface.focus &&
+        this.layout?.epoch === item.epoch && this.layout?.generation === item.generation &&
+        this.inputIdentity(current) === item.identity) return current;
+  }
+  private cancelPendingFocus(requestId = this.pendingFocus?.requestId, reason = 'focus-changed') {
     const pending = this.pendingFocus;
     if (!pending || pending.requestId !== requestId) return false;
     clearTimeout(this.focusTimer); this.focusTimer = undefined;
     if (this.inputFocus.get(pending.view)?.identity === requestId) this.inputFocus.delete(pending.view);
     this.pendingFocus = null;
+    for (const item of pending.events) this.reportInputDelivery(item, 'discarded', undefined, reason);
     return true;
+  }
+  private clearTerminalInput() {
+    for (const entry of this.terminalInput.values()) clearTimeout(entry.timer);
+    this.terminalInput.clear();
+  }
+  private pruneTerminalInput() {
+    for (const [sequence, entry] of this.terminalInput) {
+      const view = this.layout?.views.find(view => view.id === entry.surface.id);
+      if (view && this.inputIdentity(view) === entry.identity) continue;
+      clearTimeout(entry.timer);
+      this.terminalInput.delete(sequence);
+    }
+  }
+  private scheduleTerminalQuery(sequence: string, entry: TerminalInput) {
+    if (entry.event.gestureMode !== 'client-v1') {
+      entry.timer = setTimeout(() => {
+        entry.timer = undefined;
+        if (this.terminalInput.get(sequence) === entry) this.reportInputDelivery(entry, 'unconfirmed', sequence, 'terminal-result-timeout');
+      }, 2000);
+      return;
+    }
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined;
+      if (this.terminalInput.get(sequence) !== entry) return;
+      if (entry.retries === terminalQueryDelays.length) {
+        this.reportInputDelivery(entry, 'unconfirmed', sequence, 'terminal-query-timeout');
+        return;
+      }
+      const channel = this.channel;
+      if (channel?.readyState === 'open' && !this.productLocked && this.peerAuthEpoch !== 0 && channel.bufferedAmount <= 256 * 1024) {
+        try { this.sendChannel(channel, { type: 'input.touchStatus', clientSequence: sequence, sequenceId: entry.event.sequenceId }); }
+        catch { /* The next bounded query can still recover an original result. */ }
+      }
+      entry.retries++;
+      this.scheduleTerminalQuery(sequence, entry);
+    }, terminalQueryDelays[entry.retries] ?? 1000);
+  }
+  retryTouchTerminal(identity: string, sequenceId: string) {
+    if (this.productLocked || this.channel?.readyState !== 'open' || this.peerAuthEpoch === 0) return false;
+    const entry = [...this.terminalInput.entries()].reverse().find(([, request]) => request.identity === identity && request.event.sequenceId === sequenceId);
+    if (!entry || entry[1].event.gestureMode !== 'client-v1') return false;
+    const [sequence, request] = entry;
+    if (request.timer === undefined) {
+      request.retries = 0;
+      this.scheduleTerminalQuery(sequence, request);
+    }
+    return true;
+  }
+  private receiveInputResult(message: Record<string, unknown>) {
+    const sequence = String(message.clientSequence);
+    const terminal = this.terminalInput.get(sequence);
+    const sent = terminal ?? this.sentInput.get(sequence);
+    if (!sent) return;
+    const ok = message.ok === true;
+    const touchSequenceId = typeof message.touchSequenceId === 'string' ? message.touchSequenceId : undefined;
+    const state = message.touchState;
+    const touchState: InputResult['touchState'] =
+      (state === 'accepted-pending' || state === 'processed') && ok ||
+      (state === 'terminal-invalidated' || state === 'terminal-unconfirmed' || state === 'rejected') && !ok ? state : undefined;
+    if (state !== undefined && (!touchState || sent.event.type !== 'touch' || !touchSequenceId || touchSequenceId !== sent.event.sequenceId)) return;
+    if (touchState === 'accepted-pending') {
+      if (!terminal || terminal.pending) return;
+      terminal.pending = true;
+    } else if (terminal) {
+      if ((!touchState && (!ok || terminal.pending || terminal.requiresTerminalState)) ||
+          (terminal.pending && touchState === 'rejected')) return;
+      // An unresolved original request remains available to later status replies.
+      if (touchState !== 'terminal-unconfirmed') {
+        clearTimeout(terminal.timer);
+        this.terminalInput.delete(sequence);
+      }
+    } else {
+      this.sentInput.delete(sequence);
+    }
+    const error = typeof message.error === 'string' ? message.error : undefined;
+    for (const listener of this.inputResultListeners) listener({ surface: sent.surface, identity: sent.identity, event: sent.event, sequence, ok, error, touchState, touchSequenceId });
+    if (!ok && touchState !== 'terminal-unconfirmed') this.update({ error: error ?? '远程输入被拒绝' });
   }
   private bindChannel(channel: RTCDataChannel) {
     if (channel !== this.channel) { this.endpointClockProbe.reset(); this.latency.reset(); }
@@ -1156,24 +1274,21 @@ export class RemoteTransport {
           const pending = this.pendingFocus;
           const surface = this.layout?.views.find(view => view.id === pending?.view);
           if (pending && (!surface || surface.session !== pending.session || surface.instance !== pending.instance || surface.document !== pending.document || this.layout?.generation !== pending.generation || this.layout?.epoch !== pending.epoch)) this.cancelPendingFocus(pending.requestId);
+          this.discardQueuedInput('layout-changed', true);
+          this.pruneTerminalInput();
           this.flushFocusedInput();
           this.notify();
         }
         if (message.type === 'frame') { this.latency.record(message.rtpTimestamp, message.layoutEpoch, message); const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); this.matchPendingVideoObservations(); if (message.layoutEpoch === this.layout?.epoch) this.scheduleVideoMetadataRefresh(); if (this.activeFrameSource === 'track-processor') this.profileProcessor('metadata', { rtp: message.rtpTimestamp, epoch: message.layoutEpoch }); this.authorizeFrame(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
         if (message.type === 'stats') this.update({ endpoint: message });
         if (message.type === 'input.result' || message.type === 'focus') {
-          if (message.type === 'input.result') {
-            const sequence = String(message.clientSequence), sent = this.sentInput.get(sequence);
-            this.sentInput.delete(sequence);
-            if (sent) for (const listener of this.inputResultListeners) listener({ ...sent, sequence, ok: message.ok === true, error: message.error, touchState: message.touchState === 'processed' || message.touchState === 'terminal-invalidated' ? message.touchState : undefined, touchSequenceId: typeof message.touchSequenceId === 'string' ? message.touchSequenceId : undefined });
-          }
+          if (message.type === 'input.result') this.receiveInputResult(message);
           this.inputResults.push({ at: performance.now(), ...message }); if (this.inputResults.length > 128) this.inputResults.shift();
-          if (message.type === 'input.result' && message.ok === false) this.update({ error: String(message.error ?? '远程输入被拒绝') });
           if (message.type === 'focus' && this.layout) {
             const pending = this.pendingFocus, token = message.token;
             const view = pending && this.layout.views.find(view => view.id === pending.view && view.session === pending.session && view.instance === pending.instance && view.document === pending.document);
             const matches = pending && view && message.focusRequestId === pending.requestId && message.layoutEpoch === pending.epoch && this.layout.epoch === pending.epoch && this.layout.generation === pending.generation;
-            if (matches && message.ok === false) { this.cancelPendingFocus(pending.requestId); this.update({ error: String(message.error ?? '远程焦点请求被拒绝') }); }
+            if (matches && message.ok === false) { this.cancelPendingFocus(pending.requestId, 'focus-rejected'); this.update({ error: String(message.error ?? '远程焦点请求被拒绝') }); }
             if (matches && message.ok && token && token.view === pending.view && token.session === pending.session && token.instance === pending.instance && token.document === pending.document && typeof token.focus === 'string') { clearTimeout(this.focusTimer); this.focusTimer = undefined; view.focus = token.focus; const focus = this.inputFocus.get(view.id); if (focus?.identity === pending.requestId) focus.token = token.focus; pending.acknowledged = true; this.mobileEditing.reconcile(this.layout.views); this.flushFocusedInput(); this.notify(); }
           }
         }
@@ -1181,49 +1296,92 @@ export class RemoteTransport {
       } catch { this.update({ error: '收到无法识别的 Endpoint 消息。' }); }
     };
   }
-  sendInput(surface: Surface, event: Record<string, unknown>) {
-    if (this.productLocked) return false;
+  sendInput(surface: Surface, event: Record<string, unknown>, options?: { touchTerminal: boolean }) {
+    if (this.productLocked || this.peerAuthEpoch === 0) return false;
     const terminalTouch = (event.type === 'touch' || event.type === 'gesture') && (event.action === 'cancel' || event.action === 'end' || event.action === 'momentumEnd');
-    if ((event.type === 'touch' || event.type === 'gesture') && event.inputIdentity !== undefined && event.inputIdentity !== this.inputIdentity(surface)) { this.touchInputStats.dropped++; return false; }
     if (this.channel?.readyState !== 'open' || !this.layout || !terminalTouch && !this.canInput(surface.id)) { this.traceInput('blocked', surface, event, this.channel?.readyState !== 'open' ? 'channel' : 'unmatched-or-unpainted-frame'); return false; }
-    if (this.pendingFocus?.view === surface.id) { if (!this.pendingFocus.focused) { this.traceInput('blocked', surface, event, 'blur-pending'); return false; } const events = this.pendingFocus.events, merged = events.length ? (mergeTouchMoves(events[events.length - 1], event) ?? mergeGestureMomentum(events[events.length - 1], event)) : undefined; if (merged) { events[events.length - 1] = merged; this.touchInputStats.merged++; return true; } if (events.length < (terminalTouch ? 128 : 112)) { events.push(event); this.traceInput('queued-focus', surface, event); return true; } this.traceInput('blocked', surface, event, 'focus-queue-full'); this.touchInputStats.dropped++; return false; }
     const current = this.layout.views.find(view => view.id === surface.id);
     if (!current || !samePlane(current, surface)) { this.traceInput('blocked', surface, event, 'stale-surface'); return false; }
+    const identity = this.inputIdentity(current);
+    if ((event.type === 'touch' || event.type === 'gesture') && event.inputIdentity !== undefined && event.inputIdentity !== identity) { this.touchInputStats.dropped++; return false; }
+    const pending = this.pendingFocus?.view === surface.id ? this.pendingFocus : undefined;
+    if (pending && !pending.focused) { this.traceInput('blocked', surface, event, 'blur-pending'); return false; }
+    if (tracksTerminal(event) || event.type === 'touch' && event.action === 'start') {
+      const reserved = this.terminalInput.size + this.queuedInput.filter(item => tracksTerminal(item.event)).length +
+        (this.pendingFocus?.events.filter(item => tracksTerminal(item.event)).length ?? 0);
+      const capacity = event.action === 'cancel' ? 64 : event.action === 'end' ? 56 : 48;
+      if (reserved >= capacity) {
+        this.traceInput('blocked', surface, event, 'terminal-capacity');
+        this.touchInputStats.dropped++;
+        return false;
+      }
+    }
     if (event.type === 'touch') { if (event.action === 'start' && event.sampleElapsedUs === 0) { if (event.clockMode === 'source') this.touchInputStats.sourceGestures++; else this.touchInputStats.arrivalFallbackGestures++; } if (event.action === 'cancel') this.touchInputStats.cancelled++; }
-    const queued = { surface: { ...current }, event, epoch: this.layout.epoch, generation: this.layout.generation };
-    const previous = this.queuedInput[this.queuedInput.length - 1];
-    const merged = previous && previous.surface.id === current.id && previous.surface.focus === current.focus && previous.epoch === queued.epoch && previous.generation === queued.generation ? (mergeTouchMoves(previous.event, event) ?? mergeGestureMomentum(previous.event, event)) : undefined;
+    const queued: QueuedInput = { surface: { ...current }, identity, event, epoch: this.layout.epoch, generation: this.layout.generation, requiresTerminalState: event.gestureMode === 'client-v1' && (event.action === 'cancel' || options?.touchTerminal === true) };
+    const queue = pending?.events ?? this.queuedInput;
+    const previous = queue[queue.length - 1];
+    const merged = previous?.identity === identity ? (mergeTouchMoves(previous.event, event) ?? mergeGestureMomentum(previous.event, event)) : undefined;
     if (merged) { previous.event = merged; this.touchInputStats.merged++; }
     else {
       // A bounded backlog reserves terminal events by discarding obsolete move
       // packets, never start/end/cancel. Recent move history remains in batches.
-      if (this.queuedInput.length >= (terminalTouch ? 128 : 112)) {
-        const expendable = this.queuedInput.findIndex(item => item.event.type === 'touch' && item.event.action === 'move' && item.event.gestureMode !== 'client-v1');
-        if (expendable >= 0) { this.queuedInput.splice(expendable, 1); this.touchInputStats.dropped++; }
+      if (this.queuedInput.length + (this.pendingFocus?.events.length ?? 0) >= (terminalTouch ? 128 : 112)) {
+        const expendable = queue.findIndex(item => item.event.type === 'touch' && item.event.action === 'move' && item.event.gestureMode !== 'client-v1');
+        if (expendable >= 0) { queue.splice(expendable, 1); this.touchInputStats.dropped++; }
         else { this.touchInputStats.dropped++; return false; }
       }
-      this.queuedInput.push(queued); this.touchInputStats.queued++;
+      queue.push(queued); this.touchInputStats.queued++;
     }
-    this.drainInput(); return true;
+    this.reportInputDelivery(queued, 'queued');
+    if (!pending) this.drainInput();
+    return true;
   }
   private drainInput() {
     clearTimeout(this.inputDrainTimer); this.inputDrainTimer = undefined;
-    if (this.channel?.readyState !== 'open' || !this.layout) return;
-    while (this.queuedInput.length && this.channel.bufferedAmount <= 256 * 1024) {
-      const item = this.queuedInput[0], current = this.layout.views.find(view => view.id === item.surface.id);
-      if (!current || !samePlane(current, item.surface) || current.focus !== item.surface.focus || this.layout.epoch !== item.epoch || this.layout.generation !== item.generation) { this.queuedInput.shift(); this.touchInputStats.dropped++; continue; }
+    const channel = this.channel;
+    if (channel?.readyState !== 'open' || !this.layout || this.productLocked || this.peerAuthEpoch === 0) return;
+    while (this.queuedInput.length && channel.bufferedAmount <= 256 * 1024) {
+      const item = this.queuedInput[0], current = this.queuedInputCurrent(item);
+      if (!current) {
+        this.queuedInput.shift();
+        this.touchInputStats.dropped++;
+        this.reportInputDelivery(item, 'discarded', undefined, 'stale-input-identity');
+        continue;
+      }
       if (!this.canInput(current.id)) break;
       this.queuedInput.shift();
       const sequence = String(++this.sequence);
-      this.sentInput.set(sequence, { surface: { ...current }, identity: this.inputIdentity(current), event: item.event });
-      while (this.sentInput.size > 256) this.sentInput.delete(this.sentInput.keys().next().value!);
-      this.sendChannel(this.channel, { type: 'input', view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, outputGeneration: item.generation, layoutEpoch: item.epoch, sequence, event: item.event });
+      try {
+        this.sendChannel(channel, { type: 'input', view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, outputGeneration: item.generation, layoutEpoch: item.epoch, sequence, event: item.event });
+      } catch {
+        this.touchInputStats.dropped++;
+        this.reportInputDelivery(item, 'discarded', undefined, 'channel-send-failed');
+        if (item.event.type === 'touch') {
+          this.queuedInput = this.queuedInput.filter(queued => {
+            if (queued.identity !== item.identity || queued.event.sequenceId !== item.event.sequenceId ||
+                (queued.event.type !== 'touch' && queued.event.type !== 'gesture')) return true;
+            this.touchInputStats.dropped++;
+            this.reportInputDelivery(queued, 'discarded', undefined, 'touch-send-failed');
+            return false;
+          });
+        }
+        break;
+      }
+      if (tracksTerminal(item.event)) {
+        const entry = { ...item, pending: false, retries: 0 };
+        this.terminalInput.set(sequence, entry);
+        this.scheduleTerminalQuery(sequence, entry);
+      } else {
+        this.sentInput.set(sequence, item);
+        while (this.sentInput.size > 256) this.sentInput.delete(this.sentInput.keys().next().value!);
+      }
+      this.reportInputDelivery(item, 'submitted', sequence);
       this.traceInput('sent', current, item.event);
     }
     if (this.queuedInput.length) this.inputDrainTimer = setTimeout(() => this.drainInput(), 10);
   }
   focus(surface: Surface, focused: boolean) {
-    if (this.productLocked) return;
+    if (this.productLocked || this.peerAuthEpoch === 0) return;
     if (!focused) { this.mobileEditing.clear(); this.notify(); }
     if (this.channel?.readyState !== 'open' || !this.layout || !this.canInput(surface.id)) return;
     const current = this.layout.views.find(view => view.id === surface.id);
@@ -1234,8 +1392,18 @@ export class RemoteTransport {
     const requestId = `${this.attempt}:${++this.focusSequence}`;
     this.inputFocus.set(current.id, { token: current.focus, identity: requestId, focused });
     this.pendingFocus = { requestId, acknowledged: false, focused, view: current.id, session: current.session, token: current.focus, instance: current.instance, document: current.document, generation: this.layout.generation, epoch: this.layout.epoch, events: [] };
-    this.focusTimer = setTimeout(() => { if (this.pendingFocus?.requestId === requestId && !this.pendingFocus.acknowledged && this.cancelPendingFocus(requestId)) this.update({ error: '远程焦点请求超时' }); }, 2000);
-    this.sendChannel(this.channel, { type: 'focus', focusRequestId: requestId, view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, layoutEpoch: this.layout.epoch, focused });
+    this.discardQueuedInput('focus-changed', true);
+    this.pruneTerminalInput();
+    queueMicrotask(() => this.notify());
+    this.focusTimer = setTimeout(() => {
+      if (this.pendingFocus?.requestId === requestId && !this.pendingFocus.acknowledged && this.cancelPendingFocus(requestId, 'focus-timeout')) this.update({ error: '远程焦点请求超时' });
+    }, 2000);
+    try {
+      this.sendChannel(this.channel, { type: 'focus', focusRequestId: requestId, view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, layoutEpoch: this.layout.epoch, focused });
+    } catch {
+      this.cancelPendingFocus(requestId, 'focus-send-failed');
+      this.update({ error: '远程焦点请求未发送' });
+    }
   }
   private async readStats(peer: RTCPeerConnection) {
     if (peer !== this.peer || this.statsReadingPeer === peer) return;
@@ -1336,9 +1504,12 @@ export class RemoteTransport {
     this.presentationVisibility = undefined; this.presentationBarrier = undefined; this.presentationBarrierAcknowledged = false;
     this.presentationFallbackReason = undefined; this.presentationBackend = 'canvas';
     this.sharedRenderer?.dispose();this.sharedRenderer=undefined;this.mediaRefreshAt=-Infinity;
-    clearTimeout(this.inputDrainTimer); this.inputDrainTimer = undefined; this.queuedInput = []; this.inputFocus.clear();
+    clearTimeout(this.inputDrainTimer); this.inputDrainTimer = undefined;
+    this.cancelPendingFocus(undefined, 'connection-closed');
+    this.discardQueuedInput('connection-closed');
+    this.inputFocus.clear();
     this.signalAttemptId = undefined; this.remoteSignalConnection = undefined; this.remoteDescriptionReady = false; this.remoteIce = []; this.localIce = []; this.iceDelivery = Promise.resolve(); this.localIceDelivery = Promise.resolve();
-    this.attempt++; this.sentInput.clear(); this.latency.reset(); this.endpointClockProbe.reset(); this.controlClockProbe.reset(); this.feedbackReading = false; this.processorTrack = undefined; this.displayHzEstimate = undefined;
+    this.attempt++; this.sentInput.clear(); this.clearTerminalInput(); this.latency.reset(); this.endpointClockProbe.reset(); this.controlClockProbe.reset(); this.feedbackReading = false; this.processorTrack = undefined; this.displayHzEstimate = undefined;
     this.stopProcessorPump();
     this.mediaFeedback.stop(); this.statsReadingPeer = undefined; this.networkRead = undefined; this.videoPresentedFrames = undefined;
     if (this.frameCallback !== undefined) this.video.cancelVideoFrameCallback?.(this.frameCallback);

@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 import { projectOperations, snapshotNewer, requireAcceptedReceipt, type PendingOperation, operationId } from './product-operations';
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Alert,
@@ -86,6 +86,33 @@ function Workspace({
   const authRef = useRef<AuthState | null>(null);
   const [pendingOperations,setPendingOperations]=useState<PendingOperation[]>([]);
   const state=projectOperations(authoritative,pendingOperations);
+  const shell = useRef<HTMLElement>(null);
+  const showShell = !!state && !localLock && auth?.locked === false;
+  useLayoutEffect(() => {
+    const node = shell.current;
+    if (!showShell || !node) return;
+    const viewport = window.visualViewport;
+    const position = () => {
+      node.style.left = `${viewport?.offsetLeft ?? 0}px`;
+      node.style.top = `${viewport?.offsetTop ?? 0}px`;
+    };
+    const size = () => {
+      const width = viewport?.width ?? window.innerWidth;
+      node.style.width = `${width}px`;
+      node.style.height = `${viewport?.height ?? window.innerHeight}px`;
+      setWidth(width);
+      position();
+    };
+    size();
+    viewport?.addEventListener("resize", size);
+    viewport?.addEventListener("scroll", position);
+    window.addEventListener("resize", size);
+    return () => {
+      viewport?.removeEventListener("resize", size);
+      viewport?.removeEventListener("scroll", position);
+      window.removeEventListener("resize", size);
+    };
+  }, [showShell]);
   const transport = useRef<RemoteTransport | null>(null);
   const audioPending = useRef(false);
   if (!transport.current) transport.current = new RemoteTransport();
@@ -153,19 +180,21 @@ function Workspace({
     viewportTimer.current = setTimeout(() => {
       const current = latest.current;
       if (!current || authRef.current?.locked !== false || localLockRef.current || statusRef.current !== "online") return;
+      const bounds = shell.current?.getBoundingClientRect();
+      const width = bounds?.width ?? window.innerWidth;
       const all =
         current.workspace.layoutMode === "side-by-side" &&
-        window.innerWidth >=
+        width >=
           Math.max(720, current.workspace.windows.length * 365 - 5);
       const params: ViewerViewport = {
         devicePixelRatio: window.devicePixelRatio || 1,
         windows: current.workspace.windows.map((w) => ({
           windowId: w.id,
           width:
-            geometry.current.get(w.id)?.width ?? Math.max(1, window.innerWidth),
+            geometry.current.get(w.id)?.width ?? Math.max(1, Math.round(width)),
           height:
             geometry.current.get(w.id)?.height ??
-            Math.max(1, window.innerHeight - 88),
+            Math.max(1, Math.round(bounds?.height ?? window.innerHeight) - 88),
           visible:
             document.visibilityState !== "hidden" &&
             current.workspace.tabs.some(t => t.id === w.activeTabId && t.kind !== 'start') &&
@@ -188,6 +217,8 @@ function Workspace({
   }, []);
   const onGeometry = useCallback(
     (id: string, w: number, h: number) => {
+      const previous = geometry.current.get(id);
+      if (previous?.width === w && previous.height === h) return;
       geometry.current.set(id, { width: w, height: h });
       sendViewport();
     },
@@ -262,11 +293,7 @@ function Workspace({
     );
     const unsubscribe = media.subscribe(() => updateMedia((v) => v + 1));
     socket.connect();
-    const resize = () => {
-      setWidth(window.innerWidth);
-      sendViewport();
-    };
-    window.addEventListener("resize", resize);
+    window.addEventListener("resize", sendViewport);
     document.addEventListener("visibilitychange", sendViewport);
     return () => {
       active = false;
@@ -275,7 +302,7 @@ function Workspace({
       media.disconnect();
       socket.close();
       unsubscribe();
-      window.removeEventListener("resize", resize);
+      window.removeEventListener("resize", sendViewport);
       document.removeEventListener("visibilitychange", sendViewport);
     };
   }, [clearWorkspace, media]);
@@ -338,7 +365,7 @@ function Workspace({
   const foreground = !settings && !admin && !(pending && !pending.awaiting) ? foregroundRequest(state,width) : null;
   const fileRequest = foreground?.kind==='file' ? state.fileRequests.find(request=>request.id===foreground.id) : undefined;
   return (
-    <main className="viewer-shell">
+    <main className="viewer-shell" ref={shell}>
       {pendingOperations.length>0 && <Alert severity="info" sx={{position:'absolute',top:88,left:'50%',transform:'translateX(-50%)',zIndex:1190}} action={pendingOperations.some(entry=>entry.receipt?.status==='unknown')?<Button onClick={()=>setPendingOperations(entries=>entries.filter(entry=>entry.receipt?.status!=='unknown'))}>以当前工作区为准</Button>:undefined}>{pendingOperations.length} 个操作{pendingOperations.some(entry=>entry.receipt?.status==='unknown')?'结果未知，请核对工作区':'正在同步'}{media.diagnostics.channel!=='已连接'?'，等待数据通道连接':''}</Alert>}
       {productReady && media.audio.state === 'blocked' && (workspace.settings.audioChannels?.left !== false || workspace.settings.audioChannels?.right !== false) && <Button variant="contained" onClick={() => media.audio.resume()} sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}>点击开启声音</Button>}
       {status !== "online" && (

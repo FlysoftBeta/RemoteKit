@@ -2,6 +2,33 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EditingInput, editingKey } from '../client/editing-input';
 
+test('local keyboard dismissal commits the pending composition once on its current target', () => {
+  const input = new EditingInput();
+  input.focus('document/target');
+  input.start('document/target');
+  input.update('document/target', '你');
+  input.update('document/target', '你好');
+  assert.equal(input.finishCurrent('document/other', 10), undefined);
+  assert.deepEqual(input.finishCurrent('document/target', 11), { type: 'ime_commit', text: '你好' });
+  assert.equal(input.end('document/target', '你好', 12), undefined);
+  assert.deepEqual(input.edit('document/target', 'insertText', '你好', 13, 'input').events, []);
+  assert.equal(input.finishCurrent('document/target', 14), undefined);
+});
+
+test('a browser compositionend takes precedence, and remote target replacement revokes pending composition', () => {
+  const input = new EditingInput();
+  input.focus('document/target');
+  input.start('document/target');
+  input.update('document/target', 'ni');
+  assert.deepEqual(input.end('document/target', '你', 10), { type: 'ime_commit', text: '你' });
+  assert.equal(input.finishCurrent('document/target', 11), undefined);
+  input.start('document/target');
+  input.update('document/target', '旧');
+  input.focus('document/other');
+  assert.equal(input.finishCurrent('document/target', 12), undefined);
+  assert.equal(input.finishCurrent('document/other', 12), undefined);
+});
+
 test('composition is bound to local focus and document, late end cannot borrow new owner', () => {
   const input=new EditingInput(); input.focus('attempt/session/view/instance/old'); input.start('attempt/session/view/instance/old');
   assert.equal(input.update('attempt/session/view/instance/old','旧')!.type,'ime_set');

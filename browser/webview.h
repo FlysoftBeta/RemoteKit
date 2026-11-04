@@ -44,6 +44,7 @@ namespace remotekit::browser {
 class NavigationState;
 class OffscreenHost;
 class ClientGestureBridge;
+enum class ClientTouchAckState;
 
 // UI-sequence-only execution adapter. BrowserContext and Endpoint outlive this.
 // Unload restore retains complete committed history/PageState and same-process
@@ -86,7 +87,7 @@ class WebView final : public content::WebContentsObserver,
   void InvalidateLayoutInput(bool remains_visible);
   static void OverridePreferences(content::WebContents*, blink::web_pref::WebPreferences*);
   SharedAtlasTextInput TextInputState();
-  Status DispatchInput(const InputEvent&);
+  Status DispatchInput(const InputEvent&, bool* admitted = nullptr);
   // Acceptance/processing status, never a renderer/JavaScript execution ACK.
   // A first touch start resolves its OOPIF target asynchronously. All remote
   // input is busy during that resolution; callers must retry rejected input.
@@ -94,7 +95,10 @@ class WebView final : public content::WebContentsObserver,
   bool TouchProcessingPending() const {
     return touch_hit_test_pending_ || touch_cleanup_pending_ || touch_pending_callbacks_;
   }
-  std::string ClientTouchSequence() const;
+  ClientTouchRetirement::State ClientTouchStatus(const InputToken& token,
+                                                 const std::string& sequence) const {
+    return retired_client_touches_.Find(token, sequence);
+  }
   void RefreshClientTouchOwner();
   bool ClientTouchRetired(const InputToken& token, const std::string& sequence) const {
     return retired_client_touches_.Contains(token, sequence);
@@ -152,7 +156,8 @@ class WebView final : public content::WebContentsObserver,
   Status PrepareTouchClock(const TouchInput&);
   Status SendTouchEvent(const blink::WebTouchEvent&);
   void OnTouchProcessed(std::uint64_t);
-  void OnClientTouchProcessed(bool);
+  void OnClientTouchProcessed(InputToken, const std::string&, ClientTouchAckState,
+                              bool terminal, bool drained);
   void FinishTouchCleanup(std::uint64_t);
   void PrepareKeyboardTarget(content::RenderWidgetHostImpl*);
   const ui::mojom::TextInputState* UpdateEditableTarget(content::TextInputManager*);
@@ -219,6 +224,7 @@ class WebView final : public content::WebContentsObserver,
   std::optional<InputToken> client_touch_token_;
   std::string client_touch_sequence_;
   bool client_touch_mode_{};
+  bool client_touch_ack_mismatch_{};
   base::WeakPtr<content::RenderWidgetHostViewBase> touch_target_view_;
   base::WeakPtr<content::RenderFrameHostImpl> touch_target_frame_;
   std::optional<blink::DocumentToken> touch_target_document_;

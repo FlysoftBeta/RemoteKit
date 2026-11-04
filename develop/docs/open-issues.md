@@ -8,6 +8,14 @@
 - KEYBOARD-1已修复：媒体/坐标布局租约与编辑目标分开，保留原focus/input门禁，以稳定target绑定暂存与最终派发。明确reconfigure保留键盘，真实失焦、换目标/文档、锁定/断链仍撤销。键盘使用顶部保比例peek，普通布局使用最后帧模糊拉伸，旧帧不赋予输入ready。Control319项全量、最终16项定向与生产构建通过；Native构建及19项CTest完成。
 - 157/89修后真实H264组通过不失焦、composition跨resize、恰一次commit、target切换/旧target拒绝、远端blur及媒体身份保持。157本地IME用CDP，89用合成CompositionEvent，远端均为Native。Sol6.1检查两版peek与过渡截图通过；普通动画终点未单独截图。571项包文件/ZIP、启动及包内真实H264/PIN/同peer检查通过，已交付137959。实体移动软键盘仍待验收。[运行证据](keyboard-viewport-runtime-20261104.md) · [交付](keyboard-viewport-delivery-20261104.md)。
 
+## 兼容菜单与触控确认（2026-11-04，源码已验收，发布中）
+
+- KEYBOARD-2：137959仍将visualViewport偏移计入可见矩形交集，键盘打开后平移也会改变远端DIP并触发重配。已改固定Viewer外壳按visualViewport宽高布局，offset仅移动；代理输入框顶端锚定，标签切换只滚动标签条。更多菜单改“网页兼容性处理”，按站点保存manualKeyboard，浮钮控制本地键盘，同目标手动隐藏不因resize重开。
+- TOUCH-4：Endpoint对每个end同步等待终止，双指部分抬起也阻塞输入worker；Client入队即开始2秒计时、focus队列丢弃无反馈、终止回执可能在SDK BUSY或普通输入历史淘汰中丢失。已拆分queued/submitted/accepted/completed，Browser真实terminal判断与精确完成账本、Endpoint公平异步查询及可靠发送、Client原请求只读查询恢复。旧身份和未知结果不授予新输入资格，移除默认整页重连遮挡。
+- 构建与CPU：Control333/333及生产smoke、Endpoint19/19、Browser/SDK增量通过。原生probe首轮发现刚完成记录按旧插入顺序过早淘汰，production ledger修正为按状态更新时间保留后原断言通过。[边界](keyboard-touch-compat-contract-20261104.md) · [构建](keyboard-touch-compat-build-20261104.md)。
+- 真实157-run2/89-run3均通过新菜单/manual键盘单次提交、offset不改变远端DIP/epoch、可信双指部分抬起及远端滚动。屏蔽2250ms终止回执后各经四次原请求查询约3.75秒恢复，无重放、无重连提示，媒体身份保持。三次失败为弹层退出时序及新版Playwright调用89缺少API，原证据保留；Sol检查两版各6张截图无阻塞问题，实体移动键盘及更窄屏幕仍待验收。[运行记录](keyboard-touch-compat-runtime-20261104.md)。
+- TOUCH-EDGE：`ClientGestureBridge::Dispatch`在注册canonical回调后、raw实际路由前若官方gesture packet校验拒绝，现有注册项可能等待不会到来的raw ACK。代码审查已定位，未证实与本轮有效输入报警有关；本轮不扩展Chromium注册撤回补丁。后续需独立负例与受管注册撤回契约，不能将未知ACK记作完成。
+
 ## 高级认证（2026-11-04，已交付316234）
 
 - AUTH-1：空白锁屏、方向序列、密码/PIN及设置、Control/Endpoint产品权限门禁已实现。新Viewer默认锁定，序列仅揭示验证入口；旧输入/操作/媒体工作按授权代次退休。Control314项及后续transport17项、Endpoint19项、SDK/RTC/audio smoke通过。修后157/89核心7项断言均通过，同peer/DC/track锁定和密码/PIN恢复、锁下产品state及媒体截止、过期输入/产品操作拒绝均有实际证据。

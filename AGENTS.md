@@ -15,14 +15,14 @@
 - Tenant对应Session，Session是多租户数据隔离边界；其下可有多个Profile。当前单Profile限制属于实现状态，不是最终层级需求。
 - Control是产品状态真相，持有User/Window/tab/设置与Endpoint对象有限引用。Chromium恢复数据由Endpoint Session/Browser托管；对象丢失可按有限产品信息重建，对账清理orphan。
 - `/control`使用TypeScript、better-sqlite3、Vite、React、MUI。普通Viewer采用沉浸式浏览器外壳、实际内容区尺寸、多个独立Window并排/窄屏切换；不是两个active tab冒充多Window。
-- 每站点平板设置只改变UA/CH，不模拟viewport；放更多菜单。设置统一在更多→设置。质量选择只保留优先高画质、自动、优先流畅；Client Scale默认Viewer DPR，可override。设置存Control，客户端只持久化用户token。
+- 每站点设置放更多→网页兼容性处理，包含平板版网站与不自动弹出键盘；平板选项只改变UA/CH，不模拟viewport。提供悬浮按钮显示、隐藏键盘。其余设置统一在更多→设置。质量选择只保留优先高画质、自动、优先流畅；Client Scale默认Viewer DPR，可override。设置存Control，客户端只持久化用户token。
 - 首个正式注册用户为管理员；管理员面板管理服务器级注册口令。口令只用于后续注册，账号密码独立，设置由Control持久化，客户端不保存或回显口令。
 - 高级认证包含完全空白、无交互反馈的锁屏；上上下下左右左右支持键盘与触屏/鼠标点击屏幕区域。未登录只用账密，登录后可配置密码、PIN与人脸验证；锁定下保留人脸验证，检测用户离开及浏览器可提供的关屏相关信号。
 - 人脸摄像头通过既有Client↔Endpoint WebRTC连接传送未压缩RGB，帧率每秒5帧、由服务端协商；Control参与发起与授权，Endpoint承担OpenCV YuNet/SFace与MiniFASNet V1SE/V2 ONNX推理，可自行转换ONNX。不能为鉴权另建重复peer或把识别计算放回Client/Control。
 - Client直接与Endpoint建立H264 WebRTC及DataChannel输入；鉴权、信令、产品状态由Control管理，Viewer↔Control使用WebSocket。支持键鼠、文本、IME与触控。
 - Endpoint是可与Control分机部署的Native算力节点，Browser是其组件；当前每Tenant一个Browser进程、单Profile，保留多Profile余量。不能把Control与Endpoint共享路径、时钟或进程的现状当成架构要求。
 - Client与Endpoint的常规数据统一经WebRTC，包含音视频、输入、浏览器操作及文件数据；resize、focus、导航不得随意销毁连接。Control与Client同步既要即时操作反馈，也要最终状态一致，客户端不持久化产品状态。
-- 常见触摸手势由Client计算，页面消费或自定义触摸保留passthrough，不能绕过touch-action/preventDefault。移动键盘跟随远端编辑焦点弹隐，IME composition绑定正确文档；软键盘引起的尺寸变化保持内容位置并严守新旧布局输入门禁。
+- 常见触摸手势由Client计算，页面消费或自定义触摸保留passthrough，不能绕过touch-action/preventDefault。移动键盘跟随远端编辑焦点并遵守站点手动开关，真实失焦关闭输入法，IME composition绑定正确文档。软键盘引起的尺寸变化使用顶部锚定、保持比例的peek；普通布局变化使用最后一帧模糊拉伸，严守新旧布局输入门禁。Viewer外壳滚动不能误触发远端resize。
 - 提供可选择搜索引擎及简易起始页；与独立Window、服务端设置和默认video路径保持一致。
 - 开启Control Memory Saver策略。Viewer断线决定产品visible=false及回收资格；RTC连接独立决定渲染/编码需求，不反向把hidden页面显示出来。
 - Rectangle Packing把多个可见平面合为视频atlas；必须处理DPR、DIP、编码采样比例、letterbox、screen坐标与旧布局输入门禁。

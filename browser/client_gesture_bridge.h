@@ -14,6 +14,7 @@
 #include "ui/events/gesture_detection/touch_disposition_gesture_filter.h"
 
 namespace remotekit::browser {
+enum class ClientTouchAckState { canonical, target_mismatch, timeout };
 // UI sequence only. Owns arbitration, never recognition or a fling curve.
 class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient,
                                  public base::RefCounted<ClientGestureBridge> {
@@ -22,7 +23,7 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
                       input::RenderWidgetHostViewInput* root,
                       input::RenderWidgetHostViewInput* target,
                       std::string sequence, base::TimeTicks origin,
-                      base::RepeatingCallback<void(bool)> processed);
+                      base::RepeatingCallback<void(ClientTouchAckState, bool, bool)> processed);
   Status Dispatch(blink::WebTouchEvent event, const std::vector<TouchInput::Gesture>&,
                   int64_t source_elapsed_us);
   base::TimeTicks NativeTimestamp(base::TimeTicks sampled);
@@ -43,7 +44,7 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
   base::WeakPtr<input::RenderWidgetHostViewInput> root_, target_;
   const std::string sequence_;
   const base::TimeTicks origin_;
-  base::RepeatingCallback<void(bool)> processed_;
+  base::RepeatingCallback<void(ClientTouchAckState, bool, bool)> processed_;
   ui::TouchDispositionGestureFilter filter_{this};
   ClientGestureCandidateState candidate_state_;
   std::set<uint32_t> pending_;

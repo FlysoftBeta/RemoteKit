@@ -4,12 +4,14 @@ import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { WebSocket } from 'ws';
 import { Store } from '../server/store';
 import { Control } from '../server/control';
 import { createHttp } from '../server/http';
 import type { Endpoint } from '../server/endpoint';
+import type { ProductAction } from '../shared/product';
 
 class ProductEndpoint implements Endpoint {
   calls: { method: string; tenant: string; args: any }[] = [];
@@ -130,12 +132,85 @@ test('UA table precedes Browser/view creation; failed application persists desir
     endpoint.calls = []; endpoint.failSites = true;
     const pending = await control.productAction(user.tenantId, { type: 'site.set', origin: 'https://example.test', tabletUa: true, tabId: b.id }, 'lease');
     assert.equal(pending.application?.status, 'pending'); assert.equal(store.workspace(user.tenantId).sites['https://example.test'].tabletUa, true); assert.equal(endpoint.calls.filter(c => c.method === 'view.command').length, 0);
+    endpoint.calls = [];
+    const keyboard = await control.productAction(user.tenantId, { type: 'site.set', origin: 'https://example.test', manualKeyboard: true, tabId: b.id }, 'lease');
+    assert.equal(keyboard.application, undefined);
+    assert.equal(keyboard.state.workspace.tabs.find(t => t.id === b.id)?.pendingUaReloadOrigin, 'https://example.test');
+    assert.deepEqual(endpoint.calls, []);
     endpoint.failSites = false; endpoint.calls = []; await control.tick();
     const applied = endpoint.calls.findIndex(c => c.method === 'session.sitePreferences'), reloaded = endpoint.calls.findIndex(c => c.method === 'view.command'); assert.ok(applied >= 0 && reloaded > applied); assert.deepEqual(endpoint.calls.filter(c => c.method === 'view.command').map(c => c.args.viewId), [b.webviewId]); assert.notEqual(a.webviewId, b.webviewId);
     assert.equal(store.workspace(user.tenantId).tabs.find(t => t.id === b.id)!.pendingUaReloadOrigin, undefined);
     endpoint.calls = []; endpoint.browserPid++; await control.tick(); assert.ok(endpoint.calls.some(c => c.method === 'session.sitePreferences'));
     endpoint.calls = []; await control.reconcileAll(); assert.equal(endpoint.calls[0].method, 'session.sitePreferences');
   } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
+});
+
+test('manual keyboard persists per origin, has a committed receipt, and is excluded from Endpoint UA preferences', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'rk-site-settings-')), path = join(dir, 'control.db');
+  const endpoint = new ProductEndpoint();
+  let store = new Store(path), control = new Control(store, endpoint);
+  try {
+    const { tenantId } = await store.register('site-settings', 'password123');
+    const origin = 'https://example.test', unrelated = 'https://other.test';
+    store.db.prepare('INSERT INTO site_preferences VALUES (?,?,?)').run(tenantId, origin, JSON.stringify({ tabletUa: true }));
+    await control.attachViewer(tenantId, 'lease', () => {});
+    assert.deepEqual(control.productState(tenantId).workspace.sites[origin], { tabletUa: true });
+    const { state } = await control.productAction(tenantId, { type: 'window.create', url: origin + '/a' }, 'lease');
+    const tabId = state.workspace.tabs[0].id;
+    const keyboard = {
+      operationId: randomUUID(), operationGeneration: store.operationGeneration(tenantId),
+      action: { type: 'site.set', origin: 'https://EXAMPLE.test:443/path', manualKeyboard: true, tabId } as const,
+    };
+    endpoint.calls = [];
+    const receipt = await control.submitOperation(tenantId, keyboard, 'lease');
+    assert.equal(receipt.status, 'committed');
+    assert.equal(receipt.application, undefined);
+    assert.deepEqual(control.productState(tenantId).workspace.sites, { [origin]: { tabletUa: true, manualKeyboard: true } });
+    await control.productAction(tenantId, { type: 'site.set', origin: unrelated, manualKeyboard: true }, 'lease');
+    await control.tick();
+    assert.deepEqual(endpoint.calls.filter(c => ['session.sitePreferences', 'view.command'].includes(c.method)), []);
+
+    endpoint.calls = [];
+    await control.productAction(tenantId, { type: 'site.set', origin, tabletUa: false, tabId }, 'lease');
+    assert.deepEqual(store.workspace(tenantId).sites[origin], { tabletUa: false, manualKeyboard: true });
+    const cleared = endpoint.calls.filter(c => c.method === 'session.sitePreferences');
+    assert.ok(cleared.length);
+    for (const call of cleared) assert.deepEqual(call.args.sites, {});
+    assert.deepEqual(endpoint.calls.filter(c => c.method === 'view.command').map(c => c.args.command), ['reload']);
+
+    endpoint.calls = [];
+    await control.productAction(tenantId, { type: 'site.set', origin, tabletUa: true, manualKeyboard: false, tabId }, 'lease');
+    assert.deepEqual(store.workspace(tenantId).sites[origin], { tabletUa: true, manualKeyboard: false });
+    const applied = endpoint.calls.filter(c => c.method === 'session.sitePreferences');
+    assert.ok(applied.length);
+    for (const call of applied) assert.deepEqual(call.args.sites, { [origin]: { tabletUa: true } });
+    assert.deepEqual(endpoint.calls.filter(c => c.method === 'view.command').map(c => c.args.command), ['reload']);
+
+    endpoint.calls = [];
+    await control.productAction(tenantId, { type: 'site.set', origin, tabletUa: true, tabId }, 'lease');
+    assert.deepEqual(endpoint.calls, []);
+    for (const patch of [{}, { manualKeyboard: null }, { tabletUa: 'true' }, { tabletUa: true, manualKeyboard: 0 }, { manualKeyboard: true, unknown: true }]) {
+      await assert.rejects(control.productAction(tenantId, { type: 'site.set', origin, ...patch } as ProductAction, 'lease'),
+        (error: any) => error.status === 400);
+    }
+    await assert.rejects(control.productAction(tenantId, { type: 'site.set', origin: unrelated, manualKeyboard: false, tabId }, 'lease'),
+      (error: any) => error.status === 400);
+    await assert.rejects(control.productAction(tenantId, { type: 'site.set', origin: 'file:///tmp/a', manualKeyboard: true }, 'lease'),
+      (error: any) => error.status === 400);
+    assert.deepEqual(endpoint.calls, []);
+
+    await control.detachViewer(tenantId, 'lease');
+    store.db.close();
+    store = new Store(path);
+    control = new Control(store, endpoint);
+    await control.attachViewer(tenantId, 'new-lease', () => {});
+    assert.deepEqual(control.productState(tenantId).workspace.sites, {
+      [origin]: { tabletUa: true, manualKeyboard: false },
+      [unrelated]: { tabletUa: false, manualKeyboard: true },
+    });
+    assert.deepEqual(control.operationStatus(tenantId, keyboard), receipt);
+    await control.detachViewer(tenantId, 'new-lease');
+  } finally { store.db.close(); await rm(dir, { recursive: true, force: true }); }
 });
 
 test('popup adoption persists identity first; background stays unfocused, new windows are independent, replay is idempotent', async () => {

@@ -1,6 +1,7 @@
 #pragma once
 #include <json.hpp>
 #include <array>
+#include <algorithm>
 #include <deque>
 #include <mutex>
 #include <stdexcept>
@@ -35,7 +36,7 @@ inline ControlJson RequireBrowserOk(ControlJson reply) {
 template<class Rpc,class Current,class Expired,class Wait,class Retry,class Exhausted>
 ControlJson RetryBrowserInput(const ControlJson& command,Rpc rpc,Current current,Expired expired,Wait wait,Retry retry,Exhausted exhausted) {
  auto reply=rpc(command);unsigned retries=0;
- while(!reply.value("ok",false) && reply.value("code",0)==6) {
+ while(!reply.value("ok",false) && reply.value("code",0)==6 && !reply.value("inputAdmitted",false)) {
   if(retries>=50 || expired()){exhausted();break;}
   if(!current())return {{"ok",false},{"error","input_identity_changed"}};
   wait();
@@ -46,32 +47,98 @@ ControlJson RetryBrowserInput(const ControlJson& command,Rpc rpc,Current current
  return reply;
 }
 
-// Poll only after admission: never replay a terminal input while waiting for ACK.
-template<class Rpc,class Current,class Remaining,class Wait>
-ControlJson AwaitTouchTerminal(ControlJson reply,const ControlJson& command,Rpc rpc,Current current,Remaining remaining,Wait wait) {
- ControlJson query={{"method","input.touchStatus"},{"sequenceId",reply.value("touchSequenceId",std::string())}};
- for(const auto* key:{"session","view","instance","document","focus"})if(command.contains(key))query[key]=command[key];
- while(true) {
-  if(!current())return {{"ok",false},{"error","touch_terminal_identity_changed"},{"state","terminal-unconfirmed"}};
-  const auto budget=remaining();
-  if(budget<=0)return {{"ok",false},{"error","touch_terminal_timeout"},{"state","terminal-unconfirmed"}};
-  auto status=rpc(query,budget);
-  if(!current())return {{"ok",false},{"error","touch_terminal_identity_changed"},{"state","terminal-unconfirmed"}};
-  if(remaining()<=0)return {{"ok",false},{"error","touch_terminal_timeout"},{"state","terminal-unconfirmed"}};
-  if(status.value("state",std::string())=="processed" && status.value("ok",false)) {
-   reply["touchPending"]=false;reply["touchState"]="processed";return reply;
-  }
-  if(status.value("state",std::string())!="pending"){
-   status["ok"]=false;
-   if(status.value("state",std::string())=="terminal-invalidated" &&
-      status.value("sequenceId",std::string())==query.value("sequenceId",std::string())) {
-    status["touchState"]="terminal-invalidated";status["touchSequenceId"]=query["sequenceId"];
-   } else {status["state"]="terminal-unconfirmed";status.erase("touchState");status.erase("touchSequenceId");}
-   return status;
-  }
-  wait();
+// Owned by the input worker. Admission reserves space for both the acceptance
+// and final notice. Unsent notices and active queries cannot be evicted.
+struct TouchTerminalReceipt {
+ uint64_t peer{}, authorization{}, control{};
+ std::string client_sequence, sequence;
+ ControlJson query, acceptance, result;
+ bool send_acceptance{}, send_result{}, polling{};
+ int64_t due{}, deadline{};
+
+ ControlJson Notice(const char* state,bool ok,const std::string& error={}) const {
+  ControlJson reply={{"type","input.result"},{"clientSequence",client_sequence},
+                     {"touchSequenceId",sequence},{"touchState",state},{"ok",ok}};
+  if(!error.empty())reply["error"]=error;
+  return reply;
  }
+ void Accept(int64_t now,int64_t budget) {
+  acceptance=Notice("accepted-pending",true);
+  send_acceptance=true;
+  Schedule(now,budget);
+ }
+ void Schedule(int64_t now,int64_t budget) {
+  polling=true;due=now;deadline=now+budget;
+ }
+ void Finish(const char* state,bool ok,const std::string& error={}) {
+  polling=false;result=Notice(state,ok,error);send_result=true;
+ }
+ bool Busy() const {return polling || send_acceptance || send_result;}
+};
+
+inline bool ApplyTouchTerminalStatus(TouchTerminalReceipt& receipt,const ControlJson& status) {
+ if(status.value("sequenceId",std::string())!=receipt.sequence) {
+  receipt.Finish("terminal-unconfirmed",false,"touch_terminal_identity_mismatch");
+  return true;
+ }
+ const auto state=status.value("state",std::string());
+ if(state=="pending")return false;
+ if(state=="processed" && status.value("ok",false))receipt.Finish("processed",true);
+ else if(state=="terminal-invalidated")receipt.Finish("terminal-invalidated",false,status.value("error",std::string("touch_owner_invalidated")));
+ else receipt.Finish("terminal-unconfirmed",false,status.value("error",std::string("touch_terminal_unconfirmed")));
+ return true;
 }
+
+class TouchTerminalReceipts {
+ public:
+ static constexpr size_t kCapacity=64;
+ TouchTerminalReceipt* Reserve(TouchTerminalReceipt value) {
+  if(records_.size()==kCapacity) {
+   auto settled=std::find_if(records_.begin(),records_.end(),[](const auto& item){return !item.Busy();});
+   if(settled==records_.end())return nullptr;
+   records_.erase(settled);
+  }
+  records_.push_back(std::move(value));return &records_.back();
+ }
+ void Remove(TouchTerminalReceipt* value) {
+  std::erase_if(records_,[&](const auto& item){return &item==value;});
+ }
+ template<class Current> void Prune(Current current) {
+  std::erase_if(records_,[&](const auto& item){return !current(item);});
+ }
+ TouchTerminalReceipt* Find(uint64_t peer,uint64_t authorization,const std::string& client_sequence,
+                            const std::string& sequence) {
+  for(auto& item:records_)
+   if(item.peer==peer && item.authorization==authorization &&
+      item.client_sequence==client_sequence && item.sequence==sequence)return &item;
+  return nullptr;
+ }
+ TouchTerminalReceipt* Due(int64_t now) {
+  TouchTerminalReceipt* next=nullptr;
+  for(auto& item:records_)
+   if(item.polling && item.due<=now && (!next || item.due<next->due))next=&item;
+  return next;
+ }
+ bool Busy() const {return std::any_of(records_.begin(),records_.end(),[](const auto& item){return item.Busy();});}
+ bool HasNotices() const {
+  return std::any_of(records_.begin(),records_.end(),[](const auto& item){return item.send_acceptance || item.send_result;});
+ }
+ template<class Send> void Flush(Send send) {
+  unsigned sent=0;
+  for(auto& item:records_) {
+   if(item.send_acceptance) {
+    if(sent==4 || !send(item,item.acceptance))return;
+    ++sent;item.send_acceptance=false;
+   }
+   if(item.send_result) {
+    if(sent==4 || !send(item,item.result))return;
+    ++sent;item.send_result=false;
+   }
+  }
+ }
+ private:
+ std::deque<TouchTerminalReceipt> records_;
+};
 
 // Only the latest layout transaction is retained (at most mode/layout/prepare).
 // Serialize replacement and actual admission so an old prepare can never be

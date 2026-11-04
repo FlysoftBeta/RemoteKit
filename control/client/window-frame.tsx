@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import {
   Box,
-  Checkbox,
   CircularProgress,
   Divider,
   IconButton,
@@ -10,6 +9,7 @@ import {
   MenuList,
   Popover,
   MenuItem,
+  Switch,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -27,6 +27,7 @@ import {
   Check,
   OpenInNew,
   BedtimeOutlined,
+  ChevronRight,
 } from "@mui/icons-material";
 import type {
   ProductState,
@@ -39,7 +40,6 @@ import type { Action } from "./product-dialogs";
 import { StartPage } from './start-page';
 import { SEARCH_ENGINES } from '../shared/product';
 import { AudioControls } from './audio-controls';
-import { visibleContentBounds } from './viewport-transition';
 import type { AudioChannels } from './audio-output';
 export function Tool({
   title,
@@ -109,7 +109,8 @@ export function WindowFrame({
       anchor: HTMLElement;
       tab: ProductTab;
     } | null>(null),
-    [siteBusy, setSiteBusy] = useState(false);
+    [siteMenuOrigin, setSiteMenuOrigin] = useState<string>(),
+    [siteSaving, setSiteSaving] = useState<Partial<Record<'tabletUa' | 'manualKeyboard', { origin: string; value: boolean }>>>({});
   const input = useRef<HTMLInputElement>(null),
     content = useRef<HTMLDivElement>(null),
     strip = useRef<HTMLDivElement>(null);
@@ -130,7 +131,7 @@ export function WindowFrame({
   }, [active?.id, active?.url, active?.pendingUrl, active?.kind]);
   useEffect(() => {
     if (focusAddress === win.id) {
-      input.current?.focus();
+      input.current?.focus({ preventScroll: true });
       input.current?.select();
     }
   }, [focusAddress]);
@@ -145,7 +146,7 @@ export function WindowFrame({
       ) {
         event.preventDefault();
         event.stopPropagation();
-        input.current?.focus();
+        input.current?.focus({ preventScroll: true });
         input.current?.select();
       }
     };
@@ -153,15 +154,19 @@ export function WindowFrame({
     return () => document.removeEventListener("keydown", listener, true);
   }, [focused]);
   useEffect(() => {
-    strip.current
-      ?.querySelector('[aria-selected="true"]')
-      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const bar = strip.current;
+    const selected = bar?.querySelector('[aria-selected="true"]')?.closest('.browser-tab');
+    if (!bar || !selected) return;
+    const bounds = bar.getBoundingClientRect();
+    const tabBounds = selected.getBoundingClientRect();
+    if (tabBounds.left < bounds.left) bar.scrollLeft += tabBounds.left - bounds.left;
+    else if (tabBounds.right > bounds.right) bar.scrollLeft += tabBounds.right - bounds.right;
   }, [active?.id]);
   useEffect(() => {
     const node = content.current;
     if (!node) return;
     const measure = () => {
-      const rect = visibleContentBounds(node.getBoundingClientRect(), window.visualViewport);
+      const rect = node.getBoundingClientRect();
       if (!rect.width || !rect.height) return;
       onGeometry(
         win.id,
@@ -171,14 +176,8 @@ export function WindowFrame({
     };
     const observer = new ResizeObserver(measure);
     observer.observe(node);
-    window.visualViewport?.addEventListener("resize", measure);
-    window.visualViewport?.addEventListener("scroll", measure);
     measure();
-    return () => {
-      observer.disconnect();
-      window.visualViewport?.removeEventListener("resize", measure);
-      window.visualViewport?.removeEventListener("scroll", measure);
-    };
+    return () => observer.disconnect();
   }, [win.id, onGeometry]);
   let origin = "";
   try {
@@ -186,6 +185,21 @@ export function WindowFrame({
     if (parsed.protocol === "http:" || parsed.protocol === "https:")
       origin = parsed.origin;
   } catch {}
+  const sitePreferences = state.workspace.sites[origin];
+  const closeMore = () => { setMenu(null); setSiteMenuOrigin(undefined); };
+  const toggleSitePreference = (preference: 'tabletUa' | 'manualKeyboard') => {
+    if (!online || !origin || siteSaving[preference] ||
+        (preference === 'tabletUa' && !state.integrations.siteUa)) return;
+    const value = !sitePreferences?.[preference];
+    setSiteSaving(current => ({ ...current, [preference]: { origin, value } }));
+    const update = preference === 'tabletUa' ? { tabletUa: value } : { manualKeyboard: value };
+    void action({ type: 'site.set', origin, tabId: active?.id, ...update })
+      .then(result => {
+        if (result.application) report(new Error("设置已保存，下次加载生效"));
+      })
+      .catch(report)
+      .finally(() => setSiteSaving(current => ({ ...current, [preference]: undefined })));
+  };
   const activate = () => {
     if (!focused && online)
       void action({ type: "window.activate", windowId: win.id }).catch(report);
@@ -207,7 +221,7 @@ export function WindowFrame({
     if (!online || busy) return;
     setBusy(true);
     void action({ type: 'tab.create', windowId: win.id }).then(() => {
-      if (window.matchMedia('(pointer: fine)').matches) { input.current?.focus(); input.current?.select(); }
+      if (window.matchMedia('(pointer: fine)').matches) { input.current?.focus({ preventScroll: true }); input.current?.select(); }
     }).catch(report).finally(() => setBusy(false));
   };
   return (
@@ -253,7 +267,7 @@ export function WindowFrame({
                       strip.current?.querySelectorAll(".tab-select")[
                         next
                       ] as HTMLElement
-                    )?.focus();
+                    )?.focus({ preventScroll: true });
                   }
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
@@ -397,6 +411,8 @@ export function WindowFrame({
               transport={transport}
               viewId={active.webviewId}
               overlay={state.workspace.settings.showStats ?? false}
+              keyboardActive={online && focused && visible}
+              manualKeyboard={!!sitePreferences?.manualKeyboard}
               onFocus={activate}
             />
             {active.popup?.status === "pending" ? (
@@ -418,7 +434,34 @@ export function WindowFrame({
           </>
         )}
       </div>
-      <Popover anchorEl={menu} open={!!menu} onClose={() => setMenu(null)} slotProps={{ paper: { sx: { width: 360, maxWidth: 'calc(100vw - 24px)' } } }}>
+      <Popover anchorEl={menu} open={!!menu} onClose={closeMore} slotProps={{ paper: { sx: { width: 360, maxWidth: 'calc(100vw - 24px)' } } }}>
+        {origin && siteMenuOrigin === origin ? (
+          <MenuList aria-label="网页兼容性处理">
+            <MenuItem autoFocus onClick={() => setSiteMenuOrigin(undefined)}>
+              <ArrowBack fontSize="small" sx={{ mr: 1.5 }} />
+              网页兼容性处理
+            </MenuItem>
+            <Typography variant="caption" color="text.secondary" component="li" sx={{ px: 2, pb: 1, overflowWrap: 'anywhere' }}>
+              {origin}
+            </Typography>
+            <Divider component="li" />
+            {([
+              ['tabletUa', '使用平板版网站'],
+              ['manualKeyboard', '不自动弹出键盘'],
+            ] as const).map(([preference, label]) => {
+              const disabled = !online || !!siteSaving[preference] ||
+                (preference === 'tabletUa' && !state.integrations.siteUa);
+              const pending = siteSaving[preference];
+              const checked = pending?.origin === origin ? pending.value : !!sitePreferences?.[preference];
+              return (
+                <MenuItem key={preference} role="menuitemcheckbox" aria-checked={checked} disabled={disabled} onClick={() => toggleSitePreference(preference)}>
+                  <Typography sx={{ flex: 1 }}>{label}</Typography>
+                  <Switch size="small" checked={checked} disabled={disabled} slotProps={{ input: { tabIndex: -1, 'aria-hidden': true } }} sx={{ pointerEvents: 'none' }} />
+                </MenuItem>
+              );
+            })}
+          </MenuList>
+        ) : <>
         <MenuList autoFocusItem={!!menu}>
         <MenuItem
           disabled={!online}
@@ -480,38 +523,9 @@ export function WindowFrame({
           关闭此窗口
         </MenuItem>
         <Divider />
-        <MenuItem
-          disabled={
-            !online || !origin || siteBusy || !state.integrations.siteUa
-          }
-          onClick={() => {
-            setSiteBusy(true);
-            void action({
-              type: "site.set",
-              origin,
-              tabletUa: !state.workspace.sites[origin]?.tabletUa,
-              tabId: active?.id,
-            })
-              .then((result) => {
-                if (result.application)
-                  report(new Error("设置已保存，下次加载生效"));
-              })
-              .catch(report)
-              .finally(() => setSiteBusy(false));
-          }}
-        >
-          <Checkbox
-            size="small"
-            checked={!!state.workspace.sites[origin]?.tabletUa}
-            tabIndex={-1}
-            disableRipple
-          />
-          <div>
-            <Typography>使用平板版网站</Typography>
-            <Typography variant="caption" color="text.secondary">
-              {origin || "打开网站后可设置"}
-            </Typography>
-          </div>
+        <MenuItem disabled={!origin} onClick={() => setSiteMenuOrigin(origin)}>
+          <Typography sx={{ flex: 1 }}>网页兼容性处理</Typography>
+          <ChevronRight fontSize="small" />
         </MenuItem>
         <Divider />
         </MenuList>
@@ -537,6 +551,7 @@ export function WindowFrame({
           退出登录
         </MenuItem>
         </MenuList>
+        </>}
       </Popover>
       <Menu
         anchorEl={switcher}

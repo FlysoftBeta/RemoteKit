@@ -1,6 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { KeyboardViewport, ViewportTransition, resizeSnapshotSize, visibleContentBounds, FREEZE_MAX_MS, FREEZE_MAX_PIXELS, surfaceMatchesViewport } from '../client/viewport-transition';
+
+test('only full keyboard-height restoration counts as a system keyboard dismissal', () => {
+  const keyboard = new KeyboardViewport();
+  const viewport = (height: number, width = 390) => ({
+    visual: { height, width, offsetLeft: 0, offsetTop: 0 },
+    layoutWidth: width, layoutHeight: 844, scale: 1,
+  });
+  keyboard.measure(viewport(844), true, true);
+  keyboard.measure(viewport(445), true, true);
+  keyboard.measure(viewport(625), true, true);
+  assert.equal(keyboard.open, true);
+  assert.equal(keyboard.restoreCount, 0);
+  keyboard.measure(viewport(844), true, true);
+  assert.equal(keyboard.open, false);
+  assert.equal(keyboard.restoreCount, 1);
+  keyboard.measure(viewport(440), true, true);
+  keyboard.measure(viewport(440, 480), true, true);
+  assert.equal(keyboard.open, false);
+  assert.equal(keyboard.restoreCount, 1);
+});
 const old = { left: 0, top: 80, width: 390, height: 764 }, small = { ...old, height: 364 };
 test('visual viewport offset and size intersect actual content bounds', () => {
   assert.deepEqual(visibleContentBounds(old, { offsetLeft: 10, offsetTop: 100, width: 350, height: 400 }), { left: 10, top: 100, width: 350, height: 400 });
@@ -58,6 +78,26 @@ test('CSS content height changes alone use the ordinary preview, even while the 
   assert.equal(keyboard.measure({ ...occluded }, true, true), false);
   assert.equal(keyboard.open, true);
   assert.equal(keyboard.measure(viewport, false, true), true);
+});
+test('panning a keyboard-shrunk viewport preserves keyboard state without another peek', () => {
+  const keyboard = new KeyboardViewport();
+  const layout = { scale: 1, layoutWidth: 390, layoutHeight: 844 };
+  const visual = { width: 390, height: 844, offsetLeft: 0, offsetTop: 0 };
+  assert.equal(keyboard.measure({ ...layout, visual }, true, false), false);
+  const panned = { ...visual, height: 444, offsetTop: 400 };
+  assert.equal(keyboard.measure({ ...layout, visual: panned }, true, false), true);
+  assert.equal(keyboard.measure({ ...layout, visual: { ...panned, offsetTop: 385, offsetLeft: 1 } }, true, false), false);
+  assert.equal(keyboard.open, true);
+  assert.equal(keyboard.measure({ ...layout, visual }, false, false), true);
+  assert.equal(keyboard.open, false);
+});
+test('pinch zoom is not a keyboard preview even while an editor is focused', () => {
+  const keyboard = new KeyboardViewport();
+  const layout = { layoutWidth: 390, layoutHeight: 844 };
+  const visual = { width: 390, height: 844, offsetLeft: 0, offsetTop: 0 };
+  keyboard.measure({ ...layout, scale: 1, visual }, true, true);
+  assert.equal(keyboard.measure({ ...layout, scale: 2, visual: { ...visual, width: 195, height: 422 } }, true, true), false);
+  assert.equal(keyboard.open, false);
 });
 test('oversized preview downscales within its pixel budget', () => {
   assert.deepEqual(resizeSnapshotSize(390, 764), { width: 390, height: 764 });
