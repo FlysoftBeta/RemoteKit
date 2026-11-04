@@ -1,6 +1,6 @@
 # OSR 生命周期、触控与延迟排查
 
-2026-11-04，修复与范围内验收完成，待发布。用户报告152167后出现lifecycle uncertain、navigation save重复报警、触控收尾永久等待、stats缺项、呈现比解码低约10 FPS，以及RTT约10ms时input→present体感接近1秒。另复查有屏及有屏转无屏崩溃。
+2026-11-04，修复与范围内验收完成，已发布[861200](https://airportal.cn/861200/YnupKqRq8U)，见[包内验收与上传](osr-lifecycle-delivery-20261104.md)。用户报告152167后出现lifecycle uncertain、navigation save重复报警、触控收尾永久等待、stats缺项、呈现比解码低约10 FPS，以及RTT约10ms时input→present体感接近1秒。另复查有屏及有屏转无屏崩溃。
 
 ## 范围与判定
 

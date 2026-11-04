@@ -1,8 +1,8 @@
 # 当前问题与收尾记录
 
-由root维护。最新已发布源码4bf43b8，取件码[152167](https://airportal.cn/152167/lxM1Fft5Xz)，包含站点手动键盘、视口平移不重配及触控确认恢复，并保留此前键盘/尺寸过渡、Comp选卡与锁定调整。不重复历史性能组；旧全库审查依据见[审查报告](post-release-astra-review.md)。
+由root维护。最新已发布源码433655d，取件码[861200](https://airportal.cn/861200/YnupKqRq8U)，包含生命周期恢复、跨布局触控退役、Stats与接收端等待优化，并保留此前站点手动键盘、尺寸过渡、Comp选卡与锁定调整。[包内验收与上传](osr-lifecycle-delivery-20261104.md)。不重复历史性能组；旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
-## 152167 后生命周期、触控与延迟（2026-11-04，修复验收，待发布）
+## 152167 后生命周期、触控与延迟（2026-11-04，已交付861200）
 
 - LIFE-2：已修逐RVH、绑定代次的真实ACK，冻结竞争确证后解冻保留JS堆；真正未知使用guarded unload→restore闭环，不重放未知导航。真实Browser同文档/慢跨站导航竞争、10秒超时/迟到ACK、稳定frozen renderer退出与恢复通过。导航导出跳过pending/uncertain。Control持久恢复/丢回执/restart/POST拒绝模型通过。[运行](osr-lifecycle-runtime-20261104.md)。
 - TOUCH-5：已补精确账本、未路由撤回、早拒绝可靠回执及零坐标旧owner retirement。157真实双指部分抬起、屏蔽end回执后的查询/cleanup恢复、按住期间编码布局变化、重复旧retire不取消新触控通过，同peer/DC/video/track保持。普通坐标门禁不变；全tsc和24项touch测试通过。[运行与工具误判](touch-terminal-runtime-20261104.md)。
@@ -26,7 +26,7 @@
 - 真实157-run2/89-run3均通过新菜单/manual键盘单次提交、offset不改变远端DIP/epoch、可信双指部分抬起及远端滚动。屏蔽2250ms终止回执后各经四次原请求查询约3.75秒恢复，无重放、无重连提示，媒体身份保持。三次失败为弹层退出时序及新版Playwright调用89缺少API，原证据保留；Sol检查两版各6张截图无阻塞问题，实体移动键盘及更窄屏幕仍待验收。[运行记录](keyboard-touch-compat-runtime-20261104.md)。
 - 571项包文件/ZIP、11项人脸资产、启动smoke及包内157同一套真实键盘触控回归通过，已上传152167。首包因MCP预检文件使manifest标dirty未发布，同功能源码清理自有临时输出后重打干净包。[交付记录](keyboard-touch-compat-delivery-20261104.md)。
 - TOUCH-EDGE：原152167中raw路由前官方packet拒绝可留下canonical注册；本轮TOUCH-5已加入仅未路由注册撤回和候选状态回滚，受管0010及原生构建/probe通过，未知ACK仍不算完成。
-- PACKAGE-DOC：本轮已将包内README初始屏black改为blank white，并修SDK导出manifest从实际公共头读取RTC ABI（4），避免旧硬编码3。待本轮包验证。
+- PACKAGE-DOC：本轮已将包内README初始屏black改为blank white，并修SDK导出manifest从实际公共头读取RTC ABI（4），避免旧硬编码3。861200包内校验通过。
 
 ## 高级认证（2026-11-04，已交付316234）
 
