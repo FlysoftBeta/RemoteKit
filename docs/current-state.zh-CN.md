@@ -4,7 +4,11 @@
 
 ## 当前交付
 
-高级认证功能验收已完成，正在打包发布：空白锁屏与上上下下左右左右、账密/PIN/人脸设置、Control挑战及Endpoint授权代次门禁已实现。摄像头复用现有WebRTC peer的独立认证DataChannel，传送原尺寸RGB24，由Endpoint协商并按5fps授予取帧；使用YuNet/SFace和MiniFASNet V1SE/V2 ONNX，OpenCV最小模块静态链接。正式契约见[锁屏与高级认证](authentication.zh-CN.md)。
+高级认证已发布，源码`ba667bfe5675e4aa9bf2fc973b1b269ae65068f5`已推送。取件码[316234](https://airportal.cn/316234/d99cU47GIx)，2026-11-04 08:09:29（Asia/Singapore）确认成功，页面显示有效24小时、可下载2次、无密码。
+
+新包`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-080340.zip`为504933129 bytes，SHA256 `3314e13738f6cf473334f6d895ce6b2c56fc1a3530ac276ca17344f00cd0a8dc`。manifest记录干净源码，571项文件和ZIP及11项人脸资产校验通过，包内启动/模型可用及独立真实H264、锁定/PIN恢复与同peer/DC检查通过。详情见[交付记录](../develop/docs/advanced-auth-delivery-20261104.md)。
+
+空白锁屏与上上下下左右左右、账密/PIN/人脸设置、Control挑战及Endpoint授权代次门禁已实现。摄像头复用现有WebRTC peer的独立认证DataChannel，传送原尺寸RGB24，由Endpoint协商并按5fps授予取帧；使用YuNet/SFace和MiniFASNet V1SE/V2 ONNX，OpenCV最小模块静态链接。正式契约见[锁屏与高级认证](authentication.zh-CN.md)。
 
 当前新路径已通过Control生产构建与314项测试、后续17项transport定向检查、Endpoint Release及19项CTest、SDK增量/RTC probe和3项实际SDK/RTC/audio smoke。初轮锁屏导致Browser退出，CDB定位为RenderChannel析构回调重入正在销毁的OSR状态；已撤销析构时回调，生产Mojo生命周期probe通过，正常断链仍通知。首登RTC未就绪时操作误报也已修复并实测。
 

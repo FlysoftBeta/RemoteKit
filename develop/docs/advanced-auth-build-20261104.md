@@ -52,3 +52,5 @@ CPU 构建和基准停止后执行 `tools\verify-sdk.cmd`，复用外部 SDK 消
 为了定位实际锁屏验收中的同 Peer 异常断开，QA 释放资源后执行 `tools\build-endpoint.cmd package`，含诊断记录的 Endpoint 增量构建 2 步通过。同时重新构建最新 Control 客户端和服务端，Vite 及启动 smoke 通过。日志为 `endpoint-diagnostic-build.log` 和 `control-diagnostic-production.log`。诊断结果由 QA 独立记录。
 
 发现 Browser OSR RenderChannel teardown 生命周期问题后，运行正式 stage，并在同一次 Ninja 调用中构建 `remotekit_browser`、`remotekit_sdk`、`remotekit_render_channel_lifetime_probe`。Siso 5 步（26.65 秒）通过。新 probe 退出 0，SDK 导出完成。Control 定向 `tsx --test test/transport-control-rpc.test.ts` 17/17 通过，包含锁定/解锁保持同一 peer 与两条 DataChannel。日志前缀为 `chromium-lifetime-`、`sdk-lifetime-`、`render-channel-lifetime-probe.log` 和 `control-lifetime-transport-tests.log`。
+
+最终从已提交的干净源码`ba667bf`执行正式`tools/package-runtime.py --smoke`，启动/模型可用检查通过。571项manifest、ZIP和11项人脸资产核验通过，独立包内实际H264、锁屏/PIN解锁及同peer/DC保持通过。包名、校验和、上传状态和证据详见[交付记录](advanced-auth-delivery-20261104.md)。
