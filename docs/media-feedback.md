@@ -2,6 +2,8 @@
 
 网络适配由WebRTC负责。Control与Endpoint保留诊断，不再运行延迟降DPR、质量码率预设或独立网络分辨率控制器。
 
+SDK在没有显式screenshare或strict pacing trial时，为原生screenshare ALR配置pacing factor 1.1，保留上游2875ms队列参数及ALR探测预算。它只调整原生发送节拍，GCC仍决定目标与实际pacing速率；不是额外码率上限或应用自行按延迟调码率。该路径要求已协商transport-sequence扩展且未启用RFC8888；RFC8888时仍由上游控制器选择节拍。日志区分配置、扩展协商和实际速率，不从发送字节反推系数。2875ms参数用于排队较长时提高排空速率，不是旧包TTL，也不是延迟保证。[本地对照](../develop/docs/ud710-pacing-20261105.md)。
+
 ## 控制路径
 
 质量三档对应MAINTAIN_RESOLUTION、BALANCED、MAINTAIN_FRAMERATE。Control策略只有degradationPreference和客户端maxFps。SDK保持screenshare身份，仅为RemoteKit开启原生screenshare平衡/质量适配门禁，算法与阈值保持上游实现。

@@ -69,14 +69,19 @@ namespace {
 #include "remotekit/browser/sdk/rtc_silent_audio.h"
 #include "remotekit/browser/sdk/rtc_trace.h"
 
-// Keep Chromium's environment trials and enable only our screenshare policy
-// gate. The WebRTC resource algorithms and their thresholds remain upstream.
+// Preserve explicit Chromium trials. Our screenshare default changes only the
+// ALR pacing factor; queue time, probing budgets and resource algorithms remain
+// upstream. Strict pacing and screenshare trials must remain mutually exclusive.
 class RemoteKitFieldTrials final : public webrtc::FieldTrialsView {
  public:
   explicit RemoteKitFieldTrials(std::unique_ptr<webrtc::FieldTrialsView> fallback)
       : fallback_(std::move(fallback)) {}
   std::string Lookup(absl::string_view key) const override {
     if (key == "WebRTC-RemoteKit-ScreenshareAdaptation") return "Enabled";
+    if (key == "WebRTC-ProbingScreenshareBwe" &&
+        fallback_->Lookup(key).empty() &&
+        fallback_->Lookup("WebRTC-StrictPacingAndProbing").empty())
+      return "1.1,2875,80,40,-60,3";
     return fallback_->Lookup(key);
   }
   std::unique_ptr<webrtc::FieldTrialsView> CreateCopy() const override {
@@ -719,8 +724,20 @@ class LocalDescriptionObserver : public webrtc::SetLocalDescriptionObserverInter
   void OnSetLocalDescriptionComplete(webrtc::RTCError error) override {
     if (auto p = peer_.lock(); p && !p->closing.load()) {
       if (!error.ok()) p->Error(error.message());
-      else p->Event(offer_ ? REMOTEKIT_RTC_SDP_OFFER : REMOTEKIT_RTC_SDP_ANSWER,
-                    sdp_.data(), sdp_.size());
+      else {
+        if (!offer_ && p->video_sender) {
+          const auto parameters = p->video_sender->GetParameters();
+          const bool transport_sequence = std::any_of(
+              parameters.header_extensions.begin(), parameters.header_extensions.end(),
+              [](const webrtc::RtpExtension& extension) {
+                return extension.uri == webrtc::RtpExtension::kTransportSequenceNumberUri;
+              });
+          std::fprintf(stderr, "RTC negotiated video sender: peer=%llu "
+              "transport_sequence_extension=%d\n", p->id, transport_sequence);
+        }
+        p->Event(offer_ ? REMOTEKIT_RTC_SDP_OFFER : REMOTEKIT_RTC_SDP_ANSWER,
+                 sdp_.data(), sdp_.size());
+      }
     }
   }
  private:
@@ -773,6 +790,14 @@ int Peer::Start() {
     auto default_env = webrtc::CreateEnvironment();
     auto env = webrtc::CreateEnvironment(std::make_unique<RemoteKitFieldTrials>(
         default_env.field_trials().CreateCopy()));
+    std::fprintf(stderr,
+        "RTC screenshare pacing configuration: peer=%llu trial=%s "
+        "rfc8888_enabled=%d explicit_screenshare_trial=%d explicit_strict_trial=%d "
+        "(configuration only; actual pacing rate is controller-owned)\n",
+        id, env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").c_str(),
+        env.field_trials().IsEnabled("WebRTC-RFC8888CongestionControlFeedback"),
+        !default_env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").empty(),
+        !default_env.field_trials().Lookup("WebRTC-StrictPacingAndProbing").empty());
     webrtc::PeerConnectionFactoryDependencies deps;
     deps.env = env;
     deps.network_thread = network.get();
