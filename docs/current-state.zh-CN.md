@@ -4,11 +4,11 @@
 
 ## 当前交付
 
-键盘与尺寸过渡修复已发布，功能源码`e910231cdd289e76a7e90eacbcaa6166a76e9085`已推送。取件码[137959](https://airportal.cn/137959/kAlssAvih0)，2026-11-04 09:20:04（Asia/Shanghai）上传成功，有效24小时、可下载2次、无密码。新包同时包含此前单独提交的Comp选卡修复与5分钟默认空闲锁定、纯白锁屏。
+站点兼容设置、键盘与触控确认修复已发布，功能源码`4bf43b8b5cd72aab14a38f8dd2409a7b3005f97f`已推送。取件码[152167](https://airportal.cn/152167/lxM1Fft5Xz)，2026-11-04 11:25:42（Asia/Shanghai）上传成功，有效24小时、可下载2次、无密码。
 
-包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-091638.zip`，504941930 bytes，SHA256 `618ef0d6cfe8530fc19ef8e41708adb39c1eb2d90fbb5955f6851a6a130a8d40`。manifest为干净源码，571项文件/ZIP及11项人脸资产校验通过，包内启动、实际H264、锁定/PIN恢复与同peer/双DC检查通过。[交付记录](../develop/docs/keyboard-viewport-delivery-20261104.md)。
+包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-111144.zip`，504955936 bytes，SHA256 `3eb1522597e445fed97e4d772592c2c5e348bd77cb9e828e043b73bfec0be186`。manifest为干净源码，571项文件/ZIP及11项人脸资产校验通过；包内启动、隔离Chrome157真实H264键盘/触控全组及同peer/双DC检查通过。[交付记录](../develop/docs/keyboard-touch-compat-delivery-20261104.md)。新包保留此前Comp选卡、5分钟默认空闲锁定与纯白锁屏；包内README初始屏颜色仍有旧black文案，已登记待修正。
 
-## 网页兼容设置、键盘与触控（当前源码已验收，发布中）
+## 网页兼容设置、键盘与触控（已交付152167）
 
 更多菜单改为“网页兼容性处理”子菜单，按站点保存平板UA与“不自动弹出键盘”。键盘设置不刷新页面；悬浮按钮显示/隐藏本地键盘，手动隐藏完成同目标组合文本一次，真实远端失焦关闭输入法。同一目标的重复状态与resize不会重新弹出手动隐藏的键盘。
 
