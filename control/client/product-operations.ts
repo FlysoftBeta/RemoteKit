@@ -17,6 +17,16 @@ export function projectOperations(state:ProductState|null, pending:PendingOperat
   switch(a.type) {
    case 'window.create': w.windows.push({id,activeTabId:id+'-tab',weight:1});w.tabs.push({id:id+'-tab',windowId:id,webviewId:'',kind:'start',title:'新窗口（待确认）',url:''});w.activeWindowId=id;break;
    case 'tab.create': {const window=w.windows.find(x=>x.id===a.windowId);if(window){w.tabs.push({id,windowId:window.id,webviewId:'',kind:'start',title:'新标签页（待确认）',url:''});window.activeTabId=id;w.activeWindowId=window.id;}break;}
+   case 'tab.files': {
+    const window=w.windows.find(x=>x.id===a.windowId);
+    if(window){
+     const existing=w.tabs.find(tab=>tab.windowId===window.id && tab.kind==='files');
+     if(!existing)w.tabs.push({id,windowId:window.id,webviewId:'',kind:'files',title:'我的文件',url:''});
+     window.activeTabId=existing?.id??id;
+     w.activeWindowId=window.id;
+    }
+    break;
+   }
    case 'window.activate':w.activeWindowId=a.windowId;break;
    case 'tab.activate':{const tab=w.tabs.find(t=>t.id===a.tabId);if(tab){w.activeWindowId=tab.windowId;w.windows.find(x=>x.id===tab.windowId)!.activeTabId=tab.id;}break;}
    case 'tab.navigate':{const tab=w.tabs.find(t=>t.id===a.tabId);if(tab){tab.kind='remote';tab.pendingUrl=a.url;tab.loading=true;}break;}

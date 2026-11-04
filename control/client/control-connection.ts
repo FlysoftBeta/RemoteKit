@@ -9,6 +9,9 @@ import type {
 
 export type ConnectionStatus =
   "connecting" | "online" | "reconnecting" | "failed" | "revoked" | "expired";
+export class ControlRequestError extends Error {
+  constructor(message: string, readonly code: number) { super(message); }
+}
 export class ControlConnection {
   readonly lifecycle: { startedAt: number; marks: Record<string, number>; error?: string }[] = [];
   private latestState:ProductState|null=null;
@@ -81,7 +84,7 @@ export class ControlConnection {
         clearTimeout(task.timer);
         this.pending.delete(message.id);
         if (message.type === "error") {
-          task.reject(new Error(message.error.message));
+          task.reject(new ControlRequestError(message.error.message, message.error.code));
           if (message.error.code === 401) {
             this.status("expired");
             this.close();

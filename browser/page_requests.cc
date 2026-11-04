@@ -58,6 +58,41 @@ base::DictValue Kind(const char* kind) {
 bool Live(content::RenderFrameHost* frame) {
   return frame && frame->IsActive();
 }
+bool ValidSelectionId(const std::string* selection_id) {
+  return selection_id && !selection_id->empty() && selection_id->size() <= 128 &&
+         selection_id->find_first_not_of(
+             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") ==
+             std::string::npos;
+}
+base::DictValue InputAnchor(const blink::mojom::FileChooserInputAnchor& anchor,
+                            const PageRequests::AnchorLayout& layout) {
+  const auto& bounds = anchor.bounds;
+  const auto& viewport = anchor.viewport;
+  if (!std::isfinite(bounds.x()) || !std::isfinite(bounds.y()) ||
+      !std::isfinite(bounds.width()) || !std::isfinite(bounds.height()) ||
+      !std::isfinite(viewport.width()) || !std::isfinite(viewport.height()) ||
+      !std::isfinite(anchor.device_scale_factor) || bounds.IsEmpty() ||
+      viewport.IsEmpty() || bounds.x() < 0 || bounds.y() < 0 ||
+      bounds.right() > viewport.width() + 0.01f ||
+      bounds.bottom() > viewport.height() + 0.01f ||
+      std::abs(viewport.width() - layout.width) > 1.f ||
+      std::abs(viewport.height() - layout.height) > 1.f ||
+      std::abs(anchor.device_scale_factor - layout.device_scale_factor) > 0.001f) {
+    return {};
+  }
+  base::DictValue result;
+  result.Set("x", bounds.x());
+  result.Set("y", bounds.y());
+  result.Set("width", bounds.width());
+  result.Set("height", bounds.height());
+  result.Set("viewportWidth", viewport.width());
+  result.Set("viewportHeight", viewport.height());
+  result.Set("deviceScaleFactor", anchor.device_scale_factor);
+  result.Set("instance", base::NumberToString(layout.instance));
+  result.Set("document", base::NumberToString(layout.document));
+  result.Set("layoutGeneration", base::NumberToString(layout.generation));
+  return result;
+}
 using ValidatedFiles = std::pair<std::vector<PageRequests::SelectedFile>, std::string>;
 ValidatedFiles ValidateFiles(std::vector<PageRequests::SelectedFile> paths) {
   for (const auto& selected : paths) {
@@ -91,6 +126,8 @@ struct PageRequests::Pending {
   blink::mojom::FileChooserParams::Mode mode = blink::mojom::FileChooserParams::Mode::kOpen;
   GURL link;
   bool validating = false;
+  std::string selection_id;
+  SelectionBinding selection_binding;
 };
 
 PageRequests::PageRequests() = default;
@@ -183,7 +220,7 @@ void PageRequests::Cancel(std::uint64_t id, const std::string& reason) {
   event.Set("request", base::NumberToString(id));
   event.Set("reason", Clip(reason));
   Event(std::move(event));
-  if (request->file) FileResult(id, "cancelled", reason);
+  if (request->file) FileResult(id, "cancelled", *request, reason);
   if (request->type == Pending::Type::menu && reason != "context_menu_superseded" && web_contents())
     web_contents()->NotifyContextMenuClosed(GURL());
   if (request->file)
@@ -228,35 +265,69 @@ void PageRequests::Prune() {
       return;
   }
 }
-void PageRequests::FileResult(std::uint64_t id, const char* state, const std::string& error) {
+void PageRequests::FileResult(std::uint64_t id, const char* state,
+                              const Pending& request,
+                              const std::string& error) {
   auto result = Result(); result.Set("state", state);
+  if (!request.selection_id.empty()) result.Set("selection_id", request.selection_id);
   if (!error.empty()) result.Set("error", Clip(error));
-  file_results_.insert_or_assign(id, std::move(result));
+  file_results_.insert_or_assign(
+      id, FileReceipt{std::move(result), request.selection_binding});
   while (file_results_.size() > kLimit) file_results_.erase(file_results_.begin());
 }
-base::DictValue PageRequests::FileStatus(const std::string& key) {
+base::DictValue PageRequests::FileStatus(const std::string& key,
+                                        const base::Value* selection,
+                                        SelectionBinding binding,
+                                        bool terminal_only) {
+  const auto* selection_id = selection ? selection->GetIfString() : nullptr;
+  if (selection && !ValidSelectionId(selection_id))
+    return Result("invalid_selection_id");
   const auto weak = weak_factory_.GetWeakPtr();
-  Prune();
+  if (!terminal_only) Prune();
   if (!weak) return Result("manager_destroyed");
   std::uint64_t id = 0;
   if (!base::StringToUint64(key, &id) || base::NumberToString(id) != key) return Result("invalid_file_request");
   const auto found = pending_.find(id);
-  if (found != pending_.end()) {
+  if (!terminal_only && found != pending_.end()) {
     if (!found->second->file) return Result("file_request_required");
-    auto result = Result(); result.Set("state", found->second->validating ? "validating" : "pending"); return result;
+    if (selection_id && found->second->validating &&
+        (found->second->selection_id != *selection_id ||
+         found->second->selection_binding != binding))
+      return Result("unknown_file_request");
+    auto result = Result();
+    result.Set("state", found->second->validating ? "validating" : "pending");
+    if (!found->second->selection_id.empty())
+      result.Set("selection_id", found->second->selection_id);
+    return result;
   }
   const auto completed = file_results_.find(id);
-  return completed == file_results_.end() ? Result("unknown_file_request") : completed->second.Clone();
+  if (completed == file_results_.end())
+    return Result(terminal_only ? "stale_page_request_target" : "unknown_file_request");
+  const auto* completed_selection = completed->second.result.FindString("selection_id");
+  if (selection_id && (!completed_selection || *completed_selection != *selection_id ||
+                       completed->second.binding != binding))
+    return Result(terminal_only ? "stale_page_request_target" : "unknown_file_request");
+  return completed->second.result.Clone();
 }
-base::DictValue PageRequests::Snapshot() {
+base::DictValue PageRequests::Snapshot(const AnchorLayout* anchor_layout) {
   auto weak = weak_factory_.GetWeakPtr();
   Prune();
   if (!weak)
     return Result("manager_destroyed");
   base::DictValue result;
   base::ListValue pending;
-  for (const auto& [id, request] : pending_)
-    pending.Append(request->data.Clone());
+  for (const auto& [id, request] : pending_) {
+    auto data = request->data.Clone();
+    if (anchor_layout && request->file && web_contents() &&
+        request->document.AsRenderFrameHostIfValid() ==
+            web_contents()->GetPrimaryMainFrame()) {
+      if (const auto* anchor = request->file->GetInputAnchor()) {
+        auto value = InputAnchor(*anchor, *anchor_layout);
+        if (!value.empty()) data.Set("input_anchor", std::move(value));
+      }
+    }
+    pending.Append(std::move(data));
+  }
   base::ListValue events;
   while (!events_.empty()) {
     events.Append(std::move(events_.front()));
@@ -317,7 +388,7 @@ bool PageRequests::HandleJavaScriptDialog(content::WebContents*,
     reply.Set("accept", accept);
     if (prompt_override)
       reply.Set("text", Text(*prompt_override));
-    return Reply(reply).FindBool("ok").value_or(false);
+    return Reply(reply, {}).FindBool("ok").value_or(false);
   }
   return false;
 }
@@ -466,7 +537,8 @@ content::WebContents* PageRequests::AddNewContents(content::WebContents*,
   return adopted;
 }
 
-base::DictValue PageRequests::Reply(const base::DictValue& reply) {
+base::DictValue PageRequests::Reply(const base::DictValue& reply,
+                                  SelectionBinding binding) {
   const auto* key = reply.FindString("request");
   const auto accept = reply.FindBool("accept");
   std::uint64_t id = 0;
@@ -497,6 +569,10 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply) {
   if (request->validating)
     return Result("reply_already_validating");
   if (request->type == Pending::Type::file) {
+    const auto* selection = reply.Find("selection_id");
+    const auto* selection_id = selection ? selection->GetIfString() : nullptr;
+    if (selection && !ValidSelectionId(selection_id))
+      return Result("invalid_selection_id");
     const auto* values = reply.FindList("files");
     const bool legacy = !values && !reply.FindBool("file_only").value_or(false);
     if (legacy) values = reply.FindList("paths");
@@ -519,6 +595,10 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply) {
         return Result("invalid_file_display_name");
       paths.push_back({std::move(native), display ? base::UTF8ToUTF16(*display) : std::u16string()});
     }
+    if (selection_id) {
+      request->selection_id = *selection_id;
+      request->selection_binding = binding;
+    }
     request->validating = true;
     request->data.Set("state", "validating");
     base::ThreadPool::PostTaskAndReplyWithResult(
@@ -533,6 +613,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply) {
             weak_factory_.GetWeakPtr(), id));
     auto result = Result();
     result.Set("state", "validating");
+    if (selection_id) result.Set("selection_id", *selection_id);
     return result;
   }
   std::u16string text;
@@ -613,7 +694,7 @@ void PageRequests::FilesValidated(std::uint64_t id,
   event.Set("request", base::NumberToString(id));
   event.Set("state", "selected");
   Event(std::move(event));
-  FileResult(id, "selected");
+  FileResult(id, "selected", *request);
   request->file->FileSelected(std::move(files), base::FilePath(), request->mode);
 }
 

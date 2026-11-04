@@ -34,6 +34,7 @@ import {
 import { WindowFrame, WindowDivider } from "./window-frame";
 import { AdminDialog } from "./admin-dialog";
 import { FileChooserDialog } from './file-chooser-dialog';
+import { FileLibraryContext, type LibraryRequest, useFileLibrary } from './file-library-state';
 import { foregroundRequest } from './foreground-request';
 import type { AudioChannels } from './audio-output';
 import type { AuthState } from '../shared/security';
@@ -197,7 +198,7 @@ function Workspace({
             Math.max(1, Math.round(bounds?.height ?? window.innerHeight) - 88),
           visible:
             document.visibilityState !== "hidden" &&
-            current.workspace.tabs.some(t => t.id === w.activeTabId && t.kind !== 'start') &&
+            current.workspace.tabs.some(t => t.id === w.activeTabId && t.kind !== 'start' && t.kind !== 'files') &&
             (all || w.id === current.workspace.activeWindowId),
         })),
       };
@@ -349,13 +350,15 @@ function Workspace({
   const loadRegistration = useCallback(() => connection.current!.request("admin.get", {}), []);
   const saveRegistration = useCallback((serverCredential: string) =>
     connection.current!.request("admin.setRegistrationCredential", { serverCredential }), []);
-  const fileRpc = media.files;
+  const productReady = status === 'online' && media.productReady;
+  const libraryRequest: LibraryRequest = useCallback((method, params) => connection.current!.request(method, params), []);
+  const library = useFileLibrary(libraryRequest, media.files, productReady, showShell, auth?.user.id, state?.fileRequests.map(request => request.id) ?? []);
   if (localLock || auth?.locked !== false) return <RevealScreen key={`${auth?.epoch ?? 'connecting'}:${localLock ?? ''}`}>
     {close => <UnlockView auth={localLock ? null : auth} request={authRequest} camera={camera} close={close}
       retry={() => status === 'revoked' ? location.reload() : connection.current?.restart()} />}
   </RevealScreen>;
   if (!state) return <BlankScreen />;
-  const productReady = status === 'online' && media.productReady;
+
   const workspace = state.workspace,
     sideBySide =
       workspace.layoutMode === "side-by-side" &&
@@ -365,7 +368,7 @@ function Workspace({
   const foreground = !settings && !admin && !(pending && !pending.awaiting) ? foregroundRequest(state,width) : null;
   const fileRequest = foreground?.kind==='file' ? state.fileRequests.find(request=>request.id===foreground.id) : undefined;
   return (
-    <main className="viewer-shell" ref={shell}>
+    <FileLibraryContext.Provider value={library}><main className="viewer-shell" ref={shell}>
       {pendingOperations.length>0 && <Alert severity="info" sx={{position:'absolute',top:88,left:'50%',transform:'translateX(-50%)',zIndex:1190}} action={pendingOperations.some(entry=>entry.receipt?.status==='unknown')?<Button onClick={()=>setPendingOperations(entries=>entries.filter(entry=>entry.receipt?.status!=='unknown'))}>以当前工作区为准</Button>:undefined}>{pendingOperations.length} 个操作{pendingOperations.some(entry=>entry.receipt?.status==='unknown')?'结果未知，请核对工作区':'正在同步'}{media.diagnostics.channel!=='已连接'?'，等待数据通道连接':''}</Alert>}
       {productReady && media.audio.state === 'blocked' && (workspace.settings.audioChannels?.left !== false || workspace.settings.audioChannels?.right !== false) && <Button variant="contained" onClick={() => media.audio.resume()} sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}>点击开启声音</Button>}
       {status !== "online" && (
@@ -449,7 +452,8 @@ function Workspace({
         )}
       </div>
       {productReady && <PageDialogs state={state} action={action} activeId={foreground?.kind==='page'?foreground.id:null} />}
-      {fileRequest && <FileChooserDialog key={fileRequest.id} request={fileRequest} online={productReady} rpc={fileRpc} />}
+      {fileRequest && <FileChooserDialog key={fileRequest.id} request={fileRequest} transport={media}
+        viewId={workspace.tabs.find(tab => tab.id === fileRequest.tabId)?.webviewId} />}
       {state.user.isAdmin && <AdminDialog
         open={admin}
         online={status === "online"}
@@ -511,7 +515,7 @@ function Workspace({
           </Button>
         </DialogActions>
       </Dialog>
-    </main>
+    </main></FileLibraryContext.Provider>
   );
 }
 function App() {

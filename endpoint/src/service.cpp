@@ -22,6 +22,8 @@
 #include "remotekit/raw_camera.hpp"
 #include "remotekit/dc_services.hpp"
 #include "remotekit/dc_file_services.hpp"
+#include "remotekit/file_library.hpp"
+#include "remotekit/photo_processing.hpp"
 #include "remotekit/navigation_export.hpp"
 #include "control_transport.hpp"
 #include <functional>
@@ -223,12 +225,20 @@ struct Session {
  HANDLE process=nullptr,job=nullptr;std::atomic<uint64_t> control{0},client_gestures_control{0};uint64_t request_id=0;
  bool producer_stop_pending=false;
  bool process_in_job=false;
- std::string browser_incarnation,process_incarnation;
+ std::string browser_incarnation,process_incarnation,last_confirmed_browser_exit;
  remotekit::FileUploadStore file_uploads;
+ remotekit::FileLibrary file_library;
  std::mutex file_store_mutex;
  remotekit::DcFileServices file_services;
  struct FileOwner {remotekit::DcFileServices::Job job;int64_t touched;};
  std::map<std::string,FileOwner> file_owners; // file worker only.
+ struct SelectionWatch {remotekit::FileLibrary::Selection selection;uint64_t control;int64_t expires;};
+ std::deque<SelectionWatch> selection_watches; // file worker only.
+ int64_t next_selection_watch=0;
+#ifdef RK_FILE_PHOTO
+ struct PhotoThumbnail {std::string asset_id;int64_t refresh_after;};
+ std::map<std::string,PhotoThumbnail> photo_thumbnails; // file worker only.
+#endif
  std::timed_mutex rpc_mutex;
  std::map<std::string,Json> desired;
  int atlas_width=1920,atlas_height=1080;float atlas_scale=1;
@@ -333,7 +343,8 @@ struct Session {
   return fs::path(executable).parent_path()/"face-models";
  }
  Session(Sdk& api,const Options& opts,std::string tenant_id,std::string session_id):sdk(api),options(opts),
-   tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id),file_uploads(directory/"uploads"),faces(FaceModels()) {
+   tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id),
+   file_uploads(directory/"uploads"),file_library(directory/"file-library"),faces(FaceModels()) {
   effective_idle_ms=std::min(1000u,options.idle_idr_ms);
   trace=ServerTrace::Create(tenant,id);pool.SetTrace(trace);
   fs::create_directories(directory);
@@ -897,6 +908,7 @@ struct Session {
     fprintf(stderr,"unassigned producer termination failed (Windows=%lu); retaining exact process\n",GetLastError());
    const auto exited=WaitForSingleObject(process,5000);
    if(exited==WAIT_OBJECT_0) {
+    last_confirmed_browser_exit=process_incarnation;
     {std::lock_guard lock(file_store_mutex);file_uploads.ConfirmBrowserStopped(process_incarnation);}process_incarnation.clear();
     // A crash may leave the last mapping status Running. Preserve confirmed
     // producer termination on retained generations before closing its handle.
@@ -2205,6 +2217,8 @@ struct Session {
  }
  using FileBinding=remotekit::FileUploadStore::Binding;
  using FileJob=remotekit::DcFileServices::Job;
+ using LibrarySelection=remotekit::FileLibrary::Selection;
+ using LibraryState=LibrarySelection::State;
  void RequireFileJob(const FileJob& job) {
   if(!authorization.Stamp() || !file_services.Current(job))throw std::runtime_error("file_transfer_interrupted");
  }
@@ -2223,10 +2237,192 @@ struct Session {
    {std::lock_guard lock(file_store_mutex);file_uploads.Cancel(it->first);}
    it=file_owners.erase(it);
   }
+  file_library.Sweep();
+  if(selection_watches.empty() || now<next_selection_watch)return;
+  next_selection_watch=now+QpcFrequency()/10;
+  auto watch=std::move(selection_watches.front());selection_watches.pop_front();
+  if(watch.control!=control.load() || now>=watch.expires)return;
+  try {
+   const auto status=Rpc(SelectionStatusCommand(watch.selection),
+                         false,watch.control,10000,true);
+   const auto state=ObserveSelection(watch.selection,status);
+   if(state!="selected" && state!="cancelled")selection_watches.push_back(std::move(watch));
+  }catch(...) {
+   if(watch.control==control.load())selection_watches.push_back(std::move(watch));
+  }
  }
  static uint64_t FileUnsigned(const Json& value) {
   if(!value.is_number_unsigned() && (!value.is_number_integer() || value.get<int64_t>()<0))throw std::runtime_error("invalid_file_integer");
   return value.get<uint64_t>();
+ }
+ Json SelectionBrowserCommand(const FileBinding& binding,const char* method) {
+  return {{"method",method},{"session",id},{"view",binding.view},{"instance",binding.instance},
+          {"document",binding.document},{"request",binding.request}};
+ }
+ Json SelectionStatusCommand(const LibrarySelection& selection) {
+  auto command=SelectionBrowserCommand(selection.binding,"page.fileStatus");
+  if(selection.state!=LibraryState::pending)command["selection_id"]=selection.id;
+  return command;
+ }
+ std::string RetireUnsubmittedSelection(const std::string& selection_id) {
+  // Claim persists submitted before sending Browser the callback. A retired
+  // target proves cancellation only if the manifest never crossed that boundary.
+  const auto state=file_library.Finish(selection_id,LibraryState::cancelled,LibraryState::pending);
+  if(state==LibraryState::selected)return "selected";
+  return state==LibraryState::cancelled?"cancelled":"unknown";
+ }
+ std::string ObserveSelection(const LibrarySelection& selection,const Json& status) {
+  const auto current=file_library.FindSelection(selection.id);
+  if(!current)return "unknown";
+  if(current->state==LibraryState::selected)return "selected";
+  if(current->state==LibraryState::cancelled)return "cancelled";
+  if(!status.is_object())return "unknown";
+  const auto error=status.value("error",std::string());
+  if(error=="stale_page_request_target" || error=="view_not_in_session")
+   return RetireUnsubmittedSelection(selection.id);
+  const auto state=status.value("state",std::string("unknown"));
+  const bool matched=status.value("selection_id",std::string())==selection.id;
+  if(state=="selected" && matched && current->state==LibraryState::submitted) {
+   return file_library.Finish(selection.id,LibraryState::selected)==LibraryState::selected?"selected":"cancelled";
+  }
+  if(state=="cancelled" && matched && current->state==LibraryState::submitted) {
+   return file_library.Finish(selection.id,LibraryState::cancelled)==LibraryState::cancelled?"cancelled":"selected";
+  }
+  if(state=="cancelled" || (state=="selected" && !matched))
+   return RetireUnsubmittedSelection(selection.id);
+  if(state=="pending" || state=="validating")
+   return current->state==LibraryState::pending && state=="pending"?"pending":"validating";
+  return "unknown";
+ }
+ Json DirectSelectionCommit(const FileJob& job,const std::string& selection_id) {
+  const auto selection=file_library.FindSelection(selection_id);
+  if(!selection || selection->binding!=job.binding ||
+     selection->request_id!=job.message["params"]["requestId"].get_ref<const std::string&>())
+   throw std::runtime_error("unknown_file_selection");
+  const auto result=[&](const std::string& state){return Json{{"state",state},{"selectionId",selection_id}};};
+  if(selection->state==LibraryState::selected)return result("selected");
+  if(selection->state==LibraryState::cancelled)return result("cancelled");
+  auto browser_status=[&] {
+   RequireFileJob(job);
+   return Rpc(SelectionStatusCommand(*selection),false,job.control,10000,0,[&]{
+    return authorization.Stamp() && file_services.Current(job);
+   });
+  };
+  const auto initial=ObserveSelection(*selection,browser_status());
+  if(initial!="pending" || selection->state!=LibraryState::pending)return result(initial);
+  std::vector<remotekit::FileUploadStore::Source> sources;
+  for(const auto& file:selection->files) {
+   const auto asset=file_library.Describe(file.asset_id);
+   sources.push_back({{file.name,file.type,asset.size},file_library.Path(file.asset_id)});
+  }
+  Json files=Json::array();
+  {
+   std::lock_guard lock(file_store_mutex);
+   const auto check=[&]{RequireFileJob(job);};
+   const auto& batch=file_uploads.Stage(job.binding,sources,check);
+   const auto upload=batch.id;
+   try {
+    for(const auto& file:batch.files)files.push_back({{"path",Utf8(file.path)},{"displayName",file.name}});
+    if(!file_library.Claim(selection_id,check))throw std::runtime_error("file_selection_already_submitted");
+    file_uploads.MarkSubmitted(upload);
+   }catch(...) {file_uploads.Cancel(upload);throw;}
+  }
+  // The claim is durable before the callback is sent. A lost reply or a
+  // retired chooser grant can be reconciled only with a matching Browser receipt.
+  if(selection_watches.size()<64) {
+   auto submitted=*selection;submitted.state=LibraryState::submitted;
+   selection_watches.push_back({std::move(submitted),job.control,QpcNow()+QpcFrequency()*120});
+  }
+  auto response=DirectFileRpc(job,"page.reply",{{"file_only",true},{"accept",true},{"files",files},
+                                                 {"selection_id",selection_id}});
+  return result(ObserveSelection(*selection,response));
+ }
+ Json DirectLibraryCommand(const FileJob& job,const std::string& method,const Json& params) {
+  const auto check=[&]{RequireFileJob(job);};
+  if(method=="asset.begin")
+   return file_library.Begin(job.grant,Required(params,"operationId"),
+    {Required(params,"name"),params.value("type",std::string()),FileUnsigned(params.at("size"))},check);
+  if(method=="asset.chunk")
+   return {{"offset",file_library.Chunk(job.grant,Required(params,"uploadId"),FileUnsigned(params.at("offset")),
+                                        remotekit::DecodeFileChunk(params.at("data")),check)}};
+  if(method=="asset.seal")return file_library.Seal(job.grant,Required(params,"uploadId"),check).Json();
+  if(method=="asset.cancel") {
+   file_library.Cancel(job.grant,Required(params,"uploadId"),check);return {{"cancelled",true}};
+  }
+  if(method=="asset.read") {
+   const auto offset=FileUnsigned(params.at("offset"));
+   const auto [asset,bytes]=file_library.Read(Required(params,"assetId"),offset);
+   check();
+   return {{"data",remotekit::EncodeFileChunk(bytes)},{"offset",offset+bytes.size()},{"total",asset.size}};
+  }
+#ifdef RK_FILE_PHOTO
+  const auto cancelled=[&]{return !authorization.Stamp() || !file_services.Current(job);};
+  if(method=="photo.thumbnail") {
+   const auto asset_id=Required(params,"assetId");
+   const auto source=file_library.Path(asset_id);
+   const auto now=QpcNow();
+   const auto cached=photo_thumbnails.find(asset_id);
+   if(cached!=photo_thumbnails.end()) {
+    std::optional<remotekit::FileLibrary::Asset> thumbnail;
+    if(now<cached->second.refresh_after) {
+     try {thumbnail=file_library.Describe(cached->second.asset_id);}
+     catch(const std::runtime_error&) {}  // An expired derivative can be regenerated.
+    }
+    if(thumbnail) {
+     check();
+     return thumbnail->Json();
+    }
+    photo_thumbnails.erase(cached);
+   }
+   const auto thumbnail=file_library.CreateDerivative([&](const fs::path& output) {
+    const auto dimensions=remotekit::CreatePhotoThumbnail(source,output,cancelled);
+    return remotekit::FileLibrary::Derivative{dimensions.width,dimensions.height};
+   },check);
+   check();
+   constexpr size_t kThumbnailCacheEntries=256;
+   if(photo_thumbnails.size()>=kThumbnailCacheEntries) {
+    const auto oldest=std::min_element(photo_thumbnails.begin(),photo_thumbnails.end(),[](const auto& left,const auto& right) {
+     return left.second.refresh_after<right.second.refresh_after;
+    });
+    photo_thumbnails.erase(oldest);
+   }
+   // Renew before the derivative's two-hour raw asset expiration so a caller
+   // can fetch its chunks after receiving this descriptor.
+   photo_thumbnails.emplace(asset_id,PhotoThumbnail{thumbnail.id,QpcNow()+QpcFrequency()*3600});
+   return thumbnail.Json();
+  }
+  if(method=="photo.rank") {
+   const auto& ids=params.at("assetIds");
+   if(!ids.is_array() || ids.empty() || ids.size()>6)throw std::runtime_error("invalid_photo_count");
+   std::vector<fs::path> paths;
+   for(const auto& asset:ids)paths.push_back(file_library.Path(asset.get<std::string>()));
+   const auto ranked=remotekit::RankPhotos(paths,cancelled);
+   check();
+   Json candidates=Json::array();
+   for(const auto& candidate:ranked.candidates)
+    candidates.push_back({{"assetId",ids.at(candidate.index)},{"score",candidate.score}});
+   return {{"selectedAssetId",ids.at(ranked.selected_index)},{"uncertain",ranked.uncertain},
+           {"candidates",std::move(candidates)},{"reason",ranked.reason}};
+  }
+  if(method=="photo.process") {
+   const auto source=file_library.Path(Required(params,"assetId"));
+   const auto mode=Required(params,"mode");
+   if(mode!="rectify" && mode!="scan")throw std::runtime_error("invalid_photo_mode");
+   std::optional<std::array<remotekit::PhotoPoint,4>> corners;
+   if(const auto found=params.find("corners");found!=params.end()) {
+    if(!found->is_array() || found->size()!=4)throw std::runtime_error("invalid_photo_corners");
+    corners.emplace();
+    for(size_t i=0;i<4;++i)
+     (*corners)[i]={found->at(i).at("x").get<double>(),found->at(i).at("y").get<double>()};
+   }
+   return file_library.CreateDerivative([&](const fs::path& output) {
+    const auto dimensions=remotekit::ProcessPhoto(source,output,
+      mode=="scan"?remotekit::PhotoMode::kScan:remotekit::PhotoMode::kRectify,corners,cancelled);
+    return remotekit::FileLibrary::Derivative{dimensions.width,dimensions.height};
+   },check).Json();
+  }
+#endif
+  throw std::runtime_error("photo_processing_unavailable");
  }
  Json DirectFileState(const FileJob& job,const std::string& upload) {
   RequireFileJob(job);
@@ -2249,6 +2445,8 @@ struct Session {
  Json DirectFileCommand(const FileJob& job) {
   RequireFileJob(job);
   const auto method=Required(job.message,"method");const auto& params=job.message.at("params");
+  if(remotekit::LibraryFileMethod(method))return DirectLibraryCommand(job,method,params);
+  if(method=="selection.commit")return DirectSelectionCommit(job,Required(params,"selectionId"));
   if(method=="begin") {
    if(DirectFileRpc(job,"page.fileStatus").value("state",std::string())!="pending")throw std::runtime_error("file_request_not_pending");
    const auto& values=params.at("files");if(!values.is_array() || values.empty() || values.size()>64)throw std::runtime_error("invalid_file_count");
@@ -2320,8 +2518,57 @@ struct Session {
  Json FileBrowserCommand(const FileBinding& binding,const char* method) {
   if(!Alive() || !control || producer_stop_pending || binding.browser_incarnation!=browser_incarnation ||
      !desired.contains(binding.view))throw std::runtime_error("stale_file_request_target");
-  return {{"method",method},{"session",id},{"view",binding.view},{"instance",binding.instance},
-    {"document",binding.document},{"request",binding.request}};
+  return SelectionBrowserCommand(binding,method);
+ }
+ Json LibraryCommand(const std::string& method,const Json& request) {
+  if(method=="session.library.describe")
+   return file_library.Describe(Required(request,"assetId")).Json();
+  if(method=="session.library.retain" || method=="session.library.references") {
+   const auto& values=request.at("assetIds");
+   if(!values.is_array() || values.size()>(method=="session.library.retain"?64:8192))
+    throw std::runtime_error("invalid_library_assets");
+   std::vector<std::string> assets;
+   assets.reserve(values.size());
+   for(const auto& value:values)assets.push_back(value.get<std::string>());
+   if(method=="session.library.retain")file_library.Retain(assets);
+   else file_library.References(FileUnsigned(request.at("revision")),assets);
+   return {{"accepted",true}};
+  }
+  const auto selection_id=Required(request,"selectionId");
+  if(method=="session.library.prepare") {
+   LibrarySelection selection{selection_id,Required(request,"requestId"),ParseFileBinding(request.at("binding")),{}};
+   const auto& values=request.at("files");
+   if(!values.is_array() || values.empty() || values.size()>64)throw std::runtime_error("invalid_file_count");
+   for(const auto& value:values)
+    selection.files.push_back({Required(value,"assetId"),Required(value,"name"),value.value("type",std::string())});
+   if(!file_library.FindSelection(selection_id) &&
+      Rpc(FileBrowserCommand(selection.binding,"page.fileStatus")).value("state",std::string())!="pending")
+    throw std::runtime_error("file_request_not_pending");
+   file_library.Prepare(selection);
+   return {{"accepted",true}};
+  }
+  if(method=="session.library.selectionStatus") {
+   const auto selection=file_library.FindSelection(selection_id);
+   std::string state="unknown";
+   if(selection) {
+    if(selection->state==LibraryState::selected)state="selected";
+    else if(selection->state==LibraryState::cancelled)state="cancelled";
+    else if(selection->state==LibraryState::pending &&
+            (!desired.contains(selection->binding.view) ||
+             selection->binding.browser_incarnation==last_confirmed_browser_exit ||
+             (ProducerExited() && selection->binding.browser_incarnation==process_incarnation) ||
+             (!browser_incarnation.empty() && selection->binding.browser_incarnation!=browser_incarnation)))
+     state=RetireUnsubmittedSelection(selection->id);
+    else if(Alive() && control && !producer_stop_pending && selection->binding.browser_incarnation==browser_incarnation) {
+     Json status;
+     try {status=Rpc(SelectionStatusCommand(*selection),false);}
+     catch(const std::exception&) {return {{"state","unknown"}};}
+     state=ObserveSelection(*selection,status);
+    }
+   }
+   return {{"state",state}};
+  }
+  throw std::runtime_error("unknown_library_method");
  }
  Json FileStatus(const std::string& upload,const FileBinding& binding) {
   {std::lock_guard lock(file_store_mutex);const auto* batch=file_uploads.Find(upload);
@@ -2344,7 +2591,7 @@ struct Session {
    std::map<std::string,FileBinding> bindings;const auto& requests=request.at("requests");
    if(!requests.is_array() || requests.size()>64)throw std::runtime_error("invalid_file_authorization_count");
    for(const auto& item:requests) {
-    const auto token=Required(item,"id");if(token.size()>128)throw std::runtime_error("invalid_file_request_id");
+    const auto token=Required(item,"id");if(token.size()>128 || token=="library")throw std::runtime_error("invalid_file_request_id");
     const auto binding=ParseFileBinding(item.at("binding"));
     if(binding.browser_incarnation!=browser_incarnation || !desired.contains(binding.view))throw std::runtime_error("stale_file_request_target");
     if(!bindings.emplace(token,binding).second)throw std::runtime_error("duplicate_file_authorization");
@@ -2356,7 +2603,8 @@ struct Session {
     if(epoch==request.end() || !epoch->is_number_unsigned() || epoch->get<uint64_t>()!=authorization.Epoch())
      throw std::runtime_error("stale_authorization_epoch");
    }
-   file_services.Authorize(Required(request,"connectionId"),control.load(),bindings);return {{"accepted",true}};
+   file_services.Authorize(Required(request,"connectionId"),control.load(),bindings,request.value("library",false));
+   return {{"accepted",true}};
   }
   if(method=="session.files.revoke") {file_services.RevokeAuthorization();std::lock_guard lock(file_store_mutex);file_uploads.RevokeUncommitted();return {{"accepted",true}};}
   if(method=="session.files.cancel") {
@@ -2432,6 +2680,7 @@ struct Session {
   if(method=="auth.face.capabilities")return FaceCapabilities();
   if(method.starts_with("auth.face."))return FaceCommand(method,request,generation,management_current);
   if(method.starts_with("session.files."))return FileCommand(method,request);
+  if(method.starts_with("session.library."))return LibraryCommand(method,request);
   if(method=="session.ensure"){Start();return {{"sessionId",id},{"browserPid",GetProcessId(process)},{"running",true},{"accepted",true},{"browserIncarnation",browser_incarnation},{"recovery",RecoverySnapshot()}};}
   if(method=="session.snapshot")return Snapshot(request.value("outputDiagnostics",false));
   if(method=="session.events.ack") {

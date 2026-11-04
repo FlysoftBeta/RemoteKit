@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import fs from 'node:fs';
-import { CameraCandidatePool, cameraBudget } from '../client/camera-candidates';
+import { CameraCandidatePool, cameraBudget } from './fixtures/camera-candidates';
 
 const context = vm.createContext({});
-vm.runInContext(fs.readFileSync(new URL('../public/camera-score.js', import.meta.url), 'utf8'), context);
+vm.runInContext(fs.readFileSync(new URL('../../tools/camera-score-worker.js', import.meta.url), 'utf8'), context);
 const score = (pixels: Uint8Array, width=160, height=90) => context.RemoteKitCameraScore(pixels,width,height);
 test('fixed scene scorer penalizes blur, isolated noise and low light', () => {
   const w=160,h=90, sharp = Uint8Array.from({length:w*h}, (_,i) => ((Math.floor(i/w)/9|0)+(i%w/9|0))%2 ? 190 : 65);

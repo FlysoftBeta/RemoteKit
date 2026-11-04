@@ -15,6 +15,8 @@ int main() {
  CHECK(DecodeFileChunk("YWJj")==std::vector<std::uint8_t>({'a','b','c'}));
  CHECK(DecodeFileChunk("YQ==")==std::vector<std::uint8_t>({'a'}));
  CHECK(DecodeFileChunk("YWI=")==std::vector<std::uint8_t>({'a','b'}));
+ CHECK(EncodeFileChunk({})=="");
+ CHECK(EncodeFileChunk({'a','b'})=="YWI=");
  for(const auto* text:{"","a","====","YQ=+","YQ==YQ==","YR==","YWJ="," YQ=","!!!!"})CHECK(Throws([&]{DecodeFileChunk(text);}));
  CHECK(Throws([]{DecodeFileChunk(std::string(21848,'A'));}));
  const auto a=Request("00000000-0000-4000-8000-000000000001");
@@ -49,5 +51,42 @@ int main() {
  Until([&]{return sweeps.load()>=2;});services.Flush(8,[&](const std::string& text){replies.push_back(ServiceJson::parse(text));return 0;});CHECK(replies.size()==count);
  CHECK(Throws([&]{services.Authorize("connection",99,{{"opaque",binding}});}));
  services.Admit(7,a);services.Flush(8,[&](const std::string&){CHECK(false);return 0;});
- services.Stop();std::cout<<"DC file admission, strict base64, receipts and peer retirement passed\n";
+ services.Stop();
+ DcFileServices library;
+ entered=false;hold=false;executions=0;
+ library.Start([&](const DcFileServices::Job& job) {
+  const auto n=++executions;entered=true;
+  while(hold)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  return ServiceJson{{"sequence",n},{"current",library.Current(job)}};
+ },[]{});
+ library.Bind(9,"library-peer");
+ auto asset=Request("00000000-0000-4000-8000-000000000003","photo.thumbnail");
+ asset["params"]["requestId"]="library";
+ asset["params"]["assetId"]=std::string(64,'a');
+ CHECK(FileRequestEnvelope(asset,asset.dump().size()));
+ auto chooser_asset=asset;chooser_asset["params"]["requestId"]="opaque";
+ auto library_commit=asset;library_commit["method"]="selection.commit";
+ replies.clear();
+ const auto drain=[&]{
+  library.Flush(9,[&](const std::string& wire){replies.push_back(ServiceJson::parse(wire));return 0;});
+ };
+ library.Authorize("library-peer",99,{{"opaque",binding}});
+ library.Admit(9,asset);drain();CHECK(replies.back()["error"]=="stale_file_request");
+ library.Authorize("library-peer",99,{{"opaque",binding}},true);
+ library.Admit(9,chooser_asset);library.Admit(9,library_commit);drain();
+ CHECK(replies.size()==3 && replies.back()["error"]=="stale_file_request");
+ hold=true;library.Admit(9,asset);Until([&]{return entered.load();});
+ library.Authorize("library-peer",99,{},true); // Retire chooser only.
+ hold=false;
+ Until([&]{drain();return replies.size()==4;});
+ CHECK(replies.back()["result"]["current"]==true);
+ asset["requestId"]="00000000-0000-4000-8000-000000000004";
+ hold=true;entered=false;library.Admit(9,asset);Until([&]{return entered.load();});
+ library.Authorize("library-peer",99,{},false);
+ library.Authorize("library-peer",99,{},true);
+ library.Admit(9,asset);hold=false;
+ Until([&]{drain();return replies.size()==5;});
+ CHECK(replies.back()["result"]["sequence"]==3 && replies.back()["result"]["current"]==true);
+ library.Stop();
+ std::cout<<"DC file admission, strict base64, receipts and peer retirement passed\n";
 }

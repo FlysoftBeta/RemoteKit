@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CameraCapture } from '../client/camera-capture';
+import { capturePhotoBurst } from '../client/camera-capture';
+import { CameraCapture } from './fixtures/camera-capture';
 
 test('cancelled snapshot cannot terminate a newer Worker or retain full canvases', async()=>{
   const oldDocument=globalThis.document,oldWorker=globalThis.Worker;
@@ -70,4 +71,39 @@ test('bitmap burst transfers one snapshot per candidate and retains bounded top 
     for(const candidate of candidates) assert.equal(await candidate.blob.text(),String(candidate.score));
     assert.ok(capture.metrics.peakPixels<=20*1024*1024);assert.equal(terminated,1);
   } finally {Object.assign(globalThis,originals);}
+});
+
+test('Endpoint photo burst uses bounded JPEG canvases and releases them on cancellation', async () => {
+    const previous = globalThis.document;
+    const sizes: { width: number; height: number; format: string }[] = [];
+    class Canvas {
+        width = 0;
+        height = 0;
+        getContext() { return { drawImage() {} }; }
+        toBlob(callback: (blob: Blob) => void, format: string) {
+            sizes.push({ width: this.width, height: this.height, format });
+            callback(new Blob(['one snapshot'], { type: format }));
+        }
+    }
+    const canvases = [new Canvas(), new Canvas()];
+    let allocated = 0;
+    const mock = { createElement: () => canvases[allocated++] };
+    Object.assign(globalThis, { document: mock });
+    try {
+        const video = { videoWidth: 4096, videoHeight: 2160 } as HTMLVideoElement;
+        const frames = await capturePhotoBurst(video, new AbortController().signal);
+        assert.ok(frames.length >= 1 && frames.length <= 6);
+        assert.equal(sizes.length, frames.length * 2);
+        assert.ok(sizes.every(size => size.format === 'image/jpeg' && size.width * size.height <= 4 * 1024 * 1024));
+        assert.ok(sizes.filter((_, i) => i % 2).every(size => Math.max(size.width, size.height) <= 320));
+        assert.ok(canvases.every(canvas => canvas.width === 1 && canvas.height === 1));
+        allocated = 0;
+        const controller = new AbortController();
+        const pending = capturePhotoBurst(video, controller.signal);
+        controller.abort();
+        await assert.rejects(pending, { name: 'AbortError' });
+        assert.ok(canvases.every(canvas => canvas.width === 1 && canvas.height === 1));
+    } finally {
+        Object.assign(globalThis, { document: previous });
+    }
 });

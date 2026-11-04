@@ -4,13 +4,13 @@
 
 ## 当前交付
 
-冷启动补帧与Video-only清理已完成，源码`3a5df079c29b9c729d6965c3df7a76609f10883a`已推送；用户明确取消本轮上传。生产Canvas/MSTP/WebGL回退已移除；保留尺寸过渡快照、拍照和测试读回。96项Client定向、4项Endpoint定向、增量构建及生产smoke通过；157正常冷启动、首次ACK延迟4.5秒、Chrome89已保存静态页均在单peer/单视频轨道上恢复Video，成功后补帧计数停止。本地包另通过清单/CRC及实际H264/QSV触控检查。[修复与本地包](../develop/docs/first-open-recovery-20261104.md) · [真实运行](../develop/docs/osr-first-open-runtime-20261104.md)。以下861200仍为此前已上传包，不含本轮修改。
+文件篮、我的文件与Endpoint照片处理已实现，Chrome157/89真实产品整组通过，正在提交与打包。图片为主使用横向卡片，整卡拖拽、点击展开菜单；普通文件明显居多时默认列表，手柄排序且操作按钮直接可用，可手动切换。已实测鼠标、触屏横滑/长按、键盘、取消与版本冲突回滚。预览完整contain与列表提示最后修正已构建，最终包视觉复验待完成。[构建](../develop/docs/file-library-build-20261104.md) · [运行与视觉](../develop/docs/file-library-qa-20261104.md) · [正式契约](file-library-contract.md)。
 
-此前生命周期、触控及OSR延迟修复已发布，包内功能源码为`433655ddca7d7e44eb44f847a8c46ba0bc352675`。[该批完整记录](../develop/docs/osr-latency-investigation-20261104.md) · [问题清单](../develop/docs/open-issues.md)。
+拍照为全屏连续采集，由Endpoint OpenCV评分与近重复过滤，仅质量接近且画面有实质差异时要求选候选；支持指定位置重拍、移除、矫正/扫描和保留原图。文件与照片共用有序文件篮；单选需明确选一项，多选按篮子顺序交付。原生selection ID确认后才归档并出篮。更多→我的文件是独立tab，按时间排列、可分组/上传/删除/加入篮子。Control持有元数据，Endpoint按Session内SHA-256存储，字节和按需缩略图走既有RTC。主框架可见input锚定紧凑选择器，失效、隐藏或子框架回退Dialog。
 
-取件码[861200](https://airportal.cn/861200/YnupKqRq8U)，2026-11-04 14:46:48（UTC+8）上传成功，有效24小时、可下载2次、无密码。
+配套Browser/SDK、Endpoint及Control生产构建通过，Endpoint四项文件定向CTest通过。157/89实测原生FileList字节/顺序、分组/消费、合成摄像头连续采集/不确定候选/后处理、刷新后真实缩略图、动态anchor撤销和授权换代。实体摄像头、运动与复杂光照仍待验收。验收期间发现QSV在高码率1FPS下Reset -14导致编码停止，现于排空后在同session/device重新初始化编码组件；独立UHD630低帧率序列与async VPP、修后两版解锁恢复均通过。[定位](../develop/docs/file-unlock-investigation-20261104.md) · [问题清单](../develop/docs/open-issues.md)。
 
-包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-144257.zip`，504972886 bytes，SHA256 `730c595e92d2d1390880de2ffe793b65f41464184d5cf00b9925b123ea855349`。manifest为干净源码，571项清单文件、572个ZIP文件及11项人脸资产校验通过；包内启动、隔离Chrome157真实H264/QSV触控终止、媒体身份保持、Stats实际读数及默认playout 0/50ms检查通过。[交付记录](../develop/docs/osr-lifecycle-delivery-20261104.md)。包含此前站点兼容、键盘、Comp选卡、5分钟默认空闲锁定与纯白锁屏；包内README与SDK ABI manifest已修正。
+此前冷启动补帧与Video-only清理源码`3a5df07`已推送，当时用户取消上传；本次新包将包含它。96项Client与4项Endpoint定向、157正常/ACK延迟冷启动及89静态页恢复通过。[该批修复与本地包](../develop/docs/first-open-recovery-20261104.md) · [真实运行](../develop/docs/osr-first-open-runtime-20261104.md)。此前已上传的[861200](https://airportal.cn/861200/YnupKqRq8U)仅包含源码`433655d`的生命周期、触控与OSR延迟修复，不能代替本次文件功能或Video-only版本。[此前交付记录](../develop/docs/osr-lifecycle-delivery-20261104.md)。
 
 ## 生命周期、触控与延迟（已交付861200）
 
@@ -87,7 +87,7 @@ Viewer默认video，独立Window按客户端内容bounds布局、atlas只负责�
 
 Memory Saver由Control维护：Viewer断线决定产品hidden与回收资格，RTC仅决定渲染需求；安全隐藏页面30秒冻结、120秒丢弃，Native执行点复查。保护条件或实例变化会重置计时，不把RTC连接反向当作产品visible。
 
-搜索设置、起始页、文件对话框与Worker拍照选帧保留。音频来自Chromium播放target，经独立Opus管线发送；左右声道选择按整个Viewer持久化。本次质量偏好仅更新video sender。
+搜索设置与起始页保留；文件选择采用统一文件篮，拍照评分与文档后处理由Endpoint执行。音频来自Chromium播放target，经独立Opus管线发送；左右声道选择按整个Viewer持久化。本次质量偏好仅更新video sender。
 
 ## 已发布与重构前证据
 

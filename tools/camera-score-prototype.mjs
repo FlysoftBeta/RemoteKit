@@ -6,7 +6,7 @@ import vm from 'node:vm';
 import { performance } from 'node:perf_hooks';
 const root=path.resolve(import.meta.dirname,'..'),out=path.resolve(process.argv[2]??path.join(root,'develop/tmp/camera-score-prototype'));
 await fs.mkdir(out,{recursive:true});
-const context=vm.createContext({});vm.runInContext(await fs.readFile(path.join(root,'control/public/camera-score.js'),'utf8'),context);
+const context=vm.createContext({});vm.runInContext(await fs.readFile(path.join(root,'tools/camera-score-worker.js'),'utf8'),context);
 const score=context.RemoteKitCameraScore,w=160,h=90;
 const sharp=Uint8Array.from({length:w*h},(_,i)=>((Math.floor(i/w)/9|0)+(i%w/9|0))%2?190:65);
 function blur(rx,ry){return sharp.map((_,i)=>{const x=i%w,y=i/w|0;let sum=0,n=0;for(let dy=-ry;dy<=ry;dy++)for(let dx=-rx;dx<=rx;dx++){sum+=sharp[Math.max(0,Math.min(h-1,y+dy))*w+Math.max(0,Math.min(w-1,x+dx))];n++;}return sum/n;});}

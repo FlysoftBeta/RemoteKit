@@ -14,7 +14,7 @@ export function cameraFormat(accept: string[]): 'image/jpeg' | 'image/png' | nul
         return 'image/png';
     return null;
 }
-export function validateSelection(files: File[], request: FileRequest): string {
+export function validateSelection(files: Pick<File, 'size'>[], request: FileRequest): string {
     if (!files.length)
         return '请先选择文件';
     if (files.length > (request.multiple ? request.limits.maxFiles : 1))

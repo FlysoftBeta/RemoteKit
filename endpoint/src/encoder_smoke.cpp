@@ -11,7 +11,9 @@ int main(int argc,char** argv) {
  ComPtr<ID3D11Device5> device;ComPtr<ID3D11DeviceContext4> context;
  if(!CreateDevice(nullptr,device,context,error)){fprintf(stderr,"%s\n",error.c_str());return 1;}
  EncoderSettings settings;settings.width=1280;settings.height=720;
- const bool steps=argc>3&&std::string(argv[3])=="steps";
+ const std::string scenario=argc>3?argv[3]:"";
+ const bool steps=scenario=="steps";
+ const bool low_fps=scenario=="qsv-low-fps";
  if(steps){settings.bitrate=2000000;settings.max_bitrate=40000000;}
  if(argc>4)settings.width=std::stoul(argv[4]);
  if(argc>5)settings.height=std::stoul(argv[5]);
@@ -29,6 +31,10 @@ int main(int argc,char** argv) {
   settings.vbr=rate_control=="vbr";
  }
  if(argc>2)settings.async_depth=static_cast<uint32_t>(std::stoul(argv[2]));
+ if(low_fps) {
+  settings.width=1168;settings.height=752;settings.level_idc=52;
+  settings.bitrate=45535000;settings.target_usage=7;settings.qsv_low_power=0x10;settings.vbr=true;
+ }
  auto encoder=(argc>1&&std::string(argv[1])=="nvenc")?CreateNvencEncoder():CreateQsvEncoder();
  if(!encoder->Configure(device.Get(),settings,error)){fprintf(stderr,"%s\n",error.c_str());return 2;}
  Nv12Converter converter;
@@ -50,8 +56,25 @@ int main(int argc,char** argv) {
  for(uint32_t i=0;i<settings.async_depth;++i)free.push_back(i);
  std::map<uint64_t,uint32_t> inflight;
  uint64_t submitted=0,completed=0,bytes=0;auto started=QpcNow();
- const uint64_t total=steps?240:120;uint64_t phase_end=steps?60:total;bool force_key=true;
+ const uint64_t total=low_fps?5:(steps?240:120);
+ uint64_t phase_end=low_fps?1:(steps?60:total);bool force_key=true;
+ uint64_t expected_keyframe=low_fps?1:0;
  while(completed<total) {
+  if(low_fps && completed==phase_end && inflight.empty()) {
+   const uint32_t rates[]={38015000,37770833,38171667,38171667};
+   const uint32_t cadences[]={2,2,1,60};
+   const auto step=completed-1;
+   if(!encoder->SetRates(rates[step],cadences[step],error,48000000)) {
+    fprintf(stderr,"%s\n",error.c_str());return 12;
+   }
+   const auto actual=encoder->ActualSettings();
+   force_key=encoder->TakeKeyframeRequest();
+   if(actual.fps!=cadences[step] || (step!=1 && !force_key)) {
+    fprintf(stderr,"missing requested cadence or new sequence\n");return 13;
+   }
+   ++phase_end;
+   expected_keyframe=step!=1?phase_end:0;
+  }
   if(steps && completed==phase_end && inflight.empty() && phase_end<total) {
    const uint32_t rate=completed==120?500000:18000000;
    const uint32_t step_fps=completed==60?22:(completed==120?29:60);
@@ -76,6 +99,9 @@ int main(int argc,char** argv) {
   AccessUnit unit;auto result=encoder->Poll(100,unit,error);
   if(result==CodecResult::error){fprintf(stderr,"%s\n",error.c_str());return 8;}
   if(result==CodecResult::ready) {
+   if(unit.frame_cookie==expected_keyframe && !unit.keyframe) {
+    fprintf(stderr,"new QSV sequence did not encode an IDR\n");return 14;
+   }
    output.write(reinterpret_cast<const char*>(unit.bytes.data()),unit.bytes.size());bytes+=unit.bytes.size();
    auto found=inflight.find(unit.frame_cookie);
    if(found==inflight.end()){fprintf(stderr,"unknown completion cookie\n");return 9;}

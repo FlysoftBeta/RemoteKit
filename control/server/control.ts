@@ -1,9 +1,10 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { BackgroundPolicy } from './background-policy';
-import type { ProductOperation, OperationReceipt, ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, AppliedMediaPolicy, PendingClose } from '../shared/product';
+import type { ProductOperation, OperationReceipt, ProductAction, ProductActionResult, ProductState, ProductWorkspace, ProductTab, ViewerViewport, PageDialog, FileRequestAnchor, AppliedMediaPolicy, PendingClose } from '../shared/product';
 import { resolveNavigation } from './navigation';
-import { SEARCH_ENGINES, FILE_LIMITS } from '../shared/product';
+import { SEARCH_ENGINES, FILE_LIMITS, isLocalTab } from '../shared/product';
+import { FileLibrary } from './file-library';
 import { FileUploads, FileUploadError, type InternalFileRequest, type UploadLimits } from './file-uploads';
 import type { Readable } from 'node:stream';
 import { QualityState } from './quality';
@@ -14,6 +15,15 @@ import { AuthError } from './security-crypto';
 import { ViewerAuth, type ViewerSecurity } from './viewer-auth';
 import { LoopbackRelay, rewriteSdp, selectLocalCandidate, type NetworkSimulation } from './network-sim.mjs';
 function operationPayload(value:unknown):string { const canonical=(input:any):any=>Array.isArray(input)?input.map(canonical):input && typeof input==='object'?Object.fromEntries(Object.keys(input).sort().map(key=>[key,canonical(input[key])])):input;return JSON.stringify(canonical(value)); }
+function fileRequestAnchor(value: any, instance: string, document: string): FileRequestAnchor | undefined {
+  if (!value || value.instance !== instance || value.document !== document ||
+      typeof value.layoutGeneration !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value.layoutGeneration)) return;
+  const { x, y, width, height, viewportWidth, viewportHeight, deviceScaleFactor, layoutGeneration } = value;
+  if (![x, y, width, height, viewportWidth, viewportHeight, deviceScaleFactor].every(Number.isFinite) ||
+      x < 0 || y < 0 || width <= 0 || height <= 0 || deviceScaleFactor <= 0 ||
+      x + width > viewportWidth + 0.001 || y + height > viewportHeight + 0.001) return;
+  return { x, y, width, height, viewportWidth, viewportHeight, deviceScaleFactor, instance, document, layoutGeneration };
+}
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 export class Control extends EventEmitter {
   private unsubscribeSignals?:()=>void;
@@ -50,6 +60,7 @@ export class Control extends EventEmitter {
   private fileAuthorizations=new Map<string,string>();
   private fileRequests = new Map<string, InternalFileRequest[]>();
   private uploads: FileUploads;
+  private readonly library: FileLibrary;
   constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation, fileLimits: UploadLimits = FILE_LIMITS) {
     super(); this.unsubscribeActions=endpoint.onClientAction?.(event=>{void this.handleEndpointAction(event).catch(()=>{});}); this.unsubscribeSignals=endpoint.onSignal?.(event => this.receiveSignal(event));
     this.viewerAuth = new ViewerAuth(store, endpoint, (tenant, viewer, workspace) => {
@@ -73,6 +84,7 @@ export class Control extends EventEmitter {
         if (viewer.locked) await this.reconcileProduct(tenant);
       }).catch(() => {});
     });
+    this.library = new FileLibrary(store.db, endpoint, fileLimits);
     this.uploads = new FileUploads(endpoint, (tenant, lease, authentication) => {
       this.assertProductViewer(tenant, lease);
       if ((this.viewers.get(tenant)?.authentication?.identity ?? '') !== authentication) throw new ApiError(401, '上传登录身份已改变');
@@ -438,6 +450,15 @@ export class Control extends EventEmitter {
       try { return await this.store.setRegistrationCredential(tenant, params.serverCredential, authorize); }
       catch (error) { if (error instanceof ApiError) throw error; throw new ApiError(400, error instanceof Error ? error.message : String(error)); }
     }
+    if (method.startsWith('library.')) {
+      try {
+        return await this.library.request(tenant, method, params, () => this.assertProductViewer(tenant, lease, epoch),
+          id => this.fileRequests.get(tenant)?.find(request => request.id === id));
+      } catch (error) {
+        if (error instanceof FileUploadError) throw new ApiError(error.status, error.message);
+        throw error;
+      }
+    }
     if (method === 'operation.status') return this.operationStatus(tenant, params);
     // Browser actions belong to the reliable Endpoint DataChannel.
     if (method === 'action' && params.type==='settings.update') return this.productAction(tenant, params, lease);
@@ -458,7 +479,7 @@ export class Control extends EventEmitter {
       if (method === 'feedback') {
         if (this.diagnosticTenants.has(tenant)) return { accepted: false };
         const state = this.store.workspace(tenant), viewport = this.viewers.get(tenant)?.viewport;
-        const visible = !!viewport?.windows.some(region => region.visible && state.windows.some(window => window.id === region.windowId && !!window.activeTabId && !state.tabs.some(tab => tab.id === window.activeTabId && tab.kind === 'start')) && (state.layoutMode !== 'focused' || region.windowId === state.activeWindowId));
+        const visible = !!viewport?.windows.some(region => region.visible && state.windows.some(window => window.id === region.windowId && !!window.activeTabId && !state.tabs.some(tab => tab.id === window.activeTabId && isLocalTab(tab))) && (state.layoutMode !== 'focused' || region.windowId === state.activeWindowId));
         const accepted = this.qualityState(tenant).observe(params, Date.now(), visible);
         this.push(tenant); return { accepted };
       }
@@ -514,7 +535,7 @@ export class Control extends EventEmitter {
         const current=this.store.workspace(tenant),a=operation.action;
         if(a.type==='tab.close' && !a.cancel && current.tabs.some(tab=>tab.id===a.tabId) || a.type==='window.close' && current.windows.some(window=>window.id===a.windowId)) {receipt.status='applying';receipt.application={status:'pending',reason:'关闭已受理，等待页面确认'};}
       } }
-      catch(error) { const durable=this.store.operation(tenant,operation.operationId)?.receipt;if(durable && ['committed','rejected'].includes(durable.status)){Object.assign(receipt,durable);}else {receipt.status=error instanceof ApiError?'rejected':'unknown';receipt.error=error instanceof Error?error.message:String(error); const workspace=this.store.workspace(tenant);for(const tab of workspace.tabs)if(tab.navigation?.operationId===operation.operationId){tab.navigation.status=receipt.status==='rejected'?'rejected':'unknown';if(receipt.status==='rejected'){tab.kind=tab.navigation.previousKind;tab.url=tab.navigation.previousUrl;if(tab.kind==='start')tab.loading=false;delete tab.pendingUrl;}}this.store.saveOperation(workspace,receipt); } }
+      catch(error) { const durable=this.store.operation(tenant,operation.operationId)?.receipt;if(durable && ['committed','rejected'].includes(durable.status)){Object.assign(receipt,durable);}else {receipt.status=error instanceof ApiError?'rejected':'unknown';receipt.error=error instanceof Error?error.message:String(error); const workspace=this.store.workspace(tenant);for(const tab of workspace.tabs)if(tab.navigation?.operationId===operation.operationId){tab.navigation.status=receipt.status==='rejected'?'rejected':'unknown';if(receipt.status==='rejected'){tab.kind=tab.navigation.previousKind;tab.url=tab.navigation.previousUrl;if(isLocalTab(tab))tab.loading=false;delete tab.pendingUrl;}}this.store.saveOperation(workspace,receipt); } }
       finally { this.applyingOperations.delete(tenant);this.store.saveOperation(this.store.workspace(tenant),receipt);this.push(tenant); }
       return receipt;
     });
@@ -531,7 +552,21 @@ export class Control extends EventEmitter {
       const tab = () => { const found = state.tabs.find(t => t.id === action.tabId); if (!found) throw new ApiError(404, '标签页不存在'); return found; };
       const window = () => { const found = state.windows.find(w => w.id === action.windowId); if (!found) throw new ApiError(404, '窗口不存在'); return found; };
       const navigationUrl = (value: unknown) => { try { return resolveNavigation(value, state.settings.searchEngine); } catch (error) { throw new ApiError(400, error instanceof Error ? error.message : '无效网址或搜索内容'); } };
-      const createTab = (windowId: string) => { if (state.tabs.length >= 32) throw new ApiError(400, '最多支持32个标签页'); const next: ProductTab = { id: randomUUID(), windowId, webviewId: this.store.viewId(), title: String(action.title ?? '新标签页').slice(0, 120), kind: action.url === undefined ? 'start' : 'remote', url: action.url === undefined ? '' : navigationUrl(action.url) }; state.tabs.push(next); state.windows.find(w => w.id === windowId)!.activeTabId = next.id; state.activeWindowId = windowId; };
+      const createTab = (windowId: string, files = false) => {
+        if (state.tabs.length >= 32) throw new ApiError(400, '最多支持32个标签页');
+        const kind = files ? 'files' : action.url === undefined ? 'start' : 'remote';
+        const next: ProductTab = {
+          id: randomUUID(), windowId, webviewId: this.store.viewId(), kind,
+          title: files ? '我的文件' : String(action.title ?? '新标签页').slice(0, 120),
+          url: kind === 'remote' ? navigationUrl(action.url) : '',
+        };
+        state.tabs.push(next);
+        state.windows.find(w => w.id === windowId)!.activeTabId = next.id;
+        state.activeWindowId = windowId;
+      };
+      const reservesFilesTab = (tab: ProductTab) => tab.kind === 'files' ||
+        tab.navigation?.previousKind === 'files' && !tab.navigation.resolved &&
+        ['applying', 'unknown'].includes(tab.navigation.status);
       let application: ProductActionResult['application'];
       let siteUaChanged = false;
       switch (action.type) {
@@ -543,15 +578,32 @@ export class Control extends EventEmitter {
         }
         case 'window.close': { const w = window(); if (state.pendingWindowCloseId && state.pendingWindowCloseId !== w.id) throw new ApiError(409, '请先处理当前关闭请求'); state.pendingWindowCloseId = w.id; await this.continueWindowClose(state); break; }
         case 'tab.create': createTab(window().id); break;
+        case 'tab.files': {
+          const target = window(), existing = state.tabs.find(tab => tab.windowId === target.id && reservesFilesTab(tab));
+          if (existing) {
+            target.activeTabId = existing.id;
+            state.activeWindowId = target.id;
+          } else createTab(target.id, true);
+          break;
+        }
         case 'tab.activate': { const t = tab(); state.windows.find(w => w.id === t.windowId)!.activeTabId = t.id; state.activeWindowId = t.windowId; break; }
-        case 'tab.move': { const t = tab(), target = window(), old = state.windows.find(w => w.id === t.windowId)!; t.windowId = target.id; if (old.activeTabId === t.id) old.activeTabId = state.tabs.find(item => item.windowId === old.id)?.id ?? null; target.activeTabId = t.id; state.activeWindowId = target.id; break; }
+        case 'tab.move': {
+          const t = tab(), target = window(), old = state.windows.find(w => w.id === t.windowId)!;
+          if (reservesFilesTab(t) && state.tabs.some(other => other.id !== t.id && other.windowId === target.id && reservesFilesTab(other)))
+            throw new ApiError(409, '目标窗口已打开我的文件');
+          t.windowId = target.id;
+          if (old.activeTabId === t.id) old.activeTabId = state.tabs.find(item => item.windowId === old.id)?.id ?? null;
+          target.activeTabId = t.id;
+          state.activeWindowId = target.id;
+          break;
+        }
         case 'tab.navigate': {
           const t=tab(),address=navigationUrl(action.url),previousKind=t.kind??'remote',operation=this.applyingOperations.get(tenant);
           if (t.lifecycleRecovery || t.lifecycleRecoveryError) throw new ApiError(409, t.lifecycleRecoveryError ?? '页面正在恢复');
           if(operation)t.navigation={operationId:operation.operationId,operationGeneration:operation.operationGeneration,status:'applying',browserIncarnation:this.browserIncarnations.get(tenant),previousUrl:t.url,previousKind};
           t.pendingUrl=address;if(operation)t.kind='remote';this.saveProduct(state);
           const metadata=operation?{operationId:operation.operationId,operationGeneration:operation.operationGeneration,operationSequence:operation.operationSequence}:{};
-          if(previousKind==='start') {
+          if(isLocalTab({kind:previousKind})) {
             const snapshot=await this.endpoint.request('session.snapshot',tenant),exists=(snapshot.views??[]).some((view:any)=>String(view.viewId??view.view??view.id)===t.webviewId);
             const region=this.viewers.get(tenant)?.viewport?.windows.find(w=>w.windowId===t.windowId);
             if(exists)await this.endpoint.request('view.navigate',tenant,{viewId:t.webviewId,url:address,...metadata});
@@ -561,7 +613,7 @@ export class Control extends EventEmitter {
           if(operation)application={status:'pending',reason:'导航已受理，等待页面确认'};break;
         }
         case 'tab.command': {
-          const t=tab();if(!['back','forward','reload','stop'].includes(action.command))throw new ApiError(400,'未知导航命令');if(t.kind==='start')break;
+          const t=tab();if(!['back','forward','reload','stop'].includes(action.command))throw new ApiError(400,'未知导航命令');if(isLocalTab(t))break;
           if (t.lifecycleRecovery || t.lifecycleRecoveryError) throw new ApiError(409, t.lifecycleRecoveryError ?? '页面正在恢复');
           const operation=this.applyingOperations.get(tenant);
           // Stop owns a command receipt, not a document navigation. Retain the
@@ -670,7 +722,7 @@ export class Control extends EventEmitter {
   }
   private async closeProductTab(state: ProductWorkspace, tab: ProductTab) {
     if (state.pendingClose && state.pendingClose.id !== tab.id) throw new ApiError(409, '请先处理当前关闭请求');
-    if (tab.kind === 'start' || tab.popup && tab.popup.status !== 'adopted') { this.removeProductTab(state, tab); return; }
+    if (isLocalTab(tab) || tab.popup && tab.popup.status !== 'adopted') { this.removeProductTab(state, tab); return; }
     const result = await this.endpoint.request('view.close', state.tenantId, { viewId: tab.webviewId, force: false });
     if (result.closed === true) this.removeProductTab(state, tab);
     else if (result.accepted || result.pending) state.pendingClose = this.pendingClose(tab.id, result, tab.windowId);
@@ -708,7 +760,7 @@ export class Control extends EventEmitter {
       this.backgroundPolicy.retain(tenant, new Set(snapshot.running === false || resourceLimitation ? [] : actual.filter(v => state.tabs.some(t => t.webviewId === String(v.viewId ?? v.view ?? v.id))).map(v => String(v.viewId ?? v.view ?? v.id))));
       if(typeof snapshot.browserIncarnation==='string')this.browserIncarnations.set(tenant,snapshot.browserIncarnation);
       for(const tab of state.tabs){const nav=tab.navigation;if(nav && !nav.resolved && ['applying','unknown'].includes(nav.status) && nav.browserIncarnation && (snapshot.running===false || typeof snapshot.browserIncarnation==='string' && snapshot.browserIncarnation!==nav.browserIncarnation)){
-        nav.status='unknown';nav.resolved=true;tab.kind=nav.previousKind;tab.url=nav.previousUrl;if(tab.kind==='start')tab.loading=false;delete tab.pendingUrl;
+        nav.status='unknown';nav.resolved=true;tab.kind=nav.previousKind;tab.url=nav.previousUrl;if(isLocalTab(tab))tab.loading=false;delete tab.pendingUrl;
         const saved=this.store.operation(tenant,nav.operationId);if(saved && !['committed','rejected'].includes(saved.receipt.status)){saved.receipt.status='unknown';saved.receipt.resolved=true;saved.receipt.resolution='target-retired';saved.receipt.error='原页面实例已结束，导航执行结果未知';delete saved.receipt.application;this.store.saveOperation(state,saved.receipt);}
       }}
       const appliedPolicy = snapshot.stats?.mediaPolicy?.applied;
@@ -730,7 +782,7 @@ export class Control extends EventEmitter {
             // Failure and document commit are independent. A real Chromium
             // error document must remain visible even when its receipt rejects.
             if(committed || terminal.documentCommitted===true) { t.kind='remote';t.url=typeof terminal.url==='string'?terminal.url:(t.pendingUrl??t.url); }
-            else { t.kind=nav.previousKind;t.url=nav.previousUrl;if(t.kind==='start')t.loading=false; }
+            else { t.kind=nav.previousKind;t.url=nav.previousUrl;if(isLocalTab(t))t.loading=false; }
             delete t.pendingUrl;
             if(operation) {const active=this.applyingOperations.get(tenant);if(active?.operationId===nav.operationId){active.status=committed?'committed':'rejected';delete active.application;if(!committed)active.error=terminal.state==='cancelled'?'导航已取消':'导航未完成：'+terminal.state;}operation.receipt.status=committed?'committed':'rejected';delete operation.receipt.application;if(!committed)operation.receipt.error=terminal.state==='cancelled'?'导航已取消':'导航未完成：'+terminal.state;this.store.saveOperation(state,operation.receipt);}
           }
@@ -746,9 +798,9 @@ export class Control extends EventEmitter {
           if(active && active.operationId===terminal.operationId && active.operationGeneration===terminal.operationGeneration){Object.assign(active,saved.receipt);delete active.application;}
           await this.endpoint.request('view.navigation.ack',tenant,{browserIncarnation:snapshot.browserIncarnation,viewId:t.webviewId,operationId:terminal.operationId,operationGeneration:terminal.operationGeneration}).catch(()=>{});
         }
-        // A provisional failure restored the local start page. Do not project
+        // A provisional failure restored a local product tab. Do not project
         // the retained Browser view's URL/title over that local product state.
-        if (t.kind === 'start') continue;
+        if (isLocalTab(t)) continue;
         if (t.popup?.status === 'pending') t.popup = { provisionalId: t.popup.provisionalId, status: 'adopted' };
         if (current.close_state === 'closed') { this.removeProductTab(state, t); continue; }
         // Recovery uses an initial blank WebContents, then imports/restores history.
@@ -774,12 +826,12 @@ export class Control extends EventEmitter {
       resourceLimitation = this.qualityFor(tenant, state).resourceLimitation;
       if (snapshot.running === false && !resourceLimitation) throw new Error('Browser已离线，页面保留并等待恢复');
       const viewer = this.viewers.get(tenant), viewport = viewer?.viewport ?? this.lastViewports.get(tenant);
-      const wanted = (t: ProductTab) => t.kind !== 'start' && !viewer?.security?.locked && !!viewer?.viewport?.windows.some(w => w.windowId === t.windowId && w.visible) && state.windows.some(w => w.id === t.windowId && w.activeTabId === t.id) && (state.layoutMode !== 'focused' || t.windowId === state.activeWindowId);
-      const ordered = [...state.tabs].filter(t => t.kind !== 'start').sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
+      const wanted = (t: ProductTab) => !isLocalTab(t) && !viewer?.security?.locked && !!viewer?.viewport?.windows.some(w => w.windowId === t.windowId && w.visible) && state.windows.some(w => w.id === t.windowId && w.activeTabId === t.id) && (state.layoutMode !== 'focused' || t.windowId === state.activeWindowId);
+      const ordered = [...state.tabs].filter(t => !isLocalTab(t)).sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
       // A first navigation can have created/shown a Native view before a
-      // provisional failure restores the local start page. Explicitly remove
+      // provisional failure restores a local product tab. Explicitly remove
       // that existing view from the atlas, including under resource limitation.
-      for (const t of state.tabs.filter(tab => tab.kind === 'start')) {
+      for (const t of state.tabs.filter(tab => isLocalTab(tab))) {
         const current=actual.find(v=>String(v.viewId??v.view??v.id)===t.webviewId),key=tenant+'/'+t.webviewId;
         if(!current){this.configurations.delete(key);continue;}
         this.backgroundPolicy.forget(key);
@@ -914,7 +966,7 @@ export class Control extends EventEmitter {
     nav.resolved = true;
     tab.kind = nav.previousKind;
     tab.url = nav.previousUrl;
-    if (tab.kind === 'start') tab.loading = false;
+    if (isLocalTab(tab)) tab.loading = false;
     const saved = this.store.operation(state.tenantId, nav.operationId);
     if (!saved || ['committed', 'rejected'].includes(saved.receipt.status)) return;
     saved.receipt.status = 'unknown';
@@ -930,7 +982,7 @@ export class Control extends EventEmitter {
   }
   private async advanceLifecycleRecovery(state: ProductWorkspace, tab: ProductTab, current: any, browserIncarnation: unknown, visible: boolean) {
     if (!current || current.pending !== false || current.recovery?.pending === true ||
-        current.close_state === 'closing' || current.close_state === 'closed' || tab.kind === 'start' ||
+        current.close_state === 'closing' || current.close_state === 'closed' || isLocalTab(tab) ||
         state.pendingClose?.id === tab.id || state.pendingWindowCloseId === tab.windowId) return;
     const previous = tab.lifecycleRecovery;
     if (previous && tab.lifecycleRecoveryError) return;
@@ -966,7 +1018,7 @@ export class Control extends EventEmitter {
   private async maintainBackgroundTab(state: ProductWorkspace, tab: ProductTab, current: any, visible: boolean, browserIncarnation: unknown) {
     const tenant = state.tenantId, key = tenant + '/' + tab.webviewId;
     const action = this.backgroundPolicy.action(key, state.settings.memorySaverEnabled, visible,
-      tab.kind === 'start' || !!tab.popup && tab.popup.status !== 'adopted' || state.pendingClose?.id === tab.id || state.pendingWindowCloseId === tab.windowId, current, browserIncarnation);
+      isLocalTab(tab) || !!tab.popup && tab.popup.status !== 'adopted' || state.pendingClose?.id === tab.id || state.pendingWindowCloseId === tab.windowId, current, browserIncarnation);
     if (!action) return;
     const attempt = this.transitions.get(key);
     if (attempt?.action === action && Date.now() - attempt.at <= 12000) return;
@@ -990,7 +1042,7 @@ export class Control extends EventEmitter {
     const authEpoch = viewer.security?.peer?.appliedEpoch;
     if (viewer.security && (!authEpoch || viewer.security.peer?.connectionId !== connectionId)) return;
     const requests = (this.fileRequests.get(tenant) ?? []).slice(0,64).map(request => ({ id: request.id, binding: request.binding }));
-    const params = { connectionId, requests, ...(authEpoch ? { authEpoch } : {}) };
+    const params = { connectionId, requests, library: true, ...(authEpoch ? { authEpoch } : {}) };
     const encoded = JSON.stringify(params);
     if (this.fileAuthorizations.get(tenant) === encoded) return;
     this.fileAuthorizations.set(tenant, encoded);
@@ -1002,12 +1054,13 @@ export class Control extends EventEmitter {
     const files: InternalFileRequest[] = [];
     for (const view of Array.isArray(snapshot.views) ? snapshot.views : []) {
       const viewId = String(view.viewId ?? view.view ?? view.id), tab = state.tabs.find(t => t.webviewId === viewId);
-      if (!tab || snapshot.running === false || typeof snapshot.browserIncarnation !== 'string' || !snapshot.browserIncarnation || view.instance === undefined || view.document === undefined) continue;
+      if (!tab || isLocalTab(tab) || snapshot.running === false || typeof snapshot.browserIncarnation !== 'string' || !snapshot.browserIncarnation || view.instance === undefined || view.document === undefined) continue;
       const instance = String(view.instance), document = String(view.document);
       for (const request of Array.isArray(view.pageRequests?.pending) ? view.pageRequests.pending : []) {
         if (request.kind === 'file_chooser' && typeof request.request === 'string') {
           const id = createHash('sha256').update(JSON.stringify([tenant, snapshot.browserIncarnation, viewId, instance, document, request.request])).digest('hex');
-          files.push({ id, tabId: tab.id, windowId: tab.windowId, origin: String(request.origin ?? ''), multiple: request.multiple === true, acceptTypesOmitted: request.accept_types_omitted === true, accept: Array.isArray(request.accept_types) ? request.accept_types.filter((type: unknown): type is string => typeof type === 'string').slice(0,64) : [], state: request.state === 'validating' ? 'validating' : 'pending', limits: { ...this.uploads.limits }, binding: { browserIncarnation: snapshot.browserIncarnation, view: viewId, instance, document, request: request.request } });
+          const anchor = fileRequestAnchor(request.input_anchor, instance, document);
+          files.push({ id, ...(anchor ? { anchor } : {}), tabId: tab.id, windowId: tab.windowId, origin: String(request.origin ?? ''), multiple: request.multiple === true, acceptTypesOmitted: request.accept_types_omitted === true, accept: Array.isArray(request.accept_types) ? request.accept_types.filter((type: unknown): type is string => typeof type === 'string').slice(0,64) : [], state: request.state === 'validating' ? 'validating' : 'pending', limits: { ...this.uploads.limits }, binding: { browserIncarnation: snapshot.browserIncarnation, view: viewId, instance, document, request: request.request } });
         }
         if (!['alert', 'confirm', 'prompt', 'beforeunload'].includes(request.kind) || typeof request.request !== 'string' || state.pendingClose?.id === tab.id && request.kind === 'beforeunload') continue;
         // Browser replacement may restart its local token/request counters.

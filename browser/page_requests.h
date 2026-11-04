@@ -29,9 +29,24 @@ class PageRequests final : public content::WebContentsDelegate,
   PageRequests();
   ~PageRequests() override;
   void Bind(content::WebContents* contents);
-  base::DictValue Snapshot();
-  base::DictValue Reply(const base::DictValue& reply);
-  base::DictValue FileStatus(const std::string& request);
+  struct AnchorLayout {
+    int width;
+    int height;
+    float device_scale_factor;
+    std::uint64_t instance;
+    std::uint64_t document;
+    std::uint64_t generation;
+  };
+  base::DictValue Snapshot(const AnchorLayout* anchor_layout);
+  struct SelectionBinding {
+    std::uint64_t instance = 0;
+    std::uint64_t document = 0;
+    bool operator==(const SelectionBinding&) const = default;
+  };
+  base::DictValue Reply(const base::DictValue& reply, SelectionBinding binding);
+  base::DictValue FileStatus(const std::string& request,
+                             const base::Value* selection,
+                             SelectionBinding binding, bool terminal_only);
   struct SelectedFile { base::FilePath path; std::u16string display_name; };
   base::DictValue Command(const base::DictValue& command);
   void CancelAll(const std::string& reason);
@@ -92,12 +107,17 @@ class PageRequests final : public content::WebContentsDelegate,
 
  private:
   struct Pending;
+  struct FileReceipt {
+    base::DictValue result;
+    SelectionBinding binding;
+  };
   std::uint64_t Add(std::unique_ptr<Pending>);
   void Event(base::DictValue);
   void Cancel(std::uint64_t id, const std::string& reason);
   void Prune();
   void FilesValidated(std::uint64_t, std::vector<SelectedFile>, std::string);
-  void FileResult(std::uint64_t, const char*, const std::string& error = {});
+  void FileResult(std::uint64_t, const char*, const Pending& request,
+                  const std::string& error = {});
   void DidStartNavigation(content::NavigationHandle*) override;
   void DidFinishNavigation(content::NavigationHandle*) override;
   void RenderFrameDeleted(content::RenderFrameHost*) override;
@@ -113,7 +133,7 @@ class PageRequests final : public content::WebContentsDelegate,
   std::uint64_t next_id_ = 1;
   std::map<std::uint64_t, std::unique_ptr<Pending>> pending_;
   std::deque<base::DictValue> events_;
-  std::map<std::uint64_t, base::DictValue> file_results_;
+  std::map<std::uint64_t, FileReceipt> file_results_;
   bool fullscreen_ = false;
   bool cancelling_ = false;
   content::WeakDocumentPtr find_document_;

@@ -70,7 +70,9 @@ Control发送`{degradationPreference,maxFps}`；maxFps来自显式Viewer刷新�
 
 反馈只保留诊断，不再触发DPR/码率对账。只有有效源完成时戳才计算呈现估算；新OSR路径未测得完成时戳时省略该样本。Video终点是匹配真实RTP/epoch的compositor回调，不是物理屏幕点亮。独立时钟与置信度见[媒体反馈](media-feedback.md)。诊断manual模式不绕过WebRTC拥塞控制。
 
-搜索引擎偏好统一保存Control，地址栏和简易起始页使用同一URL/搜索解析。显式kind=start的Tab由Viewer本地显示，不建立远程页面渲染需求；真实about:blank或popup不因此被覆盖。首个网页导航直接创建目标，不插入伪造Browser历史；空起始页仍保留RTC数据通道。
+搜索引擎偏好统一保存Control，地址栏和简易起始页使用同一URL/搜索解析。显式kind=start或files的Tab由Viewer本地显示，不建立远程页面渲染需求；真实about:blank或popup不因此被覆盖。首个网页导航直接创建目标，不插入伪造Browser历史；本地页仍保留RTC数据通道。“我的文件”由tab.files创建或激活每Window的单例标签，导航到真实URL后转为remote；关闭本地标签不调用Browser关闭页面。
+
+Control的SQLite文件库保存目录、分组、篮子顺序与不可变选择事务，Endpoint保存Session内hash资产和网页临时副本。文件篮替换检查目录revision，归档/消费必须有匹配selection_id的原生终态；取消和已提交未知结果不消费。元数据走鉴权WebSocket，上传、读取、选片、后处理与实际文件提交沿用RTC。文件库使用独立的每Tenant元数据队列，重连后通过library.get对账；客户端不持久化文件目录。详细接口、配额和回收见[音频与文件](audio-and-files.zh-CN.md)及[文件库契约](file-library-contract.md)。
 
 ## 代码入口与验证
 

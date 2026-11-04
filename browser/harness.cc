@@ -6,6 +6,7 @@
 #include <cmath>
 #include <map>
 #include <set>
+#include <string_view>
 #include "base/base64.h"
 #include "base/base_paths.h"
 #include "base/command_line.h"
@@ -909,20 +910,31 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     return result;
   }
   if (*method == "page.requests" || *method == "page.reply" || *method == "page.command" || *method == "page.fileStatus") {
+    const auto token = endpoint.Token(session, view).value;
+    PageRequests::SelectionBinding binding{token.instance, token.document};
+    bool terminal_only = false;
     if (*method == "page.reply" || *method == "page.fileStatus") {
-      const auto token = endpoint.Token(session, view).value;
       for (const auto& [key, expected] : {std::pair{"instance", token.instance},
                                         std::pair{"document", token.document}}) {
         if (!request.Find(key)) continue;
         uint64_t supplied = 0;
-        if (!ReadId(request, key, &supplied) || supplied != expected)
+        if (!ReadId(request, key, &supplied))
           return error("stale_page_request_target");
+        if (supplied == expected) continue;
+        // A page may navigate immediately after the native callback. Allow
+        // only an exact terminal receipt from the same WebView instance.
+        if (*method != "page.fileStatus" || std::string_view(key) != "document" ||
+            !request.Find("instance") || !request.FindString("selection_id"))
+          return error("stale_page_request_target");
+        binding.document = supplied;
+        terminal_only = true;
       }
     }
     if (*method == "page.fileStatus") {
       const auto* key = request.FindString("request");
       if (!key) return error("file_request_required");
-      auto result = page_requests[index]->FileStatus(*key);
+      auto result = page_requests[index]->FileStatus(
+          *key, request.Find("selection_id"), binding, terminal_only);
       result.Set("version", 1); result.Set("id", id); return result;
     }
     if (*method == "page.command") {
@@ -938,10 +950,18 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         return result;
       }
     }
-    auto result = *method == "page.requests"
-                      ? page_requests[index]->Snapshot()
-                      : (*method == "page.reply" ? page_requests[index]->Reply(request)
-                                                 : page_requests[index]->Command(request));
+    base::DictValue result;
+    if (*method == "page.requests") {
+      const auto& spec = specs[index];
+      const PageRequests::AnchorLayout layout{
+          spec.width, spec.height, PageScale(spec), token.instance,
+          token.document, output_generation};
+      result = page_requests[index]->Snapshot(
+          output && spec.visible && token.instance && token.document ? &layout : nullptr);
+    } else {
+      result = *method == "page.reply" ? page_requests[index]->Reply(request, binding)
+                                        : page_requests[index]->Command(request);
+    }
     result.Set("version", 1);
     result.Set("id", id);
     if (*method == "page.requests")

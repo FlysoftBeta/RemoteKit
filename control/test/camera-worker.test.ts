@@ -13,7 +13,7 @@ test('bitmap worker scores and encodes one immutable snapshot and releases backi
     async convertToBlob(){assert.ok(bitmap.closed>0,'bitmap released before encoding');return new Blob(['same-snapshot']);}
   }
   const scope:any={Uint8Array,performance,OffscreenCanvas:Canvas,importScripts(){},postMessage:(message:any)=>replies.push(message)};
-  vm.runInNewContext(readFileSync(new URL('../public/camera-score.js',import.meta.url),'utf8'),scope);
+  vm.runInNewContext(readFileSync(new URL('../../tools/camera-score-worker.js',import.meta.url),'utf8'),scope);
   await scope.onmessage({data:{id:1,generation:2,bitmap,width:16,height:9,format:'image/jpeg'}});
   assert.equal(draws[0],bitmap);assert.equal(draws[1],canvases[0]);
   assert.equal(await replies[0].blob.text(),'same-snapshot');assert.ok(Number.isFinite(replies[0].result.score));

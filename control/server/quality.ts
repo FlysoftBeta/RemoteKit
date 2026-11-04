@@ -1,3 +1,4 @@
+import { isLocalTab } from '../shared/product';
 import { feasibleDpr } from './atlas-plan';
 import type { AppliedMediaPolicy, DegradationPreference, ProductFeedback, ProductQuality, ProductWorkspace, ViewerViewport } from '../shared/product';
 const preferences: Record<ProductWorkspace['settings']['qualityPreference'], DegradationPreference> = { quality: 'maintain-resolution', auto: 'balanced', smooth: 'maintain-framerate' };
@@ -18,7 +19,7 @@ export class QualityState {
   }
   snapshot(workspace: ProductWorkspace, viewport?: ViewerViewport, now = Date.now(), manual = false, applied: AppliedMediaPolicy | null = null): ProductQuality {
     const scale = workspace.settings.clientScaleOverride ?? viewport?.devicePixelRatio ?? 1;
-    const visible = viewport?.windows.filter(w => w.visible && workspace.windows.some(window => window.id === w.windowId && !!window.activeTabId && !workspace.tabs.some(tab => tab.id === window.activeTabId && tab.kind === 'start')) && (workspace.layoutMode !== 'focused' || w.windowId === workspace.activeWindowId)) ?? [];
+    const visible = viewport?.windows.filter(w => w.visible && workspace.windows.some(window => window.id === w.windowId && !!window.activeTabId && !workspace.tabs.some(tab => tab.id === window.activeTabId && isLocalTab(tab))) && (workspace.layoutMode !== 'focused' || w.windowId === workspace.activeWindowId)) ?? [];
     let effectiveDpr = scale, resourceLimitation: string | null = null;
     if (!manual) {
       try { effectiveDpr = feasibleDpr(visible, scale); }

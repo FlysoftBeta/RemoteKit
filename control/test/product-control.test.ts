@@ -626,3 +626,51 @@ test('failed first navigation retains start and a retry navigates an already-cre
     assert.equal(endpoint.calls.filter(c => c.method === 'view.navigate').slice(-1)[0]?.args.url, 'https://www.google.com/search?q=second%20query');
   } finally { await control.detachViewer(user.tenantId, 'lease'); store.db.close(); }
 });
+
+test('My Files is singleton per Window, local for media and closable or navigable as a product tab', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  const tenant = user.tenantId, lease = 'lease';
+  try {
+    await control.attachViewer(tenant, lease, () => {});
+    const initial = (await control.productAction(tenant, { type: 'window.create', url: 'https://a.test/' }, lease)).state.workspace;
+    const windowId = initial.windows[0].id, remote = initial.tabs[0];
+    await control.viewerRequest(tenant, lease, 'viewport',
+      { devicePixelRatio: 1, windows: [{ windowId, width: 800, height: 600, visible: true }] });
+    const opened = (await control.productAction(tenant, { type: 'tab.files', windowId }, lease)).state.workspace;
+    const files = opened.tabs.find(t => t.kind === 'files')!;
+    assert.equal(opened.windows[0].activeTabId, files.id);
+    assert.equal(endpoint.views.get(tenant)?.get(remote.webviewId)?.visible, false);
+    assert.equal(endpoint.views.get(tenant)?.has(files.webviewId), false);
+    const again = (await control.productAction(tenant, { type: 'tab.files', windowId }, lease)).state.workspace;
+    assert.equal(again.tabs.length, 2);
+    const navigated = (await control.productAction(tenant, { type: 'tab.navigate', tabId: files.id, url: 'https://b.test/' }, lease)).state.workspace;
+    assert.equal(navigated.tabs.find(t => t.id === files.id)?.kind, 'remote');
+    assert.equal(endpoint.views.get(tenant)?.get(files.webviewId)?.url, 'https://b.test/');
+    const reopened = (await control.productAction(tenant, { type: 'tab.files', windowId }, lease)).state.workspace.tabs.find(t => t.kind === 'files')!;
+    const closed = (await control.productAction(tenant, { type: 'tab.close', tabId: reopened.id }, lease)).state.workspace;
+    assert.equal(closed.tabs.length, 2);
+    assert.equal(endpoint.calls.some(call => call.method === 'view.close' && call.args.viewId === reopened.webviewId), false);
+  } finally { await control.detachViewer(tenant, lease); store.db.close(); }
+});
+
+test('native file chooser anchor exposes only viewport bounds bound to the pending document', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  const tenant = user.tenantId, lease = 'lease';
+  try {
+    await control.attachViewer(tenant, lease, () => {});
+    const { state } = await control.productAction(tenant, { type: 'window.create', url: 'https://a.test/' }, lease);
+    const view = endpoint.views.get(tenant)!.get(state.workspace.tabs[0].webviewId);
+    const anchor = { x: 5, y: 7, width: 9, height: 11, viewportWidth: 800, viewportHeight: 600,
+      deviceScaleFactor: 1.25, instance: view.instance, document: view.document, layoutGeneration: '42' };
+    view.pageRequests = { pending: [
+      { kind: 'file_chooser', request: '7', input_anchor: { ...anchor, ignored: 'secret' } },
+      { kind: 'file_chooser', request: '8', input_anchor: { ...anchor, document: '99' } },
+      { kind: 'file_chooser', request: '9', input_anchor: { ...anchor, x: 795 } },
+    ] };
+    await control.tick();
+    const requests = control.productState(tenant).fileRequests;
+    assert.equal(requests.length, 3);
+    assert.deepEqual(requests.map(request => request.anchor), [anchor, undefined, undefined]);
+    assert.equal('binding' in requests[0], false);
+  } finally { await control.detachViewer(tenant, lease); store.db.close(); }
+});

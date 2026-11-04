@@ -10,6 +10,8 @@ Endpoint每次fresh/force帧提交前调用SDK原生AdaptFrame，以原始atlas�
 
 SetRates提供硬件目标码率/FPS。Comp根据Slot占用、客户端能力及WebRTC限制发送Begin。观察输入FPS不是永久源上限，slot空闲时可恢复到官方限制；零码率暂停，恢复请求关键帧。配置及H264上限只是能力边界。
 
+QSV在已排空任务和VPP输出后更新速率。若Reset返回`MFX_ERR_INCOMPATIBLE_VIDEO_PARAM`（例如高码率降到1FPS需要更大的VBV），在原oneVPL session/device重新Query/Init编码组件，核对几何、色彩、LowPower与协商level，按需扩充VPP输出池并请求IDR。不得因为该状态永久退出编码线程，也不以擅自提高FPS、重建RTC或回退其他呈现后端掩盖失败；其他错误继续明确报告。硬件复现与边界见[低FPS恢复记录](../develop/docs/file-unlock-investigation-20261104.md)。
+
 首次呈现和显式刷新不能在SDK接受纹理时视为完成：source可能尚未交给编码器，编码结果也可能被布局屏障拒绝。Comp按peer、授权代次与完整呈现屏障保留刷新请求；只有该请求标记的关键帧通过屏障且SDK编码发布成功，才消费请求。请求合并、单个尝试在途，失败后的强制Begin和重新提交至多每秒一次，仍服从SetRates、Slot背压和可见布局门禁。源等待可以取消，已进入编码的尝试等待实际完成；旧代次结果不能完成新请求。该恢复请求与静态页面的单次idle尾IDR分别记账。
 
 ## DataChannel诊断

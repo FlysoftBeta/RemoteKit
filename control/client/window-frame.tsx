@@ -38,7 +38,8 @@ import { RemoteTransport } from "./transport";
 import { RemoteViewport } from "./remote-viewport";
 import type { Action } from "./product-dialogs";
 import { StartPage } from './start-page';
-import { SEARCH_ENGINES } from '../shared/product';
+import { MyFiles } from './my-files';
+import { isLocalTab, SEARCH_ENGINES } from '../shared/product';
 import { AudioControls } from './audio-controls';
 import type { AudioChannels } from './audio-output';
 export function Tool({
@@ -101,7 +102,7 @@ export function WindowFrame({
   const tabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
     active = tabs.find((t) => t.id === win.activeTabId),
     focused = state.workspace.activeWindowId === win.id;
-  const [address, setAddress] = useState(active?.kind === 'start' ? "" : active?.url ?? ""),
+  const [address, setAddress] = useState(active && isLocalTab(active) ? "" : active?.url ?? ""),
     [busy, setBusy] = useState(false),
     [menu, setMenu] = useState<HTMLElement | null>(null),
     [switcher, setSwitcher] = useState<HTMLElement | null>(null),
@@ -127,7 +128,7 @@ export function WindowFrame({
     if (previousTab.current !== active?.id) addressDirty.current = false;
     previousTab.current = active?.id;
     if (!addressDirty.current)
-      setAddress(active?.kind === 'start' ? "" : active?.pendingUrl ?? active?.url ?? "");
+      setAddress(active && isLocalTab(active) ? "" : active?.pendingUrl ?? active?.url ?? "");
   }, [active?.id, active?.url, active?.pendingUrl, active?.kind]);
   useEffect(() => {
     if (focusAddress === win.id) {
@@ -343,7 +344,7 @@ export function WindowFrame({
         </Tool>
         <Tool
           title={active?.loading ? "停止加载" : "刷新"}
-          disabled={!online || !active}
+          disabled={!online || !active || active.kind === 'files'}
           onClick={() =>
             active &&
             run({
@@ -391,7 +392,7 @@ export function WindowFrame({
               if (e.key === "Enter" && (composing.current || e.nativeEvent.isComposing || e.keyCode === 229)) e.preventDefault();
               if (e.key === "Escape") {
                 addressDirty.current = false;
-                setAddress(active?.kind === 'start' ? "" : active?.url ?? "");
+                setAddress(active && isLocalTab(active) ? "" : active?.url ?? "");
                 input.current?.blur();
               }
             }}
@@ -402,7 +403,7 @@ export function WindowFrame({
         </Tool>
       </div>
       <div className="window-content" ref={content}>
-        {!active || active.kind === 'start' ? (
+        {active?.kind === 'files' ? <MyFiles key={active.id} visible={visible} /> : !active || active.kind === 'start' ? (
           <StartPage key={active?.id ?? 'empty'} engineLabel={SEARCH_ENGINES.find(engine => engine.value === state.workspace.settings.searchEngine)?.label ?? 'Google'} online={online} onSubmit={submit} />
         ) : (
           <>
@@ -484,6 +485,9 @@ export function WindowFrame({
           }}
         >
           新建窗口
+        </MenuItem>
+        <MenuItem disabled={!online} onClick={() => { setMenu(null); run({ type: 'tab.files', windowId: win.id }); }}>
+          我的文件
         </MenuItem>
         <MenuItem
           disabled={!online || !active?.canGoForward}
@@ -620,7 +624,7 @@ export function WindowFrame({
         <MenuItem
           disabled={!online}
           onClick={() => {
-            if (tabMenu) run({ type: "window.create", url: tabMenu.tab.kind === 'start' ? undefined : tabMenu.tab.url });
+            if (tabMenu) run({ type: "window.create", url: isLocalTab(tabMenu.tab) ? undefined : tabMenu.tab.url });
             setTabMenu(null);
           }}
         >

@@ -1,0 +1,394 @@
+diff --git a/content/browser/web_contents/file_chooser_impl.cc b/content/browser/web_contents/file_chooser_impl.cc
+index fe2c28045b..0c73531e43 100644
+--- a/content/browser/web_contents/file_chooser_impl.cc
++++ b/content/browser/web_contents/file_chooser_impl.cc
+@@ -89,6 +89,13 @@ void FileChooserImpl::FileSelectListenerImpl::SetFullscreenBlock(
+   fullscreen_block_ = std::move(fullscreen_block);
+ }
+ 
++const blink::mojom::FileChooserInputAnchor*
++FileChooserImpl::FileSelectListenerImpl::GetInputAnchor() const {
++  return owner_ && owner_->listener_impl_.get() == this
++             ? owner_->input_anchor_.get()
++             : nullptr;
++}
++
+ void FileChooserImpl::FileSelectListenerImpl::FileSelected(
+     std::vector<blink::mojom::FileChooserFileInfoPtr> files,
+     const base::FilePath& base_dir,
+@@ -181,6 +188,7 @@ void FileChooserImpl::OpenFileChooser(blink::mojom::FileChooserParamsPtr params,
+     return;
+   }
+ #endif
++  input_anchor_.reset();
+   callback_ = std::move(callback);
+   auto listener = base::MakeRefCounted<FileSelectListenerImpl>(this);
+   listener_impl_ = listener.get();
+@@ -222,6 +230,12 @@ void FileChooserImpl::OpenFileChooser(blink::mojom::FileChooserParamsPtr params,
+                        *params);
+ }
+ 
++void FileChooserImpl::UpdateInputAnchor(
++    blink::mojom::FileChooserInputAnchorPtr anchor) {
++  if (listener_impl_)
++    input_anchor_ = std::move(anchor);
++}
++
+ void FileChooserImpl::EnumerateChosenDirectory(
+     const base::FilePath& directory_path,
+     EnumerateChosenDirectoryCallback callback) {
+@@ -229,6 +243,7 @@ void FileChooserImpl::EnumerateChosenDirectory(
+     std::move(callback).Run(nullptr);
+     return;
+   }
++  input_anchor_.reset();
+   callback_ = std::move(callback);
+   auto listener = base::MakeRefCounted<FileSelectListenerImpl>(this);
+   listener_impl_ = listener.get();
+diff --git a/content/browser/web_contents/file_chooser_impl.h b/content/browser/web_contents/file_chooser_impl.h
+index a1b4a3ccb5..be6b98d46f 100644
+--- a/content/browser/web_contents/file_chooser_impl.h
++++ b/content/browser/web_contents/file_chooser_impl.h
+@@ -44,6 +44,7 @@ class CONTENT_EXPORT FileChooserImpl : public blink::mojom::FileChooser {
+                       blink::mojom::FileChooserParams::Mode mode) override;
+ 
+     void FileSelectionCanceled() override;
++    const blink::mojom::FileChooserInputAnchor* GetInputAnchor() const override;
+ 
+     // This sets |was_file_select_listener_function_called_| to true so that
+     // tests can pass with mocked overrides of this class.
+@@ -80,6 +81,7 @@ class CONTENT_EXPORT FileChooserImpl : public blink::mojom::FileChooser {
+ 
+   void OpenFileChooser(blink::mojom::FileChooserParamsPtr params,
+                        OpenFileChooserCallback callback) override;
++  void UpdateInputAnchor(blink::mojom::FileChooserInputAnchorPtr anchor) override;
+   void EnumerateChosenDirectory(
+       const base::FilePath& directory_path,
+       EnumerateChosenDirectoryCallback callback) override;
+@@ -95,6 +97,7 @@ class CONTENT_EXPORT FileChooserImpl : public blink::mojom::FileChooser {
+ 
+   const GlobalRenderFrameHostId render_frame_host_id_;
+   scoped_refptr<FileSelectListenerImpl> listener_impl_;
++  blink::mojom::FileChooserInputAnchorPtr input_anchor_;
+   base::OnceCallback<void(blink::mojom::FileChooserResultPtr)> callback_;
+ 
+   base::WeakPtrFactory<FileChooserImpl> weak_factory_{this};
+diff --git a/content/public/browser/file_select_listener.h b/content/public/browser/file_select_listener.h
+index 14fbd8a1cc..5c1a87279b 100644
+--- a/content/public/browser/file_select_listener.h
++++ b/content/public/browser/file_select_listener.h
+@@ -8,6 +8,7 @@
+ #include <vector>
+ 
+ #include "base/memory/ref_counted.h"
++#include "content/common/content_export.h"
+ #include "third_party/blink/public/mojom/choosers/file_chooser.mojom.h"
+ 
+ namespace content {
+@@ -34,6 +35,10 @@ class FileSelectListener : public base::RefCounted<FileSelectListener> {
+   // dialog, or we open no file selection dialog for some reason.
+   virtual void FileSelectionCanceled() = 0;
+ 
++  // A renderer-supplied placement hint, valid only for this live listener.
++  CONTENT_EXPORT virtual const blink::mojom::FileChooserInputAnchor*
++  GetInputAnchor() const;
++
+  protected:
+   virtual ~FileSelectListener() = default;
+ 
+diff --git a/content/public/browser/web_contents_delegate.cc b/content/public/browser/web_contents_delegate.cc
+index 03560c0564..ca5da24eda 100644
+--- a/content/public/browser/web_contents_delegate.cc
++++ b/content/public/browser/web_contents_delegate.cc
+@@ -33,6 +33,11 @@
+ 
+ namespace content {
+ 
++const blink::mojom::FileChooserInputAnchor* FileSelectListener::GetInputAnchor()
++    const {
++  return nullptr;
++}
++
+ WebContentsDelegate::WebContentsDelegate() = default;
+ 
+ WebContents* WebContentsDelegate::OpenURLFromTab(
+diff --git a/third_party/blink/public/mojom/choosers/file_chooser.mojom b/third_party/blink/public/mojom/choosers/file_chooser.mojom
+index c7929be08e..7806b79f93 100644
+--- a/third_party/blink/public/mojom/choosers/file_chooser.mojom
++++ b/third_party/blink/public/mojom/choosers/file_chooser.mojom
+@@ -7,6 +7,7 @@ module blink.mojom;
+ import "mojo/public/mojom/base/file_path.mojom";
+ import "mojo/public/mojom/base/string16.mojom";
+ import "mojo/public/mojom/base/time.mojom";
++import "ui/gfx/geometry/mojom/geometry.mojom";
+ import "url/mojom/url.mojom";
+ 
+ // FileChooserParams stores arguments for an operation to open a file
+@@ -126,6 +127,13 @@ struct FileChooserResult {
+   mojo_base.mojom.FilePath base_directory;
+ };
+ 
++struct FileChooserInputAnchor {
++  // Clipped bounds and viewport dimensions in the source widget's DIPs.
++  gfx.mojom.RectF bounds;
++  gfx.mojom.SizeF viewport;
++  float device_scale_factor;
++};
++
+ // An interface to receive file chooser requests.
+ interface FileChooser {
+   // Ask a user to choose files interactively.  Null |result| is returned if the
+@@ -136,6 +144,9 @@ interface FileChooser {
+   [UnlimitedSize]
+   OpenFileChooser(FileChooserParams params) => (FileChooserResult? result);
+ 
++  // Optional presentation hint for the active chooser. Null revokes it.
++  UpdateInputAnchor(FileChooserInputAnchor? anchor);
++
+   // Ask to enumerate files which are descendants of the specified directory.
+   // Null |result| is returned if the enumeration request is not accepted.
+   EnumerateChosenDirectory(mojo_base.mojom.FilePath directory_path)
+diff --git a/third_party/blink/renderer/core/html/forms/file_chooser.cc b/third_party/blink/renderer/core/html/forms/file_chooser.cc
+index 4d7e6588ee..e8b06b26b1 100644
+--- a/third_party/blink/renderer/core/html/forms/file_chooser.cc
++++ b/third_party/blink/renderer/core/html/forms/file_chooser.cc
+@@ -30,14 +30,26 @@
+ 
+ #include <utility>
+ 
++#include "base/memory/raw_ptr.h"
+ #include "mojo/public/cpp/bindings/remote.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/file_path_conversion.h"
+ #include "third_party/blink/public/platform/task_type.h"
++#include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
++#include "third_party/blink/renderer/core/frame/local_frame_view.h"
++#include "third_party/blink/renderer/core/frame/visual_viewport.h"
++#include "third_party/blink/renderer/core/html/forms/html_input_element.h"
++#include "third_party/blink/renderer/core/layout/hit_test_location.h"
++#include "third_party/blink/renderer/core/layout/hit_test_result.h"
++#include "third_party/blink/renderer/core/layout/layout_view.h"
+ #include "third_party/blink/renderer/core/page/chrome_client_impl.h"
++#include "third_party/blink/renderer/core/page/page.h"
++#include "third_party/blink/renderer/core/style/computed_style.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
++#include "third_party/blink/renderer/platform/widget/frame_widget.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
++#include "ui/display/screen_info.h"
+ 
+ namespace blink {
+ 
+@@ -45,6 +57,91 @@ using mojom::blink::FileChooserFileInfo;
+ using mojom::blink::FileChooserFileInfoPtr;
+ using mojom::blink::NativeFileInfo;
+ 
++class FileChooser::InputAnchorObserver final
++    : public GarbageCollected<InputAnchorObserver>,
++      public LocalFrameView::LifecycleNotificationObserver {
++ public:
++  InputAnchorObserver(FileChooser& chooser,
++                      HTMLInputElement& input,
++                      LocalFrameView& view)
++      : chooser_(&chooser), input_(&input), view_(&view) {
++    view.RegisterForLifecycleNotifications(this);
++  }
++
++  void Stop() {
++    chooser_ = nullptr;
++    if (view_)
++      view_->UnregisterFromLifecycleNotifications(this);
++    view_ = nullptr;
++  }
++
++  void Trace(Visitor* visitor) const override {
++    visitor->Trace(input_);
++    visitor->Trace(view_);
++  }
++
++  void WillDisposeView() override {
++    if (chooser_)
++      chooser_->PublishInputAnchor(nullptr);
++    view_ = nullptr;
++  }
++
++  void DidFinishPostLifecycleSteps(const LocalFrameView&) override {
++    if (chooser_)
++      chooser_->PublishInputAnchor(CurrentAnchor());
++  }
++
++ private:
++  mojom::blink::FileChooserInputAnchorPtr CurrentAnchor() const {
++    auto* input = input_.Get();
++    auto* view = view_.Get();
++    if (!input || !view || !input->isConnected() ||
++        input->GetDocument().View() != view ||
++        input->FormControlType() != mojom::blink::FormControlType::kInputFile) {
++      return nullptr;
++    }
++    auto* layout = input->GetLayoutObject();
++    auto& frame = view->GetFrame();
++    auto* widget = frame.GetWidgetForLocalRoot();
++    auto* layout_view = view->GetLayoutView();
++    if (!layout || !widget || !frame.GetPage() || !layout_view ||
++        layout->Style().Visibility() != EVisibility::kVisible ||
++        !layout->HasNonZeroEffectiveOpacity()) {
++      return nullptr;
++    }
++
++    const auto& viewport = frame.GetPage()->GetVisualViewport();
++    const gfx::Rect viewport_pixels(viewport.Size());
++    gfx::Rect bounds = view->FrameToViewport(
++        input->VisibleBoundsRespectingClipsInLocalRoot());
++    bounds.Intersect(viewport_pixels);
++    if (bounds.IsEmpty())
++      return nullptr;
++
++    // Require the center of the visible fragment to resolve to the input
++    // (including the native upload button in its user agent shadow tree).
++    HitTestLocation location(view->RootFrameToDocument(
++        viewport.ViewportToRootFrame(bounds.CenterPoint())));
++    HitTestResult result(
++        HitTestRequest(HitTestRequest::kReadOnly |
++                       HitTestRequest::kIgnoreZeroOpacityObjects),
++        location);
++    if (!layout_view->HitTestNoLifecycleUpdate(location, result) ||
++        !result.InnerNode() ||
++        !input->IsShadowIncludingInclusiveAncestorOf(*result.InnerNode())) {
++      return nullptr;
++    }
++    return mojom::blink::FileChooserInputAnchor::New(
++        widget->BlinkSpaceToDIPs(gfx::RectF(bounds)),
++        widget->BlinkSpaceToDIPs(gfx::RectF(viewport_pixels)).size(),
++        widget->GetOriginalScreenInfo().device_scale_factor);
++  }
++
++  raw_ptr<FileChooser> chooser_;
++  WeakMember<HTMLInputElement> input_;
++  WeakMember<LocalFrameView> view_;
++};
++
+ FileChooserClient::~FileChooserClient() = default;
+ 
+ FileChooser* FileChooserClient::NewFileChooser(
+@@ -71,7 +168,38 @@ scoped_refptr<FileChooser> FileChooser::Create(
+   return base::AdoptRef(new FileChooser(client, params));
+ }
+ 
+-FileChooser::~FileChooser() = default;
++FileChooser::~FileChooser() {
++  StopInputAnchor();
++}
++
++void FileChooser::SetInputAnchorElement(HTMLInputElement& input) {
++  input_anchor_element_ = &input;
++}
++
++void FileChooser::PublishInputAnchor(
++    mojom::blink::FileChooserInputAnchorPtr anchor) {
++  if (!file_chooser_.is_bound() ||
++      (!anchor && !last_input_anchor_) ||
++      (anchor && last_input_anchor_ && anchor->Equals(*last_input_anchor_))) {
++    return;
++  }
++  last_input_anchor_ = anchor.Clone();
++  file_chooser_->UpdateInputAnchor(std::move(anchor));
++}
++
++void FileChooser::StopInputAnchor() {
++  if (input_anchor_observer_) {
++    input_anchor_observer_->Stop();
++    input_anchor_observer_.Clear();
++  }
++}
++
++void FileChooser::DisconnectClient() {
++  PublishInputAnchor(nullptr);
++  StopInputAnchor();
++  input_anchor_element_.Clear();
++  client_ = nullptr;
++}
+ 
+ bool FileChooser::OpenFileChooser(ChromeClientImpl& chrome_client_impl) {
+   LocalFrame* frame = FrameOrNull();
+@@ -86,6 +214,14 @@ bool FileChooser::OpenFileChooser(ChromeClientImpl& chrome_client_impl) {
+       params_.Clone(),
+       blink::BindOnce(&FileChooser::DidChooseFiles, blink::Unretained(this)));
+ 
++  if (auto* input = input_anchor_element_.Get();
++      input && frame->IsOutermostMainFrame() && frame->View()) {
++    auto& view = *frame->View();
++    input_anchor_observer_ =
++        MakeGarbageCollected<InputAnchorObserver>(*this, *input, view);
++    view.ScheduleAnimation();
++  }
++
+   // Should be released on file choosing or connection error.
+   AddRef();
+   chrome_client_impl.RegisterPopupOpeningObserver(client_);
+@@ -124,6 +260,7 @@ void FileChooser::DidChooseFiles(mojom::blink::FileChooserResultPtr result) {
+ }
+ 
+ void FileChooser::DidCloseChooser() {
++  StopInputAnchor();
+   // Close the remote explicitly to avoid this function to be called again as a
+   // disconnect handler.
+   file_chooser_.reset();
+diff --git a/third_party/blink/renderer/core/html/forms/file_chooser.h b/third_party/blink/renderer/core/html/forms/file_chooser.h
+index 8b4143a60a..da8ac81a88 100644
+--- a/third_party/blink/renderer/core/html/forms/file_chooser.h
++++ b/third_party/blink/renderer/core/html/forms/file_chooser.h
+@@ -45,6 +45,7 @@ namespace blink {
+ 
+ class ChromeClientImpl;
+ class FileChooser;
++class HTMLInputElement;
+ class LocalFrame;
+ 
+ using FileChooserFileInfoList = Vector<mojom::blink::FileChooserFileInfoPtr>;
+@@ -83,7 +84,8 @@ class FileChooser : public RefCounted<FileChooser> {
+   LocalFrame* FrameOrNull() const {
+     return client_ ? client_->FrameOrNull() : nullptr;
+   }
+-  void DisconnectClient() { client_ = nullptr; }
++  void DisconnectClient();
++  void SetInputAnchorElement(HTMLInputElement&);
+ 
+   const mojom::blink::FileChooserParams& Params() const { return *params_; }
+ 
+@@ -91,7 +93,10 @@ class FileChooser : public RefCounted<FileChooser> {
+   void EnumerateChosenDirectory();
+ 
+  private:
++  class InputAnchorObserver;
+   FileChooser(FileChooserClient*, const mojom::blink::FileChooserParams&);
++  void PublishInputAnchor(mojom::blink::FileChooserInputAnchorPtr);
++  void StopInputAnchor();
+ 
+   void DidCloseChooser();
+ 
+@@ -101,6 +106,9 @@ class FileChooser : public RefCounted<FileChooser> {
+   Persistent<FileChooserClient> client_;
+   mojom::blink::FileChooserParamsPtr params_;
+   Persistent<ChromeClientImpl> chrome_client_impl_;
++  WeakPersistent<HTMLInputElement> input_anchor_element_;
++  Persistent<InputAnchorObserver> input_anchor_observer_;
++  mojom::blink::FileChooserInputAnchorPtr last_input_anchor_;
+   mojo::Remote<mojom::blink::FileChooser> file_chooser_;
+ };
+ 
+diff --git a/third_party/blink/renderer/core/html/forms/file_input_type.cc b/third_party/blink/renderer/core/html/forms/file_input_type.cc
+index 5b59da836d..aec5ad01d6 100644
+--- a/third_party/blink/renderer/core/html/forms/file_input_type.cc
++++ b/third_party/blink/renderer/core/html/forms/file_input_type.cc
+@@ -229,7 +229,9 @@ void FileInputType::OpenPopupView() {
+         document, GetElement().GetExecutionContext()->IsSecureContext()
+                       ? WebFeature::kInputTypeFileSecureOriginOpenChooser
+                       : WebFeature::kInputTypeFileInsecureOriginOpenChooser);
+-    chrome_client->OpenFileChooser(document.GetFrame(), NewFileChooser(params));
++    auto* chooser = NewFileChooser(params);
++    chooser->SetInputAnchorElement(input);
++    chrome_client->OpenFileChooser(document.GetFrame(), chooser);
+ 
+     input.PseudoStateChanged(CSSSelector::kPseudoOpen);
+   }

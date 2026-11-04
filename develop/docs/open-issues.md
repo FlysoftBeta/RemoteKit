@@ -1,5 +1,13 @@
 # 当前问题与收尾记录
 
+## 文件库、文件篮与Endpoint拍照（2026-11-04，功能运行通过，待发布）
+
+- FILE-LIBRARY：文件字节按Session内SHA-256资产存储，Control持久目录/分组/有序篮子。原生回执绑定selection_id，成功才消费；版本校验阻止旧排序把已消费条目加回。157/89整链通过原生FileList哈希/顺序、分组、消费、重附着与锁定门禁。图片卡片整卡拖动、文件列表手柄与按钮、视图切换及触屏/键盘排序均已实测；预览裁切与列表提示已修，待最终包视觉复验。[契约](../../docs/file-library-contract.md) · [运行记录](file-library-qa-20261104.md)。
+- PHOTO-QUALITY：Endpoint OpenCV质量排序、近重复过滤、文档矫正与扫描增强已有合成模型测试；阈值为启发式，实体摄像头、运动和复杂光照效果未验收，不等同OCR或人像语义识别。
+- FILE-ANCHOR：本次支持主框架真实文件input的可见裁剪区域，隐藏/失效回退紧凑Dialog。子框架坐标转换未纳入本批，使用Dialog；位置异步更新，不宣称物理显示帧同步。
+- FILE-RECEIPT：Browser selected表示向原生监听器交付，不是网站完成上传。Browser在Endpoint观察之前丢失回执时结果保持unknown；无证据不消费或重放，相关引用继续保留。此前进程未确认Browser退出的原生暂存也继续计入配额。
+- FILE-UNLOCK：本批运行暴露QSV低帧率Reset返回-14后编码线程退出，现排空任务后在原oneVPL session/device重建encode component并要求IDR。UHD630独立60→2→1→60 FPS及async VPP检查通过，修后157/89全链解锁恢复画面且peer/DC/轨道保持。[定位与硬件证据](file-unlock-investigation-20261104.md)。
+
 ## 冷启动首帧与Video-only（2026-11-04，已推送，用户取消上传）
 
 - FIRST-OPEN：用户确认新包冷启动首次客户端白屏，刷新恢复。自然冷启动本机通过；人为延后呈现ACK 4.5秒复现旧版零RTP时错误回退Canvas，未复现现场持续白屏。新版同条件保持Video，ACK后约84.6ms取得匹配帧，输入门禁和单peer/track保持。

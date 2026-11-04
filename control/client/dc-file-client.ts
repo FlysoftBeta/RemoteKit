@@ -1,6 +1,20 @@
 import type { FileUploadResult } from '../shared/product';
+import type { Asset, SelectionState } from '../shared/file-library';
 import type { DcFileBegin, FileRpc } from './file-upload';
 import { operationId } from './product-operations';
+
+export interface PhotoRank {
+    selectedAssetId: string;
+    uncertain: boolean;
+    candidates: { assetId: string; score: number }[];
+    reason: string;
+}
+
+const libraryBinding = { requestId: 'library' };
+
+function checkAbort(signal: AbortSignal) {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+}
 
 /** File bytes and transaction commands share the current authenticated RTC peer.
  * A new peer interrupts the transfer; drafts are never silently resumed there. */
@@ -35,6 +49,7 @@ export class DcFileClient implements FileRpc {
             if (performance.now() > deadline) throw new Error('文件发送暂时拥塞，请重试');
             await new Promise(resolve => setTimeout(resolve, 10));
         }
+        if (channel !== this.getChannel() || authEpoch !== this.getAuthEpoch()) throw new Error('连接中断，请重试');
         const requestId = operationId();
         const encoded = JSON.stringify({ type: 'files.request', version: 1, requestId, method, params, authEpoch });
         // Wire byte bound includes multibyte filenames and MIME strings.
@@ -91,5 +106,76 @@ export class DcFileClient implements FileRpc {
         const result = await this.call<FileUploadResult>('cancel', { requestId, ...(owned?.channel === this.getChannel() ? { uploadId } : {}) });
         if (result.state !== 'validating' && uploadId) this.uploads.delete(uploadId);
         return result;
+    }
+    async uploadAsset(file: File, operationId: string, signal: AbortSignal): Promise<Asset> {
+        const channel = this.getChannel(), epoch = this.getAuthEpoch();
+        const check = () => {
+            checkAbort(signal);
+            if (channel !== this.getChannel() || epoch !== this.getAuthEpoch()) throw new Error('连接中断，请重试');
+        };
+        check();
+        const { uploadId, offset } = await this.call<{ uploadId: string; offset: number }>('asset.begin', {
+            ...libraryBinding, operationId, name: file.name, type: file.type, size: file.size,
+        });
+        try {
+            check();
+            if (typeof uploadId !== 'string' || !Number.isSafeInteger(offset) || offset < 0 || offset > file.size) throw new Error('文件发送状态无效');
+            for (let position = offset; position < file.size;) {
+                const bytes = new Uint8Array(await file.slice(position, position + 16384).arrayBuffer());
+                check();
+                let binary = '';
+                for (const byte of bytes) binary += String.fromCharCode(byte);
+                const result = await this.call<{ offset: number }>('asset.chunk', {
+                    ...libraryBinding, uploadId, offset: position, data: btoa(binary),
+                });
+                if (result.offset !== position + bytes.length) throw new Error('文件接收进度不一致');
+                position = result.offset;
+                check();
+            }
+            const asset = await this.call<Asset>('asset.seal', { ...libraryBinding, uploadId });
+            check();
+            return asset;
+        } catch (error) {
+            if (signal.aborted && channel === this.getChannel() && epoch === this.getAuthEpoch()) {
+                void this.call('asset.cancel', { ...libraryBinding, uploadId }).catch(() => {});
+            }
+            throw error;
+        }
+    }
+    async readPhoto(asset: Asset, signal: AbortSignal): Promise<Blob> {
+        const channel = this.getChannel(), epoch = this.getAuthEpoch();
+        const parts: Uint8Array<ArrayBuffer>[] = [];
+        if (!Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > 20 * 1024 * 1024) throw new Error('照片预览大小超出限制');
+        for (let offset = 0; offset < asset.size;) {
+            checkAbort(signal);
+            if (channel !== this.getChannel() || epoch !== this.getAuthEpoch()) throw new Error('连接中断，请重试');
+            const part = await this.call<{ data: string; offset: number; total: number }>('asset.read', {
+                ...libraryBinding, assetId: asset.assetId, offset,
+            });
+            const binary = atob(part.data);
+            if (!binary.length || binary.length > 16384 || part.offset !== offset + binary.length || part.total !== asset.size || part.offset > part.total) throw new Error('照片预览数据无效');
+            const bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+            parts.push(bytes);
+            offset = part.offset;
+        }
+        checkAbort(signal);
+        if (channel !== this.getChannel() || epoch !== this.getAuthEpoch()) throw new Error('连接中断，请重试');
+        return new Blob(parts, { type: asset.type });
+    }
+    rankPhotos(assetIds: string[]): Promise<PhotoRank> {
+        return this.call('photo.rank', { ...libraryBinding, assetIds });
+    }
+    async photoThumbnail(assetId: string, signal: AbortSignal): Promise<Blob> {
+        checkAbort(signal);
+        const asset = await this.call<Asset>('photo.thumbnail', { ...libraryBinding, assetId });
+        if (asset.type !== 'image/jpeg' || asset.size > 65536 ||
+            (asset.width ?? 0) > 320 || (asset.height ?? 0) > 320) throw new Error('照片缩略图数据无效');
+        return this.readPhoto(asset, signal);
+    }
+    processPhoto(assetId: string, mode: 'rectify' | 'scan'): Promise<Asset> {
+        return this.call('photo.process', { ...libraryBinding, assetId, mode });
+    }
+    commitSelection(requestId: string, selectionId: string): Promise<{ state: SelectionState; selectionId: string }> {
+        return this.call('selection.commit', { requestId, selectionId });
     }
 }

@@ -166,6 +166,7 @@ const FileUploadStore::Batch* FileUploadStore::FindBinding(const Binding& bindin
 }
 const FileUploadStore::Batch& FileUploadStore::BeginOrResume(const Binding& binding, const std::vector<Spec>& specs) {
   if (const auto* batch = FindBinding(binding)) {
+    if (batch->library_stage) throw std::runtime_error("file_request_upload_already_exists");
     if (batch->files.size() != specs.size()) throw std::runtime_error("file_upload_specs_conflict");
     for (std::size_t i = 0; i < specs.size(); ++i)
       if (batch->files[i].name != specs[i].name || batch->files[i].type != specs[i].type || batch->files[i].size != specs[i].size)
@@ -173,6 +174,33 @@ const FileUploadStore::Batch& FileUploadStore::BeginOrResume(const Binding& bind
     return *batch;
   }
   return Begin(binding, specs);
+}
+const FileUploadStore::Batch& FileUploadStore::Stage(const Binding& binding, const std::vector<Source>& sources,
+                                                    const std::function<void()>& check) {
+  std::vector<Spec> specs;
+  for (const auto& source : sources) specs.push_back(source.spec);
+  check();
+  const auto& batch = Begin(binding, specs);
+  const auto id = batch.id;
+  batches_.at(id).library_stage = true;
+  try {
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+      check();
+      const auto& source = sources[i];
+      if (!RegularFile(source.path) || std::filesystem::file_size(source.path) != source.spec.size)
+        throw std::runtime_error("asset_unavailable");
+      const auto& path = batch.files[i].path;
+      std::filesystem::remove(path);
+      std::error_code error;
+      std::filesystem::create_hard_link(source.path, path, error);
+      if (error) std::filesystem::copy_file(source.path, path);
+    }
+    check();
+    return Seal(id, binding);
+  } catch (...) {
+    Cancel(id);
+    throw;
+  }
 }
 std::vector<std::uint64_t> FileUploadStore::Offsets(const std::string& id, const Binding& binding) const {
   const auto* batch = Find(id);

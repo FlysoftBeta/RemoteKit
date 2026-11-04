@@ -186,9 +186,6 @@ class Qsv final : public HardwareEncoder {
     if(!SameGeometry(queried.vpp.In,vpp_params_.vpp.In)||!SameGeometry(queried.vpp.Out,vpp_params_.vpp.Out)) {
       error="QSV VPP Query changed required geometry";return false;
     }
-    mfxFrameAllocRequest vpp_request[2]{},encode_request{};
-    if(!Exact(MFXVideoVPP_QueryIOSurf(session_,&vpp_params_,vpp_request),"MFX VPP QueryIOSurf",error) ||
-       !Status(MFXVideoENCODE_QueryIOSurf(session_,&params_,&encode_request),"MFX Encode QueryIOSurf",error))return false;
     const auto status=MFXVideoVPP_Init(session_,&vpp_params_);
     if(status>=0)vpp_initialized_=true;
     if(!Exact(status,"MFX VPP Init",error))return false;
@@ -205,22 +202,29 @@ class Qsv final : public HardwareEncoder {
        vpp_stream_.GlobalAlphaEnable || vpp_stream_.PixelAlphaEnable || vpp_stream_.LumaKeyEnable)) {
       error="QSV VPP changed required letterbox composition";return false;
     }
+    if(!EnsureVppOutputs(actual.vpp.Out,error))return false;
+    fprintf(stderr,"QSV async VPP: BGRA %ux%u -> NV12 %ux%u fit=%ux%u composite=%u pool=%zu depth=%u\n",
+      source.Width,source.Height,settings_.width,settings_.height,fit_w,fit_h,letterbox,vpp_outputs_.size(),settings_.async_depth);
+    return true;
+  }
+  bool EnsureVppOutputs(const mfxFrameInfo& output_info,std::string& error) {
+    mfxFrameAllocRequest vpp_request[2]{},encode_request{};
+    if(!Exact(MFXVideoVPP_QueryIOSurf(session_,&vpp_params_,vpp_request),"MFX VPP QueryIOSurf",error) ||
+       !Status(MFXVideoENCODE_QueryIOSurf(session_,&params_,&encode_request),"MFX Encode QueryIOSurf",error))return false;
     const auto suggested=unsigned(vpp_request[1].NumFrameSuggested)+encode_request.NumFrameSuggested;
     const auto count=std::max({unsigned(settings_.async_depth),unsigned(vpp_request[1].NumFrameMin),
       unsigned(encode_request.NumFrameMin),suggested>settings_.async_depth?suggested-settings_.async_depth:1u});
-    for(unsigned i=0;i<count;++i) {
+    while(vpp_outputs_.size()<count) {
       auto output=std::make_unique<VppOutput>();D3D11_TEXTURE2D_DESC desc{};
-      desc.Width=actual.vpp.Out.Width;desc.Height=actual.vpp.Out.Height;desc.ArraySize=desc.MipLevels=1;
+      desc.Width=output_info.Width;desc.Height=output_info.Height;desc.ArraySize=desc.MipLevels=1;
       desc.Format=DXGI_FORMAT_NV12;desc.SampleDesc.Count=1;
       desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_VIDEO_ENCODER;
       if(FAILED(device_->CreateTexture2D(&desc,nullptr,&output->memory.texture))) {
         error="QSV VPP NV12 pool allocation failed";return false;
       }
-      output->surface.Info=actual.vpp.Out;output->surface.Data.MemId=&output->memory;
+      output->surface.Info=output_info;output->surface.Data.MemId=&output->memory;
       vpp_outputs_.push_back(std::move(output));
     }
-    fprintf(stderr,"QSV async VPP: BGRA %ux%u -> NV12 %ux%u fit=%ux%u composite=%u pool=%u depth=%u\n",
-      source.Width,source.Height,settings_.width,settings_.height,fit_w,fit_h,letterbox,count,settings_.async_depth);
     return true;
   }
   std::unique_ptr<Packet> NewPacket() const {
@@ -333,6 +337,14 @@ class Qsv final : public HardwareEncoder {
     allocator_.pthis=this;allocator_.Alloc=Allocate;allocator_.Free=Free;
     allocator_.Lock=Lock;allocator_.Unlock=Unlock;allocator_.GetHDL=Handle;
     if(!Status(MFXVideoCORE_SetFrameAllocator(session_,&allocator_),"MFX allocator",error)) return false;
+    return InitEncode(settings,error);
+  }
+ private:
+  bool InitEncode(const EncoderSettings& settings,std::string& error) {
+    const auto level_budget=remotekit::H264RateLimits(settings.level_idc);
+    params_={};options_={};signal_={};hrd_options_={};
+    low_power_.queried.reset();low_power_.initialized.reset();
+    low_power_.init_status.reset();low_power_.get_video_param_status.reset();
     params_.AsyncDepth=static_cast<mfxU16>(settings.async_depth);
     params_.IOPattern=MFX_IOPATTERN_IN_VIDEO_MEMORY;
     auto& info=params_.mfx;
@@ -410,6 +422,7 @@ class Qsv final : public HardwareEncoder {
       params_.mfx.GopPicSize,params_.mfx.GopRefDist,params_.mfx.CodecProfile,params_.mfx.CodecLevel);
     return true;
   }
+ public:
   CodecResult Submit(ID3D11Texture2D* texture,bool key,uint64_t cookie,std::string& error) override {
     if(!deferred_error_.empty()) {error=deferred_error_;return CodecResult::error;}
     if(jobs_.size()>=settings_.async_depth)return CodecResult::busy;
@@ -537,16 +550,15 @@ class Qsv final : public HardwareEncoder {
   bool SetRates(uint32_t bitrate,uint32_t fps,std::string& error,uint32_t maximum=0) override {
     if(!bitrate || !fps) {error="QSV invalid rate update";return false;}
     if(!jobs_.empty()||!packets_.empty()) {error="QSV rate reset requires drained queue";return false;}
-    const auto previous_max=settings_.max_bitrate;
-    if(maximum)settings_.max_bitrate=maximum;
-    bitrate=std::min(bitrate,settings_.max_bitrate);
+    const auto next_max=maximum?maximum:settings_.max_bitrate;
+    bitrate=std::min(bitrate,next_max);
     const bool cadence_changed=fps!=settings_.fps;
-    if(bitrate/1000==settings_.bitrate/1000 && previous_max==settings_.max_bitrate && !cadence_changed)return true;
+    if(bitrate/1000==settings_.bitrate/1000 && next_max==settings_.max_bitrate && !cadence_changed)return true;
     if(cadence_changed && !VppEmpty(error))return false;
     auto next=params_;
     next.mfx.FrameInfo.FrameRateExtN=fps;next.mfx.FrameInfo.FrameRateExtD=1;
     next.mfx.TargetKbps=static_cast<mfxU16>(std::max(1u,bitrate/1000));
-    next.mfx.MaxKbps=static_cast<mfxU16>(std::max(1u,(settings_.vbr?settings_.max_bitrate:bitrate)/1000));
+    next.mfx.MaxKbps=static_cast<mfxU16>(std::max(1u,(settings_.vbr?next_max:bitrate)/1000));
     next.mfx.BufferSizeInKB=allocated_buffer_kb_;
     mfxExtEncoderResetOption reset{};
     reset.Header.BufferId=MFX_EXTBUFF_ENCODER_RESET_OPTION;reset.Header.BufferSz=sizeof(reset);
@@ -558,16 +570,33 @@ class Qsv final : public HardwareEncoder {
     RK_SERVER_TRACE(trace_,"mfx_reset_begin",TraceIds{},rk_record.encoder=trace_encoder_;);
     const auto status=MFXVideoENCODE_Reset(session_,&next);
     RK_SERVER_TRACE(trace_,"mfx_reset_return",TraceIds{},rk_record.encoder=trace_encoder_;rk_record.status=status;);
-    if(!Status(status,"MFX rate Reset",error))return false;
-    next.ExtParam=extensions_.data();next.NumExtParam=static_cast<mfxU16>(extensions_.size());
-    params_=next;settings_.bitrate=bitrate;settings_.fps=fps;
-    if(cadence_changed)keyframe_requested_=true;
-    RK_SERVER_TRACE(trace_,"mfx_get_params_begin",TraceIds{},rk_record.encoder=trace_encoder_;);
-    const auto get_status=MFXVideoENCODE_GetVideoParam(session_,&params_);
-    RK_SERVER_TRACE(trace_,"mfx_get_params_return",TraceIds{},rk_record.encoder=trace_encoder_;rk_record.status=get_status;);
-    low_power_.get_video_param_status=get_status;low_power_.initialized.reset();
-    if(get_status>=0)low_power_.initialized=params_.mfx.LowPower;
-    if(!Status(get_status,"MFX GetVideoParam after rate update",error))return false;
+    const bool reinitialize=status==MFX_ERR_INCOMPATIBLE_VIDEO_PARAM;
+    if(reinitialize) {
+      // Reset cannot grow the initial allocation (for example, VBV at 1 FPS).
+      // The worker has drained accepted jobs. Keep the same session and device
+      // while rebuilding the encode component from the requested settings.
+      if(!cadence_changed && !VppEmpty(error))return false;
+      const auto geometry=params_.mfx.FrameInfo;
+      fprintf(stderr,"QSV rate Reset requires reinit: requested=%u fps=%u status=%d\n",bitrate,fps,status);
+      if(!Exact(MFXVideoENCODE_Close(session_),"MFX Encode Close for rate reinit",error))return false;
+      initialized_=false;
+      auto requested=settings_;
+      requested.bitrate=bitrate;requested.fps=fps;requested.max_bitrate=next_max;
+      if(!InitEncode(requested,error))return false;
+      if(!SameGeometry(geometry,params_.mfx.FrameInfo)) {
+        error="QSV rate reinit changed required geometry";return false;
+      }
+    } else {
+      if(!Status(status,"MFX rate Reset",error))return false;
+      next.ExtParam=extensions_.data();next.NumExtParam=static_cast<mfxU16>(extensions_.size());
+      params_=next;
+      RK_SERVER_TRACE(trace_,"mfx_get_params_begin",TraceIds{},rk_record.encoder=trace_encoder_;);
+      const auto get_status=MFXVideoENCODE_GetVideoParam(session_,&params_);
+      RK_SERVER_TRACE(trace_,"mfx_get_params_return",TraceIds{},rk_record.encoder=trace_encoder_;rk_record.status=get_status;);
+      low_power_.get_video_param_status=get_status;low_power_.initialized.reset();
+      if(get_status>=0)low_power_.initialized=params_.mfx.LowPower;
+      if(!Status(get_status,"MFX GetVideoParam after rate update",error))return false;
+    }
     if(settings_.qsv_low_power&&params_.mfx.LowPower!=settings_.qsv_low_power) {
       error="QSV rate update changed explicit LowPower value";return false;
     }
@@ -582,15 +611,20 @@ class Qsv final : public HardwareEncoder {
       vpp_params_=next_vpp;
       for(auto& output:vpp_outputs_)output->surface.Info=vpp_params_.vpp.Out;
     }
+    if(reinitialize && vpp_initialized_ && !EnsureVppOutputs(vpp_params_.vpp.Out,error))return false;
     if(!CheckSignal(error))return false;
     if(params_.mfx.CodecLevel>settings_.level_idc) {
       error="QSV rate update exceeded negotiated H264 level";return false;
     }
-    fprintf(stderr,"QSV rate Reset: requested=%u actual=%u fps=%u/%u newSequence=%s status=%d\n",
-      bitrate,params_.mfx.TargetKbps*1000u,params_.mfx.FrameInfo.FrameRateExtN,params_.mfx.FrameInfo.FrameRateExtD,cadence_changed?"ON":"OFF",status);
+    settings_.bitrate=bitrate;settings_.fps=fps;settings_.max_bitrate=next_max;
+    if(cadence_changed || reinitialize)keyframe_requested_=true;
+    fprintf(stderr,"QSV rate %s: requested=%u actual=%u fps=%u/%u newSequence=%s status=%d\n",
+      reinitialize?"reinit":"Reset",bitrate,params_.mfx.TargetKbps*1000u,params_.mfx.FrameInfo.FrameRateExtN,
+      params_.mfx.FrameInfo.FrameRateExtD,(cadence_changed || reinitialize)?"ON":"OFF",status);
     return true;
   }
   bool Drain(std::vector<AccessUnit>& result,std::string& error) override {
+    if(!initialized_)return true;
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(5);
     while(!jobs_.empty()||!packets_.empty()) {
       AccessUnit output;auto status=Poll(100,output,error);

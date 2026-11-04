@@ -1,6 +1,7 @@
 import { surfacePixelScale } from './coordinates';
 import { AuthCameraChannel, type CameraBinding } from './auth-camera-channel';
 import { DcFileClient } from './dc-file-client';
+import { projectFileInput } from './file-chooser-anchor';
 import { barrierMatchesLayout, configurePresentationVideo, presentationBarrier, videoPlaneGeometry, VideoCompositorStats, type PresentationBarrier } from './video-presentation';
 import { CaptureLatency } from './capture-latency';
 import { ClockDomain, ClockProbe } from './clock-domain';
@@ -14,7 +15,7 @@ import { PresentationDiagnostics } from './presentation-diagnostics';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource } from './plane-source';
 import { MediaFeedbackSampler } from './media-feedback';
 import { configureReceiverPlayout } from './receiver-playout';
-import type { ProductOperation, OperationReceipt, RtcServerSignal } from '../shared/product';
+import type { FileRequestAnchor, ProductOperation, OperationReceipt, RtcServerSignal } from '../shared/product';
 import { MobileEditingState } from './mobile-editing-state';
 
 export type ControlRpc = (method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback', params: unknown) => Promise<unknown>;
@@ -396,6 +397,12 @@ export class RemoteTransport {
   private videoPlaneFor(viewId: string) {
     for (const [renderer, plane] of this.videoPlanes) if (renderer.view.id === viewId && this.rendererCurrent(renderer)) return { renderer, plane };
     return undefined;
+  }
+  fileInputBounds(viewId: string, anchor: FileRequestAnchor) {
+    const current = this.videoPlaneFor(viewId);
+    if (!this.productReady || !this.layout || !current?.plane.ready || document.hidden ||
+        current.renderer.canvas.closest('.resize-waiting')) return undefined;
+    return projectFileInput(anchor, this.layout, current.renderer.view, current.renderer.canvas.getBoundingClientRect());
   }
   private hideVideoPlane(renderer: PlaneRenderer) {
     const plane = this.videoPlanes.get(renderer);

@@ -41,6 +41,11 @@
       "id": "page-lifecycle-ack",
       "path": "0015-page-lifecycle-ack.patch",
       "sha256": "64ad2cd1e7bd0effb5ba50cee59a0cb98319a0cad5031c30147e3fedc4edbe9c"
+    },
+    {
+      "id": "file-chooser-input-anchor",
+      "path": "0016-file-chooser-input-anchor.patch",
+      "sha256": "418fa5acb3c7a17b5473c1b4e1dc0fa75d1cbb9d9b447b6a5ce8b16b5388426f"
     }
   ]
 }
