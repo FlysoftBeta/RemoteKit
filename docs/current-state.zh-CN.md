@@ -8,7 +8,7 @@
 
 真实UHD630实验拒绝三个候选：LowDelayBRC令2/15Hz停稳MAE约2→20；按名义时基计算I=5T/P=2T令15Hz MAE2.01→3.46；接收0/10ms虽把末包→提交p95约40→18ms，却令提交45→38FPS、marker无改善。两个硬件策略均已从产品代码撤回，不留开关；接收默认仍0/50。保留驱动实际码控参数诊断、旧时基读回预算清理和实验运行时DLL校验。纯诊断版本低FPS质量、尾IDR、真实QSV smoke及定向归档检查通过。[本轮记录](../develop/docs/ud710-followup-20261105.md)。
 
-用户已重新授权本轮完成后打包上传，现进入成品检查。空白Viewer校准50–53FPS没有复现早前串流组32Hz；最终pacing同组RAF约54Hz，不能把跨组提交FPS差异简单归因于编码变更。
+干净提交`002aab5`成品已上传，取件码[774805](https://airportal.cn/774805/uFqAoQNWrJ)，2026-11-05 07:17（UTC+8）确认成功，有效24小时、2次、无密码。571个ZIP文件逐项hash/CRC、包内启动及Chrome89真实H.264/尺寸切换同连接检查通过。[交付记录](../develop/docs/ud710-optimization-delivery-20261105.md)。空白Viewer校准50–53FPS没有复现早前串流组32Hz；最终pacing同组RAF约54Hz，不能把跨组提交FPS差异简单归因于编码变更。
 
 ## 后续音频隔离与硬件预算实验
 
