@@ -2,17 +2,23 @@
 
 更新：2026-11-04。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
+## 当前交付
+
+键盘与尺寸过渡修复已发布，功能源码`e910231cdd289e76a7e90eacbcaa6166a76e9085`已推送。取件码[137959](https://airportal.cn/137959/kAlssAvih0)，2026-11-04 09:20:04（Asia/Shanghai）上传成功，有效24小时、可下载2次、无密码。新包同时包含此前单独提交的Comp选卡修复与5分钟默认空闲锁定、纯白锁屏。
+
+包为`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-091638.zip`，504941930 bytes，SHA256 `618ef0d6cfe8530fc19ef8e41708adb39c1eb2d90fbb5955f6851a6a130a8d40`。manifest为干净源码，571项文件/ZIP及11项人脸资产校验通过，包内启动、实际H264、锁定/PIN恢复与同peer/双DC检查通过。[交付记录](../develop/docs/keyboard-viewport-delivery-20261104.md)。
+
 ## 键盘与尺寸过渡修复（构建与运行已通过）
 
 已修复尺寸重配把未知编辑状态误报失焦、以及布局失效结束composition的路径。Browser保留同一编辑目标的composition，原focus/layout输入租约仍轮换；Client在明确reconfigure期间保留本地键盘，将有界暂存输入绑定稳定target，在新布局/画面和权威编辑状态匹配后交付。真实失焦关闭输入法，旧target事件在Browser最终派发前拒绝。
 
 键盘引起的纵向视口变化使用顶部锚定、保持比例的peek；普通窗口/分栏布局使用最后一帧模糊拉伸。快照保持输入门禁，最多4Mi像素、1.8秒，不计入稳态video帧数。Control生产构建及319项全量测试、最后分类/租约修正的16项定向测试通过；Browser/SDK及Endpoint Release增量构建通过，19项CTest分两轮完成。[构建记录](../develop/docs/keyboard-viewport-build-20261104.md)。
 
-Chrome157修前基线已复现可信focusout及输入丢失；修后157/89真实H264组均通过多段视口变化不失焦、composition持续、单次commit、旧target拒绝、真实失焦关闭输入法、两类过渡及同peer/DC/video/track保持。157本地composition用CDP，89因旧CDP能力缺失使用合成本地事件，远端均为真实Native IME。两版peek及过渡截图已检查；实体Android/iOS软键盘仍待设备验收。[正式回归工具](../tools/test-keyboard-viewport.mjs) · [运行记录](../develop/docs/keyboard-viewport-runtime-20261104.md)。本批待打包发布。
+Chrome157修前基线已复现可信focusout及输入丢失；修后157/89真实H264组均通过多段视口变化不失焦、composition持续、单次commit、旧target拒绝、真实失焦关闭输入法、两类过渡及同peer/DC/video/track保持。157本地composition用CDP，89因旧CDP能力缺失使用合成本地事件，远端均为真实Native IME。两版peek及过渡截图已检查；实体Android/iOS软键盘仍待设备验收。[正式回归工具](../tools/test-keyboard-viewport.mjs) · [运行记录](../develop/docs/keyboard-viewport-runtime-20261104.md)。
 
-## 当前交付
+## 高级认证与此前交付证据
 
-锁定行为源码已调整：默认5分钟无操作锁定，切到后台锁定默认开启，锁屏及初始空白背景为纯白。已保存的账号设置继续生效。6项认证/解锁定向测试及Control生产构建、启动smoke通过；未做真实5分钟等待或后台切换复验。本次按要求不打包，以下已发布包不含此调整。
+锁定行为源码已调整：默认5分钟无操作锁定，切到后台锁定默认开启，锁屏及初始空白背景为纯白。已保存的账号设置继续生效。6项认证/解锁定向测试及Control生产构建、启动smoke通过；未做真实5分钟等待或后台切换复验。该调整当时未单独打包，现包含于137959；以下旧包不含此调整。
 
 高级认证已发布，源码`ba667bfe5675e4aa9bf2fc973b1b269ae65068f5`已推送。取件码[316234](https://airportal.cn/316234/d99cU47GIx)，2026-11-04 08:09:29（Asia/Singapore）确认成功，页面显示有效24小时、可下载2次、无密码。
 
