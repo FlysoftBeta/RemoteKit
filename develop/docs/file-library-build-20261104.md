@@ -11,3 +11,7 @@ Chrome157 首轮运行验收后的补充版本继续复用同一 Endpoint Releas
 双布局与服务端缩略图合入后，同一 Endpoint Release 构建包含 QSV 修复及新缩略图路径，定向 CTest 4/4 再通过。Control 最终双布局、拖放及菜单焦点版本的 TypeScript、Vite、生产运行库验证与启动 smoke 通过。日志为 develop/tmp/file-library-endpoint-thumbnail.log 与 develop/tmp/file-library-control-dual-mode-final.log。
 
 157/89 双布局验收后修正缩略图裁切和单选提示。修正版本的 Control 生产构建及启动 smoke 通过，日志为 develop/tmp/file-library-control-visual-final.log。
+
+## 本地串流包
+
+用 `tools/package-runtime.py --out dev --smoke` 从干净源码 `7ab9b62bf078052fc47fee7eb8889b08eab4f08b` 生成 `RemoteKit-win-x64-streaming-qsv-nvenc-20261104-170701.zip`，505436504 bytes，SHA256 `2da620a88e72d12f9f5881687f96373020bb64d4577f7fe51c262201e8cafa0c`。逐项核对 570 个 manifest 文件、571 个 ZIP 文件的 CRC 和内容、11 项人脸资产及整包 SHA256。包内启动、认证与 Endpoint 管理 smoke 通过。日志为 `develop/tmp/file-library-runtime-package.log` 与 `develop/tmp/file-library-runtime-integrity.log`。

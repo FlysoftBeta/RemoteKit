@@ -1,12 +1,13 @@
 # 当前问题与收尾记录
 
-## 文件库、文件篮与Endpoint拍照（2026-11-04，功能运行通过，待发布）
+## 文件库、文件篮与Endpoint拍照（2026-11-04，已交付162141）
 
-- FILE-LIBRARY：文件字节按Session内SHA-256资产存储，Control持久目录/分组/有序篮子。原生回执绑定selection_id，成功才消费；版本校验阻止旧排序把已消费条目加回。157/89整链通过原生FileList哈希/顺序、分组、消费、重附着与锁定门禁。图片卡片整卡拖动、文件列表手柄与按钮、视图切换及触屏/键盘排序均已实测；预览裁切与列表提示已修，待最终包视觉复验。[契约](../../docs/file-library-contract.md) · [运行记录](file-library-qa-20261104.md)。
+- FILE-LIBRARY：文件字节按Session内SHA-256资产存储，Control持久目录/分组/有序篮子。原生回执绑定selection_id，成功才消费；版本校验阻止旧排序把已消费条目加回。157/89整链通过原生FileList哈希/顺序、分组、消费、重附着与锁定门禁。图片卡片整卡拖动、文件列表手柄与按钮、视图切换及触屏/键盘排序均已实测；预览裁切与列表提示修正后，最终包157整组和截图复核通过。[契约](../../docs/file-library-contract.md) · [运行记录](file-library-qa-20261104.md)。
 - PHOTO-QUALITY：Endpoint OpenCV质量排序、近重复过滤、文档矫正与扫描增强已有合成模型测试；阈值为启发式，实体摄像头、运动和复杂光照效果未验收，不等同OCR或人像语义识别。
 - FILE-ANCHOR：本次支持主框架真实文件input的可见裁剪区域，隐藏/失效回退紧凑Dialog。子框架坐标转换未纳入本批，使用Dialog；位置异步更新，不宣称物理显示帧同步。
 - FILE-RECEIPT：Browser selected表示向原生监听器交付，不是网站完成上传。Browser在Endpoint观察之前丢失回执时结果保持unknown；无证据不消费或重放，相关引用继续保留。此前进程未确认Browser退出的原生暂存也继续计入配额。
 - FILE-UNLOCK：本批运行暴露QSV低帧率Reset返回-14后编码线程退出，现排空任务后在原oneVPL session/device重建encode component并要求IDR。UHD630独立60→2→1→60 FPS及async VPP检查通过，修后157/89全链解锁恢复画面且peer/DC/轨道保持。[定位与硬件证据](file-unlock-investigation-20261104.md)。
+- FILE-DELIVERY：功能源码7ab9b62已推送，干净源码包570项manifest、571个ZIP文件及11项人脸资产校验通过；包内157完整H.264/QSV与最终视觉复验通过。17:33:57（UTC+8）上传成功，取件码[162141](https://airportal.cn/162141/wiVzM0mMmp)，有效24小时、可下载2次。[交付记录](file-library-delivery-20261104.md)。
 
 ## 冷启动首帧与Video-only（2026-11-04，已推送，用户取消上传）
 
@@ -15,7 +16,7 @@
 - REFRESH-COMPLETE：刷新请求按peer/授权/布局/屏障绑定，只有标记的IDR通过屏障并成功发布才完成。源丢弃、发布失败不会消费请求；单请求在途、重试至多每秒一次，旧结果不能完成新请求。定向模型覆盖掉帧/迟到，真实157/89成功后pending=false且计数静止。
 - 验证：Client 96项定向及生产构建/smoke，Endpoint Release增量与4项定向通过。157普通及延迟确认、89冷启动真实H264/QSV通过；本轮没有新增性能矩阵。源码`3a5df07`已推送，本地包清单/CRC/启动与真实Video/触控通过；按用户指示未上传。[修复与本地包](first-open-recovery-20261104.md) · [运行](osr-first-open-runtime-20261104.md)。
 
-由root维护。最新已发布源码433655d，取件码[861200](https://airportal.cn/861200/YnupKqRq8U)，包含生命周期恢复、跨布局触控退役、Stats与接收端等待优化，并保留此前站点手动键盘、尺寸过渡、Comp选卡与锁定调整。[包内验收与上传](osr-lifecycle-delivery-20261104.md)。不重复历史性能组；旧全库审查依据见[审查报告](post-release-astra-review.md)。
+由root维护。最新交付见本页文件功能162141记录。此前源码433655d、取件码[861200](https://airportal.cn/861200/YnupKqRq8U)包含生命周期恢复、跨布局触控退役、Stats与接收端等待优化，并保留此前站点手动键盘、尺寸过渡、Comp选卡与锁定调整。[此前包内验收与上传](osr-lifecycle-delivery-20261104.md)。不重复历史性能组；旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
 ## 152167 后生命周期、触控与延迟（2026-11-04，已交付861200）
 

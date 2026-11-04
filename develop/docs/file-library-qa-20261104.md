@@ -33,4 +33,10 @@ node tools/test-file-library.mjs <playwright-module> <chrome.exe> <endpoint_serv
 
 连续拍照经取消重拍和成功重拍保持原 slot ID，键盘可调整审阅顺序。不确定槽必须确认候选才放开保存，候选卡切换上方预览，再进入 520×400 原图。Viewer reload 后观察到 Endpoint `photo.thumbnail` 及其派生资产读回并实际加载，未读取被测扫描原图。两版解锁后恢复画面、peer/两个 DC/轨道保持，动态隐藏 chooser input 均撤销 anchor。
 
-初轮测试定位与事件修正：拖动后待 DnD click 抑制解除，键盘启动后等待 sensor 接管；Chrome89 用标准 CDP `Input.dispatchMouseEvent`，避免新 Playwright 使用旧浏览器不存在的拖动拦截命令。人工截图检查发现宽预览底部被裁切、列表单选提示误写卡片右上角，已反馈实现方，等待修正版截图复验。
+初轮测试定位与事件修正：拖动后待 DnD click 抑制解除，键盘启动后等待 sensor 接管；Chrome89 用标准 CDP `Input.dispatchMouseEvent`，避免新 Playwright 使用旧浏览器不存在的拖动拦截命令。人工截图检查发现宽预览底部被裁切、列表单选提示误写卡片右上角；这两处随后修正，干净包复验见下。
+
+## 干净包运行
+
+`RemoteKit-win-x64-streaming-qsv-nvenc-20261104-170701.zip` 对应干净源码 `7ab9b62bf078052fc47fee7eb8889b08eab4f08b`，SHA-256 `2da620a88e72d12f9f5881687f96373020bb64d4577f7fe51c262201e8cafa0c`。使用解压包自带 Node、Control、Endpoint、Browser，隔离 Chromium 157 完整组通过并退出 0。证据为 `develop/tmp/file-library-package-157`。浏览器重载后扫描图缩略图真实加载 221×187、8,365 字节，没有读取原图。静态期间实际触发同编码器 QSV Reset -14（1 fps、37.929 Mbps），重建后初始化返回 0、随后的 3 fps Reset 返回 0，并通过同 peer/DC/轨道的解锁恢复。
+
+复查包内列表单选文字、拍照审阅大图、候选大图与 390px 我的文件卡片。照片纸张底部与候选全部 12 行均可见，图片矩形位于各自容器内且 `object-fit: contain`；窄屏文件网格无横向溢出。没有遗留本次自有进程。
