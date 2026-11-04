@@ -37,6 +37,10 @@ set "RK_PYTHON=C:\src\depot_tools\python3.bat"
 if defined REMOTEKIT_PYTHON set "RK_PYTHON=%REMOTEKIT_PYTHON%"
 call "%RK_PYTHON%" "%RK_ROOT%\tools\fetch-media-deps.py"
 if errorlevel 1 exit /b %errorlevel%
+if not "%~1"=="package-demo" if not "%~1"=="encoder-smoke" (
+  call "%RK_PYTHON%" "%RK_ROOT%\tools\setup-face-auth.py"
+  if errorlevel 1 exit /b 1
+)
 set "RK_FRESH="
 if "%~1"=="fresh" set "RK_FRESH=--fresh"
 "%RK_CMAKE%\cmake.exe" %RK_FRESH% -S "%RK_ROOT%" -B "%RK_BUILD%" -G Ninja -DCMAKE_MAKE_PROGRAM="%RK_NINJA%" %RK_PACKAGE_ARGS%

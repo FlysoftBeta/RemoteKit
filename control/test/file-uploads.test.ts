@@ -90,7 +90,7 @@ test('octet HTTP route requires cookie and Origin and writes a bound ticket with
   const account=await store.register('file-http','password123'),authentication=createHash('sha256').update(account.token).digest('hex');
   f.setAuth(authentication);
   // FileUploads uses a fixed test Tenant; HTTP identity comes from actual Store.
-  const receive=async(_tenant:string,auth:string,ticket:string,source:Readable,length?:string)=>Control.prototype.receiveFileUpload.call({uploads:f.manager} as any,'tenant',auth,ticket,source,length);
+  const receive=async(_tenant:string,auth:string,ticket:string,source:Readable,length?:string)=>Control.prototype.receiveFileUpload.call({uploads:f.manager,viewers:new Map()} as any,'tenant',auth,ticket,source,length);
   const control=Object.assign(new EventEmitter(),{store,receiveFileUpload:receive}) as unknown as Control;
   const server=createHttp(control,{origins:['http://127.0.0.1'],clientDir:'.',metricsDir:'.'});await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
   t.after(()=>new Promise<void>(resolve=>server.close(()=>resolve())));

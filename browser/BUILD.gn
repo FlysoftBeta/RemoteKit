@@ -142,6 +142,13 @@ executable("remotekit_control_payload_probe") {
   deps = [ "//base", "//net" ]
 }
 
+executable("remotekit_render_channel_lifetime_probe") {
+  testonly = true
+  sources = [ "render_channel.cc", "render_channel_lifetime_probe.cc" ]
+  include_dirs = [ "//remotekit" ]
+  deps = [ "//base", "//mojo/core/embedder", "//mojo/public/cpp/system" ]
+}
+
 executable("remotekit_begin_frame_probe") {
   testonly = true
   sources = [ "begin_frame_probe.cc" ]

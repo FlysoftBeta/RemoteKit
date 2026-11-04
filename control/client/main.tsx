@@ -5,7 +5,6 @@ import { createRoot } from "react-dom/client";
 import {
   Alert,
   Button,
-  CircularProgress,
   CssBaseline,
   Dialog,
   DialogActions,
@@ -37,6 +36,12 @@ import { AdminDialog } from "./admin-dialog";
 import { FileChooserDialog } from './file-chooser-dialog';
 import { foregroundRequest } from './foreground-request';
 import type { AudioChannels } from './audio-output';
+import type { AuthState } from '../shared/security';
+import { BlankScreen, RevealScreen } from './lock-screen';
+import { UnlockView } from './unlock-view';
+import { SecuritySettings } from './security-settings';
+import { useAuthCamera, type AuthRequest } from './auth-camera';
+import { useAutoLock } from './auth-idle';
 import "./style.css";
 const theme = createTheme({
   palette: {
@@ -74,6 +79,11 @@ function Workspace({
     [, updateMedia] = useState(0),
     [focusAddress, setFocusAddress] = useState<string | null>(null),
     [width, setWidth] = useState(window.innerWidth);
+  const [auth, setAuth] = useState<AuthState | null>(null);
+  const [localLock, setLocalLock] = useState<string | null>(null);
+  const [manualLock, setManualLock] = useState(false);
+  const localLockRef = useRef<string | null>(null);
+  const authRef = useRef<AuthState | null>(null);
   const [pendingOperations,setPendingOperations]=useState<PendingOperation[]>([]);
   const state=projectOperations(authoritative,pendingOperations);
   const transport = useRef<RemoteTransport | null>(null);
@@ -90,13 +100,59 @@ function Workspace({
     generation = useRef<number | undefined>(undefined),
     viewportRequest = useRef(0),
     viewportFailure = useRef("");
-  latest.current = authoritative;
-  statusRef.current = status;
+  const authRequest: AuthRequest = useCallback((method, params) =>
+    connection.current!.request(method, params), []);
+  const clearWorkspace = useCallback(() => {
+    media.setProductLocked(true);
+    media.setAuthCamera();
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    latest.current = null;
+    viewportRequest.current++;
+    clearTimeout(viewportTimer.current);
+    viewportFailure.current = '';
+    geometry.current.clear();
+    setState(null);
+    setPendingOperations([]);
+    setError('');
+    setViewportNotice('');
+    setSettings(false);
+    setAdmin(false);
+    setFocusAddress(null);
+    setAudioError('');
+  }, [media]);
+  const lock = useCallback((reason: string) => {
+    if (!authRef.current || authRef.current.locked || localLockRef.current) return;
+    localLockRef.current = reason;
+    setLocalLock(reason);
+    if (reason === 'manual') setManualLock(true);
+    clearWorkspace();
+    void authRequest('auth.lock', { reason }).catch(() => connection.current?.reconnect());
+  }, [authRequest, clearWorkspace]);
+  const idle = useAutoLock(auth, lock);
+  const idleSystem = useRef(idle.system);
+  idleSystem.current = idle.system;
+  const [idleRearmed, setIdleRearmed] = useState(true);
+  useEffect(() => {
+    if (localLock === 'idle' && !idle.system) setIdleRearmed(false);
+  }, [idle.system, localLock]);
+  useEffect(() => {
+    if (idleRearmed) return;
+    const activity = () => setIdleRearmed(true);
+    window.addEventListener('pointerdown', activity, true);
+    window.addEventListener('keydown', activity, true);
+    return () => {
+      window.removeEventListener('pointerdown', activity, true);
+      window.removeEventListener('keydown', activity, true);
+    };
+  }, [idleRearmed]);
+  const onDepartureObserved = useCallback(() => setManualLock(false), []);
+  const camera = useAuthCamera(media, authRequest, localLock ? null : auth, status === 'online', manualLock,
+    !idle.blocked && idleRearmed && localLock !== 'idle' && localLock !== 'system', onDepartureObserved);
   const sendViewport = useCallback(() => {
     clearTimeout(viewportTimer.current);
     viewportTimer.current = setTimeout(() => {
       const current = latest.current;
-      if (!current || statusRef.current !== "online") return;
+      if (!current || authRef.current?.locked !== false || localLockRef.current || statusRef.current !== "online") return;
       const all =
         current.workspace.layoutMode === "side-by-side" &&
         window.innerWidth >=
@@ -142,30 +198,28 @@ function Workspace({
       started = false;
     const socket = new ControlConnection(
       (next) => {
-        if (!active) return;
+        if (!active || authRef.current?.locked !== false || localLockRef.current) return;
         setPendingOperations(entries=>entries.map(entry=>{const receipt=next.operationReceipts?.find(receipt=>receipt.operationId===entry.operationId && receipt.operationGeneration===entry.operationGeneration);return receipt?{...entry,receipt}:entry;}));
-        media.trickleIce = next.viewer.trickleIce === true;
-        if (generation.current !== next.endpointGeneration) {
-          media.observeEndpointGeneration(next.endpointGeneration);
-          generation.current = next.endpointGeneration;
-        }
+        latest.current = next;
+        if (authRef.current.peerEpoch > 0) media.setProductLocked(false);
         setState((previous) =>
           snapshotNewer(next,previous)
             ? next
             : previous,
         );
-        if (
-          !started ||
-          (statusRef.current !== "online" &&
-            ["未连接", "连接失败"].includes(media.diagnostics.connection))
-        ) {
-          started = true;
-          void media.connect();
-        }
       },
       (next) => {
         if (!active) return;
+        const previous = statusRef.current;
+        statusRef.current = next;
         setStatus(next);
+        if (next !== 'online' && previous === 'online') {
+          authRef.current = null;
+          setAuth(null);
+          clearWorkspace();
+          started = false;
+          media.disconnect();
+        }
         if (next === "revoked" || next === "expired") {
           media.disconnect();
           setState(null);
@@ -173,6 +227,34 @@ function Workspace({
         if (next === "expired") expired();
       },
       signal => media.receiveServerSignal(signal),
+      (next) => {
+        if (!active) return;
+        const previous = authRef.current;
+        if (previous && next.epoch < previous.epoch) return;
+        if (!next.locked && localLockRef.current) return;
+        if (next.locked && (!previous?.locked || next.epoch !== previous.epoch)) clearWorkspace();
+        if (next.locked) {
+          if (localLockRef.current === 'idle' && !idleSystem.current) setIdleRearmed(false);
+          localLockRef.current = null;
+          setLocalLock(null);
+        } else {
+          setManualLock(false);
+          setIdleRearmed(true);
+        }
+        authRef.current = next;
+        setAuth(next);
+        media.observePeerAuthorization(next.peerEpoch);
+        if (!next.locked && next.peerEpoch > 0 && latest.current) media.setProductLocked(false);
+        media.trickleIce = next.trickleIce;
+        if (generation.current !== next.endpointGeneration) {
+          media.observeEndpointGeneration(next.endpointGeneration);
+          generation.current = next.endpointGeneration;
+        }
+        if (!started) {
+          started = true;
+          void media.connect();
+        }
+      },
     );
     connection.current = socket;
     media.setControlRpc((method, params) =>
@@ -196,7 +278,7 @@ function Workspace({
       window.removeEventListener("resize", resize);
       document.removeEventListener("visibilitychange", sendViewport);
     };
-  }, [media]);
+  }, [clearWorkspace, media]);
   useEffect(sendViewport, [
     state?.workspace.revision,
     state?.workspace.activeWindowId,
@@ -210,7 +292,8 @@ function Workspace({
   useEffect(()=>{const timer=setInterval(()=>{for(const entry of pendingOperations.filter(entry=>!entry.receipt || ['applying','accepted','unknown'].includes(entry.receipt.status) && !entry.receipt.resolved))void connection.current?.request('operation.status',{operationId:entry.operationId,operationGeneration:entry.operationGeneration}).then(receipt=>{if(['rejected','expired'].includes(receipt.status))setError(receipt.error??'操作未完成，请核对当前工作区');setPendingOperations(entries=>entries.map(item=>item.operationId===entry.operationId?{...item,receipt}:item));}).catch(()=>{});},2000);return()=>clearInterval(timer);},[pendingOperations]);
   useEffect(()=>{const retired=pendingOperations.find(entry=>entry.receipt?.resolved && entry.receipt.status==='unknown');if(retired)setError(retired.receipt?.error??'原页面已结束，操作执行结果未知');},[pendingOperations]);
   const action: Action = async (command) => {
-    const source=latest.current;if(!source?.operationGeneration)throw new Error('正在同步产品状态');
+    const source=latest.current;if(!source?.operationGeneration || authRef.current?.locked !== false || localLockRef.current)throw new Error('正在同步产品状态');
+    if (statusRef.current !== 'online' || !media.productReady) throw new Error('正在连接浏览器，请稍后重试。');
     if(Object.values(command).some(value=>typeof value==='string'&&value.startsWith('pending-')))throw new Error('此操作正在等待确认');
     if(pendingOperations.length>=64)throw new Error('待确认操作过多，请等待同步');
     const operation:PendingOperation={operationId:operationId(),operationGeneration:source.operationGeneration,action:command};
@@ -218,53 +301,34 @@ function Workspace({
     let receipt: OperationReceipt;
     try {receipt=await media.productAction(operation);} catch (failure) {
       if((failure as {operationSent?:boolean}).operationSent===false){setPendingOperations(entries=>entries.filter(entry=>entry.operationId!==operation.operationId));throw failure;}
+      if (!latest.current || authRef.current?.locked !== false || localLockRef.current) throw failure;
       try {receipt=await connection.current!.request('operation.status',{operationId:operation.operationId,operationGeneration:operation.operationGeneration});}
       catch {receipt={operationId:operation.operationId,operationGeneration:operation.operationGeneration,status:'unknown' as const,error:'操作结果未知，请等待连接恢复后核对工作区'};}
     }
     setPendingOperations(entries=>entries.map(entry=>entry.operationId===operation.operationId?{...entry,receipt}:entry));
     return requireAcceptedReceipt(receipt);
   };
-  const report = (e: unknown) => setError(errorMessage(e));
+  const report = (e: unknown) => {
+    if (authRef.current?.locked === false && authRef.current.epoch === auth?.epoch && !localLockRef.current) setError(errorMessage(e));
+  };
   const saveAudio = (channels:AudioChannels) => {
-    if(audioPending.current || statusRef.current!=='online')return;
+    if(audioPending.current || statusRef.current!=='online' || !media.productReady)return;
     audioPending.current=true;setAudioSaving(true);setAudioError('');
-    void action({type:'settings.update',settings:{audioChannels:channels}}).catch(()=>setAudioError('声音设置未保存，请重试')).finally(()=>{audioPending.current=false;setAudioSaving(false);});
+    void action({type:'settings.update',settings:{audioChannels:channels}})
+      .catch(() => { if (authRef.current?.locked === false && authRef.current.epoch === auth?.epoch && !localLockRef.current) setAudioError('声音设置未保存，请重试'); })
+      .finally(()=>{audioPending.current=false;setAudioSaving(false);});
   };
   useEffect(()=>{if(state)media.audio.setChannels(state.workspace.settings.audioChannels);},[state?.workspace.settings.audioChannels,media]);
   const loadRegistration = useCallback(() => connection.current!.request("admin.get", {}), []);
   const saveRegistration = useCallback((serverCredential: string) =>
     connection.current!.request("admin.setRegistrationCredential", { serverCredential }), []);
   const fileRpc = media.files;
-  if (status === "revoked")
-    return (
-      <main className="workspace-empty">
-        <Typography variant="h6">浏览器已在另一处打开</Typography>
-        <Typography color="text.secondary">此处连接已停止。</Typography>
-        <Button onClick={() => location.reload()}>在此处继续</Button>
-        <Button color="inherit" onClick={logout}>
-          退出登录
-        </Button>
-      </main>
-    );
-  if (!state)
-    return (
-      <main className="workspace-empty">
-        {status === "failed" ? (
-          <>
-            <Typography>暂时无法连接</Typography>
-            <Button onClick={() => connection.current?.restart()}>重试</Button>
-            <Button color="inherit" onClick={logout}>
-              退出登录
-            </Button>
-          </>
-        ) : (
-          <>
-            <CircularProgress size={24} />
-            <Typography>正在准备浏览器…</Typography>
-          </>
-        )}
-      </main>
-    );
+  if (localLock || auth?.locked !== false) return <RevealScreen key={`${auth?.epoch ?? 'connecting'}:${localLock ?? ''}`}>
+    {close => <UnlockView auth={localLock ? null : auth} request={authRequest} camera={camera} close={close}
+      retry={() => status === 'revoked' ? location.reload() : connection.current?.restart()} />}
+  </RevealScreen>;
+  if (!state) return <BlankScreen />;
+  const productReady = status === 'online' && media.productReady;
   const workspace = state.workspace,
     sideBySide =
       workspace.layoutMode === "side-by-side" &&
@@ -276,7 +340,7 @@ function Workspace({
   return (
     <main className="viewer-shell">
       {pendingOperations.length>0 && <Alert severity="info" sx={{position:'absolute',top:88,left:'50%',transform:'translateX(-50%)',zIndex:1190}} action={pendingOperations.some(entry=>entry.receipt?.status==='unknown')?<Button onClick={()=>setPendingOperations(entries=>entries.filter(entry=>entry.receipt?.status!=='unknown'))}>以当前工作区为准</Button>:undefined}>{pendingOperations.length} 个操作{pendingOperations.some(entry=>entry.receipt?.status==='unknown')?'结果未知，请核对工作区':'正在同步'}{media.diagnostics.channel!=='已连接'?'，等待数据通道连接':''}</Alert>}
-      {media.audio.state === 'blocked' && (workspace.settings.audioChannels?.left !== false || workspace.settings.audioChannels?.right !== false) && <Button variant="contained" onClick={() => media.audio.resume()} sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}>点击开启声音</Button>}
+      {productReady && media.audio.state === 'blocked' && (workspace.settings.audioChannels?.left !== false || workspace.settings.audioChannels?.right !== false) && <Button variant="contained" onClick={() => media.audio.resume()} sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}>点击开启声音</Button>}
       {status !== "online" && (
         <Alert
           severity="warning"
@@ -295,6 +359,13 @@ function Workspace({
           {status === "failed" ? "暂时无法连接" : "正在恢复连接…"}
         </Alert>
       )}
+      {status === 'online' && !productReady && (
+        <Alert severity={media.diagnostics.connection === '连接失败' ? 'warning' : 'info'}
+          action={media.diagnostics.connection === '连接失败' &&
+            <Button color="inherit" size="small" onClick={() => void media.connect()}>重试</Button>}>
+          {media.diagnostics.connection === '连接失败' ? '浏览器连接失败' : '正在连接浏览器…'}
+        </Alert>
+      )}
       {(error || viewportNotice || state.endpointError) && (
         <Alert severity="warning" onClose={() => { setError(""); setViewportNotice(""); }}
           sx={!error && (viewportNotice || state.quality.resourceLimitation) ? { position: "absolute", top: 8, left: 12, right: 12, zIndex: 1400 } : undefined}>
@@ -309,6 +380,7 @@ function Workspace({
                 before={windows[index - 1]}
                 after={w}
                 windows={workspace.windows}
+                online={productReady}
                 action={action}
                 report={report}
               />
@@ -318,7 +390,7 @@ function Workspace({
               state={state}
               transport={media}
               action={action}
-              online={status === "online"}
+              online={productReady}
               onSettings={() => setSettings(true)}
               onAdmin={() => setAdmin(true)}
               onLogout={logout}
@@ -335,7 +407,7 @@ function Workspace({
             <Typography variant="h6">开始浏览</Typography>
             <Button
               variant="contained"
-              disabled={status !== "online"}
+              disabled={!productReady}
               onClick={() =>
                 void action({ type: "window.create" }).catch(report)
               }
@@ -349,8 +421,8 @@ function Workspace({
           </div>
         )}
       </div>
-      <PageDialogs state={state} action={action} activeId={foreground?.kind==='page'?foreground.id:null} />
-      {fileRequest && <FileChooserDialog key={fileRequest.id} request={fileRequest} online={status==='online'} rpc={fileRpc} />}
+      {productReady && <PageDialogs state={state} action={action} activeId={foreground?.kind==='page'?foreground.id:null} />}
+      {fileRequest && <FileChooserDialog key={fileRequest.id} request={fileRequest} online={productReady} rpc={fileRpc} />}
       {state.user.isAdmin && <AdminDialog
         open={admin}
         online={status === "online"}
@@ -359,17 +431,19 @@ function Workspace({
         save={saveRegistration}
       />}
       <SettingsDialog
-        online={status === "online"}
+        online={productReady}
         state={state}
         open={settings}
         onClose={() => setSettings(false)}
         action={action}
         logout={logout}
+        security={settings && <SecuritySettings auth={auth} online={status === 'online'} request={authRequest}
+          camera={camera} idle={idle} lock={() => lock('manual')} />}
       />
       <Dialog
-        open={!!pending && !pending.awaiting}
+        open={productReady && !!pending && !pending.awaiting}
         onClose={() =>
-          pending &&
+          productReady && pending &&
           void action({
             type: "tab.close",
             tabId: pending.id,
@@ -434,15 +508,8 @@ function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      {notice && (
-        <Alert severity="warning" onClose={() => setNotice("")}>
-          {notice}
-        </Alert>
-      )}
       {user === undefined ? (
-        <div className="workspace-empty">
-          <CircularProgress size={24} />
-        </div>
+        <BlankScreen />
       ) : user ? (
         <Workspace
           key={user.id}
@@ -453,12 +520,12 @@ function App() {
           }}
         />
       ) : (
-        <AuthView
+        <RevealScreen>{close => <AuthView close={close} notice={notice}
           onLogin={(next) => {
             setNotice("");
             setUser(next);
           }}
-        />
+        />}</RevealScreen>
       )}
     </ThemeProvider>
   );

@@ -10,7 +10,7 @@ def main():
  a=p.parse_args();package=a.package.resolve()
  run=a.work_dir.resolve()/str(time.time_ns());run.mkdir(parents=True)
  result={'passed':False,'package':str(package),'evidence':str(run),
-   'scope':'startup: bundled Node + production UI assets + SQLite first-admin registration + authenticated WebSocket state + clock/admin + Endpoint management reconciliation + rejected WS browser action with unchanged workspace; no RTC product operations or media',
+   'scope':'startup: bundled Node + production UI assets + SQLite first-admin registration + authenticated WebSocket state + clock/admin + Endpoint management reconciliation and face model availability + Viewer reattachment lock and password recovery + rejected WS browser action with unchanged workspace; no RTC product operations or media',
    'validationKind':'startup','browserProductOperationsTested':False,'rtcMediaTested':False};child=None
  try:
   for relative in ['bin/node.exe','bin/endpoint_service.exe','bin/remotekit_browser.exe','control/dist/server.mjs','control/dist/client/index.html']:

@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -8,7 +9,7 @@ namespace remotekit {
 // Dispatcher operations carry their socket generation; replies cannot migrate.
 class ControlTransport {
  public:
-  ControlTransport(std::string url, std::string node_id, std::string token);
+  ControlTransport(std::string url, std::string node_id, std::string token, std::function<void(uint64_t)> disconnected = {});
   ~ControlTransport();
   bool Next(std::string& message, uint64_t& generation);
   bool Current(uint64_t generation);

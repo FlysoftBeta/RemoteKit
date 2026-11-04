@@ -237,6 +237,7 @@ export function WindowFrame({
                 type="button"
                 className="tab-select"
                 role="tab"
+                disabled={!online}
                 tabIndex={active?.id === tab.id ? 0 : -1}
                 aria-selected={active?.id === tab.id}
                 onClick={() => run({ type: "tab.activate", tabId: tab.id })}
@@ -633,12 +634,14 @@ export function WindowDivider({
   before,
   after,
   windows,
+  online,
   action,
   report,
 }: {
   before: ProductWindow;
   after: ProductWindow;
   windows: ProductWindow[];
+  online: boolean;
   action: Action;
   report: (error: unknown) => void;
 }) {
@@ -670,6 +673,7 @@ export function WindowDivider({
     return Math.max(minimum, Math.min(1 - minimum, ratio));
   };
   const change = (ratio: number) => {
+    if (!online) { restoreWeights(); return; }
     const attempt = ++revision.current;
     const sum = before.weight + after.weight,
       next = clampRatio(ratio);
@@ -692,7 +696,8 @@ export function WindowDivider({
       className="window-divider"
       ref={divider}
       role="separator"
-      tabIndex={0}
+      tabIndex={online ? 0 : -1}
+      aria-disabled={!online}
       aria-label="调整窗口宽度"
       aria-orientation="vertical"
       aria-valuenow={Math.round(
@@ -710,6 +715,7 @@ export function WindowDivider({
         }
       }}
       onPointerDown={(e) => {
+        if (!online) return;
         const previous = e.currentTarget.previousElementSibling as HTMLElement,
           next = e.currentTarget.nextElementSibling as HTMLElement;
         drag.current = {
@@ -722,7 +728,7 @@ export function WindowDivider({
       }}
       onPointerMove={(e) => {
         const current = drag.current;
-        if (!current) return;
+        if (!current || !online) return;
         const ratio = clampRatio(
           current.before / (current.before + current.after) +
             (e.clientX - current.x) / current.width,

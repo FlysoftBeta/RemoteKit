@@ -68,5 +68,9 @@ int main() {
  // Session suppresses this empty prepare; first real layout creates its key.
  auto initial=gate.Layout(5,11);CHECK(initial && initial->barrier>early->barrier);
  CHECK(!gate.Ready(3,*early));CHECK(gate.Ready(3,*initial));CHECK(send(3,11));
+ auto resumed=gate.Mode(3,true,true);CHECK(resumed && resumed->barrier>initial->barrier);
+ CHECK(resumed->epoch==11 && !gate.Ready(3,*initial) && !send(3,11));
+ CHECK(gate.Ready(3,*resumed) && !send(3,11,false) && send(3,11));
+ gate.Mode(3,false,true);CHECK(!send(3,11,false) && send(3,11));
  std::cout<<"presentation barrier ordering, publication serialization and tail lease tests passed\n";
 }

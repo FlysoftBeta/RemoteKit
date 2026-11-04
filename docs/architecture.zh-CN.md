@@ -16,7 +16,7 @@
 
 Browser使用固定Chromium GN构建，不装配Chrome Browser/TabStripModel/BrowserView；Endpoint用独立CMake/Ninja，不包含Chromium私有头。SDK以C ABI连接Mojo及libwebrtc，跨DLL不传C++运行时对象。独立endpoint_service是默认入口，旧Browser harness/native client仅显式demo目标保留。
 
-默认单机包由Control启动Endpoint并以JSONL管理；远端模式由独立Endpoint主动建立认证WSS管理连接。Control与Endpoint不要求共享文件系统或时钟，管理断线不销毁已有Session/RTC。Endpoint持有Browser本地Mojo连接。网络用户只通过已认证Control/RTC会话进入，不把Session ID当凭据。详细接口见[串流协议](streaming-protocol.md)、[本地Browser协议](control-protocol.md)、[SDK](sdk.md)。
+默认单机包由Control启动Endpoint并以JSONL管理；远端模式由独立Endpoint主动建立认证WSS管理连接。Control与Endpoint不要求共享文件系统或时钟，管理断线不销毁已有Session/RTC，但立即撤销正常Viewer产品权限，恢复后由Control重新授权。Endpoint持有Browser本地Mojo连接。网络用户只通过已认证Control/RTC会话进入，不把Session ID当凭据。Cookie身份与工作区解锁权限分开；摄像头RGB与人脸计算由Endpoint处理，Control发起挑战并裁定授权，见[高级认证](authentication.zh-CN.md)。详细接口见[串流协议](streaming-protocol.md)、[本地Browser协议](control-protocol.md)、[SDK](sdk.md)。
 
 ## 产品状态、生命周期与恢复
 

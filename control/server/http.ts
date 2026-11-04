@@ -6,6 +6,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import type { Socket } from 'node:net';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ApiError, Control } from './control';
+import { AuthError } from './security-crypto';
 import type { ProductState } from '../shared/product';
 import type { EndpointNode } from './endpoint-node';
 
@@ -17,6 +18,7 @@ export function createHttp(control: Control, options: { origins: string[]; clien
     void promise.then(() => inflight.delete(promise), () => inflight.delete(promise));
     return promise;
   };
+  const firstViewer = new Map<string, number>();
   let metricsWrite: Promise<void> = Promise.resolve();
   const cookie = (token: string, clear = false) => `rk_session=${token}; HttpOnly; SameSite=Strict; Path=/${options.tls ? '; Secure' : ''}${clear ? '; Max-Age=0' : '; Max-Age=2592000'}`;
   const checkOrigin = (req: IncomingMessage) => { if (!req.headers.origin || !options.origins.includes(req.headers.origin)) throw new ApiError(403, '请求来源不允许'); };
@@ -47,8 +49,11 @@ export function createHttp(control: Control, options: { origins: string[]; clien
         const body = await readBody(req); if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ApiError(400, '需要 JSON 对象');
         if (['tenantId', 'tenant', 'userId', 'user'].some(key => key in body)) throw new ApiError(400, '客户端不能指定用户或租户');
         if (path === '/api/auth/register' || path === '/api/auth/login') {
-          let session; try { session = path.endsWith('register') ? await control.store.register(body.username, body.password, body.serverCredential) : await control.store.login(body.username, body.password); } catch (error) { throw new ApiError(path.endsWith('login') ? 401 : 400, error instanceof Error ? error.message : String(error)); }
+          let session; try { session = path.endsWith('register') ? await control.store.register(body.username, body.password, body.serverCredential) : await control.store.login(body.username, body.password); } catch (error) { throw new ApiError(error instanceof AuthError && error.status === 429 ? 429 : path.endsWith('login') ? 401 : 400, error instanceof Error ? error.message : String(error)); }
           const previous = control.store.identity(token); if (previous) { control.store.revoke(token); await control.logout(previous.tenantId, authenticationIdentity(token!)); }
+          for (const [hash, expires] of firstViewer) if (expires <= Date.now()) firstViewer.delete(hash);
+          if (firstViewer.size >= 4096) firstViewer.delete(firstViewer.keys().next().value!);
+          firstViewer.set(authenticationIdentity(session.token), Date.now() + 30000);
           res.setHeader('Set-Cookie', cookie(session.token)); return json(res, 200, { authenticated: true, user: session.user });
         }
         if (path === '/api/auth/logout') { const previous = control.store.identity(token); control.store.revoke(token); if (previous) await control.logout(previous.tenantId, authenticationIdentity(token!)); res.setHeader('Set-Cookie', cookie('', true)); return json(res, 200, { loggedOut: true }); }
@@ -80,10 +85,12 @@ export function createHttp(control: Control, options: { origins: string[]; clien
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false });
   const peers = new Map<WebSocket, { tenant: string; lease: string; token: string; alive: boolean }>();
   const send = (ws: WebSocket, message: unknown) => { if (ws.readyState === WebSocket.OPEN) { if (ws.bufferedAmount > 2 * 1024 * 1024) ws.terminate(); else ws.send(JSON.stringify(message)); } };
-  const push = (tenant: string, state: ProductState) => { for (const [ws, peer] of peers) if (peer.tenant === tenant) send(ws, { type: 'state', revision: state.workspace.revision, state }); };
+  const push = (tenant: string, state: ProductState) => { for (const [ws, peer] of peers) if (peer.tenant === tenant && control.productAllowed(tenant, peer.lease)) send(ws, { type: 'state', revision: state.workspace.revision, state }); };
   control.on('state', push);
   const signal = (tenant: string, lease: string, message: unknown) => { for (const [ws, peer] of peers) if (peer.tenant === tenant && peer.lease === lease) send(ws, message); };
   control.on('rtc.signal', signal);
+  const auth = (tenant: string, lease: string, state: unknown) => signal(tenant, lease, { type: 'auth', auth: state });
+  control.on('auth', auth);
   server.on('upgrade', (req, socket, head) => {
     try {
       if (closing) throw new ApiError(503, '服务正在关闭');
@@ -93,8 +100,11 @@ export function createHttp(control: Control, options: { origins: string[]; clien
       sockets.handleUpgrade(req, socket, head, ws => {
         const lease = randomUUID(), peer = { tenant: identity.tenantId, lease, token, alive: true }; peers.set(ws, peer);
         const pending = new Set<string>();
-        const ready = track(control.attachViewer(peer.tenant, lease, reason => { send(ws, { type: 'lease', status: 'revoked', reason }); ws.close(4001, reason); }, { identity: authenticationIdentity(token), valid: () => control.store.identity(token)?.tenantId === peer.tenant }));
-        void ready.then(state => send(ws, { type: 'state', revision: state.workspace.revision, state })).catch(() => ws.close(1011, 'Viewer unavailable'));
+        const hash = authenticationIdentity(token);
+        const initialUnlocked = (firstViewer.get(hash) ?? 0) > Date.now();
+        firstViewer.delete(hash);
+        const ready = track(control.attachViewer(peer.tenant, lease, reason => { send(ws, { type: 'lease', status: 'revoked', reason }); ws.close(4001, reason); }, { identity: hash, valid: () => control.store.identity(token)?.tenantId === peer.tenant }, identity.legacy ? undefined : initialUnlocked));
+        void ready.catch(() => ws.close(1011, 'Viewer unavailable'));
         ws.on('pong', () => { peer.alive = true; }); ws.on('error', () => {});
         ws.on('close', () => { if (peers.delete(ws)) void track(control.detachViewer(peer.tenant, lease)).catch(() => {}); });
         ws.on('message', (data, binary) => {
@@ -103,14 +113,21 @@ export function createHttp(control: Control, options: { origins: string[]; clien
           try { if (binary) throw new Error(); request = JSON.parse(data.toString()); if (!request || typeof request.id !== 'string' || !request.id || request.id.length > 128 || typeof request.method !== 'string' || pending.has(request.id) || pending.size >= 32) throw new Error(); }
           catch { send(ws, { type: 'error', id: typeof request?.id === 'string' ? request.id : '', error: { code: 400, message: '无效的 WebSocket 请求' } }); return; }
           pending.add(request.id);
-          void track(ready.then(async () => {
+          const immediate = request.method.startsWith('auth.') || request.method === 'clock.ping';
+          void track((immediate ? Promise.resolve() : ready).then(async () => {
             if (!control.store.identity(token)) throw new ApiError(401, '登录已过期');
-            const result = await control.viewerRequest(peer.tenant, lease, request.method, request.params); send(ws, { type: 'result', id: request.id, result });
+            const maintenance = immediate || ['rtc.offer', 'rtc.ice', 'rtc.close'].includes(request.method);
+            const epoch = control.productEpoch(peer.tenant, lease);
+            const result = await control.viewerRequest(peer.tenant, lease, request.method, request.params);
+            if (!maintenance && (!control.productAllowed(peer.tenant, lease) || control.productEpoch(peer.tenant, lease) !== epoch)) throw new ApiError(423, 'Viewer 已锁定');
+            send(ws, { type: 'result', id: request.id, result });
           }).catch(error => send(ws, { type: 'error', id: request.id, error: { code: error instanceof ApiError ? error.status : 502, message: error instanceof Error ? error.message : String(error) } })).finally(() => pending.delete(request.id)));
         });
       });
     } catch (error) { const status = error instanceof ApiError ? error.status : 500; socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); }
   });
+  const facePoll = setInterval(() => { if (!closing) void track(control.pollFaceAuth()); }, 500);
+  facePoll.unref();
   const heartbeat = setInterval(() => { for (const [ws, peer] of peers) { if (!peer.alive || !control.store.identity(peer.token)) { ws.terminate(); continue; } peer.alive = false; ws.ping(); } }, 30000); heartbeat.unref();
   const originalClose = server.close.bind(server);
   let shutdownPromise: Promise<void> | undefined;
@@ -119,7 +136,7 @@ export function createHttp(control: Control, options: { origins: string[]; clien
     closing = true;
     // Fail remote management requests before draining handlers waiting on them.
     options.endpointNode?.stop();
-    clearInterval(heartbeat);
+    clearInterval(heartbeat); clearInterval(facePoll); control.off('auth', auth);
     control.off('state', push); control.off('rtc.signal', signal);
     const httpClosed = new Promise<void>((resolve, reject) => originalClose(error => {
       if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') reject(error); else resolve();

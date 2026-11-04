@@ -46,5 +46,30 @@ class EndpointLayout(unittest.TestCase):
             result = next((root / 'evidence').glob('*/result.json'))
             self.assertIn('缺少运行包', result.read_text(encoding='utf-8'))
 
+    def test_face_runtime_copies_only_catalogued_package_paths(self):
+        with tempfile.TemporaryDirectory(prefix='rk package ') as temporary:
+            root = Path(temporary)
+            cache = root / 'asset-cache'
+            package = root / 'package'
+            cache.mkdir()
+            destinations = [
+                Path('bin/face-models/recognition.onnx'),
+                Path('bin/face-models/provenance.json'),
+                Path('licenses/OpenCV-LICENSE.txt'),
+            ]
+            files = []
+            for relative in destinations:
+                source = cache / relative.name
+                source.write_bytes(relative.as_posix().encode('ascii'))
+                files.append((source, relative))
+            (cache / 'unrelated.sqlite').touch()
+            packager.copy_face_runtime(files, package)
+            self.assertEqual({path.relative_to(package) for path in package.rglob('*') if path.is_file()},
+                             set(destinations))
+            for source, relative in files:
+                self.assertEqual((package / relative).read_bytes(), source.read_bytes())
+            with self.assertRaisesRegex(RuntimeError, 'collides with a runtime file'):
+                packager.copy_face_runtime(files, package)
+
 if __name__ == '__main__':
     unittest.main()

@@ -10,6 +10,8 @@ import { QualityState } from './quality';
 import type { ControlState, Device } from '../client/types';
 import type { Endpoint, RtcSignal } from './endpoint';
 import { Store } from './store';
+import { AuthError } from './security-crypto';
+import { ViewerAuth, type ViewerSecurity } from './viewer-auth';
 import { LoopbackRelay, rewriteSdp, selectLocalCandidate, type NetworkSimulation } from './network-sim.mjs';
 function operationPayload(value:unknown):string { const canonical=(input:any):any=>Array.isArray(input)?input.map(canonical):input && typeof input==='object'?Object.fromEntries(Object.keys(input).sort().map(key=>[key,canonical(input[key])])):input;return JSON.stringify(canonical(value)); }
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
@@ -33,7 +35,8 @@ export class Control extends EventEmitter {
   private mediaGeneration(tenant: string) { return this.tenantEndpointGenerations.get(tenant) ?? this.endpointGeneration; }
   private relays = new Map<string, LoopbackRelay>();
   private diagnosticTenants = new Set<string>();
-  private viewers = new Map<string, { id: string; authentication?: { identity: string; valid: () => boolean }; revoke: (reason: 'another-viewer' | 'logout') => void; viewport?: ViewerViewport }>();
+  private readonly viewerAuth: ViewerAuth;
+  private viewers = new Map<string, { id: string; authentication?: { identity: string; valid: () => boolean }; revoke: (reason: 'another-viewer' | 'logout') => void; viewport?: ViewerViewport; security?: ViewerSecurity }>();
   private lastViewports = new Map<string, ViewerViewport>();
   private started = new Set<string>();
   private backgroundPolicy = new BackgroundPolicy();
@@ -49,8 +52,29 @@ export class Control extends EventEmitter {
   private uploads: FileUploads;
   constructor(readonly store: Store, readonly endpoint: Endpoint, private simulation?: NetworkSimulation, fileLimits: UploadLimits = FILE_LIMITS) {
     super(); this.unsubscribeActions=endpoint.onClientAction?.(event=>{void this.handleEndpointAction(event).catch(()=>{});}); this.unsubscribeSignals=endpoint.onSignal?.(event => this.receiveSignal(event));
+    this.viewerAuth = new ViewerAuth(store, endpoint, (tenant, viewer, workspace) => {
+      const lease = this.viewers.get(tenant)?.id;
+      if (!lease || !this.validSecurity(tenant, viewer)) return;
+      this.emit('auth', tenant, lease, this.authState(tenant, viewer));
+      if (workspace) {
+        this.push(tenant);
+        this.authorizeFiles(tenant);
+        void this.serial(tenant, () => this.reconcileProduct(tenant)).catch(() => {});
+      }
+    }, (tenant, viewer) => this.validSecurity(tenant, viewer), (tenant, viewer) => {
+      const lease = this.viewers.get(tenant)?.id;
+      if (!lease || !this.validSecurity(tenant, viewer)) return;
+      this.fileAuthorizations.delete(tenant);
+      this.qualityState(tenant).resetFeedback();
+      void this.serial(tenant, async () => {
+        if (!this.validSecurity(tenant, viewer)) return;
+        await this.uploads.revoke(tenant, lease);
+        if (!viewer.locked) { this.fileAuthorizations.delete(tenant); this.authorizeFiles(tenant); }
+        if (viewer.locked) await this.reconcileProduct(tenant);
+      }).catch(() => {});
+    });
     this.uploads = new FileUploads(endpoint, (tenant, lease, authentication) => {
-      this.assertViewer(tenant, lease);
+      this.assertProductViewer(tenant, lease);
       if ((this.viewers.get(tenant)?.authentication?.identity ?? '') !== authentication) throw new ApiError(401, '上传登录身份已改变');
     }, (tenant, id) => this.fileRequests.get(tenant)?.find(request => request.id === id), fileLimits);
   }
@@ -145,12 +169,18 @@ export class Control extends EventEmitter {
     if (connectionId && (snapshot?.rtc?.active !== true || snapshot.rtc.connectionId !== connectionId)) {
       this.clearSignal(connectionId); this.relays.get(connectionId)?.close(); this.relays.delete(connectionId);
       this.connections.delete(tenant);
+      const security = this.viewers.get(tenant)?.security;
+      if (security) this.viewerAuth.forgetPeer(tenant, security);
       this.tenantEndpointGenerations.set(tenant, this.mediaGeneration(tenant) + 1);
+      const lease = this.viewers.get(tenant)?.id;
+      if (security && lease) this.emit('auth', tenant, lease, this.authState(tenant, security));
       this.push(tenant);
       // A mismatching peer is not authorized by the surviving Viewer lease.
       if (snapshot?.rtc?.active === true && typeof snapshot.rtc.connectionId === 'string')
         await this.endpoint.request('rtc.close', tenant, { connectionId: snapshot.rtc.connectionId });
     }
+    const security = this.viewers.get(tenant)?.security;
+    if (security) await this.viewerAuth.restore(tenant, security);
     this.pendingRtcChecks.delete(tenant);
   }
   async endpointReady(identity?: { processChanged: boolean }) {
@@ -170,7 +200,7 @@ export class Control extends EventEmitter {
       });
     }
   }
-  async reconcileAll() { this.endpointGeneration = Math.max(this.endpointGeneration, ...this.tenantEndpointGenerations.values()) + 1; this.tenantEndpointGenerations.clear(); this.pendingRtcChecks.clear(); this.closeRelays(); this.connections.clear(); this.connectionLeases.clear(); this.fileAuthorizations.clear(); this.configurations.clear(); this.started.clear(); this.transitions.clear(); this.backgroundPolicy.clear(); this.siteApplications.clear(); this.mediaApplications.clear(); this.actualMediaPolicies.clear(); this.dialogs.clear(); for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()])) await this.serial(tenant, async () => { if (this.diagnosticTenants.has(tenant)) { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); } await this.reconcile(tenant); this.push(tenant); }).catch(() => {}); }
+  async reconcileAll() { this.endpointGeneration = Math.max(this.endpointGeneration, ...this.tenantEndpointGenerations.values()) + 1; this.tenantEndpointGenerations.clear(); this.pendingRtcChecks.clear(); this.closeRelays(); this.connections.clear(); for (const [tenant, viewer] of this.viewers) if (viewer.security) this.viewerAuth.forgetPeer(tenant, viewer.security); this.connectionLeases.clear(); this.fileAuthorizations.clear(); this.configurations.clear(); this.started.clear(); this.transitions.clear(); this.backgroundPolicy.clear(); this.siteApplications.clear(); this.mediaApplications.clear(); this.actualMediaPolicies.clear(); this.dialogs.clear(); for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()])) await this.serial(tenant, async () => { if (this.diagnosticTenants.has(tenant)) { const state = this.store.state(tenant); state.pendingClose = null; this.store.save(state); } const viewer = this.viewers.get(tenant); if (viewer?.security) { this.emit('auth', tenant, viewer.id, this.authState(tenant, viewer.security)); void this.viewerAuth.capabilities(tenant, viewer.security); } await this.reconcile(tenant); this.push(tenant); }).catch(() => {}); }
   async action(tenant: string, body: any) {
     this.diagnosticTenants.add(tenant);
     return this.serial(tenant, async () => {
@@ -226,8 +256,10 @@ export class Control extends EventEmitter {
       if (!this.diagnosticTenants.has(tenant)) this.qualityState(tenant).resetFeedback();
       await this.reconcile(tenant);
       timings.reconcileEndMs = performance.now() - receivedAt;
+      const security = lease ? this.viewers.get(tenant)?.security : undefined;
       const previous = this.connections.get(tenant);
       if (previous) { this.clearSignal(previous); try { await this.endpoint.request('rtc.close', tenant, { connectionId: previous }); } finally { this.relays.get(previous)?.close(); this.relays.delete(previous); this.connections.delete(tenant); } }
+      if (security) this.viewerAuth.forgetPeer(tenant, security);
       const connectionId = randomUUID();
       let relay: LoopbackRelay | undefined;
       try {
@@ -245,13 +277,13 @@ export class Control extends EventEmitter {
           void pending.catch(() => {});
           const timer = setTimeout(() => reject(new Error('RTC answer 等待超时')), 15000);
           this.signalBindings.set(connectionId, { tenant, lease: lease!, attemptId: body.attemptId, resolve, reject, timer, answered: false });
-          const accepted = await this.endpoint.request('rtc.offer', tenant, { connectionId, sdp: offerSdp, trickle: true });
+          const accepted = await this.endpoint.request('rtc.offer', tenant, { connectionId, sdp: offerSdp, trickle: true, ...(security ? { authRequired: true } : {}) });
           timings.endpointAcceptedMs = performance.now() - receivedAt;
           if (accepted?.accepted !== true || accepted.connectionId !== connectionId) throw new ApiError(502, 'Endpoint未接受媒体协商');
           answer = { sdp: await pending };
           timings.answerReadyMs = performance.now() - receivedAt;
           this.assertViewer(tenant, lease!);
-        } else answer = await this.endpoint.request('rtc.offer', tenant, { connectionId, sdp: offerSdp });
+        } else answer = await this.endpoint.request('rtc.offer', tenant, { connectionId, sdp: offerSdp, ...(security ? { authRequired: true } : {}) });
         if (typeof answer?.sdp !== 'string' || !answer.sdp.startsWith('v=0')) throw new ApiError(502, 'Endpoint 未返回有效 answer');
         // Full-gather can finish after a Viewer takeover too. Publish both the
         // connection and its action authority only for the current Viewer.
@@ -259,10 +291,11 @@ export class Control extends EventEmitter {
         let answerSdp = answer.sdp;
         if (relay) { relay.setServer(selectLocalCandidate(answerSdp, { requireLoopback: true })); answerSdp = rewriteSdp(answerSdp, relay.clientAddress); this.relays.set(connectionId, relay); }
         this.connections.set(tenant, connectionId);
-        if (lease) this.connectionLeases.set(connectionId, lease);
+        if (security) await this.viewerAuth.bind(tenant, security, connectionId);
+        if (lease) { this.assertViewer(tenant, lease); this.connectionLeases.set(connectionId, lease); }
         this.fileAuthorizations.delete(tenant);this.authorizeFiles(tenant);
         return { type: 'answer', sdp: answerSdp, connectionId, endpointGeneration: this.mediaGeneration(tenant), negotiationTiming: timings, signalingMode: trickle ? 'trickle' : this.simulation ? 'full-gather-simulation' : 'full-gather-compatibility', ...(relay ? { networkSimulation: relay.snapshot() } : {}) };
-      } catch (error) { this.clearSignal(connectionId); if (this.connections.get(tenant) === connectionId) this.connections.delete(tenant); relay?.close(); this.relays.delete(connectionId); await this.endpoint.request('rtc.close', tenant, { connectionId }).catch(() => {}); throw error; }
+      } catch (error) { if (security) this.viewerAuth.forgetPeer(tenant, security); this.clearSignal(connectionId); if (this.connections.get(tenant) === connectionId) this.connections.delete(tenant); relay?.close(); this.relays.delete(connectionId); await this.endpoint.request('rtc.close', tenant, { connectionId }).catch(() => {}); throw error; }
     });
   }
   async ice(tenant: string, body: any) {
@@ -281,6 +314,12 @@ export class Control extends EventEmitter {
       if (lease) this.assertViewer(tenant, lease);
       if (this.connections.get(tenant) !== body.connectionId) { if (owned) return { closed: true }; throw new ApiError(403, '连接不属于当前会话'); }
       this.clearSignal(body.connectionId);
+      const security = this.viewers.get(tenant)?.security;
+      if (security) {
+        this.viewerAuth.forgetPeer(tenant, security);
+        this.emit('auth', tenant, lease, this.authState(tenant, security));
+        void this.viewerAuth.capabilities(tenant, security);
+      }
       try { await this.endpoint.request('rtc.close', tenant, { connectionId: body.connectionId }); } finally { this.relays.get(body.connectionId)?.close(); this.relays.delete(body.connectionId); this.connections.delete(tenant); } return { closed: true };
     });
   }
@@ -295,20 +334,64 @@ export class Control extends EventEmitter {
   private push(tenant: string) { this.emit('state', tenant, this.productState(tenant)); }
   private saveProduct(state: ProductWorkspace) { const operation = this.applyingOperations.get(state.tenantId); if (operation) { this.store.saveOperation(state, operation); this.push(state.tenantId); } else { const changed = this.store.saveWorkspace(state); if (changed) this.push(state.tenantId); } }
   assertViewer(tenant: string, lease: string) { const viewer = this.viewers.get(tenant); if (viewer?.id !== lease) throw new ApiError(409, '此窗口已由另一个 Viewer 接管'); if (viewer.authentication && !viewer.authentication.valid()) throw new ApiError(401, '登录已过期'); }
-  async attachViewer(tenant: string, id: string, revoke: (reason: 'another-viewer' | 'logout') => void, authentication?: { identity: string; valid: () => boolean }) {
+  private validSecurity(tenant: string, security: ViewerSecurity) {
+    const viewer = this.viewers.get(tenant);
+    return viewer?.security === security && viewer.authentication?.valid() === true;
+  }
+  private authState(tenant: string, security: ViewerSecurity) {
+    return this.viewerAuth.state(security, !!this.endpoint.onSignal && !this.simulation, this.mediaGeneration(tenant));
+  }
+  productEpoch(tenant: string, lease: string) {
+    return this.viewers.get(tenant)?.id === lease ? this.viewers.get(tenant)?.security?.epoch : undefined;
+  }
+  productAllowed(tenant: string, lease: string) {
+    const viewer = this.viewers.get(tenant);
+    return viewer?.id === lease && (!viewer.authentication || viewer.authentication.valid()) && !viewer.security?.locked;
+  }
+  private assertProductViewer(tenant: string, lease: string, epoch?: number) {
+    this.assertViewer(tenant, lease);
+    const security = this.viewers.get(tenant)?.security;
+    if (security?.locked || epoch !== undefined && security?.epoch !== epoch) throw new ApiError(423, 'Viewer 已锁定');
+  }
+  async pollFaceAuth() {
+    await Promise.all([...this.viewers].map(([tenant, viewer]) => viewer.security && this.viewerAuth.poll(tenant, viewer.security)));
+  }
+  endpointOffline() {
+    for (const [tenant, viewer] of this.viewers) if (viewer.security) {
+      viewer.security.face = { available: false };
+      void this.viewerAuth.lock(tenant, viewer.security, false, false);
+    }
+  }
+  async attachViewer(tenant: string, id: string, revoke: (reason: 'another-viewer' | 'logout') => void,
+    authentication?: { identity: string; valid: () => boolean }, initialUnlocked?: boolean) {
     this.qualityState(tenant).resetFeedback();
-    const old = this.viewers.get(tenant); this.viewers.set(tenant, { id, revoke, authentication }); old?.revoke('another-viewer');
+    const old = this.viewers.get(tenant);
+    if (old?.security) {
+      void this.viewerAuth.lock(tenant, old.security).catch(() => {});
+      this.viewerAuth.forgetPeer(tenant, old.security);
+    }
+    const user = this.store.userForTenant(tenant);
+    const security = user && initialUnlocked !== undefined ? this.viewerAuth.create(user, initialUnlocked) : undefined;
+    this.viewers.set(tenant, { id, revoke, authentication, security });
+    old?.revoke('another-viewer');
+    if (security) this.emit('auth', tenant, id, this.authState(tenant, security));
     const previous = this.connections.get(tenant); if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
       if (old) await this.uploads.revoke(tenant, old.id);
       this.assertViewer(tenant, id); await this.closeMedia(tenant);
       try { await this.reconcileProduct(tenant); } catch { /* State carries Endpoint error; controls still work offline. */ }
-      this.push(tenant); return this.productState(tenant);
+      if (security) void this.viewerAuth.capabilities(tenant, security);
+      this.push(tenant); return security?.locked ? undefined : this.productState(tenant);
     });
   }
   async detachViewer(tenant: string, id: string) {
-    if (this.viewers.get(tenant)?.id !== id) return;
+    const viewer = this.viewers.get(tenant);
+    if (viewer?.id !== id) return;
     this.viewers.delete(tenant);
+    if (viewer.security) {
+      void this.viewerAuth.lock(tenant, viewer.security).catch(() => {});
+      this.viewerAuth.forgetPeer(tenant, viewer.security);
+    }
     const previous = this.connections.get(tenant); if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
       await this.uploads.revoke(tenant, id);
@@ -329,8 +412,27 @@ export class Control extends EventEmitter {
     this.assertViewer(tenant, lease);
     if (!params || typeof params !== 'object' || Array.isArray(params)) throw new ApiError(400, '需要参数对象');
     if (['tenantId', 'tenant', 'userId', 'user'].some(key => key in params)) throw new ApiError(400, '客户端不能指定用户或租户');
+    const security = this.viewers.get(tenant)?.security;
+    if (method.startsWith('auth.')) {
+      if (!security) throw new ApiError(400, '当前会话不支持锁屏');
+      try {
+        await this.viewerAuth.request(tenant, security, method, params);
+        this.assertViewer(tenant, lease);
+        return this.authState(tenant, security);
+      } catch (error) {
+        if (error instanceof AuthError) throw new ApiError(error.status, error.message);
+        throw error;
+      }
+    }
+    if (method === 'clock.ping') return { serverTime: Date.now(), ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}) };
+    if (method === 'rtc.offer') return this.offer(tenant, params, lease);
+    if (method === 'rtc.close') return this.closeRtc(tenant, params, lease);
+    // Candidate delivery must not queue behind an offer waiting for its answer.
+    if (method === 'rtc.ice') return this.ice(tenant, params);
+    const epoch = security?.epoch;
+    this.assertProductViewer(tenant, lease, epoch);
     if (method === 'admin.get' || method === 'admin.setRegistrationCredential') {
-      const authorize = () => { this.assertViewer(tenant, lease); if (!this.store.userForTenant(tenant)?.isAdmin) throw new ApiError(403, '需要管理员权限'); };
+      const authorize = () => { this.assertProductViewer(tenant, lease, epoch); if (!this.store.userForTenant(tenant)?.isAdmin) throw new ApiError(403, '需要管理员权限'); };
       authorize();
       if (method === 'admin.get') return this.store.adminStatus();
       try { return await this.store.setRegistrationCredential(tenant, params.serverCredential, authorize); }
@@ -340,15 +442,11 @@ export class Control extends EventEmitter {
     // Browser actions belong to the reliable Endpoint DataChannel.
     if (method === 'action' && params.type==='settings.update') return this.productAction(tenant, params, lease);
     if (method === 'action') throw new ApiError(400, '产品操作必须通过WebRTC数据通道');
-    if (method === 'clock.ping') return { serverTime: Date.now(), ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}) };
-    if (method === 'viewport') return this.viewport(tenant, params, lease);
-    if (method === 'rtc.offer') return this.offer(tenant, params, lease);
-    if (method === 'rtc.close') return this.closeRtc(tenant, params, lease);
-    // Candidate delivery must not queue behind an offer waiting for its answer.
-    if (method === 'rtc.ice') return this.ice(tenant, params);
+    if (method === 'viewport') return this.viewport(tenant, params, lease, epoch);
     return this.serial(tenant, async () => {
-      this.assertViewer(tenant, lease);
+      this.assertProductViewer(tenant, lease, epoch);
       if (['files.begin','files.commit','files.cancel'].includes(method)) {
+        if (security) throw new ApiError(400, '产品文件必须通过WebRTC数据通道');
         try {
           const authentication = this.viewers.get(tenant)?.authentication?.identity ?? '';
           const result = method === 'files.begin' ? await this.uploads.begin(tenant, lease, authentication, params) : method === 'files.commit' ? await this.uploads.commit(tenant, lease, authentication, params) : await this.uploads.cancel(tenant, lease, authentication, params);
@@ -367,9 +465,9 @@ export class Control extends EventEmitter {
       throw new ApiError(400, '未知 WebSocket 方法');
     });
   }
-  private viewport(tenant: string, body: any, lease: string) {
+  private viewport(tenant: string, body: any, lease: string, epoch?: number) {
     return this.serial(tenant, async () => {
-      this.assertViewer(tenant, lease);
+      this.assertProductViewer(tenant, lease, epoch);
       const state = this.store.workspace(tenant);
       if (typeof body.devicePixelRatio !== 'number' || !Number.isFinite(body.devicePixelRatio) || body.devicePixelRatio < .5 || body.devicePixelRatio > 4 || !Array.isArray(body.windows) || body.windows.length > 8 || (body.refreshHz !== undefined && (!Number.isFinite(body.refreshHz) || body.refreshHz < 1 || body.refreshHz > 500))) throw new ApiError(400, '无效的显示区域');
       const ids = new Set<string>();
@@ -387,20 +485,23 @@ export class Control extends EventEmitter {
     if (operation.operationGeneration !== this.store.operationGeneration(tenant)) return {...operation,status:'expired',error:'操作收据代次已过期，请核对当前工作区'};
     return this.store.operation(tenant,operation.operationId)?.receipt ?? {...operation,status:'unknown',error:'尚无操作收据'};
   }
-  async handleEndpointAction(event: ProductOperation & {tenantId:string;connectionId:string}) {
+  async handleEndpointAction(event: ProductOperation & {tenantId:string;connectionId:string;authEpoch?:number}) {
     if(this.closed)return;
     const {tenantId:tenant,connectionId} = event, lease=this.connectionLeases.get(connectionId);
     if (!lease || this.connections.get(tenant)!==connectionId) return;
+    const security = this.viewers.get(tenant)?.security;
+    if (security && (!this.productAllowed(tenant, lease) || !event.authEpoch || event.authEpoch !== security.peer?.appliedEpoch)) return;
     let receipt:OperationReceipt;
     try { receipt=await this.submitOperation(tenant,event,lease,connectionId); }
     catch(error) { receipt={operationId:event.operationId,operationGeneration:event.operationGeneration,status:'rejected',error:error instanceof Error?error.message:String(error)}; }
     // A replaced peer never receives a late result from an accepted old operation.
-    if (this.connections.get(tenant)!==connectionId || this.viewers.get(tenant)?.id!==lease) return;
-    await this.endpoint.request('rtc.actionResult',tenant,{connectionId,operationId:event.operationId,operationGeneration:event.operationGeneration,ok:!['rejected','expired'].includes(receipt.status),result:receipt}).catch(()=>{});
+    if (this.connections.get(tenant)!==connectionId || !this.productAllowed(tenant,lease) || security && event.authEpoch !== security.peer?.appliedEpoch) return;
+    await this.endpoint.request('rtc.actionResult',tenant,{connectionId,...(event.authEpoch !== undefined ? { authEpoch: event.authEpoch } : {}),operationId:event.operationId,operationGeneration:event.operationGeneration,ok:!['rejected','expired'].includes(receipt.status),result:receipt}).catch(()=>{});
   }
   async submitOperation(tenant:string, operation:ProductOperation, lease:string, connectionId?:string):Promise<OperationReceipt> {
+    const epoch = this.viewers.get(tenant)?.security?.epoch;
     return this.serial(tenant,async()=>{
-      this.assertViewer(tenant,lease);
+      this.assertProductViewer(tenant, lease, epoch);
       if (connectionId && this.connections.get(tenant)!==connectionId) throw new ApiError(409,'RTC连接已被替换');
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operation.operationId) || !operation.action || JSON.stringify(operation.action).length>32768) throw new ApiError(400,'无效产品操作');
       if (operation.operationGeneration!==this.store.operationGeneration(tenant)) return {operationId:operation.operationId,operationGeneration:operation.operationGeneration,status:'expired',error:'操作收据代次已过期'};
@@ -419,8 +520,9 @@ export class Control extends EventEmitter {
     });
   }
   async productAction(tenant: string, body: ProductAction, lease?: string): Promise<ProductActionResult> {
+    const epoch = this.viewers.get(tenant)?.security?.epoch;
     return this.serial(tenant, async () => {
-      if (lease) this.assertViewer(tenant, lease);
+      if (lease) this.assertProductViewer(tenant, lease, epoch);
       return this.applyProductAction(tenant, body);
     });
   }
@@ -646,7 +748,7 @@ export class Control extends EventEmitter {
       resourceLimitation = this.qualityFor(tenant, state).resourceLimitation;
       if (snapshot.running === false && !resourceLimitation) throw new Error('Browser已离线，页面保留并等待恢复');
       const viewer = this.viewers.get(tenant), viewport = viewer?.viewport ?? this.lastViewports.get(tenant);
-      const wanted = (t: ProductTab) => t.kind !== 'start' && !!viewer?.viewport?.windows.some(w => w.windowId === t.windowId && w.visible) && state.windows.some(w => w.id === t.windowId && w.activeTabId === t.id) && (state.layoutMode !== 'focused' || t.windowId === state.activeWindowId);
+      const wanted = (t: ProductTab) => t.kind !== 'start' && !viewer?.security?.locked && !!viewer?.viewport?.windows.some(w => w.windowId === t.windowId && w.visible) && state.windows.some(w => w.id === t.windowId && w.activeTabId === t.id) && (state.layoutMode !== 'focused' || t.windowId === state.activeWindowId);
       const ordered = [...state.tabs].filter(t => t.kind !== 'start').sort((a, b) => Number(wanted(a)) - Number(wanted(b)));
       // A first navigation can have created/shown a Native view before a
       // provisional failure restores the local start page. Explicitly remove
@@ -745,11 +847,17 @@ export class Control extends EventEmitter {
     this.mediaApplications.set(tenant, { encoded, applied: result.applied === true, browserPid });
   }
   private authorizeFiles(tenant:string) {
-    const connectionId=this.connections.get(tenant);if(!connectionId)return;
-    const requests=(this.fileRequests.get(tenant)??[]).slice(0,64).map(request=>({id:request.id,binding:request.binding}));
-    const encoded=JSON.stringify({connectionId,requests});if(this.fileAuthorizations.get(tenant)===encoded)return;
-    this.fileAuthorizations.set(tenant,encoded);
-    void this.endpoint.request('session.files.authorize',tenant,{connectionId,requests}).catch(()=>{if(this.fileAuthorizations.get(tenant)===encoded)this.fileAuthorizations.delete(tenant);});
+    const connectionId = this.connections.get(tenant), viewer = this.viewers.get(tenant);
+    if (!connectionId || !viewer || !this.productAllowed(tenant, viewer.id)) return;
+    const authEpoch = viewer.security?.peer?.appliedEpoch;
+    if (viewer.security && (!authEpoch || viewer.security.peer?.connectionId !== connectionId)) return;
+    const requests = (this.fileRequests.get(tenant) ?? []).slice(0,64).map(request => ({ id: request.id, binding: request.binding }));
+    const params = { connectionId, requests, ...(authEpoch ? { authEpoch } : {}) };
+    const encoded = JSON.stringify(params);
+    if (this.fileAuthorizations.get(tenant) === encoded) return;
+    this.fileAuthorizations.set(tenant, encoded);
+    const retry = () => { if (this.fileAuthorizations.get(tenant) === encoded) this.fileAuthorizations.delete(tenant); };
+    void this.endpoint.request('session.files.authorize', tenant, params).then(result => { if (result?.accepted !== true) retry(); }, retry);
   }
   private collectDialogs(tenant: string, state: ProductWorkspace, snapshot: any) {
     const found: (PageDialog & { viewId: string; requestId: string; browserIncarnation: string; instance: string; document: string })[] = [];
@@ -772,6 +880,8 @@ export class Control extends EventEmitter {
     const changed = JSON.stringify(found) !== JSON.stringify(this.dialogs.get(tenant) ?? []) || JSON.stringify(files) !== JSON.stringify(this.fileRequests.get(tenant) ?? []); this.dialogs.set(tenant, found); this.fileRequests.set(tenant, files);this.authorizeFiles(tenant); this.uploads.retireMissing(tenant, new Set(files.map(request => request.id))); if (changed) this.push(tenant);
   }
   async receiveFileUpload(tenant: string, authentication: string, ticket: string, source: Readable, contentLength?: string) {
+    const viewer = this.viewers.get(tenant);
+    if (viewer?.security?.locked) throw new ApiError(423, 'Viewer 已锁定');
     try { await this.uploads.stream(tenant, authentication, ticket, source, contentLength); }
     catch (error) { if (error instanceof FileUploadError) throw new ApiError(error.status, error.message); throw error; }
   }

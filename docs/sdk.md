@@ -100,10 +100,28 @@ render or RTC ABIs; current build and runtime evidence is recorded in
 
 ## Streaming ownership
 
-The RTC interface is ABI version 3 and the control/render SDK is ABI version 2.
+The RTC interface is ABI version 4 and the control/render SDK is ABI version 2.
 Creation rejects mismatched ABIs. SharedRenderMapping is version 1, 36224 bytes,
 with four independent slots (7232 bytes each); SharedAtlasView remains 112 bytes.
 Page DPR and atlas pixels per DIP stay separate. Rebuild Browser, SDK and Endpoint together.
+
+RTC ABI4 adds `auth_required`, `remotekit_rtc_set_media_authorized`, and a
+separate reliable ordered `remotekit-auth` DataChannel on the same peer.
+`REMOTEKIT_RTC_AUTH_DATA` borrows bytes until the callback returns;
+`REMOTEKIT_RTC_AUTH_DATA_STATE` reports its state. Authentication messages use
+`remotekit_rtc_send_auth_data`, with a 64 KiB message/buffer bound. Only peers
+created with authentication required accept this channel. No camera RTP
+receiver or video decoder is exposed: Endpoint negotiates and assembles raw
+RGB24 frames, with a server-driven 5 FPS grant schedule.
+
+Product media authorization is separate from authentication traffic. Revocation
+disables product RTP senders and ordinary DataChannel sends while preserving
+the peer and authentication channel. Accepted video frames retain their
+authorization generation through encode completion; an old completion cannot
+send after reauthorization. Packets already transmitted and SCTP data accepted
+before revocation cannot be recalled. The SDK does not decide user identity,
+challenge validity, or RGB frame authorization; those remain Control/Endpoint
+responsibilities. See [authentication](authentication.zh-CN.md).
 
 `render_connect` claims the dedicated asynchronous endpoint using the opaque
 `render_channel` token; this field is not an OS channel name. The SDK retains at

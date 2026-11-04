@@ -17,6 +17,8 @@
 - `/control`使用TypeScript、better-sqlite3、Vite、React、MUI。普通Viewer采用沉浸式浏览器外壳、实际内容区尺寸、多个独立Window并排/窄屏切换；不是两个active tab冒充多Window。
 - 每站点平板设置只改变UA/CH，不模拟viewport；放更多菜单。设置统一在更多→设置。质量选择只保留优先高画质、自动、优先流畅；Client Scale默认Viewer DPR，可override。设置存Control，客户端只持久化用户token。
 - 首个正式注册用户为管理员；管理员面板管理服务器级注册口令。口令只用于后续注册，账号密码独立，设置由Control持久化，客户端不保存或回显口令。
+- 高级认证包含完全空白、无交互反馈的锁屏；上上下下左右左右支持键盘与触屏/鼠标点击屏幕区域。未登录只用账密，登录后可配置密码、PIN与人脸验证；锁定下保留人脸验证，检测用户离开及浏览器可提供的关屏相关信号。
+- 人脸摄像头通过既有Client↔Endpoint WebRTC连接传送未压缩RGB，帧率每秒5帧、由服务端协商；Control参与发起与授权，Endpoint承担OpenCV YuNet/SFace与MiniFASNet V1SE/V2 ONNX推理，可自行转换ONNX。不能为鉴权另建重复peer或把识别计算放回Client/Control。
 - Client直接与Endpoint建立H264 WebRTC及DataChannel输入；鉴权、信令、产品状态由Control管理，Viewer↔Control使用WebSocket。支持键鼠、文本、IME与触控。
 - Endpoint是可与Control分机部署的Native算力节点，Browser是其组件；当前每Tenant一个Browser进程、单Profile，保留多Profile余量。不能把Control与Endpoint共享路径、时钟或进程的现状当成架构要求。
 - Client与Endpoint的常规数据统一经WebRTC，包含音视频、输入、浏览器操作及文件数据；resize、focus、导航不得随意销毁连接。Control与Client同步既要即时操作反馈，也要最终状态一致，客户端不持久化产品状态。

@@ -4,7 +4,19 @@
 
 ## 当前交付
 
-源码新增Rend Wake优先发帧：当前代渲染事件可唤醒Comp的定时等待；合法Wake清除旧期限，Slot饱和或SDK暂忙时保留优先请求，成功发送Begin后恢复正常帧间隔。Endpoint Release增量与Comp节拍、Windows队列事件两项定向检查通过；本次没有重跑真实GPU/浏览器或测量唤醒延迟，按用户要求未打包上传。下面的352318包不含此增量。
+高级认证功能验收已完成，正在打包发布：空白锁屏与上上下下左右左右、账密/PIN/人脸设置、Control挑战及Endpoint授权代次门禁已实现。摄像头复用现有WebRTC peer的独立认证DataChannel，传送原尺寸RGB24，由Endpoint协商并按5fps授予取帧；使用YuNet/SFace和MiniFASNet V1SE/V2 ONNX，OpenCV最小模块静态链接。正式契约见[锁屏与高级认证](authentication.zh-CN.md)。
+
+当前新路径已通过Control生产构建与314项测试、后续17项transport定向检查、Endpoint Release及19项CTest、SDK增量/RTC probe和3项实际SDK/RTC/audio smoke。初轮锁屏导致Browser退出，CDB定位为RenderChannel析构回调重入正在销毁的OSR状态；已撤销析构时回调，生产Mojo生命周期probe通过，正常断链仍通知。首登RTC未就绪时操作误报也已修复并实测。
+
+修后Chrome157/89均通过空白与可信键鼠/触控序列、密码/PIN设置及锁定/解锁，同组peer、两条DataChannel和接收track保持；锁下无新增产品快照，尾包结束后H264/Opus计数停止，旧代输入/产品操作无效果，解锁恢复H264。两版各实测320×240 RGB24协商5fps、5完整帧/75块及取消后停发。89另通过真实15秒页面闲置和有Cookie重附着默认锁定、无产品state。
+
+157独立官方T1合成摄像头组通过3帧录入、Control AES-GCM模板、锁下3帧匹配解锁、空帧离开锁定，全程同peer/DC。该组是接线与状态机证据，不是真人活体效果。修后三组各只有一个Browser PID，无replacement/FATAL/CHECK/GPU退出，已清理自有进程。两版第二tab操作未产生可信visibilitychange，真实后台触发、系统锁屏与物理关屏尚未验收。[构建](../develop/docs/advanced-auth-build-20261104.md) · [实际运行](../develop/docs/advanced-auth-runtime-20261104.md)。
+
+LFW公开人物固定6,000对、生产阈值0.50，识别阶段全量准确率81.07%，异人误接受0/3,000、同人误拒绝37.87%；双方成功提取特征的4,130对准确率95.62%。较多拒绝来自多人脸/质量门禁，未调阈值或剔除样本。MiniFAS ONNX与PyTorch数值检查及官方T1/F1/F2管线检查通过；静态照片评测不包含摄像头与活体效果，实体摄像头仍待验证。[评测报告](../develop/docs/face-public-benchmark-20261104.md)。
+
+## 上一批交付与渲染证据
+
+Rend Wake优先发帧增量允许当前代渲染事件唤醒Comp定时等待；合法Wake清除旧期限，Slot饱和或SDK暂忙时保留优先请求，成功发送Begin后恢复正常帧间隔。Endpoint Release与Comp节拍、Windows队列事件定向检查通过；当时按用户要求未单独打包，也未测量唤醒延迟。本次高级认证版本包含该增量，旧352318包不含。
 
 Comp / Rend重构已完成并上传。发布源码`94cd1740148dda41f5609eb604bbd2d9d669fee3`，取件码[352318](https://airportal.cn/352318/RGG7EQ9ZwD)。上传完成于2026-11-04 00:50（Asia/Singapore），界面显示有效24小时、可下载2次、无密码。
 
@@ -25,7 +37,7 @@ Chrome157/DPR2与Chrome89/DPR1真实通过默认video首帧、双Window画面及
 - 三档质量分别映射WebRTC的MAINTAIN_RESOLUTION、BALANCED、MAINTAIN_FRAMERATE。官方source adaptation选择缩放/丢帧，SetRates驱动硬件码率与帧率；删除自制延迟阈值、DPR因子和码率/FPS预设。Comp另外遵守客户端、编码器及协商H264的硬能力上限。
 - 媒体适配缩放完整atlas，页面DIP和Client Scale不随网络改变。X/Y对齐取整分别进入ROI、输入与caret转换；尺寸变化保持旧布局输入门禁及新布局首帧屏障。
 - 实际receiver设置jitterBufferTarget=0；Chrome89仅在标准属性缺失时使用可用的playoutDelayHint=0，能力与读回分别报告。
-- SDK控制/渲染ABI为2，RTC ABI为3，SharedRenderMapping版本1。Browser、SDK、Endpoint须配套更新。显式native demo仍可独立构建，其fence模式明确Unsupported，不切回旧capture。
+- SDK控制/渲染ABI为2，当前源码RTC ABI为4，SharedRenderMapping版本1。高级认证新增独立认证DataChannel与媒体授权接口；旧352318包使用RTC ABI3。Browser、SDK、Endpoint须配套更新。显式native demo仍可独立构建，其fence模式明确Unsupported，不切回旧capture。
 
 正式细节：[Comp / Rend](rendering.zh-CN.md) · [GPU](gpu-output.zh-CN.md) · [SDK](sdk.md) · [媒体反馈](media-feedback.md)。
 

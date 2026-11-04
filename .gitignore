@@ -4,3 +4,4 @@
 __pycache__/
 *.pyc
 /sdk/dist/
+*.face-key

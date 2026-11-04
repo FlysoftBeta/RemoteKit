@@ -59,7 +59,9 @@ struct ControlTransport::Impl {
  Clock::time_point last_receive{}, last_ping{};
  std::thread receiver, sender;
 
- Impl(std::string url, std::string id, std::string token) : node(std::move(id)) {
+ std::function<void(uint64_t)> disconnected;
+ Impl(std::string url, std::string id, std::string token, std::function<void(uint64_t)> on_disconnect)
+  : node(std::move(id)), disconnected(std::move(on_disconnect)) {
   if (node.empty() || node.size() > 128 || !std::all_of(node.begin(), node.end(), [](unsigned char c) {
    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
   })) throw std::runtime_error("remote control requires a valid --node-id");
@@ -97,9 +99,12 @@ struct ControlTransport::Impl {
  // Close is serialized against sends, and cancels the blocking receive.
  void Disconnect(uint64_t expected = 0) {
   std::lock_guard socket_lock(socket_mutex);
+  uint64_t lost = 0;
   { std::lock_guard lock(mutex); if (expected && expected != link) return;
+   lost = active;
    active = link = 0; incoming.clear(); outgoing.clear(); incoming_bytes = outgoing_bytes = 0;
   }
+  if (lost && disconnected) disconnected(lost);
   if (socket) { WinHttpCloseHandle(socket); socket = nullptr; }
   wake.notify_all();
  }
@@ -203,8 +208,8 @@ struct ControlTransport::Impl {
   }
  }
 };
-ControlTransport::ControlTransport(std::string url, std::string node, std::string token)
- : impl_(std::make_unique<Impl>(std::move(url), std::move(node), std::move(token))) {}
+ControlTransport::ControlTransport(std::string url, std::string node, std::string token, std::function<void(uint64_t)> disconnected)
+ : impl_(std::make_unique<Impl>(std::move(url), std::move(node), std::move(token), std::move(disconnected))) {}
 ControlTransport::~ControlTransport() = default;
 bool ControlTransport::Next(std::string& message, uint64_t& generation) {
  std::unique_lock lock(impl_->mutex);

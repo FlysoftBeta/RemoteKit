@@ -1,4 +1,5 @@
 import { surfacePixelScale } from './coordinates';
+import { AuthCameraChannel, type CameraBinding } from './auth-camera-channel';
 import { DcFileClient } from './dc-file-client';
 import { barrierMatchesLayout, configurePresentationVideo, presentationBarrier, videoPlaneGeometry, VideoCompositorStats, type PresentationBarrier } from './video-presentation';
 import { CaptureLatency } from './capture-latency';
@@ -32,16 +33,78 @@ interface ProcessorSource { processor: TrackProcessor; reader: ReadableStreamDef
 
 /** All endpoint wire adaptation lives here; the UI never owns recovery state. */
 export class RemoteTransport {
+  private readonly authCamera = new AuthCameraChannel(() => this.notify());
+  get authCameraReady() { return this.authCamera.ready; }
+  get cameraDiagnostics() { return { peerAttempt: this.attempt, ...this.authCamera.diagnostics }; }
+  setAuthCamera(stream?: MediaStream, binding?: CameraBinding) { this.authCamera.setSource(stream, binding); }
+  recentAuthCameraFrame(challengeId: string) { return this.authCamera.hasRecentFrame(challengeId); }
   readonly mobileEditing = new MobileEditingState();
   private freezeCopies = 0;
   recordResizeFreezeCopy() { this.freezeCopies++; }
-  readonly files=new DcFileClient(()=>this.channel);
+  readonly files=new DcFileClient(() => this.productLocked || this.peerAuthEpoch === 0 ? null : this.channel, () => this.peerAuthEpoch);
+  private productLocked = false;
+  private peerAuthEpoch?: number;
+  get productReady() {
+    return !this.productLocked && (this.peerAuthEpoch ?? 0) > 0 && this.channel?.readyState === 'open';
+  }
+  observePeerAuthorization(epoch: number) {
+    if (this.peerAuthEpoch === epoch) return;
+    // An authorization transition resets the native layout and edit revision.
+    // Install its identity before accepting any new DataChannel messages.
+    this.setProductLocked(true);
+    this.peerAuthEpoch = epoch;
+    this.setAuthCamera();
+  }
+  private sendChannel(channel: RTCDataChannel, message: object) {
+    if (this.peerAuthEpoch === 0) return;
+    channel.send(JSON.stringify(this.peerAuthEpoch === undefined ? message : { ...message, authEpoch: this.peerAuthEpoch }));
+  }
+  setProductLocked(locked: boolean) {
+    if (locked === this.productLocked) return;
+    this.productLocked = locked;
+    this.audio.setMuted(locked);
+    if (!locked) {
+      if (this.channel?.readyState === 'open') {
+        if (this.presentationBackend === 'canvas') this.sendChannel(this.channel, { type: 'media.presentation', version: 1, backend: 'canvas', restart: true });
+        else this.negotiatePresentation(this.channel, true);
+      }
+      return;
+    }
+    this.mobileEditing.reset();
+    this.cancelPendingFocus();
+    this.inputFocus.clear();
+    this.queuedInput = [];
+    this.sentInput.clear();
+    this.files.disconnect();
+    this.layout = null;
+    this.clientGestures = false;
+    this.frameGate.clear();
+    this.sharedRenderer?.clear();
+    this.hideVideoPlanes();
+    this.cancelPresentationAck();
+    this.presentationBarrier = undefined;
+    this.presentationBarrierAcknowledged = false;
+    clearTimeout(this.presentationNegotiationTimer);
+    this.presentationNegotiationTimer = undefined;
+    this.closePendingProcessorFrame('authorization-change');
+    this.closeLatestProcessorFrame();
+    this.paintedPlanes.clear();
+    this.viewPresentations.clear();
+    this.displayedRtp = undefined;
+    this.directEpochReady = undefined;
+    for (const entry of this.productPending.values()) {
+      clearTimeout(entry.timer);
+      entry.reject(Object.assign(new Error('浏览器已锁定'), { operationSent: entry.sent }));
+    }
+    this.productPending.clear();
+  }
   private productPending = new Map<string,{operation:ProductOperation;resolve:(receipt:OperationReceipt)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>;sent:boolean}>();
   productAction(operation:ProductOperation):Promise<OperationReceipt> {
+    if (this.productLocked) return Promise.reject(Object.assign(new Error('浏览器已锁定'), { operationSent: false }));
     if(this.productPending.size>=64)return Promise.reject(new Error('待确认操作过多，请等待同步'));
     return new Promise((resolve,reject)=>{ const timer=setTimeout(()=>{const sent=this.productPending.get(operation.operationId)?.sent??false;this.productPending.delete(operation.operationId);reject(Object.assign(new Error(sent?'操作结果未知，正在核对；请勿重复执行':'数据通道尚未连接，操作未发送'),{operationSent:sent}));},20000);this.productPending.set(operation.operationId,{operation,resolve,reject,timer,sent:false});this.flushProductActions(); });
   }
-  private flushProductActions() { const channel=this.channel;if(channel?.readyState!=='open')return;for(const entry of this.productPending.values()){if(entry.sent)continue;try{channel.send(JSON.stringify({type:'product.action',version:1,...entry.operation}));entry.sent=true;}catch{/* Leave unsent intent pending until the bounded deadline. */}} }
+  private flushProductActions() { const channel=this.channel;if(this.productLocked || this.peerAuthEpoch === 0 || channel?.readyState!=='open')return;for(const entry of this.productPending.values()){if(entry.sent)continue;try{this.sendChannel(channel,{type:'product.action',version:1,...entry.operation});entry.sent=true;}catch{/* Leave unsent intent pending until the bounded deadline. */}} }
   readonly audio = new ViewerAudioOutput(() => this.notify());
   readonly touchInputStats = { queued: 0, merged: 0, dropped: 0, cancelled: 0, sourceGestures: 0, arrivalFallbackGestures: 0 };
   clientGestures = false;
@@ -116,7 +179,7 @@ export class RemoteTransport {
   private presentationVisibility?: () => void;
   private videoMetadataRefreshTimer?: ReturnType<typeof setTimeout>;
 
-  setControlRpc(callback: ControlRpc) { this.controlRpc = callback; this.diagnosticHttp = false; this.processorFallback = true; this.processorScheduler = 'fifo2'; this.frameSource = 'video'; this.preferVideoPresentation = true; }
+  setControlRpc(callback: ControlRpc) { this.observePeerAuthorization(0); this.controlRpc = callback; this.diagnosticHttp = false; this.processorFallback = true; this.processorScheduler = 'fifo2'; this.frameSource = 'video'; this.preferVideoPresentation = true; }
   enableDiagnosticHttp() { this.processorFallback = false; this.diagnosticHttp = true; this.controlRpc = undefined; }
   private rtcRequest<T>(method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback', params: unknown): Promise<T> {
     if (this.controlRpc) return this.controlRpc(method, params) as Promise<T>;
@@ -164,7 +227,8 @@ export class RemoteTransport {
   private sharedFrameCurrent(frame:SharedFrame) { return this.displayReady && this.displayedRtp===frame.rtpTimestamp && this.layout?.epoch===frame.layout.epoch && this.layout?.generation===frame.layout.generation; }
   private requestPresentationRefresh() {
     const channel=this.channel;if(!this.peer||channel?.readyState!=='open'||performance.now()-this.mediaRefreshAt<1000)return;
-    this.mediaRefreshAt=performance.now();try{channel.send(JSON.stringify({type:'media.refresh'}));this.mediaRefreshRequests++;}catch{/* A closed peer cannot refresh this presentation. */}
+    if (this.productLocked) return;
+    this.mediaRefreshAt=performance.now();try{this.sendChannel(channel,{type:'media.refresh'});this.mediaRefreshRequests++;}catch{/* A closed peer cannot refresh this presentation. */}
   }
   private redrawCurrentPresentation() {
     if(!this.displayReady)return false;
@@ -297,11 +361,11 @@ export class RemoteTransport {
     this.afterPresentationHidden(channel, () => {
       if (this.presentationBackend === 'canvas' || this.presentationBarrier !== key || !barrierMatchesLayout(key, this.layout)) return;
       this.presentationBarrierAcknowledged = true;
-      channel.send(JSON.stringify({ type: 'presentation.ready', ...key }));
+      this.sendChannel(channel, { type: 'presentation.ready', ...key });
       this.scheduleVideoMetadataRefresh();
     });
   }
-  private negotiatePresentation(channel: RTCDataChannel) {
+  private negotiatePresentation(channel: RTCDataChannel, restart = false) {
     if (!this.preferVideoPresentation) return;
     if (!this.presentationVisibility) {
       this.presentationVisibility = () => {
@@ -320,9 +384,11 @@ export class RemoteTransport {
     if (typeof this.video.requestVideoFrameCallback !== 'function' || typeof ResizeObserver !== 'function') {
       this.fallbackPresentation('video-capability-unavailable'); return;
     }
-    channel.send(JSON.stringify({ type: 'media.presentation', version: 1, backend: 'video' }));
+    this.sendChannel(channel, { type: 'media.presentation', version: 1, backend: 'video', ...(restart ? { restart: true } : {}) });
+    if (this.productLocked || this.peerAuthEpoch === 0) return;
+    clearTimeout(this.presentationNegotiationTimer);
     this.presentationNegotiationTimer = setTimeout(() => {
-      if (this.channel === channel && this.presentationBackend === 'pending') this.fallbackPresentation('presentation-protocol-unavailable');
+      if (this.channel === channel && !this.productLocked && this.presentationBackend === 'pending') this.fallbackPresentation('presentation-protocol-unavailable');
     }, 1500);
   }
   private fallbackPresentation(reason: string) {
@@ -335,7 +401,7 @@ export class RemoteTransport {
     const channel = this.channel;
     if (!channel || channel.readyState !== 'open') return;
     this.afterPresentationHidden(channel, () => {
-      channel.send(JSON.stringify({ type: 'media.presentation', version: 1, backend: 'canvas' }));
+      this.sendChannel(channel, { type: 'media.presentation', version: 1, backend: 'canvas' });
       const peer = this.peer, track = this.processorTrack;
       if (peer && track) {
         this.activeFrameSource = typeof (globalThis as any).MediaStreamTrackProcessor === 'function' && !/Chrome\/89\./.test(navigator.userAgent) ? 'track-processor' : 'video';
@@ -685,7 +751,11 @@ export class RemoteTransport {
         void video.play().catch(() => { if (this.peer === peer && this.video === video) this.update({ error: '视频播放被浏览器阻止，请重新连接。' }); });
       };
       this.bindChannel(peer.createDataChannel('remotekit', { ordered: true }));
-      peer.ondatachannel = event => { if (this.peer === peer && this.attempt === attempt) this.bindChannel(event.channel); };
+      if (this.controlRpc && !this.diagnosticHttp)
+        this.authCamera.bind(peer.createDataChannel('remotekit-auth', { ordered: true }));
+      peer.ondatachannel = event => {
+        if (this.peer === peer && this.attempt === attempt && event.channel.label === 'remotekit') this.bindChannel(event.channel);
+      };
       if (this.controlRpc && !this.diagnosticHttp) {
         this.markConnection('receiveProbeStart');
         if (!this.productReceiveSelection) this.productReceiveSelection = await selectProductReceiveProfile(navigator.userAgent, codecs);
@@ -1028,9 +1098,11 @@ export class RemoteTransport {
       if (this.channel !== channel) return;
       try {
         const message = JSON.parse(String(event.data));
+        if (this.peerAuthEpoch !== undefined && (this.peerAuthEpoch === 0 || message.authEpoch !== this.peerAuthEpoch)) return;
+        if (message.type === 'clock.pong') { this.endpointClockProbe.pong(message, performance.now(), Date.now()); return; }
+        if (this.productLocked) return;
         if (message.type === 'input.editable') { if (this.mobileEditing.receive(message, this.layout?.views ?? [])) this.notify(); return; }
         if (message.type === 'input.capabilities') this.clientGestures = message.clientGestures === 1;
-        if (message.type === 'clock.pong') { this.endpointClockProbe.pong(message, performance.now(), Date.now()); return; }
         if(this.files.handle(message))return;
         if(message.type==='product.result' && message.version===1) { const entry=this.productPending.get(message.operationId);if(entry && entry.operation.operationGeneration===message.operationGeneration) {clearTimeout(entry.timer);this.productPending.delete(message.operationId);entry.resolve(message.result ?? {operationId:message.operationId,operationGeneration:message.operationGeneration,status:'rejected',error:String(message.error??'操作被拒绝')});} }
         if (message.type === 'presentation.mode') {
@@ -1090,6 +1162,7 @@ export class RemoteTransport {
     };
   }
   sendInput(surface: Surface, event: Record<string, unknown>) {
+    if (this.productLocked) return false;
     const terminalTouch = (event.type === 'touch' || event.type === 'gesture') && (event.action === 'cancel' || event.action === 'end' || event.action === 'momentumEnd');
     if ((event.type === 'touch' || event.type === 'gesture') && event.inputIdentity !== undefined && event.inputIdentity !== this.inputIdentity(surface)) { this.touchInputStats.dropped++; return false; }
     if (this.channel?.readyState !== 'open' || !this.layout || !terminalTouch && !this.canInput(surface.id)) { this.traceInput('blocked', surface, event, this.channel?.readyState !== 'open' ? 'channel' : 'unmatched-or-unpainted-frame'); return false; }
@@ -1124,12 +1197,13 @@ export class RemoteTransport {
       const sequence = String(++this.sequence);
       this.sentInput.set(sequence, { surface: { ...current }, identity: this.inputIdentity(current), event: item.event });
       while (this.sentInput.size > 256) this.sentInput.delete(this.sentInput.keys().next().value!);
-      this.channel.send(JSON.stringify({ type: 'input', view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, outputGeneration: item.generation, layoutEpoch: item.epoch, sequence, event: item.event }));
+      this.sendChannel(this.channel, { type: 'input', view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, outputGeneration: item.generation, layoutEpoch: item.epoch, sequence, event: item.event });
       this.traceInput('sent', current, item.event);
     }
     if (this.queuedInput.length) this.inputDrainTimer = setTimeout(() => this.drainInput(), 10);
   }
   focus(surface: Surface, focused: boolean) {
+    if (this.productLocked) return;
     if (!focused) { this.mobileEditing.clear(); this.notify(); }
     if (this.channel?.readyState !== 'open' || !this.layout || !this.canInput(surface.id)) return;
     const current = this.layout.views.find(view => view.id === surface.id);
@@ -1141,7 +1215,7 @@ export class RemoteTransport {
     this.inputFocus.set(current.id, { token: current.focus, identity: requestId, focused });
     this.pendingFocus = { requestId, acknowledged: false, focused, view: current.id, session: current.session, token: current.focus, instance: current.instance, document: current.document, generation: this.layout.generation, epoch: this.layout.epoch, events: [] };
     this.focusTimer = setTimeout(() => { if (this.pendingFocus?.requestId === requestId && !this.pendingFocus.acknowledged && this.cancelPendingFocus(requestId)) this.update({ error: '远程焦点请求超时' }); }, 2000);
-    this.channel.send(JSON.stringify({ type: 'focus', focusRequestId: requestId, view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, layoutEpoch: this.layout.epoch, focused }));
+    this.sendChannel(this.channel, { type: 'focus', focusRequestId: requestId, view: current.id, session: current.session, instance: current.instance, document: current.document, focus: current.focus, layoutEpoch: this.layout.epoch, focused });
   }
   private async readStats(peer: RTCPeerConnection) {
     if (peer !== this.peer || this.statsReadingPeer === peer) return;
@@ -1184,7 +1258,7 @@ export class RemoteTransport {
           planes: [...views].map(view => ({ view, frames: counts.get(view) })),
           roundTripTimeMs: update.roundTripTime === undefined ? undefined : update.roundTripTime * 1000 });
         if (feedback?.displayHzEstimate) this.displayHzEstimate = feedback.displayHzEstimate;
-        if (feedback && this.channel.bufferedAmount <= 65536) this.channel.send(JSON.stringify(feedback));
+        if (feedback && !this.productLocked && this.channel.bufferedAmount <= 65536) this.sendChannel(this.channel, feedback);
       }
       this.refreshNetworkStats(peer);
       this.productionFeedback(peer);
@@ -1212,7 +1286,7 @@ export class RemoteTransport {
     const channel = this.channel;
     if (!channel || channel.readyState !== 'open' || channel.bufferedAmount > 65536) return;
     const ping = this.endpointClockProbe.begin(performance.now(), Date.now());
-    if (ping) { try { channel.send(JSON.stringify(ping)); } catch { /* The next bounded sample retries if the channel remains open. */ } }
+    if (ping) { try { this.sendChannel(channel, ping); } catch { /* The next bounded sample retries if the channel remains open. */ } }
   }
   private refreshNetworkStats(peer: RTCPeerConnection) {
     const connectionId = this.connectionId;
@@ -1230,6 +1304,8 @@ export class RemoteTransport {
     this.closeLocal();
   }
   private closeLocal() {
+    this.authCamera.bind(undefined);
+    if (this.peerAuthEpoch !== undefined) this.observePeerAuthorization(0);
     this.mobileEditing.reset();
     this.audio.detach();
     clearTimeout(this.videoMetadataRefreshTimer); this.videoMetadataRefreshTimer = undefined;

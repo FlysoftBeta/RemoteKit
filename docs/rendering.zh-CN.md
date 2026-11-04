@@ -50,4 +50,6 @@ resize、停止、断链和GPU故障停止接纳旧代请求。旧资源只有�
 
 Stop/Stopped与Begin/Reject共用有序render通道。Control关闭只停止产品输出，不立即丢弃render pipe；Stop之前的请求全部Reject或已经排Signal后才发送Stopped。Stopped只证明请求终态已确定，未完成GPU工作与编码租约继续保留，超时不得假装排空。
 
+RenderChannel在所有者销毁时撤销断开回调，再关闭watcher和pipe；不能从成员析构重入已释放最后一个shared引用的OSR状态。存活通道的显式关闭及实际对端断开仍各通知一次。该边界同时适用于锁屏暂停输出及普通渲染代次退休。
+
 提交时刻不能冒称GPU完成时刻。只有实际Fence完成观察可作为render完成时间；未知时间省略延迟样本。GPU执行、完成观察、编码、网络和呈现分别计量，旧capture路径的历史指标不作为新OSR路径证据。

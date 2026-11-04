@@ -3,6 +3,7 @@
 import argparse
 from datetime import datetime, timezone, timedelta
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,23 @@ def copy_endpoint(source, binary, streaming):
     target = binary / ('endpoint_service.exe' if streaming else 'endpoint_client.exe')
     shutil.copy2(source, target)
     return target
+
+
+def face_runtime_files():
+    spec = importlib.util.spec_from_file_location('setup_face_auth', ROOT / 'tools/setup-face-auth.py')
+    setup = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(setup)
+    return setup.runtime_files()
+
+
+def copy_face_runtime(files, package):
+    """Copy only the verified, enumerated release assets."""
+    for source, relative in files:
+        target = package / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            raise RuntimeError(f'Face authentication asset collides with a runtime file: {target}')
+        shutil.copy2(source, target)
 
 
 def run_startup_smoke(package, *, work_dir=None):
@@ -72,6 +90,7 @@ def main():
                 ('endpoint_service.exe' if streaming else 'endpoint_client.exe')).resolve()
     if not endpoint.is_file():
         parser.error('Build the Release endpoint first: tools\\build-endpoint.cmd package')
+    face_files = face_runtime_files() if streaming else []
     runtime = []
     targets = [browser_target]
     if streaming or args.presentation == 'fence': targets.append('//remotekit/browser/sdk:remotekit_sdk')
@@ -168,6 +187,7 @@ def main():
         shutil.copy2(ROOT / 'build/dependencies/json-LICENSE.MIT', licenses / 'nlohmann-json-LICENSE.MIT')
         header = (ROOT / 'build/dependencies/nvEncodeAPI.h').read_text(encoding='utf-8')
         (licenses / 'NVENC-header-notice.txt').write_text(header[:header.index('*/') + 2], encoding='utf-8')
+        copy_face_runtime(face_files, package)
     shutil.copytree(ROOT / 'browser/testdata', package / 'fixtures')
     launch_presentation = '--presentation=' + args.presentation
     (package / 'run.cmd').write_text(
@@ -205,9 +225,14 @@ def main():
         (package / 'README.txt').write_text(
             'RemoteKit Windows hardware streaming package\n\n'
             'Extract everything to a writable folder and run run.cmd. Open http://127.0.0.1:3001 in Chrome.\n'
+            'The initial screen is black. Press Up Up Down Down Left Right Left Right, or click the corresponding\n'
+            'top, bottom, left, and right areas in that order, to reveal the account sign-in form.\n'
             'The first registered account becomes administrator without a server credential.\n'
             'Open More > Administrator panel and set the server registration credential before creating other accounts.\n'
             'Later registrations require that credential; account passwords are independent, and login needs no credential.\n'
+            'After signing in, open More > Settings > Security to configure a PIN or face authentication.\n'
+            'Face authentication sends uncompressed RGB24 over the dedicated WebRTC data channel at the server-negotiated\n'
+            '5 FPS. The required public face models are included in bin/face-models.\n'
             'Each user has an isolated Tenant/Session and browser process.\n'
             'Viewer state and settings use an authenticated WebSocket; diagnostics are disabled by default.\n'
             'The service defaults to Intel QSV; NVIDIA NVENC can be explicitly selected on compatible hardware.\n'
@@ -231,6 +256,7 @@ def main():
         if any(part.lower() in {'data', 'profiles', 'profile', 'metrics', '.git'} for part in relative.parts):
             raise RuntimeError('Non-runtime directory in package: ' + str(relative))
         if file.is_file() and (file.name.lower() in {'cred.json', '.env'} or
+                              file.name.lower().endswith('.face-key') or
                               file.suffix.lower() in {'.pdb', '.obj', '.lib', '.exp', '.ilk', '.sqlite', '.db', '.ts', '.tsx', '.cpp', '.cc', '.h'}):
             raise RuntimeError('Non-runtime file in package: ' + str(relative))
     files = []
@@ -255,7 +281,8 @@ def main():
         'runtime_launched': bool(validation and validation.get('passed')),
         'runtime_validation': ({key: validation[key] for key in ['passed', 'validationKind', 'scope',
             'browserProductOperationsTested', 'rtcMediaTested', 'endpointManagementReachable',
-            'webSocketProductActionRejected', 'workspaceUnchanged', 'endpointSha256']} if validation else None), 'files': files,
+            'webSocketProductActionRejected', 'workspaceUnchanged', 'endpointSha256',
+            'faceModelsAvailable']} if validation else None), 'files': files,
         'excluded_runtime_graph_entries': sorted(set(excluded)),
     }
     (package / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')

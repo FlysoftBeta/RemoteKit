@@ -97,9 +97,11 @@ test('memory saver uses hidden age and canDiscard; activating a discarded page w
   const { store, endpoint, control, user } = await fixture();
   try {
     await control.attachViewer(user.tenantId, 'lease', () => {}); const created = await control.productAction(user.tenantId, { type: 'window.create', url: 'about:blank' }, 'lease'), tab = created.state.workspace.tabs[0], w = created.state.workspace.windows[0];
-    (control as any).hiddenSince.set(user.tenantId + '/' + tab.webviewId, Date.now() - 121000);
     const view = endpoint.views.get(user.tenantId)!.get(tab.webviewId); view.canDiscard = false; await control.tick(); assert.equal(endpoint.calls.filter(c => c.method === 'view.lifecycle').length, 0);
-    view.canDiscard = true; await control.tick(); assert.equal(view.actual, 2);
+    view.canDiscard = true; await control.tick();
+    const accounting = (control as any).backgroundPolicy.accounting.get(user.tenantId + '/' + tab.webviewId);
+    accounting.eligibleMs = 121000;
+    await control.tick(); assert.equal(view.actual, 2);
     await control.viewerRequest(user.tenantId, 'lease', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: w.id, width: 1200, height: 800, visible: true }] });
     assert.equal(view.visible, false); assert.equal(view.pending, true); assert.equal(endpoint.calls.filter(c => c.method === 'view.lifecycle' && c.args.action === 'restore').length, 1);
     await control.tick(); assert.equal(view.visible, false); view.actual = 0; view.pending = false; await control.tick(); assert.equal(view.visible, true);
@@ -284,7 +286,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     const foreign = await b.request('2', 'action', { type: 'tab.activate', tabId: tab.id }); assert.equal(foreign.error.code, 400);
     const scope = await b.request('3', 'action', { type: 'window.create', tenantId: stateA.workspace.tenantId }); assert.equal(scope.error.code, 400);
     await a.request('4', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: win.id, width: 900, height: 700, visible: true }] }); assert.equal(endpoint.views.get(stateA.workspace.tenantId)!.get(tab.webviewId).visible, true);
-    const replacement = connect(socketUrl, cookieA); peers.push(replacement); const revoked = await a.wait(m => m.type === 'lease'); assert.equal(revoked.reason, 'another-viewer'); await replacement.wait(m => m.type === 'state');
+    const replacement = connect(socketUrl, cookieA); peers.push(replacement); const revoked = await a.wait(m => m.type === 'lease'); assert.equal(revoked.reason, 'another-viewer'); assert.equal((await replacement.wait(m => m.type === 'auth')).auth.locked, true); await replacement.request('unlock', 'auth.verify', { method: 'password', secret: 'password123' }); await replacement.wait(m => m.type === 'state');
     await assert.rejects(control.viewerRequest(stateA.workspace.tenantId, 'stale-lease', 'action', { type: 'window.create', url: 'about:blank' }));
     await replacement.request('5', 'viewport', { devicePixelRatio: 1, windows: [{ windowId: win.id, width: 901, height: 700, visible: true }] });
     const detached = new Promise<void>(resolve => { const observed = (tenant: string, state: any) => { if (tenant === stateA.workspace.tenantId && !state.viewer.connected) { control.off('state', observed); resolve(); } }; control.on('state', observed); });
@@ -310,13 +312,13 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
     for (const operation of ['logout', 'login', 'register']) {
       const name = 'scope-' + operation, a = await store.register(name, 'password123', 'test-registration'), b = await store.login(name, 'password123');
       if (a.user.isAdmin) await store.setRegistrationCredential(a.tenantId, 'test-registration');
-      const old = connect(url, `rk_session=${a.token}`); peers.push(old); await old.wait(m => m.type === 'state');
-      const current = connect(url, `rk_session=${b.token}`); peers.push(current); await current.wait(m => m.type === 'state'); await old.wait(m => m.type === 'lease');
+      const old = connect(url, `rk_session=${a.token}`); peers.push(old); await old.wait(m => m.type === 'auth');
+      const current = connect(url, `rk_session=${b.token}`); peers.push(current); await current.wait(m => m.type === 'auth'); await old.wait(m => m.type === 'lease');
       const response = await post('/api/auth/' + operation, operation === 'logout' ? {} : { username: operation === 'register' ? 'new-' + name : name, password: 'password123', serverCredential: 'test-registration' }, `rk_session=${a.token}`);
       assert.equal(response.status, 200); assert.equal(store.identity(a.token), undefined);
       const ping = await current.request(operation, 'clock.ping', {}); assert.equal(ping.type, 'result'); assert.equal(control.productState(b.tenantId).viewer.connected, true);
       // Same-token tabs share revocation even though only the latest owns media.
-      const sameToken = connect(url, `rk_session=${b.token}`); peers.push(sameToken); await sameToken.wait(m => m.type === 'state'); await current.wait(m => m.type === 'lease');
+      const sameToken = connect(url, `rk_session=${b.token}`); peers.push(sameToken); await sameToken.wait(m => m.type === 'auth'); await current.wait(m => m.type === 'lease');
       const revoked = sameToken.wait(m => m.type === 'lease' && m.reason === 'logout');
       assert.equal((await post('/api/auth/' + operation, operation === 'logout' ? {} : { username: operation === 'register' ? 'active-' + name : name, password: 'password123', serverCredential: 'test-registration' }, `rk_session=${b.token}`)).status, 200); await revoked;
       assert.equal(store.identity(b.token), undefined); assert.equal(control.productState(b.tenantId).viewer.connected, false);

@@ -1,10 +1,11 @@
 import Database from 'better-sqlite3';
-import { randomBytes, randomUUID, scrypt as scryptCallback, timingSafeEqual, createHash } from 'node:crypto';
-import { promisify } from 'node:util';
+import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
+import { AuthAttempts, AuthError, defaultAuthSettings, deriveSecret as scrypt, FaceVault, hashSecret, verifySecret, type SecretHash } from './security-crypto';
+import type { AuthSettings } from '../shared/security';
 import { isDeepStrictEqual } from 'node:util';
 import type { ControlState } from '../client/types';
 import type { ProductUser, ProductWorkspace, OperationReceipt } from '../shared/product';
-const scrypt = promisify(scryptCallback);
+
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 export const defaultSettings = () => ({ searchEngine: 'google' as const, qualityPreference: 'auto' as const, clientScaleOverride: null, memorySaverEnabled: true, showStats: false, audioChannels: { left: true, right: true } });
 export function emptyWorkspace(tenantId: string): ProductWorkspace { return { schemaVersion: 2, tenantId, revision: 0, tabs: [], windows: [], activeWindowId: null, layoutMode: 'side-by-side', settings: defaultSettings(), sites: {}, pendingClose: null, pendingWindowCloseId: null }; }
@@ -19,7 +20,10 @@ export function migrateLegacy(state: ControlState): ProductWorkspace {
 }
 export class Store {
   readonly db: Database.Database;
+  readonly authAttempts = new AuthAttempts();
+  readonly faceVault: FaceVault;
   constructor(path: string) {
+    this.faceVault = new FaceVault(path);
     this.db = new Database(path); this.db.defaultSafeIntegers(true); this.db.pragma('journal_mode = WAL');
     this.db.exec(`CREATE TABLE IF NOT EXISTS tenants (id TEXT PRIMARY KEY, state TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, tenant TEXT NOT NULL REFERENCES tenants(id));
@@ -40,6 +44,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS operation_receipts (tenant TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant,id));`);
     // A process restart cannot prove whether an in-flight native side effect ran.
     for (const row of this.db.prepare('SELECT tenant,id,receipt FROM operation_receipts').all() as {tenant:string;id:string;receipt:string}[]) { const receipt = JSON.parse(row.receipt); if (['accepted','applying'].includes(receipt.status)) { receipt.status = 'unknown'; receipt.error = 'Control重启，执行结果待对账'; this.db.prepare('UPDATE operation_receipts SET receipt=? WHERE tenant=? AND id=?').run(JSON.stringify(receipt), row.tenant, row.id); } }
+    this.db.exec('CREATE TABLE IF NOT EXISTS user_security (user_id TEXT PRIMARY KEY REFERENCES users(id), settings TEXT NOT NULL, pin_salt TEXT, pin_hash TEXT, face_ciphertext TEXT, face_model TEXT)');
     this.db.exec('CREATE TABLE IF NOT EXISTS popup_receipts (tenant TEXT NOT NULL, provisional_id TEXT NOT NULL, tab_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,provisional_id))');
     this.db.transaction(() => {
       const legacyRows = this.db.prepare('SELECT id,state FROM tenants').all() as { id: string; state: string }[];
@@ -93,7 +98,7 @@ export class Store {
   async setRegistrationCredential(tenant: string, value: unknown, validate: () => void = () => {}) {
     const authorize = () => { validate(); if (!this.userForTenant(tenant)?.isAdmin) throw new Error('需要管理员权限'); };
     authorize(); this.validateServerCredential(value);
-    const salt = randomBytes(16).toString('hex'), hash = (await scrypt(value as string, salt, 64) as Buffer).toString('hex');
+    const salt = randomBytes(16).toString('hex'), hash = (await scrypt(value as string, salt) as Buffer).toString('hex');
     return this.db.transaction(() => { authorize(); this.db.prepare('INSERT OR REPLACE INTO registration_policy VALUES (1,?,?)').run(salt, hash); return this.adminStatus(); })();
   }
   private validateServerCredential(value: unknown): asserts value is string { if (typeof value !== 'string' || value.length < 8 || value.length > 256) throw new Error('注册口令需8–256个字符'); }
@@ -102,7 +107,7 @@ export class Store {
     if (hasAdmin && !credential) throw new Error('管理员尚未配置注册口令，注册暂未开放');
     if (hasAdmin) this.validateServerCredential(serverCredential);
     const salt = randomBytes(16).toString('hex');
-    const [hash, supplied] = await Promise.all([scrypt(password as string, salt, 64), hasAdmin ? scrypt(serverCredential as string, credential!.salt, 64) : Promise.resolve(undefined)]) as [Buffer, Buffer | undefined];
+    const [hash, supplied] = await Promise.all([scrypt(password as string, salt), hasAdmin ? scrypt(serverCredential as string, credential!.salt) : Promise.resolve(undefined)]) as [Buffer, Buffer | undefined];
     if (hasAdmin && !timingSafeEqual(supplied!, Buffer.from(credential!.credential_hash, 'hex'))) throw new Error('注册口令错误');
     return this.db.transaction(() => {
       // Hashing yields: check the exact current policy again before granting an account.
@@ -118,9 +123,43 @@ export class Store {
   async login(username: unknown, password: unknown) {
     const name = this.credentials(username, password);
     const row = this.db.prepare('SELECT id,username,tenant,salt,password_hash,is_admin FROM users WHERE username=? COLLATE NOCASE AND legacy=0').get(name) as { id: string; username: string; tenant: string; salt: string; password_hash: string; is_admin: bigint } | undefined;
-    const actual = await scrypt(password as string, row?.salt ?? 'unknown-user-salt', 64) as Buffer;
-    if (!row || !timingSafeEqual(actual, Buffer.from(row.password_hash, 'hex'))) throw new Error('用户名或密码错误');
-    return { token: this.issueToken(row.id), tenantId: row.tenant, user: { id: row.id, username: row.username, isAdmin: !!row.is_admin } };
+    return this.authAttempts.run('password:' + (row?.id ?? 'unknown:' + name.toLowerCase()), async () => {
+      const valid = await verifySecret(password as string, row && { salt: row.salt, hash: row.password_hash });
+      if (!row || !valid || this.passwordHash(row.id)?.hash !== row.password_hash) throw new AuthError(403, '用户名或密码错误');
+      return { token: this.issueToken(row.id), tenantId: row.tenant, user: { id: row.id, username: row.username, isAdmin: !!row.is_admin } };
+    });
+  }
+  private passwordHash(user: string): SecretHash | undefined {
+    return this.db.prepare('SELECT salt, password_hash AS hash FROM users WHERE id=? AND legacy=0').get(user) as SecretHash | undefined;
+  }
+  async verifyPassword(user: string, secret: unknown) {
+    if (typeof secret !== 'string' || secret.length > 256) throw new AuthError(400, '密码格式无效');
+    const saved = this.passwordHash(user);
+    const valid = await this.authAttempts.run('password:' + user, () => verifySecret(secret, saved));
+    if (!valid || this.passwordHash(user)?.hash !== saved?.hash) throw new AuthError(403, '密码错误');
+    return saved!.hash;
+  }
+  async replacePassword(user: string, currentHash: string, secret: unknown, authorize: () => void) {
+    if (typeof secret !== 'string' || secret.length < 8 || secret.length > 256) throw new AuthError(400, '密码需8–256个字符');
+    const { salt, hash } = await hashSecret(secret);
+    authorize();
+    if (!this.db.prepare('UPDATE users SET salt=?, password_hash=? WHERE id=? AND password_hash=?').run(salt, hash, user, currentHash).changes) throw new AuthError(409, '密码已更新，请重试');
+  }
+  security(user: string) {
+    const row = this.db.prepare('SELECT settings, pin_salt, pin_hash, face_ciphertext, face_model FROM user_security WHERE user_id=?').get(user) as
+      { settings: string; pin_salt: string | null; pin_hash: string | null; face_ciphertext: string | null; face_model: string | null } | undefined;
+    const settings: AuthSettings = { ...defaultAuthSettings(), ...JSON.parse(row?.settings ?? '{}') };
+    return { settings, pin: row?.pin_hash && row.pin_salt ? { salt: row.pin_salt, hash: row.pin_hash } : undefined,
+      face: row?.face_ciphertext && row.face_model ? { sealed: row.face_ciphertext, modelVersion: row.face_model } : undefined };
+  }
+  saveSecurity(user: string, record: ReturnType<Store['security']>) {
+    this.db.prepare('INSERT OR REPLACE INTO user_security VALUES (?,?,?,?,?,?)').run(user, JSON.stringify(record.settings), record.pin?.salt ?? null, record.pin?.hash ?? null, record.face?.sealed ?? null, record.face?.modelVersion ?? null);
+  }
+  async verifyPin(user: string, secret: unknown) {
+    if (typeof secret !== 'string' || !/^\d{6,12}$/.test(secret)) throw new AuthError(400, 'PIN 需6–12位数字');
+    const pin = this.security(user).pin;
+    const valid = await this.authAttempts.run('pin:' + user, () => verifySecret(secret, pin));
+    if (!valid || this.security(user).pin?.hash !== pin?.hash) throw new AuthError(403, 'PIN 错误');
   }
   private credentials(username: unknown, password: unknown) { if (typeof username !== 'string' || !/^[A-Za-z0-9_.-]{3,40}$/.test(username) || typeof password !== 'string' || password.length < 8 || password.length > 256) throw new Error('用户名需3–40个字母、数字或_.-，密码需8–256个字符'); return username; }
   workspace(tenant: string): ProductWorkspace {

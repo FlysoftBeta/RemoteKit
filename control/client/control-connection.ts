@@ -1,4 +1,5 @@
 import { snapshotNewer } from './product-operations';
+import type { AuthState } from '../shared/security';
 import type {
   ProductState,
   SocketMessage,
@@ -28,6 +29,7 @@ export class ControlConnection {
     private state: (state: ProductState) => void,
     private status: (status: ConnectionStatus) => void,
     private signal: (signal: RtcServerSignal) => void = () => {},
+    private auth: (auth: AuthState) => void = () => {},
   ) {}
   connect() {
     if (
@@ -56,6 +58,12 @@ export class ControlConnection {
       }
       if (message.type === 'rtc.signal') {
         this.signal(message);
+      } else if (message.type === 'auth') {
+        if (message.auth.locked) this.latestState = null;
+        mark('firstAuth');
+        this.attempts = 0;
+        this.status("online");
+        this.auth(message.auth);
       } else if (message.type === "state") {
         if(snapshotIncarnation && message.state.serverIncarnation!==snapshotIncarnation)return;
         if(!snapshotNewer(message.state,this.latestState))return;
@@ -92,6 +100,7 @@ export class ControlConnection {
         this.close();
         return;
       }
+      this.status("reconnecting");
       // A failed upgrade can mean an expired cookie. Check before retrying.
       void fetch("/api/auth/me", { credentials: "same-origin" })
         .then((response) => {
@@ -139,6 +148,10 @@ export class ControlConnection {
     if (this.stopped) return;
     this.attempts = 0;
     this.connect();
+  }
+  reconnect() {
+    if (this.stopped) return;
+    this.socket?.close();
   }
   close() {
     this.stopped = true;

@@ -33,6 +33,34 @@ test('receipt submission rejects only explicit rejected/expired outcomes', () =>
     assert.throws(() => requireAcceptedReceipt({ operationId: 'operation', operationGeneration: 'generation', status, error: 'explicit rejection' }), /explicit rejection/);
 });
 
+test('locking retires pending product work and old authorization cannot complete new work', async t => {
+  environment(t);
+  const transport = new RemoteTransport();
+  t.after(() => transport.disconnect());
+  transport.setControlRpc(async () => ({}));
+  transport.observePeerAuthorization(1);
+  transport.setProductLocked(false);
+  const sent: any[] = [];
+  const channel: any = { readyState: 'open', bufferedAmount: 0, send(value: string) { sent.push(JSON.parse(value)); } };
+  (transport as any).bindChannel(channel);
+  const operation = { operationId: 'open-window', operationGeneration: 'generation', action: { type: 'window.create' as const } };
+  const first = transport.productAction(operation);
+  const interrupted = assert.rejects(first, { operationSent: true });
+  transport.setProductLocked(true);
+  await interrupted;
+  await assert.rejects(transport.productAction(operation), { operationSent: false });
+  transport.observePeerAuthorization(3);
+  transport.setProductLocked(false);
+  const second = transport.productAction(operation);
+  const emit = (authEpoch: number, status: 'rejected' | 'committed') =>
+    channel.onmessage({ data: JSON.stringify({ type: 'product.result', version: 1, authEpoch, ...operation, result: { ...operation, status } }) });
+  emit(1, 'rejected');
+  emit(3, 'committed');
+  assert.equal((await second).status, 'committed');
+  assert.deepEqual(sent.filter(value => value.type === 'product.action').map(value => value.authEpoch), [1, 3]);
+  assert.equal((transport as any).channel, channel);
+});
+
 function environment(t: TestContext) {
   const values: Record<string, unknown> = {
     document: { visibilityState: 'visible', createElement: () => ({ pause() {}, remove() {} }), addEventListener() {}, removeEventListener() {} },
@@ -42,7 +70,7 @@ function environment(t: TestContext) {
     RTCPeerConnection: class {
       iceGatheringState = 'complete'; localDescription: unknown; signalingState = 'stable';
       addTransceiver() { return {}; }
-      createDataChannel() { return {}; }
+      createDataChannel(label: string) { return { label, close() {} }; }
       async createOffer() { return { type: 'offer', sdp: 'v=0\r\n' }; }
       async setLocalDescription(value: unknown) { this.localDescription = value; }
       async setRemoteDescription() {}
@@ -105,6 +133,8 @@ test('transport separates Endpoint DC clock from Control RPC and expires pending
   const state = transport as any;
   const replies: ((value: unknown) => void)[] = [];
   transport.setControlRpc(async method => method === 'clock.ping' ? new Promise(resolve => replies.push(resolve)) : {});
+  transport.observePeerAuthorization(1);
+  transport.setProductLocked(false);
   const peer = { close() {} }; state.peer = peer;
   const sent: any[] = [];
   const channel = () => ({readyState:'open',bufferedAmount:0,send(value: string) { sent.push(JSON.parse(value)); }} as any);
@@ -144,8 +174,44 @@ test('product offer and disconnect use injected RPC and preserve SDP diagnostics
   assert.equal(calls[0].method, 'rtc.offer');
   assert.equal(transport.signaling?.answerSdp, 'v=0\r\n');
   assert.equal(transport.diagnostics.connectionId, 'first');
+  assert.equal((transport as any).channel.label, 'remotekit');
+  assert.equal((transport as any).authCamera.channel.label, 'remotekit-auth');
   transport.disconnect();
   assert.deepEqual(calls[1], { method: 'rtc.close', params: { connectionId: 'first' } });
+});
+
+test('manual authorization transitions retain the negotiated peer and both channels', async t => {
+  environment(t);
+  const methods: string[] = [];
+  const transport = new RemoteTransport();
+  transport.setControlRpc(async method => {
+    methods.push(method);
+    return method === 'rtc.offer' ? { type: 'answer', sdp: 'v=0\r\n', connectionId: 'retained', endpointGeneration: 1 } : { closed: true };
+  });
+  try {
+    await transport.connect();
+    const internal = transport as any;
+    const { peer, channel } = internal;
+    const authChannel = internal.authCamera.channel;
+    transport.observeEndpointGeneration(1);
+    transport.observePeerAuthorization(1);
+    transport.setProductLocked(false);
+    // Mirror the optimistic local lock, confirmed server epoch, and then the
+    // unlocked server epoch followed by a fresh product snapshot.
+    transport.setProductLocked(true);
+    transport.setAuthCamera();
+    transport.observePeerAuthorization(2);
+    transport.observeEndpointGeneration(1);
+    transport.observePeerAuthorization(3);
+    transport.setProductLocked(false);
+    assert.equal(internal.peer, peer);
+    assert.equal(internal.channel, channel);
+    assert.equal(internal.authCamera.channel, authChannel);
+    assert.equal(transport.diagnostics.connectionId, 'retained');
+    assert.deepEqual(methods, ['rtc.offer']);
+  } finally {
+    transport.disconnect();
+  }
 });
 
 test('trickle sends an ungathered offer, queues early remote ICE, and flushes local ICE after answer', async t => {

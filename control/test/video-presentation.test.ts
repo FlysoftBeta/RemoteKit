@@ -47,8 +47,9 @@ function environment(t: TestContext, stableViewport = false) {
   const track = { kind: 'video' }, sent: any[] = [];
   const channel: any = { readyState: 'open', bufferedAmount: 0, send: (value: string) => sent.push(JSON.parse(value)) };
   internal.peer = { close() {} }; internal.processorTrack = track;
-  transport.setControlRpc(async () => ({})); internal.presentationBackend = 'pending'; internal.bindChannel(channel); channel.onopen();
-  const message = (message: object) => channel.onmessage({ data: JSON.stringify(message) });
+  transport.setControlRpc(async () => ({})); transport.observePeerAuthorization(1); transport.setProductLocked(false);
+  internal.processorTrack = track; internal.presentationBackend = 'pending'; internal.bindChannel(channel); channel.onopen();
+  const message = (message: object) => channel.onmessage({ data: JSON.stringify({ authEpoch: 1, ...message }) });
   message(layout);
   const ready = [false, false], canvases = [new Element('canvas'), new Element('canvas')];
   const removers = canvases.map((canvas, index) => {
@@ -84,7 +85,7 @@ test('video negotiation hides across two rAF turns; only latest full barrier can
   s.message({ type: 'presentation.prepare', ...key, barrierId: '10000000000000002' }); s.raf();
   s.message({ type: 'presentation.prepare', ...key });
   assert.equal(s.sent.some(message => message.type === 'presentation.ready'), false); s.raf();
-  assert.deepEqual(s.sent.filter(message => message.type === 'presentation.ready'), [{ type: 'presentation.ready', ...key, barrierId: '10000000000000002' }]);
+  assert.deepEqual(s.sent.filter(message => message.type === 'presentation.ready'), [{ type: 'presentation.ready', ...key, barrierId: '10000000000000002', authEpoch: 1 }]);
   assert.deepEqual(s.ready, [false, false]);
 });
 
@@ -127,7 +128,7 @@ test('duplicate layout/prepare transactions cannot starve hidden ACK or revoke r
   assert.equal(s.sent.some(message => message.type === 'presentation.ready'), false);
   for (let i = 0; i < 20; i++) repeat();
   s.raf();
-  assert.deepEqual(s.sent.filter(message => message.type === 'presentation.ready'), [{ type: 'presentation.ready', ...key }]);
+  assert.deepEqual(s.sent.filter(message => message.type === 'presentation.ready'), [{ type: 'presentation.ready', ...key, authEpoch: 1 }]);
   s.metadata(10); s.videos[1].frame(10); s.videos[2].frame(10);
   assert.deepEqual(s.ready, [true, true]);
   for (let i = 0; i < 20; i++) repeat();
@@ -185,6 +186,8 @@ test('viewport registrations survive RTC replacement while old receiver callback
   s.videos[2].frame(99);
   s.transport.disconnect(); assert.deepEqual(s.ready, [false, false]); assert.equal(oldVideo.srcObject, null);
   const track = { kind: 'video', id: 'replacement' };
+  s.transport.observePeerAuthorization(1);
+  s.transport.setProductLocked(false);
   s.internal.peer = { close() {} }; s.internal.processorTrack = track;
   s.internal.presentationBackend = 'pending'; s.internal.bindChannel(s.channel);
   s.message(layout); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });

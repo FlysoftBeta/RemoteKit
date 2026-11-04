@@ -14,7 +14,12 @@ RenderChannel::RenderChannel(mojo::ScopedMessagePipeHandle pipe, Handler handler
   CHECK_EQ(watcher_.Watch(pipe_.get(), MOJO_HANDLE_SIGNAL_READABLE,
       base::BindRepeating(&RenderChannel::OnReadable, base::Unretained(this))), MOJO_RESULT_OK);
 }
-RenderChannel::~RenderChannel() { Close(); }
+RenderChannel::~RenderChannel() {
+  // Owner teardown may already have released its last shared reference.
+  // Only a live channel closing can notify that owner.
+  disconnected_.Reset();
+  Close();
+}
 void RenderChannel::Close() {
   watcher_.Cancel();
   pipe_.reset();

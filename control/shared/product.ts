@@ -1,3 +1,4 @@
+import type { AuthMessage, AuthSocketMethods } from './security';
 /** Persistent product state belongs to Control; clients keep only an HttpOnly token. */
 export interface ProductUser { id: string; username: string; isAdmin: boolean }
 export type SearchEngine = 'google' | 'bing' | 'duckduckgo' | 'baidu';
@@ -39,7 +40,7 @@ export interface ProductOperation { operationId: string; operationGeneration: st
 export interface OperationReceipt { browserIncarnation?:string; resolved?:boolean; resolution?:'target-retired'; operationSequence?:string; operationId: string; operationGeneration: string; status: OperationStatus; revision?: number; application?: ProductActionResult['application']; error?: string }
 export interface RegistrationStatus { hasAdmin: boolean; credentialRequired: boolean; registrationOpen: boolean }
 export interface AdminStatus { registrationCredentialConfigured: boolean }
-export interface SocketMethods {
+export interface SocketMethods extends AuthSocketMethods {
   'files.begin': { params: { requestId: string; files: UploadFileSpec[] }; result: FileUploadBegin };
   'files.commit': { params: { uploadId: string }; result: FileUploadResult };
   'files.cancel': { params: { requestId: string; uploadId?: string }; result: FileUploadResult };
@@ -56,4 +57,4 @@ export interface SocketMethods {
 }
 export type SocketRequest = { [K in keyof SocketMethods]: { id: string; method: K; params: SocketMethods[K]['params'] } }[keyof SocketMethods];
 export type RtcServerSignal = { type: 'rtc.signal'; connectionId: string; attemptId: string; signal: { type: 'ice'; candidate: RTCIceCandidateInit } | { type: 'complete' } | { type: 'error'; message: string } };
-export type SocketMessage = RtcServerSignal | { type: 'state'; revision: number; state: ProductState } | { type: 'result'; id: string; result: unknown } | { type: 'error'; id: string; error: { code: number; message: string } } | { type: 'lease'; status: 'revoked'; reason: 'another-viewer' | 'logout' };
+export type SocketMessage = AuthMessage | RtcServerSignal | { type: 'state'; revision: number; state: ProductState } | { type: 'result'; id: string; result: unknown } | { type: 'error'; id: string; error: { code: number; message: string } } | { type: 'lease'; status: 'revoked'; reason: 'another-viewer' | 'logout' };

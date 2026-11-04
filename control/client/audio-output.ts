@@ -28,11 +28,16 @@ export class ViewerAudioOutput {
     private gains: GainNode[] = [];
     private track?: MediaStreamTrack;
     private generation = 0;
+    private muted = false;
     private channels: AudioChannels = { left: true, right: true };
     constructor(private changed: () => void) { }
     setChannels(channels: AudioChannels) {
         this.channels = { ...channels };
-        this.gains.forEach((gain, index) => { gain.gain.value = (index ? channels.right : channels.left) ? 1 : 0; });
+        this.gains.forEach((gain, index) => { gain.gain.value = !this.muted && (index ? channels.right : channels.left) ? 1 : 0; });
+    }
+    setMuted(muted: boolean) {
+        this.muted = muted;
+        this.setChannels(this.channels);
     }
     attach(track: MediaStreamTrack) {
         this.detach();

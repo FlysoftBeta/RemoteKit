@@ -13,6 +13,9 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC/detach
   const control = Object.assign(new EventEmitter(), {
     store: { identity: () => ({ tenantId: 'tenant' }) },
     attachViewer: async () => ({ workspace: { revision: 1 } }),
+    productEpoch: () => undefined,
+    productAllowed: () => true,
+    pollFaceAuth: async () => {},
     detachViewer: async () => { detachCount++; await detached.promise; },
     viewerRequest: async () => { rpcEntered.resolve(); await rpc.promise; return {}; },
     receiveFileUpload: async (_tenant: string, _auth: string, _ticket: string, source: AsyncIterable<unknown>) => {

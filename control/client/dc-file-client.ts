@@ -7,7 +7,7 @@ import { operationId } from './product-operations';
 export class DcFileClient implements FileRpc {
     private pending = new Map<string, { channel: RTCDataChannel; resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
     private uploads = new Map<string, { requestId: string; channel: RTCDataChannel }>();
-    constructor(private readonly getChannel: () => RTCDataChannel | null) {}
+    constructor(private readonly getChannel: () => RTCDataChannel | null, private readonly getAuthEpoch = (): number | undefined => undefined) {}
     handle(message: any): boolean {
         if (message?.type !== 'files.result') return false;
         if (message.version !== 1 || typeof message.requestId !== 'string') return true;
@@ -24,18 +24,19 @@ export class DcFileClient implements FileRpc {
     }
     private async call<T>(method: string, params: Record<string, unknown>): Promise<T> {
         const channel = this.getChannel();
+        const authEpoch = this.getAuthEpoch();
         if (channel?.readyState !== 'open') throw new Error('连接中断，请恢复连接后重试');
         if (this.pending.size >= 8) throw new Error('文件发送繁忙，请稍后重试');
         // Input/layout retain queue headroom. Polling also works on Chrome89,
         // without replacing transport's existing bufferedamountlow handler.
         const deadline = performance.now() + 15000;
         while (channel.bufferedAmount > 64 * 1024) {
-            if (channel !== this.getChannel() || channel.readyState !== 'open') throw new Error('连接中断，请重新选择文件');
+            if (channel !== this.getChannel() || authEpoch !== this.getAuthEpoch() || channel.readyState !== 'open') throw new Error('连接中断，请重新选择文件');
             if (performance.now() > deadline) throw new Error('文件发送暂时拥塞，请重试');
             await new Promise(resolve => setTimeout(resolve, 10));
         }
         const requestId = operationId();
-        const encoded = JSON.stringify({ type: 'files.request', version: 1, requestId, method, params });
+        const encoded = JSON.stringify({ type: 'files.request', version: 1, requestId, method, params, authEpoch });
         // Wire byte bound includes multibyte filenames and MIME strings.
         if (new TextEncoder().encode(encoded).byteLength > (method === 'begin' ? 61440 : 24576)) throw new Error('文件信息过长，请减少文件数量');
         return new Promise<T>((resolve, reject) => {
@@ -47,9 +48,10 @@ export class DcFileClient implements FileRpc {
     }
     async begin(requestId: string, files: File[]): Promise<DcFileBegin> {
         const channel = this.getChannel();
+        const authEpoch = this.getAuthEpoch();
         const result = await this.call<DcFileBegin>('begin', { requestId, files: files.map(file => ({ name: file.name, type: file.type, size: file.size })) });
         if (!result || typeof result.uploadId !== 'string' || !Array.isArray(result.offsets) || result.offsets.length !== files.length || result.offsets.some((offset, index) => !Number.isSafeInteger(offset) || offset < 0 || offset > files[index].size)) throw new Error('文件发送状态无效');
-        if (channel !== this.getChannel() || !channel) throw new Error('连接中断，请重新选择文件');
+        if (channel !== this.getChannel() || authEpoch !== this.getAuthEpoch() || !channel) throw new Error('连接中断，请重新选择文件');
         this.uploads.set(result.uploadId, { requestId, channel });
         return result;
     }
@@ -60,12 +62,14 @@ export class DcFileClient implements FileRpc {
     }
     async upload(uploadId: string, fileIndex: number, file: File, offset: number, signal: AbortSignal, progress: (bytes: number) => void) {
         const binding = this.binding(uploadId);
+        const authEpoch = this.getAuthEpoch();
         // One chunk per file is in flight. This also preserves sequential disk
         // offsets; the protocol admits up to four concurrent chunks per client.
         for (let position = offset; position < file.size;) {
             if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
             const bytes = new Uint8Array(await file.slice(position, position + 16384).arrayBuffer());
             if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+            if (authEpoch !== this.getAuthEpoch() || !this.uploads.has(uploadId)) throw new Error('连接中断，请重新选择文件');
             let text = ''; for (const byte of bytes) text += String.fromCharCode(byte);
             const result = await this.call<{ offset: number }>('chunk', { ...binding, fileIndex, offset: position, data: btoa(text) });
             if (result.offset !== position + bytes.length) throw new Error('文件接收进度不一致，请重试');

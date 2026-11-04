@@ -399,3 +399,23 @@ button:focus-visible,
 .start-page-form .MuiIconButton-root { width:44px; height:44px; flex-shrink:0; }
 .start-page .start-page-hint { margin-top:10px; font-size:12px; }
 .start-page .start-page-error { margin-top:10px; font-size:14px; overflow-wrap:anywhere; }
+#root:empty {
+  background: #000;
+}
+.viewer-lock-blank {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  cursor: none;
+  touch-action: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.auth-camera-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 220px;
+  background: #151515;
+  border-radius: 8px;
+  transform: scaleX(-1);
+}

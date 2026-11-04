@@ -135,12 +135,14 @@ test('server shutdown fails remote RPC before draining tracked handlers and neve
     Object.assign(h.control, {
       store: { identity: () => ({ tenantId: 'tenant' }) },
       attachViewer: async () => ({ workspace: { revision: 1 } }),
+      productEpoch: () => undefined,
+      productAllowed: () => true,
       detachViewer: async () => {},
       viewerRequest: () => h.endpoint.request('session.snapshot', 'tenant').catch(error => { rejected = error; throw error; }),
     });
     // Viewer work is tracked by createHttp and awaits the remote management RPC.
     const viewer = new WebSocket(h.url.replace('/api/endpoint', '/api/socket'), { origin: 'http://test.local', headers: { cookie: 'rk_session=test' } });
-    await once(viewer, 'open'); viewer.send(JSON.stringify({ id: 'rpc', method: 'state' })); await request;
+    await once(viewer, 'open'); viewer.send(JSON.stringify({ id: 'rpc', method: 'state', params: {} })); await request;
     const messages: string[] = []; socket.on('message', data => messages.push(String(data)));
     await h.server.shutdown(); assert.match(rejected?.message ?? '', /关闭/); assert.deepEqual(messages, []);
     await assert.rejects(h.endpoint.request('shutdown', ''), /尚未就绪/);

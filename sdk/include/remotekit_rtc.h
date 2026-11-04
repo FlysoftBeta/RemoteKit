@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define REMOTEKIT_RTC_ABI_VERSION 3u
+#define REMOTEKIT_RTC_ABI_VERSION 4u
 enum remotekit_rtc_event_type {
   REMOTEKIT_RTC_SDP_OFFER = 1, REMOTEKIT_RTC_SDP_ANSWER = 2,
   REMOTEKIT_RTC_ICE = 3, REMOTEKIT_RTC_STATE = 4,
@@ -15,11 +15,14 @@ enum remotekit_rtc_event_type {
   REMOTEKIT_RTC_DATA_STATE = 7,
   REMOTEKIT_RTC_ICE_COMPLETE = 8,
   REMOTEKIT_RTC_REFRESH_REQUEST = 9,
-  REMOTEKIT_RTC_STATS = 10
+  REMOTEKIT_RTC_STATS = 10,
+  REMOTEKIT_RTC_AUTH_DATA = 11,
+  REMOTEKIT_RTC_AUTH_DATA_STATE = 12
 };
 /* Event bytes are borrowed until return. SDP is UTF-8; ICE text is the
- * candidate with mid in auxiliary and mline in value. DATA is binary when
- * value=1. STATE value is PeerConnectionState (0=new..5=closed).
+ * candidate with mid in auxiliary and mline in value. DATA and AUTH_DATA are
+ * binary when value=1. STATE is PeerConnectionState (0=new..5=closed).
+ * DATA_STATE and AUTH_DATA_STATE are DataChannelState (0=connecting..3=closed).
  * ICE_COMPLETE carries the complete local SDP with gathered candidates;
  * value=1 for offer and 0 for answer. Use this event for non-trickle signaling.
  * REFRESH_REQUEST has no payload: enqueue one latest-cache refresh/IDR. It is
@@ -85,6 +88,7 @@ struct remotekit_rtc_options {
   const char* ice_username;
   const char* ice_password;
   uint32_t min_bitrate_bps, start_bitrate_bps, max_bitrate_bps;
+  uint32_t auth_required; /* 1 starts with product media disabled */
 };
 struct remotekit_rtc_encoded_frame {
   uint32_t struct_size;
@@ -110,6 +114,10 @@ REMOTEKIT_SDK_API int remotekit_rtc_sample_clock(
 REMOTEKIT_SDK_API int remotekit_rtc_create(const struct remotekit_rtc_options*,
                                          uint64_t* peer);
 REMOTEKIT_SDK_API int remotekit_rtc_close(uint64_t peer);
+/* Gates outgoing product video, audio and data. The authentication data
+ * channel remains available. Old video completions are discarded. */
+REMOTEKIT_SDK_API int remotekit_rtc_set_media_authorized(uint64_t peer,
+    int authorized);
 enum remotekit_rtc_degradation_preference {
   REMOTEKIT_RTC_MAINTAIN_RESOLUTION = 0,
   REMOTEKIT_RTC_BALANCED = 1,
@@ -137,7 +145,7 @@ REMOTEKIT_SDK_API int remotekit_rtc_adapt_frame(uint64_t peer,
     struct remotekit_rtc_adaptation* adaptation);
 REMOTEKIT_SDK_API int remotekit_rtc_create_offer(uint64_t peer);
 /* offer=1 applies remote offer and emits local answer; offer=0 applies answer.
- * Send-only SDK: remote media must be recvonly/inactive. Audio requires
+ * Remote product media must be recvonly/inactive. Audio requires
  * Opus/48000/2 with stereo=1. Video-only offers remain supported. */
 REMOTEKIT_SDK_API int remotekit_rtc_set_remote_description(uint64_t peer,
     int offer, const char* sdp, size_t size);
@@ -166,6 +174,11 @@ REMOTEKIT_SDK_API int remotekit_rtc_request_stats(uint64_t peer);
  * peer can also create it. Send returns BUSY when queued bytes exceed 1 MiB. */
 REMOTEKIT_SDK_API int remotekit_rtc_open_data_channel(uint64_t peer);
 REMOTEKIT_SDK_API int remotekit_rtc_send_data(uint64_t peer,
+    const void* data, size_t size, int binary);
+/* The remote peer creates the reliable ordered "remotekit-auth" channel.
+ * Available for auth_required peers independent of product authorization.
+ * Authentication messages are limited to 64 KiB each. */
+REMOTEKIT_SDK_API int remotekit_rtc_send_auth_data(uint64_t peer,
     const void* data, size_t size, int binary);
 /* Success transfers one release callback obligation to the SDK, plus an SDK
  * COM reference. Failure retains ownership in the caller. GPU readiness is

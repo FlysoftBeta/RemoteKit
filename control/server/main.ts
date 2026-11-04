@@ -19,6 +19,8 @@ const background = new Set<Promise<unknown>>();
 function run(work: Promise<unknown>) { background.add(work); void work.then(() => background.delete(work), error => { background.delete(work); console.error(error); }); }
 const endpointReady = (identity?: { processChanged: boolean }) => { if (!closing) run(control.endpointReady(identity)); };
 endpoint.on('ready', endpointReady);
+const endpointOffline = () => { if (!closing) control.endpointOffline(); };
+endpoint.on('offline', endpointOffline);
 const port = Number(process.env.PORT ?? 3001);
 const host = process.env.REMOTEKIT_CONTROL_HOST ?? '127.0.0.1';
 const tlsKey = process.env.REMOTEKIT_HTTPS_KEY, tlsCert = process.env.REMOTEKIT_HTTPS_CERT;
@@ -31,7 +33,7 @@ server.listen(port, host, () => { endpoint.start(); const address = server.addre
 let closePromise: Promise<void> | undefined;
 function close(): Promise<void> {
   if (closePromise) return closePromise;
-  closing = true; clearInterval(reconciliationTimer); endpoint.off('ready', endpointReady);
+  closing = true; clearInterval(reconciliationTimer); endpoint.off('ready', endpointReady); endpoint.off('offline', endpointOffline);
   closePromise = (async () => {
     await server.shutdown();
     while (background.size) await Promise.allSettled([...background]);

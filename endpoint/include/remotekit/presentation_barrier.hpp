@@ -16,13 +16,13 @@ class PresentationBarrier {
     std::lock_guard lock(mutex_);peer_=peer;video_=false;waiting_=false;
     key_={};needs_keyframe_=false;
   }
-  std::optional<Key> Mode(uint64_t peer,bool video) {
+  std::optional<Key> Mode(uint64_t peer,bool video,bool restart=false) {
     std::lock_guard lock(mutex_);
     if(!peer || peer!=peer_)return {};
-    if(video && !video_) {key_.barrier=++serial_;waiting_=true;needs_keyframe_=true;}
+    if(video && (!video_ || restart)) {key_.barrier=++serial_;waiting_=true;needs_keyframe_=true;}
     // Switching away from video cancels the ACK wait, but dropped bitstream
     // dependencies still require a successful current-layout keyframe.
-    if(!video)waiting_=false;
+    if(!video) {waiting_=false;if(restart)needs_keyframe_=true;}
     video_=video;
     return video&&waiting_?std::optional<Key>(key_):std::nullopt;
   }

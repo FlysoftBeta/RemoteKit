@@ -2,7 +2,15 @@
 
 由root维护。最新已发布源码94cd174，取件码352318；Comp/Rend重构及规定范围新增路径验证已完成，不重复历史性能组。旧全库审查依据见[审查报告](post-release-astra-review.md)。
 
-## Wake优先发帧（2026-11-04，源码完成，未打包上传）
+## 高级认证（2026-11-04，功能验收完成，待发布）
+
+- AUTH-1：空白锁屏、方向序列、密码/PIN及设置、Control/Endpoint产品权限门禁已实现。新Viewer默认锁定，序列仅揭示验证入口；旧输入/操作/媒体工作按授权代次退休。Control314项及后续transport17项、Endpoint19项、SDK/RTC/audio smoke通过。修后157/89核心7项断言均通过，同peer/DC/track锁定和密码/PIN恢复、锁下产品state及媒体截止、过期输入/产品操作拒绝均有实际证据。
+- AUTH-2：同peer独立认证DataChannel传送原尺寸RGB24，Endpoint协商/授予5fps取帧；SDK RTC ABI4、YuNet/SFace与MiniFASNet V1SE/V2 ONNX及静态OpenCV已构建。157/89实际各5完整帧及取消停发通过；官方T1合成摄像头另通过3帧登记、AES-GCM模板、锁下匹配解锁及空帧离开锁定，未替代真人活体验收。ONNX数值等价通过；LFW全6,000对识别准确率81.07%，双方特征可用4,130对为95.62%，未观测到异人误接受，实体摄像头/防伪效果未验收。原始画面不落盘，模板由Control加密持久化。[评测](face-public-benchmark-20261104.md)。
+- AUTH-3：浏览器系统锁定/闲置、页面后台及Endpoint人脸缺席是独立信号，不能把visibilitychange当物理关屏；89真实15秒页面闲置锁定通过。两版第二tab未产生可信hidden，真实后台、系统/物理关屏与实体摄像头仍待验收。具体边界见[实施契约](advanced-auth-contract-20261104.md)。
+- AUTH-4：已修复。CDB明确定位RenderChannel析构时调用disconnected回调，重入正在销毁的OsrRenderer::State，shared_from_this触发bad_weak_ptr并以0xC0000409退出。析构先撤销回调再关闭watcher/pipe，存活通道的正常断链通知保持；新增生产Mojo生命周期probe通过。修后157/89及合成人脸组三组各单一Browser PID，无replacement/FATAL/CHECK/GPU退出，原连接保持。初次失败与符号堆栈保留于[运行记录](advanced-auth-runtime-20261104.md)。
+- AUTH-5：已修复。首登RTC未就绪时“新建窗口”误报已锁定；增加Endpoint授权代次、产品DataChannel及状态快照就绪门禁，定向测试及157真实首次连接检查通过。
+
+## Wake优先发帧（2026-11-04，源码完成，本次高级认证包包含）
 
 - RENDER-3：旧实现只在轮询发现Wake时清除deadline，SDK callback不能中断Comp的timer等待，且未发送成功的Begin也会推进一个帧间隔。现以每代独立Windows事件唤醒Comp，入队/Signal与出队/Reset共用锁；输出暂停时不等待未消费的事件，旧代事件不唤醒当前代。合法Wake的优先请求保留到Begin实际发送，Slot占满或SDK_BUSY不会消耗它，Stop/换代取消，零码率/FPS及产品可见性门禁保持。
 - 验证：Endpoint Release增量构建通过；生产CompBeginSchedule/CompPacing和RenderEventQueue两项CTest通过，覆盖提前到期、Slot饱和/BUSY、发送后周期、零rate/Stop/旧代，以及实际Windows事件对长timer的唤醒、预先Signal、drain后重新入队和代隔离。没有真实GPU/浏览器复验或毫秒延迟测量；按本次要求不打包上传。

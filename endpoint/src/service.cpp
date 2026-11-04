@@ -16,6 +16,9 @@
 #include "remotekit/input_sequence.hpp"
 #include "remotekit/presentation_barrier.hpp"
 #include "remotekit/control_reliability.hpp"
+#include "remotekit/product_authorization.hpp"
+#include "remotekit/face_auth.hpp"
+#include "remotekit/raw_camera.hpp"
 #include "remotekit/dc_services.hpp"
 #include "remotekit/dc_file_services.hpp"
 #include "remotekit/navigation_export.hpp"
@@ -48,7 +51,7 @@ using namespace remotekit::media;
 namespace fs=std::filesystem;
 namespace {
 std::function<void(std::string)> management_output=[](std::string bytes){std::cout<<bytes<<'\n'<<std::flush;};
-std::function<bool(std::string)> management_action=[](std::string bytes){management_output(std::move(bytes));return bool(std::cout);};
+std::function<bool(std::string,uint64_t)> management_action=[](std::string bytes,uint64_t){management_output(std::move(bytes));return bool(std::cout);};
 std::string Env(const char* key,std::string fallback={}) {const char* v=std::getenv(key);return v?v:fallback;}
 fs::path Utf8Path(const std::string& value){return fs::u8path(value);}
 std::string Utf8(const fs::path& path){auto v=path.u8string();return {reinterpret_cast<const char*>(v.data()),v.size()};}
@@ -184,12 +187,28 @@ struct Session {
  std::atomic<uint64_t> audio_gaps{0},audio_submitted{0},audio_rejected{0};
  remotekit::CoordinateReadiness coordinate_readiness;
  std::atomic<uint64_t> peer{0};std::string connection;
+ // Transitions serialize with peer creation/close. Admission never holds its
+ // lock while calling an SDK operation that marshals to signaling.
+ std::mutex authorization_mutex,admission_mutex;
+ remotekit::ProductAuthorization authorization;
+ std::atomic<uint64_t> management_generation{0};
+ std::atomic<uint64_t> frame_authorization{0},input_authorization{0};
+ std::atomic<int64_t> audio_authorized_after{0};
+ rk::auth::Faces faces;
+ rk::auth::RawCamera raw_camera;
+ std::mutex camera_mutex;
+ std::condition_variable camera_wake;
+ bool camera_changed=false;
+ std::thread camera_thread;
+ std::atomic<bool> stop_camera{false};
+
  std::shared_ptr<EncoderStats> stats=std::make_shared<EncoderStats>();
  remotekit::MediaFeedback media_feedback;
  std::atomic<uint32_t> comp_bitrate{1},comp_fps{60};
  std::mutex encoder_mutex;std::map<uint64_t,std::unique_ptr<EncoderWorker>> encoders;
  ComPtr<ID3D11Device> encoder_device;
- struct Event{uint32_t type;std::string bytes,auxiliary;int32_t value;uint64_t peer;};
+ struct Event{uint32_t type;std::string bytes,auxiliary;int32_t value;uint64_t peer;uint64_t authorization=0;};
+ bool ProductCurrent(const Event& event) const {return event.peer==peer.load() && authorization.Current(event.authorization);}
  std::mutex event_mutex;std::condition_variable event_wake;std::deque<Event> events;
  std::mutex signal_mutex;std::string answer,rtc_error;bool ice_complete=false;
  std::atomic<bool> trickle_signals{false};std::deque<Event> signal_events;bool signal_overflow=false;
@@ -257,8 +276,13 @@ struct Session {
  };
  std::map<std::string,Recovery> recoveries;
  std::string recovery_cursor;
+ static fs::path FaceModels() {
+  wchar_t executable[32768]{};
+  GetModuleFileNameW(nullptr,executable,32768);
+  return fs::path(executable).parent_path()/"face-models";
+ }
  Session(Sdk& api,const Options& opts,std::string tenant_id,std::string session_id):sdk(api),options(opts),
-   tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id),file_uploads(directory/"uploads") {
+   tenant(std::move(tenant_id)),id(std::move(session_id)),directory(options.data/"sessions"/id),file_uploads(directory/"uploads"),faces(FaceModels()) {
   effective_idle_ms=std::min(1000u,options.idle_idr_ms);
   trace=ServerTrace::Create(tenant,id);pool.SetTrace(trace);
   fs::create_directories(directory);
@@ -309,7 +333,7 @@ struct Session {
  void AckClosed(const Json& views) {
   if(!views.empty())Rpc({{"method","view.closed.ack"},{"session",id},{"views",views},{"browserIncarnation",browser_incarnation}});
  }
- Json Rpc(Json command,bool require_ok=true,uint64_t expected_control=0,uint32_t timeout_ms=10000,int64_t request_deadline=0) {
+ Json Rpc(Json command,bool require_ok=true,uint64_t expected_control=0,uint32_t timeout_ms=10000,int64_t request_deadline=0,const std::function<bool()>& admitted={}) {
   std::unique_lock lock(rpc_mutex,std::defer_lock);
   if(request_deadline) {
    const auto remaining=request_deadline-QpcNow();
@@ -319,13 +343,21 @@ struct Session {
    if(active<=0)throw std::runtime_error("touch_terminal_timeout");
    timeout_ms=static_cast<uint32_t>(std::max<int64_t>(1,active*1000/QpcFrequency()));
   } else lock.lock();
+  if(admitted && !admitted())throw std::runtime_error("authorization_changed");
   if(expected_control && control.load()!=expected_control)throw std::runtime_error("stale_file_browser");
   if(!control)throw std::runtime_error("browser control unavailable");
   auto result=remotekit::BrowserRpc(command,request_id,[&](const std::string& encoded,std::vector<char>& response,size_t& count){
    const int status=sdk.remotekit_sdk_control_request(control,encoded.data(),encoded.size(),response.data(),response.size(),&count,timeout_ms);
-   if(status!=0){control=0;throw std::runtime_error("browser request transport "+std::to_string(status)+
-     " method="+command.value("method",std::string())+" "+ProcessDiagnostic()+
-     " browser_log="+Utf8(directory/"browser.log"));}
+   if(status!=0){
+    control=0;
+    const auto error="browser request transport "+std::to_string(status)+
+      " method="+command.value("method",std::string())+" "+ProcessDiagnostic()+
+      " browser_log="+Utf8(directory/"browser.log");
+    // Snapshot can recover a transport failure into an inactive result. Keep
+    // the initiating method and process identity visible before that fallback.
+    fprintf(stderr,"session %s %s\n",id.c_str(),error.c_str());
+    throw std::runtime_error(error);
+   }
    return status;
   });
   if(command.value("method",std::string())=="snapshot")
@@ -347,6 +379,8 @@ struct Session {
  }
  void Start() {
   if(!producer_stop_pending && Alive()&&control)return;
+  if(process || job)fprintf(stderr,"session %s browser replacement control=%d stop_pending=%d peer=%llu %s\n",
+    id.c_str(),control.load()!=0,producer_stop_pending,peer.load(),ProcessDiagnostic().c_str());
   if(!Stop())throw std::runtime_error("previous browser termination unfinished; retry the retained producer before restart");
   job=CreateJobObjectW(nullptr,nullptr);if(!job)throw std::runtime_error("CreateJobObject failed");
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -712,7 +746,11 @@ struct Session {
  Json InactiveSnapshot() {
   // Only a signaled process handle proves producer exit. Retire its GPU state
   // through the existing stop boundary; observing a Session never launches it.
-  if(ProducerExited())Stop();
+  if(ProducerExited()) {
+   fprintf(stderr,"session %s inactive snapshot observed producer exit peer=%llu %s\n",
+     id.c_str(),peer.load(),ProcessDiagnostic().c_str());
+   Stop();
+  }
   return {{"sessionId",id},{"browserPid",0},{"views",Json::array()},
    {"pendingPopups",Json::array()},{"events",durable_events},{"running",false},{"browserIncarnation",nullptr},{"rtc",RtcSnapshot()},{"stats",Stats()},{"recovery",RecoverySnapshot()}};
  }
@@ -807,11 +845,53 @@ struct Session {
   current_geometry.clear();
   return true;
  }
+ static int64_t CameraNow() {return static_cast<int64_t>(1000.0*QpcNow()/QpcFrequency());}
+ bool FacePending(uint64_t epoch,std::string_view challenge) {
+  const auto result=faces.Status(epoch,challenge);
+  return result && result->state==rk::auth::FaceState::pending;
+ }
+ void WakeCamera() {
+  {std::lock_guard lock(camera_mutex);camera_changed=true;}
+  camera_wake.notify_one();
+ }
+ void CameraLoop() {
+  const auto pending=[&](uint64_t epoch,std::string_view challenge){return FacePending(epoch,challenge);};
+  while(!stop_camera) {
+   try {
+    if(auto message=raw_camera.Next(CameraNow(),pending)) {
+     if(sdk.remotekit_rtc_send_auth_data(message->peer,message->json.data(),message->json.size(),0)!=0)
+      raw_camera.Failed(*message);
+     else raw_camera.Sent(*message,CameraNow());
+    }
+   } catch(const std::exception&) {}
+   const bool active=raw_camera.Active();
+   std::unique_lock lock(camera_mutex);
+   const auto ready=[&]{return stop_camera || camera_changed;};
+   if(active)camera_wake.wait_for(lock,std::chrono::milliseconds(20),ready);
+   else camera_wake.wait(lock,ready);
+   camera_changed=false;
+  }
+ }
  static void EventCallback(void* context,uint64_t peer,uint32_t type,const void* bytes,size_t size,
                            const char* auxiliary,int32_t value) {
   auto* self=static_cast<Session*>(context);
+  if(type==REMOTEKIT_RTC_AUTH_DATA_STATE) {
+   self->raw_camera.State(peer,value==1);
+   self->WakeCamera();
+   return;
+  }
+  if(type==REMOTEKIT_RTC_AUTH_DATA) {
+   try {
+    self->raw_camera.Receive(peer,value==1,bytes,size,CameraNow(),
+     [&](uint64_t epoch,std::string_view challenge){return self->FacePending(epoch,challenge);},
+     [&](int width,int height,const uint8_t* rgb,int stride){self->faces.SubmitRGB24(width,height,rgb,stride);});
+   } catch(const std::exception&) {}
+   self->WakeCamera();
+   return;
+  }
   if(type==REMOTEKIT_RTC_DATA && (peer!=self->peer.load() || size>65536))return;
-  Event event{type,std::string(static_cast<const char*>(bytes?bytes:""),size),auxiliary?auxiliary:"",value,peer};
+  const auto stamp=self->authorization.Stamp();
+  Event event{type,std::string(static_cast<const char*>(bytes?bytes:""),size),auxiliary?auxiliary:"",value,peer,stamp};
   if(peer==self->peer.load()) {
    if(type==REMOTEKIT_RTC_SDP_ANSWER)self->MarkConnection(ConnectionPhase::answer);
    else if(type==REMOTEKIT_RTC_ICE)self->MarkConnection(ConnectionPhase::first_candidate);
@@ -821,12 +901,21 @@ struct Session {
   }
   if(type==REMOTEKIT_RTC_DATA) {
    auto message=Json::parse(event.bytes,nullptr,false);
+   if(self->authorization.Required()) {
+    if(!message.is_object())return;
+    const auto epoch=message.find("authEpoch");
+    if(epoch==message.end() || !epoch->is_number_unsigned() || epoch->get<uint64_t>()!=self->authorization.Epoch())return;
+   }
+   if(!self->ProductCurrent(event) &&
+      (!message.is_object() || message.value("type",Json())!="media.presentation"))return;
    if(message.is_object() && message.value("type",Json())=="files.request") {
-    if(value==0 && remotekit::FileRequestEnvelope(message,size))self->file_services.Admit(peer,message);
+    std::lock_guard admission(self->admission_mutex);
+    if(self->ProductCurrent(event) && value==0 && remotekit::FileRequestEnvelope(message,size))
+     self->file_services.Admit(peer,message);
     return;
    }
     if(message.is_object() && message.value("type",Json())=="media.refresh") {
-     if(peer==self->peer.load() && size<=256) {
+     if(self->ProductCurrent(event) && size<=256) {
       const auto now=QpcNow();auto previous=self->last_media_refresh_qpc.load();
       if((!previous || now-previous>=QpcFrequency()) && self->last_media_refresh_qpc.compare_exchange_strong(previous,now)) {
        self->refresh_connected=true;self->event_wake.notify_one();
@@ -835,7 +924,7 @@ struct Session {
      return;
     }
    if(message.is_object() && message.value("type",Json())=="media.feedback") {
-    self->media_feedback.Receive(peer,message,QpcNow(),size);return;
+    if(self->ProductCurrent(event))self->media_feedback.Receive(peer,message,QpcNow(),size);return;
    }
   }
    if(type==REMOTEKIT_RTC_SDP_ANSWER || type==REMOTEKIT_RTC_ICE || type==REMOTEKIT_RTC_ICE_COMPLETE || type==REMOTEKIT_RTC_ERROR) {
@@ -856,6 +945,8 @@ struct Session {
   self->encoders.emplace(encoder,std::make_unique<EncoderWorker>(self->sdk,encoder,self->encoder_device.Get(),
          self->options.encoder,self->options.encoding,self->stats,
       [self,encoder_peer,first_encoded=true](uint32_t timestamp,uint64_t epoch,size_t encoded_bytes,bool keyframe,const remotekit_rtc_frame& source) mutable {
+       const auto stamp=self->frame_authorization.load();
+       if(!self->authorization.Current(stamp) || epoch!=self->layout_epoch.load())return;
        if(first_encoded) {if(encoder_peer==self->peer.load())self->MarkConnection(ConnectionPhase::encoded);first_encoded=false;}
        // Enqueue only: signaling-thread destroy joins this encoder worker.
        Json message={{"type","frame"},{"rtpTimestamp",timestamp},{"layoutEpoch",std::to_string(epoch)},
@@ -869,11 +960,18 @@ struct Session {
         message["captureClockUncertaintyMs"]=clock->uncertainty_ms;message["sourceCaptureId"]=std::to_string(source.capture_qpc);
        }
        std::lock_guard event_lock(self->event_mutex);
-       if(self->events.size()<1024)self->events.push_back(Event{0x10000,message.dump(),"",0,encoder_peer});
+       if(self->events.size()<1024)self->events.push_back(Event{0x10000,message.dump(),"",0,encoder_peer,stamp});
        self->event_wake.notify_one();
       },self->trace,encoder_peer,
       [self,encoder_peer](const remotekit_rtc_frame& source,bool keyframe,const std::function<bool()>& send) {
-       return self->presentation.Send(encoder_peer,source.layout_epoch,keyframe,send);
+       const auto stamp=self->frame_authorization.load();
+       if(!self->authorization.Current(stamp) || source.layout_epoch!=self->layout_epoch.load())return false;
+       return self->presentation.Send(encoder_peer,source.layout_epoch,keyframe,[&]{
+        if(!self->authorization.Current(stamp))return false;
+        const bool sent=send();
+        if(sent && keyframe)self->input_authorization=stamp;
+        return sent;
+       });
       }));return 0;
  }
  static int ConfigureEncoder(void* context,uint64_t encoder,const remotekit_rtc_encoder_config* config) {
@@ -916,7 +1014,7 @@ struct Session {
   // MediaLoop's resource replacement uses its existing subscription state.
   // Control may already be changing desired before PauseOutput joins us.
   if(!preserve_visibility)output_suspended=!has_visible_output.load();
-  if(output_suspended || !rtc_connected)return;
+  if(output_suspended || !rtc_connected || !authorization.Stamp())return;
   remotekit_rtc_clock_sample clock{};clock.struct_size=sizeof(clock);
   if(!sdk.sample_clock || sdk.sample_clock(&clock)!=0 || !clock.qpc_frequency)throw std::runtime_error("SDK monotonic clock mapping unavailable");
   pool.SetClock(clock);if(trace)trace->SdkClock(clock);
@@ -936,37 +1034,46 @@ struct Session {
   {std::lock_guard lock(encoder_mutex);encoder_device=pool.Device();}
   MarkConnection(ConnectionPhase::output_open_end);
  }
- void Send(const Json& message) {
-  auto handle=peer.load();if(!handle||!data_open)return;
+ int SendData(uint64_t handle,uint64_t stamp,const std::string& encoded) {
+  if(!authorization.Current(stamp))return 1;
+  if(!authorization.Required())return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+  // All outboxes serialize objects. Append the active wire epoch at actual
+  // admission, while the queue's local generation still owns this send.
+  if(encoded.size()<2 || encoded.front()!='{' || encoded.back()!='}')return 1;
+  std::string wire=encoded.substr(0,encoded.size()-1);
+  if(wire.size()>1)wire+=',';
+  wire+="\"authEpoch\":"+std::to_string(authorization.Epoch())+"}";
+  return authorization.Current(stamp)?sdk.remotekit_rtc_send_data(handle,wire.data(),wire.size(),0):1;
+ }
+ void Send(const Json& message,uint64_t expected_stamp=0) {
+  const auto stamp=authorization.Stamp();
+  auto handle=peer.load();if(!stamp || (expected_stamp && stamp!=expected_stamp) || !handle || !data_open || stamp!=frame_authorization.load())return;
   FlushControl();
   control_outbox.Transient(handle,message.dump(),[&](const std::string& encoded){
-   return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+   return SendData(handle,stamp,encoded);
   },message.value("type",std::string())=="frame" || message.value("type",std::string())=="stats");
  }
  void FlushControl() {
-  const auto handle=peer.load();if(!handle || !data_open)return;
+  const auto stamp=authorization.Stamp();
+  const auto handle=peer.load();if(!stamp || !handle || !data_open || stamp!=frame_authorization.load())return;
   control_outbox.Flush(handle,[&](const std::string& encoded){
-   return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+   return SendData(handle,stamp,encoded);
   });
   // Layout and prepare always have admission priority over service replies.
   control_outbox.Transient(handle,std::string(),[&](const std::string&){
    direct_services.Flush(handle,[&](const std::string& encoded){
-    return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);
+    return SendData(handle,stamp,encoded);
    });return 0;
   });
   control_outbox.Transient(handle,std::string(),[&](const std::string&){
-   file_services.Flush(handle,[&](const std::string& encoded){return sdk.remotekit_rtc_send_data(handle,encoded.data(),encoded.size(),0);});return 0;
+   file_services.Flush(handle,[&](const std::string& encoded){return SendData(handle,stamp,encoded);});return 0;
   });
  }
  bool ServiceMessage(const Event& event) {
-  if(event.value!=0 || event.peer!=peer.load())return false;
+  if(event.value!=0 || !ProductCurrent(event))return false;
   const auto message=Json::parse(event.bytes,nullptr,false);
   if(!message.is_object())return false;
   const auto type=message.value("type",Json());
-  if(type=="files.request") {
-   if(remotekit::FileRequestEnvelope(message,event.bytes.size()))file_services.Admit(event.peer,message);
-   return true;
-  }
   if(type=="clock.ping") {
    if(event.bytes.size()>512 || message.value("version",Json())!=1 ||
       !message.contains("requestId") || !remotekit::BoundedServiceId(message["requestId"]))return true;
@@ -975,14 +1082,17 @@ struct Session {
    ULARGE_INTEGER ticks{};ticks.LowPart=utc.dwLowDateTime;ticks.HighPart=utc.dwHighDateTime;
    Send({{"type","clock.pong"},{"version",1},{"requestId",message["requestId"]},
     {"serverTimeMs",double(ticks.QuadPart-116444736000000000ULL)/10000.0},
-    {"serverMonotonicMs",1000.0*(before.QuadPart+(after.QuadPart-before.QuadPart)/2)/QpcFrequency()}});
+    {"serverMonotonicMs",1000.0*(before.QuadPart+(after.QuadPart-before.QuadPart)/2)/QpcFrequency()}},event.authorization);
    return true;
   }
   if(type!="product.action")return false;
+  std::unique_lock admission(admission_mutex);
+  if(!ProductCurrent(event))return true;
   if(!remotekit::ProductActionEnvelope(message,event.bytes.size()))return true;
-  if(!direct_services.Admit(event.peer,message,1000.0*QpcNow()/QpcFrequency()))
-   Send({{"type","product.result"},{"version",1},{"operationId",message["operationId"]},
-    {"connectionId",connection},{"operationGeneration",message["operationGeneration"]},{"ok",false},{"error","endpoint_backpressure"}});
+  const bool accepted=direct_services.Admit(event.peer,message,1000.0*QpcNow()/QpcFrequency());
+  admission.unlock();
+  if(!accepted)Send({{"type","product.result"},{"version",1},{"operationId",message["operationId"]},
+    {"connectionId",connection},{"operationGeneration",message["operationGeneration"]},{"ok",false},{"error","endpoint_backpressure"}},event.authorization);
   return true;
  }
  void QueueLayout(const Json& mode=Json()) {
@@ -1012,7 +1122,13 @@ struct Session {
   if(type=="media.presentation") {
    const auto backend=message.value("backend",Json());
    if(backend!="video" && backend!="canvas")return true;
-   layout_prepare=presentation.Mode(event.peer,backend=="video");
+   const bool restart=authorization.Required() && ProductCurrent(event) && message.value("restart",Json())==true;
+   layout_prepare=presentation.Mode(event.peer,backend=="video",restart);
+   if(restart) {
+    input_authorization=0;
+    control_outbox.Bind(event.peer);
+    refresh_connected=true;
+   }
    // Mode() installs the gate before any video support confirmation leaves.
    QueueLayout({{"type","presentation.mode"},{"version",1},{"backend",backend}});
    if(backend=="canvas")refresh_connected=true;
@@ -1077,7 +1193,7 @@ struct Session {
   if(key!=current_geometry){current_geometry=key;layout_epoch.fetch_add(1);}
   return layout_epoch.load();
  }
- void ReplyInput(Json reply,const Json& request) {
+ void ReplyInput(Json reply,const Json& request,uint64_t stamp) {
   const bool focus=request.is_object()&&request.value("type",Json())=="focus";
   reply["type"]=focus?"focus":"input.result";
   if(focus) {
@@ -1086,33 +1202,34 @@ struct Session {
   } else if(request.is_object() && request.contains("sequence")) {
    reply["clientSequence"]=request["sequence"];
   }
-  Send(reply);
+  Send(reply,stamp);
  }
  void HandleData(const Event& event) {
-  if(event.value!=0 || event.peer!=peer.load())return;
+  const auto admitted=[&]{return ProductCurrent(event) && input_authorization.load()==event.authorization;};
+  if(event.value!=0 || !admitted())return;
   auto command=Json::parse(event.bytes,nullptr,false);if(command.is_discarded()||!command.is_object())return;
   auto type=command.value("type",std::string());
   if(type!="input"&&type!="focus")return;
   const auto request=command;
   const auto request_epoch=layout_epoch.load();
   if(command.value("layoutEpoch",std::string())!=std::to_string(request_epoch)) {
-   ++input_rejected;ReplyInput({{"ok",false},{"error","stale_layout_epoch"}},request);return;
+   ++input_rejected;ReplyInput({{"ok",false},{"error","stale_layout_epoch"}},request,event.authorization);return;
   }
   command.erase("layoutEpoch");command.erase("focusRequestId");
   if(command.value("session",std::string())!=id) {
-   ++input_rejected;ReplyInput({{"ok",false},{"error","wrong_session"}},request);return;
+   ++input_rejected;ReplyInput({{"ok",false},{"error","wrong_session"}},request,event.authorization);return;
   }
   if(type=="input" && command.contains("event") && command["event"].is_object()) {
    const auto event_type=command["event"].value("type",std::string());
    if((event_type=="mouse"||event_type=="wheel"||event_type=="touch"||event_type=="gesture") &&
       !coordinate_readiness.Allows(command.value("view",std::string()),request_epoch)) {
-    ++input_rejected;ReplyInput({{"ok",false},{"error","view_not_ready"}},request);return;
+    ++input_rejected;ReplyInput({{"ok",false},{"error","view_not_ready"}},request,event.authorization);return;
    }
   }
   command["method"]=type;command.erase("type");
   if(type=="input") {
    const auto sequence=input_sequence.NextBrowser();
-   if(!sequence){++input_rejected;ReplyInput({{"ok",false},{"error","input_sequence_exhausted"}},request);return;}
+   if(!sequence){++input_rejected;ReplyInput({{"ok",false},{"error","input_sequence_exhausted"}},request,event.authorization);return;}
    command["sequence"]=std::to_string(*sequence);
   }
   if(command.contains("outputGeneration")){command["output_generation"]=command["outputGeneration"];command.erase("outputGeneration");}
@@ -1124,51 +1241,51 @@ struct Session {
     const auto input_control=control.load();
     const auto deadline=QpcNow()+QpcFrequency()/4;
     auto reply=type=="input"?remotekit::RetryBrowserInput(command,
-      [&](const Json& request){return Rpc(request,false,input_control);},
-      [&]{return !stop_input && event.peer==peer.load() && request_epoch==layout_epoch.load();},
+      [&](const Json& request){return Rpc(request,false,input_control,10000,0,admitted);},
+      [&]{return !stop_input && admitted() && request_epoch==layout_epoch.load();},
       [&]{return QpcNow()>=deadline;},
       []{std::this_thread::sleep_for(std::chrono::milliseconds(5));},
-      [&]{++input_busy_retries;},[&]{++input_busy_exhausted;}):Rpc(command,false);
+      [&]{++input_busy_retries;},[&]{++input_busy_exhausted;}):Rpc(command,false,0,10000,0,admitted);
     if(type=="input" && reply.value("ok",false) && command.contains("event")) {
      const auto& raw=command["event"];
      if(raw.value("type",std::string())=="touch" && raw.value("gestureMode",std::string())=="client-v1" &&
         (raw.value("action",std::string())=="end" || raw.value("action",std::string())=="cancel")) {
       const auto terminal_deadline=QpcNow()+2*QpcFrequency();
       reply=remotekit::AwaitTouchTerminal(std::move(reply),command,
-       [&](const Json& query,int64_t remaining){return Rpc(query,false,input_control,static_cast<uint32_t>(std::max<int64_t>(1,remaining*1000/QpcFrequency())),terminal_deadline);},
-       [&]{return !stop_input && event.peer==peer.load() && request_epoch==layout_epoch.load() && control.load()==input_control;},
+       [&](const Json& query,int64_t remaining){return Rpc(query,false,input_control,static_cast<uint32_t>(std::max<int64_t>(1,remaining*1000/QpcFrequency())),terminal_deadline,admitted);},
+       [&]{return !stop_input && admitted() && request_epoch==layout_epoch.load() && control.load()==input_control;},
        [&]{return terminal_deadline-QpcNow();},
        []{std::this_thread::sleep_for(std::chrono::milliseconds(5));});
      }
     }
     if(type=="input")reply["browserSequence"]=command["sequence"];
-    ReplyInput(std::move(reply),request);
+    if(admitted())ReplyInput(std::move(reply),request,event.authorization);
    }
-  catch(const std::exception& error){ReplyInput({{"ok",false},{"error",error.what()}},request);}
+  catch(const std::exception& error){if(admitted())ReplyInput({{"ok",false},{"error",error.what()}},request,event.authorization);}
  }
  void QueueInput(const Event& event) {
   std::lock_guard lock(input_mutex);
-  if(event.peer!=peer.load() || event.value!=0)return;
+  if(!ProductCurrent(event) || input_authorization.load()!=event.authorization || event.value!=0)return;
   auto parsed=Json::parse(event.bytes,nullptr,false);
   // Validate arrival order before move coalescing can replace a newer packet.
   // The Browser keeps its independent Session counter across RTC reconnects.
   if(parsed.is_object() && parsed.value("type",Json())=="input" &&
      (!parsed.contains("sequence") || !parsed["sequence"].is_string() ||
       !input_sequence.Admit(event.peer,parsed["sequence"].get<std::string>()))) {
-   ++input_rejected;ReplyInput({{"ok",false},{"error","stale_client_sequence"}},parsed);return;
+   ++input_rejected;ReplyInput({{"ok",false},{"error","stale_client_sequence"}},parsed,event.authorization);return;
   }
   bool move=!parsed.is_discarded()&&parsed.value("type",std::string())=="input"&&parsed.contains("event")&&
     parsed["event"].value("type",std::string())=="mouse"&&parsed["event"].value("action",std::string())=="move";
   if(move&&!input_queue.empty()) {
    auto before=Json::parse(input_queue.back().bytes,nullptr,false);
-   if(input_queue.back().peer==event.peer&&!before.is_discarded()&&before.value("view",std::string())==parsed.value("view",std::string())&&
+   if(input_queue.back().peer==event.peer && input_queue.back().authorization==event.authorization && !before.is_discarded()&&before.value("view",std::string())==parsed.value("view",std::string())&&
       before.contains("event")&&before["event"].value("type",std::string())=="mouse"&&
       before["event"].value("action",std::string())=="move") {
     input_queue.back()=event;++input_coalesced;input_wake.notify_one();return;
    }
   }
   if(input_queue.size()>=256) {
-   ++input_rejected;ReplyInput({{"ok",false},{"error","input_queue_busy"}},parsed);return;
+   ++input_rejected;ReplyInput({{"ok",false},{"error","input_queue_busy"}},parsed,event.authorization);return;
   }
   input_queue.push_back(event);input_wake.notify_one();
  }
@@ -1177,7 +1294,7 @@ struct Session {
    Event event;
    {std::unique_lock lock(input_mutex);input_wake.wait(lock,[&]{return stop_input||!input_queue.empty();});
     if(stop_input)break;event=std::move(input_queue.front());input_queue.pop_front();}
-   try{HandleData(event);}catch(const std::exception& error){++input_rejected;ReplyInput({{"ok",false},{"error",error.what()}},Json::parse(event.bytes,nullptr,false));}
+   try{HandleData(event);}catch(const std::exception& error){++input_rejected;if(ProductCurrent(event))ReplyInput({{"ok",false},{"error",error.what()}},Json::parse(event.bytes,nullptr,false),event.authorization);}
   }
  }
  void MediaLoop() {
@@ -1211,16 +1328,42 @@ struct Session {
   double next_tail_attempt_ms=0;uint32_t tail_begins=0;
   constexpr double tail_retry_ms=250;
   effective_idle_ms=idle.delay_ms();source_interval_ms=0;
+  uint64_t active_authorization=authorization.Stamp();
+  frame_authorization=active_authorization;
   while(!stop_media) {
+   const auto stamp=authorization.Stamp();
+   if(stamp!=active_authorization) {
+    frame_authorization=0;
+    if(tail_attempt)tail_attempt->CancelWaiting();
+    tail_attempt.reset();
+    stream_started=false;next_tail_attempt_ms=0;begin_schedule.Reset();
+    InvalidateLayout(stamp?"authorization-resuming":"authorization-locked");
+    if(rtc_connected) {
+     try {
+      if(pool.EventHandle()) {
+       Rpc({{"method","output.close"}});
+       std::string drain_error;
+       if(!pool.Close(drain_error))throw std::runtime_error(drain_error);
+      }
+      if(stamp && authorization.Current(stamp))OpenOutput();
+     } catch(const std::exception& error) {
+      fprintf(stderr,"authorization output transition: %s\n",error.what());
+      return;
+     }
+    }
+    active_authorization=stamp;
+    frame_authorization=stamp;
+    if(stamp)refresh_connected=true;
+   }
    sampling_fps=cadence.Update(comp_bitrate.load(),comp_fps.load(),policy_max_fps.load(),std::min(official_max_fps,codec_max_fps),
      pool.HasCapacity(),static_cast<int64_t>(1000000.0*QpcNow()/QpcFrequency()));
-   {std::lock_guard lock(comp_diagnostics_mutex);comp_diagnostics.targetFps=rtc_connected.load()&&!output_suspended.load()?sampling_fps:0;comp_diagnostics.officialMaxFps=official_max_fps;comp_diagnostics.codecMaxFps=codec_max_fps;comp_diagnostics.resumeMaxFps=std::min({policy_max_fps.load(),official_max_fps,codec_max_fps});}
+   {std::lock_guard lock(comp_diagnostics_mutex);comp_diagnostics.targetFps=rtc_connected.load()&&authorization.Current(active_authorization)&&!output_suspended.load()?sampling_fps:0;comp_diagnostics.officialMaxFps=official_max_fps;comp_diagnostics.codecMaxFps=codec_max_fps;comp_diagnostics.resumeMaxFps=std::min({policy_max_fps.load(),official_max_fps,codec_max_fps});}
    std::deque<Event> incoming;
    {std::lock_guard lock(event_mutex);incoming.swap(events);}
    for(auto& event:incoming) {
     if(event.peer!=peer.load())continue;
-    if(event.type==0x10000) {
-     auto message=Json::parse(event.bytes,nullptr,false);if(!message.is_discarded())Send(message);
+    if(event.type==0x10000 && ProductCurrent(event)) {
+     auto message=Json::parse(event.bytes,nullptr,false);if(!message.is_discarded())Send(message,event.authorization);
     } else if(event.type==REMOTEKIT_RTC_STATS) {
      auto sample=Json::parse(event.bytes,nullptr,false);
      if(sample.is_object()) {std::lock_guard lock(stats->mutex);stats->sender_rtc_stats=std::move(sample);}
@@ -1234,7 +1377,7 @@ struct Session {
       stream_started=false;next_tail_attempt_ms=0;begin_schedule.Reset();
       InvalidateLayout(connected?"rtc-resuming":"rtc-disconnected");
       try {
-       if(connected) {OpenOutput();refresh_connected=true;}
+       if(connected) {if(authorization.Current(active_authorization))OpenOutput();refresh_connected=true;}
        else {
         Rpc({{"method","output.close"}});
         std::string drain_error;if(!pool.Close(drain_error))fprintf(stderr,"disconnected render drain: %s\n",drain_error.c_str());
@@ -1255,12 +1398,19 @@ struct Session {
      if(!opened)data_open=false;
      if(data_open){QueueLayout();direct_services.RefreshEditable();}
     } else if(event.type==REMOTEKIT_RTC_DATA) {
-     try{if(!ServiceMessage(event) && !PresentationMessage(event))QueueInput(event);}catch(const std::exception& error){++input_rejected;Send({{"type","input.result"},{"ok",false},{"error",error.what()}});}
+     // The presentation backend can be declared while the product is locked.
+     // Its ACK still has to match the fresh layout transaction on unlock.
+     if(!ProductCurrent(event)) {
+      const auto message=Json::parse(event.bytes,nullptr,false);
+      if(message.is_object() && message.value("type",Json())=="media.presentation")PresentationMessage(event);
+      continue;
+     }
+     try{if(!ServiceMessage(event) && !PresentationMessage(event))QueueInput(event);}catch(const std::exception& error){++input_rejected;Send({{"type","input.result"},{"ok",false},{"error",error.what()}},event.authorization);}
     }
     else if(event.type==REMOTEKIT_RTC_ERROR)fprintf(stderr,"RTC %s: %s\n",id.c_str(),event.bytes.c_str());
    }
    FlushControl();
-   if(!rtc_connected) {
+   if(!rtc_connected || !authorization.Current(active_authorization)) {
     std::unique_lock lock(event_mutex);
     event_wake.wait_for(lock,std::chrono::milliseconds(20),[&]{return stop_media||!events.empty();});
     continue;
@@ -1384,7 +1534,7 @@ struct Session {
      if(tail){tail_attempt=std::make_shared<remotekit::TailIdrAttempt>();next_tail_attempt_ms=now_ms+tail_retry_ms;
       auto wrapped=remotekit::TailRefreshLease::Wrap(frame,tail_attempt);frame.release(frame.release_context,frame.frame_id);frame=wrapped;}
      if(first_submit){MarkConnection(ConnectionPhase::submit);first_submit=false;}
-     const int status=sdk.remotekit_rtc_submit_texture(handle,&frame);
+     const int status=authorization.Current(active_authorization)?sdk.remotekit_rtc_submit_texture(handle,&frame):1;
      if(status!=0){frame.release(frame.release_context,frame.frame_id);if(refresh)refresh_connected=true;}
      else {stream_started=true;if(tail)++tail_submissions;}
     }
@@ -1429,13 +1579,14 @@ struct Session {
    }
   }
  }
- Json Offer(const Json& request) {
+ Json Offer(const Json& request,uint64_t generation) {
   Start();ClosePeer();
   for(auto& phase:connection_phases)phase=0;connection_started_qpc=QpcNow();
   connection=Required(request,"connectionId");
   {std::lock_guard lock(signal_mutex);answer.clear();rtc_error.clear();ice_complete=false;signal_events.clear();signal_overflow=false;}
   trickle_signals=request.value("trickle",false);
   remotekit_rtc_options config{};config.struct_size=sizeof(config);config.abi_version=REMOTEKIT_RTC_ABI_VERSION;
+  config.auth_required=request.value("authRequired",false);
   config.context=this;config.event=EventCallback;config.encoder.struct_size=sizeof(config.encoder);
   config.encoder.create=CreateEncoder;config.encoder.configure=ConfigureEncoder;config.encoder.encode=Encode;
   config.encoder.set_rates=Rates;config.encoder.request_keyframe=Keyframe;config.encoder.destroy=DestroyEncoder;
@@ -1444,7 +1595,16 @@ struct Session {
   uint64_t handle=0;
   if(sdk.remotekit_rtc_create(&config,&handle)!=0)throw std::runtime_error("RTC create failed");
   if(sdk.remotekit_rtc_set_degradation_preference(handle,policy_degradation)!=0 || sdk.remotekit_rtc_set_source_max_fps(handle,policy_max_fps)!=0){sdk.remotekit_rtc_close(handle);throw std::runtime_error("RTC media policy rejected");}
-  receive_level=0;refresh_connected=false;presentation.Bind(handle);control_outbox.Bind(handle);direct_services.Bind(handle,connection);file_services.Bind(handle,connection);layout_prepare.reset();peer=handle;input_sequence.Bind(handle);stop_media=false;data_open=false;layout=Json();
+  {
+   std::lock_guard transition(authorization_mutex);
+   std::lock_guard admission(admission_mutex);
+   authorization.Bind(config.auth_required!=0);
+   raw_camera.Bind(config.auth_required?handle:0);
+   management_generation=generation;
+   receive_level=0;refresh_connected=false;presentation.Bind(handle);control_outbox.Bind(handle);
+   if(authorization.Stamp()){direct_services.Bind(handle,connection);file_services.Bind(handle,connection);}
+   layout_prepare.reset();peer=handle;input_sequence.Bind(handle);stop_media=false;data_open=false;layout=Json();
+  }
   last_media_refresh_qpc=0;
   if(options.rtc_playout_max_ms>=0) {
    const int status=sdk.remotekit_rtc_set_playout_delay(handle,0,options.rtc_playout_max_ms);
@@ -1453,6 +1613,11 @@ struct Session {
   auto sdp=Required(request,"sdp");
   if(sdk.remotekit_rtc_set_remote_description(handle,1,sdp.data(),sdp.size())!=0) {
    ClosePeer();throw std::runtime_error("RTC remote offer rejected");
+  }
+  if(config.auth_required) {
+   stop_camera=false;
+   try{camera_thread=std::thread([this]{CameraLoop();});}
+   catch(...){ClosePeer();throw;}
   }
   if(sdp.find("m=audio ")!=std::string::npos) {
    try{OpenAudio();}catch(...){ClosePeer();throw;}
@@ -1483,9 +1648,11 @@ struct Session {
  }
  // Only the dispatcher writes JSONL. SDK callback threads never write stdout.
  void FlushSignals() {
-  direct_services.DispatchPending(peer.load(),1000.0*QpcNow()/QpcFrequency(),[&](const Json& message){
-   return management_action(Json({{"event","client.action"},{"tenantId",tenant},{"connectionId",connection},
-    {"operationGeneration",message["operationGeneration"]},{"operationId",message["operationId"]},{"action",message["action"]}}).dump());
+  const auto stamp=authorization.Stamp();
+  if(stamp)direct_services.DispatchPending(peer.load(),1000.0*QpcNow()/QpcFrequency(),[&](const Json& message){
+   if(!authorization.Current(stamp))return false;
+   return management_action(Json({{"event","client.action"},{"tenantId",tenant},{"connectionId",connection},{"authEpoch",authorization.Epoch()},
+    {"operationGeneration",message["operationGeneration"]},{"operationId",message["operationId"]},{"action",message["action"]}}).dump(),management_generation);
   });
   std::deque<Event> pending;
   {std::lock_guard lock(signal_mutex);pending.swap(signal_events);}
@@ -1500,8 +1667,160 @@ struct Session {
    management_output(Json({{"event","rtc.signal"},{"tenantId",tenant},{"connectionId",connection},{"signal",signal}}).dump());
   }
  }
+ // authorization_mutex serializes this with authorization and peer replacement.
+ int RevokeProduct() {
+  {
+   std::lock_guard admission(admission_mutex);
+   authorization.Close();
+   frame_authorization=0;input_authorization=0;
+   file_services.Bind(0);
+  }
+  raw_camera.Cancel();
+  faces.Cancel();
+  WakeCamera();
+  const auto handle=peer.load();
+  const int status=handle && authorization.Required()?sdk.remotekit_rtc_set_media_authorized(handle,0):0;
+  direct_services.Bind(0);
+  {std::lock_guard lock(input_mutex);input_queue.clear();}
+  event_wake.notify_all();
+  return status;
+ }
+ void ManagementLost(uint64_t generation) {
+  std::lock_guard transition(authorization_mutex);
+  if(authorization.Required() && management_generation==generation) {
+   if(RevokeProduct()!=0)fprintf(stderr,"RTC media authorization revoke failed\n");
+  }
+ }
+ uint64_t AuthorizationEpoch(const Json& request) {
+  const auto& value=request.at("epoch");
+  if(!value.is_number_unsigned() || !value.get<uint64_t>() || value.get<uint64_t>()>9007199254740991ULL)
+   throw std::runtime_error("invalid_authorization_epoch");
+  return value.get<uint64_t>();
+ }
+ void RequireAuthPeer(const Json& request) {
+  if(!peer.load() || !authorization.Required() || Required(request,"connectionId")!=connection)
+   throw std::runtime_error("stale_rtc_connection");
+ }
+ Json Authorize(const Json& request,uint64_t generation,const std::function<bool()>& management_current) {
+  std::lock_guard transition(authorization_mutex);
+  RequireAuthPeer(request);
+  if(!management_current())throw std::runtime_error("management_disconnected");
+  const auto epoch=AuthorizationEpoch(request);
+  const bool unlocked=request.at("unlocked").get<bool>();
+  const auto decision=authorization.Check(epoch,unlocked);
+  using Decision=remotekit::ProductAuthorization::Decision;
+  if(decision==Decision::reject)throw std::runtime_error("stale_authorization_epoch");
+  if(decision==Decision::change) {
+   management_generation=generation;
+   if(RevokeProduct()!=0)throw std::runtime_error("rtc_media_authorization_failed");
+   if(unlocked) {
+    const auto handle=peer.load();
+    if(sdk.remotekit_rtc_set_media_authorized(handle,1)!=0)
+     throw std::runtime_error("rtc_media_authorization_failed");
+    direct_services.Bind(handle,connection);
+    {
+     std::lock_guard admission(admission_mutex);
+     file_services.Bind(handle,connection);
+     audio_authorized_after=QpcNow();
+     authorization.Commit(epoch,true);
+     authorization.Open();
+    }
+    if(!management_current()){
+     RevokeProduct();throw std::runtime_error("management_disconnected");
+    }
+   }
+   if(!unlocked)authorization.Commit(epoch,false);
+   event_wake.notify_all();
+  }
+  management_generation=generation;
+  return {{"applied",true},{"epoch",epoch}};
+ }
+ static Json FaceCapabilities() {
+  const auto capability=rk::auth::Faces::Capabilities(FaceModels());
+  Json result={{"available",capability.available},{"modelVersion",capability.model_version}};
+  if(!capability.reason.empty())result["reason"]=capability.reason;
+  return result;
+ }
+ Json FaceCommand(const std::string& method,const Json& request,uint64_t generation,const std::function<bool()>& management_current) {
+  std::lock_guard transition(authorization_mutex);
+  RequireAuthPeer(request);
+  const auto epoch=AuthorizationEpoch(request);
+  if(epoch!=authorization.Epoch() || management_generation!=generation || !management_current())
+   throw std::runtime_error("stale_authorization_epoch");
+  const auto challenge=Required(request,"challengeId");
+  if(!rk::auth::CameraChallengeId(challenge))throw std::runtime_error("invalid_face_challenge");
+  if(method=="auth.face.cancel"){
+   raw_camera.Cancel(epoch,challenge);
+   faces.Cancel(epoch,challenge);
+   return {{"cancelled",true}};
+  }
+  if(method=="auth.face.status") {
+   const auto result=faces.Status(epoch,challenge);
+   if(!result)throw std::runtime_error("stale_face_challenge");
+   using State=rk::auth::FaceState;
+   const char* state=nullptr;
+   switch(result->state) {
+    case State::pending:state="pending";break;
+    case State::matched:state="matched";break;
+    case State::enrolled:state="enrolled";break;
+    case State::absent:state="absent";break;
+    case State::failed:state="failed";break;
+    case State::expired:state="expired";break;
+   }
+   Json reply={{"challengeId",challenge},{"status",state}};
+   if(result->state==State::enrolled && result->face_template)reply["template"]=*result->face_template;
+   if(!result->reason.empty())reply["reason"]=result->reason;
+   return reply;
+  }
+  if(method!="auth.face.begin")throw std::runtime_error("unknown_face_method");
+  using Purpose=rk::auth::FacePurpose;
+  const auto purpose=Required(request,"purpose");
+  Purpose kind;uint32_t maximum;
+  if(purpose=="enroll"){kind=Purpose::enroll;maximum=60000;}
+  else if(purpose=="verify"){kind=Purpose::verify;maximum=30000;}
+  else if(purpose=="presence"){kind=Purpose::presence;maximum=120000;}
+  else throw std::runtime_error("invalid_face_purpose");
+  const bool unlocked=authorization.Stamp()!=0;
+  if((kind==Purpose::enroll && !unlocked) || (kind==Purpose::verify && unlocked))
+   throw std::runtime_error("invalid_face_authorization");
+  const auto& timeout=request.at("timeoutMs");
+  if(!timeout.is_number_unsigned() || !timeout.get<uint64_t>() || timeout.get<uint64_t>()>maximum)
+   throw std::runtime_error("invalid_face_timeout");
+  rk::auth::FaceChallenge input{epoch,challenge,kind,timeout.get<uint32_t>(),{}};
+  const auto model=request.find("template");
+  if(kind==Purpose::enroll) {
+   if(model!=request.end())throw std::runtime_error("unexpected_face_template");
+  } else {
+   rk::auth::FaceTemplate value{};
+   if(model==request.end() || !model->is_array() || model->size()!=value.size())
+    throw std::runtime_error("invalid_face_template");
+   double norm=0;
+   for(size_t i=0;i<value.size();++i) {
+    if(!(*model)[i].is_number())throw std::runtime_error("invalid_face_template");
+    const double sample=(*model)[i].get<double>();
+    if(!std::isfinite(sample) || std::abs(sample)>1.01)throw std::runtime_error("invalid_face_template");
+    value[i]=static_cast<float>(sample);norm+=sample*sample;
+   }
+   if(std::abs(norm-1)>0.01)throw std::runtime_error("invalid_face_template");
+   input.face_template=value;
+  }
+  // Do not let a final chunk from the old challenge enter the new worker.
+  raw_camera.Cancel();
+  if(!faces.Begin(std::move(input)))throw std::runtime_error("face_challenge_unavailable");
+  raw_camera.Begin(peer.load(),epoch,challenge,CameraNow()+timeout.get<uint32_t>());
+  WakeCamera();
+  return {{"accepted",true}};
+ }
  void ClosePeer() {
-  file_services.Bind(0);
+  {
+   std::lock_guard transition(authorization_mutex);
+   RevokeProduct();
+   management_generation=0;
+  }
+  stop_camera=true;
+  raw_camera.Bind(0);
+  WakeCamera();
+  if(camera_thread.joinable())camera_thread.join();
   const bool had_audio=audio_ring.IsOpen();
   stop_audio=true;
   if(audio_thread.joinable())audio_thread.join();
@@ -1548,9 +1867,12 @@ struct Session {
     if(!audio_ring.Poll(packet,gaps)) {std::this_thread::sleep_for(std::chrono::milliseconds(2));continue;}
     audio_gaps=gaps+stale;
     const auto handle=peer.load();
-    if(!handle || !rtc_connected.load())continue;
+    const auto stamp=authorization.Stamp();
+    if(!handle || !stamp || !rtc_connected.load() ||
+       packet.first_sample_qpc<audio_authorized_after.load())continue;
     // Bound age independently of the video encoder and never await its queue.
     if(QpcNow()-packet.first_sample_qpc>QpcFrequency()/20) {++stale;audio_gaps=gaps+stale;continue;}
+    if(!authorization.Current(stamp))continue;
     const int status=sdk.remotekit_rtc_submit_audio(handle,packet.pcm,480,generation,packet.sequence,
       packet.sample_index,packet.first_sample_qpc,packet.discontinuity);
     if(status==0)++audio_submitted;else ++audio_rejected;
@@ -1560,13 +1882,15 @@ struct Session {
  using FileBinding=remotekit::FileUploadStore::Binding;
  using FileJob=remotekit::DcFileServices::Job;
  void RequireFileJob(const FileJob& job) {
-  if(!file_services.Current(job))throw std::runtime_error("file_transfer_interrupted");
+  if(!authorization.Stamp() || !file_services.Current(job))throw std::runtime_error("file_transfer_interrupted");
  }
  Json DirectFileRpc(const FileJob& job,const char* method,Json additions=Json::object()) {
   RequireFileJob(job);
   Json command={{"method",method},{"session",id},{"view",job.binding.view},{"instance",job.binding.instance},
    {"document",job.binding.document},{"request",job.binding.request}};
-  command.update(additions);return Rpc(std::move(command),true,job.control);
+  command.update(additions);return Rpc(std::move(command),true,job.control,10000,0,[&]{
+   return authorization.Stamp() && file_services.Current(job);
+  });
  }
  void SweepDirectFiles() {
   const auto now=QpcNow();
@@ -1701,6 +2025,13 @@ struct Session {
     if(binding.browser_incarnation!=browser_incarnation || !desired.contains(binding.view))throw std::runtime_error("stale_file_request_target");
     if(!bindings.emplace(token,binding).second)throw std::runtime_error("duplicate_file_authorization");
    }
+   std::lock_guard admission(admission_mutex);
+   if(!authorization.Stamp())throw std::runtime_error("authorization_changed");
+   if(authorization.Required()) {
+    const auto epoch=request.find("authEpoch");
+    if(epoch==request.end() || !epoch->is_number_unsigned() || epoch->get<uint64_t>()!=authorization.Epoch())
+     throw std::runtime_error("stale_authorization_epoch");
+   }
    file_services.Authorize(Required(request,"connectionId"),control.load(),bindings);return {{"accepted",true}};
   }
   if(method=="session.files.revoke") {file_services.RevokeAuthorization();std::lock_guard lock(file_store_mutex);file_uploads.RevokeUncommitted();return {{"accepted",true}};}
@@ -1771,8 +2102,11 @@ struct Session {
   Rpc(command);
   return FileStatus(upload,binding);
  }
- Json Command(const Json& request) {
+ Json Command(const Json& request,uint64_t generation,const std::function<bool()>& management_current) {
   const auto method=Required(request,"method");
+  if(method=="rtc.authorize")return Authorize(request,generation,management_current);
+  if(method=="auth.face.capabilities")return FaceCapabilities();
+  if(method.starts_with("auth.face."))return FaceCommand(method,request,generation,management_current);
   if(method.starts_with("session.files."))return FileCommand(method,request);
   if(method=="session.ensure"){Start();return {{"sessionId",id},{"browserPid",GetProcessId(process)},{"running",true},{"accepted",true},{"browserIncarnation",browser_incarnation},{"recovery",RecoverySnapshot()}};}
   if(method=="session.snapshot")return Snapshot(request.value("outputDiagnostics",false));
@@ -1815,7 +2149,8 @@ struct Session {
    return {{"accepted",true},{"applied",Alive()&&control!=0}};
   }
   if(method=="rtc.actionResult") {
-   if(request.value("connectionId",std::string())!=connection || !peer.load())return {{"accepted",false}};
+   if(request.value("connectionId",std::string())!=connection || !peer.load() || !authorization.Stamp())return {{"accepted",false}};
+   if(authorization.Required() && request.value("authEpoch",Json())!=authorization.Epoch())return {{"accepted",false}};
    if(!request.contains("operationId") || !remotekit::BoundedServiceId(request["operationId"],36) ||
       !request.contains("operationGeneration") || !remotekit::BoundedServiceId(request["operationGeneration"]) ||
       !request.contains("ok") || !request["ok"].is_boolean())throw std::runtime_error("invalid action result");
@@ -1825,7 +2160,11 @@ struct Session {
    if(request.contains("error"))result["error"]=request["error"];
    const bool accepted=direct_services.Result(peer.load(),result);event_wake.notify_one();return {{"accepted",accepted}};
   }
-  if(method=="rtc.offer")return Offer(request);
+  if(method=="rtc.offer") {
+   auto result=Offer(request,generation);
+   if(!management_current()){ManagementLost(generation);throw std::runtime_error("management_disconnected");}
+   return result;
+  }
   if(method=="rtc.close") {
    if(request.value("connectionId",std::string())==connection)ClosePeer();
    return {{"closed",true}};
@@ -1944,7 +2283,7 @@ class ServiceRequests {
  std::mutex mutex_;std::condition_variable wake_;std::deque<std::string> queue_;
  bool stopping_=false,eof_=false;size_t queued_bytes_=0;std::thread reader_;
  public:
- ServiceRequests(bool enabled=true) {if(enabled)reader_=std::thread([this]{
+ ServiceRequests(bool enabled,std::function<void()> disconnected) {if(enabled)reader_=std::thread([this,disconnected=std::move(disconnected)]{
   std::string line;
   while(remotekit::ReadServiceLine(std::cin,line)) {
    std::unique_lock lock(mutex_);
@@ -1952,6 +2291,7 @@ class ServiceRequests {
    if(stopping_)break;
    queued_bytes_+=line.size();queue_.push_back(std::move(line));wake_.notify_all();
   }
+  disconnected();
   {std::lock_guard lock(mutex_);eof_=true;}wake_.notify_all();
  });}
  ~ServiceRequests() {
@@ -1979,14 +2319,25 @@ int main(int argc,char** argv) {
   Options options;options.Parse(argc,argv);fs::create_directories(options.data);
   Sdk sdk;sdk.Open(options.browser.parent_path()/"remotekit_sdk.dll");
   auto registry=LoadJson(options.data/"sessions.json",{{"next",1},{"tenants",Json::object()}});
+  std::mutex sessions_mutex;
+  std::map<std::string,std::unique_ptr<Session>> sessions;
+  std::atomic<bool> local_connected{true};
+  const auto disconnected=[&](uint64_t generation){
+   std::lock_guard lock(sessions_mutex);
+   for(auto& [tenant,session]:sessions)session->ManagementLost(generation);
+  };
+  const auto clear_sessions=[&]{
+   // Session shutdown joins workers and must run outside the registry lock.
+   decltype(sessions) closing;
+   {std::lock_guard lock(sessions_mutex);closing.swap(sessions);}
+  };
   std::unique_ptr<remotekit::ControlTransport> remote;
   if(!options.control_url.empty()) {
-   remote=std::make_unique<remotekit::ControlTransport>(options.control_url,options.node_id,Env("REMOTEKIT_ENDPOINT_TOKEN"));
+   remote=std::make_unique<remotekit::ControlTransport>(options.control_url,options.node_id,Env("REMOTEKIT_ENDPOINT_TOKEN"),disconnected);
    management_output=[&](std::string bytes){remote->Send(std::move(bytes));};
-   management_action=[&](std::string bytes){return remote->TrySend(std::move(bytes));};
+   management_action=[&](std::string bytes,uint64_t generation){return remote->TrySend(std::move(bytes),generation);};
   } else if(!options.node_id.empty())throw std::runtime_error("--node-id requires --control-url");
-  std::map<std::string,std::unique_ptr<Session>> sessions;
-  ServiceRequests requests(!remote);std::string maintenance_cursor,line;
+  ServiceRequests requests(!remote,[&]{local_connected=false;disconnected(0);});std::string maintenance_cursor,line;
   while(true) {
    bool eof=false;uint64_t generation=0;
    const bool received=remote?remote->Next(line,generation):requests.Next(line,eof);if(eof)break;
@@ -2000,7 +2351,7 @@ int main(int argc,char** argv) {
     if(!request.is_object())throw std::runtime_error("invalid JSON request");
     auto method=Required(request,"method");
     if(method=="__oversized_request")throw std::runtime_error("request exceeds 1 MiB");
-    if(method=="shutdown"){sessions.clear();response["result"]={{"closed",true}};shutdown=true;}
+    if(method=="shutdown"){clear_sessions();response["result"]={{"closed",true}};shutdown=true;}
     else {
      auto tenant=Required(request,"tenantId");
      if(tenant.size()>128||!std::all_of(tenant.begin(),tenant.end(),[](char c){return isalnum(static_cast<unsigned char>(c))||c=='-'||c=='_';}))
@@ -2010,9 +2361,10 @@ int main(int argc,char** argv) {
        uint64_t id=registry["next"].get<uint64_t>();registry["next"]=id+1;
        registry["tenants"][tenant]=std::to_string(id);SaveJson(options.data/"sessions.json",registry);
       }
-      sessions.emplace(tenant,std::make_unique<Session>(sdk,options,tenant,registry["tenants"][tenant].get<std::string>()));
+      auto session=std::make_unique<Session>(sdk,options,tenant,registry["tenants"][tenant].get<std::string>());
+      {std::lock_guard lock(sessions_mutex);sessions.emplace(tenant,std::move(session));}
      }
-     response["result"]=sessions.at(tenant)->Command(request);
+     response["result"]=sessions.at(tenant)->Command(request,generation,[&]{return remote?remote->Current(generation):local_connected.load();});
     }
     response["ok"]=true;
    }catch(const std::exception& error){response["ok"]=false;response["error"]=error.what();fprintf(stderr,"endpoint: %s\n",error.what());}
@@ -2026,6 +2378,6 @@ int main(int argc,char** argv) {
     maintenance_cursor=selected->first;selected->second->MaintainRecovery();
    }
   }
-  sessions.clear();return 0;
+  clear_sessions();return 0;
  }catch(const std::exception& error){fprintf(stderr,"endpoint startup: %s\n",error.what());return 1;}
 }

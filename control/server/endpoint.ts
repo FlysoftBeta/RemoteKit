@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 
 export interface RtcSignal { tenantId: string; connectionId: string; signal: { type: 'answer'; sdp: string } | { type: 'ice'; candidate: { candidate: string; sdpMid: string; sdpMLineIndex: number } } | { type: 'complete' } | { type: 'error'; message: string } }
-export type ClientActionEvent = ProductOperation & {tenantId:string;connectionId:string};
+export type ClientActionEvent = ProductOperation & {tenantId:string;connectionId:string;authEpoch?:number};
 export interface Endpoint { onClientAction?(listener:(event:ClientActionEvent)=>void):()=>void; request(method: string, tenantId: string, args?: Record<string, unknown>): Promise<any>; onSignal?(listener: (event: RtcSignal) => void): () => void }
 export class EndpointProcess extends EventEmitter implements Endpoint {
   private child?: ChildProcessWithoutNullStreams;

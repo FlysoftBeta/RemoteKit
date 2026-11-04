@@ -36,8 +36,12 @@ export const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 export function AuthView({
   onLogin,
+  close,
+  notice,
 }: {
   onLogin: (user: ProductUser) => void;
+  close: () => void;
+  notice: string;
 }) {
   const [register, setRegister] = useState(false),
     [username, setUsername] = useState(""),
@@ -48,6 +52,11 @@ export function AuthView({
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
   const submitting = useRef(false), registrationRequest = useRef(0);
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !submitting.current) close(); };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
+  }, [close]);
   const refreshRegistration = useCallback(async () => {
     const sequence = ++registrationRequest.current;
     setRegistration(null);
@@ -99,6 +108,10 @@ export function AuthView({
           }
         }}
       >
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <IconButton aria-label="关闭登录" onClick={close} disabled={busy}><Close /></IconButton>
+        </Box>
+        {notice && <Alert severity="warning">{notice}</Alert>}
         <Typography variant="h5" component="h1">
           {register ? "创建账户" : "登录 RemoteKit"}
         </Typography>
@@ -169,6 +182,7 @@ export function SettingsDialog({
   onClose,
   action,
   logout,
+  security,
 }: {
   state: ProductState;
   online: boolean;
@@ -176,6 +190,7 @@ export function SettingsDialog({
   onClose: () => void;
   action: Action;
   logout: () => void;
+  security?: React.ReactNode;
 }) {
   const compact = useMediaQuery("(max-width:600px)"),
     settings = state.workspace.settings;
@@ -193,6 +208,7 @@ export function SettingsDialog({
     }
   }, [open]);
   const save = async (key: string, value: Partial<ProductSettings>) => {
+    if (!online) return;
     setBusy((p) => ({ ...p, [key]: true }));
     setResult((p) => ({ ...p, [key]: "" }));
     try {
@@ -264,7 +280,7 @@ export function SettingsDialog({
               className="quality-option"
               key={value}
               value={value}
-              disabled={busy.quality}
+              disabled={!online || busy.quality}
               control={<Radio size="small" />}
               label={
                 <>
@@ -294,7 +310,7 @@ export function SettingsDialog({
             control={
               <Switch
                 checked={settings.clientScaleOverride === null}
-                disabled={busy.scale}
+                disabled={!online || busy.scale}
                 onChange={(_, checked) =>
                   void save("scale", {
                     clientScaleOverride: checked
@@ -312,6 +328,7 @@ export function SettingsDialog({
                 size="small"
                 label="像素比例"
                 type="number"
+                disabled={!online}
                 value={scale}
                 onChange={(e) => setScale(e.target.value)}
                 inputProps={{
@@ -323,7 +340,7 @@ export function SettingsDialog({
               />
               <Button
                 disabled={
-                  busy.scale ||
+                  !online || busy.scale ||
                   !Number.isFinite(Number(scale)) ||
                   Number(scale) < state.constraints.clientScaleMin ||
                   Number(scale) > state.constraints.clientScaleMax
@@ -346,7 +363,7 @@ export function SettingsDialog({
             control={
               <Switch
                 checked={settings.memorySaverEnabled}
-                disabled={busy.memory}
+                disabled={!online || busy.memory}
                 onChange={(_, checked) =>
                   void save("memory", { memorySaverEnabled: checked })
                 }
@@ -362,7 +379,7 @@ export function SettingsDialog({
             control={
               <Checkbox
                 checked={settings.showStats ?? false}
-                disabled={busy.stats}
+                disabled={!online || busy.stats}
                 onChange={(_, checked) =>
                   void save("stats", { showStats: checked })
                 }
@@ -373,6 +390,7 @@ export function SettingsDialog({
           {note("stats")}
         </div>
         <Divider />
+        {security}
         <div className="account-row">
           <Typography color="text.secondary">{state.user.username}</Typography>
           <Button color="inherit" onClick={logout}>
