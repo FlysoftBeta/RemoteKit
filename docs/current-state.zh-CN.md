@@ -2,7 +2,15 @@
 
 更新：2026-11-04。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
-## 当前交付
+## 当前修订
+
+用户实用反馈否定162141的拍照布局和三层流程：横屏快门难触达、取景被挤小、采样与上传串行造成等待、扫描依赖完整页边并丢色。现已重做全屏覆盖取景/侧边快门、相机配置和连续拍摄，取消独立检查照片页，拍后在紧凑文件篮strip中处理；只保留普通照片/文档扫描，扫描合并几何与保色增强。原图不经串流视频codec，临时小图经Endpoint增量评分，最多1秒/20个不同帧，质量够用提前停止；最终上传保留帧PNG。
+
+本轮Endpoint与Control构建、4项原生文件测试及Client/Control定向检查通过。157完整RTC与Native FileList链路、最终Control窄组、三种平板尺寸/DPR2触控模拟通过；89完整组在活跃远页条件下通过。清晰合成样例两帧提前停止，软糊样例19个不同帧、UI约1秒解锁。四份彩色扫描RTC输出与Native探针一致。正在打包，尚未上传。实体Android平板、物理摄像头和手持效果未验收。[当前契约](camera-pipeline-contract.md) · [运行记录](../develop/docs/camera-flow-qa-20261104.md) · [构建](../develop/docs/camera-flow-build-20261104.md)。
+
+部分页/阴影/弱字和彩色样例已做Native对照；UVDoc虽改善行弧，实测会丢失部分入镜页的边缘内容，本批不接入。书页展平、严重截断透视尚未解决，硬阴影可有窄光晕。另发现89静态页1FPS时QSV重建实际level50超过协商42导致画面停止，原有重建修复未覆盖此情形，本轮未修改媒体路径。[Native记录](../develop/docs/photo-pipeline-native-20261104.md) · [模型实验](../develop/docs/document-unwarp-eval-20261104.md) · [问题清单](../develop/docs/open-issues.md)。
+
+## 最近交付（162141，本轮修订尚未包含）
 
 文件篮、我的文件与Endpoint照片处理已完成并上传，功能源码`7ab9b62bf078052fc47fee7eb8889b08eab4f08b`已推送，干净源码包通过核验及真实运行。图片为主使用横向卡片，整卡拖拽、点击展开菜单；普通文件明显居多时默认列表，手柄排序且操作按钮直接可用，可手动切换。157/89已实测鼠标、触屏横滑/长按、键盘、取消与版本冲突回滚；最终包157整组及宽图contain、候选预览和390px窄屏视觉复核通过。[交付记录](../develop/docs/file-library-delivery-20261104.md) · [构建](../develop/docs/file-library-build-20261104.md) · [运行与视觉](../develop/docs/file-library-qa-20261104.md) · [正式契约](file-library-contract.md)。
 

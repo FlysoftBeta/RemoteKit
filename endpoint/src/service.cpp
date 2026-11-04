@@ -236,6 +236,7 @@ struct Session {
  std::deque<SelectionWatch> selection_watches; // file worker only.
  int64_t next_selection_watch=0;
 #ifdef RK_FILE_PHOTO
+ remotekit::PhotoBurstSessions<remotekit::PhotoBurstAnalyzer> photo_bursts; // file worker only.
  struct PhotoThumbnail {std::string asset_id;int64_t refresh_after;};
  std::map<std::string,PhotoThumbnail> photo_thumbnails; // file worker only.
 #endif
@@ -2232,6 +2233,11 @@ struct Session {
  }
  void SweepDirectFiles() {
   const auto now=QpcNow();
+#ifdef RK_FILE_PHOTO
+  photo_bursts.Sweep([&](uint64_t grant) {
+   return authorization.Stamp() && file_services.CurrentLibraryGrant(grant);
+  });
+#endif
   for(auto it=file_owners.begin();it!=file_owners.end();) {
    if(file_services.Current(it->second.job) && now-it->second.touched<QpcFrequency()*15*60){++it;continue;}
    {std::lock_guard lock(file_store_mutex);file_uploads.Cancel(it->first);}
@@ -2349,6 +2355,11 @@ struct Session {
   if(method=="asset.cancel") {
    file_library.Cancel(job.grant,Required(params,"uploadId"),check);return {{"cancelled",true}};
   }
+  if(method=="asset.describe") {
+   const auto asset=file_library.Describe(Required(params,"assetId"));
+   check();
+   return asset.Json();
+  }
   if(method=="asset.read") {
    const auto offset=FileUnsigned(params.at("offset"));
    const auto [asset,bytes]=file_library.Read(Required(params,"assetId"),offset);
@@ -2357,6 +2368,8 @@ struct Session {
   }
 #ifdef RK_FILE_PHOTO
   const auto cancelled=[&]{return !authorization.Stamp() || !file_services.Current(job);};
+  if(remotekit::PhotoBurstMethod(method))
+   return photo_bursts.Execute(job.grant,method,params,cancelled);
   if(method=="photo.thumbnail") {
    const auto asset_id=Required(params,"assetId");
    const auto source=file_library.Path(asset_id);
@@ -2415,11 +2428,15 @@ struct Session {
     for(size_t i=0;i<4;++i)
      (*corners)[i]={found->at(i).at("x").get<double>(),found->at(i).at("y").get<double>()};
    }
-   return file_library.CreateDerivative([&](const fs::path& output) {
+   std::string geometry;
+   auto asset=file_library.CreateDerivative([&](const fs::path& output) {
     const auto dimensions=remotekit::ProcessPhoto(source,output,
       mode=="scan"?remotekit::PhotoMode::kScan:remotekit::PhotoMode::kRectify,corners,cancelled);
+    geometry=dimensions.geometry;
     return remotekit::FileLibrary::Derivative{dimensions.width,dimensions.height};
-   },check).Json();
+   },check,remotekit::FileLibrary::DerivativeFormat::png).Json();
+   asset["geometry"]=std::move(geometry);
+   return asset;
   }
 #endif
   throw std::runtime_error("photo_processing_unavailable");

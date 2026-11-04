@@ -3,7 +3,7 @@ import { Box, Skeleton, Typography, type SxProps, type Theme } from '@mui/materi
 import { ImageOutlined, InsertDriveFileOutlined } from '@mui/icons-material';
 import { useLibrary } from './file-library-state';
 
-export function FileThumbnail({ assetId, type, blob, extension, sx }: { assetId: string; type: string; blob?: Blob; extension?: string; sx?: SxProps<Theme> }) {
+export function FileThumbnail({ assetId, type, blob, extension, sx, localOnly = false }: { assetId: string; type: string; blob?: Blob; extension?: string; sx?: SxProps<Theme>; localOnly?: boolean }) {
     const { online, thumbnails } = useLibrary();
     const image = type.toLowerCase().startsWith('image/');
     const decodable = /^(image\/jpeg|image\/png)$/i.test(type);
@@ -32,13 +32,13 @@ export function FileThumbnail({ assetId, type, blob, extension, sx }: { assetId:
         let release: (() => void) | undefined;
         if (!visible) display(undefined);
         else if (blob) display(blob);
-        else if (online && decodable) { setLoading(true); release = thumbnails.subscribe(assetId, display); }
+        else if (!localOnly && online && decodable) { setLoading(true); release = thumbnails.subscribe(assetId, display); }
         else display(thumbnails.get(assetId));
         return () => {
             release?.();
             if (objectUrl) URL.revokeObjectURL(objectUrl);
         };
-    }, [assetId, blob, decodable, online, thumbnails, visible]);
+    }, [assetId, blob, decodable, localOnly, online, thumbnails, visible]);
 
     return <Box ref={host} aria-hidden="true" sx={[{
         position: 'relative', minWidth: 0, display: 'grid', placeItems: 'center', overflow: 'hidden',

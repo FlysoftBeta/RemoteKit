@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, MenuItem, TextField } from '@mui/material';
+import { Box, Button, Dialog, MenuItem, TextField, Typography } from '@mui/material';
 import type { LibraryEntry, LibraryGroup, LibrarySnapshot } from '../shared/file-library';
 import { FILE_LIMITS } from '../shared/product';
 import { operationId } from './product-operations';
@@ -32,30 +32,38 @@ export function GroupField({ groups, value, onChange, includeAll = false }: {
     </TextField>;
 }
 
-export function GroupPicker({ groups, title, onClose, onChoose, initial = null }: {
+export function GroupConfirm({ groups, title, onClose, onChoose, initial = null, disabled = false }: {
     groups: LibraryGroup[];
     title: string;
     initial?: string | null;
+    disabled?: boolean;
     onClose: () => void;
     onChoose: (groupId: string | null) => void;
 }) {
     const [group, setGroup] = useState(initial);
-    return <Dialog open fullWidth maxWidth="xs" onClose={onClose}>
-        <DialogTitle>{title}</DialogTitle>
-        <DialogContent><Box sx={{ mt: 1 }}><GroupField groups={groups} value={group} onChange={setGroup} /></Box></DialogContent>
-        <DialogActions><Button onClick={onClose}>取消</Button><Button variant="contained" onClick={() => onChoose(group)}>确认</Button></DialogActions>
-    </Dialog>;
+    return <Box sx={{ p: 1, display: 'flex', flexDirection: 'column', gap: .75 }}>
+        <Typography variant="subtitle2">{title}</Typography>
+        <GroupField groups={groups} value={group} onChange={setGroup} />
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <Button onClick={onClose}>返回</Button>
+            <Button variant="contained" disabled={disabled} onClick={() => onChoose(group)}>确认</Button>
+        </Box>
+    </Box>;
 }
 
+export function GroupPicker(props: Parameters<typeof GroupConfirm>[0]) {
+    return <Dialog open fullWidth maxWidth="xs" onClose={props.onClose}><GroupConfirm {...props} /></Dialog>;
+}
 export interface ImportJob {
     file: File;
     operationId: string;
     assetId?: string;
 }
 
-export function DeviceImport({ destination, accept, disabled, afterId, onDone, onError, inputRef, onBusy }: {
+export function DeviceImport({ destination, accept, disabled, afterId, onDone, onError, inputRef, onBusy, inline = false }: {
     destination: 'library' | 'basket';
     accept?: string[];
+    inline?: boolean;
     disabled: boolean;
     afterId?: string;
     onDone?: () => void;
@@ -113,6 +121,7 @@ export function DeviceImport({ destination, accept, disabled, afterId, onDone, o
             if (mounted.current) onBusy?.(false);
         }
     }
+    const ChooseGroup = inline ? GroupConfirm : GroupPicker;
     return <>
         <input ref={inputRef} hidden type="file" multiple accept={accept?.join(',') || undefined} onChange={event => {
             const files = Array.from(event.target.files ?? []);
@@ -128,7 +137,7 @@ export function DeviceImport({ destination, accept, disabled, afterId, onDone, o
             if (groups.length) setPicking(true);
             else void upload();
         }} />
-        {picking && <GroupPicker title="选择上传分组" groups={groups} onClose={discard} onChoose={groupId => {
+        {picking && <ChooseGroup title="选择上传分组" disabled={disabled} groups={groups} onClose={discard} onChoose={groupId => {
             setPicking(false);
             if (pending.current) pending.current.groupId = groupId;
             void upload();

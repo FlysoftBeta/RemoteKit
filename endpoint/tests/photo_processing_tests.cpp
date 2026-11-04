@@ -67,12 +67,22 @@ class Fixtures {
     ComPtr<IWICStream> stream;
     ComPtr<IWICBitmapEncoder> encoder;
     ComPtr<IWICBitmapFrameEncode> frame;
+    ComPtr<IPropertyBag2> properties;
     Check(factory_->CreateStream(&stream));
     Check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE));
     Check(factory_->CreateEncoder(container, nullptr, &encoder));
     Check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache));
-    Check(encoder->CreateNewFrame(&frame, nullptr));
-    Check(frame->Initialize(nullptr));
+    Check(encoder->CreateNewFrame(&frame, &properties));
+    if (container == GUID_ContainerFormatJpeg) {
+      wchar_t name[] = L"ImageQuality";
+      PROPBAG2 option{};
+      option.pstrName = name;
+      VARIANT quality{};
+      quality.vt = VT_R4;
+      quality.fltVal = 0.70f;
+      Check(properties->Write(1, &option, &quality));
+    }
+    Check(frame->Initialize(properties.Get()));
     Check(frame->SetSize(image.cols, image.rows));
     const auto desired = image.channels() == 4 ? GUID_WICPixelFormat32bppBGRA
                                                : GUID_WICPixelFormat24bppBGR;
@@ -90,7 +100,7 @@ class Fixtures {
     return Encode(name, image, GUID_ContainerFormatPng);
   }
 
-  cv::Mat ReadJpeg(const std::filesystem::path& path) {
+  cv::Mat Read(const std::filesystem::path& path, const GUID& expected = GUID_ContainerFormatJpeg) {
     ComPtr<IWICBitmapDecoder> decoder;
     ComPtr<IWICBitmapFrameDecode> frame;
     ComPtr<IWICFormatConverter> converter;
@@ -98,7 +108,7 @@ class Fixtures {
                                               WICDecodeMetadataCacheOnDemand, &decoder));
     GUID container{};
     Check(decoder->GetContainerFormat(&container));
-    Require(container == GUID_ContainerFormatJpeg, "processed output should be JPEG");
+    Require(container == expected, "unexpected output image container");
     Check(decoder->GetFrame(0, &frame));
     UINT width = 0, height = 0;
     Check(frame->GetSize(&width, &height));
@@ -123,6 +133,75 @@ cv::Mat DetailFixture(cv::Scalar background, cv::Scalar ink) {
     cv::putText(image, "RemoteKit photo quality", {24, y}, cv::FONT_HERSHEY_SIMPLEX,
                 1.1, ink, 2, cv::LINE_AA);
   return image;
+}
+
+void CheckBurst(Fixtures& fixtures) {
+  auto jpeg = [&](const char* name, const cv::Mat& image) {
+    const auto path = fixtures.Encode(name, image, GUID_ContainerFormatJpeg);
+    std::ifstream file(path, std::ios::binary);
+    return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(file), {});
+  };
+  cv::Mat sharp;
+  cv::resize(DetailFixture({184, 188, 192}, {28, 31, 34}), sharp, {512, 394});
+  cv::Mat blur, dark, noise;
+  cv::GaussianBlur(sharp, blur, {23, 5}, 6.5, 1.2);
+  sharp.convertTo(dark, -1, 0.21);
+  cv::RNG random(4412);
+  noise.create(sharp.size(), CV_8UC3);
+  random.fill(noise, cv::RNG::NORMAL, cv::Scalar::all(128), cv::Scalar::all(15));
+  const auto clear_bytes = jpeg("burst-clear.jpg", sharp);
+  const auto blur_bytes = jpeg("burst-blur.jpg", blur);
+  const auto dark_bytes = jpeg("burst-dark.jpg", dark);
+  const auto noise_bytes = jpeg("burst-noise.jpg", noise);
+  PhotoBurstAnalyzer scores;
+  auto analyze = [](const auto& bytes) {
+    PhotoBurstAnalyzer analyzer;
+    const auto result = analyzer.Observe("first", bytes, {"first"});
+    Require(!result.stop, "one sample must not certify stable quality");
+    return result.candidates.front().score;
+  };
+  const auto clear_score = analyze(clear_bytes);
+  Require(clear_score > analyze(blur_bytes) + 0.16 &&
+              clear_score > analyze(dark_bytes) + 0.16 &&
+              clear_score > analyze(noise_bytes) + 0.16,
+          "512 px quality must separate clear detail from blur, dark detail and random noise");
+  scores.Observe("blur", blur_bytes, {"blur"});
+  const auto good = scores.Observe("clear", clear_bytes, {"blur", "clear"});
+  Require(good.selected_frame_id == "clear" && !good.stop && !good.uncertain,
+          "a single sharp frame can displace blur without certifying stable quality");
+  cv::Mat similar;
+  sharp.convertTo(similar, -1, 1, 4);
+  const auto near_bytes = jpeg("burst-near.jpg", similar);
+  const auto stop = scores.Observe("near", near_bytes, {"clear", "near"});
+  Require(stop.stop && stop.candidates.size() == 1 && stop.keep_frame_ids.size() == 1 &&
+              !stop.uncertain,
+          "two clear, equivalent frames should stop early with one retained candidate");
+  Require(scores.Finish(stop.keep_frame_ids).selected_frame_id == stop.selected_frame_id,
+          "finish must select the acknowledged retained frame");
+  RequireError([&] { scores.Finish({"unseen"}); }, "invalid-photo-count");
+
+  cv::Mat blue, orange;
+  cv::resize(DetailFixture({255, 174, 193}, {92, 25, 31}), blue, sharp.size());
+  cv::resize(DetailFixture({94, 184, 235}, {0, 19, 69}), orange, sharp.size());
+  const auto blue_bytes = jpeg("burst-blue.jpg", blue);
+  const auto orange_bytes = jpeg("burst-orange.jpg", orange);
+  PhotoBurstAnalyzer distinct;
+  distinct.Observe("blue", blue_bytes, {"blue"});
+  const auto choice = distinct.Observe("orange", orange_bytes, {"blue", "orange"});
+  Require(!choice.stop && choice.uncertain && choice.keep_frame_ids.size() == 2 &&
+              choice.candidates.size() == 2,
+          "distinct close-quality scenes should retain both original frame IDs");
+  Require(distinct.Finish({"orange"}).selected_frame_id == "orange",
+          "finish must not select an evicted winner");
+  RequireError([&] { distinct.Observe("blue", blue_bytes, {"blue"}); }, "invalid-photo-frame");
+  RequireError([&] { distinct.Observe("missing", clear_bytes, {"orange"}); }, "invalid-photo-frame");
+  const cv::Mat wide(64, 513, CV_8UC3, cv::Scalar::all(160));
+  RequireError([&] { distinct.Observe("wide", jpeg("burst-wide.jpg", wide),
+                                      {"wide"}); }, "photo-too-large");
+  RequireError([&] { distinct.Observe("big", std::vector<std::uint8_t>(44 * 1024 + 1), {"big"}); },
+               "photo-too-large");
+  RequireError([&] { distinct.Observe("cancelled", clear_bytes, {"cancelled"}, [] { return true; }); },
+               "cancelled");
 }
 
 void CheckRank(Fixtures& fixtures) {
@@ -178,25 +257,28 @@ void CheckDocuments(Fixtures& fixtures) {
   Require(corrected.width >= 470 && corrected.width <= 500 &&
               corrected.height >= 342 && corrected.height <= 370,
           "auto detection should use the complete perspective boundary");
-  const auto jpeg = fixtures.ReadJpeg(rectified);
-  Require(jpeg.cols == corrected.width && jpeg.rows == corrected.height &&
-              jpeg.at<cv::Vec3b>(70, 22)[0] > 95,
-          "rectified JPEG should match dimensions and contain the document");
+  const auto rectified_png = fixtures.Read(rectified, GUID_ContainerFormatPng);
+  Require(rectified_png.cols == corrected.width && rectified_png.rows == corrected.height &&
+              rectified_png.at<cv::Vec3b>(70, 22)[0] > 95 && corrected.geometry == "perspective",
+          "rectified PNG should match dimensions and contain the document");
 
   std::array<PhotoPoint, 4> manual;
   for (std::size_t i = 0; i < manual.size(); ++i)
     manual[i] = {quad[i].x / 639.0, quad[i].y / 479.0};
   const auto clean = ProcessPhoto(input, scanned, PhotoMode::kScan, manual);
-  const auto scan = fixtures.ReadJpeg(scanned);
-  Require(scan.cols == clean.width && scan.rows == clean.height && clean.width >= 480,
+  const auto scan = fixtures.Read(scanned, GUID_ContainerFormatPng);
+  Require(scan.cols == clean.width && scan.rows == clean.height && clean.width >= 480 &&
+              clean.geometry == "perspective",
           "manual crop should use the exact supplied perspective boundary");
   const auto left = cv::mean(scan(cv::Rect{10, 12, 30, 18}))[0];
   const auto right = cv::mean(scan(cv::Rect{scan.cols - 40, 12, 30, 18}))[0];
   cv::Mat gray;
   cv::cvtColor(scan, gray, cv::COLOR_BGR2GRAY);
-  Require(left > 230 && right > 230 && std::abs(left - right) < 15 &&
+  Require(left > 170 && right > 170 && std::abs(left - right) < 15 &&
               cv::countNonZero(gray < 55) > 1000,
           "scan should normalize uneven paper and preserve dark lines");
+  Require(ProcessPhoto(input, scanned, PhotoMode::kScan).geometry == "perspective",
+          "clear complete page should support automatic perspective in scan mode");
   Require(RankPhotos(std::array{input}).candidates.size() == 1,
           "processing should preserve the original asset");
   std::swap(manual[1], manual[2]);
@@ -212,11 +294,78 @@ void CheckDocuments(Fixtures& fixtures) {
   const auto ambiguous = fixtures.Png("two-documents.png", two);
   RequireError([&] { ProcessPhoto(ambiguous, invalid, PhotoMode::kRectify); }, "no-document");
   const auto oversized = fixtures.Png(
-      "oversized.png", cv::Mat(2049, 2049, CV_8UC3, cv::Scalar::all(165)));
+      "oversized.png", cv::Mat(2897, 2897, CV_8UC3, cv::Scalar::all(165)));
   RequireError([&] { RankPhotos(std::array{oversized}); }, "photo-too-large");
   const auto broken = fixtures.dir / "broken.png";
   std::ofstream(broken, std::ios::binary) << "not an image";
   RequireError([&] { RankPhotos(std::array{broken}); }, "invalid-photo");
+}
+
+void CheckPartialDocuments(Fixtures& fixtures) {
+  cv::Mat page(650, 920, CV_8UC3);
+  for (int x = 0; x < page.cols; ++x)
+    page.col(x).setTo(cv::Scalar(127 + x / 10, 129 + x / 10, 131 + x / 10));
+  for (int y = 46; y < page.rows - 30; y += 42)
+    cv::putText(page, "Crop shows a portion of a long document", {14, y},
+                cv::FONT_HERSHEY_SIMPLEX, 0.94, {36, 39, 41}, 2, cv::LINE_AA);
+  cv::rectangle(page, {24, 570}, {99, 592}, {27, 36, 186}, cv::FILLED);
+  cv::rectangle(page, {500, 566}, {530, 573}, {162, 164, 166}, cv::FILLED);
+  const auto full = fixtures.Png("partial-flat.png", page);
+  const auto output = fixtures.dir / "partial-scan.temp";
+  const auto flat = ProcessPhoto(full, output, PhotoMode::kScan);
+  Require(flat.geometry == "unchanged" && flat.width == page.cols && flat.height == page.rows,
+          "aligned partial page should keep its whole view");
+  const auto scanned = fixtures.Read(output, GUID_ContainerFormatPng);
+  Require(scanned.at<cv::Vec3b>(580, 60)[2] - scanned.at<cv::Vec3b>(580, 60)[0] > 135,
+          "red stamp should retain its color");
+  const auto weak = scanned.at<cv::Vec3b>(569, 515)[0];
+  Require(scanned.at<cv::Vec3b>(559, 515)[0] - weak >= 8,
+          "weak pencil stroke should remain distinguishable");
+  const auto before_range = page.at<cv::Vec3b>(615, 850)[0] - page.at<cv::Vec3b>(615, 120)[0];
+  const auto after_range = scanned.at<cv::Vec3b>(615, 850)[0] - scanned.at<cv::Vec3b>(615, 120)[0];
+  Require(after_range < before_range * 0.6, "scan should reduce gradual illumination variation");
+  Require(cv::norm(fixtures.Read(full, GUID_ContainerFormatPng), page, cv::NORM_INF) == 0,
+          "source PNG must remain pixel-identical");
+
+  for (const double tilt : {-7.5, 7.5}) {
+    cv::Mat angled;
+    const cv::Point2f center{page.cols * 0.5f, page.rows * 0.5f};
+    cv::warpAffine(page, angled, cv::getRotationMatrix2D(center, tilt, 1), page.size(),
+                   cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+    // These markers are captured at the extreme edges of the tilted frame.
+    cv::rectangle(angled, {0, 292}, {14, 310}, {220, 48, 29}, cv::FILLED);
+    cv::rectangle(angled, {angled.cols - 15, 292}, {angled.cols - 1, 310},
+                  {34, 170, 35}, cv::FILLED);
+    const auto rotated = fixtures.Png(tilt > 0 ? "plus.png" : "minus.png", angled);
+    const auto deskewed = ProcessPhoto(rotated, output, PhotoMode::kScan);
+    Require(deskewed.geometry == "deskew" && deskewed.width > page.cols &&
+                deskewed.height > page.rows,
+            "partial page with consistent slanted text should be deskewed with expanded canvas");
+    const auto pixels = fixtures.Read(output, GUID_ContainerFormatPng);
+    const cv::Point2f target_center{(pixels.cols - 1) * 0.5f, (pixels.rows - 1) * 0.5f};
+    auto transform = cv::getRotationMatrix2D(
+        {(angled.cols - 1) * 0.5f, (angled.rows - 1) * 0.5f}, -tilt, 1);
+    transform.at<double>(0, 2) += target_center.x - (angled.cols - 1) * 0.5;
+    transform.at<double>(1, 2) += target_center.y - (angled.rows - 1) * 0.5;
+    std::vector<cv::Point2f> marker_locations{{7, 301}, {angled.cols - 8.0f, 301}};
+    cv::transform(marker_locations, marker_locations, transform);
+    const auto left = pixels.at<cv::Vec3b>(cvRound(marker_locations[0].y),
+                                           cvRound(marker_locations[0].x));
+    const auto right = pixels.at<cv::Vec3b>(cvRound(marker_locations[1].y),
+                                            cvRound(marker_locations[1].x));
+    Require(left[0] - left[1] > 125 && right[1] - right[0] > 100,
+            "deskew angle must preserve both known edge markers near their expected positions");
+  }
+
+  cv::Mat ambiguous(410, 630, CV_8UC3, cv::Scalar::all(225));
+  cv::rectangle(ambiguous, {67, 62}, {540, 338}, {45, 54, 63}, 3);
+  for (int y = 110; y < 340; y += 43)
+    cv::line(ambiguous, {67, y}, {540, y}, {45, 54, 63}, 2);
+  const auto table = fixtures.Png("table-without-page-boundary.png", ambiguous);
+  const auto kept = ProcessPhoto(table, output, PhotoMode::kScan);
+  Require(kept.geometry == "unchanged" && kept.width == ambiguous.cols &&
+              kept.height == ambiguous.rows,
+          "an internal table border must not be used as a page boundary");
 }
 
 void CheckThumbnails(Fixtures& fixtures) {
@@ -227,14 +376,14 @@ void CheckThumbnails(Fixtures& fixtures) {
   Require(result.width == 320 && result.height == 206 &&
               std::filesystem::file_size(output) <= 64 * 1024,
           "thumbnail must resize large sources proportionally within the byte limit");
-  Require(fixtures.ReadJpeg(output).size() == cv::Size{320, 206}, "thumbnail JPEG dimensions");
-  RequireError([&] { RankPhotos(std::array{big}); }, "photo-too-large");
+  Require(fixtures.Read(output).size() == cv::Size{320, 206}, "thumbnail JPEG dimensions");
+  Require(RankPhotos(std::array{big}).selected_index == 0, "8 Mi-pixel budget accepts 5 MP input");
 
   cv::Mat transparent(20, 28, CV_8UC4, cv::Scalar(0, 0, 0, 0));
   cv::rectangle(transparent, {9, 5}, {18, 14}, {0, 0, 220, 255}, cv::FILLED);
   const auto alpha = fixtures.Png("transparent.png", transparent);
   const auto tiny = CreatePhotoThumbnail(alpha, output);
-  const auto flattened = fixtures.ReadJpeg(output);
+  const auto flattened = fixtures.Read(output);
   Require(tiny.width == 28 && tiny.height == 20 &&
               flattened.at<cv::Vec3b>(1, 1)[0] > 245 &&
               flattened.at<cv::Vec3b>(10, 13)[2] > 190 &&
@@ -258,7 +407,7 @@ void CheckThumbnails(Fixtures& fixtures) {
   tagged.write(jpeg_bytes.data() + 2, jpeg_bytes.size() - 2);
   tagged.close();
   const auto rotated = CreatePhotoThumbnail(oriented, output);
-  const auto rotated_jpeg = fixtures.ReadJpeg(output);
+  const auto rotated_jpeg = fixtures.Read(output);
   Require(rotated.width == 107 && rotated.height == 320 &&
               rotated_jpeg.at<cv::Vec3b>(30, 45)[0] < 60 &&
               rotated_jpeg.at<cv::Vec3b>(290, 45)[0] > 205,
@@ -286,7 +435,9 @@ int main() {
   try {
     Fixtures fixtures;
     CheckRank(fixtures);
+    CheckBurst(fixtures);
     CheckDocuments(fixtures);
+    CheckPartialDocuments(fixtures);
     CheckThumbnails(fixtures);
     return 0;
   } catch (const std::exception& error) {

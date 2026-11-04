@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -36,12 +37,42 @@ struct PhotoRankResult {
 struct PhotoProcessResult {
   std::uint32_t width;
   std::uint32_t height;
+  std::string geometry;
+};
+
+struct PhotoBurstCandidate {
+  std::string frame_id;
+  double score;
+};
+
+struct PhotoBurstDecision {
+  std::string selected_frame_id;
+  std::vector<std::string> keep_frame_ids;
+  std::vector<PhotoBurstCandidate> candidates;
+  bool uncertain = false;
+  bool stop = false;
+  std::string reason;
+};
+
+class PhotoBurstAnalyzer {
+ public:
+  PhotoBurstAnalyzer();
+  ~PhotoBurstAnalyzer();
+  PhotoBurstDecision Observe(const std::string& frame_id,
+                             std::span<const std::uint8_t> encoded,
+                             const std::vector<std::string>& available,
+                             const PhotoCancelled& cancelled = {});
+  PhotoBurstDecision Finish(const std::vector<std::string>& available);
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 PhotoRankResult RankPhotos(std::span<const std::filesystem::path> inputs,
                           const PhotoCancelled& cancelled = {});
 
-// Writes JPEG to a caller-owned staging path. The caller cleans up on failure
+// Writes PNG to a caller-owned staging path. The caller cleans up on failure
 // and publishes the result only on success. Corners are in displayed image
 // coordinates, normalized clockwise.
 PhotoProcessResult ProcessPhoto(

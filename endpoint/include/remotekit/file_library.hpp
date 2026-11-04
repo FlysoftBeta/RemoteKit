@@ -31,6 +31,7 @@ class FileLibrary {
     enum class State { pending, submitted, selected, cancelled } state = State::pending;
   };
   struct Derivative { std::uint32_t width, height; };
+  enum class DerivativeFormat { jpeg, png };
   using Render = std::function<Derivative(const std::filesystem::path&)>;
 
   explicit FileLibrary(std::filesystem::path root);
@@ -44,7 +45,7 @@ class FileLibrary {
   std::pair<Asset, std::vector<std::uint8_t>> Read(const std::string& asset, std::uint64_t offset) const;
   void Retain(const std::vector<std::string>& assets);
   void References(std::uint64_t revision, const std::vector<std::string>& assets);
-  Asset CreateDerivative(const Render&, const Check&);
+  Asset CreateDerivative(const Render&, const Check&, DerivativeFormat = DerivativeFormat::jpeg);
   void Sweep();
 
   void Prepare(const Selection&);

@@ -3,6 +3,7 @@ import type { LibraryMethods, LibrarySnapshot, SelectionState } from '../shared/
 import type { DcFileClient } from './dc-file-client';
 import { operationId } from './product-operations';
 import { ControlRequestError } from './control-connection';
+import { usePhotoJobs } from './photo-jobs';
 import { FileThumbnails } from './file-thumbnails';
 
 export type LibraryRequest = <K extends keyof LibraryMethods>(method: K, params: LibraryMethods[K]['params']) => Promise<LibraryMethods[K]['result']>;
@@ -19,6 +20,7 @@ interface Checkout {
 
 export function useFileLibrary(request: LibraryRequest, rpc: DcFileClient, online: boolean, enabled: boolean, identity: string | undefined, requestIds: string[]) {
     const [snapshot, setSnapshot] = useState<LibrarySnapshot>();
+    const latestSnapshot = useRef<LibrarySnapshot | undefined>(undefined);
     const [, render] = useState(0);
     const checkouts = useRef(new Map<string, Checkout>());
     const [thumbnails] = useState(() => new FileThumbnails((assetId, signal) => rpc.photoThumbnail(assetId, signal)));
@@ -37,23 +39,27 @@ export function useFileLibrary(request: LibraryRequest, rpc: DcFileClient, onlin
     }
     const publish = (next: LibrarySnapshot) => {
         if (currentIdentity.current !== identity || !active.current || authorization.current !== epoch) return;
-        setSnapshot(old => !old || next.revision > old.revision ? next : old);
+        if (!latestSnapshot.current || next.revision > latestSnapshot.current.revision) {
+            latestSnapshot.current = next;
+            setSnapshot(next);
+        }
     };
     const epoch = authorization.current;
     useEffect(() => {
+        latestSnapshot.current = undefined;
         setSnapshot(undefined);
         return () => thumbnails.clear();
     }, [identity, enabled, thumbnails]);
 
-    async function mutate<K extends 'library.import' | 'library.basket' | 'library.group' | 'library.move' | 'library.delete'>(method: K, params: LibraryMethods[K]['params']) {
+    async function mutate<K extends 'library.import' | 'library.replace' | 'library.basket' | 'library.group' | 'library.move' | 'library.delete'>(method: K, params: LibraryMethods[K]['params']) {
         try {
             const next = await request(method, params);
             publish(next);
             return next;
         } catch (error) {
-            if (method === 'library.basket' && error instanceof ControlRequestError && error.code === 409) {
+            if ((method === 'library.basket' || method === 'library.replace') && error instanceof ControlRequestError && error.code === 409) {
                 await refresh().catch(() => {});
-                throw new Error('文件篮已更新，请检查当前顺序后重试');
+                throw new Error(method === 'library.basket' ? '文件篮已更新，请检查当前顺序后重试' : '文件已更新，请重新打开后重试');
             }
             throw error;
         }
@@ -129,7 +135,8 @@ export function useFileLibrary(request: LibraryRequest, rpc: DcFileClient, onlin
         return () => clearInterval(timer);
     }, [request, rpc, enabled, online, identity]);
 
-    return { snapshot, refresh, mutate, select, checkout: (id: string) => checkouts.current.get(id),
+    const photos = usePhotoJobs({ mutate, rpc, latestSnapshot: () => latestSnapshot.current }, online && enabled && !!identity, identity);
+    return { snapshot, refresh, mutate, select, photos, checkout: (id: string) => checkouts.current.get(id),
         rememberPreview, thumbnails, rpc, online };
 }
 

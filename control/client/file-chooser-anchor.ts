@@ -31,7 +31,7 @@ export function placeFileChooser(anchor: Bounds, viewport: Bounds) {
     const above = anchor.top - viewport.top - gap - padding;
     const useBelow = below >= 420 || below >= above;
     const height = Math.min(420, useBelow ? below : above);
-    if (height < 225) return;
+    if (height < 156) return;
     const left = Math.max(viewport.left + padding, Math.min(anchor.left, right - width - padding));
     return { width, left, maxHeight: height, top: useBelow ? anchorBottom + gap : anchor.top - gap, above: !useBelow };
 }

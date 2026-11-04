@@ -4,7 +4,7 @@ import { FileThumbnail } from './file-thumbnail';
 import type { SortActivator } from './sortable-file-items';
 
 export function FileCard({ id, title, type, assetId, blob, detail, index, status, selected = false, open = false, disabled = false,
-    selection, activator, popup = true, onOpen }: {
+    selection, activator, popup = true, compact = false, localOnly = false, onOpen }: {
     id: string;
     title: string;
     type: string;
@@ -19,6 +19,8 @@ export function FileCard({ id, title, type, assetId, blob, detail, index, status
     selection?: React.ReactNode;
     activator?: SortActivator;
     popup?: boolean;
+    compact?: boolean;
+    localOnly?: boolean;
     onOpen?: (anchor: HTMLElement) => void;
 }) {
     const touch = useRef<{ x: number; y: number; moved: boolean } | undefined>(undefined);
@@ -44,11 +46,11 @@ export function FileCard({ id, title, type, assetId, blob, detail, index, status
             }}
             sx={{ display: 'block', width: '100%', textAlign: 'left', borderRadius: 'inherit',
                 '&.Mui-focusVisible': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: -3 } }}>
-            <FileThumbnail assetId={assetId} type={type} blob={blob} extension={extension}
-                sx={{ height: 108 }} />
-            <Box sx={{ height: 48, p: .75, boxSizing: 'border-box' }}>
-                <Typography variant="body2" noWrap title={title}>{title}</Typography>
-                <Typography variant="caption" display="block" color="text.secondary" noWrap>{detail}</Typography>
+            <FileThumbnail assetId={assetId} type={type} blob={blob} extension={extension} localOnly={localOnly}
+                sx={{ height: compact ? 90 : 108 }} />
+            <Box sx={{ height: compact ? 32 : 48, p: compact ? .25 : .75, boxSizing: 'border-box' }}>
+                <Typography variant="body2" noWrap title={title} sx={compact ? { fontSize: 12, lineHeight: 1.15 } : undefined}>{title}</Typography>
+                <Typography variant="caption" display="block" color="text.secondary" noWrap sx={compact ? { fontSize: 11, lineHeight: 1.15 } : undefined}>{detail}</Typography>
             </Box>
         </ButtonBase>
         {index !== undefined && <Typography variant="caption" component="span" sx={{ ...badge, position: 'absolute', top: 6, left: 6, pointerEvents: 'none' }}>{index}</Typography>}

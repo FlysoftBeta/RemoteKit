@@ -18,7 +18,7 @@ interface SortableItem { id: string; name: string }
 export interface SortablePresentation { activator?: SortActivator; handle?: React.ReactNode; dragging: boolean; index: number; overlay?: boolean }
 const cardWidth = 144;
 
-function SortableFileItem({ id, name, index, mode, renderItem, disabled, isCurrent, anyDrag }: {
+function SortableFileItem({ id, name, index, mode, renderItem, disabled, isCurrent, anyDrag, width }: {
     id: string;
     name: string;
     index: number;
@@ -27,6 +27,7 @@ function SortableFileItem({ id, name, index, mode, renderItem, disabled, isCurre
     disabled: boolean;
     isCurrent: boolean;
     anyDrag: boolean;
+    width: number;
 }) {
     const { setNodeRef, setActivatorNodeRef, attributes, listeners, transform, transition, isDragging, isOver, index: currentIndex, activeIndex } =
         useSortable({ id, disabled: { draggable: disabled, droppable: false } });
@@ -43,7 +44,7 @@ function SortableFileItem({ id, name, index, mode, renderItem, disabled, isCurre
         : { left: 0, right: 0, height: 2, top: marker === 'before' ? 0 : 'calc(100% - 2px)' });
     return <Box component="li" ref={setNodeRef} data-sort-item={id} data-sort-target={marker}
         style={{ transform: isCurrent ? CSS.Transform.toString(transform) : undefined, transition: isCurrent ? transition : undefined }}
-        sx={{ width: cards ? cardWidth : '100%', flex: '0 0 auto', position: 'relative', scrollSnapAlign: cards ? 'start' : undefined,
+        sx={{ width: cards ? width : '100%', flex: '0 0 auto', position: 'relative', scrollSnapAlign: cards ? 'start' : undefined,
             '&::before': lifted ? { content: '""', position: 'absolute', inset: 0, bgcolor: 'action.hover', border: '1px dashed',
                 borderColor: 'divider', borderRadius: '10px', pointerEvents: 'none' } : undefined,
             '&::after': markerStyle ? { ...markerStyle, content: '""', position: 'absolute', zIndex: 2,
@@ -52,8 +53,9 @@ function SortableFileItem({ id, name, index, mode, renderItem, disabled, isCurre
     </Box>;
 }
 
-export function SortableFileItems<T extends SortableItem>({ items, revision, mode, disabled, label, renderItem, onChange, onDragging }: {
+export function SortableFileItems<T extends SortableItem>({ items, revision, mode, disabled, label, renderItem, onChange, onDragging, compact = false }: {
     items: T[];
+    compact?: boolean;
     revision: number;
     mode: FileView;
     disabled: boolean;
@@ -106,14 +108,14 @@ export function SortableFileItems<T extends SortableItem>({ items, revision, mod
     return <>
         <DndContext sensors={sensors} collisionDetection={args => {
                 const point = args.pointerCoordinates;
-                const bounds = (cards ? list.current : list.current?.closest('.MuiDialogContent-root'))?.getBoundingClientRect();
+                const bounds = (cards ? list.current : (compact ? list.current : list.current?.closest('.MuiDialogContent-root')))?.getBoundingClientRect();
                 if (point && bounds && (point.x < bounds.left || point.x > bounds.right || point.y < bounds.top || point.y > bounds.bottom)) return [];
                 return closestCenter(args);
             }}
             modifiers={[({ transform }) => cards ? { ...transform, y: 0 } : { ...transform, x: 0 }]}
             autoScroll={active ? { acceleration: 4.5, interval: 10,
                 threshold: cards ? { x: scrollEdge, y: 0 } : { x: 0, y: scrollEdge },
-                canScroll: element => element === (cards ? list.current : list.current?.closest('.MuiDialogContent-root')) } : false}
+                canScroll: element => element === (cards ? list.current : (compact ? list.current : list.current?.closest('.MuiDialogContent-root'))) } : false}
             cancelDrop={() => !drag.current || disabled || !basketDragCurrent(drag.current, ids, revision)}
             accessibility={{ screenReaderInstructions: { draggable: `按空格拿起，按${cards ? '左右' : '上下'}方向键调整位置，按回车或空格放下，按退出键取消。` },
                 announcements: {
@@ -126,7 +128,7 @@ export function SortableFileItems<T extends SortableItem>({ items, revision, mod
                 drag.current = { id: String(active.id), ids, revision };
                 setActiveId(drag.current.id);
                 onDragging(true);
-                const extent = cards ? list.current?.clientWidth : list.current?.closest('.MuiDialogContent-root')?.clientHeight;
+                const extent = cards ? list.current?.clientWidth : (compact ? list.current : list.current?.closest('.MuiDialogContent-root'))?.clientHeight;
                 if (extent) setScrollEdge(Math.min(.5, 36 / extent));
             }}
             onDragCancel={endDrag}
@@ -139,12 +141,12 @@ export function SortableFileItems<T extends SortableItem>({ items, revision, mod
             }}>
             <SortableContext items={order} strategy={cards ? horizontalListSortingStrategy : verticalListSortingStrategy}>
                 <Box component="ul" ref={list} aria-label={label} sx={{ m: 0, p: 0, listStyle: 'none', flexShrink: 0,
-                    ...(cards ? { display: 'flex', gap: '10px', overflowX: 'auto', overflowY: 'hidden', scrollSnapType: active ? 'none' : 'x proximity',
+                    ...(cards ? { display: 'flex', gap: compact ? '6px' : '10px', overflowX: 'auto', overflowY: 'hidden', scrollSnapType: active ? 'none' : 'x proximity',
                         scrollPaddingInline: '4px', px: .5, pt: .5, pb: .75, '&::-webkit-scrollbar': { height: 6 },
-                        '&::-webkit-scrollbar-thumb': { bgcolor: 'divider', borderRadius: 3 } } : {}) }}>
+                        '&::-webkit-scrollbar-thumb': { bgcolor: 'divider', borderRadius: 3 } } : compact ? { maxHeight: 170, overflowY: 'auto' } : {}) }}>
                     {order.map((id, index) => {
                         const item = byId.get(id);
-                        return item && <SortableFileItem key={id} id={id} name={item.name} index={index} mode={mode} disabled={disabled || !!saving || ids.length < 2}
+                        return item && <SortableFileItem key={id} id={id} name={item.name} index={index} mode={mode} width={compact ? 96 : cardWidth} disabled={disabled || !!saving || ids.length < 2}
                             isCurrent={!!active} anyDrag={!!activeId} renderItem={flags => renderItem(item, flags)} />;
                     })}
                 </Box>

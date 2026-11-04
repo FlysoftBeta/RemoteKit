@@ -20,7 +20,8 @@ constexpr std::uint64_t kMiB = 1024 * 1024;
 constexpr std::uint64_t kFileBytes = 256 * kMiB;
 constexpr std::uint64_t kLibraryBytes = 1024 * kMiB;
 constexpr std::uint64_t kDraftBytes = 512 * kMiB;
-constexpr std::uint64_t kDerivativeBytes = 24 * kMiB;
+constexpr std::uint64_t kJpegDerivativeBytes = 24 * kMiB;
+constexpr std::uint64_t kPngDerivativeBytes = 64 * kMiB;
 constexpr std::size_t kAssets = 8192;
 constexpr std::size_t kDrafts = 1024;
 constexpr std::size_t kActiveDrafts = 32;
@@ -483,20 +484,22 @@ void FileLibrary::References(std::uint64_t revision, const std::vector<std::stri
     reference_revision_ = revision;
   }
 }
-FileLibrary::Asset FileLibrary::CreateDerivative(const Render& render, const Check& check) {
+FileLibrary::Asset FileLibrary::CreateDerivative(const Render& render, const Check& check, DerivativeFormat format) {
+  const bool png = format == DerivativeFormat::png;
+  const auto budget = png ? kPngDerivativeBytes : kJpegDerivativeBytes;
   {
     std::lock_guard lock(mutex_);
     check();
-    if (entries_.size() >= kAssets || asset_bytes_ + draft_bytes_ + kDerivativeBytes > kLibraryBytes)
+    if (entries_.size() >= kAssets || asset_bytes_ + draft_bytes_ + budget > kLibraryBytes)
       throw std::runtime_error("asset_library_quota");
   }
-  const auto path = DraftData(RandomId());
+  const auto path = DraftData(RandomId() + (png ? ".png" : ".jpg"));
   try {
     const auto dimensions = render(path);
     if (!Plain(path)) throw std::runtime_error("photo_output_failed");
     const auto size = fs::file_size(path);
-    if (size > kDerivativeBytes) throw std::runtime_error("photo_output_too_large");
-    auto result = Publish(path, {{}, "image/jpeg", size, dimensions.width, dimensions.height}, check);
+    if (size > budget) throw std::runtime_error("photo_output_too_large");
+    auto result = Publish(path, {{}, png ? "image/png" : "image/jpeg", size, dimensions.width, dimensions.height}, check);
     Remove(path);
     return result;
   } catch (...) { Remove(path); throw; }

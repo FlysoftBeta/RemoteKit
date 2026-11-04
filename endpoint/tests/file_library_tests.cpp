@@ -21,7 +21,9 @@ int main() {
   const auto session = root / "session";
   const std::string hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
   const FileUploadStore::Spec spec{"photo.jpeg", "image/jpeg", 3};
+  const std::vector<std::uint8_t> png_signature{137,80,78,71,13,10,26,10};
   std::string upload;
+  std::string derivative_id;
   FileLibrary::Selection selection{"aabbccddaabbccddaabbccddaabbccdd", "chooser",
       {"browser", "1", "2", "3", "4"}, {{hash, "photo.jpeg", "image/jpeg"}}};
   auto unsubmitted = selection;
@@ -51,6 +53,15 @@ int main() {
     CHECK(library.Seal(1, upload, live).id == hash);
     CHECK(library.Read(hash, 1).second == std::vector<std::uint8_t>({'b', 'c'}));
     CHECK(library.Read(hash, 3).second.empty());
+    const auto derivative = library.CreateDerivative([&](const fs::path& path) {
+      CHECK(path.extension() == ".png");
+      std::ofstream output(path, std::ios::binary);
+      output.write(reinterpret_cast<const char*>(png_signature.data()), png_signature.size());
+      return FileLibrary::Derivative{800, 600};
+    }, live, FileLibrary::DerivativeFormat::png);
+    CHECK(derivative.type == "image/png" && derivative.width == 800 && derivative.height == 600);
+    derivative_id = derivative.id;
+    CHECK(library.Read(derivative_id, 0).second == png_signature);
     CHECK(Throws([&] { library.Read(hash, 4); }));
     FileLibrary other(root / "other-session");
     CHECK(Throws([&] { other.Describe(hash); }));
@@ -81,6 +92,7 @@ int main() {
     FileLibrary library(session);
     using State = FileLibrary::Selection::State;
     CHECK(library.Describe(hash).size == 3);
+    CHECK(library.Describe(derivative_id).type == "image/png");
     CHECK(library.Begin(1, "operation", spec, live)["offset"] == 3);
     CHECK(library.Seal(1, upload, live).id == hash);
     CHECK(library.FindSelection(selection.id)->state == State::submitted);

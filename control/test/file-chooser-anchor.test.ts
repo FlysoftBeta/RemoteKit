@@ -35,4 +35,8 @@ test('chooser stays in visual bounds, prefers below and can flip above without c
     assert.deepEqual(placeFileChooser({ left: 100, top: 660, width: 100, height: 30 }, viewport),
         { width: 360, left: 100, top: 652, maxHeight: 420, above: true });
     assert.equal(placeFileChooser({ left: 100, top: 680, width: 100, height: 30 }, viewport), undefined);
+    const compactViewport = { left: 0, top: 0, width: 568, height: 320 };
+    assert.deepEqual(placeFileChooser({ left: 100, top: 104, width: 100, height: 40 }, compactViewport),
+        { width: 360, left: 100, top: 152, maxHeight: 156, above: false });
+    assert.equal(placeFileChooser({ left: 100, top: 105, width: 100, height: 40 }, compactViewport), undefined);
 });

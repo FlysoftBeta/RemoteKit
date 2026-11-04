@@ -11,7 +11,72 @@ template<class F> void Until(F ready){const auto end=std::chrono::steady_clock::
 ServiceJson Request(const char* id,const char* method="status") {
  return {{"type","files.request"},{"version",1},{"requestId",id},{"method",method},{"params",{{"requestId","opaque"}}}};
 }
+struct TestBurstAnalyzer {
+ PhotoBurstDecision Observe(const std::string& frame,std::span<const std::uint8_t>,
+                            const std::vector<std::string>&,const PhotoCancelled& cancelled) {
+  CHECK(!cancelled());
+  return Decide(frame);
+ }
+ PhotoBurstDecision Finish(const std::vector<std::string>& available) {return Decide(available.front());}
+ static PhotoBurstDecision Decide(const std::string& frame) {
+  return {frame,{frame},{{frame,0.75}},false,false,"test"};
+ }
+};
+void CheckBursts() {
+ PhotoBurstSessions<TestBurstAnalyzer> bursts;
+ const auto live=[] {return false;};
+ const auto begin=[&] {return bursts.Execute(11,"photo.burst.begin",{},live)["burstId"].get<std::string>();};
+ const auto first=begin(),second=begin();
+ CHECK(first!=second);
+ CHECK(Throws(begin));
+ auto sample=[&](const std::string& frame,const std::vector<std::string>& available,
+                 const std::string& data="YWJj") {
+  return bursts.Execute(11,"photo.burst.sample",{{"burstId",first},{"frameId",frame},
+                         {"availableFrameIds",available},{"data",data}},live);
+ };
+ CHECK(Throws([&] {sample("1",{"1","future"});}));
+ CHECK(Throws([&] {sample("1",{"1","1"});}));
+ CHECK(Throws([&] {sample("1",{"1","2","3","4"});}));
+ CHECK(Throws([&] {sample("invalid\n",{"invalid\n"});}));
+ const auto decision=sample("1",{"1"});
+ CHECK(decision["selectedFrameId"]=="1" && decision["keepFrameIds"].size()==1 && decision["candidates"][0]["score"]==0.75);
+ CHECK(Throws([&] {sample("1",{"1"},"ZGVm");}));
+ CHECK(sample("2",{"1","2"})["selectedFrameId"]=="2");
+ CHECK(sample("3",{"2","3"})["selectedFrameId"]=="3");
+ CHECK(Throws([&] {sample("4",{"1","4"});}));
+ for(unsigned i=4;i<=20;++i) {
+  const auto id=std::to_string(i);
+  CHECK(sample(id,{id})["selectedFrameId"]==id);
+ }
+ CHECK(Throws([&] {sample("21",{"21"});}));
+ const ServiceJson end={{"burstId",first},{"availableFrameIds",{"20"}}};
+ const auto result=bursts.Execute(11,"photo.burst.end",end,live);
+ CHECK(result["selectedFrameId"]=="20");
+ CHECK(bursts.Execute(11,"photo.burst.end",end,live)==result);
+ CHECK(Throws([&] {bursts.Execute(12,"photo.burst.end",end,live);}));
+ auto conflict=end;conflict["availableFrameIds"]={"19"};
+ CHECK(Throws([&] {bursts.Execute(11,"photo.burst.end",conflict,live);}));
+ const ServiceJson cancel={{"burstId",second}};
+ CHECK(bursts.Execute(12,"photo.burst.cancel",cancel,live)["cancelled"]==true);
+ const auto third=begin();
+ CHECK(Throws(begin));
+ CHECK(bursts.Execute(11,"photo.burst.cancel",cancel,live)["cancelled"]==true);
+ CHECK(bursts.Execute(11,"photo.burst.cancel",cancel,live)["cancelled"]==true);
+ const ServiceJson empty_end={{"burstId",third},{"availableFrameIds",ServiceJson::array()}};
+ for(int i=0;i<2;++i) {
+  try {
+   bursts.Execute(11,"photo.burst.end",empty_end,live);
+   CHECK(false);
+  } catch(const std::runtime_error& error) {CHECK(std::string(error.what())=="photo_burst_no_samples");}
+ }
+ const auto expiring=begin();
+ bursts.Sweep([](uint64_t){return true;},decltype(bursts)::Clock::now()+std::chrono::seconds(6));
+ CHECK(Throws([&] {bursts.Execute(11,"photo.burst.end",{{"burstId",expiring},{"availableFrameIds",ServiceJson::array()}},live);}));
+ bursts.Sweep([](uint64_t){return false;});
+ CHECK(Throws([&] {bursts.Execute(11,"photo.burst.end",end,live);}));
+}
 int main() {
+ CheckBursts();
  CHECK(DecodeFileChunk("YWJj")==std::vector<std::uint8_t>({'a','b','c'}));
  CHECK(DecodeFileChunk("YQ==")==std::vector<std::uint8_t>({'a'}));
  CHECK(DecodeFileChunk("YWI=")==std::vector<std::uint8_t>({'a','b'}));
@@ -21,6 +86,15 @@ int main() {
  CHECK(Throws([]{DecodeFileChunk(std::string(21848,'A'));}));
  const auto a=Request("00000000-0000-4000-8000-000000000001");
  CHECK(FileRequestEnvelope(a,a.dump().size()));CHECK(!FileRequestEnvelope(a,24577));
+ auto burst_request=a;burst_request["params"]["requestId"]="library";burst_request["method"]="photo.burst.sample";
+ CHECK(FileRequestEnvelope(burst_request,61440));CHECK(!FileRequestEnvelope(burst_request,61441));
+ for(const auto method:{"photo.burst.begin","photo.burst.end","photo.burst.cancel","photo.process","asset.chunk","asset.describe"}) {
+  auto small=burst_request;small["method"]=method;
+  CHECK(FileRequestEnvelope(small,24576));CHECK(!FileRequestEnvelope(small,24577));
+ }
+ constexpr auto sample_bytes=PhotoBurstSessions<TestBurstAnalyzer>::kMaxSampleBytes;
+ CHECK(DecodeFileChunk(EncodeFileChunk(std::vector<std::uint8_t>(sample_bytes)),sample_bytes).size()==sample_bytes);
+ CHECK(Throws([&] {DecodeFileChunk(EncodeFileChunk(std::vector<std::uint8_t>(sample_bytes+1)),sample_bytes);}));
  auto malformed=a;malformed["requestId"]="g0000000-0000-4000-8000-000000000001";CHECK(!FileRequestEnvelope(malformed,512));
  DcFileServices services;std::atomic<unsigned> executions=0,sweeps=0;std::atomic<bool> hold=false,entered=false;
  services.Start([&](const DcFileServices::Job& job) {
@@ -60,11 +134,12 @@ int main() {
   return ServiceJson{{"sequence",n},{"current",library.Current(job)}};
  },[]{});
  library.Bind(9,"library-peer");
- auto asset=Request("00000000-0000-4000-8000-000000000003","photo.thumbnail");
+ auto asset=Request("00000000-0000-4000-8000-000000000003","photo.burst.sample");
  asset["params"]["requestId"]="library";
- asset["params"]["assetId"]=std::string(64,'a');
+ asset["params"]["burstId"]="test-burst";
  CHECK(FileRequestEnvelope(asset,asset.dump().size()));
  auto chooser_asset=asset;chooser_asset["params"]["requestId"]="opaque";
+ auto chooser_describe=chooser_asset;chooser_describe["method"]="asset.describe";
  auto library_commit=asset;library_commit["method"]="selection.commit";
  replies.clear();
  const auto drain=[&]{
@@ -87,6 +162,14 @@ int main() {
  library.Admit(9,asset);hold=false;
  Until([&]{drain();return replies.size()==5;});
  CHECK(replies.back()["result"]["sequence"]==3 && replies.back()["result"]["current"]==true);
+ library.Authorize("library-peer",99,{{"opaque",binding}},true);
+ chooser_describe["requestId"]="00000000-0000-4000-8000-000000000005";
+ library.Admit(9,chooser_describe);drain();
+ CHECK(replies.size()==6 && replies.back()["error"]=="stale_file_request");
+ chooser_describe["params"]["requestId"]="library";
+ library.Admit(9,chooser_describe);
+ Until([&]{drain();return replies.size()==7;});
+ CHECK(replies.back()["ok"]==true);
  library.Stop();
  std::cout<<"DC file admission, strict base64, receipts and peer retirement passed\n";
 }

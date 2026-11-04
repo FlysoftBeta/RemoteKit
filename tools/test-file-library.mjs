@@ -1,17 +1,18 @@
 /**
  * Isolated production H264/file-library regression.
- * node tools/test-file-library.mjs <playwright module> <viewer exe> <endpoint exe> <browser exe> <new output dir> [port] [Control server.mjs]
+ * node tools/test-file-library.mjs <playwright module> <viewer exe> <endpoint exe> <browser exe> <new output dir> [port] [Control server.mjs] [scan fixture directory]
+ * REMOTEKIT_QA_ACTIVE_FIXTURE=1 keeps the isolated remote fixture repainting during media-idle investigations.
  */
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const [playwright, viewer, endpoint, browser, output, listenPort = '33791', server] = process.argv.slice(2);
+const [playwright, viewer, endpoint, browser, output, listenPort = '33791', server, scanFixtures] = process.argv.slice(2);
 assert([playwright, viewer, endpoint, browser, output].every(Boolean), 'Expected module, three executables and a new output directory');
 const port = Number(listenPort);
 assert(Number.isInteger(port) && port > 1024 && port < 65535);
@@ -19,6 +20,8 @@ const root = fileURLToPath(new URL('../', import.meta.url));
 const run = resolve(output);
 const origin = 'http://127.0.0.1:' + port;
 const fixtureOrigin = 'http://127.0.0.1:' + (port + 1);
+const activeFixture = process.env.REMOTEKIT_QA_ACTIVE_FIXTURE === '1';
+const basketDialog = '[role="dialog"][aria-label="文件篮"]';
 const { chromium } = createRequire(import.meta.url)(resolve(playwright));
 await mkdir(run);
 
@@ -58,9 +61,21 @@ const fixture = createServer(async (request, response) => {
     <meta name="viewport" content="width=device-width,initial-scale=1">
     <style>body{margin:16px;font:18px sans-serif}input,button{display:block;margin-bottom:22px;width:290px;height:45px}[hidden]{display:none}</style>
     <input id="single" type="file" accept=".txt"><input id="multiple" type="file" multiple>
-    <button id="hidden">Hidden input</button><input id="fallback" type="file" hidden>
+    <button id="hidden">Hidden input</button><input id="fallback" type="file" hidden multiple>
     <button id="later">Read held files again</button>
     <script>
+      if (${activeFixture}) {
+        const marker = document.createElement('canvas');
+        marker.width = marker.height = 24;
+        marker.style.cssText = 'position:fixed;right:0;bottom:0;pointer-events:none';
+        document.body.append(marker);
+        const draw = marker.getContext('2d');
+        let tick = 0;
+        setInterval(() => {
+          draw.fillStyle = ++tick % 2 ? '#f03030' : '#2830f0';
+          draw.fillRect(0, 0, 24, 24);
+        }, 80);
+      }
       const report = (type, detail) => fetch('/event', {method:'POST',body:JSON.stringify({type,...detail})});
       const inputs = [...document.querySelectorAll('input')];
       const reportGeometry = () => report('geometry', {
@@ -116,7 +131,7 @@ function pixels(x, y, variant) {
   return y > 53 && y < 191 && x > 100 && x < 232 && x % 13 < 3 ? 32 : 230;
 }
 async function makeCamera() {
-  const { width, height } = photoSize;
+      const { width, height } = photoSize;
   const yuv = Buffer.alloc(width * height * 3 / 2, 128);
   for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) yuv[y * width + x] = pixels(x, y, 'page');
   const frame = Buffer.concat([Buffer.from('FRAME\n'), yuv]);
@@ -142,7 +157,7 @@ try {
   page.setDefaultTimeout(6000);
   await page.addInitScript(() => {
     const qa = window.fileQA = { sockets: [], peers: [], channels: [], pending: new Map(), sealed: new Map(), timeline: [],
-      thumbnails: new Map(), imageReads: new Set() };
+      thumbnails: new Map(), imageReads: new Set(), photoWire: [], heldUploads: [], cameraTracks: [], stillCalls: 0 };
     const ids = new WeakMap();
     let nextId = 0;
     const identity = object => {
@@ -162,6 +177,8 @@ try {
         qa.note({ type: message.type, epoch: message.epoch ?? message.layoutEpoch,
           peerEpoch: message.authEpoch, keyframe: message.keyframe, views: message.views?.length });
       if (message.type === 'files.result') {
+        const request = qa.photoWire.find(item => item.id === message.requestId);
+        if (request) Object.assign(request, { result: message.result, error: message.error, replied: performance.now() });
         const source = qa.thumbnails.get(message.requestId);
         if (source && message.ok && message.result?.assetId) qa.thumbnails.set(source, message.result);
         if (message.ok && message.result?.assetId && message.result?.hash)
@@ -201,10 +218,21 @@ try {
         const packet = JSON.parse(raw);
         if (packet.method === 'photo.thumbnail') qa.thumbnails.set(packet.requestId, packet.params.assetId);
         if (packet.method === 'asset.read') qa.imageReads.add(packet.params.assetId);
+        if (packet.method?.startsWith('photo.burst.') || packet.method === 'photo.process' ||
+            packet.method === 'asset.begin' && packet.params.type === 'image/png') {
+          const { data, ...params } = packet.params;
+          qa.photoWire.push({ id: packet.requestId, method: packet.method, params, at: performance.now(),
+            ...(data ? { jpeg: data.startsWith('/9j/'), bytes: atob(data).length, frame: qa.cameraSnapshotFrame } : {}) });
+          if (packet.method === 'photo.burst.sample') qa.cameraSampleIndex = (qa.cameraSampleIndex ?? 0) + 1;
+        }
         if (packet.type === 'media.refresh') qa.note({ type: packet.type, peerEpoch: packet.authEpoch });
         if (packet.authEpoch > 0 && this.label !== 'remotekit-auth') {
           qa.fileChannel = this;
           qa.peerEpoch = packet.authEpoch;
+        }
+        if (qa.holdPhotoUploads && packet.method === 'asset.begin' && packet.params.type === 'image/png') {
+          qa.heldUploads.push(() => send.call(this, raw));
+          return;
         }
       } catch {}
       return send.call(this, raw);
@@ -243,26 +271,80 @@ try {
     const devices = navigator.mediaDevices;
     const getUserMedia = devices?.getUserMedia.bind(devices);
     if (getUserMedia) devices.getUserMedia = async constraints => {
-      if (!qa.alternateCamera || !constraints.video) return getUserMedia(constraints);
+      if (!constraints.video) return getUserMedia(constraints);
+      if (qa.cameraFixture === 'denied') throw new DOMException('QA denied camera', 'NotAllowedError');
+      if (!qa.cameraFixture) {
+        const stream = await getUserMedia(constraints);
+        qa.cameraTracks.push(stream.getVideoTracks()[0]);
+        return stream;
+      }
       const canvas = document.createElement('canvas');
-      canvas.width = 520; canvas.height = 400;
+      canvas.width = 640; canvas.height = 480;
       const drawing = canvas.getContext('2d');
-      let alternate = false;
+      let tick = 0;
       const render = () => {
-        drawing.fillStyle = alternate ? 'rgb(235,184,94)' : 'rgb(193,174,255)';
+        tick++;
+        drawing.fillStyle = tick % 2 ? '#ababab' : '#aaaaaa';
         drawing.fillRect(0, 0, canvas.width, canvas.height);
-        drawing.fillStyle = alternate ? 'rgb(69,19,0)' : 'rgb(31,25,92)';
-        drawing.font = 'bold 28px sans-serif';
-        for (let y = 42; y < 400; y += 31) drawing.fillText('RemoteKit photo quality', 24, y);
-        alternate = !alternate;
+        if (qa.cameraFixture === 'soft') {
+          drawing.filter = 'blur(14px)';
+          drawing.fillStyle = '#656565';
+          drawing.font = 'bold 40px sans-serif';
+          drawing.fillText('Out of focus document', 25, 260);
+          drawing.filter = 'none';
+          return;
+        }
+        const alternate = qa.cameraFixture === 'alternate' && (qa.cameraSampleIndex ?? 0) % 2;
+        drawing.fillStyle = qa.cameraFixture === 'alternate' ? (alternate ? '#ebb85e' : '#c1aeff') : '#c0bcb8';
+        drawing.fillRect(70, 34, 500, 412);
+        if (qa.cameraFixture === 'alternate') drawing.filter = 'blur(1.4px)';
+        drawing.fillStyle = qa.cameraFixture === 'alternate' ? (alternate ? '#451300' : '#1f195c') : '#221f1c';
+        drawing.font = '24px sans-serif';
+        for (let y = 74; y < 430; y += 28) {
+          drawing.fillText('RemoteKit photo quality · RemoteKit photo quality', 84, y);
+        }
+        // Four camera axes distinguish each edge when one axis is cropped.
+        // A flat band avoids cross-browser text antialiasing at the side probes.
+        drawing.fillStyle = '#a0a0a0';
+        drawing.fillRect(0, 222, 640, 36);
+        for (const [color, x, y, w, h] of [
+          ['#ef2020', 0, 222, 150, 36], ['#20e040', 490, 222, 150, 36],
+          ['#2040ef', 302, 0, 36, 125], ['#efd020', 302, 355, 36, 125],
+        ]) {
+          drawing.fillStyle = color;
+          drawing.fillRect(x, y, w, h);
+        }
+        drawing.filter = 'none';
       };
-      const stream = canvas.captureStream(24);
+      const stream = canvas.captureStream(60);
       const track = stream.getVideoTracks()[0];
+      qa.cameraTracks.push(track);
       const stop = track.stop.bind(track);
       render();
-      const timer = setInterval(render, 140);
+      const timer = setInterval(render, 1000 / 60);
       track.stop = () => { clearInterval(timer); stop(); };
       return stream;
+    };
+    if (window.ImageCapture) {
+      const takePhoto = ImageCapture.prototype.takePhoto;
+      ImageCapture.prototype.takePhoto = function(...args) {
+        qa.stillCalls++;
+        return takePhoto.apply(this, args);
+      };
+    }
+    const requestVideoFrame = HTMLVideoElement.prototype.requestVideoFrameCallback;
+    if (requestVideoFrame) HTMLVideoElement.prototype.requestVideoFrameCallback = function(callback) {
+      return requestVideoFrame.call(this, (now, metadata) => {
+        const localCamera = this.closest('[aria-label="摄像头拍照"]');
+        if (localCamera) qa.cameraPresentedFrame = { presentedFrames: metadata.presentedFrames, mediaTime: metadata.mediaTime };
+        try { callback(now, metadata); } finally { if (localCamera) delete qa.cameraPresentedFrame; }
+      });
+    };
+    const drawImage = CanvasRenderingContext2D.prototype.drawImage;
+    CanvasRenderingContext2D.prototype.drawImage = function(source, ...args) {
+      if (source instanceof HTMLVideoElement && qa.cameraPresentedFrame)
+        qa.cameraSnapshotFrame = qa.cameraPresentedFrame;
+      return drawImage.call(this, source, ...args);
     };
   });
 
@@ -298,6 +380,9 @@ try {
     const { x, y } = await handle.jsonValue();
     await page.mouse.click(x, y);
   };
+  const bounds = selector => page.evaluate(css => document.querySelector(css)?.getBoundingClientRect().toJSON(), selector);
+  const scrollIntoView = selector => page.evaluate(css => document.querySelector(css)?.scrollIntoView({ block: 'nearest', inline: 'nearest' }), selector);
+  const isDisabled = selector => page.evaluate(css => !!document.querySelector(css)?.disabled, selector);
   const fill = async (css, value) => {
     await page.focus(css);
     await page.keyboard.press('Control+A');
@@ -311,7 +396,7 @@ try {
   });
   const tapRemote = async id => {
     await ready();
-    const local = await page.locator('.remote-viewport').boundingBox();
+    const local = await bounds('.remote-viewport');
     const geometry = await until('current remote fixture geometry', async () => {
       const path = await page.locator('.address-form input').inputValue();
       if (!path.startsWith(fixtureOrigin)) return null;
@@ -323,7 +408,7 @@ try {
       local.y + (y + height / 2) * local.height / geometry.height);
   };
   const chooser = async id => {
-    await wait(() => !document.getElementById('file-chooser-title') && !fileQA.state.fileRequests.length);
+    await wait(css => !document.querySelector(css) && !fileQA.state.fileRequests.length, basketDialog);
     await tapRemote(id);
     return until('native chooser ' + id, async () => (await state())?.fileRequests.find(request => request.state === 'pending'));
   };
@@ -342,11 +427,11 @@ try {
         inner.top >= outer.top - 1 && inner.bottom <= outer.bottom + 1;
     });
   }, selector);
-  const waitForAnchor = requestId => wait(id => {
+  const waitForAnchor = requestId => wait(({ id, css }) => {
     const current = fileQA.state.fileRequests.find(request => request.id === id);
-    const paper = document.getElementById('file-chooser-title')?.closest('[role="dialog"]');
+    const paper = document.querySelector(css);
     return current?.anchor && paper && getComputedStyle(paper).position === 'fixed' && current.anchor;
-  }, requestId).then(handle => handle.jsonValue());
+  }, { id: requestId, css: basketDialog }).then(handle => handle.jsonValue());
 
   await page.goto(origin, { timeout: 12000 });
   await wait(() => document.querySelector('.viewer-lock-blank'));
@@ -456,7 +541,7 @@ try {
   const anchor = await waitForAnchor(single.id);
   assert(anchor.instance && anchor.document && anchor.layoutGeneration);
   assert(anchor.width > 0 && anchor.height > 0 && anchor.x + anchor.width <= anchor.viewportWidth);
-  const basketList = 'ul[aria-label="文件篮"]';
+  const basketList = 'ul[aria-label="文件篮项目"]';
   const listRow = id => `${basketList} > li[data-sort-item="${id}"]`;
   const cardButton = id => listRow(id) + ' [data-file-card] > button';
   const handle = id => listRow(id) + ' button[aria-label^="拖动排序 "]';
@@ -468,7 +553,7 @@ try {
       JSON.stringify(await order()) === JSON.stringify(expected));
   };
   const center = async selector => {
-    const box = await page.locator(selector).boundingBox();
+    const box = await bounds(selector);
     assert(box, selector + ' has no bounds');
     return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
   };
@@ -516,22 +601,24 @@ try {
     return rows.length === 3 && rows.every(row => {
       const buttons = Array.from(row.querySelectorAll('button')).filter(button => button.getBoundingClientRect().width > 0);
       return buttons.some(button => button.getAttribute('aria-label')?.startsWith('拖动排序 ')) &&
-        ['插入', '移除'].every(action => buttons.some(button => button.textContent.trim() === action));
+        ['插入', '移除'].every(action => buttons.some(button => button.getAttribute('aria-label') === action));
     });
   }, basketList);
-  await wait(() => document.getElementById('file-chooser-title')?.closest('[role="dialog"]')?.textContent.includes('使用单选按钮选择一个文件'));
   await screenshot('chooser-list');
   await dragMouse(handle(b), listRow(c));
   await basketOrder([c,b,a]);
+  const more = basketDialog + ' button[aria-label="更多"]';
+  await click(more);
+  await wait(css => document.querySelector(css)?.textContent.includes('使用单选按钮选择一个文件'), basketDialog);
   await click('button[aria-label="切换到卡片"]');
+  await click(more);
   await wait(css => document.querySelectorAll(css + ' [data-file-card]').length === 3 &&
     !document.querySelector(css + ' button[aria-label^="拖动排序 "]'), basketList);
   await click(cardButton(c));
-  await wait(() => Array.from(document.querySelectorAll('[role="menuitem"]'))
-    .some(item => item.textContent.trim() === '从文件篮移除'));
+  await wait(() => [...document.querySelectorAll('button')].some(item => item.textContent.trim() === '从文件篮移除'));
   assert.equal(await page.locator('input[name="chooser-file"]:checked').count(), 0);
   await page.keyboard.press('Escape');
-  await wait(() => !document.querySelector('[role="menuitem"]'));
+  await wait(() => !document.querySelector('button[aria-label="收起项目"]'));
   await dragMouse(cardButton(c), cardButton(b));
   await basketOrder([b,c,a]);
   const writes = () => page.evaluate(() => fileQA.basketWrites ?? 0);
@@ -545,6 +632,11 @@ try {
   await basketOrder([b,c,a]);
   await screenshot('chooser-single');
 
+  await page.setViewportSize({ width: 320, height: 568 });
+  await wait(css => {
+    const strip = document.querySelector(css);
+    return strip && strip.scrollWidth - strip.clientWidth > 25;
+  }, basketList);
   const touch = await context.newCDPSession(page);
   await touch.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
   const dispatchTouch = (type, point) => touch.send('Input.dispatchTouchEvent', {
@@ -552,15 +644,19 @@ try {
   });
   const beforeSwipe = await writes();
   const start = await center(cardButton(c));
-  await dispatchTouch('touchStart', start);
-  for (let delta = 20; delta <= 120; delta += 20) await dispatchTouch('touchMove', { x: start.x - delta, y: start.y });
-  await dispatchTouch('touchEnd');
+  // Send the short swipe as one ordered CDP burst so debugger round trips on
+  // old Chromium cannot turn the gesture into the 200 ms drag hold.
+  await Promise.all([
+    dispatchTouch('touchStart', start),
+    ...[20, 40, 60, 80, 100, 120].map(delta => dispatchTouch('touchMove', { x: start.x - delta, y: start.y })),
+    dispatchTouch('touchEnd'),
+  ]);
   await wait(css => document.querySelector(css)?.scrollLeft > 20, basketList);
-  assert.equal(await page.locator('[role="menuitem"]').count(), 0);
+  assert.equal(await page.locator('button[aria-label="收起项目"]').count(), 0);
   assert.equal(await page.locator(overlay).count(), 0);
   await basketOrder([b,c,a]);
   assert.equal(await writes(), beforeSwipe);
-  await page.locator(basketList).evaluate(node => { node.scrollLeft = 0; });
+  await page.evaluate(css => { document.querySelector(css).scrollLeft = 0; }, basketList);
   const first = await center(cardButton(b)), target = await center(cardButton(c));
   await dispatchTouch('touchStart', first);
   await wait(css => document.querySelector(css), overlay);
@@ -570,9 +666,12 @@ try {
   await dispatchTouch('touchEnd');
   await basketOrder([c,b,a]);
   assert.equal(await writes(), beforeSwipe + 1);
-  assert.equal(await page.locator('[role="menuitem"]').count(), 0);
+  assert.equal(await page.locator('button[aria-label="收起项目"]').count(), 0);
   await touch.send('Emulation.setTouchEmulationEnabled', { enabled: false });
   await touch.detach();
+  await page.setViewportSize({ width: 1152, height: 820 });
+  await ready();
+  await sleep(250);
 
   await page.evaluate(() => { fileQA.holdBasket = true; });
   await keyboardSort(cardButton(c), 'ArrowRight', 'Enter');
@@ -580,6 +679,7 @@ try {
   const held = await page.evaluate(() => fileQA.heldBasket.params);
   assert.deepEqual(held.ids, [b,c,a]);
   assert.deepEqual(await order(), held.ids);
+  await click(more);
   await wait(() => document.querySelector('button[aria-label="切换到列表"]')?.disabled);
   const winner = [c,a,b];
   await operation('basket', { ids: winner, expectedRevision: held.expectedRevision });
@@ -588,6 +688,7 @@ try {
   await wait(() => Array.from(document.querySelectorAll('[role="alert"]'))
     .some(node => node.textContent.includes('文件篮已更新')));
   await screenshot('basket-conflict-rollback');
+  await click(more);
   await wait(css => document.querySelectorAll(css + ' [data-file-card]').length === 3, basketList);
   await keyboardSort(cardButton(b), 'Home', 'Enter');
   await basketOrder([b,c,a]);
@@ -624,7 +725,7 @@ try {
   await expectRejection('library.prepare', { operationId: randomUUID(), requestId: single.id, entryIds: [a,b], groupId });
   await select(single, [a], [expected('中文-字节.txt', assetA)]);
   assert.deepEqual((await library('get')).basket, [b,c]);
-  await wait(() => !document.getElementById('file-chooser-title'));
+  await wait(css => !document.querySelector(css), basketDialog);
   await tapRemote('later');
   assert.deepEqual((await until('held browser file bytes', () => events.find(event => event.type === 'delayed'))).files,
     [expected('中文-字节.txt', assetA)]);
@@ -671,81 +772,379 @@ try {
   const scan = await rtc('photo.process', { assetId: original.assetId, mode: 'scan' });
   for (const asset of [rectify, scan]) {
     assert(asset.width > 0 && asset.height > 0);
+    assert.equal(asset.type, 'image/png');
     assert.notEqual(asset.hash, original.hash);
-    assert((await read(asset)).length > 0);
+    assert.equal((await read(asset)).subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
   }
   assert.notEqual(scan.hash, rectify.hash);
   assert.deepEqual(await read(original), originalBytes);
-  snapshot = await importAsset(scan, 'scan.jpg', { destination: 'library', originalAssetId: original.assetId, groupId });
+  snapshot = await importAsset(scan, 'scan.png', { destination: 'library', originalAssetId: original.assetId, groupId });
   const scanEntry = snapshot.entries.find(entry => entry.assetId === scan.assetId);
   assert(scanEntry.archived && scanEntry.originalAssetId === original.assetId);
   snapshot = await operation('move', { ids: [scanEntry.id], groupId: null });
   assert.equal(snapshot.entries.find(entry => entry.id === scanEntry.id).groupId, null);
   await log(stage, { ranking, singleRank, original, rectify, scan });
 
-  stage = 'continuous-camera-and-chooser-retirement';
-  const openCamera = async () => {
-    await click('button', '添加文件');
-    await click('[role="menuitem"]', '摄像头拍照');
-  };
-  const hidden = await chooser('hidden');
-  await wait(id => {
-    const current = fileQA.state.fileRequests.find(request => request.id === id);
-    const paper = document.getElementById('file-chooser-title')?.closest('[role="dialog"]');
-    return current && !current.anchor && paper && getComputedStyle(paper).position !== 'fixed';
-  }, hidden.id);
-  await screenshot('chooser-fallback');
-  await openCamera();
-  const camera = '[role="dialog"].MuiDialog-paperFullScreen';
-  await wait(css => {
-    const video = document.querySelector(css + ' video');
-    if (!(video?.videoWidth > 0)) return false;
-    fileQA.cameraTrack = video.srcObject.getVideoTracks()[0];
-    return true;
-  }, camera);
-  const shutter = camera + ' button[aria-label="拍照"]';
-  await screenshot('camera');
-  await click(shutter);
-  await wait(css => Array.from(document.querySelectorAll(css + ' button')).some(button => button.textContent.trim() === '完成（1）'), camera);
-  await click(shutter);
-  await click(camera + ' button', '完成（2）');
-  const review = '[role="dialog"][aria-labelledby="photo-review"]';
-  const reviewItems = review + ' ul[aria-label="照片顺序"] > li[data-sort-item]';
-  const reviewCard = index => `${reviewItems}:nth-child(${index}) [data-file-card] > button`;
-  const reviewIds = () => page.locator(reviewItems).evaluateAll(nodes => nodes.map(node => node.dataset.sortItem));
-  await wait(css => document.querySelectorAll(css).length === 2 && fileQA.cameraTrack.readyState === 'ended', reviewItems);
-  await click(reviewCard(1));
-  await wait(() => document.querySelector('[role="menuitem"]'));
-  const candidateCount = await page.evaluate(() => Array.from(document.querySelectorAll('[role="menuitem"]'))
-    .filter(item => item.textContent.trim() === '查看候选').length);
-  assert.equal(candidateCount, 0, 'Identical fake-camera frames should not require choosing candidates');
-  const beforeRetake = await reviewIds();
-  await click('[role="menuitem"]', '重拍这张');
-  await click(camera + ' button[aria-label="取消重拍"]');
-  await wait(css => document.querySelectorAll(css).length === 2, reviewItems);
-  assert.deepEqual(await reviewIds(), beforeRetake);
-  await click(reviewCard(1));
-  await click('[role="menuitem"]', '重拍这张');
-  await click(shutter);
-  await wait(css => !document.querySelector(css), camera);
-  assert.deepEqual(await reviewIds(), beforeRetake);
-  await keyboardSort(reviewCard(1), 'ArrowRight', 'Enter');
-  assert.deepEqual(await reviewIds(), [...beforeRetake].reverse());
-  await containedImages(review + ' button[aria-label="查看当前照片大图"] img');
-  await screenshot('camera-review');
-  await click(reviewCard(1));
-  await click('[role="menuitem"]', '移除');
-  await click(review + ' button', '继续拍照');
-  await click(shutter);
-  await click(camera + ' button', '完成（2）');
-  await click(review + ' button', '加入文件篮（2）');
-  await click('[role="dialog"] button', '确认');
-  snapshot = await until('two continuous photos imported', async () => {
-    const next = await library('get');
-    return next.basket.length === 2 && next;
+  stage = 'camera-color-scan-stamp';
+  const stampedData = await page.evaluate(() => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1000; canvas.height = 700;
+    const ink = canvas.getContext('2d');
+    const light = ink.createLinearGradient(0, 0, canvas.width, 180);
+    light.addColorStop(0, '#85807b'); light.addColorStop(.7, '#ece8e2'); light.addColorStop(1, '#f0ede5');
+    ink.fillStyle = light;
+    ink.fillRect(0, 0, canvas.width, canvas.height);
+    ink.fillStyle = '#263d71';
+    ink.font = '24px sans-serif';
+    for (let y = 30; y < 700; y += 38) ink.fillText('EDGE / Blue ink / partial-page record', -6, y);
+    ink.fillStyle = '#9f988f';
+    ink.font = 'italic 22px serif';
+    ink.fillText('faint pencilled note', 240, 602);
+    ink.strokeStyle = ink.fillStyle = '#a02d38';
+    ink.lineWidth = 6;
+    ink.beginPath(); ink.arc(732, 380, 80, 0, Math.PI * 2); ink.stroke();
+    ink.font = 'bold 30px sans-serif';
+    ink.fillText('STAMP', 678, 390);
+    return canvas.toDataURL('image/png').split(',')[1];
   });
+  const stampedBytes = Buffer.from(stampedData, 'base64');
+  const stamped = await upload('color-partial.png', 'image/png', stampedBytes);
+  const stampedScan = await rtc('photo.process', { assetId: stamped.assetId, mode: 'scan' });
+  assert.equal(stampedScan.geometry, 'unchanged');
+  assert.deepEqual([stampedScan.width, stampedScan.height], [1000,700]);
+  const stampedOutput = await read(stampedScan);
+  const stampRgb = await page.evaluate(async encoded => {
+    const image = new Image();
+    image.src = 'data:image/png;base64,' + encoded;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width; canvas.height = image.height;
+    const draw = canvas.getContext('2d');
+    draw.drawImage(image, 0, 0);
+    return [...draw.getImageData(732, 300, 1, 1).data.slice(0, 3)];
+  }, stampedOutput.toString('base64'));
+  assert(stampRgb[0] - stampRgb[1] > 50, JSON.stringify(stampRgb));
+  await writeFile(join(run, 'color-partial-input.png'), stampedBytes);
+  await writeFile(join(run, 'color-partial-scan.png'), stampedOutput);
+  await log(stage, { stampRgb, geometry: stampedScan.geometry });
+
+  stage = 'camera-cover-and-sampling';
+  const camera = '[role="dialog"][aria-label="摄像头拍照"]';
+  const shutter = camera + ' button[aria-label="拍照"]';
+  const scanMode = camera + ' button[aria-pressed][value="scan"]';
+  const photoMode = camera + ' button[aria-pressed][value="photo"]';
+  const cameraFixture = name => page.evaluate(name => { fileQA.cameraFixture = name; }, name);
+  const basketSend = basketDialog + ' button[aria-label="发送"]';
+  const basketAdd = basketDialog + ' button[aria-label="添加文件"]';
+  const openCamera = async () => {
+    await click(basketAdd);
+    await click(basketDialog + ' button', '摄像头拍照');
+    if (await page.evaluate(() => fileQA.cameraFixture) !== 'denied')
+      await wait(css => !document.querySelector(css)?.disabled && document.querySelector(css), shutter);
+  };
+  const cameraReturn = () => click(camera + ' button[aria-label^="返回文件篮，"]');
+  const assertCameraLayout = async (width, height, safe = {}) => {
+    const actual = await page.evaluate(({ camera, shutter }) => {
+      const dialog = document.querySelector(camera);
+      const video = dialog.querySelector('video');
+      const button = document.querySelector(shutter);
+      return { view: [innerWidth, innerHeight], dialog: dialog.getBoundingClientRect().toJSON(),
+        video: video.getBoundingClientRect().toJSON(), cover: getComputedStyle(video).objectFit,
+        position: getComputedStyle(video).objectPosition,
+        shutter: button.getBoundingClientRect().toJSON() };
+    }, { camera, shutter });
+    for (const bounds of [actual.dialog, actual.video]) {
+      assert.equal(bounds.x, 0);
+      assert.equal(bounds.y, 0);
+      assert.equal(bounds.width, width);
+      assert.equal(bounds.height, height);
+    }
+    assert.equal(actual.cover, 'cover');
+    assert.equal(actual.position, '50% 50%');
+    const button = actual.shutter;
+    if (width > height) {
+      assert.equal(button.y + button.height / 2, height / 2);
+      assert.equal(width - button.right, 18 + (safe.right ?? 0));
+    } else {
+      assert.equal(button.x + button.width / 2, width / 2);
+      assert.equal(height - button.bottom, 18 + (safe.bottom ?? 0));
+    }
+    return actual;
+  };
+  const take = async () => {
+    const start = await page.evaluate(css => {
+      const button = document.querySelector(css);
+      fileQA.samplingEndedAt = undefined;
+      button.addEventListener('click', () => { fileQA.shutterAt = performance.now(); }, { capture: true, once: true });
+      return fileQA.photoWire.length;
+    }, shutter);
+    await click(shutter);
+    return start;
+  };
+  const sampleTrace = async start => {
+    await wait(start => fileQA.photoWire.slice(start).some(event => event.method === 'photo.burst.end' && event.result), start);
+    const trace = await page.evaluate(start => {
+      const tail = fileQA.photoWire.slice(start);
+      const end = tail.find(event => event.method === 'photo.burst.end');
+      return { begin: tail.find(event => event.method === 'photo.burst.begin'), end,
+        samples: tail.filter(event => event.method === 'photo.burst.sample' && event.params.burstId === end.params.burstId),
+        samplingMs: fileQA.samplingEndedAt - fileQA.shutterAt, stillCalls: fileQA.stillCalls };
+    }, start);
+    assert(trace.samples.length > 0 && trace.samples.length <= 20);
+    assert.equal(new Set(trace.samples.map(sample => sample.params.frameId)).size, trace.samples.length);
+    assert(trace.samples.every(sample => sample.jpeg && sample.bytes <= 44 * 1024));
+    const presented = trace.samples.map(sample => sample.frame);
+    assert(presented.every((frame, index) => frame && (!index || frame.presentedFrames > presented[index - 1].presentedFrames &&
+      frame.mediaTime > presented[index - 1].mediaTime)), JSON.stringify(presented));
+    assert.equal(trace.stillCalls, 0);
+    return trace;
+  };
+  const waitForPhoto = length => until('persisted camera photo count ' + length, async () => {
+    const current = await library('get');
+    return current.basket.length === length && current;
+  });
+  const assetOf = id => page.evaluate(id => fileQA.sealed.get(id), id);
+  const assertCrop = async (asset, width, height, fixture) => {
+    assert.equal(asset.type, 'image/png');
+    const bytes = await read(asset);
+    assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    const outputWidth = bytes.readUInt32BE(16);
+    const outputHeight = bytes.readUInt32BE(20);
+    const scale = Math.max(width / fixture.width, height / fixture.height);
+    const croppedWidth = Math.floor(width / scale + 1e-8);
+    const croppedHeight = Math.floor(height / scale + 1e-8);
+    assert(Math.abs(outputWidth - croppedWidth) <= 1);
+    assert(Math.abs(outputHeight - croppedHeight) <= 1);
+    const compared = await page.evaluate(async ({ png, width, height, outputWidth, outputHeight, fixture }) => {
+      const image = new Image();
+      image.src = 'data:image/png;base64,' + png;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = outputWidth;
+      canvas.height = outputHeight;
+      const context = canvas.getContext('2d');
+      context.drawImage(image, 0, 0);
+      const photo = context.getImageData(0, 0, outputWidth, outputHeight);
+      const scale = Math.max(width / fixture.width, height / fixture.height);
+      const left = (fixture.width - width / scale) / 2;
+      const top = (fixture.height - height / scale) / 2;
+      return [[.05,.5], [.95,.5], [.5,.05], [.5,.95]].map(([x,y]) => {
+        const px = Math.floor(x * outputWidth), py = Math.floor(y * outputHeight);
+        const sx = Math.round(left + px), sy = Math.round(top + py);
+        const index = (sx + sy * fixture.width) * 4;
+        return { x, y, sx, sy,
+          expected: fixture.probes[String(index)],
+          actual: [...photo.data.slice((px + py * outputWidth) * 4, (px + py * outputWidth) * 4 + 3)] };
+      });
+    }, { png: bytes.toString('base64'), width, height, outputWidth, outputHeight, fixture });
+    for (const sample of compared) {
+      assert(sample.expected && sample.actual.every((value, index) => Math.abs(value - sample.expected[index]) <= 20),
+        JSON.stringify(sample));
+    }
+    await writeFile(join(run, 'captured-' + width + 'x' + height + '.png'), bytes);
+    return compared;
+  };
+  const cropFixture = (width, height) => page.evaluate(({ width, height, camera }) => {
+    // Sample the local camera video, after browser color conversion, independently of the application capture.
+    const video = document.querySelector(camera + ' video');
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const context = canvas.getContext('2d');
+    context.drawImage(video, 0, 0);
+    const source = context.getImageData(0, 0, canvas.width, canvas.height);
+    const scale = Math.max(width / source.width, height / source.height);
+    const left = (source.width - width / scale) / 2;
+    const top = (source.height - height / scale) / 2;
+    const probes = {};
+    for (const [x, y] of [[.05,.5], [.95,.5], [.5,.05], [.5,.95]]) {
+      const px = Math.floor(x * Math.floor(width / scale + 1e-8));
+      const py = Math.floor(y * Math.floor(height / scale + 1e-8));
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const index = (Math.round(left + px) + dx + (Math.round(top + py) + dy) * source.width) * 4;
+        probes[String(index)] = [...source.data.slice(index, index + 3)];
+      }
+    }
+    return { width: source.width, height: source.height, probes };
+  }, { width, height, camera });
+  const watchSampling = () => page.evaluate(css => {
+    const shutter = document.querySelector(css);
+    fileQA.samplingEndedAt = undefined;
+    let disabled = false;
+    const observer = new MutationObserver(() => {
+      if (shutter.disabled) disabled = true;
+      else if (disabled) {
+        fileQA.samplingEndedAt = performance.now();
+        observer.disconnect();
+      }
+    });
+    observer.observe(shutter, { attributes: true, attributeFilter: ['disabled'] });
+  }, shutter);
+  const hidden = await chooser('hidden');
+  assert.equal(hidden.multiple, true);
+  await wait(id => fileQA.state.fileRequests.some(request => request.id === id && !request.anchor), hidden.id);
+  await cameraFixture('markers');
+  await openCamera();
+  if (userAgent.includes('Chrome/157.')) {
+    stage = 'camera-android-tablet-simulation';
+    const tablet = await context.newCDPSession(page);
+    await tablet.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+    const tap = async selector => {
+      const { x, y } = await center(selector);
+      await tablet.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y, id: 1 }] });
+      await tablet.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    };
+    const tabletLayouts = [];
+    try {
+      for (const [width, height] of [[1280,800], [800,1280], [1024,768]]) {
+        await tablet.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 2, mobile: false,
+          screenOrientation: { type: width > height ? 'landscapePrimary' : 'portraitPrimary', angle: width > height ? 90 : 0 } });
+        await wait(({ camera, width, height }) => {
+          const bounds = document.querySelector(camera)?.getBoundingClientRect();
+          return devicePixelRatio === 2 && bounds?.width === width && bounds.height === height;
+        }, { camera, width, height });
+        await tap(scanMode);
+        assert.equal(await page.locator(scanMode).getAttribute('aria-pressed'), 'true');
+        await tap(photoMode);
+        assert.equal(await page.locator(photoMode).getAttribute('aria-pressed'), 'true');
+        const layout = await assertCameraLayout(width, height);
+        // Playwright's screenshot helper restores its configured viewport.
+        // Capture through the same CDP session that owns the tablet metrics.
+        const png = await tablet.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
+        const screen = Buffer.from(png.data, 'base64');
+        assert.deepEqual([screen.readUInt32BE(16), screen.readUInt32BE(20)], [width * 2, height * 2]);
+        await writeFile(join(run, 'camera-tablet-' + width + 'x' + height + '.png'), screen);
+        tabletLayouts.push({ ...layout, dpr: 2 });
+      }
+      const wireStart = await page.evaluate(() => fileQA.photoWire.length);
+      await tap(shutter);
+      await sampleTrace(wireStart);
+      const tabletPhoto = await waitForPhoto(1);
+      await cameraReturn();
+      await operation('basket', { ids: [], expectedRevision: tabletPhoto.revision });
+      await openCamera();
+    } finally {
+      await tablet.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+      await tablet.send('Emulation.clearDeviceMetricsOverride');
+      await tablet.detach();
+    }
+    await log(stage, tabletLayouts);
+    stage = 'camera-cover-and-sampling';
+  }
+  const layouts = [];
+  for (const [width, height] of [[390,844], [844,390], [320,568], [568,320], [1280,720]]) {
+    await page.setViewportSize({ width, height });
+    await wait(({ camera, width, height }) => {
+      const bounds = document.querySelector(camera)?.getBoundingClientRect();
+      return bounds?.width === width && bounds.height === height;
+    }, { camera, width, height });
+    layouts.push(await assertCameraLayout(width, height));
+    await screenshot('camera-' + width + 'x' + height);
+  }
+  const safe = { left: 32, right: 38, bottom: 24, top: 18 };
+  await page.evaluate(safe => {
+    for (const [side, pixels] of Object.entries(safe))
+      document.documentElement.style.setProperty('--remotekit-safe-area-' + side, pixels + 'px');
+  }, safe);
+  for (const [width, height] of [[320,568], [568,320]]) {
+    await page.setViewportSize({ width, height });
+    await wait(({ camera, width, height }) => {
+      const bounds = document.querySelector(camera)?.getBoundingClientRect();
+      return bounds?.width === width && bounds.height === height;
+    }, { camera, width, height });
+    const actual = await assertCameraLayout(width, height, safe);
+    const back = await bounds(camera + ' button[aria-label="返回"]');
+    assert.equal(back.x, safe.left + 8);
+    assert.equal(back.y, safe.top + 8);
+    await screenshot('camera-safe-' + width + 'x' + height);
+    layouts.push({ ...actual, safe, back });
+  }
+  await page.evaluate(safe => {
+    for (const side of Object.keys(safe)) document.documentElement.style.removeProperty('--remotekit-safe-area-' + side);
+  }, safe);
+  await log('camera-layout', layouts);
+  for (const [width, height] of [[390,844], [844,390]]) {
+    await page.setViewportSize({ width, height });
+    await wait(({ camera, width, height }) => {
+      const bounds = document.querySelector(camera)?.getBoundingClientRect();
+      return bounds?.width === width && bounds.height === height;
+    }, { camera, width, height });
+    const fixture = await cropFixture(width, height);
+    await watchSampling();
+    const trace = await sampleTrace(await take());
+    assert(trace.samples.some(sample => sample.result?.stop), 'Sharp fixture must receive Endpoint early-stop');
+    assert(trace.samplingMs > 0 && trace.samplingMs < 950, JSON.stringify(trace));
+    snapshot = await waitForPhoto(width > height ? 2 : 1);
+    const photo = snapshot.entries.find(entry => entry.id === snapshot.basket.at(-1));
+    assert.equal(photo.photo.mode, 'photo');
+    assert.equal(photo.photo.pending, undefined);
+    const crop = await assertCrop(await assetOf(photo.assetId), width, height, fixture);
+    await log('camera-sharp', { trace, crop });
+  }
+
+  stage = 'camera-queue-orientation-retake';
+  await cameraFixture('soft');
+  await sleep(100);
+  const orientationStart = await take();
+  await wait(start => fileQA.photoWire.slice(start).some(event => event.method === 'photo.burst.sample'), orientationStart);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await wait(css => document.querySelector(css)?.textContent.includes('取景尺寸已改变'), camera);
+  await wait(start => fileQA.photoWire.slice(start).some(event => event.method === 'photo.burst.cancel'), orientationStart);
+  assert.equal((await library('get')).basket.length, 2);
+
+  await page.evaluate(() => { fileQA.holdPhotoUploads = true; });
+  await click(scanMode);
+  await watchSampling();
+  const soft = await sampleTrace(await take());
+  assert(soft.samplingMs >= 900 && soft.samplingMs <= 1100, JSON.stringify(soft));
+  assert(soft.samples.every(sample => !sample.result?.stop));
+  await wait(() => fileQA.heldUploads.length === 1);
+  const firstJob = (await order()).find(id => !snapshot.basket.includes(id));
+  assert(firstJob);
+  await click(photoMode);
+  const queued = await take();
+  await sampleTrace(queued);
+  await wait(css => document.querySelector(css)?.textContent.includes('处理中，稍候再拍'), camera);
+  assert(await isDisabled(shutter));
+  await page.evaluate(css => document.querySelector(css).click(), shutter);
+  assert.equal(await page.evaluate(start => fileQA.photoWire.slice(start)
+    .filter(event => event.method === 'photo.burst.begin').length, queued), 1);
+  await cameraReturn();
+  await wait(() => fileQA.cameraTracks.every(track => track.readyState === 'ended'));
+  assert(await isDisabled(basketSend));
+  await screenshot('camera-queue-in-basket');
+  await log('camera-soft', { samplingMs: soft.samplingMs, samples: soft.samples.length, trace: soft });
+
+  // Discard the queued second job before releasing the first transfer.
+  const queueIds = (await order()).filter(id => !snapshot.basket.includes(id));
+  assert.equal(queueIds.length, 2);
+  assert.equal(queueIds[0], firstJob);
+  await scrollIntoView(cardButton(queueIds[1]));
+  await click(cardButton(queueIds[1]));
+  await click(basketDialog + ' button', '移除照片');
+  await wait(id => !document.querySelector('li[data-sort-item="' + id + '"]'), queueIds[1]);
+  await page.evaluate(() => { fileQA.holdPhotoUploads = false; fileQA.heldUploads.shift()(); });
+  snapshot = await waitForPhoto(3);
+  assert.equal(snapshot.entries.find(entry => entry.id === snapshot.basket.at(-1)).photo.mode, 'scan');
+  assert.equal(snapshot.entries.find(entry => entry.id === snapshot.basket.at(-1)).photo.pending, undefined);
+  assert.equal((await order()).includes(queueIds[1]), false);
+  assert(!await isDisabled(basketSend));
+
+  const oldEntry = snapshot.entries.find(entry => entry.id === snapshot.basket[0]);
+  await click(cardButton(oldEntry.id));
+  await click(basketDialog + ' button', '重拍');
+  await click(camera + ' button[aria-label="取消重拍"]');
+  assert.deepEqual((await library('get')).entries.find(entry => entry.id === oldEntry.id), oldEntry);
+  await cameraFixture('denied');
+  if (!await page.locator('button[aria-label="收起项目"]').count()) await click(cardButton(oldEntry.id));
+  await click(basketDialog + ' button', '重拍');
+  await wait(css => document.querySelector(css)?.textContent.includes('无法使用摄像头'), camera);
+  await click(camera + ' button[aria-label="取消重拍"]');
+  assert.deepEqual((await library('get')).entries.find(entry => entry.id === oldEntry.id), oldEntry);
   assert.deepEqual(await identity(), baseline);
-  const prepared = await library('prepare', { operationId: randomUUID(), requestId: hidden.id, entryIds: snapshot.basket.slice(0, 1), groupId: null });
+
+  const prepared = await library('prepare', { operationId: randomUUID(), requestId: hidden.id,
+    entryIds: snapshot.basket.slice(0, 1), groupId: null });
   const remoteTab = (await state()).workspace.windows.find(window => window.id === hidden.windowId).activeTabId;
   await action({ type: 'tab.navigate', tabId: remoteTab, url: fixtureOrigin + '/retired' });
   const retired = await until('prepared chooser retires without consuming basket', async () => {
@@ -753,78 +1152,68 @@ try {
     return result.state === 'cancelled' && result;
   });
   assert.deepEqual(retired.snapshot.basket, snapshot.basket);
-  assert.equal(events.filter(event => event.type === 'selected').length, 2);
   const photos = snapshot.basket.map(id => snapshot.entries.find(entry => entry.id === id));
   await chooser('single');
-  await wait(() => document.querySelectorAll('input[name="chooser-file"]').length === 2);
-  await wait(css => document.querySelectorAll(css + ' [data-file-card] img').length === 2, basketList);
+  await wait(() => document.querySelectorAll('input[name="chooser-file"]').length === 3);
   await screenshot('chooser-photo-cards');
-  const submit = () => page.evaluate(() => Array.from(document.querySelectorAll('button'))
-    .find(button => button.textContent.trim() === '使用选中文件')?.disabled);
-  assert.equal(await submit(), true);
-  await click('[aria-label="文件篮"] li:nth-child(2) input[name="chooser-file"]');
-  assert.equal(await submit(), false);
-  await click('button', '使用选中文件');
-  await click('[role="dialog"] button', '确认');
+  const stripBox = await bounds(basketDialog);
+  const toolbar = await Promise.all([basketSend, basketAdd, more].map(selector => bounds(selector)));
+  assert(stripBox.height >= 135 && stripBox.height <= 165, JSON.stringify(stripBox));
+  assert(toolbar.every((box, index) => box.width === 44 && box.height === 44 &&
+    box.x === toolbar[0].x && box.y === toolbar[0].y + index * 46), JSON.stringify(toolbar));
+  assert(await isDisabled(basketSend));
+  await click(listRow(photos[1].id) + ' input[name="chooser-file"]');
+  assert(!await isDisabled(basketSend));
+  await click(basketSend);
+  await click(basketDialog + ' button', '确认');
   const photoSelected = await until('radio choice delivers exactly one photo', () =>
     events.filter(event => event.type === 'selected')[2]);
-  const chosenPhoto = await page.evaluate(id => fileQA.sealed.get(id), photos[1].assetId);
-  assert(chosenPhoto);
+  const chosenPhoto = await assetOf(photos[1].assetId);
   assert.deepEqual(photoSelected.files, [expected(photos[1].name, chosenPhoto)]);
-  await until('radio choice removes only selected photo', async () => {
-    const current = await library('get');
-    return current.basket.length === 1 && current.basket[0] === photos[0].id;
-  });
+  await waitForPhoto(2);
   await ready();
-  await log(stage, { candidateCount, outcome: retired.state, remainingPhotos: 1 });
+  await log(stage, { outcome: retired.state, originalEntry: oldEntry.id, stripBox, toolbar });
 
-  stage = 'uncertain-camera-review';
-  await page.evaluate(() => { fileQA.alternateCamera = true; });
-  await chooser('hidden');
+  stage = 'inline-candidate';
+  await cameraFixture('alternate');
+  const pendingChooser = await chooser('hidden');
   await openCamera();
-  await click(shutter);
-  await click(camera + ' button', '完成（1）');
-  const canSave = () => page.evaluate(css => Array.from(document.querySelectorAll(css + ' button'))
-    .find(button => button.textContent.trim().startsWith('加入文件篮'))?.disabled === false, review);
-  await wait(css => document.querySelector(css)?.textContent.includes('待选片'), review);
-  assert.equal(await canSave(), false);
-  await click(reviewCard(1));
-  await click('[role="menuitem"]', '查看候选');
-  const comparison = await wait(() => {
-    const dialog = Array.from(document.querySelectorAll('[role="dialog"]'))
-      .find(node => node.textContent.includes('比较候选照片') && node.textContent.includes('使用这张'));
-    const candidates = Array.from(dialog?.querySelectorAll('[data-file-card] img') ?? []);
-    if (candidates.length < 2 || candidates.some(img => img.naturalWidth < 300)) return false;
-    return candidates.map(img => ({ width: img.width, height: img.height, sourceWidth: img.naturalWidth }));
-  }).then(handle => handle.jsonValue());
-  const candidateHero = 'button[aria-label="查看原图"] img';
-  await click('[data-file-card] > button[aria-label="候选 1"]');
-  await sleep(150);
-  const candidateHeroBefore = await page.locator(candidateHero).getAttribute('src');
-  await click('[data-file-card] > button[aria-label="候选 2"]');
-  await wait(({ css, src }) => {
-    const image = document.querySelector(css);
-    return image?.complete && image.naturalWidth > 0 && image.src !== src;
-  }, { css: candidateHero, src: candidateHeroBefore });
-  await containedImages(candidateHero);
-  await screenshot('camera-candidate-comparison');
-  await click('button[aria-label="查看原图"]');
-  const preview = await wait(() => {
-    const dialog = Array.from(document.querySelectorAll('[role="dialog"]'))
-      .find(node => Array.from(node.querySelectorAll('button')).some(button => button.textContent.trim() === '返回候选'));
-    const photo = dialog?.querySelector('img');
-    return photo?.naturalWidth >= 500 && photo.getBoundingClientRect().width > 300 &&
-      { displayed: photo.getBoundingClientRect().width, original: photo.naturalWidth };
-  }).then(handle => handle.jsonValue());
-  await screenshot('camera-candidate-original');
-  await click('[role="dialog"] button', '返回候选');
-  await click('[role="dialog"] button', '使用这张');
-  assert.equal(await canSave(), true);
-  await click(review + ' button', '关闭');
-  await click('button[aria-label="取消文件选择"]');
-  await wait(() => !document.getElementById('file-chooser-title'));
+  await click(camera + ' button[aria-label="连续拍摄已开启"]');
+  await click(scanMode);
+  await page.evaluate(() => { fileQA.holdPhotoUploads = true; });
+  const alternateStart = await take();
+  await wait(css => !document.querySelector(css), camera);
+  const alternate = await sampleTrace(alternateStart);
+  await wait(() => fileQA.heldUploads.length === 1);
+  assert.equal((await library('get')).basket.length, 2);
+  assert(await isDisabled(basketSend));
+  await page.evaluate(() => { fileQA.holdPhotoUploads = false; fileQA.heldUploads.shift()(); });
+  assert(alternate.end.result.uncertain, JSON.stringify(alternate));
+  snapshot = await waitForPhoto(3);
+  const candidateEntry = snapshot.entries.find(entry => entry.id === snapshot.basket.at(-1));
+  assert.equal(candidateEntry.photo.mode, 'scan');
+  assert.equal(candidateEntry.photo.pending, 'choice');
+  assert.equal(candidateEntry.photo.candidateAssetIds.length, 2);
+  assert(await isDisabled(basketSend));
+  await expectRejection('library.prepare', { operationId: randomUUID(), requestId: pendingChooser.id, entryIds: snapshot.basket, groupId: null });
+  await scrollIntoView(cardButton(candidateEntry.id));
+  await click(cardButton(candidateEntry.id));
+  await wait(() => [...document.querySelectorAll('button')].some(node => node.textContent.trim() === '使用这张'));
+  assert.equal(await page.locator('[role="dialog"]').count(), 1);
+  await click(basketDialog + ' button[aria-label="候选 2"]');
+  assert.equal(await page.locator(basketDialog + ' button[aria-label="候选 2"]').getAttribute('aria-pressed'), 'true');
+  await screenshot('camera-inline-candidate');
+  await click(basketDialog + ' button', '使用这张');
+  await until('chosen candidate processed with frozen scan mode', async () => {
+    const entry = (await library('get')).entries.find(entry => entry.id === candidateEntry.id);
+    return entry?.photo.mode === 'scan' && !entry.photo.pending && entry.originalAssetId && entry.assetId !== entry.originalAssetId;
+  });
+  assert(!await isDisabled(basketSend));
+  await click(more);
+  await click(basketDialog + ' button', '取消文件选择');
+  await wait(css => !document.querySelector(css), basketDialog);
   assert.deepEqual(await identity(), baseline);
-  await log(stage, { comparison, preview, resolveCandidate: '使用这张' });
+  await log(stage, { candidates: candidateEntry.photo.candidateAssetIds, decision: alternate.end.result });
 
   stage = 'authorization';
   const originalEpoch = await page.evaluate(() => fileQA.peerEpoch);
@@ -906,22 +1295,45 @@ try {
   stage = 'anchor-visibility-revocation';
   const moving = await chooser('single');
   const visible = await waitForAnchor(moving.id);
-  const beforeHide = await page.locator('.remote-viewport').boundingBox();
+  const beforeHide = await bounds('.remote-viewport');
   await until('remote hides actual input', () => events.some(event => event.type === 'anchor-hidden'));
-  await wait(id => {
+  await wait(({ id, css }) => {
     const current = fileQA.state.fileRequests.find(request => request.id === id);
-    const paper = document.getElementById('file-chooser-title')?.closest('[role="dialog"]');
+    const paper = document.querySelector(css);
     return current && !current.anchor && paper && getComputedStyle(paper).position !== 'fixed';
-  }, moving.id);
-  assert.deepEqual(await page.locator('.remote-viewport').boundingBox(), beforeHide);
-  await click('button[aria-label="取消文件选择"]');
+  }, { id: moving.id, css: basketDialog });
+  assert.deepEqual(await bounds('.remote-viewport'), beforeHide);
+  await click(more);
+  await click(basketDialog + ' button', '取消文件选择');
   await until('cancel native request after fallback', async () => !(await state()).fileRequests.some(request => request.id === moving.id));
   await log(stage, { visible, contentBounds: beforeHide });
+  if (scanFixtures) {
+    stage = 'camera-color-scan-fixtures';
+    for (const name of ['partial_soft-input.png', 'partial_hard-input.png', 'book-input.png', 'receipt.jpg']) {
+      const input = await readFile(join(scanFixtures, name));
+      const source = await upload(name, name.endsWith('.jpg') ? 'image/jpeg' : 'image/png', input);
+      const start = performance.now();
+      const result = await rtc('photo.process', { assetId: source.assetId, mode: 'scan' });
+      const processingMs = performance.now() - start;
+      const actual = await read(result);
+      assert.equal(result.type, 'image/png');
+      assert.equal(actual.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+      if (name.startsWith('partial')) {
+        assert.equal(result.geometry, 'unchanged');
+        assert.deepEqual([result.width, result.height], [input.readUInt32BE(16), input.readUInt32BE(20)]);
+      }
+      assert.deepEqual(await read(source), input);
+      await writeFile(join(run, name + '-scan.png'), actual);
+      await log(stage, { name, source, result, processingMs });
+    }
+  }
+
   await log('pass');
 } catch (error) {
   process.exitCode = 1;
-  const probe = await page?.evaluate(async () => {
-    const paper = document.getElementById('file-chooser-title')?.closest('[role="dialog"]');
+  const probe = await page?.evaluate(async css => {
+    const paper = document.querySelector(css);
+    const camera = document.querySelector('[role="dialog"][aria-label="摄像头拍照"]');
     const qa = window.fileQA;
     const stats = await qa?.peers[0]?.getStats().catch(() => undefined);
     const inbound = Array.from(stats?.values() ?? []).filter(entry => entry.type === 'inbound-rtp' &&
@@ -936,8 +1348,12 @@ try {
       input: document.querySelector('canvas[data-video-input]')?.className, inbound, timeline: qa?.timeline,
       activeTab: activeTab && { id: activeTab.id, webviewId: activeTab.webviewId, restoring: activeTab.restoring,
         residency: activeTab.residency, kind: activeTab.kind },
+      photoWire: qa?.photoWire.slice(-30),
+      camera: camera && { bounds: camera.getBoundingClientRect().toJSON(), maxHeight: getComputedStyle(camera).maxHeight,
+        inner: [innerWidth, innerHeight], visual: [visualViewport?.width, visualViewport?.height],
+        secure: isSecureContext, cameraApi: !!navigator.mediaDevices?.getUserMedia },
       dialogs: Array.from(document.querySelectorAll('[role="dialog"]'), dialog => dialog.textContent.slice(0, 600)) };
-  }).catch(() => null);
+  }, basketDialog).catch(() => null);
   await log('failure', { stage, error: error.stack, probe });
   await page?.screenshot({ path: join(run, 'failure.png'), timeout: 3000 }).catch(() => {});
 } finally {

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import type { Asset, LibraryEntry, LibraryMethods, LibrarySnapshot, SelectionState } from '../shared/file-library';
+import type { Asset, LibraryEntry, LibraryMethods, LibrarySnapshot, PhotoMetadata, SelectionState } from '../shared/file-library';
 import type { Endpoint } from './endpoint';
 import { FileUploadError, type FileBinding, type InternalFileRequest, type UploadLimits } from './file-uploads';
 
@@ -30,6 +30,23 @@ function id(value: unknown): string {
 function ids(value: unknown, max: number, min = 0): string[] {
   if (!Array.isArray(value) || value.length < min || value.length > max || new Set(value).size !== value.length) throw invalid('无效的文件数量或重复文件');
   return value.map(id);
+}
+function photoMetadata(value: unknown): PhotoMetadata | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object') throw invalid('无效的照片信息');
+  const { mode, pending, warning, candidateAssetIds } = value as Partial<PhotoMetadata>;
+  if (mode !== 'photo' && mode !== 'scan') throw invalid('无效的拍摄模式');
+  if (pending !== undefined && pending !== 'choice' && pending !== 'scan-error') throw invalid('无效的照片状态');
+  if (warning !== undefined && (typeof warning !== 'string' || warning.length > 256)) throw invalid('无效的照片警告');
+  return {
+    mode,
+    ...(candidateAssetIds !== undefined ? { candidateAssetIds: ids(candidateAssetIds, 2) } : {}),
+    ...(pending !== undefined ? { pending } : {}),
+    ...(warning !== undefined ? { warning } : {}),
+  };
+}
+function assetIds({ assetId, originalAssetId, photo }: Pick<LibraryEntry, 'assetId' | 'originalAssetId' | 'photo'>): string[] {
+  return [...new Set([assetId, ...(originalAssetId ? [originalAssetId] : []), ...(photo?.candidateAssetIds ?? [])])];
 }
 function fileName(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 255 || /[\x00-\x1f\x7f<>:"/\\|?*]/.test(value) || /[ .]$/.test(value) ||
@@ -103,15 +120,29 @@ export class FileLibrary {
       throw new FileUploadError(502, 'Endpoint未返回有效文件信息');
     return value;
   }
+  private async retainAssets(tenant: string, fields: Pick<LibraryEntry, 'assetId' | 'originalAssetId' | 'photo'>,
+                             authorize: () => void): Promise<Asset> {
+    const references = assetIds(fields);
+    const asset = await this.describe(tenant, fields.assetId);
+    for (const reference of references.slice(1)) await this.describe(tenant, reference);
+    authorize();
+    const retained = await this.endpoint.request('session.library.retain', tenant, { assetIds: references });
+    authorize();
+    if (retained?.accepted !== true) throw new FileUploadError(502, 'Endpoint未确认保留文件');
+    return asset;
+  }
   private async import(tenant: string, params: Params<'library.import'>, authorize: () => void) {
     const operationId = id(params.operationId), assetId = id(params.assetId), name = fileName(params.name);
     const { destination } = params;
     if (destination !== 'basket' && destination !== 'library') throw invalid('无效的文件保存位置');
     const originalAssetId = params.originalAssetId === undefined ? undefined : id(params.originalAssetId);
+    const photo = photoMetadata(params.photo);
     const afterId = params.afterId === undefined ? undefined : id(params.afterId);
     if (afterId !== undefined && destination !== 'basket') throw invalid('仅篮内文件支持指定插入位置');
     const requestedGroup = params.groupId === null ? null : id(params.groupId);
-    const payload = operationHash('import', assetId, name, destination, requestedGroup, originalAssetId, afterId);
+    // Keep the original receipt hash for imports from before photo metadata.
+    const fields = ['import', assetId, name, destination, requestedGroup, originalAssetId, afterId];
+    const payload = operationHash(...fields, ...(photo ? [photo] : []));
     if (this.operation(tenant, operationId, payload)) return this.snapshot(tenant);
     const validate = (snapshot: LibrarySnapshot) => {
       const groupId = group(snapshot, requestedGroup);
@@ -121,23 +152,46 @@ export class FileLibrary {
       return groupId;
     };
     validate(this.snapshot(tenant));
-    const asset = await this.describe(tenant, assetId);
-    if (originalAssetId && originalAssetId !== assetId) await this.describe(tenant, originalAssetId);
-    authorize();
-    const retained = await this.endpoint.request('session.library.retain', tenant, {
-      assetIds: originalAssetId && originalAssetId !== assetId ? [assetId, originalAssetId] : [assetId],
-    });
-    authorize();
-    if (retained?.accepted !== true) throw new FileUploadError(502, 'Endpoint未确认保留文件');
+    const asset = await this.retainAssets(tenant, { assetId, originalAssetId, photo }, authorize);
     return this.change(tenant, operationId, payload, snapshot => {
       const groupId = validate(snapshot), entryId = randomUUID();
       snapshot.entries.unshift({ id: entryId, assetId, name, type: asset.type, size: asset.size, createdAt: Date.now(),
-        groupId, archived: destination === 'library', ...(originalAssetId ? { originalAssetId } : {}) });
+        groupId, archived: destination === 'library', ...(originalAssetId ? { originalAssetId } : {}), ...(photo ? { photo } : {}) });
       if (destination === 'basket') {
         const index = afterId === undefined ? snapshot.basket.length : snapshot.basket.indexOf(afterId) + 1;
         snapshot.basket.splice(index, 0, entryId);
       }
     });
+  }
+  private async replace(tenant: string, params: Params<'library.replace'>, authorize: () => void) {
+    const operationId = id(params.operationId), entryId = id(params.entryId), assetId = id(params.assetId);
+    const { expectedRevision } = params;
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw invalid('无效的文件库版本');
+    const originalAssetId = params.originalAssetId === undefined ? undefined : id(params.originalAssetId);
+    const photo = photoMetadata(params.photo);
+    const payload = operationHash('replace', entryId, expectedRevision, assetId, originalAssetId, photo);
+    if (this.operation(tenant, operationId, payload)) return this.snapshot(tenant);
+    const validate = (snapshot: LibrarySnapshot) => {
+      if (snapshot.revision !== expectedRevision) throw new FileUploadError(409, '文件篮已更新，请刷新后重试');
+      const [entry] = entries(snapshot, [entryId]);
+      if (this.pendingEntries(tenant).has(entryId)) throw new FileUploadError(409, '文件选择尚未确认，暂不能替换');
+      return entry;
+    };
+    validate(this.snapshot(tenant));
+    const asset = await this.retainAssets(tenant, { assetId, originalAssetId, photo }, authorize);
+    const snapshot = this.change(tenant, operationId, payload, snapshot => {
+      const entry = validate(snapshot);
+      entry.assetId = assetId;
+      entry.type = asset.type;
+      entry.size = asset.size;
+      if (originalAssetId) entry.originalAssetId = originalAssetId;
+      else delete entry.originalAssetId;
+      if (photo) entry.photo = photo;
+      else delete entry.photo;
+    });
+    await this.reconcileReferences(tenant, snapshot);
+    authorize();
+    return snapshot;
   }
   private pendingEntries(tenant: string) {
     const ids = new Set<string>();
@@ -158,10 +212,7 @@ export class FileLibrary {
   }
   private async reconcileReferences(tenant: string, snapshot: LibrarySnapshot) {
     const assets = new Set<string>();
-    for (const entry of snapshot.entries) {
-      assets.add(entry.assetId);
-      if (entry.originalAssetId) assets.add(entry.originalAssetId);
-    }
+    for (const entry of snapshot.entries) for (const assetId of assetIds(entry)) assets.add(assetId);
     // SQLite stays authoritative if Endpoint is offline. The next library.get
     // replays the complete retained set, including references from pending selections.
     await this.endpoint.request('session.library.references', tenant, {
@@ -191,6 +242,7 @@ export class FileLibrary {
       if (!request || request.state !== 'pending') throw new FileUploadError(409, '文件选择请求已失效');
       if (!request.multiple && entryIds.length !== 1 || entryIds.length > request.limits.maxFiles) throw invalid('文件数量超出页面限制');
       const snapshot = this.snapshot(tenant), selected = entries(snapshot, entryIds);
+      if (selected.some(entry => entry.photo?.pending)) throw new FileUploadError(409, '照片尚未确认');
       if (selected.some(entry => entry.size > request.limits.maxFileBytes) ||
           selected.reduce((sum, entry) => sum + entry.size, 0) > request.limits.maxBatchBytes)
         throw new FileUploadError(413, '文件大小超过限制');
@@ -281,6 +333,7 @@ export class FileLibrary {
     switch (method) {
       case 'library.get': return this.get(tenant, authorize);
       case 'library.import': return this.import(tenant, params, authorize);
+      case 'library.replace': return this.replace(tenant, params, authorize);
       case 'library.prepare': return this.prepare(tenant, params, authorize, resolve);
       case 'library.finish': return this.finish(tenant, id(params.selectionId), authorize);
       case 'library.basket': {

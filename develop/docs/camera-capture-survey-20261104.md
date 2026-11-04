@@ -1,0 +1,26 @@
+# 拍照采集与提前停止调查
+
+2026-11-04，工作树只读调查、官方 Chromium 源码核对与 Chrome 89/157 合成设备探针。未测实体摄像头、移动浏览器、实体光照、相机驱动压缩及生产链路耗时。
+
+## 现有慢点与质量损失
+
+- [拍照 UI](../../control/client/photo-library-capture.tsx) 把本机 getUserMedia track 直接放进 video.srcObject，现有 [采集](../../control/client/camera-capture.ts) 从 video 画入 Canvas。应用的拍照链路没有 RTP 视频编码、MediaRecorder 或 Endpoint H264 解码。摄像头 ISP、降噪、色度采样、驱动 MJPEG、浏览器取流缩放或颜色转换可能先改变像素，标准 Web API 不提供保证传感器 RAW 或强制原生无压缩格式的能力。Chrome 的 [摄像头 Blob 适配源码](https://github.com/chromium/chromium/blob/157.0.8103.15/media/capture/video/blob_utils.cc) 显示部分输入可直接返回原 MJPEG JPEG，有旋转时可能重编码，其余若干输入转换为 PNG。
+- 当前 gUM 请求 ideal 1920×1080/15fps、max 2560×2160/24fps。真实尺寸取决于设备和约束，Canvas 还有 4 Mi 像素上限。每次最多六次采集，间隔至少约 100ms，850ms 只在下一轮启动时检查，每帧等待整图 JPEG .90 和缩略图 JPEG .75 编码。即使相机已经取得好画面，UI 仍把所有整图串行上传，之后才请求 Endpoint 评分。
+- [文件 DC](../../control/client/dc-file-client.ts) 的 asset.chunk 单次最多 16384 字节，base64 并逐块等回执，之后 asset.seal 才可用于 photo.rank。10ms RTT 时每 MiB 仅 ACK 等待至少约 640ms，另有磁盘、CPU、网络实际带宽。六张各 1MiB 是至少 3.84 秒 ACK 等待。旧预览只用于 UI，当前评分从文件解码整图。原图上传资产保持 JPEG 字节，校正或扫描则有透视/灰度处理及 WIC JPEG .92 再编码。
+- [Endpoint 评分](../../endpoint/src/photo_processing.cpp) 先逐个解码，使用最长边 768 和 384 分析清晰度、曝光、噪声，并使用 YCrCb 签名去除近重复构图。0.23 是现有低质量下限，0.085 是相对分差，两者都不是提前停止门槛。输入改成 320 缩略图或灰度后须验证阈值。原有照片处理解码限制为 4 Mi 像素，缩略图 32 Mi 像素，高于旧采集上限的原图要单独处理派生操作的解码和输出上限。
+
+## API 与 Chrome 证据
+
+- [W3C 草案](https://www.w3.org/TR/image-capture/) 区分 grabFrame 的未编码 ImageBitmap 和 takePhoto 的一次新曝光及编码 Blob。takePhoto 可传 imageWidth、imageHeight 等能力内参数，无标准 JPEG quality 选项；最大宽和高不能保证是同一个设备支持组合。读 getPhotoCapabilities、getPhotoSettings、getSettings，最终按返回 Blob 的实际类型、尺寸处理。[Chrome 文档](https://developer.chrome.com/blog/imagecapture/) 记录 Android/桌面从 59 提供此 API，独立 still 可访问不同分辨率。
+- Chrome 89.0.4389.90 官方 [IDL](https://github.com/chromium/chromium/blob/89.0.4389.90/third_party/blink/renderer/modules/imagecapture/image_capture.idl) 和本机 157 tag 均有两项。两代 Windows [89 DirectShow](https://github.com/chromium/chromium/blob/89.0.4389.90/media/capture/video/win/video_capture_device_win.cc) / [157 DirectShow](https://github.com/chromium/chromium/blob/157.0.8103.15/media/capture/video/win/video_capture_device_win.cc) 都把下一帧作为 still，photo 范围锁定当前设备捕获格式。两代 [89 Media Foundation](https://github.com/chromium/chromium/blob/89.0.4389.90/media/capture/video/win/video_capture_device_mf_win.cc) / [157 Media Foundation](https://github.com/chromium/chromium/blob/157.0.8103.15/media/capture/video/win/video_capture_device_mf_win.cc) 可在有 photo stream 时独立捕获，否则回落至视频帧。两代 Android [89 Camera2](https://github.com/chromium/chromium/blob/89.0.4389.90/media/capture/video/android/java/src/org/chromium/media/VideoCaptureCamera2.java) / [157 Camera2](https://github.com/chromium/chromium/blob/157.0.8103.15/media/capture/video/android/java/src/org/chromium/media/VideoCaptureCamera2.java) 有独立 JPEG ImageReader / TEMPLATE_STILL_CAPTURE，过程中可重建取景会话。没有跨设备保证 still 最大尺寸、调用延迟、是否抢占取景或连续速率。
+- 隔离 headless、禁 GPU、loopback 安全上下文、fake device 与 fake permission，分别使用现存 Chrome89 及 Chromium157。请求 ideal 1920×1080@20，得到 1920×1080@20 和 resizeMode none。两版 track caps width 1–3840、height 1–2160、frameRate 0–20；photo caps width 96–1920、height 96–1080。ImageCapture、requestVideoFrameCallback 均可用，grabFrame 返回 1920×1080，单次完成约 88/64ms；takePhoto 返回 image/png 1920×1080、13362/11026 字节，含浏览器解码约 62/31ms。以到达时间距上次约 49ms 的粗 rVFC 节流，约 1s 取得 17/15 次。这是合成设备单次探索，应用采集率还受曝光、帧回调和主线程负载影响。证据与探针在 develop/tmp/camera-capture-survey-20261104，独立 profile 已清理。
+
+## 采集与传输建议
+
+- 相机启动时请求约 20–30fps，支持时偏好原生 resizeMode none，限制像素预算，实际决策依据 track settings 与视频固有像素。预览对象覆盖、横屏快门位置和 CSS 旋转不能参与拍照源尺寸或裁切。预览暖好再允许快门。默认用 requestVideoFrameCallback，从同一回调把固有尺寸视频帧冻结到池内可转移的画布或 ImageBitmap，从同一个快照生成分析图，使用 presentedFrames / mediaTime 判重。以绝对时钟槽和唯一帧作节拍，避免按「上个回调时间 + 50ms」累积漂移。特性缺失时可单在途 grabFrame，并关闭超时回来的 ImageBitmap；最后可用 Canvas 定时取帧，须保守地检查可用新帧，不能把可能重复的帧计作 20 个独立样本。
+- 快门按下开始客户端单调计时，最多接纳 20 帧，硬截止 1000ms。Endpoint 评分反馈先到就立即结束，取消回调与尚未接纳的帧。Deadline 后不接受新快照，即使等待中的 grab 或任务最终完成。采集结束、选片完成、选中原图编码、上传、文档处理分别计时。只有采集受 1 秒硬限。延迟高或背压时跳过采样槽，快门流程仍在限定窗口结束。
+- 预先建立同 peer 的拍照会话，将 burstId 绑定 viewer、授权代、camera generation 及文件库绑定，单 burst 单次锁定。已有文件 DC 或同 peer 专用 DC 承载带 frameId、采集序号、尺寸、格式的有界二进制分析数据。使用连续窗口和有限在途小帧，避免每个分片一轮往返。Endpoint 增量测量并返回累计序号、需保留 ID、最终选择和是否提前停止。客户端持有「需保留的 1–3 张 + 分析在途的有限快照」，Endpoint 只能从仍保留的 ID 选取，过期旧响应不得复活淘汰帧。确定的上层状态区分 stopped / chosen / uploaded，超时按已接纳帧收敛。取消、掉线、锁定、切相机、重拍撤销租约并释放快照；服务端限并发、帧数、最大维度、字节数、TTL 与授权代。
+- 优先让评分样本最长边 768 以对应旧算法输入，并用 Endpoint 实测决定降采样和算法阈值。768×432 RGB24 是 0.995 MB/帧，20fps 约 159 Mbps，远超常见上行。384×216 RGB24 是 249 KB/帧、约 40 Mbps，灰度是 83 KB/帧、约 13.3 Mbps。320×180 RGB24 约 27.6 Mbps，灰度约 9.2 Mbps。带宽数据未含封包，base64 增长约三分之一。低带宽下可用小灰度全幅加小区域细节或一次独立静态图片压缩的分析图，Endpoint 重新校准清晰度、噪声与色彩签名；压缩或传输处理只作用于分析数据。需要同时达到 20fps 与低上行时，应把网络拥堵作为降低有效取样数的输入。
+- 20 张 1920×1080 RGBA 约 158 MiB，20 张 3840×2160 RGBA 约 633 MiB，还未计入 Canvas/读回副本。保留 3 候选 + 2 在途，估算约 40/158 MiB。按实际像素和最坏四字节每像素设硬上限，复用池且只在所有者释放后重用；无法为新快照预留空间时跳槽。GPU-backed 对象可能保留额外资源，不能用 JS heap 当全部内存证据。
+- 选中后上传对应原尺寸快照，及确需供用户选择的最多两个候选。无额外有损压缩优先采用 PNG 或带尺寸/步长/像素布局契约的原始 RGB；若需小体积与快上传，一次高质量 JPEG 是静态图像编码取舍。已经是设备 still JPEG 的直接传 Blob。RGB24 1080p 单张约 6.22 MB，10Mbps 上行仅裸传输约 5 秒，PNG 体积随画面变化。大图使用有界二进制窗口或较大分块，限制与其他共享连接的流量竞争。文档处理只对选中的原像素执行。最终资产像素尺寸、实际 MIME 与分析快照身份应验证。
+- takePhoto 若作为独立高分辨率模式，需对每张实际 still 生成分析图并按其 ID 保存原始 Blob，或者将一次独立 still 明确当作新曝光并在 Endpoint 对其重新验证。它无法保证 20fps 或 1 秒内可交付。先从预览评分选中 frameId，再抓一张 still，后者的清晰度、构图、曝光和内容可能已变化，不能用预览的选择和评分标识作为该 still 的证明。

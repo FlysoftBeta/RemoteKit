@@ -157,3 +157,68 @@ test('explicit deletion is atomic and keeps assets referenced by another entry o
   f.reopen();
   assert.deepEqual(await f.run('delete', removeFirst), remaining);
 });
+
+test('photo choice and scan failure remain blocked until confirmed in place', async t => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const references = () => f.calls.filter(c => c.method === 'session.library.references').pop()?.args.assetIds;
+  const groupId = (await f.run('group', { operationId: 'group', name: 'Scans' })).groups[0].id;
+  await f.add('draft');
+  const photo = { mode: 'scan', pending: 'choice', candidateAssetIds: ['photo', 'extra'] };
+  const initial = await f.add('photo', 'basket', { groupId, originalAssetId: 'original', photo });
+  const [entry] = initial.entries;
+  assert.deepEqual(entry.photo, photo);
+  assert.deepEqual(f.calls.filter(c => c.method === 'session.library.retain').pop()?.args.assetIds, ['photo', 'original', 'extra']);
+  f.reopen();
+  assert.deepEqual(await f.run('get'), initial);
+  assert.deepEqual(references(), ['draft', 'extra', 'original', 'photo']);
+  await assert.rejects(f.add('photo', 'basket', { groupId, originalAssetId: 'original', photo: { ...photo, mode: 'photo' } }), { status: 409 });
+  const prepare = { operationId: 'prepare', requestId: 'chooser', entryIds: [entry.id], groupId };
+  await assert.rejects(f.run('prepare', prepare), { status: 409 });
+  const scanError = { mode: 'scan', pending: 'scan-error', warning: '扫描失败' };
+  const choice = { operationId: 'choose', entryId: entry.id, expectedRevision: initial.revision,
+    assetId: 'extra', originalAssetId: 'original', photo: scanError };
+  const chosen = await f.run('replace', choice);
+  assert.deepEqual(chosen.entries, [{ ...entry, assetId: 'extra', size: 4, photo: scanError }, initial.entries[1]]);
+  assert.deepEqual(chosen.basket, initial.basket);
+  assert.deepEqual(references(), ['draft', 'extra', 'original']);
+  await assert.rejects(f.run('prepare', prepare), { status: 409 });
+  const confirm = { operationId: 'confirm', entryId: entry.id, expectedRevision: chosen.revision,
+    assetId: 'original', originalAssetId: 'original', photo: { mode: 'scan' } };
+  await assert.rejects(f.run('replace', { ...confirm, expectedRevision: initial.revision }), { status: 409 });
+  const confirmed = await f.run('replace', confirm);
+  assert.deepEqual(confirmed.entries[0], { ...entry, assetId: 'original', size: 5, photo: confirm.photo });
+  assert.deepEqual(references(), ['draft', 'original']);
+  f.reopen();
+  const callsBeforeReplay = f.calls.length;
+  assert.deepEqual(await f.run('replace', choice), confirmed);
+  assert.equal(f.calls.length, callsBeforeReplay);
+  await assert.rejects(f.run('replace', { ...choice, originalAssetId: 'draft' }), { status: 409 });
+  f.losePrepare();
+  await assert.rejects(f.run('prepare', prepare), /response lost/);
+  const replacement = { operationId: 'replace', entryId: entry.id, expectedRevision: confirmed.revision, assetId: 'photo' };
+  await assert.rejects(f.run('replace', replacement), { status: 409 });
+  const prepared = await f.run<{ selectionId: string }>('prepare', prepare);
+  assert.deepEqual(f.calls.filter(c => c.method === 'session.library.prepare').pop()?.args.files,
+    [{ assetId: 'original', name: entry.name, type: 'image/jpeg' }]);
+  f.states.set(prepared.selectionId, 'cancelled');
+  await f.run('finish', prepared);
+  const replaced = await f.run('replace', replacement);
+  assert.deepEqual(replaced.entries[0], { id: entry.id, assetId: 'photo', size: 3, type: entry.type,
+    name: entry.name, createdAt: entry.createdAt, groupId, archived: false });
+  assert.deepEqual(references(), ['draft', 'photo']);
+});
+
+test('photo metadata validates candidate references and prunes them when an entry is removed', async t => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  await assert.rejects(f.add('photo', 'basket', { photo: { mode: 'scan', warning: 'x'.repeat(257) } }), { status: 400 });
+  await assert.rejects(f.add('photo', 'basket', { photo: { mode: 'photo', candidateAssetIds: ['extra', 'extra'] } }), { status: 400 });
+  await assert.rejects(f.add('photo', 'basket', { photo: { mode: 'photo', candidateAssetIds: ['draft', 'extra', 'original'] } }), { status: 400 });
+  await assert.rejects(f.add('photo', 'basket', { photo: { mode: 'photo', candidateAssetIds: ['missing'] } }), /asset_missing/);
+  await f.add('draft', 'library', { originalAssetId: 'original' });
+  const pending = await f.add('photo', 'basket', { photo: { mode: 'photo', pending: 'choice', candidateAssetIds: ['original', 'extra'] } });
+  const pruned = await f.run('basket', { operationId: 'prune', expectedRevision: pending.revision, ids: [] });
+  assert.deepEqual(pruned.entries.map(e => e.assetId), ['draft']);
+  assert.deepEqual(f.calls.filter(c => c.method === 'session.library.references').pop()?.args.assetIds, ['draft', 'original']);
+});
