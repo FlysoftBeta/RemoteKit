@@ -20,6 +20,10 @@ struct QsvLowPowerInfo {
   int requested=0;
   std::optional<int> queried,initialized,query_status,init_status,get_video_param_status;
 };
+struct QsvRateControlInfo {
+  uint32_t low_delay_brc=0,max_frame_size=0,max_frame_size_i=0,max_frame_size_p=0;
+  uint32_t buffer_size_kb=0,initial_delay_kb=0;
+};
 struct AccessUnit {
   uint64_t frame_cookie=0;
   std::vector<uint8_t> bytes;
@@ -56,6 +60,7 @@ class HardwareEncoder {
   virtual const char* Name() const=0;
   virtual EncoderInput InputFormat() const { return EncoderInput::nv12; }
   virtual std::optional<QsvLowPowerInfo> LowPowerInfo() const { return {}; }
+  virtual std::optional<QsvRateControlInfo> RateControlInfo() const { return {}; }
   virtual bool TakeKeyframeRequest() { return false; }
   virtual EncoderSettings ActualSettings() const {
     EncoderSettings value;value.bitrate=value.max_bitrate=value.fps=value.level_idc=0;return value;

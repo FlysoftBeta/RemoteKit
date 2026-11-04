@@ -14,6 +14,19 @@ int main() {
   CHECK(zero["gccTargetBitrate"]==0 && zero["gccTargetFps"]==0);
   CHECK(!zero.contains("lastRequestedBitrate") && !zero.contains("pendingReplaced"));
   CHECK(zero["requestedTargetUsage"].is_null() && zero["appliedTargetUsage"].is_null());
+  CHECK(!zero.contains("qsvRateControl"));
+  // Readback values, including driver-generated limits and explicit zeros,
+  // survive snapshots. No QSV subtree is emitted for a backend without info.
+  stats.qsv_rate_control=remotekit::media::QsvRateControlInfo{16,0,150000,100000,6000,3000};
+  auto rate=stats.Snapshot()["qsvRateControl"];
+  CHECK(rate["lowDelayBrc"]==16 && rate["maxFrameSize"]==0);
+  CHECK(rate["maxFrameSizeI"]==150000 && rate["maxFrameSizeP"]==100000);
+  CHECK(rate["bufferSizeKb"]==6000 && rate["initialDelayKb"]==3000);
+  stats.qsv_rate_control=remotekit::media::QsvRateControlInfo{32,0,0,0,4000,2000};
+  rate=stats.Snapshot()["qsvRateControl"];
+  CHECK(rate["lowDelayBrc"]==32 && rate["maxFrameSizeI"]==0 && rate["maxFrameSizeP"]==0);
+  stats.qsv_rate_control.reset();
+  CHECK(!stats.Snapshot().contains("qsvRateControl"));
   stats.requested_target_usage=7;stats.applied_target_usage=6;
   stats.pending=1;stats.inflight=4;stats.queue_full_drops=2;stats.hardware_busy=3;
   stats.paused_drops=5;stats.error_drops=6;stats.inactive_drops=7;stats.cancelled_drops=8;

@@ -71,6 +71,7 @@ const clientFields = words(`
   appliedBitrate appliedMaxBitrate appliedFps actualLevel sourceWidth sourceHeight encodedWidth encodedHeight negotiatedReceiveLevel samplingFpsBudget
   configuredIdleIdrMs effectiveIdleIdrMs tailIdrSubmissions tailIdrCompletions lastTailAfterSourceMs atlasAllocationAlignment atlasSharedBorrows
   atlasSharedHeldSlots feedbackRafSamples encoder qsvVpp atlasReadyGateEnabled qsvLowPower mediaPolicy requested applied maxFps
+  qsvRateControl lowDelayBrc maxFrameSize maxFrameSizeI maxFrameSizeP bufferSizeKb initialDelayKb
   degradationPreference queried initialized queryStatus initStatus getVideoParamStatus submitted gaps rejected idle idleEntries wakes begins
   rejectIdle rejectNotReady rejectStopped readyObserved consumedCompleted stopSent stopConfirmed activeDepth occupied retiredOccupied peakOccupied
   retiredGenerations retiredGenerationsCompleted unknownGpuRetainedGenerations unknownGpuRetentions targetFps resumeMaxFps officialMaxFps

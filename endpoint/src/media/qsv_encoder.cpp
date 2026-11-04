@@ -45,9 +45,10 @@ class Qsv final : public HardwareEncoder {
   mfxSession session_=nullptr;
   mfxVideoParam params_{};
   mfxExtCodingOption2 options_{};
+  mfxExtCodingOption3 options3_{};
   mfxExtVideoSignalInfo signal_{};
   mfxExtCodingOption hrd_options_{};
-  std::array<mfxExtBuffer*,3> extensions_{};
+  std::array<mfxExtBuffer*,4> extensions_{};
   mfxFrameAllocator allocator_{};
   std::map<mfxMemId,std::unique_ptr<Memory>> allocations_;
   std::map<uint64_t,std::unique_ptr<Task>> jobs_;
@@ -65,6 +66,7 @@ class Qsv final : public HardwareEncoder {
   EncoderSettings settings_;
   QsvCadencePolicy cadence_{0};
   QsvLowPowerInfo low_power_;
+  std::optional<QsvRateControlInfo> rate_control_;
   bool initialized_=false,keyframe_requested_=false;
   mfxU16 allocated_buffer_kb_=0;
   static bool Status(mfxStatus status,const char* operation,std::string& error) {
@@ -77,6 +79,21 @@ class Qsv final : public HardwareEncoder {
       error="QSV did not accept BT.709 limited-range color metadata";return false;
     }
     return true;
+  }
+  void ClearFrameBudgetReadback() {
+    // Query/GetVideoParam may synthesize budgets from the old timebase. Never
+    // feed those readbacks into a later Init/Reset as explicit frame limits.
+    options_.MaxFrameSize=0;
+    options3_.MaxFrameSizeI=0;options3_.MaxFrameSizeP=0;
+    options3_.LowDelayBRC=MFX_CODINGOPTION_UNKNOWN;
+  }
+  void ReadRateControl() {
+    rate_control_=QsvRateControlInfo{options3_.LowDelayBRC,options_.MaxFrameSize,
+      options3_.MaxFrameSizeI,options3_.MaxFrameSizeP,
+      params_.mfx.BufferSizeInKB,params_.mfx.InitialDelayInKB};
+    fprintf(stderr,"QSV actual frame budget: LowDelayBRC=%u MaxFrameSize=%u I=%u P=%u VBV_KB=%u InitialDelay_KB=%u\n",
+      rate_control_->low_delay_brc,rate_control_->max_frame_size,rate_control_->max_frame_size_i,
+      rate_control_->max_frame_size_p,rate_control_->buffer_size_kb,rate_control_->initial_delay_kb);
   }
   static mfxStatus MFX_CDECL Allocate(mfxHDL context,mfxFrameAllocRequest* request,
                                      mfxFrameAllocResponse* response) {
@@ -271,6 +288,7 @@ class Qsv final : public HardwareEncoder {
   }
  public:
   std::optional<QsvLowPowerInfo> LowPowerInfo() const override {return low_power_;}
+  std::optional<QsvRateControlInfo> RateControlInfo() const override {return rate_control_;}
   ~Qsv() override {
     if(session_) {
       // Close is the hardware cancellation/drain boundary even on device error.
@@ -348,7 +366,8 @@ class Qsv final : public HardwareEncoder {
  private:
   bool InitEncode(const EncoderSettings& settings,std::string& error) {
     const auto level_budget=remotekit::H264RateLimits(settings.level_idc);
-    params_={};options_={};signal_={};hrd_options_={};
+    params_={};options_={};options3_={};signal_={};hrd_options_={};
+    rate_control_.reset();
     low_power_.queried.reset();low_power_.initialized.reset();
     low_power_.init_status.reset();low_power_.get_video_param_status.reset();
     params_.AsyncDepth=static_cast<mfxU16>(settings.async_depth);
@@ -374,6 +393,8 @@ class Qsv final : public HardwareEncoder {
     options_.Header.BufferId=MFX_EXTBUFF_CODING_OPTION2;options_.Header.BufferSz=sizeof(options_);
     options_.LookAheadDepth=0;options_.ExtBRC=MFX_CODINGOPTION_OFF;options_.MBBRC=MFX_CODINGOPTION_OFF;
     options_.RepeatPPS=MFX_CODINGOPTION_ON;
+    options3_.Header.BufferId=MFX_EXTBUFF_CODING_OPTION3;options3_.Header.BufferSz=sizeof(options3_);
+    ClearFrameBudgetReadback();
     signal_.Header.BufferId=MFX_EXTBUFF_VIDEO_SIGNAL_INFO;signal_.Header.BufferSz=sizeof(signal_);
     signal_.VideoFormat=5;signal_.VideoFullRange=0;signal_.ColourDescriptionPresent=1;
     signal_.ColourPrimaries=1;signal_.TransferCharacteristics=1;signal_.MatrixCoefficients=1;
@@ -384,6 +405,7 @@ class Qsv final : public HardwareEncoder {
     hrd_options_.VuiNalHrdParameters=MFX_CODINGOPTION_OFF;
     hrd_options_.VuiVclHrdParameters=MFX_CODINGOPTION_OFF;
     extensions_[2]=reinterpret_cast<mfxExtBuffer*>(&hrd_options_);
+    extensions_[3]=reinterpret_cast<mfxExtBuffer*>(&options3_);
     params_.ExtParam=extensions_.data();params_.NumExtParam=static_cast<mfxU16>(extensions_.size());
     const auto query_status=MFXVideoENCODE_Query(session_,&params_,&params_);
     low_power_.query_status=query_status;
@@ -395,6 +417,7 @@ class Qsv final : public HardwareEncoder {
       error="QSV Query changed explicit LowPower request to "+std::to_string(params_.mfx.LowPower);return false;
     }
     if(params_.mfx.GopRefDist!=1) {error="QSV unexpectedly enabled B frames";return false;}
+    ClearFrameBudgetReadback();
     const auto init_status=MFXVideoENCODE_Init(session_,&params_);
     low_power_.init_status=init_status;
     fprintf(stderr,"QSV LowPower: initStatus=%d\n",init_status);
@@ -406,6 +429,7 @@ class Qsv final : public HardwareEncoder {
     fprintf(stderr,"QSV LowPower: initialized=%d getVideoParamStatus=%d\n",
       low_power_.initialized.value_or(-1),get_status);
     if(!Status(get_status,"MFX GetVideoParam",error))return false;
+    ReadRateControl();
     if(!MatchesFrameRate(params_.mfx.FrameInfo,settings.fps)) {
       error="QSV initialization did not apply configured frame rate";return false;
     }
@@ -574,12 +598,13 @@ class Qsv final : public HardwareEncoder {
     next.mfx.TargetKbps=static_cast<mfxU16>(std::max(1u,bitrate/1000));
     next.mfx.MaxKbps=static_cast<mfxU16>(std::max(1u,(settings_.vbr?next_max:bitrate)/1000));
     next.mfx.BufferSizeInKB=allocated_buffer_kb_;
+    ClearFrameBudgetReadback();
     mfxExtEncoderResetOption reset{};
     reset.Header.BufferId=MFX_EXTBUFF_ENCODER_RESET_OPTION;reset.Header.BufferSz=sizeof(reset);
     // A changed H264 VUI/HRD timebase needs a new sequence. Pure bitrate
     // changes retain the existing sequence and do not manufacture an IDR.
     reset.StartNewSequence=cadence_changed?MFX_CODINGOPTION_ON:MFX_CODINGOPTION_OFF;
-    std::array<mfxExtBuffer*,4> reset_extensions={extensions_[0],extensions_[1],extensions_[2],reinterpret_cast<mfxExtBuffer*>(&reset)};
+    std::array<mfxExtBuffer*,5> reset_extensions={extensions_[0],extensions_[1],extensions_[2],extensions_[3],reinterpret_cast<mfxExtBuffer*>(&reset)};
     next.ExtParam=reset_extensions.data();next.NumExtParam=static_cast<mfxU16>(reset_extensions.size());
     RK_SERVER_TRACE(trace_,"mfx_reset_begin",TraceIds{},rk_record.encoder=trace_encoder_;);
     const auto status=MFXVideoENCODE_Reset(session_,&next);
@@ -610,6 +635,7 @@ class Qsv final : public HardwareEncoder {
       low_power_.get_video_param_status=get_status;low_power_.initialized.reset();
       if(get_status>=0)low_power_.initialized=params_.mfx.LowPower;
       if(!Status(get_status,"MFX GetVideoParam after rate update",error))return false;
+      ReadRateControl();
     }
     if(settings_.qsv_low_power&&params_.mfx.LowPower!=settings_.qsv_low_power) {
       error="QSV rate update changed explicit LowPower value";return false;

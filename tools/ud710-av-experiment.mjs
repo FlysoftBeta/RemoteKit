@@ -27,6 +27,11 @@ async function tree(directory) {
   }
   return files.sort();
 }
+async function runtimeFiles(directory) {
+  return (await readdir(directory, {withFileTypes:true}))
+    .filter(entry => entry.isFile() && /\.(dll|pak|bin|dat)$/i.test(entry.name))
+    .map(entry => join(directory, entry.name));
+}
 async function invoke(args, env = {}) {
   const child = spawn(process.execPath, args, {cwd:root, windowsHide:true, stdio:'inherit', env:{...process.env, ...env}});
   await new Promise((accept, reject) => {
@@ -49,6 +54,8 @@ if (mode === 'prepare') {
   assert(order.length === 2 && order.includes('on') && order.includes('off'));
   const inputs = [...new Set([
     ...Object.values(paths), join(dirname(paths.browser), 'remotekit_sdk.dll'),
+    ...await runtimeFiles(dirname(paths.viewer)), ...await runtimeFiles(dirname(paths.browser)),
+    ...await runtimeFiles(dirname(paths.endpoint)),
     ...await tree(join(root, 'control/dist')),
     ...['test-diagnostic-collection.mjs', 'ud710-av-scenario.mjs', 'ud710-marker.mjs',
       'ud710-lag-scenario.mjs', 'analyze-ud710-lag.mjs', 'ud710-av-experiment.mjs'].map(name => join(root, 'tools', name)),

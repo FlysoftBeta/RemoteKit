@@ -47,7 +47,9 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
     endpoint: { request: async (method: string, tenant: string, options: unknown) => {
       assert.equal(method, 'session.snapshot'); assert.deepEqual(options, { outputDiagnostics: true }); snapshots.push(tenant);
       return { running: true, browserIncarnation: 'sensitive-id', rtc: { active: true, connectionId: 'sensitive-connection' },
-        stats: { comp: { begins: 7 }, decoderImplementation: 'password-from-page', senderRtcStats: { outbound: [
+        stats: { comp: { begins: 7 }, qsvRateControl: { lowDelayBrc: 16, maxFrameSize: 0, maxFrameSizeI: 0,
+          maxFrameSizeP: 0, bufferSizeKb: 6000, initialDelayKb: 3000, token: 99 },
+          decoderImplementation: 'password-from-page', senderRtcStats: { outbound: [
           { kind: 'video', packetsSent: 3, token: 99 }, { kind: 'audio', packetsSent: 12, bytesSent: 345, token: 88 },
         ] } },
         views: [{ width: 1920, title: 'sensitive-title', url: 'https://secret.invalid', compositor: { osr: { kind: 'custom-osr', enabled: true } } }],
@@ -128,6 +130,8 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   assert.deepEqual(archived.presentation, data.presentation);
   const endpoint = JSON.parse(files.get('endpoint.jsonl')!).data;
   assert.equal(endpoint.stats.comp.begins, 7);
+  assert.deepEqual(endpoint.stats.qsvRateControl, { lowDelayBrc: 16, maxFrameSize: 0, maxFrameSizeI: 0,
+    maxFrameSizeP: 0, bufferSizeKb: 6000, initialDelayKb: 3000 });
   assert.deepEqual(endpoint.stats.senderRtcStats.outbound, [
     { kind: 'video', packetsSent: 3 }, { kind: 'audio', packetsSent: 12, bytesSent: 345 },
   ]);

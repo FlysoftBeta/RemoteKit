@@ -14,7 +14,7 @@ nlohmann::json EncoderStats::Snapshot() {
   add("queryStatus",qsv_low_power->query_status);add("initStatus",qsv_low_power->init_status);
   add("getVideoParamStatus",qsv_low_power->get_video_param_status);
  }
- return {{"qsvLowPower",low_power},{"senderRtcStats",sender_rtc_stats},{"encoder",backend},{"encodeSubmitted",submitted.load()},{"encodeCompleted",completed.load()},
+ nlohmann::json result={{"qsvLowPower",low_power},{"senderRtcStats",sender_rtc_stats},{"encoder",backend},{"encodeSubmitted",submitted.load()},{"encodeCompleted",completed.load()},
          {"encodedBytes",bytes.load()},{"encodeDropped",dropped.load()},
          {"encodePending",pending.load()},{"encodeInflight",inflight.load()},
          {"queueFullDrops",queue_full_drops.load()},{"hardwareBusy",hardware_busy.load()},
@@ -31,6 +31,13 @@ nlohmann::json EncoderStats::Snapshot() {
          {"appliedMaxBitrate",applied_max_bitrate? nlohmann::json(applied_max_bitrate):nlohmann::json(nullptr)},
          {"appliedFps",applied_fps? nlohmann::json(applied_fps):nlohmann::json(nullptr)},
          {"actualLevel",actual_level},{"error",error.empty()?nlohmann::json(nullptr):nlohmann::json(error)}};
+ if(qsv_rate_control) {
+  const auto& info=*qsv_rate_control;
+  result["qsvRateControl"]={{"lowDelayBrc",info.low_delay_brc},{"maxFrameSize",info.max_frame_size},
+    {"maxFrameSizeI",info.max_frame_size_i},{"maxFrameSizeP",info.max_frame_size_p},
+    {"bufferSizeKb",info.buffer_size_kb},{"initialDelayKb",info.initial_delay_kb}};
+ }
+ return result;
 }
 EncoderWorker::EncoderWorker(Sdk& sdk,uint64_t encoder,ID3D11Device* device,std::string mode,
        EncoderSettings defaults,std::shared_ptr<EncoderStats> stats,std::function<void(uint32_t,uint64_t,size_t,bool,const remotekit_rtc_frame&)> completed,
@@ -74,7 +81,7 @@ bool EncoderWorker::RetainUnsafeInputs(Job* additional) {
 }
 bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  Stop(); // WebRTC may configure an existing encoder after a size transition.
- {std::lock_guard lock(stats_->mutex);stats_->applied_target_usage.reset();stats_->requested_target_usage=0;}
+ {std::lock_guard lock(stats_->mutex);stats_->applied_target_usage.reset();stats_->requested_target_usage=0;stats_->qsv_rate_control.reset();}
  settings_.width=config.width;settings_.height=config.height;
  settings_.fps=config.fps?config.fps:settings_.fps;
  settings_.bitrate=config.bitrate_bps?config.bitrate_bps:settings_.bitrate;
@@ -99,7 +106,7 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
  hardware_=hardware_factory_?hardware_factory_():(mode_=="nvenc"?CreateNvencEncoder():CreateQsvEncoder());
  hardware_->SetTrace(trace_,encoder_);converter_.SetTrace(trace_);
  if(!hardware_->Configure(device_.Get(),settings_,error)) {
-  {std::lock_guard lock(stats_->mutex);stats_->qsv_low_power=hardware_->LowPowerInfo();}
+  {std::lock_guard lock(stats_->mutex);stats_->qsv_low_power=hardware_->LowPowerInfo();stats_->qsv_rate_control=hardware_->RateControlInfo();}
   hardware_.reset();
   if(mode_!="auto"||(settings_.qsv_low_power&&settings_.qsv_low_power_explicit)||settings_.qsv_async_vpp){Error(error);return false;}
   const std::string qsv_error=error;
@@ -115,6 +122,7 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
   surfaces_.push_back(std::move(surface));free_.push_back(i);
  }
  {std::lock_guard lock(stats_->mutex);stats_->backend=hardware_->Name();stats_->error.clear();
+  stats_->qsv_rate_control=hardware_->RateControlInfo();
   if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;
   auto actual=hardware_->ActualSettings();stats_->applied_bitrate=actual.bitrate;stats_->applied_max_bitrate=actual.max_bitrate;stats_->applied_fps=actual.fps;
   stats_->actual_level=actual.level_idc;stats_->gcc_target_bitrate=0;stats_->gcc_target_fps=0;
@@ -228,13 +236,14 @@ void EncoderWorker::Run() {
    const bool applied=hardware_->SetRates(effective_rate,effective_fps,error,rate_limit_);
    RK_SERVER_TRACE(trace_,"worker_set_rates_return",TraceIds{},rk_record.encoder=encoder_;rk_record.peer=trace_peer_;rk_record.status=applied?0:1;);
    if(!applied) {
-    {std::lock_guard lock(stats_->mutex);if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
+    {std::lock_guard lock(stats_->mutex);if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;stats_->qsv_rate_control=hardware_->RateControlInfo();}
     Error(error);break;
    }
    ++stats_->rate_updates;
    if(hardware_->TakeKeyframeRequest())keyframe_=true;
    settings_.bitrate=effective_rate;settings_.fps=effective_fps;
    {std::lock_guard lock(stats_->mutex);auto actual=hardware_->ActualSettings();
+    stats_->qsv_rate_control=hardware_->RateControlInfo();
     stats_->applied_bitrate=actual.bitrate;stats_->applied_max_bitrate=actual.max_bitrate;stats_->applied_fps=actual.fps;stats_->actual_level=actual.level_idc;
     if(std::string(hardware_->Name())=="qsv")stats_->applied_target_usage=actual.target_usage;
     if(auto info=hardware_->LowPowerInfo())stats_->qsv_low_power=*info;}
