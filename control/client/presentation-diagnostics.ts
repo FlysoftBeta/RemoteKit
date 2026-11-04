@@ -37,6 +37,18 @@ export class PresentationDiagnostics {
   }
   clientRaf(at: number) { this.viewportRafCallbacks++; if (at !== this.lastRafAt) { this.clientRafCount++; push(this.raf, [at, this.lastRafAt === undefined ? null : at - this.lastRafAt]); this.lastRafAt = at; } }
   cost(name: keyof PresentationDiagnostics['costs'], at: number, durationMs: number, view: string | null = null) { if (this.costs[name]) push(this.costs[name], [at, durationMs, view]); }
+  recentVideo(sinceMs: number) {
+    const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+    return this.rvfc.slice(-32).flatMap(([at, rtp, presentedFrames, expectedDisplayTime, presentationTime, receiveTime, , , , processingDuration]) => {
+      const atMs = number(at);
+      if (atMs === undefined || atMs < sinceMs) return [];
+      return [{
+        atMs, rtpTimestamp: number(rtp), presentedFrames: number(presentedFrames),
+        expectedDisplayTimeMs: number(expectedDisplayTime), presentationTimeMs: number(presentationTime),
+        receiveTimeMs: number(receiveTime), processingDurationSeconds: number(processingDuration),
+      }];
+    });
+  }
   snapshot(raw = false) {
     const pending = this.pending && this.observed.get(this.pending.rtp)?.outcome === 'pending' ? { ...this.pending, ageMs: performance.now() - this.pending.at } : null;
     return { elapsedMs: performance.now() - this.startedAt, rawRvfcCount: this.rawRvfcCount, latestPresentedFrames: this.presentedFrames, latestDecodedFrames: this.decodedFrames, clientRafCount: this.clientRafCount, viewportRafCallbacks: this.viewportRafCallbacks, epoch: { matched: this.matched, pending, missed: this.missed, unknownAtVideo: this.unknownAtVideo, wrongEpochAtVideo: this.wrongEpochAtVideo, missingRtp: this.missingRtp, metadataCount: this.metadataCount, lateMetadataForMissed: this.lateMetadataForMissed }, intervals: { rvfc: summary(this.rvfc, 7), clientRaf: summary(this.raf, 1) }, authorizeWaitMs: summary(this.matches, 3), metadataRelativeToVideoMs: summary(this.matches, 4), lateMetadataRelativeToVideoMs: summary(this.metadata, 3), costsMs: Object.fromEntries(Object.entries(this.costs).map(([name, list]) => [name, summary(list, 1)])), ...(raw ? { raw: { columns: { rvfc: ['at', 'rtp', 'presentedFrames', 'expectedDisplayTime', 'presentationTime', 'receiveTime', 'decodedFrames', 'intervalMs', 'view', 'processingDurationSeconds'], raf: ['at', 'intervalMs'], metadata: ['at', 'rtp', 'epoch', 'relativeToVideoMs'], matches: ['at', 'rtp', 'epoch', 'waitMs', 'metadataRelativeToVideoMs'], misses: ['at', 'rtp', 'waitMs'], costs: ['at', 'durationMs', 'view'] }, rvfc: this.rvfc, raf: this.raf, metadata: this.metadata, matches: this.matches, misses: this.misses, costs: this.costs } } : {}) };

@@ -22,6 +22,12 @@ Client约每1500ms发送layout绑定的media.feedback，包括seq、generation/e
 
 Stats同轮采集RTC解码、各video元素收帧/丢帧、compositor提交与rVFC回调，区分四种计数。有效静态窗口显示0，计数器倒退或布局门禁变化重新建立基线。浏览器提供时显示末包receiveTime→presentationTime、提交→实际回调、预计显示超期，以及RTC累计差分的jitterBufferDelay与totalDecodeTime均值。缺字段不填0；旧capture/copy路径空白项不再进入当前叠层。视频提交和预计显示都不是物理屏幕扫描完成。
 
+接收采样另区分video/audio的实际缓冲、目标缓冲和最低目标缓冲差分均值；最低目标不是观测到的最快帧。`totalAssemblyTime / framesAssembledFromMultiplePackets` 的同窗增量只覆盖已解码的多包帧首末包间隔；`totalProcessingDelay / framesDecoded` 的同窗增量包含首包到解码完成的等待，不能作为纯解码耗时。音频使用自己的出缓冲样本计数，不与视频帧数混用。
+
+重传包占比为 `ΔretransmittedPacketsReceived / ΔpacketsReceived`，发送端对应 `Sent` 字段，分母包含重传包；字节占比同理。NACK是反馈计数，不是重传包数。只有字段齐备、窗口连续、计数有效且分母大于零才产生占比；RTP丢包累计值可能因迟到包下修，保留带符号差分。发送端使用Endpoint自身采样时间，重复缓存报告不产生伪速率。`totalPacketSendDelay`记录发送前累计等待，不单独证明网络单向耗时或纯pacer耗时。
+
+低RTT不能排除帧到达抖动、重传或组帧等待；带宽估计也不能代替连续的实际包时序。用户现场可通过[设置内诊断收集](diagnostic-collection.md)生成服务端tar.zst诊断包，不再从Stats下载JSON。
+
 Video是唯一串流呈现后端。缺少首帧或当前RTP元数据时，保持门禁并在原连接上限频请求刷新；能力、协议或播放错误单独报告，不回退Canvas。解码FPS、接收码率是窗口增量，0不代表连接从未接收过视频；编码耗时也不表示对应码流已经发布。
 
 ## 完成时戳与呈现估算

@@ -48,4 +48,26 @@ test('video stats show real receiver intervals without retired capture or canvas
   assert.match(html, /接收缓冲均值<\/dt><dd>0.0 ms/);
   assert.match(html, /1296×488/);
   assert.doesNotMatch(html, /捕获完成|GPU copy|Metadata \/ 队列|Marker p50|末包→Video/);
+  assert.doesNotMatch(html, /接收缓冲目标均值|接收缓冲最小均值|帧组装耗时均值|接收处理耗时均值|解码器|RTP 播放延迟|接收重传包占比/);
+});
+
+test('media diagnostics show receiver measurements', () => {
+  const diagnostics: Diagnostics = {
+    connection: '已连接', channel: '已连接',
+    receiverVideoTiming: {
+      jitterBufferTargetMeanMs: 82, jitterBufferMinimumMeanMs: 0, assemblyMeanMs: 3, processingMeanMs: 18,
+      decoderImplementation: 'MediaCodec', receivedPacketRetransmitRatio: 0.025,
+    },
+    receiverVideoPlayoutExtensionNegotiated: false,
+    endpoint: { rtcPlayoutDelayRequested: { minMs: 0, maxMs: 50 } },
+  };
+  const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
+  assert.doesNotMatch(html, /导出诊断/);
+  assert.match(html, /接收缓冲目标均值<\/dt><dd>82.0 ms/);
+  assert.match(html, /接收缓冲最小均值<\/dt><dd>0.0 ms/);
+  assert.match(html, /帧组装耗时均值<\/dt><dd>3.0 ms/);
+  assert.match(html, /接收处理耗时均值<\/dt><dd>18.0 ms/);
+  assert.match(html, /解码器<\/dt><dd[^>]*>MediaCodec/);
+  assert.match(html, /RTP 播放延迟<\/dt><dd>未协商 \/ 请求 50 ms/);
+  assert.match(html, /接收重传包占比<\/dt><dd>2.50 %/);
 });

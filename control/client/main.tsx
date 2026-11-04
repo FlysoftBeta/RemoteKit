@@ -44,6 +44,8 @@ import { SecuritySettings } from './security-settings';
 import { useAuthCamera, type AuthRequest } from './auth-camera';
 import { useAutoLock } from './auth-idle';
 import { useAutoFullscreen } from './use-auto-fullscreen';
+import { DiagnosticCollection, diagnosticEnvironment, type DiagnosticState } from './diagnostic-collection';
+import { DiagnosticCollectionView, DiagnosticSettings } from './diagnostic-collection-view';
 import "./style.css";
 const theme = createTheme({
   palette: {
@@ -132,7 +134,18 @@ function Workspace({
     viewportFailure = useRef("");
   const authRequest: AuthRequest = useCallback((method, params) =>
     connection.current!.request(method, params), []);
+  const [diagnosticState, setDiagnosticState] = useState<DiagnosticState>({ phase: 'idle' });
+  const [diagnostics] = useState(() => new DiagnosticCollection(
+    (method, params) => connection.current!.request(method, params),
+    since => media.getDiagnosticCollectionSample(since),
+    setDiagnosticState,
+  ));
+  useLayoutEffect(() => {
+    diagnostics.setAvailable(status === 'online' && auth?.locked === false && !localLock);
+  }, [diagnostics, status, auth?.locked, auth?.epoch, localLock]);
+  useEffect(() => () => diagnostics.dispose(), [diagnostics]);
   const clearWorkspace = useCallback(() => {
+    diagnostics.setAvailable(false);
     media.setProductLocked(true);
     media.setAuthCamera();
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
@@ -149,7 +162,7 @@ function Workspace({
     setAdmin(false);
     setFocusAddress(null);
     setAudioError('');
-  }, [media]);
+  }, [diagnostics, media]);
   const lock = useCallback((reason: string) => {
     if (!authRef.current || authRef.current.locked || localLockRef.current) return;
     localLockRef.current = reason;
@@ -267,6 +280,7 @@ function Workspace({
         const previous = authRef.current;
         if (previous && next.epoch < previous.epoch) return;
         if (!next.locked && localLockRef.current) return;
+        if (previous && next.epoch !== previous.epoch) diagnostics.setAvailable(false);
         if (next.locked && (!previous?.locked || next.epoch !== previous.epoch)) clearWorkspace();
         if (next.locked) {
           if (localLockRef.current === 'idle' && !idleSystem.current) setIdleRearmed(false);
@@ -309,7 +323,7 @@ function Workspace({
       window.removeEventListener("resize", sendViewport);
       document.removeEventListener("visibilitychange", sendViewport);
     };
-  }, [clearWorkspace, media]);
+  }, [clearWorkspace, diagnostics, media]);
   useEffect(sendViewport, [
     state?.workspace.revision,
     state?.workspace.activeWindowId,
@@ -395,6 +409,8 @@ function Workspace({
   const fileRequest = foreground?.kind==='file' ? state.fileRequests.find(request=>request.id===foreground.id) : undefined;
   return (
     <FileLibraryContext.Provider value={library}><main className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}`} ref={shell}>
+      <DiagnosticCollectionView state={diagnosticState} online={status === 'online'}
+        stop={() => diagnostics.stop()} dismiss={() => diagnostics.dismiss()} />
       {pendingOperations.length>0 && <Alert severity="info" sx={{position:'absolute',top:88,left:'50%',transform:'translateX(-50%)',zIndex:1190}} action={pendingOperations.some(entry=>entry.receipt?.status==='unknown')?<Button onClick={()=>setPendingOperations(entries=>entries.filter(entry=>entry.receipt?.status!=='unknown'))}>以当前工作区为准</Button>:undefined}>{pendingOperations.length} 个操作{pendingOperations.some(entry=>entry.receipt?.status==='unknown')?'结果未知，请核对工作区':'正在同步'}{media.diagnostics.channel!=='已连接'?'，等待数据通道连接':''}</Alert>}
       {productReady && media.audio.state === 'blocked' && (workspace.settings.audioChannels?.left !== false || workspace.settings.audioChannels?.right !== false) && <Button variant="contained" onClick={() => media.audio.resume()} sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}>点击开启声音</Button>}
       {status !== "online" && (
@@ -499,6 +515,9 @@ function Workspace({
         onClose={() => setSettings(false)}
         action={action}
         logout={logout}
+        diagnostics={settings && <DiagnosticSettings state={diagnosticState} online={status === 'online'} start={() => {
+          void diagnostics.start(diagnosticEnvironment()).then(started => { if (started) setSettings(false); });
+        }} />}
         security={settings && <SecuritySettings auth={auth} online={status === 'online'} request={authRequest}
           camera={camera} idle={idle} lock={() => lock('manual')} />}
       />

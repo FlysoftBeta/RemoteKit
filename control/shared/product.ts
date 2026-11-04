@@ -1,5 +1,6 @@
 import type { LibraryMethods } from './file-library';
 import type { AuthMessage, AuthSocketMethods } from './security';
+import type { DiagnosticMethods } from './diagnostics';
 /** Persistent product state belongs to Control; clients keep only an HttpOnly token. */
 export interface ProductUser { id: string; username: string; isAdmin: boolean }
 export type SearchEngine = 'google' | 'bing' | 'duckduckgo' | 'baidu';
@@ -59,7 +60,7 @@ export interface ProductOperation { operationId: string; operationGeneration: st
 export interface OperationReceipt { browserIncarnation?:string; resolved?:boolean; resolution?:'target-retired'; operationSequence?:string; operationId: string; operationGeneration: string; status: OperationStatus; revision?: number; application?: ProductActionResult['application']; error?: string }
 export interface RegistrationStatus { hasAdmin: boolean; credentialRequired: boolean; registrationOpen: boolean }
 export interface AdminStatus { registrationCredentialConfigured: boolean }
-export interface SocketMethods extends AuthSocketMethods, LibraryMethods {
+export interface SocketMethods extends AuthSocketMethods, LibraryMethods, DiagnosticMethods {
   'files.begin': { params: { requestId: string; files: UploadFileSpec[] }; result: FileUploadBegin };
   'files.commit': { params: { uploadId: string }; result: FileUploadResult };
   'files.cancel': { params: { requestId: string; uploadId?: string }; result: FileUploadResult };

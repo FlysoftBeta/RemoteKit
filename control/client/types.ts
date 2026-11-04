@@ -1,5 +1,7 @@
 import type { PendingClose } from '../shared/product';
 import type { ReceiverPlayout } from './receiver-playout';
+import type { ReceiverBufferTiming, ReceiverVideoTiming } from './media-diagnostics';
+export type { ReceiverVideoTiming } from './media-diagnostics';
 export interface Tab { id: string; title: string; url: string; webviewId: string | null; pendingUrl?: string; canGoBack?: boolean; canGoForward?: boolean; loading?: boolean }
 export interface Device { mode: 'desktop' | 'tablet'; width: number; height: number; deviceScaleFactor: number }
 export interface ControlState { tenantId: string; tabs: Tab[]; activeTabId: string | null; splitTabId: string | null; device: Device; endpointGeneration?: number; endpointError?: string | null; pendingClose?: PendingClose | null }
@@ -8,7 +10,6 @@ export interface Layout { type: 'layout'; generation: string; epoch: string; wid
 export interface VideoPresentation { viewId: string; rtpTimestamp: number; layoutEpoch: string; paintedAt: number; paintedWallTime: number; authorizedAt: number }
 interface TimingPercentile { samples: number; p95: number }
 export interface VideoPlaneTiming { callbackFps?: number; videoElementFps?: number; videoElementDrops?: number; receiveToSubmit?: TimingPercentile; submitToCallback?: TimingPercentile; expectedDisplayLateness?: TimingPercentile; processing?: TimingPercentile }
-export interface ReceiverVideoTiming { jitterBufferMeanMs?: number; decodeMeanMs?: number; droppedFrames?: number }
 export interface RenderingDiagnostics {
   backend: 'pending' | 'video' | 'unavailable';
   backendReason?: string;
@@ -17,7 +18,7 @@ export interface RenderingDiagnostics {
   freezeCopies: number;
   mediaRefreshRequests: number;
 }
-export interface Diagnostics { receiverPlayout?: Partial<Record<'video' | 'audio', ReceiverPlayout>>; rendering?:RenderingDiagnostics; receiveSelection?: { profile: string; reason: string }; presentationEstimate?: { presentationLatencyMs: number; clockUncertaintyMs: number; sampleCount: number }; connection: string; channel: string; framesDecoded?: number; framesPerSecond?: number; displayFramesPerSecond?: number; decodedFramesPerSecond?: number; paintFpsByView?: Record<string, number | undefined>; videoTimingByView?: Record<string, VideoPlaneTiming>; receiverVideoTiming?: ReceiverVideoTiming; markerSampleHz?: number; bytesReceived?: number; receiveBitrateBps?: number; roundTripTime?: number; codec?: string; videoWidth?: number; videoHeight?: number; endpoint?: Record<string, unknown>; error?: string; networkSimulation?: Record<string, unknown>; selectedCandidates?: unknown; connectionId?: string; marker?: { kind: 'input' | 'render'; p50: number; p95: number; samples: number } }
+export interface Diagnostics { receiverPlayout?: Partial<Record<'video' | 'audio', ReceiverPlayout>>; rendering?:RenderingDiagnostics; receiveSelection?: { profile: string; reason: string }; presentationEstimate?: { presentationLatencyMs: number; clockUncertaintyMs: number; sampleCount: number }; connection: string; channel: string; framesDecoded?: number; framesPerSecond?: number; displayFramesPerSecond?: number; decodedFramesPerSecond?: number; paintFpsByView?: Record<string, number | undefined>; videoTimingByView?: Record<string, VideoPlaneTiming>; receiverVideoTiming?: ReceiverVideoTiming; receiverAudioTiming?: ReceiverBufferTiming; receiverVideoPlayoutExtensionNegotiated?: boolean; markerSampleHz?: number; bytesReceived?: number; receiveBitrateBps?: number; roundTripTime?: number; codec?: string; videoWidth?: number; videoHeight?: number; endpoint?: Record<string, unknown>; error?: string; networkSimulation?: Record<string, unknown>; selectedCandidates?: unknown; connectionId?: string; marker?: { kind: 'input' | 'render'; p50: number; p95: number; samples: number } }
 export async function request<T>(path: string, body?: unknown): Promise<T> {
   const response = await fetch(path, { credentials: 'same-origin', ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }) });
   const value = await response.json().catch(() => null);

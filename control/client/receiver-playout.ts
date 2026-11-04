@@ -6,6 +6,15 @@ export interface ReceiverPlayout {
   error?: string;
 }
 
+const playoutDelayUri = 'http://www.webrtc.org/experiments/rtp-hdrext/playout-delay';
+
+export function negotiatedReceiverPlayout(receiver?: RTCRtpReceiver) {
+  try {
+    const extensions = receiver?.getParameters?.()?.headerExtensions;
+    return extensions?.some(extension => extension.uri === playoutDelayUri);
+  } catch { return undefined; }
+}
+
 /** Feature detection must not create an inert standard property on Chrome89. */
 export function configureReceiverPlayout(receiver: RTCRtpReceiver): ReceiverPlayout {
   const target = receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null; playoutDelayHint?: number | null };

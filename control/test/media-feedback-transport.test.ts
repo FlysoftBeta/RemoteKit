@@ -61,6 +61,13 @@ test('transport feedback is independent of delayed/failed relay HTTP and disconn
   assert.equal(transport.diagnostics.receiverVideoTiming?.jitterBufferMeanMs, 10);
   assert.ok(Math.abs(transport.diagnostics.receiverVideoTiming!.decodeMeanMs! - 1) < 1e-9);
   assert.equal(transport.diagnostics.receiverVideoTiming?.droppedFrames, undefined);
+  const collection = transport.getDiagnosticCollectionSample();
+  assert.equal(collection?.clientTimeMs, 3000);
+  assert.equal(collection?.rtc?.sampledAtMs, 3000);
+  assert.equal(collection?.rtc?.inboundVideo?.framesDecoded, 175);
+  assert.equal(collection?.media?.video?.jitterBufferMeanMs, 10);
+  assert.equal(collection?.availability.sourceCaptureTiming, false);
+  assert.doesNotMatch(JSON.stringify(collection), /connection-1|"id":/);
   now = 3200; network[0].resolve({ enabled: true, observation: 'delayed' }); await flush();
   assert.equal(transport.diagnostics.networkSimulation?.observation, 'delayed');
   decoded = 200; now = 4500; await connected.readStats(peer);
@@ -71,11 +78,14 @@ test('transport feedback is independent of delayed/failed relay HTTP and disconn
   assert.equal(transport.diagnostics.decodedFramesPerSecond, undefined);
   assert.equal(transport.diagnostics.receiverVideoTiming, undefined);
   assert.equal(transport.diagnostics.networkSimulation?.observation, 'delayed');
+  assert.equal(transport.exportMediaDiagnostics().samples.length, 4);
   // A getStats completion from the old peer must never restart observation or send.
   peer.getStats = () => new Promise(resolve => { pending = () => resolve(reports() as unknown as RTCStatsReport); });
   now = 7500; const oldRead = connected.readStats(peer);
   connected.closeLocal(); assert.equal(closed, true); assert.equal(callbacks.size, 0); assert.equal(listeners.size, 0);
   pending!(); await oldRead; assert.equal(sent.length, 4); assert.equal(callbacks.size, 0);
+  assert.deepEqual(transport.exportMediaDiagnostics().samples, []);
+  assert.equal(transport.getDiagnosticCollectionSample(), undefined);
   // An HTTP response from the disconnected peer cannot overwrite a new connection.
   connected.peer = {} as RTCPeerConnection; connected.connectionId = 'connection-2';
   transport.diagnostics.networkSimulation = { enabled: true, observation: 'replacement' };

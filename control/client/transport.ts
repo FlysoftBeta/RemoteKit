@@ -14,7 +14,8 @@ import { ReconnectPolicy } from './reconnect';
 import { PresentationDiagnostics } from './presentation-diagnostics';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource } from './plane-source';
 import { MediaFeedbackSampler } from './media-feedback';
-import { configureReceiverPlayout } from './receiver-playout';
+import { configureReceiverPlayout, negotiatedReceiverPlayout } from './receiver-playout';
+import { collectionDecoderLabel, collectionEndpointSample, collectionInputSample, collectionRtcSample, diagnosticLabel, diagnosticSequence, InboundMediaSampler, MediaDiagnosticsHistory, type InboundMediaStats } from './media-diagnostics';
 import type { FileRequestAnchor, ProductOperation, OperationReceipt, RtcServerSignal } from '../shared/product';
 import { MobileEditingState } from './mobile-editing-state';
 
@@ -26,10 +27,6 @@ export interface InputDelivery extends InputRequest { phase: 'queued' | 'submitt
 export interface TouchRetireLease { surface: Surface; identity: string; layoutEpoch: string; authorization?: number }
 interface TerminalInput extends InputRequest { requiresTerminalState: boolean; pending: boolean; retries: number; timer?: ReturnType<typeof setTimeout>; retirement?: boolean }
 const terminalQueryDelays = [250, 500, 1000, 2000];
-function counterDelta(current: unknown, previous?: number) {
-  return typeof current === 'number' && typeof previous === 'number' && Number.isFinite(current - previous) && current >= previous
-    ? current - previous : undefined;
-}
 function tracksTerminal(event: Record<string, unknown>) {
   return event.type === 'touch' && (event.gestureMode === 'client-v1' || event.gestureMode === 'legacy') &&
     typeof event.sequenceId === 'string' && (event.action === 'end' || event.action === 'cancel');
@@ -70,6 +67,7 @@ export class RemoteTransport {
     if (this.peerAuthEpoch === epoch) return;
     // An authorization transition resets the native layout and edit revision.
     // Install its identity before accepting any new DataChannel messages.
+    if (this.productLocked) this.resetMediaDiagnostics();
     this.setProductLocked(true);
     this.peerAuthEpoch = epoch;
     this.setAuthCamera();
@@ -81,6 +79,7 @@ export class RemoteTransport {
   setProductLocked(locked: boolean) {
     if (locked === this.productLocked) return;
     this.productLocked = locked;
+    this.resetMediaDiagnostics();
     this.audio.setMuted(locked);
     if (!locked) {
       if (this.channel?.readyState === 'open') this.negotiatePresentation(this.channel, true);
@@ -275,7 +274,83 @@ export class RemoteTransport {
   private presentedListeners = new Set<(frame: VideoPresentation) => void>();
   private viewPresentations = new Map<string, VideoPresentation>();
   selectedViewId: string | undefined;
-  private lastInboundSample: { id: string; timestamp: number; bytes: number; frames?: number; emitted?: number; jitterDelay?: number; decodeTime?: number; framesDropped?: number } | undefined;
+  private readonly inboundVideo = new InboundMediaSampler();
+  private readonly inboundAudio = new InboundMediaSampler();
+  private readonly mediaDiagnosticsHistory = new MediaDiagnosticsHistory();
+  private mediaDiagnosticsRevision = 0;
+  private mediaDiagnosticsScopeAt = performance.now();
+  private endpointStatsAtMs?: number;
+  private collectionRtcSource?: { video?: InboundMediaStats; audio?: InboundMediaStats; pair?: RTCIceCandidatePairStats; sampledAtMs: number; getStatsWaitMs: number };
+  exportMediaDiagnostics() { return this.mediaDiagnosticsHistory.export(globalThis.navigator?.userAgent ?? ''); }
+  getDiagnosticCollectionSample(sinceMs = 0) {
+    const peer = this.peer;
+    if (!peer || this.productLocked || this.peerAuthEpoch === 0) return;
+    const now = performance.now(), since = Math.max(sinceMs, this.mediaDiagnosticsScopeAt, now - 2500);
+    const layout = this.layout, viewport = globalThis.visualViewport;
+    const rtc = this.collectionRtcSource;
+    const media = this.mediaDiagnosticsHistory.latest();
+    const ua = globalThis.navigator?.userAgent ?? '';
+    const chromiumMajor = /\b(?:Chromium|Chrome)\/(\d{1,4})\./.exec(ua)?.[1];
+    const androidMajor = /\bAndroid (\d{1,3})\b/.exec(ua)?.[1];
+    const channel = this.channel;
+    const planes = layout?.views.slice(0, 4).map(view => ({
+      x: view.x, y: view.y, width: view.width, height: view.height, deviceScaleFactor: view.deviceScaleFactor,
+      mediaScaleX: view.mediaScaleX ?? view.mediaScale, mediaScaleY: view.mediaScaleY ?? view.mediaScale,
+      stale: view.stale === true, ready: this.canInput(view.id), selected: this.selectedViewId === view.id,
+    }));
+    return {
+      schema: 1, clientTimeMs: now, clientClock: 'browser-performance' as const,
+      availability: { sourceCaptureTiming: false, nativeGpuProfileCollectedByClient: false },
+      browser: {
+        chromiumMajor: chromiumMajor === undefined ? undefined : Number(chromiumMajor),
+        androidMajor: androidMajor === undefined ? undefined : Number(androidMajor),
+      },
+      media: media && { ...media, video: media.video && { ...media.video, decoderImplementation: collectionDecoderLabel(media.video.decoderImplementation) } },
+      rtc: rtc && { ...collectionRtcSample(rtc.video, rtc.audio, rtc.pair),
+        sampledAtMs: rtc.sampledAtMs, ageMs: now - rtc.sampledAtMs, getStatsWaitMs: rtc.getStatsWaitMs },
+      endpoint: collectionEndpointSample(this.diagnostics.endpoint),
+      endpointReceivedAtMs: this.endpointStatsAtMs,
+      endpointAgeMs: this.endpointStatsAtMs === undefined ? undefined : now - this.endpointStatsAtMs,
+      viewport: {
+        width: globalThis.innerWidth, height: globalThis.innerHeight, dpr: globalThis.devicePixelRatio,
+        visualWidth: viewport?.width, visualHeight: viewport?.height, visualScale: viewport?.scale,
+        visibility: diagnosticLabel(globalThis.document?.visibilityState, ['visible', 'hidden']),
+      },
+      connection: {
+        peerState: peer.connectionState, iceState: peer.iceConnectionState, signalingState: peer.signalingState,
+        channelState: channel?.readyState, bufferedAmount: channel?.bufferedAmount,
+        codec: diagnosticLabel(this.diagnostics.codec?.toLowerCase(), ['video/h264', 'video/vp8', 'video/vp9', 'video/av1']),
+      },
+      layout: layout && {
+        width: layout.width, height: layout.height, generation: diagnosticSequence(layout.generation), epoch: diagnosticSequence(layout.epoch),
+        reconfiguring: layout.reconfiguring === true, planes,
+      },
+      presentation: {
+        backend: this.presentationBackend, backendReason: this.presentationErrorCode,
+        counterScope: 'transport' as const, metadataWindowStartMs: since,
+        freezeCopies: this.freezeCopies, mediaRefreshRequests: this.mediaRefreshRequests,
+        barrierAcknowledged: this.presentationBarrierAcknowledged,
+        barrierLayoutEpoch: diagnosticSequence(this.presentationBarrier?.layoutEpoch),
+        barrierOutputGeneration: diagnosticSequence(this.presentationBarrier?.outputGeneration),
+        frames: this.presentation.recentVideo(since),
+        metadata: this.encodedFrameSamples.slice(-64).filter(frame => frame.at >= since).map(frame => ({
+          atMs: frame.at, rtpTimestamp: frame.rtpTimestamp, layoutEpoch: diagnosticSequence(frame.layoutEpoch),
+          encodedBytes: frame.encodedBytes, keyframe: frame.keyframe,
+        })),
+      },
+      input: collectionInputSample(this.inputTrace, this.inputResults, since),
+    };
+  }
+  private resetMediaDiagnostics() {
+    this.mediaDiagnosticsRevision++;
+    this.mediaDiagnosticsScopeAt = performance.now();
+    this.endpointStatsAtMs = undefined;
+    this.collectionRtcSource = undefined;
+    this.mediaDiagnosticsHistory.clear();
+    this.inboundVideo.reset();
+    this.inboundAudio.reset();
+    this.diagnostics = { ...this.diagnostics, endpoint: undefined, receiverVideoTiming: undefined, receiverAudioTiming: undefined };
+  }
   private timer: ReturnType<typeof setInterval> | undefined;
   private statsReadingPeer: RTCPeerConnection | undefined;
   private networkRead: { peer: RTCPeerConnection; connectionId: string } | undefined;
@@ -287,7 +362,7 @@ export class RemoteTransport {
   private sequence = 0n;
   readonly inputTrace: Record<string, unknown>[] = [];
   readonly inputResults: Record<string, unknown>[] = [];
-  private traceInput(phase: string, surface: Surface, event: Record<string, unknown>, reason?: string) { this.inputTrace.push({ at: performance.now(), phase, view: surface.id, eventType: event.type, action: event.action, reason, epoch: this.layout?.epoch, ...(event.type === 'touch' ? { sourceClock: event.clockMode, sampleElapsedUs: event.sampleElapsedUs, touchSequenceId: event.sequenceId } : {}) }); if (this.inputTrace.length > 128) this.inputTrace.shift(); }
+  private traceInput(phase: string, surface: Surface, event: Record<string, unknown>, reason?: string, sequence?: string) { this.inputTrace.push({ at: performance.now(), phase, view: surface.id, eventType: event.type, action: event.action, reason, sequence, epoch: this.layout?.epoch, ...(event.type === 'touch' || event.type === 'gesture' ? { sourceClock: event.clockMode, sampleElapsedUs: event.sampleElapsedUs, touchSequenceId: event.sequenceId } : {}) }); if (this.inputTrace.length > 128) this.inputTrace.shift(); }
   private focusSequence = 0n;
   private pendingFocus: { requestId: string; acknowledged: boolean; focused: boolean; view: string; session: string; token: string; instance: string; document: string; generation: string; epoch: string; events: QueuedInput[] } | null = null;
   private attempt = 0;
@@ -1007,10 +1082,10 @@ export class RemoteTransport {
           this.notify();
         }
         if (message.type === 'frame') { this.latency.record(message.rtpTimestamp, message.layoutEpoch, message); const start = performance.now(); if (Number.isInteger(message.rtpTimestamp) && typeof message.layoutEpoch === 'string') { this.presentation.frameMetadata(start, message.rtpTimestamp, message.layoutEpoch); this.encodedFrameSamples.push({ at: start, rtpTimestamp: message.rtpTimestamp, layoutEpoch: message.layoutEpoch, encodedBytes: typeof message.encodedBytes === 'number' ? message.encodedBytes : undefined, keyframe: typeof message.keyframe === 'boolean' ? message.keyframe : undefined }); if (this.encodedFrameSamples.length > 2400) this.encodedFrameSamples.shift(); } this.frameGate.record(message.rtpTimestamp, message.layoutEpoch); this.matchPendingVideoObservations(); if (message.layoutEpoch === this.layout?.epoch) this.scheduleVideoMetadataRefresh(); this.presentation.cost('frameMessageTotal', start, performance.now() - start); }
-        if (message.type === 'stats') this.update({ endpoint: message });
+        if (message.type === 'stats') { this.endpointStatsAtMs = performance.now(); this.update({ endpoint: message }); }
         if (message.type === 'input.result' || message.type === 'focus') {
           if (message.type === 'input.result') this.receiveInputResult(message);
-          this.inputResults.push({ at: performance.now(), ...message }); if (this.inputResults.length > 128) this.inputResults.shift();
+          this.inputResults.push({ ...message, at: performance.now() }); if (this.inputResults.length > 128) this.inputResults.shift();
           if (message.type === 'focus' && this.layout) {
             const pending = this.pendingFocus, token = message.token;
             const view = pending && this.layout.views.find(view => view.id === pending.view && view.session === pending.session && view.instance === pending.instance && view.document === pending.document);
@@ -1101,7 +1176,7 @@ export class RemoteTransport {
         while (this.sentInput.size > 256) this.sentInput.delete(this.sentInput.keys().next().value!);
       }
       this.reportInputDelivery(item, 'submitted', sequence);
-      this.traceInput('sent', current, item.event);
+      this.traceInput('sent', current, item.event, undefined, sequence);
     }
     if (this.queuedInput.length) this.inputDrainTimer = setTimeout(() => this.drainInput(), 10);
   }
@@ -1133,6 +1208,7 @@ export class RemoteTransport {
   private async readStats(peer: RTCPeerConnection) {
     if (peer !== this.peer || this.statsReadingPeer === peer) return;
     this.statsReadingPeer = peer;
+    const mediaRevision = this.mediaDiagnosticsRevision;
     try {
       // Snapshot video counters at the getStats request edge. Use the same
       // polling windows for rates rather than the rolling rVFC diagnostic FPS.
@@ -1143,40 +1219,43 @@ export class RemoteTransport {
         timing: plane.stats.timing(at),
       }));
       const stats = await peer.getStats();
-      if (peer !== this.peer) return;
-      const update: Partial<Diagnostics> = { decodedFramesPerSecond: undefined, receiveBitrateBps: undefined, receiverVideoTiming: undefined, roundTripTime: undefined, selectedCandidates: undefined };
+      const getStatsWaitMs = performance.now() - at;
+      if (peer !== this.peer || mediaRevision !== this.mediaDiagnosticsRevision) return;
+      const videoReceiver = peer.getReceivers?.().find(receiver => receiver.track === this.videoTrack);
+      const update: Partial<Diagnostics> = {
+        decodedFramesPerSecond: undefined, receiveBitrateBps: undefined, receiverVideoTiming: undefined,
+        receiverAudioTiming: undefined, receiverVideoPlayoutExtensionNegotiated: negotiatedReceiverPlayout(videoReceiver),
+        roundTripTime: undefined, selectedCandidates: undefined, videoWidth: undefined, videoHeight: undefined,
+      };
       let inboundCounters: { decodedFrames?: number; packetsLost?: number; framesDropped?: number } = {};
+      let videoReport: (InboundMediaStats & { framesPerSecond?: number; frameWidth?: number; frameHeight?: number; codecId?: string }) | undefined;
+      let audioReport: InboundMediaStats | undefined;
       let selectedPairId: string | undefined;
       let nominatedPair: RTCIceCandidatePairStats | undefined;
       stats.forEach(report => {
-        if (report.type === 'inbound-rtp' && (report.kind === 'video' || report.mediaType === 'video')) {
-          inboundCounters = { decodedFrames: report.framesDecoded, packetsLost: report.packetsLost, framesDropped: report.framesDropped };
-          update.framesDecoded = report.framesDecoded; update.framesPerSecond = report.framesPerSecond; update.bytesReceived = report.bytesReceived;
-          if (typeof report.timestamp === 'number' && typeof report.bytesReceived === 'number') {
-            const previous = this.lastInboundSample?.id === report.id ? this.lastInboundSample : undefined;
-            if (previous && report.timestamp > previous.timestamp && report.bytesReceived >= previous.bytes) update.receiveBitrateBps = (report.bytesReceived - previous.bytes) * 8000 / (report.timestamp - previous.timestamp);
-            if (previous?.frames !== undefined && typeof report.framesDecoded === 'number' && report.timestamp > previous.timestamp && report.framesDecoded >= previous.frames) update.decodedFramesPerSecond = (report.framesDecoded - previous.frames) * 1000 / (report.timestamp - previous.timestamp);
-            if (previous && report.timestamp > previous.timestamp) {
-              const decoded = counterDelta(report.framesDecoded, previous.frames);
-              const emitted = counterDelta(report.jitterBufferEmittedCount, previous.emitted);
-              const jitter = counterDelta(report.jitterBufferDelay, previous.jitterDelay);
-              const decode = counterDelta(report.totalDecodeTime, previous.decodeTime);
-              update.receiverVideoTiming = {
-                jitterBufferMeanMs: emitted && jitter !== undefined ? jitter * 1000 / emitted : undefined,
-                decodeMeanMs: decoded && decode !== undefined ? decode * 1000 / decoded : undefined,
-                droppedFrames: counterDelta(report.framesDropped, previous.framesDropped),
-              };
-            }
-            this.lastInboundSample = { id: report.id, timestamp: report.timestamp, bytes: report.bytesReceived, frames: report.framesDecoded,
-              emitted: report.jitterBufferEmittedCount, jitterDelay: report.jitterBufferDelay, decodeTime: report.totalDecodeTime, framesDropped: report.framesDropped };
-          }
-          update.videoWidth = report.frameWidth;
-          update.videoHeight = report.frameHeight;
-          if (report.codecId) update.codec = stats.get(report.codecId)?.mimeType;
+        if (report.type === 'inbound-rtp') {
+          const kind = report.kind ?? report.mediaType;
+          if (kind === 'video') videoReport = report;
+          if (kind === 'audio') audioReport = report;
         }
         if (report.type === 'transport' && report.selectedCandidatePairId) selectedPairId = report.selectedCandidatePairId;
         if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) nominatedPair ??= report;
       });
+      if (videoReport) {
+        const { video, decodedFps, bitrateBps } = this.inboundVideo.sample(videoReport);
+        inboundCounters = { decodedFrames: videoReport.framesDecoded, packetsLost: videoReport.packetsLost, framesDropped: videoReport.framesDropped };
+        update.framesDecoded = videoReport.framesDecoded;
+        update.framesPerSecond = videoReport.framesPerSecond;
+        update.bytesReceived = videoReport.bytesReceived;
+        update.videoWidth = videoReport.frameWidth;
+        update.videoHeight = videoReport.frameHeight;
+        update.decodedFramesPerSecond = decodedFps;
+        update.receiveBitrateBps = bitrateBps;
+        if (Object.values(video).some(value => value !== undefined)) update.receiverVideoTiming = video;
+        if (videoReport.codecId) update.codec = stats.get(videoReport.codecId)?.mimeType;
+      } else this.inboundVideo.reset();
+      if (audioReport) update.receiverAudioTiming = this.inboundAudio.sample(audioReport).buffer;
+      else this.inboundAudio.reset();
       const pair = (selectedPairId ? stats.get(selectedPairId) as RTCIceCandidatePairStats | undefined : undefined) ?? nominatedPair;
       if (pair) {
         update.roundTripTime = pair.currentRoundTripTime;
@@ -1192,6 +1271,10 @@ export class RemoteTransport {
           videoElementDrops: window?.videoElementDrops, ...timing }]));
       update.rendering=this.getRenderingDiagnostics();
       update.displayFramesPerSecond = this.selectedViewId ? paints[this.selectedViewId]?.fps : undefined;
+      if (!this.productLocked && this.peerAuthEpoch !== 0) {
+        this.collectionRtcSource = { video: videoReport, audio: audioReport, pair, sampledAtMs: at, getStatsWaitMs };
+        this.mediaDiagnosticsHistory.record(at, { ...this.diagnostics, ...update }, this.selectedViewId);
+      }
       this.update(update);
       if (this.layout && this.channel?.readyState === 'open') {
         const counts = new Map([...this.videoPlanes].map(([renderer, plane]) => [renderer.view.id, plane.stats.frames]));
@@ -1271,7 +1354,7 @@ export class RemoteTransport {
     this.attempt++; this.sentInput.clear(); this.clearTerminalInput(); this.latency.reset(); this.endpointClockProbe.reset(); this.controlClockProbe.reset(); this.feedbackReading = false; this.videoTrack = undefined; this.displayHzEstimate = undefined;
     this.mediaFeedback.stop(); this.statsReadingPeer = undefined; this.networkRead = undefined;
     this.frameGate.clear();
-    this.lastInboundSample = undefined;
+    this.resetMediaDiagnostics();
     this.viewPresentations.clear();
     for (const renderer of this.renderers) renderer.ready(false); this.renderers.clear();
     for (const registration of this.viewports) { registration.renderer = undefined; registration.remove = undefined; }

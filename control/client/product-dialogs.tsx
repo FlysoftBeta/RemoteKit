@@ -183,6 +183,7 @@ export function SettingsDialog({
   action,
   logout,
   security,
+  diagnostics,
 }: {
   state: ProductState;
   online: boolean;
@@ -191,6 +192,7 @@ export function SettingsDialog({
   action: Action;
   logout: () => void;
   security?: React.ReactNode;
+  diagnostics?: React.ReactNode;
 }) {
   const compact = useMediaQuery("(max-width:600px)"),
     settings = state.workspace.settings;
@@ -408,6 +410,7 @@ export function SettingsDialog({
           {note("stats")}
         </div>
         <Divider />
+        {diagnostics}
         {security}
         <div className="account-row">
           <Typography color="text.secondary">{state.user.username}</Typography>

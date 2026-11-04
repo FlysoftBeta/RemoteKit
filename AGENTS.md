@@ -35,6 +35,7 @@
 - 服务串流与输入的关键参数尽量独立于宿主系统设置，避免服务器显示器、DPI、刷新率或RDP改变行为；客户端DPR/刷新能力和产品媒体策略仍作为适配输入。具体固定值与实现方式放正式架构文档，不固化为用户要求。
 - 保留Chrome89支持。性能环境为UHD630、RTT10ms、24–48Mbps；用户把重载目标从4调到3，再允许2租户，接受新版Chromium模拟刷新验收。目标实际动态canvas≥50FPS、Pixel marker p95≤100ms；静态低FPS正常。
 - 用户要求单次idle尾IDR、显示/网络自适应FPS、背压、高码率换编码速度与高精度计时。拥塞控制与媒体降级交给WebRTC，质量三档对应DegradationPreference；不再保留自行按延迟调整DPR/分辨率/码率的控制器。Comp依据SetRates与Slot压力安排Begin和活动队列深度，经BeginFrameSource驱动自定义OSR呈现后端，不使用Capture API截取。Viewer接收端jitterBufferTarget设为0。受控实验使用独立无交互测试页和下放配置；保留细粒度GPU/延迟profile，淘汰无效旋钮并集中归档。
+- 诊断从设置内点击开始，收集期间显示悬浮的停止数据收集按钮；停止后打包为tar.zst文件保存在服务端，客户端显示诊断ID。诊断包尽可能涵盖完整的调试信息。
 
 ## 仓库与文档
 

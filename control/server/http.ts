@@ -9,9 +9,24 @@ import { ApiError, Control } from './control';
 import { AuthError } from './security-crypto';
 import type { ProductState } from '../shared/product';
 import type { EndpointNode } from './endpoint-node';
+import { DiagnosticSessions, diagnosticMessageLimit } from './diagnostic-sessions';
 
-export function createHttp(control: Control, options: { origins: string[]; clientDir: string; metricsDir: string; diagnostics?: boolean; tls?: { key: Buffer; cert: Buffer }; endpointNode?: EndpointNode }) {
+export function createHttp(control: Control, options: { origins: string[]; clientDir: string; metricsDir: string; diagnostics?: boolean; diagnosticDir?: string; tls?: { key: Buffer; cert: Buffer }; endpointNode?: EndpointNode }) {
   let closing = false;
+  const diagnosticSessions = options.diagnosticDir ? new DiagnosticSessions(options.diagnosticDir, {
+    control: tenant => {
+      const { revision, layoutMode, settings, tabs, windows } = control.store.workspace(tenant);
+      return {
+        revision, layoutMode, windowCount: windows.length, tabCount: tabs.length,
+        windows: windows.slice(0, 64).map(window => ({ weight: window.weight, active: window.activeTabId !== null })),
+        settings: {
+          qualityPreference: settings.qualityPreference, clientScaleOverride: settings.clientScaleOverride,
+          memorySaverEnabled: settings.memorySaverEnabled, autoFullscreen: settings.autoFullscreen, audioChannels: settings.audioChannels,
+        },
+      };
+    },
+    endpoint: tenant => control.endpoint.request('session.snapshot', tenant, { outputDiagnostics: true }),
+  }) : undefined;
   const inflight = new Set<Promise<unknown>>();
   const track = <T>(promise: Promise<T>): Promise<T> => {
     inflight.add(promise);
@@ -89,7 +104,10 @@ export function createHttp(control: Control, options: { origins: string[]; clien
   control.on('state', push);
   const signal = (tenant: string, lease: string, message: unknown) => { for (const [ws, peer] of peers) if (peer.tenant === tenant && peer.lease === lease) send(ws, message); };
   control.on('rtc.signal', signal);
-  const auth = (tenant: string, lease: string, state: unknown) => signal(tenant, lease, { type: 'auth', auth: state });
+  const auth = (tenant: string, lease: string, state: unknown) => {
+    diagnosticSessions?.checkViewer(tenant, lease);
+    signal(tenant, lease, { type: 'auth', auth: state });
+  };
   control.on('auth', auth);
   server.on('upgrade', (req, socket, head) => {
     try {
@@ -103,22 +121,42 @@ export function createHttp(control: Control, options: { origins: string[]; clien
         const hash = authenticationIdentity(token);
         const initialUnlocked = (firstViewer.get(hash) ?? 0) > Date.now();
         firstViewer.delete(hash);
-        const ready = track(control.attachViewer(peer.tenant, lease, reason => { send(ws, { type: 'lease', status: 'revoked', reason }); ws.close(4001, reason); }, { identity: hash, valid: () => control.store.identity(token)?.tenantId === peer.tenant }, identity.legacy ? undefined : initialUnlocked));
+        const ready = track(control.attachViewer(peer.tenant, lease, reason => {
+          diagnosticSessions?.detachViewer(peer.tenant, lease, 'authorization-changed');
+          send(ws, { type: 'lease', status: 'revoked', reason }); ws.close(4001, reason);
+        }, { identity: hash, valid: () => control.store.identity(token)?.tenantId === peer.tenant }, identity.legacy ? undefined : initialUnlocked));
         void ready.catch(() => ws.close(1011, 'Viewer unavailable'));
         ws.on('pong', () => { peer.alive = true; }); ws.on('error', () => {});
-        ws.on('close', () => { if (peers.delete(ws)) void track(control.detachViewer(peer.tenant, lease)).catch(() => {}); });
+        ws.on('close', () => {
+          diagnosticSessions?.detachViewer(peer.tenant, lease, 'disconnected');
+          if (peers.delete(ws)) void track(control.detachViewer(peer.tenant, lease)).catch(() => {});
+        });
         ws.on('message', (data, binary) => {
           if (closing) return;
           let request: any;
-          try { if (binary) throw new Error(); request = JSON.parse(data.toString()); if (!request || typeof request.id !== 'string' || !request.id || request.id.length > 128 || typeof request.method !== 'string' || pending.has(request.id) || pending.size >= 32) throw new Error(); }
+          const raw = data.toString();
+          try { if (binary) throw new Error(); request = JSON.parse(raw); if (!request || typeof request.id !== 'string' || !request.id || request.id.length > 128 || typeof request.method !== 'string' || pending.has(request.id) || pending.size >= 32) throw new Error(); }
           catch { send(ws, { type: 'error', id: typeof request?.id === 'string' ? request.id : '', error: { code: 400, message: '无效的 WebSocket 请求' } }); return; }
+          const diagnosticRequest = request.method.startsWith('diagnostics.');
+          if (diagnosticRequest && Buffer.byteLength(raw) > diagnosticMessageLimit) {
+            send(ws, { type: 'error', id: request.id, error: { code: 413, message: '诊断请求过大' } }); return;
+          }
           pending.add(request.id);
           const immediate = request.method.startsWith('auth.') || request.method === 'clock.ping';
           void track((immediate ? Promise.resolve() : ready).then(async () => {
-            if (!control.store.identity(token)) throw new ApiError(401, '登录已过期');
+            const currentIdentity = control.store.identity(token);
+            if (!currentIdentity) throw new ApiError(401, '登录已过期');
             const maintenance = immediate || ['rtc.offer', 'rtc.ice', 'rtc.close'].includes(request.method);
             const epoch = control.productEpoch(peer.tenant, lease);
-            const result = await control.viewerRequest(peer.tenant, lease, request.method, request.params);
+            let result: unknown;
+            if (diagnosticRequest) {
+              if (!diagnosticSessions) throw new ApiError(404, '诊断采集未配置');
+              const allowed = () => !closing && peers.has(ws) && control.productAllowed(peer.tenant, lease) && control.productEpoch(peer.tenant, lease) === epoch;
+              if (currentIdentity.legacy || currentIdentity.tenantId !== peer.tenant || epoch === undefined || !allowed()) throw new ApiError(423, 'Viewer 已锁定');
+              result = await diagnosticSessions.request({ tenant: peer.tenant, lease, epoch, identity: hash, allowed }, request.method, request.params);
+            } else {
+              result = await control.viewerRequest(peer.tenant, lease, request.method, request.params);
+            }
             if (!maintenance && (!control.productAllowed(peer.tenant, lease) || control.productEpoch(peer.tenant, lease) !== epoch)) throw new ApiError(423, 'Viewer 已锁定');
             send(ws, { type: 'result', id: request.id, result });
           }).catch(error => send(ws, { type: 'error', id: request.id, error: { code: error instanceof ApiError ? error.status : 502, message: error instanceof Error ? error.message : String(error) } })).finally(() => pending.delete(request.id)));
@@ -134,6 +172,7 @@ export function createHttp(control: Control, options: { origins: string[]; clien
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     closing = true;
+    const archivesClosed = diagnosticSessions?.shutdown();
     // Fail remote management requests before draining handlers waiting on them.
     options.endpointNode?.stop();
     clearInterval(heartbeat); clearInterval(facePoll); control.off('auth', auth);
@@ -153,6 +192,7 @@ export function createHttp(control: Control, options: { origins: string[]; clien
     shutdownPromise = (async () => {
       await httpClosed;
       while (inflight.size) await Promise.allSettled([...inflight]);
+      await archivesClosed;
       await metricsWrite;
       control.closeRelays?.();
     })();
