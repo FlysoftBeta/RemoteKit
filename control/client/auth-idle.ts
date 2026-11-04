@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { AuthState } from '../shared/security';
+import { DEFAULT_IDLE_SECONDS, type AuthState } from '../shared/security';
 
 interface IdleMonitor extends EventTarget {
   userState: 'active' | 'idle' | null;
@@ -20,7 +20,7 @@ export function useAutoLock(auth: AuthState | null, lock: (reason: string) => vo
   const enabled = auth?.settings.lockOnIdle === true;
   const lockOnHidden = auth?.settings.lockOnHidden === true;
   const locked = auth?.locked !== false;
-  const idleSeconds = auth?.settings.idleSeconds ?? 60;
+  const idleSeconds = auth?.settings.idleSeconds ?? DEFAULT_IDLE_SECONDS;
 
   useEffect(() => {
     if (!IdleDetector) return;

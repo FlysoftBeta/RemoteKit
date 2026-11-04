@@ -107,10 +107,14 @@ test('late unlock acknowledgement cannot restore rights after a subsequent lock'
 
 test('settings require current password, PIN is hashed and failures are limited across leases', async t => {
   const f = await fixture(t);
+  const initial = await f.request('auth.get');
+  assert.equal(initial.settings.lockOnIdle, true);
+  assert.equal(initial.settings.idleSeconds, 300);
+  assert.equal(initial.settings.lockOnHidden, true);
   await assert.rejects(f.request('auth.settings', { currentPassword: 'wrong', pin: '123456' }), { status: 403 });
   assert.equal(f.store.security(f.user.id).pin, undefined);
   await assert.rejects(f.request('auth.settings', { currentPassword: password, pin: '1234' }), { status: 400 });
-  await f.request('auth.settings', { currentPassword: password, pin: '123456', settings: { lockOnHidden: false } });
+  await f.request('auth.settings', { currentPassword: password, pin: '123456', settings: { lockOnHidden: false, idleSeconds: 60 } });
   assert.notEqual(f.store.security(f.user.id).pin?.hash, '123456');
   await f.request('auth.password', { currentPassword: password, newPassword: 'changed-password' });
   await f.request('auth.lock');
@@ -121,6 +125,7 @@ test('settings require current password, PIN is hashed and failures are limited 
   const state = await f.request('auth.verify', { method: 'password', secret: 'changed-password' }, 'replacement');
   assert.equal(state.locked, false);
   assert.equal(state.settings.lockOnHidden, false);
+  assert.equal(state.settings.idleSeconds, 60);
 });
 
 test('face template is encrypted and late matches or enrollment results cannot commit', async t => {

@@ -1,5 +1,7 @@
 import type { ProductUser } from './product';
 
+export const DEFAULT_IDLE_SECONDS = 300;
+
 export interface AuthSettings {
   lockOnHidden: boolean;
   lockOnIdle: boolean;

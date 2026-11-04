@@ -1,13 +1,13 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
-import type { AuthSettings } from '../shared/security';
+import { DEFAULT_IDLE_SECONDS, type AuthSettings } from '../shared/security';
 
 export class AuthError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
 export const defaultAuthSettings = (): AuthSettings => ({
-  lockOnHidden: true, lockOnIdle: true, idleSeconds: 60, lockOnDeparture: false, faceEnabled: false,
+  lockOnHidden: true, lockOnIdle: true, idleSeconds: DEFAULT_IDLE_SECONDS, lockOnDeparture: false, faceEnabled: false,
 });
 
 export interface SecretHash { salt: string; hash: string }
