@@ -17,7 +17,7 @@ Result<LayoutPlan> LayoutTransaction::Prepare(ViewRegistry::Specifications specs
       !std::isfinite(plan.scale) || plan.scale < .5 || plan.scale > 4 ||
       (plan.alignment != 1 && plan.alignment != 16))
     return {{}, {ErrorCode::invalid_request, "Invalid output geometry"}};
-  std::vector<PackItem> items;
+  std::vector<protocol::PackItem> items;
   for (const auto& [id, spec] : specs) {
     if (spec.width < 1 || spec.height < 1 || spec.width > 8192 || spec.height > 8192 ||
         (spec.page_dsf != 0 &&
@@ -40,11 +40,12 @@ Result<LayoutPlan> LayoutTransaction::Prepare(ViewRegistry::Specifications specs
     if (spec.visible)
       items.push_back({id, spec.width, spec.height, 1.0});
   }
-  auto atlas = PackAtlas(plan.width, plan.height, 4, OrderAtlasItems(std::move(items)));
+  auto atlas =
+      protocol::PackAtlas(plan.width, plan.height, 4, protocol::OrderAtlasItems(std::move(items)));
   if (!atlas)
-    return {{}, atlas.status};
+    return {{}, {atlas.error, atlas.message}};
   const auto dimensions =
-      AtlasAllocationDimensions(plan.width, plan.height, plan.scale, plan.alignment);
+      protocol::AtlasAllocationDimensions(plan.width, plan.height, plan.scale, plan.alignment);
   if (!dimensions)
     return {{}, {ErrorCode::resource_limit, "Atlas resource budget exceeded"}};
   plan.specs = std::move(specs);
@@ -64,10 +65,11 @@ void LayoutTransaction::Commit(LayoutPlan plan) {
   output_width = plan.output_width;
   output_height = plan.output_height;
   for (auto& [id, record] : views_.records) {
-    const auto found = std::ranges::find(plan.atlas.placements, id, &Placement::view);
+    const auto found = std::ranges::find(plan.atlas.placements, id, &protocol::Placement::view);
     const bool visible = found != plan.atlas.placements.end();
     const auto placement =
-        visible ? *found : Placement{id, {}, {0, 0, record.spec.width, record.spec.height}, 1.0};
+        visible ? *found
+                : protocol::Placement{id, {}, {0, 0, record.spec.width, record.spec.height}, 1.0};
     if (changed || record.placement.content != placement.content)
       record.webview->InvalidateLayoutInput(visible);
     CHECK(record.webview->SetVisible(visible));

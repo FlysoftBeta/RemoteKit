@@ -1,5 +1,5 @@
 #pragma once
-#include "remotekit/error.hpp"
+#include "util/error.hpp"
 #include <json.hpp>
 #include <map>
 #include <optional>

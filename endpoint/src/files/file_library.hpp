@@ -1,7 +1,7 @@
 #pragma once
-#include "remotekit/error.hpp"
-#include "remotekit/file_upload.hpp"
-#include "remotekit/dc_services.hpp"
+#include "util/error.hpp"
+#include "files/file_upload.hpp"
+#include "rtc/dc_services.hpp"
 #include <filesystem>
 #include <functional>
 #include <map>

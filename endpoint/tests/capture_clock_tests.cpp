@@ -1,4 +1,4 @@
-#include "remotekit/capture_clock.hpp"
+#include "media/capture_clock.hpp"
 #include <cstdlib>
 #include <iostream>
 #define CHECK(x)                                    \

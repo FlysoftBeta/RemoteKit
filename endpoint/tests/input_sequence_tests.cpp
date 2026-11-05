@@ -1,4 +1,4 @@
-#include "remotekit/input_sequence.hpp"
+#include "input/input_sequence.hpp"
 #include <cstdlib>
 #include <iostream>
 

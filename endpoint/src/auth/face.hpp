@@ -1,6 +1,6 @@
 #pragma once
-#include "remotekit/face_auth.hpp"
-#include "remotekit/raw_camera.hpp"
+#include "auth/face_auth.hpp"
+#include "auth/raw_camera.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/event.hpp"
 #include "session/context.hpp"

@@ -1,7 +1,7 @@
 #include "media/gpu_device.hpp"
 #include "input/input.hpp"
 #include "rtc/data_router.hpp"
-#include "remotekit/thread.hpp"
+#include "util/thread.hpp"
 namespace remotekit {
 using media::QpcFrequency;
 using media::QpcNow;

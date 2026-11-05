@@ -1,6 +1,6 @@
 #include "render_slots.hpp"
 #include "render_event_queue.hpp"
-#include "remotekit/comp_pacing.hpp"
+#include "media/comp_pacing.hpp"
 #include <atomic>
 #include <cstring>
 #include <cmath>
@@ -392,10 +392,7 @@ RenderSlots::Result RenderSlots::Poll(remotekit_rtc_frame& frame,
     return Result::error;
   SharedAtlasFrame layout{};
   if (Snapshot(s.mapping->publication_sequence, s.mapping->latest_layout, layout)) {
-    if (layout.status == SharedAtlasStatus::kReconfigureNeeded)
-      return Result::reconfigure;
-    if (layout.status == SharedAtlasStatus::kFailed ||
-        layout.status == SharedAtlasStatus::kDeviceLost) {
+    if (layout.status == SharedAtlasStatus::kFailed) {
       error = "render producer GPU failure; resources retained";
       return Result::error;
     }

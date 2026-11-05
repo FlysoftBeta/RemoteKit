@@ -1,9 +1,9 @@
 #pragma once
-#include "remotekit/presentation_refresh.hpp"
-#include "remotekit/comp_pacing.hpp"
-#include "remotekit/idle_idr.hpp"
-#include "remotekit/tail_refresh.hpp"
-#include "remotekit/sampling.hpp"
+#include "media/presentation_refresh.hpp"
+#include "media/comp_pacing.hpp"
+#include "media/idle_idr.hpp"
+#include "media/tail_refresh.hpp"
+#include "media/sampling.hpp"
 #include "rtc/event.hpp"
 #include "session/context.hpp"
 namespace remotekit {

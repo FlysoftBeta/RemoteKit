@@ -1,5 +1,5 @@
-#include "remotekit/thread.hpp"
-#include "remotekit/face_auth.hpp"
+#include "util/thread.hpp"
+#include "auth/face_auth.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -8,7 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
-#include "remotekit/result_macros.hpp"
+#include "util/result_macros.hpp"
 #include <thread>
 #include <vector>
 

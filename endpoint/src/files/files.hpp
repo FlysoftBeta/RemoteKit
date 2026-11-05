@@ -1,6 +1,6 @@
 #pragma once
-#include "remotekit/file_library.hpp"
-#include "remotekit/dc_file_services.hpp"
+#include "files/file_library.hpp"
+#include "files/dc_file_services.hpp"
 #include "rtc/authorization.hpp"
 #include "rtc/peer.hpp"
 #include "rtc/event.hpp"

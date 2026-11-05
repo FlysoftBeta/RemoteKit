@@ -1,5 +1,5 @@
 #include "management/remote_link.hpp"
-#include "remotekit/thread.hpp"
+#include "util/thread.hpp"
 #include <windows.h>
 #include <winhttp.h>
 #include <objbase.h>

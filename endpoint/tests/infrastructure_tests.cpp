@@ -4,7 +4,7 @@
 #include "platform/process.hpp"
 #include "service.hpp"
 #include "media/sdk_loader.hpp"
-#include "remotekit/thread.hpp"
+#include "util/thread.hpp"
 #include <windows.h>
 #include <array>
 #include <fstream>

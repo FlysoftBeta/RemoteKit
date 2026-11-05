@@ -1,6 +1,10 @@
 #include "remotekit/browser/view_model.h"
 
 #include "base/check.h"
+#include "base/check_op.h"
+#include "base/command_line.h"
+#include "base/files/file_util.h"
+#include <sstream>
 
 namespace {
 using namespace remotekit;
@@ -78,18 +82,58 @@ void CheckValidationAndPacking() {
   CHECK(ValidateInput(selection).error == ErrorCode::invalid_request);
   selection.selection_end = 2;
   CHECK(ValidateInput(selection));
-  const auto items = OrderAtlasItems({{1, 10, 10}, {2, 20, 10}, {3, 20, 10}});
+  const auto items = protocol::OrderAtlasItems({{1, 10, 10}, {2, 20, 10}, {3, 20, 10}});
   CHECK(items[0].view == 2 && items[1].view == 3 && items[2].view == 1);
-  const auto packed = PackAtlas(64, 64, 4, items);
+  const auto packed = protocol::PackAtlas(64, 64, 4, items);
   CHECK(packed);
   CHECK(packed.value.placements.size() == 3);
-  CHECK(packed.value.placements[0].outer == (PixelRect{0, 0, 28, 18}));
-  CHECK(packed.value.placements[0].content == (PixelRect{4, 4, 20, 10}));
-  CHECK(PackAtlas(16, 16, 4, items).status.error == ErrorCode::resource_limit);
+  CHECK(packed.value.placements[0].outer == (protocol::PixelRect{0, 0, 28, 18}));
+  CHECK(packed.value.placements[0].content == (protocol::PixelRect{4, 4, 20, 10}));
+  CHECK(protocol::PackAtlas(16, 16, 4, items).error == ErrorCode::resource_limit);
+}
+void CheckAtlasFixtures(const base::FilePath& path) {
+  std::string contents;
+  CHECK(base::ReadFileToString(path, &contents));
+  std::istringstream file(contents);
+  std::string line;
+  while (std::getline(file, line)) {
+    if (line.empty() || line[0] == '#')
+      continue;
+    std::istringstream row(line);
+    std::string name, list;
+    float scale;
+    unsigned alignment;
+    int width, height, physical_width, physical_height;
+    CHECK(row >> name >> scale >> alignment >> list >> width >> height >> physical_width >>
+          physical_height);
+    std::vector<protocol::PackItem> items;
+    if (list != "-") {
+      std::istringstream parts(list);
+      std::string item;
+      while (std::getline(parts, item, ',')) {
+        const auto separator = item.find('x');
+        items.push_back({items.size() + 1, std::stoi(item.substr(0, separator)),
+                         std::stoi(item.substr(separator + 1)), 1});
+      }
+    }
+    const auto plan = protocol::PlanAtlas(items, scale, alignment);
+    CHECK_EQ(width == 0, !plan) << name;
+    if (!plan)
+      continue;
+    CHECK_EQ(plan->width, width) << name;
+    CHECK_EQ(plan->height, height) << name;
+    CHECK_EQ(plan->physical.width, static_cast<unsigned>(physical_width)) << name;
+    CHECK_EQ(plan->physical.height, static_cast<unsigned>(physical_height)) << name;
+    CHECK(protocol::PackAtlas(width, height, 4, protocol::OrderAtlasItems(items))) << name;
+  }
 }
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  base::CommandLine::Init(argc, argv);
+  const auto arguments = base::CommandLine::ForCurrentProcess()->GetArgs();
+  CHECK_EQ(arguments.size(), 1u);
+  CheckAtlasFixtures(base::FilePath(arguments.front()));
   CheckLifecycleAndInput();
   CheckValidationAndPacking();
 }

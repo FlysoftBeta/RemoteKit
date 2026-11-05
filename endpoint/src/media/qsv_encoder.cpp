@@ -1,7 +1,7 @@
 #include "hardware_encoder.hpp"
 #include "qsv_cadence_policy.hpp"
 #include "server_trace.hpp"
-#include "remotekit/sampling.hpp"
+#include "media/sampling.hpp"
 #include <vpl/mfxdispatcher.h>
 #include <vpl/mfxvideo.h>
 #include <wrl/client.h>

@@ -1,6 +1,6 @@
 #include "session/views.hpp"
-#include "remotekit/file_io.hpp"
-#include "remotekit/result_macros.hpp"
+#include "util/file_io.hpp"
+#include "util/result_macros.hpp"
 #include "diagnostics/stats.hpp"
 #include "diagnostics/timing.hpp"
 #include "media/encoders.hpp"
@@ -139,7 +139,7 @@ Result<void> ViewController::Start() {
 }
 
 Result<ViewController::Geometry> ViewController::DesiredGeometry() {
-  std::vector<remotekit::PackItem> items;
+  std::vector<protocol::PackItem> items;
   float scale = .5f;
   for (auto& [view, config] : desired) {
     if (!config.value("visible", false))
@@ -152,8 +152,8 @@ Result<ViewController::Geometry> ViewController::DesiredGeometry() {
     items.push_back({std::stoull(view), w, h, 1.0});
     scale = std::max(scale, device.value("deviceScaleFactor", 1.0f));
   }
-  const auto plan = remotekit::PlanAtlas(items, items.empty() ? 1.f : scale,
-                                         RuntimeOptions::kAtlasAllocationAlignment);
+  const auto plan = protocol::PlanAtlas(items, items.empty() ? 1.f : scale,
+                                        RuntimeOptions::kAtlasAllocationAlignment);
   if (!plan)
     return Error{ErrorCode::kLimitExceeded,
                  "visible source atlas cannot be packed within the aligned 16-megapixel/8192-pixel "
@@ -162,8 +162,8 @@ Result<ViewController::Geometry> ViewController::DesiredGeometry() {
 }
 
 Result<void> ViewController::GeometryConfig(const Geometry& value) {
-  if (!remotekit::AtlasAllocationDimensions(value.width, value.height, value.scale,
-                                            RuntimeOptions::kAtlasAllocationAlignment))
+  if (!protocol::AtlasAllocationDimensions(value.width, value.height, value.scale,
+                                           RuntimeOptions::kAtlasAllocationAlignment))
     return Error{ErrorCode::kLimitExceeded,
                  "source atlas exceeds the aligned 16-megapixel/8192-pixel resource budget"};
   Json configs = Json::array();

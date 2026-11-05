@@ -39,7 +39,7 @@
 #include "browser/closed_views.h"
 #include "browser/navigation_transfer.h"
 #include "browser/control_response.h"
-#include "remotekit/endpoint/include/remotekit/atlas_dimensions.hpp"
+#include "protocol/atlas_dimensions.hpp"
 #include "remotekit/protocol/control.h"
 #include "ui/display/screen.h"
 #include "url/gurl.h"
@@ -223,8 +223,8 @@ int RemoteKitMainParts::PreMainMessageLoopRun() {
   state_->layout_transaction.logical_width = width;
   state_->layout_transaction.logical_height = height;
   const auto dimensions =
-      AtlasAllocationDimensions(width, height, state_->layout_transaction.output_scale,
-                                state_->layout_transaction.allocation_alignment);
+      protocol::AtlasAllocationDimensions(width, height, state_->layout_transaction.output_scale,
+                                          state_->layout_transaction.allocation_alignment);
   if (!dimensions)
     return 1;
   state_->layout_transaction.output_width = dimensions->width;

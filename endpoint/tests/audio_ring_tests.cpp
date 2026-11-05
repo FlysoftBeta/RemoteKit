@@ -1,5 +1,5 @@
 #include "../src/media/audio_ring.hpp"
-#include "remotekit/audio_timeline.h"
+#include "protocol/audio_timeline.h"
 #include <atomic>
 #include <iostream>
 #include <memory>

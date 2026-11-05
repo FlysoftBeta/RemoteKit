@@ -1,14 +1,14 @@
-#include "remotekit/control_reliability.hpp"
+#include "session/control_reliability.hpp"
 #include "rtc/outbox.hpp"
 #include "session/browser_rpc.hpp"
-#include "remotekit/navigation_export.hpp"
-#include "remotekit/presentation_barrier.hpp"
+#include "session/navigation_export.hpp"
+#include "media/presentation_barrier.hpp"
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <condition_variable>
 #include <thread>
-#include "remotekit/thread.hpp"
+#include "util/thread.hpp"
 
 #define CHECK(x)                                    \
   do {                                              \

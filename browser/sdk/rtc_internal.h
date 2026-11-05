@@ -60,7 +60,7 @@
 #include "third_party/webrtc/rtc_base/time_utils.h"
 
 #include "remotekit/browser/sdk/rtc_audio_source.h"
-#include "remotekit/endpoint/include/remotekit/audio_timeline.h"
+#include "protocol/audio_timeline.h"
 #include "third_party/webrtc/api/audio_codecs/opus/audio_encoder_opus.h"
 
 int RemoteKitSdkBeginRtc();

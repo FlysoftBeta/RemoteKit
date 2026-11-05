@@ -1,6 +1,6 @@
 #pragma once
-#include "common.hpp"
-#include "remotekit/error.hpp"
+#include "util/common.hpp"
+#include "util/error.hpp"
 #include <functional>
 namespace remotekit {
 Result<void> FlushFile(const fs::path& path);

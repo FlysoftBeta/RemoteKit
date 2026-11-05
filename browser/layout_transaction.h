@@ -1,10 +1,10 @@
 #pragma once
 #include "browser/view_registry.h"
-#include "remotekit/endpoint/include/remotekit/atlas_dimensions.hpp"
+#include "protocol/atlas_dimensions.hpp"
 namespace remotekit::browser {
 struct LayoutPlan {
   ViewRegistry::Specifications specs;
-  Atlas atlas;
+  protocol::Atlas atlas;
   int width = 0, height = 0;
   float scale = 1;
   uint32_t alignment = 1;

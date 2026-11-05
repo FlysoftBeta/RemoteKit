@@ -1,4 +1,4 @@
-#include "remotekit/comp_pacing.hpp"
+#include "media/comp_pacing.hpp"
 #include <cstdio>
 #include <cstdlib>
 using remotekit::CompPacing;

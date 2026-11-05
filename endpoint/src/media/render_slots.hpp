@@ -1,7 +1,7 @@
 #pragma once
 #include "gpu_device.hpp"
 #include "sdk_loader.hpp"
-#include "remotekit/shared_render_slots.h"
+#include "protocol/shared_render_slots.h"
 #include "server_trace.hpp"
 #include <memory>
 #include <optional>
@@ -26,7 +26,7 @@ class RenderSlots {
              unknownGpuRetainedGenerations = 0, unknownGpuRetentions = 0;
   };
   StatsSnapshot Stats() const;
-  enum class Result { idle, ready, reconfigure, error };
+  enum class Result { idle, ready, error };
   void SetTrace(std::shared_ptr<ServerTrace> trace) { trace_ = std::move(trace); }
   void SetClock(const remotekit_rtc_clock_sample& sample) { clock_ = sample; }
   bool Open(remotekit_sdk_render_setup,

@@ -1,4 +1,4 @@
-#include "remotekit/product_authorization.hpp"
+#include "rtc/product_authorization.hpp"
 
 #include <cstdlib>
 #include <iostream>

@@ -3,7 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <optional>
-namespace remotekit {
+namespace remotekit::protocol {
 struct AtlasDimensions {
   uint32_t width = 0, height = 0;
 };
@@ -27,4 +27,4 @@ inline std::optional<AtlasDimensions> AtlasAllocationDimensions(int width,
     return std::nullopt;
   return result;
 }
-}  // namespace remotekit
+}  // namespace remotekit::protocol

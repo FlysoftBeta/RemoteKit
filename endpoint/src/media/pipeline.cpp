@@ -64,7 +64,6 @@ void MediaPipeline::MediaLoop() {
   bool has_current_view = false;
 
   bool first_source = true, first_submit = true;
-  unsigned consecutive_reconfigures = 0;
   double next_tail_attempt_ms = 0;
   uint32_t tail_begins = 0;
   constexpr double tail_retry_ms = 250;
@@ -232,46 +231,6 @@ void MediaPipeline::MediaLoop() {
       timing.MarkConnection(ConnectionPhase::source_frame);
       first_source = false;
     }
-    if (result == RenderSlots::Result::reconfigure) {
-      presentation.InvalidateLayout("reconfigure");
-      if (tail_attempt)
-        tail_attempt->CancelWaiting();
-      tail_attempt.reset();
-      presentation_refresh.SetScope(std::nullopt);
-      has_current_view = false;
-      next_tail_attempt_ms = 0;
-      begin_schedule.Reset();
-      idle = remotekit::IdleIdrPolicy(options.idle_idr_ms);
-      effective_idle_ms = idle.delay_ms();
-      source_interval_ms = 0;
-      last_tail_age_ms = 0;
-      auto reconfigured = [&]() -> Result<void> {
-        if (++consecutive_reconfigures > 3)
-          return Error{ErrorCode::kUnavailable,
-                       "atlas repeatedly requested reconfiguration before a frame"};
-        if (state != State::kRunning)
-          return {};
-        auto closed = output.Close();
-        if (!closed)
-          return closed.error();
-        if (state != State::kRunning)
-          return {};
-        return output.OpenOutput(true);
-      }();
-      if (state != State::kRunning)
-        break;
-      if (reconfigured) {
-        previous_delivered = output.Slots().delivered_frames();
-        previous_encoded = registry.Completed();
-        previous_bytes = registry.Bytes();
-        last_stats = QpcNow();
-        refresh_connected = true;
-        registry.Keyframes();
-        continue;
-      }
-      error = "atlas reconfigure failed: " + reconfigured.error().message;
-      result = RenderSlots::Result::error;
-    }
     if (result == RenderSlots::Result::error) {
       presentation.InvalidateLayout("fatal");
       {
@@ -338,7 +297,6 @@ void MediaPipeline::MediaLoop() {
       begin_schedule.Attempted(now, std::max<int64_t>(1, QpcFrequency() / sampling_fps), sent);
     }
     if (result == RenderSlots::Result::ready) {
-      consecutive_reconfigures = 0;
       const bool fresh =
           idle.Observe(metadata.generation, metadata.frame_id, metadata.capture_time_us, now_ms);
       if (fresh) {

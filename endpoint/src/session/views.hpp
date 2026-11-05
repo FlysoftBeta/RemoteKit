@@ -1,6 +1,6 @@
 #pragma once
-#include "remotekit/atlas_plan.hpp"
-#include "remotekit/atlas_dimensions.hpp"
+#include "protocol/atlas_plan.hpp"
+#include "protocol/atlas_dimensions.hpp"
 #include "session/context.hpp"
 namespace remotekit {
 class PeerController;

@@ -1,9 +1,8 @@
 #pragma once
-#include "remotekit/error.hpp"
+#include "util/error.hpp"
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <utility>
 #include <variant>
 #include <vector>
 
@@ -96,25 +95,4 @@ using InputPayload = std::variant<KeyInput,
                                   ImeCancel,
                                   ImeFinish>;
 Result<void> ValidateInput(const InputPayload&);
-struct PixelRect {
-  int x{}, y{}, width{}, height{};
-  bool operator==(const PixelRect&) const = default;
-};
-struct PackItem {
-  WebViewId view{};
-  int width{}, height{};
-  double scale{1.0};
-};
-struct Placement {
-  WebViewId view{};
-  PixelRect outer, content;
-  double scale{1.0};
-};
-struct Atlas {
-  int width{}, height{}, padding{};
-  std::vector<Placement> placements;
-};
-// Input order is preserved; best-short-side MaxRects scoring has deterministic ties.
-// Dimensions are content pixels; padding is reserved on all four sides. No rotation.
-Result<Atlas> PackAtlas(int width, int height, int padding, const std::vector<PackItem>&);
 }  // namespace remotekit

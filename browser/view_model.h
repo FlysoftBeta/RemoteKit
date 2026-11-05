@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remotekit/protocol/control.h"
+#include "protocol/atlas_plan.hpp"
 
 #include <cstdint>
 #include <map>
@@ -195,26 +196,4 @@ class ViewModel {
   WebView* MutableView(SessionId, WebViewId);
 };
 
-struct PixelRect {
-  int x{}, y{}, width{}, height{};
-  bool operator==(const PixelRect&) const = default;
-};
-struct PackItem {
-  WebViewId view{};
-  int width{}, height{};
-  double scale{1.0};
-};
-struct Placement {
-  WebViewId view{};
-  PixelRect outer, content;
-  double scale{1.0};
-};
-struct Atlas {
-  int width{}, height{}, padding{};
-  std::vector<Placement> placements;
-};
-std::vector<PackItem> OrderAtlasItems(std::vector<PackItem> items);
-// Input order is preserved; best-short-side MaxRects scoring has deterministic ties.
-// Dimensions are content pixels; padding is reserved on all four sides. No rotation.
-Result<Atlas> PackAtlas(int width, int height, int padding, const std::vector<PackItem>&);
 }  // namespace remotekit

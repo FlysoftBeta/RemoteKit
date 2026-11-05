@@ -1,7 +1,7 @@
 #pragma once
-#include "common.hpp"
+#include "util/common.hpp"
 #include "media/sdk_loader.hpp"
-#include "remotekit/error.hpp"
+#include "util/error.hpp"
 #include <atomic>
 #include <functional>
 #include <mutex>

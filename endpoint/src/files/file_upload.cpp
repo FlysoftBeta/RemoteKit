@@ -1,10 +1,10 @@
-#include "remotekit/file_upload.hpp"
+#include "files/file_upload.hpp"
 #include <algorithm>
 #include <array>
 #include <fstream>
 #include <limits>
-#include "remotekit/result_macros.hpp"
-#include "remotekit/file_io.hpp"
+#include "util/result_macros.hpp"
+#include "util/file_io.hpp"
 #include <windows.h>
 #include <bcrypt.h>
 

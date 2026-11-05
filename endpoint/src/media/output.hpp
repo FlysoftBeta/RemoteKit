@@ -35,7 +35,7 @@ class OutputController : private ControllerContext {
   double ClockUncertaintyMs() const { return capture_clock_uncertainty_ms; }
   Result<void> Configure(int width, int height, float scale, Json views, bool visible);
   Result<void> Close();
-  Result<void> OpenOutput(bool preserve_visibility = false);
+  Result<void> OpenOutput();
   Result<bool> PauseOutput(bool reconfiguring = false);
   Result<void> ResumeOutput(bool active);
 

@@ -12,8 +12,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = '1aa07b638799e59656559ae6c6649d4b197f555e'
-OVERLAY_TREES = ('browser', 'endpoint/include', 'protocol', 'sdk/include')
-RETIRED_OVERLAY_TREES = ('endpoint/src',)
+OVERLAY_TREES = ('browser', 'protocol', 'sdk/include')
+RETIRED_OVERLAY_TREES = ('endpoint/src', 'endpoint/include')
 # Git HEAD content (normalized LF) for this migration's explicitly removed files.
 # Retain these entries after the first manifest so a prior partial stage can
 # still remove old files once their content is verified.
@@ -97,7 +97,7 @@ def main():
         src = ROOT / folder
         if src.exists():
             for path in src.rglob('*'):
-                if path.is_file() and path.suffix in ['.h', '.hpp', '.cc', '.cpp', '.gn', '.mojom']:
+                if path.is_file() and path.suffix in ['.h', '.hpp', '.cc', '.cpp', '.gn', '.mojom', '.txt']:
                     relative = path.relative_to(ROOT).as_posix()
                     target = owned_path(destination, relative)
                     current[relative] = digest(path)

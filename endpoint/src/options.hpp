@@ -1,7 +1,7 @@
 #pragma once
-#include "common.hpp"
+#include "util/common.hpp"
 #include "media/hardware_encoder.hpp"
-#include "remotekit/error.hpp"
+#include "util/error.hpp"
 namespace remotekit {
 struct OptionValues;
 class RuntimeOptions {

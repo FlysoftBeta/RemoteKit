@@ -1,6 +1,6 @@
 #pragma once
 #include "remotekit_sdk.h"
-#include "remotekit/error.hpp"
+#include "util/error.hpp"
 #include "remotekit_rtc.h"
 #include <windows.h>
 #include <filesystem>
@@ -87,15 +87,15 @@ struct Sdk {
     RK_LOAD(remotekit_sdk_control_close)
     RK_LOAD(remotekit_sdk_control_request)
     RK_LOAD(remotekit_sdk_control_open_render)
-    RK_LOAD(remotekit_rtc_create) RK_LOAD(remotekit_rtc_close)
-        RK_LOAD(remotekit_rtc_set_media_authorized) RK_LOAD(remotekit_rtc_set_remote_description)
-            RK_LOAD(remotekit_rtc_add_ice) RK_LOAD(remotekit_rtc_send_data) RK_LOAD(
-                remotekit_rtc_send_auth_data) RK_LOAD(remotekit_rtc_get_receive_level)
-                RK_LOAD(remotekit_sdk_render_connect) RK_LOAD(remotekit_sdk_render_begin)
-                    RK_LOAD(remotekit_sdk_render_close) RK_LOAD(remotekit_sdk_render_observe_signal)
-                        RK_LOAD(remotekit_sdk_render_stop) RK_LOAD(remotekit_rtc_set_source_max_fps)
-                            RK_LOAD(remotekit_rtc_adapt_frame) RK_LOAD(
-                                remotekit_rtc_set_degradation_preference)
+    RK_LOAD(remotekit_rtc_create)
+    RK_LOAD(remotekit_rtc_close) RK_LOAD(remotekit_rtc_set_media_authorized)
+        RK_LOAD(remotekit_rtc_set_remote_description) RK_LOAD(remotekit_rtc_add_ice)
+            RK_LOAD(remotekit_rtc_send_data) RK_LOAD(remotekit_rtc_send_auth_data)
+                RK_LOAD(remotekit_rtc_get_receive_level) RK_LOAD(remotekit_sdk_render_connect)
+                    RK_LOAD(remotekit_sdk_render_begin) RK_LOAD(remotekit_sdk_render_close) RK_LOAD(
+                        remotekit_sdk_render_observe_signal) RK_LOAD(remotekit_sdk_render_stop)
+                        RK_LOAD(remotekit_rtc_set_source_max_fps) RK_LOAD(remotekit_rtc_adapt_frame)
+                            RK_LOAD(remotekit_rtc_set_degradation_preference)
                                 RK_LOAD(remotekit_rtc_set_playout_delay) RK_LOAD(
                                     remotekit_rtc_submit_texture) RK_LOAD(remotekit_rtc_encoded)
                                     RK_LOAD(remotekit_rtc_submit_audio)

@@ -1,7 +1,7 @@
 #pragma once
-#include "common.hpp"
+#include "util/common.hpp"
 #include "rtc/event.hpp"
-#include "remotekit/error.hpp"
+#include "util/error.hpp"
 #include <deque>
 #include <functional>
 #include <mutex>

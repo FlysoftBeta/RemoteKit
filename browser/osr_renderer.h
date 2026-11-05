@@ -9,7 +9,7 @@
 #include "base/memory/raw_ptr.h"
 #include "base/values.h"
 #include "mojo/public/cpp/system/message_pipe.h"
-#include "remotekit/shared_render_slots.h"
+#include "protocol/shared_render_slots.h"
 
 namespace remotekit {
 struct InputEvent;

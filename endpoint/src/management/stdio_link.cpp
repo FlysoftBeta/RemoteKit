@@ -1,5 +1,5 @@
 #include "management/link.hpp"
-#include "remotekit/thread.hpp"
+#include "util/thread.hpp"
 #include <windows.h>
 #include <atomic>
 #include <condition_variable>

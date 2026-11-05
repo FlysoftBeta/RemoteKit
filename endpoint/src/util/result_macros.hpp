@@ -1,6 +1,6 @@
 #pragma once
 
-#include "remotekit/error.hpp"
+#include "util/error.hpp"
 
 #define RK_RETURN_IF_ERROR(...)     \
   do {                              \

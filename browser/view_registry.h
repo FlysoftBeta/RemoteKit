@@ -17,7 +17,7 @@ struct ViewRecord {
   std::unique_ptr<WebView> webview;
   std::unique_ptr<PageRequests> requests;
   ViewSpec spec;
-  Placement placement;
+  protocol::Placement placement;
 };
 class ViewRegistry {
  public:

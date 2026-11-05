@@ -1,7 +1,7 @@
 #pragma once
 #include "media/encoder_worker.hpp"
-#include "remotekit/capture_clock.hpp"
-#include "remotekit/tail_refresh.hpp"
+#include "media/capture_clock.hpp"
+#include "media/tail_refresh.hpp"
 #include "session/context.hpp"
 namespace remotekit {
 class PeerController;

@@ -54,6 +54,7 @@ shared_library("remotekit_sdk") {
 # Mojo pipes; it does not start Chromium ContentMain or require GPU hardware.
 executable("remotekit_sdk_control_lifetime_probe") {
   testonly = true
+  include_dirs = [ "//remotekit" ]
   configs -= [ "//build/config/clang:find_bad_constructs" ]
   sources = [ "control_channel_lifetime_probe.cc" ] + sdk_headers + sdk_sources
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
@@ -72,6 +73,7 @@ executable("remotekit_sdk_control_lifetime_probe") {
 # without a renderer, negotiated media transport, or hardware encoder.
 executable("remotekit_rtc_adaptation_probe") {
   testonly = true
+  include_dirs = [ "//remotekit" ]
   configs -= [ "//build/config/clang:find_bad_constructs" ]
   sources = [ "rtc_adaptation_probe.cc" ] + sdk_headers + rtc_sources
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]

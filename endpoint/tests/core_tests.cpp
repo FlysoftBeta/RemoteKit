@@ -1,13 +1,14 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
-#include "remotekit/core.hpp"
-#include "remotekit/touch_clock.hpp"
-#include "remotekit/sampling.hpp"
-#include "remotekit/idle_idr.hpp"
-#include "remotekit/tail_refresh.hpp"
-#include "remotekit/atlas_dimensions.hpp"
-#include "remotekit/coordinate_readiness.hpp"
+#include "input/validation.hpp"
+#include "protocol/atlas_plan.hpp"
+#include "protocol/touch_clock.hpp"
+#include "media/sampling.hpp"
+#include "media/idle_idr.hpp"
+#include "media/tail_refresh.hpp"
+#include "protocol/atlas_dimensions.hpp"
+#include "media/coordinate_readiness.hpp"
 using namespace remotekit;
 #define CHECK(x)                                                       \
   do {                                                                 \
@@ -16,7 +17,7 @@ using namespace remotekit;
       std::exit(1);                                                    \
     }                                                                  \
   } while (false)
-static bool Overlap(const PixelRect& a, const PixelRect& b) {
+static bool Overlap(const protocol::PixelRect& a, const protocol::PixelRect& b) {
   return a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
 }
 static void TailAttemptTests() {
@@ -90,26 +91,27 @@ static void TailAttemptTests() {
 }
 int main() {
   TailAttemptTests();
-  auto legacy_atlas = AtlasAllocationDimensions(1928, 1088, 1, 1);
-  auto aligned_atlas = AtlasAllocationDimensions(1928, 1088, 1, 16);
+  auto legacy_atlas = protocol::AtlasAllocationDimensions(1928, 1088, 1, 1);
+  auto aligned_atlas = protocol::AtlasAllocationDimensions(1928, 1088, 1, 16);
   CHECK(legacy_atlas && legacy_atlas->width == 1928 && legacy_atlas->height == 1088);
   CHECK(aligned_atlas && aligned_atlas->width == 1936 && aligned_atlas->height == 1088);
-  auto legacy_odd = AtlasAllocationDimensions(129, 127, 1.25f, 1);
-  auto aligned_odd = AtlasAllocationDimensions(129, 127, 1.25f, 16);
+  auto legacy_odd = protocol::AtlasAllocationDimensions(129, 127, 1.25f, 1);
+  auto aligned_odd = protocol::AtlasAllocationDimensions(129, 127, 1.25f, 16);
   CHECK(legacy_odd && legacy_odd->width == 162 && legacy_odd->height == 160);
   CHECK(aligned_odd && aligned_odd->width == 176 && aligned_odd->height == 160);
-  auto tablet_atlas = AtlasAllocationDimensions(828, 1188, 2, 16);
+  auto tablet_atlas = protocol::AtlasAllocationDimensions(828, 1188, 2, 16);
   CHECK(tablet_atlas && tablet_atlas->width == 1664 && tablet_atlas->height == 2384);
-  auto split_atlas = AtlasAllocationDimensions(2756, 1188, 2, 16);
+  auto split_atlas = protocol::AtlasAllocationDimensions(2756, 1188, 2, 16);
   CHECK(split_atlas && split_atlas->width == 5520 && split_atlas->height == 2384);
-  CHECK(AtlasAllocationDimensions(4096, 4096, 1, 16));  // Exactly 16Mi pixels.
-  CHECK(AtlasAllocationDimensions(4097, 4090, 1, 1));
-  CHECK(!AtlasAllocationDimensions(4097, 4090, 1, 16));  // Padding itself exceeds the budget.
-  auto edge_atlas = AtlasAllocationDimensions(8191, 16, 1, 16);
+  CHECK(protocol::AtlasAllocationDimensions(4096, 4096, 1, 16));  // Exactly 16Mi pixels.
+  CHECK(protocol::AtlasAllocationDimensions(4097, 4090, 1, 1));
+  CHECK(!protocol::AtlasAllocationDimensions(4097, 4090, 1,
+                                             16));  // Padding itself exceeds the budget.
+  auto edge_atlas = protocol::AtlasAllocationDimensions(8191, 16, 1, 16);
   CHECK(edge_atlas && edge_atlas->width == 8192);
-  CHECK(!AtlasAllocationDimensions(8192, 16, 1.25f, 16));
-  CHECK(!AtlasAllocationDimensions(16, 16, std::numeric_limits<float>::quiet_NaN(), 16));
-  CHECK(!AtlasAllocationDimensions(16, 16, 1, 8));
+  CHECK(!protocol::AtlasAllocationDimensions(8192, 16, 1.25f, 16));
+  CHECK(!protocol::AtlasAllocationDimensions(16, 16, std::numeric_limits<float>::quiet_NaN(), 16));
+  CHECK(!protocol::AtlasAllocationDimensions(16, 16, 1, 8));
   CoordinateReadiness readiness;
   readiness.Set(7, {{"1", true}, {"2", false}});
   CHECK(readiness.Allows("1", 7) && !readiness.Allows("2", 7));
@@ -232,35 +234,38 @@ int main() {
   // Long gestures use monotonic age; there is no wall argument to re-anchor.
   CHECK(TouchElapsedValid(3600000000LL, 3600016000LL, 3600020000LL, true));
   CHECK(!ValidateInput(WheelInput{0, 0, std::numeric_limits<double>::infinity(), 0, 0}));
-  std::vector<PackItem> items{{1, 60, 40, 2}, {2, 40, 70, 1}, {3, 20, 20, 1.5}, {4, 12, 18, 1}};
-  auto atlas = PackAtlas(160, 128, 2, items);
+  std::vector<protocol::PackItem> items{
+      {1, 60, 40, 2}, {2, 40, 70, 1}, {3, 20, 20, 1.5}, {4, 12, 18, 1}};
+  auto atlas = protocol::PackAtlas(160, 128, 2, items);
   CHECK(atlas);
-  auto again = PackAtlas(160, 128, 2, items);
-  CHECK(again && again.value().placements.size() == items.size());
-  for (std::size_t i = 0; i < atlas.value().placements.size(); ++i) {
-    auto a = atlas.value().placements[i];
-    CHECK(a.outer == again.value().placements[i].outer);
+  auto again = protocol::PackAtlas(160, 128, 2, items);
+  CHECK(again && again.value.placements.size() == items.size());
+  for (std::size_t i = 0; i < atlas.value.placements.size(); ++i) {
+    auto a = atlas.value.placements[i];
+    CHECK(a.outer == again.value.placements[i].outer);
     CHECK(a.outer.x >= 0 && a.outer.y >= 0 && a.outer.x + a.outer.width <= 160 &&
           a.outer.y + a.outer.height <= 128);
     for (std::size_t j = 0; j < i; ++j)
-      CHECK(!Overlap(a.outer, atlas.value().placements[j].outer));
+      CHECK(!Overlap(a.outer, atlas.value.placements[j].outer));
   }
-  CHECK(PackAtlas(10, 10, 0, {{1, 11, 1, 1}}).error().code == ErrorCode::kLimitExceeded);
-  CHECK(PackAtlas(10, 10, 1, {{1, 9, 9, 1}}).error().code == ErrorCode::kLimitExceeded);
-  CHECK(!PackAtlas(10, 10, 0, {{1, 6, 10, 1}, {2, 6, 10, 1}}));
-  CHECK(!PackAtlas(10, 10, 0, {{1, 1, 1, 1}, {1, 1, 1, 1}}));
-  CHECK(!PackAtlas(10, 10, 0, {{1, 1, 1, 0}}));
-  CHECK(!PackAtlas(10, 10, std::numeric_limits<int>::max(), {{1, 1, 1, 1}}));
+  CHECK(protocol::PackAtlas(10, 10, 0, {{1, 11, 1, 1}}).error ==
+        protocol::ErrorCode::resource_limit);
+  CHECK(protocol::PackAtlas(10, 10, 1, {{1, 9, 9, 1}}).error ==
+        protocol::ErrorCode::resource_limit);
+  CHECK(!protocol::PackAtlas(10, 10, 0, {{1, 6, 10, 1}, {2, 6, 10, 1}}));
+  CHECK(!protocol::PackAtlas(10, 10, 0, {{1, 1, 1, 1}, {1, 1, 1, 1}}));
+  CHECK(!protocol::PackAtlas(10, 10, 0, {{1, 1, 1, 0}}));
+  CHECK(!protocol::PackAtlas(10, 10, std::numeric_limits<int>::max(), {{1, 1, 1, 1}}));
   // Many deterministic layouts exercise MaxRects splitting and pruning.
   for (int n = 1; n <= 40; ++n) {
-    std::vector<PackItem> small;
+    std::vector<protocol::PackItem> small;
     for (int i = 0; i < n; ++i)
       small.push_back({static_cast<WebViewId>(i + 1), 3 + (i * 7) % 19, 3 + (i * 11) % 17, 1});
-    auto packed = PackAtlas(256, 256, 1, small);
+    auto packed = protocol::PackAtlas(256, 256, 1, small);
     CHECK(packed);
-    for (std::size_t i = 0; i < packed.value().placements.size(); ++i)
+    for (std::size_t i = 0; i < packed.value.placements.size(); ++i)
       for (std::size_t j = 0; j < i; ++j)
-        CHECK(!Overlap(packed.value().placements[i].outer, packed.value().placements[j].outer));
+        CHECK(!Overlap(packed.value.placements[i].outer, packed.value.placements[j].outer));
   }
   std::cout << "endpoint core tests passed\n";
 }

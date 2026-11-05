@@ -1,4 +1,4 @@
-#include "remotekit/photo_processing.hpp"
+#include "files/photo_processing.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX

@@ -1,6 +1,6 @@
-#include "remotekit/presentation_barrier.hpp"
-#include "remotekit/presentation_refresh.hpp"
-#include "remotekit/tail_refresh.hpp"
+#include "media/presentation_barrier.hpp"
+#include "media/presentation_refresh.hpp"
+#include "media/tail_refresh.hpp"
 #include <cstdlib>
 #include <future>
 #include <iostream>

@@ -1,10 +1,10 @@
 #pragma once
-#include "common.hpp"
+#include "util/common.hpp"
 #include "rtc/event.hpp"
 #include "rtc/authorization.hpp"
 #include "media/server_trace.hpp"
-#include "remotekit/control_reliability.hpp"
-#include "remotekit/input_sequence.hpp"
+#include "session/control_reliability.hpp"
+#include "input/input_sequence.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <functional>

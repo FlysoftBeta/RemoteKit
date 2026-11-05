@@ -21,7 +21,7 @@
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents.h"
 #include "remotekit/browser/view_model.h"
-#include "remotekit/shared_render_slots.h"
+#include "protocol/shared_render_slots.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 #include "ui/gfx/geometry/point_f.h"
 #include "url/gurl.h"

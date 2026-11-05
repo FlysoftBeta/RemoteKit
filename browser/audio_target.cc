@@ -12,7 +12,7 @@
 #include "media/base/audio_bus.h"
 #include "media/base/audio_converter.h"
 #include "media/base/audio_parameters.h"
-#include "remotekit/shared_audio.h"
+#include "protocol/shared_audio.h"
 
 namespace remotekit::browser {
 namespace {

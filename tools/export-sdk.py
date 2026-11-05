@@ -87,21 +87,21 @@ def main():
     shutil.copy2(header, destination / "include" / header.name)
     rtc_header = header.with_name("remotekit_rtc.h")
     shutil.copy2(rtc_header, destination / "include" / rtc_header.name)
-    shared_header = header.parents[2] / "endpoint/include/remotekit/shared_render_slots.h"
-    (destination / "include/remotekit").mkdir(exist_ok=True)
-    shutil.copy2(shared_header, destination / "include/remotekit/shared_render_slots.h")
-    protocol_header = header.parents[2] / "protocol/render_slots.h"
+    shared_header = header.parents[2] / "protocol/shared_render_slots.h"
     (destination / "include/protocol").mkdir(exist_ok=True)
+    shutil.copy2(shared_header, destination / "include/protocol/shared_render_slots.h")
+    protocol_header = header.parents[2] / "protocol/render_slots.h"
     shutil.copy2(protocol_header, destination / "include/protocol/render_slots.h")
-    old_header = destination / "include/remotekit/shared_atlas.h"
-    if old_header.is_file():
-        old_header.unlink()
+    for name in ("shared_atlas.h", "shared_render_slots.h"):
+        old_header = destination / "include/remotekit" / name
+        if old_header.is_file():
+            old_header.unlink()
     (destination / "manifest.json").write_text(json.dumps({
         **metadata,
         "abi_version": 2,
         "rtc_abi_version": int(re.search(r"^#define REMOTEKIT_RTC_ABI_VERSION (\d+)u?$", rtc_header.read_text(encoding="utf-8"), re.MULTILINE).group(1)),
         "public_headers": ["remotekit_sdk.h", "remotekit_rtc.h",
-                           "remotekit/shared_render_slots.h", "protocol/render_slots.h"],
+                           "protocol/shared_render_slots.h", "protocol/render_slots.h"],
         "gn_target": "//remotekit/browser/sdk:remotekit_sdk",
         "component_build": component_build,
         "runtime": {

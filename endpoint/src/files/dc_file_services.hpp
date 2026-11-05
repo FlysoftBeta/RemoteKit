@@ -1,10 +1,10 @@
 #pragma once
-#include "remotekit/result_macros.hpp"
-#include "remotekit/thread.hpp"
-#include "remotekit/error.hpp"
-#include "remotekit/dc_services.hpp"
-#include "remotekit/file_upload.hpp"
-#include "remotekit/photo_processing.hpp"
+#include "util/result_macros.hpp"
+#include "util/thread.hpp"
+#include "util/error.hpp"
+#include "rtc/dc_services.hpp"
+#include "files/file_upload.hpp"
+#include "files/photo_processing.hpp"
 #include <chrono>
 #include <condition_variable>
 #include <cctype>

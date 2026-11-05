@@ -1,4 +1,4 @@
-#include "remotekit/photo_processing.hpp"
+#include "files/photo_processing.hpp"
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -14,7 +14,7 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
-#include "remotekit/result_macros.hpp"
+#include "util/result_macros.hpp"
 #include <utility>
 
 namespace remotekit {

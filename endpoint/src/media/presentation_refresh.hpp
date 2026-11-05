@@ -1,6 +1,6 @@
 #pragma once
-#include "remotekit/idle_idr.hpp"
-#include "remotekit/presentation_barrier.hpp"
+#include "media/idle_idr.hpp"
+#include "media/presentation_barrier.hpp"
 #include <algorithm>
 #include <memory>
 #include <optional>

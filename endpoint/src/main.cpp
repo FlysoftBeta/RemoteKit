@@ -1,8 +1,8 @@
 #include "service.hpp"
 #include "media/sdk_loader.hpp"
 #include "management/remote_link.hpp"
-#include "remotekit/thread.hpp"
-#include "remotekit/file_io.hpp"
+#include "util/thread.hpp"
+#include "util/file_io.hpp"
 #include <windows.h>
 #include <mmsystem.h>
 #include <fcntl.h>

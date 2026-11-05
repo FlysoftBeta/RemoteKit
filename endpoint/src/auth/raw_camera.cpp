@@ -1,4 +1,4 @@
-#include "remotekit/raw_camera.hpp"
+#include "auth/raw_camera.hpp"
 
 #include <algorithm>
 #include <limits>

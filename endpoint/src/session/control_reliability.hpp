@@ -1,6 +1,6 @@
 #pragma once
 #include <json.hpp>
-#include "remotekit/error.hpp"
+#include "util/error.hpp"
 #include <array>
 #include <algorithm>
 #include <deque>

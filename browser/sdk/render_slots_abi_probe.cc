@@ -1,6 +1,6 @@
 #include "sdk/include/remotekit_sdk.h"
 #include "protocol/render_slots.h"
-#include "endpoint/include/remotekit/shared_render_slots.h"
+#include "protocol/shared_render_slots.h"
 #include <cstddef>
 #include <type_traits>
 static_assert(REMOTEKIT_SDK_ABI_VERSION == 2);

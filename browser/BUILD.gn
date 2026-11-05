@@ -100,10 +100,7 @@ executable("remotekit_browser") {
     "webview_touch.cc",
     "webview_touch.h",
   ]
-  include_dirs = [
-    "//remotekit",
-    "//remotekit/endpoint/include",
-  ]
+  include_dirs = [ "//remotekit" ]
   deps = [
     ":pak",
     "//base",

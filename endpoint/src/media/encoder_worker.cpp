@@ -1,7 +1,7 @@
-#include "remotekit/thread.hpp"
+#include "util/thread.hpp"
 #include "encoder_worker.hpp"
-#include "remotekit/sampling.hpp"
-#include "remotekit/tail_refresh.hpp"
+#include "media/sampling.hpp"
+#include "media/tail_refresh.hpp"
 #include <chrono>
 #include <utility>
 namespace remotekit::media {

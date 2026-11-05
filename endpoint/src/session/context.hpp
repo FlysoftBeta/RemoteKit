@@ -1,12 +1,12 @@
 #pragma once
-#include "common.hpp"
+#include "util/common.hpp"
 #include "options.hpp"
 #include "management/link.hpp"
 #include "media/adapter.hpp"
 #include "media/server_trace.hpp"
 #include "persistence/session_store.hpp"
 #include "session/browser.hpp"
-#include "remotekit/thread.hpp"
+#include "util/thread.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>

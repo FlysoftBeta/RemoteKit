@@ -8,14 +8,11 @@
 namespace remotekit {
 using ConnectionPhase = ConnectionTiming::ConnectionPhase;
 using Event = RtcEvent;
-Result<void> OutputController::OpenOutput(bool preserve_visibility) {
+Result<void> OutputController::OpenOutput() {
   timing.MarkConnection(ConnectionPhase::output_open_start);
   // OSR output resources require a subscribed view. With no visible output,
   // keep RTC/DataChannel alive without opening a render generation.
-  // MediaLoop's resource replacement uses its existing subscription state.
-  // Control may already be changing desired before PauseOutput joins us.
-  if (!preserve_visibility)
-    output_suspended = !has_visible_output.load();
+  output_suspended = !has_visible_output.load();
   if (output_suspended || !peer_controller.Connected() || !authorization.Stamp())
     return {};
   remotekit_rtc_clock_sample clock{};

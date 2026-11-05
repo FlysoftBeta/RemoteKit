@@ -1,8 +1,8 @@
 #pragma once
-#include "common.hpp"
+#include "util/common.hpp"
 #include "media/sdk_loader.hpp"
-#include "remotekit/product_authorization.hpp"
-#include "remotekit/error.hpp"
+#include "rtc/product_authorization.hpp"
+#include "util/error.hpp"
 #include <functional>
 #include <mutex>
 namespace remotekit {

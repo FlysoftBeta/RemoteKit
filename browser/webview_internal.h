@@ -56,7 +56,7 @@
 #include "third_party/blink/public/common/input/web_mouse_event.h"
 #include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
 #include "third_party/blink/public/common/input/web_touch_event.h"
-#include "remotekit/endpoint/include/remotekit/touch_clock.hpp"
+#include "protocol/touch_clock.hpp"
 #include "ui/aura/window.h"
 #include "ui/aura/window_tree_host.h"
 #include "ui/base/ime/text_input_type.h"

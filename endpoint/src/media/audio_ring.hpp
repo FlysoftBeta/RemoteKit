@@ -1,6 +1,6 @@
 #pragma once
-#include "remotekit/shared_audio.h"
-#include "remotekit/error.hpp"
+#include "protocol/shared_audio.h"
+#include "util/error.hpp"
 #include <string>
 namespace remotekit::media {
 class AudioRing {

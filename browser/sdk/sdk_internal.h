@@ -1,6 +1,6 @@
 #pragma once
 #include "remotekit/sdk/include/remotekit_sdk.h"
-#include "remotekit/endpoint/include/remotekit/shared_render_slots.h"
+#include "protocol/shared_render_slots.h"
 #include "remotekit/protocol/control.h"
 #include "remotekit/browser/sdk/render_endpoint_pending.h"
 
