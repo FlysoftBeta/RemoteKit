@@ -77,12 +77,10 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py
 
 ## 委派（Codex）
 
-- root（主对话）负责架构设计、接口契约、取舍、拆分、审阅、集成与 commit/push，并亲自撰写 `docs/`。不把核心架构决策或文档写作委派出去。
-- 实现、调查、构建、测试、bug 定位、资料搜集委派给 Codex：`codex exec -m gpt-6.1-sol -c model_reasoning_effort=<low|medium|high> -c project_doc_max_bytes=0`（`project_doc_max_bytes=0` 避免它读取本文件）。复杂实现用 high，机械任务用 low。
-- Codex 会忠实完成字面任务但不会多想：提示里必须给出明确的目标结构、状态定义、错误约定、要删除什么、文件归属（owned paths）和验证方式。要求它并行调用工具、只跑相关测试、不做 benchmark。审阅时看 diff，不以它的报告为准；它倾向于保守保留旧代码和写防御性说明，审阅时纠正。
-- 并行任务按目录/构建域划分归属，不并改同一文件；跨组件契约变更先定接口再分头实现，或串行。
+- 只有用户在对话中明确要求时才调用 Codex；否则主对话自己完成实现、调查、构建与测试，不主动委派。
+- 用户要求委派时：主对话负责架构设计、接口契约、取舍、拆分、审阅、集成与 commit/push，不把核心架构决策委派出去；`docs/` 由主对话亲自撰写。用法、提示写法、并行与审阅要点见 [tools/codex/README.md](tools/codex/README.md)。
 - 不频繁询问进度；有独立工作继续推进，等待使用合理长超时，不忙轮询。
 
 ## 发布
 
-- 上传流程见 `docs/upload/README.md`（本地文件，不纳入版本控制）；上传已授权，凭据不输出、不打包、不进日志。用 Codex（gpt-6.1-sol，low）执行，返回取件码。
+- 上传流程见 `docs/upload/README.md`（本地文件，不纳入版本控制）；上传已授权，凭据不输出、不打包、不进日志。用户要求用 Codex 时以 gpt-6.1-sol、low 执行，返回取件码。
