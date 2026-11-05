@@ -76,7 +76,6 @@ class EncoderWorker {
   uint64_t trace_peer_ = 0;
   std::unique_ptr<HardwareEncoder> hardware_;
   Nv12Converter converter_;
-  bool bgra_input_ = false;
   std::vector<ComPtr<ID3D11Texture2D>> surfaces_;
   std::deque<uint32_t> free_;
   std::deque<Job> queue_;

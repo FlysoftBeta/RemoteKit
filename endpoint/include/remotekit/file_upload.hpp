@@ -34,44 +34,29 @@ class FileUploadStore {
     std::uint64_t size{};
     std::filesystem::path path;
   };
-  enum class State { uploading, sealed, submitted, selected };
+  enum class State { uploading, sealed, submitted };
   struct Batch {
     std::string id;
     Binding binding;
     std::vector<File> files;
     State state = State::uploading;
-    bool library_stage = false;
   };
   explicit FileUploadStore(std::filesystem::path root);
   FileUploadStore(std::filesystem::path root, Limits limits);
   // root is Session-owned. Call ConfirmBrowserStopped only on confirmed exit,
   // never merely a lost control channel. Destructor does not delete selections.
-  const Batch& Begin(const Binding&, const std::vector<Spec>&);
-  const Batch& BeginOrResume(const Binding&, const std::vector<Spec>&);
   const Batch& Stage(const Binding&,
                      const std::vector<Source>&,
                      const std::function<void()>& check);
-  const Batch* FindBinding(const Binding&) const;
-  std::uint64_t Write(const std::string& id,
-                      const Binding&,
-                      std::size_t file,
-                      std::uint64_t offset,
-                      const std::vector<std::uint8_t>& bytes);
-  std::vector<std::uint64_t> Offsets(const std::string& id, const Binding&) const;
-  bool CancelBinding(const Binding&);
-  const Batch& Seal(const std::string& id, const Binding&);
   void MarkSubmitted(const std::string& id);
-  void MarkSelected(const std::string& id);
-  const Batch* Find(const std::string& id) const;
-  bool Cancel(const std::string& id);  // false: already submitted/selected.
-  // Only after Browser explicitly confirms cancelled/validation failed.
-  bool DiscardUnselected(const std::string& id);
-  void RevokeUncommitted();
+  bool Cancel(const std::string& id);
   void ConfirmBrowserStopped(const std::string& incarnation);
   std::uint64_t reserved_bytes() const { return reserved_bytes_; }
   std::uint64_t reserved_files() const { return reserved_files_; }
 
  private:
+  const Batch& Begin(const Binding&, const std::vector<Spec>&);
+  const Batch& Seal(const std::string& id, const Binding&);
   void Erase(std::map<std::string, Batch>::iterator);
   std::filesystem::path root_;
   Limits limits_;

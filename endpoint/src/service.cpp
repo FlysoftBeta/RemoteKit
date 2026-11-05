@@ -158,14 +158,12 @@ size_t DecodedSize(const std::string& text) {
 struct Options {
   std::string control_url, node_id;
   fs::path browser, data, browser_trace_directory;
-  std::string encoder = "qsv", browser_enable_features, browser_disable_features;
+  std::string encoder = "qsv";
   EncoderSettings encoding;
   uint32_t idle_idr_ms = 150, max_encode_width = 4096, max_encode_height = 4096;
-  uint32_t atlas_allocation_alignment = 16;
   bool qsv_low_power_explicit = false;
-  // Request WebRTC low-latency playout with room for video composition pacing.
-  // The explicit -1 override leaves the RTP extension unset.
-  int32_t rtc_playout_max_ms = 50;
+  static constexpr uint32_t kAtlasAllocationAlignment = 1;
+  static constexpr int32_t kRtcPlayoutMinMs = 0, kRtcPlayoutMaxMs = 50;
   Options() {
     wchar_t executable[32768]{};
     GetModuleFileNameW(nullptr, executable, 32768);
@@ -191,23 +189,11 @@ struct Options {
         browser = Utf8Path(value);
       else if (key == "--data-path")
         data = Utf8Path(value);
-      else if (key == "--browser-enable-features")
-        browser_enable_features = value;
-      else if (key == "--browser-disable-features")
-        browser_disable_features = value;
       else if (key == "--browser-trace-dir")
         browser_trace_directory = Utf8Path(value);
       else if (key == "--encoder")
         encoder = value;
-      else if (key == "--qsv-vpp") {
-        if (value != "external" && value != "async")
-          throw std::runtime_error("qsv-vpp must be external or async");
-        encoding.qsv_async_vpp = value == "async";
-      } else if (key == "--atlas-alignment") {
-        if (value != "1" && value != "16")
-          throw std::runtime_error("atlas-alignment must be 1 or 16");
-        atlas_allocation_alignment = value == "16" ? 16 : 1;
-      } else if (key == "--fps")
+      else if (key == "--fps")
         encoding.fps = std::stoul(value);
       else if (key == "--bitrate")
         encoding.bitrate = std::stoul(value);
@@ -235,12 +221,7 @@ struct Options {
         encoding.rate_control_explicit = true;
       } else if (key == "--idle-idr-ms")
         idle_idr_ms = std::stoul(value);
-      else if (key == "--rtc-playout-max-ms") {
-        size_t parsed = 0;
-        rtc_playout_max_ms = std::stoi(value, &parsed);
-        if (parsed != value.size())
-          throw std::runtime_error("rtc-playout-max-ms must be an integer");
-      } else if (key == "--max-encode-width")
+      else if (key == "--max-encode-width")
         max_encode_width = std::stoul(value);
       else if (key == "--max-encode-height")
         max_encode_height = std::stoul(value);
@@ -257,15 +238,10 @@ struct Options {
       throw std::runtime_error("invalid encoder settings");
     browser = fs::absolute(browser);
     data = fs::absolute(data);
-    if (encoding.qsv_async_vpp && (encoder != "qsv" || atlas_allocation_alignment != 16))
-      throw std::runtime_error("qsv-vpp=async requires encoder=qsv and atlas-alignment=16");
     if (!qsv_low_power_explicit && encoder != "nvenc")
       encoding.qsv_low_power = 0x10u;
     if (encoder == "nvenc" && encoding.qsv_low_power)
       throw std::runtime_error("qsv-low-power requires qsv or auto encoder");
-    if (rtc_playout_max_ms != -1 &&
-        (rtc_playout_max_ms < 0 || rtc_playout_max_ms > 40950 || rtc_playout_max_ms % 10))
-      throw std::runtime_error("rtc-playout-max-ms must be -1 or a multiple of 10 in 0..40950");
   }
 };
 std::string AdapterLuid(LUID luid) {
@@ -282,7 +258,6 @@ StreamingAdapter SelectStreamingAdapter(Sdk& sdk, const Options& options) {
   if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
     throw std::runtime_error("streaming DXGI factory unavailable");
   const bool qsv_required =
-      options.encoding.qsv_async_vpp ||
       (options.encoding.qsv_low_power && options.encoding.qsv_low_power_explicit);
   std::string failures;
   for (std::string_view backend : {"qsv", "nvenc"}) {
@@ -339,11 +314,6 @@ struct Session {
   remotekit::FileLibrary file_library;
   std::mutex file_store_mutex;
   remotekit::DcFileServices file_services;
-  struct FileOwner {
-    remotekit::DcFileServices::Job job;
-    int64_t touched;
-  };
-  std::map<std::string, FileOwner> file_owners;  // file worker only.
   struct SelectionWatch {
     remotekit::FileLibrary::Selection selection;
     uint64_t control;
@@ -410,12 +380,8 @@ struct Session {
   std::condition_variable event_wake;
   std::deque<Event> events;
   std::mutex signal_mutex;
-  std::string answer, rtc_error;
-  bool ice_complete = false;
-  std::atomic<bool> trickle_signals{false};
   std::deque<Event> signal_events;
   bool signal_overflow = false;
-  std::condition_variable signal_wake;
   std::mutex input_mutex;
   std::condition_variable input_wake;
   std::deque<Event> input_queue;
@@ -740,12 +706,6 @@ struct Session {
     append(L"--data-path=" + directory.wstring());
     append(L"--atlas-width=1920");
     append(L"--atlas-height=1080");
-    if (!options.browser_enable_features.empty())
-      append(L"--enable-features=" + std::wstring(options.browser_enable_features.begin(),
-                                                  options.browser_enable_features.end()));
-    if (!options.browser_disable_features.empty())
-      append(L"--disable-features=" + std::wstring(options.browser_disable_features.begin(),
-                                                   options.browser_disable_features.end()));
     if (!options.browser_trace_directory.empty()) {
       fs::create_directories(options.browser_trace_directory);
       const auto file = options.browser_trace_directory /
@@ -850,7 +810,7 @@ struct Session {
       scale = std::max(scale, device.value("deviceScaleFactor", 1.0f));
     }
     const auto plan = remotekit::PlanAtlas(items, items.empty() ? 1.f : scale,
-                                           options.atlas_allocation_alignment);
+                                           Options::kAtlasAllocationAlignment);
     if (!plan)
       throw std::runtime_error(
           "visible source atlas cannot be packed within the aligned 16-megapixel/8192-pixel "
@@ -878,14 +838,14 @@ struct Session {
     // thread (e.g. output-open failure), this caller must perform that barrier.
     if (!had_media_thread) {
       std::string render_error;
-      if (!pool.Close(render_error, ProducerExited()))
+      if (!pool.Close(render_error))
         fprintf(stderr, "paused render drain: %s\n", render_error.c_str());
     }
     return active;
   }
   void GeometryConfig(const Geometry& value) {
     if (!remotekit::AtlasAllocationDimensions(value.width, value.height, value.scale,
-                                              options.atlas_allocation_alignment))
+                                              Options::kAtlasAllocationAlignment))
       throw std::runtime_error(
           "source atlas exceeds the aligned 16-megapixel/8192-pixel resource budget");
     Json configs = Json::array();
@@ -907,7 +867,7 @@ struct Session {
          {"height", value.height},
          {"viewConfigs", std::move(configs)},
          {"device_scale", value.scale},
-         {"allocation_alignment", options.atlas_allocation_alignment}});
+         {"allocation_alignment", Options::kAtlasAllocationAlignment}});
     atlas_width = value.width;
     atlas_height = value.height;
     atlas_scale = value.scale;
@@ -1331,21 +1291,18 @@ struct Session {
     value["connectionTimingMs"] = ConnectionTimings();
     value["connectionTimingOrigin"] = "endpoint-offer-monotonic";
     value["connectionTimingConnectionId"] = connection;
-    value["qsvVpp"] = options.encoding.qsv_async_vpp ? "async" : "external";
-    value["atlasAllocationAlignment"] = options.atlas_allocation_alignment;
     value["reconciliationPending"] = reconciliation_pending.load();
     value.update(media_feedback.Snapshot(QpcNow(), QpcFrequency()));
     value["audio"] = {{"submitted", audio_submitted.load()},
                       {"gaps", audio_gaps.load()},
                       {"rejected", audio_rejected.load()}};
-    value["rtcPlayoutDelayRequested"] = {{"minMs", options.rtc_playout_max_ms < 0 ? -1 : 0},
-                                         {"maxMs", options.rtc_playout_max_ms}};
+    value["rtcPlayoutDelayRequested"] = {{"minMs", Options::kRtcPlayoutMinMs},
+                                         {"maxMs", Options::kRtcPlayoutMaxMs}};
     value["effectiveIdleIdrMs"] = effective_idle_ms.load();
     value["tailIdrSubmissions"] = tail_submissions.load();
     value["tailIdrCompletions"] = tail_completions.load();
     const auto interval = source_interval_ms.load(), age = last_tail_age_ms.load();
     value["sourceFrameIntervalMs"] = interval > 0 ? Json(interval) : Json(nullptr);
-    value["atlasReadyGateEnabled"] = pool.ready_gate_enabled();
     value["encoderSelection"] = options.encoder;
     value["atlasInput"] = "render-slots";
     value["atlasSharedBorrows"] = pool.shared_borrows();
@@ -1501,10 +1458,9 @@ struct Session {
           file_uploads.ConfirmBrowserStopped(process_incarnation);
         }
         process_incarnation.clear();
-        // A crash may leave the last mapping status Running. Preserve confirmed
-        // producer termination on retained generations before closing its handle.
+        // Drain retained render generations before closing the process handle.
         std::string error;
-        if (!pool.Close(error, true))
+        if (!pool.Close(error))
           fprintf(stderr, "pool close after producer exit unfinished: %s\n", error.c_str());
       } else {
         fprintf(stderr,
@@ -1617,7 +1573,7 @@ struct Session {
     }
     if (type == REMOTEKIT_RTC_DATA) {
       auto message = Json::parse(event.bytes, nullptr, false);
-      if (self->authorization.Required()) {
+      {
         if (!message.is_object())
           return;
         const auto epoch = message.find("authEpoch");
@@ -1666,7 +1622,7 @@ struct Session {
     if (type == REMOTEKIT_RTC_SDP_ANSWER || type == REMOTEKIT_RTC_ICE ||
         type == REMOTEKIT_RTC_ICE_COMPLETE || type == REMOTEKIT_RTC_ERROR) {
       std::lock_guard lock(self->signal_mutex);
-      if (self->trickle_signals && !self->signal_overflow) {
+      if (!self->signal_overflow) {
         if (self->signal_events.size() < 256)
           self->signal_events.push_back(event);
         else {
@@ -1676,12 +1632,6 @@ struct Session {
               Event{REMOTEKIT_RTC_ERROR, "RTC signaling queue exceeded bound", "", 0, peer});
         }
       }
-      if (type == REMOTEKIT_RTC_ICE_COMPLETE) {
-        self->answer = event.bytes;
-        self->ice_complete = true;
-      } else if (type == REMOTEKIT_RTC_ERROR)
-        self->rtc_error = event.bytes;
-      self->signal_wake.notify_all();
     }
     {
       std::lock_guard lock(self->event_mutex);
@@ -1874,8 +1824,6 @@ struct Session {
   int SendData(uint64_t handle, uint64_t stamp, const std::string& encoded) {
     if (!authorization.Current(stamp))
       return 1;
-    if (!authorization.Required())
-      return sdk.remotekit_rtc_send_data(handle, encoded.data(), encoded.size(), 0);
     // All outboxes serialize objects. Append the active wire epoch at actual
     // admission, while the queue's local generation still owns this send.
     if (encoded.size() < 2 || encoded.front() != '{' || encoded.back() != '}')
@@ -2006,8 +1954,7 @@ struct Session {
     if (type == "media.presentation") {
       if (message.value("backend", Json()) != "video")
         return true;
-      const bool restart = authorization.Required() && ProductCurrent(event) &&
-                           message.value("restart", Json()) == true;
+      const bool restart = ProductCurrent(event) && message.value("restart", Json()) == true;
       layout_prepare = presentation.Video(event.peer, restart);
       if (restart) {
         input_authorization = 0;
@@ -2581,8 +2528,7 @@ struct Session {
     int64_t last_stats = QpcNow();
     uint32_t official_max_fps = 240, codec_max_fps = 240;
     remotekit::CompCadence cadence;
-    uint64_t previous_encoded = stats->completed.load(), previous_bytes = stats->bytes.load(),
-             previous_copies = pool.copied_frames();
+    uint64_t previous_encoded = stats->completed.load(), previous_bytes = stats->bytes.load();
     uint64_t previous_delivered = pool.delivered_frames();
     remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
     bool has_current_view = false;
@@ -2787,7 +2733,6 @@ struct Session {
           OpenOutput(true);
           if (stop_media.load())
             break;
-          previous_copies = pool.copied_frames();
           previous_delivered = pool.delivered_frames();
           previous_encoded = stats->completed.load();
           previous_bytes = stats->bytes.load();
@@ -3013,21 +2958,15 @@ struct Session {
         auto report = Stats();
         report["type"] = "stats";
         const double seconds = static_cast<double>(now - last_stats) / QpcFrequency();
-        const auto encoded = stats->completed.load(), bytes = stats->bytes.load(),
-                   copies = pool.copied_frames();
+        const auto encoded = stats->completed.load(), bytes = stats->bytes.load();
         report["encodedFps"] = (encoded - previous_encoded) / seconds;
         report["encodedBitrateBps"] = 8.0 * (bytes - previous_bytes) / seconds;
-        report["atlasCopies"] = copies;
-        report["atlasCopyFps"] = (copies - previous_copies) / seconds;
         const auto delivered = pool.delivered_frames();
         report["atlasDeliveredFrames"] = delivered;
         report["atlasDeliveredFps"] = (delivered - previous_delivered) / seconds;
         previous_delivered = delivered;
         previous_encoded = encoded;
         previous_bytes = bytes;
-        previous_copies = copies;
-        report["atlasPoolDrops"] = pool.drops();
-        report["lastGpuCopyMs"] = pool.shared_input() ? Json(nullptr) : Json(pool.last_copy_ms());
         report["sourceAtlasWidth"] = current_metadata.width_pixels;
         report["sourceAtlasHeight"] = current_metadata.height_pixels;
         report["mediaScale"] = sampling.scale;
@@ -3076,17 +3015,13 @@ struct Session {
     connection = Required(request, "connectionId");
     {
       std::lock_guard lock(signal_mutex);
-      answer.clear();
-      rtc_error.clear();
-      ice_complete = false;
       signal_events.clear();
       signal_overflow = false;
     }
-    trickle_signals = request.value("trickle", false);
     remotekit_rtc_options config{};
     config.struct_size = sizeof(config);
     config.abi_version = REMOTEKIT_RTC_ABI_VERSION;
-    config.auth_required = request.value("authRequired", false);
+    config.auth_required = 1;
     config.context = this;
     config.event = EventCallback;
     config.encoder.struct_size = sizeof(config.encoder);
@@ -3112,17 +3047,13 @@ struct Session {
     {
       std::lock_guard transition(authorization_mutex);
       std::lock_guard admission(admission_mutex);
-      authorization.Bind(config.auth_required != 0);
-      raw_camera.Bind(config.auth_required ? handle : 0);
+      authorization.Bind();
+      raw_camera.Bind(handle);
       management_generation = generation;
       receive_level = 0;
       refresh_connected = false;
       presentation.Bind(handle);
       control_outbox.Bind(handle);
-      if (authorization.Stamp()) {
-        direct_services.Bind(handle, connection);
-        file_services.Bind(handle, connection);
-      }
       layout_prepare.reset();
       peer = handle;
       input_sequence.Bind(handle);
@@ -3131,8 +3062,9 @@ struct Session {
       layout = Json();
     }
     last_media_refresh_qpc = 0;
-    if (options.rtc_playout_max_ms >= 0) {
-      const int status = sdk.remotekit_rtc_set_playout_delay(handle, 0, options.rtc_playout_max_ms);
+    {
+      const int status = sdk.remotekit_rtc_set_playout_delay(handle, Options::kRtcPlayoutMinMs,
+                                                             Options::kRtcPlayoutMaxMs);
       if (status != 0) {
         ClosePeer();
         throw std::runtime_error("RTC playout delay rejected (SDK " + std::to_string(status) + ")");
@@ -3143,7 +3075,7 @@ struct Session {
       ClosePeer();
       throw std::runtime_error("RTC remote offer rejected");
     }
-    if (config.auth_required) {
+    {
       stop_camera = false;
       try {
         camera_thread = std::thread([this] { CameraLoop(); });
@@ -3160,29 +3092,6 @@ struct Session {
         throw;
       }
     }
-    if (trickle_signals) {
-      uint32_t level = 0;
-      if (sdk.remotekit_rtc_get_receive_level(handle, &level) != 0 || !level) {
-        ClosePeer();
-        throw std::runtime_error("peer has no compatible receiving H264 level");
-      }
-      receive_level = level;
-      stop_input = false;
-      input_thread = std::thread([this] { InputLoop(); });
-      media_thread = std::thread([this] { MediaLoop(); });
-      return {{"accepted", true}, {"pending", true}, {"connectionId", connection}};
-    }
-    std::unique_lock lock(signal_mutex);
-    signal_wake.wait_for(lock, std::chrono::seconds(20),
-                         [&] { return ice_complete || !rtc_error.empty(); });
-    if (!ice_complete) {
-      auto error = rtc_error.empty() ? "ICE gathering timed out" : rtc_error;
-      lock.unlock();
-      ClosePeer();
-      throw std::runtime_error(error);
-    }
-    const auto gathered_answer = answer;
-    lock.unlock();
     uint32_t level = 0;
     if (sdk.remotekit_rtc_get_receive_level(handle, &level) != 0 || !level) {
       ClosePeer();
@@ -3192,8 +3101,7 @@ struct Session {
     stop_input = false;
     input_thread = std::thread([this] { InputLoop(); });
     media_thread = std::thread([this] { MediaLoop(); });
-    event_wake.notify_all();
-    return {{"sdp", gathered_answer}, {"type", "answer"}, {"connectionId", connection}};
+    return {{"accepted", true}, {"pending", true}, {"connectionId", connection}};
   }
   // Only the dispatcher writes JSONL. SDK callback threads never write stdout.
   void FlushSignals() {
@@ -3219,7 +3127,7 @@ struct Session {
       pending.swap(signal_events);
     }
     for (const auto& event : pending) {
-      if (!trickle_signals || !peer.load() || event.peer != peer.load())
+      if (!peer.load() || event.peer != peer.load())
         continue;
       Json signal;
       if (event.type == REMOTEKIT_RTC_SDP_ANSWER)
@@ -3256,8 +3164,7 @@ struct Session {
     faces.Cancel();
     WakeCamera();
     const auto handle = peer.load();
-    const int status =
-        handle && authorization.Required() ? sdk.remotekit_rtc_set_media_authorized(handle, 0) : 0;
+    const int status = handle ? sdk.remotekit_rtc_set_media_authorized(handle, 0) : 0;
     direct_services.Bind(0);
     {
       std::lock_guard lock(input_mutex);
@@ -3268,7 +3175,7 @@ struct Session {
   }
   void ManagementLost(uint64_t generation) {
     std::lock_guard transition(authorization_mutex);
-    if (authorization.Required() && management_generation == generation) {
+    if (management_generation == generation) {
       if (RevokeProduct() != 0)
         fprintf(stderr, "RTC media authorization revoke failed\n");
     }
@@ -3281,8 +3188,7 @@ struct Session {
     return value.get<uint64_t>();
   }
   void RequireAuthPeer(const Json& request) {
-    if (!peer.load() || !authorization.Required() ||
-        Required(request, "connectionId") != connection)
+    if (!peer.load() || Required(request, "connectionId") != connection)
       throw std::runtime_error("stale_rtc_connection");
   }
   Json Authorize(const Json& request,
@@ -3461,7 +3367,6 @@ struct Session {
         fprintf(stderr, "audio close: %s\n", error.what());
       }
     audio_ring.Close();
-    trickle_signals = false;
     stop_input = true;
     input_wake.notify_all();
     if (input_thread.joinable())
@@ -3493,17 +3398,15 @@ struct Session {
     remaining.clear();
     // Product output stop and the render generation FIFO barrier are separate.
     // Stop/Stopped can drain accepted Begins even if the control RPC failed.
-    bool producer_exited = ProducerExited();
-    if (control && !producer_exited) {
+    if (control && !ProducerExited()) {
       try {
         Rpc({{"method", "output.close"}});
       } catch (const std::exception& error) {
         fprintf(stderr, "product output close unfinished: %s\n", error.what());
       }
     }
-    producer_exited = producer_exited || ProducerExited();
     std::string close_error;
-    if (!pool.Close(close_error, producer_exited))
+    if (!pool.Close(close_error))
       fprintf(stderr, "render close: %s\n", close_error.c_str());
     data_open = false;
     connection.clear();
@@ -3595,18 +3498,6 @@ struct Session {
       return authorization.Stamp() && file_services.CurrentLibraryGrant(grant);
     });
 #endif
-    for (auto it = file_owners.begin(); it != file_owners.end();) {
-      if (file_services.Current(it->second.job) &&
-          now - it->second.touched < QpcFrequency() * 15 * 60) {
-        ++it;
-        continue;
-      }
-      {
-        std::lock_guard lock(file_store_mutex);
-        file_uploads.Cancel(it->first);
-      }
-      it = file_owners.erase(it);
-    }
     file_library.Sweep();
     if (selection_watches.empty() || now < next_selection_watch)
       return;
@@ -3867,33 +3758,6 @@ struct Session {
 #endif
     throw std::runtime_error("photo_processing_unavailable");
   }
-  Json DirectFileState(const FileJob& job, const std::string& upload) {
-    RequireFileJob(job);
-    std::vector<uint64_t> offsets;
-    {
-      std::lock_guard lock(file_store_mutex);
-      const auto* batch = file_uploads.Find(upload);
-      if (!batch || !(batch->binding == job.binding))
-        throw std::runtime_error("unknown_file_upload");
-      offsets = file_uploads.Offsets(upload, job.binding);
-      if (batch->state == remotekit::FileUploadStore::State::selected)
-        return {{"uploadId", upload}, {"state", "selected"}, {"offsets", offsets}};
-    }
-    auto status = DirectFileRpc(job, "page.fileStatus");
-    const auto state = status.value("state", std::string("unknown"));
-    {
-      std::lock_guard lock(file_store_mutex);
-      if (file_uploads.Find(upload)) {
-        if (state == "selected")
-          file_uploads.MarkSelected(upload);
-        else if (state == "cancelled")
-          file_uploads.DiscardUnselected(upload);
-      }
-    }
-    if (state == "cancelled")
-      file_owners.erase(upload);
-    return {{"uploadId", upload}, {"state", state}, {"offsets", offsets}};
-  }
   Json DirectFileCommand(const FileJob& job) {
     RequireFileJob(job);
     const auto method = Required(job.message, "method");
@@ -3902,106 +3766,7 @@ struct Session {
       return DirectLibraryCommand(job, method, params);
     if (method == "selection.commit")
       return DirectSelectionCommit(job, Required(params, "selectionId"));
-    if (method == "begin") {
-      if (DirectFileRpc(job, "page.fileStatus").value("state", std::string()) != "pending")
-        throw std::runtime_error("file_request_not_pending");
-      const auto& values = params.at("files");
-      if (!values.is_array() || values.empty() || values.size() > 64)
-        throw std::runtime_error("invalid_file_count");
-      std::vector<remotekit::FileUploadStore::Spec> specs;
-      for (const auto& value : values)
-        specs.push_back({Required(value, "name"), value.value("type", std::string()),
-                         FileUnsigned(value.at("size"))});
-      std::lock_guard lock(file_store_mutex);
-      RequireFileJob(job);
-      if (const auto* existing = file_uploads.FindBinding(job.binding)) {
-        const auto owner = file_owners.find(existing->id);
-        if (owner == file_owners.end() || owner->second.job.peer != job.peer ||
-            owner->second.job.epoch != job.epoch)
-          throw std::runtime_error("file_upload_owned_by_other_peer");
-      }
-      const auto& batch = file_uploads.BeginOrResume(job.binding, specs);
-      file_owners[batch.id] = {job, QpcNow()};
-      return {{"uploadId", batch.id}, {"offsets", file_uploads.Offsets(batch.id, job.binding)}};
-    }
-    if (method == "cancel") {
-      std::string upload = params.value("uploadId", std::string());
-      {
-        std::lock_guard lock(file_store_mutex);
-        if (!upload.empty()) {
-          const auto* batch = file_uploads.Find(upload);
-          if (batch && !(batch->binding == job.binding))
-            throw std::runtime_error("unknown_file_upload");
-        } else if (const auto* batch = file_uploads.FindBinding(job.binding))
-          upload = batch->id;
-      }
-      const auto status = DirectFileRpc(job, "page.fileStatus");
-      auto state = status.value("state", std::string("unknown"));
-      if (state == "pending" || state == "validating") {
-        DirectFileRpc(job, "page.reply", {{"file_only", true}, {"accept", false}});
-        state = DirectFileRpc(job, "page.fileStatus").value("state", std::string("unknown"));
-      }
-      if (state == "selected" || state == "cancelled") {
-        std::lock_guard lock(file_store_mutex);
-        if (!upload.empty() && file_uploads.Find(upload)) {
-          if (state == "selected")
-            file_uploads.MarkSelected(upload);
-          else
-            file_uploads.DiscardUnselected(upload);
-        }
-      }
-      if (state == "cancelled" && !upload.empty())
-        file_owners.erase(upload);
-      if (state != "selected" && state != "cancelled")
-        state = "validating";
-      return {{"state", state}};
-    }
-    const auto upload = Required(params, "uploadId");
-    const auto owner = file_owners.find(upload);
-    if (owner == file_owners.end() || owner->second.job.peer != job.peer ||
-        owner->second.job.epoch != job.epoch || !(owner->second.job.binding == job.binding))
-      throw std::runtime_error("file_upload_owned_by_other_peer");
-    owner->second.touched = QpcNow();
-    if (method == "chunk") {
-      const auto bytes = remotekit::DecodeFileChunk(params.at("data"));
-      const auto index = FileUnsigned(params.at("fileIndex")),
-                 offset = FileUnsigned(params.at("offset"));
-      if (index > 63)
-        throw std::runtime_error("invalid_file_index");
-      std::lock_guard lock(file_store_mutex);
-      RequireFileJob(job);
-      return {{"offset",
-               file_uploads.Write(upload, job.binding, static_cast<size_t>(index), offset, bytes)}};
-    }
-    if (method == "status")
-      return DirectFileState(job, upload);
-    if (method != "commit")
-      throw std::runtime_error("unknown_file_upload_method");
-    bool submitted = false;
-    {
-      std::lock_guard lock(file_store_mutex);
-      const auto* batch = file_uploads.Find(upload);
-      if (!batch || !(batch->binding == job.binding))
-        throw std::runtime_error("unknown_file_upload");
-      submitted = batch->state == remotekit::FileUploadStore::State::submitted ||
-                  batch->state == remotekit::FileUploadStore::State::selected;
-    }
-    if (submitted)
-      return DirectFileState(job,
-                             upload);  // Never replay a Browser callback after an uncertain submit.
-    if (DirectFileRpc(job, "page.fileStatus").value("state", std::string()) != "pending")
-      throw std::runtime_error("file_request_not_pending");
-    Json files = Json::array();
-    {
-      std::lock_guard lock(file_store_mutex);
-      RequireFileJob(job);
-      const auto& batch = file_uploads.Seal(upload, job.binding);
-      for (const auto& file : batch.files)
-        files.push_back({{"path", Utf8(file.path)}, {"displayName", file.name}});
-      file_uploads.MarkSubmitted(upload);
-    }
-    DirectFileRpc(job, "page.reply", {{"file_only", true}, {"accept", true}, {"files", files}});
-    return DirectFileState(job, upload);
+    throw std::runtime_error("unknown_file_method");
   }
   FileBinding ParseFileBinding(const Json& value) {
     return {Required(value, "browserIncarnation"), Required(value, "view"),
@@ -4080,182 +3845,33 @@ struct Session {
     }
     throw std::runtime_error("unknown_library_method");
   }
-  Json FileStatus(const std::string& upload, const FileBinding& binding) {
+  Json AuthorizeFiles(const Json& request) {
+    std::map<std::string, FileBinding> bindings;
+    const auto& requests = request.at("requests");
+    if (!requests.is_array() || requests.size() > 64)
+      throw std::runtime_error("invalid_file_authorization_count");
+    for (const auto& item : requests) {
+      const auto token = Required(item, "id");
+      if (token.size() > 128 || token == "library")
+        throw std::runtime_error("invalid_file_request_id");
+      const auto binding = ParseFileBinding(item.at("binding"));
+      if (binding.browser_incarnation != browser_incarnation || !desired.contains(binding.view))
+        throw std::runtime_error("stale_file_request_target");
+      if (!bindings.emplace(token, binding).second)
+        throw std::runtime_error("duplicate_file_authorization");
+    }
+    std::lock_guard admission(admission_mutex);
+    if (!authorization.Stamp())
+      throw std::runtime_error("authorization_changed");
     {
-      std::lock_guard lock(file_store_mutex);
-      const auto* batch = file_uploads.Find(upload);
-      if (!batch || !(batch->binding == binding))
-        throw std::runtime_error("unknown_file_upload");
-      if (batch->state == remotekit::FileUploadStore::State::selected)
-        return {
-            {"uploadId", upload}, {"state", "selected"}, {"pending", false}, {"selected", true}};
+      const auto epoch = request.find("authEpoch");
+      if (epoch == request.end() || !epoch->is_number_unsigned() ||
+          epoch->get<uint64_t>() != authorization.Epoch())
+        throw std::runtime_error("stale_authorization_epoch");
     }
-    auto status = Rpc(FileBrowserCommand(binding, "page.fileStatus"));
-    const auto state = status.value("state", std::string("unknown"));
-    {
-      std::lock_guard lock(file_store_mutex);
-      if (file_uploads.Find(upload)) {
-        if (state == "selected")
-          file_uploads.MarkSelected(upload);
-        else if (state == "cancelled")
-          file_uploads.DiscardUnselected(upload);
-      }
-    }
-    Json result = {{"uploadId", upload},
-                   {"state", state},
-                   {"pending", state == "pending" || state == "validating"},
-                   {"selected", state == "selected"}};
-    if (status.contains("error"))
-      result["error"] = status["error"];
-    return result;
-  }
-  Json FileCommand(const std::string& method, const Json& request) {
-    if (method == "session.files.authorize") {
-      std::map<std::string, FileBinding> bindings;
-      const auto& requests = request.at("requests");
-      if (!requests.is_array() || requests.size() > 64)
-        throw std::runtime_error("invalid_file_authorization_count");
-      for (const auto& item : requests) {
-        const auto token = Required(item, "id");
-        if (token.size() > 128 || token == "library")
-          throw std::runtime_error("invalid_file_request_id");
-        const auto binding = ParseFileBinding(item.at("binding"));
-        if (binding.browser_incarnation != browser_incarnation || !desired.contains(binding.view))
-          throw std::runtime_error("stale_file_request_target");
-        if (!bindings.emplace(token, binding).second)
-          throw std::runtime_error("duplicate_file_authorization");
-      }
-      std::lock_guard admission(admission_mutex);
-      if (!authorization.Stamp())
-        throw std::runtime_error("authorization_changed");
-      if (authorization.Required()) {
-        const auto epoch = request.find("authEpoch");
-        if (epoch == request.end() || !epoch->is_number_unsigned() ||
-            epoch->get<uint64_t>() != authorization.Epoch())
-          throw std::runtime_error("stale_authorization_epoch");
-      }
-      file_services.Authorize(Required(request, "connectionId"), control.load(), bindings,
-                              request.value("library", false));
-      return {{"accepted", true}};
-    }
-    if (method == "session.files.revoke") {
-      file_services.RevokeAuthorization();
-      std::lock_guard lock(file_store_mutex);
-      file_uploads.RevokeUncommitted();
-      return {{"accepted", true}};
-    }
-    if (method == "session.files.cancel") {
-      const auto upload = request.value("uploadId", std::string());
-      if (request.value("cancelRequest", false)) {
-        const auto binding = ParseFileBinding(request.at("binding"));
-        bool known = false;
-        {
-          std::lock_guard lock(file_store_mutex);
-          known = !upload.empty() && file_uploads.Find(upload);
-        }
-        if (known) {
-          const auto status = FileStatus(upload, binding);
-          if (status.value("state", std::string()) == "selected" ||
-              status.value("state", std::string()) == "cancelled")
-            return status;
-        }
-        auto status = Rpc(FileBrowserCommand(binding, "page.fileStatus"));
-        const auto state = status.value("state", std::string());
-        if (state == "pending" || state == "validating") {
-          auto command = FileBrowserCommand(binding, "page.reply");
-          command["file_only"] = true;
-          command["accept"] = false;
-          Rpc(command);
-        }
-        {
-          std::lock_guard lock(file_store_mutex);
-          file_uploads.CancelBinding(binding);
-        }
-        {
-          std::lock_guard lock(file_store_mutex);
-          known = !upload.empty() && file_uploads.Find(upload);
-        }
-        if (known)
-          return FileStatus(upload, binding);
-        status = Rpc(FileBrowserCommand(binding, "page.fileStatus"));
-        return {{"accepted", true}, {"state", status.value("state", std::string("unknown"))}};
-      }
-      if (upload.empty()) {
-        std::lock_guard lock(file_store_mutex);
-        file_uploads.RevokeUncommitted();
-        return {{"accepted", true}};
-      }
-      std::optional<FileBinding> pending;
-      {
-        std::lock_guard lock(file_store_mutex);
-        const auto* batch = file_uploads.Find(upload);
-        if (!batch)
-          return {{"accepted", true}, {"state", "cancelled"}};
-        const auto binding = batch->binding;
-        if (!file_uploads.Cancel(upload))
-          pending = binding;
-      }
-      if (pending)
-        return FileStatus(upload, *pending);
-      return {{"accepted", true}, {"state", "cancelled"}};
-    }
-    const auto binding = ParseFileBinding(request.at("binding"));
-    if (method == "session.files.begin") {
-      if (Rpc(FileBrowserCommand(binding, "page.fileStatus")).value("state", std::string()) !=
-          "pending")
-        throw std::runtime_error("file_request_not_pending");
-      const auto& values = request.at("files");
-      if (!values.is_array() || values.empty() || values.size() > 64)
-        throw std::runtime_error("invalid_file_count");
-      std::vector<remotekit::FileUploadStore::Spec> specs;
-      for (const auto& value : values) {
-        if (!value.at("size").is_number_unsigned() &&
-            (!value.at("size").is_number_integer() || value.at("size").get<int64_t>() < 0))
-          throw std::runtime_error("invalid_file_size");
-        specs.push_back({Required(value, "name"), value.value("type", std::string()),
-                         value.at("size").get<uint64_t>()});
-      }
-      std::lock_guard lock(file_store_mutex);
-      const auto& batch = file_uploads.BeginOrResume(binding, specs);
-      Json files = Json::array();
-      for (const auto& file : batch.files)
-        files.push_back({{"ticket", file.ticket}, {"path", Utf8(file.path)}});
-      return {{"uploadId", batch.id}, {"files", files}};
-    }
-    const auto upload = Required(request, "uploadId");
-    if (method == "session.files.status")
-      return FileStatus(upload, binding);
-    if (method != "session.files.commit")
-      throw std::runtime_error("unknown_file_upload_method");
-    bool submitted = false;
-    {
-      std::lock_guard lock(file_store_mutex);
-      const auto* existing = file_uploads.Find(upload);
-      if (!existing || !(existing->binding == binding))
-        throw std::runtime_error("unknown_file_upload");
-      submitted = existing->state == remotekit::FileUploadStore::State::submitted ||
-                  existing->state == remotekit::FileUploadStore::State::selected;
-    }
-    if (submitted)
-      return FileStatus(upload, binding);
-    if (Rpc(FileBrowserCommand(binding, "page.fileStatus")).value("state", std::string()) !=
-        "pending")
-      throw std::runtime_error("file_request_not_pending");
-    Json files = Json::array();
-    {
-      std::lock_guard lock(file_store_mutex);
-      const auto& batch = file_uploads.Seal(upload, binding);
-      for (const auto& file : batch.files)
-        files.push_back({{"path", Utf8(file.path)}, {"displayName", file.name}});
-      file_uploads.MarkSubmitted(
-          upload);  // An RPC timeout can occur after Browser received these paths.
-    }
-    auto command = FileBrowserCommand(binding, "page.reply");
-    command["file_only"] = true;
-    command["accept"] = true;
-    command["files"] = files;
-    Rpc(command);
-    return FileStatus(upload, binding);
+    file_services.Authorize(Required(request, "connectionId"), control.load(), bindings,
+                            request.value("library", false));
+    return {{"accepted", true}};
   }
   Json Command(const Json& request,
                uint64_t generation,
@@ -4267,8 +3883,8 @@ struct Session {
       return FaceCapabilities();
     if (method.starts_with("auth.face."))
       return FaceCommand(method, request, generation, management_current);
-    if (method.starts_with("session.files."))
-      return FileCommand(method, request);
+    if (method == "session.files.authorize")
+      return AuthorizeFiles(request);
     if (method.starts_with("session.library."))
       return LibraryCommand(method, request);
     if (method == "session.ensure") {
@@ -4348,7 +3964,7 @@ struct Session {
       if (request.value("connectionId", std::string()) != connection || !peer.load() ||
           !authorization.Stamp())
         return {{"accepted", false}};
-      if (authorization.Required() && request.value("authEpoch", Json()) != authorization.Epoch())
+      if (request.value("authEpoch", Json()) != authorization.Epoch())
         return {{"accepted", false}};
       if (!request.contains("operationId") ||
           !remotekit::BoundedServiceId(request["operationId"], 36) ||

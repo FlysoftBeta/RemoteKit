@@ -12,7 +12,6 @@ struct EncoderSettings {
   uint32_t width = 0, height = 0, fps = 60, bitrate = 24000000, max_bitrate = 48000000;
   uint32_t level_idc = 51, async_depth = 1, gop = 120, target_usage = 4, buffer_ms = 1000;
   bool vbr = false;
-  bool qsv_async_vpp = false;
   bool target_usage_explicit = false, rate_control_explicit = false, qsv_low_power_explicit = false;
   uint32_t qsv_low_power = 0;  // mfxCodingOption: auto=0, on=0x10, off=0x20.
 };
@@ -31,10 +30,8 @@ struct AccessUnit {
   int qp = -1;
 };
 enum class CodecResult { accepted, busy, ready, pending, error };
-enum class EncoderInput { nv12, bgra };
 // One worker owns each backend. Input texture is immutable and GPU-ready.
-// InputFormat selects NV12 (external conversion) or BGRA (same-session QSV
-// VPP). BGRA uses its true texture dimensions, each physically 16-aligned.
+// Input textures contain externally converted NV12 frames.
 // accepted Submit retains the texture until matching Poll completion or Drain.
 // Caller keeps its pool lease through completion; COM AddRef alone is not lease.
 // Worker fills up to async_depth, then polls. Never sync immediately per Submit.
@@ -68,7 +65,6 @@ class HardwareEncoder {
   virtual bool CanReleaseInputs() const { return true; }
   virtual void HoldInputsUntilProcessExit(std::shared_ptr<void>) {}
   virtual const char* Name() const = 0;
-  virtual EncoderInput InputFormat() const { return EncoderInput::nv12; }
   virtual std::optional<QsvLowPowerInfo> LowPowerInfo() const { return {}; }
   virtual std::optional<QsvRateControlInfo> RateControlInfo() const { return {}; }
   virtual bool TakeKeyframeRequest() { return false; }

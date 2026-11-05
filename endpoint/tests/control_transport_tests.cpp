@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
       std::cout << "control transport configuration tests passed\n";
       return 0;
     }
-    // Native half of tools/test-endpoint-control-transport.mjs. No SDK/GPU load.
+    // Native half of tests/integration/test-endpoint-control-transport.mjs. No SDK/GPU load.
     remotekit::ControlTransport transport(argv[1], "test-node", "test-secret");
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(40);
     uint64_t old_generation = 0;

@@ -66,20 +66,6 @@ if(BUILD_TESTING)
   target_link_libraries(endpoint_comp_pacing_tests PRIVATE remotekit_endpoint)
   add_test(NAME endpoint_comp_pacing COMMAND endpoint_comp_pacing_tests)
 endif()
-add_executable(endpoint_demo EXCLUDE_FROM_ALL src/demo.cpp)
-target_link_libraries(endpoint_demo PRIVATE remotekit_endpoint)
-if(WIN32)
-  add_executable(endpoint_client WIN32 EXCLUDE_FROM_ALL src/client_win.cpp src/client_win.manifest
-    src/atlas_client.cpp src/atlas_consumer.cpp)
-  target_include_directories(endpoint_client PRIVATE ${PROJECT_SOURCE_DIR}/sdk/include)
-  target_compile_definitions(endpoint_client PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN
-    _WIN32_WINNT=0x0A00 WINVER=0x0A00)
-  target_link_libraries(endpoint_client PRIVATE remotekit_endpoint shell32 user32 imm32 d3d11 dxgi d3dcompiler)
-  if(MSVC)
-    target_compile_options(endpoint_client PRIVATE /W4 /utf-8)
-  endif()
-endif()
-
 if(WIN32)
   add_library(remotekit_media STATIC src/media/gpu_device.cpp src/media/qsv_encoder.cpp
     src/media/nvenc_encoder.cpp src/media/render_slots.cpp src/media/encoder_worker.cpp)
@@ -204,22 +190,6 @@ if(WIN32)
   target_link_libraries(endpoint_encoder_smoke PRIVATE remotekit_media)
   add_custom_command(TARGET endpoint_encoder_smoke POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_encoder_smoke>)
-  add_executable(endpoint_qsv_vpp_probe EXCLUDE_FROM_ALL ../tools/qsv-vpp-probe.cpp)
-  target_include_directories(endpoint_qsv_vpp_probe PRIVATE ${RK_DEPS} ${RK_DEPS}/libvpl-2.17.0/api)
-  target_compile_definitions(endpoint_qsv_vpp_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
-    _WIN32_WINNT=0x0A00 WINVER=0x0A00 MFX_DEPRECATED_OFF)
-  target_compile_options(endpoint_qsv_vpp_probe PRIVATE /W4 /utf-8)
-  target_link_libraries(endpoint_qsv_vpp_probe PRIVATE VPL d3d11 dxgi pdh)
-  add_custom_command(TARGET endpoint_qsv_vpp_probe POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_qsv_vpp_probe>)
-  add_executable(endpoint_qsv_frame_budget_probe EXCLUDE_FROM_ALL ../tools/qsv-frame-budget-probe.cpp)
-  target_include_directories(endpoint_qsv_frame_budget_probe PRIVATE ${RK_DEPS} ${RK_DEPS}/libvpl-2.17.0/api)
-  target_compile_definitions(endpoint_qsv_frame_budget_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN
-    _WIN32_WINNT=0x0A00 WINVER=0x0A00 MFX_DEPRECATED_OFF)
-  target_compile_options(endpoint_qsv_frame_budget_probe PRIVATE /W4 /utf-8)
-  target_link_libraries(endpoint_qsv_frame_budget_probe PRIVATE VPL d3d11 dxgi)
-  add_custom_command(TARGET endpoint_qsv_frame_budget_probe POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_qsv_frame_budget_probe>)
 endif()
 
 if(BUILD_TESTING)

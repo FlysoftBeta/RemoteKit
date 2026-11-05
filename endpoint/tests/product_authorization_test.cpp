@@ -15,7 +15,7 @@ int main() {
   using Gate = remotekit::ProductAuthorization;
   using Decision = Gate::Decision;
   Gate gate;
-  gate.Bind(true);
+  gate.Bind();
   CHECK(!gate.Stamp());
   CHECK(gate.Check(0, true) == Decision::reject);
   CHECK(gate.Check(1, false) == Decision::change);
@@ -43,10 +43,7 @@ int main() {
   const auto second = gate.Stamp();
   CHECK(gate.Current(second) && !gate.Current(first));
 
-  gate.Bind(true);
+  gate.Bind();
   CHECK(!gate.Current(second));
   CHECK(gate.Check(1, true) == Decision::change);
-  gate.Bind(false);
-  CHECK(gate.Stamp() && !gate.Current(second));
-  CHECK(gate.Check(1, true) == Decision::reject);
 }

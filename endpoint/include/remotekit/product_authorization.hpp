@@ -10,16 +10,13 @@ namespace remotekit {
 class ProductAuthorization {
  public:
   enum class Decision { reject, unchanged, change };
-  void Bind(bool required) {
-    required_ = required;
+  void Bind() {
     epoch_ = 0;
     unlocked_ = false;
     Close();
-    if (!required)
-      Open();
   }
   Decision Check(uint64_t epoch, bool unlocked) const {
-    if (!Required() || !epoch || epoch < Epoch())
+    if (!epoch || epoch < Epoch())
       return Decision::reject;
     if (epoch > Epoch())
       return Decision::change;
@@ -32,7 +29,6 @@ class ProductAuthorization {
     unlocked_ = unlocked;
   }
   uint64_t Epoch() const { return epoch_.load(); }
-  bool Required() const { return required_.load(); }
   void Close() { stamp_ = 0; }
   void Open() { stamp_ = ++serial_; }
   uint64_t Stamp() const { return stamp_.load(); }
@@ -41,7 +37,6 @@ class ProductAuthorization {
  private:
   bool unlocked_ = false;
   uint64_t serial_ = 0;
-  std::atomic<bool> required_{false};
   std::atomic<uint64_t> epoch_{0};
   std::atomic<uint64_t> stamp_{0};
 };

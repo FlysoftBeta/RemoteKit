@@ -90,10 +90,9 @@ inline bool FileRequestEnvelope(const ServiceJson& message, size_t bytes) {
       return false;
   }
   const auto method = message.value("method", ServiceJson());
-  if (method != "begin" && method != "photo.burst.sample" && bytes > 24576)
+  if (method != "photo.burst.sample" && bytes > 24576)
     return false;
-  return method == "begin" || method == "chunk" || method == "commit" || method == "cancel" ||
-         method == "status" || method == "selection.commit" || LibraryFileMethod(method);
+  return method == "selection.commit" || LibraryFileMethod(method);
 }
 
 // Session disk-worker state. The library grant serial is unique across
@@ -450,17 +449,6 @@ class DcFileServices {
     authorized_ = std::move(next);
     wake_.notify_all();
   }
-  void RevokeAuthorization() {
-    std::lock_guard lock(mutex_);
-    ++epoch_;
-    authorized_.clear();
-    jobs_.clear();
-    receipts_.clear();
-    history_.clear();
-    outbox_.clear();
-    sweep_requested_ = true;
-    wake_.notify_all();
-  }
   bool Current(const Job& job) const {
     std::lock_guard lock(mutex_);
     return CurrentLocked(job);
@@ -489,7 +477,7 @@ class DcFileServices {
         QueueReply(found->second.reply, found->second.grant);
       return;
     }
-    const bool chunk = message["method"] == "chunk" || message["method"] == "asset.chunk";
+    const bool chunk = message["method"] == "asset.chunk";
     if (jobs_.size() >= 8 || outbox_.size() >= 24 ||
         (chunk && std::count_if(receipts_.begin(), receipts_.end(), [](const auto& item) {
                     return item.second.chunk && item.second.reply.is_null();

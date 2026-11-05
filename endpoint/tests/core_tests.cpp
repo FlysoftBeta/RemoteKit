@@ -190,187 +190,6 @@ int main() {
   auto lower_cadence = FitH264Sampling(3856, 2176, 50, 51);
   CHECK(lower_cadence.width > limited_4k.width && lower_cadence.scale < 1);
   CHECK(std::string(limited_4k.limitation) == "receiver-level-macroblock-rate");
-  // Hover is permitted before focus, with the same token/sequence authority.
-  Endpoint hover_endpoint;
-  const auto hover_session = hover_endpoint.CreateSession("hover").value;
-  const auto hover_profile = hover_endpoint.AddProfile(hover_session, "default").value;
-  const auto hover_view = hover_endpoint.CreateWebView(hover_session, hover_profile).value;
-  auto hover_token = hover_endpoint.Token(hover_session, hover_view).value;
-  MouseInput hover_move;
-  hover_move.modifiers = 15;  // Keyboard modifier state does not mean mouse drag.
-  MouseInput hover_leave;
-  hover_leave.action = MouseInput::Action::leave;
-  CHECK(IsHoverInput(hover_move) && IsHoverInput(hover_leave));
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 1, hover_move}));
-  hover_move.modifiers = 0;
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 2, hover_leave}));
-  CHECK(!hover_endpoint.FindWebView(hover_session, hover_view)->focused);
-  CHECK(hover_endpoint.Token(hover_session, hover_view).value == hover_token);
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 2, hover_move}).error ==
-        Error::stale);
-  CHECK(hover_endpoint.AcceptInput(hover_session + 1, {hover_token, 3, hover_move}).error ==
-        Error::wrong_session);
-  auto invalid_hover = hover_move;
-  invalid_hover.x = std::numeric_limits<double>::quiet_NaN();
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 3, invalid_hover}).error ==
-        Error::invalid);
-  auto reject_without_focus = [&](const InputPayload& payload) {
-    CHECK(!IsHoverInput(payload));
-    CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 3, payload}).error ==
-          Error::unavailable);
-  };
-  MouseInput button_event;
-  button_event.action = MouseInput::Action::down;
-  button_event.button = 1;
-  reject_without_focus(button_event);
-  button_event.action = MouseInput::Action::up;
-  reject_without_focus(button_event);
-  button_event.action = MouseInput::Action::move;
-  reject_without_focus(button_event);
-  for (const auto held : {64u, 128u, 256u, 1u << 20, 1u << 21}) {
-    CHECK(kMouseButtonModifiers & held);
-    button_event.button = 0;
-    button_event.modifiers = held;
-    reject_without_focus(button_event);
-    button_event.action = MouseInput::Action::leave;
-    reject_without_focus(button_event);
-    button_event.action = MouseInput::Action::move;
-  }
-  reject_without_focus(KeyInput{});
-  reject_without_focus(WheelInput{});
-  reject_without_focus(TouchInput{TouchInput::Action::start, {{1, 10, 10, .5}}});
-  reject_without_focus(ImeSet{u"x", 0, 1});
-  reject_without_focus(ImeCommit{u"x"});
-  reject_without_focus(ImeCancel{});
-  reject_without_focus(ImeFinish{});
-  CHECK(hover_endpoint.FindWebView(hover_session, hover_view)->last_sequence == 2);
-  CHECK(hover_endpoint.SetFocus(hover_session, hover_view, true));
-  CHECK(hover_endpoint.SetFocus(hover_session, hover_view, false));
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 3, hover_move}).error ==
-        Error::stale);
-  hover_token = hover_endpoint.Token(hover_session, hover_view).value;
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 3, hover_move}));
-  CHECK(hover_endpoint.CommitDocument(hover_session, hover_view));
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 4, hover_leave}).error ==
-        Error::stale);
-  hover_token = hover_endpoint.Token(hover_session, hover_view).value;
-  const auto hover_freeze =
-      hover_endpoint.RequestLifecycle(hover_session, hover_view, Lifecycle::freeze).value;
-  hover_token = hover_endpoint.Token(hover_session, hover_view).value;
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 4, hover_move}).error ==
-        Error::unavailable);
-  CHECK(hover_endpoint.CompleteLifecycle(hover_session, hover_freeze, true));
-  hover_token = hover_endpoint.Token(hover_session, hover_view).value;
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 4, hover_move}).error ==
-        Error::unavailable);
-  CHECK(hover_endpoint.ResetWebView(hover_session, hover_view));
-  CHECK(hover_endpoint.AcceptInput(hover_session, {hover_token, 4, hover_move}).error ==
-        Error::stale);
-  Endpoint stable;
-  auto persisted = stable.CreateSession("stable-tenant", 987654321);
-  CHECK(persisted && persisted.value == 987654321);
-  auto stable_profile = stable.AddProfile(persisted.value, "default");
-  auto stable_view = stable.CreateWebView(persisted.value, stable_profile.value, 876543210);
-  CHECK(stable_view && stable_view.value == 876543210);
-  CHECK(stable.SetFocus(persisted.value, stable_view.value, true));
-  auto old_layout = stable.Token(persisted.value, stable_view.value).value;
-  CHECK(stable.InvalidateInput(persisted.value, stable_view.value));
-  CHECK(stable.Token(persisted.value, stable_view.value).value.instance == old_layout.instance);
-  CHECK(stable.AcceptInput(persisted.value, {old_layout, 1, MouseInput{}}).error == Error::stale);
-  CHECK(stable.ResetWebView(persisted.value, stable_view.value));
-  CHECK(stable.Token(persisted.value, stable_view.value).value.instance > old_layout.instance);
-  CHECK(stable.RemoveWebView(persisted.value, stable_view.value));
-  CHECK(!stable.FindWebView(persisted.value, stable_view.value));
-  Endpoint e;
-  auto s = e.CreateSession("tenant-a");
-  auto b = e.CreateSession("tenant-b");
-  CHECK(s && b);
-  CHECK(!e.CreateSession("tenant-a"));
-  CHECK(!e.CreateSession(""));
-  auto p = e.AddProfile(s.value, "default");
-  auto pb = e.AddProfile(b.value, "default");
-  CHECK(p && pb);
-  CHECK(e.AddProfile(s.value, "second").status.error == Error::unsupported);
-  CHECK(e.CreateWebView(b.value, p.value).status.error == Error::wrong_session);
-  auto v = e.CreateWebView(s.value, p.value);
-  auto v2 = e.CreateWebView(s.value, p.value);
-  CHECK(v && v2);
-  CHECK(!e.FindWebView(b.value, v.value));
-  CHECK(!e.SetFocus(b.value, v.value, true));
-  CHECK(e.SetFocus(s.value, v.value, true));
-  InputEvent input{e.Token(s.value, v.value).value, 1, KeyInput{}};
-  CHECK(e.AcceptInput(b.value, input).error == Error::wrong_session);
-  CHECK(e.AcceptInput(s.value, input));
-  CHECK(e.AcceptInput(s.value, input).error == Error::stale);
-  ++input.sequence;
-  CHECK(e.CommitDocument(s.value, v.value));
-  CHECK(e.AcceptInput(s.value, input).error == Error::stale);
-  input.token = e.Token(s.value, v.value).value;
-  CHECK(e.AcceptInput(s.value, input));
-  CHECK(e.SetFocus(s.value, v2.value, true));
-  ++input.sequence;
-  CHECK(e.AcceptInput(s.value, input).error == Error::stale);
-  CHECK(e.SetFocus(s.value, v.value, true));
-  auto freeze = e.RequestLifecycle(s.value, v.value, Lifecycle::freeze);
-  CHECK(freeze);
-  auto state = e.FindWebView(s.value, v.value);
-  CHECK(state->actual == Residency::live && state->desired == Residency::frozen && state->pending);
-  const auto before_freeze_commit = e.Token(s.value, v.value).value;
-  CHECK(e.CommitDocument(s.value, v.value));
-  CHECK(e.Token(s.value, v.value).value.document == before_freeze_commit.document + 1);
-  CHECK(e.RequestLifecycle(s.value, v.value, Lifecycle::unload).status.error == Error::busy);
-  CHECK(!e.AcceptInput(s.value, {e.Token(s.value, v.value).value, 4, KeyInput{}}));
-  CHECK(!e.CompleteLifecycle(b.value, freeze.value, true));
-  CHECK(e.CompleteLifecycle(s.value, freeze.value, true));
-  CHECK(e.FindWebView(s.value, v.value)->actual == Residency::frozen);
-  CHECK(e.CompleteLifecycle(s.value, freeze.value, true).error == Error::stale);
-  auto restore = e.RequestLifecycle(s.value, v.value, Lifecycle::restore);
-  CHECK(restore);
-  const auto before_thaw_commit = e.Token(s.value, v.value).value;
-  CHECK(e.CommitDocument(s.value, v.value));
-  CHECK(e.Token(s.value, v.value).value.document == before_thaw_commit.document + 1);
-  CHECK(e.CompleteLifecycle(s.value, restore.value, false));
-  CHECK(e.FindWebView(s.value, v.value)->desired == Residency::live &&
-        e.FindWebView(s.value, v.value)->actual == Residency::frozen);
-  restore = e.RequestLifecycle(s.value, v.value, Lifecycle::restore);
-  CHECK(e.CompleteLifecycle(s.value, restore.value, true));
-  auto before = e.Token(s.value, v.value).value;
-  auto discard = e.RequestLifecycle(s.value, v.value, Lifecycle::discard);
-  CHECK(discard);
-  CHECK(!e.CommitDocument(s.value, v.value));
-  CHECK(e.CompleteLifecycle(s.value, discard.value, true));
-  CHECK(e.FindWebView(s.value, v.value)->profile == p.value);
-  CHECK(e.Token(s.value, v.value).value.instance > before.instance);
-  restore = e.RequestLifecycle(s.value, v.value, Lifecycle::restore);
-  CHECK(e.CompleteLifecycle(s.value, restore.value, true));
-  auto unload = e.RequestLifecycle(s.value, v.value, Lifecycle::unload);
-  CHECK(unload);
-  CHECK(e.CompleteLifecycle(s.value, unload.value, true));
-  CHECK(e.FindWebView(s.value, v.value)->actual == Residency::unloaded);
-  const auto first_unload_token = e.Token(s.value, v.value).value;
-  auto repeated_unload = e.RequestLifecycle(s.value, v.value, Lifecycle::unload);
-  CHECK(repeated_unload);
-  CHECK(e.CompleteLifecycle(s.value, repeated_unload.value, true));
-  CHECK(e.FindWebView(s.value, v.value)->desired == Residency::unloaded);
-  CHECK(e.Token(s.value, v.value).value.instance > first_unload_token.instance);
-  CHECK(e.AcceptInput(s.value, {first_unload_token, 99, KeyInput{}}).error == Error::stale);
-  const auto unloaded_token = e.Token(s.value, v.value).value;
-  CHECK(e.InvalidateInstance(s.value, v.value));
-  CHECK(e.Token(s.value, v.value).value.instance > unloaded_token.instance);
-  CHECK(e.FindWebView(s.value, v.value)->actual == Residency::unloaded);
-  CHECK(!e.RequestLifecycle(s.value, v.value, Lifecycle::freeze));
-  restore = e.RequestLifecycle(s.value, v.value, Lifecycle::restore);
-  CHECK(e.CompleteLifecycle(s.value, restore.value, true));
-  CHECK(e.SetFocus(s.value, v.value, true));
-  CHECK(e.AcceptInput(s.value, {before, 8, KeyInput{}}).error == Error::stale);
-  auto pending_crash = e.RequestLifecycle(s.value, v.value, Lifecycle::freeze);
-  CHECK(pending_crash);
-  const auto crash_token = e.Token(s.value, v.value).value;
-  CHECK(e.InvalidateInstance(s.value, v.value));
-  CHECK(e.Token(s.value, v.value).value.instance > crash_token.instance);
-  CHECK(!e.FindWebView(s.value, v.value)->pending && !e.FindWebView(s.value, v.value)->focused);
-  CHECK(e.CompleteLifecycle(s.value, pending_crash.value, true).error == Error::stale);
-  CHECK(e.SetFocus(s.value, v.value, true));
   KeyInput unicode_key;
   unicode_key.text = u"\U0001f600";
   CHECK(ValidateInput(unicode_key));
@@ -413,11 +232,6 @@ int main() {
   // Long gestures use monotonic age; there is no wall argument to re-anchor.
   CHECK(TouchElapsedValid(3600000000LL, 3600016000LL, 3600020000LL, true));
   CHECK(!ValidateInput(WheelInput{0, 0, std::numeric_limits<double>::infinity(), 0, 0}));
-  auto fresh = e.Token(s.value, v.value).value;
-  CHECK(!e.AcceptInput(s.value, {fresh, 20, ImeSet{u"abc", 0, 9}}));
-  CHECK(e.AcceptInput(s.value,
-                      {fresh, 20, ImeCommit{u"abc"}}));  // Invalid input did not consume sequence.
-
   std::vector<PackItem> items{{1, 60, 40, 2}, {2, 40, 70, 1}, {3, 20, 20, 1.5}, {4, 12, 18, 1}};
   auto atlas = PackAtlas(160, 128, 2, items);
   CHECK(atlas);
@@ -430,14 +244,7 @@ int main() {
           a.outer.y + a.outer.height <= 128);
     for (std::size_t j = 0; j < i; ++j)
       CHECK(!Overlap(a.outer, atlas.value.placements[j].outer));
-    auto pixel = atlas.value.DipToPixel(a.view, 2, 3);
-    CHECK(pixel);
-    auto hit = atlas.value.HitTest(pixel.value.first, pixel.value.second);
-    CHECK(hit && hit->view == a.view && hit->dip_x == 2 && hit->dip_y == 3);
-    CHECK(!atlas.value.HitTest(a.outer.x, a.outer.y));
   }
-  CHECK(!atlas.value.HitTest(-1, 2));
-  CHECK(!atlas.value.DipToPixel(1, 30, 0));
   CHECK(PackAtlas(10, 10, 0, {{1, 11, 1, 1}}).status.error == Error::no_space);
   CHECK(PackAtlas(10, 10, 1, {{1, 9, 9, 1}}).status.error == Error::no_space);
   CHECK(!PackAtlas(10, 10, 0, {{1, 6, 10, 1}, {2, 6, 10, 1}}));

@@ -40,8 +40,7 @@ struct RenderSlots::State {
   RenderEventQueue events;
   StatsSnapshot* counters = nullptr;
   bool unknown_counted = false;
-  bool fatal = false, untracked = false, closing = false, producer_exited = false,
-       stop_requested = false, stop_confirmed = false;
+  bool fatal = false, untracked = false, closing = false, stop_requested = false;
   std::string failure;
   SharedAtlasFrame latest{};
   std::shared_ptr<ServerTrace> trace;
@@ -121,7 +120,6 @@ struct RenderSlots::State {
                           rk_record.fence = e.value; rk_record.producer_pid = producer_pid;);
         }
       } else if (e.type == REMOTEKIT_SDK_RENDER_STOPPED) {
-        stop_confirmed = true;
         ++counters->stopConfirmed;
         RK_SERVER_TRACE(trace, "render_stopped", (TraceIds{0, 0, e.generation, 0, 0}), );
         CloseChannel();
@@ -481,14 +479,8 @@ RenderSlots::Result RenderSlots::Poll(remotekit_rtc_frame& frame,
 SharedAtlasFrame RenderSlots::LatestMetadata() const {
   return state_ ? state_->latest : SharedAtlasFrame{};
 }
-bool RenderSlots::Close(std::string& error, bool producer_exited) {
+bool RenderSlots::Close(std::string& error) {
   PublishGuard publish{*this};
-  if (producer_exited) {
-    if (state_)
-      state_->producer_exited = true;
-    for (auto& old : retired_)
-      old->producer_exited = true;
-  }
   if (state_) {
     state_->RequestStop();
     retired_.push_back(std::move(state_));

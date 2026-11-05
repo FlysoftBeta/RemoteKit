@@ -41,16 +41,11 @@ class RenderSlots {
   HANDLE EventHandle() const;
   Result Poll(remotekit_rtc_frame&, SharedAtlasFrame&, std::string&);
   SharedAtlasFrame LatestMetadata() const;
-  bool Close(std::string&, bool producer_exited = false);
+  bool Close(std::string&);
   int64_t MonotonicMicros() const;
   std::optional<double> capture_to_ready_ms() const;
   double clock_uncertainty_us() const;
-  uint64_t copied_frames() const { return 0; }
   uint64_t delivered_frames() const { return delivered_.load(); }
-  uint64_t drops() const { return 0; }
-  bool shared_input() const { return true; }
-  double last_copy_ms() const { return 0; }
-  bool ready_gate_enabled() const { return true; }
   uint64_t shared_borrows() const { return delivered_.load(); }
   uint64_t shared_held_slots() const;
 

@@ -38,7 +38,7 @@ struct TrackedTexture final : ID3D11Texture2D {
   UINT STDMETHODCALLTYPE GetEvictionPriority() override { return 0; }
   void STDMETHODCALLTYPE GetDesc(D3D11_TEXTURE2D_DESC* desc) override { *desc = {}; }
 };
-// Exercises the production Configure/Run path with only the hardware replaced.
+// Records Configure before GPU setup; Run exercises rate changes without frames.
 struct RateState {
   std::mutex mutex;
   std::condition_variable changed;
@@ -55,15 +55,16 @@ class RateBackend final : public HardwareEncoder {
   EncoderSettings settings_;
 
  public:
-  explicit RateBackend(std::shared_ptr<RateState> state) : state_(std::move(state)) {}
-  bool Configure(ID3D11Device*, const EncoderSettings& settings, std::string&) override {
+  explicit RateBackend(std::shared_ptr<RateState> state)
+      : state_(std::move(state)), settings_(state_->configured) {}
+  bool Configure(ID3D11Device*, const EncoderSettings& settings, std::string& error) override {
     settings_ = settings;
     std::lock_guard lock(state_->mutex);
     state_->configured = settings;
     ++state_->configurations;
-    return true;
+    error = "rate_mock_configuration_boundary";
+    return false;
   }
-  EncoderInput InputFormat() const override { return EncoderInput::bgra; }
   const char* Name() const override { return "rate-mock"; }
   EncoderSettings ActualSettings() const override { return settings_; }
   CodecResult Submit(ID3D11Texture2D*, bool, uint64_t, std::string&) override {
@@ -302,9 +303,15 @@ struct EncoderWorkerTestAccess {
     config.width = 1936;
     config.height = 1088;
     config.h264_level_idc = 42;
-    CHECK(worker.Configure(config));
+    CHECK(!worker.Configure(config));
     CHECK(state->configurations == 1 && state->configured.fps == 63);
-    CHECK(stats->Snapshot()["appliedFps"] == 63);
+    CHECK(stats->Snapshot()["error"] == "rate_mock_configuration_boundary");
+    worker.hardware_ = std::make_unique<RateBackend>(state);
+    worker.rate_limit_ = worker.settings_.max_bitrate;
+    worker.failed_ = false;
+    worker.stopping_ = false;
+    worker.configured_ = true;
+    worker.thread_ = std::thread([&] { worker.Run(); });
     worker.Rates(1234567, 120);
     state->Wait(1);
     CHECK(stats->Snapshot()["gccTargetFps"] == 120);
@@ -357,6 +364,7 @@ struct EncoderWorkerTestAccess {
     auto snapshot = stats->Snapshot();
     CHECK(snapshot["gccTargetBitrate"] == 1234567 && snapshot["gccTargetFps"] == 27);
     // Retire through production Run's never-submitted cleanup, without a GPU.
+    worker.hardware_ = std::make_unique<RateBackend>(std::make_shared<RateState>());
     worker.stopping_ = true;
     worker.Run();
     worker.Stop();

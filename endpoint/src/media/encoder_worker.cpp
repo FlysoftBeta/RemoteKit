@@ -177,8 +177,7 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
       stats_->qsv_rate_control = hardware_->RateControlInfo();
     }
     hardware_.reset();
-    if (mode_ != "auto" || (settings_.qsv_low_power && settings_.qsv_low_power_explicit) ||
-        settings_.qsv_async_vpp) {
+    if (mode_ != "auto" || (settings_.qsv_low_power && settings_.qsv_low_power_explicit)) {
       Error(error);
       return false;
     }
@@ -193,15 +192,13 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
       return false;
     }
   }
-  bgra_input_ = hardware_->InputFormat() == EncoderInput::bgra;
-  if (!bgra_input_ &&
-      !converter_.Open(device_.Get(), settings_.width, settings_.height, settings_.fps, error)) {
+  if (!converter_.Open(device_.Get(), settings_.width, settings_.height, settings_.fps, error)) {
     Error(error);
     return false;
   }
   for (uint32_t i = 0; i < settings_.async_depth; ++i) {
     ComPtr<ID3D11Texture2D> surface;
-    if (!bgra_input_ && !converter_.CreateSurface(surface, error)) {
+    if (!converter_.CreateSurface(surface, error)) {
       Error(error);
       return false;
     }
@@ -470,8 +467,7 @@ void EncoderWorker::Run() {
       std::string error;
       if (trace_)
         converter_.SetTraceFrame(TraceIds::Frame(job.frame, true));
-      if (!bgra_input_ &&
-          !converter_.Convert(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture),
+      if (!converter_.Convert(static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture),
                               surfaces_[job.surface].Get(), error)) {
         ++stats_->error_drops;
         remotekit::TailRefreshLease::Finish(job.frame, false);
@@ -495,8 +491,7 @@ void EncoderWorker::Run() {
       job.submitted_qpc = QpcNow();
       const bool requested_key = keyframe_.exchange(false);
       const bool key = job.key || requested_key;
-      auto* input = bgra_input_ ? static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)
-                                : surfaces_[job.surface].Get();
+      auto* input = surfaces_[job.surface].Get();
       auto status = hardware_->Submit(input, key, job.cookie, error);
       RK_SERVER_TRACE(trace_, "hardware_submit", TraceIds::Frame(job.frame, true),
                       rk_record.cookie = job.cookie;

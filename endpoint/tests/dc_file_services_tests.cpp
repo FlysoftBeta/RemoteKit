@@ -29,7 +29,7 @@ void Until(F ready) {
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
-ServiceJson Request(const char* id, const char* method = "status") {
+ServiceJson Request(const char* id, const char* method = "selection.commit") {
   return {{"type", "files.request"},
           {"version", 1},
           {"requestId", id},
@@ -201,7 +201,7 @@ int main() {
   });
   CHECK(executions == 1);
   auto conflict = a;
-  conflict["method"] = "cancel";
+  conflict["params"]["selectionId"] = "conflict";
   services.Admit(7, conflict);
   flush();
   CHECK(replies.back()["error"] == "file_request_id_conflict");

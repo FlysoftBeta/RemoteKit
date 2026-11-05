@@ -123,9 +123,8 @@ int main() {
     const auto source = library.Path(hash);
     const auto& batch = staging.Stage(selection.binding, {{spec, source}}, live);
     const auto staged = batch.files.front().path;
-    CHECK(Throws([&] { staging.BeginOrResume(selection.binding, {spec}); }));
+    CHECK(Throws([&] { staging.Stage(selection.binding, {{spec, source}}, live); }));
     staging.MarkSubmitted(batch.id);
-    staging.RevokeUncommitted();
     CHECK(fs::exists(staged));
     fs::remove(source);
     std::ifstream input(staged, std::ios::binary);
