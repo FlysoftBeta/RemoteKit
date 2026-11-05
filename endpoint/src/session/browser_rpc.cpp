@@ -90,7 +90,10 @@ Result<Json> BrowserRpc::Request(Json command,
                      (reply.contains("error") ? reply["error"].is_string()
                                                     ? reply["error"].get<std::string>()
                                                     : reply["error"].dump()
-                                              : "command failed")};
+                                              : "command failed") +
+                     (reply.contains("detail") && reply["detail"].is_string()
+                          ? " detail=" + reply["detail"].get<std::string>()
+                          : std::string())};
   }
   return reply;
 }

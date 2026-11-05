@@ -1,4 +1,10 @@
 #pragma once
+#include "rtc/event.hpp"
+#include "rtc/peer.hpp"
+#include "rtc/authorization.hpp"
+#include "rtc/data_router.hpp"
+#include "media/presentation.hpp"
+#include "input/input.hpp"
 #include "media/render_slots.hpp"
 #include "media/encoder_worker.hpp"
 #include "media/sdk_loader.hpp"
@@ -8,17 +14,11 @@
 #include "remotekit/sampling.hpp"
 #include "remotekit/idle_idr.hpp"
 #include "remotekit/tail_refresh.hpp"
-#include "remotekit/media_feedback.hpp"
 #include "remotekit/capture_clock.hpp"
 #include "remotekit/comp_pacing.hpp"
 #include "remotekit/atlas_dimensions.hpp"
 #include "remotekit/atlas_plan.hpp"
-#include "remotekit/coordinate_readiness.hpp"
-#include "remotekit/input_sequence.hpp"
-#include "remotekit/presentation_barrier.hpp"
 #include "remotekit/presentation_refresh.hpp"
-#include "remotekit/control_reliability.hpp"
-#include "remotekit/product_authorization.hpp"
 #include "remotekit/face_auth.hpp"
 #include "remotekit/raw_camera.hpp"
 #include "remotekit/dc_services.hpp"
@@ -64,7 +64,6 @@ class Session {
   SessionStore store;
   ManagementLink& management;
   uint64_t request_generation_ = 0;
-  std::atomic<uint64_t> client_gestures_control{0};
   std::string last_confirmed_browser_exit;
   remotekit::FileUploadStore file_uploads;
   remotekit::FileLibrary file_library;
@@ -95,16 +94,7 @@ class Session {
   std::thread audio_thread;
   std::atomic<bool> stop_audio{false};
   std::atomic<uint64_t> audio_gaps{0}, audio_submitted{0}, audio_rejected{0};
-  remotekit::CoordinateReadiness coordinate_readiness;
-  std::atomic<uint64_t> peer{0};
-  std::string connection;
-  // Transitions serialize with peer creation/close. Admission never holds its
-  // lock while calling an SDK operation that marshals to signaling.
-  std::mutex authorization_mutex, admission_mutex;
-  remotekit::ProductAuthorization authorization;
-  std::atomic<uint64_t> management_generation{0}, peer_management_generation{0};
-  std::atomic<uint64_t> frame_authorization{0}, input_authorization{0};
-  std::atomic<int64_t> audio_authorized_after{0};
+  AuthorizationController authorization;
   rk::auth::Faces faces;
   rk::auth::RawCamera raw_camera;
   std::mutex camera_mutex;
@@ -114,41 +104,19 @@ class Session {
   std::atomic<bool> stop_camera{false};
 
   std::shared_ptr<EncoderStats> stats = std::make_shared<EncoderStats>();
-  remotekit::MediaFeedback media_feedback;
   std::atomic<uint32_t> comp_bitrate{1}, comp_fps{60};
   std::mutex encoder_mutex;
   std::map<uint64_t, std::unique_ptr<EncoderWorker>> encoders;
   std::optional<StreamingAdapter> streaming_adapter;
-  struct Event {
-    uint32_t type;
-    std::string bytes, auxiliary;
-    int32_t value;
-    uint64_t peer;
-    uint64_t authorization = 0;
-    const char* input_rejection = nullptr;
-    uint64_t trace_input_sequence = 0;
-    uint64_t management_generation = 0;
-  };
+  using Event = RtcEvent;
 
   std::mutex event_mutex;
   std::condition_variable event_wake;
   std::deque<Event> events;
-  std::mutex signal_mutex;
-  std::deque<Event> signal_events;
-  bool signal_overflow = false;
-  std::mutex input_mutex;
-  std::condition_variable input_wake;
-  std::deque<Event> input_queue;
-  remotekit::InputSequence input_sequence;
-  std::thread input_thread;
-  std::atomic<bool> stop_input{false};
-  std::atomic<uint64_t> input_rejected{0}, input_coalesced{0};
-  std::atomic<uint64_t> input_busy_retries{0}, input_busy_exhausted{0};
-  Json layout;
-  std::atomic<bool> data_open{false};
-  remotekit::ReliableControlOutbox control_outbox;
+  InputController input;
+  ControlOutbox control_outbox;
+  DataRouter data_router;
   remotekit::DirectServices direct_services;
-  std::optional<remotekit::PresentationBarrier::Key> layout_prepare;
   Json site_preferences = Json::object();
   std::mutex media_policy_mutex;
   Json requested_media_policy = nullptr;
@@ -160,10 +128,6 @@ class Session {
   std::atomic<bool> output_suspended{false}, has_visible_output{false},
       reconciliation_pending{false};
   int64_t next_reconciliation = 0;
-  std::string current_geometry;
-  std::atomic<uint64_t> layout_epoch{0};
-  remotekit::PresentationBarrier presentation;
-  std::atomic<uint32_t> receive_level{0};
   enum class ConnectionPhase : size_t {
     answer,
     first_candidate,
@@ -196,7 +160,6 @@ class Session {
   CompDiagnostics comp_diagnostics;
   uint32_t sampling_fps = 60;
 
-  std::atomic<bool> rtc_connected{false};
   std::atomic<uint32_t> effective_idle_ms{150};
   std::atomic<double> source_interval_ms{0}, last_tail_age_ms{0};
   std::atomic<uint64_t> tail_submissions{0}, tail_completions{0};
@@ -295,13 +258,11 @@ class Session {
   bool FacePending(uint64_t epoch, std::string_view challenge);
   void WakeCamera();
   void CameraLoop();
-  static void EventCallback(void* context,
-                            uint64_t peer,
-                            uint32_t type,
-                            const void* bytes,
-                            size_t size,
-                            const char* auxiliary,
-                            int32_t value);
+  void HandlePeerEvent(const RtcEvent& event);
+  void BindPeerResources(uint64_t handle);
+  Result<void> StartPeerResources(uint64_t handle, const std::string& sdp);
+  void StopPeerResources();
+  void DrainPeerResources();
   static int CreateEncoder(void* context, uint64_t encoder_peer, uint64_t encoder);
   static int ConfigureEncoder(void* context,
                               uint64_t encoder,
@@ -314,41 +275,12 @@ class Session {
   int SendData(uint64_t handle, uint64_t stamp, const std::string& encoded);
   void Send(const Json& message, uint64_t expected_stamp = 0);
   void FlushControl();
+  void FlushServices();
   bool ServiceMessage(const Event& event);
-  void QueueLayout(const Json& mode = Json());
-  static bool PresentationNumber(const Json& message, const char* field, uint64_t& result);
-  bool PresentationMessage(const Event& event);
-  void PublishLayout(Json next, uint64_t epoch);
-  void InvalidateLayout(const char* reason);
-  Json Layout(const remotekit::SharedAtlasFrame& frame);
-  std::string GeometryKey(const remotekit::SharedAtlasFrame& frame);
-  uint64_t ObserveLayout(const remotekit::SharedAtlasFrame& frame);
-  void ReplyInput(Json reply, const Json& request, uint64_t stamp);
-  static std::string ClientTouchSequence(const Json& request);
-  static std::string ClientTouchTerminal(const Json& request);
-  remotekit::TouchTerminalReceipt* ReserveTouchTerminal(remotekit::TouchTerminalReceipts& terminals,
-                                                        const Event& event,
-                                                        const Json& request,
-                                                        const std::string& sequence,
-                                                        uint64_t input_control);
-  void RejectInput(const char* error,
-                   const Json& request,
-                   const Event& event,
-                   remotekit::TouchTerminalReceipts* terminals = nullptr);
-  void PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt);
-  void FlushTouchTerminals(remotekit::TouchTerminalReceipts& terminals);
-  Result<void> RouteData(const Event& event);
-  void HandleData(const Event& event, remotekit::TouchTerminalReceipts& terminals);
-  void QueueInput(const Event& event);
-  void InputLoop();
+  PresentationController presentation;
+  PeerController peer_controller;
   void MediaLoop();
   Result<Json> Offer(const Json& request, uint64_t generation);
-  int RevokeProduct();
-  Result<uint64_t> AuthorizationEpoch(const Json& request);
-  Result<void> RequireAuthPeer(const Json& request);
-  Result<Json> Authorize(const Json& request,
-                         uint64_t generation,
-                         const std::function<bool()>& management_current);
   static Json FaceCapabilities();
   Result<Json> FaceCommand(const std::string& method,
                            const Json& request,
@@ -367,6 +299,7 @@ class Session {
   std::string RetireUnsubmittedSelection(const std::string& selection_id);
   std::string ObserveSelection(const LibrarySelection& selection, const Json& status);
   Result<Json> DirectSelectionCommit(const FileJob& job, const std::string& selection_id);
+  Result<Json> DirectSelectionCancel(const FileJob& job);
   Result<Json> DirectLibraryCommand(const FileJob& job,
                                     const std::string& method,
                                     const Json& params);

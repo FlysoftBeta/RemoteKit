@@ -1,13 +1,7 @@
 #include "session/session.hpp"
 namespace remotekit {
 Result<void> Session::ManagementLost(uint64_t generation) {
-  std::lock_guard transition(authorization_mutex);
-  if (management_generation == generation) {
-    if (RevokeProduct() != 0)
-      fprintf(stderr, "RTC media authorization revoke failed\n");
-  }
-
-  return {};
+  return authorization.ManagementLost(generation);
 }
 
 Result<Json> Session::ManageSessionEnsure(const Json& request) {
@@ -67,16 +61,16 @@ Result<Json> Session::ManageSessionMediaPolicy(const Json& request) {
     return Error{ErrorCode::kInvalidRequest, "invalid degradation preference"};
   {
     std::lock_guard lock(media_policy_mutex);
-    if (peer && (sdk.remotekit_rtc_set_degradation_preference(peer, degradation) != 0 ||
-                 sdk.remotekit_rtc_set_source_max_fps(peer, value.get<uint32_t>()) != 0))
-      return Error{ErrorCode::kRejected, "RTC media policy rejected"};
+    auto applied = peer_controller.Policy(value.get<uint32_t>(), degradation);
+    if (!applied)
+      return applied.error();
     policy_max_fps = value.get<uint32_t>();
     policy_degradation = degradation;
     requested_media_policy = {{"maxFps", policy_max_fps.load()},
                               {"degradationPreference", preference}};
   }
   event_wake.notify_one();
-  return Json{{"accepted", true}, {"applied", peer.load() != 0}};
+  return Json{{"accepted", true}, {"applied", peer_controller.Handle() != 0}};
 }
 
 Result<Json> Session::ManageSessionSitePreferences(const Json& request) {
@@ -105,8 +99,8 @@ Result<Json> Session::ManageSessionSitePreferences(const Json& request) {
 }
 
 Result<Json> Session::ManageRtcActionResult(const Json& request) {
-  if (request.value("connectionId", std::string()) != connection || !peer.load() ||
-      !authorization.Stamp())
+  if (request.value("connectionId", std::string()) != peer_controller.Connection() ||
+      !peer_controller.Handle() || !authorization.Stamp())
     return Json{{"accepted", false}};
   if (request.value("authEpoch", Json()) != authorization.Epoch())
     return Json{{"accepted", false}};
@@ -116,7 +110,7 @@ Result<Json> Session::ManageRtcActionResult(const Json& request) {
       !remotekit::BoundedServiceId(request["operationGeneration"]) || !request.contains("ok") ||
       !request["ok"].is_boolean())
     return Error{ErrorCode::kInvalidRequest, "invalid action result"};
-  Json result = {{"connectionId", connection},
+  Json result = {{"connectionId", peer_controller.Connection()},
                  {"operationId", request["operationId"]},
                  {"operationGeneration", request["operationGeneration"]},
                  {"ok", request["ok"]}};
@@ -124,7 +118,7 @@ Result<Json> Session::ManageRtcActionResult(const Json& request) {
     result["result"] = request["result"];
   if (request.contains("error"))
     result["error"] = request["error"];
-  const bool accepted = direct_services.Result(peer.load(), result);
+  const bool accepted = direct_services.Result(peer_controller.Handle(), result);
   event_wake.notify_one();
   return Json{{"accepted", accepted}};
 }
@@ -146,23 +140,13 @@ Result<Json> Session::ManageRtcOffer(const Json& request) {
 }
 
 Result<Json> Session::ManageRtcClose(const Json& request) {
-  if (request.value("connectionId", std::string()) == connection)
+  if (request.value("connectionId", std::string()) == peer_controller.Connection())
     ClosePeer();
   return Json{{"closed", true}};
 }
 
 Result<Json> Session::ManageRtcIce(const Json& request) {
-  if (request.value("connectionId", std::string()) != connection || !peer)
-    return Error{ErrorCode::kConflict, "stale RTC connection"};
-  auto ice = request.at("candidate");
-  if (ice.is_null())
-    return Json::object();
-  auto candidate = ice.value("candidate", std::string()),
-       mid = ice.value("sdpMid", std::string("0"));
-  if (sdk.remotekit_rtc_add_ice(peer.load(), mid.c_str(), ice.value("sdpMLineIndex", 0),
-                                candidate.data(), candidate.size()) != 0)
-    return Error{ErrorCode::kRejected, "ICE candidate rejected"};
-  return Json::object();
+  return peer_controller.Ice(request);
 }
 
 Result<Json> Session::ManageViewNavigationAck(const Json& request) {
@@ -431,8 +415,8 @@ Result<Json> Session::ManageViewConfigure(const Json& request) {
 }
 
 Result<Json> Session::ManageRtcAuthorize(const Json& request) {
-  return Authorize(request, request_generation_,
-                   [this] { return management.Current(request_generation_); });
+  return authorization.Authorize(request, request_generation_,
+                                 [this] { return management.Current(request_generation_); });
 }
 
 Result<Json> Session::ManageAuthFaceCapabilities(const Json& request) {

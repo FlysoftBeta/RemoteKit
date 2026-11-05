@@ -7,6 +7,9 @@ void Session::RequireFileJob(const FileJob& job) {
 
 Result<Json> Session::DirectFileRpc(const FileJob& job, const char* method, Json additions) {
   RequireFileJob(job);
+  const auto token = authorization.Admit();
+  if (token.peer != job.peer || !authorization.Current(token))
+    return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
   Json command = {{"method", method},
                   {"session", id},
                   {"view", job.binding.view},
@@ -14,8 +17,9 @@ Result<Json> Session::DirectFileRpc(const FileJob& job, const char* method, Json
                   {"document", job.binding.document},
                   {"request", job.binding.request}};
   command.update(additions);
-  return browser.Rpc().Request(std::move(command), job.control, 10000, 0,
-                               [&] { return authorization.Stamp() && file_services.Current(job); });
+  return browser.Rpc().Request(std::move(command), job.control, 10000, false, [&] {
+    return authorization.Current(token) && file_services.Current(job);
+  });
 }
 
 void Session::SweepDirectFiles() {
@@ -310,7 +314,37 @@ Result<Json> Session::DirectFileCommand(const FileJob& job) {
     return DirectLibraryCommand(job, method, params);
   if (method == "selection.commit")
     return DirectSelectionCommit(job, Required(params, "selectionId"));
+  if (method == "selection.cancel")
+    return DirectSelectionCancel(job);
   return Error{ErrorCode::kInvalidRequest, "unknown_file_method"};
+}
+
+Result<Json> Session::DirectSelectionCancel(const FileJob& job) {
+  const auto token = authorization.Admit();
+  const auto current = [&] {
+    return authorization.Current(token) && token.peer == job.peer && job.library_grant &&
+           file_services.Current(job);
+  };
+  if (!current())
+    return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+  const auto check = [&] { RequireFileJob(job); };
+  const auto state = file_library.CancelPendingSelections(job.binding, check);
+  if (state == LibraryState::submitted)
+    return Json{{"state", "validating"}};
+  if (state == LibraryState::selected)
+    return Json{{"state", "selected"}};
+  auto status = DirectFileRpc(job, "page.fileStatus");
+  if (!status)
+    return status.error();
+  const auto existing = status.value().value("state", std::string("unknown"));
+  if (existing != "pending")
+    return Json{{"state", existing}};
+  if (!current())
+    return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+  auto cancelled = DirectFileRpc(job, "page.reply", {{"file_only", true}, {"accept", false}});
+  if (!cancelled)
+    return cancelled.error();
+  return Json{{"state", "cancelled"}};
 }
 
 Result<Session::FileBinding> Session::ParseFileBinding(const Json& value) {
@@ -423,7 +457,7 @@ Result<Json> Session::AuthorizeFiles(const Json& request) {
     if (!bindings.emplace(token, binding).second)
       return Error{ErrorCode::kForbidden, "duplicate_file_authorization"};
   }
-  std::lock_guard admission(admission_mutex);
+  auto admission = authorization.LockAdmission();
   if (!authorization.Stamp())
     return Error{ErrorCode::kForbidden, "authorization_changed"};
   {

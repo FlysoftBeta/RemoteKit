@@ -28,7 +28,7 @@ void Session::MediaLoop() {
   HANDLE pace_timer =
       CreateWaitableTimerExW(nullptr, nullptr, 0x2, TIMER_MODIFY_STATE | SYNCHRONIZE);
   if (!pace_timer) {
-    InvalidateLayout("comp-timer-unavailable");
+    presentation.InvalidateLayout("comp-timer-unavailable");
     std::lock_guard lock(stats->mutex);
     stats->error = "high resolution Comp timer unavailable";
     return;
@@ -62,11 +62,11 @@ void Session::MediaLoop() {
   effective_idle_ms = idle.delay_ms();
   source_interval_ms = 0;
   uint64_t active_authorization = authorization.Stamp();
-  frame_authorization = active_authorization;
+  authorization.SetFrame(active_authorization);
   auto update_refresh = [&](uint64_t handle, double now_ms) {
     std::optional<remotekit::PresentationRefresh::Scope> scope;
     if (has_current_view && !output_suspended && authorization.Current(active_authorization)) {
-      if (auto key = presentation.RefreshKey(handle, layout_epoch.load()))
+      if (auto key = presentation.RefreshKey(handle, presentation.Epoch()))
         scope = remotekit::PresentationRefresh::Scope{handle, active_authorization, *key};
     }
     presentation_refresh.SetScope(scope);
@@ -76,7 +76,7 @@ void Session::MediaLoop() {
   while (!stop_media) {
     const auto stamp = authorization.Stamp();
     if (stamp != active_authorization) {
-      frame_authorization = 0;
+      authorization.SetFrame(0);
       if (tail_attempt)
         tail_attempt->CancelWaiting();
       tail_attempt.reset();
@@ -84,8 +84,8 @@ void Session::MediaLoop() {
       has_current_view = false;
       next_tail_attempt_ms = 0;
       begin_schedule.Reset();
-      InvalidateLayout(stamp ? "authorization-resuming" : "authorization-locked");
-      if (rtc_connected) {
+      presentation.InvalidateLayout(stamp ? "authorization-resuming" : "authorization-locked");
+      if (peer_controller.Connected()) {
         {
           if (pool.EventHandle()) {
             {
@@ -114,7 +114,7 @@ void Session::MediaLoop() {
         }
       }
       active_authorization = stamp;
-      frame_authorization = stamp;
+      authorization.SetFrame(stamp);
       if (stamp)
         refresh_connected = true;
     }
@@ -123,7 +123,7 @@ void Session::MediaLoop() {
                                   static_cast<int64_t>(1000000.0 * QpcNow() / QpcFrequency()));
     {
       std::lock_guard lock(comp_diagnostics_mutex);
-      comp_diagnostics.targetFps = rtc_connected.load() &&
+      comp_diagnostics.targetFps = peer_controller.Connected() &&
                                            authorization.Current(active_authorization) &&
                                            !output_suspended.load()
                                        ? sampling_fps
@@ -140,7 +140,7 @@ void Session::MediaLoop() {
       incoming.swap(events);
     }
     for (auto& event : incoming) {
-      if (event.peer != peer.load())
+      if (event.peer != peer_controller.Handle())
         continue;
       if (event.type == 0x10000 && ProductCurrent(event)) {
         auto message = Json::parse(event.bytes, nullptr, false);
@@ -156,7 +156,7 @@ void Session::MediaLoop() {
         refresh_connected = true;
       } else if (event.type == REMOTEKIT_RTC_STATE) {
         const bool connected = event.value == 2;
-        if (connected != rtc_connected.exchange(connected)) {
+        if (event.connection_changed) {
           if (tail_attempt)
             tail_attempt->CancelWaiting();
           tail_attempt.reset();
@@ -164,7 +164,7 @@ void Session::MediaLoop() {
           has_current_view = false;
           next_tail_attempt_ms = 0;
           begin_schedule.Reset();
-          InvalidateLayout(connected ? "rtc-resuming" : "rtc-disconnected");
+          presentation.InvalidateLayout(connected ? "rtc-resuming" : "rtc-disconnected");
           {
             if (connected) {
               if (authorization.Current(active_authorization)) {
@@ -175,7 +175,7 @@ void Session::MediaLoop() {
                     std::lock_guard lock(stats->mutex);
                     stats->error = failure.message.c_str();
                   }
-                  InvalidateLayout("rtc-output-error");
+                  presentation.InvalidateLayout("rtc-output-error");
                   {
                     auto closed = browser.Rpc().Request({{"method", "output.close"}});
                     if (!closed)
@@ -197,7 +197,7 @@ void Session::MediaLoop() {
                     std::lock_guard lock(stats->mutex);
                     stats->error = failure.message.c_str();
                   }
-                  InvalidateLayout("rtc-output-error");
+                  presentation.InvalidateLayout("rtc-output-error");
                   {
                     auto closed = browser.Rpc().Request({{"method", "output.close"}});
                     if (!closed)
@@ -215,29 +215,11 @@ void Session::MediaLoop() {
             }
           }
         }
-      } else if (event.type == REMOTEKIT_RTC_DATA_STATE) {
-        const bool opened = event.value == 1;
-        if (opened && !data_open.exchange(opened))
-          refresh_connected = true;
-        if (!opened)
-          data_open = false;
-        if (data_open) {
-          QueueLayout();
-          direct_services.RefreshEditable();
-        }
-      } else if (event.type == REMOTEKIT_RTC_DATA) {
-        auto routed = RouteData(event);
-        if (!routed)
-          Send({{"type", "error"},
-                {"error",
-                 {{"code", ErrorCodeName(routed.error().code)},
-                  {"message", routed.error().message}}}},
-               event.authorization);
       } else if (event.type == REMOTEKIT_RTC_ERROR)
         fprintf(stderr, "RTC %s: %s\n", id.c_str(), event.bytes.c_str());
     }
     FlushControl();
-    if (!rtc_connected || !authorization.Current(active_authorization)) {
+    if (!peer_controller.Connected() || !authorization.Current(active_authorization)) {
       std::unique_lock lock(event_mutex);
       event_wake.wait_for(lock, std::chrono::milliseconds(20),
                           [&] { return stop_media || !events.empty(); });
@@ -253,7 +235,7 @@ void Session::MediaLoop() {
       first_source = false;
     }
     if (result == RenderSlots::Result::reconfigure) {
-      InvalidateLayout("reconfigure");
+      presentation.InvalidateLayout("reconfigure");
       if (tail_attempt)
         tail_attempt->CancelWaiting();
       tail_attempt.reset();
@@ -297,7 +279,7 @@ void Session::MediaLoop() {
       result = RenderSlots::Result::error;
     }
     if (result == RenderSlots::Result::error) {
-      InvalidateLayout("fatal");
+      presentation.InvalidateLayout("fatal");
       {
         {
           auto output_close_result_3 = browser.Rpc().Request({{"method", "output.close"}});
@@ -316,13 +298,11 @@ void Session::MediaLoop() {
       fprintf(stderr, "session %s media: %s\n", id.c_str(), error.c_str());
       break;
     }
-    const auto current_metadata =
-        output_suspended ? remotekit::SharedAtlasFrame{} : pool.LatestMetadata();
     if (output_suspended) {
-      if (current_geometry != "invalid:no-visible-views")
-        InvalidateLayout("no-visible-views");
+      if (!presentation.IsInvalid("no-visible-views"))
+        presentation.InvalidateLayout("no-visible-views");
     }
-    const auto handle = peer.load();
+    const auto handle = peer_controller.Handle();
     const auto now = QpcNow();
     const double now_ms = 1000.0 * now / QpcFrequency();
     update_refresh(handle, now_ms);
@@ -354,7 +334,7 @@ void Session::MediaLoop() {
           std::lock_guard lock(stats->mutex);
           stats->error = error;
         }
-        InvalidateLayout("render-begin-failed");
+        presentation.InvalidateLayout("render-begin-failed");
         break;
       }
       if (sent && force_tail)
@@ -412,11 +392,11 @@ void Session::MediaLoop() {
       } else {
         // Retain hard H264 texture/frame limits, without trading product quality
         // against cadence. Official AdaptFrame remains the network controller.
-        const auto hard =
-            remotekit::FitH264Sampling(adapted.width, adapted.height, 1, receive_level.load(),
-                                       options.max_encode_width, options.max_encode_height);
+        const auto hard = remotekit::FitH264Sampling(
+            adapted.width, adapted.height, 1, peer_controller.ReceiveLevel(),
+            options.max_encode_width, options.max_encode_height);
         codec_max_fps = hard.width ? remotekit::H264FrameRateLimit(hard.width, hard.height,
-                                                                   receive_level.load())
+                                                                   peer_controller.ReceiveLevel())
                                    : 0;
         {
           std::lock_guard lock(comp_diagnostics_mutex);
@@ -427,12 +407,12 @@ void Session::MediaLoop() {
           const std::string failure = "no legal H264 frame rate for selected encoder dimensions " +
                                       std::to_string(hard.width) + "x" +
                                       std::to_string(hard.height) +
-                                      " level=" + std::to_string(receive_level.load());
+                                      " level=" + std::to_string(peer_controller.ReceiveLevel());
           {
             std::lock_guard lock(stats->mutex);
             stats->error = failure;
           }
-          InvalidateLayout("codec-capability-error");
+          presentation.InvalidateLayout("codec-capability-error");
           fprintf(stderr, "session %s media: %s\n", id.c_str(), failure.c_str());
           {
             {
@@ -468,15 +448,13 @@ void Session::MediaLoop() {
         }
         // Build the epoch from this exact GPU-observed texture and chosen sample.
         // No old texture is relabeled using the latest-layout publication.
-        auto next = remotekit::LayoutCapabilities(
-            Layout(metadata), browser.Rpc().Control() != 0 &&
-                                  client_gestures_control.load() == browser.Rpc().Control());
-        const auto epoch = ObserveLayout(metadata);
+        auto next = presentation.Layout(metadata);
+        const auto epoch = presentation.ObserveLayout(metadata);
         next["epoch"] = std::to_string(epoch);
-        if (next != layout) {
+        if (next != presentation.Snapshot()) {
           has_current_view = std::ranges::any_of(
               next.at("views"), [](const auto& view) { return !view.value("stale", false); });
-          PublishLayout(std::move(next), epoch);
+          presentation.PublishLayout(std::move(next), epoch);
         }
         frame.layout_epoch = epoch;
         update_refresh(handle, now_ms);
@@ -505,7 +483,6 @@ void Session::MediaLoop() {
           ++tail_submissions;
       }
     }
-    direct_services.Editable(peer.load(), current_metadata, output_suspended);
     if (now - last_stats >= QpcFrequency()) {
       if (trace)
         trace->WallClock();
@@ -523,23 +500,17 @@ void Session::MediaLoop() {
       previous_delivered = delivered;
       previous_encoded = encoded;
       previous_bytes = bytes;
+      const auto current_metadata = output_suspended ? SharedAtlasFrame{} : pool.LatestMetadata();
       report["sourceAtlasWidth"] = current_metadata.width_pixels;
       report["sourceAtlasHeight"] = current_metadata.height_pixels;
       report["mediaScale"] = sampling.scale;
-      report["negotiatedReceiveLevel"] = receive_level.load();
+      report["negotiatedReceiveLevel"] = peer_controller.ReceiveLevel();
       report["samplingFpsBudget"] = SamplingFps();
       report["resolutionLimitation"] = sampling.limitation;
       report["samplingMaxFrameMacroblocks"] = sampling.max_frame_macroblocks;
       report["samplingMaxMacroblocksPerSecond"] = sampling.max_macroblocks_per_second;
-      report["receiveLevel"] = receive_level.load();
-      report["inputRejected"] = input_rejected.load();
-      report["inputCoalesced"] = input_coalesced.load();
-      report["inputBusyRetries"] = input_busy_retries.load();
-      report["inputBusyExhausted"] = input_busy_exhausted.load();
-      {
-        std::lock_guard lock(input_mutex);
-        report["inputQueue"] = input_queue.size();
-      }
+      report["receiveLevel"] = peer_controller.ReceiveLevel();
+      report.update(input.Snapshot());
       const auto latency = pool.capture_to_ready_ms();
       report["captureToReadyMs"] = latency ? Json(*latency) : Json(nullptr);
       report["captureClock"] = latency ? "measured SDK TimeTicks to QPC mapping" : "unavailable";
@@ -555,7 +526,7 @@ void Session::MediaLoop() {
     const HANDLE wait_handles[] = {pace_timer, output_suspended ? nullptr : pool.EventHandle()};
     if (!SetWaitableTimerEx(pace_timer, &due, 0, nullptr, nullptr, nullptr, 0) ||
         WaitForMultipleObjects(wait_handles[1] ? 2 : 1, wait_handles, FALSE, 2) == WAIT_FAILED) {
-      InvalidateLayout("comp-pacing-failed");
+      presentation.InvalidateLayout("comp-pacing-failed");
       std::lock_guard lock(stats->mutex);
       stats->error = "Comp pacing wait failed";
       break;

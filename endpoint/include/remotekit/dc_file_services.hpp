@@ -94,7 +94,7 @@ inline bool FileRequestEnvelope(const ServiceJson& message, size_t bytes) {
   const auto method = message.value("method", ServiceJson());
   if (method != "photo.burst.sample" && bytes > 24576)
     return false;
-  return method == "selection.commit" || LibraryFileMethod(method);
+  return method == "selection.commit" || method == "selection.cancel" || LibraryFileMethod(method);
 }
 
 // Session disk-worker state. The library grant serial is unique across
@@ -275,6 +275,7 @@ class DcFileServices {
     ServiceJson message;
     FileUploadStore::Binding binding;
     uint64_t grant{};
+    uint64_t library_grant{};
   };
   using Execute = std::function<Result<ServiceJson>(const Job&)>;
   using Sweep = std::function<void()>;
@@ -285,6 +286,7 @@ class DcFileServices {
     ServiceJson reply;
     bool chunk = false;
     uint64_t grant{};
+    uint64_t library_grant{};
   };
   mutable std::mutex mutex_;
   std::mutex flush_mutex_;
@@ -300,23 +302,26 @@ class DcFileServices {
   std::map<std::string, Grant> authorized_;
   uint64_t grant_serial_ = 0, delivery_serial_ = 0;
   struct Delivery {
-    uint64_t serial, grant;
+    uint64_t serial, grant, library_grant;
     std::string wire;
   };
   std::deque<Job> jobs_;
   std::map<std::string, Receipt> receipts_;
   std::deque<std::string> history_;
   std::deque<Delivery> outbox_;
-  void QueueReply(const ServiceJson& reply, uint64_t grant) {
+  void QueueReply(const ServiceJson& reply, uint64_t grant, uint64_t library_grant = 0) {
     if (outbox_.size() < 32)
-      outbox_.push_back({++delivery_serial_, grant, reply.dump()});
+      outbox_.push_back({++delivery_serial_, grant, library_grant, reply.dump()});
   }
   bool CurrentLocked(const Job& job) const {
     if (!peer_ || job.peer != peer_ || job.epoch != epoch_ || job.control != control_)
       return false;
     const auto& id = job.message["params"]["requestId"].get_ref<const std::string&>();
     const auto found = authorized_.find(id);
-    return found != authorized_.end() && found->second.serial == job.grant;
+    const auto library = authorized_.find("library");
+    return found != authorized_.end() && found->second.serial == job.grant &&
+           (!job.library_grant ||
+            (library != authorized_.end() && library->second.serial == job.library_grant));
   }
   ServiceJson Reply(const ServiceJson& request, bool ok, const ServiceJson& value) {
     ServiceJson result = {
@@ -376,7 +381,7 @@ class DcFileServices {
                 continue;
               found->second.reply = reply;
               history_.push_back(key);
-              QueueReply(reply, job.grant);
+              QueueReply(reply, job.grant, job.library_grant);
               while (history_.size() > 128) {
                 receipts_.erase(history_.front());
                 history_.pop_front();
@@ -445,11 +450,17 @@ class DcFileServices {
     });
     if (retired) {
       sweep_requested_ = true;
-      std::erase_if(jobs_, [&](const auto& job) { return !retained(job.grant); });
-      std::erase_if(receipts_, [&](const auto& item) { return !retained(item.second.grant); });
+      std::erase_if(jobs_, [&](const auto& job) {
+        return !retained(job.grant) || (job.library_grant && !retained(job.library_grant));
+      });
+      std::erase_if(receipts_, [&](const auto& item) {
+        return !retained(item.second.grant) ||
+               (item.second.library_grant && !retained(item.second.library_grant));
+      });
       std::erase_if(history_, [&](const auto& key) { return !receipts_.contains(key); });
       std::erase_if(outbox_, [&](const auto& delivery) {
-        return delivery.grant && !retained(delivery.grant);
+        return (delivery.grant && !retained(delivery.grant)) ||
+               (delivery.library_grant && !retained(delivery.library_grant));
       });
     }
     control_ = control;
@@ -477,11 +488,20 @@ class DcFileServices {
       failure("stale_file_request");
       return;
     }
+    uint64_t library_grant = 0;
+    if (message["method"] == "selection.cancel") {
+      const auto library = authorized_.find("library");
+      if (library == authorized_.end()) {
+        failure("stale_library_authorization");
+        return;
+      }
+      library_grant = library->second.serial;
+    }
     if (const auto found = receipts_.find(key); found != receipts_.end()) {
       if (found->second.fingerprint != fingerprint)
         failure("file_request_id_conflict");
       else if (!found->second.reply.is_null())
-        QueueReply(found->second.reply, found->second.grant);
+        QueueReply(found->second.reply, found->second.grant, found->second.library_grant);
       return;
     }
     const bool chunk = message["method"] == "asset.chunk";
@@ -492,8 +512,10 @@ class DcFileServices {
       failure("file_transfer_busy");
       return;
     }
-    receipts_.emplace(key, Receipt{fingerprint, nullptr, chunk, found->second.serial});
-    jobs_.push_back({peer, epoch_, control_, message, found->second.binding, found->second.serial});
+    receipts_.emplace(key,
+                      Receipt{fingerprint, nullptr, chunk, found->second.serial, library_grant});
+    jobs_.push_back({peer, epoch_, control_, message, found->second.binding, found->second.serial,
+                     library_grant});
     wake_.notify_one();
   }
   template <class Send>

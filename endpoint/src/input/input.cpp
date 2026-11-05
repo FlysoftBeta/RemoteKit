@@ -1,6 +1,12 @@
-#include "session/session.hpp"
+#include "media/gpu_device.hpp"
+#include "input/input.hpp"
+#include "rtc/data_router.hpp"
+#include "remotekit/thread.hpp"
 namespace remotekit {
-void Session::ReplyInput(Json reply, const Json& request, uint64_t stamp) {
+using media::QpcFrequency;
+using media::QpcNow;
+using media::TraceIds;
+void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp) {
   const bool focus = request.is_object() && request.value("type", Json()) == "focus";
   reply["type"] = focus ? "focus" : "input.result";
   if (focus) {
@@ -11,10 +17,10 @@ void Session::ReplyInput(Json reply, const Json& request, uint64_t stamp) {
   } else if (request.is_object() && request.contains("clientSequence")) {
     reply["clientSequence"] = request["clientSequence"];
   }
-  Send(reply, stamp);
+  hooks_.send(reply, stamp);
 }
 
-std::string Session::ClientTouchSequence(const Json& request) {
+std::string InputController::ClientTouchSequence(const Json& request) {
   if (request.value("type", std::string()) == "input.touchRetire")
     return request.value("sequenceId", std::string());
   const auto raw = request.find("event");
@@ -24,7 +30,7 @@ std::string Session::ClientTouchSequence(const Json& request) {
   return raw->value("sequenceId", std::string());
 }
 
-std::string Session::ClientTouchTerminal(const Json& request) {
+std::string InputController::ClientTouchTerminal(const Json& request) {
   const auto sequence = ClientTouchSequence(request);
   if (sequence.empty() || sequence.size() > 128)
     return {};
@@ -39,7 +45,7 @@ std::string Session::ClientTouchTerminal(const Json& request) {
   return sequence;
 }
 
-remotekit::TouchTerminalReceipt* Session::ReserveTouchTerminal(
+remotekit::TouchTerminalReceipt* InputController::ReserveTouchTerminal(
     remotekit::TouchTerminalReceipts& terminals,
     const Event& event,
     const Json& request,
@@ -58,10 +64,10 @@ remotekit::TouchTerminalReceipt* Session::ReserveTouchTerminal(
   return terminals.Reserve(std::move(candidate));
 }
 
-void Session::RejectInput(const char* error,
-                          const Json& request,
-                          const Event& event,
-                          remotekit::TouchTerminalReceipts* terminals) {
+void InputController::RejectInput(const char* error,
+                                  const Json& request,
+                                  const Event& event,
+                                  remotekit::TouchTerminalReceipts* terminals) {
   ++input_rejected;
   if (terminals) {
     const auto sequence = ClientTouchTerminal(request);
@@ -89,10 +95,10 @@ void Session::RejectInput(const char* error,
   ReplyInput(std::move(reply), request, event.authorization);
 }
 
-void Session::PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt) {
+void InputController::PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt) {
   const auto current = [&] {
-    return peer.load() == receipt.peer && authorization.Current(receipt.authorization) &&
-           browser.Rpc().Control() == receipt.control;
+    return hooks_.peer() == receipt.peer && hooks_.current(receipt.authorization) &&
+           hooks_.control() == receipt.control;
   };
   if (!current()) {
     receipt.Finish("terminal-unconfirmed", false, "touch_terminal_identity_changed");
@@ -102,7 +108,7 @@ void Session::PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt) {
     receipt.Finish("terminal-unconfirmed", false, "touch_terminal_timeout");
     return;
   }
-  auto status = browser.Rpc().Request(receipt.query, receipt.control, 10000, true, current);
+  auto status = hooks_.rpc(receipt.query, receipt.control, 10000, true, current);
   if (!status) {
     if (status.error().code == ErrorCode::kBusy)
       receipt.due = QpcNow() + QpcFrequency() / 200;
@@ -116,49 +122,30 @@ void Session::PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt) {
     receipt.due = QpcNow() + QpcFrequency() / 200;
 }
 
-void Session::FlushTouchTerminals(remotekit::TouchTerminalReceipts& terminals) {
-  FlushControl();
+void InputController::FlushTouchTerminals(remotekit::TouchTerminalReceipts& terminals) {
+  hooks_.flush();
   terminals.Flush([&](const auto& receipt, const Json& message) {
     bool sent = false;
-    control_outbox.Transient(receipt.peer, message.dump(), [&](const std::string& encoded) {
-      sent = peer.load() == receipt.peer && data_open &&
-             frame_authorization.load() == receipt.authorization &&
-             SendData(receipt.peer, receipt.authorization, encoded) == 0;
-    });
+    hooks_.notice(receipt.peer, receipt.authorization, message.dump(),
+                  [&](const std::string& encoded) {
+                    sent = hooks_.peer() == receipt.peer && hooks_.data_open() &&
+                           hooks_.frame_stamp() == receipt.authorization &&
+                           hooks_.send_data(receipt.peer, receipt.authorization, encoded) == 0;
+                  });
     return sent;
   });
 }
 
-Result<void> Session::RouteData(const Event& event) {
-  try {
-    if (!ProductCurrent(event)) {
-      const auto message = Json::parse(event.bytes, nullptr, false);
-      if (message.is_object() && message.value("type", Json()) == "media.presentation")
-        PresentationMessage(event);
-      return {};
-    }
-    if (!ServiceMessage(event) && !PresentationMessage(event))
-      QueueInput(event);
-    return {};
-  } catch (const Json::exception& error) {
-    fprintf(stderr, "data router invalid request: %s\n", error.what());
-    return Error{ErrorCode::kInvalidRequest, "invalid DataChannel JSON"};
-  } catch (const std::exception& error) {
-    fprintf(stderr, "data router internal: %s\n", error.what());
-    return Error{ErrorCode::kInternal, "internal DataChannel error"};
-  } catch (...) {
-    fprintf(stderr, "data router internal: unknown exception\n");
-    return Error{ErrorCode::kInternal, "internal DataChannel error"};
-  }
-}
-
-void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& terminals) {
-  const auto admitted = [&] {
-    return ProductCurrent(event) && input_authorization.load() == event.authorization;
+void InputController::HandleData(const Event& event, remotekit::TouchTerminalReceipts& terminals) {
+  const auto token = hooks_.admission();
+  const auto current_token = [&] {
+    return event.peer == token.peer && event.authorization == token.stamp &&
+           hooks_.revalidate(token);
   };
-  if (event.value != 0 || !ProductCurrent(event))
+  const auto admitted = [&] { return current_token() && hooks_.input_stamp() == token.stamp; };
+  if (event.value != 0 || !hooks_.admitted(event))
     return;
-  auto command = Json::parse(event.bytes, nullptr, false);
+  auto command = event.message;
   if (command.is_discarded() || !command.is_object())
     return;
   auto type = command.value("type", std::string());
@@ -175,7 +162,7 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
                              : std::string();
       if (receipt->polling)
         receipt->send_acceptance = receipt->acceptance.is_object();
-      else if (state == "terminal-unconfirmed" && receipt->control == browser.Rpc().Control())
+      else if (state == "terminal-unconfirmed" && receipt->control == hooks_.control())
         receipt->Schedule(QpcNow(), 2 * QpcFrequency());
       else
         receipt->send_result = true;
@@ -197,16 +184,16 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
   if (type == "input.touchRetire") {
     const auto sequence = ClientTouchTerminal(request);
     uint64_t old_epoch = 0, token_id = 0;
-    if (sequence.empty() || !PresentationNumber(request, "layoutEpoch", old_epoch) ||
-        old_epoch >= layout_epoch.load() || request.value("session", std::string()) != id ||
-        !PresentationNumber(request, "view", token_id) ||
-        !PresentationNumber(request, "instance", token_id) ||
-        !PresentationNumber(request, "document", token_id) ||
-        !PresentationNumber(request, "focus", token_id)) {
+    if (sequence.empty() || !DataRouter::Number(request, "layoutEpoch", old_epoch) ||
+        old_epoch >= hooks_.epoch() || request.value("session", std::string()) != session_id_ ||
+        !DataRouter::Number(request, "view", token_id) ||
+        !DataRouter::Number(request, "instance", token_id) ||
+        !DataRouter::Number(request, "document", token_id) ||
+        !DataRouter::Number(request, "focus", token_id)) {
       RejectInput("invalid_touch_retirement_identity", request, event, &terminals);
       return;
     }
-    const auto input_control = browser.Rpc().Control();
+    const auto input_control = hooks_.control();
     auto* receipt = ReserveTouchTerminal(terminals, event, request, sequence, input_control);
     if (!receipt) {
       RejectInput("touch_terminal_queue_busy", request, event);
@@ -216,11 +203,9 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
     retire["method"] = "input.touchRetire";
     // This command has no coordinates and only operates on the exact old
     // Browser owner. Keep the normal coordinate/keyframe gates below.
-    const auto current = [&] {
-      return ProductCurrent(event) && input_control == browser.Rpc().Control();
-    };
+    const auto current = [&] { return current_token() && input_control == hooks_.control(); };
     {
-      auto rpc_result = browser.Rpc().Request(retire, input_control, 10000, 0, current);
+      auto rpc_result = hooks_.rpc(retire, input_control, 10000, false, current);
       if (!rpc_result) {
         const Error error = rpc_result.error();
         receipt->Finish("terminal-unconfirmed", false, error.message.c_str());
@@ -239,14 +224,14 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
     RejectInput("input_not_authorized", request, event, &terminals);
     return;
   }
-  const auto request_epoch = layout_epoch.load();
+  const auto request_epoch = hooks_.epoch();
   if (command.value("layoutEpoch", std::string()) != std::to_string(request_epoch)) {
     RejectInput("stale_layout_epoch", request, event, &terminals);
     return;
   }
   command.erase("layoutEpoch");
   command.erase("focusRequestId");
-  if (command.value("session", std::string()) != id) {
+  if (command.value("session", std::string()) != session_id_) {
     RejectInput("wrong_session", request, event, &terminals);
     return;
   }
@@ -254,7 +239,7 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
     const auto event_type = command["event"].value("type", std::string());
     if ((event_type == "mouse" || event_type == "wheel" || event_type == "touch" ||
          event_type == "gesture") &&
-        !coordinate_readiness.Allows(command.value("view", std::string()), request_epoch)) {
+        !hooks_.allows(command.value("view", std::string()), request_epoch)) {
       RejectInput("view_not_ready", request, event, &terminals);
       return;
     }
@@ -269,7 +254,8 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
     }
     command["sequence"] = std::to_string(*sequence);
     if (event.trace_input_sequence) {
-      RK_SERVER_TRACE(trace, "input_browser_assigned", TraceIds{}, rk_record.peer = event.peer;
+      RK_SERVER_TRACE(hooks_.trace(), "input_browser_assigned", TraceIds{},
+                      rk_record.peer = event.peer;
                       rk_record.client_sequence = event.trace_input_sequence;
                       rk_record.browser_sequence = *sequence;);
     }
@@ -280,7 +266,7 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
   }
   // This connection is already bound to this Session by authenticated Control.
   // The browser validates membership and all token/sequence/output generations.
-  const auto input_control = browser.Rpc().Control();
+  const auto input_control = hooks_.control();
   const auto touch_sequence = ClientTouchSequence(request);
   remotekit::TouchTerminalReceipt* receipt = nullptr;
   if (!touch_sequence.empty()) {
@@ -302,13 +288,13 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
             ? remotekit::RetryBrowserInput(
                   command,
                   [&](const Json& request) {
-                    return browser.Rpc().Request(request, input_control, 10000, 0, admitted);
+                    return hooks_.rpc(request, input_control, 10000, 0, admitted);
                   },
-                  [&] { return !stop_input && admitted() && request_epoch == layout_epoch.load(); },
+                  [&] { return !stop_input && admitted() && request_epoch == hooks_.epoch(); },
                   [&] { return QpcNow() >= deadline; },
                   [] { std::this_thread::sleep_for(std::chrono::milliseconds(5)); },
                   [&] { ++input_busy_retries; }, [&] { ++input_busy_exhausted; })
-            : browser.Rpc().Request(command, 0, 10000, 0, admitted);
+            : hooks_.rpc(command, 0, 10000, 0, admitted);
     if (!response) {
       const auto& error = response.error();
       if (receipt)
@@ -347,15 +333,15 @@ void Session::HandleData(const Event& event, remotekit::TouchTerminalReceipts& t
   }
 }
 
-void Session::QueueInput(const Event& event) {
+void InputController::QueueInput(const Event& event) {
   std::lock_guard lock(input_mutex);
-  if (!ProductCurrent(event) || event.value != 0)
+  if (!hooks_.admitted(event) || event.value != 0)
     return;
   if (event.trace_input_sequence) {
-    RK_SERVER_TRACE(trace, "input_comp_dequeue", TraceIds{}, rk_record.peer = event.peer;
+    RK_SERVER_TRACE(hooks_.trace(), "input_comp_dequeue", TraceIds{}, rk_record.peer = event.peer;
                     rk_record.client_sequence = event.trace_input_sequence;);
   }
-  auto parsed = Json::parse(event.bytes, nullptr, false);
+  auto parsed = event.message;
   if (!parsed.is_object())
     return;
   const auto reject = [&](const char* error) {
@@ -371,7 +357,7 @@ void Session::QueueInput(const Event& event) {
   };
   const auto type = parsed.value("type", std::string());
   if (type != "input.touchStatus" && type != "input.touchRetire" &&
-      input_authorization.load() != event.authorization) {
+      hooks_.input_stamp() != event.authorization) {
     reject("input_not_authorized");
     return;
   }
@@ -387,7 +373,7 @@ void Session::QueueInput(const Event& event) {
               parsed.contains("event") && parsed["event"].value("type", std::string()) == "mouse" &&
               parsed["event"].value("action", std::string()) == "move";
   if (move && !input_queue.empty()) {
-    auto before = Json::parse(input_queue.back().bytes, nullptr, false);
+    auto before = input_queue.back().message;
     if (input_queue.back().peer == event.peer &&
         input_queue.back().authorization == event.authorization && !before.is_discarded() &&
         before.value("view", std::string()) == parsed.value("view", std::string()) &&
@@ -404,7 +390,7 @@ void Session::QueueInput(const Event& event) {
     return;
   }
   if (event.trace_input_sequence) {
-    RK_SERVER_TRACE(trace, "input_worker_queue", TraceIds{}, rk_record.peer = event.peer;
+    RK_SERVER_TRACE(hooks_.trace(), "input_worker_queue", TraceIds{}, rk_record.peer = event.peer;
                     rk_record.client_sequence = event.trace_input_sequence;
                     rk_record.queue = static_cast<int>(input_queue.size()););
   }
@@ -412,7 +398,7 @@ void Session::QueueInput(const Event& event) {
   input_wake.notify_one();
 }
 
-void Session::InputLoop() {
+void InputController::InputLoop() {
   remotekit::TouchTerminalReceipts terminals;
   while (true) {
     std::optional<Event> event;
@@ -431,32 +417,25 @@ void Session::InputLoop() {
       }
     }
     terminals.Prune([&](const auto& receipt) {
-      return peer.load() == receipt.peer && authorization.Current(receipt.authorization);
+      return hooks_.peer() == receipt.peer && hooks_.current(receipt.authorization);
     });
     if (event) {
       if (event->trace_input_sequence) {
-        RK_SERVER_TRACE(trace, "input_worker_begin", TraceIds{}, rk_record.peer = event->peer;
+        RK_SERVER_TRACE(hooks_.trace(), "input_worker_begin", TraceIds{},
+                        rk_record.peer = event->peer;
                         rk_record.client_sequence = event->trace_input_sequence;);
       }
-      try {
+      auto handled = DataRouter::Boundary([&]() -> Result<void> {
         HandleData(*event, terminals);
-      } catch (const Json::exception& error) {
-        fprintf(stderr, "input invalid request: %s\n", error.what());
+        return {};
+      });
+      if (!handled && hooks_.admitted(*event)) {
         ++input_rejected;
-        if (ProductCurrent(*event))
-          ReplyInput({{"ok", false},
-                      {"error", {{"code", "invalid_request"}, {"message", "invalid input JSON"}}}},
-                     Json::parse(event->bytes, nullptr, false), event->authorization);
-      } catch (const std::exception& error) {
-        fprintf(stderr, "input internal: %s\n", error.what());
-        ++input_rejected;
-        if (ProductCurrent(*event))
-          ReplyInput({{"ok", false},
-                      {"error", {{"code", "internal"}, {"message", "internal input error"}}}},
-                     Json::parse(event->bytes, nullptr, false), event->authorization);
-      } catch (...) {
-        fprintf(stderr, "input internal: unknown exception\n");
-        ++input_rejected;
+        ReplyInput({{"ok", false},
+                    {"error",
+                     {{"code", ErrorCodeName(handled.error().code)},
+                      {"message", handled.error().message}}}},
+                   event->message, event->authorization);
       }
     }
     // One due status read per input turn. A pending sequence does not hold
@@ -466,5 +445,47 @@ void Session::InputLoop() {
     if (terminals.HasNotices())
       FlushTouchTerminals(terminals);
   }
+}
+InputController::InputController(std::string session, Hooks hooks)
+    : session_id_(std::move(session)), hooks_(std::move(hooks)) {}
+InputController::~InputController() {
+  Stop();
+}
+void InputController::Start(uint64_t peer) {
+  Stop();
+  {
+    std::lock_guard lock(input_mutex);
+    input_sequence.Bind(peer);
+  }
+  stop_input = false;
+  input_thread = std::thread([this] {
+    RunThread(
+        "input", [this] { InputLoop(); },
+        [this] {
+          stop_input = true;
+          hooks_.failed();
+        });
+  });
+}
+void InputController::Clear() {
+  std::lock_guard lock(input_mutex);
+  input_queue.clear();
+}
+void InputController::Stop() {
+  stop_input = true;
+  input_wake.notify_all();
+  if (input_thread.joinable())
+    input_thread.join();
+  Clear();
+  std::lock_guard lock(input_mutex);
+  input_sequence.Bind(0);
+}
+Json InputController::Snapshot() const {
+  std::lock_guard lock(input_mutex);
+  return {{"inputRejected", input_rejected.load()},
+          {"inputCoalesced", input_coalesced.load()},
+          {"inputBusyRetries", input_busy_retries.load()},
+          {"inputBusyExhausted", input_busy_exhausted.load()},
+          {"inputQueue", input_queue.size()}};
 }
 }  // namespace remotekit

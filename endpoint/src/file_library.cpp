@@ -665,6 +665,30 @@ bool FileLibrary::Claim(const std::string& id, const Check& check) {
   selection.state = State::submitted;
   return true;
 }
+std::optional<State> FileLibrary::CancelPendingSelections(const FileUploadStore::Binding& binding,
+                                                          const Check& check) {
+  std::lock_guard lock(mutex_);
+  check();
+  std::optional<State> result;
+  for (const auto& [id, selection] : selections_) {
+    if (selection.binding != binding)
+      continue;
+    if (selection.state == State::submitted || selection.state == State::selected)
+      return selection.state;
+  }
+  for (auto& [id, selection] : selections_) {
+    if (selection.binding != binding)
+      continue;
+    if (selection.state == State::pending) {
+      auto cancelled = selection;
+      cancelled.state = State::cancelled;
+      SaveSelection(cancelled, check);
+      selection.state = State::cancelled;
+    }
+    result = selection.state;
+  }
+  return result;
+}
 State FileLibrary::Finish(const std::string& id, State state, std::optional<State> expected) {
   std::lock_guard lock(mutex_);
   auto& selection = selections_.at(id);

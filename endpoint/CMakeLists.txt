@@ -29,7 +29,7 @@ if(WIN32 AND BUILD_TESTING)
   add_test(NAME endpoint_control_transport_integration
     COMMAND ${RK_NODE_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/test-endpoint-control-transport.mjs
       $<TARGET_FILE:endpoint_control_transport_tests>)
-  add_executable(endpoint_control_reliability_tests tests/control_reliability_tests.cpp src/session/browser_rpc.cpp)
+  add_executable(endpoint_control_reliability_tests tests/control_reliability_tests.cpp src/session/browser_rpc.cpp src/rtc/outbox.cpp)
   target_include_directories(endpoint_control_reliability_tests PRIVATE src include ${RK_DEPS} ${PROJECT_SOURCE_DIR}/sdk/include)
   target_compile_features(endpoint_control_reliability_tests PRIVATE cxx_std_20)
   add_test(NAME endpoint_control_reliability COMMAND endpoint_control_reliability_tests)
@@ -195,11 +195,16 @@ if(WIN32)
     src/file_upload.cpp
     src/raw_camera.cpp
     src/session/session.cpp
+    src/rtc/peer.cpp
+    src/rtc/authorization.cpp
+    src/rtc/data_router.cpp
+    src/rtc/outbox.cpp
+    src/media/presentation.cpp
+    src/input/input.cpp
     src/session/session_audio.cpp
     src/session/session_auth.cpp
     src/session/session_encoders.cpp
     src/session/session_files.cpp
-    src/session/session_input.cpp
     src/session/session_management.cpp
     src/session/session_media.cpp
     src/session/session_output.cpp
@@ -215,6 +220,12 @@ if(WIN32)
   target_link_libraries(endpoint_service PRIVATE remotekit_runtime)
   target_compile_options(endpoint_service PRIVATE /W4 /utf-8)
   if(BUILD_TESTING)
+    add_executable(endpoint_session_controllers_tests tests/session_controllers_tests.cpp)
+    target_compile_options(endpoint_session_controllers_tests PRIVATE /W4 /utf-8)
+    target_link_libraries(endpoint_session_controllers_tests PRIVATE remotekit_runtime)
+    add_custom_command(TARGET endpoint_session_controllers_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_session_controllers_tests>)
+    add_test(NAME endpoint_session_controllers COMMAND endpoint_session_controllers_tests)
     add_executable(endpoint_infrastructure_tests tests/infrastructure_tests.cpp)
     target_compile_options(endpoint_infrastructure_tests PRIVATE /W4 /utf-8)
     target_link_libraries(endpoint_infrastructure_tests PRIVATE remotekit_runtime)

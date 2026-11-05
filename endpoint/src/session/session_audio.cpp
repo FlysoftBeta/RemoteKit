@@ -35,10 +35,10 @@ Result<void> Session::OpenAudio() {
               continue;
             }
             audio_gaps = gaps + stale;
-            const auto handle = peer.load();
+            const auto handle = peer_controller.Handle();
             const auto stamp = authorization.Stamp();
-            if (!handle || !stamp || !rtc_connected.load() ||
-                packet.first_sample_qpc < audio_authorized_after.load())
+            if (!handle || !stamp || !peer_controller.Connected() ||
+                packet.first_sample_qpc < authorization.AudioAfter())
               continue;
             // Bound age independently of the video encoder and never await its queue.
             if (QpcNow() - packet.first_sample_qpc > QpcFrequency() / 20) {

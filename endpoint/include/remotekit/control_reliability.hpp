@@ -11,12 +11,6 @@
 
 namespace remotekit {
 using ControlJson = nlohmann::json;
-// Compare exactly the wire layout, including capabilities added by Session.
-// Omitting these fields from polling candidates creates perpetual replacement.
-inline ControlJson LayoutCapabilities(ControlJson layout, bool client_gestures) {
-  layout["clientGestures"] = client_gestures ? 1 : 0;
-  return layout;
-}
 template <class Rpc, class Current, class Expired, class Wait, class Retry, class Exhausted>
 Result<ControlJson> RetryBrowserInput(const ControlJson& command,
                                       Rpc rpc,
@@ -176,58 +170,4 @@ class TouchTerminalReceipts {
 // Only the latest layout transaction is retained (at most mode/layout/prepare).
 // Serialize replacement and actual admission so an old prepare can never be
 // admitted after a newer layout. BUSY leaves the head in place for the next tick.
-class ReliableControlOutbox {
- public:
-  void Bind(uint64_t peer) {
-    std::lock_guard lock(mutex_);
-    peer_ = peer;
-    pending_.clear();
-    mode_.clear();
-    transaction_ = {};
-  }
-  void Replace(uint64_t peer, std::string mode, std::string layout, std::string prepare) {
-    std::lock_guard lock(mutex_);
-    if (!peer || peer != peer_)
-      return;
-    if (!mode.empty())
-      mode_ = std::move(mode);
-    const std::array<std::string, 3> transaction{mode_, layout, prepare};
-    // Admission is reliable for this peer. Identical polling observations must
-    // neither replay admitted messages nor rewind a partially admitted head.
-    if (transaction == transaction_)
-      return;
-    transaction_ = transaction;
-    pending_.clear();
-    if (!mode_.empty())
-      pending_.push_back(mode_);
-    if (!layout.empty())
-      pending_.push_back(std::move(layout));
-    if (!prepare.empty())
-      pending_.push_back(std::move(prepare));
-  }
-  template <class Send>
-  void Flush(uint64_t peer, Send send) {
-    std::lock_guard lock(mutex_);
-    if (!peer || peer != peer_)
-      return;
-    for (size_t sent = 0; sent < 3 && !pending_.empty(); ++sent) {
-      if (send(pending_.front()) != 0)
-        return;
-      pending_.pop_front();
-    }
-  }
-  template <class Send>
-  void Transient(uint64_t peer, const std::string& bytes, Send send, bool low_priority = true) {
-    std::lock_guard lock(mutex_);
-    if (peer && peer == peer_ && (!low_priority || pending_.empty()))
-      send(bytes);
-  }
-
- private:
-  std::mutex mutex_;
-  uint64_t peer_ = 0;
-  std::string mode_;
-  std::deque<std::string> pending_;
-  std::array<std::string, 3> transaction_;
-};
 }  // namespace remotekit

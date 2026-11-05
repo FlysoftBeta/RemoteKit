@@ -36,6 +36,55 @@ ServiceJson Request(const char* id, const char* method = "selection.commit") {
           {"method", method},
           {"params", {{"requestId", "opaque"}}}};
 }
+void CheckSelectionCancellationGrant() {
+  const auto request = Request("00000000-0000-4000-8000-000000000099", "selection.cancel");
+  CHECK(FileRequestEnvelope(request, request.dump().size()));
+  DcFileServices services;
+  std::atomic<bool> entered = false, hold = true, current_after_revoke = true;
+  std::atomic<unsigned> executed = 0;
+  services.Start(
+      [&](const DcFileServices::Job& job) {
+        ++executed;
+        CHECK(job.library_grant != 0);
+        entered = true;
+        while (hold)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        current_after_revoke = services.Current(job);
+        return ServiceJson{{"state", "cancelled"}};
+      },
+      [] {});
+  services.Bind(7, "connection");
+  const FileUploadStore::Binding binding{"browser", "1", "1", "1", "1"};
+  services.Authorize("connection", 99, {{"opaque", binding}}, true);
+  services.Admit(7, request);
+  Until([&] { return entered.load(); });
+  services.Authorize("connection", 99, {{"opaque", binding}}, false);
+  hold = false;
+  Until([&] { return !current_after_revoke.load(); });
+  std::vector<ServiceJson> replies;
+  const auto flush = [&] {
+    services.Flush(7, [&](const std::string& wire) {
+      replies.push_back(ServiceJson::parse(wire));
+      return 0;
+    });
+  };
+  flush();
+  CHECK(replies.empty());
+  services.Admit(7, request);
+  flush();
+  CHECK(replies.size() == 1 && replies.back()["error"] == "stale_library_authorization");
+  services.Authorize("connection", 99, {{"opaque", binding}}, true);
+  services.Admit(7, request);
+  Until([&] {
+    flush();
+    return replies.size() == 2;
+  });
+  CHECK(executed == 2 && replies.back()["result"]["state"] == "cancelled");
+  services.Admit(7, request);
+  flush();
+  CHECK(executed == 2 && replies.size() == 3);
+  services.Stop();
+}
 struct TestBurstAnalyzer {
   PhotoBurstDecision Observe(const std::string& frame,
                              std::span<const std::uint8_t>,
@@ -117,6 +166,7 @@ void CheckBursts() {
   CHECK(Throws([&] { bursts.Execute(11, "photo.burst.end", end, live); }));
 }
 int main() {
+  CheckSelectionCancellationGrant();
   CheckBursts();
   CHECK(DecodeFileChunk("YWJj") == std::vector<std::uint8_t>({'a', 'b', 'c'}));
   CHECK(DecodeFileChunk("YQ==") == std::vector<std::uint8_t>({'a'}));

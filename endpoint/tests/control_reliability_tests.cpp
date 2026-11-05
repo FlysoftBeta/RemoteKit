@@ -1,4 +1,5 @@
 #include "remotekit/control_reliability.hpp"
+#include "rtc/outbox.hpp"
 #include "session/browser_rpc.hpp"
 #include "remotekit/navigation_export.hpp"
 #include "remotekit/presentation_barrier.hpp"
@@ -123,11 +124,13 @@ void InputWireFailures() {
   application = {{"ok", true}, {"accepted", true}, {"injectionStatus", "failed"}, {"code", 6}};
   CHECK(dispatch().value().at("accepted") == true);
   CHECK(calls == 4 && retries == 2);
-  application = {{"ok", false}, {"code", 3}, {"error", "rejected"}};
+  application = {{"ok", false}, {"code", 3}, {"error", "rejected"}, {"detail", "target mismatch"}};
   CHECK(dispatch().error().code == remotekit::ErrorCode::kRejected);
   CHECK(calls == 5 && retries == 2);
   auto rejected = dispatch();
   CHECK(!rejected && rejected.error().message.find("3") != std::string::npos);
+  CHECK(rejected.error().message.find("rejected") != std::string::npos);
+  CHECK(rejected.error().message.find("target mismatch") != std::string::npos);
   application = {{"ok", false}, {"code", 6}};
   identity = false;
   CHECK(dispatch().error().code == remotekit::ErrorCode::kConflict);
@@ -149,8 +152,8 @@ void InputWireFailures() {
 }
 
 void ControlBackpressure() {
-  remotekit::ReliableControlOutbox box;
-  box.Bind(1);
+  remotekit::ControlOutbox box;
+  box.Bind({1, 1});
   std::vector<std::string> sent;
   std::string busy = "mode";
   auto send = [&](const std::string& bytes) {
@@ -159,47 +162,47 @@ void ControlBackpressure() {
     sent.push_back(bytes);
     return 0;
   };
-  box.Replace(1, "mode", "layout1", "prepare1");
+  box.Replace({1, 1}, "mode", "layout1", "prepare1");
   for (int i = 0; i < 100; ++i)
-    box.Flush(1, send);
+    box.Flush({1, 1}, send);
   CHECK(sent.empty());
-  box.Transient(1, "frame", send);
+  box.Transient({1, 1}, "frame", send);
   CHECK(sent.empty());
   busy = "layout1";
-  box.Flush(1, send);
+  box.Flush({1, 1}, send);
   CHECK(sent == std::vector<std::string>{"mode"});
   busy = "prepare1";
-  box.Flush(1, send);
+  box.Flush({1, 1}, send);
   CHECK((sent == std::vector<std::string>{"mode", "layout1"}));
   for (int i = 0; i < 100; ++i) {
-    box.Replace(1, "", "layout1", "prepare1");
-    box.Flush(1, send);
+    box.Replace({1, 1}, "", "layout1", "prepare1");
+    box.Flush({1, 1}, send);
   }
   CHECK((sent == std::vector<std::string>{"mode", "layout1"}));  // BUSY head never rewinds.
   // Superseding layout revokes the old pending prepare, even under long BUSY.
-  box.Replace(1, "", "layout2", "prepare2");
+  box.Replace({1, 1}, "", "layout2", "prepare2");
   busy = "prepare2";
-  box.Flush(1, send);
+  box.Flush({1, 1}, send);
   CHECK((sent == std::vector<std::string>{"mode", "layout1", "mode", "layout2"}));
   busy = "";
-  box.Flush(1, send);
+  box.Flush({1, 1}, send);
   CHECK(sent.back() == "prepare2");
   CHECK(std::find(sent.begin(), sent.end(), "prepare1") == sent.end());
   const auto admitted = sent.size();
   for (int i = 0; i < 100; ++i) {
-    box.Replace(1, "", "layout2", "prepare2");
-    box.Flush(1, send);
+    box.Replace({1, 1}, "", "layout2", "prepare2");
+    box.Flush({1, 1}, send);
   }
   CHECK(sent.size() == admitted);  // Identical transactions are already reliable.
-  box.Replace(1, "", "old-layout", "old-prepare");
-  box.Bind(2);
-  box.Flush(1, send);
-  box.Replace(1, "bad-mode", "bad-layout", "bad-prepare");
+  box.Replace({1, 1}, "", "old-layout", "old-prepare");
+  box.Bind({2, 1});
+  box.Flush({1, 1}, send);
+  box.Replace({1, 1}, "bad-mode", "bad-layout", "bad-prepare");
   const auto count = sent.size();
-  box.Flush(2, send);
+  box.Flush({2, 1}, send);
   CHECK(sent.size() == count);
-  box.Replace(2, "mode2", "layout3", "prepare3");
-  box.Flush(2, send);
+  box.Replace({2, 1}, "mode2", "layout3", "prepare3");
+  box.Flush({2, 1}, send);
   CHECK(sent.back() == "prepare3");
   // Outbox admission does not release the media gate; only matching ACK does.
   remotekit::PresentationBarrier gate;
@@ -219,17 +222,6 @@ void ControlBackpressure() {
     return true;
   });
   CHECK(published);
-}
-
-void StableWireLayout() {
-  Json raw = {{"type", "layout"}, {"generation", "6"}, {"epoch", "24"}, {"views", Json::array()}};
-  for (bool enabled : {false, true}) {
-    const auto published = remotekit::LayoutCapabilities(raw, enabled);
-    CHECK(published.at("clientGestures") == int(enabled));
-    for (int tick = 0; tick < 100; ++tick)
-      CHECK(remotekit::LayoutCapabilities(raw, enabled) == published);
-    CHECK(remotekit::LayoutCapabilities(raw, !enabled) != published);
-  }
 }
 
 struct ExportFixture {
@@ -489,7 +481,6 @@ void OversizedBrowserReplyIsApplicationError() {
 int main() {
   RpcLockAndStatusMapping();
   OversizedBrowserReplyIsApplicationError();
-  StableWireLayout();
   TouchTerminal();
   InputWireFailures();
   ControlBackpressure();

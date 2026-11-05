@@ -59,6 +59,8 @@ class FileLibrary {
 
   void Prepare(const Selection&);
   std::optional<Selection> FindSelection(const std::string& id) const;
+  std::optional<Selection::State> CancelPendingSelections(const FileUploadStore::Binding&,
+                                                          const Check&);
   bool Claim(const std::string& id, const Check&);
   Selection::State Finish(const std::string& id,
                           Selection::State,

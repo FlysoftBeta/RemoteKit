@@ -24,7 +24,7 @@ Result<Session::Geometry> Session::DesiredGeometry() {
 }
 
 bool Session::PauseOutput(bool reconfiguring) {
-  const bool active = peer.load() != 0;
+  const bool active = peer_controller.Handle() != 0;
   const bool had_media_thread = media_thread.joinable();
   if (active || had_media_thread) {
     stop_media = true;
@@ -32,7 +32,7 @@ bool Session::PauseOutput(bool reconfiguring) {
     if (media_thread.joinable())
       media_thread.join();
   }
-  InvalidateLayout(reconfiguring ? "reconfigure" : "output-paused");
+  presentation.InvalidateLayout(reconfiguring ? "reconfigure" : "output-paused");
   {
     {
       auto output_close_result = browser.Rpc().Request({{"method", "output.close"}});
@@ -124,7 +124,7 @@ Result<void> Session::ResumeOutput(bool active) {
         "media", [this] { MediaLoop(); },
         [this] {
           stop_media = true;
-          rtc_connected = false;
+          peer_controller.Failed();
         });
   });
 
@@ -164,7 +164,8 @@ Result<Json> Session::ApplyView(const Json& config, bool create, bool recovering
     return value;
   };
   if (!previous.is_null() && normalized(previous) == normalized(config)) {
-    if (reconciliation_pending || (output_suspended && has_visible_output && rtc_connected)) {
+    if (reconciliation_pending ||
+        (output_suspended && has_visible_output && peer_controller.Connected())) {
       auto reconciled = ReconcileOutput();
       if (!reconciled)
         return reconciled.error();
@@ -218,7 +219,7 @@ Result<Json> Session::ApplyView(const Json& config, bool create, bool recovering
     next_reconciliation = QpcNow() + QpcFrequency();
     output_suspended = true;
     if (reconfiguring)
-      InvalidateLayout("reconfigure-failed");
+      presentation.InvalidateLayout("reconfigure-failed");
     std::lock_guard lock(stats->mutex);
     stats->error = result.error().message;
   }
@@ -277,9 +278,9 @@ Json Session::Stats() {
   const char* preference = degradation == REMOTEKIT_RTC_MAINTAIN_RESOLUTION  ? "maintain-resolution"
                            : degradation == REMOTEKIT_RTC_MAINTAIN_FRAMERATE ? "maintain-framerate"
                                                                              : "balanced";
-  const Json applied_policy =
-      peer.load() ? Json{{"maxFps", policy_max_fps.load()}, {"degradationPreference", preference}}
-                  : Json(nullptr);
+  const Json applied_policy = peer_controller.Handle() ? Json{{"maxFps", policy_max_fps.load()},
+                                                              {"degradationPreference", preference}}
+                                                       : Json(nullptr);
   value["mediaPolicy"] = {{"requested", requested_policy}, {"applied", applied_policy}};
   const auto slots = pool.Stats();
   CompDiagnostics comp;
@@ -325,9 +326,9 @@ Json Session::Stats() {
   value["configuredIdleIdrMs"] = options.idle_idr_ms;
   value["connectionTimingMs"] = ConnectionTimings();
   value["connectionTimingOrigin"] = "endpoint-offer-monotonic";
-  value["connectionTimingConnectionId"] = connection;
+  value["connectionTimingConnectionId"] = peer_controller.Connection();
   value["reconciliationPending"] = reconciliation_pending.load();
-  value.update(media_feedback.Snapshot(QpcNow(), QpcFrequency()));
+  value.update(presentation.FeedbackSnapshot(QpcNow(), QpcFrequency()));
   value["audio"] = {{"submitted", audio_submitted.load()},
                     {"gaps", audio_gaps.load()},
                     {"rejected", audio_rejected.load()}};
@@ -347,8 +348,9 @@ Json Session::Stats() {
 }
 
 Json Session::RtcSnapshot() const {
-  const bool active = peer.load() != 0;
-  return {{"active", active}, {"connectionId", active ? Json(connection) : Json(nullptr)}};
+  const bool active = peer_controller.Handle() != 0;
+  return {{"active", active},
+          {"connectionId", active ? Json(peer_controller.Connection()) : Json(nullptr)}};
 }
 
 Json Session::InactiveSnapshot() {
@@ -356,7 +358,7 @@ Json Session::InactiveSnapshot() {
   // through the existing stop boundary; observing a Session never launches it.
   if (ProducerExited()) {
     fprintf(stderr, "session %s inactive snapshot observed producer exit peer=%llu %s\n",
-            id.c_str(), peer.load(), ProcessDiagnostic().c_str());
+            id.c_str(), peer_controller.Handle(), ProcessDiagnostic().c_str());
     Stop();
   }
   return {{"sessionId", id},

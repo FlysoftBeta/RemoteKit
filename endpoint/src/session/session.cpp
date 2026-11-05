@@ -1,7 +1,7 @@
 #include "session/session.hpp"
 namespace remotekit {
 bool Session::ProductCurrent(const Event& event) const {
-  return event.peer == peer.load() && authorization.Current(event.authorization);
+  return event.peer == peer_controller.Handle() && authorization.Current(event.authorization);
 }
 
 void Session::MarkConnection(ConnectionPhase phase) {
@@ -51,7 +51,178 @@ Session::Session(Sdk& api,
       management(link),
       file_uploads(directory / "uploads"),
       file_library(directory / "file-library"),
-      faces(FaceModels()) {}
+      authorization(api,
+                    AuthorizationController::Hooks{
+                        .peer = [this] { return peer_controller.Handle(); },
+                        .connection = [this] { return peer_controller.Connection(); },
+                        .files_closed = [this] { file_services.Bind(0); },
+                        .revoked =
+                            [this] {
+                              raw_camera.Cancel();
+                              faces.Cancel();
+                              WakeCamera();
+                              direct_services.Bind(0);
+                              input.Clear();
+                              control_outbox.Bind({});
+                            },
+                        .wake = [this] { event_wake.notify_all(); },
+                        .opened =
+                            [this](uint64_t handle) {
+                              direct_services.Bind(handle, peer_controller.Connection());
+                              control_outbox.Bind({handle, authorization.Stamp()});
+                              presentation.QueueLayout();
+                            },
+                        .files_opened =
+                            [this](uint64_t handle) {
+                              file_services.Bind(handle, peer_controller.Connection());
+                            }}),
+      faces(FaceModels()),
+      input(id,
+            InputController::Hooks{
+                .peer = [this] { return peer_controller.Handle(); },
+                .control = [this] { return browser.Rpc().Control(); },
+                .input_stamp = [this] { return authorization.Input(); },
+                .frame_stamp = [this] { return authorization.Frame(); },
+                .epoch = [this] { return presentation.Epoch(); },
+                .data_open = [this] { return peer_controller.DataOpen(); },
+                .current = [this](uint64_t stamp) { return authorization.Current(stamp); },
+                .admitted = [this](const RtcEvent& event) { return ProductCurrent(event); },
+                .admission = [this] { return authorization.Admit(); },
+                .revalidate =
+                    [this](const AuthorizationController::AdmissionToken& token) {
+                      return authorization.Current(token);
+                    },
+                .allows = [this](const std::string& view,
+                                 uint64_t epoch) { return presentation.Allows(view, epoch); },
+                .rpc =
+                    [this](Json request,
+                           uint64_t control,
+                           uint32_t timeout,
+                           bool opportunistic,
+                           const std::function<bool()>& admitted) {
+                      return browser.Rpc().Request(std::move(request), control, timeout,
+                                                   opportunistic, admitted);
+                    },
+                .send = [this](const Json& message, uint64_t stamp) { Send(message, stamp); },
+                .send_data =
+                    [this](uint64_t peer, uint64_t stamp, const std::string& encoded) {
+                      return SendData(peer, stamp, encoded);
+                    },
+                .notice =
+                    [this](uint64_t peer,
+                           uint64_t stamp,
+                           const std::string& encoded,
+                           const std::function<void(const std::string&)>& send) {
+                      control_outbox.Notice({peer, stamp}, encoded, send);
+                    },
+                .flush = [this] { FlushControl(); },
+                .failed = [this] { authorization.SetInput(0); },
+                .trace = [this] { return trace; }}),
+      data_router(DataRouter::Hooks{
+          .peer = [this] { return peer_controller.Handle(); },
+          .stamp = [this] { return authorization.Stamp(); },
+          .epoch = [this] { return authorization.Epoch(); },
+          .current = [this](const RtcEvent& event) { return ProductCurrent(event); },
+          .product = [this](const RtcEvent& event) { ServiceMessage(event); },
+          .presentation =
+              [this](const RtcEvent& event) { presentation.PresentationMessage(event); },
+          .input = [this](const RtcEvent& event) { input.QueueInput(event); },
+          .files =
+              [this](const RtcEvent& event) {
+                auto admission = authorization.LockAdmission();
+                if (ProductCurrent(event) && FileRequestEnvelope(event.message, event.bytes.size()))
+                  file_services.Admit(event.peer, event.message);
+              },
+          .feedback =
+              [this](const RtcEvent& event) {
+                presentation.ReceiveFeedback(event.peer, event.message, QpcNow(),
+                                             event.bytes.size());
+              },
+          .refresh =
+              [this](const RtcEvent& event) {
+                if (event.bytes.size() > 256)
+                  return;
+                const auto now = QpcNow();
+                auto previous = last_media_refresh_qpc.load();
+                if ((!previous || now - previous >= QpcFrequency()) &&
+                    last_media_refresh_qpc.compare_exchange_strong(previous, now)) {
+                  refresh_connected = true;
+                  event_wake.notify_one();
+                }
+              },
+          .data_state =
+              [this](const RtcEvent& event) {
+                if (event.value == 1) {
+                  refresh_connected = true;
+                  presentation.QueueLayout();
+                  direct_services.RefreshEditable();
+                }
+              },
+          .received =
+              [this](const RtcEvent& event) {
+                if (event.message.value("type", Json()) != "input" || !event.trace_input_sequence)
+                  return;
+                RK_SERVER_TRACE(trace, "input_dc_received", TraceIds{},
+                                rk_record.qpc = event.received_qpc;
+                                rk_record.peer = event.peer;
+                                rk_record.client_sequence = event.trace_input_sequence;
+                                DataRouter::Number(event.message, "view", rk_record.view);
+                                DataRouter::Number(event.message, "instance", rk_record.instance);
+                                DataRouter::Number(event.message, "document", rk_record.document);
+                                DataRouter::Number(event.message, "focus", rk_record.focus););
+              },
+          .send = [this](const Json& message, uint64_t stamp) { Send(message, stamp); }}),
+      presentation(PresentationController::Hooks{
+          .peer = [this] { return peer_controller.Handle(); },
+          .scope =
+              [this] {
+                return ControlOutbox::Scope{peer_controller.Handle(), authorization.Stamp()};
+              },
+          .admitted = [this](const RtcEvent& event) { return ProductCurrent(event); },
+          .reset_input = [this] { authorization.SetInput(0); },
+          .refresh =
+              [this] {
+                refresh_connected = true;
+                event_wake.notify_one();
+              },
+          .flush = [this] { FlushControl(); },
+          .refresh_editable = [this] { direct_services.RefreshEditable(); },
+          .outbox = [this]() -> ControlOutbox& { return control_outbox; },
+          .sampling = [this] { return sampling; }}),
+      peer_controller(
+          api,
+          options,
+          PeerController::Hooks{
+              .bind = [this](uint64_t handle, uint64_t) { BindPeerResources(handle); },
+              .started = [this](uint64_t handle,
+                                const std::string& sdp) { return StartPeerResources(handle, sdp); },
+              .stopping = [this] { StopPeerResources(); },
+              .drained = [this] { DrainPeerResources(); },
+              .event = [this](const RtcEvent& event) { HandlePeerEvent(event); },
+              .signal =
+                  [this](uint64_t generation, const Json& signal) {
+                    management.SendEvent(Json{{"event", "rtc.signal"},
+                                              {"tenantId", tenant},
+                                              {"connectionId", peer_controller.Connection()},
+                                              {"signal", signal}},
+                                         generation);
+                  },
+              .create_encoder =
+                  [this](uint64_t peer, uint64_t encoder) {
+                    return CreateEncoder(this, peer, encoder);
+                  },
+              .configure_encoder =
+                  [this](uint64_t encoder, const remotekit_rtc_encoder_config* config) {
+                    return ConfigureEncoder(this, encoder, config);
+                  },
+              .encode = [this](uint64_t encoder,
+                               const remotekit_rtc_frame* frame,
+                               int key) { return Encode(this, encoder, frame, key); },
+              .rates = [this](uint64_t encoder,
+                              uint32_t bitrate,
+                              uint32_t fps) { Rates(this, encoder, bitrate, fps); },
+              .keyframe = [this](uint64_t encoder) { Keyframe(this, encoder); },
+              .destroy_encoder = [this](uint64_t encoder) { DestroyEncoder(this, encoder); }}) {}
 
 Result<void> Session::Initialize() {
   effective_idle_ms = std::min(1000u, options.idle_idr_ms);
@@ -183,7 +354,7 @@ Result<void> Session::Start() {
     return {};
   if (browser.Present())
     fprintf(stderr, "session %s browser replacement control=%d stop_pending=%d peer=%llu %s\n",
-            id.c_str(), browser.Rpc().Control() != 0, browser.Stopping(), peer.load(),
+            id.c_str(), browser.Rpc().Control() != 0, browser.Stopping(), peer_controller.Handle(),
             ProcessDiagnostic().c_str());
   if (!Stop())
     return Error{
@@ -198,7 +369,6 @@ Result<void> Session::Start() {
           streaming_adapter->encoder.c_str(), luid.c_str());
   std::string channel = "RemoteKit.service." + std::to_string(GetCurrentProcessId()) + "." + id +
                         "." + std::to_string(QpcNow());
-  client_gestures_control = 0;
   auto incarnation = browser.NewIncarnation();
   if (!incarnation)
     return incarnation.error();
@@ -273,8 +443,6 @@ Result<Json> Session::BrowserSnapshot() {
   auto result = browser.Snapshot();
   if (!result)
     return result.error();
-  client_gestures_control =
-      result.value().value("clientGestures", Json()) == 1 ? browser.Rpc().Control() : 0;
   return result;
 }
 
@@ -304,7 +472,7 @@ bool Session::Stop() {
   }
   browser.ReleaseExited();
   streaming_adapter.reset();
-  current_geometry.clear();
+  presentation.Bind(0);
   return true;
 }
 

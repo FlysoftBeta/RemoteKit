@@ -97,12 +97,24 @@ int main() {
     conflict.files[0].name = "different";
     CHECK(Throws([&] { library.Prepare(conflict); }));
     CHECK(Throws([&] { library.Claim(selection.id, retired); }));
+    auto competing = selection;
+    competing.id = "11111111111111111111111111111111";
+    competing.request_id = "other-chooser-token";
+    library.Prepare(competing);
     CHECK(library.Claim(selection.id, live));
     CHECK(!library.Claim(selection.id, live));
     using State = FileLibrary::Selection::State;
+    CHECK(library.CancelPendingSelections(selection.binding, live) == State::submitted);
+    CHECK(library.FindSelection("11111111111111111111111111111111")->state == State::pending);
     CHECK(library.Finish(selection.id, State::cancelled, State::pending) == State::submitted);
     library.Prepare(unsubmitted);
-    CHECK(library.Finish(unsubmitted.id, State::cancelled, State::pending) == State::cancelled);
+    auto wrong_binding = unsubmitted.binding;
+    wrong_binding.document = "other";
+    CHECK(!library.CancelPendingSelections(wrong_binding, live));
+    CHECK(Throws([&] { library.CancelPendingSelections(unsubmitted.binding, retired); }));
+    CHECK(library.FindSelection(unsubmitted.id)->state == State::pending);
+    CHECK(library.CancelPendingSelections(unsubmitted.binding, live) == State::cancelled);
+    CHECK(library.CancelPendingSelections(unsubmitted.binding, live) == State::cancelled);
     CHECK(!library.Claim(unsubmitted.id, live));
   }
   {
