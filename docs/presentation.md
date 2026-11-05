@@ -53,7 +53,8 @@ Client:   每个 video 观察到自己的真实 RTP 并匹配当前 epoch → �
 
 - 客户端对实际 receiver 设置 `jitterBufferTarget = 0`。Chrome89 没有标准属性，在可用时设置 `playoutDelayHint = 0`。能力、尝试设置的值和读回值分别报告。
 - Endpoint 在创建 peer 时请求 RTP playout-delay min 0 / max 50ms。Chromium157 中 min=0 且 0 < max ≤ 500ms 会进入低延迟分支，保留有界的合成队列；50ms 约等于 60Hz 下三帧的合成预算。
-- 这些都是请求，不是保证：min=0 时解码调度仍有约 8ms 的最小值，音视频同步可能抬高实际最小值；`jitterBufferTarget=0` 也不取消解码、抖动和 A/V 同步所需的等待。
+- 这些都是请求，不是保证：min=0 时解码调度仍有约 8ms 的最小值；`jitterBufferTarget=0` 也不取消解码和抖动所需的等待。
+- 视频与音频使用不同的 stream id（`remotekit-video`、`remotekit-audio`），接收端不把它们放进同一同步组。同组时 RtpStreamsSynchronizer 会把视频最小播放延迟抬到 NetEq 的音频延迟（实测音频静音补偿时约 84–99ms，视频最小延迟 60–111ms，而包抖动只有 2–17ms），min 一旦大于 0 就离开上面的低延迟分支。代价是页面内音视频不做唇音同步，音频通常比画面晚几十毫秒。
 - 0/50 对比未设置（同二进制，1936×1008，QSV，48Mbps/10ms）：合成 55.5→57.9FPS，丢帧 58/1172→9/1170，末包→合成 p95 78.5→50.4ms，实际缓冲均值 59.6→28.9ms，marker p95 115→92ms。
 - 0/10 被否决：末包→合成 p95 约 39→18ms，但合成帧率 45→38FPS，marker p95 没有改善，首段 rVFC 间隔 p95 38→74ms。更紧的预算导致有用的呈现丢失。
 - 0/0 是另一种原生行为，不能和 0/10、0/50 的结果混在一起。

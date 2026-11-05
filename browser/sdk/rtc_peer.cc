@@ -305,7 +305,9 @@ int Peer::Start() {
     // JSEP only reuses unassociated transceivers created by AddTrack when
     // applying an incoming offer. AddTransceiver here would leave our sender
     // unassociated and create a second recvonly transceiver (inactive answer).
-    auto added = pc->AddTrack(track, {"remotekit"});
+    // Audio uses a different stream id. A shared stream makes the receiver
+    // lip-sync video to NetEq's delay, which disables the min=0 playout path.
+    auto added = pc->AddTrack(track, {"remotekit-video"});
     if (!added.ok())
       return REMOTEKIT_SDK_INVALID_STATE;
     auto sender = added.MoveValue();
@@ -483,7 +485,7 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
     if (receives_audio && !p.audio_source) {
       p.audio_source = webrtc::make_ref_counted<PageAudioSource>();
       auto audio_track = p.factory->CreateAudioTrack("remotekit-audio", p.audio_source.get());
-      auto added = p.pc->AddTrack(audio_track, {"remotekit"});
+      auto added = p.pc->AddTrack(audio_track, {"remotekit-audio"});
       if (!added.ok())
         return REMOTEKIT_SDK_INVALID_STATE;
       p.audio_sender = added.value();
