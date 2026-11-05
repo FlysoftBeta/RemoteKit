@@ -1,9 +1,59 @@
-.automation-shell { min-height: 100vh; display: flex; background: #111; color: #eee; }
-.automation-views { flex: 1; min-width: 0; display: flex; align-items: stretch; }
-.automation-views > * { flex: 1; min-width: 0; }
-.automation-shell .remote-viewport { position: relative; height: 100vh; overflow: hidden; display: grid; place-items: center; }
-.automation-shell .remote-viewport canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; touch-action: none; }
-.automation-shell .remote-input { position: absolute; width: 1px; height: 1px; opacity: 0; top: 0; left: 0; }
-.automation-shell .page-overlay { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; }
-.automation-diagnostics { width: 360px; height: 100vh; overflow: auto; padding: 16px; box-sizing: border-box; }
-.automation-diagnostics pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.automation-shell {
+  min-height: 100vh;
+  display: flex;
+  background: #111;
+  color: #eee;
+}
+.automation-views {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+}
+.automation-views > * {
+  flex: 1;
+  min-width: 0;
+}
+.automation-shell .remote-viewport {
+  position: relative;
+  height: 100vh;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.automation-shell .remote-viewport canvas {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  touch-action: none;
+}
+.automation-shell .remote-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  top: 0;
+  left: 0;
+}
+.automation-shell .page-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.automation-diagnostics {
+  width: 360px;
+  height: 100vh;
+  overflow: auto;
+  padding: 16px;
+  box-sizing: border-box;
+}
+.automation-diagnostics pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}

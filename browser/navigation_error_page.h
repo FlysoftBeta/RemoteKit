@@ -12,12 +12,24 @@ inline std::string EscapeNavigationErrorText(std::string_view text) {
   escaped.reserve(text.size());
   for (char value : text) {
     switch (value) {
-      case '&': escaped += "&amp;"; break;
-      case '<': escaped += "&lt;"; break;
-      case '>': escaped += "&gt;"; break;
-      case '"': escaped += "&quot;"; break;
-      case '\'': escaped += "&#39;"; break;
-      default: escaped += value; break;
+      case '&':
+        escaped += "&amp;";
+        break;
+      case '<':
+        escaped += "&lt;";
+        break;
+      case '>':
+        escaped += "&gt;";
+        break;
+      case '"':
+        escaped += "&quot;";
+        break;
+      case '\'':
+        escaped += "&#39;";
+        break;
+      default:
+        escaped += value;
+        break;
     }
   }
   return escaped;
@@ -26,8 +38,8 @@ inline std::string EscapeNavigationErrorText(std::string_view text) {
 // Used by the renderer's real error-document commit. It has no requests,
 // scripts or retry action, so it cannot bypass navigation/repost policy.
 inline std::string BuildNavigationErrorHtml(std::string_view failed_url,
-                                           int error_code,
-                                           std::string_view error_name) {
+                                            int error_code,
+                                            std::string_view error_name) {
   return std::string(R"HTML(<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -48,8 +60,8 @@ dd{margin:8px 0 20px;overflow-wrap:anywhere;white-space:pre-wrap;unicode-bidi:pl
 <dl><dt>失败网址</dt><dd dir="auto">)HTML") +
          EscapeNavigationErrorText(failed_url) +
          "</dd><dt>错误标识</dt><dd class=\"code\" dir=\"ltr\">" +
-         EscapeNavigationErrorText(error_name) + " (" +
-         std::to_string(error_code) + ")</dd></dl></main></body></html>";
+         EscapeNavigationErrorText(error_name) + " (" + std::to_string(error_code) +
+         ")</dd></dl></main></body></html>";
 }
 
 }  // namespace remotekit::browser

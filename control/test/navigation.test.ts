@@ -4,15 +4,40 @@ import { resolveNavigation } from '../server/navigation';
 
 test('navigation uses fixed providers and encodes search text as one query value', () => {
   const text = '中文 & a+b #x? / 100%';
-  for (const [engine, base] of [['google', 'https://www.google.com/search?q='], ['bing', 'https://www.bing.com/search?q='], ['duckduckgo', 'https://duckduckgo.com/?q='], ['baidu', 'https://www.baidu.com/s?wd=']] as const)
+  for (const [engine, base] of [
+    ['google', 'https://www.google.com/search?q='],
+    ['bing', 'https://www.bing.com/search?q='],
+    ['duckduckgo', 'https://duckduckgo.com/?q='],
+    ['baidu', 'https://www.baidu.com/s?wd='],
+  ] as const)
     assert.equal(resolveNavigation(text, engine), base + encodeURIComponent(text));
 });
 test('navigation recognizes web addresses while keeping unsupported schemes inert', () => {
-  for (const [text, expected] of [['example.com/path?q=1#x', 'https://example.com/path?q=1#x'], ['localhost:8080/a', 'https://localhost:8080/a'], ['127.0.0.1:9000', 'https://127.0.0.1:9000/'], ['[::1]:8080', 'https://[::1]:8080/'], ['HTTPS://example.com', 'https://example.com/'], [' about:blank ', 'about:blank']])
+  for (const [text, expected] of [
+    ['example.com/path?q=1#x', 'https://example.com/path?q=1#x'],
+    ['localhost:8080/a', 'https://localhost:8080/a'],
+    ['127.0.0.1:9000', 'https://127.0.0.1:9000/'],
+    ['[::1]:8080', 'https://[::1]:8080/'],
+    ['HTTPS://example.com', 'https://example.com/'],
+    [' about:blank ', 'about:blank'],
+  ])
     assert.equal(resolveNavigation(text, 'google'), expected);
-  for (const text of ['javascript:alert(1)', 'file:///c:/x', 'data:text/html,hello', 'htps://example.com', 'about:config', 'hello world', '//evil.test/path', 'user:password@example.com'])
-    assert.equal(resolveNavigation(text, 'bing'), 'https://www.bing.com/search?q=' + encodeURIComponent(text));
-  for (const text of ['', '  ', 'http://', 'https://user:password@example.com']) assert.throws(() => resolveNavigation(text, 'google'));
+  for (const text of [
+    'javascript:alert(1)',
+    'file:///c:/x',
+    'data:text/html,hello',
+    'htps://example.com',
+    'about:config',
+    'hello world',
+    '//evil.test/path',
+    'user:password@example.com',
+  ])
+    assert.equal(
+      resolveNavigation(text, 'bing'),
+      'https://www.bing.com/search?q=' + encodeURIComponent(text),
+    );
+  for (const text of ['', '  ', 'http://', 'https://user:password@example.com'])
+    assert.throws(() => resolveNavigation(text, 'google'));
 });
 
 test('navigation checks final normalized URL bytes after URL and search expansion', () => {

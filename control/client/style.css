@@ -15,7 +15,7 @@ textarea {
   font: inherit;
 }
 button:focus-visible,
-[role="separator"]:focus-visible {
+[role='separator']:focus-visible {
   outline: 2px solid #245db5;
   outline-offset: -2px;
 }
@@ -215,11 +215,19 @@ button:focus-visible,
   animation: none;
 }
 @keyframes remote-resize-stretch {
-  from { transform: scale(var(--resize-from-x), var(--resize-from-y)); filter: blur(1px); }
-  to { transform: scale(1); filter: blur(5px); }
+  from {
+    transform: scale(var(--resize-from-x), var(--resize-from-y));
+    filter: blur(1px);
+  }
+  to {
+    transform: scale(1);
+    filter: blur(5px);
+  }
 }
 @media (prefers-reduced-motion: reduce) {
-  .remote-viewport canvas.remote-resize-freeze { animation: none; }
+  .remote-viewport canvas.remote-resize-freeze {
+    animation: none;
+  }
 }
 .remote-open-keyboard.MuiButton-root {
   position: absolute;
@@ -435,17 +443,68 @@ button:focus-visible,
   }
 }
 
-.start-page { position:absolute; inset:0; overflow:auto; display:flex; flex-direction:column; align-items:center; padding:32px 24px; background:#f2f4f7; }
-.start-page::before { content:""; flex:1 0 16px; }
-.start-page::after { content:""; flex:2 0 32px; }
-.start-page-body { width:100%; max-width:520px; flex:0 0 auto; }
-.start-page .start-page-title { font-size:28px; font-weight:600; margin-bottom:24px; }
-.start-page-form { display:flex; align-items:center; width:100%; min-width:0; height:48px; padding-left:14px; border:1px solid #dde2e8; border-radius:12px; background:#fff; }
-.start-page-form:focus-within { border-color:#245db5; box-shadow:0 0 0 1px #245db5; }
-.start-page-form .MuiInputBase-root { flex:1; min-width:0; margin-left:10px; }
-.start-page-form .MuiIconButton-root { width:44px; height:44px; flex-shrink:0; }
-.start-page .start-page-hint { margin-top:10px; font-size:12px; }
-.start-page .start-page-error { margin-top:10px; font-size:14px; overflow-wrap:anywhere; }
+.start-page {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 24px;
+  background: #f2f4f7;
+}
+.start-page::before {
+  content: '';
+  flex: 1 0 16px;
+}
+.start-page::after {
+  content: '';
+  flex: 2 0 32px;
+}
+.start-page-body {
+  width: 100%;
+  max-width: 520px;
+  flex: 0 0 auto;
+}
+.start-page .start-page-title {
+  font-size: 28px;
+  font-weight: 600;
+  margin-bottom: 24px;
+}
+.start-page-form {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  height: 48px;
+  padding-left: 14px;
+  border: 1px solid #dde2e8;
+  border-radius: 12px;
+  background: #fff;
+}
+.start-page-form:focus-within {
+  border-color: #245db5;
+  box-shadow: 0 0 0 1px #245db5;
+}
+.start-page-form .MuiInputBase-root {
+  flex: 1;
+  min-width: 0;
+  margin-left: 10px;
+}
+.start-page-form .MuiIconButton-root {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+.start-page .start-page-hint {
+  margin-top: 10px;
+  font-size: 12px;
+}
+.start-page .start-page-error {
+  margin-top: 10px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
 .viewer-lock-blank {
   position: fixed;
   inset: 0;

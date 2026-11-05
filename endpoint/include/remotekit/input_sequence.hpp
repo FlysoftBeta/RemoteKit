@@ -10,7 +10,10 @@ namespace remotekit {
 // Browser counter. Bind only after the previous workers have joined.
 class InputSequence {
  public:
-  void Bind(uint64_t peer) { peer_ = peer; client_ = 0; }
+  void Bind(uint64_t peer) {
+    peer_ = peer;
+    client_ = 0;
+  }
   bool Admit(uint64_t peer, std::string_view sequence) {
     uint64_t value = 0;
     const auto parsed = std::from_chars(sequence.data(), sequence.data() + sequence.size(), value);
@@ -21,10 +24,12 @@ class InputSequence {
     return true;
   }
   std::optional<uint64_t> NextBrowser() {
-    if (browser_ == std::numeric_limits<uint64_t>::max()) return std::nullopt;
+    if (browser_ == std::numeric_limits<uint64_t>::max())
+      return std::nullopt;
     return ++browser_;
   }
+
  private:
   uint64_t peer_ = 0, client_ = 0, browser_ = 0;
 };
-}
+}  // namespace remotekit

@@ -5,7 +5,10 @@ import { lockDirection, RevealSequence } from '../client/lock-screen';
 test('lock reveal accepts one mixed direction sequence and recovers its longest prefix', () => {
   const reveal = new RevealSequence();
   const directions = ['Up', 'Up', 'Up', 'Down', 'Down', 'Left', 'Right', 'Left', 'Right'] as const;
-  assert.deepEqual(directions.map((direction, i) => reveal.push(direction, i * 400)), [...Array(8).fill(false), true]);
+  assert.deepEqual(
+    directions.map((direction, i) => reveal.push(direction, i * 400)),
+    [...Array(8).fill(false), true],
+  );
   assert.equal(reveal.push('Right', 4000), false);
   reveal.push('Up', 4100);
   reveal.push('Up', 9200);

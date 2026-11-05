@@ -10,11 +10,17 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const { values: options } = parseArgs({ options: {
-  package: { type: 'string' }, evidence: { type: 'string' },
-  port: { type: 'string', default: '33623' }, viewer: { type: 'string', default: 'C:/src/chromium/src/out/rel/chrome.exe' },
-  'live-build': { type: 'boolean' }, 'rtc-playout-max-ms': { type: 'string' }, state: { type: 'string' },
-} });
+const { values: options } = parseArgs({
+  options: {
+    package: { type: 'string' },
+    evidence: { type: 'string' },
+    port: { type: 'string', default: '33623' },
+    viewer: { type: 'string', default: 'C:/src/chromium/src/out/rel/chrome.exe' },
+    'live-build': { type: 'boolean' },
+    'rtc-playout-max-ms': { type: 'string' },
+    state: { type: 'string' },
+  },
+});
 if (!options.package || !options.evidence) throw Error('--package and --evidence are required');
 const port = Number(options.port);
 if (!Number.isInteger(port) || port < 1024 || port > 65534) throw Error('Invalid Control port');
@@ -32,10 +38,12 @@ if (options.state) await stat(join(state, 'control.db'));
 const pkg = resolve(options.package);
 const node = join(pkg, 'bin', 'node.exe');
 const viewer = resolve(options.viewer);
-const endpoint = options['live-build'] ? join(root, 'build', 'endpoint-package', 'endpoint', 'endpoint_service.exe') :
-  join(pkg, 'bin', 'endpoint_service.exe');
-const browser = options['live-build'] ? resolve('C:/src/chromium/src/out/dev/remotekit_browser.exe') :
-  join(pkg, 'bin', 'remotekit_browser.exe');
+const endpoint = options['live-build']
+  ? join(root, 'build', 'endpoint-package', 'endpoint', 'endpoint_service.exe')
+  : join(pkg, 'bin', 'endpoint_service.exe');
+const browser = options['live-build']
+  ? resolve('C:/src/chromium/src/out/dev/remotekit_browser.exe')
+  : join(pkg, 'bin', 'remotekit_browser.exe');
 const control = join(options['live-build'] ? root : pkg, 'control', 'dist', 'server.mjs');
 const clientRoot = join(dirname(control), 'client');
 const clientIndex = join(clientRoot, 'index.html');
@@ -49,18 +57,30 @@ async function fingerprint(path) {
   return { path, sha256: hash.digest('hex'), bytes: info.size, modifiedUtc: info.mtime.toISOString() };
 }
 
-const fingerprints = await Promise.all([
-  node, viewer, endpoint, browser, control, clientIndex, join(clientRoot, clientEntry),
-  join(dirname(browser), 'remotekit_sdk.dll'), join(dirname(browser), 'components_viz_service.dll'),
-].map(fingerprint));
+const fingerprints = await Promise.all(
+  [
+    node,
+    viewer,
+    endpoint,
+    browser,
+    control,
+    clientIndex,
+    join(clientRoot, clientEntry),
+    join(dirname(browser), 'remotekit_sdk.dll'),
+    join(dirname(browser), 'components_viz_service.dll'),
+  ].map(fingerprint),
+);
 await mkdir(dirname(evidence), { recursive: true });
 await mkdir(evidence);
 await writeFile(join(evidence, 'artifact-hashes.json'), JSON.stringify(fingerprints, null, 2));
 await copyFile(join(root, 'tools', 'osr-video-profile-browser.js'), join(evidence, 'driver.js'));
-if (!options['live-build']) await copyFile(join(pkg, 'manifest.json'), join(evidence, 'package-manifest.json'));
+if (!options['live-build'])
+  await copyFile(join(pkg, 'manifest.json'), join(evidence, 'package-manifest.json'));
 
 const original = await readFile(join(root, 'control', 'public', 'test-pattern.html'), 'utf8');
-const fixture = original.replace('function tick(now)', `
+const fixture = original.replace(
+  'function tick(now)',
+  `
 addEventListener('pointerdown', event => {
   if (!event.isTrusted || event.clientY < innerHeight * 0.5) return;
   const handlerAt = performance.now(), handlerWall = Date.now();
@@ -74,13 +94,18 @@ for (const type of ['touchstart', 'touchend']) addEventListener(type, event => {
   fetch('/touch-event', { method: 'POST', body: JSON.stringify({ type, trusted: event.isTrusted,
     active: event.touches.length, changed: event.changedTouches.length, wall: Date.now() }) }).catch(() => {});
 }, { passive: true });
-function tick(now)`);
+function tick(now)`,
+);
 if (fixture === original) throw Error('Marker fixture hook is missing');
 const codec = await readFile(join(root, 'control', 'public', 'marker-codec.js'));
 const sinks = {
-  '/event': 'remote-input.jsonl', '/health': 'health.jsonl',
-  '/report': 'video-profile.json', '/clean-report': 'video-profile-clean.json', '/stats-report': 'stats-overlay.json',
-  '/touch-event': 'remote-touch.jsonl', '/touch-report': 'touch-compatibility.json',
+  '/event': 'remote-input.jsonl',
+  '/health': 'health.jsonl',
+  '/report': 'video-profile.json',
+  '/clean-report': 'video-profile-clean.json',
+  '/stats-report': 'stats-overlay.json',
+  '/touch-event': 'remote-touch.jsonl',
+  '/touch-report': 'touch-compatibility.json',
 };
 const server = createServer(async (req, res) => {
   try {
@@ -88,10 +113,13 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && route === '/fixture') {
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(fixture);
     } else if (req.method === 'GET' && route === '/static-fixture') {
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(
-        '<!doctype html><meta charset="utf-8"><title>Static first frame</title>' +
-        '<style>body{margin:0;background:#125b80;color:white;font:32px sans-serif}h1{margin:32px}</style>' +
-        '<h1>Static first frame</h1>');
+      res
+        .writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        .end(
+          '<!doctype html><meta charset="utf-8"><title>Static first frame</title>' +
+            '<style>body{margin:0;background:#125b80;color:white;font:32px sans-serif}h1{margin:32px}</style>' +
+            '<h1>Static first frame</h1>',
+        );
     } else if (req.method === 'GET' && route === '/marker-codec.js') {
       res.writeHead(200, { 'Content-Type': 'text/javascript' }).end(codec);
     } else if (req.method === 'POST' && route === '/shutdown') {
@@ -102,7 +130,10 @@ const server = createServer(async (req, res) => {
       let length = 0;
       for await (const chunk of req) {
         length += chunk.length;
-        if (length > 12000000) { res.writeHead(413).end(); return; }
+        if (length > 12000000) {
+          res.writeHead(413).end();
+          return;
+        }
         chunks.push(chunk);
       }
       const data = JSON.parse(Buffer.concat(chunks).toString());
@@ -126,13 +157,22 @@ await new Promise((ready, reject) => {
 });
 const endpointArgs = [`--browser=${browser}`, `--data-path=${join(state, 'endpoint')}`];
 if (maxPlayout) endpointArgs.push(`--rtc-playout-max-ms=${maxPlayout}`);
-const child = spawn(node, [control], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], env: {
-  ...process.env, PORT: String(port), REMOTEKIT_CONTROL_HOST: '127.0.0.1',
-  REMOTEKIT_CONTROL_DB: join(state, 'control.db'), REMOTEKIT_METRICS_DIR: join(evidence, 'metrics'),
-  REMOTEKIT_SERVER_TRACE: join(evidence, 'server-trace'), REMOTEKIT_MEDIA_TRACE: join(evidence, 'browser-trace'),
-  REMOTEKIT_ENDPOINT: endpoint, REMOTEKIT_ENDPOINT_ARGS: JSON.stringify(endpointArgs),
-  REMOTEKIT_CONTROL_ORIGINS: `http://127.0.0.1:${port}`,
-} });
+const child = spawn(node, [control], {
+  windowsHide: true,
+  stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  env: {
+    ...process.env,
+    PORT: String(port),
+    REMOTEKIT_CONTROL_HOST: '127.0.0.1',
+    REMOTEKIT_CONTROL_DB: join(state, 'control.db'),
+    REMOTEKIT_METRICS_DIR: join(evidence, 'metrics'),
+    REMOTEKIT_SERVER_TRACE: join(evidence, 'server-trace'),
+    REMOTEKIT_MEDIA_TRACE: join(evidence, 'browser-trace'),
+    REMOTEKIT_ENDPOINT: endpoint,
+    REMOTEKIT_ENDPOINT_ARGS: JSON.stringify(endpointArgs),
+    REMOTEKIT_CONTROL_ORIGINS: `http://127.0.0.1:${port}`,
+  },
+});
 child.stdout.pipe(createWriteStream(join(evidence, 'server.stdout.log')));
 const stderr = createWriteStream(join(evidence, 'server.stderr.log'));
 child.stderr.pipe(stderr, { end: false });
@@ -146,7 +186,7 @@ function close() {
   if (child.connected) child.disconnect();
   server.close();
 }
-child.on('error', error => {
+child.on('error', (error) => {
   process.exitCode = 1;
   stderr.end(String(error) + '\n');
   close();
@@ -158,8 +198,25 @@ child.on('close', (code, signal) => {
 });
 process.on('SIGINT', close);
 process.on('SIGTERM', close);
-await writeFile(join(evidence, 'service.json'), JSON.stringify({
-  supervisorPid: process.pid, controlPid: child.pid, port, fixturePort, pkg, endpoint, browser, control,
-  endpointArgs, state, maxPlayout: maxPlayout ?? null, startedUtc: new Date().toISOString(),
-}, null, 2));
+await writeFile(
+  join(evidence, 'service.json'),
+  JSON.stringify(
+    {
+      supervisorPid: process.pid,
+      controlPid: child.pid,
+      port,
+      fixturePort,
+      pkg,
+      endpoint,
+      browser,
+      control,
+      endpointArgs,
+      state,
+      maxPlayout: maxPlayout ?? null,
+      startedUtc: new Date().toISOString(),
+    },
+    null,
+    2,
+  ),
+);
 console.log(`Control port ${port}, fixture port ${fixturePort}, evidence ${evidence}`);

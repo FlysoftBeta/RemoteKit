@@ -6,7 +6,9 @@
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/client_hints_controller_delegate.h"
 #include "services/network/public/mojom/network_context.mojom-forward.h"
-namespace content { class WebContents; }
+namespace content {
+class WebContents;
+}
 
 namespace remotekit::browser {
 class ProfilePermissions;
@@ -28,7 +30,8 @@ class BrowserContext final : public content::BrowserContext {
   bool TabletUaFor(const GURL&) const;
   // Attach before the first navigation, including provisional popup contents.
   static void InstallSiteIdentity(content::WebContents*);
-  void ConfigureNetworkContext(bool in_memory, const base::FilePath& relative_partition_path,
+  void ConfigureNetworkContext(bool in_memory,
+                               const base::FilePath& relative_partition_path,
                                network::mojom::NetworkContextParams* params);
   content::BrowserPluginGuestManager* GetGuestManager() override { return nullptr; }
   storage::SpecialStoragePolicy* GetSpecialStoragePolicy() override { return nullptr; }

@@ -24,7 +24,9 @@ function resolveInput(value: unknown, engine: SearchEngine): string {
       const parsed = new URL(text);
       if (!parsed.hostname || parsed.username || parsed.password || /[\s\\]/.test(text)) throw new Error();
       return parsed.href;
-    } catch { throw new Error('请输入有效的 HTTP 或 HTTPS 网址'); }
+    } catch {
+      throw new Error('请输入有效的 HTTP 或 HTTPS 网址');
+    }
   }
   // A colon may be a bare host port, but no other explicit scheme is executable.
   // Misspelled or unsupported schemes become ordinary search text.
@@ -32,9 +34,13 @@ function resolveInput(value: unknown, engine: SearchEngine): string {
     try {
       const parsed = new URL(`https://${text}`);
       const host = parsed.hostname;
-      const domain = host.includes('.') && host.split('.').every(part => /^[a-z\d](?:[a-z\d-]*[a-z\d])?$/i.test(part));
-      if (!parsed.username && !parsed.password && (host === 'localhost' || host.startsWith('[') || domain)) return parsed.href;
-    } catch { /* Search text, including malformed schemes. */ }
+      const domain =
+        host.includes('.') && host.split('.').every((part) => /^[a-z\d](?:[a-z\d-]*[a-z\d])?$/i.test(part));
+      if (!parsed.username && !parsed.password && (host === 'localhost' || host.startsWith('[') || domain))
+        return parsed.href;
+    } catch {
+      /* Search text, including malformed schemes. */
+    }
   }
   return (searchUrls[engine] ?? searchUrls.google) + encodeURIComponent(text);
 }

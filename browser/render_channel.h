@@ -11,13 +11,16 @@ class RenderChannel final {
  public:
   using Handler = base::RepeatingCallback<void(const RenderBegin&)>;
   using StopHandler = base::RepeatingCallback<void(uint64_t)>;
-  RenderChannel(mojo::ScopedMessagePipeHandle pipe, Handler handler, StopHandler stop_handler,
+  RenderChannel(mojo::ScopedMessagePipeHandle pipe,
+                Handler handler,
+                StopHandler stop_handler,
                 base::OnceClosure disconnected = {});
   ~RenderChannel();
   bool Reject(const RenderIdentity& identity, RenderRejectReason reason);
   bool Stopped(uint64_t generation);
   bool Wake(const RenderIdentity& identity);
   void Close();
+
  private:
   void OnReadable(MojoResult result);
   Handler handler_;
@@ -30,4 +33,4 @@ class RenderChannel final {
   RenderWakeState wake_state_;
   base::WeakPtrFactory<RenderChannel> weak_factory_{this};
 };
-} // namespace remotekit::browser
+}  // namespace remotekit::browser

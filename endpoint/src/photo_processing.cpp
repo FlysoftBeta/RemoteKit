@@ -50,9 +50,8 @@ class Imaging {
     if (result != RPC_E_CHANGED_MODE)
       Check(result, error);
     initialized_ = SUCCEEDED(result);
-    const auto factory_result =
-        CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                         IID_PPV_ARGS(&factory));
+    const auto factory_result = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                                 CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
     if (FAILED(factory_result)) {
       if (initialized_)
         CoUninitialize();
@@ -131,22 +130,38 @@ UINT ScaleSide(UINT dimension, UINT longest, UINT target) {
 
 void Orient(cv::Mat& image, unsigned orientation) {
   switch (orientation) {
-    case 2: cv::flip(image, image, 1); break;
-    case 3: cv::rotate(image, image, cv::ROTATE_180); break;
-    case 4: cv::flip(image, image, 0); break;
-    case 5: cv::transpose(image, image); break;
-    case 6: cv::rotate(image, image, cv::ROTATE_90_CLOCKWISE); break;
+    case 2:
+      cv::flip(image, image, 1);
+      break;
+    case 3:
+      cv::rotate(image, image, cv::ROTATE_180);
+      break;
+    case 4:
+      cv::flip(image, image, 0);
+      break;
+    case 5:
+      cv::transpose(image, image);
+      break;
+    case 6:
+      cv::rotate(image, image, cv::ROTATE_90_CLOCKWISE);
+      break;
     case 7:
       cv::transpose(image, image);
       cv::flip(image, image, -1);
       break;
-    case 8: cv::rotate(image, image, cv::ROTATE_90_COUNTERCLOCKWISE); break;
-    default: break;
+    case 8:
+      cv::rotate(image, image, cv::ROTATE_90_COUNTERCLOCKWISE);
+      break;
+    default:
+      break;
   }
 }
 
-cv::Mat DecodeMemory(IWICImagingFactory& factory, std::span<const BYTE> compressed,
-                     const PhotoCancelled& cancelled, bool thumbnail, bool analysis) {
+cv::Mat DecodeMemory(IWICImagingFactory& factory,
+                     std::span<const BYTE> compressed,
+                     const PhotoCancelled& cancelled,
+                     bool thumbnail,
+                     bool analysis) {
   const char* invalid = thumbnail ? "invalid_photo" : "invalid-photo";
   const char* too_large = thumbnail ? "photo_too_large" : "photo-too-large";
   CheckCancelled(cancelled);
@@ -154,8 +169,8 @@ cv::Mat DecodeMemory(IWICImagingFactory& factory, std::span<const BYTE> compress
     throw std::runtime_error(invalid);
   constexpr std::array<BYTE, 8> png_signature{137, 80, 78, 71, 13, 10, 26, 10};
   const bool jpeg = compressed[0] == 0xff && compressed[1] == 0xd8 && compressed[2] == 0xff;
-  if (!jpeg && (analysis || !std::equal(png_signature.begin(), png_signature.end(),
-                                        compressed.begin())))
+  if (!jpeg &&
+      (analysis || !std::equal(png_signature.begin(), png_signature.end(), compressed.begin())))
     throw std::runtime_error(invalid);
 
   ComPtr<IWICStream> stream;
@@ -164,9 +179,11 @@ cv::Mat DecodeMemory(IWICImagingFactory& factory, std::span<const BYTE> compress
   Check(factory.CreateStream(&stream), invalid);
   // The decoder only reads this caller-owned buffer.
   Check(stream->InitializeFromMemory(const_cast<BYTE*>(compressed.data()),
-                                     static_cast<DWORD>(compressed.size())), invalid);
+                                     static_cast<DWORD>(compressed.size())),
+        invalid);
   Check(factory.CreateDecoder(jpeg ? GUID_ContainerFormatJpeg : GUID_ContainerFormatPng,
-                              &GUID_VendorMicrosoft, &decoder), invalid);
+                              &GUID_VendorMicrosoft, &decoder),
+        invalid);
   Check(decoder->Initialize(stream.Get(), WICDecodeMetadataCacheOnDemand), invalid);
   UINT frame_count = 0;
   Check(decoder->GetFrameCount(&frame_count), invalid);
@@ -187,9 +204,11 @@ cv::Mat DecodeMemory(IWICImagingFactory& factory, std::span<const BYTE> compress
   ComPtr<IWICFormatConverter> converter;
   const bool flatten_alpha = !jpeg;
   Check(factory.CreateFormatConverter(&converter), invalid);
-  Check(converter->Initialize(frame.Get(), flatten_alpha ? GUID_WICPixelFormat32bppPBGRA
-                                                         : GUID_WICPixelFormat24bppBGR,
-                              WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom), invalid);
+  Check(
+      converter->Initialize(
+          frame.Get(), flatten_alpha ? GUID_WICPixelFormat32bppPBGRA : GUID_WICPixelFormat24bppBGR,
+          WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom),
+      invalid);
   IWICBitmapSource* pixels = converter.Get();
   ComPtr<IWICBitmapScaler> scaler;
   const UINT longest = std::max(width, height);
@@ -200,9 +219,11 @@ cv::Mat DecodeMemory(IWICImagingFactory& factory, std::span<const BYTE> compress
     Check(scaler->Initialize(pixels, width, height, WICBitmapInterpolationModeFant), invalid);
     pixels = scaler.Get();
   }
-  cv::Mat image(static_cast<int>(height), static_cast<int>(width), flatten_alpha ? CV_8UC4 : CV_8UC3);
+  cv::Mat image(static_cast<int>(height), static_cast<int>(width),
+                flatten_alpha ? CV_8UC4 : CV_8UC3);
   Check(pixels->CopyPixels(nullptr, static_cast<UINT>(image.step),
-                           static_cast<UINT>(image.total() * image.elemSize()), image.data), invalid);
+                           static_cast<UINT>(image.total() * image.elemSize()), image.data),
+        invalid);
   CheckCancelled(cancelled);
   if (flatten_alpha) {
     cv::Mat opaque(image.size(), CV_8UC3);
@@ -226,8 +247,10 @@ cv::Mat DecodeMemory(IWICImagingFactory& factory, std::span<const BYTE> compress
   return image;
 }
 
-cv::Mat Decode(IWICImagingFactory& factory, const std::filesystem::path& path,
-               const PhotoCancelled& cancelled, bool thumbnail = false) {
+cv::Mat Decode(IWICImagingFactory& factory,
+               const std::filesystem::path& path,
+               const PhotoCancelled& cancelled,
+               bool thumbnail = false) {
   const char* invalid = thumbnail ? "invalid_photo" : "invalid-photo";
   CheckCancelled(cancelled);
   std::ifstream input(path, std::ios::binary | std::ios::ate);
@@ -243,8 +266,11 @@ cv::Mat Decode(IWICImagingFactory& factory, const std::filesystem::path& path,
   return DecodeMemory(factory, compressed, cancelled, thumbnail, false);
 }
 
-void EncodeJpeg(IWICImagingFactory& factory, IStream& stream, const cv::Mat& image,
-                float compression_quality, const char* error) {
+void EncodeJpeg(IWICImagingFactory& factory,
+                IStream& stream,
+                const cv::Mat& image,
+                float compression_quality,
+                const char* error) {
   ComPtr<IWICBitmapEncoder> encoder;
   ComPtr<IWICBitmapFrameEncode> frame;
   ComPtr<IPropertyBag2> properties;
@@ -265,13 +291,16 @@ void EncodeJpeg(IWICImagingFactory& factory, IStream& stream, const cv::Mat& ima
   if (format != GUID_WICPixelFormat24bppBGR)
     throw std::runtime_error(error);
   Check(frame->WritePixels(image.rows, static_cast<UINT>(image.step),
-                           static_cast<UINT>(image.total() * image.elemSize()), image.data), error);
+                           static_cast<UINT>(image.total() * image.elemSize()), image.data),
+        error);
   Check(frame->Commit(), error);
   Check(encoder->Commit(), error);
 }
 
-void EncodePng(IWICImagingFactory& factory, const std::filesystem::path& path,
-               const cv::Mat& image, const PhotoCancelled& cancelled) {
+void EncodePng(IWICImagingFactory& factory,
+               const std::filesystem::path& path,
+               const cv::Mat& image,
+               const PhotoCancelled& cancelled) {
   constexpr char error[] = "photo-output-failed";
   ComPtr<IWICStream> stream;
   Check(factory.CreateStream(&stream), error);
@@ -306,13 +335,16 @@ cv::Mat LimitSide(const cv::Mat& image, int side) {
   if (longest <= side)
     return image;
   cv::Mat result;
-  cv::resize(image, result, {std::max(4, image.cols * side / longest),
-                             std::max(4, image.rows * side / longest)}, 0, 0, cv::INTER_AREA);
+  cv::resize(image, result,
+             {std::max(4, image.cols * side / longest), std::max(4, image.rows * side / longest)},
+             0, 0, cv::INTER_AREA);
   return result;
 }
 
-void WriteThumbnail(IWICImagingFactory& factory, const std::filesystem::path& output,
-                    cv::Mat& image, const PhotoCancelled& cancelled) {
+void WriteThumbnail(IWICImagingFactory& factory,
+                    const std::filesystem::path& output,
+                    cv::Mat& image,
+                    const PhotoCancelled& cancelled) {
   for (const int side : {kThumbnailSide, 240, 160}) {
     const int longest = std::max(image.cols, image.rows);
     if (longest > side) {
@@ -433,9 +465,11 @@ Quality Measure(const cv::Mat& image, std::size_t index) {
                                          (48 - midtone) / 48, (midtone - 225) / 30, 0.0});
   const double noise_loss = std::clamp((detail.noise - 2.5) / 11, 0.0, 1.0);
   const double structure = 0.6 * detail.strength + 0.4 * coarse.strength;
-  const double crispness = std::sqrt(structure) * (0.7 * detail.fine_ratio + 0.3 * coarse.fine_ratio);
-  const double score = std::clamp(0.64 * std::sqrt(structure) + 0.36 * crispness -
-                                  0.23 * exposure_loss - 0.24 * noise_loss, 0.0, 1.0);
+  const double crispness =
+      std::sqrt(structure) * (0.7 * detail.fine_ratio + 0.3 * coarse.fine_ratio);
+  const double score = std::clamp(
+      0.64 * std::sqrt(structure) + 0.36 * crispness - 0.23 * exposure_loss - 0.24 * noise_loss,
+      0.0, 1.0);
   return {{index, score}, CompositionSignature(image)};
 }
 
@@ -446,9 +480,10 @@ double MeasureBurstQuality(const cv::Mat& image) {
   const double mean = cv::mean(gray)[0];
   const double clipped_dark = static_cast<double>(cv::countNonZero(gray <= 8)) / gray.total();
   const double clipped_light = static_cast<double>(cv::countNonZero(gray >= 249)) / gray.total();
-  const double exposure = std::clamp(std::min({mean / 72, (255 - mean) / 32,
-                                             (1 - clipped_dark) / 0.70,
-                                             (1 - clipped_light) / 0.55}), 0.0, 1.0);
+  const double exposure =
+      std::clamp(std::min({mean / 72, (255 - mean) / 32, (1 - clipped_dark) / 0.70,
+                           (1 - clipped_light) / 0.55}),
+                 0.0, 1.0);
   const double coherent = std::clamp(std::sqrt(detail.strength * 1.35), 0.0, 1.0);
   const double noise_penalty = std::clamp((detail.noise - 1.8) / 13, 0.0, 0.8);
   return coherent * (0.42 + 0.58 * detail.fine_ratio) * exposure * (1 - noise_penalty);
@@ -501,9 +536,8 @@ bool ValidQuad(const Quad& quad, double minimum_area, double minimum_side) {
 }
 
 void StartAtTopLeft(Quad& quad) {
-  const auto first = std::min_element(quad.begin(), quad.end(), [](auto a, auto b) {
-    return a.x + a.y < b.x + b.y;
-  });
+  const auto first = std::min_element(quad.begin(), quad.end(),
+                                      [](auto a, auto b) { return a.x + a.y < b.x + b.y; });
   std::rotate(quad.begin(), first, quad.end());
 }
 
@@ -517,9 +551,8 @@ double BoundaryScore(const cv::Mat& gray, const Quad& quad, bool conservative) {
     for (int sample = 1; sample <= 19; ++sample) {
       const auto point = a + edge * (sample / 20.0f);
       const auto inside = point + normal, outside = point - normal;
-      const int signed_difference =
-          gray.at<std::uint8_t>(cvRound(inside.y), cvRound(inside.x)) -
-          gray.at<std::uint8_t>(cvRound(outside.y), cvRound(outside.x));
+      const int signed_difference = gray.at<std::uint8_t>(cvRound(inside.y), cvRound(inside.x)) -
+                                    gray.at<std::uint8_t>(cvRound(outside.y), cvRound(outside.x));
       const int difference = conservative ? signed_difference : std::abs(signed_difference);
       supporting += difference >= (conservative ? 20 : 14);
       mean_contrast += std::clamp(difference, 0, 65) / 65.0;
@@ -536,8 +569,10 @@ struct DocumentCandidate {
   double score;
 };
 
-void CollectDocuments(const cv::Mat& gray, cv::Mat mask,
-                      std::vector<DocumentCandidate>& candidates, bool conservative) {
+void CollectDocuments(const cv::Mat& gray,
+                      cv::Mat mask,
+                      std::vector<DocumentCandidate>& candidates,
+                      bool conservative) {
   std::vector<std::vector<cv::Point>> contours;
   cv::findContours(mask, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
   const double frame_area = gray.total();
@@ -578,13 +613,12 @@ std::optional<Quad> DetectDocument(const cv::Mat& image, bool conservative) {
   CollectDocuments(gray, mask, candidates, conservative);
   if (candidates.empty())
     return {};
-  std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
-    return a.score > b.score;
-  });
+  std::sort(candidates.begin(), candidates.end(),
+            [](const auto& a, const auto& b) { return a.score > b.score; });
   auto quad = candidates.front().quad;
-  for (std::size_t i = 1; i < candidates.size() &&
-                         candidates.front().score - candidates[i].score <
-                             (conservative ? 0.20 : 0.12); ++i) {
+  for (std::size_t i = 1; i < candidates.size() && candidates.front().score - candidates[i].score <
+                                                       (conservative ? 0.20 : 0.12);
+       ++i) {
     const auto& other = candidates[i].quad;
     const std::vector<cv::Point2f> a(quad.begin(), quad.end()), b(other.begin(), other.end());
     std::vector<cv::Point2f> overlap;
@@ -626,7 +660,7 @@ cv::Mat Rectify(const cv::Mat& image, const Quad& quad) {
   const int width = cvRound(std::max(Length(quad[1] - quad[0]), Length(quad[2] - quad[3])));
   const int height = cvRound(std::max(Length(quad[3] - quad[0]), Length(quad[2] - quad[1])));
   const double scale = std::min({1.0, std::sqrt(static_cast<double>(kMaxPixels) / (width * height)),
-                                static_cast<double>(kMaxDimension) / std::max(width, height)});
+                                 static_cast<double>(kMaxDimension) / std::max(width, height)});
   const int out_width = static_cast<int>(width * scale);
   const int out_height = static_cast<int>(height * scale);
   if (out_width < 32 || out_height < 32)
@@ -687,8 +721,7 @@ TextDirection EstimateTextDirection(const std::vector<cv::Point2d>& letters) {
     }
     for (std::size_t bin = 4; bin + 4 < bins.size(); ++bin) {
       const auto begin = smoothed.begin() + bin - 3;
-      if (smoothed[bin] >= 12 &&
-          std::max_element(begin, begin + 7) == smoothed.begin() + bin)
+      if (smoothed[bin] >= 12 && std::max_element(begin, begin + 7) == smoothed.begin() + bin)
         ++lines[step];
     }
   }
@@ -708,17 +741,15 @@ std::optional<double> DeskewAngle(const cv::Mat& image, const PhotoCancelled& ca
   cv::Mat dark;
   cv::morphologyEx(gray, dark, cv::MORPH_BLACKHAT,
                    cv::getStructuringElement(cv::MORPH_RECT, {9, 9}));
-  cv::threshold(dark, dark, std::max(6.0, 0.65 * Percentile(dark, 0.90)), 255,
-                cv::THRESH_BINARY);
+  cv::threshold(dark, dark, std::max(6.0, 0.65 * Percentile(dark, 0.90)), 255, cv::THRESH_BINARY);
   cv::Mat labels, stats, centers;
   const int count = cv::connectedComponentsWithStats(dark, labels, stats, centers, 8);
   std::vector<cv::Point2d> letters, left, right;
   int upper = 0, lower = 0;
   for (int i = 1; i < count; ++i) {
     const auto* box = stats.ptr<int>(i);
-    if (box[cv::CC_STAT_AREA] < 5 || box[cv::CC_STAT_WIDTH] < 2 ||
-        box[cv::CC_STAT_WIDTH] > 32 || box[cv::CC_STAT_HEIGHT] < 3 ||
-        box[cv::CC_STAT_HEIGHT] > 24)
+    if (box[cv::CC_STAT_AREA] < 5 || box[cv::CC_STAT_WIDTH] < 2 || box[cv::CC_STAT_WIDTH] > 32 ||
+        box[cv::CC_STAT_HEIGHT] < 3 || box[cv::CC_STAT_HEIGHT] > 24)
       continue;
     const cv::Point2d point{centers.at<double>(i, 0), centers.at<double>(i, 1)};
     if (point.x < 8 || point.x >= gray.cols - 8 || point.y < 8 || point.y >= gray.rows - 8)
@@ -734,8 +765,8 @@ std::optional<double> DeskewAngle(const cv::Mat& image, const PhotoCancelled& ca
     return {};
   CheckCancelled(cancelled);
   const auto full = EstimateTextDirection(letters);
-  if (std::abs(full.degrees) < 1 || std::abs(full.degrees) > 13 ||
-      full.dominance < 1.18 || full.lines < 3)
+  if (std::abs(full.degrees) < 1 || std::abs(full.degrees) > 13 || full.dominance < 1.18 ||
+      full.lines < 3)
     return {};
   for (const auto* region : {&left, &right}) {
     const auto direction = EstimateTextDirection(*region);
@@ -754,9 +785,9 @@ cv::Mat Deskew(const cv::Mat& image, double angle) {
   const double width = cosine * image.cols + sine * image.rows;
   const double height = sine * image.cols + cosine * image.rows;
   // Reserve the extra pixel per side needed for the integer canvas.
-  const double scale = std::min({1.0, std::sqrt(static_cast<double>(kMaxPixels) /
-                                               ((width + 1) * (height + 1))),
-                                 (kMaxDimension - 1.0) / std::max(width, height)});
+  const double scale =
+      std::min({1.0, std::sqrt(static_cast<double>(kMaxPixels) / ((width + 1) * (height + 1))),
+                (kMaxDimension - 1.0) / std::max(width, height)});
   const cv::Size size{static_cast<int>(std::ceil(width * scale)),
                       static_cast<int>(std::ceil(height * scale))};
   transform *= scale;
@@ -786,8 +817,8 @@ void EnhanceScan(cv::Mat& image, const PhotoCancelled& cancelled) {
     for (int x = 0; x < paper.cols; ++x) {
       const float local = paper.at<std::uint8_t>(y, x);
       const float jump = high.at<std::uint8_t>(y, x) - low.at<std::uint8_t>(y, x);
-      const float confidence = std::clamp((local - 58) / 48, 0.0f, 1.0f) *
-                               std::clamp(1 - (jump - 12) / 60, 0.25f, 1.0f);
+      const float confidence =
+          std::clamp((local - 58) / 48, 0.0f, 1.0f) * std::clamp(1 - (jump - 12) / 60, 0.25f, 1.0f);
       const float lift = std::clamp(reference / std::max(local, 64.0f) - 1, 0.0f, 0.70f);
       gain.at<std::uint8_t>(y, x) = cv::saturate_cast<std::uint8_t>(255 * lift * confidence);
     }
@@ -867,9 +898,9 @@ PhotoBurstAnalyzer::PhotoBurstAnalyzer() : impl_(std::make_unique<Impl>()) {}
 PhotoBurstAnalyzer::~PhotoBurstAnalyzer() = default;
 
 PhotoBurstDecision PhotoBurstAnalyzer::Observe(const std::string& frame_id,
-                                              std::span<const std::uint8_t> encoded,
-                                              const std::vector<std::string>& available,
-                                              const PhotoCancelled& cancelled) {
+                                               std::span<const std::uint8_t> encoded,
+                                               const std::vector<std::string>& available,
+                                               const PhotoCancelled& cancelled) {
   if (impl_->seen.size() >= 20)
     throw std::runtime_error("invalid-photo-count");
   if (frame_id.empty() || frame_id.size() > 128 || available.size() > 3 ||
@@ -920,7 +951,7 @@ PhotoBurstDecision PhotoBurstAnalyzer::Finish(const std::vector<std::string>& av
 }
 
 PhotoRankResult RankPhotos(std::span<const std::filesystem::path> inputs,
-                          const PhotoCancelled& cancelled) {
+                           const PhotoCancelled& cancelled) {
   if (inputs.empty() || inputs.size() > 6)
     throw std::runtime_error("invalid-photo-count");
   CheckCancelled(cancelled);
@@ -933,9 +964,8 @@ PhotoRankResult RankPhotos(std::span<const std::filesystem::path> inputs,
     qualities.push_back(Measure(image, i));
   }
   CheckCancelled(cancelled);
-  std::stable_sort(qualities.begin(), qualities.end(), [](const Quality& a, const Quality& b) {
-    return a.rank.score > b.rank.score;
-  });
+  std::stable_sort(qualities.begin(), qualities.end(),
+                   [](const Quality& a, const Quality& b) { return a.rank.score > b.rank.score; });
   const auto& best = qualities.front().rank;
   PhotoRankResult result{best.index, false, {best}, "clear-winner"};
   if (best.score < 0.23) {
@@ -964,9 +994,11 @@ PhotoRankResult RankPhotos(std::span<const std::filesystem::path> inputs,
   return result;
 }
 
-PhotoProcessResult ProcessPhoto(
-    const std::filesystem::path& input, const std::filesystem::path& output, PhotoMode mode,
-    const std::optional<std::array<PhotoPoint, 4>>& corners, const PhotoCancelled& cancelled) {
+PhotoProcessResult ProcessPhoto(const std::filesystem::path& input,
+                                const std::filesystem::path& output,
+                                PhotoMode mode,
+                                const std::optional<std::array<PhotoPoint, 4>>& corners,
+                                const PhotoCancelled& cancelled) {
   CheckCancelled(cancelled);
   std::error_code equivalent_error;
   if (std::filesystem::equivalent(input, output, equivalent_error))
@@ -974,8 +1006,8 @@ PhotoProcessResult ProcessPhoto(
   Imaging imaging;
   auto image = Decode(*imaging.factory.Get(), input, cancelled);
   CheckCancelled(cancelled);
-  const auto quad = corners ? std::optional{ManualQuad(image, *corners)} :
-                              DetectDocument(image, mode == PhotoMode::kScan);
+  const auto quad = corners ? std::optional{ManualQuad(image, *corners)}
+                            : DetectDocument(image, mode == PhotoMode::kScan);
   CheckCancelled(cancelled);
   std::string geometry = "unchanged";
   std::optional<double> angle;
@@ -1004,8 +1036,8 @@ PhotoProcessResult ProcessPhoto(
 }
 
 PhotoProcessResult CreatePhotoThumbnail(const std::filesystem::path& input,
-                                       const std::filesystem::path& output,
-                                       const PhotoCancelled& cancelled) {
+                                        const std::filesystem::path& output,
+                                        const PhotoCancelled& cancelled) {
   CheckCancelled(cancelled);
   std::error_code equivalent_error;
   if (std::filesystem::equivalent(input, output, equivalent_error))

@@ -36,8 +36,8 @@ FileChooserAcceptHints ExportFileChooserAcceptHints(const std::vector<std::u16st
       continue;
     }
     std::string utf8;
-    if (!base::UTF16ToUTF8(type.data(), type.size(), &utf8) ||
-        utf8.size() > 256 || !UsableHint(utf8)) {
+    if (!base::UTF16ToUTF8(type.data(), type.size(), &utf8) || utf8.size() > 256 ||
+        !UsableHint(utf8)) {
       result.omitted = true;
       continue;
     }

@@ -29,7 +29,8 @@ void CloseSetup(AtlasConsumerSetup& setup) {
     CloseHandle(std::exchange(setup.mapping, nullptr));
   for (auto& handles : {&setup.ready_fences, &setup.consumed_fences})
     for (auto& handle : *handles)
-      if (handle) CloseHandle(std::exchange(handle, nullptr));
+      if (handle)
+        CloseHandle(std::exchange(handle, nullptr));
 }
 
 constexpr char kShader[] = R"(
@@ -141,8 +142,10 @@ struct AtlasConsumer::Impl {
     sampler.Reset();
     pixel_shader.Reset();
     vertex_shader.Reset();
-    for (auto& fence : ready) fence.Reset();
-    for (auto& fence : consumed) fence.Reset();
+    for (auto& fence : ready)
+      fence.Reset();
+    for (auto& fence : consumed)
+      fence.Reset();
     pending = ready_value = consumed_value = 0;
     context.Reset();
     device.Reset();
@@ -245,9 +248,11 @@ struct AtlasConsumer::Impl {
       if (!setup.ready_fences[i] || !setup.consumed_fences[i])
         return Fail(L"Missing per-slot fence handle");
       hr = device->OpenSharedFence(setup.ready_fences[i], IID_PPV_ARGS(&ready[i]));
-      if (FAILED(hr)) return Fail(L"Shared ready fence import failed", hr);
+      if (FAILED(hr))
+        return Fail(L"Shared ready fence import failed", hr);
       hr = device->OpenSharedFence(setup.consumed_fences[i], IID_PPV_ARGS(&consumed[i]));
-      if (FAILED(hr)) return Fail(L"Shared consumed fence import failed", hr);
+      if (FAILED(hr))
+        return Fail(L"Shared consumed fence import failed", hr);
     }
     for (std::size_t i = 0; i < textures.size(); ++i) {
       hr = device->OpenSharedResource1(setup.textures[i], IID_PPV_ARGS(&textures[i]));
@@ -353,11 +358,13 @@ AtlasPollResult AtlasConsumer::Impl::Poll() {
   bool layout_stable = false;
   for (int attempt = 0; attempt < 3; ++attempt) {
     const auto before = InterlockedCompareExchange64(layout_sequence, 0, 0);
-    if (before & 1) continue;
+    if (before & 1)
+      continue;
     std::memcpy(&layout, &mapping_header->latest_layout, sizeof(layout));
     MemoryBarrier();
     if (before == InterlockedCompareExchange64(layout_sequence, 0, 0)) {
-      layout_stable = true; break;
+      layout_stable = true;
+      break;
     }
   }
   if (layout_stable && layout.status != SharedAtlasStatus::kStarting &&
@@ -380,12 +387,17 @@ AtlasPollResult AtlasConsumer::Impl::Poll() {
       bool stable = false;
       for (int attempt = 0; attempt < 3; ++attempt) {
         const LONG64 before = InterlockedCompareExchange64(sequence, 0, 0);
-        if (before & 1) continue;
+        if (before & 1)
+          continue;
         std::memcpy(&frame, &slot.frame, sizeof(frame));
         MemoryBarrier();
-        if (before == InterlockedCompareExchange64(sequence, 0, 0)) { stable = true; break; }
+        if (before == InterlockedCompareExchange64(sequence, 0, 0)) {
+          stable = true;
+          break;
+        }
       }
-      if (!stable) return AtlasPollResult::idle;
+      if (!stable)
+        return AtlasPollResult::idle;
       if (frame.generation != setup.generation || frame.slot != 0 ||
           frame.ready_fence_value != pending || !frame.frame_id ||
           frame.width_pixels != setup.width || frame.height_pixels != setup.height ||
@@ -397,18 +409,23 @@ AtlasPollResult AtlasConsumer::Impl::Poll() {
         const auto& view = frame.views[i];
         if (!std::isfinite(view.atlas_pixels_per_dip) || view.atlas_pixels_per_dip <= 0 ||
             !std::isfinite(view.page_device_scale_factor) || view.page_device_scale_factor <= 0) {
-          Fail(L"Invalid render view scale"); return AtlasPollResult::error;
+          Fail(L"Invalid render view scale");
+          return AtlasPollResult::error;
         }
       }
       ID3D11ShaderResourceView* empty = nullptr;
       context->PSSetShaderResources(0, 1, &empty);
       hr = context->Wait(ready[0].Get(), pending);
-      if (FAILED(hr)) { Fail(L"Ready fence GPU wait failed", hr); return AtlasPollResult::error; }
+      if (FAILED(hr)) {
+        Fail(L"Ready fence GPU wait failed", hr);
+        return AtlasPollResult::error;
+      }
       read_without_signal = true;
       context->CopyResource(cache.Get(), textures[0].Get());
       hr = context->Signal(consumed[0].Get(), pending);
       if (FAILED(hr)) {
-        context->Flush(); Fail(L"Consumed GPU signal failed; resources retained", hr);
+        context->Flush();
+        Fail(L"Consumed GPU signal failed; resources retained", hr);
         return AtlasPollResult::error;
       }
       read_without_signal = false;
@@ -422,9 +439,13 @@ AtlasPollResult AtlasConsumer::Impl::Poll() {
   if (pending && ready_value) {
     const auto done = consumed[0]->GetCompletedValue();
     if (done == std::numeric_limits<UINT64>::max()) {
-      Fail(L"Invalid consumed fence completion"); return AtlasPollResult::error;
+      Fail(L"Invalid consumed fence completion");
+      return AtlasPollResult::error;
     }
-    if (done >= pending) { consumed_value = pending; pending = 0; }
+    if (done >= pending) {
+      consumed_value = pending;
+      pending = 0;
+    }
   }
   if (!repaint || !last_frame || !client_width || !client_height)
     return AtlasPollResult::idle;
@@ -532,16 +553,22 @@ bool AtlasConsumer::Close() {
   return true;
 }
 bool AtlasConsumer::Begin(std::uint64_t value) {
-  if (!value || impl_->pending || impl_->failed) return false;
+  if (!value || impl_->pending || impl_->failed)
+    return false;
   impl_->pending = value;
   impl_->ready_value = impl_->consumed_value = 0;
   return true;
 }
 void AtlasConsumer::Reject(std::uint64_t value) {
-  if (impl_->pending == value && !impl_->ready_value) impl_->pending = 0;
+  if (impl_->pending == value && !impl_->ready_value)
+    impl_->pending = 0;
 }
-std::uint64_t AtlasConsumer::ReadyValue() const { return impl_->ready_value; }
-std::uint64_t AtlasConsumer::ConsumedValue() const { return impl_->consumed_value; }
+std::uint64_t AtlasConsumer::ReadyValue() const {
+  return impl_->ready_value;
+}
+std::uint64_t AtlasConsumer::ConsumedValue() const {
+  return impl_->consumed_value;
+}
 bool AtlasConsumer::Resize() {
   return impl_->Resize();
 }

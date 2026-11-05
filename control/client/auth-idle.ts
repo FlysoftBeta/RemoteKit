@@ -6,9 +6,11 @@ interface IdleMonitor extends EventTarget {
   screenState: 'locked' | 'unlocked' | null;
   start(options: { threshold: number; signal: AbortSignal }): Promise<void>;
 }
-const IdleDetector = (globalThis as typeof globalThis & {
-  IdleDetector?: { new(): IdleMonitor; requestPermission(): Promise<PermissionState> };
-}).IdleDetector;
+const IdleDetector = (
+  globalThis as typeof globalThis & {
+    IdleDetector?: { new (): IdleMonitor; requestPermission(): Promise<PermissionState> };
+  }
+).IdleDetector;
 
 export function useAutoLock(auth: AuthState | null, lock: (reason: string) => void) {
   const [permission, setPermission] = useState<PermissionState>();
@@ -26,14 +28,22 @@ export function useAutoLock(auth: AuthState | null, lock: (reason: string) => vo
     if (!IdleDetector) return;
     let live = true;
     let watched: PermissionStatus | undefined;
-    const update = () => { if (live) setPermission(watched?.state); };
-    void navigator.permissions?.query({ name: 'idle-detection' as PermissionName }).then(result => {
-      if (!live) return;
-      watched = result;
-      result.addEventListener('change', update);
-      update();
-    }).catch(() => {});
-    return () => { live = false; watched?.removeEventListener('change', update); };
+    const update = () => {
+      if (live) setPermission(watched?.state);
+    };
+    void navigator.permissions
+      ?.query({ name: 'idle-detection' as PermissionName })
+      .then((result) => {
+        if (!live) return;
+        watched = result;
+        result.addEventListener('change', update);
+        update();
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+      watched?.removeEventListener('change', update);
+    };
   }, []);
 
   useEffect(() => {
@@ -46,9 +56,15 @@ export function useAutoLock(auth: AuthState | null, lock: (reason: string) => vo
       if (away) lock(monitor.screenState === 'locked' ? 'system' : 'idle');
     };
     monitor.addEventListener('change', change);
-    void monitor.start({ threshold: Math.max(60, idleSeconds) * 1000, signal: controller.signal }).then(() => {
-      if (!controller.signal.aborted) { setSystem(true); change(); }
-    }).catch(() => {});
+    void monitor
+      .start({ threshold: Math.max(60, idleSeconds) * 1000, signal: controller.signal })
+      .then(() => {
+        if (!controller.signal.aborted) {
+          setSystem(true);
+          change();
+        }
+      })
+      .catch(() => {});
     return () => {
       controller.abort();
       monitor.removeEventListener('change', change);
@@ -60,10 +76,14 @@ export function useAutoLock(auth: AuthState | null, lock: (reason: string) => vo
   useEffect(() => {
     if (locked || !enabled || (system && idleSeconds >= 60)) return;
     let lastActivity = performance.now();
-    const activity = () => { lastActivity = performance.now(); };
+    const activity = () => {
+      lastActivity = performance.now();
+    };
     const events = ['pointerdown', 'pointermove', 'keydown', 'wheel', 'input'] as const;
     for (const event of events) window.addEventListener(event, activity, { capture: true, passive: true });
-    const timer = setInterval(() => { if (performance.now() - lastActivity >= idleSeconds * 1000) lock('idle'); }, 1000);
+    const timer = setInterval(() => {
+      if (performance.now() - lastActivity >= idleSeconds * 1000) lock('idle');
+    }, 1000);
     return () => {
       clearInterval(timer);
       for (const event of events) window.removeEventListener(event, activity, true);
@@ -72,7 +92,9 @@ export function useAutoLock(auth: AuthState | null, lock: (reason: string) => vo
 
   useEffect(() => {
     if (locked || !lockOnHidden) return;
-    const hidden = () => { if (document.hidden) lock('hidden'); };
+    const hidden = () => {
+      if (document.hidden) lock('hidden');
+    };
     document.addEventListener('visibilitychange', hidden);
     hidden();
     return () => document.removeEventListener('visibilitychange', hidden);

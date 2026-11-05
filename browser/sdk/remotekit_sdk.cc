@@ -136,19 +136,21 @@ void RetireChannel(uint64_t handle, const std::shared_ptr<ControlChannel>& chann
 constexpr size_t kMaxMessageSize = 1024 * 1024;
 void RunPoolLifecycle(SDKState& state, bool start) {
   base::WaitableEvent done;
-  state.io_thread->task_runner()->PostTask(FROM_HERE, base::BindOnce(
-      [](bool start_pool, base::WaitableEvent* completed) {
-        if (start_pool) {
-          base::ThreadPoolInstance::CreateAndStartWithDefaultParams("RemoteKitSDK");
-        } else {
-          base::ThreadPoolInstance::Get()->Shutdown();
-          // Shutdown leaves Chromium workers alive; a loadable SDK requires
-          // the complete join barrier before DLL unload.
-          base::ThreadPoolInstance::Get()->JoinForTesting();
-          base::ThreadPoolInstance::Set(nullptr);
-        }
-        completed->Signal();
-      }, start, base::Unretained(&done)));
+  state.io_thread->task_runner()->PostTask(
+      FROM_HERE, base::BindOnce(
+                     [](bool start_pool, base::WaitableEvent* completed) {
+                       if (start_pool) {
+                         base::ThreadPoolInstance::CreateAndStartWithDefaultParams("RemoteKitSDK");
+                       } else {
+                         base::ThreadPoolInstance::Get()->Shutdown();
+                         // Shutdown leaves Chromium workers alive; a loadable SDK requires
+                         // the complete join barrier before DLL unload.
+                         base::ThreadPoolInstance::Get()->JoinForTesting();
+                         base::ThreadPoolInstance::Set(nullptr);
+                       }
+                       completed->Signal();
+                     },
+                     start, base::Unretained(&done)));
   done.Wait();
 }
 }  // namespace
@@ -157,7 +159,8 @@ void RunPoolLifecycle(SDKState& state, bool start) {
 int RemoteKitSdkBeginRtc() {
   auto& state = State();
   std::lock_guard lock(state.lock);
-  if (!state.at_exit || state.stopped || state.stopping) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!state.at_exit || state.stopped || state.stopping)
+    return REMOTEKIT_SDK_INVALID_STATE;
   ++state.rtc_peers;
   return REMOTEKIT_SDK_OK;
 }
@@ -341,14 +344,15 @@ int remotekit_sdk_control_connect(const char* name_utf8, uint64_t* handle) {
 
 namespace {
 int ControlRequestInternal(uint64_t handle,
-                                  const void* input,
-                                  size_t size,
-                                  void* output,
-                                  size_t capacity,
-                                  size_t* output_size,
-                                  uint32_t timeout_ms,
-                                  std::vector<mojo::ScopedHandle>* attachments) {
-  if (attachments) attachments->clear();
+                           const void* input,
+                           size_t size,
+                           void* output,
+                           size_t capacity,
+                           size_t* output_size,
+                           uint32_t timeout_ms,
+                           std::vector<mojo::ScopedHandle>* attachments) {
+  if (attachments)
+    attachments->clear();
   if (output_size)
     *output_size = 0;
   OperationLease lease;
@@ -408,15 +412,21 @@ int ControlRequestInternal(uint64_t handle,
   auto output_bytes = UNSAFE_BUFFERS(base::span(static_cast<uint8_t*>(output), response.size()));
   output_bytes.copy_from(response);
   *output_size = response.size();
-  if (attachments) *attachments = std::move(received_handles);
+  if (attachments)
+    *attachments = std::move(received_handles);
   return REMOTEKIT_SDK_OK;
 }
 
-} // namespace
-int remotekit_sdk_control_request(uint64_t handle, const void* input, size_t size,
-    void* output, size_t capacity, size_t* output_size, uint32_t timeout_ms) {
-  return ControlRequestInternal(handle, input, size, output, capacity, output_size,
-                                timeout_ms, nullptr);
+}  // namespace
+int remotekit_sdk_control_request(uint64_t handle,
+                                  const void* input,
+                                  size_t size,
+                                  void* output,
+                                  size_t capacity,
+                                  size_t* output_size,
+                                  uint32_t timeout_ms) {
+  return ControlRequestInternal(handle, input, size, output, capacity, output_size, timeout_ms,
+                                nullptr);
 }
 
 int remotekit_sdk_control_close(uint64_t handle) {
@@ -444,9 +454,9 @@ void RenderReader(std::shared_ptr<RenderConnection> channel) {
     std::vector<uint8_t> bytes;
     std::vector<mojo::ScopedHandle> handles;
     const auto result = channel->failed.load(std::memory_order_acquire)
-        ? MOJO_RESULT_FAILED_PRECONDITION
-        : mojo::ReadMessageRaw(channel->pipe.get(), &bytes, &handles,
-                               MOJO_READ_MESSAGE_FLAG_NONE);
+                            ? MOJO_RESULT_FAILED_PRECONDITION
+                            : mojo::ReadMessageRaw(channel->pipe.get(), &bytes, &handles,
+                                                   MOJO_READ_MESSAGE_FLAG_NONE);
     if (result == MOJO_RESULT_SHOULD_WAIT) {
       base::PlatformThread::Sleep(base::Milliseconds(1));
       continue;
@@ -463,9 +473,8 @@ void RenderReader(std::shared_ptr<RenderConnection> channel) {
       if (message.magic == remotekit::kRenderWireMagic &&
           message.version == remotekit::kRenderWireVersion &&
           message.type == remotekit::RenderWireType::kReject &&
-          remotekit::ValidRenderIdentity(message.begin.identity) &&
-          message.reason >= 1 && message.reason <= 4 &&
-          !message.begin.interval_us && !message.begin.force) {
+          remotekit::ValidRenderIdentity(message.begin.identity) && message.reason >= 1 &&
+          message.reason <= 4 && !message.begin.interval_us && !message.begin.force) {
         event.type = REMOTEKIT_SDK_RENDER_REJECT;
         event.reason = message.reason;
         event.generation = message.begin.identity.generation;
@@ -478,7 +487,8 @@ void RenderReader(std::shared_ptr<RenderConnection> channel) {
           // Stop may have crossed an already queued inbound Wake. Ignore that
           // known wake without treating it as a fresh demand or GPU completion.
           if (channel->generation_state.stopping() ||
-              observed == remotekit::RenderWakeResult::kDuplicate) continue;
+              observed == remotekit::RenderWakeResult::kDuplicate)
+            continue;
           event.type = REMOTEKIT_SDK_RENDER_WAKE;
           event.generation = message.begin.identity.generation;
           event.value = message.begin.identity.value;
@@ -512,49 +522,63 @@ void RenderReader(std::shared_ptr<RenderConnection> channel) {
     std::lock_guard callback_lock(channel->callback_lock);
     if (event.type == REMOTEKIT_SDK_RENDER_WAKE) {
       std::lock_guard lock(channel->lock);
-      if (channel->generation_state.stopping()) continue;
+      if (channel->generation_state.stopping())
+        continue;
     }
     // close joins this thread before returning, including any active callback.
-    if (channel->closed.load(std::memory_order_acquire)) break;
+    if (channel->closed.load(std::memory_order_acquire))
+      break;
     const bool fatal = event.type == REMOTEKIT_SDK_RENDER_FATAL;
-    if (fatal) channel->closed.store(true, std::memory_order_release);
+    if (fatal)
+      channel->closed.store(true, std::memory_order_release);
     channel->callback(channel->context, &event);
-    if (fatal) break;
+    if (fatal)
+      break;
   }
 }
-} // namespace
+}  // namespace
 int remotekit_sdk_render_connect(const char* name_utf8,
-    remotekit_sdk_render_callback callback, void* context, uint64_t* handle) {
-  if (!handle) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+                                 remotekit_sdk_render_callback callback,
+                                 void* context,
+                                 uint64_t* handle) {
+  if (!handle)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   *handle = 0;
-  if (!name_utf8 || !callback) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!name_utf8 || !callback)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   size_t length = 0;
   for (; length <= 128; ++length) {
     const unsigned char ch = UNSAFE_BUFFERS(name_utf8[length]);
-    if (!ch) break;
-    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-          (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.'))
+    if (!ch)
+      break;
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+          ch == '_' || ch == '-' || ch == '.'))
       return REMOTEKIT_SDK_INVALID_ARGUMENT;
   }
-  if (!length || length > 128) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!length || length > 128)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   OperationLease lease;
-  if (!lease) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!lease)
+    return REMOTEKIT_SDK_INVALID_STATE;
   const auto token = UNSAFE_BUFFERS(std::string_view(name_utf8, length));
   auto channel = std::make_shared<RenderConnection>();
   channel->callback = callback;
   channel->context = context;
   auto& state = State();
   std::lock_guard lock(state.lock);
-  if (state.stopping || !state.next_handle) return REMOTEKIT_SDK_INVALID_STATE;
+  if (state.stopping || !state.next_handle)
+    return REMOTEKIT_SDK_INVALID_STATE;
   // The opaque token is scoped to its original live Control connection. Claim
   // is atomic with control close/retire/new-open and consumes it exactly once.
   for (auto& [control_id, control] : state.channels) {
-    if (!control->closed.load(std::memory_order_acquire) && control->pending_render.Matches(token)) {
+    if (!control->closed.load(std::memory_order_acquire) &&
+        control->pending_render.Matches(token)) {
       channel->pipe = control->pending_render.Claim(token);
       break;
     }
   }
-  if (!channel->pipe.is_valid()) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (!channel->pipe.is_valid())
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
   const uint64_t id = state.next_handle++;
   state.render_channels.emplace(id, channel);
   channel->reader = std::thread(RenderReader, channel);
@@ -562,33 +586,41 @@ int remotekit_sdk_render_connect(const char* name_utf8,
   *handle = id;
   return REMOTEKIT_SDK_OK;
 }
-int remotekit_sdk_render_begin(uint64_t handle,
-                              const struct remotekit_sdk_render_request* begin) {
-  if (!begin) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+int remotekit_sdk_render_begin(uint64_t handle, const struct remotekit_sdk_render_request* begin) {
+  if (!begin)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   remotekit::RenderWireMessage message;
   message.begin.identity.generation = begin->generation;
   message.begin.identity.value = begin->value;
   message.begin.identity.slot = begin->slot;
   message.begin.interval_us = begin->interval_us;
   message.begin.force = begin->force;
-  if (!remotekit::ValidRenderBegin(message.begin)) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!remotekit::ValidRenderBegin(message.begin))
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   OperationLease lease;
-  if (!lease) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (!lease)
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
   std::shared_ptr<RenderConnection> channel;
   {
     auto& state = State();
     std::lock_guard lock(state.lock);
     const auto found = state.render_channels.find(handle);
-    if (found == state.render_channels.end()) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+    if (found == state.render_channels.end())
+      return REMOTEKIT_SDK_CHANNEL_CLOSED;
     channel = found->second;
   }
   std::lock_guard lock(channel->lock);
-  if (channel->closed.load(std::memory_order_acquire)) return REMOTEKIT_SDK_CHANNEL_CLOSED;
-  if (channel->generation_state.stopping()) return REMOTEKIT_SDK_INVALID_STATE;
-  if (!channel->generation_state.CanBegin(begin->generation)) return REMOTEKIT_SDK_DATA_MISMATCH;
-  if (begin->value <= channel->last_value) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (channel->closed.load(std::memory_order_acquire))
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (channel->generation_state.stopping())
+    return REMOTEKIT_SDK_INVALID_STATE;
+  if (!channel->generation_state.CanBegin(begin->generation))
+    return REMOTEKIT_SDK_DATA_MISMATCH;
+  if (begin->value <= channel->last_value)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   auto& pending = channel->pending[begin->slot];
-  if (pending) return REMOTEKIT_SDK_BUSY;
+  if (pending)
+    return REMOTEKIT_SDK_BUSY;
   if (mojo::WriteMessageRaw(channel->pipe.get(), &message, sizeof(message), nullptr, 0,
                             MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
     channel->failed.store(true, std::memory_order_release);
@@ -600,26 +632,31 @@ int remotekit_sdk_render_begin(uint64_t handle,
   return REMOTEKIT_SDK_OK;
 }
 int remotekit_sdk_render_observe_signal(uint64_t handle,
-    const struct remotekit_sdk_render_identity* identity) {
-  if (!identity) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+                                        const struct remotekit_sdk_render_identity* identity) {
+  if (!identity)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   remotekit::RenderIdentity value;
   value.generation = identity->generation;
   value.value = identity->value;
   value.slot = identity->slot;
   value.reserved = identity->reserved;
-  if (!remotekit::ValidRenderIdentity(value)) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!remotekit::ValidRenderIdentity(value))
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   OperationLease lease;
-  if (!lease) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (!lease)
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
   std::shared_ptr<RenderConnection> channel;
   {
     auto& state = State();
     std::lock_guard lock(state.lock);
     const auto found = state.render_channels.find(handle);
-    if (found == state.render_channels.end()) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+    if (found == state.render_channels.end())
+      return REMOTEKIT_SDK_CHANNEL_CLOSED;
     channel = found->second;
   }
   std::lock_guard lock(channel->lock);
-  if (channel->closed.load(std::memory_order_acquire)) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (channel->closed.load(std::memory_order_acquire))
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
   auto& pending = channel->pending[value.slot];
   if (!pending || pending->generation != value.generation || pending->value != value.value)
     return REMOTEKIT_SDK_DATA_MISMATCH;
@@ -627,24 +664,30 @@ int remotekit_sdk_render_observe_signal(uint64_t handle,
   return REMOTEKIT_SDK_OK;
 }
 int remotekit_sdk_render_stop(uint64_t handle, uint64_t generation) {
-  if (!generation) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!generation)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   OperationLease lease;
-  if (!lease) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (!lease)
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
   std::shared_ptr<RenderConnection> channel;
   {
     auto& state = State();
     std::lock_guard lock(state.lock);
     const auto found = state.render_channels.find(handle);
-    if (found == state.render_channels.end()) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+    if (found == state.render_channels.end())
+      return REMOTEKIT_SDK_CHANNEL_CLOSED;
     channel = found->second;
   }
   // Same mutex as Begin establishes the wire FIFO boundary without queued tasks.
   // Lock callback first, matching the reader's Wake delivery gate.
   std::lock_guard callback_lock(channel->callback_lock);
   std::lock_guard lock(channel->lock);
-  if (channel->closed.load(std::memory_order_acquire)) return REMOTEKIT_SDK_CHANNEL_CLOSED;
-  if (!channel->generation_state.CanStop(generation)) return REMOTEKIT_SDK_DATA_MISMATCH;
-  if (channel->generation_state.stopping()) return REMOTEKIT_SDK_OK;
+  if (channel->closed.load(std::memory_order_acquire))
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (!channel->generation_state.CanStop(generation))
+    return REMOTEKIT_SDK_DATA_MISMATCH;
+  if (channel->generation_state.stopping())
+    return REMOTEKIT_SDK_OK;
   remotekit::RenderWireMessage message;
   message.type = remotekit::RenderWireType::kStop;
   message.begin.identity.generation = generation;
@@ -658,13 +701,15 @@ int remotekit_sdk_render_stop(uint64_t handle, uint64_t generation) {
 }
 int remotekit_sdk_render_close(uint64_t handle) {
   OperationLease lease;
-  if (!lease) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  if (!lease)
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
   std::shared_ptr<RenderConnection> channel;
   {
     auto& state = State();
     std::lock_guard lock(state.lock);
     const auto found = state.render_channels.find(handle);
-    if (found == state.render_channels.end()) return REMOTEKIT_SDK_CHANNEL_CLOSED;
+    if (found == state.render_channels.end())
+      return REMOTEKIT_SDK_CHANNEL_CLOSED;
     channel = found->second;
     if (channel->reader_id == std::this_thread::get_id())
       return REMOTEKIT_SDK_INVALID_STATE;
@@ -675,9 +720,11 @@ int remotekit_sdk_render_close(uint64_t handle) {
   {
     std::lock_guard lock(channel->lock);
     channel->closed.store(true, std::memory_order_release);
-    for (auto& pending : channel->pending) pending.reset();
+    for (auto& pending : channel->pending)
+      pending.reset();
   }
-  if (channel->reader.joinable()) channel->reader.join();
+  if (channel->reader.joinable())
+    channel->reader.join();
   {
     auto& state = State();
     std::lock_guard state_lock(state.lock);
@@ -766,8 +813,10 @@ class ReplyHandles {
   }
   void Transfer(const remotekit_sdk_render_setup& setup) {
     owned_.erase(setup.mapping_handle);
-    for (uint64_t value : setup.ready_fence_handles) owned_.erase(value);
-    for (uint64_t value : setup.consumed_fence_handles) owned_.erase(value);
+    for (uint64_t value : setup.ready_fence_handles)
+      owned_.erase(value);
+    for (uint64_t value : setup.consumed_fence_handles)
+      owned_.erase(value);
     for (uint64_t value : setup.texture_handles)
       owned_.erase(value);
   }
@@ -795,7 +844,8 @@ class ReplyHandles {
     Add(dict.Find("mapping_handle"));
     for (const char* key : {"ready_fence_handles", "consumed_fence_handles"})
       if (const auto* list = dict.FindList(key))
-        for (const auto& value : *list) Add(&value);
+        for (const auto& value : *list)
+          Add(&value);
     if (const auto* textures = dict.FindList("texture_handles"))
       for (const auto& texture : *textures)
         Add(&texture);
@@ -813,8 +863,8 @@ int ExchangeJson(uint64_t handle,
   std::vector<uint8_t> response(kMaxMessageSize);
   size_t size = 0;
   // control_request serializes the exchange on this channel only.
-  int status = ControlRequestInternal(handle, request.data(), request.size(),
-                                      response.data(), response.size(), &size, timeout_ms, attachments);
+  int status = ControlRequestInternal(handle, request.data(), request.size(), response.data(),
+                                      response.size(), &size, timeout_ms, attachments);
   if (status != REMOTEKIT_SDK_OK)
     return status;
   if (size > response.size())
@@ -888,8 +938,7 @@ bool Pending(const base::DictValue& reply) {
 }
 // Log only exact, bounded Browser-owned error literals. Unknown replies never
 // expose arbitrary payloads, full JSON, resource handles or OS error values.
-void LogRenderOpenFailure(bool opening, const base::DictValue& reply,
-                          std::string_view fallback) {
+void LogRenderOpenFailure(bool opening, const base::DictValue& reply, std::string_view fallback) {
   constexpr std::string_view kKnownErrors[] = {
       "output_gpu_fault_sealed",
       "consumer_pid_required",
@@ -948,27 +997,35 @@ bool ParseRender(const base::DictValue& reply, remotekit_sdk_render_setup* setup
       !Int32Field(dict, "adapter_luid_high", &parsed.adapter_luid_high))
     return false;
   const auto* name = dict.FindString("render_channel");
-  if (!name || name->empty() || name->size() > 128) return false;
+  if (!name || name->empty() || name->size() > 128)
+    return false;
   for (char ch : *name)
-    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
-          (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' || ch == '.')) return false;
+    if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+          ch == '_' || ch == '-' || ch == '.'))
+      return false;
   // SAFETY: name is bounded above to 128 bytes; render_channel has 129 bytes
   // and parsed was zero-initialized, preserving the terminating NUL.
   UNSAFE_BUFFERS(std::memcpy(parsed.render_channel, name->data(), name->size()));
   std::set<uint64_t> unique{parsed.mapping_handle};
-  for (auto entry : {std::pair{"texture_handles", base::span(parsed.texture_handles)},
-                     std::pair{"ready_fence_handles", base::span(parsed.ready_fence_handles)},
-                     std::pair{"consumed_fence_handles", base::span(parsed.consumed_fence_handles)}}) {
+  for (auto entry :
+       {std::pair{"texture_handles", base::span(parsed.texture_handles)},
+        std::pair{"ready_fence_handles", base::span(parsed.ready_fence_handles)},
+        std::pair{"consumed_fence_handles", base::span(parsed.consumed_fence_handles)}}) {
     const auto* list = dict.FindList(entry.first);
-    if (!list || list->size() != 4) return false;
+    if (!list || list->size() != 4)
+      return false;
     for (size_t i = 0; i < 4; ++i) {
       const auto* text = (*list)[i].GetIfString();
-      if (!text || !DecimalUint64(*text, &entry.second[i])) return false;
+      if (!text || !DecimalUint64(*text, &entry.second[i]))
+        return false;
       unique.insert(entry.second[i]);
     }
   }
-  if (unique.size() != 13) return false;
-  for (uint64_t handle : unique) if (!ValidHandle(handle)) return false;
+  if (unique.size() != 13)
+    return false;
+  for (uint64_t handle : unique)
+    if (!ValidHandle(handle))
+      return false;
   *setup = parsed;
   return true;
 }
@@ -991,15 +1048,14 @@ int remotekit_sdk_control_command_token(uint64_t handle,
   return Command(handle, json, size, timeout_ms, token);
 }
 int remotekit_sdk_control_open_render(uint64_t handle,
-                                     uint32_t consumer_pid,
-                                     remotekit_sdk_render_setup* setup,
-                                     uint32_t timeout_ms) {
+                                      uint32_t consumer_pid,
+                                      remotekit_sdk_render_setup* setup,
+                                      uint32_t timeout_ms) {
   if (!setup || setup->struct_size != sizeof(*setup))
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   *setup = {};
   setup->struct_size = sizeof(*setup);
-  if (consumer_pid != GetCurrentProcessId() || !timeout_ms ||
-      timeout_ms > 30000)
+  if (consumer_pid != GetCurrentProcessId() || !timeout_ms || timeout_ms > 30000)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   OperationLease lease;
   if (!lease)

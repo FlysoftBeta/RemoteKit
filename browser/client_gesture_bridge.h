@@ -17,14 +17,16 @@ namespace remotekit::browser {
 enum class ClientTouchAckState { canonical, target_mismatch, timeout };
 // UI sequence only. Owns arbitration, never recognition or a fling curve.
 class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient,
-                                 public base::RefCounted<ClientGestureBridge> {
+                                  public base::RefCounted<ClientGestureBridge> {
  public:
   ClientGestureBridge(input::RenderWidgetHostInputEventRouter*,
                       input::RenderWidgetHostViewInput* root,
                       input::RenderWidgetHostViewInput* target,
-                      std::string sequence, base::TimeTicks origin,
+                      std::string sequence,
+                      base::TimeTicks origin,
                       base::RepeatingCallback<void(ClientTouchAckState, bool, bool)> processed);
-  Status Dispatch(blink::WebTouchEvent event, const std::vector<TouchInput::Gesture>&,
+  Status Dispatch(blink::WebTouchEvent event,
+                  const std::vector<TouchInput::Gesture>&,
                   int64_t source_elapsed_us);
   base::TimeTicks NativeTimestamp(base::TimeTicks sampled);
   Status Momentum(const GestureInput&);
@@ -33,10 +35,12 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
   void ForwardGestureEvent(const ui::GestureEventData&) override;
   const std::string& sequence() const { return sequence_; }
   bool pending() const { return !pending_.empty(); }
+
  private:
   friend class base::RefCounted<ClientGestureBridge>;
   ~ClientGestureBridge();
-  void Ack(const blink::WebTouchEvent&, blink::mojom::InputEventResultState,
+  void Ack(const blink::WebTouchEvent&,
+           blink::mojom::InputEventResultState,
            input::RenderWidgetHostViewInput*);
   bool Route(blink::WebGestureEvent);
   void EndMomentum();

@@ -127,20 +127,25 @@ struct HarnessMainParts::State {
   // ACK removes the replay payload, while the compact identity set prevents
   // a delayed create request from resurrecting a closed view in this process.
   std::set<WebViewId> retired_views;
-  Result<Atlas> Layout(const std::vector<ViewSpec>& next, WebViewId extra = 0,
-                       int width = 0, int height = 0) {
+  Result<Atlas> Layout(const std::vector<ViewSpec>& next,
+                       WebViewId extra = 0,
+                       int width = 0,
+                       int height = 0) {
     std::vector<PackItem> items;
     for (size_t i = 0; i < next.size(); ++i) {
-      if (!next[i].visible) continue;
-      items.push_back({i < contents.size() ? contents[i]->view_id() : extra,
-                       next[i].width, next[i].height, 1.0});
+      if (!next[i].visible)
+        continue;
+      items.push_back({i < contents.size() ? contents[i]->view_id() : extra, next[i].width,
+                       next[i].height, 1.0});
     }
-    return PackAtlas(width ? width : logical_width, height ? height : logical_height, 4, OrderAtlasItems(std::move(items)));
+    return PackAtlas(width ? width : logical_width, height ? height : logical_height, 4,
+                     OrderAtlasItems(std::move(items)));
   }
   void ApplyLayout(const Atlas& atlas) {
     placements.clear();
     for (size_t i = 0; i < contents.size(); ++i) {
-      const auto found = std::ranges::find(atlas.placements, contents[i]->view_id(), &Placement::view);
+      const auto found =
+          std::ranges::find(atlas.placements, contents[i]->view_id(), &Placement::view);
       const bool visible = found != atlas.placements.end();
       contents[i]->InvalidateLayoutInput(visible);
       const auto rect = visible ? found->content : PixelRect{0, 0, specs[i].width, specs[i].height};
@@ -150,7 +155,8 @@ struct HarnessMainParts::State {
       }
       CHECK(contents[i]->SetVisible(visible));
       placements.emplace_back(rect.x, rect.y, rect.width, rect.height);
-      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
+      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet,
+                                   PageScale(specs[i]), !demo);
     }
     UpdateOutput();
   }
@@ -165,7 +171,8 @@ struct HarnessMainParts::State {
     closed_views.insert_or_assign(view, std::move(tombstone));
     retired_views.insert(view);
     std::erase_if(adopted_popups, [view](const auto& item) { return item.second == view; });
-    if (output) output->StopView(view);
+    if (output)
+      output->StopView(view);
     paused_output.insert(view);
     UpdateOutput();
     page_requests[index]->Bind(nullptr);
@@ -182,12 +189,14 @@ struct HarnessMainParts::State {
     paused_output.erase(view);
     endpoint.RemoveWebView(session, view);
     auto layout = Layout(specs);
-    if (layout) ApplyLayout(layout.value);
+    if (layout)
+      ApplyLayout(layout.value);
   }
   void DrainClosed() {
     PrunePopups();
     for (size_t i = contents.size(); i > 0; --i)
-      if (page_requests[i - 1]->close_state() == "closed") RemoveView(i - 1);
+      if (page_requests[i - 1]->close_state() == "closed")
+        RemoveView(i - 1);
   }
   std::vector<SessionId> sessions;
   struct PendingPopup {
@@ -205,11 +214,14 @@ struct HarnessMainParts::State {
   std::map<std::string, WebViewId> adopted_popups;
   void PrunePopups() {
     for (auto& [key, popup] : pending_popups) {
-      if (popup.status != "pending") continue;
+      if (popup.status != "pending")
+        continue;
       const bool closed = popup.requests->close_state() == "closed";
-      if (!closed && base::TimeTicks::Now() < popup.deadline) continue;
+      if (!closed && base::TimeTicks::Now() < popup.deadline)
+        continue;
       popup.status = closed ? "closed" : "timed_out";
-      popup.requests.reset(); popup.contents.reset();
+      popup.requests.reset();
+      popup.contents.reset();
       popup.deadline = base::TimeTicks::Now() + base::Seconds(30);
     }
     std::erase_if(pending_popups, [](const auto& entry) {
@@ -218,14 +230,19 @@ struct HarnessMainParts::State {
   }
   void WirePopups(PageRequests* requests, SessionId session, WebViewId opener) {
     requests->SetPopupHandler([this, session, opener](std::unique_ptr<content::WebContents> page,
-        const GURL& url, WindowOpenDisposition disposition, bool gesture) -> content::WebContents* {
-      if (shutting_down) return nullptr;
+                                                      const GURL& url,
+                                                      WindowOpenDisposition disposition,
+                                                      bool gesture) -> content::WebContents* {
+      if (shutting_down)
+        return nullptr;
       PrunePopups();
-      if (pending_popups.size() >= 16 || !gesture) return nullptr;
+      if (pending_popups.size() >= 16 || !gesture)
+        return nullptr;
       const auto key = base::UnguessableToken::Create().ToString();
-      PendingPopup popup{session, opener, url, disposition, gesture,
-                         base::TimeTicks::Now() + base::Seconds(30)};
-      popup.contents = std::move(page); popup.contents->WasHidden();
+      PendingPopup popup{session,     opener,  url,
+                         disposition, gesture, base::TimeTicks::Now() + base::Seconds(30)};
+      popup.contents = std::move(page);
+      popup.contents->WasHidden();
       popup.requests = std::make_unique<PageRequests>();
       popup.requests->Bind(popup.contents.get());
       auto* result = popup.contents.get();
@@ -274,18 +291,20 @@ struct HarnessMainParts::State {
   void UpdateOutput() {
     for (size_t i = 0; i < contents.size(); ++i) {
       const auto& adapter = contents[i];
-      if (adapter->offscreen_host()) adapter->offscreen_host()->SetOutputScale(output_scale);
+      if (adapter->offscreen_host())
+        adapter->offscreen_host()->SetOutputScale(output_scale);
       adapter->RefreshBackingScale();
       const auto* model = endpoint.FindWebView(adapter->session_id(), adapter->view_id());
-      adapter->SetRenderDemand(output && output_enabled && specs[i].visible &&
-          model && model->actual == Residency::live && !model->pending &&
-          !paused_output.contains(adapter->view_id()));
+      adapter->SetRenderDemand(output && output_enabled && specs[i].visible && model &&
+                               model->actual == Residency::live && !model->pending &&
+                               !paused_output.contains(adapter->view_id()));
     }
     if (!output)
       return;
     std::vector<OsrRenderer::View> views;
     for (size_t i = 0; i < contents.size(); ++i) {
-      if (!specs[i].visible) continue;
+      if (!specs[i].visible)
+        continue;
       auto& adapter = *contents[i];
       const auto token = endpoint.Token(adapter.session_id(), adapter.view_id());
       const auto* model = endpoint.FindWebView(adapter.session_id(), adapter.view_id());
@@ -308,26 +327,29 @@ struct HarnessMainParts::State {
       view.contents = adapter.contents();
       view.offscreen_host = adapter.offscreen_host();
       view.render_enabled = adapter.contents() && model->actual == Residency::live &&
-                             !model->pending && output_enabled &&
-                             !paused_output.contains(adapter.view_id());
+                            !model->pending && output_enabled &&
+                            !paused_output.contains(adapter.view_id());
       views.push_back(std::move(view));
     }
     output->SetViews(std::move(views));
   }
   mojo::ScopedMessagePipeHandle TakeControlAttachment(const base::DictValue& request,
-                                                     const base::DictValue& reply) {
+                                                      const base::DictValue& reply) {
     uint64_t pid = 0;
     const auto* token = reply.FindString("render_channel");
     const auto* pid_text = request.FindString("consumer_pid");
-    if (!output || !token || !pid_text || !base::StringToUint64(*pid_text, &pid) ||
-        !pid || pid > UINT32_MAX)
+    if (!output || !token || !pid_text || !base::StringToUint64(*pid_text, &pid) || !pid ||
+        pid > UINT32_MAX)
       return {};
     return output->TakeRenderEndpoint(*token, static_cast<uint32_t>(pid));
   }
   void OnControlClosed() {
-    if (shutting_down) return;
-    if (offscreen) output_enabled = false;
-    for (const auto& adapter : contents) adapter->SetRenderDemand(false);
+    if (shutting_down)
+      return;
+    if (offscreen)
+      output_enabled = false;
+    for (const auto& adapter : contents)
+      adapter->SetRenderDemand(false);
     if (output)
       output->Stop();
     for (size_t i = 0; i < contents.size(); ++i) {
@@ -393,10 +415,13 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   if (*method == "output.configure") {
     auto scale = Number(request, "device_scale");
     int next_width = logical_width, next_height = logical_height;
-    for (const auto& [name, target] : {std::pair{"width", &next_width}, std::pair{"height", &next_height}}) {
-      if (!request.Find(name)) continue;
+    for (const auto& [name, target] :
+         {std::pair{"width", &next_width}, std::pair{"height", &next_height}}) {
+      if (!request.Find(name))
+        continue;
       const auto value = request.FindInt(name);
-      if (!value || *value < 16 || *value > 16384) return error("invalid_atlas_dimensions");
+      if (!value || *value < 16 || *value > 16384)
+        return error("invalid_atlas_dimensions");
       *target = *value;
     }
     if (output && (next_width != logical_width || next_height != logical_height))
@@ -405,7 +430,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     // neither the old nor new layout must fit a max(old,new) intermediate atlas.
     auto next_specs = specs;
     if (request.Find("viewConfigs")) {
-      if (output) return error("close_output_before_view_transaction");
+      if (output)
+        return error("close_output_before_view_transaction");
       const auto* configs = request.FindList("viewConfigs");
       if (!configs || configs->size() > kSharedAtlasMaxViews)
         return error("invalid_view_configs");
@@ -413,11 +439,12 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       for (const auto& value : *configs) {
         const auto* config = value.GetIfDict();
         uint64_t session = 0, view = 0;
-        if (!config || !ReadId(*config, "session", &session) ||
-            !ReadId(*config, "view", &view) || !configured.insert(view).second)
+        if (!config || !ReadId(*config, "session", &session) || !ReadId(*config, "view", &view) ||
+            !configured.insert(view).second)
           return error("invalid_or_duplicate_view_identity");
         size_t index = 0;
-        while (index < contents.size() && contents[index]->view_id() != view) ++index;
+        while (index < contents.size() && contents[index]->view_id() != view)
+          ++index;
         if (index == contents.size() || contents[index]->session_id() != session)
           return error("view_transaction_identity_mismatch");
         auto& spec = next_specs[index];
@@ -425,21 +452,23 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         const auto* device = config->FindString("device");
         const auto page_scale = Number(*config, "device_scale_factor");
         const auto visible = config->FindBool("visible");
-        if (!width || !height || *width < 1 || *height < 1 ||
-            *width > 8192 || *height > 8192 || !device ||
-            (*device != "desktop" && *device != "tablet") || !page_scale ||
+        if (!width || !height || *width < 1 || *height < 1 || *width > 8192 || *height > 8192 ||
+            !device || (*device != "desktop" && *device != "tablet") || !page_scale ||
             !std::isfinite(*page_scale) || *page_scale < .5 || *page_scale > 4 ||
             !visible.has_value())
           return error("invalid_view_transaction_configuration");
-        spec.width = *width; spec.height = *height;
+        spec.width = *width;
+        spec.height = *height;
         spec.tablet = demo && *device == "tablet";
-        spec.page_dsf = static_cast<float>(*page_scale); spec.visible = *visible;
+        spec.page_dsf = static_cast<float>(*page_scale);
+        spec.visible = *visible;
         if (page_requests[index]->close_state() == "closing" && spec != specs[index])
           return error("view_closing");
       }
     }
     auto next_layout = Layout(next_specs, 0, next_width, next_height);
-    if (!next_layout) return error("atlas_no_space");
+    if (!next_layout)
+      return error("atlas_no_space");
     auto next_scale = output_scale;
     auto next_alignment = allocation_alignment;
     auto next_enabled = output_enabled;
@@ -462,33 +491,40 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         return error("enabled_boolean_required");
       next_enabled = value->GetBool();
     }
-    const auto dimensions = AtlasAllocationDimensions(next_width, next_height, next_scale, next_alignment);
-    if (!dimensions) return error("atlas_resource_budget_exceeded");
+    const auto dimensions =
+        AtlasAllocationDimensions(next_width, next_height, next_scale, next_alignment);
+    if (!dimensions)
+      return error("atlas_resource_budget_exceeded");
     // Validate the whole batch before changing geometry, focus/input tokens or
     // product visibility. A persistent view is not necessarily resident/live.
     for (size_t i = 0; i < contents.size(); ++i) {
       const auto& adapter = contents[i];
       const auto* model = endpoint.FindWebView(adapter->session_id(), adapter->view_id());
-      if (!model) return error("view_missing");
+      if (!model)
+        return error("view_missing");
       if (next_specs[i].visible && (!adapter->contents() || adapter->lifecycle_uncertain() ||
-          model->actual != Residency::live || model->pending))
+                                    model->actual != Residency::live || model->pending))
         return error("restore_required_before_show");
     }
     const bool layout_changed = logical_width != next_width || logical_height != next_height ||
                                 output_scale != next_scale || specs != next_specs;
     // Every rejection above leaves both specs and output configuration intact.
     specs = std::move(next_specs);
-    logical_width = next_width; logical_height = next_height;
+    logical_width = next_width;
+    logical_height = next_height;
     output_scale = next_scale;
     allocation_alignment = next_alignment;
     for (size_t i = 0; i < contents.size(); ++i)
-      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet, PageScale(specs[i]), !demo);
+      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet,
+                                   PageScale(specs[i]), !demo);
     output_enabled = next_enabled;
     output_width = dimensions->width;
     output_height = dimensions->height;
     if (layout_changed) {
-      if (root) root->SetPreferredSize(gfx::Size(logical_width, logical_height));
-      if (widget) widget->SetSize(gfx::Size(logical_width, logical_height));
+      if (root)
+        root->SetPreferredSize(gfx::Size(logical_width, logical_height));
+      if (widget)
+        widget->SetSize(gfx::Size(logical_width, logical_height));
       ApplyLayout(next_layout.value);
     }
     UpdateOutput();
@@ -503,7 +539,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (!ReadId(request, "consumer_pid", &pid) || pid > UINT32_MAX)
       return error("consumer_pid_required");
     if (*method == "output.open") {
-      if (OsrRenderer::IsGpuFaultSealed()) return error("output_gpu_fault_sealed");
+      if (OsrRenderer::IsGpuFaultSealed())
+        return error("output_gpu_fault_sealed");
       if (!output)
         output = std::make_unique<OsrRenderer>(output_width, output_height, ++output_generation);
       UpdateOutput();
@@ -546,19 +583,24 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     const auto* name = request.FindString("mapping");
     if (!name || !ReadId(request, "generation", &generation) ||
         !ReadId(request, "session", &session) || sessions.size() != 1 || sessions[0] != session ||
-        !OpenAudioTarget(*name, generation, session)) return error("invalid_audio_target");
-    reply.Set("ok", true); return reply;
+        !OpenAudioTarget(*name, generation, session))
+      return error("invalid_audio_target");
+    reply.Set("ok", true);
+    return reply;
   }
   if (*method == "audio.close") {
-    CloseAudioTarget(); reply.Set("ok", true); return reply;
+    CloseAudioTarget();
+    reply.Set("ok", true);
+    return reply;
   }
   if (*method == "view.closed.ack") {
     uint64_t session = 0;
     const auto* incarnation = request.FindString("browserIncarnation");
     const auto* ids = request.FindList("views");
-    const auto current = base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("browser-incarnation");
-    if (!ReadId(request, "session", &session) || !endpoint.FindSession(session) ||
-        !incarnation || current.empty() || *incarnation != current || !ids || ids->size() > 256)
+    const auto current =
+        base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("browser-incarnation");
+    if (!ReadId(request, "session", &session) || !endpoint.FindSession(session) || !incarnation ||
+        current.empty() || *incarnation != current || !ids || ids->size() > 256)
       return error("invalid_closed_ack_target");
     std::vector<uint64_t> parsed;
     for (const auto& value : *ids) {
@@ -566,12 +608,15 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       if (!value.is_string() || !base::StringToUint64(value.GetString(), &view) || !view)
         return error("invalid_closed_ack_view");
       const auto found = closed_views.find(view);
-      if (found != closed_views.end() && *found->second.FindString("session") != base::NumberToString(session))
+      if (found != closed_views.end() &&
+          *found->second.FindString("session") != base::NumberToString(session))
         return error("wrong_closed_ack_session");
       parsed.push_back(view);
     }
-    for (auto view : parsed) closed_views.erase(view);
-    reply.Set("ok", true); reply.Set("accepted", true);
+    for (auto view : parsed)
+      closed_views.erase(view);
+    reply.Set("ok", true);
+    reply.Set("accepted", true);
     return reply;
   }
   if (*method == "snapshot") {
@@ -606,7 +651,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           value.Set("device", specs[i].tablet ? "tablet" : "desktop");
           value.Set("deviceScaleFactor", PageScale(specs[i]));
           auto compositor = adapter->CompositorDiagnostics();
-          if (output) compositor.Set("osr", output->RenderStatus(view_id));
+          if (output)
+            compositor.Set("osr", output->RenderStatus(view_id));
           value.Set("compositor", std::move(compositor));
           value.Set("navigationRevision", base::NumberToString(adapter->navigation_revision()));
           value.Set("navigationOperations", adapter->NavigationOperationSnapshot());
@@ -653,14 +699,17 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       session_value.Set("views", std::move(views));
       base::ListValue popups;
       for (const auto& [key, popup] : pending_popups) {
-        if (popup.session != session_id) continue;
+        if (popup.session != session_id)
+          continue;
         base::DictValue item;
         item.Set("provisionalId", key);
         item.Set("openerViewId", base::NumberToString(popup.opener));
         item.Set("url", popup.contents && !popup.contents->GetLastCommittedURL().is_empty()
-                            ? popup.contents->GetLastCommittedURL().spec() : popup.url.spec());
+                            ? popup.contents->GetLastCommittedURL().spec()
+                            : popup.url.spec());
         item.Set("disposition", static_cast<int>(popup.disposition));
-        item.Set("userGesture", popup.user_gesture); item.Set("status", popup.status);
+        item.Set("userGesture", popup.user_gesture);
+        item.Set("status", popup.status);
         popups.Append(std::move(item));
       }
       session_value.Set("pendingPopups", std::move(popups));
@@ -674,12 +723,17 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   if (*method == "session.sitePreferences") {
     uint64_t session = 0;
     const auto* sites = request.FindDict("sites");
-    if (!ReadId(request, "session", &session) || !sites) return error("session_and_sites_required");
+    if (!ReadId(request, "session", &session) || !sites)
+      return error("session_and_sites_required");
     const auto owner = std::ranges::find(sessions, session);
-    if (owner == sessions.end()) return error("session_not_found");
+    if (owner == sessions.end())
+      return error("session_not_found");
     std::string detail;
-    if (!contexts[owner - sessions.begin()]->SetSitePreferences(*sites, &detail)) return error(detail);
-    reply.Set("ok", true); reply.Set("accepted", true); reply.Set("applied", true);
+    if (!contexts[owner - sessions.begin()]->SetSitePreferences(*sites, &detail))
+      return error(detail);
+    reply.Set("ok", true);
+    reply.Set("accepted", true);
+    reply.Set("applied", true);
     return reply;
   }
   if (*method == "view.create" || *method == "view.adopt") {
@@ -687,27 +741,33 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (!ReadId(request, "session", &session) || !ReadId(request, "view", &view) ||
         !endpoint.FindSession(session) || (!demo && session != sessions.front()))
       return error("invalid_session_or_view");
-    if (retired_views.contains(view)) return error("view_id_closed");
+    if (retired_views.contains(view))
+      return error("view_id_closed");
     const bool adopting = *method == "view.adopt";
     const auto* provisional = request.FindString("provisionalId");
-    if (adopting && !provisional) return error("provisional_id_required");
+    if (adopting && !provisional)
+      return error("provisional_id_required");
     if (adopting && adopted_popups.contains(*provisional)) {
-      if (adopted_popups.at(*provisional) != view) return error("popup_already_adopted_elsewhere");
-      reply.Set("ok", true); reply.Set("accepted", true); reply.Set("completed", true);
-      reply.Set("token", TokenValue(endpoint.Token(session, view).value)); return reply;
+      if (adopted_popups.at(*provisional) != view)
+        return error("popup_already_adopted_elsewhere");
+      reply.Set("ok", true);
+      reply.Set("accepted", true);
+      reply.Set("completed", true);
+      reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+      return reply;
     }
     PrunePopups();
     if (adopting && (!pending_popups.contains(*provisional) ||
-        pending_popups.at(*provisional).session != session ||
-        pending_popups.at(*provisional).status != "pending")) return error("popup_not_pending");
+                     pending_popups.at(*provisional).session != session ||
+                     pending_popups.at(*provisional).status != "pending"))
+      return error("popup_not_pending");
     ViewSpec spec;
     spec.width = request.FindInt("width").value_or(0);
     spec.height = request.FindInt("height").value_or(0);
     const auto* url = request.FindString("url");
     const auto* device = request.FindString("device");
-    if (!url || !GURL(*url).is_valid() || spec.width < 1 || spec.height < 1 ||
-        spec.width > 8192 || spec.height > 8192 ||
-        (device && *device != "desktop" && *device != "tablet") ||
+    if (!url || !GURL(*url).is_valid() || spec.width < 1 || spec.height < 1 || spec.width > 8192 ||
+        spec.height > 8192 || (device && *device != "desktop" && *device != "tablet") ||
         (request.Find("device") && !device))
       return error("invalid_view_configuration");
     spec.visible = request.FindBool("visible").value_or(true);
@@ -722,39 +782,49 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     spec.url = *url;
     spec.tablet = demo && device && *device == "tablet";
     for (size_t i = 0; i < contents.size(); ++i) {
-      if (contents[i]->view_id() != view) continue;
-      if (adopting) return error("view_id_already_exists");
+      if (contents[i]->view_id() != view)
+        continue;
+      if (adopting)
+        return error("view_id_already_exists");
       if (contents[i]->session_id() != session || specs[i] != spec)
         return error("view_id_configuration_conflict");
       if (request.Find("operationId")) {
         const auto status = contents[i]->Navigate(GURL(spec.url), &request);
-        if (!status) return error(status.message);
+        if (!status)
+          return error(status.message);
       }
       reply.Set("ok", true);
       reply.Set("accepted", true);
       reply.Set("completed", true);
       reply.Set("token", TokenValue(endpoint.Token(session, view).value));
-      if (request.Find("operationId")) reply.Set("completed", false);
+      if (request.Find("operationId"))
+        reply.Set("completed", false);
       return reply;
     }
-    if (contents.size() >= kSharedAtlasMaxViews) return error("view_limit_reached");
+    if (contents.size() >= kSharedAtlasMaxViews)
+      return error("view_limit_reached");
     auto next = specs;
     next.push_back(spec);
     auto layout = Layout(next, view);
-    if (!layout) return error("atlas_no_space");
+    if (!layout)
+      return error("atlas_no_space");
     size_t owner = 0;
-    while (owner < sessions.size() && sessions[owner] != session) ++owner;
+    while (owner < sessions.size() && sessions[owner] != session)
+      ++owner;
     auto created = endpoint.CreateWebView(session, profiles[owner], view);
-    if (!created) return error(created.status.message);
+    if (!created)
+      return error(created.status.message);
     std::unique_ptr<content::WebContents> adopted;
     if (adopting) {
       auto& popup = pending_popups.at(*provisional);
-      popup.requests->Bind(nullptr); popup.requests.reset();
+      popup.requests->Bind(nullptr);
+      popup.requests.reset();
       adopted = std::move(popup.contents);
     }
-    auto adapter = std::make_unique<WebView>(contexts[owner].get(), &endpoint, session, view, offscreen, std::move(adopted));
-    adapter->SetNativeFocusEnabled(demo &&
-        !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
+    auto adapter = std::make_unique<WebView>(contexts[owner].get(), &endpoint, session, view,
+                                             offscreen, std::move(adopted));
+    adapter->SetNativeFocusEnabled(
+        demo && !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
     adapter->ConfigureDevice(spec.width, spec.height, spec.tablet, PageScale(spec), !demo);
     auto requests = std::make_unique<PageRequests>();
     requests->Bind(adapter->contents());
@@ -783,13 +853,15 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     reply.Set("accepted", true);
     reply.Set("completed", true);
     reply.Set("token", TokenValue(endpoint.Token(session, view).value));
-    if (request.Find("operationId")) reply.Set("completed", false);
+    if (request.Find("operationId"))
+      reply.Set("completed", false);
     return reply;
   }
   if (*method == "view.close") {
     uint64_t session = 0, view = 0;
     if (!ReadId(request, "session", &session) || !ReadId(request, "view", &view) ||
-        !endpoint.FindSession(session)) return error("invalid_session_or_view");
+        !endpoint.FindSession(session))
+      return error("invalid_session_or_view");
     if (retired_views.contains(view)) {
       reply.Set("ok", true);
       reply.Set("accepted", true);
@@ -797,14 +869,18 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       return reply;
     }
     size_t index = 0;
-    while (index < contents.size() && (contents[index]->session_id() != session ||
-                                      contents[index]->view_id() != view)) ++index;
-    if (index == contents.size()) return error("view_not_in_session");
+    while (index < contents.size() &&
+           (contents[index]->session_id() != session || contents[index]->view_id() != view))
+      ++index;
+    if (index == contents.size())
+      return error("view_not_in_session");
     if (request.Find("force") && !request.Find("force")->is_bool())
       return error("force_boolean_required");
     bool force = request.FindBool("force").value_or(false);
-    if (force) RemoveView(index);
-    else page_requests[index]->RequestClose();
+    if (force)
+      RemoveView(index);
+    else
+      page_requests[index]->RequestClose();
     reply.Set("ok", true);
     reply.Set("accepted", true);
     reply.Set("completed", force);
@@ -823,52 +899,74 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   auto& adapter = *contents[index];
   if (*method == "view.recreate") {
     if (page_requests[index]->close_state() == "closing" ||
-        page_requests[index]->close_state() == "closed") return error("view_closing");
+        page_requests[index]->close_state() == "closed")
+      return error("view_closing");
     const auto* url = request.FindString("url");
-    if (!url || !GURL(*url).is_valid()) return error("invalid_url");
+    if (!url || !GURL(*url).is_valid())
+      return error("invalid_url");
     if (const auto existing = adapter.ExistingNavigationOperation(GURL(*url), request)) {
-      if (!*existing) return error(existing->message);
-      reply.Set("ok", true); reply.Set("accepted", true);
-      reply.Set("token", TokenValue(endpoint.Token(session, view).value)); return reply;
+      if (!*existing)
+        return error(existing->message);
+      reply.Set("ok", true);
+      reply.Set("accepted", true);
+      reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+      return reply;
     }
     transfers.erase(view);
-    if (output) output->StopView(view);
-    paused_output.insert(view); UpdateOutput();
+    if (output)
+      output->StopView(view);
+    paused_output.insert(view);
+    UpdateOutput();
     page_requests[index]->Bind(nullptr);
-    if (native_views[index]) native_views[index]->SetWebContents(nullptr);
+    if (native_views[index])
+      native_views[index]->SetWebContents(nullptr);
     const auto profile = endpoint.FindWebView(session, view)->profile;
     const auto owner = std::ranges::find(profiles, profile);
-    if (owner == profiles.end()) return error("profile_missing");
+    if (owner == profiles.end())
+      return error("profile_missing");
     auto navigation_operations = contents[index]->ReleaseNavigationOperations();
     contents[index].reset();
     endpoint.ResetWebView(session, view);
-    contents[index] = std::make_unique<WebView>(contexts[owner - profiles.begin()].get(), &endpoint, session, view, offscreen);
+    contents[index] = std::make_unique<WebView>(contexts[owner - profiles.begin()].get(), &endpoint,
+                                                session, view, offscreen);
     contents[index]->RestoreNavigationOperations(std::move(navigation_operations));
-    contents[index]->SetNativeFocusEnabled(demo && !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
-    contents[index]->ConfigureDevice(specs[index].width, specs[index].height, specs[index].tablet, PageScale(specs[index]), !demo);
+    contents[index]->SetNativeFocusEnabled(
+        demo && !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
+    contents[index]->ConfigureDevice(specs[index].width, specs[index].height, specs[index].tablet,
+                                     PageScale(specs[index]), !demo);
     page_requests[index] = std::make_unique<PageRequests>();
     page_requests[index]->Bind(contents[index]->contents());
     WirePopups(page_requests[index].get(), session, view);
-    if (native_views[index]) native_views[index]->SetWebContents(contents[index]->contents());
+    if (native_views[index])
+      native_views[index]->SetWebContents(contents[index]->contents());
     contents[index]->SetVisible(specs[index].visible);
     const auto status = contents[index]->Navigate(GURL(*url), &request);
-    paused_output.erase(view); UpdateOutput();
-    reply.Set("ok", static_cast<bool>(status)); reply.Set("accepted", static_cast<bool>(status));
-    reply.Set("token", TokenValue(endpoint.Token(session, view).value)); return reply;
+    paused_output.erase(view);
+    UpdateOutput();
+    reply.Set("ok", static_cast<bool>(status));
+    reply.Set("accepted", static_cast<bool>(status));
+    reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+    return reply;
   }
   if (*method == "view.configure") {
     auto spec = specs[index];
-    if (page_requests[index]->close_state() == "closing") return error("view_closing");
+    if (page_requests[index]->close_state() == "closing")
+      return error("view_closing");
     if (request.Find("visible")) {
-      if (!request.Find("visible")->is_bool()) return error("visible_boolean_required");
+      if (!request.Find("visible")->is_bool())
+        return error("visible_boolean_required");
       spec.visible = *request.FindBool("visible");
     }
-    if (request.Find("width")) spec.width = request.FindInt("width").value_or(0);
-    if (request.Find("height")) spec.height = request.FindInt("height").value_or(0);
+    if (request.Find("width"))
+      spec.width = request.FindInt("width").value_or(0);
+    if (request.Find("height"))
+      spec.height = request.FindInt("height").value_or(0);
     if (const auto* device = request.FindString("device")) {
-      if (*device != "desktop" && *device != "tablet") return error("invalid_device");
+      if (*device != "desktop" && *device != "tablet")
+        return error("invalid_device");
       spec.tablet = demo && *device == "tablet";
-    } else if (request.Find("device")) return error("invalid_device");
+    } else if (request.Find("device"))
+      return error("invalid_device");
     if (request.Find("device_scale_factor")) {
       const auto scale = Number(request, "device_scale_factor");
       if (!scale || !std::isfinite(*scale) || *scale < 0.5 || *scale > 4)
@@ -878,15 +976,20 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (spec.width < 1 || spec.height < 1 || spec.width > 8192 || spec.height > 8192)
       return error("invalid_viewport");
     if (spec == specs[index]) {
-      reply.Set("ok", true); reply.Set("accepted", true); reply.Set("completed", true);
-      reply.Set("token", TokenValue(endpoint.Token(session, view).value)); return reply;
+      reply.Set("ok", true);
+      reply.Set("accepted", true);
+      reply.Set("completed", true);
+      reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+      return reply;
     }
     auto next = specs;
     next[index] = spec;
     auto layout = Layout(next);
-    if (!layout) return error("atlas_no_space");
+    if (!layout)
+      return error("atlas_no_space");
     const auto visibility = adapter.SetVisible(spec.visible);
-    if (!visibility) return error(visibility.message);
+    if (!visibility)
+      return error(visibility.message);
     specs = std::move(next);
     ApplyLayout(layout.value);
     reply.Set("ok", true);
@@ -910,18 +1013,21 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     result.Set("id", id);
     return result;
   }
-  if (*method == "page.requests" || *method == "page.reply" || *method == "page.command" || *method == "page.fileStatus") {
+  if (*method == "page.requests" || *method == "page.reply" || *method == "page.command" ||
+      *method == "page.fileStatus") {
     const auto token = endpoint.Token(session, view).value;
     PageRequests::SelectionBinding binding{token.instance, token.document};
     bool terminal_only = false;
     if (*method == "page.reply" || *method == "page.fileStatus") {
-      for (const auto& [key, expected] : {std::pair{"instance", token.instance},
-                                        std::pair{"document", token.document}}) {
-        if (!request.Find(key)) continue;
+      for (const auto& [key, expected] :
+           {std::pair{"instance", token.instance}, std::pair{"document", token.document}}) {
+        if (!request.Find(key))
+          continue;
         uint64_t supplied = 0;
         if (!ReadId(request, key, &supplied))
           return error("stale_page_request_target");
-        if (supplied == expected) continue;
+        if (supplied == expected)
+          continue;
         // A page may navigate immediately after the native callback. Allow
         // only an exact terminal receipt from the same WebView instance.
         if (*method != "page.fileStatus" || std::string_view(key) != "document" ||
@@ -933,35 +1039,38 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     }
     if (*method == "page.fileStatus") {
       const auto* key = request.FindString("request");
-      if (!key) return error("file_request_required");
-      auto result = page_requests[index]->FileStatus(
-          *key, request.Find("selection_id"), binding, terminal_only);
-      result.Set("version", 1); result.Set("id", id); return result;
+      if (!key)
+        return error("file_request_required");
+      auto result = page_requests[index]->FileStatus(*key, request.Find("selection_id"), binding,
+                                                     terminal_only);
+      result.Set("version", 1);
+      result.Set("id", id);
+      return result;
     }
     if (*method == "page.command") {
       const auto* action = request.FindString("action");
-      if (action && (*action == "back" || *action == "forward" ||
-                     *action == "reload" || *action == "stop")) {
+      if (action &&
+          (*action == "back" || *action == "forward" || *action == "reload" || *action == "stop")) {
         auto status = adapter.NavigationCommand(request);
         auto result = reply.Clone();
         result.Set("ok", static_cast<bool>(status));
         result.Set("accepted", static_cast<bool>(status));
         result.Set("state", "submitted");
-        if (!status) result.Set("error", status.message);
+        if (!status)
+          result.Set("error", status.message);
         return result;
       }
     }
     base::DictValue result;
     if (*method == "page.requests") {
       const auto& spec = specs[index];
-      const PageRequests::AnchorLayout layout{
-          spec.width, spec.height, PageScale(spec), token.instance,
-          token.document, output_generation};
+      const PageRequests::AnchorLayout layout{spec.width,     spec.height,    PageScale(spec),
+                                              token.instance, token.document, output_generation};
       result = page_requests[index]->Snapshot(
           output && spec.visible && token.instance && token.document ? &layout : nullptr);
     } else {
       result = *method == "page.reply" ? page_requests[index]->Reply(request, binding)
-                                        : page_requests[index]->Command(request);
+                                       : page_requests[index]->Command(request);
     }
     result.Set("version", 1);
     result.Set("id", id);
@@ -985,7 +1094,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   if (method->starts_with("navigation.")) {
     if (*method == "navigation.ack") {
       const auto status = adapter.AcknowledgeNavigation(request);
-      if (!status) return error(status.message);
+      if (!status)
+        return error(status.message);
       reply.Set("ok", true);
       return reply;
     }
@@ -1086,8 +1196,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     reply.Set("pending", false);
     if (!sequence || sequence->empty() || sequence->size() > 128 ||
         !ReadId(request, "instance", &owner.instance) ||
-        !ReadId(request, "document", &owner.document) ||
-        !ReadId(request, "focus", &owner.focus))
+        !ReadId(request, "document", &owner.document) || !ReadId(request, "focus", &owner.focus))
       return error("invalid_touch_status_identity");
     reply.Set("sequenceId", *sequence);
     adapter.RefreshClientTouchOwner();
@@ -1111,7 +1220,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     return reply;
   }
   if (*method == "focus") {
-    if (!demo && !request.Find("focus")) return error("focus_token_required");
+    if (!demo && !request.Find("focus"))
+      return error("focus_token_required");
     const auto current = endpoint.Token(session, view).value;
     for (auto [key, expected] :
          {std::pair{"instance", current.instance}, std::pair{"document", current.document},
@@ -1138,7 +1248,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     auto next = specs;
     next[index].visible = *visible;
     auto layout = Layout(next);
-    if (!layout) return error("atlas_no_space");
+    if (!layout)
+      return error("atlas_no_space");
     status = adapter.SetVisible(*visible);
     if (status) {
       specs = std::move(next);
@@ -1169,14 +1280,15 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (guarded) {
       uint64_t generation = 0;
       const auto* model = endpoint.FindWebView(session, view);
-      if (!ReadId(request, "expected_lifecycle_generation", &generation) ||
-          !model || model->lifecycle_generation != generation || model->pending ||
+      if (!ReadId(request, "expected_lifecycle_generation", &generation) || !model ||
+          model->lifecycle_generation != generation || model->pending ||
           page_requests[index]->close_state() == "closing" ||
           page_requests[index]->close_state() == "closed")
         return error("stale_lifecycle_recovery");
       if (recover_uncertain) {
         const auto allowed = adapter.CanRecoverLifecycle();
-        if (!allowed) return error(allowed.message);
+        if (!allowed)
+          return error(allowed.message);
       } else if (*operation != Lifecycle::restore || model->actual != Residency::unloaded ||
                  adapter.lifecycle_uncertain()) {
         return error("stale_lifecycle_recovery");
@@ -1184,7 +1296,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     }
     if (*operation == Lifecycle::discard || *operation == Lifecycle::freeze) {
       const auto allowed = CanDiscard(index);
-      if (!allowed) return error(allowed.message);
+      if (!allowed)
+        return error(allowed.message);
     }
     if (output) {
       paused_output.insert(view);
@@ -1197,7 +1310,8 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     page_requests[index]->Bind(nullptr);
     status = adapter.RequestLifecycle(*operation, {}, recover_uncertain);
     page_requests[index]->Bind(adapter.contents());
-    if (native_views[index]) native_views[index]->SetWebContents(adapter.contents());
+    if (native_views[index])
+      native_views[index]->SetWebContents(adapter.contents());
     paused_output.erase(view);
     UpdateOutput();
     reply.Set("accepted", static_cast<bool>(status));
@@ -1284,33 +1398,45 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         return error("invalid_touch");
       TouchInput touch;
       if (const auto* mode = event->FindString("gestureMode")) {
-        if (*mode != "client-v1" && *mode != "legacy") return error("invalid_gesture_mode");
+        if (*mode != "client-v1" && *mode != "legacy")
+          return error("invalid_gesture_mode");
         touch.client_gestures = *mode == "client-v1";
       }
       const auto* candidates = event->FindList("gestures");
-      if ((touch.client_gestures && !candidates) || (candidates && (!touch.client_gestures || candidates->size() > 8)))
+      if ((touch.client_gestures && !candidates) ||
+          (candidates && (!touch.client_gestures || candidates->size() > 8)))
         return error("invalid_gestures");
-      if (candidates) for (const auto& candidate : *candidates) {
-        const auto* g = candidate.GetIfDict();
-        const auto* kind = g ? g->FindString("type") : nullptr;
-        const auto x = g ? Number(*g, "x") : std::nullopt, y = g ? Number(*g, "y") : std::nullopt;
-        if (!kind || !x || !y) return error("invalid_gesture");
-        static constexpr std::array<const char*, 11> names = {"tapDown", "tapCancel", "tap", "scrollBegin", "scrollUpdate", "scrollEnd",
-          "pinchBegin", "pinchUpdate", "pinchEnd", "flingStart", "flingCancel"};
-        int candidate_index = 0;
-        while (candidate_index != 11 && *kind != names[candidate_index]) ++candidate_index;
-        if (candidate_index == 11) return error("invalid_gesture_type");
-        for (const auto* field : {"deltaX", "deltaY", "scale", "velocityX", "velocityY"})
-          if (g->contains(field) && !Number(*g, field)) return error("invalid_gesture_number");
-        if ((candidate_index == 3 || candidate_index == 4) && (!Number(*g, "deltaX") || !Number(*g, "deltaY")))
-          return error("missing_gesture_delta");
-        if (candidate_index == 7 && !Number(*g, "scale")) return error("missing_gesture_scale");
-        if (candidate_index == 9 && (!Number(*g, "velocityX") || !Number(*g, "velocityY")))
-          return error("missing_gesture_velocity");
-        touch.gestures.push_back({static_cast<TouchInput::Gesture::Type>(candidate_index), *x, *y,
-          Number(*g, "deltaX").value_or(0), Number(*g, "deltaY").value_or(0), Number(*g, "scale").value_or(1),
-          Number(*g, "velocityX").value_or(0), Number(*g, "velocityY").value_or(0)});
-      }
+      if (candidates)
+        for (const auto& candidate : *candidates) {
+          const auto* g = candidate.GetIfDict();
+          const auto* kind = g ? g->FindString("type") : nullptr;
+          const auto x = g ? Number(*g, "x") : std::nullopt, y = g ? Number(*g, "y") : std::nullopt;
+          if (!kind || !x || !y)
+            return error("invalid_gesture");
+          static constexpr std::array<const char*, 11> names = {
+              "tapDown",    "tapCancel",   "tap",      "scrollBegin", "scrollUpdate", "scrollEnd",
+              "pinchBegin", "pinchUpdate", "pinchEnd", "flingStart",  "flingCancel"};
+          int candidate_index = 0;
+          while (candidate_index != 11 && *kind != names[candidate_index])
+            ++candidate_index;
+          if (candidate_index == 11)
+            return error("invalid_gesture_type");
+          for (const auto* field : {"deltaX", "deltaY", "scale", "velocityX", "velocityY"})
+            if (g->contains(field) && !Number(*g, field))
+              return error("invalid_gesture_number");
+          if ((candidate_index == 3 || candidate_index == 4) &&
+              (!Number(*g, "deltaX") || !Number(*g, "deltaY")))
+            return error("missing_gesture_delta");
+          if (candidate_index == 7 && !Number(*g, "scale"))
+            return error("missing_gesture_scale");
+          if (candidate_index == 9 && (!Number(*g, "velocityX") || !Number(*g, "velocityY")))
+            return error("missing_gesture_velocity");
+          touch.gestures.push_back(
+              {static_cast<TouchInput::Gesture::Type>(candidate_index), *x, *y,
+               Number(*g, "deltaX").value_or(0), Number(*g, "deltaY").value_or(0),
+               Number(*g, "scale").value_or(1), Number(*g, "velocityX").value_or(0),
+               Number(*g, "velocityY").value_or(0)});
+        }
 
       if (*action == "start")
         touch.action = TouchInput::Action::start;
@@ -1326,15 +1452,18 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         const auto* sequence = event->FindString("sequenceId");
         const auto elapsed = Number(*event, "sampleElapsedUs");
         const auto wall = Number(*event, "startServerWallUs");
-        if (!sequence || sequence->empty() || sequence->size() > 128 || !elapsed ||
-            *elapsed < 0 || *elapsed > 86400000000.0 || std::floor(*elapsed) != *elapsed ||
+        if (!sequence || sequence->empty() || sequence->size() > 128 || !elapsed || *elapsed < 0 ||
+            *elapsed > 86400000000.0 || std::floor(*elapsed) != *elapsed ||
             (*mode != "source" && *mode != "arrival-fallback") ||
-            (*mode == "source" && (!wall || *wall <= 0 || *wall > 9007199254740991.0 || std::floor(*wall) != *wall)) ||
+            (*mode == "source" &&
+             (!wall || *wall <= 0 || *wall > 9007199254740991.0 || std::floor(*wall) != *wall)) ||
             (*mode == "arrival-fallback" && wall))
           return error("invalid_touch_clock");
-        touch.clock = TouchInput::Clock{*sequence, *mode == "source", static_cast<int64_t>(*elapsed),
-                                       wall ? static_cast<int64_t>(*wall) : 0};
-      } else if (event->contains("sequenceId") || event->contains("sampleElapsedUs") || event->contains("startServerWallUs"))
+        touch.clock =
+            TouchInput::Clock{*sequence, *mode == "source", static_cast<int64_t>(*elapsed),
+                              wall ? static_cast<int64_t>(*wall) : 0};
+      } else if (event->contains("sequenceId") || event->contains("sampleElapsedUs") ||
+                 event->contains("startServerWallUs"))
         return error("incomplete_touch_clock");
       if (const auto* samples = event->FindList("samples")) {
         if (!touch.clock || touch.action != TouchInput::Action::move || samples->size() > 32)
@@ -1343,15 +1472,20 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           const auto* dict = sample.GetIfDict();
           const auto elapsed = dict ? Number(*dict, "sampleElapsedUs") : std::nullopt;
           const auto* changed = dict ? dict->FindList("points") : nullptr;
-          if (!elapsed || *elapsed < 0 || *elapsed > touch.clock->elapsed_us || std::floor(*elapsed) != *elapsed || !changed || changed->empty() || changed->size() > 16)
+          if (!elapsed || *elapsed < 0 || *elapsed > touch.clock->elapsed_us ||
+              std::floor(*elapsed) != *elapsed || !changed || changed->empty() ||
+              changed->size() > 16)
             return error("invalid_touch_sample");
           TouchInput::Sample value{static_cast<int64_t>(*elapsed), {}};
           for (const auto& point : *changed) {
             const auto* point_dict = point.GetIfDict();
-            if (!point_dict) return error("invalid_touch_sample_point");
+            if (!point_dict)
+              return error("invalid_touch_sample_point");
             const auto contact_id = point_dict->FindInt("id");
-            const auto x = Number(*point_dict, "x"), y = Number(*point_dict, "y"), pressure = Number(*point_dict, "pressure");
-            if (!contact_id || *contact_id < 0 || !x || !y || !pressure) return error("invalid_touch_sample_point");
+            const auto x = Number(*point_dict, "x"), y = Number(*point_dict, "y"),
+                       pressure = Number(*point_dict, "pressure");
+            if (!contact_id || *contact_id < 0 || !x || !y || !pressure)
+              return error("invalid_touch_sample_point");
             value.points.push_back({static_cast<uint32_t>(*contact_id), *x, *y, *pressure});
           }
           touch.samples.push_back(std::move(value));
@@ -1372,15 +1506,20 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       const auto* mode = event->FindString("gestureMode");
       const auto* action = event->FindString("action");
       const auto* sequence = event->FindString("sequenceId");
-      const auto elapsed = Number(*event, "sampleElapsedUs"), x = Number(*event, "cumulativeX"), y = Number(*event, "cumulativeY");
+      const auto elapsed = Number(*event, "sampleElapsedUs"), x = Number(*event, "cumulativeX"),
+                 y = Number(*event, "cumulativeY");
       if (!mode || *mode != "client-v1" || !action || !sequence || !elapsed || !x || !y ||
           *elapsed < 0 || *elapsed > 86400000000.0 || std::floor(*elapsed) != *elapsed)
         return error("invalid_momentum");
       GestureInput::Action kind;
-      if (*action == "momentum") kind = GestureInput::Action::momentum;
-      else if (*action == "momentumEnd") kind = GestureInput::Action::momentum_end;
-      else if (*action == "cancel") kind = GestureInput::Action::cancel;
-      else return error("invalid_momentum_action");
+      if (*action == "momentum")
+        kind = GestureInput::Action::momentum;
+      else if (*action == "momentumEnd")
+        kind = GestureInput::Action::momentum_end;
+      else if (*action == "cancel")
+        kind = GestureInput::Action::cancel;
+      else
+        return error("invalid_momentum_action");
       input.payload = GestureInput{kind, *sequence, static_cast<int64_t>(*elapsed), *x, *y};
     } else if (*type == "mouse") {
       const auto* action = event->FindString("action");
@@ -1417,18 +1556,20 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     } else
       return error("unsupported_input_type");
     bool input_admitted = false;
-    if (output) output->TraceInput("input_browser_dispatch", input);
+    if (output)
+      output->TraceInput("input_browser_dispatch", input);
     status = adapter.DispatchInput(input, &input_admitted);
-    if (output) output->TraceInput("input_browser_dispatch_return", input,
-                                   static_cast<int>(status.error));
+    if (output)
+      output->TraceInput("input_browser_dispatch_return", input, static_cast<int>(status.error));
     if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
       reply.Set("touchPending", adapter.TouchProcessingPending());
       reply.Set("touchSequenceId", touch->clock ? touch->clock->sequence_id : std::string());
       reply.Set("inputAdmitted", input_admitted);
       if (touch->client_gestures && touch->clock &&
           (touch->action == TouchInput::Action::end || touch->action == TouchInput::Action::cancel))
-        reply.Set("touchTerminal", adapter.ClientTouchStatus(input.token, touch->clock->sequence_id) !=
-                                       ClientTouchRetirement::State::unknown);
+        reply.Set("touchTerminal",
+                  adapter.ClientTouchStatus(input.token, touch->clock->sequence_id) !=
+                      ClientTouchRetirement::State::unknown);
       if (!status && touch->client_gestures && touch->clock &&
           (input_admitted || (status.error == Error::stale &&
                               status.message == "Client touch owner explicitly invalidated")) &&
@@ -1471,7 +1612,8 @@ int HarnessMainParts::PreMainMessageLoopRun() {
   state_->demo = true;
 #endif
   const auto host_mode = command.GetSwitchValueASCII("remotekit-render-host");
-  if (!host_mode.empty() && host_mode != "offscreen" && host_mode != "window") return 2;
+  if (!host_mode.empty() && host_mode != "offscreen" && host_mode != "window")
+    return 2;
 #if !defined(REMOTEKIT_DEMO_HARNESS)
   if (host_mode == "window") {
     LOG(ERROR) << "Native window render host is unsupported by the service Browser";
@@ -1497,10 +1639,11 @@ int HarnessMainParts::PreMainMessageLoopRun() {
   state_->demo = true;
 #endif
   uint64_t service_session = 0;
-  if (!state_->demo && (!command.HasSwitch("control-channel") ||
-      !base::StringToUint64(command.GetSwitchValueASCII("session-id"), &service_session) ||
-      service_session == 0 || command.GetSwitchValueASCII("tenant-id").empty() ||
-      !data.IsAbsolute() || !command.HasSwitch("data-path") || command.HasSwitch("sessions")))
+  if (!state_->demo &&
+      (!command.HasSwitch("control-channel") ||
+       !base::StringToUint64(command.GetSwitchValueASCII("session-id"), &service_session) ||
+       service_session == 0 || command.GetSwitchValueASCII("tenant-id").empty() ||
+       !data.IsAbsolute() || !command.HasSwitch("data-path") || command.HasSwitch("sessions")))
     return 2;
   int session_count = 1;
 #if defined(REMOTEKIT_DEMO_HARNESS)
@@ -1510,10 +1653,10 @@ int HarnessMainParts::PreMainMessageLoopRun() {
   }
 #endif
   for (int i = 0; i < session_count; ++i) {
-    auto session = state_->endpoint.CreateSession(
-        state_->demo ? "tenant-" + base::NumberToString(i + 1) :
-                       command.GetSwitchValueASCII("tenant-id"),
-        state_->demo ? 0 : service_session);
+    auto session =
+        state_->endpoint.CreateSession(state_->demo ? "tenant-" + base::NumberToString(i + 1)
+                                                    : command.GetSwitchValueASCII("tenant-id"),
+                                       state_->demo ? 0 : service_session);
     CHECK(session);
     auto profile = state_->endpoint.AddProfile(session.value, "default");
     CHECK(profile);
@@ -1524,7 +1667,8 @@ int HarnessMainParts::PreMainMessageLoopRun() {
             .AppendASCII("profile-" + base::NumberToString(profile.value))));
   }
   LOG(INFO) << "RemoteKit startup Profile ready";
-  if (state_->demo) StartDevTools(data);
+  if (state_->demo)
+    StartDevTools(data);
 #if defined(REMOTEKIT_DEMO_HARNESS)
   auto urls = base::SplitString(command.GetSwitchValueASCII("urls"), "|", base::TRIM_WHITESPACE,
                                 base::SPLIT_WANT_NONEMPTY);
@@ -1543,16 +1687,17 @@ int HarnessMainParts::PreMainMessageLoopRun() {
     items.push_back({view.value, 480, 360, 1.0});
   }
   // Pick a compact atlas shape, then use MaxRects for the actual placement.
-  const int columns = urls.size() <= 2 ? std::max(1, static_cast<int>(urls.size())) : (urls.size() <= 4 ? 2 : 3);
+  const int columns =
+      urls.size() <= 2 ? std::max(1, static_cast<int>(urls.size())) : (urls.size() <= 4 ? 2 : 3);
   const int rows = (static_cast<int>(urls.size()) + columns - 1) / columns;
   int atlas_width = columns * 488, atlas_height = rows * 368;
   if (!state_->demo) {
     atlas_width = 1920;
     atlas_height = 1080;
-    if ((command.HasSwitch("atlas-width") && !base::StringToInt(
-            command.GetSwitchValueASCII("atlas-width"), &atlas_width)) ||
-        (command.HasSwitch("atlas-height") && !base::StringToInt(
-            command.GetSwitchValueASCII("atlas-height"), &atlas_height)) ||
+    if ((command.HasSwitch("atlas-width") &&
+         !base::StringToInt(command.GetSwitchValueASCII("atlas-width"), &atlas_width)) ||
+        (command.HasSwitch("atlas-height") &&
+         !base::StringToInt(command.GetSwitchValueASCII("atlas-height"), &atlas_height)) ||
         atlas_width < 16 || atlas_height < 16 || atlas_width > 8192 || atlas_height > 8192)
       return 2;
   }
@@ -1585,71 +1730,80 @@ int HarnessMainParts::PreMainMessageLoopRun() {
     state_->specs.push_back({480, 360, false, urls[i]});
     state_->contents.push_back(std::move(contents));
   }
-  if (!state_->demo) { width = atlas_width; height = atlas_height; }
-  if (!state_->offscreen) {
-  root->SetPreferredSize(gfx::Size(width, height));
-  auto delegate = std::make_unique<views::WidgetDelegate>();
-  delegate->SetTitle(u"RemoteKit — content embedder harness");
-  const bool embedded = command.HasSwitch("parent-window");
-  const bool frame_less = embedded || !state_->demo;
-  delegate->SetHasWindowSizeControls(!frame_less);
-  delegate->SetContentsView(std::move(root));
-  auto* widget = new views::Widget();
-  // Embedded and service HWNDs have no non-client area. Choose the Views
-  // type before Init instead of leaving a titled widget's frame layout behind
-  // when changing the Win32 style during reparenting.
-  views::Widget::InitParams params(views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
-                                   frame_less ? views::Widget::InitParams::TYPE_WINDOW_FRAMELESS
-                                            : views::Widget::InitParams::TYPE_WINDOW);
-  params.remove_standard_frame = frame_less;
-  state_->window_delegate = std::move(delegate);
-  params.delegate = state_->window_delegate.get();
-  params.bounds = gfx::Rect(state_->demo ? 40 : -20000, state_->demo ? 40 : -20000,
-                            width + (state_->demo ? 20 : 0),
-                            height + (state_->demo ? 50 : 0));
-  widget->Init(std::move(params));
-  state_->widget = widget;
-  state_->observer = std::make_unique<WindowObserver>(
-      base::BindRepeating(&State::OnWindowClosed, base::Unretained(state_.get())));
-  widget->AddObserver(state_->observer.get());
-  if (embedded) {
-    uint64_t parent_value = 0;
-    CHECK(base::StringToUint64(command.GetSwitchValueASCII("parent-window"), &parent_value));
-    HWND parent = reinterpret_cast<HWND>(static_cast<uintptr_t>(parent_value));
-    CHECK(IsWindow(parent));
-    CHECK(AreDpiAwarenessContextsEqual(GetWindowDpiAwarenessContext(parent),
-                                       GetThreadDpiAwarenessContext()))
-        << "Endpoint and browser must use the same Per-Monitor V2 DPI context";
-    HWND child = widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget();
-    LONG_PTR style = GetWindowLongPtr(child, GWL_STYLE);
-    SetWindowLongPtr(child, GWL_STYLE,
-                     (style & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU)) | WS_CHILD);
-    SetLastError(0);
-    HWND previous_parent = SetParent(child, parent);
-    CHECK(previous_parent || GetLastError() == 0);
-    RECT bounds;
-    CHECK(GetClientRect(parent, &bounds));
-    CHECK(SetWindowPos(child, nullptr, command.HasSwitch("gpu-output") ? -bounds.right * 2 : 0, 0,
-                       bounds.right, bounds.bottom,
-                       SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED));
+  if (!state_->demo) {
+    width = atlas_width;
+    height = atlas_height;
   }
-  if (!command.HasSwitch("no-window-show"))
-    widget->Show();
-  state_->output_scale = state_->demo ?
-      GetDpiForWindow(widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget()) / 96.0f : 1.0f;
+  if (!state_->offscreen) {
+    root->SetPreferredSize(gfx::Size(width, height));
+    auto delegate = std::make_unique<views::WidgetDelegate>();
+    delegate->SetTitle(u"RemoteKit — content embedder harness");
+    const bool embedded = command.HasSwitch("parent-window");
+    const bool frame_less = embedded || !state_->demo;
+    delegate->SetHasWindowSizeControls(!frame_less);
+    delegate->SetContentsView(std::move(root));
+    auto* widget = new views::Widget();
+    // Embedded and service HWNDs have no non-client area. Choose the Views
+    // type before Init instead of leaving a titled widget's frame layout behind
+    // when changing the Win32 style during reparenting.
+    views::Widget::InitParams params(views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
+                                     frame_less ? views::Widget::InitParams::TYPE_WINDOW_FRAMELESS
+                                                : views::Widget::InitParams::TYPE_WINDOW);
+    params.remove_standard_frame = frame_less;
+    state_->window_delegate = std::move(delegate);
+    params.delegate = state_->window_delegate.get();
+    params.bounds = gfx::Rect(state_->demo ? 40 : -20000, state_->demo ? 40 : -20000,
+                              width + (state_->demo ? 20 : 0), height + (state_->demo ? 50 : 0));
+    widget->Init(std::move(params));
+    state_->widget = widget;
+    state_->observer = std::make_unique<WindowObserver>(
+        base::BindRepeating(&State::OnWindowClosed, base::Unretained(state_.get())));
+    widget->AddObserver(state_->observer.get());
+    if (embedded) {
+      uint64_t parent_value = 0;
+      CHECK(base::StringToUint64(command.GetSwitchValueASCII("parent-window"), &parent_value));
+      HWND parent = reinterpret_cast<HWND>(static_cast<uintptr_t>(parent_value));
+      CHECK(IsWindow(parent));
+      CHECK(AreDpiAwarenessContextsEqual(GetWindowDpiAwarenessContext(parent),
+                                         GetThreadDpiAwarenessContext()))
+          << "Endpoint and browser must use the same Per-Monitor V2 DPI context";
+      HWND child = widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget();
+      LONG_PTR style = GetWindowLongPtr(child, GWL_STYLE);
+      SetWindowLongPtr(child, GWL_STYLE,
+                       (style & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU)) | WS_CHILD);
+      SetLastError(0);
+      HWND previous_parent = SetParent(child, parent);
+      CHECK(previous_parent || GetLastError() == 0);
+      RECT bounds;
+      CHECK(GetClientRect(parent, &bounds));
+      CHECK(SetWindowPos(child, nullptr, command.HasSwitch("gpu-output") ? -bounds.right * 2 : 0, 0,
+                         bounds.right, bounds.bottom,
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED));
+    }
+    if (!command.HasSwitch("no-window-show"))
+      widget->Show();
+    state_->output_scale =
+        state_->demo
+            ? GetDpiForWindow(widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget()) / 96.0f
+            : 1.0f;
   } else {
     state_->output_scale = 1.f;
   }
   state_->logical_width = width;
   state_->logical_height = height;
-  const auto dimensions = AtlasAllocationDimensions(width, height, state_->output_scale, state_->allocation_alignment);
-  if (!dimensions) return 1;
+  const auto dimensions =
+      AtlasAllocationDimensions(width, height, state_->output_scale, state_->allocation_alignment);
+  if (!dimensions)
+    return 1;
   state_->output_width = dimensions->width;
   state_->output_height = dimensions->height;
-  state_->output_timer.Start(
-      FROM_HERE, base::Milliseconds(8),
-      base::BindRepeating([](State* state) { state->DrainClosed(); state->UpdateOutput(); },
-                          base::Unretained(state_.get())));
+  state_->output_timer.Start(FROM_HERE, base::Milliseconds(8),
+                             base::BindRepeating(
+                                 [](State* state) {
+                                   state->DrainClosed();
+                                   state->UpdateOutput();
+                                 },
+                                 base::Unretained(state_.get())));
   if (command.HasSwitch("control-channel")) {
     state_->control = std::make_unique<ControlServer>(
         command.GetSwitchValueASCII("control-channel"),
@@ -1664,7 +1818,8 @@ void HarnessMainParts::WillRunMainMessageLoop(std::unique_ptr<base::RunLoop>& ru
   state_->quit = run_loop->QuitClosure();
 }
 void HarnessMainParts::PostMainMessageLoopRun() {
-  if (!state_) return;
+  if (!state_)
+    return;
   state_->shutting_down = true;
   state_->quit.Reset();
   // Stop producers and invalidate page callbacks before destroying consumers.
@@ -1687,7 +1842,8 @@ void HarnessMainParts::PostMainMessageLoopRun() {
   StopDevTools();
   if (state_->widget)
     for (auto& view : state_->native_views)
-      if (view) view->SetWebContents(nullptr);
+      if (view)
+        view->SetWebContents(nullptr);
   state_->native_views.clear();
   if (state_->widget && state_->observer)
     state_->widget->RemoveObserver(state_->observer.get());
@@ -1695,7 +1851,8 @@ void HarnessMainParts::PostMainMessageLoopRun() {
   auto* widget = state_->widget.get();
   state_->widget = nullptr;
   state_->root = nullptr;
-  if (widget) widget->CloseNow();
+  if (widget)
+    widget->CloseNow();
   state_->window_delegate.reset();
   state_->contents.clear();
   // Offscreen compositor teardown can make sync Mojo calls. Run the deferred

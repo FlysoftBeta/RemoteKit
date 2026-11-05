@@ -14,12 +14,21 @@ struct RenderBegin {
   std::uint32_t force = 0;
 };
 enum class RenderRejectReason : std::uint32_t {
-  kIdle = 1, kNotReady = 2, kStaleGeneration = 3, kStopped = 4,
+  kIdle = 1,
+  kNotReady = 2,
+  kStaleGeneration = 3,
+  kStopped = 4,
 };
 // Fixed-size raw Mojo messages, no attached handles or pointers.
 inline constexpr std::uint32_t kRenderWireMagic = 0x524B5243;
 inline constexpr std::uint32_t kRenderWireVersion = 1;
-enum class RenderWireType : std::uint32_t { kBegin = 1, kReject = 2, kStop = 3, kStopped = 4, kWake = 5 };
+enum class RenderWireType : std::uint32_t {
+  kBegin = 1,
+  kReject = 2,
+  kStop = 3,
+  kStopped = 4,
+  kWake = 5
+};
 struct RenderWireMessage {
   std::uint32_t magic = kRenderWireMagic;
   std::uint32_t version = kRenderWireVersion;
@@ -32,8 +41,7 @@ inline constexpr bool ValidRenderIdentity(const RenderIdentity& identity) {
          identity.slot < 4 && !identity.reserved;
 }
 inline constexpr bool ValidRenderBegin(const RenderBegin& begin) {
-  return ValidRenderIdentity(begin.identity) && begin.interval_us &&
-         begin.force <= 1;
+  return ValidRenderIdentity(begin.identity) && begin.interval_us && begin.force <= 1;
 }
 // Generation controls carry no frame identity or timing payload.
 inline constexpr bool ValidRenderGenerationControl(const RenderWireMessage& message) {
@@ -62,10 +70,12 @@ class RenderWakeState {
     if (!ValidRenderIdentity(identity) || identity.generation != idle_.generation ||
         identity.value != idle_.value || identity.slot != idle_.slot)
       return RenderWakeResult::kInvalid;
-    if (delivered_) return RenderWakeResult::kDuplicate;
+    if (delivered_)
+      return RenderWakeResult::kDuplicate;
     delivered_ = true;
     return RenderWakeResult::kFirst;
   }
+
  private:
   RenderIdentity idle_;
   bool delivered_ = false;
@@ -78,7 +88,8 @@ class RenderGenerationState {
     return generation && !stopping_ && (!generation_ || generation_ == generation);
   }
   constexpr bool RecordBegin(uint64_t generation) {
-    if (!CanBegin(generation)) return false;
+    if (!CanBegin(generation))
+      return false;
     generation_ = generation;
     return true;
   }
@@ -86,18 +97,21 @@ class RenderGenerationState {
     return generation && (!generation_ || generation_ == generation);
   }
   constexpr bool RecordStop(uint64_t generation) {
-    if (!CanStop(generation) || stopping_) return false;
+    if (!CanStop(generation) || stopping_)
+      return false;
     generation_ = generation;
     stopping_ = true;
     return true;
   }
   constexpr bool RecordStopped(uint64_t generation) {
-    if (!stopping_ || stopped_ || generation != generation_) return false;
+    if (!stopping_ || stopped_ || generation != generation_)
+      return false;
     stopped_ = true;
     return true;
   }
   constexpr bool stopping() const { return stopping_; }
   constexpr bool stopped() const { return stopped_; }
+
  private:
   uint64_t generation_ = 0;
   bool stopping_ = false;
@@ -107,4 +121,4 @@ static_assert(sizeof(RenderIdentity) == 24);
 static_assert(sizeof(RenderBegin) == 32);
 static_assert(sizeof(RenderWireMessage) == 48);
 static_assert(std::is_trivially_copyable_v<RenderWireMessage>);
-} // namespace remotekit
+}  // namespace remotekit

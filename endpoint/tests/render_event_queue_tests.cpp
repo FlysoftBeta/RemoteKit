@@ -7,7 +7,8 @@
 namespace {
 
 void Require(bool ok, const char* message) {
-  if (ok) return;
+  if (ok)
+    return;
   std::fprintf(stderr, "FAIL: %s\n", message);
   std::exit(1);
 }

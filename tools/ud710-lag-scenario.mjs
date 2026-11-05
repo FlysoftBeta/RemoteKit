@@ -6,17 +6,21 @@ const rateControl = process.env.REMOTEKIT_QA_UD710_RATE_CONTROL;
 if (rateControl && rateControl !== 'cbr' && rateControl !== 'vbr') {
   throw new Error('REMOTEKIT_QA_UD710_RATE_CONTROL must be cbr or vbr');
 }
-export const viewport = {width:1920, height:888};
+export const viewport = { width: 1920, height: 888 };
 export const endpointArgs = ['--encoder=qsv', '--fps=60', '--max-bitrate=48000000'];
 if (rateControl) endpointArgs.push('--rate-control=' + rateControl);
 export const controlEnvironment = {
-  REMOTEKIT_NETWORK_SIM:JSON.stringify({
-    oneWayDelayMs:5, downlinkMbps:24, uplinkMbps:1000, maxQueueBytes:300000, maxQueueDelayMs:100,
+  REMOTEKIT_NETWORK_SIM: JSON.stringify({
+    oneWayDelayMs: 5,
+    downlinkMbps: 24,
+    uplinkMbps: 1000,
+    maxQueueBytes: 300000,
+    maxQueueDelayMs: 100,
   }),
-  REMOTEKIT_RTC_LOOPBACK_TEST:'1',
+  REMOTEKIT_RTC_LOOPBACK_TEST: '1',
 };
 
-export function createScrollStimulus({markerWidth = 224, markerHeight = 32, markerScript} = {}) {
+export function createScrollStimulus({ markerWidth = 224, markerHeight = 32, markerScript } = {}) {
   return `<!doctype html><meta charset="utf-8"><title>UD710 controlled scroll</title>
 <style>
   body { margin:0; overflow:hidden; background:#f0ece9; font:18px Arial; }
@@ -43,7 +47,9 @@ export function createScrollStimulus({markerWidth = 224, markerHeight = 32, mark
   const ctx = document.querySelector('canvas').getContext('2d');
   let active = false;
   let motionStart = 0;
-  ${markerScript ?? `function marker() {
+  ${
+    markerScript ??
+    `function marker() {
     const time = Date.now() >>> 0;
     ctx.fillStyle = 'white';
     ctx.fillRect(0, 0, 224, 32);
@@ -54,7 +60,8 @@ export function createScrollStimulus({markerWidth = 224, markerHeight = 32, mark
       const y = Math.floor(bit / 16) * 16;
       ctx.fillRect(x, y, 14, 16);
     }
-  }`}
+  }`
+  }
   function animate(t) {
     if (!active) return;
     const elapsed = t - motionStart;
@@ -83,14 +90,14 @@ export function createScrollStimulus({markerWidth = 224, markerHeight = 32, mark
 }
 const stimulus = createScrollStimulus();
 
-export async function start({page}) {
+export async function start({ page }) {
   await page.evaluate(() => {
     const video = document.querySelector('.remote-video-plane video');
     const canvas = document.createElement('canvas');
     canvas.width = 224;
     canvas.height = 32;
-    const ctx = canvas.getContext('2d', {willReadFrequently:true});
-    const frames = window.diagnosticQA.lagFrames = [];
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const frames = (window.diagnosticQA.lagFrames = []);
     window.diagnosticQA.lagDims = [video.videoWidth, video.videoHeight];
     window.diagnosticQA.lagClockOffset = () => Date.now() - (performance.timeOrigin + performance.now());
     function record(now, data) {
@@ -106,10 +113,10 @@ export async function start({page}) {
           const y = Math.floor(bit / 16) * 16 + 8;
           if (pixels[(y * 224 + x) * 4] < 100) value |= 1 << bit;
         }
-        const delay = ((performance.timeOrigin + data.presentationTime) - (value >>> 0)) | 0;
-        if (delay >= 0 && delay < 10000) marker = {value:value >>> 0, delay};
+        const delay = (performance.timeOrigin + data.presentationTime - (value >>> 0)) | 0;
+        if (delay >= 0 && delay < 10000) marker = { value: value >>> 0, delay };
       }
-      frames.push({now, ...data, marker});
+      frames.push({ now, ...data, marker });
       video.requestVideoFrameCallback(record);
     }
     video.requestVideoFrameCallback(record);
@@ -140,29 +147,32 @@ export function createScenario(options = {}) {
       response.end(options.stimulus ?? stimulus);
     },
 
-    start:options.start ?? start,
+    start: options.start ?? start,
 
-    async measure({read, log, sleep}) {
+    async measure({ read, log, sleep }) {
       const offset = await read('diagnosticQA.lagClockOffset()');
-      await log('phase-idle', {wall:Date.now(), offset});
+      await log('phase-idle', { wall: Date.now(), offset });
       await sleep(30000);
       setMotion(true);
-      await log('phase-motion', {wall:Date.now()});
+      await log('phase-motion', { wall: Date.now() });
       await sleep(22000);
       setMotion(false);
-      await log('phase-idle-2', {wall:Date.now()});
+      await log('phase-idle-2', { wall: Date.now() });
       await sleep(5000);
       setMotion(true);
-      await log('phase-motion-2', {wall:Date.now()});
+      await log('phase-motion-2', { wall: Date.now() });
       await sleep(13000);
       setMotion(false);
-      await log('phase-done', {wall:Date.now(), offset:await read('diagnosticQA.lagClockOffset()')});
-      await log('frame-raw', await read(`({
+      await log('phase-done', { wall: Date.now(), offset: await read('diagnosticQA.lagClockOffset()') });
+      await log(
+        'frame-raw',
+        await read(`({
         dims:diagnosticQA.lagDims,
         timeOrigin:performance.timeOrigin,
         frames:diagnosticQA.lagFrames,
         probe:diagnosticQA.lagProbe
-      })`));
+      })`),
+      );
     },
   };
 }

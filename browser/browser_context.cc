@@ -39,7 +39,9 @@ class SiteIdentity final : public base::SupportsUserData::Data,
       metadata.platform_version = "13.0.0";
       metadata.architecture = "arm";
       metadata.bitness = "64";
-      metadata.model.clear(); metadata.mobile = false; metadata.wow64 = false;
+      metadata.model.clear();
+      metadata.mobile = false;
+      metadata.wow64 = false;
       metadata.form_factors = {"Tablet"};
     }
     ua.ua_metadata_override = std::move(metadata);
@@ -50,14 +52,16 @@ class SiteIdentity final : public base::SupportsUserData::Data,
     web_contents()->SyncRendererPrefs();
   }
   void DidStartNavigation(content::NavigationHandle* navigation) override {
-    if (!navigation->IsInPrimaryMainFrame() || navigation->IsSameDocument()) return;
+    if (!navigation->IsInPrimaryMainFrame() || navigation->IsSameDocument())
+      return;
     Apply(navigation->GetURL());
     // Always override, including desktop, so every redirect can choose a new
     // identity without changing the NavigationRequest's immutable UA flag.
     navigation->SetIsOverridingUserAgent(true);
   }
   void DidRedirectNavigation(content::NavigationHandle* navigation) override {
-    if (navigation->IsInPrimaryMainFrame()) Apply(navigation->GetURL());
+    if (navigation->IsInPrimaryMainFrame())
+      Apply(navigation->GetURL());
   }
 };
 }  // namespace
@@ -66,17 +70,22 @@ void BrowserContext::InstallSiteIdentity(content::WebContents* contents) {
     contents->SetUserData(&kSiteIdentityKey, std::make_unique<SiteIdentity>(contents));
 }
 bool BrowserContext::SetSitePreferences(const base::DictValue& sites, std::string* error) {
-  if (sites.size() > 4096) { *error = "site_preference_limit"; return false; }
+  if (sites.size() > 4096) {
+    *error = "site_preference_limit";
+    return false;
+  }
   std::map<std::string, bool> next;
   for (const auto [key, value] : sites) {
     const GURL url(key);
     if (!url.SchemeIsHTTPOrHTTPS() || url::Origin::Create(url).Serialize() != key ||
         !value.is_dict() || !value.GetDict().FindBool("tabletUa")) {
-      *error = "invalid_site_preference"; return false;
+      *error = "invalid_site_preference";
+      return false;
     }
     next[key] = *value.GetDict().FindBool("tabletUa");
   }
-  site_preferences_ = std::move(next); return true;
+  site_preferences_ = std::move(next);
+  return true;
 }
 bool BrowserContext::TabletUaFor(const GURL& url) const {
   const auto found = site_preferences_.find(url::Origin::Create(url).Serialize());
@@ -101,26 +110,30 @@ BrowserContext::~BrowserContext() {
     auto done = base::BarrierClosure(count, flushed.QuitClosure());
     ForEachLoadedStoragePartition([&done](content::StoragePartition* partition) {
       partition->GetCookieManagerForBrowserProcess()->FlushCookieStore(
-          mojo::WrapCallbackWithDropHandler(base::BindOnce(
-              [](base::RepeatingClosure finish) { finish.Run(); }, done),
-              base::BindOnce([](base::RepeatingClosure finish) {
-                LOG(ERROR) << "Cookie flush disconnected during Profile shutdown";
-                finish.Run();
-              }, done)));
+          mojo::WrapCallbackWithDropHandler(
+              base::BindOnce([](base::RepeatingClosure finish) { finish.Run(); }, done),
+              base::BindOnce(
+                  [](base::RepeatingClosure finish) {
+                    LOG(ERROR) << "Cookie flush disconnected during Profile shutdown";
+                    finish.Run();
+                  },
+                  done)));
     });
     base::OneShotTimer timeout;
-    timeout.Start(FROM_HERE, base::Seconds(5), base::BindOnce(
-        [](base::OnceClosure quit) {
-          LOG(ERROR) << "Cookie flush timed out during Profile shutdown";
-          std::move(quit).Run();
-        }, flushed.QuitClosure()));
+    timeout.Start(FROM_HERE, base::Seconds(5),
+                  base::BindOnce(
+                      [](base::OnceClosure quit) {
+                        LOG(ERROR) << "Cookie flush timed out during Profile shutdown";
+                        std::move(quit).Run();
+                      },
+                      flushed.QuitClosure()));
     flushed.Run();
   }
   ShutdownStoragePartitions();
 }
 void BrowserContext::ConfigureNetworkContext(bool in_memory,
-    const base::FilePath& relative_partition_path,
-    network::mojom::NetworkContextParams* params) {
+                                             const base::FilePath& relative_partition_path,
+                                             network::mojom::NetworkContextParams* params) {
   network_state_->Configure(in_memory, relative_partition_path, params);
 }
 base::FilePath BrowserContext::GetPath() const {

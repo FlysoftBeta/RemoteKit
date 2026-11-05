@@ -11,7 +11,8 @@ namespace remotekit::browser {
 // installed only by the service executable, before child feature propagation.
 inline void ConfigureServiceScrollPolicy(base::CommandLine& command) {
   std::string disabled = command.GetSwitchValueASCII("disable-features");
-  if (!disabled.empty()) disabled += ",";
+  if (!disabled.empty())
+    disabled += ",";
   disabled += blink::features::kResamplingScrollEvents.name;
   command.AppendSwitchASCII("disable-features", disabled);
 }

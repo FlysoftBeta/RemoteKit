@@ -1,43 +1,104 @@
 import { useState } from 'react';
-import { Alert, Button, Dialog, DialogActions, DialogContent, DialogTitle, Divider, TextField, Typography } from '@mui/material';
+import {
+  Alert,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Divider,
+  TextField,
+  Typography,
+} from '@mui/material';
 import type { DiagnosticState } from './diagnostic-collection';
 
-export function DiagnosticSettings({ state, online, start }: { state: DiagnosticState; online: boolean; start: () => void }) {
-  return <>
-    <div className="setting-section">
-      <Typography fontWeight={600}>诊断</Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
-        收集连接、媒体与性能信息，停止后保存在服务端。
-      </Typography>
-      <Button variant="outlined" onClick={start}
-        disabled={!online || (state.phase !== 'idle' && state.phase !== 'start-error')}>
-        {state.phase === 'starting' ? '正在开始…' : '开始诊断'}
-      </Button>
-      {state.phase === 'start-error' && <Alert severity="error" sx={{ mt: 1 }}>未能确认诊断已开始，请重试。</Alert>}
-    </div>
-    <Divider />
-  </>;
+export function DiagnosticSettings({
+  state,
+  online,
+  start,
+}: {
+  state: DiagnosticState;
+  online: boolean;
+  start: () => void;
+}) {
+  return (
+    <>
+      <div className="setting-section">
+        <Typography fontWeight={600}>诊断</Typography>
+        <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
+          收集连接、媒体与性能信息，停止后保存在服务端。
+        </Typography>
+        <Button
+          variant="outlined"
+          onClick={start}
+          disabled={!online || (state.phase !== 'idle' && state.phase !== 'start-error')}
+        >
+          {state.phase === 'starting' ? '正在开始…' : '开始诊断'}
+        </Button>
+        {state.phase === 'start-error' && (
+          <Alert severity="error" sx={{ mt: 1 }}>
+            未能确认诊断已开始，请重试。
+          </Alert>
+        )}
+      </div>
+      <Divider />
+    </>
+  );
 }
 
-export function DiagnosticCollectionView({ state, online, stop, dismiss }: {
-  state: DiagnosticState; online: boolean; stop: () => void; dismiss: () => void;
+export function DiagnosticCollectionView({
+  state,
+  online,
+  stop,
+  dismiss,
+}: {
+  state: DiagnosticState;
+  online: boolean;
+  stop: () => void;
+  dismiss: () => void;
 }) {
   if (state.phase === 'collecting' || state.phase === 'finalizing' || state.phase === 'retry') {
     const retry = state.phase === 'retry';
-    return <Alert
-      severity={retry ? 'warning' : 'info'}
-      sx={{ position: 'absolute', left: '50%', bottom: 'max(12px, env(safe-area-inset-bottom))', transform: 'translateX(-50%)',
-        zIndex: 1210, width: 'max-content', maxWidth: 'calc(100% - 24px)', alignItems: 'center', boxShadow: 2 }}
-      action={state.phase !== 'finalizing' && <Button color="inherit" size="small" disabled={!online}
-        onClick={stop}>{retry ? '重试确认' : '停止数据收集'}</Button>}
-    >
-      {retry ? '保存尚未确认' : state.phase === 'finalizing' ? '正在保存诊断…' : `已收集 ${state.samples} 个样本`}
-    </Alert>;
+    return (
+      <Alert
+        severity={retry ? 'warning' : 'info'}
+        sx={{
+          position: 'absolute',
+          left: '50%',
+          bottom: 'max(12px, env(safe-area-inset-bottom))',
+          transform: 'translateX(-50%)',
+          zIndex: 1210,
+          width: 'max-content',
+          maxWidth: 'calc(100% - 24px)',
+          alignItems: 'center',
+          boxShadow: 2,
+        }}
+        action={
+          state.phase !== 'finalizing' && (
+            <Button color="inherit" size="small" disabled={!online} onClick={stop}>
+              {retry ? '重试确认' : '停止数据收集'}
+            </Button>
+          )
+        }
+      >
+        {retry
+          ? '保存尚未确认'
+          : state.phase === 'finalizing'
+            ? '正在保存诊断…'
+            : `已收集 ${state.samples} 个样本`}
+      </Alert>
+    );
   }
-  return state.phase === 'complete' || state.phase === 'failed'
-    ? <DiagnosticResult key={state.id} id={state.id} complete={state.phase === 'complete'}
-      missingSamples={state.missingSamples} reason={state.reason} dismiss={dismiss} />
-    : null;
+  return state.phase === 'complete' || state.phase === 'failed' ? (
+    <DiagnosticResult
+      key={state.id}
+      id={state.id}
+      complete={state.phase === 'complete'}
+      missingSamples={state.missingSamples}
+      reason={state.reason}
+      dismiss={dismiss}
+    />
+  ) : null;
 }
 
 const stopReasons = new Map([
@@ -48,31 +109,66 @@ const stopReasons = new Map([
   ['shutdown', '服务端停止运行，收集已停止。'],
 ]);
 
-function DiagnosticResult({ id, complete, missingSamples, reason, dismiss }: {
-  id: string; complete: boolean; missingSamples: number; reason?: string; dismiss: () => void;
+function DiagnosticResult({
+  id,
+  complete,
+  missingSamples,
+  reason,
+  dismiss,
+}: {
+  id: string;
+  complete: boolean;
+  missingSamples: number;
+  reason?: string;
+  dismiss: () => void;
 }) {
   const [copy, setCopy] = useState<'copied' | 'error'>();
-  return <Dialog open onClose={dismiss} fullWidth maxWidth="xs">
-    <DialogTitle>{complete ? '诊断已保存' : '诊断保存失败'}</DialogTitle>
-    <DialogContent>
-      <Typography variant="body2" sx={{ mb: 2 }}>
-        {complete ? '可将诊断 ID 提供给服务端维护人员。' : '请记录此 ID，关闭后可重新开始诊断。'}
-      </Typography>
-      {reason && stopReasons.has(reason) && <Typography variant="body2" sx={{ mb: 2 }}>{stopReasons.get(reason)}</Typography>}
-      {missingSamples > 0 && <Alert severity="warning" sx={{ mb: 2 }}>
-        有 {missingSamples} 次客户端采样未完成或未收到确认。
-      </Alert>}
-      <TextField label="诊断 ID" value={id} size="small" fullWidth slotProps={{ input: { readOnly: true } }}
-        onFocus={event => (event.target as HTMLInputElement).select()} />
-      {copy && <Typography variant="body2" role="status" sx={{ mt: 1 }}>
-        {copy === 'copied' ? '已复制' : '复制失败，可选中诊断 ID 手动复制。'}
-      </Typography>}
-    </DialogContent>
-    <DialogActions>
-      {typeof navigator.clipboard?.writeText === 'function' && <Button onClick={() =>
-        void navigator.clipboard.writeText(id).then(() => setCopy('copied'), () => setCopy('error'))
-      }>复制 ID</Button>}
-      <Button onClick={dismiss}>完成</Button>
-    </DialogActions>
-  </Dialog>;
+  return (
+    <Dialog open onClose={dismiss} fullWidth maxWidth="xs">
+      <DialogTitle>{complete ? '诊断已保存' : '诊断保存失败'}</DialogTitle>
+      <DialogContent>
+        <Typography variant="body2" sx={{ mb: 2 }}>
+          {complete ? '可将诊断 ID 提供给服务端维护人员。' : '请记录此 ID，关闭后可重新开始诊断。'}
+        </Typography>
+        {reason && stopReasons.has(reason) && (
+          <Typography variant="body2" sx={{ mb: 2 }}>
+            {stopReasons.get(reason)}
+          </Typography>
+        )}
+        {missingSamples > 0 && (
+          <Alert severity="warning" sx={{ mb: 2 }}>
+            有 {missingSamples} 次客户端采样未完成或未收到确认。
+          </Alert>
+        )}
+        <TextField
+          label="诊断 ID"
+          value={id}
+          size="small"
+          fullWidth
+          slotProps={{ input: { readOnly: true } }}
+          onFocus={(event) => (event.target as HTMLInputElement).select()}
+        />
+        {copy && (
+          <Typography variant="body2" role="status" sx={{ mt: 1 }}>
+            {copy === 'copied' ? '已复制' : '复制失败，可选中诊断 ID 手动复制。'}
+          </Typography>
+        )}
+      </DialogContent>
+      <DialogActions>
+        {typeof navigator.clipboard?.writeText === 'function' && (
+          <Button
+            onClick={() =>
+              void navigator.clipboard.writeText(id).then(
+                () => setCopy('copied'),
+                () => setCopy('error'),
+              )
+            }
+          >
+            复制 ID
+          </Button>
+        )}
+        <Button onClick={dismiss}>完成</Button>
+      </DialogActions>
+    </Dialog>
+  );
 }

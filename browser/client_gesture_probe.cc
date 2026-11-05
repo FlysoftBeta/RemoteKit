@@ -31,16 +31,22 @@ void TestClientInputTiming() {
   CHECK(!retired.Contains(owner, "new-owner"));
   for (int field = 0; field < 5; ++field) {
     auto changed = owner;
-    if (field == 0) ++changed.session;
-    if (field == 1) ++changed.view;
-    if (field == 2) ++changed.instance;
-    if (field == 3) ++changed.document;
-    if (field == 4) ++changed.focus;
+    if (field == 0)
+      ++changed.session;
+    if (field == 1)
+      ++changed.view;
+    if (field == 2)
+      ++changed.instance;
+    if (field == 3)
+      ++changed.document;
+    if (field == 4)
+      ++changed.focus;
     CHECK(!retired.Contains(changed, "destroyed-target"));
   }
   using State = remotekit::browser::ClientTouchRetirement::State;
   retired.Begin(owner, "awaiting-ack");
-  for (size_t i = 0; i < retired.kCapacity; ++i) retired.Retire(owner, std::to_string(i), true);
+  for (size_t i = 0; i < retired.kCapacity; ++i)
+    retired.Retire(owner, std::to_string(i), true);
   CHECK(!retired.Contains(owner, "destroyed-target"));
   CHECK(retired.Contains(owner, "31"));
   CHECK(retired.Find(owner, "awaiting-ack") == State::pending);
@@ -118,14 +124,20 @@ struct Sink : ui::TouchDispositionGestureFilterClient {
     CHECK(web.GetType() != blink::WebInputEvent::Type::kUndefined);
     events.push_back(event);
   }
-  bool Has(E type) const { return std::ranges::any_of(events, [type](const auto& e) { return e.type() == type; }); }
+  bool Has(E type) const {
+    return std::ranges::any_of(events, [type](const auto& e) { return e.type() == type; });
+  }
 };
-void Packet(ui::TouchDispositionGestureFilter& filter, uint32_t id, A action,
-            const std::vector<G>& gestures, bool consumed) {
+void Packet(ui::TouchDispositionGestureFilter& filter,
+            uint32_t id,
+            A action,
+            const std::vector<G>& gestures,
+            bool consumed) {
   ui::PointerProperties pointer(100, 100, 1);
   pointer.id = 0;
   pointer.tool_type = ui::MotionEvent::ToolType::FINGER;
-  ui::MotionEventGeneric event(action, base::TimeTicks() + base::Seconds(1) + base::Milliseconds(id), pointer);
+  ui::MotionEventGeneric event(
+      action, base::TimeTicks() + base::Seconds(1) + base::Milliseconds(id), pointer);
   event.set_unique_event_id(id);
   const auto packet = remotekit::browser::MakeClientGesturePacket(event, gestures, 1);
   CHECK_EQ(packet.unique_touch_event_id(), id);
@@ -136,10 +148,15 @@ struct ActionSink : input::TouchActionFilterClient {
   void OnUnconfirmedTapConvertedToTap() override {}
 };
 blink::WebGestureEvent Gesture(blink::WebInputEvent::Type type) {
-  return blink::WebGestureEvent(type, 0, base::TimeTicks() + base::Seconds(1), blink::WebGestureDevice::kTouchscreen);
+  return blink::WebGestureEvent(type, 0, base::TimeTicks() + base::Seconds(1),
+                                blink::WebGestureDevice::kTouchscreen);
 }
-void TestMomentumAction(cc::TouchAction action, bool x_allowed, bool y_allowed,
-                        float hint_x, float hint_y, int pointers = 1,
+void TestMomentumAction(cc::TouchAction action,
+                        bool x_allowed,
+                        bool y_allowed,
+                        float hint_x,
+                        float hint_y,
+                        int pointers = 1,
                         bool pinch_allowed = false) {
   ActionSink sink;
   input::TouchActionFilter filter(&sink);
@@ -153,8 +170,8 @@ void TestMomentumAction(cc::TouchAction action, bool x_allowed, bool y_allowed,
   begin.data.scroll_begin.delta_y_hint = hint_y;
   begin.data.scroll_begin.pointer_count = pointers;
   const auto begin_result = filter.FilterGestureEvent(&begin);
-  CHECK(begin_result == (x_allowed || y_allowed ? input::FilterGestureEventResult::kAllowed :
-                                                 input::FilterGestureEventResult::kFiltered));
+  CHECK(begin_result == (x_allowed || y_allowed ? input::FilterGestureEventResult::kAllowed
+                                                : input::FilterGestureEventResult::kFiltered));
   filter.SetClientMomentumActive(true);
   filter.DecreaseActiveTouches();
   filter.ReportAndResetTouchAction();
@@ -167,10 +184,11 @@ void TestMomentumAction(cc::TouchAction action, bool x_allowed, bool y_allowed,
     CHECK(result == input::FilterGestureEventResult::kAllowed);
     CHECK_EQ(update.data.scroll_update.delta_x, x_allowed ? 9 : 0);
     CHECK_EQ(update.data.scroll_update.delta_y, y_allowed ? 9 : 0);
-  } else CHECK(result == input::FilterGestureEventResult::kFiltered);
+  } else
+    CHECK(result == input::FilterGestureEventResult::kFiltered);
   auto pinch = Gesture(blink::WebInputEvent::Type::kGesturePinchBegin);
-  const auto pinch_result = pinch_allowed ? input::FilterGestureEventResult::kAllowed :
-                                            input::FilterGestureEventResult::kFiltered;
+  const auto pinch_result = pinch_allowed ? input::FilterGestureEventResult::kAllowed
+                                          : input::FilterGestureEventResult::kFiltered;
   CHECK(filter.FilterGestureEvent(&pinch) == pinch_result);
   auto pinch_end = Gesture(blink::WebInputEvent::Type::kGesturePinchEnd);
   CHECK(filter.FilterGestureEvent(&pinch_end) == pinch_result);
@@ -190,7 +208,7 @@ void TestMomentumAction(cc::TouchAction action, bool x_allowed, bool y_allowed,
   filter.DecreaseActiveTouches();
   filter.ReportAndResetTouchAction();
 }
-}
+}  // namespace
 int main(int argc, char** argv) {
   base::AtExitManager at_exit;
   base::CommandLine::Init(argc, argv);
@@ -200,24 +218,29 @@ int main(int argc, char** argv) {
     ui::TouchDispositionGestureFilter filter(&sink);
     filter.DisableScrollUpdateCompensation();
     Packet(filter, 1, A::DOWN, {{T::tap_down}}, false);
-    Packet(filter, 2, A::MOVE, {{T::scroll_begin, 100, 100, 0, -10},
-                             {T::scroll_update, 100, 90, 0, -10}}, false);
+    Packet(filter, 2, A::MOVE,
+           {{T::scroll_begin, 100, 100, 0, -10}, {T::scroll_update, 100, 90, 0, -10}}, false);
     Packet(filter, 3, A::MOVE, {{T::scroll_update, 100, 80, 0, -10}}, true);
-    const auto updates = std::ranges::count_if(sink.events, [](const auto& e) { return e.type() == E::kGestureScrollUpdate; });
+    const auto updates = std::ranges::count_if(
+        sink.events, [](const auto& e) { return e.type() == E::kGestureScrollUpdate; });
     CHECK_EQ(updates, 1);
     Packet(filter, 4, A::UP, {{T::fling_start, 100, 80, 0, 0, 1, 0, -1000}}, false);
     CHECK(!sink.Has(E::kScrollFlingStart));
     CHECK(sink.Has(E::kGestureScrollEnd));
     int teardown_count = 0, processed_count = 0;
     remotekit::browser::CompleteClientTouchAck(true, true, sink.Has(E::kScrollFlingStart),
-        base::BindOnce([](int* teardown, int* processed) {
-          CHECK_EQ(*processed, 0);
-          ++*teardown;
-        }, &teardown_count, &processed_count),
-        base::BindOnce([](int* teardown, int* processed) {
-          CHECK_EQ(*teardown, 1);
-          ++*processed;
-        }, &teardown_count, &processed_count));
+                                               base::BindOnce(
+                                                   [](int* teardown, int* processed) {
+                                                     CHECK_EQ(*processed, 0);
+                                                     ++*teardown;
+                                                   },
+                                                   &teardown_count, &processed_count),
+                                               base::BindOnce(
+                                                   [](int* teardown, int* processed) {
+                                                     CHECK_EQ(*teardown, 1);
+                                                     ++*processed;
+                                                   },
+                                                   &teardown_count, &processed_count));
     CHECK_EQ(teardown_count, 1);
     CHECK_EQ(processed_count, 1);
   }
@@ -241,7 +264,8 @@ int main(int argc, char** argv) {
     CHECK(sink.Has(E::kScrollFlingStart));
     CHECK(!sink.Has(E::kGestureScrollEnd));
     int teardown_count = 0, processed_count = 0;
-    remotekit::browser::CompleteClientTouchAck(true, false, sink.Has(E::kScrollFlingStart),
+    remotekit::browser::CompleteClientTouchAck(
+        true, false, sink.Has(E::kScrollFlingStart),
         base::BindOnce([](int* count) { ++*count; }, &teardown_count),
         base::BindOnce([](int* count) { ++*count; }, &processed_count));
     CHECK_EQ(teardown_count, 0);
@@ -261,13 +285,18 @@ int main(int argc, char** argv) {
     ui::TouchDispositionGestureFilter filter(&sink);
     filter.DisableScrollUpdateCompensation();
     Packet(filter, 1, A::DOWN, {{T::tap_down}}, false);
-    Packet(filter, 2, A::MOVE, {{T::tap_cancel}, {T::scroll_begin, 0, 0, 0, -10},
-                              {T::scroll_update, 0, 0, 0, -10}, {T::pinch_begin},
-                              {T::pinch_update, 0, 0, 0, 0, 1.2f}}, false);
+    Packet(filter, 2, A::MOVE,
+           {{T::tap_cancel},
+            {T::scroll_begin, 0, 0, 0, -10},
+            {T::scroll_update, 0, 0, 0, -10},
+            {T::pinch_begin},
+            {T::pinch_update, 0, 0, 0, 0, 1.2f}},
+           false);
     Packet(filter, 3, A::UP, {{T::pinch_end}, {T::scroll_end}}, false);
-    for (auto type : {E::kGestureTapDown, E::kGestureTapCancel, E::kGestureScrollBegin,
-                      E::kGestureScrollUpdate, E::kGestureScrollEnd, E::kGesturePinchBegin,
-                      E::kGesturePinchUpdate, E::kGesturePinchEnd}) CHECK(sink.Has(type));
+    for (auto type :
+         {E::kGestureTapDown, E::kGestureTapCancel, E::kGestureScrollBegin, E::kGestureScrollUpdate,
+          E::kGestureScrollEnd, E::kGesturePinchBegin, E::kGesturePinchUpdate, E::kGesturePinchEnd})
+      CHECK(sink.Has(type));
   }
   {
     Sink sink;
@@ -277,8 +306,8 @@ int main(int argc, char** argv) {
     Packet(filter, 2, A::CANCEL, {}, false);
     CHECK(sink.Has(E::kGestureTapCancel));  // No candidate: official repair.
     Packet(filter, 3, A::DOWN, {{T::tap_down}}, false);
-    Packet(filter, 4, A::MOVE, {{T::scroll_begin, 0, 0, 0, -10},
-                              {T::scroll_update, 0, 0, 0, -10}}, false);
+    Packet(filter, 4, A::MOVE, {{T::scroll_begin, 0, 0, 0, -10}, {T::scroll_update, 0, 0, 0, -10}},
+           false);
     Packet(filter, 5, A::CANCEL, {}, false);
     CHECK(sink.Has(E::kGestureScrollEnd));  // No candidate: official repair.
   }
@@ -287,13 +316,15 @@ int main(int argc, char** argv) {
     ui::TouchDispositionGestureFilter filter(&sink);
     filter.DisableScrollUpdateCompensation();
     Packet(filter, 1, A::DOWN, {{T::tap_down}}, false);
-    Packet(filter, 2, A::MOVE, {{T::scroll_begin, 0, 0, 0, -10},
-                              {T::scroll_update, 0, 0, 0, -10}}, false);
+    Packet(filter, 2, A::MOVE, {{T::scroll_begin, 0, 0, 0, -10}, {T::scroll_update, 0, 0, 0, -10}},
+           false);
     Packet(filter, 3, A::UP, {{T::fling_start, 0, 0, 0, 0, 1, 0, -1000}}, false);
     CHECK(sink.Has(E::kScrollFlingStart));
     // Both the explicit candidate and new-sequence official repair reach Blink.
-    Packet(filter, 4, A::DOWN, explicit_cancel ? std::vector<G>{{T::fling_cancel}, {T::tap_down}}
-                                              : std::vector<G>{{T::tap_down}}, false);
+    Packet(filter, 4, A::DOWN,
+           explicit_cancel ? std::vector<G>{{T::fling_cancel}, {T::tap_down}}
+                           : std::vector<G>{{T::tap_down}},
+           false);
     CHECK(sink.Has(E::kScrollFlingCancel));
     Packet(filter, 5, A::UP, {{T::tap}}, false);
   }
@@ -313,11 +344,13 @@ int main(int argc, char** argv) {
   CHECK(single_scroll.Accept({{T::scroll_update, 0, 0, -10, 0}}, false, false, 1));
   CHECK(single_scroll.Accept({{T::scroll_end}}, false, true, 1));
   ui::PointerProperties first(100, 100, 1), second(200, 100, 1);
-  first.id = 0; second.id = 1;
+  first.id = 0;
+  second.id = 1;
   first.tool_type = second.tool_type = ui::MotionEvent::ToolType::FINGER;
   ui::MotionEventGeneric two_fingers(A::MOVE, base::TimeTicks() + base::Seconds(1), first);
   two_fingers.PushPointer(second);
-  const auto packet = remotekit::browser::MakeClientGesturePacket(two_fingers, {{T::scroll_begin}}, 1);
+  const auto packet =
+      remotekit::browser::MakeClientGesturePacket(two_fingers, {{T::scroll_begin}}, 1);
   CHECK_EQ(packet.gesture(0).details.touch_points(), 2);
   TestMomentumAction(cc::TouchAction::kPanX, true, false, 10, 0);
   TestMomentumAction(cc::TouchAction::kPanY, false, true, 0, 10);
@@ -325,7 +358,7 @@ int main(int argc, char** argv) {
   TestMomentumAction(cc::TouchAction::kNone, false, false, 0, -10);
   TestMomentumAction(cc::TouchAction::kNone, false, false, 10, -10);
   TestMomentumAction(cc::TouchAction::kNone, false, false, 0, 0, 2);
-  TestMomentumAction(cc::TouchAction::kPanY | cc::TouchAction::kPinchZoom,
-                     false, true, 0, 10, 1, true);
+  TestMomentumAction(cc::TouchAction::kPanY | cc::TouchAction::kPinchZoom, false, true, 0, 10, 1,
+                     true);
   return 0;
 }

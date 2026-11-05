@@ -12,7 +12,8 @@ namespace remotekit::media {
 class RenderEventQueue {
  public:
   ~RenderEventQueue() {
-    if (event_) CloseHandle(event_);
+    if (event_)
+      CloseHandle(event_);
   }
 
   HANDLE handle() const { return event_; }
@@ -27,7 +28,8 @@ class RenderEventQueue {
     std::deque<remotekit_sdk_render_event> incoming;
     std::lock_guard lock(mutex_);
     incoming.swap(events_);
-    if (event_) ResetEvent(event_);
+    if (event_)
+      ResetEvent(event_);
     return incoming;
   }
 

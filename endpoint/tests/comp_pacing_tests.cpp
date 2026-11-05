@@ -2,97 +2,154 @@
 #include <cstdio>
 #include <cstdlib>
 using remotekit::CompPacing;
-void Require(bool value,const char* message){if(!value){std::fprintf(stderr,"FAIL: %s\n",message);std::exit(1);}}
-int main(){
- remotekit::CompCadence cadence;
- Require(cadence.Update(1000000,1,60,60,true,0)==1,"observed low fps starts cadence");
- uint32_t recovered=0;for(int64_t t=250000;t<=1500000;t+=250000)recovered=cadence.Update(1000000,1,60,60,true,t);
- Require(recovered==60,"idle observed fps does not permanently pin source cadence");
- Require(cadence.Update(1000000,60,60,15,true,1750000)==15,"official restriction caps source cadence");
- Require(cadence.Update(0,60,60,60,true,2000000)==0,"zero rate pauses Begins");
- Require(cadence.Update(1000000,0,60,60,true,2000001)==0,"zero fps pauses Begins");
- Require(cadence.Update(1000000,1,60,60,false,2000002)==1,"resume uses observed start");
- Require(cadence.Update(1000000,1,60,60,false,3000000)==1,"occupied slots prohibit cadence growth");
- CompPacing comp;comp.Reset(12);
- auto first=comp.Reserve();Require(first.has_value(),"initial depth one accepts Begin");
- Require(!comp.Reserve(),"render pending fills depth one");
- comp.Pressure(false,true);auto second=comp.Reserve();Require(second.has_value(),"slot saturation grows depth");
- Require(comp.EarliestRendering()->value==first->value,"oldest Begin blocks later ready delivery");
- // Fence completion and Reject can arrive in either order across slots.
- Require(comp.Ready(*second),"second ready before first");
- Require(comp.Reject(*first),"first Reject independent of later fence");
- Require(comp.Consume(*second),"last lease queues consumed");
- Require(!comp.Reject(*second),"Reject cannot free GPU consuming slot");
- Require(comp.occupied()==1,"queued consumed signal does not free slot");
- Require(comp.Reusable(*second),"actual consumed fence frees exact slot");
- auto stale=*first;stale.generation=11;Require(!comp.Reject(stale),"old generation cannot reject current slot");
- comp.Pressure(false,true);comp.Pressure(false,true);Require(comp.depth()==4,"capacity is four");
- auto a=comp.Reserve(),b=comp.Reserve(),c=comp.Reserve(),d=comp.Reserve();Require(a&&b&&c&&d&&!comp.Reserve(),"capacity bounds all sent Begins");
- Require(comp.Ready(*a),"lease a");Require(comp.Ready(*b),"lease b");
- comp.Pressure(true,true);comp.Pressure(true,true);comp.Pressure(true,true);
- Require(comp.depth()==1&&comp.occupied()==4,"shrink never steals inflight work or leases");
- Require(!comp.Reserve(),"shrink gates new Begins until drained");
- Require(comp.Consume(*a)&&comp.Reusable(*a),"a drains");Require(comp.Consume(*b)&&comp.Reusable(*b),"b drains");
- Require(comp.Reject(*c)&&comp.Reject(*d),"remaining rejects drain");
- auto tail=comp.Reserve(true);Require(tail.has_value(),"idle force Begin uses free depth one slot");
- Require(comp.slots()[tail->slot].force,"force identity is retained");
- Require(comp.Ready(*tail)&&comp.Consume(*tail)&&comp.Reusable(*tail),"tail releases without latest-cache deadlock");
- auto newer=comp.Reserve();Require(newer.has_value(),"animation resumes after tail");
- Require(!comp.Reject(*tail),"old value cannot free reused slot");
- Require(comp.Reject(*newer),"current value reject");
- // Slot index and presentation order are independent after a slot is reused.
- comp.Reset(20);comp.Pressure(false,true);auto old0=comp.Reserve(),old1=comp.Reserve();
- Require(comp.Reject(*old0),"free low-index slot");auto new0=comp.Reserve();
- Require(new0->slot<old1->slot&&new0->value>old1->value,"reuse gives lower slot a later identity");
- Require(comp.EarliestRendering()->value==old1->value,"slot index cannot reverse presentation order");
- CompPacing demand;demand.Reset(30);
- auto idle_request=demand.Reserve();Require(idle_request&&demand.Reject(*idle_request),"Idle request rejects its own slot");
- demand.IdleRejected(*idle_request);Require(demand.idle()&&!demand.Reserve(),"Idle suspends normal Begin");
- auto forced_tail=demand.Reserve(true);Require(forced_tail.has_value(),"one tail can break idle without resuming normal demand");
- Require(demand.Ready(*forced_tail)&&demand.Consume(*forced_tail)&&demand.Reusable(*forced_tail),"tail drains its actual lease and GPU stages");
- Require(demand.idle()&&!demand.Reserve(),"completed tail leaves idle demand paused");
- auto wrong_wake=*idle_request;wrong_wake.generation=29;
- Require(!demand.Wake(wrong_wake)&&demand.idle(),"old generation Wake cannot resume");
- Require(demand.Wake(*idle_request)&&!demand.idle(),"matching Wake restores regular Begin");
- Require(!demand.Wake(*idle_request),"duplicate Wake is idempotent");
- Require(demand.Reserve().has_value(),"regular frame resumes after Wake");
- CompPacing late_idle;late_idle.Reset(31);late_idle.Pressure(false,true);
- auto early=late_idle.Reserve(),late=late_idle.Reserve();
- Require(early&&late&&late_idle.Reject(*early),"two in-flight requests before Idle");late_idle.IdleRejected(*early);
- Require(late_idle.Wake(*early),"Wake establishes issued-request watermark");
- Require(late_idle.Reject(*late),"late old request can still retire");late_idle.IdleRejected(*late);
- Require(!late_idle.idle(),"late pre-Wake Idle cannot suspend fresh demand");
- late_idle.Stop();Require(!late_idle.Wake(*late)&&!late_idle.Reserve(true),"Stop prevents Wake and forced Begin");
- late_idle.Reset(32);Require(!late_idle.idle()&&late_idle.Reserve().has_value(),"new generation starts with demand");
- remotekit::CompBeginSchedule schedule;
- schedule.Attempted(100,100,false);
- Require(!schedule.Due(150)&&schedule.Due(200),"ordinary unsent attempts keep the regular cadence");
- CompPacing resume;resume.Reset(40);
- auto idle_begin=resume.Reserve();
- Require(idle_begin&&resume.Reject(*idle_begin)&&resume.IdleRejected(*idle_begin),"enter Idle before early Begin");
- auto occupied=resume.Reserve(true);
- Require(occupied.has_value(),"a tail attempt can occupy the only slot at Wake");
- auto old_wake=*idle_begin;old_wake.generation=39;
- if(resume.Wake(old_wake))schedule.Wake();
- Require(!schedule.Due(150),"old-generation Wake cannot advance the schedule");
- if(resume.Wake(*idle_begin))schedule.Wake();
- Require(schedule.Due(150)&&!resume.Reserve(),"legal Wake advances the deadline without bypassing slot capacity");
- schedule.Attempted(150,100,false);
- Require(resume.Reject(*occupied)&&schedule.Due(151),"saturation does not consume Wake priority");
- auto busy=resume.Reserve();
- Require(busy&&resume.Reject(*busy),"an SDK BUSY attempt releases its reservation");
- schedule.Attempted(151,100,false);
- Require(schedule.Due(152),"SDK BUSY does not consume Wake priority");
- Require(cadence.Update(0,60,60,60,true,2000003)==0&&schedule.Due(152),"Wake remains due while zero rate blocks sampling");
- Require(resume.Reserve().has_value(),"Wake can use a free slot once media gates permit");
- schedule.Attempted(152,100,true);
- Require(!schedule.Due(153)&&!schedule.Due(251)&&schedule.Due(252),"a sent Begin restores regular cadence");
- schedule.Wake();
- resume.Stop();
- schedule.Reset();
- if(resume.Wake(*idle_begin))schedule.Wake();
- Require(!resume.Reserve(true),"reset does not bypass the Stop gate");
- schedule.Attempted(153,100,false);
- Require(!schedule.Due(154),"reset and a stopped Wake leave no pending priority");
- std::puts("Comp pacing identity, out-of-order, shrink, idle Wake and forced tail checks passed");
+void Require(bool value, const char* message) {
+  if (!value) {
+    std::fprintf(stderr, "FAIL: %s\n", message);
+    std::exit(1);
+  }
+}
+int main() {
+  remotekit::CompCadence cadence;
+  Require(cadence.Update(1000000, 1, 60, 60, true, 0) == 1, "observed low fps starts cadence");
+  uint32_t recovered = 0;
+  for (int64_t t = 250000; t <= 1500000; t += 250000)
+    recovered = cadence.Update(1000000, 1, 60, 60, true, t);
+  Require(recovered == 60, "idle observed fps does not permanently pin source cadence");
+  Require(cadence.Update(1000000, 60, 60, 15, true, 1750000) == 15,
+          "official restriction caps source cadence");
+  Require(cadence.Update(0, 60, 60, 60, true, 2000000) == 0, "zero rate pauses Begins");
+  Require(cadence.Update(1000000, 0, 60, 60, true, 2000001) == 0, "zero fps pauses Begins");
+  Require(cadence.Update(1000000, 1, 60, 60, false, 2000002) == 1, "resume uses observed start");
+  Require(cadence.Update(1000000, 1, 60, 60, false, 3000000) == 1,
+          "occupied slots prohibit cadence growth");
+  CompPacing comp;
+  comp.Reset(12);
+  auto first = comp.Reserve();
+  Require(first.has_value(), "initial depth one accepts Begin");
+  Require(!comp.Reserve(), "render pending fills depth one");
+  comp.Pressure(false, true);
+  auto second = comp.Reserve();
+  Require(second.has_value(), "slot saturation grows depth");
+  Require(comp.EarliestRendering()->value == first->value,
+          "oldest Begin blocks later ready delivery");
+  // Fence completion and Reject can arrive in either order across slots.
+  Require(comp.Ready(*second), "second ready before first");
+  Require(comp.Reject(*first), "first Reject independent of later fence");
+  Require(comp.Consume(*second), "last lease queues consumed");
+  Require(!comp.Reject(*second), "Reject cannot free GPU consuming slot");
+  Require(comp.occupied() == 1, "queued consumed signal does not free slot");
+  Require(comp.Reusable(*second), "actual consumed fence frees exact slot");
+  auto stale = *first;
+  stale.generation = 11;
+  Require(!comp.Reject(stale), "old generation cannot reject current slot");
+  comp.Pressure(false, true);
+  comp.Pressure(false, true);
+  Require(comp.depth() == 4, "capacity is four");
+  auto a = comp.Reserve(), b = comp.Reserve(), c = comp.Reserve(), d = comp.Reserve();
+  Require(a && b && c && d && !comp.Reserve(), "capacity bounds all sent Begins");
+  Require(comp.Ready(*a), "lease a");
+  Require(comp.Ready(*b), "lease b");
+  comp.Pressure(true, true);
+  comp.Pressure(true, true);
+  comp.Pressure(true, true);
+  Require(comp.depth() == 1 && comp.occupied() == 4, "shrink never steals inflight work or leases");
+  Require(!comp.Reserve(), "shrink gates new Begins until drained");
+  Require(comp.Consume(*a) && comp.Reusable(*a), "a drains");
+  Require(comp.Consume(*b) && comp.Reusable(*b), "b drains");
+  Require(comp.Reject(*c) && comp.Reject(*d), "remaining rejects drain");
+  auto tail = comp.Reserve(true);
+  Require(tail.has_value(), "idle force Begin uses free depth one slot");
+  Require(comp.slots()[tail->slot].force, "force identity is retained");
+  Require(comp.Ready(*tail) && comp.Consume(*tail) && comp.Reusable(*tail),
+          "tail releases without latest-cache deadlock");
+  auto newer = comp.Reserve();
+  Require(newer.has_value(), "animation resumes after tail");
+  Require(!comp.Reject(*tail), "old value cannot free reused slot");
+  Require(comp.Reject(*newer), "current value reject");
+  // Slot index and presentation order are independent after a slot is reused.
+  comp.Reset(20);
+  comp.Pressure(false, true);
+  auto old0 = comp.Reserve(), old1 = comp.Reserve();
+  Require(comp.Reject(*old0), "free low-index slot");
+  auto new0 = comp.Reserve();
+  Require(new0->slot < old1->slot && new0->value > old1->value,
+          "reuse gives lower slot a later identity");
+  Require(comp.EarliestRendering()->value == old1->value,
+          "slot index cannot reverse presentation order");
+  CompPacing demand;
+  demand.Reset(30);
+  auto idle_request = demand.Reserve();
+  Require(idle_request && demand.Reject(*idle_request), "Idle request rejects its own slot");
+  demand.IdleRejected(*idle_request);
+  Require(demand.idle() && !demand.Reserve(), "Idle suspends normal Begin");
+  auto forced_tail = demand.Reserve(true);
+  Require(forced_tail.has_value(), "one tail can break idle without resuming normal demand");
+  Require(
+      demand.Ready(*forced_tail) && demand.Consume(*forced_tail) && demand.Reusable(*forced_tail),
+      "tail drains its actual lease and GPU stages");
+  Require(demand.idle() && !demand.Reserve(), "completed tail leaves idle demand paused");
+  auto wrong_wake = *idle_request;
+  wrong_wake.generation = 29;
+  Require(!demand.Wake(wrong_wake) && demand.idle(), "old generation Wake cannot resume");
+  Require(demand.Wake(*idle_request) && !demand.idle(), "matching Wake restores regular Begin");
+  Require(!demand.Wake(*idle_request), "duplicate Wake is idempotent");
+  Require(demand.Reserve().has_value(), "regular frame resumes after Wake");
+  CompPacing late_idle;
+  late_idle.Reset(31);
+  late_idle.Pressure(false, true);
+  auto early = late_idle.Reserve(), late = late_idle.Reserve();
+  Require(early && late && late_idle.Reject(*early), "two in-flight requests before Idle");
+  late_idle.IdleRejected(*early);
+  Require(late_idle.Wake(*early), "Wake establishes issued-request watermark");
+  Require(late_idle.Reject(*late), "late old request can still retire");
+  late_idle.IdleRejected(*late);
+  Require(!late_idle.idle(), "late pre-Wake Idle cannot suspend fresh demand");
+  late_idle.Stop();
+  Require(!late_idle.Wake(*late) && !late_idle.Reserve(true),
+          "Stop prevents Wake and forced Begin");
+  late_idle.Reset(32);
+  Require(!late_idle.idle() && late_idle.Reserve().has_value(),
+          "new generation starts with demand");
+  remotekit::CompBeginSchedule schedule;
+  schedule.Attempted(100, 100, false);
+  Require(!schedule.Due(150) && schedule.Due(200),
+          "ordinary unsent attempts keep the regular cadence");
+  CompPacing resume;
+  resume.Reset(40);
+  auto idle_begin = resume.Reserve();
+  Require(idle_begin && resume.Reject(*idle_begin) && resume.IdleRejected(*idle_begin),
+          "enter Idle before early Begin");
+  auto occupied = resume.Reserve(true);
+  Require(occupied.has_value(), "a tail attempt can occupy the only slot at Wake");
+  auto old_wake = *idle_begin;
+  old_wake.generation = 39;
+  if (resume.Wake(old_wake))
+    schedule.Wake();
+  Require(!schedule.Due(150), "old-generation Wake cannot advance the schedule");
+  if (resume.Wake(*idle_begin))
+    schedule.Wake();
+  Require(schedule.Due(150) && !resume.Reserve(),
+          "legal Wake advances the deadline without bypassing slot capacity");
+  schedule.Attempted(150, 100, false);
+  Require(resume.Reject(*occupied) && schedule.Due(151),
+          "saturation does not consume Wake priority");
+  auto busy = resume.Reserve();
+  Require(busy && resume.Reject(*busy), "an SDK BUSY attempt releases its reservation");
+  schedule.Attempted(151, 100, false);
+  Require(schedule.Due(152), "SDK BUSY does not consume Wake priority");
+  Require(cadence.Update(0, 60, 60, 60, true, 2000003) == 0 && schedule.Due(152),
+          "Wake remains due while zero rate blocks sampling");
+  Require(resume.Reserve().has_value(), "Wake can use a free slot once media gates permit");
+  schedule.Attempted(152, 100, true);
+  Require(!schedule.Due(153) && !schedule.Due(251) && schedule.Due(252),
+          "a sent Begin restores regular cadence");
+  schedule.Wake();
+  resume.Stop();
+  schedule.Reset();
+  if (resume.Wake(*idle_begin))
+    schedule.Wake();
+  Require(!resume.Reserve(true), "reset does not bypass the Stop gate");
+  schedule.Attempted(153, 100, false);
+  Require(!schedule.Due(154), "reset and a stopped Wake leave no pending priority");
+  std::puts("Comp pacing identity, out-of-order, shrink, idle Wake and forced tail checks passed");
 }

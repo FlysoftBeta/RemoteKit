@@ -52,8 +52,7 @@ ProfileNetworkState::ProfileNetworkState(const base::FilePath& profile_path)
         << "Cannot open Profile network encryption key";
     CHECK(!base::DirectoryExists(profile_path_.AppendASCII("Network")))
         << "Profile network storage exists without its encryption key";
-    CHECK(os_crypt_async::Init(key_prefs_.get()))
-        << "Cannot create Profile network encryption key";
+    CHECK(os_crypt_async::Init(key_prefs_.get())) << "Cannot create Profile network encryption key";
   }
   key_file.Close();
   base::DictValue stored;
@@ -64,7 +63,8 @@ ProfileNetworkState::ProfileNetworkState(const base::FilePath& profile_path)
       << "Cannot persist Profile network encryption key";
 
   std::vector<std::pair<os_crypt_async::OSCryptAsync::Precedence,
-                        std::unique_ptr<os_crypt_async::KeyProvider>>> providers;
+                        std::unique_ptr<os_crypt_async::KeyProvider>>>
+      providers;
   providers.emplace_back(1, std::make_unique<os_crypt_async::DPAPIKeyProvider>(key_prefs_.get()));
   crypt_ = std::make_unique<os_crypt_async::OSCryptAsync>(std::move(providers));
   // Validate the actual provider before opening any cookie database. DPAPI key
@@ -74,16 +74,18 @@ ProfileNetworkState::ProfileNetworkState(const base::FilePath& profile_path)
       [](base::OnceClosure quit, scoped_refptr<os_crypt_async::Encryptor> encryptor) {
         CHECK(encryptor && encryptor->IsEncryptionAvailable());
         std::move(quit).Run();
-      }, ready.QuitClosure()));
+      },
+      ready.QuitClosure()));
   ready.Run();
   encryption_provider_ = std::make_unique<CookieEncryptionProviderImpl>(crypt_.get());
 }
 ProfileNetworkState::~ProfileNetworkState() = default;
 
 void ProfileNetworkState::Configure(bool in_memory,
-    const base::FilePath& relative_partition_path,
-    network::mojom::NetworkContextParams* params) {
-  if (in_memory) return;
+                                    const base::FilePath& relative_partition_path,
+                                    network::mojom::NetworkContextParams* params) {
+  if (in_memory)
+    return;
   CHECK(!relative_partition_path.IsAbsolute());
   CHECK(!relative_partition_path.ReferencesParent());
   const auto partition_path = profile_path_.Append(relative_partition_path);

@@ -3,7 +3,10 @@
 #include <iostream>
 using remotekit::browser::NavigationOperations;
 using Acceptance = NavigationOperations::Acceptance;
-void Check(bool value) { if (!value) std::abort(); }
+void Check(bool value) {
+  if (!value)
+    std::abort();
+}
 int main() {
   NavigationOperations ledger;
   NavigationOperations::Identity a{"a", "generation", 1}, b{"b", "generation", 2};
@@ -52,16 +55,19 @@ int main() {
   ledger.Bind(*error_page, 101, true, true, "https://unreachable/");
   ledger.EndCollection(*error_page);
   ledger.Complete(*error_page, 101, "failed", "ERR_CONNECTION_REFUSED", true, true);
-  Check(error_page->state == "failed" && error_page->document_committed && error_page->is_error_page);
+  Check(error_page->state == "failed" && error_page->document_committed &&
+        error_page->is_error_page);
   ledger.Complete(*error_page, 101, "committed", {}, false, false);
-  Check(error_page->state == "failed" && error_page->document_committed && error_page->is_error_page);
+  Check(error_page->state == "failed" && error_page->document_committed &&
+        error_page->is_error_page);
   NavigationOperations::Identity e{"e", "generation", 5};
   Check(ledger.Accept(e, "navigate\nprovisional") == Acceptance::fresh);
   auto* provisional = ledger.Find(e);
   ledger.Bind(*provisional, 111, true, true, "https://provisional/");
   ledger.EndCollection(*provisional);
   ledger.Complete(*provisional, 111, "failed", "ERR_FAILED");
-  Check(provisional->state == "failed" && !provisional->document_committed && !provisional->is_error_page);
+  Check(provisional->state == "failed" && !provisional->document_committed &&
+        !provisional->is_error_page);
   NavigationOperations::Identity f{"f", "generation", 6};
   Check(ledger.Accept(f, "back\n") == Acceptance::fresh);
   auto* mixed = ledger.Find(f);

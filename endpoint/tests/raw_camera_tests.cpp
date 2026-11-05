@@ -5,7 +5,13 @@
 #include <iostream>
 #include <json.hpp>
 
-#define CHECK(x) do { if (!(x)) { std::cerr << __LINE__ << " failed: " #x "\n"; std::exit(1); } } while (false)
+#define CHECK(x)                                    \
+  do {                                              \
+    if (!(x)) {                                     \
+      std::cerr << __LINE__ << " failed: " #x "\n"; \
+      std::exit(1);                                 \
+    }                                               \
+  } while (false)
 
 using Json = nlohmann::json;
 constexpr uint64_t kPeer = 7, kEpoch = 2;
@@ -13,10 +19,14 @@ constexpr char kChallenge[] = "38901d17-8c89-45e0-8ef3-0d70ddfb37e2";
 constexpr char kNextChallenge[] = "38901d17-8c89-45e0-8ef3-0d70ddfb37e3";
 constexpr size_t kHeader = 68, kBytes = 64 * 64 * 3;
 
-std::vector<uint8_t> Chunk(uint32_t capture, uint32_t offset, size_t count, uint64_t epoch = kEpoch) {
+std::vector<uint8_t> Chunk(uint32_t capture,
+                           uint32_t offset,
+                           size_t count,
+                           uint64_t epoch = kEpoch) {
   std::vector<uint8_t> bytes(kHeader + count, 0xA5);
   const auto write = [&](size_t start, size_t size, uint64_t value) {
-    for (size_t i = 0; i < size; ++i) bytes[start + i] = static_cast<uint8_t>(value >> (8 * i));
+    for (size_t i = 0; i < size; ++i)
+      bytes[start + i] = static_cast<uint8_t>(value >> (8 * i));
   };
   write(0, 4, 0x46414b52);
   write(4, 2, 1);
@@ -41,9 +51,18 @@ int main() {
     CHECK(std::all_of(rgb, rgb + kBytes, [](uint8_t b) { return b == 0xA5; }));
     ++submitted;
   };
-  const auto text = [&](const char* type, int64_t now, const char* challenge = kChallenge, int width = 64) {
-    const auto wire = Json({{"type", type}, {"version", 1}, {"authEpoch", kEpoch}, {"challengeId", challenge},
-                            {"width", width}, {"height", 64}, {"format", "rgb24"}, {"maxFps", 5}, {"fps", 5}}).dump();
+  const auto text = [&](const char* type, int64_t now, const char* challenge = kChallenge,
+                        int width = 64) {
+    const auto wire = Json({{"type", type},
+                            {"version", 1},
+                            {"authEpoch", kEpoch},
+                            {"challengeId", challenge},
+                            {"width", width},
+                            {"height", 64},
+                            {"format", "rgb24"},
+                            {"maxFps", 5},
+                            {"fps", 5}})
+                          .dump();
     camera.Receive(kPeer, false, wire.data(), wire.size(), now, pending, submit);
   };
   const auto binary = [&](const std::vector<uint8_t>& bytes, int64_t now, uint64_t peer = kPeer) {
@@ -87,7 +106,7 @@ int main() {
   CHECK(submitted == 1 && !next(404));
   const auto third = next(405);
   CHECK(third && third->capture == 3);
-  CHECK(!next(1404));  // At most one uncompleted grant.
+  CHECK(!next(1404));                 // At most one uncompleted grant.
   binary(Chunk(3, 0, kBytes), 1405);  // Arrival at the deadline is stale.
   const auto fourth = next(1405);
   CHECK(fourth && fourth->capture == 4 && submitted == 1);

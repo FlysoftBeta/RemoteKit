@@ -15,15 +15,22 @@ class ProductAuthorization {
     epoch_ = 0;
     unlocked_ = false;
     Close();
-    if (!required) Open();
+    if (!required)
+      Open();
   }
   Decision Check(uint64_t epoch, bool unlocked) const {
-    if (!Required() || !epoch || epoch < Epoch()) return Decision::reject;
-    if (epoch > Epoch()) return Decision::change;
-    if (unlocked == unlocked_ && (!unlocked || Stamp())) return Decision::unchanged;
+    if (!Required() || !epoch || epoch < Epoch())
+      return Decision::reject;
+    if (epoch > Epoch())
+      return Decision::change;
+    if (unlocked == unlocked_ && (!unlocked || Stamp()))
+      return Decision::unchanged;
     return Decision::reject;
   }
-  void Commit(uint64_t epoch, bool unlocked) { epoch_ = epoch; unlocked_ = unlocked; }
+  void Commit(uint64_t epoch, bool unlocked) {
+    epoch_ = epoch;
+    unlocked_ = unlocked;
+  }
   uint64_t Epoch() const { return epoch_.load(); }
   bool Required() const { return required_.load(); }
   void Close() { stamp_ = 0; }
@@ -38,4 +45,4 @@ class ProductAuthorization {
   std::atomic<uint64_t> epoch_{0};
   std::atomic<uint64_t> stamp_{0};
 };
-}
+}  // namespace remotekit

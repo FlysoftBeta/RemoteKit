@@ -11,8 +11,7 @@ namespace remotekit::browser {
 template <typename Timestamp>
 class ClientNativeInputClock {
  public:
-  ClientNativeInputClock(Timestamp origin, Timestamp now)
-      : last_(std::min(origin, now)) {}
+  ClientNativeInputClock(Timestamp origin, Timestamp now) : last_(std::min(origin, now)) {}
 
   Timestamp Dispatch(Timestamp sampled, Timestamp now) {
     last_ = std::min(now, std::max(last_, sampled));
@@ -28,9 +27,11 @@ class ClientNativeInputClock {
 class ClientGestureSourceTime {
  public:
   bool Raw(std::int64_t elapsed, bool terminal) {
-    if (elapsed < last_) return false;
+    if (elapsed < last_)
+      return false;
     last_ = elapsed;
-    if (terminal) up_ = elapsed;
+    if (terminal)
+      up_ = elapsed;
     return true;
   }
   bool Momentum(std::int64_t elapsed) {

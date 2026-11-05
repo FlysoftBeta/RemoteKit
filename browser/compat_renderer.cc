@@ -208,12 +208,11 @@ void CompatRendererClient::RenderFrameCreated(content::RenderFrame* render_frame
   new CompatFrameObserver(render_frame);
 }
 
-void CompatRendererClient::PrepareErrorPage(
-    content::RenderFrame*,
-    const blink::WebURLError& error,
-    const std::string&,
-    content::mojom::AlternativeErrorPageOverrideInfoPtr,
-    std::string* error_html) {
+void CompatRendererClient::PrepareErrorPage(content::RenderFrame*,
+                                            const blink::WebURLError& error,
+                                            const std::string&,
+                                            content::mojom::AlternativeErrorPageOverrideInfoPtr,
+                                            std::string* error_html) {
   // A null output means Chromium already supplied the error document. Do not
   // replace it or navigate again: retry stays in the normal toolbar/POST path.
   if (error_html && error_html->empty()) {

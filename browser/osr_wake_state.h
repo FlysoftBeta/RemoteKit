@@ -8,7 +8,8 @@ class OsrWakeProof {
  public:
   constexpr void ObserveBegin(const RenderBegin&) {}
   constexpr void RecordIdle(const RenderIdentity& identity) {
-    if (!stopped_) idle_ = identity;
+    if (!stopped_)
+      idle_ = identity;
   }
   constexpr const RenderIdentity* pending() const {
     return ValidRenderIdentity(idle_) ? &idle_ : nullptr;
@@ -16,14 +17,19 @@ class OsrWakeProof {
   constexpr void RequestRebindWake() { rebind_ |= pending() != nullptr; }
   constexpr bool rebind_requested() const { return rebind_; }
   constexpr bool Delivered(const RenderIdentity& identity) {
-    if (!pending() || identity.generation != idle_.generation ||
-        identity.value != idle_.value || identity.slot != idle_.slot ||
-        identity.reserved != idle_.reserved) return false;
+    if (!pending() || identity.generation != idle_.generation || identity.value != idle_.value ||
+        identity.slot != idle_.slot || identity.reserved != idle_.reserved)
+      return false;
     idle_ = {};
     rebind_ = false;
     return true;
   }
-  constexpr void Stop() { stopped_ = true; idle_ = {}; rebind_ = false; }
+  constexpr void Stop() {
+    stopped_ = true;
+    idle_ = {};
+    rebind_ = false;
+  }
+
  private:
   RenderIdentity idle_;
   bool rebind_ = false, stopped_ = false;

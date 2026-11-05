@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { start } from './ud710-lag-scenario.mjs';
 export { controlEnvironment, endpointArgs, viewport } from './ud710-lag-scenario.mjs';
 
-const roi = {x:64, y:64, width:640, height:320};
+const roi = { x: 64, y: 64, width: 640, height: 320 };
 const stimulus = `<!doctype html><meta charset="utf-8"><title>UD710 sparse motion</title>
 <style>
   body { margin:0; overflow:hidden; }
@@ -100,64 +100,88 @@ export function createScenario() {
   }
 
   async function captureQuality(page, run, fps, reference) {
-    const captured = await page.evaluate(async ({reference, roi}) => {
-      const video = document.querySelector('.remote-video-plane video');
-      const layout = window.diagnosticQA.latestLayout;
-      const plane = layout?.planes?.[0];
-      if (layout?.planes?.length !== 1 || layout.reconfiguring || !plane?.ready ||
-          plane.mediaScaleX !== 1 || plane.mediaScaleY !== 1 ||
-          layout.width !== video.videoWidth || layout.height !== video.videoHeight) {
-        throw new Error('Expected one ready, unscaled atlas plane for pixel comparison');
-      }
-      const canvas = document.createElement('canvas');
-      canvas.width = roi.width;
-      canvas.height = roi.height;
-      const context = canvas.getContext('2d', {willReadFrequently:true});
-      const picture = new Image();
-      picture.src = reference.png;
-      await picture.decode();
+    const captured = await page.evaluate(
+      async ({ reference, roi }) => {
+        const video = document.querySelector('.remote-video-plane video');
+        const layout = window.diagnosticQA.latestLayout;
+        const plane = layout?.planes?.[0];
+        if (
+          layout?.planes?.length !== 1 ||
+          layout.reconfiguring ||
+          !plane?.ready ||
+          plane.mediaScaleX !== 1 ||
+          plane.mediaScaleY !== 1 ||
+          layout.width !== video.videoWidth ||
+          layout.height !== video.videoHeight
+        ) {
+          throw new Error('Expected one ready, unscaled atlas plane for pixel comparison');
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = roi.width;
+        canvas.height = roi.height;
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+        const picture = new Image();
+        picture.src = reference.png;
+        await picture.decode();
 
-      context.drawImage(video, plane.x, plane.y, 224, 32, 0, 0, 224, 32);
-      const marker = context.getImageData(0, 0, 224, 32).data;
-      let decodedTime = 0;
-      for (let bit = 0; bit < 32; bit++) {
-        const x = (bit % 16) * 14 + 7;
-        const y = Math.floor(bit / 16) * 16 + 8;
-        if (marker[(y * 224 + x) * 4] < 100) decodedTime |= 1 << bit;
-      }
+        context.drawImage(video, plane.x, plane.y, 224, 32, 0, 0, 224, 32);
+        const marker = context.getImageData(0, 0, 224, 32).data;
+        let decodedTime = 0;
+        for (let bit = 0; bit < 32; bit++) {
+          const x = (bit % 16) * 14 + 7;
+          const y = Math.floor(bit / 16) * 16 + 8;
+          if (marker[(y * 224 + x) * 4] < 100) decodedTime |= 1 << bit;
+        }
 
-      context.drawImage(video, plane.x + roi.x, plane.y + roi.y, roi.width, roi.height, 0, 0, roi.width, roi.height);
-      const decoded = context.getImageData(0, 0, roi.width, roi.height).data;
-      const png = canvas.toDataURL('image/png');
-      context.drawImage(picture, 0, 0);
-      const source = context.getImageData(0, 0, roi.width, roi.height).data;
-      const errors = new Uint32Array(256);
-      let sum = 0;
-      let squared = 0;
-      for (let i = 0; i < source.length; ++i) {
-        if (i % 4 === 3) continue;
-        const delta = Math.abs(decoded[i] - source[i]);
-        sum += delta;
-        squared += delta * delta;
-        errors[delta]++;
-      }
-      const channels = roi.width * roi.height * 3;
-      let cumulative = 0;
-      const p95 = errors.findIndex(count => (cumulative += count) >= channels * .95);
-      return {
-        decodedTime:decodedTime >>> 0, meanAbsoluteError:sum / channels,
-        rgbRmse:Math.sqrt(squared / channels), rgbAbsoluteErrorP95:p95,
-        atlasOffset:[plane.x, plane.y], png,
-      };
-    }, {reference, roi});
+        context.drawImage(
+          video,
+          plane.x + roi.x,
+          plane.y + roi.y,
+          roi.width,
+          roi.height,
+          0,
+          0,
+          roi.width,
+          roi.height,
+        );
+        const decoded = context.getImageData(0, 0, roi.width, roi.height).data;
+        const png = canvas.toDataURL('image/png');
+        context.drawImage(picture, 0, 0);
+        const source = context.getImageData(0, 0, roi.width, roi.height).data;
+        const errors = new Uint32Array(256);
+        let sum = 0;
+        let squared = 0;
+        for (let i = 0; i < source.length; ++i) {
+          if (i % 4 === 3) continue;
+          const delta = Math.abs(decoded[i] - source[i]);
+          sum += delta;
+          squared += delta * delta;
+          errors[delta]++;
+        }
+        const channels = roi.width * roi.height * 3;
+        let cumulative = 0;
+        const p95 = errors.findIndex((count) => (cumulative += count) >= channels * 0.95);
+        return {
+          decodedTime: decodedTime >>> 0,
+          meanAbsoluteError: sum / channels,
+          rgbRmse: Math.sqrt(squared / channels),
+          rgbAbsoluteErrorP95: p95,
+          atlasOffset: [plane.x, plane.y],
+          png,
+        };
+      },
+      { reference, roi },
+    );
     function save(label, dataUrl) {
       return writeFile(join(run, label + '-' + fps + 'hz.png'), Buffer.from(dataUrl.split(',')[1], 'base64'));
     }
     await Promise.all([save('reference', reference.png), save('decoded', captured.png)]);
-    const {png, ...metrics} = captured;
+    const { png, ...metrics } = captured;
     return {
-      ...metrics, sourceFrames:reference.sourceFrames, sourceMarkerTime:reference.markerTime,
-      sameMarker:metrics.decodedTime === reference.markerTime,
+      ...metrics,
+      sourceFrames: reference.sourceFrames,
+      sourceMarkerTime: reference.markerTime,
+      sameMarker: metrics.decodedTime === reference.markerTime,
     };
   }
 
@@ -177,15 +201,18 @@ export function createScenario() {
         const fps = Number(request.url.split('/').at(-1));
         request.setEncoding('utf8');
         let text = '';
-        request.on('data', chunk => {
+        request.on('data', (chunk) => {
           text += chunk;
           if (text.length > 2 * 1024 * 1024) request.destroy();
         });
         request.on('end', () => {
           try {
             const reference = JSON.parse(text);
-            assert(Number.isInteger(reference.markerTime) && Number.isInteger(reference.sourceFrames) &&
-              reference.png.startsWith('data:image/png;base64,'));
+            assert(
+              Number.isInteger(reference.markerTime) &&
+                Number.isInteger(reference.sourceFrames) &&
+                reference.png.startsWith('data:image/png;base64,'),
+            );
             references.set(fps, reference);
             response.end();
           } catch {
@@ -199,26 +226,29 @@ export function createScenario() {
       response.end(stimulus);
     },
     start,
-    async measure({page, run, read, log, sleep}) {
+    async measure({ page, run, read, log, sleep }) {
       const offset = await read('diagnosticQA.lagClockOffset()');
-      await log('phase-idle', {wall:Date.now(), offset});
+      await log('phase-idle', { wall: Date.now(), offset });
       await sleep(3000);
       for (const fps of [2, 15]) {
         changePhase(fps);
-        await log('phase-motion-' + fps + 'hz', {wall:Date.now()});
+        await log('phase-motion-' + fps + 'hz', { wall: Date.now() });
         await sleep(10000);
         changePhase(0);
-        await log('phase-idle-' + fps + 'hz', {wall:Date.now()});
+        await log('phase-idle-' + fps + 'hz', { wall: Date.now() });
         await sleep(4000);
         assert(references.has(fps), 'No reference for ' + fps + ' Hz');
         await log('quality-' + fps + 'hz', await captureQuality(page, run, fps, references.get(fps)));
       }
-      await log('phase-done', {wall:Date.now(), offset:await read('diagnosticQA.lagClockOffset()')});
-      await log('frame-raw', await read(`({
+      await log('phase-done', { wall: Date.now(), offset: await read('diagnosticQA.lagClockOffset()') });
+      await log(
+        'frame-raw',
+        await read(`({
         dims:diagnosticQA.lagDims,
         timeOrigin:performance.timeOrigin,
         frames:diagnosticQA.lagFrames
-      })`));
+      })`),
+      );
     },
   };
 }

@@ -16,14 +16,22 @@
 #include "ui/aura/window_tree_host.h"
 #include "ui/events/platform/platform_event_dispatcher.h"
 
-namespace content { class WebContents; }
-namespace display { class Screen; }
-namespace viz { struct BeginFrameAck; }
-namespace ui { class InputMethod; }
+namespace content {
+class WebContents;
+}
+namespace display {
+class Screen;
+}
+namespace viz {
+struct BeginFrameAck;
+}
+namespace ui {
+class InputMethod;
+}
 namespace aura::client {
 class FocusClient;
 class WindowParentingClient;
-}
+}  // namespace aura::client
 
 namespace remotekit::browser {
 

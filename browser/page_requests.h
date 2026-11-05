@@ -46,8 +46,12 @@ class PageRequests final : public content::WebContentsDelegate,
   base::DictValue Reply(const base::DictValue& reply, SelectionBinding binding);
   base::DictValue FileStatus(const std::string& request,
                              const base::Value* selection,
-                             SelectionBinding binding, bool terminal_only);
-  struct SelectedFile { base::FilePath path; std::u16string display_name; };
+                             SelectionBinding binding,
+                             bool terminal_only);
+  struct SelectedFile {
+    base::FilePath path;
+    std::u16string display_name;
+  };
   base::DictValue Command(const base::DictValue& command);
   void CancelAll(const std::string& reason);
   size_t pending_count() const { return pending_.size(); }
@@ -62,11 +66,17 @@ class PageRequests final : public content::WebContentsDelegate,
   void BeforeUnloadFired(content::WebContents*, bool, bool*) override;
   void ReportTooltip(const std::u16string& text);
   using PopupHandler = std::function<content::WebContents*(std::unique_ptr<content::WebContents>,
-      const GURL&, WindowOpenDisposition, bool)>;
+                                                           const GURL&,
+                                                           WindowOpenDisposition,
+                                                           bool)>;
   void SetPopupHandler(PopupHandler handler) { popup_handler_ = std::move(handler); }
-  content::WebContents* AddNewContents(content::WebContents*, std::unique_ptr<content::WebContents>,
-      const GURL&, WindowOpenDisposition, const blink::mojom::WindowFeatures&,
-      bool user_gesture, bool* was_blocked) override;
+  content::WebContents* AddNewContents(content::WebContents*,
+                                       std::unique_ptr<content::WebContents>,
+                                       const GURL&,
+                                       WindowOpenDisposition,
+                                       const blink::mojom::WindowFeatures&,
+                                       bool user_gesture,
+                                       bool* was_blocked) override;
 
   content::JavaScriptDialogManager* GetJavaScriptDialogManager(content::WebContents*) override;
   void RunJavaScriptDialog(content::WebContents*,
@@ -117,7 +127,9 @@ class PageRequests final : public content::WebContentsDelegate,
   void Cancel(std::uint64_t id, const std::string& reason);
   void Prune();
   void FilesValidated(std::uint64_t, std::vector<SelectedFile>, std::string);
-  void FileResult(std::uint64_t, const char*, const Pending& request,
+  void FileResult(std::uint64_t,
+                  const char*,
+                  const Pending& request,
                   const std::string& error = {});
   void DidStartNavigation(content::NavigationHandle*) override;
   void DidFinishNavigation(content::NavigationHandle*) override;

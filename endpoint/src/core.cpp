@@ -45,15 +45,18 @@ Status ValidateInput(const InputPayload& p) {
           return Finite(v.x, v.y) && Finite(v.delta_x, v.delta_y);
         else if constexpr (std::is_same_v<T, TouchInput>) {
           if (v.gestures.size() > 8 || (!v.client_gestures && !v.gestures.empty()) ||
-              (v.client_gestures && !v.clock)) return false;
+              (v.client_gestures && !v.clock))
+            return false;
           for (const auto& g : v.gestures)
-            if (g.type < TouchInput::Gesture::Type::tap_down || g.type > TouchInput::Gesture::Type::fling_cancel ||
-                !Finite(g.x, g.y) || !Finite(g.delta_x, g.delta_y) ||
-                !Finite(g.velocity_x, g.velocity_y) || !std::isfinite(g.scale) || g.scale <= 0 ||
-                std::abs(g.x) > 1e7 || std::abs(g.y) > 1e7 || std::abs(g.delta_x) > 1e7 ||
-                std::abs(g.delta_y) > 1e7 || std::abs(g.velocity_x) > 1e7 || std::abs(g.velocity_y) > 1e7 || g.scale > 100)
+            if (g.type < TouchInput::Gesture::Type::tap_down ||
+                g.type > TouchInput::Gesture::Type::fling_cancel || !Finite(g.x, g.y) ||
+                !Finite(g.delta_x, g.delta_y) || !Finite(g.velocity_x, g.velocity_y) ||
+                !std::isfinite(g.scale) || g.scale <= 0 || std::abs(g.x) > 1e7 ||
+                std::abs(g.y) > 1e7 || std::abs(g.delta_x) > 1e7 || std::abs(g.delta_y) > 1e7 ||
+                std::abs(g.velocity_x) > 1e7 || std::abs(g.velocity_y) > 1e7 || g.scale > 100)
               return false;
-          if (v.samples.size() > 32 || (!v.samples.empty() && (!v.clock || v.action != TouchInput::Action::move)))
+          if (v.samples.size() > 32 ||
+              (!v.samples.empty() && (!v.clock || v.action != TouchInput::Action::move)))
             return false;
           if (v.clock && (v.clock->sequence_id.empty() || v.clock->sequence_id.size() > 128 ||
                           v.clock->elapsed_us < 0 || v.clock->elapsed_us > 86400000000LL ||
@@ -61,12 +64,14 @@ Status ValidateInput(const InputPayload& p) {
             return false;
           std::int64_t previous = -1;
           for (const auto& sample : v.samples) {
-            if (sample.elapsed_us < previous || sample.elapsed_us > v.clock->elapsed_us || sample.points.empty() || sample.points.size() > 16)
+            if (sample.elapsed_us < previous || sample.elapsed_us > v.clock->elapsed_us ||
+                sample.points.empty() || sample.points.size() > 16)
               return false;
             previous = sample.elapsed_us;
             std::set<std::uint32_t> sample_ids;
             for (const auto& point : sample.points)
-              if (!Finite(point.x, point.y) || !std::isfinite(point.pressure) || point.pressure < 0 || point.pressure > 1 || !sample_ids.insert(point.id).second)
+              if (!Finite(point.x, point.y) || !std::isfinite(point.pressure) ||
+                  point.pressure < 0 || point.pressure > 1 || !sample_ids.insert(point.id).second)
                 return false;
           }
           std::set<std::uint32_t> ids;
@@ -79,8 +84,9 @@ Status ValidateInput(const InputPayload& p) {
               return false;
           return true;
         } else if constexpr (std::is_same_v<T, GestureInput>)
-          return v.action >= GestureInput::Action::momentum && v.action <= GestureInput::Action::cancel &&
-                 !v.sequence_id.empty() && v.sequence_id.size() <= 128 && v.elapsed_us >= 0 &&
+          return v.action >= GestureInput::Action::momentum &&
+                 v.action <= GestureInput::Action::cancel && !v.sequence_id.empty() &&
+                 v.sequence_id.size() <= 128 && v.elapsed_us >= 0 &&
                  v.elapsed_us <= 86400000000LL && Finite(v.cumulative_x, v.cumulative_y) &&
                  std::abs(v.cumulative_x) <= 1e7 && std::abs(v.cumulative_y) <= 1e7;
         else if constexpr (std::is_same_v<T, KeyInput>)
@@ -142,7 +148,8 @@ Result<WebViewId> Endpoint::CreateWebView(SessionId s, ProfileId p, WebViewId re
 }
 Status Endpoint::ResetWebView(SessionId session, WebViewId view) {
   auto* model = MutableView(session, view);
-  if (!model) return Fail(Error::not_found, "WebView not found in session");
+  if (!model)
+    return Fail(Error::not_found, "WebView not found in session");
   InvalidateInstance(session, view);
   model->actual = model->desired = Residency::live;
   model->last_lifecycle.reset();
@@ -192,7 +199,8 @@ Status Endpoint::SetFocus(SessionId s, WebViewId id, bool focused) {
 }
 Status Endpoint::InvalidateInput(SessionId session, WebViewId view) {
   auto* model = MutableView(session, view);
-  if (!model) return Fail(Error::not_found, "WebView not found in session");
+  if (!model)
+    return Fail(Error::not_found, "WebView not found in session");
   ++model->focus_generation;
   return {};
 }
@@ -229,8 +237,9 @@ Result<InputToken> Endpoint::Token(SessionId s, WebViewId id) const {
 }
 bool IsHoverInput(const InputPayload& payload) {
   const auto* mouse = std::get_if<MouseInput>(&payload);
-  return mouse && (mouse->action == MouseInput::Action::move ||
-                   mouse->action == MouseInput::Action::leave) &&
+  return mouse &&
+         (mouse->action == MouseInput::Action::move ||
+          mouse->action == MouseInput::Action::leave) &&
          mouse->button == 0 && !(mouse->modifiers & kMouseButtonModifiers);
 }
 Status Endpoint::AcceptInput(SessionId s, const InputEvent& e) {

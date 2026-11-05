@@ -6,9 +6,16 @@ import { StatsOverlay } from '../client/stats-overlay';
 import type { Diagnostics } from '../client/types';
 
 function overlay(reason: string) {
-  const diagnostics: Diagnostics = { connection: '已连接', channel: '已连接', rendering: {
-    backend: 'unavailable', backendReason: reason, freezeCopies: 0, mediaRefreshRequests: 0,
-  } };
+  const diagnostics: Diagnostics = {
+    connection: '已连接',
+    channel: '已连接',
+    rendering: {
+      backend: 'unavailable',
+      backendReason: reason,
+      freezeCopies: 0,
+      mediaRefreshRequests: 0,
+    },
+  };
   return renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
 }
 
@@ -24,22 +31,43 @@ test('unknown presentation errors retain the actual reason', () => {
 });
 
 test('media diagnostics distinguish GCC targets, display ceiling and compatibility playout hint', () => {
-  const diagnostics: Diagnostics = { connection: '已连接', channel: '已连接',
-    receiverPlayout: { video: { jitterBufferTargetSupported: false, jitterBufferTarget: null, playoutDelayHintSupported: true, playoutDelayHint: 0 } },
-    endpoint: { gccTargetFps: 42, gccTargetBitrate: 12000000, queueFullDrops: 3, appliedFps: 240,
-      mediaPolicy: { requested: { degradationPreference: 'balanced', maxFps: 60 }, applied: { degradationPreference: 'balanced', maxFps: 60 } } },
+  const diagnostics: Diagnostics = {
+    connection: '已连接',
+    channel: '已连接',
+    receiverPlayout: {
+      video: {
+        jitterBufferTargetSupported: false,
+        jitterBufferTarget: null,
+        playoutDelayHintSupported: true,
+        playoutDelayHint: 0,
+      },
+    },
+    endpoint: {
+      gccTargetFps: 42,
+      gccTargetBitrate: 12000000,
+      queueFullDrops: 3,
+      appliedFps: 240,
+      mediaPolicy: {
+        requested: { degradationPreference: 'balanced', maxFps: 60 },
+        applied: { degradationPreference: 'balanced', maxFps: 60 },
+      },
+    },
   };
   const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
   assert.match(html, /输入 FPS 估计<\/dt><dd>42.0 fps/);
   assert.match(html, /GCC 目标码率<\/dt><dd>12.00 Mbps/);
   assert.match(html, /编码队列满丢帧<\/dt><dd>3/);
-  assert.match(html, /60 \/ 60/); assert.match(html, /balanced/);
-  assert.match(html, /兼容 hint 0 s/); assert.doesNotMatch(html, /240/);
+  assert.match(html, /60 \/ 60/);
+  assert.match(html, /balanced/);
+  assert.match(html, /兼容 hint 0 s/);
+  assert.doesNotMatch(html, /240/);
 });
 
 test('video stats show real receiver intervals without retired capture or canvas rows', () => {
   const diagnostics: Diagnostics = {
-    connection: '已连接', channel: '已连接', receiverVideoTiming: { jitterBufferMeanMs: 0, decodeMeanMs: 3, droppedFrames: 1 },
+    connection: '已连接',
+    channel: '已连接',
+    receiverVideoTiming: { jitterBufferMeanMs: 0, decodeMeanMs: 3, droppedFrames: 1 },
     endpoint: { sourceAtlasWidth: 1296, sourceAtlasHeight: 488 },
     rendering: { backend: 'video', freezeCopies: 0, mediaRefreshRequests: 0 },
   };
@@ -48,15 +76,23 @@ test('video stats show real receiver intervals without retired capture or canvas
   assert.match(html, /接收缓冲均值<\/dt><dd>0.0 ms/);
   assert.match(html, /1296×488/);
   assert.doesNotMatch(html, /捕获完成|GPU copy|Metadata \/ 队列|Marker p50|末包→Video/);
-  assert.doesNotMatch(html, /接收缓冲目标均值|接收缓冲最小均值|帧组装耗时均值|接收处理耗时均值|解码器|RTP 播放延迟|接收重传包占比/);
+  assert.doesNotMatch(
+    html,
+    /接收缓冲目标均值|接收缓冲最小均值|帧组装耗时均值|接收处理耗时均值|解码器|RTP 播放延迟|接收重传包占比/,
+  );
 });
 
 test('media diagnostics show receiver measurements', () => {
   const diagnostics: Diagnostics = {
-    connection: '已连接', channel: '已连接',
+    connection: '已连接',
+    channel: '已连接',
     receiverVideoTiming: {
-      jitterBufferTargetMeanMs: 82, jitterBufferMinimumMeanMs: 0, assemblyMeanMs: 3, processingMeanMs: 18,
-      decoderImplementation: 'MediaCodec', receivedPacketRetransmitRatio: 0.025,
+      jitterBufferTargetMeanMs: 82,
+      jitterBufferMinimumMeanMs: 0,
+      assemblyMeanMs: 3,
+      processingMeanMs: 18,
+      decoderImplementation: 'MediaCodec',
+      receivedPacketRetransmitRatio: 0.025,
     },
     receiverVideoPlayoutExtensionNegotiated: false,
     endpoint: { rtcPlayoutDelayRequested: { minMs: 0, maxMs: 50 } },

@@ -22,8 +22,10 @@ class PresentationRefresh {
   ~PresentationRefresh() { SetScope(std::nullopt); }
 
   void SetScope(std::optional<Scope> scope) {
-    if (scope_ == scope) return;
-    if (attempt_) attempt_->CancelWaiting();
+    if (scope_ == scope)
+      return;
+    if (attempt_)
+      attempt_->CancelWaiting();
     attempt_.reset();
     scope_ = scope;
     pending_ = scope_.has_value();
@@ -31,9 +33,11 @@ class PresentationRefresh {
   }
 
   void Update(bool requested, double now_ms) {
-    if (!scope_) return;
+    if (!scope_)
+      return;
     if (attempt_) {
-      if (now_ms >= source_deadline_ms_) attempt_->CancelWaiting();
+      if (now_ms >= source_deadline_ms_)
+        attempt_->CancelWaiting();
       using State = TailIdrAttempt::State;
       const auto state = attempt_->state();
       if (state != State::source_wait && state != State::encoding) {
@@ -49,9 +53,7 @@ class PresentationRefresh {
     pending_ |= requested;
   }
 
-  bool CanForce(double now_ms) const {
-    return Due(now_ms) && now_ms >= next_force_ms_;
-  }
+  bool CanForce(double now_ms) const { return Due(now_ms) && now_ms >= next_force_ms_; }
 
   void Forced(double now_ms) {
     next_force_ms_ = now_ms + kRetryMs;
@@ -62,7 +64,8 @@ class PresentationRefresh {
   Stats Snapshot() const { return {pending_, attempts_, forced_begins_, successes_}; }
 
   std::shared_ptr<TailIdrAttempt> TryStart(double now_ms, double interval_ms) {
-    if (!Due(now_ms)) return {};
+    if (!Due(now_ms))
+      return {};
     next_attempt_ms_ = now_ms + kRetryMs;
     source_deadline_ms_ = now_ms + std::max(kRetryMs, 2 * interval_ms);
     attempt_ = std::make_shared<TailIdrAttempt>();
@@ -73,9 +76,7 @@ class PresentationRefresh {
  private:
   static constexpr double kRetryMs = 1000;
 
-  bool Due(double now_ms) const {
-    return pending_ && !attempt_ && now_ms >= next_attempt_ms_;
-  }
+  bool Due(double now_ms) const { return pending_ && !attempt_ && now_ms >= next_attempt_ms_; }
 
   std::optional<Scope> scope_;
   std::shared_ptr<TailIdrAttempt> attempt_;
@@ -85,4 +86,4 @@ class PresentationRefresh {
   double next_force_ms_ = 0;
   double source_deadline_ms_ = 0;
 };
-} // namespace remotekit
+}  // namespace remotekit

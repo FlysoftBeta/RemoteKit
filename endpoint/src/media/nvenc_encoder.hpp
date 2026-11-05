@@ -11,10 +11,16 @@ struct NvencTestHooks {
   std::function<std::chrono::steady_clock::time_point()> now;
   std::function<DWORD(HANDLE, DWORD)> wait;
 };
-std::unique_ptr<HardwareEncoder> CreateNvencEncoderForTest(
-    const NV_ENCODE_API_FUNCTION_LIST&, void* session, HANDLE completion,
-    NV_ENC_OUTPUT_PTR output, NV_ENC_INPUT_PTR input, uint64_t cookie,
-    NvencTestHooks);
-struct NvencQuarantineInfo { size_t sessions; bool unavailable; };
+std::unique_ptr<HardwareEncoder> CreateNvencEncoderForTest(const NV_ENCODE_API_FUNCTION_LIST&,
+                                                           void* session,
+                                                           HANDLE completion,
+                                                           NV_ENC_OUTPUT_PTR output,
+                                                           NV_ENC_INPUT_PTR input,
+                                                           uint64_t cookie,
+                                                           NvencTestHooks);
+struct NvencQuarantineInfo {
+  size_t sessions;
+  bool unavailable;
+};
 NvencQuarantineInfo GetNvencQuarantineInfo();
 }  // namespace remotekit::media

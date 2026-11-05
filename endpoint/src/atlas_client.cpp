@@ -98,9 +98,11 @@ void CloseSetupHandles(remotekit_sdk_render_setup& setup) {
       CloseHandle(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(value, 0))));
   for (auto* handles : {&setup.ready_fence_handles, &setup.consumed_fence_handles})
     for (auto& value : *handles)
-      if (value) CloseHandle(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(value, 0))));
+      if (value)
+        CloseHandle(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(value, 0))));
   if (setup.mapping_handle)
-    CloseHandle(reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(setup.mapping_handle, 0))));
+    CloseHandle(
+        reinterpret_cast<HANDLE>(static_cast<uintptr_t>(std::exchange(setup.mapping_handle, 0))));
   setup = {};
 }
 }  // namespace
@@ -428,10 +430,14 @@ struct AtlasClient::Impl {
         GetProcAddress(module, "remotekit_sdk_control_close"));
     auto open = reinterpret_cast<decltype(&remotekit_sdk_control_open_render)>(
         GetProcAddress(module, "remotekit_sdk_control_open_render"));
-    auto render_connect = reinterpret_cast<decltype(&remotekit_sdk_render_connect)>(GetProcAddress(module, "remotekit_sdk_render_connect"));
-    auto render_begin = reinterpret_cast<decltype(&remotekit_sdk_render_begin)>(GetProcAddress(module, "remotekit_sdk_render_begin"));
-    auto render_observe = reinterpret_cast<decltype(&remotekit_sdk_render_observe_signal)>(GetProcAddress(module, "remotekit_sdk_render_observe_signal"));
-    auto render_close = reinterpret_cast<decltype(&remotekit_sdk_render_close)>(GetProcAddress(module, "remotekit_sdk_render_close"));
+    auto render_connect = reinterpret_cast<decltype(&remotekit_sdk_render_connect)>(
+        GetProcAddress(module, "remotekit_sdk_render_connect"));
+    auto render_begin = reinterpret_cast<decltype(&remotekit_sdk_render_begin)>(
+        GetProcAddress(module, "remotekit_sdk_render_begin"));
+    auto render_observe = reinterpret_cast<decltype(&remotekit_sdk_render_observe_signal)>(
+        GetProcAddress(module, "remotekit_sdk_render_observe_signal"));
+    auto render_close = reinterpret_cast<decltype(&remotekit_sdk_render_close)>(
+        GetProcAddress(module, "remotekit_sdk_render_close"));
     auto command = reinterpret_cast<decltype(&remotekit_sdk_control_command_token)>(
         GetProcAddress(module, "remotekit_sdk_control_command_token"));
     auto dom_code = reinterpret_cast<decltype(&remotekit_sdk_windows_dom_code)>(
@@ -503,12 +509,14 @@ struct AtlasClient::Impl {
     auto next_begin = std::chrono::steady_clock::now();
     auto request_started = next_begin;
     auto create_output = [&](bool rebuild) {
-      if (render_handle) render_close(std::exchange(render_handle, 0));
+      if (render_handle)
+        render_close(std::exchange(render_handle, 0));
       outstanding = 0;
       observed = false;
       {
         std::lock_guard lock(mutex);
-        render_events.clear(); render_updates.clear();
+        render_events.clear();
+        render_updates.clear();
         ui_ready_value = ui_consumed_value = 0;
       }
       double scale;
@@ -525,14 +533,18 @@ struct AtlasClient::Impl {
       {
         // Defer opening while minimized; opening only describes OSR resources.
         std::unique_lock lock(mutex);
-        wake.wait(lock,[&] { return stopping || desired_enabled; });
-        if(stopping) return false;
-        if(restart_pending && restart_ready) {
+        wake.wait(lock, [&] { return stopping || desired_enabled; });
+        if (stopping)
+          return false;
+        if (restart_pending && restart_ready) {
           // Additional DPI changes while closed need no second generation.
-          restart_pending=false; restart_ready=false;
+          restart_pending = false;
+          restart_ready = false;
         }
-        scale=desired_scale; enabled=desired_enabled; revision=configuration_revision;
-        configure_pending=false;
+        scale = desired_scale;
+        enabled = desired_enabled;
+        revision = configuration_revision;
+        configure_pending = false;
       }
       status = control("output.configure", ",\"device_scale\":" + std::to_string(scale) +
                                                ",\"enabled\":" + (enabled ? "true" : "false") +
@@ -601,48 +613,71 @@ struct AtlasClient::Impl {
       {
         std::lock_guard lock(mutex);
         events.swap(render_events);
-        ready_value = ui_ready_value; consumed_value = ui_consumed_value;
-        may_begin = ui_attached && enabled_applied && desired_enabled && !restart_pending && !stopping;
+        ready_value = ui_ready_value;
+        consumed_value = ui_consumed_value;
+        may_begin =
+            ui_attached && enabled_applied && desired_enabled && !restart_pending && !stopping;
       }
       for (const auto& event : events) {
         if (event.type == REMOTEKIT_SDK_RENDER_FATAL || event.generation != active_generation ||
             event.slot != 0 || event.value != outstanding || observed) {
           SetWorkerError(L"Render channel fatal or mismatched terminal identity");
-          running = false; break;
+          running = false;
+          break;
         }
         if (event.type != REMOTEKIT_SDK_RENDER_REJECT) {
-          SetWorkerError(L"Unknown render channel event"); running = false; break;
+          SetWorkerError(L"Unknown render channel event");
+          running = false;
+          break;
         }
-        { std::lock_guard lock(mutex); render_updates.emplace_back(outstanding, true); }
+        {
+          std::lock_guard lock(mutex);
+          render_updates.emplace_back(outstanding, true);
+        }
         outstanding = 0;
       }
-      if (!running) break;
+      if (!running)
+        break;
       if (outstanding && ready_value == outstanding && !observed) {
         remotekit_sdk_render_identity identity{active_generation, outstanding, 0, 0};
         status = render_observe(render_handle, &identity);
-        if (status != REMOTEKIT_SDK_OK) { SetWorkerError(L"Render signal identity mismatch"); break; }
+        if (status != REMOTEKIT_SDK_OK) {
+          SetWorkerError(L"Render signal identity mismatch");
+          break;
+        }
         observed = true;
       }
-      if (outstanding && observed && consumed_value == outstanding) outstanding = 0;
+      if (outstanding && observed && consumed_value == outstanding)
+        outstanding = 0;
       auto now = std::chrono::steady_clock::now();
       if (outstanding && now - request_started > std::chrono::seconds(3)) {
-        SetWorkerError(L"Render slot did not complete within 3 seconds; stopped without fallback"); break;
+        SetWorkerError(L"Render slot did not complete within 3 seconds; stopped without fallback");
+        break;
       }
       if (!outstanding && may_begin && now >= next_begin) {
-        outstanding = ++render_value; observed = false; request_started = now;
+        outstanding = ++render_value;
+        observed = false;
+        request_started = now;
         next_begin = now + std::chrono::microseconds(33333);
-        { std::lock_guard lock(mutex); render_updates.emplace_back(outstanding, false); }
+        {
+          std::lock_guard lock(mutex);
+          render_updates.emplace_back(outstanding, false);
+        }
         remotekit_sdk_render_request request{active_generation, outstanding, 0, 33333, 0};
         status = render_begin(render_handle, &request);
-        if (status != REMOTEKIT_SDK_OK) { SetWorkerError(L"Render Begin failed; stopped without fallback"); break; }
+        if (status != REMOTEKIT_SDK_OK) {
+          SetWorkerError(L"Render Begin failed; stopped without fallback");
+          break;
+        }
       }
       Task task;
       bool rebuild = false, configure = false, should_blur = false, enabled = true;
       {
         std::unique_lock lock(mutex);
         wake.wait_for(lock, std::chrono::milliseconds(4), [&] {
-          return stopping || !render_events.empty() || blur_pending || (restart_pending && restart_ready) ||
-                 (configure_pending && !restart_pending) || (accept_input && !tasks.empty());
+          return stopping || !render_events.empty() || blur_pending ||
+                 (restart_pending && restart_ready) || (configure_pending && !restart_pending) ||
+                 (accept_input && !tasks.empty());
         });
         if (stopping)
           break;
@@ -794,7 +829,8 @@ struct AtlasClient::Impl {
       else if (status != REMOTEKIT_SDK_OK && !busy_deadline)
         SetWorkerError(L"RemoteKit control channel failed; reconnect is disabled");
     }
-    if (render_handle) render_close(std::exchange(render_handle, 0));
+    if (render_handle)
+      render_close(std::exchange(render_handle, 0));
     // No SDK call is made from the UI thread, including teardown.
     if (status == REMOTEKIT_SDK_OK) {
       const int blurred = blur();
@@ -952,11 +988,16 @@ void AtlasClient::Poll() {
   }
   if (p.attached) {
     std::deque<std::pair<std::uint64_t, bool>> updates;
-    { std::lock_guard lock(p.mutex); updates.swap(p.render_updates); }
+    {
+      std::lock_guard lock(p.mutex);
+      updates.swap(p.render_updates);
+    }
     for (const auto& [value, reject] : updates) {
-      if (reject) p.consumer.Reject(value);
+      if (reject)
+        p.consumer.Reject(value);
       else if (!p.consumer.Begin(value)) {
-        p.Stop(L"Demo render slot already has an outstanding request"); return;
+        p.Stop(L"Demo render slot already has an outstanding request");
+        return;
       }
     }
   }

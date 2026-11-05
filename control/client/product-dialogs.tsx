@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -20,20 +20,14 @@ import {
   TextField,
   Typography,
   useMediaQuery,
-} from "@mui/material";
-import Close from "@mui/icons-material/Close";
-import type {
-  ProductSettings,
-  ProductState,
-  ProductUser,
-  RegistrationStatus,
-} from "../shared/product";
+} from '@mui/material';
+import Close from '@mui/icons-material/Close';
+import type { ProductSettings, ProductState, ProductUser, RegistrationStatus } from '../shared/product';
 import { SEARCH_ENGINES } from '../shared/product';
-import { request } from "./types";
+import { request } from './types';
 export type { ProductActionHandler as Action } from './product-operations';
 import type { ProductActionHandler as Action } from './product-operations';
-export const errorMessage = (error: unknown) =>
-  error instanceof Error ? error.message : String(error);
+export const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
 export function AuthView({
   onLogin,
   close,
@@ -44,25 +38,28 @@ export function AuthView({
   notice: string;
 }) {
   const [register, setRegister] = useState(false),
-    [username, setUsername] = useState(""),
-    [password, setPassword] = useState(""),
-    [serverCredential, setServerCredential] = useState(""),
+    [username, setUsername] = useState(''),
+    [password, setPassword] = useState(''),
+    [serverCredential, setServerCredential] = useState(''),
     [registration, setRegistration] = useState<RegistrationStatus | null>(null),
-    [registrationError, setRegistrationError] = useState(""),
+    [registrationError, setRegistrationError] = useState(''),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
-  const submitting = useRef(false), registrationRequest = useRef(0);
+    [error, setError] = useState('');
+  const submitting = useRef(false),
+    registrationRequest = useRef(0);
   useEffect(() => {
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && !submitting.current) close(); };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !submitting.current) close();
+    };
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [close]);
   const refreshRegistration = useCallback(async () => {
     const sequence = ++registrationRequest.current;
     setRegistration(null);
-    setRegistrationError("");
+    setRegistrationError('');
     try {
-      const result = await request<RegistrationStatus>("/api/auth/registration");
+      const result = await request<RegistrationStatus>('/api/auth/registration');
       if (sequence === registrationRequest.current) setRegistration(result);
     } catch (e) {
       if (sequence === registrationRequest.current) setRegistrationError(errorMessage(e));
@@ -70,11 +67,13 @@ export function AuthView({
   }, []);
   useEffect(() => {
     void refreshRegistration();
-    const refresh = () => { void refreshRegistration(); };
-    window.addEventListener("focus", refresh);
+    const refresh = () => {
+      void refreshRegistration();
+    };
+    window.addEventListener('focus', refresh);
     return () => {
       registrationRequest.current++;
-      window.removeEventListener("focus", refresh);
+      window.removeEventListener('focus', refresh);
     };
   }, [register, refreshRegistration]);
   return (
@@ -85,17 +84,20 @@ export function AuthView({
         onSubmit={async (event) => {
           event.preventDefault();
           if (submitting.current || (register && !registration?.registrationOpen)) return;
-          if (register && registration?.credentialRequired &&
-              (serverCredential.length < 8 || serverCredential.length > 256)) {
-            setError("注册口令须为 8–256 个字符");
+          if (
+            register &&
+            registration?.credentialRequired &&
+            (serverCredential.length < 8 || serverCredential.length > 256)
+          ) {
+            setError('注册口令须为 8–256 个字符');
             return;
           }
           submitting.current = true;
           setBusy(true);
-          setError("");
+          setError('');
           try {
             const result = await request<{ user: ProductUser }>(
-              `/api/auth/${register ? "register" : "login"}`,
+              `/api/auth/${register ? 'register' : 'login'}`,
               { username, password, ...(register ? { serverCredential } : {}) },
             );
             onLogin(result.user);
@@ -109,24 +111,46 @@ export function AuthView({
         }}
       >
         <Box sx={{ display: 'flex', justifyContent: 'flex-end' }}>
-          <IconButton aria-label="关闭登录" onClick={close} disabled={busy}><Close /></IconButton>
+          <IconButton aria-label="关闭登录" onClick={close} disabled={busy}>
+            <Close />
+          </IconButton>
         </Box>
         {notice && <Alert severity="warning">{notice}</Alert>}
         <Typography variant="h5" component="h1">
-          {register ? "创建账户" : "登录 RemoteKit"}
+          {register ? '创建账户' : '登录 RemoteKit'}
         </Typography>
         <Typography color="text.secondary">继续你的浏览器工作空间</Typography>
         {error && <Alert severity="error">{error}</Alert>}
-        {register && (
-          registrationError ? <Alert severity="error" action={
-            <Button color="inherit" onClick={() => void refreshRegistration()}>重试</Button>
-          }>无法读取注册状态：{registrationError}</Alert> :
-          !registration ? <Typography color="text.secondary" role="status">正在读取注册状态…</Typography> :
-          !registration.hasAdmin ? <Alert severity="info">首个账户将成为管理员。创建后，请在更多 → 管理员面板设置注册口令。</Alert> :
-          !registration.registrationOpen ? <Alert severity="info" action={
-            <Button color="inherit" onClick={() => void refreshRegistration()}>刷新</Button>
-          }>注册暂未开放，请联系管理员先设置注册口令。</Alert> : null
-        )}
+        {register &&
+          (registrationError ? (
+            <Alert
+              severity="error"
+              action={
+                <Button color="inherit" onClick={() => void refreshRegistration()}>
+                  重试
+                </Button>
+              }
+            >
+              无法读取注册状态：{registrationError}
+            </Alert>
+          ) : !registration ? (
+            <Typography color="text.secondary" role="status">
+              正在读取注册状态…
+            </Typography>
+          ) : !registration.hasAdmin ? (
+            <Alert severity="info">首个账户将成为管理员。创建后，请在更多 → 管理员面板设置注册口令。</Alert>
+          ) : !registration.registrationOpen ? (
+            <Alert
+              severity="info"
+              action={
+                <Button color="inherit" onClick={() => void refreshRegistration()}>
+                  刷新
+                </Button>
+              }
+            >
+              注册暂未开放，请联系管理员先设置注册口令。
+            </Alert>
+          ) : null)}
         <TextField
           required
           autoFocus
@@ -141,7 +165,7 @@ export function AuthView({
           label="账户密码"
           disabled={busy}
           type="password"
-          autoComplete={register ? "new-password" : "current-password"}
+          autoComplete={register ? 'new-password' : 'current-password'}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
@@ -158,18 +182,22 @@ export function AuthView({
             inputProps={{ minLength: 8, maxLength: 256 }}
           />
         )}
-        <Button variant="contained" type="submit" disabled={busy || (register && !registration?.registrationOpen)}>
-          {busy ? "请稍候…" : register ? "创建账户" : "登录"}
+        <Button
+          variant="contained"
+          type="submit"
+          disabled={busy || (register && !registration?.registrationOpen)}
+        >
+          {busy ? '请稍候…' : register ? '创建账户' : '登录'}
         </Button>
         <Button
           disabled={busy}
           onClick={() => {
             setRegister(!register);
-            setServerCredential("");
-            setError("");
+            setServerCredential('');
+            setError('');
           }}
         >
-          {register ? "已有账户？登录" : "创建账户"}
+          {register ? '已有账户？登录' : '创建账户'}
         </Button>
       </Box>
     </main>
@@ -194,28 +222,24 @@ export function SettingsDialog({
   security?: React.ReactNode;
   diagnostics?: React.ReactNode;
 }) {
-  const compact = useMediaQuery("(max-width:600px)"),
+  const compact = useMediaQuery('(max-width:600px)'),
     settings = state.workspace.settings;
-  const [scale, setScale] = useState(
-      String(settings.clientScaleOverride ?? window.devicePixelRatio ?? 1),
-    ),
+  const [scale, setScale] = useState(String(settings.clientScaleOverride ?? window.devicePixelRatio ?? 1)),
     [result, setResult] = useState<Record<string, string>>({}),
     [busy, setBusy] = useState<Record<string, boolean>>({});
   useEffect(() => {
     if (open) {
-      setScale(
-        String(settings.clientScaleOverride ?? window.devicePixelRatio ?? 1),
-      );
+      setScale(String(settings.clientScaleOverride ?? window.devicePixelRatio ?? 1));
       setResult({});
     }
   }, [open]);
   const save = async (key: string, value: Partial<ProductSettings>) => {
     if (!online) return;
     setBusy((p) => ({ ...p, [key]: true }));
-    setResult((p) => ({ ...p, [key]: "" }));
+    setResult((p) => ({ ...p, [key]: '' }));
     try {
-      await action({ type: "settings.update", settings: value });
-      setResult((p) => ({ ...p, [key]: "已保存" }));
+      await action({ type: 'settings.update', settings: value });
+      setResult((p) => ({ ...p, [key]: '已保存' }));
     } catch (e) {
       setResult((p) => ({ ...p, [key]: `未保存，请重试：${errorMessage(e)}` }));
     } finally {
@@ -226,9 +250,9 @@ export function SettingsDialog({
     <Typography
       className="setting-result"
       role="status"
-      color={busy[key] || !result[key] || result[key] === "已保存" ? "text.secondary" : "error"}
+      color={busy[key] || !result[key] || result[key] === '已保存' ? 'text.secondary' : 'error'}
     >
-      {busy[key] ? "正在保存…" : result[key] || " "}
+      {busy[key] ? '正在保存…' : result[key] || ' '}
     </Typography>
   );
   return (
@@ -238,7 +262,7 @@ export function SettingsDialog({
       fullScreen={compact}
       fullWidth
       maxWidth="sm"
-      PaperProps={{ className: "settings-paper" }}
+      PaperProps={{ className: 'settings-paper' }}
     >
       <DialogTitle className="dialog-heading">
         设置
@@ -248,15 +272,29 @@ export function SettingsDialog({
       </DialogTitle>
       <DialogContent dividers>
         <div className="setting-section">
-          <Typography fontWeight={600} sx={{ mb: 2 }}>搜索</Typography>
+          <Typography fontWeight={600} sx={{ mb: 2 }}>
+            搜索
+          </Typography>
           <FormControl fullWidth size="small" disabled={!online || busy.search}>
             <InputLabel id="search-engine-label">默认搜索引擎</InputLabel>
-            <Select labelId="search-engine-label" label="默认搜索引擎" value={settings.searchEngine}
-              onChange={event => void save('search', { searchEngine: event.target.value as ProductSettings['searchEngine'] })}>
-              {SEARCH_ENGINES.map(engine => <MenuItem key={engine.value} value={engine.value}>{engine.label}</MenuItem>)}
+            <Select
+              labelId="search-engine-label"
+              label="默认搜索引擎"
+              value={settings.searchEngine}
+              onChange={(event) =>
+                void save('search', { searchEngine: event.target.value as ProductSettings['searchEngine'] })
+              }
+            >
+              {SEARCH_ENGINES.map((engine) => (
+                <MenuItem key={engine.value} value={engine.value}>
+                  {engine.label}
+                </MenuItem>
+              ))}
             </Select>
           </FormControl>
-          <Typography variant="caption" color="text.secondary">用于地址栏和起始页中的搜索</Typography>
+          <Typography variant="caption" color="text.secondary">
+            用于地址栏和起始页中的搜索
+          </Typography>
           {note('search')}
         </div>
         <Divider sx={{ mb: 2 }} />
@@ -265,17 +303,16 @@ export function SettingsDialog({
           aria-label="画面质量"
           value={settings.qualityPreference}
           onChange={(e) =>
-            void save("quality", {
-              qualityPreference: e.target
-                .value as ProductSettings["qualityPreference"],
+            void save('quality', {
+              qualityPreference: e.target.value as ProductSettings['qualityPreference'],
             })
           }
         >
           {(
             [
-              ["quality", "优先高画质", "尽量保留画面细节"],
-              ["auto", "自动", "平衡清晰度与响应速度"],
-              ["smooth", "优先流畅", "优先保持操作顺畅"],
+              ['quality', '优先高画质', '尽量保留画面细节'],
+              ['auto', '自动', '平衡清晰度与响应速度'],
+              ['smooth', '优先流畅', '优先保持操作顺畅'],
             ] as const
           ).map(([value, title, detail]) => (
             <FormControlLabel
@@ -295,16 +332,12 @@ export function SettingsDialog({
             />
           ))}
         </RadioGroup>
-        {note("quality")}
+        {note('quality')}
         <Divider />
         <div className="setting-section">
           <Typography fontWeight={600}>
-            显示像素比例{" "}
-            <Typography
-              component="span"
-              variant="caption"
-              color="text.secondary"
-            >
+            显示像素比例{' '}
+            <Typography component="span" variant="caption" color="text.secondary">
               Client Scale
             </Typography>
           </Typography>
@@ -314,10 +347,8 @@ export function SettingsDialog({
                 checked={settings.clientScaleOverride === null}
                 disabled={!online || busy.scale}
                 onChange={(_, checked) =>
-                  void save("scale", {
-                    clientScaleOverride: checked
-                      ? null
-                      : Number(scale) || window.devicePixelRatio || 1,
+                  void save('scale', {
+                    clientScaleOverride: checked ? null : Number(scale) || window.devicePixelRatio || 1,
                   })
                 }
               />
@@ -342,20 +373,19 @@ export function SettingsDialog({
               />
               <Button
                 disabled={
-                  !online || busy.scale ||
+                  !online ||
+                  busy.scale ||
                   !Number.isFinite(Number(scale)) ||
                   Number(scale) < state.constraints.clientScaleMin ||
                   Number(scale) > state.constraints.clientScaleMax
                 }
-                onClick={() =>
-                  void save("scale", { clientScaleOverride: Number(scale) })
-                }
+                onClick={() => void save('scale', { clientScaleOverride: Number(scale) })}
               >
                 应用
               </Button>
             </div>
           )}
-          {note("scale")}
+          {note('scale')}
         </div>
         <Divider />
         <div className="setting-section">
@@ -366,14 +396,12 @@ export function SettingsDialog({
               <Switch
                 checked={settings.autoFullscreen}
                 disabled={!online || busy.fullscreen}
-                onChange={(_, checked) =>
-                  void save("fullscreen", { autoFullscreen: checked })
-                }
+                onChange={(_, checked) => void save('fullscreen', { autoFullscreen: checked })}
               />
             }
             label="打开或激活时全屏"
           />
-          {note("fullscreen")}
+          {note('fullscreen')}
         </div>
         <Divider />
         <div className="setting-section">
@@ -384,9 +412,7 @@ export function SettingsDialog({
               <Switch
                 checked={settings.memorySaverEnabled}
                 disabled={!online || busy.memory}
-                onChange={(_, checked) =>
-                  void save("memory", { memorySaverEnabled: checked })
-                }
+                onChange={(_, checked) => void save('memory', { memorySaverEnabled: checked })}
               />
             }
             label="内存节省"
@@ -394,20 +420,18 @@ export function SettingsDialog({
           <Typography variant="body2" color="text.secondary">
             暂不使用的页面可以休眠，返回时自动恢复。
           </Typography>
-          {note("memory")}
+          {note('memory')}
           <FormControlLabel
             control={
               <Checkbox
                 checked={settings.showStats ?? false}
                 disabled={!online || busy.stats}
-                onChange={(_, checked) =>
-                  void save("stats", { showStats: checked })
-                }
+                onChange={(_, checked) => void save('stats', { showStats: checked })}
               />
             }
             label="显示连接统计"
           />
-          {note("stats")}
+          {note('stats')}
         </div>
         <Divider />
         {diagnostics}
@@ -423,29 +447,89 @@ export function SettingsDialog({
   );
 }
 
-export function PageDialogs({ state, action, activeId }: { state: ProductState; action: Action; activeId?:string|null }) {
-  const visible = state.workspace.windows.filter(w => state.workspace.layoutMode === 'side-by-side' && window.innerWidth >= Math.max(720, state.workspace.windows.length * 365 - 5) || w.id === state.workspace.activeWindowId).map(w => w.activeTabId);
-  const dialog = state.pageDialogs?.find(d => activeId===undefined?visible.includes(d.tabId):d.id===activeId);
+export function PageDialogs({
+  state,
+  action,
+  activeId,
+}: {
+  state: ProductState;
+  action: Action;
+  activeId?: string | null;
+}) {
+  const visible = state.workspace.windows
+    .filter(
+      (w) =>
+        (state.workspace.layoutMode === 'side-by-side' &&
+          window.innerWidth >= Math.max(720, state.workspace.windows.length * 365 - 5)) ||
+        w.id === state.workspace.activeWindowId,
+    )
+    .map((w) => w.activeTabId);
+  const dialog = state.pageDialogs?.find((d) =>
+    activeId === undefined ? visible.includes(d.tabId) : d.id === activeId,
+  );
   return dialog ? <PageDialogForm key={dialog.id} dialog={dialog} action={action} /> : null;
 }
-function PageDialogForm({ dialog, action }: { dialog: NonNullable<ProductState['pageDialogs']>[number]; action: Action }) {
+function PageDialogForm({
+  dialog,
+  action,
+}: {
+  dialog: NonNullable<ProductState['pageDialogs']>[number];
+  action: Action;
+}) {
   const [text, setText] = useState(dialog.defaultPrompt ?? '');
-  const [busy, setBusy] = useState(false), [error, setError] = useState('');
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState('');
   const reply = async (accept: boolean) => {
-    if (busy) return; setBusy(true); setError('');
-    try { await action({ type: 'page.reply', dialogId: dialog.id, accept, ...(dialog.kind === 'prompt' ? { text } : {}) }); }
-    catch (e) { setError(errorMessage(e)); setBusy(false); }
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await action({
+        type: 'page.reply',
+        dialogId: dialog.id,
+        accept,
+        ...(dialog.kind === 'prompt' ? { text } : {}),
+      });
+    } catch (e) {
+      setError(errorMessage(e));
+      setBusy(false);
+    }
   };
   const leaving = dialog.kind === 'beforeunload';
-  return <Dialog open onClose={dialog.kind === 'alert' || busy ? undefined : () => void reply(false)} maxWidth="sm" fullWidth>
-    <DialogTitle>{leaving ? '离开此页面？' : dialog.origin || '页面消息'}</DialogTitle>
-    <DialogContent><Typography sx={{ whiteSpace: 'pre-wrap' }}>{dialog.message || (leaving ? '此页面可能有未保存的内容。' : '')}</Typography>
-      {dialog.kind === 'prompt' && <TextField autoFocus fullWidth value={text} disabled={busy} onChange={e => setText(e.target.value)} sx={{ mt: 2 }} />}
-      {error && <Alert severity="error">{error}</Alert>}
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 2 }}>
-        {dialog.kind !== 'alert' && <Button disabled={busy} onClick={() => void reply(false)}>{leaving ? '留在页面' : '取消'}</Button>}
-        <Button disabled={busy} variant="contained" onClick={() => void reply(true)}>{leaving ? '继续离开' : '确认'}</Button>
-      </Box>
-    </DialogContent>
-  </Dialog>;
+  return (
+    <Dialog
+      open
+      onClose={dialog.kind === 'alert' || busy ? undefined : () => void reply(false)}
+      maxWidth="sm"
+      fullWidth
+    >
+      <DialogTitle>{leaving ? '离开此页面？' : dialog.origin || '页面消息'}</DialogTitle>
+      <DialogContent>
+        <Typography sx={{ whiteSpace: 'pre-wrap' }}>
+          {dialog.message || (leaving ? '此页面可能有未保存的内容。' : '')}
+        </Typography>
+        {dialog.kind === 'prompt' && (
+          <TextField
+            autoFocus
+            fullWidth
+            value={text}
+            disabled={busy}
+            onChange={(e) => setText(e.target.value)}
+            sx={{ mt: 2 }}
+          />
+        )}
+        {error && <Alert severity="error">{error}</Alert>}
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 2 }}>
+          {dialog.kind !== 'alert' && (
+            <Button disabled={busy} onClick={() => void reply(false)}>
+              {leaving ? '留在页面' : '取消'}
+            </Button>
+          )}
+          <Button disabled={busy} variant="contained" onClick={() => void reply(true)}>
+            {leaving ? '继续离开' : '确认'}
+          </Button>
+        </Box>
+      </DialogContent>
+    </Dialog>
+  );
 }

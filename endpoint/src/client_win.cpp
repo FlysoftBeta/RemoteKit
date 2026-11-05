@@ -303,7 +303,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         L"The OSR renderer requires the Endpoint service OffscreenHost. "
         L"Use the streaming runtime, or explicitly select --presentation=native.";
     OutputDebugStringW(message);
-    MessageBoxW(nullptr, message, L"Endpoint client — unsupported presentation", MB_OK | MB_ICONERROR);
+    MessageBoxW(nullptr, message, L"Endpoint client — unsupported presentation",
+                MB_OK | MB_ICONERROR);
     return 2;
   }
   app.channel =

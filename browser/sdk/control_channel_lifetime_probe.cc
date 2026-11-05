@@ -50,7 +50,8 @@ std::vector<uint8_t> Read(mojo::MessagePipeHandle pipe) {
 
 void Reply(mojo::MessagePipeHandle pipe, const std::vector<uint8_t>& bytes) {
   CHECK_EQ(mojo::WriteMessageRaw(pipe, bytes.data(), bytes.size(), nullptr, 0,
-                               MOJO_WRITE_MESSAGE_FLAG_NONE), MOJO_RESULT_OK);
+                                 MOJO_WRITE_MESSAGE_FLAG_NONE),
+           MOJO_RESULT_OK);
 }
 
 int Request(uint64_t id, uint8_t byte) {
@@ -92,10 +93,14 @@ void SameChannelSerializationAndQueuedClose() {
   std::thread first([&] { first_status = Request(channel.id, 3); });
   auto first_bytes = Read(channel.peer.get());
   std::thread second([&] { second_status = Request(channel.id, 4); });
-  WaitFor([] { std::lock_guard lock(State().lock); return State().operations == 2; });
+  WaitFor([] {
+    std::lock_guard lock(State().lock);
+    return State().operations == 2;
+  });
   std::vector<uint8_t> premature;
-  CHECK_EQ(mojo::ReadMessageRaw(channel.peer.get(), &premature, nullptr,
-                               MOJO_READ_MESSAGE_FLAG_NONE), MOJO_RESULT_SHOULD_WAIT);
+  CHECK_EQ(
+      mojo::ReadMessageRaw(channel.peer.get(), &premature, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
+      MOJO_RESULT_SHOULD_WAIT);
   Reply(channel.peer.get(), first_bytes);
   auto second_bytes = Read(channel.peer.get());
   CHECK_EQ(second_bytes.front(), 4);
@@ -108,7 +113,10 @@ void SameChannelSerializationAndQueuedClose() {
   std::thread active([&] { first_status = Request(channel.id, 5); });
   Read(channel.peer.get());
   std::thread queued([&] { second_status = Request(channel.id, 6); });
-  WaitFor([] { std::lock_guard lock(State().lock); return State().operations == 2; });
+  WaitFor([] {
+    std::lock_guard lock(State().lock);
+    return State().operations == 2;
+  });
   CHECK_EQ(remotekit_sdk_control_close(channel.id), REMOTEKIT_SDK_OK);
   active.join();
   queued.join();
@@ -120,7 +128,8 @@ void SameChannelSerializationAndQueuedClose() {
 std::vector<mojo::ScopedHandle> GenericEndpoints(
     std::vector<mojo::ScopedMessagePipeHandle> endpoints) {
   std::vector<mojo::ScopedHandle> result;
-  for (auto& endpoint : endpoints) result.emplace_back(endpoint.release());
+  for (auto& endpoint : endpoints)
+    result.emplace_back(endpoint.release());
   return result;
 }
 void PendingEndpointOwnership() {
@@ -131,7 +140,8 @@ void PendingEndpointOwnership() {
   for (int i = 0; i < 2; ++i) {
     mojo::ScopedMessagePipeHandle endpoint, peer;
     CHECK_EQ(mojo::CreateMessagePipe(nullptr, &endpoint, &peer), MOJO_RESULT_OK);
-    endpoints.push_back(std::move(endpoint)); peers.push_back(std::move(peer));
+    endpoints.push_back(std::move(endpoint));
+    peers.push_back(std::move(peer));
   }
   CHECK(!pending.Install("multiple", GenericEndpoints(std::move(endpoints))));
   for (const auto& peer : peers) {
@@ -151,10 +161,12 @@ void PendingEndpointOwnership() {
   CHECK(pending.Install("once", std::move(one)));
   CHECK(!pending.Claim("other").is_valid());
   auto claimed = pending.Claim("once");
-  CHECK(claimed.is_valid()); CHECK(!pending.Claim("once").is_valid());
+  CHECK(claimed.is_valid());
+  CHECK(!pending.Claim("once").is_valid());
   // Reset must not own or close an endpoint after its one-use claim.
   pending.Reset();
-  Reply(claimed.get(), {9}); CHECK_EQ(Read(peer.get()).front(), 9);
+  Reply(claimed.get(), {9});
+  CHECK_EQ(Read(peer.get()).front(), 9);
   claimed.reset();
   CHECK_EQ(mojo::CreateMessagePipe(nullptr, &endpoint, &peer), MOJO_RESULT_OK);
   one.emplace_back(endpoint.release());
@@ -164,20 +176,26 @@ void PendingEndpointOwnership() {
   CHECK_EQ(mojo::ReadMessageRaw(peer.get(), &bytes, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
            MOJO_RESULT_FAILED_PRECONDITION);
 }
-void ReplyWithEndpoints(mojo::MessagePipeHandle pipe, const base::DictValue& reply,
+void ReplyWithEndpoints(mojo::MessagePipeHandle pipe,
+                        const base::DictValue& reply,
                         std::vector<mojo::ScopedMessagePipeHandle>* endpoints) {
-  const auto json = base::WriteJson(reply); CHECK(json);
+  const auto json = base::WriteJson(reply);
+  CHECK(json);
   std::vector<MojoHandle> raw;
-  for (const auto& endpoint : *endpoints) raw.push_back(endpoint.get().value());
+  for (const auto& endpoint : *endpoints)
+    raw.push_back(endpoint.get().value());
   CHECK_EQ(mojo::WriteMessageRaw(pipe, json->data(), json->size(), raw.data(), raw.size(),
-                                 MOJO_WRITE_MESSAGE_FLAG_NONE), MOJO_RESULT_OK);
-  for (auto& endpoint : *endpoints) static_cast<void>(endpoint.release());
+                                 MOJO_WRITE_MESSAGE_FLAG_NONE),
+           MOJO_RESULT_OK);
+  for (auto& endpoint : *endpoints)
+    static_cast<void>(endpoint.release());
 }
 base::DictValue ReadJsonRequest(mojo::MessagePipeHandle pipe) {
   auto bytes = Read(pipe);
-  auto request = base::JSONReader::ReadDict(base::as_string_view(base::span(bytes)),
-                                           base::JSON_PARSE_RFC);
-  CHECK(request); return std::move(*request);
+  auto request =
+      base::JSONReader::ReadDict(base::as_string_view(base::span(bytes)), base::JSON_PARSE_RFC);
+  CHECK(request);
+  return std::move(*request);
 }
 void OpenRenderAttachmentContract(size_t attachment_count) {
   auto control = NewChannel();
@@ -191,62 +209,82 @@ void OpenRenderAttachmentContract(size_t attachment_count) {
   }
   std::vector<uint64_t> windows_handles;
   for (size_t i = 0; i < 13; ++i) {
-    HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr); CHECK(event);
+    HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    CHECK(event);
     windows_handles.push_back(reinterpret_cast<uintptr_t>(event));
   }
   std::vector<mojo::ScopedMessagePipeHandle> endpoints, producers;
   for (size_t i = 0; i < attachment_count; ++i) {
     mojo::ScopedMessagePipeHandle endpoint, producer;
     CHECK_EQ(mojo::CreateMessagePipe(nullptr, &endpoint, &producer), MOJO_RESULT_OK);
-    endpoints.push_back(std::move(endpoint)); producers.push_back(std::move(producer));
+    endpoints.push_back(std::move(endpoint));
+    producers.push_back(std::move(producer));
   }
   std::thread responder([&] {
     auto open = ReadJsonRequest(control.peer.get());
-    CHECK_EQ(*open.FindString("method"), "output.open"); CHECK(!open.Find("fps"));
+    CHECK_EQ(*open.FindString("method"), "output.open");
+    CHECK(!open.Find("fps"));
     base::DictValue accepted;
-    accepted.Set("version", 1); accepted.Set("id", *open.FindInt("id"));
-    accepted.Set("ok", true); accepted.Set("accepted", true);
+    accepted.Set("version", 1);
+    accepted.Set("id", *open.FindInt("id"));
+    accepted.Set("ok", true);
+    accepted.Set("accepted", true);
     std::vector<mojo::ScopedMessagePipeHandle> none;
     ReplyWithEndpoints(control.peer.get(), accepted, &none);
     auto describe = ReadJsonRequest(control.peer.get());
     CHECK_EQ(*describe.FindString("method"), "output.describe");
     base::DictValue reply;
-    reply.Set("version", 1); reply.Set("id", *describe.FindInt("id"));
-    reply.Set("ok", true); reply.Set("generation", "1");
-    reply.Set("width", 64); reply.Set("height", 64);
+    reply.Set("version", 1);
+    reply.Set("id", *describe.FindInt("id"));
+    reply.Set("ok", true);
+    reply.Set("generation", "1");
+    reply.Set("width", 64);
+    reply.Set("height", 64);
     reply.Set("mapping_size", int(sizeof(remotekit::SharedRenderMapping)));
     reply.Set("mapping_handle", base::NumberToString(windows_handles[0]));
-    reply.Set("adapter_luid_low", "0"); reply.Set("adapter_luid_high", "0");
+    reply.Set("adapter_luid_low", "0");
+    reply.Set("adapter_luid_high", "0");
     reply.Set("render_channel", "opaque-once-token");
     for (size_t group = 0; group < 3; ++group) {
       base::ListValue handles;
       for (size_t i = 0; i < 4; ++i)
         handles.Append(base::NumberToString(windows_handles[1 + group * 4 + i]));
-      reply.Set(group == 0 ? "ready_fence_handles" :
-                group == 1 ? "consumed_fence_handles" : "texture_handles", std::move(handles));
+      reply.Set(group == 0   ? "ready_fence_handles"
+                : group == 1 ? "consumed_fence_handles"
+                             : "texture_handles",
+                std::move(handles));
     }
     ReplyWithEndpoints(control.peer.get(), reply, &endpoints);
   });
-  remotekit_sdk_render_setup setup{}; setup.struct_size = sizeof(setup);
-  const int status = remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 5000);
+  remotekit_sdk_render_setup setup{};
+  setup.struct_size = sizeof(setup);
+  const int status =
+      remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 5000);
   responder.join();
   std::vector<uint8_t> old_bytes;
-  CHECK_EQ(mojo::ReadMessageRaw(old_producer.get(), &old_bytes, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
-           MOJO_RESULT_FAILED_PRECONDITION);
+  CHECK_EQ(
+      mojo::ReadMessageRaw(old_producer.get(), &old_bytes, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
+      MOJO_RESULT_FAILED_PRECONDITION);
   if (attachment_count != 1) {
     CHECK_EQ(status, REMOTEKIT_SDK_DATA_MISMATCH);
-    for (uint64_t handle : windows_handles) CHECK(!ValidHandle(handle));
+    for (uint64_t handle : windows_handles)
+      CHECK(!ValidHandle(handle));
   } else {
     CHECK_EQ(status, REMOTEKIT_SDK_OK);
     std::atomic<int> rejects{0};
     uint64_t render = 0, repeated = 0;
-    CHECK_EQ(remotekit_sdk_render_connect(setup.render_channel,
-        [](void* context, const remotekit_sdk_render_event* event) {
-          CHECK_EQ(event->type, uint32_t(REMOTEKIT_SDK_RENDER_REJECT));
-          ++*static_cast<std::atomic<int>*>(context);
-        }, &rejects, &render), REMOTEKIT_SDK_OK);
-    CHECK_EQ(remotekit_sdk_render_connect(setup.render_channel,
-        [](void*, const remotekit_sdk_render_event*) {}, nullptr, &repeated), REMOTEKIT_SDK_CHANNEL_CLOSED);
+    CHECK_EQ(remotekit_sdk_render_connect(
+                 setup.render_channel,
+                 [](void* context, const remotekit_sdk_render_event* event) {
+                   CHECK_EQ(event->type, uint32_t(REMOTEKIT_SDK_RENDER_REJECT));
+                   ++*static_cast<std::atomic<int>*>(context);
+                 },
+                 &rejects, &render),
+             REMOTEKIT_SDK_OK);
+    CHECK_EQ(remotekit_sdk_render_connect(
+                 setup.render_channel, [](void*, const remotekit_sdk_render_event*) {}, nullptr,
+                 &repeated),
+             REMOTEKIT_SDK_CHANNEL_CLOSED);
     remotekit_sdk_render_request begin{1, 1, 0, 16667, 0};
     CHECK_EQ(remotekit_sdk_render_begin(render, &begin), REMOTEKIT_SDK_OK);
     auto wire_bytes = Read(producers.front().get());
@@ -256,18 +294,21 @@ void OpenRenderAttachmentContract(size_t attachment_count) {
     reject.reason = uint32_t(remotekit::RenderRejectReason::kIdle);
     reject.begin.identity = {1, 1, 0, 0};
     CHECK_EQ(mojo::WriteMessageRaw(producers.front().get(), &reject, sizeof(reject), nullptr, 0,
-                                   MOJO_WRITE_MESSAGE_FLAG_NONE), MOJO_RESULT_OK);
+                                   MOJO_WRITE_MESSAGE_FLAG_NONE),
+             MOJO_RESULT_OK);
     WaitFor([&] { return rejects.load() == 1; });
     // The original Control pipe must remain usable after independent render IPC.
     std::thread echo([&] { Reply(control.peer.get(), Read(control.peer.get())); });
-    CHECK_EQ(Request(control.id, 17), REMOTEKIT_SDK_OK); echo.join();
+    CHECK_EQ(Request(control.id, 17), REMOTEKIT_SDK_OK);
+    echo.join();
     // Claim transfers ownership: closing Control must not close claimed render.
     CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
     begin.value = 2;
     CHECK_EQ(remotekit_sdk_render_begin(render, &begin), REMOTEKIT_SDK_OK);
     CHECK_EQ(Read(producers.front().get()).size(), sizeof(remotekit::RenderWireMessage));
     CHECK_EQ(remotekit_sdk_render_close(render), REMOTEKIT_SDK_OK);
-    for (uint64_t handle : windows_handles) CHECK(CloseHandle(NativeHandle(handle)));
+    for (uint64_t handle : windows_handles)
+      CHECK(CloseHandle(NativeHandle(handle)));
     return;
   }
   CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
@@ -284,8 +325,9 @@ void UnclaimedControlClose() {
   }
   CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
   uint64_t handle = 0;
-  CHECK_EQ(remotekit_sdk_render_connect("unclaimed",
-      [](void*, const remotekit_sdk_render_event*) {}, nullptr, &handle), REMOTEKIT_SDK_CHANNEL_CLOSED);
+  CHECK_EQ(remotekit_sdk_render_connect(
+               "unclaimed", [](void*, const remotekit_sdk_render_event*) {}, nullptr, &handle),
+           REMOTEKIT_SDK_CHANNEL_CLOSED);
   std::vector<uint8_t> bytes;
   CHECK_EQ(mojo::ReadMessageRaw(producer.get(), &bytes, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
            MOJO_RESULT_FAILED_PRECONDITION);
@@ -298,7 +340,8 @@ void RawControlRejectsAttachments() {
     const auto request = Read(channel.peer.get());
     const MojoHandle raw = endpoint.get().value();
     CHECK_EQ(mojo::WriteMessageRaw(channel.peer.get(), request.data(), request.size(), &raw, 1,
-                                   MOJO_WRITE_MESSAGE_FLAG_NONE), MOJO_RESULT_OK);
+                                   MOJO_WRITE_MESSAGE_FLAG_NONE),
+             MOJO_RESULT_OK);
     static_cast<void>(endpoint.release());
   });
   CHECK_EQ(Request(channel.id, 1), REMOTEKIT_SDK_DATA_MISMATCH);
@@ -322,7 +365,10 @@ void ShutdownDrainsLeases() {
     shutdown_status = remotekit_sdk_shutdown();
     finished.store(true);
   });
-  WaitFor([] { std::lock_guard lock(State().lock); return State().stopping; });
+  WaitFor([] {
+    std::lock_guard lock(State().lock);
+    return State().stopping;
+  });
   request.join();
   CHECK_EQ(request_status, REMOTEKIT_SDK_CHANNEL_CLOSED);
   CHECK(channel.lifetime.expired());

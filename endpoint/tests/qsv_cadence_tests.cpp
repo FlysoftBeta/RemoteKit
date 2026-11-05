@@ -3,7 +3,13 @@
 #include <cstdlib>
 #include <iostream>
 
-#define CHECK(x) do { if (!(x)) { std::cerr << __LINE__ << " failed: " #x "\n"; std::exit(1); } } while (false)
+#define CHECK(x)                                    \
+  do {                                              \
+    if (!(x)) {                                     \
+      std::cerr << __LINE__ << " failed: " #x "\n"; \
+      std::exit(1);                                 \
+    }                                               \
+  } while (false)
 
 int main() {
   using remotekit::media::QsvCadencePolicy;

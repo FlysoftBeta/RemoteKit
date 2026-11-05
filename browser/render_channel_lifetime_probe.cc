@@ -20,8 +20,7 @@ void CheckOwnerDestruction() {
   bool owner_alive = true;
   mojo::MessagePipe pipe;
   {
-    RenderChannel channel(std::move(pipe.handle0), {}, {},
-                          base::BindLambdaForTesting([&] {
+    RenderChannel channel(std::move(pipe.handle0), {}, {}, base::BindLambdaForTesting([&] {
                             CHECK(owner_alive);
                             ++notified;
                           }));
@@ -51,8 +50,7 @@ void CheckRemoteClose() {
   mojo::MessagePipe pipe;
   base::RunLoop loop;
   {
-    RenderChannel channel(std::move(pipe.handle0), {}, {},
-                          base::BindLambdaForTesting([&] {
+    RenderChannel channel(std::move(pipe.handle0), {}, {}, base::BindLambdaForTesting([&] {
                             ++notified;
                             loop.Quit();
                           }));

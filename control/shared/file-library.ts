@@ -30,18 +30,50 @@ export interface LibraryEntry extends LibraryAssetFields {
   archived: boolean;
 }
 
-export interface LibraryGroup { id: string; name: string }
-export interface LibrarySnapshot { revision: number; entries: LibraryEntry[]; basket: string[]; groups: LibraryGroup[] }
+export interface LibraryGroup {
+  id: string;
+  name: string;
+}
+export interface LibrarySnapshot {
+  revision: number;
+  entries: LibraryEntry[];
+  basket: string[];
+  groups: LibraryGroup[];
+}
 export type SelectionState = 'pending' | 'validating' | 'selected' | 'cancelled' | 'unknown';
 
 export interface LibraryMethods {
   'library.get': { params: Record<string, never>; result: LibrarySnapshot };
-  'library.import': { params: LibraryAssetFields & { operationId: string; name: string; destination: 'basket' | 'library'; groupId: string | null; afterId?: string }; result: LibrarySnapshot };
-  'library.replace': { params: LibraryAssetFields & { operationId: string; entryId: string; expectedRevision: number }; result: LibrarySnapshot };
-  'library.basket': { params: { operationId: string; expectedRevision: number; ids: string[] }; result: LibrarySnapshot };
+  'library.import': {
+    params: LibraryAssetFields & {
+      operationId: string;
+      name: string;
+      destination: 'basket' | 'library';
+      groupId: string | null;
+      afterId?: string;
+    };
+    result: LibrarySnapshot;
+  };
+  'library.replace': {
+    params: LibraryAssetFields & { operationId: string; entryId: string; expectedRevision: number };
+    result: LibrarySnapshot;
+  };
+  'library.basket': {
+    params: { operationId: string; expectedRevision: number; ids: string[] };
+    result: LibrarySnapshot;
+  };
   'library.group': { params: { operationId: string; id?: string; name: string }; result: LibrarySnapshot };
-  'library.move': { params: { operationId: string; ids: string[]; groupId: string | null }; result: LibrarySnapshot };
+  'library.move': {
+    params: { operationId: string; ids: string[]; groupId: string | null };
+    result: LibrarySnapshot;
+  };
   'library.delete': { params: { operationId: string; ids: string[] }; result: LibrarySnapshot };
-  'library.prepare': { params: { operationId: string; requestId: string; entryIds: string[]; groupId: string | null }; result: { selectionId: string } };
-  'library.finish': { params: { selectionId: string }; result: { state: SelectionState; snapshot: LibrarySnapshot } };
+  'library.prepare': {
+    params: { operationId: string; requestId: string; entryIds: string[]; groupId: string | null };
+    result: { selectionId: string };
+  };
+  'library.finish': {
+    params: { selectionId: string };
+    result: { state: SelectionState; snapshot: LibrarySnapshot };
+  };
 }

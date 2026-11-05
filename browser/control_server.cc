@@ -63,26 +63,32 @@ void ControlServer::OnReadable(MojoResult result) {
     }
     const base::DictValue invalid_request;
     const auto& application_request = parsed ? *parsed : invalid_request;
-    if (!WriteControlResponse(application_request, reply,
-          base::BindRepeating([](ControlServer* server, const base::DictValue* request,
-                                const base::DictValue* response,
-                                std::string_view encoded, bool original_reply) {
-            mojo::ScopedMessagePipeHandle endpoint;
-            if (ShouldAttachRenderEndpoint(*request, *response, original_reply)) {
-              if (!server->attachment_provider_) return false;
-              endpoint = server->attachment_provider_.Run(*request, *response);
-              if (!endpoint.is_valid()) return false;
-            }
-            const MojoHandle attached = endpoint.get().value();
-            const auto result = mojo::WriteMessageRaw(server->pipe_.get(), encoded.data(),
-                encoded.size(), endpoint.is_valid() ? &attached : nullptr,
-                endpoint.is_valid() ? 1 : 0, MOJO_WRITE_MESSAGE_FLAG_NONE);
-            // Mojo consumes attached handles only on a successful write.
-            // Failure destroys the local endpoint, then Close stops output.
-            if (result == MOJO_RESULT_OK && endpoint.is_valid()) (void)endpoint.release();
-            return result == MOJO_RESULT_OK;
-          }, base::Unretained(this), base::Unretained(&application_request),
-             base::Unretained(&reply)))) {
+    if (!WriteControlResponse(
+            application_request, reply,
+            base::BindRepeating(
+                [](ControlServer* server, const base::DictValue* request,
+                   const base::DictValue* response, std::string_view encoded, bool original_reply) {
+                  mojo::ScopedMessagePipeHandle endpoint;
+                  if (ShouldAttachRenderEndpoint(*request, *response, original_reply)) {
+                    if (!server->attachment_provider_)
+                      return false;
+                    endpoint = server->attachment_provider_.Run(*request, *response);
+                    if (!endpoint.is_valid())
+                      return false;
+                  }
+                  const MojoHandle attached = endpoint.get().value();
+                  const auto result = mojo::WriteMessageRaw(
+                      server->pipe_.get(), encoded.data(), encoded.size(),
+                      endpoint.is_valid() ? &attached : nullptr, endpoint.is_valid() ? 1 : 0,
+                      MOJO_WRITE_MESSAGE_FLAG_NONE);
+                  // Mojo consumes attached handles only on a successful write.
+                  // Failure destroys the local endpoint, then Close stops output.
+                  if (result == MOJO_RESULT_OK && endpoint.is_valid())
+                    (void)endpoint.release();
+                  return result == MOJO_RESULT_OK;
+                },
+                base::Unretained(this), base::Unretained(&application_request),
+                base::Unretained(&reply)))) {
       Close();
       return;
     }

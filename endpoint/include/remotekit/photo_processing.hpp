@@ -70,21 +70,20 @@ class PhotoBurstAnalyzer {
 };
 
 PhotoRankResult RankPhotos(std::span<const std::filesystem::path> inputs,
-                          const PhotoCancelled& cancelled = {});
+                           const PhotoCancelled& cancelled = {});
 
 // Writes PNG to a caller-owned staging path. The caller cleans up on failure
 // and publishes the result only on success. Corners are in displayed image
 // coordinates, normalized clockwise.
-PhotoProcessResult ProcessPhoto(
-    const std::filesystem::path& input,
-    const std::filesystem::path& output,
-    PhotoMode mode,
-    const std::optional<std::array<PhotoPoint, 4>>& corners = {},
-    const PhotoCancelled& cancelled = {});
+PhotoProcessResult ProcessPhoto(const std::filesystem::path& input,
+                                const std::filesystem::path& output,
+                                PhotoMode mode,
+                                const std::optional<std::array<PhotoPoint, 4>>& corners = {},
+                                const PhotoCancelled& cancelled = {});
 
 // Produces a display-oriented JPEG up to 320 pixels per side and 64 KiB.
 PhotoProcessResult CreatePhotoThumbnail(const std::filesystem::path& input,
-                                       const std::filesystem::path& output,
-                                       const PhotoCancelled& cancelled = {});
+                                        const std::filesystem::path& output,
+                                        const PhotoCancelled& cancelled = {});
 
 }  // namespace remotekit

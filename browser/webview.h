@@ -34,7 +34,9 @@ class RenderFrameHostImpl;
 class RenderViewHostImpl;
 class RenderWidgetHostViewBase;
 }  // namespace content
-namespace blink::web_pref { struct WebPreferences; }
+namespace blink::web_pref {
+struct WebPreferences;
+}
 namespace input {
 class TouchEmulator;
 }
@@ -59,8 +61,12 @@ class WebView final : public content::WebContentsObserver,
                       public content::TextInputManager::Observer {
  public:
   using Completion = std::function<void(Status)>;
-  WebView(content::BrowserContext*, Endpoint*, SessionId, WebViewId,
-          bool offscreen_host = false, std::unique_ptr<content::WebContents> adopted = {});
+  WebView(content::BrowserContext*,
+          Endpoint*,
+          SessionId,
+          WebViewId,
+          bool offscreen_host = false,
+          std::unique_ptr<content::WebContents> adopted = {});
   ~WebView() override;
   WebView(const WebView&) = delete;
   WebView& operator=(const WebView&) = delete;
@@ -79,7 +85,10 @@ class WebView final : public content::WebContentsObserver,
   Status SetVisible(bool);
   Status Focus(bool);
   void SetNativeFocusEnabled(bool enabled);
-  void ConfigureDevice(int width, int height, bool tablet, float scale = 1,
+  void ConfigureDevice(int width,
+                       int height,
+                       bool tablet,
+                       float scale = 1,
                        bool match_page_backing = false);
   // Service rendering follows page DPR; demo rendering follows native DPI.
   // Also called from the existing output timer to notice host-DPI changes.
@@ -159,20 +168,32 @@ class WebView final : public content::WebContentsObserver,
   Status PrepareTouchClock(const TouchInput&);
   Status SendTouchEvent(const blink::WebTouchEvent&);
   void OnTouchProcessed(std::uint64_t);
-  void OnClientTouchProcessed(InputToken, const std::string&, ClientTouchAckState,
-                              bool terminal, bool drained);
+  void OnClientTouchProcessed(InputToken,
+                              const std::string&,
+                              ClientTouchAckState,
+                              bool terminal,
+                              bool drained);
   void FinishTouchCleanup(std::uint64_t);
   void PrepareKeyboardTarget(content::RenderWidgetHostImpl*);
   const ui::mojom::TextInputState* UpdateEditableTarget(content::TextInputManager*);
   void OnUpdateTextInputStateCalled(content::TextInputManager*,
-                                    content::RenderWidgetHostViewBase*, bool) override;
+                                    content::RenderWidgetHostViewBase*,
+                                    bool) override;
   bool KeyboardTargetAlive() const;
   bool PointerTargetAlive() const;
   void ReleaseKeyboard(bool finish_composition, bool deliver);
   void ReleaseHeldKeys(bool deliver);
   void ReleasePointer(bool deliver);
   void RememberPointerTarget();
-  enum class PendingKind { none, freeze, thaw, cancel_freeze, discard, restore_unloaded, restore_discarded };
+  enum class PendingKind {
+    none,
+    freeze,
+    thaw,
+    cancel_freeze,
+    discard,
+    restore_unloaded,
+    restore_discarded
+  };
   struct LifecycleView {
     base::WeakPtr<content::RenderViewHostImpl> host;
     std::uint64_t broadcast_generation;
@@ -182,7 +203,8 @@ class WebView final : public content::WebContentsObserver,
   Status FinishLifecycle(bool success, Status, bool uncertain = true);
   Status CheckQuiescent() const;
   bool UpdateLifecycleViews(bool frozen);
-  void OnLifecycleViewAcknowledged(base::WeakPtr<content::RenderViewHostImpl>, std::uint64_t request);
+  void OnLifecycleViewAcknowledged(base::WeakPtr<content::RenderViewHostImpl>,
+                                   std::uint64_t request);
   void PollLifecycle();
   void OnDiscarded(std::uint64_t generation);
   void StartLifecycleTimer();
@@ -227,7 +249,8 @@ class WebView final : public content::WebContentsObserver,
   std::map<std::uint32_t, TouchPoint> touches_;
   std::optional<TouchInput::Clock> touch_clock_;
   base::TimeTicks touch_clock_origin_;
-  std::uint64_t touch_source_gestures_{}, touch_fallback_gestures_{}, touch_clock_rejected_{}, touch_cancelled_{}, touch_samples_{};
+  std::uint64_t touch_source_gestures_{}, touch_fallback_gestures_{}, touch_clock_rejected_{},
+      touch_cancelled_{}, touch_samples_{};
   double touch_last_dispatch_wall_ms_{}, touch_last_source_age_ms_{};
   // This is the WebContents' shared emulator, not an adapter-owned emulator.
   // Claim it only while disabled, and never change it while CDP is attached.

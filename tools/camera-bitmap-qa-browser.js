@@ -1,9 +1,69 @@
-async host => {
-const p=host._presentationBaseline.page,version=host._presentationBaseline.version;
-const pt=await p.evaluate(()=>{const t=baseline.transport(),s=t.layout.views[0],r=document.querySelector('.remote-viewport canvas').getBoundingClientRect(),scale=s.deviceScaleFactor*(s.mediaScale??1);return {x:r.left+260/(s.width/scale)*r.width,y:r.top+25/(s.height/scale)*r.height};});
-if (!await p.evaluate(()=>!!document.querySelector('[role=dialog]'))) await p.mouse.click(pt.x,pt.y);await p.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.includes('摄像头拍照')));await p.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent.includes('摄像头拍照')).click());await p.waitForFunction(()=>document.querySelector('video')?.videoWidth>0);
-await p.evaluate(()=>{for(const el of document.querySelectorAll('*')){const key=Object.keys(el).find(k=>k.startsWith('__reactFiber$'));for(let f=key&&el[key];f;f=f.return)for(let h=f.memoizedState;h;h=h.next){const o=h.memoizedState?.current;if(o?.metrics?.snapshotSyncMs)window.cameraQa=o;}}window.cameraTracks=[...document.querySelector('video').srcObject.getTracks()];window.cameraLong=[];window.cameraObserver=new PerformanceObserver(list=>cameraLong.push(...list.getEntries().map(e=>({at:e.startTime,ms:e.duration}))));cameraObserver.observe({entryTypes:['longtask']});window.cameraAt=performance.now();});
-await p.evaluate(()=>[...document.querySelectorAll('button')].find(b=>b.textContent==='拍照').click());await p.waitForFunction(()=>[...document.querySelectorAll('button')].some(b=>b.textContent.includes('重新拍照')));
-const result=await p.evaluate(async version=>{const result={kind:'camera-bitmap-'+version,metrics:cameraQa.metrics,longTasks:cameraLong.filter(v=>v.at>=cameraAt),worker:!!cameraQa.worker,canvases:cameraQa.canvases.size,tracks:cameraTracks.map(t=>t.readyState),photos:document.querySelectorAll('[name="camera-photo"]').length,selected:[...document.querySelectorAll('[name="camera-photo"]')].filter(i=>i.checked).length,images:[...document.querySelectorAll('[role="dialog"] img')].map(i=>({w:i.naturalWidth,h:i.naturalHeight}))};await fetch('/api/metrics',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(result)});return result;},version);
-await p.screenshot({path:host._baselineRoot+'/'+version+'-camera-bitmap.png'});return result;
-}
+async (host) => {
+  const p = host._presentationBaseline.page,
+    version = host._presentationBaseline.version;
+  const pt = await p.evaluate(() => {
+    const t = baseline.transport(),
+      s = t.layout.views[0],
+      r = document.querySelector('.remote-viewport canvas').getBoundingClientRect(),
+      scale = s.deviceScaleFactor * (s.mediaScale ?? 1);
+    return {
+      x: r.left + (260 / (s.width / scale)) * r.width,
+      y: r.top + (25 / (s.height / scale)) * r.height,
+    };
+  });
+  if (!(await p.evaluate(() => !!document.querySelector('[role=dialog]')))) await p.mouse.click(pt.x, pt.y);
+  await p.waitForFunction(() =>
+    [...document.querySelectorAll('button')].some((b) => b.textContent.includes('摄像头拍照')),
+  );
+  await p.evaluate(() =>
+    [...document.querySelectorAll('button')].find((b) => b.textContent.includes('摄像头拍照')).click(),
+  );
+  await p.waitForFunction(() => document.querySelector('video')?.videoWidth > 0);
+  await p.evaluate(() => {
+    for (const el of document.querySelectorAll('*')) {
+      const key = Object.keys(el).find((k) => k.startsWith('__reactFiber$'));
+      for (let f = key && el[key]; f; f = f.return)
+        for (let h = f.memoizedState; h; h = h.next) {
+          const o = h.memoizedState?.current;
+          if (o?.metrics?.snapshotSyncMs) window.cameraQa = o;
+        }
+    }
+    window.cameraTracks = [...document.querySelector('video').srcObject.getTracks()];
+    window.cameraLong = [];
+    window.cameraObserver = new PerformanceObserver((list) =>
+      cameraLong.push(...list.getEntries().map((e) => ({ at: e.startTime, ms: e.duration }))),
+    );
+    cameraObserver.observe({ entryTypes: ['longtask'] });
+    window.cameraAt = performance.now();
+  });
+  await p.evaluate(() =>
+    [...document.querySelectorAll('button')].find((b) => b.textContent === '拍照').click(),
+  );
+  await p.waitForFunction(() =>
+    [...document.querySelectorAll('button')].some((b) => b.textContent.includes('重新拍照')),
+  );
+  const result = await p.evaluate(async (version) => {
+    const result = {
+      kind: 'camera-bitmap-' + version,
+      metrics: cameraQa.metrics,
+      longTasks: cameraLong.filter((v) => v.at >= cameraAt),
+      worker: !!cameraQa.worker,
+      canvases: cameraQa.canvases.size,
+      tracks: cameraTracks.map((t) => t.readyState),
+      photos: document.querySelectorAll('[name="camera-photo"]').length,
+      selected: [...document.querySelectorAll('[name="camera-photo"]')].filter((i) => i.checked).length,
+      images: [...document.querySelectorAll('[role="dialog"] img')].map((i) => ({
+        w: i.naturalWidth,
+        h: i.naturalHeight,
+      })),
+    };
+    await fetch('/api/metrics', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(result),
+    });
+    return result;
+  }, version);
+  await p.screenshot({ path: host._baselineRoot + '/' + version + '-camera-bitmap.png' });
+  return result;
+};

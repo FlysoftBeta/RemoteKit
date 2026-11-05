@@ -13,7 +13,12 @@ import type { ProductState, ProductTab, ProductWindow } from '../shared/product'
 
 const windowWithTab: ProductWindow = { id: 'window-id', activeTabId: 'tab-id', weight: 1 };
 const startTab: ProductTab = {
-  id: 'tab-id', windowId: windowWithTab.id, webviewId: '1', kind: 'start', title: '新标签页', url: '',
+  id: 'tab-id',
+  windowId: windowWithTab.id,
+  webviewId: '1',
+  kind: 'start',
+  title: '新标签页',
+  url: '',
 };
 
 function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
@@ -21,15 +26,28 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
     user: { id: 'user-id', username: 'viewer', isAdmin: false },
     workspace: {
       ...emptyWorkspace('tenant-id'),
-      windows: win ? [win] : [], tabs: tab ? [tab] : [], activeWindowId: win?.id ?? null,
+      windows: win ? [win] : [],
+      tabs: tab ? [tab] : [],
+      activeWindowId: win?.id ?? null,
     },
-    pageDialogs: [], fileRequests: [],
+    pageDialogs: [],
+    fileRequests: [],
     quality: {
-      resourceLimitation: null, mode: 'product', preference: 'auto', clientScale: 1, effectiveDpr: 1,
-      requested: { degradationPreference: 'balanced', maxFps: 60 }, applied: null,
-      estimatedLatencyMs: null, clockUncertaintyMs: null, feedbackStatus: 'unknown', reason: '',
+      resourceLimitation: null,
+      mode: 'product',
+      preference: 'auto',
+      clientScale: 1,
+      effectiveDpr: 1,
+      requested: { degradationPreference: 'balanced', maxFps: 60 },
+      applied: null,
+      estimatedLatencyMs: null,
+      clockUncertaintyMs: null,
+      feedbackStatus: 'unknown',
+      reason: '',
     },
-    endpointGeneration: 1, endpointError: null, viewer: { connected: true },
+    endpointGeneration: 1,
+    endpointError: null,
+    viewer: { connected: true },
     integrations: { siteUa: false, lifecycle: false, popupAdoption: false },
     constraints: { clientScaleMin: 1, clientScaleMax: 2 },
   };
@@ -42,17 +60,35 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
     files: new DcFileClient(() => null),
   } satisfies Pick<RemoteTransport, 'audio' | 'files'>;
   const library = useFileLibrary(unexpected, transport.files, false, false, undefined, []);
-  const win = state.workspace.windows.find(window => window.id === state.workspace.activeWindowId)!;
-  return createElement(FileLibraryContext.Provider, { value: library },
+  const win = state.workspace.windows.find((window) => window.id === state.workspace.activeWindowId)!;
+  return createElement(
+    FileLibraryContext.Provider,
+    { value: library },
     createElement(WindowFrame, {
-      win, state, transport: transport as RemoteTransport, online, action: unexpected, report: unexpected,
-      onSettings: unexpected, onAdmin: unexpected, onLogout: unexpected, onGeometry: unexpected,
-      focusAddress: null, visible: true, fullscreen: false,
-      audioSaving: false, audioError: '', saveAudio: unexpected,
-    }));
+      win,
+      state,
+      transport: transport as RemoteTransport,
+      online,
+      action: unexpected,
+      report: unexpected,
+      onSettings: unexpected,
+      onAdmin: unexpected,
+      onLogout: unexpected,
+      onGeometry: unexpected,
+      focusAddress: null,
+      visible: true,
+      fullscreen: false,
+      audioSaving: false,
+      audioError: '',
+      saveAudio: unexpected,
+    }),
+  );
 }
 
-function checkNavigation(state: ProductState, options: { inputs: number; disabled: boolean; creating?: boolean; online?: boolean }) {
+function checkNavigation(
+  state: ProductState,
+  options: { inputs: number; disabled: boolean; creating?: boolean; online?: boolean },
+) {
   const html = renderToStaticMarkup(createElement(Frame, { state, online: options.online ?? true }));
   const inputs = html.match(/<input\b[^>]*aria-label="搜索或输入网址"[^>]*>/g) ?? [];
   assert.equal(inputs.length, options.inputs);
@@ -62,15 +98,26 @@ function checkNavigation(state: ProductState, options: { inputs: number; disable
 
 test('projected window and tab cannot take navigation drafts before their IDs are confirmed', () => {
   const confirmed = snapshot(windowWithTab, startTab);
-  const pendingWindow = projectOperations(snapshot(), [{
-    operationId: 'create-window', operationGeneration: 'generation', action: { type: 'window.create' },
-  }])!;
-  const pendingTab = projectOperations(confirmed, [{
-    operationId: 'create-tab', operationGeneration: 'generation', action: { type: 'tab.create', windowId: windowWithTab.id },
-  }])!;
+  const pendingWindow = projectOperations(snapshot(), [
+    {
+      operationId: 'create-window',
+      operationGeneration: 'generation',
+      action: { type: 'window.create' },
+    },
+  ])!;
+  const pendingTab = projectOperations(confirmed, [
+    {
+      operationId: 'create-tab',
+      operationGeneration: 'generation',
+      action: { type: 'tab.create', windowId: windowWithTab.id },
+    },
+  ])!;
   checkNavigation(pendingWindow, { inputs: 2, disabled: true, creating: true });
-  checkNavigation(snapshot({ ...pendingWindow.workspace.windows[0], activeTabId: null }),
-    { inputs: 2, disabled: true, creating: true });
+  checkNavigation(snapshot({ ...pendingWindow.workspace.windows[0], activeTabId: null }), {
+    inputs: 2,
+    disabled: true,
+    creating: true,
+  });
   checkNavigation(pendingTab, { inputs: 2, disabled: true, creating: true });
   checkNavigation(confirmed, { inputs: 2, disabled: false });
   checkNavigation(confirmed, { inputs: 2, disabled: true, online: false });

@@ -34,7 +34,8 @@ scoped_refptr<os_crypt_async::Encryptor> EncryptorFor(
          scoped_refptr<os_crypt_async::Encryptor> value) {
         *result = std::move(value);
         std::move(quit).Run();
-      }, &result, loop.QuitClosure()));
+      },
+      &result, loop.QuitClosure()));
   loop.Run();
   CHECK(result && result->IsEncryptionAvailable());
   return result;
@@ -57,14 +58,14 @@ int main(int argc, char** argv) {
     auto params = network::mojom::NetworkContextParams::New();
     state.Configure(false, {}, params.get());
     CHECK(params->file_paths->data_directory.path() == a.AppendASCII("Network"));
-    CHECK(params->file_paths->cookie_database_name ==
-          base::FilePath(FILE_PATH_LITERAL("Cookies")));
+    CHECK(params->file_paths->cookie_database_name == base::FilePath(FILE_PATH_LITERAL("Cookies")));
     CHECK(params->file_paths->trigger_migration);
     CHECK(params->enable_encrypted_cookies);
     CHECK(!params->persist_session_cookies && !params->restore_old_session_cookies);
     auto partition = network::mojom::NetworkContextParams::New();
     state.Configure(false, base::FilePath(FILE_PATH_LITERAL("partitions/site-a")), partition.get());
-    CHECK(partition->file_paths->data_directory.path() != params->file_paths->data_directory.path());
+    CHECK(partition->file_paths->data_directory.path() !=
+          params->file_paths->data_directory.path());
     CHECK(a.IsParent(partition->file_paths->data_directory.path()));
     auto memory = network::mojom::NetworkContextParams::New();
     state.Configure(true, {}, memory.get());
@@ -84,21 +85,26 @@ int main(int argc, char** argv) {
   // accidentally fall back to ClipboardWin or inspect the user's clipboard.
   headless::SetHeadlessClipboardForCurrentThread();
   CHECK(ui::ClipboardNonBacked::GetForCurrentThread());
-  const auto empty = ui::Clipboard::GetForCurrentThread()->GetSequenceNumber(ui::ClipboardBuffer::kCopyPaste);
+  const auto empty =
+      ui::Clipboard::GetForCurrentThread()->GetSequenceNumber(ui::ClipboardBuffer::kCopyPaste);
   {
     ui::ScopedClipboardWriter writer(ui::ClipboardBuffer::kCopyPaste);
     writer.WriteText(u"tenant-a-only");
   }
-  CHECK(ui::Clipboard::GetForCurrentThread()->GetSequenceNumber(ui::ClipboardBuffer::kCopyPaste) != empty);
+  CHECK(ui::Clipboard::GetForCurrentThread()->GetSequenceNumber(ui::ClipboardBuffer::kCopyPaste) !=
+        empty);
   ui::Clipboard::DestroyClipboardForCurrentThread();
   headless::SetHeadlessClipboardForCurrentThread();
   CHECK(ui::ClipboardNonBacked::GetForCurrentThread());
   base::RunLoop read;
-  ui::Clipboard::GetForCurrentThread()->ReadText(ui::ClipboardBuffer::kCopyPaste, std::nullopt,
-      base::BindOnce([](base::OnceClosure quit, std::u16string text) {
-        CHECK(text.empty());
-        std::move(quit).Run();
-      }, read.QuitClosure()));
+  ui::Clipboard::GetForCurrentThread()->ReadText(
+      ui::ClipboardBuffer::kCopyPaste, std::nullopt,
+      base::BindOnce(
+          [](base::OnceClosure quit, std::u16string text) {
+            CHECK(text.empty());
+            std::move(quit).Run();
+          },
+          read.QuitClosure()));
   read.Run();
   ui::Clipboard::DestroyClipboardForCurrentThread();
   base::ThreadPoolInstance::Get()->Shutdown();

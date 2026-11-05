@@ -44,10 +44,12 @@ inline void PublishAudio(SharedAudio* ring, const AudioPacket& packet) {
   InterlockedExchange64(&ring->published, static_cast<LONG64>(packet.sequence));
 }
 inline bool ReadAudio(SharedAudio* ring, uint64_t sequence, AudioPacket& packet) {
-  if (!sequence) return false;
+  if (!sequence)
+    return false;
   auto& slot = ring->slots[(sequence - 1) % kAudioSlots];
   const auto before = InterlockedCompareExchange64(&slot.lock, 0, 0);
-  if (before & 1) return false;
+  if (before & 1)
+    return false;
   packet = slot.packet;
   MemoryBarrier();
   return before == InterlockedCompareExchange64(&slot.lock, 0, 0) && packet.sequence == sequence;

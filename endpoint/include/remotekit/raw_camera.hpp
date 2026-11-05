@@ -31,8 +31,13 @@ class RawCamera {
   void Cancel();
   void Cancel(uint64_t epoch, std::string_view challenge);
   bool Active();
-  void Receive(uint64_t peer, bool binary, const void* bytes, size_t size, int64_t now,
-               const Pending& pending, const Submit& submit);
+  void Receive(uint64_t peer,
+               bool binary,
+               const void* bytes,
+               size_t size,
+               int64_t now,
+               const Pending& pending,
+               const Submit& submit);
   std::optional<Message> Next(int64_t now, const Pending& pending);
   void Sent(const Message& message, int64_t now);
   void Failed(const Message& message);

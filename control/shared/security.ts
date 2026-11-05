@@ -20,7 +20,14 @@ export interface AuthState {
   peerEpoch: number;
   methods: { password: true; pin: boolean; face: boolean };
   settings: AuthSettings;
-  face: { available: boolean; enrolled: boolean; reason?: string; challengeId?: string; purpose?: FacePurpose; status?: FaceStatus };
+  face: {
+    available: boolean;
+    enrolled: boolean;
+    reason?: string;
+    challengeId?: string;
+    purpose?: FacePurpose;
+    status?: FaceStatus;
+  };
   trickleIce: boolean;
   endpointGeneration: number;
 }
@@ -29,7 +36,10 @@ export interface AuthSocketMethods {
   'auth.get': { params: Record<string, never>; result: AuthState };
   'auth.lock': { params: { reason?: string }; result: AuthState };
   'auth.verify': { params: { method: 'password' | 'pin'; secret: string }; result: AuthState };
-  'auth.settings': { params: { currentPassword: string; settings?: Partial<AuthSettings>; pin?: string | null }; result: AuthState };
+  'auth.settings': {
+    params: { currentPassword: string; settings?: Partial<AuthSettings>; pin?: string | null };
+    result: AuthState;
+  };
   'auth.password': { params: { currentPassword: string; newPassword: string }; result: AuthState };
   'auth.face.begin': { params: { purpose: FacePurpose; currentPassword?: string }; result: AuthState };
   'auth.face.cancel': { params: { challengeId: string }; result: AuthState };

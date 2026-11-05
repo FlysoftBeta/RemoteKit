@@ -77,9 +77,9 @@ class RemoteKitFieldTrials final : public webrtc::FieldTrialsView {
   explicit RemoteKitFieldTrials(std::unique_ptr<webrtc::FieldTrialsView> fallback)
       : fallback_(std::move(fallback)) {}
   std::string Lookup(absl::string_view key) const override {
-    if (key == "WebRTC-RemoteKit-ScreenshareAdaptation") return "Enabled";
-    if (key == "WebRTC-ProbingScreenshareBwe" &&
-        fallback_->Lookup(key).empty() &&
+    if (key == "WebRTC-RemoteKit-ScreenshareAdaptation")
+      return "Enabled";
+    if (key == "WebRTC-ProbingScreenshareBwe" && fallback_->Lookup(key).empty() &&
         fallback_->Lookup("WebRTC-StrictPacingAndProbing").empty())
       return "1.1,2875,80,40,-60,3";
     return fallback_->Lookup(key);
@@ -87,6 +87,7 @@ class RemoteKitFieldTrials final : public webrtc::FieldTrialsView {
   std::unique_ptr<webrtc::FieldTrialsView> CreateCopy() const override {
     return std::make_unique<RemoteKitFieldTrials>(fallback_->CreateCopy());
   }
+
  private:
   std::unique_ptr<webrtc::FieldTrialsView> fallback_;
 };
@@ -101,18 +102,25 @@ class StereoOpusEncoders : public webrtc::AudioEncoderFactory {
   std::vector<webrtc::AudioCodecSpec> GetSupportedEncoders() override {
     std::vector<webrtc::AudioCodecSpec> specs;
     webrtc::AudioEncoderOpus::AppendSupportedEncoders(&specs);
-    for (auto& spec : specs) { spec.format.parameters["stereo"] = "1"; spec.format.parameters["sprop-stereo"] = "1"; }
+    for (auto& spec : specs) {
+      spec.format.parameters["stereo"] = "1";
+      spec.format.parameters["sprop-stereo"] = "1";
+    }
     return specs;
   }
-  std::optional<webrtc::AudioCodecInfo> QueryAudioEncoder(const webrtc::SdpAudioFormat& format) override {
+  std::optional<webrtc::AudioCodecInfo> QueryAudioEncoder(
+      const webrtc::SdpAudioFormat& format) override {
     auto config = webrtc::AudioEncoderOpus::SdpToConfig(format);
-    if (!config || config->num_channels != 2) return std::nullopt;
+    if (!config || config->num_channels != 2)
+      return std::nullopt;
     return webrtc::AudioEncoderOpus::QueryAudioEncoder(*config);
   }
   std::unique_ptr<webrtc::AudioEncoder> Create(const webrtc::Environment& env,
-      const webrtc::SdpAudioFormat& format, Options options) override {
+                                               const webrtc::SdpAudioFormat& format,
+                                               Options options) override {
     auto config = webrtc::AudioEncoderOpus::SdpToConfig(format);
-    if (!config || config->num_channels != 2) return nullptr;
+    if (!config || config->num_channels != 2)
+      return nullptr;
     config->application = webrtc::AudioEncoderOpusConfig::ApplicationMode::kAudio;
     return webrtc::AudioEncoderOpus::MakeAudioEncoder(env, *config, options);
   }
@@ -125,14 +133,19 @@ class SendOnlyAudioDecoderCapabilities : public webrtc::AudioDecoderFactory {
   std::vector<webrtc::AudioCodecSpec> GetSupportedDecoders() override {
     std::vector<webrtc::AudioCodecSpec> specs;
     webrtc::AudioEncoderOpus::AppendSupportedEncoders(&specs);
-    for (auto& spec : specs) { spec.format.parameters["stereo"] = "1"; spec.format.parameters["sprop-stereo"] = "1"; }
+    for (auto& spec : specs) {
+      spec.format.parameters["stereo"] = "1";
+      spec.format.parameters["sprop-stereo"] = "1";
+    }
     return specs;
   }
   bool IsSupportedDecoder(const webrtc::SdpAudioFormat& format) override {
     return format.name == "opus" && format.clockrate_hz == 48000 && format.num_channels == 2;
   }
   std::unique_ptr<webrtc::AudioDecoder> Create(const webrtc::Environment&,
-      const webrtc::SdpAudioFormat&) override { return nullptr; }
+                                               const webrtc::SdpAudioFormat&) override {
+    return nullptr;
+  }
 };
 
 struct LeaseTracker {
@@ -142,16 +155,23 @@ struct LeaseTracker {
 };
 class TextureBuffer : public webrtc::VideoFrameBuffer {
  public:
-  TextureBuffer(const remotekit_rtc_frame& frame, std::shared_ptr<LeaseTracker> tracker,
+  TextureBuffer(const remotekit_rtc_frame& frame,
+                std::shared_ptr<LeaseTracker> tracker,
                 uint64_t authorization)
       : frame_(frame), tracker_(std::move(tracker)), authorization_(authorization) {
-    { std::lock_guard lock(tracker_->mutex); ++tracker_->active; }
+    {
+      std::lock_guard lock(tracker_->mutex);
+      ++tracker_->active;
+    }
     texture_ = static_cast<ID3D11Texture2D*>(frame.d3d11_texture);
   }
   ~TextureBuffer() override {
     texture_.Reset();
     frame_.release(frame_.release_context, frame_.frame_id);
-    { std::lock_guard lock(tracker_->mutex); --tracker_->active; }
+    {
+      std::lock_guard lock(tracker_->mutex);
+      --tracker_->active;
+    }
     tracker_->done.notify_all();
   }
   Type type() const override { return Type::kNative; }
@@ -160,6 +180,7 @@ class TextureBuffer : public webrtc::VideoFrameBuffer {
   scoped_refptr<webrtc::I420BufferInterface> ToI420() override { return nullptr; }
   const remotekit_rtc_frame& frame() const { return frame_; }
   uint64_t authorization() const { return authorization_; }
+
  private:
   remotekit_rtc_frame frame_;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> texture_;
@@ -171,7 +192,8 @@ class TextureSource : public webrtc::AdaptedVideoTrackSource {
  public:
   TextureSource(std::shared_ptr<LeaseTracker> tracker, std::function<void()> refresh)
       : webrtc::AdaptedVideoTrackSource(2),
-        tracker_(std::move(tracker)), refresh_(std::move(refresh)) {}
+        tracker_(std::move(tracker)),
+        refresh_(std::move(refresh)) {}
   SourceState state() const override { return kLive; }
   bool remote() const override { return false; }
   bool is_screencast() const override { return true; }
@@ -185,8 +207,8 @@ class TextureSource : public webrtc::AdaptedVideoTrackSource {
       result.max_fps = static_cast<uint32_t>(std::max(1.0f, std::floor(max_fps)));
     int out_width = 0, out_height = 0, crop_width = 0, crop_height = 0;
     int crop_x = 0, crop_y = 0;
-    if (AdaptFrame(width, height, timestamp_us, &out_width, &out_height,
-                   &crop_width, &crop_height, &crop_x, &crop_y)) {
+    if (AdaptFrame(width, height, timestamp_us, &out_width, &out_height, &crop_width, &crop_height,
+                   &crop_x, &crop_y)) {
       // Atlas coordinates describe every pixel. The adapter's alignment-only
       // crop is not applied to the atlas: scale its full bounds to the selected
       // dimensions, preserving every plane including the right/bottom edge.
@@ -196,14 +218,17 @@ class TextureSource : public webrtc::AdaptedVideoTrackSource {
     }
     return result;
   }
-  void Submit(const remotekit_rtc_frame& input, int64_t media_timestamp_us,
+  void Submit(const remotekit_rtc_frame& input,
+              int64_t media_timestamp_us,
               uint64_t authorization = 1) {
     OnFrame(webrtc::VideoFrame::Builder()
-        .set_video_frame_buffer(webrtc::make_ref_counted<TextureBuffer>(
-            input, tracker_, authorization))
-        .set_timestamp_us(media_timestamp_us)
-        .set_rotation(webrtc::kVideoRotation_0).build());
+                .set_video_frame_buffer(
+                    webrtc::make_ref_counted<TextureBuffer>(input, tracker_, authorization))
+                .set_timestamp_us(media_timestamp_us)
+                .set_rotation(webrtc::kVideoRotation_0)
+                .build());
   }
+
  private:
   std::shared_ptr<LeaseTracker> tracker_;
   std::function<void()> refresh_;
@@ -241,7 +266,10 @@ struct Registry {
   std::map<uint64_t, std::shared_ptr<Peer>> peers;
   std::map<uint64_t, std::weak_ptr<EncoderState>> encoders;
 };
-Registry& GetRegistry() { static base::NoDestructor<Registry> r; return *r; }
+Registry& GetRegistry() {
+  static base::NoDestructor<Registry> r;
+  return *r;
+}
 uint64_t NewID() {
   auto& r = GetRegistry();
   std::lock_guard lock(r.mutex);
@@ -250,11 +278,16 @@ uint64_t NewID() {
 
 class ExternalEncoder : public webrtc::VideoEncoder {
  public:
-  ExternalEncoder(uint64_t peer, const remotekit_rtc_options& options,
-                  uint32_t level, std::shared_ptr<RequestedPlayoutDelay> playout,
+  ExternalEncoder(uint64_t peer,
+                  const remotekit_rtc_options& options,
+                  uint32_t level,
+                  std::shared_ptr<RequestedPlayoutDelay> playout,
                   std::shared_ptr<SdkTrace> trace,
                   std::shared_ptr<MediaAuthorization> authorization)
-      : peer_(peer), id_(NewID()), options_(options), level_(level),
+      : peer_(peer),
+        id_(NewID()),
+        options_(options),
+        level_(level),
         state_(std::make_shared<EncoderState>()) {
     state_->playout_delay = std::move(playout);
     state_->trace = std::move(trace);
@@ -264,8 +297,7 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     r.encoders.emplace(id_, state_);
   }
   ~ExternalEncoder() override { Release(); }
-  int InitEncode(const webrtc::VideoCodec* codec,
-                 const Settings& settings) override {
+  int InitEncode(const webrtc::VideoCodec* codec, const Settings& settings) override {
     if (!codec || codec->codecType != webrtc::kVideoCodecH264)
       return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
     if (!created_) {
@@ -292,10 +324,12 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     config.max_bitrate_bps = codec->maxBitrate * 1000u;
     config.max_payload_size = static_cast<uint32_t>(settings.max_payload_size);
     config.h264_level_idc = level_;
-    std::fprintf(stderr, "RTC encoder configure: peer=%llu encoder=%llu %ux%u fps=%u "
-        "start=%u max=%u level=%u requestedStart=%u requestedMax=%u\n",
-        peer_, id_, config.width, config.height, config.fps, config.bitrate_bps,
-        config.max_bitrate_bps, level_, options_.start_bitrate_bps, options_.max_bitrate_bps);
+    std::fprintf(stderr,
+                 "RTC encoder configure: peer=%llu encoder=%llu %ux%u fps=%u "
+                 "start=%u max=%u level=%u requestedStart=%u requestedMax=%u\n",
+                 peer_, id_, config.width, config.height, config.fps, config.bitrate_bps,
+                 config.max_bitrate_bps, level_, options_.start_bitrate_bps,
+                 options_.max_bitrate_bps);
     const int configured = options_.encoder.configure(options_.context, id_, &config);
     if (configured == 0) {
       std::lock_guard lock(state_->mutex);
@@ -326,9 +360,8 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     return WEBRTC_VIDEO_CODEC_OK;
   }
   int32_t Encode(const webrtc::VideoFrame& frame,
-                const std::vector<webrtc::VideoFrameType>* types) override {
-    if (!created_ || frame.video_frame_buffer()->type() !=
-                         webrtc::VideoFrameBuffer::Type::kNative)
+                 const std::vector<webrtc::VideoFrameType>* types) override {
+    if (!created_ || frame.video_frame_buffer()->type() != webrtc::VideoFrameBuffer::Type::kNative)
       return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
     const auto* buffer = static_cast<TextureBuffer*>(frame.video_frame_buffer().get());
     auto input = buffer->frame();
@@ -336,8 +369,7 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     {
       std::lock_guard lock(state_->mutex);
       const auto epoch = state_->authorization->epoch.load();
-      if (!(epoch & 1) || buffer->authorization() != epoch ||
-          state_->pending.size() >= 64 ||
+      if (!(epoch & 1) || buffer->authorization() != epoch || state_->pending.size() >= 64 ||
           !state_->pending.emplace(input.rtp_timestamp, epoch).second) {
         if (state_->active && state_->callback)
           state_->callback->OnFrameDropped(input.rtp_timestamp, 0, true);
@@ -346,28 +378,29 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     }
     state_->trace->Add("encode_enter", id_, &input, input.rtp_timestamp);
     const bool key = types && std::find(types->begin(), types->end(),
-        webrtc::VideoFrameType::kVideoFrameKey) != types->end();
+                                        webrtc::VideoFrameType::kVideoFrameKey) != types->end();
     if (key && options_.encoder.request_keyframe)
       options_.encoder.request_keyframe(options_.context, id_);
     const int result = options_.encoder.encode(options_.context, id_, &input, key);
     state_->trace->Add("encode_return", id_, &input, input.rtp_timestamp, 0, result);
     if (result != REMOTEKIT_SDK_OK) {
       std::lock_guard lock(state_->mutex);
-      if (state_->pending.erase(input.rtp_timestamp) &&
-          result == REMOTEKIT_SDK_BUSY && state_->active && state_->callback)
+      if (state_->pending.erase(input.rtp_timestamp) && result == REMOTEKIT_SDK_BUSY &&
+          state_->active && state_->callback)
         state_->callback->OnFrameDropped(input.rtp_timestamp, 0, true);
     }
-    return result == REMOTEKIT_SDK_OK || result == REMOTEKIT_SDK_BUSY
-        ? WEBRTC_VIDEO_CODEC_OK : WEBRTC_VIDEO_CODEC_ERROR;
+    return result == REMOTEKIT_SDK_OK || result == REMOTEKIT_SDK_BUSY ? WEBRTC_VIDEO_CODEC_OK
+                                                                      : WEBRTC_VIDEO_CODEC_ERROR;
   }
   void SetRates(const RateControlParameters& p) override {
     if (last_rate_ != p.bitrate.get_sum_bps() || last_fps_ != p.framerate_fps) {
-      std::fprintf(stderr, "RTC encoder rates: encoder=%llu target=%u fps=%.2f timeMs=%lld\n",
-          id_, p.bitrate.get_sum_bps(), p.framerate_fps, webrtc::TimeMillis());
-      last_rate_ = p.bitrate.get_sum_bps(); last_fps_ = p.framerate_fps;
+      std::fprintf(stderr, "RTC encoder rates: encoder=%llu target=%u fps=%.2f timeMs=%lld\n", id_,
+                   p.bitrate.get_sum_bps(), p.framerate_fps, webrtc::TimeMillis());
+      last_rate_ = p.bitrate.get_sum_bps();
+      last_fps_ = p.framerate_fps;
     }
-    options_.encoder.set_rates(options_.context, id_,
-        p.bitrate.get_sum_bps(), static_cast<uint32_t>(std::max(0.0, p.framerate_fps)));
+    options_.encoder.set_rates(options_.context, id_, p.bitrate.get_sum_bps(),
+                               static_cast<uint32_t>(std::max(0.0, p.framerate_fps)));
   }
   EncoderInfo GetEncoderInfo() const override {
     EncoderInfo info;
@@ -385,6 +418,7 @@ class ExternalEncoder : public webrtc::VideoEncoder {
     info.apply_alignment_to_all_simulcast_layers = true;
     return info;
   }
+
  private:
   uint64_t peer_, id_;
   remotekit_rtc_options options_;
@@ -399,7 +433,8 @@ webrtc::SdpVideoFormat H264Format() {
   // Level 5.2 permits full 4K60 atlases. Negotiation can lower it;
   // configure receives the negotiated level and endpoint must honor it.
   return webrtc::SdpVideoFormat("H264", {{"profile-level-id", "42e034"},
-      {"level-asymmetry-allowed", "1"}, {"packetization-mode", "1"}});
+                                         {"level-asymmetry-allowed", "1"},
+                                         {"packetization-mode", "1"}});
 }
 // PeerConnection builds receive channels even for send-only transceivers and
 // intersects receive/send codec capabilities when constructing SDP. Preserve
@@ -410,33 +445,43 @@ class SendOnlyDecoderCapabilities : public webrtc::VideoDecoderFactory {
     return {H264Format()};
   }
   std::unique_ptr<webrtc::VideoDecoder> Create(const webrtc::Environment&,
-      const webrtc::SdpVideoFormat&) override { return nullptr; }
+                                               const webrtc::SdpVideoFormat&) override {
+    return nullptr;
+  }
 };
 class ExternalEncoderFactory : public webrtc::VideoEncoderFactory {
  public:
-  ExternalEncoderFactory(uint64_t peer, const remotekit_rtc_options& o,
+  ExternalEncoderFactory(uint64_t peer,
+                         const remotekit_rtc_options& o,
                          std::shared_ptr<RemoteReceiveLimits> remote,
                          std::shared_ptr<RequestedPlayoutDelay> playout,
                          std::shared_ptr<SdkTrace> trace,
                          std::shared_ptr<MediaAuthorization> authorization)
-      : peer_(peer), options_(o), remote_(std::move(remote)), playout_(std::move(playout)),
-        trace_(std::move(trace)), authorization_(std::move(authorization)) {}
+      : peer_(peer),
+        options_(o),
+        remote_(std::move(remote)),
+        playout_(std::move(playout)),
+        trace_(std::move(trace)),
+        authorization_(std::move(authorization)) {}
   std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
     return {H264Format()};
   }
   std::unique_ptr<webrtc::VideoEncoder> Create(const webrtc::Environment&,
-      const webrtc::SdpVideoFormat& f) override {
+                                               const webrtc::SdpVideoFormat& f) override {
     const auto profile = webrtc::ParseSdpForH264ProfileLevelId(f.parameters);
     auto mode = f.parameters.find("packetization-mode");
-    if (f.name != "H264" || !profile || profile->profile !=
-        webrtc::H264Profile::kProfileConstrainedBaseline ||
-        mode == f.parameters.end() || mode->second != "1") return nullptr;
+    if (f.name != "H264" || !profile ||
+        profile->profile != webrtc::H264Profile::kProfileConstrainedBaseline ||
+        mode == f.parameters.end() || mode->second != "1")
+      return nullptr;
     const uint32_t receive_level = remote_->h264_level.load();
-    if (!receive_level) return nullptr;
-    return std::make_unique<ExternalEncoder>(peer_, options_,
-        std::min(static_cast<uint32_t>(profile->level), receive_level), playout_, trace_,
-        authorization_);
+    if (!receive_level)
+      return nullptr;
+    return std::make_unique<ExternalEncoder>(
+        peer_, options_, std::min(static_cast<uint32_t>(profile->level), receive_level), playout_,
+        trace_, authorization_);
   }
+
  private:
   uint64_t peer_;
   remotekit_rtc_options options_;
@@ -451,7 +496,8 @@ class RemoteDescriptionObserver;
 class CreateDescriptionObserver;
 
 bool SetSenderActive(webrtc::RtpSenderInterface* sender, bool active) {
-  if (!sender) return true;
+  if (!sender)
+    return true;
   auto parameters = sender->GetParameters();
   bool changed = false;
   for (auto& encoding : parameters.encodings) {
@@ -466,51 +512,70 @@ class Peer : public webrtc::PeerConnectionObserver,
              public std::enable_shared_from_this<Peer> {
  public:
   Peer(uint64_t id, const remotekit_rtc_options& options)
-      : id(id), options(options), trace(std::make_shared<SdkTrace>(id)),
+      : id(id),
+        options(options),
+        trace(std::make_shared<SdkTrace>(id)),
         authorization(std::make_shared<MediaAuthorization>(!options.auth_required)) {}
   ~Peer() override = default;
   int Start();
   void Close() {
     closing.store(true);
     std::lock_guard audio_guard(audio_mutex);
-    if (signaling_started) signaling->BlockingCall([this] {
-      if (auth_data) {
-        auth_data->UnregisterObserver();
-        auth_data->Close();
-        auth_data = nullptr;
-      }
-      if (data) { data->UnregisterObserver(); data->Close(); data = nullptr; }
-      if (pc) { pc->Close(); pc = nullptr; }
-      source = nullptr;
-      audio_source = nullptr;
-      audio_sender = nullptr;
-      video_sender = nullptr;
-      factory = nullptr;
-    });
-    if (signaling) signaling->Stop();
-    if (network) network->Stop();
-    if (winsock_started) { WSACleanup(); winsock_started = false; }
+    if (signaling_started)
+      signaling->BlockingCall([this] {
+        if (auth_data) {
+          auth_data->UnregisterObserver();
+          auth_data->Close();
+          auth_data = nullptr;
+        }
+        if (data) {
+          data->UnregisterObserver();
+          data->Close();
+          data = nullptr;
+        }
+        if (pc) {
+          pc->Close();
+          pc = nullptr;
+        }
+        source = nullptr;
+        audio_source = nullptr;
+        audio_sender = nullptr;
+        video_sender = nullptr;
+        factory = nullptr;
+      });
+    if (signaling)
+      signaling->Stop();
+    if (network)
+      network->Stop();
+    if (winsock_started) {
+      WSACleanup();
+      winsock_started = false;
+    }
     // WebRTC can discard queued native frames after VideoSendStream teardown.
     // Their release callbacks are part of the host-context close barrier too.
     {
       std::unique_lock lock(leases->mutex);
       leases->done.wait(lock, [this] { return leases->active == 0; });
     }
-    std::lock_guard lock(event_mutex); // Wait for an already running callback.
+    std::lock_guard lock(event_mutex);  // Wait for an already running callback.
     trace->Save();
   }
-  void Event(uint32_t type, const void* bytes = nullptr, size_t size = 0,
-             const char* auxiliary = nullptr, int32_t value = 0) {
+  void Event(uint32_t type,
+             const void* bytes = nullptr,
+             size_t size = 0,
+             const char* auxiliary = nullptr,
+             int32_t value = 0) {
     std::lock_guard lock(event_mutex);
-    if (!closing.load()) options.event(options.context, id, type,
-        bytes, size, auxiliary, value);
+    if (!closing.load())
+      options.event(options.context, id, type, bytes, size, auxiliary, value);
   }
-  void Error(const std::string& text) {
-    Event(REMOTEKIT_RTC_ERROR, text.data(), text.size());
-  }
+  void Error(const std::string& text) { Event(REMOTEKIT_RTC_ERROR, text.data(), text.size()); }
   void Offer(bool offer);
   void AttachData(scoped_refptr<webrtc::DataChannelInterface> channel) {
-    if (channel->label() != "remotekit" || data) { channel->Close(); return; }
+    if (channel->label() != "remotekit" || data) {
+      channel->Close();
+      return;
+    }
     data = std::move(channel);
     data->RegisterObserver(this);
     OnStateChange();
@@ -528,8 +593,7 @@ class Peer : public webrtc::PeerConnectionObserver,
   void OnIceCandidate(const webrtc::IceCandidate* candidate) override {
     auto text = candidate->ToString();
     auto mid = candidate->sdp_mid();
-    Event(REMOTEKIT_RTC_ICE, text.data(), text.size(), mid.c_str(),
-          candidate->sdp_mline_index());
+    Event(REMOTEKIT_RTC_ICE, text.data(), text.size(), mid.c_str(), candidate->sdp_mline_index());
   }
   void OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState s) override {
     Event(REMOTEKIT_RTC_STATE, nullptr, 0, nullptr, static_cast<int32_t>(s));
@@ -553,8 +617,8 @@ class Peer : public webrtc::PeerConnectionObserver,
   }
   void OnMessage(const webrtc::DataBuffer& message) override {
     if (message.data.size() <= kMaxMessage)
-      Event(REMOTEKIT_RTC_DATA, message.data.data(), message.data.size(),
-            nullptr, message.binary ? 1 : 0);
+      Event(REMOTEKIT_RTC_DATA, message.data.data(), message.data.size(), nullptr,
+            message.binary ? 1 : 0);
   }
   const uint64_t id;
   remotekit_rtc_options options;
@@ -575,7 +639,8 @@ class Peer : public webrtc::PeerConnectionObserver,
   remotekit::AudioTimeline audio_timeline;
   uint64_t audio_clock_generation = 0, audio_origin_sample = 0;
   int64_t audio_origin_capture_ms = 0;
-  std::atomic<uint64_t> audio_silence_blocks{0}, audio_restarts_gap{0}, audio_restarts_epoch{0}, audio_restarts_discontinuity{0};
+  std::atomic<uint64_t> audio_silence_blocks{0}, audio_restarts_gap{0}, audio_restarts_epoch{0},
+      audio_restarts_discontinuity{0};
   std::atomic<int> audio_last_restart{0};
   std::mutex audio_mutex;
   scoped_refptr<webrtc::DataChannelInterface> data;
@@ -584,14 +649,14 @@ class Peer : public webrtc::PeerConnectionObserver,
    public:
     explicit AuthObserver(Peer& peer) : peer_(peer) {}
     void OnStateChange() override {
-      peer_.Event(REMOTEKIT_RTC_AUTH_DATA_STATE, nullptr, 0, nullptr,
-                  peer_.auth_data->state());
+      peer_.Event(REMOTEKIT_RTC_AUTH_DATA_STATE, nullptr, 0, nullptr, peer_.auth_data->state());
     }
     void OnMessage(const webrtc::DataBuffer& message) override {
       if (message.data.size() <= kMaxAuthMessage)
-        peer_.Event(REMOTEKIT_RTC_AUTH_DATA, message.data.data(), message.data.size(),
-                    nullptr, message.binary ? 1 : 0);
+        peer_.Event(REMOTEKIT_RTC_AUTH_DATA, message.data.data(), message.data.size(), nullptr,
+                    message.binary ? 1 : 0);
     }
+
    private:
     Peer& peer_;
   };
@@ -603,9 +668,11 @@ class Peer : public webrtc::PeerConnectionObserver,
 
 template <typename T>
 void PutStat(base::DictValue& destination, const char* key, const std::optional<T>& value) {
-  if (!value) return;
+  if (!value)
+    return;
   if constexpr (std::is_floating_point_v<T>)
-    if (!std::isfinite(*value)) return;
+    if (!std::isfinite(*value))
+      return;
   if constexpr (std::is_same_v<T, std::string> || std::is_same_v<T, bool>)
     destination.Set(key, *value);
   else
@@ -626,29 +693,44 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
   explicit StatsObserver(std::weak_ptr<Peer> peer) : peer_(std::move(peer)) {}
   void OnStatsDelivered(const scoped_refptr<const webrtc::RTCStatsReport>& report) override {
     auto peer = peer_.lock();
-    if (!peer) return;
-    if (peer->closing.load()) { peer->stats_pending = false; return; }
-    auto result = base::DictValue().Set("type", "sender-rtc-stats")
-        .Set("sampleTimeUs", static_cast<double>(report->timestamp().us()))
-        .Set("callbackMonotonicUs", static_cast<double>(base::TimeTicks::Now().since_origin().InMicroseconds()));
+    if (!peer)
+      return;
+    if (peer->closing.load()) {
+      peer->stats_pending = false;
+      return;
+    }
+    auto result =
+        base::DictValue()
+            .Set("type", "sender-rtc-stats")
+            .Set("sampleTimeUs", static_cast<double>(report->timestamp().us()))
+            .Set("callbackMonotonicUs",
+                 static_cast<double>(base::TimeTicks::Now().since_origin().InMicroseconds()));
     const uint64_t requested = peer->playout_delay->packed.load();
-    result.Set("requestedPlayoutDelay", base::DictValue()
-        .Set("minMs", requested == UINT64_MAX ? -1 : static_cast<int>(requested >> 32))
-        .Set("maxMs", requested == UINT64_MAX ? -1 : static_cast<int>(requested & UINT32_MAX)));
-    result.Set("audioTimeline", base::DictValue()
-        .Set("silenceBlocks", static_cast<double>(peer->audio_silence_blocks.load()))
-        .Set("gapRestarts", static_cast<double>(peer->audio_restarts_gap.load()))
-        .Set("epochRestarts", static_cast<double>(peer->audio_restarts_epoch.load()))
-        .Set("discontinuityRestarts", static_cast<double>(peer->audio_restarts_discontinuity.load()))
-        .Set("lastRestartReason", peer->audio_last_restart.load() == 1 ? "source-gap" :
-             peer->audio_last_restart.load() == 2 ? "source-generation" :
-             peer->audio_last_restart.load() == 3 ? "source-discontinuity" : "none"));
+    result.Set(
+        "requestedPlayoutDelay",
+        base::DictValue()
+            .Set("minMs", requested == UINT64_MAX ? -1 : static_cast<int>(requested >> 32))
+            .Set("maxMs", requested == UINT64_MAX ? -1 : static_cast<int>(requested & UINT32_MAX)));
+    result.Set("audioTimeline",
+               base::DictValue()
+                   .Set("silenceBlocks", static_cast<double>(peer->audio_silence_blocks.load()))
+                   .Set("gapRestarts", static_cast<double>(peer->audio_restarts_gap.load()))
+                   .Set("epochRestarts", static_cast<double>(peer->audio_restarts_epoch.load()))
+                   .Set("discontinuityRestarts",
+                        static_cast<double>(peer->audio_restarts_discontinuity.load()))
+                   .Set("lastRestartReason",
+                        peer->audio_last_restart.load() == 1   ? "source-gap"
+                        : peer->audio_last_restart.load() == 2 ? "source-generation"
+                        : peer->audio_last_restart.load() == 3 ? "source-discontinuity"
+                                                               : "none"));
     base::ListValue outbound;
     std::string transport_id;
     for (const auto* stream : report->GetStatsOfType<webrtc::RTCOutboundRtpStreamStats>()) {
       const auto kind = stream->kind.value_or("");
-      if (kind != "video" && kind != "audio") continue;
-      if (transport_id.empty() || kind == "video") transport_id = stream->transport_id.value_or("");
+      if (kind != "video" && kind != "audio")
+        continue;
+      if (transport_id.empty() || kind == "video")
+        transport_id = stream->transport_id.value_or("");
       auto row = base::DictValue().Set("id", stream->id());
       PutStat(row, "ssrc", stream->ssrc);
       PutStat(row, "kind", stream->kind);
@@ -675,7 +757,8 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
       if (stream->quality_limitation_durations) {
         base::DictValue durations;
         for (const auto& [reason, seconds] : *stream->quality_limitation_durations)
-          if (std::isfinite(seconds)) durations.Set(reason, seconds);
+          if (std::isfinite(seconds))
+            durations.Set(reason, seconds);
         row.Set("qualityLimitationDurations", std::move(durations));
       }
       outbound.Append(std::move(row));
@@ -684,10 +767,15 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
     const auto* transport = report->GetAs<webrtc::RTCTransportStats>(transport_id);
     if (!transport) {
       for (const auto* candidate : report->GetStatsOfType<webrtc::RTCTransportStats>())
-        if (candidate->selected_candidate_pair_id) { transport = candidate; break; }
+        if (candidate->selected_candidate_pair_id) {
+          transport = candidate;
+          break;
+        }
     }
-    const auto* pair = transport && transport->selected_candidate_pair_id ?
-        report->GetAs<webrtc::RTCIceCandidatePairStats>(*transport->selected_candidate_pair_id) : nullptr;
+    const auto* pair = transport && transport->selected_candidate_pair_id
+                           ? report->GetAs<webrtc::RTCIceCandidatePairStats>(
+                                 *transport->selected_candidate_pair_id)
+                           : nullptr;
     if (pair) {
       auto row = base::DictValue().Set("id", pair->id());
       PutStat(row, "state", pair->state);
@@ -701,11 +789,13 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
       PutStat(row, "packetsReceived", pair->packets_received);
       result.Set("selectedPair", std::move(row));
       if (pair->local_candidate_id) {
-        if (const auto* candidate = report->GetAs<webrtc::RTCLocalIceCandidateStats>(*pair->local_candidate_id))
+        if (const auto* candidate =
+                report->GetAs<webrtc::RTCLocalIceCandidateStats>(*pair->local_candidate_id))
           result.Set("localCandidate", CandidateStats(*candidate));
       }
       if (pair->remote_candidate_id) {
-        if (const auto* candidate = report->GetAs<webrtc::RTCRemoteIceCandidateStats>(*pair->remote_candidate_id))
+        if (const auto* candidate =
+                report->GetAs<webrtc::RTCRemoteIceCandidateStats>(*pair->remote_candidate_id))
           result.Set("remoteCandidate", CandidateStats(*candidate));
       }
     }
@@ -713,6 +803,7 @@ class StatsObserver : public webrtc::RTCStatsCollectorCallback {
       peer->Event(REMOTEKIT_RTC_STATS, json->data(), json->size());
     peer->stats_pending = false;
   }
+
  private:
   std::weak_ptr<Peer> peer_;
 };
@@ -723,7 +814,8 @@ class LocalDescriptionObserver : public webrtc::SetLocalDescriptionObserverInter
       : peer_(p), sdp_(std::move(sdp)), offer_(offer) {}
   void OnSetLocalDescriptionComplete(webrtc::RTCError error) override {
     if (auto p = peer_.lock(); p && !p->closing.load()) {
-      if (!error.ok()) p->Error(error.message());
+      if (!error.ok())
+        p->Error(error.message());
       else {
         if (!offer_ && p->video_sender) {
           const auto parameters = p->video_sender->GetParameters();
@@ -732,14 +824,17 @@ class LocalDescriptionObserver : public webrtc::SetLocalDescriptionObserverInter
               [](const webrtc::RtpExtension& extension) {
                 return extension.uri == webrtc::RtpExtension::kTransportSequenceNumberUri;
               });
-          std::fprintf(stderr, "RTC negotiated video sender: peer=%llu "
-              "transport_sequence_extension=%d\n", p->id, transport_sequence);
+          std::fprintf(stderr,
+                       "RTC negotiated video sender: peer=%llu "
+                       "transport_sequence_extension=%d\n",
+                       p->id, transport_sequence);
         }
-        p->Event(offer_ ? REMOTEKIT_RTC_SDP_OFFER : REMOTEKIT_RTC_SDP_ANSWER,
-                 sdp_.data(), sdp_.size());
+        p->Event(offer_ ? REMOTEKIT_RTC_SDP_OFFER : REMOTEKIT_RTC_SDP_ANSWER, sdp_.data(),
+                 sdp_.size());
       }
     }
   }
+
  private:
   std::weak_ptr<Peer> peer_;
   std::string sdp_;
@@ -752,13 +847,15 @@ class CreateDescriptionObserver : public webrtc::CreateSessionDescriptionObserve
     std::unique_ptr<webrtc::SessionDescriptionInterface> sdp(raw);
     if (auto p = peer_.lock(); p && !p->closing.load()) {
       std::string text = sdp->ToString();
-      p->pc->SetLocalDescription(std::move(sdp),
-          webrtc::make_ref_counted<LocalDescriptionObserver>(peer_, std::move(text), offer_));
+      p->pc->SetLocalDescription(std::move(sdp), webrtc::make_ref_counted<LocalDescriptionObserver>(
+                                                     peer_, std::move(text), offer_));
     }
   }
   void OnFailure(webrtc::RTCError error) override {
-    if (auto p = peer_.lock()) p->Error(error.message());
+    if (auto p = peer_.lock())
+      p->Error(error.message());
   }
+
  private:
   std::weak_ptr<Peer> peer_;
   bool offer_;
@@ -768,10 +865,13 @@ class RemoteDescriptionObserver : public webrtc::SetRemoteDescriptionObserverInt
   RemoteDescriptionObserver(std::weak_ptr<Peer> p, bool offer) : peer_(p), offer_(offer) {}
   void OnSetRemoteDescriptionComplete(webrtc::RTCError error) override {
     if (auto p = peer_.lock(); p && !p->closing.load()) {
-      if (!error.ok()) p->Error(error.message());
-      else if (offer_) p->Offer(false);
+      if (!error.ok())
+        p->Error(error.message());
+      else if (offer_)
+        p->Offer(false);
     }
   }
+
  private:
   std::weak_ptr<Peer> peer_;
   bool offer_;
@@ -779,25 +879,28 @@ class RemoteDescriptionObserver : public webrtc::SetRemoteDescriptionObserverInt
 
 int Peer::Start() {
   WSADATA winsock{};
-  if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0) return REMOTEKIT_SDK_INVALID_STATE;
+  if (WSAStartup(MAKEWORD(2, 2), &winsock) != 0)
+    return REMOTEKIT_SDK_INVALID_STATE;
   winsock_started = true;
   network = webrtc::Thread::CreateWithSocketServer();
   signaling = webrtc::Thread::Create();
-  if (!network->Start()) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!network->Start())
+    return REMOTEKIT_SDK_INVALID_STATE;
   signaling_started = signaling->Start();
-  if (!signaling_started) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!signaling_started)
+    return REMOTEKIT_SDK_INVALID_STATE;
   return signaling->BlockingCall([this] {
     auto default_env = webrtc::CreateEnvironment();
-    auto env = webrtc::CreateEnvironment(std::make_unique<RemoteKitFieldTrials>(
-        default_env.field_trials().CreateCopy()));
+    auto env = webrtc::CreateEnvironment(
+        std::make_unique<RemoteKitFieldTrials>(default_env.field_trials().CreateCopy()));
     std::fprintf(stderr,
-        "RTC screenshare pacing configuration: peer=%llu trial=%s "
-        "rfc8888_enabled=%d explicit_screenshare_trial=%d explicit_strict_trial=%d "
-        "(configuration only; actual pacing rate is controller-owned)\n",
-        id, env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").c_str(),
-        env.field_trials().IsEnabled("WebRTC-RFC8888CongestionControlFeedback"),
-        !default_env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").empty(),
-        !default_env.field_trials().Lookup("WebRTC-StrictPacingAndProbing").empty());
+                 "RTC screenshare pacing configuration: peer=%llu trial=%s "
+                 "rfc8888_enabled=%d explicit_screenshare_trial=%d explicit_strict_trial=%d "
+                 "(configuration only; actual pacing rate is controller-owned)\n",
+                 id, env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").c_str(),
+                 env.field_trials().IsEnabled("WebRTC-RFC8888CongestionControlFeedback"),
+                 !default_env.field_trials().Lookup("WebRTC-ProbingScreenshareBwe").empty(),
+                 !default_env.field_trials().Lookup("WebRTC-StrictPacingAndProbing").empty());
     webrtc::PeerConnectionFactoryDependencies deps;
     deps.env = env;
     deps.network_thread = network.get();
@@ -809,10 +912,12 @@ int Peer::Start() {
     deps.video_encoder_factory = std::make_unique<ExternalEncoderFactory>(
         id, options, remote_limits, playout_delay, trace, authorization);
     deps.video_decoder_factory = std::make_unique<SendOnlyDecoderCapabilities>();
-    const bool loopback_test = base::Environment::Create()->GetVar("REMOTEKIT_RTC_LOOPBACK_TEST").value_or("") == "1";
+    const bool loopback_test =
+        base::Environment::Create()->GetVar("REMOTEKIT_RTC_LOOPBACK_TEST").value_or("") == "1";
     webrtc::EnableMedia(deps);
     factory = webrtc::CreateModularPeerConnectionFactory(std::move(deps));
-    if (!factory) return REMOTEKIT_SDK_INVALID_STATE;
+    if (!factory)
+      return REMOTEKIT_SDK_INVALID_STATE;
     if (loopback_test) {
       webrtc::PeerConnectionFactoryInterface::Options factory_options;
       factory_options.network_ignore_mask = 0;
@@ -824,28 +929,35 @@ int Peer::Start() {
     if (options.ice_server_url && *options.ice_server_url) {
       webrtc::PeerConnectionInterface::IceServer server;
       server.urls.emplace_back(options.ice_server_url);
-      if (options.ice_username) server.username = options.ice_username;
-      if (options.ice_password) server.password = options.ice_password;
+      if (options.ice_username)
+        server.username = options.ice_username;
+      if (options.ice_password)
+        server.password = options.ice_password;
       config.servers.push_back(std::move(server));
     }
-    auto result = factory->CreatePeerConnectionOrError(config,
-        webrtc::PeerConnectionDependencies(this));
-    if (!result.ok()) { Error(result.error().message()); return REMOTEKIT_SDK_INVALID_STATE; }
+    auto result =
+        factory->CreatePeerConnectionOrError(config, webrtc::PeerConnectionDependencies(this));
+    if (!result.ok()) {
+      Error(result.error().message());
+      return REMOTEKIT_SDK_INVALID_STATE;
+    }
     pc = result.MoveValue();
     source = webrtc::make_ref_counted<TextureSource>(leases, [weak = weak_from_this()] {
-      if (auto peer = weak.lock()) peer->Event(REMOTEKIT_RTC_REFRESH_REQUEST);
+      if (auto peer = weak.lock())
+        peer->Event(REMOTEKIT_RTC_REFRESH_REQUEST);
     });
     auto track = factory->CreateVideoTrack(source, "remotekit-atlas");
     // JSEP only reuses unassociated transceivers created by AddTrack when
     // applying an incoming offer. AddTransceiver here would leave our sender
     // unassociated and create a second recvonly transceiver (inactive answer).
     auto added = pc->AddTrack(track, {"remotekit"});
-    if (!added.ok()) return REMOTEKIT_SDK_INVALID_STATE;
+    if (!added.ok())
+      return REMOTEKIT_SDK_INVALID_STATE;
     auto sender = added.MoveValue();
     video_sender = sender;
     for (auto& transceiver : pc->GetTransceivers()) {
-      if (transceiver->sender() == sender && !transceiver->SetDirectionWithError(
-          webrtc::RtpTransceiverDirection::kSendOnly).ok())
+      if (transceiver->sender() == sender &&
+          !transceiver->SetDirectionWithError(webrtc::RtpTransceiverDirection::kSendOnly).ok())
         return REMOTEKIT_SDK_INVALID_STATE;
     }
     auto parameters = sender->GetParameters();
@@ -853,24 +965,32 @@ int Peer::Start() {
       encoding.active = !options.auth_required;
       encoding.max_framerate = 60.0;
       encoding.num_temporal_layers = 1;
-      if (options.max_bitrate_bps) encoding.max_bitrate_bps = options.max_bitrate_bps;
+      if (options.max_bitrate_bps)
+        encoding.max_bitrate_bps = options.max_bitrate_bps;
     }
     parameters.degradation_preference = webrtc::DegradationPreference::BALANCED;
-    if (!sender->SetParameters(parameters).ok()) return REMOTEKIT_SDK_INVALID_STATE;
+    if (!sender->SetParameters(parameters).ok())
+      return REMOTEKIT_SDK_INVALID_STATE;
     webrtc::BitrateSettings bitrate;
-    if (options.min_bitrate_bps) bitrate.min_bitrate_bps = options.min_bitrate_bps;
-    if (options.start_bitrate_bps) bitrate.start_bitrate_bps = options.start_bitrate_bps;
-    if (options.max_bitrate_bps) bitrate.max_bitrate_bps = options.max_bitrate_bps;
+    if (options.min_bitrate_bps)
+      bitrate.min_bitrate_bps = options.min_bitrate_bps;
+    if (options.start_bitrate_bps)
+      bitrate.start_bitrate_bps = options.start_bitrate_bps;
+    if (options.max_bitrate_bps)
+      bitrate.max_bitrate_bps = options.max_bitrate_bps;
     auto error = pc->SetBitrate(bitrate);
-    if (!error.ok()) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+    if (!error.ok())
+      return REMOTEKIT_SDK_INVALID_ARGUMENT;
     return REMOTEKIT_SDK_OK;
   });
 }
 void Peer::Offer(bool offer) {
   auto observer = webrtc::make_ref_counted<CreateDescriptionObserver>(weak_from_this(), offer);
   webrtc::PeerConnectionInterface::RTCOfferAnswerOptions opts;
-  if (offer) pc->CreateOffer(observer.get(), opts);
-  else pc->CreateAnswer(observer.get(), opts);
+  if (offer)
+    pc->CreateOffer(observer.get(), opts);
+  else
+    pc->CreateAnswer(observer.get(), opts);
 }
 std::shared_ptr<Peer> FindPeer(uint64_t id) {
   auto& r = GetRegistry();
@@ -878,11 +998,14 @@ std::shared_ptr<Peer> FindPeer(uint64_t id) {
   auto it = r.peers.find(id);
   return it == r.peers.end() ? nullptr : it->second;
 }
-template <typename F> int WithPeer(uint64_t id, F fn) {
+template <typename F>
+int WithPeer(uint64_t id, F fn) {
   auto p = FindPeer(id);
-  if (!p) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!p)
+    return REMOTEKIT_SDK_INVALID_STATE;
   std::lock_guard lock(p->api_mutex);
-  if (p->closing.load()) return REMOTEKIT_SDK_INVALID_STATE;
+  if (p->closing.load())
+    return REMOTEKIT_SDK_INVALID_STATE;
   return p->signaling->BlockingCall([&] { return fn(*p); });
 }
 bool ValidBytes(const void* data, size_t size, size_t max = kMaxMessage) {
@@ -891,21 +1014,28 @@ bool ValidBytes(const void* data, size_t size, size_t max = kMaxMessage) {
 }  // namespace
 
 int remotekit_rtc_create(const remotekit_rtc_options* options, uint64_t* id) {
-  if (id) *id = 0;
+  if (id)
+    *id = 0;
   if (!id || !options || options->struct_size != sizeof(*options) ||
       options->abi_version != REMOTEKIT_RTC_ABI_VERSION || !options->event ||
-      options->auth_required > 1 ||
-      options->encoder.struct_size != sizeof(options->encoder) ||
+      options->auth_required > 1 || options->encoder.struct_size != sizeof(options->encoder) ||
       !options->encoder.create || !options->encoder.configure || !options->encoder.encode ||
       !options->encoder.set_rates || !options->encoder.destroy)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   if (RemoteKitSdkBeginRtc() != REMOTEKIT_SDK_OK)
     return REMOTEKIT_SDK_INVALID_STATE;
   static const bool ssl_initialized = webrtc::InitializeSSL();
-  if (!ssl_initialized) { RemoteKitSdkEndRtc(); return REMOTEKIT_SDK_INVALID_STATE; }
+  if (!ssl_initialized) {
+    RemoteKitSdkEndRtc();
+    return REMOTEKIT_SDK_INVALID_STATE;
+  }
   auto peer = std::make_shared<Peer>(NewID(), *options);
   int result = peer->Start();
-  if (result != REMOTEKIT_SDK_OK) { peer->Close(); RemoteKitSdkEndRtc(); return result; }
+  if (result != REMOTEKIT_SDK_OK) {
+    peer->Close();
+    RemoteKitSdkEndRtc();
+    return result;
+  }
   auto& r = GetRegistry();
   std::lock_guard lock(r.mutex);
   r.peers.emplace(peer->id, peer);
@@ -918,8 +1048,10 @@ int remotekit_rtc_close(uint64_t id) {
   {
     std::lock_guard lock(r.mutex);
     auto it = r.peers.find(id);
-    if (it == r.peers.end()) return REMOTEKIT_SDK_INVALID_STATE;
-    p = std::move(it->second); r.peers.erase(it);
+    if (it == r.peers.end())
+      return REMOTEKIT_SDK_INVALID_STATE;
+    p = std::move(it->second);
+    r.peers.erase(it);
   }
   std::lock_guard lock(p->api_mutex);
   p->Close();
@@ -927,15 +1059,21 @@ int remotekit_rtc_close(uint64_t id) {
   return REMOTEKIT_SDK_OK;
 }
 int remotekit_rtc_create_offer(uint64_t id) {
-  return WithPeer(id, [](Peer& p) { p.Offer(true); return REMOTEKIT_SDK_OK; });
+  return WithPeer(id, [](Peer& p) {
+    p.Offer(true);
+    return REMOTEKIT_SDK_OK;
+  });
 }
 int remotekit_rtc_set_media_authorized(uint64_t id, int authorized) {
-  if (authorized != 0 && authorized != 1) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (authorized != 0 && authorized != 1)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   auto peer = FindPeer(id);
-  if (!peer) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!peer)
+    return REMOTEKIT_SDK_INVALID_STATE;
   std::lock_guard api_lock(peer->api_mutex);
   std::lock_guard audio_lock(peer->audio_mutex);
-  if (peer->closing.load()) return REMOTEKIT_SDK_INVALID_STATE;
+  if (peer->closing.load())
+    return REMOTEKIT_SDK_INVALID_STATE;
   auto& gate = *peer->authorization;
   auto epoch = gate.epoch.load();
   if (!authorized && (epoch & 1)) {
@@ -953,103 +1091,142 @@ int remotekit_rtc_set_media_authorized(uint64_t id, int authorized) {
     }
     return video && audio;
   });
-  if (!applied) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!applied)
+    return REMOTEKIT_SDK_INVALID_STATE;
   if (authorized && !(epoch & 1)) {
     std::lock_guard lock(gate.completion_mutex);
     gate.epoch.store(epoch + 1);
   }
   return REMOTEKIT_SDK_OK;
 }
-int remotekit_rtc_submit_audio(uint64_t id, const int16_t* pcm, uint32_t frames,
-    uint64_t generation, uint64_t sequence, uint64_t sample_index,
-    int64_t first_sample_qpc, uint32_t discontinuity) {
+int remotekit_rtc_submit_audio(uint64_t id,
+                               const int16_t* pcm,
+                               uint32_t frames,
+                               uint64_t generation,
+                               uint64_t sequence,
+                               uint64_t sample_index,
+                               int64_t first_sample_qpc,
+                               uint32_t discontinuity) {
   if (!pcm || frames != 480 || !generation || !sequence || sample_index % 480 ||
       first_sample_qpc <= 0 || discontinuity > 1)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   auto peer = FindPeer(id);
-  if (!peer) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!peer)
+    return REMOTEKIT_SDK_INVALID_STATE;
   const auto authorization = peer->authorization->epoch.load();
-  if (!(authorization & 1)) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!(authorization & 1))
+    return REMOTEKIT_SDK_INVALID_STATE;
   webrtc::scoped_refptr<PageAudioSource> source;
   {
     std::lock_guard lock(peer->api_mutex);
-    if (peer->closing.load() || !peer->audio_source) return REMOTEKIT_SDK_INVALID_STATE;
+    if (peer->closing.load() || !peer->audio_source)
+      return REMOTEKIT_SDK_INVALID_STATE;
     source = peer->audio_source;
   }
   std::lock_guard lock(peer->audio_mutex);
   if (peer->closing.load() || peer->authorization->epoch.load() != authorization)
     return REMOTEKIT_SDK_INVALID_STATE;
-  const auto advance = peer->audio_timeline.Plan(generation, sequence, sample_index, first_sample_qpc, discontinuity != 0);
-  if (advance.step == remotekit::AudioStep::reject) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  const auto advance = peer->audio_timeline.Plan(generation, sequence, sample_index,
+                                                 first_sample_qpc, discontinuity != 0);
+  if (advance.step == remotekit::AudioStep::reject)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   LARGE_INTEGER qpc, frequency;
-  QueryPerformanceCounter(&qpc); QueryPerformanceFrequency(&frequency);
+  QueryPerformanceCounter(&qpc);
+  QueryPerformanceFrequency(&frequency);
   const int64_t delta_us = static_cast<int64_t>(
       static_cast<long double>(qpc.QuadPart - first_sample_qpc) * 1000000 / frequency.QuadPart);
-  if (delta_us < -100000 || delta_us > 1000000) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (delta_us < -100000 || delta_us > 1000000)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   const bool new_clock = peer->audio_clock_generation != generation;
   const int64_t mapped_capture_ms = (webrtc::TimeMicros() - delta_us) / 1000;
-  const int64_t capture_ms = new_clock ? mapped_capture_ms :
-      peer->audio_origin_capture_ms + static_cast<int64_t>((sample_index - peer->audio_origin_sample) / 48);
+  const int64_t capture_ms =
+      new_clock ? mapped_capture_ms
+                : peer->audio_origin_capture_ms +
+                      static_cast<int64_t>((sample_index - peer->audio_origin_sample) / 48);
   // Reject incoherent/overflow-sized sample positions before WebRTC computes
   // RTP deltas. The disciplined source clock and same-machine QPC agree.
-  if (std::abs(capture_ms - mapped_capture_ms) > 20) return REMOTEKIT_SDK_INVALID_ARGUMENT;
-  if (advance.step == remotekit::AudioStep::restart_gap || advance.step == remotekit::AudioStep::restart_epoch ||
+  if (std::abs(capture_ms - mapped_capture_ms) > 20)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (advance.step == remotekit::AudioStep::restart_gap ||
+      advance.step == remotekit::AudioStep::restart_epoch ||
       advance.step == remotekit::AudioStep::restart_discontinuity) {
     // ChannelSend::StartSend sets first_frame_, which advances its existing
     // RTP clock by the absolute capture-time gap instead of compressing it.
     const int status = peer->signaling->BlockingCall([&] {
-      if (peer->closing.load() || !peer->audio_sender) return REMOTEKIT_SDK_INVALID_STATE;
+      if (peer->closing.load() || !peer->audio_sender)
+        return REMOTEKIT_SDK_INVALID_STATE;
       auto parameters = peer->audio_sender->GetParameters();
-      for (auto& encoding : parameters.encodings) encoding.active = false;
-      if (!peer->audio_sender->SetParameters(parameters).ok()) return REMOTEKIT_SDK_INVALID_STATE;
+      for (auto& encoding : parameters.encodings)
+        encoding.active = false;
+      if (!peer->audio_sender->SetParameters(parameters).ok())
+        return REMOTEKIT_SDK_INVALID_STATE;
       parameters = peer->audio_sender->GetParameters();
-      for (auto& encoding : parameters.encodings) encoding.active = true;
-      return peer->audio_sender->SetParameters(parameters).ok() ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+      for (auto& encoding : parameters.encodings)
+        encoding.active = true;
+      return peer->audio_sender->SetParameters(parameters).ok() ? REMOTEKIT_SDK_OK
+                                                                : REMOTEKIT_SDK_INVALID_STATE;
     });
-    if (status != REMOTEKIT_SDK_OK) return status;
-    if (advance.step == remotekit::AudioStep::restart_gap) { ++peer->audio_restarts_gap; peer->audio_last_restart = 1; }
-    else if (advance.step == remotekit::AudioStep::restart_epoch) { ++peer->audio_restarts_epoch; peer->audio_last_restart = 2; }
-    else { ++peer->audio_restarts_discontinuity; peer->audio_last_restart = 3; }
+    if (status != REMOTEKIT_SDK_OK)
+      return status;
+    if (advance.step == remotekit::AudioStep::restart_gap) {
+      ++peer->audio_restarts_gap;
+      peer->audio_last_restart = 1;
+    } else if (advance.step == remotekit::AudioStep::restart_epoch) {
+      ++peer->audio_restarts_epoch;
+      peer->audio_last_restart = 2;
+    } else {
+      ++peer->audio_restarts_discontinuity;
+      peer->audio_last_restart = 3;
+    }
   }
   if (advance.silence_blocks) {
     const int16_t silence[960]{};
-    for (uint32_t i = advance.silence_blocks; i > 0; --i) source->Submit(silence, capture_ms - i * 10);
+    for (uint32_t i = advance.silence_blocks; i > 0; --i)
+      source->Submit(silence, capture_ms - i * 10);
     peer->audio_silence_blocks += advance.silence_blocks;
   }
   source->Submit(pcm, capture_ms);
   peer->audio_timeline.Commit(generation, sequence, sample_index, first_sample_qpc);
   if (new_clock) {
-    peer->audio_clock_generation = generation; peer->audio_origin_sample = sample_index;
+    peer->audio_clock_generation = generation;
+    peer->audio_origin_sample = sample_index;
     peer->audio_origin_capture_ms = capture_ms;
   }
   return REMOTEKIT_SDK_OK;
 }
 int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* bytes, size_t size) {
-  if (!ValidBytes(bytes, size) || (offer != 0 && offer != 1)) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!ValidBytes(bytes, size) || (offer != 0 && offer != 1))
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   return WithPeer(id, [&](Peer& p) {
     webrtc::SdpParseError error;
-    auto sdp = webrtc::CreateSessionDescription(offer ? webrtc::SdpType::kOffer :
-        webrtc::SdpType::kAnswer, std::string(bytes, size), &error);
-    if (!sdp) { p.Error(error.description); return REMOTEKIT_SDK_INVALID_ARGUMENT; }
+    auto sdp =
+        webrtc::CreateSessionDescription(offer ? webrtc::SdpType::kOffer : webrtc::SdpType::kAnswer,
+                                         std::string(bytes, size), &error);
+    if (!sdp) {
+      p.Error(error.description);
+      return REMOTEKIT_SDK_INVALID_ARGUMENT;
+    }
     bool receives_audio = false;
     using Direction = webrtc::RtpTransceiverDirection;
     // No receiving RTP media is supported. Validate all sections first.
     for (const auto& section : sdp->description()->contents()) {
-      if (section.rejected) continue;
+      if (section.rejected)
+        continue;
       const auto* media = section.media_description();
-      if ((media->as_audio() || media->as_video()) &&
-          (media->direction() == Direction::kSendOnly ||
-           media->direction() == Direction::kSendRecv))
+      if ((media->as_audio() || media->as_video()) && (media->direction() == Direction::kSendOnly ||
+                                                       media->direction() == Direction::kSendRecv))
         return REMOTEKIT_SDK_INVALID_ARGUMENT;
-      if (const auto* audio = media->as_audio(); audio &&
-          media->direction() == webrtc::RtpTransceiverDirection::kRecvOnly) {
+      if (const auto* audio = media->as_audio();
+          audio && media->direction() == webrtc::RtpTransceiverDirection::kRecvOnly) {
         bool stereo_opus = false;
         for (const auto& codec : audio->codecs()) {
           const auto stereo = codec.params.find("stereo");
           if (codec.name == "opus" && codec.clockrate == 48000 && codec.channels == 2 &&
-              stereo != codec.params.end() && stereo->second == "1") stereo_opus = true;
+              stereo != codec.params.end() && stereo->second == "1")
+            stereo_opus = true;
         }
-        if (!stereo_opus) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+        if (!stereo_opus)
+          return REMOTEKIT_SDK_INVALID_ARGUMENT;
         receives_audio = true;
       }
     }
@@ -1057,13 +1234,15 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
       p.audio_source = webrtc::make_ref_counted<PageAudioSource>();
       auto audio_track = p.factory->CreateAudioTrack("remotekit-audio", p.audio_source.get());
       auto added = p.pc->AddTrack(audio_track, {"remotekit"});
-      if (!added.ok()) return REMOTEKIT_SDK_INVALID_STATE;
+      if (!added.ok())
+        return REMOTEKIT_SDK_INVALID_STATE;
       p.audio_sender = added.value();
       for (auto& transceiver : p.pc->GetTransceivers())
-        if (transceiver->sender() == added.value() && !transceiver->SetDirectionWithError(
-            webrtc::RtpTransceiverDirection::kSendOnly).ok()) return REMOTEKIT_SDK_INVALID_STATE;
-      if (!(p.authorization->epoch.load() & 1) &&
-          !SetSenderActive(p.audio_sender.get(), false)) return REMOTEKIT_SDK_INVALID_STATE;
+        if (transceiver->sender() == added.value() &&
+            !transceiver->SetDirectionWithError(webrtc::RtpTransceiverDirection::kSendOnly).ok())
+          return REMOTEKIT_SDK_INVALID_STATE;
+      if (!(p.authorization->epoch.load() & 1) && !SetSenderActive(p.audio_sender.get(), false))
+        return REMOTEKIT_SDK_INVALID_STATE;
     }
     // Level asymmetry lets our answer advertise a different receive level;
     // it does not increase the remote receiver's declared capability. Read the
@@ -1073,36 +1252,45 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
       const auto* media = section.media_description();
       if (section.rejected || !media->as_video() ||
           (media->direction() != webrtc::RtpTransceiverDirection::kRecvOnly &&
-           media->direction() != webrtc::RtpTransceiverDirection::kSendRecv)) continue;
+           media->direction() != webrtc::RtpTransceiverDirection::kSendRecv))
+        continue;
       for (const auto& codec : media->codecs()) {
-        if (codec.name != "H264") continue;
+        if (codec.name != "H264")
+          continue;
         auto mode = codec.params.find("packetization-mode");
         auto profile = webrtc::ParseSdpForH264ProfileLevelId(codec.params);
         if (mode == codec.params.end() || mode->second != "1" || !profile ||
-            profile->profile != webrtc::H264Profile::kProfileConstrainedBaseline) continue;
+            profile->profile != webrtc::H264Profile::kProfileConstrainedBaseline)
+          continue;
         const uint32_t level = static_cast<uint32_t>(profile->level);
         remote_level = remote_level ? std::min(remote_level, level) : level;
       }
     }
     p.remote_limits->h264_level.store(remote_level);
     std::fprintf(stderr, "RTC remote H264 receive level: peer=%llu level=%u\n", p.id, remote_level);
-    p.pc->SetRemoteDescription(std::move(sdp),
-        webrtc::make_ref_counted<RemoteDescriptionObserver>(p.weak_from_this(), offer != 0));
+    p.pc->SetRemoteDescription(std::move(sdp), webrtc::make_ref_counted<RemoteDescriptionObserver>(
+                                                   p.weak_from_this(), offer != 0));
     return REMOTEKIT_SDK_OK;
   });
 }
-int remotekit_rtc_add_ice(uint64_t id, const char* mid, int32_t mline,
-                         const char* bytes, size_t size) {
-  if (!mid || mline < 0 || !ValidBytes(bytes, size)) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+int remotekit_rtc_add_ice(uint64_t id,
+                          const char* mid,
+                          int32_t mline,
+                          const char* bytes,
+                          size_t size) {
+  if (!mid || mline < 0 || !ValidBytes(bytes, size))
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   return WithPeer(id, [&](Peer& p) {
     webrtc::SdpParseError error;
     auto candidate = webrtc::IceCandidate::Create(mid, mline, std::string(bytes, size), &error);
-    if (!candidate) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+    if (!candidate)
+      return REMOTEKIT_SDK_INVALID_ARGUMENT;
     return p.pc->AddIceCandidate(candidate.get()) ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
   });
 }
 int remotekit_rtc_get_receive_level(uint64_t id, uint32_t* level_idc) {
-  if (!level_idc) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!level_idc)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   *level_idc = 0;
   return WithPeer(id, [&](Peer& peer) {
     *level_idc = std::min(52u, peer.remote_limits->h264_level.load());
@@ -1111,24 +1299,26 @@ int remotekit_rtc_get_receive_level(uint64_t id, uint32_t* level_idc) {
 }
 int remotekit_rtc_set_playout_delay(uint64_t id, int32_t min_ms, int32_t max_ms) {
   const bool clear = min_ms == -1 && max_ms == -1;
-  if (!clear && (min_ms < 0 || max_ms < min_ms || max_ms > 40950 ||
-                 min_ms % 10 != 0 || max_ms % 10 != 0))
+  if (!clear &&
+      (min_ms < 0 || max_ms < min_ms || max_ms > 40950 || min_ms % 10 != 0 || max_ms % 10 != 0))
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
-  const uint64_t packed = clear ? UINT64_MAX :
-      (static_cast<uint64_t>(min_ms) << 32) | static_cast<uint32_t>(max_ms);
+  const uint64_t packed =
+      clear ? UINT64_MAX : (static_cast<uint64_t>(min_ms) << 32) | static_cast<uint32_t>(max_ms);
   return WithPeer(id, [&](Peer& peer) {
     // WithPeer's API lock serializes valid updates and cancellation checks.
     // RTP sender/receiver retain an earlier header limit when later images
     // omit it, so never report a successful clear after an explicit request.
-    if (clear) return peer.playout_delay->packed.load() == UINT64_MAX ?
-        REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+    if (clear)
+      return peer.playout_delay->packed.load() == UINT64_MAX ? REMOTEKIT_SDK_OK
+                                                             : REMOTEKIT_SDK_INVALID_STATE;
     peer.playout_delay->packed.store(packed);
     return REMOTEKIT_SDK_OK;
   });
 }
 int remotekit_rtc_request_stats(uint64_t id) {
   return WithPeer(id, [](Peer& peer) {
-    if (peer.stats_pending.exchange(true)) return REMOTEKIT_SDK_BUSY;
+    if (peer.stats_pending.exchange(true))
+      return REMOTEKIT_SDK_BUSY;
     auto callback = webrtc::make_ref_counted<StatsObserver>(peer.weak_from_this());
     peer.pc->GetStats(callback.get());
     return REMOTEKIT_SDK_OK;
@@ -1136,81 +1326,98 @@ int remotekit_rtc_request_stats(uint64_t id) {
 }
 int remotekit_rtc_open_data_channel(uint64_t id) {
   return WithPeer(id, [](Peer& p) {
-    if (p.data) return REMOTEKIT_SDK_INVALID_STATE;
+    if (p.data)
+      return REMOTEKIT_SDK_INVALID_STATE;
     webrtc::DataChannelInit init;
     auto result = p.pc->CreateDataChannelOrError("remotekit", &init);
-    if (!result.ok()) return REMOTEKIT_SDK_INVALID_STATE;
+    if (!result.ok())
+      return REMOTEKIT_SDK_INVALID_STATE;
     p.AttachData(result.MoveValue());
     return REMOTEKIT_SDK_OK;
   });
 }
 int remotekit_rtc_send_data(uint64_t id, const void* data, size_t size, int binary) {
-  if (!ValidBytes(data, size)) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!ValidBytes(data, size))
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   auto peer = FindPeer(id);
-  if (!peer) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!peer)
+    return REMOTEKIT_SDK_INVALID_STATE;
   const auto authorization = peer->authorization->epoch.load();
   return WithPeer(id, [&](Peer& p) {
-    if (!(authorization & 1) || p.authorization->epoch.load() != authorization ||
-        !p.data || p.data->state() != webrtc::DataChannelInterface::kOpen)
+    if (!(authorization & 1) || p.authorization->epoch.load() != authorization || !p.data ||
+        p.data->state() != webrtc::DataChannelInterface::kOpen)
       return REMOTEKIT_SDK_INVALID_STATE;
-    if (p.data->buffered_amount() + size > kMaxMessage) return REMOTEKIT_SDK_BUSY;
+    if (p.data->buffered_amount() + size > kMaxMessage)
+      return REMOTEKIT_SDK_BUSY;
     webrtc::DataBuffer buffer(webrtc::CopyOnWriteBuffer(static_cast<const uint8_t*>(data), size),
                               binary != 0);
     return p.data->Send(buffer) ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_BUSY;
   });
 }
-int remotekit_rtc_send_auth_data(uint64_t id, const void* data, size_t size,
-                                 int binary) {
-  if (!ValidBytes(data, size, kMaxAuthMessage)) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+int remotekit_rtc_send_auth_data(uint64_t id, const void* data, size_t size, int binary) {
+  if (!ValidBytes(data, size, kMaxAuthMessage))
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   return WithPeer(id, [&](Peer& p) {
     if (!p.auth_data || p.auth_data->state() != webrtc::DataChannelInterface::kOpen)
       return REMOTEKIT_SDK_INVALID_STATE;
     if (p.auth_data->buffered_amount() + size > kMaxAuthMessage)
       return REMOTEKIT_SDK_BUSY;
-    webrtc::DataBuffer buffer(webrtc::CopyOnWriteBuffer(
-        static_cast<const uint8_t*>(data), size), binary != 0);
+    webrtc::DataBuffer buffer(webrtc::CopyOnWriteBuffer(static_cast<const uint8_t*>(data), size),
+                              binary != 0);
     return p.auth_data->Send(buffer) ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_BUSY;
   });
 }
 std::optional<webrtc::DegradationPreference> DegradationPreference(uint32_t preference) {
   switch (preference) {
-    case REMOTEKIT_RTC_MAINTAIN_RESOLUTION: return webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
-    case REMOTEKIT_RTC_BALANCED: return webrtc::DegradationPreference::BALANCED;
-    case REMOTEKIT_RTC_MAINTAIN_FRAMERATE: return webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
-    default: return std::nullopt;
+    case REMOTEKIT_RTC_MAINTAIN_RESOLUTION:
+      return webrtc::DegradationPreference::MAINTAIN_RESOLUTION;
+    case REMOTEKIT_RTC_BALANCED:
+      return webrtc::DegradationPreference::BALANCED;
+    case REMOTEKIT_RTC_MAINTAIN_FRAMERATE:
+      return webrtc::DegradationPreference::MAINTAIN_FRAMERATE;
+    default:
+      return std::nullopt;
   }
 }
 int remotekit_rtc_set_degradation_preference(uint64_t id, uint32_t preference) {
   const auto value = DegradationPreference(preference);
-  if (!value) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (!value)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   return WithPeer(id, [&](Peer& peer) {
-    if (!peer.video_sender) return REMOTEKIT_SDK_INVALID_STATE;
+    if (!peer.video_sender)
+      return REMOTEKIT_SDK_INVALID_STATE;
     auto parameters = peer.video_sender->GetParameters();
     parameters.degradation_preference = *value;
-    return peer.video_sender->SetParameters(parameters).ok() ?
-        REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+    return peer.video_sender->SetParameters(parameters).ok() ? REMOTEKIT_SDK_OK
+                                                             : REMOTEKIT_SDK_INVALID_STATE;
   });
 }
 int remotekit_rtc_set_source_max_fps(uint64_t id, uint32_t fps) {
-  if (fps < 1 || fps > 240) return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  if (fps < 1 || fps > 240)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
   return WithPeer(id, [&](Peer& peer) {
-    if (!peer.video_sender) return REMOTEKIT_SDK_INVALID_STATE;
+    if (!peer.video_sender)
+      return REMOTEKIT_SDK_INVALID_STATE;
     auto parameters = peer.video_sender->GetParameters();
-    for (auto& encoding : parameters.encodings) encoding.max_framerate = double(fps);
-    return peer.video_sender->SetParameters(parameters).ok() ?
-        REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+    for (auto& encoding : parameters.encodings)
+      encoding.max_framerate = double(fps);
+    return peer.video_sender->SetParameters(parameters).ok() ? REMOTEKIT_SDK_OK
+                                                             : REMOTEKIT_SDK_INVALID_STATE;
   });
 }
-int remotekit_rtc_adapt_frame(uint64_t id, uint32_t width, uint32_t height,
-    int64_t timestamp_us, remotekit_rtc_adaptation* adaptation) {
-  if (!adaptation || adaptation->struct_size != sizeof(*adaptation) ||
-      !width || !height || width > 16384 || height > 16384 ||
-      (width & 1) || (height & 1) || timestamp_us < 0 ||
+int remotekit_rtc_adapt_frame(uint64_t id,
+                              uint32_t width,
+                              uint32_t height,
+                              int64_t timestamp_us,
+                              remotekit_rtc_adaptation* adaptation) {
+  if (!adaptation || adaptation->struct_size != sizeof(*adaptation) || !width || !height ||
+      width > 16384 || height > 16384 || (width & 1) || (height & 1) || timestamp_us < 0 ||
       timestamp_us > std::numeric_limits<int64_t>::max() / 1000)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   *adaptation = {sizeof(*adaptation), 0, 0, 1, 0};
   return WithPeer(id, [&](Peer& peer) {
-    if (!peer.source) return REMOTEKIT_SDK_INVALID_STATE;
+    if (!peer.source)
+      return REMOTEKIT_SDK_INVALID_STATE;
     if (timestamp_us <= peer.last_adaptation_timestamp_us)
       return REMOTEKIT_SDK_INVALID_ARGUMENT;
     peer.last_adaptation_timestamp_us = timestamp_us;
@@ -1219,16 +1426,17 @@ int remotekit_rtc_adapt_frame(uint64_t id, uint32_t width, uint32_t height,
   });
 }
 int remotekit_rtc_submit_texture(uint64_t id, const remotekit_rtc_frame* frame) {
-  if (!frame || frame->struct_size != sizeof(*frame) || !frame->d3d11_texture ||
-      !frame->retain || !frame->release || !frame->width || !frame->height ||
-      frame->width > 16384 || frame->height > 16384 ||
-      (frame->width & 1) || (frame->height & 1) || frame->qpc_frequency <= 0 ||
-      frame->capture_qpc < 0)
+  if (!frame || frame->struct_size != sizeof(*frame) || !frame->d3d11_texture || !frame->retain ||
+      !frame->release || !frame->width || !frame->height || frame->width > 16384 ||
+      frame->height > 16384 || (frame->width & 1) || (frame->height & 1) ||
+      frame->qpc_frequency <= 0 || frame->capture_qpc < 0)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   auto peer = FindPeer(id);
-  if (!peer) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!peer)
+    return REMOTEKIT_SDK_INVALID_STATE;
   const auto authorization = peer->authorization->epoch.load();
-  if (!(authorization & 1)) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!(authorization & 1))
+    return REMOTEKIT_SDK_INVALID_STATE;
   return WithPeer(id, [&](Peer& p) {
     if (p.authorization->epoch.load() != authorization)
       return REMOTEKIT_SDK_INVALID_STATE;
@@ -1247,8 +1455,12 @@ int remotekit_rtc_submit_texture(uint64_t id, const remotekit_rtc_frame* frame) 
     // media frame. Keep the original capture QPC for measurement and assign a
     // fresh monotonic media timestamp (>=1ms apart for a distinct 90kHz RTP ts).
     const int64_t clock_us = webrtc::TimeMicros();
-    input.capture_time_us = input.capture_qpc > 0 ? clock_us - static_cast<int64_t>(
-        static_cast<double>(now.QuadPart - input.capture_qpc) * 1000000.0 / frequency.QuadPart) : 0;
+    input.capture_time_us =
+        input.capture_qpc > 0
+            ? clock_us -
+                  static_cast<int64_t>(static_cast<double>(now.QuadPart - input.capture_qpc) *
+                                       1000000.0 / frequency.QuadPart)
+            : 0;
     const int64_t media_timestamp = std::max(clock_us, p.last_media_timestamp_us + 1000);
     p.last_media_timestamp_us = media_timestamp;
     p.trace->Add("texture_submit", 0, &input, 0, 0, REMOTEKIT_SDK_OK, media_timestamp);
@@ -1256,25 +1468,33 @@ int remotekit_rtc_submit_texture(uint64_t id, const remotekit_rtc_frame* frame) 
     return REMOTEKIT_SDK_OK;
   });
 }
-int remotekit_rtc_encoded(uint64_t id, const remotekit_rtc_encoded_frame* frame,
+int remotekit_rtc_encoded(uint64_t id,
+                          const remotekit_rtc_encoded_frame* frame,
                           uint32_t* wire_rtp_timestamp) {
-  if (wire_rtp_timestamp) *wire_rtp_timestamp = 0;
+  if (wire_rtp_timestamp)
+    *wire_rtp_timestamp = 0;
   if (!frame || frame->struct_size != sizeof(*frame) ||
-      !ValidBytes(frame->annex_b, frame->size, kMaxAccessUnit) ||
-      !frame->width || !frame->height || frame->width > 16384 || frame->height > 16384)
+      !ValidBytes(frame->annex_b, frame->size, kMaxAccessUnit) || !frame->width || !frame->height ||
+      frame->width > 16384 || frame->height > 16384)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   std::shared_ptr<EncoderState> s;
   {
-    auto& r = GetRegistry(); std::lock_guard lock(r.mutex);
+    auto& r = GetRegistry();
+    std::lock_guard lock(r.mutex);
     auto it = r.encoders.find(id);
-    if (it != r.encoders.end()) s = it->second.lock();
+    if (it != r.encoders.end())
+      s = it->second.lock();
   }
-  if (!s) return REMOTEKIT_SDK_INVALID_STATE;
-  s->trace->Add("encoded_begin", id, nullptr, frame->rtp_timestamp, 0, 0, 0, frame->capture_time_us);
+  if (!s)
+    return REMOTEKIT_SDK_INVALID_STATE;
+  s->trace->Add("encoded_begin", id, nullptr, frame->rtp_timestamp, 0, 0, 0,
+                frame->capture_time_us);
   std::lock_guard lock(s->mutex);
-  if (!s->active || !s->callback) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!s->active || !s->callback)
+    return REMOTEKIT_SDK_INVALID_STATE;
   const auto pending = s->pending.extract(frame->rtp_timestamp);
-  if (pending.empty()) return REMOTEKIT_SDK_INVALID_STATE;
+  if (pending.empty())
+    return REMOTEKIT_SDK_INVALID_STATE;
   std::lock_guard completion_lock(s->authorization->completion_mutex);
   if (pending.mapped() != s->authorization->epoch.load()) {
     s->callback->OnFrameDropped(frame->rtp_timestamp, 0, true);
@@ -1283,32 +1503,36 @@ int remotekit_rtc_encoded(uint64_t id, const remotekit_rtc_encoded_frame* frame,
   if (!s->logged_sps) {
     const std::span<const uint8_t> bytes(static_cast<const uint8_t*>(frame->annex_b), frame->size);
     for (size_t i = 0; i + 7 < bytes.size(); ++i) {
-      if (bytes[i] != 0 || bytes[i + 1] != 0) continue;
+      if (bytes[i] != 0 || bytes[i + 1] != 0)
+        continue;
       size_t nalu = 0;
-      if (bytes[i + 2] == 1) nalu = i + 3;
-      else if (bytes[i + 2] == 0 && bytes[i + 3] == 1) nalu = i + 4;
+      if (bytes[i + 2] == 1)
+        nalu = i + 3;
+      else if (bytes[i + 2] == 0 && bytes[i + 3] == 1)
+        nalu = i + 4;
       if (nalu && (bytes[nalu] & 31) == 7) {
-        std::fprintf(stderr, "RTC H264 SPS: encoder=%llu profile-level-id=%02x%02x%02x "
-            "size=%ux%u rtp=%u\n", id, unsigned(bytes[nalu + 1]),
-            unsigned(bytes[nalu + 2]), unsigned(bytes[nalu + 3]),
-            frame->width, frame->height, frame->rtp_timestamp);
+        std::fprintf(stderr,
+                     "RTC H264 SPS: encoder=%llu profile-level-id=%02x%02x%02x "
+                     "size=%ux%u rtp=%u\n",
+                     id, unsigned(bytes[nalu + 1]), unsigned(bytes[nalu + 2]),
+                     unsigned(bytes[nalu + 3]), frame->width, frame->height, frame->rtp_timestamp);
         s->logged_sps = true;
         break;
       }
     }
   }
   webrtc::EncodedImage image;
-  image.SetEncodedData(webrtc::EncodedImageBuffer::Create(
-      static_cast<const uint8_t*>(frame->annex_b), frame->size));
+  image.SetEncodedData(
+      webrtc::EncodedImageBuffer::Create(static_cast<const uint8_t*>(frame->annex_b), frame->size));
   image._encodedWidth = frame->width;
   image._encodedHeight = frame->height;
   image.SetRtpTimestamp(frame->rtp_timestamp);
   image.capture_time_ms_ = frame->capture_time_us / 1000;
-  image._frameType = frame->keyframe ? webrtc::VideoFrameType::kVideoFrameKey :
-                                     webrtc::VideoFrameType::kVideoFrameDelta;
+  image._frameType = frame->keyframe ? webrtc::VideoFrameType::kVideoFrameKey
+                                     : webrtc::VideoFrameType::kVideoFrameDelta;
   // Maintain SPS/PPS state even when this AU already has a hardware QP.
-  s->qp_parser.ParseBitstream(std::span<const uint8_t>(
-      static_cast<const uint8_t*>(frame->annex_b), frame->size));
+  s->qp_parser.ParseBitstream(
+      std::span<const uint8_t>(static_cast<const uint8_t*>(frame->annex_b), frame->size));
   image.qp_ = frame->qp >= 0 ? frame->qp : s->qp_parser.GetLastSliceQp().value_or(-1);
   image.content_type_ = webrtc::VideoContentType::SCREENSHARE;
   const uint64_t requested_playout = s->playout_delay->packed.load();
@@ -1324,13 +1548,15 @@ int remotekit_rtc_encoded(uint64_t id, const remotekit_rtc_encoded_frame* frame,
   codec.codecSpecific.H264.idr_frame = frame->keyframe != 0;
   auto result = s->callback->OnEncodedImage(image, &codec);
   s->trace->Add("encoded_return", id, nullptr, frame->rtp_timestamp,
-      result.error == webrtc::EncodedImageCallback::Result::OK ? result.frame_id : 0,
-      result.error == webrtc::EncodedImageCallback::Result::OK ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE,
-      0, frame->capture_time_us);
+                result.error == webrtc::EncodedImageCallback::Result::OK ? result.frame_id : 0,
+                result.error == webrtc::EncodedImageCallback::Result::OK
+                    ? REMOTEKIT_SDK_OK
+                    : REMOTEKIT_SDK_INVALID_STATE,
+                0, frame->capture_time_us);
   if (result.error == webrtc::EncodedImageCallback::Result::OK && wire_rtp_timestamp)
     *wire_rtp_timestamp = result.frame_id;
-  return result.error == webrtc::EncodedImageCallback::Result::OK
-      ? REMOTEKIT_SDK_OK : REMOTEKIT_SDK_INVALID_STATE;
+  return result.error == webrtc::EncodedImageCallback::Result::OK ? REMOTEKIT_SDK_OK
+                                                                  : REMOTEKIT_SDK_INVALID_STATE;
 }
 int remotekit_rtc_encoder_drop(uint64_t id, uint32_t rtp_timestamp) {
   std::shared_ptr<EncoderState> state;
@@ -1338,12 +1564,16 @@ int remotekit_rtc_encoder_drop(uint64_t id, uint32_t rtp_timestamp) {
     auto& registry = GetRegistry();
     std::lock_guard lock(registry.mutex);
     auto it = registry.encoders.find(id);
-    if (it != registry.encoders.end()) state = it->second.lock();
+    if (it != registry.encoders.end())
+      state = it->second.lock();
   }
-  if (!state) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!state)
+    return REMOTEKIT_SDK_INVALID_STATE;
   std::lock_guard lock(state->mutex);
-  if (!state->active || !state->callback) return REMOTEKIT_SDK_INVALID_STATE;
-  if (!state->pending.erase(rtp_timestamp)) return REMOTEKIT_SDK_INVALID_STATE;
+  if (!state->active || !state->callback)
+    return REMOTEKIT_SDK_INVALID_STATE;
+  if (!state->pending.erase(rtp_timestamp))
+    return REMOTEKIT_SDK_INVALID_STATE;
   state->trace->Add("encoder_drop", id, nullptr, rtp_timestamp);
   state->callback->OnFrameDropped(rtp_timestamp, 0, true);
   return REMOTEKIT_SDK_OK;
@@ -1351,7 +1581,8 @@ int remotekit_rtc_encoder_drop(uint64_t id, uint32_t rtp_timestamp) {
 int remotekit_rtc_sample_clock(remotekit_rtc_clock_sample* sample) {
   if (!sample || sample->struct_size != sizeof(*sample))
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
-  if (RemoteKitSdkBeginRtc() != REMOTEKIT_SDK_OK) return REMOTEKIT_SDK_INVALID_STATE;
+  if (RemoteKitSdkBeginRtc() != REMOTEKIT_SDK_OK)
+    return REMOTEKIT_SDK_INVALID_STATE;
   remotekit_rtc_clock_sample result{};
   result.struct_size = sizeof(result);
   result.consistent_across_processes = base::TimeTicks::IsConsistentAcrossProcesses();
@@ -1361,7 +1592,8 @@ int remotekit_rtc_sample_clock(remotekit_rtc_clock_sample* sample) {
   QueryPerformanceCounter(&before);
   result.monotonic_us = base::TimeTicks::Now().since_origin().InMicroseconds();
   QueryPerformanceCounter(&after);
-  result.qpc_before = before.QuadPart; result.qpc_after = after.QuadPart;
+  result.qpc_before = before.QuadPart;
+  result.qpc_after = after.QuadPart;
   result.qpc_frequency = frequency.QuadPart;
   *sample = result;
   RemoteKitSdkEndRtc();

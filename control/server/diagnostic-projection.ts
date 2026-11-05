@@ -7,15 +7,19 @@ const labels: Record<string, ReadonlySet<string>> = {
   visibility: words('visible hidden'),
   peerState: words('new connecting connected disconnected failed closed'),
   iceState: words('new checking connected completed failed disconnected closed'),
-  signalingState: words('stable have-local-offer have-remote-offer have-local-pranswer have-remote-pranswer closed'),
+  signalingState: words(
+    'stable have-local-offer have-remote-offer have-local-pranswer have-remote-pranswer closed',
+  ),
   channelState: words('connecting open closing closed'),
   codec: words('video/h264 video/vp8 video/vp9 video/av1'),
   state: words('frozen waiting in-progress failed succeeded'),
   kind: words('osr-renderer custom-osr video audio'),
-  encoder: words('qsv nvenc none'), encoderSelection: words('qsv nvenc auto'),
+  encoder: words('qsv nvenc none'),
+  encoderSelection: words('qsv nvenc auto'),
   qsvVpp: words('async external'),
   degradationPreference: words('maintain-resolution maintain-framerate balanced disabled'),
-  backend: words('pending video'), backendReason: words(`video-playback-failed presentation-protocol-unavailable
+  backend: words('pending video'),
+  backendReason: words(`video-playback-failed presentation-protocol-unavailable
     video-capability-unavailable video-rtp-metadata-unavailable invalid-presentation-mode invalid-presentation-barrier`),
   phase: words('blocked sent unload unloaded restore'),
   eventType: words('pointer mouse wheel key text composition touch gesture'),
@@ -25,22 +29,33 @@ const labels: Record<string, ReadonlySet<string>> = {
   sourceClock: words('source arrival-fallback'),
   type: words('focus input.result'),
   touchState: words('accepted-pending processed terminal-invalidated terminal-unconfirmed rejected'),
-  clock: words('endpoint-webrtc-report browser-rtc-stats'), clientClock: words('browser-performance'), connectionTimingOrigin: words('endpoint-offer-monotonic'),
-  atlasInput: words('render-slots'), completionTime: words('unmeasured'), device: words('tablet desktop'),
+  clock: words('endpoint-webrtc-report browser-rtc-stats'),
+  clientClock: words('browser-performance'),
+  connectionTimingOrigin: words('endpoint-offer-monotonic'),
+  atlasInput: words('render-slots'),
+  completionTime: words('unmeasured'),
+  device: words('tablet desktop'),
   close_state: words('open closing closed'),
-  configuration: words('generic-desktop current-platform'), counterScope: words('transport'),
+  configuration: words('generic-desktop current-platform'),
+  counterScope: words('transport'),
 };
 
 const decoderLabels = new Set([
   ...words('ExternalDecoder FFmpeg OpenH264 libvpx dav1d'),
-  ...Array.from(words('FFmpeg OpenH264 libvpx dav1d'), name => `${name} (software fallback)`),
-  ...['Unknown Video Decoder', ...words(`Unknown FFmpegVideoDecoder VpxVideoDecoder AomVideoDecoder MojoVideoDecoder
+  ...Array.from(words('FFmpeg OpenH264 libvpx dav1d'), (name) => `${name} (software fallback)`),
+  ...[
+    'Unknown Video Decoder',
+    ...words(`Unknown FFmpegVideoDecoder VpxVideoDecoder AomVideoDecoder MojoVideoDecoder
     Dav1dVideoDecoder MediaCodec MediaCodecVideoDecoder D3D11VideoDecoder VaapiVideoDecoder VideoDecoderBroker VDAVideoDecoder
-    V4L2VideoDecoder OOPVideoDecoder VideoToolboxVideoDecoder`)].map(name => `ExternalDecoder (${name})`),
+    V4L2VideoDecoder OOPVideoDecoder VideoToolboxVideoDecoder`),
+  ].map((name) => `ExternalDecoder (${name})`),
 ]);
 
-const decimalCounters = words('generation epoch barrierLayoutEpoch barrierOutputGeneration layoutEpoch submitted rejected lifecycle_generation sequence');
-const environmentFields = words(`browserFamily browserMajorVersion browserVersion platform osVersion viewportWidth viewportHeight devicePixelRatio screenWidth screenHeight
+const decimalCounters = words(
+  'generation epoch barrierLayoutEpoch barrierOutputGeneration layoutEpoch submitted rejected lifecycle_generation sequence',
+);
+const environmentFields =
+  words(`browserFamily browserMajorVersion browserVersion platform osVersion viewportWidth viewportHeight devicePixelRatio screenWidth screenHeight
   screenColorDepth maxTouchPoints videoFrameCallbackSupported hardwareConcurrency deviceMemoryGiB effectiveConnectionType networkRttMs networkDownlinkMbps`);
 const clientFields = words(`
   schema clientTimeMs clientClock browser chromiumMajor androidMajor statsAtMs endpointReceivedAtMs endpointAgeMs media rtc endpoint viewport connection layout presentation input
@@ -82,28 +97,42 @@ const clientFields = words(`
 // Only the tenant's diagnostic subtrees enter this projection. Identity, raw
 // content, connection addresses and free-form status/error text are dropped.
 const nativeKey = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
-const excludedNativeKey = /(?:token|secret|credential|password|(?:^|_)id$|Id$|Incarnation$|url|title|origin$|address|candidate|sdp|handle|channel|message|detail|identifier|fingerprint|content|text|filename|username|href|navigation|input|auth|path)/i;
-const nativeViewFields = words(`actual desired pending focused last_lifecycle close_state width height device deviceScaleFactor compositor visible
+const excludedNativeKey =
+  /(?:token|secret|credential|password|(?:^|_)id$|Id$|Incarnation$|url|title|origin$|address|candidate|sdp|handle|channel|message|detail|identifier|fingerprint|content|text|filename|username|href|navigation|input|auth|path)/i;
+const nativeViewFields =
+  words(`actual desired pending focused last_lifecycle close_state width height device deviceScaleFactor compositor visible
   lifecycle_uncertain canDiscard touch_code pending_page_requests loading audible crashed fullscreen recovery browserPending browserDesired`);
 
-function project(value: unknown, allowed: (key: string) => boolean, truncated?: Set<string>, source = 'client') {
+function project(
+  value: unknown,
+  allowed: (key: string) => boolean,
+  truncated?: Set<string>,
+  source = 'client',
+) {
   let remaining = 4096;
   const mark = () => truncated?.add(`${source}-projection-limit`);
   const walk = (item: unknown, key: string, depth: number): unknown => {
-    if (--remaining < 0 || depth > 8) { mark(); return undefined; }
+    if (--remaining < 0 || depth > 8) {
+      mark();
+      return undefined;
+    }
     if (typeof item === 'number') return Number.isFinite(item) ? item : undefined;
     if (typeof item === 'boolean') return item;
     if (typeof item === 'string') {
       if (Object.prototype.hasOwnProperty.call(labels, key) && labels[key].has(item)) return item;
       if (decimalCounters.has(key) && /^\d{1,20}$/.test(item)) return item;
-      if ((key === 'browserVersion' || key === 'osVersion') && /^\d{1,5}(?:\.\d{1,5}){0,4}$/.test(item)) return item;
+      if ((key === 'browserVersion' || key === 'osVersion') && /^\d{1,5}(?:\.\d{1,5}){0,4}$/.test(item))
+        return item;
       if (key === 'decoderImplementation' && decoderLabels.has(item)) return item;
       return undefined;
     }
     if (!item || typeof item !== 'object') return undefined;
     if (Array.isArray(item)) {
       if (item.length > 64) mark();
-      return item.slice(0, 64).map(child => walk(child, key, depth + 1)).filter(child => child !== undefined);
+      return item
+        .slice(0, 64)
+        .map((child) => walk(child, key, depth + 1))
+        .filter((child) => child !== undefined);
     }
     const entries = Object.entries(item);
     if (entries.length > 256) mark();
@@ -120,29 +149,48 @@ function project(value: unknown, allowed: (key: string) => boolean, truncated?: 
 
 export function diagnosticEnvironment(value: unknown): Record<string, unknown> {
   const input = record(value);
-  const allowed = Object.fromEntries(Object.entries(input).filter(([key, entry]) => environmentFields.has(key) && typeof entry !== 'object'));
-  return project(allowed, key => environmentFields.has(key)) as Record<string, unknown>;
+  const allowed = Object.fromEntries(
+    Object.entries(input).filter(([key, entry]) => environmentFields.has(key) && typeof entry !== 'object'),
+  );
+  return project(allowed, (key) => environmentFields.has(key)) as Record<string, unknown>;
 }
 
 export function diagnosticClientSample(value: unknown, truncated: Set<string>) {
-  return project(value, key => clientFields.has(key), truncated);
+  return project(value, (key) => clientFields.has(key), truncated);
 }
 
 function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 export function diagnosticEndpointSnapshot(value: unknown, truncated: Set<string>) {
-  const snapshot = record(value), outputDiagnostics = record(snapshot.outputDiagnostics), rtc = record(snapshot.rtc);
+  const snapshot = record(value),
+    outputDiagnostics = record(snapshot.outputDiagnostics),
+    rtc = record(snapshot.rtc);
   const views = Array.isArray(snapshot.views) ? snapshot.views : [];
   if (views.length > 64) truncated.add('endpoint-view-count');
   const data = {
-    running: snapshot.running, rtcActive: rtc.active,
+    running: snapshot.running,
+    rtcActive: rtc.active,
     browserOutputAvailable: outputDiagnostics.ok === true,
     browserOutput: outputDiagnostics.ok === true ? outputDiagnostics.output : undefined,
     stats: snapshot.stats,
     recovery: snapshot.recovery,
-    views: views.slice(0, 64).map(view => Object.fromEntries(Object.entries(record(view)).filter(([key]) => nativeViewFields.has(key)))),
+    views: views
+      .slice(0, 64)
+      .map((view) =>
+        Object.fromEntries(Object.entries(record(view)).filter(([key]) => nativeViewFields.has(key))),
+      ),
   };
-  return project(data, key => key === 'atlasInput' || key === 'connectionTimingOrigin' || nativeKey.test(key) && !excludedNativeKey.test(key), truncated, 'endpoint') as Record<string, unknown>;
+  return project(
+    data,
+    (key) =>
+      key === 'atlasInput' ||
+      key === 'connectionTimingOrigin' ||
+      (nativeKey.test(key) && !excludedNativeKey.test(key)),
+    truncated,
+    'endpoint',
+  ) as Record<string, unknown>;
 }

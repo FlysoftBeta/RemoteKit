@@ -5,251 +5,439 @@
 #include <cstring>
 #include <iostream>
 
-#define CHECK(x) do {if(!(x)){std::cerr<<__LINE__<<" failed: " #x "\n";std::exit(1);}} while(false)
-using Json=nlohmann::json;
+#define CHECK(x)                                    \
+  do {                                              \
+    if (!(x)) {                                     \
+      std::cerr << __LINE__ << " failed: " #x "\n"; \
+      std::exit(1);                                 \
+    }                                               \
+  } while (false)
+using Json = nlohmann::json;
 
 void InputWireFailures() {
- uint64_t serial=0;int calls=0,retries=0,waits=0,exhausted=0;bool identity=true,expired=false;
- Json application;
- auto rpc=[&](const Json& request) {
-  return remotekit::BrowserRpc(request,serial,[&](const std::string& encoded,std::vector<char>& bytes,size_t& count){
-   const auto wire=Json::parse(encoded);CHECK(wire.at("sequence")=="41");CHECK(wire.at("version")==1);
-   CHECK(wire.at("id")==++calls);
-   const auto response=application.is_null()?(calls<3?Json{{"ok",false},{"code",6},{"error","busy"}}:Json{{"ok",true},{"accepted",true}}):application;
-   const auto text=response.dump();count=text.size();std::memcpy(bytes.data(),text.data(),count);return 0;
-  });
- };
- auto dispatch=[&] {
-  return remotekit::RetryBrowserInput(Json{{"method","input"},{"sequence","41"}},rpc,[&]{return identity;},[&]{return expired;},
-   [&]{++waits;},[&]{++retries;},[&]{++exhausted;});
- };
- CHECK(dispatch().at("ok")==true);CHECK(calls==3 && retries==2 && waits==2 && exhausted==0);
- // An accepted injection's later status is not a pre-admission BUSY.
- application={{"ok",true},{"accepted",true},{"injectionStatus","failed"},{"code",6}};
- CHECK(dispatch().at("accepted")==true);CHECK(calls==4 && retries==2);
- application={{"ok",false},{"code",3},{"error","rejected"}};
- CHECK(dispatch().at("code")==3);CHECK(calls==5 && retries==2);
- bool threw=false;try{remotekit::RequireBrowserOk(application);}catch(const std::runtime_error&){threw=true;}CHECK(threw);
- application={{"ok",false},{"code",6}};identity=false;
- CHECK(dispatch().at("error")=="input_identity_changed");CHECK(calls==6 && retries==2);
- identity=true;expired=true;CHECK(dispatch().at("code")==6);CHECK(exhausted==1 && calls==7);
- expired=false;const auto before=calls;CHECK(dispatch().at("code")==6);CHECK(calls-before==51 && exhausted==2);
- // Timeout is transport failure, never an application retry.
- threw=false;try{remotekit::BrowserRpc(Json::object(),serial,[](const auto&,auto&,auto&){return 7;});}
- catch(const std::runtime_error&){threw=true;}CHECK(threw);
+  uint64_t serial = 0;
+  int calls = 0, retries = 0, waits = 0, exhausted = 0;
+  bool identity = true, expired = false;
+  Json application;
+  auto rpc = [&](const Json& request) {
+    return remotekit::BrowserRpc(
+        request, serial, [&](const std::string& encoded, std::vector<char>& bytes, size_t& count) {
+          const auto wire = Json::parse(encoded);
+          CHECK(wire.at("sequence") == "41");
+          CHECK(wire.at("version") == 1);
+          CHECK(wire.at("id") == ++calls);
+          const auto response =
+              application.is_null()
+                  ? (calls < 3 ? Json{{"ok", false}, {"code", 6}, {"error", "busy"}}
+                               : Json{{"ok", true}, {"accepted", true}})
+                  : application;
+          const auto text = response.dump();
+          count = text.size();
+          std::memcpy(bytes.data(), text.data(), count);
+          return 0;
+        });
+  };
+  auto dispatch = [&] {
+    return remotekit::RetryBrowserInput(
+        Json{{"method", "input"}, {"sequence", "41"}}, rpc, [&] { return identity; },
+        [&] { return expired; }, [&] { ++waits; }, [&] { ++retries; }, [&] { ++exhausted; });
+  };
+  CHECK(dispatch().at("ok") == true);
+  CHECK(calls == 3 && retries == 2 && waits == 2 && exhausted == 0);
+  // An accepted injection's later status is not a pre-admission BUSY.
+  application = {{"ok", true}, {"accepted", true}, {"injectionStatus", "failed"}, {"code", 6}};
+  CHECK(dispatch().at("accepted") == true);
+  CHECK(calls == 4 && retries == 2);
+  application = {{"ok", false}, {"code", 3}, {"error", "rejected"}};
+  CHECK(dispatch().at("code") == 3);
+  CHECK(calls == 5 && retries == 2);
+  bool threw = false;
+  try {
+    remotekit::RequireBrowserOk(application);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw);
+  application = {{"ok", false}, {"code", 6}};
+  identity = false;
+  CHECK(dispatch().at("error") == "input_identity_changed");
+  CHECK(calls == 6 && retries == 2);
+  identity = true;
+  expired = true;
+  CHECK(dispatch().at("code") == 6);
+  CHECK(exhausted == 1 && calls == 7);
+  expired = false;
+  const auto before = calls;
+  CHECK(dispatch().at("code") == 6);
+  CHECK(calls - before == 51 && exhausted == 2);
+  // Timeout is transport failure, never an application retry.
+  threw = false;
+  try {
+    remotekit::BrowserRpc(Json::object(), serial, [](const auto&, auto&, auto&) { return 7; });
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw);
 }
 
 void ControlBackpressure() {
- remotekit::ReliableControlOutbox box;box.Bind(1);
- std::vector<std::string> sent;std::string busy="mode";
- auto send=[&](const std::string& bytes){if(bytes==busy)return 6;sent.push_back(bytes);return 0;};
- box.Replace(1,"mode","layout1","prepare1");
- for(int i=0;i<100;++i)box.Flush(1,send);
- CHECK(sent.empty());box.Transient(1,"frame",send);CHECK(sent.empty());
- busy="layout1";box.Flush(1,send);CHECK(sent==std::vector<std::string>{"mode"});
- busy="prepare1";box.Flush(1,send);CHECK((sent==std::vector<std::string>{"mode","layout1"}));
- for(int i=0;i<100;++i) {
-  box.Replace(1,"","layout1","prepare1");box.Flush(1,send);
- }
- CHECK((sent==std::vector<std::string>{"mode","layout1"})); // BUSY head never rewinds.
- // Superseding layout revokes the old pending prepare, even under long BUSY.
- box.Replace(1,"","layout2","prepare2");busy="prepare2";box.Flush(1,send);
- CHECK((sent==std::vector<std::string>{"mode","layout1","mode","layout2"}));
- busy="";box.Flush(1,send);CHECK(sent.back()=="prepare2");
- CHECK(std::find(sent.begin(),sent.end(),"prepare1")==sent.end());
- const auto admitted=sent.size();
- for(int i=0;i<100;++i){box.Replace(1,"","layout2","prepare2");box.Flush(1,send);}
- CHECK(sent.size()==admitted); // Identical transactions are already reliable.
- box.Replace(1,"","old-layout","old-prepare");box.Bind(2);box.Flush(1,send);
- box.Replace(1,"bad-mode","bad-layout","bad-prepare");
- const auto count=sent.size();box.Flush(2,send);CHECK(sent.size()==count);
- box.Replace(2,"mode2","layout3","prepare3");box.Flush(2,send);CHECK(sent.back()=="prepare3");
- // Outbox admission does not release the media gate; only matching ACK does.
- remotekit::PresentationBarrier gate;gate.Bind(2);gate.Video(2);auto key=gate.Layout(3,4);CHECK(key);
- bool published=false;gate.Send(2,4,true,[&]{published=true;return true;});CHECK(!published);
- CHECK(gate.Ready(2,*key));gate.Send(2,4,true,[&]{published=true;return true;});CHECK(published);
+  remotekit::ReliableControlOutbox box;
+  box.Bind(1);
+  std::vector<std::string> sent;
+  std::string busy = "mode";
+  auto send = [&](const std::string& bytes) {
+    if (bytes == busy)
+      return 6;
+    sent.push_back(bytes);
+    return 0;
+  };
+  box.Replace(1, "mode", "layout1", "prepare1");
+  for (int i = 0; i < 100; ++i)
+    box.Flush(1, send);
+  CHECK(sent.empty());
+  box.Transient(1, "frame", send);
+  CHECK(sent.empty());
+  busy = "layout1";
+  box.Flush(1, send);
+  CHECK(sent == std::vector<std::string>{"mode"});
+  busy = "prepare1";
+  box.Flush(1, send);
+  CHECK((sent == std::vector<std::string>{"mode", "layout1"}));
+  for (int i = 0; i < 100; ++i) {
+    box.Replace(1, "", "layout1", "prepare1");
+    box.Flush(1, send);
+  }
+  CHECK((sent == std::vector<std::string>{"mode", "layout1"}));  // BUSY head never rewinds.
+  // Superseding layout revokes the old pending prepare, even under long BUSY.
+  box.Replace(1, "", "layout2", "prepare2");
+  busy = "prepare2";
+  box.Flush(1, send);
+  CHECK((sent == std::vector<std::string>{"mode", "layout1", "mode", "layout2"}));
+  busy = "";
+  box.Flush(1, send);
+  CHECK(sent.back() == "prepare2");
+  CHECK(std::find(sent.begin(), sent.end(), "prepare1") == sent.end());
+  const auto admitted = sent.size();
+  for (int i = 0; i < 100; ++i) {
+    box.Replace(1, "", "layout2", "prepare2");
+    box.Flush(1, send);
+  }
+  CHECK(sent.size() == admitted);  // Identical transactions are already reliable.
+  box.Replace(1, "", "old-layout", "old-prepare");
+  box.Bind(2);
+  box.Flush(1, send);
+  box.Replace(1, "bad-mode", "bad-layout", "bad-prepare");
+  const auto count = sent.size();
+  box.Flush(2, send);
+  CHECK(sent.size() == count);
+  box.Replace(2, "mode2", "layout3", "prepare3");
+  box.Flush(2, send);
+  CHECK(sent.back() == "prepare3");
+  // Outbox admission does not release the media gate; only matching ACK does.
+  remotekit::PresentationBarrier gate;
+  gate.Bind(2);
+  gate.Video(2);
+  auto key = gate.Layout(3, 4);
+  CHECK(key);
+  bool published = false;
+  gate.Send(2, 4, true, [&] {
+    published = true;
+    return true;
+  });
+  CHECK(!published);
+  CHECK(gate.Ready(2, *key));
+  gate.Send(2, 4, true, [&] {
+    published = true;
+    return true;
+  });
+  CHECK(published);
 }
 
 void StableWireLayout() {
- Json raw={{"type","layout"},{"generation","6"},{"epoch","24"},{"views",Json::array()}};
- for(bool enabled:{false,true}) {
-  const auto published=remotekit::LayoutCapabilities(raw,enabled);
-  CHECK(published.at("clientGestures")==int(enabled));
-  for(int tick=0;tick<100;++tick)CHECK(remotekit::LayoutCapabilities(raw,enabled)==published);
-  CHECK(remotekit::LayoutCapabilities(raw,!enabled)!=published);
- }
+  Json raw = {{"type", "layout"}, {"generation", "6"}, {"epoch", "24"}, {"views", Json::array()}};
+  for (bool enabled : {false, true}) {
+    const auto published = remotekit::LayoutCapabilities(raw, enabled);
+    CHECK(published.at("clientGestures") == int(enabled));
+    for (int tick = 0; tick < 100; ++tick)
+      CHECK(remotekit::LayoutCapabilities(raw, enabled) == published);
+    CHECK(remotekit::LayoutCapabilities(raw, !enabled) != published);
+  }
 }
 
 struct ExportFixture {
- remotekit::NavigationExport exporter;
- Json current={{"view","1"},{"instance","3"},{"document","5"},{"navigationRevision","7"},{"close_state","open"}};
- Json saved={{"previous",true}};
- std::string incarnation="browser1";int begin=0,chunks=0,cancel=0,reads=0,writes=0;bool disk_fail=false;
- void Observe(){exporter.Observe(current,incarnation,true);}
- void Tick() {
-  exporter.Tick(incarnation,[&](const auto& view)->Json{++reads;return current.is_object() && current.at("view")==view?current:Json();},[&](const Json& request)->Json {
-   const auto method=request.at("method");
-   if(method=="navigation.export.begin") {++begin;return {{"transfer","11"},{"size",std::to_string(3*256*1024)},{"navigationRevision","7"}};}
-   if(method=="navigation.export.chunk") {++chunks;CHECK(request.at("length")==256*1024);return {{"data","fake-256KiB"}};}
-   CHECK(method=="navigation.transfer.cancel");++cancel;return {{"ok",true}};
-  },[](const auto&){return 256*1024;},[&](const auto& view,const Json& data){
-   CHECK(view=="1");if(disk_fail)throw std::runtime_error("disk failure");++writes;saved=data;
-  });
- }
+  remotekit::NavigationExport exporter;
+  Json current = {{"view", "1"},
+                  {"instance", "3"},
+                  {"document", "5"},
+                  {"navigationRevision", "7"},
+                  {"close_state", "open"}};
+  Json saved = {{"previous", true}};
+  std::string incarnation = "browser1";
+  int begin = 0, chunks = 0, cancel = 0, reads = 0, writes = 0;
+  bool disk_fail = false;
+  void Observe() { exporter.Observe(current, incarnation, true); }
+  void Tick() {
+    exporter.Tick(
+        incarnation,
+        [&](const auto& view) -> Json {
+          ++reads;
+          return current.is_object() && current.at("view") == view ? current : Json();
+        },
+        [&](const Json& request) -> Json {
+          const auto method = request.at("method");
+          if (method == "navigation.export.begin") {
+            ++begin;
+            return {{"transfer", "11"},
+                    {"size", std::to_string(3 * 256 * 1024)},
+                    {"navigationRevision", "7"}};
+          }
+          if (method == "navigation.export.chunk") {
+            ++chunks;
+            CHECK(request.at("length") == 256 * 1024);
+            return {{"data", "fake-256KiB"}};
+          }
+          CHECK(method == "navigation.transfer.cancel");
+          ++cancel;
+          return {{"ok", true}};
+        },
+        [](const auto&) { return 256 * 1024; },
+        [&](const auto& view, const Json& data) {
+          CHECK(view == "1");
+          if (disk_fail)
+            throw std::runtime_error("disk failure");
+          ++writes;
+          saved = data;
+        });
+  }
 };
 
 void IncrementalExport() {
- ExportFixture f;f.Observe();CHECK(f.begin==0);f.Tick();CHECK(f.begin==1 && f.chunks==0);
- int other_session_commands=0;
- for(int i=0;i<3;++i) {
-  f.Observe(); // Frequent snapshots cannot restart the active export.
-  const auto before=f.chunks;f.Tick();CHECK(f.chunks==before+1);++other_session_commands;
-  CHECK(f.saved.contains("previous"));CHECK(f.begin==1 && f.writes==0);
- }
- CHECK(other_session_commands==3);f.Tick();CHECK(f.writes==1 && f.cancel==1);
- CHECK(f.saved.at("chunks").size()==3 && !f.exporter.Pending());
- // Navigation, close, Browser incarnation, instance and lifecycle changes each cancel,
- // preserving the last atomically committed recovery state.
- for(int scenario=0;scenario<6;++scenario) {
-  ExportFixture cancelled;cancelled.Observe();cancelled.Tick();cancelled.Tick();
-  if(scenario==0)cancelled.current["navigationRevision"]="8";
-  if(scenario==1)cancelled.current=nullptr;
-  if(scenario==2)cancelled.incarnation="browser2";
-  if(scenario==3)cancelled.current["instance"]="4";
-  if(scenario==4)cancelled.current["pending"]=true;
-  if(scenario==5)cancelled.current["lifecycle_uncertain"]=true;
-  cancelled.Tick();CHECK(cancelled.cancel==1 && cancelled.chunks==1 && cancelled.writes==0);
-  CHECK(cancelled.saved.contains("previous"));
- }
- ExportFixture uncertain;uncertain.current["lifecycle_uncertain"]=true;
- uncertain.Observe();uncertain.Tick();CHECK(uncertain.begin==0 && !uncertain.exporter.Pending());
- uncertain.current["lifecycle_uncertain"]=false;
- uncertain.Observe();for(int i=0;i<5;++i)uncertain.Tick();
- CHECK(uncertain.begin==1 && uncertain.writes==1);
- ExportFixture forgotten;forgotten.Observe();forgotten.Tick();forgotten.exporter.Forget("1");forgotten.Tick();
- CHECK(forgotten.cancel==1 && forgotten.writes==0);
- ExportFixture failed;failed.Observe();for(int i=0;i<4;++i)failed.Tick();failed.disk_fail=true;
- bool threw=false;try{failed.Tick();}catch(const std::runtime_error&){threw=true;}
- CHECK(threw && failed.saved.contains("previous") && !failed.exporter.Pending());
- // Fairness between two views: bounded active transfer then next candidate.
- ExportFixture multiple;multiple.Observe();auto second=multiple.current;second["view"]="2";
- multiple.exporter.Observe(second,multiple.incarnation,true);
- for(int i=0;i<5;++i)multiple.Tick();CHECK(multiple.writes==1);
- // The second candidate vanished before selection; no stale begin is issued.
- multiple.Tick();CHECK(multiple.begin==1 && !multiple.exporter.Pending());
+  ExportFixture f;
+  f.Observe();
+  CHECK(f.begin == 0);
+  f.Tick();
+  CHECK(f.begin == 1 && f.chunks == 0);
+  int other_session_commands = 0;
+  for (int i = 0; i < 3; ++i) {
+    f.Observe();  // Frequent snapshots cannot restart the active export.
+    const auto before = f.chunks;
+    f.Tick();
+    CHECK(f.chunks == before + 1);
+    ++other_session_commands;
+    CHECK(f.saved.contains("previous"));
+    CHECK(f.begin == 1 && f.writes == 0);
+  }
+  CHECK(other_session_commands == 3);
+  f.Tick();
+  CHECK(f.writes == 1 && f.cancel == 1);
+  CHECK(f.saved.at("chunks").size() == 3 && !f.exporter.Pending());
+  // Navigation, close, Browser incarnation, instance and lifecycle changes each cancel,
+  // preserving the last atomically committed recovery state.
+  for (int scenario = 0; scenario < 6; ++scenario) {
+    ExportFixture cancelled;
+    cancelled.Observe();
+    cancelled.Tick();
+    cancelled.Tick();
+    if (scenario == 0)
+      cancelled.current["navigationRevision"] = "8";
+    if (scenario == 1)
+      cancelled.current = nullptr;
+    if (scenario == 2)
+      cancelled.incarnation = "browser2";
+    if (scenario == 3)
+      cancelled.current["instance"] = "4";
+    if (scenario == 4)
+      cancelled.current["pending"] = true;
+    if (scenario == 5)
+      cancelled.current["lifecycle_uncertain"] = true;
+    cancelled.Tick();
+    CHECK(cancelled.cancel == 1 && cancelled.chunks == 1 && cancelled.writes == 0);
+    CHECK(cancelled.saved.contains("previous"));
+  }
+  ExportFixture uncertain;
+  uncertain.current["lifecycle_uncertain"] = true;
+  uncertain.Observe();
+  uncertain.Tick();
+  CHECK(uncertain.begin == 0 && !uncertain.exporter.Pending());
+  uncertain.current["lifecycle_uncertain"] = false;
+  uncertain.Observe();
+  for (int i = 0; i < 5; ++i)
+    uncertain.Tick();
+  CHECK(uncertain.begin == 1 && uncertain.writes == 1);
+  ExportFixture forgotten;
+  forgotten.Observe();
+  forgotten.Tick();
+  forgotten.exporter.Forget("1");
+  forgotten.Tick();
+  CHECK(forgotten.cancel == 1 && forgotten.writes == 0);
+  ExportFixture failed;
+  failed.Observe();
+  for (int i = 0; i < 4; ++i)
+    failed.Tick();
+  failed.disk_fail = true;
+  bool threw = false;
+  try {
+    failed.Tick();
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  CHECK(threw && failed.saved.contains("previous") && !failed.exporter.Pending());
+  // Fairness between two views: bounded active transfer then next candidate.
+  ExportFixture multiple;
+  multiple.Observe();
+  auto second = multiple.current;
+  second["view"] = "2";
+  multiple.exporter.Observe(second, multiple.incarnation, true);
+  for (int i = 0; i < 5; ++i)
+    multiple.Tick();
+  CHECK(multiple.writes == 1);
+  // The second candidate vanished before selection; no stale begin is issued.
+  multiple.Tick();
+  CHECK(multiple.begin == 1 && !multiple.exporter.Pending());
 }
 void TouchTerminal() {
   using remotekit::TouchTerminalReceipt;
   using remotekit::TouchTerminalReceipts;
-  const auto make=[](int sequence) {
-   TouchTerminalReceipt receipt;
-   receipt.peer=10;receipt.authorization=20;receipt.control=30;
-   receipt.client_sequence=std::to_string(sequence);
-   receipt.sequence="physical-"+receipt.client_sequence;
-   receipt.query={{"method","input.touchStatus"},{"sequenceId",receipt.sequence},{"focus","5"}};
-   return receipt;
+  const auto make = [](int sequence) {
+    TouchTerminalReceipt receipt;
+    receipt.peer = 10;
+    receipt.authorization = 20;
+    receipt.control = 30;
+    receipt.client_sequence = std::to_string(sequence);
+    receipt.sequence = "physical-" + receipt.client_sequence;
+    receipt.query = {
+        {"method", "input.touchStatus"}, {"sequenceId", receipt.sequence}, {"focus", "5"}};
+    return receipt;
   };
-  const auto status=[](const char* state,const std::string& sequence,bool ok=false) {
-   return Json{{"state",state},{"sequenceId",sequence},{"ok",ok}};
+  const auto status = [](const char* state, const std::string& sequence, bool ok = false) {
+    return Json{{"state", state}, {"sequenceId", sequence}, {"ok", ok}};
   };
   TouchTerminalReceipts receipts;
-  auto* old=receipts.Reserve(make(1));
-  CHECK(old && !receipts.HasNotices()); // Space reserved before dispatch.
-  old->Accept(100,200);
-  CHECK(receipts.Due(100)==old);
-  CHECK(!remotekit::ApplyTouchTerminalStatus(*old,status("pending",old->sequence)));
-  old->due=105;
+  auto* old = receipts.Reserve(make(1));
+  CHECK(old && !receipts.HasNotices());  // Space reserved before dispatch.
+  old->Accept(100, 200);
+  CHECK(receipts.Due(100) == old);
+  CHECK(!remotekit::ApplyTouchTerminalStatus(*old, status("pending", old->sequence)));
+  old->due = 105;
   // A pending native status yields to later dispatch and other due queries.
-  auto* next=receipts.Reserve(make(2));
-  next->Accept(101,200);
-  CHECK(receipts.Due(101)==next);
-  CHECK(remotekit::ApplyTouchTerminalStatus(*next,status("processed",next->sequence,true)));
+  auto* next = receipts.Reserve(make(2));
+  next->Accept(101, 200);
+  CHECK(receipts.Due(101) == next);
+  CHECK(remotekit::ApplyTouchTerminalStatus(*next, status("processed", next->sequence, true)));
   CHECK(!receipts.Due(104));
-  CHECK(receipts.Due(105)==old);
-  CHECK(receipts.Find(10,20,"1","physical-1")==old);
-  CHECK(!receipts.Find(11,20,"1","physical-1"));
-  CHECK(!receipts.Find(10,21,"1","physical-1"));
-  CHECK(!receipts.Find(10,20,"1","physical-2"));
-  CHECK(remotekit::ApplyTouchTerminalStatus(*old,status("processed",next->sequence,true)));
-  CHECK(old->result.at("touchState")=="terminal-unconfirmed");
+  CHECK(receipts.Due(105) == old);
+  CHECK(receipts.Find(10, 20, "1", "physical-1") == old);
+  CHECK(!receipts.Find(11, 20, "1", "physical-1"));
+  CHECK(!receipts.Find(10, 21, "1", "physical-1"));
+  CHECK(!receipts.Find(10, 20, "1", "physical-2"));
+  CHECK(remotekit::ApplyTouchTerminalStatus(*old, status("processed", next->sequence, true)));
+  CHECK(old->result.at("touchState") == "terminal-unconfirmed");
   CHECK(!old->result.at("ok").get<bool>());
-  old->Schedule(106,200);
-  CHECK(remotekit::ApplyTouchTerminalStatus(*old,status("terminal-invalidated",old->sequence)));
-  CHECK(old->result.at("touchState")=="terminal-invalidated");
+  old->Schedule(106, 200);
+  CHECK(remotekit::ApplyTouchTerminalStatus(*old, status("terminal-invalidated", old->sequence)));
+  CHECK(old->result.at("touchState") == "terminal-invalidated");
   CHECK(!old->result.at("ok").get<bool>());
 
   std::vector<Json> sent;
-  bool sdk_busy=true;
-  const auto send=[&](const auto&,const Json& message){
-   if(sdk_busy)return false;
-   sent.push_back(message);return true;
+  bool sdk_busy = true;
+  const auto send = [&](const auto&, const Json& message) {
+    if (sdk_busy)
+      return false;
+    sent.push_back(message);
+    return true;
   };
   receipts.Flush(send);
   CHECK(sent.empty() && receipts.HasNotices());
-  sdk_busy=false;
+  sdk_busy = false;
   receipts.Flush(send);
-  CHECK(sent.size()==4 && !receipts.Busy());
-  CHECK(sent[0].at("touchState")=="accepted-pending" && sent[0].at("clientSequence")=="1");
-  CHECK(sent[1].at("touchState")=="terminal-invalidated" && sent[1].at("clientSequence")=="1");
-  CHECK(sent[2].at("touchState")=="accepted-pending" && sent[2].at("clientSequence")=="2");
-  CHECK(sent[3].at("touchState")=="processed" && sent[3].at("clientSequence")=="2");
+  CHECK(sent.size() == 4 && !receipts.Busy());
+  CHECK(sent[0].at("touchState") == "accepted-pending" && sent[0].at("clientSequence") == "1");
+  CHECK(sent[1].at("touchState") == "terminal-invalidated" && sent[1].at("clientSequence") == "1");
+  CHECK(sent[2].at("touchState") == "accepted-pending" && sent[2].at("clientSequence") == "2");
+  CHECK(sent[3].at("touchState") == "processed" && sent[3].at("clientSequence") == "2");
 
   // A pre-admission rejection is recoverable across SDK BUSY and a lost
   // reply, without creating an acceptance or invoking Browser input.
-  auto* early=receipts.Reserve(make(3));
+  auto* early = receipts.Reserve(make(3));
   CHECK(early);
-  early->Finish("rejected",false,"input_queue_busy");
-  sdk_busy=true;
+  early->Finish("rejected", false, "input_queue_busy");
+  sdk_busy = true;
   receipts.Flush(send);
-  CHECK(sent.size()==4 && early->Busy());
-  sdk_busy=false;
+  CHECK(sent.size() == 4 && early->Busy());
+  sdk_busy = false;
   receipts.Flush(send);
-  CHECK(sent.size()==5 && !early->Busy());
-  auto* queried=receipts.Find(10,20,"3","physical-3");
-  CHECK(queried==early);
-  queried->send_result=true;
+  CHECK(sent.size() == 5 && !early->Busy());
+  auto* queried = receipts.Find(10, 20, "3", "physical-3");
+  CHECK(queried == early);
+  queried->send_result = true;
   receipts.Flush(send);
-  CHECK(sent.size()==6 && sent[4]==sent[5]);
-  CHECK(sent[5].at("touchState")=="rejected" && sent[5].at("error")=="input_queue_busy");
+  CHECK(sent.size() == 6 && sent[4] == sent[5]);
+  CHECK(sent[5].at("touchState") == "rejected" && sent[5].at("error") == "input_queue_busy");
 
   TouchTerminalReceipts full;
-  for(size_t index=0;index<full.kCapacity;++index) {
-   auto* entry=full.Reserve(make(static_cast<int>(index)));
-   CHECK(entry);
-   entry->Accept(1,200);
+  for (size_t index = 0; index < full.kCapacity; ++index) {
+    auto* entry = full.Reserve(make(static_cast<int>(index)));
+    CHECK(entry);
+    entry->Accept(1, 200);
   }
   CHECK(!full.Reserve(make(65)));
-  auto* first=full.Find(10,20,"0","physical-0");
+  auto* first = full.Find(10, 20, "0", "physical-0");
   CHECK(first);
-  first->Finish("terminal-unconfirmed",false,"touch_terminal_timeout");
-  CHECK(!full.Reserve(make(65))); // Never discard an unsent result.
+  first->Finish("terminal-unconfirmed", false, "touch_terminal_timeout");
+  CHECK(!full.Reserve(make(65)));  // Never discard an unsent result.
   full.Flush(send);
   CHECK(full.Reserve(make(65)));
-  CHECK(!full.Find(10,20,"0","physical-0"));
-  full.Prune([](const auto& entry){return entry.authorization==21;});
-  CHECK(!full.Busy() && !full.Find(10,20,"1","physical-1"));
+  CHECK(!full.Find(10, 20, "0", "physical-0"));
+  full.Prune([](const auto& entry) { return entry.authorization == 21; });
+  CHECK(!full.Busy() && !full.Find(10, 20, "1", "physical-1"));
 }
 void OversizedBrowserReplyIsApplicationError() {
- uint64_t serial=72;
- const auto reply=remotekit::BrowserRpc(Json{{"method","snapshot"}},serial,
-  [&](const std::string& encoded,std::vector<char>& buffer,size_t& count) {
-   const auto request=Json::parse(encoded);CHECK(request.at("id")==73);
-   // Exact bounded envelope emitted by Browser WriteControlResponse.
-   const auto wire=Json{{"version",1},{"id",request.at("id")},{"ok",false},{"error","response_too_large"},
-    {"message","Browser state is too large to synchronize. Close or change the affected page and retry."}}.dump();
-   count=wire.size();std::memcpy(buffer.data(),wire.data(),count);return 0;
-  });
- CHECK(reply.at("id")==73 && reply.at("error")=="response_too_large");
- bool rejected=false;
- try {remotekit::RequireBrowserOk(reply);}
- catch(const std::runtime_error& error) {rejected=std::string(error.what())=="browser: response_too_large";}
- CHECK(rejected);
- // A subsequent RPC can use the same live control rather than recreate Browser.
- const auto next=remotekit::BrowserRpc(Json{{"method","snapshot"}},serial,
-  [&](const std::string& encoded,std::vector<char>& buffer,size_t& count) {
-   const auto request=Json::parse(encoded);CHECK(request.at("id")==74);
-   const auto wire=Json{{"id",74},{"ok",true}}.dump();count=wire.size();std::memcpy(buffer.data(),wire.data(),count);return 0;
-  });
- CHECK(next.at("ok")==true);
+  uint64_t serial = 72;
+  const auto reply = remotekit::BrowserRpc(
+      Json{{"method", "snapshot"}}, serial,
+      [&](const std::string& encoded, std::vector<char>& buffer, size_t& count) {
+        const auto request = Json::parse(encoded);
+        CHECK(request.at("id") == 73);
+        // Exact bounded envelope emitted by Browser WriteControlResponse.
+        const auto wire = Json{{"version", 1},
+                               {"id", request.at("id")},
+                               {"ok", false},
+                               {"error", "response_too_large"},
+                               {"message",
+                                "Browser state is too large to synchronize. Close or change the "
+                                "affected page and retry."}}
+                              .dump();
+        count = wire.size();
+        std::memcpy(buffer.data(), wire.data(), count);
+        return 0;
+      });
+  CHECK(reply.at("id") == 73 && reply.at("error") == "response_too_large");
+  bool rejected = false;
+  try {
+    remotekit::RequireBrowserOk(reply);
+  } catch (const std::runtime_error& error) {
+    rejected = std::string(error.what()) == "browser: response_too_large";
+  }
+  CHECK(rejected);
+  // A subsequent RPC can use the same live control rather than recreate Browser.
+  const auto next = remotekit::BrowserRpc(
+      Json{{"method", "snapshot"}}, serial,
+      [&](const std::string& encoded, std::vector<char>& buffer, size_t& count) {
+        const auto request = Json::parse(encoded);
+        CHECK(request.at("id") == 74);
+        const auto wire = Json{{"id", 74}, {"ok", true}}.dump();
+        count = wire.size();
+        std::memcpy(buffer.data(), wire.data(), count);
+        return 0;
+      });
+  CHECK(next.at("ok") == true);
 }
-int main(){OversizedBrowserReplyIsApplicationError();StableWireLayout();TouchTerminal();InputWireFailures();ControlBackpressure();IncrementalExport();std::cout<<"control reliability tests passed\n";}
+int main() {
+  OversizedBrowserReplyIsApplicationError();
+  StableWireLayout();
+  TouchTerminal();
+  InputWireFailures();
+  ControlBackpressure();
+  IncrementalExport();
+  std::cout << "control reliability tests passed\n";
+}

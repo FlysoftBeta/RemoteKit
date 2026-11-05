@@ -56,11 +56,19 @@ class BrowserClient final : public content::ContentBrowserClient {
   void OnWebContentsCreated(content::WebContents* contents) override {
     BrowserContext::InstallSiteIdentity(contents);
   }
-  bool CanCreateWindow(content::RenderFrameHost*, const GURL&, const GURL&,
-      const url::Origin&, content::mojom::WindowContainerType, const GURL&,
-      const content::Referrer&, const std::string&, WindowOpenDisposition,
-      const blink::mojom::WindowFeatures&, bool user_gesture, bool,
-      bool* no_javascript_access) override {
+  bool CanCreateWindow(content::RenderFrameHost*,
+                       const GURL&,
+                       const GURL&,
+                       const url::Origin&,
+                       content::mojom::WindowContainerType,
+                       const GURL&,
+                       const content::Referrer&,
+                       const std::string&,
+                       WindowOpenDisposition,
+                       const blink::mojom::WindowFeatures&,
+                       bool user_gesture,
+                       bool,
+                       bool* no_javascript_access) override {
     *no_javascript_access = false;
     return user_gesture;
   }
@@ -87,8 +95,8 @@ class BrowserClient final : public content::ContentBrowserClient {
     params->user_agent = ChromeUserAgent();
     params->accept_language = "en-US,en";
     params->enable_zstd = true;
-    static_cast<BrowserContext*>(context)->ConfigureNetworkContext(
-        in_memory, relative_partition_path, params);
+    static_cast<BrowserContext*>(context)->ConfigureNetworkContext(in_memory,
+                                                                   relative_partition_path, params);
   }
 };
 }  // namespace
@@ -139,8 +147,7 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   // Preserve it so GPU/renderer failures reach this Session's browser log.
   if (command.GetSwitchValueASCII("enable-logging") == "handle") {
     uint64_t log_handle = 0;
-    if (base::StringToUint64(command.GetSwitchValueASCII("log-file"), &log_handle) &&
-        log_handle) {
+    if (base::StringToUint64(command.GetSwitchValueASCII("log-file"), &log_handle) && log_handle) {
       settings.logging_dest |= logging::LOG_TO_FILE;
       settings.log_file = reinterpret_cast<HANDLE>(static_cast<uintptr_t>(log_handle));
     }
@@ -153,7 +160,8 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
     settings.lock_log = logging::LOCK_LOG_FILE;
   }
   const bool logging_ready = logging::InitLogging(settings);
-  if (!command.HasSwitch("type")) LOG(INFO) << "RemoteKit startup InitLogging=" << logging_ready;
+  if (!command.HasSwitch("type"))
+    LOG(INFO) << "RemoteKit startup InitLogging=" << logging_ready;
   return std::nullopt;
 }
 void MainDelegate::PreSandboxStartup() {

@@ -5,7 +5,8 @@
 #include <cstring>
 
 int main() {
-  if (remotekit_sdk_abi_version() != REMOTEKIT_SDK_ABI_VERSION || remotekit_sdk_initialize() != REMOTEKIT_SDK_OK ||
+  if (remotekit_sdk_abi_version() != REMOTEKIT_SDK_ABI_VERSION ||
+      remotekit_sdk_initialize() != REMOTEKIT_SDK_OK ||
       remotekit_sdk_initialize() != REMOTEKIT_SDK_OK) {
     std::fputs("SDK initialization failed\n", stderr);
     return 1;
@@ -40,7 +41,6 @@ int main() {
     return 2;
   }
   std::printf("RemoteKit SDK ABI %u: Mojo binary roundtrip OK; WebRTC clock %lld\n",
-              static_cast<unsigned>(REMOTEKIT_SDK_ABI_VERSION),
-              static_cast<long long>(timestamp));
+              static_cast<unsigned>(REMOTEKIT_SDK_ABI_VERSION), static_cast<long long>(timestamp));
   return 0;
 }

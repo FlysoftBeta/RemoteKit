@@ -21,9 +21,19 @@ class FileUploadStore {
     std::string browser_incarnation, view, instance, document, request;
     bool operator==(const Binding&) const = default;
   };
-  struct Spec { std::string name, type; std::uint64_t size{}; };
-  struct Source { Spec spec; std::filesystem::path path; };
-  struct File { std::string ticket, name, type; std::uint64_t size{}; std::filesystem::path path; };
+  struct Spec {
+    std::string name, type;
+    std::uint64_t size{};
+  };
+  struct Source {
+    Spec spec;
+    std::filesystem::path path;
+  };
+  struct File {
+    std::string ticket, name, type;
+    std::uint64_t size{};
+    std::filesystem::path path;
+  };
   enum class State { uploading, sealed, submitted, selected };
   struct Batch {
     std::string id;
@@ -38,10 +48,15 @@ class FileUploadStore {
   // never merely a lost control channel. Destructor does not delete selections.
   const Batch& Begin(const Binding&, const std::vector<Spec>&);
   const Batch& BeginOrResume(const Binding&, const std::vector<Spec>&);
-  const Batch& Stage(const Binding&, const std::vector<Source>&, const std::function<void()>& check);
+  const Batch& Stage(const Binding&,
+                     const std::vector<Source>&,
+                     const std::function<void()>& check);
   const Batch* FindBinding(const Binding&) const;
-  std::uint64_t Write(const std::string& id, const Binding&, std::size_t file,
-                      std::uint64_t offset, const std::vector<std::uint8_t>& bytes);
+  std::uint64_t Write(const std::string& id,
+                      const Binding&,
+                      std::size_t file,
+                      std::uint64_t offset,
+                      const std::vector<std::uint8_t>& bytes);
   std::vector<std::uint64_t> Offsets(const std::string& id, const Binding&) const;
   bool CancelBinding(const Binding&);
   const Batch& Seal(const std::string& id, const Binding&);
@@ -55,6 +70,7 @@ class FileUploadStore {
   void ConfirmBrowserStopped(const std::string& incarnation);
   std::uint64_t reserved_bytes() const { return reserved_bytes_; }
   std::uint64_t reserved_files() const { return reserved_files_; }
+
  private:
   void Erase(std::map<std::string, Batch>::iterator);
   std::filesystem::path root_;

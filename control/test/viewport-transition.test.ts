@@ -1,9 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { KeyboardViewport, ResizePreview, ViewportTransition, resizeSnapshotSize, visibleContentBounds, FREEZE_MAX_PIXELS, surfaceMatchesViewport } from '../client/viewport-transition';
+import {
+  KeyboardViewport,
+  ResizePreview,
+  ViewportTransition,
+  resizeSnapshotSize,
+  visibleContentBounds,
+  FREEZE_MAX_PIXELS,
+  surfaceMatchesViewport,
+} from '../client/viewport-transition';
 
 const viewport = (height: number, layoutHeight = 844, width = 390) => ({
-  visual: { height, width, offsetLeft: 0, offsetTop: 0 }, layoutWidth: width, layoutHeight, scale: 1,
+  visual: { height, width, offsetLeft: 0, offsetTop: 0 },
+  layoutWidth: width,
+  layoutHeight,
+  scale: 1,
 });
 
 test('only settled full height restoration reports a system dismissal', () => {
@@ -21,36 +32,68 @@ test('only settled full height restoration reports a system dismissal', () => {
   assert.equal(keyboard.open, false);
   assert.equal(keyboard.dismissals, 1);
 });
-const old = { left: 0, top: 80, width: 390, height: 764 }, small = { ...old, height: 364 };
+const old = { left: 0, top: 80, width: 390, height: 764 },
+  small = { ...old, height: 364 };
 test('visual viewport offset and size intersect actual content bounds', () => {
-  assert.deepEqual(visibleContentBounds(old, { offsetLeft: 10, offsetTop: 100, width: 350, height: 400 }), { left: 10, top: 100, width: 350, height: 400 });
-  assert.deepEqual(visibleContentBounds(old, { offsetLeft: 0, offsetTop: 0, width: 390, height: 444 }), small);
+  assert.deepEqual(visibleContentBounds(old, { offsetLeft: 10, offsetTop: 100, width: 350, height: 400 }), {
+    left: 10,
+    top: 100,
+    width: 350,
+    height: 400,
+  });
+  assert.deepEqual(
+    visibleContentBounds(old, { offsetLeft: 0, offsetTop: 0, width: 390, height: 444 }),
+    small,
+  );
 });
 test('one fixed copy spans keyboard animation and clears only on the new desired presentation', () => {
-  const state = new ViewportTransition(); state.ready('peer/doc', '1', old);
+  const state = new ViewportTransition();
+  state.ready('peer/doc', '1', old);
   assert.ok(state.begin('peer/doc', small, 390 * 764, true));
   assert.deepEqual(state.freeze?.bounds, old);
   assert.equal(state.begin('peer/doc', { ...small, height: 300 }, 100, true), false);
   assert.equal(state.ready('peer/doc', '2', small), false);
-  assert.equal(state.confirmed?.layout, '1'); assert.ok(state.freeze);
-  state.ready('peer/doc', '3', { ...small, height: 300 }); assert.equal(state.freeze, undefined);
+  assert.equal(state.confirmed?.layout, '1');
+  assert.ok(state.freeze);
+  state.ready('peer/doc', '3', { ...small, height: 300 });
+  assert.equal(state.freeze, undefined);
 });
 test('slow recovery retains the preview; document/peer invalidation and pixel budget never manufacture ready', () => {
-  const state = new ViewportTransition(); state.ready('peer/doc', '1', old);
+  const state = new ViewportTransition();
+  state.ready('peer/doc', '1', old);
   assert.equal(state.begin('peer/doc', small, FREEZE_MAX_PIXELS + 1, true), false);
   assert.equal(state.begin('peer/doc', small, 100, false), false);
   assert.ok(state.begin('peer/doc', small, 100, true));
-  state.invalidate('peer/doc'); assert.ok(state.freeze);
+  state.invalidate('peer/doc');
+  assert.ok(state.freeze);
   assert.equal(state.confirmed?.layout, '1');
   assert.equal(state.begin('peer/doc', small, 100, true), false);
-  state.invalidate('other-peer/doc'); assert.equal(state.freeze, undefined); assert.equal(state.confirmed, undefined);
+  state.invalidate('other-peer/doc');
+  assert.equal(state.freeze, undefined);
+  assert.equal(state.confirmed, undefined);
 });
 
 test('viewport readiness checks both exact sampling axes and rejects old geometry', () => {
-  const surface = { id: '1', session: 's', instance: 'i', document: 'd', focus: 'f', x: 0, y: 0,
-    width: 800, height: 594, deviceScaleFactor: 2, mediaScale: .495, mediaScaleX: .5, mediaScaleY: .495 };
+  const surface = {
+    id: '1',
+    session: 's',
+    instance: 'i',
+    document: 'd',
+    focus: 'f',
+    x: 0,
+    y: 0,
+    width: 800,
+    height: 594,
+    deviceScaleFactor: 2,
+    mediaScale: 0.495,
+    mediaScaleX: 0.5,
+    mediaScaleY: 0.495,
+  };
   assert.ok(surfaceMatchesViewport(surface, { width: 800, height: 600 }));
-  assert.equal(surfaceMatchesViewport({ ...surface, mediaScaleX: .495 }, { width: 800, height: 600 }), false);
+  assert.equal(
+    surfaceMatchesViewport({ ...surface, mediaScaleX: 0.495 }, { width: 800, height: 600 }),
+    false,
+  );
   assert.equal(surfaceMatchesViewport(surface, { width: 800, height: 500 }), false);
   assert.equal(surfaceMatchesViewport({ ...surface, mediaScaleY: NaN }, { width: 800, height: 600 }), false);
 });
@@ -61,7 +104,11 @@ test('simultaneous layout and visual viewport shrink is classified on coarse poi
   assert.equal(keyboard.measure(viewport(842, 842), true, true, 2), undefined);
   assert.equal(keyboard.open, false);
   assert.equal(keyboard.measure(viewport(450, 450), true, true, 3), 'keyboard');
-  assert.equal(keyboard.measure(viewport(844, 450), true, true, 4), undefined, 'use the smaller viewport during interleaved restoration');
+  assert.equal(
+    keyboard.measure(viewport(844, 450), true, true, 4),
+    undefined,
+    'use the smaller viewport during interleaved restoration',
+  );
   assert.equal(keyboard.measure(viewport(844), false, true, 5), 'keyboard');
   assert.equal(keyboard.settle(145), true);
 });
@@ -87,7 +134,8 @@ test('viewport event can reclassify a content-first preview without copying agai
 });
 
 test('resize reversal can return to the authorized size without waiting for a new server layout', () => {
-  const state = new ViewportTransition(); state.ready('doc', '1', old);
+  const state = new ViewportTransition();
+  state.ready('doc', '1', old);
   assert.ok(state.begin('doc', small, 100, true));
   assert.equal(state.begin('doc', old, 100, true), false);
   state.ready('doc', '1', old);

@@ -13,9 +13,8 @@ static_assert(sizeof(remotekit_sdk_render_setup) == 272);
 static_assert(offsetof(remotekit_sdk_render_setup, render_channel) == 136);
 static_assert(std::is_standard_layout_v<remotekit_sdk_render_setup>);
 static_assert(std::is_same_v<decltype(&remotekit_sdk_render_begin),
-    int (*)(uint64_t, const remotekit_sdk_render_request*)>);
+                             int (*)(uint64_t, const remotekit_sdk_render_request*)>);
 
 static_assert(static_cast<uint32_t>(REMOTEKIT_SDK_RENDER_STOPPED) !=
               static_cast<uint32_t>(REMOTEKIT_SDK_RENDER_REJECT_STOPPED));
-static_assert(std::is_same_v<decltype(&remotekit_sdk_render_stop),
-    int (*)(uint64_t, uint64_t)>);
+static_assert(std::is_same_v<decltype(&remotekit_sdk_render_stop), int (*)(uint64_t, uint64_t)>);

@@ -32,7 +32,8 @@ std::map<aura::Window*, float>& OutputScales() {
   return *scales;
 }
 float OutputScale(aura::Window* window) {
-  if (!window) return 1.f;
+  if (!window)
+    return 1.f;
   auto it = OutputScales().find(window->GetRootWindow());
   return it == OutputScales().end() ? 1.f : it->second;
 }
@@ -47,10 +48,12 @@ class RetiredHost final : public std::enable_shared_from_this<RetiredHost> {
     timer_.Start(FROM_HERE, base::Milliseconds(2),
                  base::BindRepeating(&RetiredHost::Poll, base::Unretained(this)));
   }
+
  private:
   void Poll() {
     auto protect = shared_from_this();
-    if (!host_->CanDestroyGpuOutput()) return;
+    if (!host_->CanDestroyGpuOutput())
+      return;
     timer_.Stop();
     host_.reset();
     keepalive_.reset();
@@ -71,7 +74,9 @@ class ServiceScreen final : public display::ScreenBase {
   bool IsWindowUnderCursor(gfx::NativeWindow) override { return false; }
   gfx::NativeWindow GetWindowAtScreenPoint(const gfx::Point&) override { return nullptr; }
   gfx::NativeWindow GetLocalProcessWindowAtPoint(const gfx::Point&,
-      const std::set<gfx::NativeWindow>&) override { return nullptr; }
+                                                 const std::set<gfx::NativeWindow>&) override {
+    return nullptr;
+  }
   display::Display GetDisplayNearestWindow(gfx::NativeWindow window) const override {
     auto result = GetPrimaryDisplay();
     result.set_device_scale_factor(OutputScale(window));
@@ -83,8 +88,7 @@ class ServiceScreen final : public display::ScreenBase {
   bool IsHeadless() const override { return true; }
 };
 
-class FocusClient final : public aura::client::FocusClient,
-                          public aura::WindowObserver {
+class FocusClient final : public aura::client::FocusClient, public aura::WindowObserver {
  public:
   void AddObserver(aura::client::FocusChangeObserver* observer) override {
     observers_.AddObserver(observer);
@@ -93,22 +97,27 @@ class FocusClient final : public aura::client::FocusClient,
     observers_.RemoveObserver(observer);
   }
   void FocusWindow(aura::Window* window) override {
-    if (window == focused_ || (window && !window->CanFocus())) return;
+    if (window == focused_ || (window && !window->CanFocus()))
+      return;
     observation_.Reset();
     auto* old = focused_.get();
     focused_ = window;
-    if (window) observation_.Observe(window);
-    for (auto& observer : observers_) observer.OnWindowFocused(window, old);
+    if (window)
+      observation_.Observe(window);
+    for (auto& observer : observers_)
+      observer.OnWindowFocused(window, old);
     if (auto* observer = aura::client::GetFocusChangeObserver(old))
       observer->OnWindowFocused(window, old);
     if (auto* observer = aura::client::GetFocusChangeObserver(window))
       observer->OnWindowFocused(window, old);
   }
   void ResetFocusWithinActiveWindow(aura::Window* window) override {
-    if (!window->Contains(focused_)) FocusWindow(window);
+    if (!window->Contains(focused_))
+      FocusWindow(window);
   }
   aura::Window* GetFocusedWindow() override { return focused_; }
   void OnWindowDestroying(aura::Window*) override { FocusWindow(nullptr); }
+
  private:
   raw_ptr<aura::Window> focused_ = nullptr;
   base::ScopedObservation<aura::Window, aura::WindowObserver> observation_{this};
@@ -124,6 +133,7 @@ class ParentingClient final : public aura::client::WindowParentingClient {
   aura::Window* GetDefaultParent(aura::Window*, const gfx::Rect&, int64_t) override {
     return root_;
   }
+
  private:
   raw_ptr<aura::Window> root_;
 };
@@ -133,8 +143,7 @@ std::unique_ptr<display::Screen> CreateOffscreenScreen() {
   return std::make_unique<ServiceScreen>();
 }
 
-OffscreenHost::OffscreenHost(content::WebContents* contents,
-                           const gfx::Size& viewport)
+OffscreenHost::OffscreenHost(content::WebContents* contents, const gfx::Size& viewport)
     : begin_frame_source_id_(viz::StubBeginFrameSource().source_id()) {
   SetNativeWindowOcclusionEnabled(false);
   // InputMethodMinimal is abstract on Windows (native IME/locale hooks).
@@ -168,23 +177,27 @@ OffscreenHost::~OffscreenHost() {
 
 void OffscreenHost::SetViewport(const gfx::Size& viewport) {
   viewport_ = viewport;
-  if (content_window_) content_window_->SetBounds(gfx::Rect(viewport));
+  if (content_window_)
+    content_window_->SetBounds(gfx::Rect(viewport));
   SetBoundsInPixels(gfx::Rect(gfx::Size(std::lround(viewport.width() * output_scale_),
-                                     std::lround(viewport.height() * output_scale_))));
+                                        std::lround(viewport.height() * output_scale_))));
 }
 
 void OffscreenHost::SetOutputScale(float scale) {
-  if (!std::isfinite(scale) || scale <= 0 || output_scale_ == scale) return;
+  if (!std::isfinite(scale) || scale <= 0 || output_scale_ == scale)
+    return;
   output_scale_ = scale;
   OutputScales()[window()] = scale;
   const auto old_bounds = bounds_;
   SetViewport(viewport_);
   // Even unchanged rounded pixel dimensions can carry a different DSF.
-  if (bounds_ == old_bounds) OnHostResizedInPixels(bounds_.size());
+  if (bounds_ == old_bounds)
+    OnHostResizedInPixels(bounds_.size());
 }
 
 void OffscreenHost::SetRenderDemand(bool enabled) {
-  if (enabled_ == enabled) return;
+  if (enabled_ == enabled)
+    return;
   enabled_ = enabled;
   // Endpoint Begin admission is the only render clock. Visibility expresses
   // product demand and never creates a second, autonomous BeginFrame source.
@@ -206,9 +219,10 @@ void OffscreenHost::Detach() {
 }
 
 viz::BeginFrameArgs OffscreenHost::CreateBeginFrameArgs(base::TimeTicks now,
-                                                       base::TimeDelta interval) {
+                                                        base::TimeDelta interval) {
   return viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE, begin_frame_source_id_,
-      ++begin_frame_sequence_, now, now + interval, interval, viz::BeginFrameArgs::NORMAL);
+                                     ++begin_frame_sequence_, now, now + interval, interval,
+                                     viz::BeginFrameArgs::NORMAL);
 }
 
 void OffscreenHost::SetNeedsBeginFrameCallback(base::RepeatingClosure callback) {
@@ -228,7 +242,8 @@ OffscreenHost::CreateExternalBeginFrameControllerClient() {
   // again later and must remain registered for the host's final retirement.
   if (begin_frame_binding_epoch_ > 1)
     for (auto& probe : gpu_retirement_probes_)
-      if (!probe.Run()) rebound_with_unretired_gpu_work_ = true;
+      if (!probe.Run())
+        rebound_with_unretired_gpu_work_ = true;
   if (begin_frame_binding_epoch_ > 1 && needs_begin_frame_callback_)
     needs_begin_frame_callback_.Run();
   return remote;
@@ -238,7 +253,8 @@ void OffscreenHost::SetNeedsBeginFrame(bool needs_begin_frames) {
   const bool changed = !begin_frame_demand_known_ || needs_begin_frames_ != needs_begin_frames;
   begin_frame_demand_known_ = true;
   needs_begin_frames_ = needs_begin_frames;
-  if (changed && needs_begin_frame_callback_) needs_begin_frame_callback_.Run();
+  if (changed && needs_begin_frame_callback_)
+    needs_begin_frame_callback_.Run();
 }
 
 void OffscreenHost::NeedsBeginFrameWithId(int64_t display_id, bool needs_begin_frames) {
@@ -262,19 +278,26 @@ bool OffscreenHost::CanDestroyGpuOutput() {
 }
 
 void OffscreenHost::Retire(std::unique_ptr<OffscreenHost> host) {
-  if (!host) return;
+  if (!host)
+    return;
   host->Detach();
   std::make_shared<RetiredHost>(std::move(host))->Start();
 }
 
-void OffscreenHost::ClearFocus() { focus_client_->FocusWindow(nullptr); }
+void OffscreenHost::ClearFocus() {
+  focus_client_->FocusWindow(nullptr);
+}
 
 base::DictValue OffscreenHost::Diagnostics() const {
-  return base::DictValue().Set("kind", "offscreen-aura")
-      .Set("nativePageWindow", false).Set("acceleratedWidgetNull", true)
+  return base::DictValue()
+      .Set("kind", "offscreen-aura")
+      .Set("nativePageWindow", false)
+      .Set("acceleratedWidgetNull", true)
       .Set("hostDeviceScaleFactor", device_scale_factor())
-      .Set("hostWidthPixels", bounds_.width()).Set("hostHeightPixels", bounds_.height())
-      .Set("enabled", enabled_).Set("renderClock", "endpoint-begin-frame-source")
+      .Set("hostWidthPixels", bounds_.width())
+      .Set("hostHeightPixels", bounds_.height())
+      .Set("enabled", enabled_)
+      .Set("renderClock", "endpoint-begin-frame-source")
       .Set("needsBeginFrames", needs_begin_frames_)
       .Set("beginFrameDemandKnown", begin_frame_demand_known_)
       .Set("beginFrameSourceId", base::NumberToString(begin_frame_source_id_))
@@ -283,26 +306,45 @@ base::DictValue OffscreenHost::Diagnostics() const {
       .Set("preferredIntervalUs", static_cast<double>(preferred_interval_.InMicroseconds()));
 }
 
-bool OffscreenHost::CanDispatchEvent(const ui::PlatformEvent&) { return false; }
-uint32_t OffscreenHost::DispatchEvent(const ui::PlatformEvent&) { return 0; }
-ui::EventSource* OffscreenHost::GetEventSource() { return this; }
-gfx::AcceleratedWidget OffscreenHost::GetAcceleratedWidget() { return gfx::kNullAcceleratedWidget; }
+bool OffscreenHost::CanDispatchEvent(const ui::PlatformEvent&) {
+  return false;
+}
+uint32_t OffscreenHost::DispatchEvent(const ui::PlatformEvent&) {
+  return 0;
+}
+ui::EventSource* OffscreenHost::GetEventSource() {
+  return this;
+}
+gfx::AcceleratedWidget OffscreenHost::GetAcceleratedWidget() {
+  return gfx::kNullAcceleratedWidget;
+}
 void OffscreenHost::ShowImpl() {}
 void OffscreenHost::HideImpl() {}
-gfx::Rect OffscreenHost::GetBoundsInPixels() const { return bounds_; }
+gfx::Rect OffscreenHost::GetBoundsInPixels() const {
+  return bounds_;
+}
 void OffscreenHost::SetBoundsInPixels(const gfx::Rect& bounds) {
-  if (bounds_ == bounds) return;
+  if (bounds_ == bounds)
+    return;
   bounds_ = bounds;
   window()->SetBounds(bounds);
   OnHostResizedInPixels(bounds.size());
 }
-gfx::Point OffscreenHost::GetLocationOnScreenInPixels() const { return {}; }
+gfx::Point OffscreenHost::GetLocationOnScreenInPixels() const {
+  return {};
+}
 void OffscreenHost::SetCapture() {}
 void OffscreenHost::ReleaseCapture() {}
-bool OffscreenHost::CaptureSystemKeyEventsImpl(std::optional<base::flat_set<ui::DomCode>>) { return false; }
+bool OffscreenHost::CaptureSystemKeyEventsImpl(std::optional<base::flat_set<ui::DomCode>>) {
+  return false;
+}
 void OffscreenHost::ReleaseSystemKeyEventCapture() {}
-bool OffscreenHost::IsKeyLocked(ui::DomCode) { return false; }
-base::flat_map<std::string, std::string> OffscreenHost::GetKeyboardLayoutMap() { return {}; }
+bool OffscreenHost::IsKeyLocked(ui::DomCode) {
+  return false;
+}
+base::flat_map<std::string, std::string> OffscreenHost::GetKeyboardLayoutMap() {
+  return {};
+}
 void OffscreenHost::SetCursorNative(gfx::NativeCursor) {}
 void OffscreenHost::MoveCursorToScreenLocationInPixels(const gfx::Point&) {}
 void OffscreenHost::OnCursorVisibilityChangedNative(bool) {}

@@ -35,8 +35,7 @@ class ExternalBeginFrameSourceMojoTestApi {
  public:
   static void EarlyNak(ExternalBeginFrameSourceMojo& source) {
     const auto id = *source.original_frame_id_;
-    source.DispatchFrameCallback(
-        BeginFrameAck(id.source_id, id.sequence_number, false));
+    source.DispatchFrameCallback(BeginFrameAck(id.source_id, id.sequence_number, false));
   }
   static size_t RetiredCount(const ExternalBeginFrameSourceMojo& source) {
     return source.retired_frame_callbacks_.size();
@@ -55,8 +54,7 @@ class SourceClient : public viz::ExternalBeginFrameSourceClient {
 
 class AdmissionObserver : public viz::BeginFrameObserverBase {
  public:
-  explicit AdmissionObserver(
-      base::RepeatingCallback<void(const viz::BeginFrameArgs&)> action)
+  explicit AdmissionObserver(base::RepeatingCallback<void(const viz::BeginFrameArgs&)> action)
       : action_(std::move(action)) {}
   void OnBeginFrameSourcePausedChanged(bool) override {}
   bool delivering = false;
@@ -77,23 +75,18 @@ class Damage : public viz::DisplayDamageTracker {
   using DisplayDamageTracker::DisplayDamageTracker;
   void SetMissing(bool missing) { SetRootFrameMissing(missing); }
   void UpdateRootFrameMissing() override { SetRootFrameMissing(false); }
-  bool SurfaceHasUnackedFrame(const viz::SurfaceId&) const override {
-    return false;
-  }
+  bool SurfaceHasUnackedFrame(const viz::SurfaceId&) const override { return false; }
 };
 
 class Scheduler : public viz::DisplayScheduler {
  public:
-  Scheduler(viz::BeginFrameSource* source,
-            base::SingleThreadTaskRunner* runner, Damage* damage)
+  Scheduler(viz::BeginFrameSource* source, base::SingleThreadTaskRunner* runner, Damage* damage)
       : DisplayScheduler(source, runner, viz::PendingSwapParams(1)) {
     SetDamageTracker(damage);
   }
   // Tests explicitly fire deadlines; all production transition logic runs.
   void ScheduleBeginFrameDeadline() override { ++deadline_schedules; }
-  void Admit(const viz::BeginFrameArgs& args) {
-    OnBeginFrameContinuation(args);
-  }
+  void Admit(const viz::BeginFrameArgs& args) { OnBeginFrameContinuation(args); }
   unsigned deadline_schedules = 0;
   bool active() const { return inside_begin_frame_deadline_interval_; }
   void Finish() {
@@ -115,8 +108,7 @@ class Client : public viz::DisplaySchedulerClient {
   void DidFinishFrame(const viz::BeginFrameId& id,
                       viz::DisplaySchedulerDrawResult result) override {
     finished.push_back(id);
-    std::cout << " finish " << id.ToString() << " result="
-              << static_cast<int>(result) << '\n';
+    std::cout << " finish " << id.ToString() << " result=" << static_cast<int>(result) << '\n';
   }
   raw_ptr<Scheduler> scheduler = nullptr;
   unsigned swaps = 0;
@@ -131,31 +123,32 @@ struct Fixture {
         provider(&images, &gpu_scheduler),
         aggregator(&manager, &provider, false),
         damage(&manager, &aggregator),
-        scheduler(&source, base::SingleThreadTaskRunner::GetCurrentDefault().get(),
-                  &damage) {
+        scheduler(&source, base::SingleThreadTaskRunner::GetCurrentDefault().get(), &damage) {
     client.scheduler = &scheduler;
     scheduler.SetClient(&client);
     scheduler.SetVisible(true);
     damage.SetNewRootSurface(viz::SurfaceId(
-        viz::FrameSinkId(1, 1),
-        viz::LocalSurfaceId(1, base::UnguessableToken::Create())));
+        viz::FrameSinkId(1, 1), viz::LocalSurfaceId(1, base::UnguessableToken::Create())));
   }
   ~Fixture() {
     // Drain synthetic swap accounting before destroying the real scheduler.
-    while (acks < client.swaps) Ack();
+    while (acks < client.swaps)
+      Ack();
   }
   viz::BeginFrameArgs Args() {
     const auto time = origin + base::Milliseconds(20) * ++serial;
     return viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE, 123, serial, time,
-                                     time + base::Milliseconds(20),
-                                     base::Milliseconds(20),
-                                     viz::BeginFrameArgs::NORMAL);
+                                       time + base::Milliseconds(20), base::Milliseconds(20),
+                                       viz::BeginFrameArgs::NORMAL);
   }
   void Issue(const viz::BeginFrameArgs& args) {
     source.OnBeginFrame(args);
     scheduler.SetNeedsOneBeginFrame(args, false);
   }
-  void Ack() { ++acks; scheduler.DidReceiveSwapBuffersAck(); }
+  void Ack() {
+    ++acks;
+    scheduler.DidReceiveSwapBuffersAck();
+  }
   void Expect(const std::vector<viz::BeginFrameArgs>& args) {
     CHECK_EQ(args.size(), client.finished.size());
     for (size_t i = 0; i < args.size(); ++i)
@@ -229,30 +222,28 @@ void SchedulerIdempotentAdmission() {
 void MojoStaleCompletion() {
   base::test::AllowCheckIsTestForTesting();
   mojo::core::Init();
-  viz::FrameSinkManagerImpl manager(
-      viz::FrameSinkManagerImpl::InitParams(nullptr));
+  viz::FrameSinkManagerImpl manager(viz::FrameSinkManagerImpl::InitParams(nullptr));
   const viz::FrameSinkId root(1, 1);
   manager.RegisterFrameSinkId(root, false);
   mojo::AssociatedRemote<viz::mojom::ExternalBeginFrameController> controller;
   viz::ExternalBeginFrameSourceMojo source(
-      &manager, controller.BindNewEndpointAndPassDedicatedReceiver(),
-      mojo::NullAssociatedRemote(), viz::BeginFrameSource::kNotRestartableId);
+      &manager, controller.BindNewEndpointAndPassDedicatedReceiver(), mojo::NullAssociatedRemote(),
+      viz::BeginFrameSource::kNotRestartableId);
   manager.RegisterBeginFrameSource(&source, root);
   auto& observer = static_cast<viz::DisplayObserver&>(source);
   const auto now = base::TimeTicks::Now();
   auto make_args = [&](uint64_t sequence) {
     const auto time = now + base::Milliseconds(20) * sequence;
     return viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE, 123, sequence, time,
-        time + base::Milliseconds(20), base::Milliseconds(20),
-        viz::BeginFrameArgs::NORMAL);
+                                       time + base::Milliseconds(20), base::Milliseconds(20),
+                                       viz::BeginFrameArgs::NORMAL);
   };
   const auto a = make_args(2), b = make_args(3);
   std::vector<viz::BeginFrameId> callbacks;
   auto callback = [&] {
     return base::BindOnce([](std::vector<viz::BeginFrameId>* out,
-                            const viz::BeginFrameAck& ack) {
-      out->push_back(ack.frame_id);
-    }, &callbacks);
+                             const viz::BeginFrameAck& ack) { out->push_back(ack.frame_id); },
+                          &callbacks);
   };
   source.IssueExternalBeginFrame(a, callback());
   viz::ExternalBeginFrameSourceMojoTestApi::EarlyNak(source);
@@ -264,26 +255,22 @@ void MojoStaleCompletion() {
   CHECK_EQ(source.pending_frame_sinks_for_testing().size(), 1u);
   manager.DidFinishFrame(root, a);
   CHECK_EQ(source.pending_frame_sinks_for_testing().size(), 1u);
-  observer.OnDisplayDidFinishFrame(a.frame_id,
-                                  viz::DisplaySchedulerDrawResult::kDidNotDraw);
+  observer.OnDisplayDidFinishFrame(a.frame_id, viz::DisplaySchedulerDrawResult::kDidNotDraw);
   CHECK_EQ(callbacks.size(), 1u);
   CHECK_EQ(viz::ExternalBeginFrameSourceMojoTestApi::RetiredCount(source), 0u);
   const auto* command = base::CommandLine::ForCurrentProcess();
   if (command->HasSwitch("mojo-foreign"))
     observer.OnDisplayDidFinishFrame(viz::BeginFrameId(124, 3),
-                                    viz::DisplaySchedulerDrawResult::kDidNotDraw);
+                                     viz::DisplaySchedulerDrawResult::kDidNotDraw);
   if (command->HasSwitch("mojo-future"))
     observer.OnDisplayDidFinishFrame(viz::BeginFrameId(123, 4),
-                                    viz::DisplaySchedulerDrawResult::kDidNotDraw);
+                                     viz::DisplaySchedulerDrawResult::kDidNotDraw);
   if (command->HasSwitch("mojo-unproven-old"))
-    observer.OnDisplayDidFinishFrame(a.frame_id,
-                                    viz::DisplaySchedulerDrawResult::kDidNotDraw);
+    observer.OnDisplayDidFinishFrame(a.frame_id, viz::DisplaySchedulerDrawResult::kDidNotDraw);
   // Before the fix, this hits !pending_ack_ with pending=A/original=B/incoming=B.
-  observer.OnDisplayDidFinishFrame(b.frame_id,
-                                  viz::DisplaySchedulerDrawResult::kDidNotDraw);
+  observer.OnDisplayDidFinishFrame(b.frame_id, viz::DisplaySchedulerDrawResult::kDidNotDraw);
   if (command->HasSwitch("mojo-duplicate"))
-    observer.OnDisplayDidFinishFrame(b.frame_id,
-                                    viz::DisplaySchedulerDrawResult::kDidNotDraw);
+    observer.OnDisplayDidFinishFrame(b.frame_id, viz::DisplaySchedulerDrawResult::kDidNotDraw);
   CHECK_EQ(callbacks.size(), 1u);
   manager.DidFinishFrame(root, b);
   CHECK_EQ(callbacks.size(), 2u);
@@ -301,32 +288,35 @@ void MojoStaleCompletion() {
   viz::ExternalBeginFrameSourceMojoTestApi::MaybeComplete(source);
   CHECK_EQ(callbacks.size(), 10u);
   observer.OnDisplayDidFinishFrame(make_args(18).frame_id,
-                                  viz::DisplaySchedulerDrawResult::kDidNotDraw);
+                                   viz::DisplaySchedulerDrawResult::kDidNotDraw);
   CHECK_EQ(callbacks.size(), 11u);
   CHECK_EQ(viz::ExternalBeginFrameSourceMojoTestApi::RetiredCount(source), 0u);
   // A callback may synchronously admit the next request in an embedder/test.
   // Completing C must not reset the ACK belonging to that newly admitted D.
   const auto c = make_args(20), d = make_args(21);
-  source.IssueExternalBeginFrame(c, base::BindOnce(
-      [](viz::ExternalBeginFrameSourceMojo* next_source,
-         std::vector<viz::BeginFrameId>* out, viz::FrameSinkId sink,
-         viz::BeginFrameArgs next, const viz::BeginFrameAck& ack) {
-        out->push_back(ack.frame_id);
-        next_source->IssueExternalBeginFrame(next, base::BindOnce(
-            [](std::vector<viz::BeginFrameId>* entries,
-               const viz::BeginFrameAck& next_ack) {
-              entries->push_back(next_ack.frame_id);
-            }, out));
-        // Test this source's reentrancy, not the manager's intentionally
-        // non-reentrant ObserverList traversal.
-        static_cast<viz::FrameSinkObserver*>(next_source)
-            ->OnFrameSinkDidBeginFrame(sink, next);
-        static_cast<viz::DisplayObserver*>(next_source)->OnDisplayDidFinishFrame(
-            next.frame_id, viz::DisplaySchedulerDrawResult::kDidNotDraw);
-      }, base::Unretained(&source), &callbacks, root, d));
+  source.IssueExternalBeginFrame(
+      c,
+      base::BindOnce(
+          [](viz::ExternalBeginFrameSourceMojo* next_source, std::vector<viz::BeginFrameId>* out,
+             viz::FrameSinkId sink, viz::BeginFrameArgs next, const viz::BeginFrameAck& ack) {
+            out->push_back(ack.frame_id);
+            next_source->IssueExternalBeginFrame(next,
+                                                 base::BindOnce(
+                                                     [](std::vector<viz::BeginFrameId>* entries,
+                                                        const viz::BeginFrameAck& next_ack) {
+                                                       entries->push_back(next_ack.frame_id);
+                                                     },
+                                                     out));
+            // Test this source's reentrancy, not the manager's intentionally
+            // non-reentrant ObserverList traversal.
+            static_cast<viz::FrameSinkObserver*>(next_source)->OnFrameSinkDidBeginFrame(sink, next);
+            static_cast<viz::DisplayObserver*>(next_source)
+                ->OnDisplayDidFinishFrame(next.frame_id,
+                                          viz::DisplaySchedulerDrawResult::kDidNotDraw);
+          },
+          base::Unretained(&source), &callbacks, root, d));
   manager.DidBeginFrame(root, c);
-  observer.OnDisplayDidFinishFrame(c.frame_id,
-                                  viz::DisplaySchedulerDrawResult::kDidNotDraw);
+  observer.OnDisplayDidFinishFrame(c.frame_id, viz::DisplaySchedulerDrawResult::kDidNotDraw);
   manager.DidFinishFrame(root, c);
   CHECK_EQ(callbacks.size(), 12u);
   CHECK(callbacks.back() == c.frame_id);
@@ -338,14 +328,13 @@ void MojoStaleCompletion() {
   mojo::AssociatedRemote<viz::mojom::ExternalBeginFrameController> fast_controller;
   viz::ExternalBeginFrameSourceMojo fast_source(
       &manager, fast_controller.BindNewEndpointAndPassDedicatedReceiver(),
-      mojo::NullAssociatedRemote(), viz::BeginFrameSource::kNotRestartableId,
-      false);
+      mojo::NullAssociatedRemote(), viz::BeginFrameSource::kNotRestartableId, false);
   manager.RegisterBeginFrameSource(&fast_source, root);
   const auto fast = make_args(30);
   fast_source.IssueExternalBeginFrame(fast, callback());
   manager.DidBeginFrame(root, fast);
-  static_cast<viz::DisplayObserver&>(fast_source).OnDisplayDidFinishFrame(
-      fast.frame_id, viz::DisplaySchedulerDrawResult::kDidNotDraw);
+  static_cast<viz::DisplayObserver&>(fast_source)
+      .OnDisplayDidFinishFrame(fast.frame_id, viz::DisplaySchedulerDrawResult::kDidNotDraw);
   CHECK_EQ(callbacks.size(), 14u);
   CHECK(fast_source.pending_frame_sinks_for_testing().empty());
   manager.UnregisterBeginFrameSource(&fast_source);
@@ -359,23 +348,21 @@ void MojoStaleCompletion() {
 void MojoSynchronousAdmission(bool wait_for_sinks) {
   base::test::AllowCheckIsTestForTesting();
   mojo::core::Init();
-  viz::FrameSinkManagerImpl manager(
-      viz::FrameSinkManagerImpl::InitParams(nullptr));
+  viz::FrameSinkManagerImpl manager(viz::FrameSinkManagerImpl::InitParams(nullptr));
   const viz::FrameSinkId root(1, 1), later(2, 2);
   manager.RegisterFrameSinkId(root, false);
   mojo::AssociatedRemote<viz::mojom::ExternalBeginFrameController> controller;
   viz::ExternalBeginFrameSourceMojo source(
-      &manager, controller.BindNewEndpointAndPassDedicatedReceiver(),
-      mojo::NullAssociatedRemote(), viz::BeginFrameSource::kNotRestartableId,
-      wait_for_sinks);
+      &manager, controller.BindNewEndpointAndPassDedicatedReceiver(), mojo::NullAssociatedRemote(),
+      viz::BeginFrameSource::kNotRestartableId, wait_for_sinks);
   manager.RegisterBeginFrameSource(&source, root);
   auto& display = static_cast<viz::DisplayObserver&>(source);
   const auto now = base::TimeTicks::Now();
   auto args = [&](uint64_t sequence) {
     const auto time = now + base::Milliseconds(20) * sequence;
-    return viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE, 321, sequence,
-        time, time + base::Milliseconds(20), base::Milliseconds(20),
-        viz::BeginFrameArgs::NORMAL);
+    return viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE, 321, sequence, time,
+                                       time + base::Milliseconds(20), base::Milliseconds(20),
+                                       viz::BeginFrameArgs::NORMAL);
   };
   const auto a = args(5), b = args(6);
   unsigned callbacks = 0;
@@ -386,38 +373,36 @@ void MojoSynchronousAdmission(bool wait_for_sinks) {
       manager.DidFinishFrame(root, incoming);
       CHECK_EQ(callbacks, 0u);  // Temporarily empty is not admission finished.
     }
-    display.OnDisplayDidFinishFrame(incoming.frame_id,
-                                    viz::DisplaySchedulerDrawResult::kDrawn);
+    display.OnDisplayDidFinishFrame(incoming.frame_id, viz::DisplaySchedulerDrawResult::kDrawn);
     CHECK_EQ(callbacks, 0u);
     if (base::CommandLine::ForCurrentProcess()->HasSwitch("mojo-sync-duplicate"))
-      display.OnDisplayDidFinishFrame(incoming.frame_id,
-                                      viz::DisplaySchedulerDrawResult::kDrawn);
+      display.OnDisplayDidFinishFrame(incoming.frame_id, viz::DisplaySchedulerDrawResult::kDrawn);
     if (incoming.frame_id == a.frame_id) {
       // This sink only registers after the display has already completed.
-      static_cast<viz::FrameSinkObserver&>(source)
-          .OnFrameSinkDidBeginFrame(later, incoming);
+      static_cast<viz::FrameSinkObserver&>(source).OnFrameSinkDidBeginFrame(later, incoming);
     }
   });
   AdmissionObserver observer(action);
   source.AddObserver(&observer);
-  source.IssueExternalBeginFrame(a, base::BindLambdaForTesting([&](const viz::BeginFrameAck& ack) {
-    CHECK(!observer.delivering);
-    CHECK(ack.frame_id == a.frame_id && ack.has_damage);
-    CHECK_EQ(callbacks, 0u);
-    // Callback reentry is safe only after the old fanout has fully unwound.
-    source.IssueExternalBeginFrame(b, base::BindLambdaForTesting([&](const viz::BeginFrameAck& next) {
-      CHECK(!observer.delivering);
-      CHECK(next.frame_id == b.frame_id && next.has_damage);
-      ++callbacks;
-    }));
-    ++callbacks;
-  }));
+  source.IssueExternalBeginFrame(
+      a, base::BindLambdaForTesting([&](const viz::BeginFrameAck& ack) {
+        CHECK(!observer.delivering);
+        CHECK(ack.frame_id == a.frame_id && ack.has_damage);
+        CHECK_EQ(callbacks, 0u);
+        // Callback reentry is safe only after the old fanout has fully unwound.
+        source.IssueExternalBeginFrame(
+            b, base::BindLambdaForTesting([&](const viz::BeginFrameAck& next) {
+              CHECK(!observer.delivering);
+              CHECK(next.frame_id == b.frame_id && next.has_damage);
+              ++callbacks;
+            }));
+        ++callbacks;
+      }));
   if (wait_for_sinks) {
     CHECK_EQ(callbacks, 0u);
     CHECK_EQ(source.pending_frame_sinks_for_testing().size(), 1u);
     if (base::CommandLine::ForCurrentProcess()->HasSwitch("mojo-pending-duplicate"))
-      display.OnDisplayDidFinishFrame(a.frame_id,
-                                      viz::DisplaySchedulerDrawResult::kDrawn);
+      display.OnDisplayDidFinishFrame(a.frame_id, viz::DisplaySchedulerDrawResult::kDrawn);
     static_cast<viz::FrameSinkObserver&>(source).OnFrameSinkDidFinishFrame(later, a);
   }
   CHECK_EQ(callbacks, 2u);
@@ -443,8 +428,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (command->HasSwitch("mojo-sync") || command->HasSwitch("mojo-sync-fast") ||
-      command->HasSwitch("mojo-sync-duplicate") ||
-      command->HasSwitch("mojo-pending-duplicate")) {
+      command->HasSwitch("mojo-sync-duplicate") || command->HasSwitch("mojo-pending-duplicate")) {
     MojoSynchronousAdmission(!command->HasSwitch("mojo-sync-fast"));
     return 0;
   }
@@ -457,24 +441,35 @@ int main(int argc, char** argv) {
   {
     std::cout << "idle/missed/scheduler-client\n";
     Fixture f;
-    auto a = f.Args(); f.Issue(a); f.scheduler.Finish(); f.Ack();
-    auto b = f.Args(); f.Issue(b); f.scheduler.Finish();
+    auto a = f.Args();
+    f.Issue(a);
+    f.scheduler.Finish();
+    f.Ack();
+    auto b = f.Args();
+    f.Issue(b);
+    f.scheduler.Finish();
     CHECK(!f.scheduler.active());
     // Source delivery while idle, followed by the controller forcing one frame.
-    auto c = f.Args(); f.Issue(c); f.scheduler.Finish();
+    auto c = f.Args();
+    f.Issue(c);
+    f.scheduler.Finish();
     f.Expect({a, b, c});
   }
   {
     std::cout << "gpu-busy/early-nak/deferred-resume\n";
     Fixture f;
-    auto x = f.Args(); f.Issue(x); f.scheduler.Finish();
+    auto x = f.Args();
+    f.Issue(x);
+    f.scheduler.Finish();
     // X's swap is unacknowledged. A is the one frame allowed while busy.
     // With a missing root, ExternalBeginFrameSourceMojo returns A's early NAK
     // without finishing this scheduler interval. Its caller can now issue B.
     f.damage.SetMissing(true);
-    auto a = f.Args(); f.Issue(a);
+    auto a = f.Args();
+    f.Issue(a);
     CHECK(f.scheduler.active());
-    auto b = f.Args(); f.Issue(b);  // GPU-busy defers source delivery of B.
+    auto b = f.Args();
+    f.Issue(b);  // GPU-busy defers source delivery of B.
     CHECK_EQ(f.client.finished.size(), 1u);
     f.Ack();
     // Resuming B first ends A synchronously. The Mojo request owner is already
@@ -489,11 +484,14 @@ int main(int argc, char** argv) {
   {
     std::cout << "resize/immediate-swap/deadline\n";
     Fixture f;
-    auto a = f.Args(); f.Issue(a);
+    auto a = f.Args();
+    f.Issue(a);
     f.scheduler.ForceImmediateSwapIfPossible();
     CHECK(!f.scheduler.active());
     f.Ack();
-    auto b = f.Args(); f.Issue(b); f.scheduler.Finish();
+    auto b = f.Args();
+    f.Issue(b);
+    f.scheduler.Finish();
     f.Expect({a, b});
   }
   std::cout << "3 scheduler lifecycle cases passed\n";

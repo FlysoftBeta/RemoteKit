@@ -23,13 +23,14 @@ void Responses() {
   int writes = 0;
   bool original_reply = false;
   const auto writer = base::BindRepeating(
-      [](std::string* output, int* write_count, bool* original,
-         std::string_view encoded, bool is_original) {
+      [](std::string* output, int* write_count, bool* original, std::string_view encoded,
+         bool is_original) {
         *output = encoded;
         ++*write_count;
         *original = is_original;
         return true;
-      }, base::Unretained(&wire), base::Unretained(&writes), base::Unretained(&original_reply));
+      },
+      base::Unretained(&wire), base::Unretained(&writes), base::Unretained(&original_reply));
   CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
   CHECK(original && wire == *original && writes == 1 && original_reply);
   reply.Set("data", std::string(1024 * 1024, 'x'));
@@ -49,8 +50,8 @@ void Responses() {
   CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
   CHECK(writes == 3 && wire == *base::WriteJson(reply) && original_reply);
   // Actual failed writes still take the transport failure path.
-  CHECK(!remotekit::browser::WriteControlResponse(request, reply,
-      base::BindRepeating([](std::string_view, bool) { return false; })));
+  CHECK(!remotekit::browser::WriteControlResponse(
+      request, reply, base::BindRepeating([](std::string_view, bool) { return false; })));
 }
 void RenderEndpointResponses() {
   base::DictValue request;
@@ -60,12 +61,13 @@ void RenderEndpointResponses() {
   reply.Set("render_channel", "opaque-token");
   int attachments = 0;
   const auto writer = base::BindRepeating(
-      [](const base::DictValue* request, const base::DictValue* reply, int* count,
-         std::string_view, bool original_reply) {
+      [](const base::DictValue* request, const base::DictValue* reply, int* count, std::string_view,
+         bool original_reply) {
         if (remotekit::browser::ShouldAttachRenderEndpoint(*request, *reply, original_reply))
           ++*count;
         return true;
-      }, base::Unretained(&request), base::Unretained(&reply), base::Unretained(&attachments));
+      },
+      base::Unretained(&request), base::Unretained(&reply), base::Unretained(&attachments));
   CHECK(remotekit::browser::WriteControlResponse(request, reply, writer));
   CHECK(attachments == 1);
   // The original object still claims success/token, but the actual serialized
@@ -100,19 +102,25 @@ void AcceptHints() {
   CHECK(!exported.omitted && exported.types.size() == 4);
   CHECK(exported.types[0].GetString() == "image/*");
   CHECK(exported.types[2].GetString() == ".tar.gz");
-  const auto invalid = ExportFileChooserAcceptHints({u".", u"not-a-mime", u".a,b", u"image/png;foo=bar", u".txt"});
+  const auto invalid =
+      ExportFileChooserAcceptHints({u".", u"not-a-mime", u".a,b", u"image/png;foo=bar", u".txt"});
   CHECK(invalid.omitted && invalid.types.size() == 1 && invalid.types[0].GetString() == ".txt");
-  std::vector<std::u16string> declarations{u"." + std::u16string(86, u'中'), u"." + std::u16string(255, u'a'), u".png"};
+  std::vector<std::u16string> declarations{u"." + std::u16string(86, u'中'),
+                                           u"." + std::u16string(255, u'a'), u".png"};
   const auto bytes = ExportFileChooserAcceptHints(declarations);
   CHECK(bytes.omitted && bytes.types.size() == 2);
   CHECK(bytes.types[0].GetString().size() == 256);
-  const auto malformed = ExportFileChooserAcceptHints({std::u16string{u'.', char16_t(0xd800)}, u".jpg"});
-  CHECK(malformed.omitted && malformed.types.size() == 1 && malformed.types[0].GetString() == ".jpg");
-  const auto all = ExportFileChooserAcceptHints(std::vector<std::u16string>(64, u"." + std::u16string(255, u'a')));
+  const auto malformed =
+      ExportFileChooserAcceptHints({std::u16string{u'.', char16_t(0xd800)}, u".jpg"});
+  CHECK(malformed.omitted && malformed.types.size() == 1 &&
+        malformed.types[0].GetString() == ".jpg");
+  const auto all = ExportFileChooserAcceptHints(
+      std::vector<std::u16string>(64, u"." + std::u16string(255, u'a')));
   CHECK(all.omitted && all.types.size() < 64);
   CHECK(base::WriteJson(all.types)->size() <= 16 * 1024);
   // Escaping contributes to the actual aggregate JSON budget as well.
-  const auto escaped = ExportFileChooserAcceptHints(std::vector<std::u16string>(64, u"." + std::u16string(255, u'"')));
+  const auto escaped = ExportFileChooserAcceptHints(
+      std::vector<std::u16string>(64, u"." + std::u16string(255, u'"')));
   CHECK(escaped.omitted && escaped.types.size() < all.types.size());
   CHECK(base::WriteJson(escaped.types)->size() <= 16 * 1024);
   const auto count = ExportFileChooserAcceptHints(std::vector<std::u16string>(65, u".txt"));

@@ -87,7 +87,7 @@ struct alignas(64) SharedRenderMapping {
   SharedAtlasFrame latest_layout;
   SharedRenderSlot slots[kSharedAtlasSlotCount];
 };
-inline constexpr std::uint32_t kSharedRenderMagic = 0x524B5253; // RKRS
+inline constexpr std::uint32_t kSharedRenderMagic = 0x524B5253;  // RKRS
 inline constexpr std::uint32_t kSharedRenderVersion = 2;
 inline constexpr std::uint32_t kRenderSlotCount = kSharedAtlasSlotCount;
 using RenderView = SharedAtlasView;
@@ -105,4 +105,4 @@ static_assert(offsetof(SharedRenderMapping, slots) == 7808);
 static_assert(sizeof(SharedRenderMapping) == 38784);
 // Only consumed_fences[slot] >= value releases that slot. UINT64_MAX means
 // device loss, never completion. No other slot's fence value releases it.
-} // namespace remotekit
+}  // namespace remotekit

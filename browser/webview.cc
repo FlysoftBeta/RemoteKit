@@ -27,22 +27,22 @@
 #include "third_party/blink/public/common/widget/device_emulation_params.h"
 #include "third_party/blink/public/mojom/page/widget.mojom.h"
 #include "components/input/render_widget_host_input_event_router.h"
-#include "content/browser/renderer_host/frame_tree.h"                    // nogncheck
-#include "content/browser/renderer_host/frame_tree_node.h"               // nogncheck
-#include "content/browser/renderer_host/navigation_request.h"            // nogncheck
-#include "content/browser/renderer_host/input/touch_emulator_impl.h"     // nogncheck
+#include "content/browser/renderer_host/frame_tree.h"                 // nogncheck
+#include "content/browser/renderer_host/frame_tree_node.h"            // nogncheck
+#include "content/browser/renderer_host/navigation_request.h"         // nogncheck
+#include "content/browser/renderer_host/input/touch_emulator_impl.h"  // nogncheck
 #include "browser/client_gesture_bridge.h"
-#include "content/browser/renderer_host/input/mouse_wheel_phase_handler.h"  // nogncheck
-#include "content/browser/renderer_host/page_lifecycle_state_manager.h"  // nogncheck
-#include "content/browser/renderer_host/render_frame_host_impl.h"        // nogncheck
+#include "content/browser/renderer_host/input/mouse_wheel_phase_handler.h"      // nogncheck
+#include "content/browser/renderer_host/page_lifecycle_state_manager.h"         // nogncheck
+#include "content/browser/renderer_host/render_frame_host_impl.h"               // nogncheck
 #include "content/browser/renderer_host/render_frame_metadata_provider_impl.h"  // nogncheck
-#include "content/browser/renderer_host/render_view_host_impl.h"         // nogncheck
-#include "content/browser/renderer_host/render_widget_host_delegate.h"   // nogncheck
-#include "content/browser/renderer_host/render_widget_host_impl.h"       // nogncheck
-#include "content/browser/renderer_host/render_widget_host_view_base.h"  // nogncheck
-#include "content/browser/renderer_host/render_widget_host_view_aura.h"  // nogncheck
-#include "content/browser/renderer_host/text_input_manager.h"            // nogncheck
-#include "content/browser/web_contents/web_contents_impl.h"              // nogncheck
+#include "content/browser/renderer_host/render_view_host_impl.h"                // nogncheck
+#include "content/browser/renderer_host/render_widget_host_delegate.h"          // nogncheck
+#include "content/browser/renderer_host/render_widget_host_impl.h"              // nogncheck
+#include "content/browser/renderer_host/render_widget_host_view_base.h"         // nogncheck
+#include "content/browser/renderer_host/render_widget_host_view_aura.h"         // nogncheck
+#include "content/browser/renderer_host/text_input_manager.h"                   // nogncheck
+#include "content/browser/web_contents/web_contents_impl.h"                     // nogncheck
 #include "content/public/browser/devtools_agent_host.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_handle.h"
@@ -146,11 +146,16 @@ constexpr blink::WebPointerProperties::Button MouseMoveButton(std::uint32_t modi
   // Blink uses button on moves to retain drag/scrollbar state. The wire button
   // describes the changed button, so moves instead use the held-button flags.
   // Match ui::MakeWebMouseEvent's ordering for chorded mouse buttons.
-  if (modifiers & blink::WebInputEvent::kRightButtonDown) return B::kRight;
-  if (modifiers & blink::WebInputEvent::kMiddleButtonDown) return B::kMiddle;
-  if (modifiers & blink::WebInputEvent::kLeftButtonDown) return B::kLeft;
-  if (modifiers & blink::WebInputEvent::kForwardButtonDown) return B::kForward;
-  if (modifiers & blink::WebInputEvent::kBackButtonDown) return B::kBack;
+  if (modifiers & blink::WebInputEvent::kRightButtonDown)
+    return B::kRight;
+  if (modifiers & blink::WebInputEvent::kMiddleButtonDown)
+    return B::kMiddle;
+  if (modifiers & blink::WebInputEvent::kLeftButtonDown)
+    return B::kLeft;
+  if (modifiers & blink::WebInputEvent::kForwardButtonDown)
+    return B::kForward;
+  if (modifiers & blink::WebInputEvent::kBackButtonDown)
+    return B::kBack;
   return B::kNoButton;
 }
 static_assert(MouseMoveButton(0) == blink::WebPointerProperties::Button::kNoButton);
@@ -191,8 +196,12 @@ WebView::WebView(content::BrowserContext* context,
                  Endpoint* endpoint,
                  SessionId session,
                  WebViewId view,
-                 bool offscreen_host, std::unique_ptr<content::WebContents> adopted)
-    : context_(context), endpoint_(endpoint), session_(session), view_(view),
+                 bool offscreen_host,
+                 std::unique_ptr<content::WebContents> adopted)
+    : context_(context),
+      endpoint_(endpoint),
+      session_(session),
+      view_(view),
       use_offscreen_host_(offscreen_host) {
   DeviceAdapters().push_back(this);
   CHECK(context_);
@@ -242,32 +251,38 @@ void WebView::CreateContents(std::unique_ptr<content::WebContents> adopted) {
   implementation->GetTouchEmulator(true);
 }
 void WebView::AttachOffscreenHost() {
-  if (!use_offscreen_host_ || !contents_) return;
-  offscreen_host_ = std::make_unique<OffscreenHost>(contents_.get(),
-      gfx::Size(std::max(1, viewport_width_ ? viewport_width_ : 480),
-                std::max(1, viewport_height_ ? viewport_height_ : 360)));
+  if (!use_offscreen_host_ || !contents_)
+    return;
+  offscreen_host_ = std::make_unique<OffscreenHost>(
+      contents_.get(), gfx::Size(std::max(1, viewport_width_ ? viewport_width_ : 480),
+                                 std::max(1, viewport_height_ ? viewport_height_ : 360)));
   offscreen_host_->SetRenderDemand(render_demand_ && visible_);
 }
 void WebView::DropContents() {
   text_input_observation_.Reset();
   editable_target_.reset();
   auto host = std::move(offscreen_host_);
-  if (host) host->Detach();
+  if (host)
+    host->Detach();
   contents_.reset();
   OffscreenHost::Retire(std::move(host));
 }
 void WebView::SetRenderDemand(bool enabled) {
   render_demand_ = enabled;
-  if (!use_offscreen_host_) return;
-  if (offscreen_host_) offscreen_host_->SetRenderDemand(enabled && visible_);
+  if (!use_offscreen_host_)
+    return;
+  if (offscreen_host_)
+    offscreen_host_->SetRenderDemand(enabled && visible_);
 }
 void WebView::OverridePreferences(content::WebContents* contents,
-                                   blink::web_pref::WebPreferences* prefs) {
+                                  blink::web_pref::WebPreferences* prefs) {
   for (auto* adapter : DeviceAdapters()) {
-    if (adapter->contents() != contents || !adapter->tablet_) continue;
+    if (adapter->contents() != contents || !adapter->tablet_)
+      continue;
     prefs->touch_event_feature_detection_enabled = true;
     prefs->pointer_events_max_touch_points = 10;
-    prefs->available_pointer_types = static_cast<int>(blink::mojom::PointerType::kPointerCoarseType);
+    prefs->available_pointer_types =
+        static_cast<int>(blink::mojom::PointerType::kPointerCoarseType);
     prefs->primary_pointer_type = blink::mojom::PointerType::kPointerCoarseType;
     prefs->available_hover_types = static_cast<int>(blink::mojom::HoverType::kHoverNone);
     prefs->primary_hover_type = blink::mojom::HoverType::kHoverNone;
@@ -281,8 +296,8 @@ void WebView::InvalidateLayoutInput(bool remains_visible) {
     ReleaseKeyboard(true, true);
   } else {
     const auto* state = UpdateEditableTarget(text_input_observation_.GetSource());
-    const bool preserve = state && KeyboardTargetAlive() &&
-                          keyboard_editable_target_id_ == last_editable_target_id_;
+    const bool preserve =
+        state && KeyboardTargetAlive() && keyboard_editable_target_id_ == last_editable_target_id_;
     // Coordinate tokens and held keys expire with layout. Composition still
     // belongs to the same editable node and can continue under the new token.
     ReleaseHeldKeys(true);
@@ -295,12 +310,14 @@ void WebView::InvalidateLayoutInput(bool remains_visible) {
   ReleasePointer(true);
   endpoint_->InvalidateInput(session_, view_);
 }
-void WebView::ConfigureDevice(int width, int height, bool tablet, float scale,
-                             bool match_page_backing) {
+void WebView::ConfigureDevice(int width,
+                              int height,
+                              bool tablet,
+                              float scale,
+                              bool match_page_backing) {
   const bool mode_changed = tablet_ != tablet;
-  const bool changed = viewport_width_ != width || viewport_height_ != height ||
-                       mode_changed || device_scale_ != scale ||
-                       match_page_backing_ != match_page_backing;
+  const bool changed = viewport_width_ != width || viewport_height_ != height || mode_changed ||
+                       device_scale_ != scale || match_page_backing_ != match_page_backing;
   if (match_page_backing_ && !match_page_backing) {
     if (auto* native_view = RootView(contents_.get()))
       native_view->SetScaleOverrideForCapture(1.0f);
@@ -311,8 +328,10 @@ void WebView::ConfigureDevice(int width, int height, bool tablet, float scale,
   viewport_height_ = height;
   tablet_ = tablet;
   device_scale_ = scale;
-  if (offscreen_host_) offscreen_host_->SetViewport(gfx::Size(width, height));
-  if (!contents_ || !changed) return;
+  if (offscreen_host_)
+    offscreen_host_->SetViewport(gfx::Size(width, height));
+  if (!contents_ || !changed)
+    return;
   contents_->OnWebPreferencesChanged();
   ApplyDevice();
 }
@@ -333,8 +352,7 @@ void WebView::ApplyBackingScale(content::RenderWidgetHostViewBase* native_view) 
     return;
   // Match GetNewScreenInfosForUpdate's original display selection. Never use
   // GetDeviceScaleFactor as the denominator: it already includes our override.
-  const auto display = window ? screen->GetDisplayNearestView(window)
-                              : screen->GetPrimaryDisplay();
+  const auto display = window ? screen->GetDisplayNearestView(window) : screen->GetPrimaryDisplay();
   const float native_scale = display.device_scale_factor();
   if (!std::isfinite(native_scale) || native_scale <= 0)
     return;
@@ -346,21 +364,26 @@ void WebView::ApplyBackingScale(content::RenderWidgetHostViewBase* native_view) 
     native_view->SetScaleOverrideForCapture(multiplier);
 }
 void WebView::ApplyDevice(content::RenderFrameHost* frame) {
-  if (!contents_ || !viewport_width_ || !viewport_height_) return;
-  if (!frame) frame = contents_->GetPrimaryMainFrame();
-  if (!frame || frame->GetParentOrOuterDocument()) return;
+  if (!contents_ || !viewport_width_ || !viewport_height_)
+    return;
+  if (!frame)
+    frame = contents_->GetPrimaryMainFrame();
+  if (!frame || frame->GetParentOrOuterDocument())
+    return;
   auto* host = static_cast<content::RenderFrameHostImpl*>(frame)->GetRenderWidgetHost();
   ApplyBackingScale(host->GetView());
   auto& widget = host->GetAssociatedFrameWidget();
-  if (!widget) return;
+  if (!widget)
+    return;
   blink::DeviceEmulationParams params;
-  params.screen_type = tablet_ ? blink::mojom::EmulatedScreenType::kMobile :
-                                blink::mojom::EmulatedScreenType::kDesktop;
+  params.screen_type = tablet_ ? blink::mojom::EmulatedScreenType::kMobile
+                               : blink::mojom::EmulatedScreenType::kDesktop;
   params.screen_size = gfx::Size(viewport_width_, viewport_height_);
   params.view_size = params.screen_size;
   params.device_scale_factor = device_scale_;
-  params.screen_orientation_type = viewport_width_ > viewport_height_ ?
-      display::mojom::ScreenOrientation::kLandscapePrimary : display::mojom::ScreenOrientation::kPortraitPrimary;
+  params.screen_orientation_type = viewport_width_ > viewport_height_
+                                       ? display::mojom::ScreenOrientation::kLandscapePrimary
+                                       : display::mojom::ScreenOrientation::kPortraitPrimary;
   params.screen_orientation_angle = viewport_width_ > viewport_height_ ? 90 : 0;
   params.force_viewport_meta = tablet_;
   params.force_text_size_adjust = tablet_;
@@ -430,30 +453,35 @@ Status WebView::Navigate(const GURL& url, const base::DictValue* operation) {
 }
 Status WebView::NavigationCommand(const base::DictValue& request) {
   const auto* action = request.FindString("action");
-  if (!action || (*action != "back" && *action != "forward" &&
-                  *action != "reload" && *action != "stop"))
+  if (!action ||
+      (*action != "back" && *action != "forward" && *action != "reload" && *action != "stop"))
     return Fail(Error::invalid, "invalid_navigation_action");
   return RunNavigation(*action, GURL(), &request);
 }
-std::optional<Status> WebView::ExistingNavigationOperation(
-    const GURL& url, const base::DictValue& request) {
+std::optional<Status> WebView::ExistingNavigationOperation(const GURL& url,
+                                                           const base::DictValue& request) {
   if (!request.Find("operationId") && !request.Find("operationGeneration") &&
-      !request.Find("operationSequence")) return std::nullopt;
+      !request.Find("operationSequence"))
+    return std::nullopt;
   const auto* id = request.FindString("operationId");
   const auto* generation = request.FindString("operationGeneration");
   const auto* sequence = request.FindString("operationSequence");
   std::uint64_t parsed = 0;
   if (!id || !generation || !sequence || !base::StringToUint64(*sequence, &parsed))
     return Fail(Error::invalid, "navigation_operation_identity_required");
-  const auto result = navigation_operations_.Check({*id, *generation, parsed}, "navigate\n" + url.spec());
+  const auto result =
+      navigation_operations_.Check({*id, *generation, parsed}, "navigate\n" + url.spec());
   using Acceptance = NavigationOperations::Acceptance;
-  if (result == Acceptance::fresh) return std::nullopt;
+  if (result == Acceptance::fresh)
+    return std::nullopt;
   if (result == Acceptance::duplicate) {
     const auto* record = navigation_operations_.Find({*id, *generation, parsed});
     return record->admitted ? Status{} : Status{Error::unavailable, record->error};
   }
-  if (result == Acceptance::stale) return Fail(Error::stale, "stale_navigation_operation");
-  if (result == Acceptance::full) return Fail(Error::busy, "navigation_operation_capacity");
+  if (result == Acceptance::stale)
+    return Fail(Error::stale, "stale_navigation_operation");
+  if (result == Acceptance::full)
+    return Fail(Error::busy, "navigation_operation_capacity");
   return Fail(Error::invalid, "navigation_operation_conflict");
 }
 NavigationOperations WebView::ReleaseNavigationOperations() {
@@ -471,7 +499,8 @@ Status WebView::AcknowledgeNavigation(const base::DictValue& request) {
   if (!id || id->empty() || !generation || generation->empty())
     return Fail(Error::invalid, "navigation_operation_identity_required");
   return navigation_operations_.Ack({*id, *generation, 0})
-             ? Status{} : Fail(Error::busy, "navigation_operation_pending");
+             ? Status{}
+             : Fail(Error::busy, "navigation_operation_pending");
 }
 base::ListValue WebView::NavigationOperationSnapshot() const {
   base::ListValue result;
@@ -485,14 +514,18 @@ base::ListValue WebView::NavigationOperationSnapshot() const {
       value.Set("documentCommitted", record.document_committed);
       value.Set("isErrorPage", record.is_error_page);
     }
-    if (record.navigation_id) value.Set("navigationId", base::NumberToString(record.navigation_id));
-    if (!record.url.empty()) value.Set("url", record.url);
-    if (!record.error.empty()) value.Set("error", record.error);
+    if (record.navigation_id)
+      value.Set("navigationId", base::NumberToString(record.navigation_id));
+    if (!record.url.empty())
+      value.Set("url", record.url);
+    if (!record.error.empty())
+      value.Set("error", record.error);
     result.Append(std::move(value));
   }
   return result;
 }
-Status WebView::RunNavigation(const std::string& action, const GURL& url,
+Status WebView::RunNavigation(const std::string& action,
+                              const GURL& url,
                               const base::DictValue* request) {
   NavigationOperations::Record* operation = nullptr;
   std::optional<NavigationOperations::Identity> identity;
@@ -511,8 +544,10 @@ Status WebView::RunNavigation(const std::string& action, const GURL& url,
       const auto* original = navigation_operations_.Find(*identity);
       return original->admitted ? Status{} : Status{Error::unavailable, original->error};
     }
-    if (accepted == Acceptance::full) return Fail(Error::busy, "navigation_operation_capacity");
-    if (accepted == Acceptance::stale) return Fail(Error::stale, "stale_navigation_operation");
+    if (accepted == Acceptance::full)
+      return Fail(Error::busy, "navigation_operation_capacity");
+    if (accepted == Acceptance::stale)
+      return Fail(Error::stale, "stale_navigation_operation");
     if (accepted != Acceptance::fresh)
       return Fail(Error::invalid, "navigation_operation_conflict");
     operation = navigation_operations_.Find(*identity);
@@ -521,30 +556,38 @@ Status WebView::RunNavigation(const std::string& action, const GURL& url,
   const auto* model = endpoint_->FindWebView(session_, view_);
   if (lifecycle_uncertain_ || !contents_ || !model || model->actual != Residency::live ||
       model->pending) {
-    if (operation) navigation_operations_.Finish(*operation, "failed", "view_unavailable");
+    if (operation)
+      navigation_operations_.Finish(*operation, "failed", "view_unavailable");
     return Fail(Error::unavailable, "WebView cannot navigate in this state");
   }
   auto& controller = contents_->GetController();
   const char* invalid = nullptr;
-  if (action == "back" && !controller.CanGoBack()) invalid = "no_back_entry";
-  if (action == "forward" && !controller.CanGoForward()) invalid = "no_forward_entry";
+  if (action == "back" && !controller.CanGoBack())
+    invalid = "no_back_entry";
+  if (action == "forward" && !controller.CanGoForward())
+    invalid = "no_forward_entry";
   // A repost prompt has no product reply protocol. Do not guess a navigation
   // identity or silently replay POST data as a GET.
   if (action == "reload" && controller.GetLastCommittedEntry() &&
-      controller.GetLastCommittedEntry()->GetHasPostData()) invalid = "reload_post_confirmation_unsupported";
+      controller.GetLastCommittedEntry()->GetHasPostData())
+    invalid = "reload_post_confirmation_unsupported";
   if (invalid) {
-    if (operation) navigation_operations_.Finish(*operation, "failed", invalid);
+    if (operation)
+      navigation_operations_.Finish(*operation, "failed", invalid);
     return Fail(Error::unavailable, invalid);
   }
-  if (operation) operation->admitted = true;
+  if (operation)
+    operation->admitted = true;
   if (action == "stop") {
     for (const auto& [key, record] : navigation_operations_.records()) {
-      if (operation == &record) continue;
+      if (operation == &record)
+        continue;
       if (auto* current = navigation_operations_.Find(record.identity))
         navigation_operations_.Finish(*current, "cancelled", "stopped");
     }
     contents_->Stop();
-    if (operation) navigation_operations_.Finish(*operation, "committed");
+    if (operation)
+      navigation_operations_.Finish(*operation, "committed");
     return {};
   }
   // A command owns only handles created by this controller call. Subsequent
@@ -556,13 +599,15 @@ Status WebView::RunNavigation(const std::string& action, const GURL& url,
   bool cancelled_during_start = false;
   if (action == "navigate") {
     content::NavigationController::LoadURLParams params(url);
-    params.override_user_agent = tablet_ ? content::NavigationController::UA_OVERRIDE_TRUE :
-                                         content::NavigationController::UA_OVERRIDE_FALSE;
+    params.override_user_agent = tablet_ ? content::NavigationController::UA_OVERRIDE_TRUE
+                                         : content::NavigationController::UA_OVERRIDE_FALSE;
     auto result = controller.LoadURLWithParamsForResult(params);
-    if (result.has_value()) handles.push_back(result.value());
+    if (result.has_value())
+      handles.push_back(result.value());
     else {
       no_navigation = true;
-      cancelled_during_start = result.error() == content::NavigationNotStartedReason::kCancelledDuringStart;
+      cancelled_during_start =
+          result.error() == content::NavigationNotStartedReason::kCancelledDuringStart;
     }
   } else if (action == "back") {
     handles = controller.GoBack();
@@ -574,12 +619,15 @@ Status WebView::RunNavigation(const std::string& action, const GURL& url,
     // that call, including a request waiting for beforeunload, rather than
     // assigning the next unrelated DidStartNavigation to this operation.
     auto* reload_request = static_cast<content::WebContentsImpl*>(contents_.get())
-                               ->GetPrimaryFrameTree().root()->navigation_request();
+                               ->GetPrimaryFrameTree()
+                               .root()
+                               ->navigation_request();
     if (reload_request && reload_request->GetReloadType() != content::ReloadType::NONE)
       handles.push_back(reload_request->GetWeakPtr());
   }
   for (const auto& handle : handles) {
-    if (!handle) continue;
+    if (!handle)
+      continue;
     BindNavigation(handle.get(), false);
     navigation_handles_[handle->GetNavigationId()] = handle;
   }
@@ -588,23 +636,27 @@ Status WebView::RunNavigation(const std::string& action, const GURL& url,
     navigation_operations_.EndCollection(*operation);
     if (!operation->terminal() && operation->handles.empty())
       navigation_operations_.Finish(*operation, cancelled_during_start ? "cancelled" : "failed",
-          cancelled_during_start ? "navigation_cancelled_during_start" :
-          no_navigation ? "navigation_not_started" : "no_navigation_created");
+                                    cancelled_during_start ? "navigation_cancelled_during_start"
+                                    : no_navigation        ? "navigation_not_started"
+                                                           : "no_navigation_created");
   }
   if (!navigation_handles_.empty() && !navigation_operation_timer_.IsRunning())
     navigation_operation_timer_.Start(FROM_HERE, base::Milliseconds(50), this,
-                                     &WebView::PollNavigationOperations);
+                                      &WebView::PollNavigationOperations);
   return {};
 }
 void WebView::BindNavigation(content::NavigationHandle* navigation, bool started) {
   auto* record = navigation_operations_.ByNavigation(navigation->GetNavigationId());
   if (!record && issuing_navigation_ && !navigation->IsRendererInitiated()) {
     record = navigation_operations_.Find(*issuing_navigation_);
-    if (record && record->terminal()) record = nullptr;
+    if (record && record->terminal())
+      record = nullptr;
   }
-  if (!record) return;
+  if (!record)
+    return;
   navigation_operations_.Bind(*record, navigation->GetNavigationId(),
-      navigation->IsInPrimaryMainFrame(), started, navigation->GetURL().spec());
+                              navigation->IsInPrimaryMainFrame(), started,
+                              navigation->GetURL().spec());
 }
 void WebView::PollNavigationOperations() {
   for (auto it = navigation_handles_.begin(); it != navigation_handles_.end();) {
@@ -613,11 +665,15 @@ void WebView::PollNavigationOperations() {
       // Chromium explicitly permits a pre-start handle to disappear without
       // DidFinishNavigation. A committed handle has already been made terminal
       // in DidFinishNavigation before its weak pointer expires.
-      if (record) navigation_operations_.Complete(*record, it->first, "cancelled", "navigation_destroyed_before_finish");
+      if (record)
+        navigation_operations_.Complete(*record, it->first, "cancelled",
+                                        "navigation_destroyed_before_finish");
       it = navigation_handles_.erase(it);
-    } else ++it;
+    } else
+      ++it;
   }
-  if (navigation_handles_.empty()) navigation_operation_timer_.Stop();
+  if (navigation_handles_.empty())
+    navigation_operation_timer_.Stop();
 }
 void WebView::BeforeUnloadDialogCancelled() {
   PollNavigationOperations();
@@ -642,7 +698,8 @@ Status WebView::SetVisible(bool visible) {
       return status;
   }
   visible_ = visible;
-  if (offscreen_host_) offscreen_host_->SetRenderDemand(visible && render_demand_);
+  if (offscreen_host_)
+    offscreen_host_->SetRenderDemand(visible && render_demand_);
   if (visible)
     contents_->WasShown();
   else
@@ -775,10 +832,9 @@ const ui::mojom::TextInputState* WebView::UpdateEditableTarget(content::TextInpu
   auto* focused = contents_ ? contents_->GetFocusedFrame() : nullptr;
   const auto* state = active ? manager->GetTextInputState() : nullptr;
   if (!visible_ || !model || !model->focused || model->actual != Residency::live ||
-      model->pending || !input_commit_navigations_.empty() || lifecycle_uncertain_ ||
-      !active || !active->GetView() || !InputFrameReady(focused) ||
-      active != focused->GetRenderWidgetHost() || !state || !state->node_id ||
-      state->type == ui::TEXT_INPUT_TYPE_NONE) {
+      model->pending || !input_commit_navigations_.empty() || lifecycle_uncertain_ || !active ||
+      !active->GetView() || !InputFrameReady(focused) || active != focused->GetRenderWidgetHost() ||
+      !state || !state->node_id || state->type == ui::TEXT_INPUT_TYPE_NONE) {
     editable_target_.reset();
     return nullptr;
   }
@@ -787,14 +843,15 @@ const ui::mojom::TextInputState* WebView::UpdateEditableTarget(content::TextInpu
   if (!editable_target_ || editable_target_->widget.get() != active ||
       editable_target_->frame.get() != frame || editable_target_->document != document ||
       editable_target_->node_id != state->node_id) {
-    editable_target_ = EditableTarget{active->GetWeakPtr(), frame->GetWeakPtr(),
-                                      document, state->node_id};
+    editable_target_ =
+        EditableTarget{active->GetWeakPtr(), frame->GetWeakPtr(), document, state->node_id};
     CHECK(++last_editable_target_id_);
   }
   return state;
 }
 void WebView::OnUpdateTextInputStateCalled(content::TextInputManager* manager,
-                                          content::RenderWidgetHostViewBase*, bool) {
+                                           content::RenderWidgetHostViewBase*,
+                                           bool) {
   UpdateEditableTarget(manager);
 }
 SharedAtlasTextInput WebView::TextInputState() {
@@ -864,7 +921,8 @@ Status WebView::Focus(bool focused) {
   if (contents_) {
     if (focused && (native_focus_enabled_ || offscreen_host_))
       contents_->Focus();
-    if (!focused && offscreen_host_) offscreen_host_->ClearFocus();
+    if (!focused && offscreen_host_)
+      offscreen_host_->ClearFocus();
     if (auto* host = RootWidget(contents_.get())) {
       host->SetActive(focused);
       if (focused)
@@ -945,7 +1003,8 @@ base::DictValue WebView::CompositorDiagnostics() const {
   timing.Set("logicalPixelsPerInch", 96.0);
 #endif
   result.Set("touchTiming", std::move(timing));
-  if (offscreen_host_) result.Set("renderHost", offscreen_host_->Diagnostics());
+  if (offscreen_host_)
+    result.Set("renderHost", offscreen_host_->Diagnostics());
   auto* native_view = RootView(contents_.get());
   if (!native_view)
     return result;
@@ -961,8 +1020,8 @@ base::DictValue WebView::CompositorDiagnostics() const {
   result.Set("pageBackingScaleOverride", native_view->GetScaleOverrideForCapture());
   if (auto* screen = display::Screen::Get()) {
     auto* window = native_view->GetNativeView();
-    const auto display = window ? screen->GetDisplayNearestView(window)
-                                : screen->GetPrimaryDisplay();
+    const auto display =
+        window ? screen->GetDisplayNearestView(window) : screen->GetPrimaryDisplay();
     result.Set("hostDisplayDeviceScaleFactor", display.device_scale_factor());
   }
   const auto requested = native_view->GetRequestedRendererSizeDevicePx();
@@ -971,16 +1030,13 @@ base::DictValue WebView::CompositorDiagnostics() const {
   const auto viewport = native_view->GetCompositorViewportPixelSize();
   if (!viewport.IsEmpty())
     result.Set("compositorViewportPixels", size_value(viewport));
-  if (auto* host = content::RenderWidgetHostImpl::From(
-          native_view->GetRenderWidgetHost())) {
+  if (auto* host = content::RenderWidgetHostImpl::From(native_view->GetRenderWidgetHost())) {
     // This is the last metadata already delivered to the browser; do not turn
     // on ReportAllFrameSubmissionsForTesting or introduce per-frame IPC.
-    const auto& metadata =
-        host->render_frame_metadata_provider()->LastRenderFrameMetadata();
+    const auto& metadata = host->render_frame_metadata_provider()->LastRenderFrameMetadata();
     if (!metadata.viewport_size_in_pixels.IsEmpty()) {
       base::DictValue submitted;
-      if (std::isfinite(metadata.device_scale_factor) &&
-          metadata.device_scale_factor > 0)
+      if (std::isfinite(metadata.device_scale_factor) && metadata.device_scale_factor > 0)
         submitted.Set("deviceScaleFactor", metadata.device_scale_factor);
       submitted.Set("viewportPixels", size_value(metadata.viewport_size_in_pixels));
       result.Set("lastSubmittedFrame", std::move(submitted));
@@ -1009,13 +1065,12 @@ void WebView::RefreshClientTouchOwner() {
   }
 }
 
-ClientTouchRetirement::State WebView::RetireClientTouch(
-    const InputToken& token, const std::string& sequence) {
+ClientTouchRetirement::State WebView::RetireClientTouch(const InputToken& token,
+                                                        const std::string& sequence) {
   using State = ClientTouchRetirement::State;
   RefreshClientTouchOwner();
   const auto prior = ClientTouchStatus(token, sequence);
-  if (prior != State::unknown || client_touch_token_ != token ||
-      client_touch_sequence_ != sequence)
+  if (prior != State::unknown || client_touch_token_ != token || client_touch_sequence_ != sequence)
     return prior;
   auto weak = weak_factory_.GetWeakPtr();
   if (touch_hit_test_pending_) {
@@ -1105,27 +1160,32 @@ void WebView::CancelTouches(bool deliver) {
       touch_cleanup_pending_ = false;
       touch_owner_lost_ = false;
     }
-    if (touch_cleanup_pending_) return;
+    if (touch_cleanup_pending_)
+      return;
     if (deliver && TouchTargetAlive() && !touches_.empty()) {
       TouchInput cancel;
       cancel.action = TouchInput::Action::cancel;
       cancel.client_gestures = true;
       cancel.clock = touch_clock_;
       InjectTouches(cancel);
-      if (!weak_self) return;
+      if (!weak_self)
+        return;
     }
     client_gesture_bridge_->Cancel(deliver);
-    if (!weak_self) return;
+    if (!weak_self)
+      return;
     touch_cleanup_pending_ = touch_pending_callbacks_ != 0;
     touches_.clear();
     touch_pointer_ids_.clear();
     touch_clock_.reset();
     touch_hit_test_pending_ = false;
     ++touch_epoch_;
-    if (touch_cleanup_pending_) return;
+    if (touch_cleanup_pending_)
+      return;
     client_gesture_bridge_.reset();
   }
-  if (!touches_.empty() || touch_hit_test_pending_) ++touch_cancelled_;
+  if (!touches_.empty() || touch_hit_test_pending_)
+    ++touch_cancelled_;
   touch_clock_.reset();
   ++touch_epoch_;
   touch_hit_test_pending_ = false;
@@ -1216,20 +1276,28 @@ void WebView::OnTouchProcessed(std::uint64_t expected) {
   }
 }
 
-void WebView::OnClientTouchProcessed(InputToken token, const std::string& sequence,
-                                     ClientTouchAckState ack, bool terminal, bool drained) {
-  if (client_touch_token_ != token || client_touch_sequence_ != sequence) return;
+void WebView::OnClientTouchProcessed(InputToken token,
+                                     const std::string& sequence,
+                                     ClientTouchAckState ack,
+                                     bool terminal,
+                                     bool drained) {
+  if (client_touch_token_ != token || client_touch_sequence_ != sequence)
+    return;
   using State = ClientTouchRetirement::State;
   if (ack != ClientTouchAckState::timeout && touch_pending_callbacks_)
     --touch_pending_callbacks_;
   if (ack != ClientTouchAckState::canonical) {
     const bool invalidated = !TouchTargetAlive();
-    if (ack == ClientTouchAckState::target_mismatch) client_touch_ack_mismatch_ = true;
-    if (invalidated) retired_client_touches_.Retire(token, sequence, true);
-    else retired_client_touches_.Resolve(token, sequence, State::unconfirmed);
+    if (ack == ClientTouchAckState::target_mismatch)
+      client_touch_ack_mismatch_ = true;
+    if (invalidated)
+      retired_client_touches_.Retire(token, sequence, true);
+    else
+      retired_client_touches_.Resolve(token, sequence, State::unconfirmed);
     touch_owner_lost_ = !invalidated;
     touch_status_ = Fail(Error::stale, "Client touch owner/ACK invalidated");
-    if (invalidated) CancelTouches(false);
+    if (invalidated)
+      CancelTouches(false);
   } else if (terminal && drained && !touch_pending_callbacks_ && !client_touch_ack_mismatch_) {
     retired_client_touches_.Resolve(token, sequence, State::processed);
     if (ClientTouchStatus(token, sequence) == State::processed) {
@@ -1239,8 +1307,8 @@ void WebView::OnClientTouchProcessed(InputToken token, const std::string& sequen
   }
   if (touch_cleanup_pending_ && !touch_pending_callbacks_) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(&WebView::FinishTouchCleanup,
-                                 weak_factory_.GetWeakPtr(), touch_ack_epoch_));
+        FROM_HERE,
+        base::BindOnce(&WebView::FinishTouchCleanup, weak_factory_.GetWeakPtr(), touch_ack_epoch_));
   }
 }
 
@@ -1264,32 +1332,46 @@ Status WebView::PrepareTouchClock(const TouchInput& touch) {
   if (first) {
     touch_clock_.reset();
     touch_clock_origin_ = base::TimeTicks::Now();
-    if (!touch.clock) { ++touch_fallback_gestures_; return {}; }
-    if (touch.clock->elapsed_us != 0) return reject();
+    if (!touch.clock) {
+      ++touch_fallback_gestures_;
+      return {};
+    }
+    if (touch.clock->elapsed_us != 0)
+      return reject();
     touch_clock_ = touch.clock;
-    if (!touch.clock->source) { ++touch_fallback_gestures_; return {}; }
+    if (!touch.clock->source) {
+      ++touch_fallback_gestures_;
+      return {};
+    }
     // Wall is consulted exactly once. Every subsequent event uses this fixed
     // monotonic origin, including gestures spanning a system-wall adjustment.
     const auto now = base::TimeTicks::Now();
     const auto wall_us = (base::Time::Now() - base::Time::UnixEpoch()).InMicroseconds();
     const auto age = TouchStartAgeUs(touch.clock->start_wall_us, wall_us);
-    if (!age) return reject();
+    if (!age)
+      return reject();
     touch_clock_origin_ = now - base::Microseconds(*age);
     ++touch_source_gestures_;
     return {};
   }
-  if (touch_clock_.has_value() != touch.clock.has_value()) return reject();
-  if (!touch.clock) return {};
-  if (touch_clock_->sequence_id != touch.clock->sequence_id || touch_clock_->source != touch.clock->source ||
-      touch_clock_->start_wall_us != touch.clock->start_wall_us || touch.clock->elapsed_us < touch_clock_->elapsed_us)
+  if (touch_clock_.has_value() != touch.clock.has_value())
+    return reject();
+  if (!touch.clock)
+    return {};
+  if (touch_clock_->sequence_id != touch.clock->sequence_id ||
+      touch_clock_->source != touch.clock->source ||
+      touch_clock_->start_wall_us != touch.clock->start_wall_us ||
+      touch.clock->elapsed_us < touch_clock_->elapsed_us)
     return reject();
   auto previous = touch_clock_->elapsed_us;
   for (const auto& sample : touch.samples) {
-    if (sample.elapsed_us < previous) return reject();
+    if (sample.elapsed_us < previous)
+      return reject();
     previous = sample.elapsed_us;
   }
   if (!TouchElapsedValid(touch_clock_->elapsed_us, touch.clock->elapsed_us,
-                         (base::TimeTicks::Now() - touch_clock_origin_).InMicroseconds(), touch.clock->source))
+                         (base::TimeTicks::Now() - touch_clock_origin_).InMicroseconds(),
+                         touch.clock->source))
     return reject();
   touch_clock_->elapsed_us = touch.clock->elapsed_us;
   return {};
@@ -1300,7 +1382,8 @@ Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token
   if (!first && client_touch_mode_ != touch.client_gestures)
     return Fail(Error::invalid, "Touch gesture mode cannot change within a sequence");
   if (first) {
-    if (client_gesture_bridge_) client_gesture_bridge_->Cancel(true);
+    if (client_gesture_bridge_)
+      client_gesture_bridge_->Cancel(true);
     client_gesture_bridge_.reset();
     if (touch.client_gestures && touch_emulator_owned_ && touch_emulator_) {
       static_cast<content::TouchEmulatorImpl*>(touch_emulator_.get())->Disable();
@@ -1330,22 +1413,21 @@ Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token
     touch_hit_test_pending_ = true;
     touch_status_ = {};
     const auto epoch = ++touch_epoch_;
-    touch_hit_test_timer_.Start(FROM_HERE, base::Seconds(2),
-                                base::BindOnce(
-                                    [](base::WeakPtr<WebView> self, std::uint64_t expected) {
-                                      if (!self || self->touch_epoch_ != expected)
-                                        return;
-                                      // The first raw event cannot route until
-                                      // this hit test completes.
-                                      if (self->client_touch_token_)
-                                        self->retired_client_touches_.Retire(
-                                            *self->client_touch_token_,
-                                            self->client_touch_sequence_, true);
-                                      self->CancelTouches(true);
-                                      self->touch_status_ =
-                                          Fail(Error::unavailable, "Touch hit test timed out");
-                                    },
-                                    weak_factory_.GetWeakPtr(), epoch));
+    touch_hit_test_timer_.Start(
+        FROM_HERE, base::Seconds(2),
+        base::BindOnce(
+            [](base::WeakPtr<WebView> self, std::uint64_t expected) {
+              if (!self || self->touch_epoch_ != expected)
+                return;
+              // The first raw event cannot route until
+              // this hit test completes.
+              if (self->client_touch_token_)
+                self->retired_client_touches_.Retire(*self->client_touch_token_,
+                                                     self->client_touch_sequence_, true);
+              self->CancelTouches(true);
+              self->touch_status_ = Fail(Error::unavailable, "Touch hit test timed out");
+            },
+            weak_factory_.GetWeakPtr(), epoch));
     // As in DevTools InputHandler, hit test once before injection. Injecting
     // into rootView directly would skip OOPIF hit testing entirely.
     root->delegate()->GetRenderWidgetHostAtPointAsynchronously(
@@ -1361,7 +1443,8 @@ Status WebView::DispatchTouches(const TouchInput& touch, const InputToken& token
   const auto result = InjectTouches(touch);
   if (weak && !result && touch.action == TouchInput::Action::cancel)
     CancelTouches(true);
-  if (weak) touch_status_ = result;
+  if (weak)
+    touch_status_ = result;
   return result;
 }
 
@@ -1416,15 +1499,16 @@ void WebView::OnTouchTarget(std::uint64_t epoch,
     client_gesture_bridge_ = base::MakeRefCounted<ClientGestureBridge>(
         pointer_root_widget_->GetInputEventRouter(), pointer_root_view_.get(),
         touch_target_view_.get(), touch.clock->sequence_id, touch_clock_origin_,
-        base::BindRepeating(&WebView::OnClientTouchProcessed, weak_factory_.GetWeakPtr(),
-                            token, touch.clock->sequence_id));
+        base::BindRepeating(&WebView::OnClientTouchProcessed, weak_factory_.GetWeakPtr(), token,
+                            touch.clock->sequence_id));
   }
   auto weak = weak_factory_.GetWeakPtr();
   auto bridge = client_gesture_bridge_;
   const auto result = InjectTouches(touch);
   if (weak && !result && bridge && !bridge->has_routed_raw())
     retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
-  if (weak) touch_status_ = result;
+  if (weak)
+    touch_status_ = result;
 }
 
 Status WebView::SendTouchEvent(const blink::WebTouchEvent& event) {
@@ -1438,10 +1522,11 @@ Status WebView::SendTouchEvent(const blink::WebTouchEvent& event) {
   // neither ACK timing nor routing acceptance says whether the page consumed it.
   const auto epoch = touch_ack_epoch_;
   ++touch_pending_callbacks_;
-  const bool routed = static_cast<content::TouchEmulatorImpl*>(touch_emulator_.get())
-      ->InjectTouchEventWithResult(event, touch_target_view_.get(),
-                         base::BindOnce(&WebView::OnTouchProcessed,
-                                        weak_factory_.GetWeakPtr(), epoch));
+  const bool routed =
+      static_cast<content::TouchEmulatorImpl*>(touch_emulator_.get())
+          ->InjectTouchEventWithResult(
+              event, touch_target_view_.get(),
+              base::BindOnce(&WebView::OnTouchProcessed, weak_factory_.GetWeakPtr(), epoch));
   if (!routed) {
     CancelTouches(true);
     return Fail(Error::unavailable,
@@ -1472,8 +1557,10 @@ Status WebView::InjectTouches(const TouchInput& touch) {
       history.points = sample.points;
       history.clock->elapsed_us = sample.elapsed_us;
       auto status = InjectTouches(history);
-      if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
-      if (!status) return status;
+      if (!weak_self)
+        return Fail(Error::stale, "Touch owner destroyed");
+      if (!status)
+        return status;
     }
     history.points = touch.points;
     history.clock = touch.clock;
@@ -1492,9 +1579,8 @@ Status WebView::InjectTouches(const TouchInput& touch) {
     // the Browser clock even if a later packet has less delay than the first.
     if (touch.client_gestures && !client_gesture_bridge_)
       return Fail(Error::stale, "Client gesture bridge missing");
-    const auto dispatched = touch.client_gestures
-                                ? client_gesture_bridge_->NativeTimestamp(sampled)
-                                : sampled;
+    const auto dispatched =
+        touch.client_gestures ? client_gesture_bridge_->NativeTimestamp(sampled) : sampled;
     blink::WebTouchEvent event(type, 0, dispatched);
     event.dispatch_type = type == Type::kTouchCancel
                               ? blink::WebInputEvent::DispatchType::kEventNonBlocking
@@ -1517,12 +1603,13 @@ Status WebView::InjectTouches(const TouchInput& touch) {
     // TouchEmulator assigns the global ui::GetNextTouchEventId() before routing
     // and owns canonical (including synthetic/OOPIF) ACK and gesture synthesis.
     if (touch.client_gestures) {
-      if (!client_gesture_bridge_) return Fail(Error::stale, "Client gesture bridge missing");
+      if (!client_gesture_bridge_)
+        return Fail(Error::stale, "Client gesture bridge missing");
       std::vector<TouchInput::Gesture> gestures;
       for (const auto& gesture : touch.gestures) {
         const bool first = gesture.type == TouchInput::Gesture::Type::tap_down;
-        if (!changed || (!touch.points.empty() && changed ==
-                (first ? touch.points.front().id : touch.points.back().id)))
+        if (!changed || (!touch.points.empty() &&
+                         changed == (first ? touch.points.front().id : touch.points.back().id)))
           gestures.push_back(gesture);
       }
       for (auto& gesture : gestures) {
@@ -1531,12 +1618,15 @@ Status WebView::InjectTouches(const TouchInput& touch) {
       }
       const auto terminal_owner = event.IsTouchSequenceEnd() ? client_touch_token_ : std::nullopt;
       const auto terminal_sequence = terminal_owner ? client_touch_sequence_ : std::string();
-      if (terminal_owner) retired_client_touches_.Begin(*terminal_owner, terminal_sequence);
+      if (terminal_owner)
+        retired_client_touches_.Begin(*terminal_owner, terminal_sequence);
       ++touch_pending_callbacks_;
       auto result = client_gesture_bridge_->Dispatch(event, gestures, touch.clock->elapsed_us);
-      if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
+      if (!weak_self)
+        return Fail(Error::stale, "Touch owner destroyed");
       if (!result) {
-        if (touch_pending_callbacks_) --touch_pending_callbacks_;
+        if (touch_pending_callbacks_)
+          --touch_pending_callbacks_;
         if (terminal_owner)
           retired_client_touches_.Resolve(*terminal_owner, terminal_sequence,
                                           ClientTouchRetirement::State::unconfirmed);
@@ -1549,7 +1639,8 @@ Status WebView::InjectTouches(const TouchInput& touch) {
     ++touch_cancelled_;
     // MotionEventWeb requires ALL contacts cancelled in a cancellation event.
     auto status = emit(Type::kTouchCancel, std::nullopt);
-    if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
+    if (!weak_self)
+      return Fail(Error::stale, "Touch owner destroyed");
     if (status || !touch.client_gestures) {
       touches_.clear();
       touch_pointer_ids_.clear();
@@ -1574,10 +1665,12 @@ Status WebView::InjectTouches(const TouchInput& touch) {
                        : touch.action == TouchInput::Action::move ? Type::kTouchMove
                                                                   : Type::kTouchEnd,
                        point.id);
-    if (!weak_self) return Fail(Error::stale, "Touch owner destroyed");
+    if (!weak_self)
+      return Fail(Error::stale, "Touch owner destroyed");
     if (!status) {
       if (touch.client_gestures) {
-        if (previous) touches_[point.id] = *previous;
+        if (previous)
+          touches_[point.id] = *previous;
         else {
           touches_.erase(point.id);
           touch_pointer_ids_.erase(point.id);
@@ -1594,11 +1687,12 @@ Status WebView::InjectTouches(const TouchInput& touch) {
   return {};
 }
 Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
-  if (admitted) *admitted = false;
+  if (admitted)
+    *admitted = false;
   static_assert(kMouseButtonModifiers ==
-      (blink::WebInputEvent::kLeftButtonDown | blink::WebInputEvent::kMiddleButtonDown |
-       blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
-       blink::WebInputEvent::kForwardButtonDown));
+                (blink::WebInputEvent::kLeftButtonDown | blink::WebInputEvent::kMiddleButtonDown |
+                 blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
+                 blink::WebInputEvent::kForwardButtonDown));
   RefreshClientTouchOwner();
   using TouchState = ClientTouchRetirement::State;
   const auto* incoming_touch = std::get_if<TouchInput>(&input.payload);
@@ -1639,9 +1733,10 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
   auto* router = root->GetInputEventRouter();
   if (routed && !router)
     return Fail(Error::unavailable, "Input routing unavailable");
-  auto* wheel_phase_handler = std::holds_alternative<WheelInput>(input.payload)
-      ? static_cast<content::RenderWidgetHostViewAura*>(root_view)->GetMouseWheelPhaseHandler()
-      : nullptr;
+  auto* wheel_phase_handler =
+      std::holds_alternative<WheelInput>(input.payload)
+          ? static_cast<content::RenderWidgetHostViewAura*>(root_view)->GetMouseWheelPhaseHandler()
+          : nullptr;
   if (std::holds_alternative<WheelInput>(input.payload) && !wheel_phase_handler)
     return Fail(Error::unavailable, "Mouse wheel phase handling unavailable");
   std::map<std::uint32_t, TouchPoint> next_touches;
@@ -1655,21 +1750,24 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
         // A routed terminal owns the sequence until its canonical ACK. A
         // second cleanup only observes that receipt, even during cleanup.
         auto accepted = endpoint_->AcceptInput(session_, input);
-        if (accepted && admitted) *admitted = true;
+        if (accepted && admitted)
+          *admitted = true;
         return accepted;
       }
     }
     if (touch->client_gestures && touch->clock &&
         ClientTouchRetired(input.token, touch->clock->sequence_id)) {
       auto accepted = endpoint_->AcceptInput(session_, input);
-      if (!accepted) return accepted;
+      if (!accepted)
+        return accepted;
       if (touch->action == TouchInput::Action::start)
         return Fail(Error::invalid, "Retired client touch sequence cannot restart");
       return Fail(Error::stale, "Client touch owner explicitly invalidated");
     }
     if (touch->client_gestures && touch->clock && client_touch_token_ &&
         (!touches_.empty() || touch->action != TouchInput::Action::start) &&
-        (*client_touch_token_ != input.token || touch->clock->sequence_id != client_touch_sequence_))
+        (*client_touch_token_ != input.token ||
+         touch->clock->sequence_id != client_touch_sequence_))
       return Fail(Error::stale, "Client touch sequence does not own the current contacts");
     if (touch_owner_lost_)
       return Fail(Error::unavailable, "Touch ownership became uncertain; reload WebView required");
@@ -1680,7 +1778,8 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
         (!touch_emulator_owned_ || touch_emulator_.get() != existing_emulator))
       return Fail(Error::busy, "Touch emulator belongs to another owner; reload may be required");
     std::size_t changed_points = touch->points.size();
-    for (const auto& sample : touch->samples) changed_points += sample.points.size();
+    for (const auto& sample : touch->samples)
+      changed_points += sample.points.size();
     if (changed_points > 64)
       return Fail(Error::invalid, "Too many touch history contacts");
     if (touch_pending_callbacks_ + changed_points + 1 > 128 ||
@@ -1721,7 +1820,8 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
   auto accepted = endpoint_->AcceptInput(session_, input);
   if (!accepted)
     return accepted;
-  if (admitted) *admitted = true;
+  if (admitted)
+    *admitted = true;
   if (routed)
     RememberPointerTarget();
   else {
@@ -1772,17 +1872,19 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
             host->ForwardKeyboardEvent(event);
           }
         } else if constexpr (std::is_same_v<T, MouseInput>) {
-          Type type = value.action == MouseInput::Action::move   ? Type::kMouseMove
-                      : value.action == MouseInput::Action::down ? Type::kMouseDown
+          Type type = value.action == MouseInput::Action::move    ? Type::kMouseMove
+                      : value.action == MouseInput::Action::down  ? Type::kMouseDown
                       : value.action == MouseInput::Action::leave ? Type::kMouseLeave
-                                                                 : Type::kMouseUp;
+                                                                  : Type::kMouseUp;
           blink::WebMouseEvent event(type, static_cast<int>(value.modifiers), now);
           event.SetPositionInWidget(static_cast<float>(value.x), static_cast<float>(value.y));
           event.SetPositionInScreen(ViewportToScreen(root_view, event.PositionInWidget()));
-          event.button = value.action == MouseInput::Action::move
-                             ? MouseMoveButton(value.modifiers) : Button(value.button);
+          event.button = value.action == MouseInput::Action::move ? MouseMoveButton(value.modifiers)
+                                                                  : Button(value.button);
           event.click_count = (value.action == MouseInput::Action::move ||
-                               value.action == MouseInput::Action::leave) ? 0 : value.click_count;
+                               value.action == MouseInput::Action::leave)
+                                  ? 0
+                                  : value.click_count;
           last_mouse_ = value;
           if (value.button && value.action == MouseInput::Action::down)
             pressed_mouse_buttons_.insert(value.button);
@@ -1824,7 +1926,8 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
 }
 
 Status WebView::CheckQuiescent() const {
-  if (!contents_) return Fail(Error::unavailable, "WebView is unloaded");
+  if (!contents_)
+    return Fail(Error::unavailable, "WebView is unloaded");
   if (contents_->GetVisibility() != content::Visibility::HIDDEN)
     return Fail(Error::unavailable, "WebView is visible");
   if (contents_->IsCurrentlyAudible())
@@ -1832,8 +1935,10 @@ Status WebView::CheckQuiescent() const {
   if (contents_->IsLoading() || contents_->HasUncommittedNavigationInPrimaryMainFrame() ||
       contents_->GetController().GetPendingEntry())
     return Fail(Error::unavailable, "Navigation is in progress");
-  if (contents_->IsCrashed()) return Fail(Error::unavailable, "Renderer has crashed");
-  if (contents_->IsBeingDestroyed()) return Fail(Error::unavailable, "WebView is being destroyed");
+  if (contents_->IsCrashed())
+    return Fail(Error::unavailable, "Renderer has crashed");
+  if (contents_->IsBeingDestroyed())
+    return Fail(Error::unavailable, "WebView is being destroyed");
   if (!contents_->GetPrimaryMainFrame())
     return Fail(Error::unavailable, "Live main frame required");
   if (contents_->GetPrimaryMainFrame()->GetSiteInstance()->GetRelatedActiveContentsCount() > 1)
@@ -1879,19 +1984,22 @@ Status WebView::CanDiscard() const {
   if (lifecycle_uncertain_)
     return Fail(Error::unavailable, "Browser lifecycle state uncertain; unload required");
   const auto* model = endpoint_->FindWebView(session_, view_);
-  if (!model) return Fail(Error::not_found, "WebView model missing");
-  if (model->pending) return Fail(Error::busy, "Lifecycle operation pending");
+  if (!model)
+    return Fail(Error::not_found, "WebView model missing");
+  if (model->pending)
+    return Fail(Error::busy, "Lifecycle operation pending");
   if (model->actual != Residency::live && model->actual != Residency::frozen)
     return Fail(Error::invalid, "Discard requires live or frozen state");
-  if (touch_cleanup_pending_ || (touch_emulator_owned_ &&
-      (!touches_.empty() || touch_pending_callbacks_)))
+  if (touch_cleanup_pending_ ||
+      (touch_emulator_owned_ && (!touches_.empty() || touch_pending_callbacks_)))
     return Fail(Error::busy, "Touch cancellation must drain before discard; retry");
   if (touch_owner_lost_)
     return Fail(Error::unavailable, "Touch cleanup uncertain; unload required");
   if (contents_ && contents_->NeedToFireBeforeUnloadOrUnloadEvents())
     return Fail(Error::unavailable, "Beforeunload or unload handler prevents discard");
   auto quiet = CheckQuiescent();
-  if (!quiet) return quiet;
+  if (!quiet)
+    return quiet;
   if (!base::FeatureList::IsEnabled(::features::kWebContentsDiscard))
     return Fail(Error::unsupported, "WebContentsDiscard feature is disabled");
   if (contents_->WasDiscarded())
@@ -1901,8 +2009,7 @@ Status WebView::CanDiscard() const {
 
 bool WebView::UpdateLifecycleViews(bool frozen) {
   if (!contents_ || contents_->GetVisibility() != content::Visibility::HIDDEN ||
-      !contents_->GetPrimaryMainFrame() ||
-      !contents_->GetPrimaryMainFrame()->IsRenderFrameLive())
+      !contents_->GetPrimaryMainFrame() || !contents_->GetPrimaryMainFrame()->IsRenderFrameLive())
     return false;
   auto* impl = static_cast<content::WebContentsImpl*>(contents_.get());
   bool all = true;
@@ -1938,20 +2045,22 @@ bool WebView::UpdateLifecycleViews(bool frozen) {
       const auto request = ++lifecycle_view_request_;
       auto weak_host = host->GetWeakPtr();
       lifecycle_views_.insert_or_assign(host, LifecycleView{weak_host, generation, request});
-      if (!manager->SetIsFrozenWithAck(frozen, base::BindOnce(&WebView::OnLifecycleViewAcknowledged,
-              weak_factory_.GetWeakPtr(), std::move(weak_host), request)))
+      if (!manager->SetIsFrozenWithAck(
+              frozen, base::BindOnce(&WebView::OnLifecycleViewAcknowledged,
+                                     weak_factory_.GetWeakPtr(), std::move(weak_host), request)))
         lifecycle_views_.erase(host);
       all = false;
       return;
     }
     all &= target->second.acknowledged;
   });
-  std::erase_if(lifecycle_views_, [&](const auto& target) { return !current.contains(target.first); });
+  std::erase_if(lifecycle_views_,
+                [&](const auto& target) { return !current.contains(target.first); });
   return !current.empty() && all;
 }
 
 void WebView::OnLifecycleViewAcknowledged(base::WeakPtr<content::RenderViewHostImpl> host,
-                                         std::uint64_t request) {
+                                          std::uint64_t request) {
   if (!host)
     return;
   const auto target = lifecycle_views_.find(host.get());
@@ -1992,7 +2101,8 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion, bool r
     return Fail(Error::not_found, "WebView model missing");
   if (action == Lifecycle::discard) {
     auto allowed = CanDiscard();
-    if (!allowed) return allowed;
+    if (!allowed)
+      return allowed;
   }
   const Residency previous = model->actual;
   PendingKind kind = PendingKind::none;
@@ -2115,8 +2225,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion, bool r
   const int configured_width = viewport_width_;
   const int configured_height = viewport_height_;
   viewport_width_ = 0;
-  ConfigureDevice(configured_width, configured_height, tablet_, device_scale_,
-                  match_page_backing_);
+  ConfigureDevice(configured_width, configured_height, tablet_, device_scale_, match_page_backing_);
   visible_ = false;
   auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
   if (auto* manager = implementation->GetTextInputManager())
@@ -2216,10 +2325,9 @@ void WebView::DidStartNavigation(content::NavigationHandle* navigation) {
   BindNavigation(navigation, true);
   bool in_primary_page = navigation->IsInPrimaryMainFrame();
   if (contents_ && contents_->GetPrimaryMainFrame())
-    contents_->GetPrimaryMainFrame()->ForEachRenderFrameHost(
-        [&](content::RenderFrameHost* frame) {
-          in_primary_page |= frame->GetFrameTreeNodeId() == navigation->GetFrameTreeNodeId();
-        });
+    contents_->GetPrimaryMainFrame()->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
+      in_primary_page |= frame->GetFrameTreeNodeId() == navigation->GetFrameTreeNodeId();
+    });
   if (!navigation->IsSameDocument()) {
     auto* focused = contents_ ? contents_->GetFocusedFrame() : nullptr;
     if (focused && NavigationAffectsFrame(navigation, focused))
@@ -2279,19 +2387,22 @@ void WebView::NavigationListPruned(const content::PrunedDetails&) {
 }
 void WebView::DidFinishNavigation(content::NavigationHandle* navigation) {
   if (auto* operation = navigation_operations_.ByNavigation(navigation->GetNavigationId())) {
-    if (navigation->IsInPrimaryMainFrame()) operation->url = navigation->GetURL().spec();
+    if (navigation->IsInPrimaryMainFrame())
+      operation->url = navigation->GetURL().spec();
     if (navigation->HasCommitted() && !navigation->IsErrorPage() &&
         navigation->GetNetErrorCode() == net::OK)
       navigation_operations_.Complete(*operation, navigation->GetNavigationId(), "committed", {},
-          navigation->HasCommitted(), navigation->IsErrorPage());
+                                      navigation->HasCommitted(), navigation->IsErrorPage());
     else if (navigation->GetNetErrorCode() == net::ERR_ABORTED)
-      navigation_operations_.Complete(*operation, navigation->GetNavigationId(), "cancelled", "navigation_aborted",
-          navigation->HasCommitted(), navigation->IsErrorPage());
+      navigation_operations_.Complete(*operation, navigation->GetNavigationId(), "cancelled",
+                                      "navigation_aborted", navigation->HasCommitted(),
+                                      navigation->IsErrorPage());
     else
       navigation_operations_.Complete(*operation, navigation->GetNavigationId(), "failed",
-          navigation->GetNetErrorCode() == net::OK ? "navigation_not_committed" :
-          net::ErrorToShortString(navigation->GetNetErrorCode()),
-          navigation->HasCommitted(), navigation->IsErrorPage());
+                                      navigation->GetNetErrorCode() == net::OK
+                                          ? "navigation_not_committed"
+                                          : net::ErrorToShortString(navigation->GetNetErrorCode()),
+                                      navigation->HasCommitted(), navigation->IsErrorPage());
   }
   navigation_handles_.erase(navigation->GetNavigationId());
   input_commit_navigations_.erase(navigation->GetNavigationId());

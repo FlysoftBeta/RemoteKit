@@ -68,13 +68,11 @@ base::DictValue InputAnchor(const blink::mojom::FileChooserInputAnchor& anchor,
                             const PageRequests::AnchorLayout& layout) {
   const auto& bounds = anchor.bounds;
   const auto& viewport = anchor.viewport;
-  if (!std::isfinite(bounds.x()) || !std::isfinite(bounds.y()) ||
-      !std::isfinite(bounds.width()) || !std::isfinite(bounds.height()) ||
-      !std::isfinite(viewport.width()) || !std::isfinite(viewport.height()) ||
-      !std::isfinite(anchor.device_scale_factor) || bounds.IsEmpty() ||
-      viewport.IsEmpty() || bounds.x() < 0 || bounds.y() < 0 ||
-      bounds.right() > viewport.width() + 0.01f ||
-      bounds.bottom() > viewport.height() + 0.01f ||
+  if (!std::isfinite(bounds.x()) || !std::isfinite(bounds.y()) || !std::isfinite(bounds.width()) ||
+      !std::isfinite(bounds.height()) || !std::isfinite(viewport.width()) ||
+      !std::isfinite(viewport.height()) || !std::isfinite(anchor.device_scale_factor) ||
+      bounds.IsEmpty() || viewport.IsEmpty() || bounds.x() < 0 || bounds.y() < 0 ||
+      bounds.right() > viewport.width() + 0.01f || bounds.bottom() > viewport.height() + 0.01f ||
       std::abs(viewport.width() - layout.width) > 1.f ||
       std::abs(viewport.height() - layout.height) > 1.f ||
       std::abs(anchor.device_scale_factor - layout.device_scale_factor) > 0.001f) {
@@ -172,14 +170,16 @@ void PageRequests::RequestClose() {
   else
     web_contents()->ClosePage();
 }
-void PageRequests::BeforeUnloadFired(content::WebContents*, bool proceed,
-                                    bool* proceed_to_fire_unload) {
+void PageRequests::BeforeUnloadFired(content::WebContents*,
+                                     bool proceed,
+                                     bool* proceed_to_fire_unload) {
   *proceed_to_fire_unload = proceed;
   if (close_state_ == "closing" && !proceed)
     close_state_ = "cancelled";
 }
 void PageRequests::CloseContents(content::WebContents*) {
-  if (close_state_ != "closing") close_reason_ = "window.close";
+  if (close_state_ != "closing")
+    close_reason_ = "window.close";
   close_state_ = "closed";
 }
 void PageRequests::Event(base::DictValue event) {
@@ -220,7 +220,8 @@ void PageRequests::Cancel(std::uint64_t id, const std::string& reason) {
   event.Set("request", base::NumberToString(id));
   event.Set("reason", Clip(reason));
   Event(std::move(event));
-  if (request->file) FileResult(id, "cancelled", *request, reason);
+  if (request->file)
+    FileResult(id, "cancelled", *request, reason);
   if (request->type == Pending::Type::menu && reason != "context_menu_superseded" && web_contents())
     web_contents()->NotifyContextMenuClosed(GURL());
   if (request->file)
@@ -265,31 +266,39 @@ void PageRequests::Prune() {
       return;
   }
 }
-void PageRequests::FileResult(std::uint64_t id, const char* state,
+void PageRequests::FileResult(std::uint64_t id,
+                              const char* state,
                               const Pending& request,
                               const std::string& error) {
-  auto result = Result(); result.Set("state", state);
-  if (!request.selection_id.empty()) result.Set("selection_id", request.selection_id);
-  if (!error.empty()) result.Set("error", Clip(error));
-  file_results_.insert_or_assign(
-      id, FileReceipt{std::move(result), request.selection_binding});
-  while (file_results_.size() > kLimit) file_results_.erase(file_results_.begin());
+  auto result = Result();
+  result.Set("state", state);
+  if (!request.selection_id.empty())
+    result.Set("selection_id", request.selection_id);
+  if (!error.empty())
+    result.Set("error", Clip(error));
+  file_results_.insert_or_assign(id, FileReceipt{std::move(result), request.selection_binding});
+  while (file_results_.size() > kLimit)
+    file_results_.erase(file_results_.begin());
 }
 base::DictValue PageRequests::FileStatus(const std::string& key,
-                                        const base::Value* selection,
-                                        SelectionBinding binding,
-                                        bool terminal_only) {
+                                         const base::Value* selection,
+                                         SelectionBinding binding,
+                                         bool terminal_only) {
   const auto* selection_id = selection ? selection->GetIfString() : nullptr;
   if (selection && !ValidSelectionId(selection_id))
     return Result("invalid_selection_id");
   const auto weak = weak_factory_.GetWeakPtr();
-  if (!terminal_only) Prune();
-  if (!weak) return Result("manager_destroyed");
+  if (!terminal_only)
+    Prune();
+  if (!weak)
+    return Result("manager_destroyed");
   std::uint64_t id = 0;
-  if (!base::StringToUint64(key, &id) || base::NumberToString(id) != key) return Result("invalid_file_request");
+  if (!base::StringToUint64(key, &id) || base::NumberToString(id) != key)
+    return Result("invalid_file_request");
   const auto found = pending_.find(id);
   if (!terminal_only && found != pending_.end()) {
-    if (!found->second->file) return Result("file_request_required");
+    if (!found->second->file)
+      return Result("file_request_required");
     if (selection_id && found->second->validating &&
         (found->second->selection_id != *selection_id ||
          found->second->selection_binding != binding))
@@ -319,11 +328,11 @@ base::DictValue PageRequests::Snapshot(const AnchorLayout* anchor_layout) {
   for (const auto& [id, request] : pending_) {
     auto data = request->data.Clone();
     if (anchor_layout && request->file && web_contents() &&
-        request->document.AsRenderFrameHostIfValid() ==
-            web_contents()->GetPrimaryMainFrame()) {
+        request->document.AsRenderFrameHostIfValid() == web_contents()->GetPrimaryMainFrame()) {
       if (const auto* anchor = request->file->GetInputAnchor()) {
         auto value = InputAnchor(*anchor, *anchor_layout);
-        if (!value.empty()) data.Set("input_anchor", std::move(value));
+        if (!value.empty())
+          data.Set("input_anchor", std::move(value));
       }
     }
     pending.Append(std::move(data));
@@ -515,7 +524,8 @@ bool PageRequests::IsWebContentsCreationOverridden(content::RenderFrameHost*,
                                                    const GURL&,
                                                    const std::string&,
                                                    const GURL& target_url) {
-  if (popup_handler_) return false;
+  if (popup_handler_)
+    return false;
   auto event = Kind("blocked_popup");
   event.Set("url", Clip(target_url.spec()));
   event.Set("reason", "dynamic_webview_creation_unsupported");
@@ -523,22 +533,28 @@ bool PageRequests::IsWebContentsCreationOverridden(content::RenderFrameHost*,
   return true;
 }
 content::WebContents* PageRequests::AddNewContents(content::WebContents*,
-    std::unique_ptr<content::WebContents> contents, const GURL& url,
-    WindowOpenDisposition disposition, const blink::mojom::WindowFeatures&,
-    bool user_gesture, bool* was_blocked) {
+                                                   std::unique_ptr<content::WebContents> contents,
+                                                   const GURL& url,
+                                                   WindowOpenDisposition disposition,
+                                                   const blink::mojom::WindowFeatures&,
+                                                   bool user_gesture,
+                                                   bool* was_blocked) {
   if (!popup_handler_ || !user_gesture) {
-    if (was_blocked) *was_blocked = true;
-    auto event = Kind("blocked_popup"); event.Set("url", Clip(url.spec()));
-    event.Set("reason", "user_gesture_required"); Event(std::move(event));
+    if (was_blocked)
+      *was_blocked = true;
+    auto event = Kind("blocked_popup");
+    event.Set("url", Clip(url.spec()));
+    event.Set("reason", "user_gesture_required");
+    Event(std::move(event));
     return nullptr;
   }
   auto* adopted = popup_handler_(std::move(contents), url, disposition, user_gesture);
-  if (!adopted && was_blocked) *was_blocked = true;
+  if (!adopted && was_blocked)
+    *was_blocked = true;
   return adopted;
 }
 
-base::DictValue PageRequests::Reply(const base::DictValue& reply,
-                                  SelectionBinding binding) {
+base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBinding binding) {
   const auto* key = reply.FindString("request");
   const auto accept = reply.FindBool("accept");
   std::uint64_t id = 0;
@@ -575,7 +591,8 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply,
       return Result("invalid_selection_id");
     const auto* values = reply.FindList("files");
     const bool legacy = !values && !reply.FindBool("file_only").value_or(false);
-    if (legacy) values = reply.FindList("paths");
+    if (legacy)
+      values = reply.FindList("paths");
     const bool multiple = request->mode == blink::mojom::FileChooserParams::Mode::kOpenMultiple;
     if (!values || values->empty() || values->size() > kLimit || (!multiple && values->size() != 1))
       return Result("invalid_file_count");
@@ -590,10 +607,13 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply,
       auto native = base::FilePath::FromUTF8Unsafe(*path);
       if (!native.IsAbsolute())
         return Result("file_path_must_be_absolute");
-      if (!legacy && (!display || display->empty() || display->size() > 1024 || !base::IsStringUTF8(*display) ||
-                      display->find_first_of("/\\:\0", 0, 4) != std::string::npos || *display == "." || *display == ".."))
+      if (!legacy && (!display || display->empty() || display->size() > 1024 ||
+                      !base::IsStringUTF8(*display) ||
+                      display->find_first_of("/\\:\0", 0, 4) != std::string::npos ||
+                      *display == "." || *display == ".."))
         return Result("invalid_file_display_name");
-      paths.push_back({std::move(native), display ? base::UTF8ToUTF16(*display) : std::u16string()});
+      paths.push_back(
+          {std::move(native), display ? base::UTF8ToUTF16(*display) : std::u16string()});
     }
     if (selection_id) {
       request->selection_id = *selection_id;
@@ -613,7 +633,8 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply,
             weak_factory_.GetWeakPtr(), id));
     auto result = Result();
     result.Set("state", "validating");
-    if (selection_id) result.Set("selection_id", *selection_id);
+    if (selection_id)
+      result.Set("selection_id", *selection_id);
     return result;
   }
   std::u16string text;

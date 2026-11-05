@@ -11,72 +11,156 @@ import type { ProductState } from '../shared/product';
 import type { EndpointNode } from './endpoint-node';
 import { DiagnosticSessions, diagnosticMessageLimit } from './diagnostic-sessions';
 
-export function createHttp(control: Control, options: { origins: string[]; clientDir: string; metricsDir: string; diagnostics?: boolean; diagnosticDir?: string; tls?: { key: Buffer; cert: Buffer }; endpointNode?: EndpointNode }) {
+export function createHttp(
+  control: Control,
+  options: {
+    origins: string[];
+    clientDir: string;
+    metricsDir: string;
+    diagnostics?: boolean;
+    diagnosticDir?: string;
+    tls?: { key: Buffer; cert: Buffer };
+    endpointNode?: EndpointNode;
+  },
+) {
   let closing = false;
-  const diagnosticSessions = options.diagnosticDir ? new DiagnosticSessions(options.diagnosticDir, {
-    control: tenant => {
-      const { revision, layoutMode, settings, tabs, windows } = control.store.workspace(tenant);
-      return {
-        revision, layoutMode, windowCount: windows.length, tabCount: tabs.length,
-        windows: windows.slice(0, 64).map(window => ({ weight: window.weight, active: window.activeTabId !== null })),
-        settings: {
-          qualityPreference: settings.qualityPreference, clientScaleOverride: settings.clientScaleOverride,
-          memorySaverEnabled: settings.memorySaverEnabled, autoFullscreen: settings.autoFullscreen, audioChannels: settings.audioChannels,
+  const diagnosticSessions = options.diagnosticDir
+    ? new DiagnosticSessions(options.diagnosticDir, {
+        control: (tenant) => {
+          const { revision, layoutMode, settings, tabs, windows } = control.store.workspace(tenant);
+          return {
+            revision,
+            layoutMode,
+            windowCount: windows.length,
+            tabCount: tabs.length,
+            windows: windows
+              .slice(0, 64)
+              .map((window) => ({ weight: window.weight, active: window.activeTabId !== null })),
+            settings: {
+              qualityPreference: settings.qualityPreference,
+              clientScaleOverride: settings.clientScaleOverride,
+              memorySaverEnabled: settings.memorySaverEnabled,
+              autoFullscreen: settings.autoFullscreen,
+              audioChannels: settings.audioChannels,
+            },
+          };
         },
-      };
-    },
-    endpoint: tenant => control.endpoint.request('session.snapshot', tenant, { outputDiagnostics: true }),
-  }) : undefined;
+        endpoint: (tenant) =>
+          control.endpoint.request('session.snapshot', tenant, { outputDiagnostics: true }),
+      })
+    : undefined;
   const inflight = new Set<Promise<unknown>>();
   const track = <T>(promise: Promise<T>): Promise<T> => {
     inflight.add(promise);
-    void promise.then(() => inflight.delete(promise), () => inflight.delete(promise));
+    void promise.then(
+      () => inflight.delete(promise),
+      () => inflight.delete(promise),
+    );
     return promise;
   };
   const firstViewer = new Map<string, number>();
   let metricsWrite: Promise<void> = Promise.resolve();
-  const cookie = (token: string, clear = false) => `rk_session=${token}; HttpOnly; SameSite=Strict; Path=/${options.tls ? '; Secure' : ''}${clear ? '; Max-Age=0' : '; Max-Age=2592000'}`;
-  const checkOrigin = (req: IncomingMessage) => { if (!req.headers.origin || !options.origins.includes(req.headers.origin)) throw new ApiError(403, '请求来源不允许'); };
+  const cookie = (token: string, clear = false) =>
+    `rk_session=${token}; HttpOnly; SameSite=Strict; Path=/${options.tls ? '; Secure' : ''}${clear ? '; Max-Age=0' : '; Max-Age=2592000'}`;
+  const checkOrigin = (req: IncomingMessage) => {
+    if (!req.headers.origin || !options.origins.includes(req.headers.origin))
+      throw new ApiError(403, '请求来源不允许');
+  };
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff'); res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'no-store');
     try {
       if (closing) throw new ApiError(503, '服务正在关闭');
-      const address = new URL(req.url ?? '/', 'http://localhost'), path = address.pathname, token = readToken(req);
+      const address = new URL(req.url ?? '/', 'http://localhost'),
+        path = address.pathname,
+        token = readToken(req);
       const diagnostic = options.diagnostics === true;
-      if (path === '/api/auth/registration' && req.method === 'GET') return json(res, 200, control.store.registrationStatus());
-      if (path === '/api/auth/me' && req.method === 'GET') { const identity = control.store.identity(token); if (!identity) throw new ApiError(401, '请先登录'); return json(res, 200, { authenticated: true, user: identity.user }); }
+      if (path === '/api/auth/registration' && req.method === 'GET')
+        return json(res, 200, control.store.registrationStatus());
+      if (path === '/api/auth/me' && req.method === 'GET') {
+        const identity = control.store.identity(token);
+        if (!identity) throw new ApiError(401, '请先登录');
+        return json(res, 200, { authenticated: true, user: identity.user });
+      }
       if (path === '/api/state' && req.method === 'GET') {
         if (!diagnostic) throw new ApiError(404, '正常 Viewer 请使用 WebSocket');
-        const identity = control.store.identity(token); if (identity && !identity.legacy) throw new ApiError(409, '请在独立会话打开诊断页面');
-        const session = control.store.session(token); if (session.fresh) res.setHeader('Set-Cookie', cookie(session.token));
+        const identity = control.store.identity(token);
+        if (identity && !identity.legacy) throw new ApiError(409, '请在独立会话打开诊断页面');
+        const session = control.store.session(token);
+        if (session.fresh) res.setHeader('Set-Cookie', cookie(session.token));
         return json(res, 200, await control.getState(session.tenantId));
       }
       if (path.startsWith('/api/')) {
-        if (req.method !== 'POST') throw new ApiError(405, '不支持的方法'); checkOrigin(req);
+        if (req.method !== 'POST') throw new ApiError(405, '不支持的方法');
+        checkOrigin(req);
         if (path.startsWith('/api/files/')) {
-          const identity = control.store.identity(token); if (!identity || !token) throw new ApiError(401, '请先登录');
-          if (req.headers['content-type'] !== 'application/octet-stream') throw new ApiError(415, '需要原始文件内容');
-          const ticket = path.slice('/api/files/'.length); if (!/^[a-zA-Z0-9_-]{16,128}$/.test(ticket)) throw new ApiError(404, '文件ticket不存在');
-          await control.receiveFileUpload(identity.tenantId, authenticationIdentity(token), ticket, req, req.headers['content-length']);
-          res.statusCode = 204; res.end(); return;
+          const identity = control.store.identity(token);
+          if (!identity || !token) throw new ApiError(401, '请先登录');
+          if (req.headers['content-type'] !== 'application/octet-stream')
+            throw new ApiError(415, '需要原始文件内容');
+          const ticket = path.slice('/api/files/'.length);
+          if (!/^[a-zA-Z0-9_-]{16,128}$/.test(ticket)) throw new ApiError(404, '文件ticket不存在');
+          await control.receiveFileUpload(
+            identity.tenantId,
+            authenticationIdentity(token),
+            ticket,
+            req,
+            req.headers['content-length'],
+          );
+          res.statusCode = 204;
+          res.end();
+          return;
         }
-        if (!req.headers['content-type']?.startsWith('application/json')) throw new ApiError(415, '需要 JSON 请求');
-        const body = await readBody(req); if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ApiError(400, '需要 JSON 对象');
-        if (['tenantId', 'tenant', 'userId', 'user'].some(key => key in body)) throw new ApiError(400, '客户端不能指定用户或租户');
+        if (!req.headers['content-type']?.startsWith('application/json'))
+          throw new ApiError(415, '需要 JSON 请求');
+        const body = await readBody(req);
+        if (!body || typeof body !== 'object' || Array.isArray(body))
+          throw new ApiError(400, '需要 JSON 对象');
+        if (['tenantId', 'tenant', 'userId', 'user'].some((key) => key in body))
+          throw new ApiError(400, '客户端不能指定用户或租户');
         if (path === '/api/auth/register' || path === '/api/auth/login') {
-          let session; try { session = path.endsWith('register') ? await control.store.register(body.username, body.password, body.serverCredential) : await control.store.login(body.username, body.password); } catch (error) { throw new ApiError(error instanceof AuthError && error.status === 429 ? 429 : path.endsWith('login') ? 401 : 400, error instanceof Error ? error.message : String(error)); }
-          const previous = control.store.identity(token); if (previous) { control.store.revoke(token); await control.logout(previous.tenantId, authenticationIdentity(token!)); }
+          let session;
+          try {
+            session = path.endsWith('register')
+              ? await control.store.register(body.username, body.password, body.serverCredential)
+              : await control.store.login(body.username, body.password);
+          } catch (error) {
+            throw new ApiError(
+              error instanceof AuthError && error.status === 429 ? 429 : path.endsWith('login') ? 401 : 400,
+              error instanceof Error ? error.message : String(error),
+            );
+          }
+          const previous = control.store.identity(token);
+          if (previous) {
+            control.store.revoke(token);
+            await control.logout(previous.tenantId, authenticationIdentity(token!));
+          }
           for (const [hash, expires] of firstViewer) if (expires <= Date.now()) firstViewer.delete(hash);
           if (firstViewer.size >= 4096) firstViewer.delete(firstViewer.keys().next().value!);
           firstViewer.set(authenticationIdentity(session.token), Date.now() + 30000);
-          res.setHeader('Set-Cookie', cookie(session.token)); return json(res, 200, { authenticated: true, user: session.user });
+          res.setHeader('Set-Cookie', cookie(session.token));
+          return json(res, 200, { authenticated: true, user: session.user });
         }
-        if (path === '/api/auth/logout') { const previous = control.store.identity(token); control.store.revoke(token); if (previous) await control.logout(previous.tenantId, authenticationIdentity(token!)); res.setHeader('Set-Cookie', cookie('', true)); return json(res, 200, { loggedOut: true }); }
-        const identity = control.store.identity(token); if (!identity) throw new ApiError(401, '请先登录'); const tenant = identity.tenantId;
+        if (path === '/api/auth/logout') {
+          const previous = control.store.identity(token);
+          control.store.revoke(token);
+          if (previous) await control.logout(previous.tenantId, authenticationIdentity(token!));
+          res.setHeader('Set-Cookie', cookie('', true));
+          return json(res, 200, { loggedOut: true });
+        }
+        const identity = control.store.identity(token);
+        if (!identity) throw new ApiError(401, '请先登录');
+        const tenant = identity.tenantId;
         if (path === '/api/metrics') {
-          const record = JSON.stringify({ receivedAt: new Date().toISOString(), tenantId: tenant, metrics: body }) + '\n';
-          const write = metricsWrite.then(async () => { await mkdir(options.metricsDir, { recursive: true }); await appendFile(resolve(options.metricsDir, 'client-metrics.jsonl'), record); });
-          metricsWrite = write.catch(() => {}); await write; return json(res, 200, { stored: true });
+          const record =
+            JSON.stringify({ receivedAt: new Date().toISOString(), tenantId: tenant, metrics: body }) + '\n';
+          const write = metricsWrite.then(async () => {
+            await mkdir(options.metricsDir, { recursive: true });
+            await appendFile(resolve(options.metricsDir, 'client-metrics.jsonl'), record);
+          });
+          metricsWrite = write.catch(() => {});
+          await write;
+          return json(res, 200, { stored: true });
         }
         if (!diagnostic || !identity.legacy) throw new ApiError(404, '正常 Viewer 请使用 WebSocket');
         if (path === '/api/actions') return json(res, 200, await control.action(tenant, body));
@@ -87,22 +171,56 @@ export function createHttp(control: Control, options: { origins: string[]; clien
         throw new ApiError(404, '接口不存在');
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new ApiError(405, '不支持的方法');
-      const root = resolve(options.clientDir), appEntry = ['/', '/diagnostics', '/automation'].includes(path), file = resolve(root, appEntry ? 'index.html' : `.${path}`);
+      const root = resolve(options.clientDir),
+        appEntry = ['/', '/diagnostics', '/automation'].includes(path),
+        file = resolve(root, appEntry ? 'index.html' : `.${path}`);
       if (!file.startsWith(root + sep)) throw new ApiError(403, '无效路径');
-      const content = await readFile(file).catch(() => { throw new ApiError(404, '文件不存在，请先 npm run build'); });
-      const mime: Record<string, string> = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml' };
-      res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream'); res.end(req.method === 'HEAD' ? undefined : content);
-    } catch (error) { json(res, error instanceof ApiError ? error.status : 502, { error: { message: error instanceof Error ? error.message : String(error) } }); }
+      const content = await readFile(file).catch(() => {
+        throw new ApiError(404, '文件不存在，请先 npm run build');
+      });
+      const mime: Record<string, string> = {
+        '.html': 'text/html; charset=utf-8',
+        '.js': 'text/javascript',
+        '.css': 'text/css',
+        '.svg': 'image/svg+xml',
+      };
+      res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
+      res.end(req.method === 'HEAD' ? undefined : content);
+    } catch (error) {
+      json(res, error instanceof ApiError ? error.status : 502, {
+        error: { message: error instanceof Error ? error.message : String(error) },
+      });
+    }
   };
-  const server = options.tls ? createHttpsServer(options.tls, (req, res) => { void track(handler(req, res)); }) : createServer((req, res) => { void track(handler(req, res)); });
+  const server = options.tls
+    ? createHttpsServer(options.tls, (req, res) => {
+        void track(handler(req, res));
+      })
+    : createServer((req, res) => {
+        void track(handler(req, res));
+      });
   const connections = new Set<Socket>();
-  server.on('connection', socket => { connections.add(socket); socket.once('close', () => connections.delete(socket)); });
+  server.on('connection', (socket) => {
+    connections.add(socket);
+    socket.once('close', () => connections.delete(socket));
+  });
   const sockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024, perMessageDeflate: false });
   const peers = new Map<WebSocket, { tenant: string; lease: string; token: string; alive: boolean }>();
-  const send = (ws: WebSocket, message: unknown) => { if (ws.readyState === WebSocket.OPEN) { if (ws.bufferedAmount > 2 * 1024 * 1024) ws.terminate(); else ws.send(JSON.stringify(message)); } };
-  const push = (tenant: string, state: ProductState) => { for (const [ws, peer] of peers) if (peer.tenant === tenant && control.productAllowed(tenant, peer.lease)) send(ws, { type: 'state', revision: state.workspace.revision, state }); };
+  const send = (ws: WebSocket, message: unknown) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      if (ws.bufferedAmount > 2 * 1024 * 1024) ws.terminate();
+      else ws.send(JSON.stringify(message));
+    }
+  };
+  const push = (tenant: string, state: ProductState) => {
+    for (const [ws, peer] of peers)
+      if (peer.tenant === tenant && control.productAllowed(tenant, peer.lease))
+        send(ws, { type: 'state', revision: state.workspace.revision, state });
+  };
   control.on('state', push);
-  const signal = (tenant: string, lease: string, message: unknown) => { for (const [ws, peer] of peers) if (peer.tenant === tenant && peer.lease === lease) send(ws, message); };
+  const signal = (tenant: string, lease: string, message: unknown) => {
+    for (const [ws, peer] of peers) if (peer.tenant === tenant && peer.lease === lease) send(ws, message);
+  };
   control.on('rtc.signal', signal);
   const auth = (tenant: string, lease: string, state: unknown) => {
     diagnosticSessions?.checkViewer(tenant, lease);
@@ -113,20 +231,38 @@ export function createHttp(control: Control, options: { origins: string[]; clien
     try {
       if (closing) throw new ApiError(503, '服务正在关闭');
       if (options.endpointNode?.handleUpgrade(req, socket, head)) return;
-      if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/api/socket') throw new ApiError(404, '接口不存在'); checkOrigin(req);
-      const token = readToken(req), identity = control.store.identity(token); if (!identity || !token) throw new ApiError(401, '请先登录');
-      sockets.handleUpgrade(req, socket, head, ws => {
-        const lease = randomUUID(), peer = { tenant: identity.tenantId, lease, token, alive: true }; peers.set(ws, peer);
+      if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/api/socket')
+        throw new ApiError(404, '接口不存在');
+      checkOrigin(req);
+      const token = readToken(req),
+        identity = control.store.identity(token);
+      if (!identity || !token) throw new ApiError(401, '请先登录');
+      sockets.handleUpgrade(req, socket, head, (ws) => {
+        const lease = randomUUID(),
+          peer = { tenant: identity.tenantId, lease, token, alive: true };
+        peers.set(ws, peer);
         const pending = new Set<string>();
         const hash = authenticationIdentity(token);
         const initialUnlocked = (firstViewer.get(hash) ?? 0) > Date.now();
         firstViewer.delete(hash);
-        const ready = track(control.attachViewer(peer.tenant, lease, reason => {
-          diagnosticSessions?.detachViewer(peer.tenant, lease, 'authorization-changed');
-          send(ws, { type: 'lease', status: 'revoked', reason }); ws.close(4001, reason);
-        }, { identity: hash, valid: () => control.store.identity(token)?.tenantId === peer.tenant }, identity.legacy ? undefined : initialUnlocked));
+        const ready = track(
+          control.attachViewer(
+            peer.tenant,
+            lease,
+            (reason) => {
+              diagnosticSessions?.detachViewer(peer.tenant, lease, 'authorization-changed');
+              send(ws, { type: 'lease', status: 'revoked', reason });
+              ws.close(4001, reason);
+            },
+            { identity: hash, valid: () => control.store.identity(token)?.tenantId === peer.tenant },
+            identity.legacy ? undefined : initialUnlocked,
+          ),
+        );
         void ready.catch(() => ws.close(1011, 'Viewer unavailable'));
-        ws.on('pong', () => { peer.alive = true; }); ws.on('error', () => {});
+        ws.on('pong', () => {
+          peer.alive = true;
+        });
+        ws.on('error', () => {});
         ws.on('close', () => {
           diagnosticSessions?.detachViewer(peer.tenant, lease, 'disconnected');
           if (peers.delete(ws)) void track(control.detachViewer(peer.tenant, lease)).catch(() => {});
@@ -135,38 +271,107 @@ export function createHttp(control: Control, options: { origins: string[]; clien
           if (closing) return;
           let request: any;
           const raw = data.toString();
-          try { if (binary) throw new Error(); request = JSON.parse(raw); if (!request || typeof request.id !== 'string' || !request.id || request.id.length > 128 || typeof request.method !== 'string' || pending.has(request.id) || pending.size >= 32) throw new Error(); }
-          catch { send(ws, { type: 'error', id: typeof request?.id === 'string' ? request.id : '', error: { code: 400, message: '无效的 WebSocket 请求' } }); return; }
+          try {
+            if (binary) throw new Error();
+            request = JSON.parse(raw);
+            if (
+              !request ||
+              typeof request.id !== 'string' ||
+              !request.id ||
+              request.id.length > 128 ||
+              typeof request.method !== 'string' ||
+              pending.has(request.id) ||
+              pending.size >= 32
+            )
+              throw new Error();
+          } catch {
+            send(ws, {
+              type: 'error',
+              id: typeof request?.id === 'string' ? request.id : '',
+              error: { code: 400, message: '无效的 WebSocket 请求' },
+            });
+            return;
+          }
           const diagnosticRequest = request.method.startsWith('diagnostics.');
           if (diagnosticRequest && Buffer.byteLength(raw) > diagnosticMessageLimit) {
-            send(ws, { type: 'error', id: request.id, error: { code: 413, message: '诊断请求过大' } }); return;
+            send(ws, { type: 'error', id: request.id, error: { code: 413, message: '诊断请求过大' } });
+            return;
           }
           pending.add(request.id);
           const immediate = request.method.startsWith('auth.') || request.method === 'clock.ping';
-          void track((immediate ? Promise.resolve() : ready).then(async () => {
-            const currentIdentity = control.store.identity(token);
-            if (!currentIdentity) throw new ApiError(401, '登录已过期');
-            const maintenance = immediate || ['rtc.offer', 'rtc.ice', 'rtc.close'].includes(request.method);
-            const epoch = control.productEpoch(peer.tenant, lease);
-            let result: unknown;
-            if (diagnosticRequest) {
-              if (!diagnosticSessions) throw new ApiError(404, '诊断采集未配置');
-              const allowed = () => !closing && peers.has(ws) && control.productAllowed(peer.tenant, lease) && control.productEpoch(peer.tenant, lease) === epoch;
-              if (currentIdentity.legacy || currentIdentity.tenantId !== peer.tenant || epoch === undefined || !allowed()) throw new ApiError(423, 'Viewer 已锁定');
-              result = await diagnosticSessions.request({ tenant: peer.tenant, lease, epoch, identity: hash, allowed }, request.method, request.params);
-            } else {
-              result = await control.viewerRequest(peer.tenant, lease, request.method, request.params);
-            }
-            if (!maintenance && (!control.productAllowed(peer.tenant, lease) || control.productEpoch(peer.tenant, lease) !== epoch)) throw new ApiError(423, 'Viewer 已锁定');
-            send(ws, { type: 'result', id: request.id, result });
-          }).catch(error => send(ws, { type: 'error', id: request.id, error: { code: error instanceof ApiError ? error.status : 502, message: error instanceof Error ? error.message : String(error) } })).finally(() => pending.delete(request.id)));
+          void track(
+            (immediate ? Promise.resolve() : ready)
+              .then(async () => {
+                const currentIdentity = control.store.identity(token);
+                if (!currentIdentity) throw new ApiError(401, '登录已过期');
+                const maintenance =
+                  immediate || ['rtc.offer', 'rtc.ice', 'rtc.close'].includes(request.method);
+                const epoch = control.productEpoch(peer.tenant, lease);
+                let result: unknown;
+                if (diagnosticRequest) {
+                  if (!diagnosticSessions) throw new ApiError(404, '诊断采集未配置');
+                  const allowed = () =>
+                    !closing &&
+                    peers.has(ws) &&
+                    control.productAllowed(peer.tenant, lease) &&
+                    control.productEpoch(peer.tenant, lease) === epoch;
+                  if (
+                    currentIdentity.legacy ||
+                    currentIdentity.tenantId !== peer.tenant ||
+                    epoch === undefined ||
+                    !allowed()
+                  )
+                    throw new ApiError(423, 'Viewer 已锁定');
+                  result = await diagnosticSessions.request(
+                    { tenant: peer.tenant, lease, epoch, identity: hash, allowed },
+                    request.method,
+                    request.params,
+                  );
+                } else {
+                  result = await control.viewerRequest(peer.tenant, lease, request.method, request.params);
+                }
+                if (
+                  !maintenance &&
+                  (!control.productAllowed(peer.tenant, lease) ||
+                    control.productEpoch(peer.tenant, lease) !== epoch)
+                )
+                  throw new ApiError(423, 'Viewer 已锁定');
+                send(ws, { type: 'result', id: request.id, result });
+              })
+              .catch((error) =>
+                send(ws, {
+                  type: 'error',
+                  id: request.id,
+                  error: {
+                    code: error instanceof ApiError ? error.status : 502,
+                    message: error instanceof Error ? error.message : String(error),
+                  },
+                }),
+              )
+              .finally(() => pending.delete(request.id)),
+          );
         });
       });
-    } catch (error) { const status = error instanceof ApiError ? error.status : 500; socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); }
+    } catch (error) {
+      const status = error instanceof ApiError ? error.status : 500;
+      socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+    }
   });
-  const facePoll = setInterval(() => { if (!closing) void track(control.pollFaceAuth()); }, 500);
+  const facePoll = setInterval(() => {
+    if (!closing) void track(control.pollFaceAuth());
+  }, 500);
   facePoll.unref();
-  const heartbeat = setInterval(() => { for (const [ws, peer] of peers) { if (!peer.alive || !control.store.identity(peer.token)) { ws.terminate(); continue; } peer.alive = false; ws.ping(); } }, 30000); heartbeat.unref();
+  const heartbeat = setInterval(() => {
+    for (const [ws, peer] of peers) {
+      if (!peer.alive || !control.store.identity(peer.token)) {
+        ws.terminate();
+        continue;
+      }
+      peer.alive = false;
+      ws.ping();
+    }
+  }, 30000);
+  heartbeat.unref();
   const originalClose = server.close.bind(server);
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
@@ -175,11 +380,17 @@ export function createHttp(control: Control, options: { origins: string[]; clien
     const archivesClosed = diagnosticSessions?.shutdown();
     // Fail remote management requests before draining handlers waiting on them.
     options.endpointNode?.stop();
-    clearInterval(heartbeat); clearInterval(facePoll); control.off('auth', auth);
-    control.off('state', push); control.off('rtc.signal', signal);
-    const httpClosed = new Promise<void>((resolve, reject) => originalClose(error => {
-      if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') reject(error); else resolve();
-    }));
+    clearInterval(heartbeat);
+    clearInterval(facePoll);
+    control.off('auth', auth);
+    control.off('state', push);
+    control.off('rtc.signal', signal);
+    const httpClosed = new Promise<void>((resolve, reject) =>
+      originalClose((error) => {
+        if (error && (error as NodeJS.ErrnoException).code !== 'ERR_SERVER_NOT_RUNNING') reject(error);
+        else resolve();
+      }),
+    );
     for (const [ws, peer] of peers) {
       peers.delete(ws);
       void track(control.detachViewer(peer.tenant, peer.lease)).catch(() => {});
@@ -199,13 +410,42 @@ export function createHttp(control: Control, options: { origins: string[]; clien
     return shutdownPromise;
   };
   server.close = ((callback?: (error?: Error) => void) => {
-    void shutdown().then(() => callback?.(), error => callback?.(error));
+    void shutdown().then(
+      () => callback?.(),
+      (error) => callback?.(error),
+    );
     return server;
   }) as typeof server.close;
   return Object.assign(server, { shutdown });
 }
-function readToken(req: IncomingMessage) { return req.headers.cookie?.split(';').map(value => value.trim()).find(value => value.startsWith('rk_session='))?.slice(11); }
-function json(res: ServerResponse, status: number, body: unknown) { if (res.destroyed || res.writableEnded) return; res.statusCode = status; res.setHeader('Content-Type', 'application/json; charset=utf-8'); res.end(JSON.stringify(body)); }
-async function readBody(req: IncomingMessage) { let size = 0; const chunks: Buffer[] = []; for await (const chunk of req) { size += chunk.length; if (size > 1024 * 1024) throw new ApiError(413, '请求过大'); chunks.push(Buffer.from(chunk)); } try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { throw new ApiError(400, 'JSON 格式错误'); } }
+function readToken(req: IncomingMessage) {
+  return req.headers.cookie
+    ?.split(';')
+    .map((value) => value.trim())
+    .find((value) => value.startsWith('rk_session='))
+    ?.slice(11);
+}
+function json(res: ServerResponse, status: number, body: unknown) {
+  if (res.destroyed || res.writableEnded) return;
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.end(JSON.stringify(body));
+}
+async function readBody(req: IncomingMessage) {
+  let size = 0;
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > 1024 * 1024) throw new ApiError(413, '请求过大');
+    chunks.push(Buffer.from(chunk));
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw new ApiError(400, 'JSON 格式错误');
+  }
+}
 
-function authenticationIdentity(token: string) { return createHash('sha256').update(token).digest('hex'); }
+function authenticationIdentity(token: string) {
+  return createHash('sha256').update(token).digest('hex');
+}

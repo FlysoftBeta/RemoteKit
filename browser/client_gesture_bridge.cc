@@ -11,25 +11,33 @@
 namespace remotekit::browser {
 ClientGestureBridge::ClientGestureBridge(
     input::RenderWidgetHostInputEventRouter* router,
-    input::RenderWidgetHostViewInput* root, input::RenderWidgetHostViewInput* target,
-    std::string sequence, base::TimeTicks origin,
+    input::RenderWidgetHostViewInput* root,
+    input::RenderWidgetHostViewInput* target,
+    std::string sequence,
+    base::TimeTicks origin,
     base::RepeatingCallback<void(ClientTouchAckState, bool, bool)> processed)
-    : router_(router->GetWeakPtr()), root_(root->GetInputWeakPtr()),
-      target_(target->GetInputWeakPtr()), sequence_(std::move(sequence)),
-      origin_(origin), processed_(std::move(processed)),
+    : router_(router->GetWeakPtr()),
+      root_(root->GetInputWeakPtr()),
+      target_(target->GetInputWeakPtr()),
+      sequence_(std::move(sequence)),
+      origin_(origin),
+      processed_(std::move(processed)),
       native_clock_(origin, base::TimeTicks::Now()) {
   // Source deltas are authoritative; ACK/network latency must not scale them.
   filter_.DisableScrollUpdateCompensation();
 }
-ClientGestureBridge::~ClientGestureBridge() { filter_.Shutdown(); }
+ClientGestureBridge::~ClientGestureBridge() {
+  filter_.Shutdown();
+}
 
 Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
-                                    const std::vector<TouchInput::Gesture>& candidates,
-                                    int64_t source_elapsed_us) {
+                                     const std::vector<TouchInput::Gesture>& candidates,
+                                     int64_t source_elapsed_us) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
   if (stopped_ || !router_ || !root_ || !target_ || !router_->IsViewInMap(root_.get()))
     return {Error::stale, "Client touch owner lost"};
-  if (pending_.size() >= 128) return {Error::busy, "Client touch ACK queue full"};
+  if (pending_.size() >= 128)
+    return {Error::busy, "Client touch ACK queue full"};
   event.unique_touch_event_id = ui::GetNextTouchEventId();
   if (!first_id_ && !event.IsTouchSequenceStart())
     return {Error::invalid, "Missing first client touch"};
@@ -44,8 +52,9 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
   event.moved_beyond_slop_region = candidate_state.moved();
   content::MotionEventWeb motion(event);
   auto packet = MakeClientGesturePacket(motion, candidates, first_id);
-  if (!router_->RegisterClientTouch(root_.get(), event.unique_touch_event_id,
-      base::BindOnce(&ClientGestureBridge::Ack, weak_factory_.GetWeakPtr())))
+  if (!router_->RegisterClientTouch(
+          root_.get(), event.unique_touch_event_id,
+          base::BindOnce(&ClientGestureBridge::Ack, weak_factory_.GetWeakPtr())))
     return {Error::busy, "Client touch router registrations full"};
   pending_.insert(event.unique_touch_event_id);
   auto weak = weak_factory_.GetWeakPtr();
@@ -54,8 +63,7 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
     pending_.erase(event.unique_touch_event_id);
     return {Error::invalid, "Invalid client gesture packet order"};
   }
-  if (!weak || stopped_ || !router_ || !root_ || !target_ ||
-      !router_->IsViewInMap(root_.get())) {
+  if (!weak || stopped_ || !router_ || !root_ || !target_ || !router_->IsViewInMap(root_.get())) {
     if (router_)
       router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
     pending_.erase(event.unique_touch_event_id);
@@ -65,9 +73,9 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
   candidate_state_ = candidate_state;
   source_time_ = source_time;
   for (const auto& candidate : candidates)
-    if (candidate.type == TouchInput::Gesture::Type::fling_start) fling_pending_ = true;
-  timeout_.Start(FROM_HERE, base::Seconds(2),
-                 base::BindOnce(&ClientGestureBridge::Timeout, weak));
+    if (candidate.type == TouchInput::Gesture::Type::fling_start)
+      fling_pending_ = true;
+  timeout_.Start(FROM_HERE, base::Seconds(2), base::BindOnce(&ClientGestureBridge::Timeout, weak));
   // OnGesturePacket can synchronously release a preceding packet's repair.
   // Recheck at the actual raw routing boundary as well.
   event.SetTimeStamp(NativeTimestamp(event.TimeStamp()));
@@ -76,26 +84,32 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
 }
 
 void ClientGestureBridge::Ack(const blink::WebTouchEvent& event,
-    blink::mojom::InputEventResultState result, input::RenderWidgetHostViewInput* target) {
+                              blink::mojom::InputEventResultState result,
+                              input::RenderWidgetHostViewInput* target) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
-  if (!pending_.erase(event.unique_touch_event_id)) return;
+  if (!pending_.erase(event.unique_touch_event_id))
+    return;
   const bool alive = router_ && root_ && target_ && target == target_.get();
   auto weak = weak_factory_.GetWeakPtr();
   if (alive && !stopped_) {
     const bool consumed = result == blink::mojom::InputEventResultState::kConsumed ||
-        result == blink::mojom::InputEventResultState::kUnknown;
+                          result == blink::mojom::InputEventResultState::kUnknown;
     if (consumed && event.unique_touch_event_id == first_id_)
       router_->OnHandledTouchStartOrFirstTouchMove(first_id_);
     filter_.OnTouchEventAck(event.unique_touch_event_id, consumed,
-                           input::InputEventResultStateIsSetBlocking(result));
+                            input::InputEventResultStateIsSetBlocking(result));
   } else if (!alive) {
     Cancel(false);
   }
-  if (!weak) return;
-  if (pending_.empty() && !momentum_) timeout_.Stop();
-  CompleteClientTouchAck(event.IsTouchSequenceEnd(), fling_pending_, momentum_,
+  if (!weak)
+    return;
+  if (pending_.empty() && !momentum_)
+    timeout_.Stop();
+  CompleteClientTouchAck(
+      event.IsTouchSequenceEnd(), fling_pending_, momentum_,
       base::BindOnce(&ClientGestureBridge::EndMomentum, weak),
-      base::BindOnce(processed_, alive ? ClientTouchAckState::canonical : ClientTouchAckState::target_mismatch,
+      base::BindOnce(processed_,
+                     alive ? ClientTouchAckState::canonical : ClientTouchAckState::target_mismatch,
                      event.IsTouchSequenceEnd(), pending_.empty()));
 }
 
@@ -103,7 +117,8 @@ base::TimeTicks ClientGestureBridge::NativeTimestamp(base::TimeTicks sampled) {
   return native_clock_.Dispatch(sampled, base::TimeTicks::Now());
 }
 bool ClientGestureBridge::Route(blink::WebGestureEvent event) {
-  if (stopped_ || !router_ || !root_ || !target_) return false;
+  if (stopped_ || !router_ || !root_ || !target_)
+    return false;
   // ACKs can release an old candidate after a newer raw event was dispatched.
   event.SetTimeStamp(NativeTimestamp(event.TimeStamp()));
   return router_->RouteClientGestureEvent(root_.get(), event, first_id_, target_.get());
@@ -117,10 +132,14 @@ void ClientGestureBridge::ForwardGestureEvent(const ui::GestureEventData& data) 
     auto* input_router = target_ ? target_->GetViewRenderInputRouter()->input_router() : nullptr;
     momentum_ = bound_ && scroll_ && target_ && root_ && input_router &&
                 input_router->ActiveTouchAction().has_value();
-    if (momentum_) input_router->SetClientMomentumActive(true);
+    if (momentum_)
+      input_router->SetClientMomentumActive(true);
     momentum_deadline_ = base::TimeTicks::Now() + base::Seconds(5);
     fling_pending_ = false;
-    if (!momentum_) { EndMomentum(); return; }
+    if (!momentum_) {
+      EndMomentum();
+      return;
+    }
     if (momentum_ && buffered_) {
       const auto value = *buffered_;
       buffered_.reset();
@@ -128,15 +147,21 @@ void ClientGestureBridge::ForwardGestureEvent(const ui::GestureEventData& data) 
     }
     return;
   }
-  if (event.GetType() == T::kGestureFlingCancel) { EndMomentum(); return; }
+  if (event.GetType() == T::kGestureFlingCancel) {
+    EndMomentum();
+    return;
+  }
   if (event.GetType() == T::kGestureTapDown) {
     event.unique_touch_event_id = first_id_;
     bound_ = Route(event);
     return;
   }
-  if (!bound_) return;
-  if (event.GetType() == T::kGestureScrollBegin) scroll_ = true;
-  if (event.GetType() == T::kGestureScrollEnd) scroll_ = false;
+  if (!bound_)
+    return;
+  if (event.GetType() == T::kGestureScrollBegin)
+    scroll_ = true;
+  if (event.GetType() == T::kGestureScrollEnd)
+    scroll_ = false;
   last_gesture_ = event;
   Route(event);
 }
@@ -145,9 +170,15 @@ Status ClientGestureBridge::Momentum(const GestureInput& value) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
   if (stopped_ || value.sequence_id != sequence_ || !root_ || !target_)
     return {Error::stale, "Momentum owner lost"};
-  if (value.action == GestureInput::Action::cancel) { EndMomentum(); return {}; }
+  if (value.action == GestureInput::Action::cancel) {
+    EndMomentum();
+    return {};
+  }
   if (!momentum_) {
-    if (fling_pending_) { buffered_ = value; return {}; }
+    if (fling_pending_) {
+      buffered_ = value;
+      return {};
+    }
     return {Error::stale, "Momentum was not allowed"};
   }
   if (base::TimeTicks::Now() > momentum_deadline_ || !source_time_.Momentum(value.elapsed_us)) {
@@ -166,11 +197,15 @@ Status ClientGestureBridge::Momentum(const GestureInput& value) {
   cumulative_x_ = value.cumulative_x;
   cumulative_y_ = value.cumulative_y;
   auto weak = weak_factory_.GetWeakPtr();
-  if (event.data.scroll_update.delta_x || event.data.scroll_update.delta_y) Route(event);
-  if (!weak) return {};
-  if (value.action == GestureInput::Action::momentum_end) EndMomentum();
-  else timeout_.Start(FROM_HERE, base::Seconds(2),
-                      base::BindOnce(&ClientGestureBridge::Timeout, weak));
+  if (event.data.scroll_update.delta_x || event.data.scroll_update.delta_y)
+    Route(event);
+  if (!weak)
+    return {};
+  if (value.action == GestureInput::Action::momentum_end)
+    EndMomentum();
+  else
+    timeout_.Start(FROM_HERE, base::Seconds(2),
+                   base::BindOnce(&ClientGestureBridge::Timeout, weak));
   return {};
 }
 void ClientGestureBridge::EndMomentum() {
@@ -186,25 +221,34 @@ void ClientGestureBridge::EndMomentum() {
     end.data.scroll_end.inertial_phase = blink::WebGestureEvent::InertialPhaseState::kMomentum;
     Route(end);
   }
-  if (target_) target_->GetViewRenderInputRouter()->input_router()->SetClientMomentumActive(false);
-  if (pending_.empty()) timeout_.Stop();
+  if (target_)
+    target_->GetViewRenderInputRouter()->input_router()->SetClientMomentumActive(false);
+  if (pending_.empty())
+    timeout_.Stop();
 }
 void ClientGestureBridge::Cancel(bool deliver) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
-  if (stopped_) return;
-  if (deliver) EndMomentum();
-  else if (target_) target_->GetViewRenderInputRouter()->input_router()->SetClientMomentumActive(false);
+  if (stopped_)
+    return;
+  if (deliver)
+    EndMomentum();
+  else if (target_)
+    target_->GetViewRenderInputRouter()->input_router()->SetClientMomentumActive(false);
   stopped_ = true;
   filter_.Shutdown();
-  if (pending_.empty()) timeout_.Stop();
-  else timeout_.Start(FROM_HERE, base::Seconds(2),
-                       base::BindOnce(&ClientGestureBridge::Timeout, weak_factory_.GetWeakPtr()));
-  if (router_ && first_id_) router_->OnHandledTouchStartOrFirstTouchMove(first_id_);
+  if (pending_.empty())
+    timeout_.Stop();
+  else
+    timeout_.Start(FROM_HERE, base::Seconds(2),
+                   base::BindOnce(&ClientGestureBridge::Timeout, weak_factory_.GetWeakPtr()));
+  if (router_ && first_id_)
+    router_->OnHandledTouchStartOrFirstTouchMove(first_id_);
   buffered_.reset();
 }
 void ClientGestureBridge::Timeout() {
   const bool raw_pending = !pending_.empty();
   Cancel(true);
-  if (raw_pending) processed_.Run(ClientTouchAckState::timeout, false, false);
+  if (raw_pending)
+    processed_.Run(ClientTouchAckState::timeout, false, false);
 }
 }  // namespace remotekit::browser

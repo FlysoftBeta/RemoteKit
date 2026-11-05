@@ -3,51 +3,90 @@ import type { DiagnosticEnvironment, DiagnosticMethods, DiagnosticReply } from '
 export function diagnosticEnvironment(): DiagnosticEnvironment {
   const ua = navigator.userAgent;
   const browsers = [
-    ['edge', /Edg(?:A|iOS)?\/([\d.]+)/], ['firefox', /(?:Firefox|FxiOS)\/([\d.]+)/],
-    ['chrome', /(?:Chrome|CriOS)\/([\d.]+)/], ['chromium', /Chromium\/([\d.]+)/],
+    ['edge', /Edg(?:A|iOS)?\/([\d.]+)/],
+    ['firefox', /(?:Firefox|FxiOS)\/([\d.]+)/],
+    ['chrome', /(?:Chrome|CriOS)\/([\d.]+)/],
+    ['chromium', /Chromium\/([\d.]+)/],
     ['safari', /Version\/([\d.]+).*Safari\//],
   ] as const;
   const browser = browsers.find(([, pattern]) => pattern.test(ua));
-  const platform = /Android/.test(ua) ? 'android' : /iPhone|iPad|iPod/.test(ua) ||
-    (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'ios' : /Windows/.test(ua) ? 'windows' :
-    /CrOS/.test(ua) ? 'chromeos' : /Macintosh/.test(ua) ? 'macos' : /Linux/.test(ua) ? 'linux' : 'other';
+  const platform = /Android/.test(ua)
+    ? 'android'
+    : /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)
+      ? 'ios'
+      : /Windows/.test(ua)
+        ? 'windows'
+        : /CrOS/.test(ua)
+          ? 'chromeos'
+          : /Macintosh/.test(ua)
+            ? 'macos'
+            : /Linux/.test(ua)
+              ? 'linux'
+              : 'other';
   const osPatterns = {
-    android: /Android ([\d.]+)/, ios: /(?:CPU (?:iPhone )?OS|iPhone OS) ([\d_]+)/,
-    windows: /Windows NT ([\d.]+)/, macos: /Mac OS X ([\d_.]+)/, chromeos: /CrOS [\w-]+ ([\d.]+)/,
-    linux: undefined, other: undefined,
+    android: /Android ([\d.]+)/,
+    ios: /(?:CPU (?:iPhone )?OS|iPhone OS) ([\d_]+)/,
+    windows: /Windows NT ([\d.]+)/,
+    macos: /Mac OS X ([\d_.]+)/,
+    chromeos: /CrOS [\w-]+ ([\d.]+)/,
+    linux: undefined,
+    other: undefined,
   };
-  const version = (value?: string) => value && /^\d{1,6}(?:[._]\d{1,6}){0,3}$/.test(value)
-    ? value.replace(/_/g, '.') : undefined;
+  const version = (value?: string) =>
+    value && /^\d{1,6}(?:[._]\d{1,6}){0,3}$/.test(value) ? value.replace(/_/g, '.') : undefined;
   const browserVersion = version(browser?.[1].exec(ua)?.[1]);
   const osVersion = version(osPatterns[platform]?.exec(ua)?.[1]);
-  const device = navigator as Navigator & { deviceMemory?: number; connection?: {
-    effectiveType?: string; rtt?: number; downlink?: number;
-  } };
+  const device = navigator as Navigator & {
+    deviceMemory?: number;
+    connection?: {
+      effectiveType?: string;
+      rtt?: number;
+      downlink?: number;
+    };
+  };
   const effectiveType = device.connection?.effectiveType;
   return {
-    browserFamily: 'brave' in navigator ? 'brave' : browser?.[0] ?? 'other',
+    browserFamily: 'brave' in navigator ? 'brave' : (browser?.[0] ?? 'other'),
     browserMajorVersion: browserVersion ? Number(browserVersion.split('.')[0]) : undefined,
-    browserVersion, platform, osVersion,
+    browserVersion,
+    platform,
+    osVersion,
     viewportWidth: window.visualViewport?.width ?? window.innerWidth,
     viewportHeight: window.visualViewport?.height ?? window.innerHeight,
     devicePixelRatio: window.devicePixelRatio,
-    screenWidth: screen.width, screenHeight: screen.height, screenColorDepth: screen.colorDepth,
+    screenWidth: screen.width,
+    screenHeight: screen.height,
+    screenColorDepth: screen.colorDepth,
     maxTouchPoints: navigator.maxTouchPoints,
-    hardwareConcurrency: navigator.hardwareConcurrency, deviceMemoryGiB: device.deviceMemory,
-    effectiveConnectionType: effectiveType === 'slow-2g' || effectiveType === '2g' ||
-      effectiveType === '3g' || effectiveType === '4g' ? effectiveType : undefined,
-    networkRttMs: device.connection?.rtt, networkDownlinkMbps: device.connection?.downlink,
+    hardwareConcurrency: navigator.hardwareConcurrency,
+    deviceMemoryGiB: device.deviceMemory,
+    effectiveConnectionType:
+      effectiveType === 'slow-2g' ||
+      effectiveType === '2g' ||
+      effectiveType === '3g' ||
+      effectiveType === '4g'
+        ? effectiveType
+        : undefined,
+    networkRttMs: device.connection?.rtt,
+    networkDownlinkMbps: device.connection?.downlink,
     videoFrameCallbackSupported: typeof HTMLVideoElement.prototype.requestVideoFrameCallback === 'function',
   };
 }
 
 export type DiagnosticRequest = <K extends keyof DiagnosticMethods>(
-  method: K, params: DiagnosticMethods[K]['params'],
+  method: K,
+  params: DiagnosticMethods[K]['params'],
 ) => Promise<DiagnosticReply>;
 
 export type DiagnosticState =
   | { phase: 'idle' | 'starting' | 'start-error' }
-  | { phase: 'collecting' | 'finalizing' | 'complete' | 'retry' | 'failed'; id: string; samples: number; missingSamples: number; reason?: string };
+  | {
+      phase: 'collecting' | 'finalizing' | 'complete' | 'retry' | 'failed';
+      id: string;
+      samples: number;
+      missingSamples: number;
+      reason?: string;
+    };
 
 export class DiagnosticCollection {
   private state: DiagnosticState = { phase: 'idle' };
@@ -93,8 +132,7 @@ export class DiagnosticCollection {
   }
 
   dismiss() {
-    if (this.state.phase === 'complete' || this.state.phase === 'failed')
-      this.update({ phase: 'idle' });
+    if (this.state.phase === 'complete' || this.state.phase === 'failed') this.update({ phase: 'idle' });
   }
 
   async start(environment: DiagnosticEnvironment) {
@@ -125,8 +163,10 @@ export class DiagnosticCollection {
 
   private apply(reply: DiagnosticReply, current: Extract<DiagnosticState, { id: string }>) {
     if (reply.status === 'collecting') return false;
-    const reason = reply.reason === 'user' && current.reason === 'duration-limit'
-      ? current.reason : reply.reason ?? current.reason;
+    const reason =
+      reply.reason === 'user' && current.reason === 'duration-limit'
+        ? current.reason
+        : (reply.reason ?? current.reason);
     this.update({ ...current, phase: reply.status, reason });
     return true;
   }
@@ -139,7 +179,9 @@ export class DiagnosticCollection {
       return;
     }
     let data: object | undefined;
-    try { data = this.capture(this.since); } catch {}
+    try {
+      data = this.capture(this.since);
+    } catch {}
     if (!data) {
       this.update({ ...current, missingSamples: current.missingSamples + 1 });
       this.schedule(() => this.sample());

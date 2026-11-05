@@ -21,39 +21,79 @@ test('RGB24 wire omits alpha and writes the grant header little endian', () => {
   assert.deepEqual([...new Uint8Array(packet, 68)], [4, 5, 6]);
 });
 
-test('camera produces only server-granted RGB frames and cancels a backpressured grant', async t => {
+test('camera produces only server-granted RGB frames and cancels a backpressured grant', async (t) => {
   class Channel extends EventTarget {
     readyState = 'open';
     bufferedAmount = 0;
     bufferedAmountLowThreshold = 0;
     onmessage?: (event: { data: string }) => void;
     sent: (string | ArrayBuffer)[] = [];
-    send(value: string | ArrayBuffer) { this.sent.push(value); }
-    close() { this.readyState = 'closed'; }
-    emit(value: object) { this.onmessage?.({ data: JSON.stringify({ version: 1, ...binding, ...value }) }); }
+    send(value: string | ArrayBuffer) {
+      this.sent.push(value);
+    }
+    close() {
+      this.readyState = 'closed';
+    }
+    emit(value: object) {
+      this.onmessage?.({ data: JSON.stringify({ version: 1, ...binding, ...value }) });
+    }
   }
-  const video = { videoWidth: 160, videoHeight: 120, readyState: 2, currentTime: 1, play: async () => {}, pause() {} };
+  const video = {
+    videoWidth: 160,
+    videoHeight: 120,
+    readyState: 2,
+    currentTime: 1,
+    play: async () => {},
+    pause() {},
+  };
   let draws = 0;
   const document = {
     hidden: false,
-    createElement: (kind: string) => kind === 'video' ? video : {
-      width: 0, height: 0, getContext: () => ({
-        drawImage: () => draws++,
-        getImageData: () => ({ data: new Uint8ClampedArray(160 * 120 * 4) }),
-      }),
-    },
+    createElement: (kind: string) =>
+      kind === 'video'
+        ? video
+        : {
+            width: 0,
+            height: 0,
+            getContext: () => ({
+              drawImage: () => draws++,
+              getImageData: () => ({ data: new Uint8ClampedArray(160 * 120 * 4) }),
+            }),
+          },
   };
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
   Object.defineProperty(globalThis, 'document', { configurable: true, value: document });
-  t.after(() => previous ? Object.defineProperty(globalThis, 'document', previous) : Reflect.deleteProperty(globalThis, 'document'));
+  t.after(() =>
+    previous
+      ? Object.defineProperty(globalThis, 'document', previous)
+      : Reflect.deleteProperty(globalThis, 'document'),
+  );
   const camera = new AuthCameraChannel(() => {});
   const channel = new Channel();
   camera.bind(channel as unknown as RTCDataChannel);
-  camera.setSource({ getVideoTracks: () => [{ readyState: 'live', muted: false }] } as unknown as MediaStream, binding);
+  camera.setSource(
+    { getVideoTracks: () => [{ readyState: 'live', muted: false }] } as unknown as MediaStream,
+    binding,
+  );
   const binary = () => channel.sent.filter((packet): packet is ArrayBuffer => packet instanceof ArrayBuffer);
-  const config = { type: 'auth.camera.config', width: 160, height: 120, fps: 5, format: 'rgb24', chunkBytes: 16384 };
+  const config = {
+    type: 'auth.camera.config',
+    width: 160,
+    height: 120,
+    fps: 5,
+    format: 'rgb24',
+    chunkBytes: 16384,
+  };
   const grant = (captureId: number) => channel.emit({ type: 'auth.camera.frame', captureId });
-  assert.deepEqual(JSON.parse(channel.sent[0] as string), { version: 1, ...binding, type: 'auth.camera.ready', width: 160, height: 120, format: 'rgb24', maxFps: 5 });
+  assert.deepEqual(JSON.parse(channel.sent[0] as string), {
+    version: 1,
+    ...binding,
+    type: 'auth.camera.ready',
+    width: 160,
+    height: 120,
+    format: 'rgb24',
+    maxFps: 5,
+  });
   grant(1);
   channel.emit({ ...config, fps: 6 });
   grant(2);
@@ -83,6 +123,9 @@ test('camera produces only server-granted RGB frames and cancels a backpressured
   channel.bufferedAmount = 0;
   channel.dispatchEvent(new Event('bufferedamountlow'));
   await Promise.resolve();
-  assert.equal(binary().reduce((bytes, packet) => bytes + packet.byteLength - 68, 0), offset);
+  assert.equal(
+    binary().reduce((bytes, packet) => bytes + packet.byteLength - 68, 0),
+    offset,
+  );
   assert.equal(camera.hasRecentFrame(binding.challengeId), false);
 });

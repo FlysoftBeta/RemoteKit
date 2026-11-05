@@ -11,13 +11,18 @@ const playoutDelayUri = 'http://www.webrtc.org/experiments/rtp-hdrext/playout-de
 export function negotiatedReceiverPlayout(receiver?: RTCRtpReceiver) {
   try {
     const extensions = receiver?.getParameters?.()?.headerExtensions;
-    return extensions?.some(extension => extension.uri === playoutDelayUri);
-  } catch { return undefined; }
+    return extensions?.some((extension) => extension.uri === playoutDelayUri);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Feature detection must not create an inert standard property on Chrome89. */
 export function configureReceiverPlayout(receiver: RTCRtpReceiver): ReceiverPlayout {
-  const target = receiver as RTCRtpReceiver & { jitterBufferTarget?: number | null; playoutDelayHint?: number | null };
+  const target = receiver as RTCRtpReceiver & {
+    jitterBufferTarget?: number | null;
+    playoutDelayHint?: number | null;
+  };
   const result: ReceiverPlayout = {
     jitterBufferTargetSupported: 'jitterBufferTarget' in target,
     jitterBufferTarget: null,
@@ -25,12 +30,20 @@ export function configureReceiverPlayout(receiver: RTCRtpReceiver): ReceiverPlay
     playoutDelayHint: null,
   };
   if (result.jitterBufferTargetSupported) {
-    try { target.jitterBufferTarget = 0; result.jitterBufferTarget = target.jitterBufferTarget ?? null; }
-    catch { result.error = 'jitter-buffer-target-rejected'; }
+    try {
+      target.jitterBufferTarget = 0;
+      result.jitterBufferTarget = target.jitterBufferTarget ?? null;
+    } catch {
+      result.error = 'jitter-buffer-target-rejected';
+    }
   }
   if (result.jitterBufferTarget !== 0 && result.playoutDelayHintSupported) {
-    try { target.playoutDelayHint = 0; result.playoutDelayHint = target.playoutDelayHint ?? null; }
-    catch { result.error = 'playout-delay-hint-rejected'; }
+    try {
+      target.playoutDelayHint = 0;
+      result.playoutDelayHint = target.playoutDelayHint ?? null;
+    } catch {
+      result.error = 'playout-delay-hint-rejected';
+    }
   }
   return result;
 }

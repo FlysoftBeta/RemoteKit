@@ -5,7 +5,9 @@ export function useAutoFullscreen(enabled: boolean) {
   useEffect(() => {
     const target = document.documentElement;
     if (!enabled || !document.fullscreenEnabled || !target.requestFullscreen) return;
-    let armed = false, pending = false, inactive = true;
+    let armed = false,
+      pending = false,
+      inactive = true;
 
     const attempt = async () => {
       if (!armed || pending || inactive || document.fullscreenElement) return;
@@ -19,7 +21,10 @@ export function useAutoFullscreen(enabled: boolean) {
         pending = false;
       }
     };
-    const deactivate = () => { inactive = true; armed = false; };
+    const deactivate = () => {
+      inactive = true;
+      armed = false;
+    };
     const activate = () => {
       if (document.visibilityState !== 'visible' || !document.hasFocus()) return;
       if (!inactive) return;
@@ -32,10 +37,16 @@ export function useAutoFullscreen(enabled: boolean) {
       else deactivate();
     };
     const gesture = (event: Event) => {
-      if (event.isTrusted && (event.type !== 'keydown' || (event as KeyboardEvent).key !== 'Escape') &&
-          navigator.userActivation?.isActive !== false) void attempt();
+      if (
+        event.isTrusted &&
+        (event.type !== 'keydown' || (event as KeyboardEvent).key !== 'Escape') &&
+        navigator.userActivation?.isActive !== false
+      )
+        void attempt();
     };
-    const fullscreen = () => { armed = false; };
+    const fullscreen = () => {
+      armed = false;
+    };
     window.addEventListener('focus', activate);
     window.addEventListener('blur', deactivate);
     document.addEventListener('visibilitychange', visibility);

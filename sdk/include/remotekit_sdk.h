@@ -94,12 +94,16 @@ struct remotekit_sdk_render_request {
   uint32_t slot, interval_us, force;
 };
 enum remotekit_sdk_render_event_type {
-  REMOTEKIT_SDK_RENDER_REJECT = 1, REMOTEKIT_SDK_RENDER_FATAL = 2,
-  REMOTEKIT_SDK_RENDER_STOPPED = 3, REMOTEKIT_SDK_RENDER_WAKE = 4
+  REMOTEKIT_SDK_RENDER_REJECT = 1,
+  REMOTEKIT_SDK_RENDER_FATAL = 2,
+  REMOTEKIT_SDK_RENDER_STOPPED = 3,
+  REMOTEKIT_SDK_RENDER_WAKE = 4
 };
 enum remotekit_sdk_render_reject_reason {
-  REMOTEKIT_SDK_RENDER_IDLE = 1, REMOTEKIT_SDK_RENDER_NOT_READY = 2,
-  REMOTEKIT_SDK_RENDER_STALE_GENERATION = 3, REMOTEKIT_SDK_RENDER_REJECT_STOPPED = 4
+  REMOTEKIT_SDK_RENDER_IDLE = 1,
+  REMOTEKIT_SDK_RENDER_NOT_READY = 2,
+  REMOTEKIT_SDK_RENDER_STALE_GENERATION = 3,
+  REMOTEKIT_SDK_RENDER_REJECT_STOPPED = 4
 };
 struct remotekit_sdk_render_event {
   uint32_t struct_size, type, reason, reserved;
@@ -107,7 +111,7 @@ struct remotekit_sdk_render_event {
   uint32_t slot, reserved2;
 };
 typedef void (*remotekit_sdk_render_callback)(void* context,
-    const struct remotekit_sdk_render_event* event);
+                                              const struct remotekit_sdk_render_event* event);
 /* Claim the opaque one-use setup.render_channel token from a successful
  * open_render on this SDK's original live Control connection. No OS named pipe
  * or additional process link is opened. Control owns at most one unclaimed
@@ -125,14 +129,17 @@ typedef void (*remotekit_sdk_render_callback)(void* context,
  * request. Duplicate Wake is ignored; no Wake callback is delivered after Stop.
  * close is a callback barrier. No callback may run after it returns. */
 REMOTEKIT_SDK_API int remotekit_sdk_render_connect(const char* name_utf8,
-    remotekit_sdk_render_callback callback, void* context, uint64_t* handle);
+                                                   remotekit_sdk_render_callback callback,
+                                                   void* context,
+                                                   uint64_t* handle);
 REMOTEKIT_SDK_API int remotekit_sdk_render_begin(uint64_t handle,
-    const struct remotekit_sdk_render_request* begin);
+                                                 const struct remotekit_sdk_render_request* begin);
 /* Local bookkeeping only; sends no IPC. Call after the matching slot ready
  * Fence actually completes. Reject clears its matching outstanding request
  * automatically. Unknown identities return DATA_MISMATCH. This releases no GPU
  * resource: slot reuse still requires encoder leases and consumed Fence. */
-REMOTEKIT_SDK_API int remotekit_sdk_render_observe_signal(uint64_t handle,
+REMOTEKIT_SDK_API int remotekit_sdk_render_observe_signal(
+    uint64_t handle,
     const struct remotekit_sdk_render_identity* identity);
 /* Generation FIFO barrier, not a per-frame success notification. Sends Stop
  * once; same-generation repeats are idempotent. A successful stop forbids later
@@ -171,8 +178,9 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_command_token(uint64_t handle,
  * render_connect claims its opaque token. Failure closes all reply attachments
  * and all decoded Windows resource handles; raw control rejects attachments. */
 REMOTEKIT_SDK_API int remotekit_sdk_control_open_render(uint64_t handle,
-    uint32_t consumer_pid, struct remotekit_sdk_render_setup* setup,
-    uint32_t timeout_ms);
+                                                        uint32_t consumer_pid,
+                                                        struct remotekit_sdk_render_setup* setup,
+                                                        uint32_t timeout_ms);
 /* Windows set-1 native scan code: ordinary 0x00xx, E0-prefixed 0xE0xx
  * (e.g. right Control 0xE01D), not a virtual-key or raw LPARAM. For ordinary
  * keyboard LPARAMs combine bits 16..23 with 0xE000 when extended bit 24 is set.

@@ -12,5 +12,7 @@ process.env.REMOTEKIT_ENDPOINT_ARGS = JSON.stringify([
 process.env.REMOTEKIT_CONTROL_DB = path.join(root, 'data', 'control.db');
 process.env.REMOTEKIT_METRICS_DIR = path.join(root, 'metrics');
 
-import(pathToFileURL(path.join(root, 'control', 'dist', 'server.mjs')).href)
-  .catch(error => { console.error(error); process.exitCode = 1; });
+import(pathToFileURL(path.join(root, 'control', 'dist', 'server.mjs')).href).catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
