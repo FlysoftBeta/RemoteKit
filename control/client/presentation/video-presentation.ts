@@ -1,4 +1,4 @@
-import type { Layout, Surface } from '../types';
+import type { Layout, Surface } from './types';
 
 export interface PresentationBarrier {
   version: 1;

@@ -1,4 +1,4 @@
-import type { Surface } from '../types';
+import type { Surface } from '../presentation/types';
 import type { TouchPacket } from './touch-input';
 import type { InputResult } from './types';
 

@@ -5,11 +5,12 @@ import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { Store } from '../../control/server/store.ts';
-import { Control } from '../../control/server/control.ts';
-import { EndpointProcess } from '../../control/server/endpoint.ts';
-import { EndpointNode } from '../../control/server/endpoint-node.ts';
-import { createHttp } from '../../control/server/http.ts';
+import { ControlDatabase } from '../../control/server/persistence/database.ts';
+import { EndpointGateway } from '../../control/server/endpoint/gateway.ts';
+import { createApplication } from '../../control/server/application.ts';
+import { LocalProcessLink } from '../../control/server/endpoint/local-process.ts';
+import { RemoteNodeLink } from '../../control/server/endpoint/remote-node.ts';
+import { createHttp } from '../../control/server/http/server.ts';
 const root = resolve('.'),
   run = resolve(process.argv[2] ?? `develop/tmp/robust-viewer-qa-${Date.now()}`);
 function required(name: string) {
@@ -38,18 +39,19 @@ const nodeMode = process.env.ROBUST_QA_ENDPOINT_MODE === 'node',
   nodeToken = randomUUID() + randomUUID(),
   nodeId = 'robust-qa';
 let native: ChildProcess | undefined;
-const store = new Store(join(run, 'control.db')),
-  endpointNode = nodeMode ? new EndpointNode({ nodeId, token: nodeToken }) : undefined;
+const store = new ControlDatabase(join(run, 'control.db')),
+  endpointNode = nodeMode ? new RemoteNodeLink({ nodeId, token: nodeToken }) : undefined;
 const endpoint =
     endpointNode ??
-    new EndpointProcess(executable, [`--browser=${browser}`, `--data-path=${join(run, 'endpoint')}`]),
-  control = new Control(store, endpoint);
+    new LocalProcessLink(executable, [`--browser=${browser}`, `--data-path=${join(run, 'endpoint')}`]),
+  control = createApplication(store, new EndpointGateway(endpoint));
 const server = createHttp(control, {
   origins: [`http://127.0.0.1:${port}`],
   clientDir,
   endpointNode,
 });
-endpoint.on('ready', (identity) => void control.endpointReady(identity));
+endpoint.on('ready', (identity) => void control.reconciler.endpointReady(identity).catch(console.error));
+endpoint.on('offline', () => control.rtc.endpointOffline());
 const fixture = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${fixturePort}`);
@@ -90,7 +92,7 @@ const fixture = createServer(async (req, res) => {
           users: await Promise.all(
             users.map(async (user) => ({
               username: user.username,
-              state: control.productState(user.tenant),
+              state: control.viewers.productState(user.tenant),
               snapshot: await endpoint
                 .request('session.snapshot', user.tenant, { outputDiagnostics: true })
                 .catch((error) => ({ error: String(error) })),
@@ -136,7 +138,7 @@ const fixture = createServer(async (req, res) => {
   }
 });
 let closing = false;
-const timer = setInterval(() => void control.tick(), 1500);
+const timer = setInterval(() => void control.reconciler.tick().catch(console.error), 1500);
 async function close() {
   if (closing) return;
   closing = true;
@@ -144,7 +146,7 @@ async function close() {
   await server.shutdown();
   await control.close();
   if (native) {
-    await endpoint.request('shutdown', '').catch(() => {});
+    await endpoint.request('shutdown', '').catch((error) => console.error('Fixture shutdown:', error));
     if (native.exitCode === null) {
       await Promise.race([
         new Promise<void>((r) => native!.once('exit', () => r())),
@@ -190,7 +192,7 @@ await writeFile(
     {
       pid: process.pid,
       nativePid: native?.pid,
-      mode: nodeMode ? 'WinHTTP-EndpointNode' : 'stdio',
+      mode: nodeMode ? 'WinHTTP-RemoteNodeLink' : 'stdio',
       run,
       port,
       fixturePort,

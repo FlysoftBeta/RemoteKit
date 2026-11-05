@@ -1,9 +1,9 @@
 import { RemoteKitError } from '../../shared/errors';
 import type { ProductState, ViewerViewport } from '../../shared/product';
-import { formatError } from '../format-error';
+import { formatError } from '../util/format-error';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
-import { selectVisibility } from '../visibility';
+import { selectVisibility } from '../app/visibility';
 
 export class ViewportRequests extends Store<string> {
   private readonly geometry = new Map<string, { width: number; height: number }>();

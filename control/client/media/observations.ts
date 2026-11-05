@@ -1,4 +1,4 @@
-import { type Diagnostics } from '../types';
+import { type Diagnostics } from './types';
 import { ViewerAudioOutput } from './audio-output';
 import { CaptureLatency } from './capture-latency';
 import { ClockDomain, ClockProbe } from './clock-domain';

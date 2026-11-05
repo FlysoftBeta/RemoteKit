@@ -1,19 +1,12 @@
 import type { FileRequestAnchor } from '../../shared/product';
-import { projectFileInput } from '../file-chooser-anchor';
-import { surfacePixelScale } from '../input/coordinates';
+import { projectFileInput } from '../files/file-chooser-anchor';
 import { PresentationDiagnostics } from '../media/presentation-diagnostics';
-import { type Layout, type Surface, type VideoPresentation } from '../types';
+import { type Layout, type Surface, type VideoPresentation } from './types';
 import { freezeSnapshot } from '../util/store';
 import { FrameEpochGate } from './frame-epoch';
 import { planeMatchesLayout, samePlane, type PlaneIdentity, type PresentedPlaneSource } from './plane-source';
 import { VideoPlane } from './video-plane';
-import {
-  barrierMatchesLayout,
-  configurePresentationVideo,
-  presentationBarrier,
-  VideoCompositorStats,
-  type PresentationBarrier,
-} from './video-presentation';
+import { barrierMatchesLayout, presentationBarrier, type PresentationBarrier } from './video-presentation';
 
 import { RemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
@@ -146,7 +139,7 @@ export class PresentationSession {
 
   private videoMetadataRefreshTimer?: ReturnType<typeof setTimeout>;
 
-  private readonly capabilityVideo = this.createReceiverVideo();
+  private readonly videoSupported = VideoPlane.supported();
 
   private renderers = new Set<PlaneRenderer>();
 
@@ -236,7 +229,7 @@ export class PresentationSession {
   }
 
   resetPresentationDiagnostics() {
-    for (const plane of this.videoPlanes.values()) plane.stats = new VideoCompositorStats();
+    for (const plane of this.videoPlanes.values()) plane.resetStats();
     this.freezeCopies = 0;
     this.mediaRefreshRequests = 0;
     this.presentation = new PresentationDiagnostics();
@@ -272,12 +265,6 @@ export class PresentationSession {
   private viewPresentations = new Map<string, VideoPresentation>();
 
   selectedViewId: string | undefined;
-
-  private createReceiverVideo() {
-    const video = document.createElement('video');
-    configurePresentationVideo(video);
-    return video;
-  }
 
   private cancelPresentationAck(preserveAction = false) {
     if (!preserveAction) this.pendingPresentationAction = undefined;
@@ -373,10 +360,7 @@ export class PresentationSession {
       };
       document.addEventListener('visibilitychange', this.presentationVisibility);
     }
-    if (
-      typeof this.capabilityVideo.requestVideoFrameCallback !== 'function' ||
-      typeof ResizeObserver !== 'function'
-    ) {
+    if (!this.videoSupported) {
       this.failPresentation('video-capability-unavailable');
       return;
     }
@@ -563,8 +547,7 @@ export class PresentationSession {
       planeMatchesLayout(observation.identity, this.layout) &&
       samePlane(observation.identity.view, renderer.view) &&
       !renderer.view.stale &&
-      plane.video.videoWidth === this.layout?.width &&
-      plane.video.videoHeight === this.layout.height
+      plane.matchesAtlas(this.layout)
     );
   }
 
@@ -582,13 +565,7 @@ export class PresentationSession {
       // Endpoint's ACK barrier guarantees stable geometry for every published
       // frame in this interval. This recovers layout authorization, not the
       // autonomous element's current RTP or a new compositor observation.
-      const wasReady = plane.ready;
-      plane.ready = true;
-      plane.rtp = undefined;
-      if (!wasReady) {
-        plane.stats.resetObservation();
-        plane.clip.style.opacity = '1';
-      }
+      const wasReady = plane.show(undefined, true);
       this.notify();
       this.presentation.authorize(performance.now(), observation.rtp, epoch);
       this.observations.emit({ rtp: observation.rtp, epoch, at: observation.at, wall: observation.wall });
@@ -625,8 +602,7 @@ export class PresentationSession {
       document.visibilityState === 'visible' &&
       this.rendererCurrent(renderer) &&
       !renderer.view.stale &&
-      plane.video.videoWidth === this.layout?.width &&
-      plane.video.videoHeight === this.layout.height;
+      plane.matchesAtlas(this.layout);
     if (!sameBarrier || !validRtp || !this.positionVideoPlane(renderer)) {
       this.hideVideoPlane(renderer);
       if (sameBarrier && !validRtp) this.failPresentation('video-rtp-metadata-unavailable');
@@ -662,9 +638,7 @@ export class PresentationSession {
     // Exact current-RTP reports require THIS element's real callback.
     const wasReady = plane.ready;
     plane.stats.observe(at, metadata.presentedFrames, wasReady, metadata);
-    plane.rtp = rtp;
-    plane.ready = true;
-    if (!wasReady) plane.clip.style.opacity = '1';
+    plane.show(rtp);
     this.presentation.authorize(at, rtp!, epoch!);
     this.ports.rtc.markConnection('firstVideoCompositor');
     const old = this.viewPresentations.get(renderer.view.id);
@@ -725,9 +699,8 @@ export class PresentationSession {
         }
         Object.assign(renderer, identity, { view: { ...view } });
         if (this.presentationBackend === 'video') {
-          if (renderer.canvas.width !== view.width) renderer.canvas.width = view.width;
-          if (renderer.canvas.height !== view.height) renderer.canvas.height = view.height;
           this.attachVideoPlane(renderer);
+          this.videoPlanes.get(renderer)?.resizeInput();
           this.positionVideoPlane(renderer);
         }
       }
@@ -775,19 +748,7 @@ export class PresentationSession {
     const current = this.videoPlaneFor(viewId),
       layout = this.layout;
     if (!current || !current.plane.ready || current.plane.rtp !== rtpTimestamp || !layout) return undefined;
-    const view = current.renderer.view;
-    return {
-      image: current.plane.video,
-      sourceRect: { x: view.x, y: view.y, width: view.width, height: view.height },
-      kind: 'atlas',
-      viewId,
-      rtpTimestamp,
-      layoutEpoch: layout.epoch,
-      encodedWidth: view.width,
-      encodedHeight: view.height,
-      pixelsPerDip: surfacePixelScale(view),
-      pixelsPerDipY: surfacePixelScale(view, 'y'),
-    };
+    return current.plane.presentedSource(layout, rtpTimestamp);
   }
 
   canInput(viewId: string): InputAuthority | null {
@@ -948,11 +909,7 @@ export class PresentationSession {
       token: plane,
       counters: plane.stats,
       revision: plane.stats.observationRevision,
-      window: plane.stats.sampleWindow(
-        at,
-        plane.ready && this.rendererCurrent(renderer),
-        plane.video.getVideoPlaybackQuality?.(),
-      ),
+      window: plane.sampleWindow(at, this.rendererCurrent(renderer)),
       timing: plane.stats.timing(at),
     }));
   }
@@ -970,17 +927,7 @@ export class PresentationSession {
   }
   feedbackPlanes() {
     return [...this.renderers]
-      .filter((renderer) => {
-        if (!this.rendererCurrent(renderer)) return false;
-        const rect = renderer.canvas.getBoundingClientRect(),
-          style = getComputedStyle(renderer.canvas);
-        return (
-          rect.width > 0 &&
-          rect.height > 0 &&
-          style.visibility !== 'hidden' &&
-          style.visibility !== 'collapse'
-        );
-      })
+      .filter((renderer) => this.rendererCurrent(renderer) && VideoPlane.visible(renderer.canvas))
       .map((renderer) => ({ view: renderer.view.id, frames: this.videoPlanes.get(renderer)?.stats.frames }));
   }
 

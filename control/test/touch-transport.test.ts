@@ -2,7 +2,7 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { inputFixture } from './client-fixture';
 import { TouchInput } from '../client/input/touch-input';
-import type { Surface } from '../client/types';
+import type { Surface } from '../client/presentation/types';
 import { touchTerminalResult, type TouchOwner } from '../client/input/touch-terminal';
 import type { InputDelivery, InputResult } from '../client/input/types';
 

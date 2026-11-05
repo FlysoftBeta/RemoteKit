@@ -2,10 +2,11 @@
 import { createServer } from 'node:http';
 import { mkdir, readFile, stat, writeFile, appendFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
-import { Store } from '../../control/server/store.ts';
-import { Control } from '../../control/server/control.ts';
-import { EndpointProcess } from '../../control/server/endpoint.ts';
-import { createHttp } from '../../control/server/http.ts';
+import { ControlDatabase } from '../../control/server/persistence/database.ts';
+import { EndpointGateway } from '../../control/server/endpoint/gateway.ts';
+import { createApplication } from '../../control/server/application.ts';
+import { LocalProcessLink } from '../../control/server/endpoint/local-process.ts';
+import { createHttp } from '../../control/server/http/server.ts';
 const root = resolve('.'),
   run = resolve(process.argv[2] ?? `develop/tmp/client-gesture-qa-${Date.now()}`);
 if (process.env.CLIENT_GESTURE_QA_READY !== '1' || process.env.CLIENT_GESTURE_QA_GPU_GRANTED !== '1')
@@ -28,13 +29,13 @@ const port = Number(process.env.CLIENT_GESTURE_QA_PORT ?? 33581),
   fixturePort = port + 1;
 await mkdir(run, { recursive: true });
 const browserDisableFeatures = process.env.CLIENT_GESTURE_QA_BROWSER_DISABLE_FEATURES ?? '';
-const store = new Store(join(run, 'control.db')),
-  endpoint = new EndpointProcess(executable, [
+const store = new ControlDatabase(join(run, 'control.db')),
+  endpoint = new LocalProcessLink(executable, [
     `--browser=${browser}`,
     `--data-path=${join(run, 'endpoint')}`,
     ...(browserDisableFeatures ? [`--browser-disable-features=${browserDisableFeatures}`] : []),
   ]),
-  control = new Control(store, endpoint);
+  control = createApplication(store, new EndpointGateway(endpoint));
 const latest = new Map<string, unknown>(),
   commands = new Map<string, unknown[]>(),
   fixtureHtml = await readFile(join(root, 'tests/e2e/client-gesture-qa-page.html'));
@@ -42,12 +43,13 @@ const server = createHttp(control, {
   origins: [`http://127.0.0.1:${port}`],
   clientDir,
 });
-endpoint.on('ready', () => void control.reconcileAll());
+endpoint.on('ready', (identity) => void control.reconciler.endpointReady(identity).catch(console.error));
+endpoint.on('offline', () => control.rtc.endpointOffline());
 const fixture = createServer(async (req, res) => {
   try {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type');
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Access-createApplication-Allow-Origin', '*');
+    res.setHeader('Access-createApplication-Allow-Headers', 'content-type');
+    res.setHeader('Cache-createApplication', 'no-store');
     if (req.method === 'OPTIONS') {
       res.end();
       return;
@@ -116,7 +118,7 @@ const fixture = createServer(async (req, res) => {
           users: await Promise.all(
             users.map(async (user) => ({
               username: user.username,
-              state: control.productState(user.tenant),
+              state: control.viewers.productState(user.tenant),
               snapshot: await endpoint
                 .request('session.snapshot', user.tenant, { outputDiagnostics: true })
                 .catch((error) => ({ error: String(error) })),
@@ -133,7 +135,7 @@ const fixture = createServer(async (req, res) => {
   }
 });
 let closing = false;
-const timer = setInterval(() => void control.tick(), 1500);
+const timer = setInterval(() => void control.reconciler.tick().catch(console.error), 1500);
 async function close() {
   if (closing) return;
   closing = true;

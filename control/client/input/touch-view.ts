@@ -1,5 +1,5 @@
 import type { PresentationSession } from '../presentation/presentation-session';
-import type { Surface } from '../types';
+import type { Surface } from '../presentation/types';
 import { Store } from '../util/store';
 import { momentumPosition, type MomentumPacket, type MomentumPlan } from './client-gestures';
 import type { InputPipeline } from './input-pipeline';

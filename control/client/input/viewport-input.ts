@@ -1,7 +1,7 @@
 import type { EditingSession } from '../editing/editing-session';
 import { EditingView, type ResizeObservation } from '../editing/editing-view';
 import type { PresentationSession } from '../presentation/presentation-session';
-import type { Surface } from '../types';
+import type { Surface } from '../presentation/types';
 import { clientPointToDip, pointerPointToDip, wheelDeltaToDip, type PointerAction } from './coordinates';
 import type { InputPipeline } from './input-pipeline';
 import { mouseButtonModifiers } from './keys';

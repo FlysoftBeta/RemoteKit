@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react';
 import { RemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
-import type { Surface } from '../types';
+import type { Surface } from './types';
 import { Store } from '../util/store';
 import type { PresentationSession } from './presentation-session';
 import {

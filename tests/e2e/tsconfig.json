@@ -1,0 +1,8 @@
+{
+  "extends": "../../control/tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "typeRoots": ["../../control/node_modules/@types"]
+  },
+  "include": ["*.mts"]
+}

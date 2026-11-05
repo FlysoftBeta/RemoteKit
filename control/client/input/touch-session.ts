@@ -1,4 +1,4 @@
-import { type Layout, type Surface } from '../types';
+import { type Layout, type Surface } from '../presentation/types';
 import { freezeSnapshot } from '../util/store';
 import { RequestTracker } from '../util/request-tracker';
 

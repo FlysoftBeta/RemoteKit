@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inputFixture } from './client-fixture';
-import type { Surface } from '../client/types';
+import type { Surface } from '../client/presentation/types';
 
 function setup() {
   const transport = inputFixture();

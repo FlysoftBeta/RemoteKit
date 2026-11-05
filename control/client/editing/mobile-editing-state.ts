@@ -1,5 +1,5 @@
 import type { EditableMessage, EditableView } from '../rtc/protocol';
-import type { Layout, Surface } from '../types';
+import type { Layout, Surface } from '../presentation/types';
 
 function sameEditingDocument(a: EditableView, b: EditableView) {
   return a.session === b.session && a.id === b.id && a.instance === b.instance && a.document === b.document;

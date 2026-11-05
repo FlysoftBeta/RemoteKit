@@ -4,7 +4,7 @@ import {
   DiagnosticCollection,
   type DiagnosticRequest,
   type DiagnosticState,
-} from '../client/diagnostic-collection';
+} from '../client/media/diagnostic-collection';
 import type { DiagnosticEnvironment, DiagnosticReply } from '../shared/diagnostics';
 
 const environment: DiagnosticEnvironment = {

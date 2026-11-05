@@ -7,7 +7,7 @@ import {
   VideoCompositorStats,
 } from '../client/presentation/video-presentation';
 import { CaptureLatency } from '../client/media/capture-latency';
-import type { Layout, Surface } from '../client/types';
+import type { Layout, Surface } from '../client/presentation/types';
 import { decodeIncoming } from '../client/rtc/protocol';
 const first: Surface = {
   id: '1',

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { lockDirection, RevealSequence } from '../client/lock-screen';
+import { lockDirection, RevealSequence } from '../client/auth/lock-screen';
 
 test('lock reveal accepts one mixed direction sequence and recovers its longest prefix', () => {
   const reveal = new RevealSequence();

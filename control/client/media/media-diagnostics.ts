@@ -1,4 +1,4 @@
-import type { Diagnostics, VideoPlaneTiming } from '../types';
+import type { Diagnostics, VideoPlaneTiming } from './types';
 
 const counterNames = [
   'bytesReceived',

@@ -1,5 +1,5 @@
 import { surfacePixelScale } from '../input/coordinates';
-import type { Layout, Surface } from '../types';
+import type { Layout, Surface } from './types';
 
 export interface PixelRect {
   x: number;

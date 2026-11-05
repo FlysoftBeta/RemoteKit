@@ -14,10 +14,6 @@ export type ClientActionEvent = ProductOperation & {
   authEpoch?: number;
 };
 
-export interface NativeReplyError {
-  code?: string;
-  message?: string;
-}
 export interface Accepted {
   accepted: boolean;
   browser?: { ok?: boolean };

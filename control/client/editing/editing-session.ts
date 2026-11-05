@@ -1,4 +1,4 @@
-import { type Surface } from '../types';
+import { type Surface } from '../presentation/types';
 import { freezeSnapshot } from '../util/store';
 import { EditingView, type EditingViewPorts } from './editing-view';
 import { MobileEditingState } from './mobile-editing-state';

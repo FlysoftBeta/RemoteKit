@@ -4,10 +4,10 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ViewerAudioOutput } from '../client/media/audio-output';
 import { FileChannel } from '../client/files/file-channel';
-import { FileLibraryContext, useFileLibrary } from '../client/file-library-state';
+import { FileLibraryContext, useFileLibrary } from '../client/files/file-library-state';
 import { projectOperations } from '../client/control/product-operations';
 import type { ViewerSession } from '../client/viewer-session';
-import { WindowFrame } from '../client/window-frame';
+import { WindowFrame } from '../client/app/window-frame';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import type { ProductState, ProductTab, ProductWindow } from '../shared/product';
 

@@ -1,6 +1,7 @@
 import { samePlane } from '../presentation/plane-source';
 import type { InputAuthority } from '../presentation/presentation-session';
-import { type Diagnostics, type Layout, type Surface } from '../types';
+import { type Diagnostics } from '../media/types';
+import { type Layout, type Surface } from '../presentation/types';
 import { mergeGestureMomentum, mergeTouchMoves } from './touch-input';
 export interface InputPorts {
   canInput(viewId: string): InputAuthority | null;

@@ -1,7 +1,7 @@
 import type { ProductState, SocketMethods } from '../../shared/product';
 import type { AuthState } from '../../shared/security';
 import type { AuthorizationScope } from '../auth/authorization-scope';
-import { formatError } from '../format-error';
+import { formatError } from '../util/format-error';
 import { diagnostics } from '../media/diagnostics';
 import type { RtcSession } from '../rtc/rtc-session';
 import { Store } from '../util/store';

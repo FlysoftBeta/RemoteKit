@@ -5,7 +5,7 @@ import {
   photoCoverCrop,
   type CaptureStats,
   type PhotoBurstDecision,
-} from '../client/camera-capture';
+} from '../client/files/camera-capture';
 import type { FileChannel } from '../client/files/file-channel';
 
 function deferred<T>() {

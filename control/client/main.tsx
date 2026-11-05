@@ -1,15 +1,15 @@
 /// <reference types="vite/client" />
 import { WorkspaceView } from './app/workspace-view';
-import { formatError } from './format-error';
+import { formatError } from './util/format-error';
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { ProductUser } from '../shared/product';
-import { BlankScreen, RevealScreen } from './lock-screen';
+import { BlankScreen, RevealScreen } from './auth/lock-screen';
 import { selectProductReceiveProfile } from './media/receive-profile';
-import { AuthView } from './product-dialogs';
+import { AuthView } from './app/product-dialogs';
 import './style.css';
-import { request } from './types';
+import { request } from './control/http-request';
 const theme = createTheme({
   palette: {
     primary: { main: '#245DB5' },

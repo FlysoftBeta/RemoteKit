@@ -1,8 +1,25 @@
-import type { Layout } from '../types';
+import type { Layout } from './types';
+import { surfacePixelScale } from '../input/coordinates';
+import type { PresentedPlaneSource } from './plane-source';
 import type { PlaneRenderer, VideoObservation } from './types';
 import { configurePresentationVideo, VideoCompositorStats, videoPlaneGeometry } from './video-presentation';
 
 export class VideoPlane {
+  static supported() {
+    const video = document.createElement('video');
+    configurePresentationVideo(video);
+    return typeof video.requestVideoFrameCallback === 'function' && typeof ResizeObserver === 'function';
+  }
+  static visible(canvas: HTMLCanvasElement) {
+    const bounds = canvas.getBoundingClientRect();
+    const style = getComputedStyle(canvas);
+    return (
+      bounds.width > 0 &&
+      bounds.height > 0 &&
+      style.visibility !== 'hidden' &&
+      style.visibility !== 'collapse'
+    );
+  }
   readonly video = document.createElement('video');
   readonly clip = document.createElement('div');
   private readonly observer: ResizeObserver;
@@ -92,6 +109,47 @@ export class VideoPlane {
     });
     for (const [name, value] of Object.entries(geometry)) this.video.style.setProperty(name, `${value}px`);
     return true;
+  }
+
+  matchesAtlas(layout: Layout | null) {
+    return !!layout && this.video.videoWidth === layout.width && this.video.videoHeight === layout.height;
+  }
+  resizeInput() {
+    const { canvas, view } = this.renderer;
+    if (canvas.width !== view.width) canvas.width = view.width;
+    if (canvas.height !== view.height) canvas.height = view.height;
+  }
+  show(rtp?: number, resetObservation = false) {
+    const wasReady = this.ready;
+    this.ready = true;
+    this.rtp = rtp;
+    if (!wasReady) {
+      if (resetObservation) this.stats.resetObservation();
+      this.clip.style.opacity = '1';
+    }
+    return wasReady;
+  }
+  resetStats() {
+    this.stats = new VideoCompositorStats();
+  }
+  sampleWindow(at: number, current: boolean) {
+    return this.stats.sampleWindow(at, this.ready && current, this.video.getVideoPlaybackQuality?.());
+  }
+  presentedSource(layout: Layout, rtpTimestamp: number): PresentedPlaneSource | undefined {
+    if (!this.ready || this.rtp !== rtpTimestamp) return;
+    const view = this.renderer.view;
+    return {
+      image: this.video,
+      sourceRect: { x: view.x, y: view.y, width: view.width, height: view.height },
+      kind: 'atlas',
+      viewId: view.id,
+      rtpTimestamp,
+      layoutEpoch: layout.epoch,
+      encodedWidth: view.width,
+      encodedHeight: view.height,
+      pixelsPerDip: surfacePixelScale(view),
+      pixelsPerDipY: surfacePixelScale(view, 'y'),
+    };
   }
 
   hide() {

@@ -13,7 +13,7 @@ export type FileMethod =
   | 'photo.process'
   | 'selection.cancel'
   | 'selection.commit';
-import type { Layout, Surface } from '../types';
+import type { Layout, Surface } from '../presentation/types';
 export interface EditableView {
   session: string;
   id: string;

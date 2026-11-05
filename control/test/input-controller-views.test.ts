@@ -5,7 +5,7 @@ import { EditingView } from '../client/editing/editing-view';
 import { EditingSession } from '../client/editing/editing-session';
 import { Events } from '../client/util/store';
 import type { InputDelivery, InputResult } from '../client/input/types';
-import type { Surface, Layout } from '../client/types';
+import type { Surface, Layout } from '../client/presentation/types';
 
 const surface: Surface = {
   id: '1',

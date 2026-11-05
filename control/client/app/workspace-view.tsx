@@ -1,4 +1,4 @@
-import { formatError } from '../format-error';
+import { formatError } from '../util/format-error';
 import { Alert, Button, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from '@mui/material';
 import React, {
   useCallback,
@@ -8,23 +8,27 @@ import React, {
   useState,
   useSyncExternalStore,
 } from 'react';
-import { AdminDialog } from '../admin-dialog';
-import { useAuthCamera, type AuthRequest } from '../auth-camera';
-import { useAutoLock } from '../auth-idle';
-import { DiagnosticCollection, diagnosticEnvironment, type DiagnosticState } from '../diagnostic-collection';
-import { DiagnosticCollectionView, DiagnosticSettings } from '../diagnostic-collection-view';
-import { FileChooserDialog } from '../file-chooser-dialog';
-import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../file-library-state';
-import { BlankScreen, RevealScreen } from '../lock-screen';
+import { AdminDialog } from './admin-dialog';
+import { useAuthCamera, type AuthRequest } from '../auth/auth-camera';
+import { useAutoLock } from '../auth/auth-idle';
+import {
+  DiagnosticCollection,
+  diagnosticEnvironment,
+  type DiagnosticState,
+} from '../media/diagnostic-collection';
+import { DiagnosticCollectionView, DiagnosticSettings } from './diagnostic-collection-view';
+import { FileChooserDialog } from '../files/file-chooser-dialog';
+import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../files/file-library-state';
+import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import type { AudioChannels } from '../media/audio-output';
-import { PageDialogs, SettingsDialog, type Action } from '../product-dialogs';
-import { SecuritySettings } from '../security-settings';
-import { UnlockView } from '../unlock-view';
-import { useAutoFullscreen } from '../use-auto-fullscreen';
-import { useViewerSession } from '../use-viewer-session';
+import { PageDialogs, SettingsDialog, type Action } from './product-dialogs';
+import { SecuritySettings } from '../auth/security-settings';
+import { UnlockView } from '../auth/unlock-view';
+import { useAutoFullscreen } from './use-auto-fullscreen';
+import { useViewerSession } from './use-viewer-session';
 import { ViewerSession } from '../viewer-session';
-import { selectVisibility } from '../visibility';
-import { WindowDivider, WindowFrame } from '../window-frame';
+import { selectVisibility } from './visibility';
+import { WindowDivider, WindowFrame } from './window-frame';
 
 export function WorkspaceView({ logout, expired }: { logout: () => void; expired: () => void }) {
   const [media] = useState(() => new ViewerSession());

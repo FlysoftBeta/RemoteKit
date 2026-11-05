@@ -1,5 +1,5 @@
 import { surfaceDipSize } from '../input/coordinates';
-import type { Surface } from '../types';
+import type { Surface } from './types';
 export interface ViewportBounds {
   left: number;
   top: number;

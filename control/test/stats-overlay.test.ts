@@ -1,7 +1,7 @@
 ﻿import test from 'node:test';
 import assert from 'node:assert/strict';
 import { statsViewModel } from '../client/media/stats-view-model';
-import type { Diagnostics } from '../client/types';
+import type { Diagnostics } from '../client/media/types';
 
 test('stats choose the selected view presentation window and retain unknown metrics', () => {
   const diagnostics: Diagnostics = {

@@ -382,7 +382,7 @@ export class FileChannel {
   processPhoto(assetId: string, mode: 'rectify' | 'scan', signal?: AbortSignal): Promise<Asset> {
     return this.call('photo.process', { ...libraryBinding, assetId, mode }, { signal });
   }
-  cancelSelection(requestId: string): Promise<{ state: 'cancelled' | 'validating' }> {
+  cancelSelection(requestId: string): Promise<{ state: SelectionState }> {
     return this.call('selection.cancel', { requestId });
   }
   commitSelection(

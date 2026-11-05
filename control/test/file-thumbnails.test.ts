@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FileThumbnails } from '../client/file-thumbnails';
+import { FileThumbnails } from '../client/files/file-thumbnails';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 

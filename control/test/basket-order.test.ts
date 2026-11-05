@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { basketDragCurrent, basketDrop } from '../client/basket-order';
+import { basketDragCurrent, basketDrop } from '../client/files/basket-order';
 
 const ids = ['a', 'b', 'c', 'd'];
 const drag = { id: 'b', ids, revision: 24 };

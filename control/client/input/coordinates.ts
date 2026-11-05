@@ -1,4 +1,4 @@
-import type { Surface } from '../types';
+import type { Surface } from '../presentation/types';
 export type PointerAction = 'down' | 'move' | 'up' | 'cancel' | 'leave';
 export const surfacePixelScale = (
   surface: Pick<Surface, 'deviceScaleFactor' | 'mediaScale' | 'mediaScaleX' | 'mediaScaleY'>,

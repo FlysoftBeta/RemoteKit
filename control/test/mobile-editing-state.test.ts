@@ -7,7 +7,7 @@ import {
   editableInputMode,
 } from '../client/editing/mobile-editing-state';
 import { EditingInput } from '../client/editing/editing-input';
-import type { Surface } from '../client/types';
+import type { Surface } from '../client/presentation/types';
 const view: Surface = {
   session: 's',
   id: 'v',

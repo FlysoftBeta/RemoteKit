@@ -8,7 +8,7 @@ import {
   type ProductReceiveSelection,
   type ReceiveProfile,
 } from '../media/receive-profile';
-import { type Diagnostics } from '../types';
+import { type Diagnostics } from '../media/types';
 
 import { RemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';

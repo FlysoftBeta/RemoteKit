@@ -8,7 +8,7 @@ import {
   surfaceDipSize,
   wheelDeltaToDip,
 } from '../client/input/coordinates';
-import type { Surface } from '../client/types';
+import type { Surface } from '../client/presentation/types';
 test('client coordinates and marker regions combine DPR with independent media sampling', () => {
   const surface: Surface = {
     id: '1',

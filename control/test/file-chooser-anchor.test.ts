@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { FileRequestAnchor } from '../shared/product';
-import { placeFileChooser, projectFileInput } from '../client/file-chooser-anchor';
-import type { Layout, Surface } from '../client/types';
+import { placeFileChooser, projectFileInput } from '../client/files/file-chooser-anchor';
+import type { Layout, Surface } from '../client/presentation/types';
 
 const surface: Surface = {
   id: 'view',

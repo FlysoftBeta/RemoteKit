@@ -193,6 +193,7 @@ test('original preview permits PNGs through 64 MiB while thumbnails remain limit
 
 test('chooser cancellation uses the authenticated selection command without an upload batch', async () => {
   const messages: any[] = [];
+  let state = 'cancelled';
   const channel = {
     readyState: 'open',
     bufferedAmount: 0,
@@ -205,7 +206,7 @@ test('chooser cancellation uses the authenticated selection command without an u
           version: 1,
           requestId: message.requestId,
           ok: true,
-          result: { state: 'cancelled' },
+          result: { state },
         }),
       );
     },
@@ -214,7 +215,10 @@ test('chooser cancellation uses the authenticated selection command without an u
     () => channel,
     () => 7,
   );
-  assert.deepEqual(await client.cancelSelection('chooser'), { state: 'cancelled' });
+  for (const outcome of ['cancelled', 'validating', 'selected', 'unknown']) {
+    state = outcome;
+    assert.deepEqual(await client.cancelSelection('chooser'), { state: outcome });
+  }
   assert.equal(messages[0].method, 'selection.cancel');
   assert.deepEqual(messages[0].params, { requestId: 'chooser' });
   assert.equal(messages[0].authEpoch, 7);

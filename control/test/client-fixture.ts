@@ -2,7 +2,8 @@ import { InputPipeline } from '../client/input/input-pipeline';
 import { TouchSession } from '../client/input/touch-session';
 import { EditingSession } from '../client/editing/editing-session';
 import { EndpointChannel } from '../client/rtc/endpoint-channel';
-import type { Layout, Diagnostics } from '../client/types';
+import type { Layout } from '../client/presentation/types';
+import type { Diagnostics } from '../client/media/types';
 
 export function inputFixture() {
   const rtc = { attempt: 0, peer: undefined as unknown };

@@ -1,4 +1,4 @@
-import type { Diagnostics } from '../types';
+import type { Diagnostics } from './types';
 
 export function statsViewModel(diagnostics: Diagnostics, viewId?: string) {
   const endpoint = diagnostics.endpoint;

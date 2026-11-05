@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fileChooserAccept, validateSelection } from '../client/file-selection';
-import { selectVisibility } from '../client/visibility';
+import { fileChooserAccept, selectionViewModel, validateSelection } from '../client/files/file-selection';
+import { selectVisibility } from '../client/app/visibility';
 import type { FileRequest, ProductState } from '../shared/product';
 const request: FileRequest = {
   id: 'opaque',
@@ -13,6 +13,17 @@ const request: FileRequest = {
   state: 'pending',
   limits: { maxFiles: 3, maxFileBytes: 100, maxBatchBytes: 150, sessionBytes: 1000 },
 };
+
+test('chooser cancellation preserves claimed outcomes until terminal reconciliation', () => {
+  assert.equal(selectionViewModel('unknown', 'selected').selected, true);
+  assert.equal(selectionViewModel('unknown', 'selected').cancelled, false);
+  assert.equal(selectionViewModel('pending', 'unknown').uncertain, true);
+  assert.equal(selectionViewModel('unknown', 'unknown').terminal, false);
+  assert.equal(selectionViewModel('validating', 'validating').terminal, false);
+  assert.equal(selectionViewModel('selected', 'unknown').selected, true);
+  assert.equal(selectionViewModel('selected', 'unknown').uncertain, false);
+  assert.equal(selectionViewModel('cancelled', 'unknown').cancelled, true);
+});
 
 test('omitted file hints do not restrict selection to an incomplete accept list', () => {
   assert.deepEqual(fileChooserAccept(request), request.accept);

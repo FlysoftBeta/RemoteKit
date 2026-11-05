@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { MediaObservations } from '../client/media/observations';
 import { PresentationDiagnostics } from '../client/media/presentation-diagnostics';
-import type { Layout } from '../client/types';
+import type { Layout } from '../client/presentation/types';
 import type { Outgoing } from '../client/rtc/protocol';
 
 test('media sampling selects current RTC counters and discards stale peer completions', async (t) => {
