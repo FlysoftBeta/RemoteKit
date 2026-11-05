@@ -12,7 +12,7 @@ struct RenderRequest {
 struct Work : RenderRequest {
   uint64_t revision = 0;
   size_t pending = 0;
-  bool updated = false, unavailable = false, lost = false;
+  bool updated = false, lost = false;
   std::vector<PlaneRead> reads;
 };
 struct Scheduler {
@@ -21,7 +21,6 @@ struct Scheduler {
   void Begin(const RenderBegin& begin);
   void Reject(const RenderBegin& begin, RenderRejectReason reason);
   void Pump();
-  bool HasFutureDemand() const;
   void MaybeWake();
   void FinishReject(RenderRejectReason reason);
   void SchedulePump();

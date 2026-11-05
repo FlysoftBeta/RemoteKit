@@ -232,6 +232,12 @@ void MediaPipeline::MediaLoop() {
       first_source = false;
     }
     if (result == RenderSlots::Result::error) {
+      auto status = browser.Rpc().Request({{"method", "output.status"}}, 0, 1000);
+      if (status && status.value().contains("output")) {
+        const auto& description = status.value()["output"];
+        if (!description.value("error", std::string()).empty())
+          error = description.value("message", description["error"].get<std::string>());
+      }
       presentation.InvalidateLayout("fatal");
       {
         {

@@ -7,6 +7,8 @@
 #include "mojo/public/cpp/platform/platform_handle.h"
 #include "ui/compositor/compositor.h"
 #include "ui/gfx/gpu_memory_buffer_handle.h"
+#include "content/public/browser/gpu_data_manager.h"
+#include "gpu/config/gpu_info.h"
 
 namespace remotekit::browser::osr {
 namespace {
@@ -112,7 +114,9 @@ bool PlanePool::Configure(const std::shared_ptr<Plane>& plane) {
   if (plane->configure_deadline.is_null())
     plane->configure_deadline = now + base::Seconds(5);
   if (now >= plane->configure_deadline) {
-    owner_.Fatal("OSR output configuration did not succeed within 5 seconds");
+    const auto info = content::GpuDataManager::GetInstance()->GetGPUInfo();
+    owner_.Fatal("hardware ANGLE D3D11/Ganesh OSR configuration failed within 5 seconds; ANGLE=" +
+                 info.gl_renderer + "; adapter=" + info.active_gpu().device_string);
     return false;
   }
   if (plane->configuring || !plane->host || plane->size.IsEmpty() ||
@@ -199,9 +203,7 @@ void PlanePool::Configured(std::shared_ptr<Plane> plane, bool ok) {
   plane->configured = ok;
   if (!ok) {
     plane->next_configure_attempt = base::TimeTicks::Now() + base::Milliseconds(50);
-    if (!owner_.retirement_.stopping_ && !plane->retired &&
-        base::TimeTicks::Now() >= plane->configure_deadline)
-      owner_.Fatal("OSR output configuration did not succeed within 5 seconds");
+    // Configure() supplies the terminal diagnostics at its bounded deadline.
   }
   // False can mean an old GPU-process backing is still retiring. Retry only
   // on a future Endpoint Begin; this callback never creates a render clock.
@@ -236,7 +238,8 @@ void PlanePool::PlaneResult(std::shared_ptr<Work> work,
         break;
       case viz::mojom::RemoteKitFrameStatus::kNotReady:
         target->writing = false;
-        work->unavailable = true;
+        // Same-identity cached pixels remain usable. CompleteWork distinguishes
+        // an empty cache from a root which simply produced no new pixels.
         break;
       case viz::mojom::RemoteKitFrameStatus::kLost:
         work->lost = true;

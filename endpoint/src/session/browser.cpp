@@ -6,9 +6,47 @@
 #include <thread>
 
 namespace remotekit {
+Result<void> BrowserRuntime::AdmitLaunch() {
+  if (!start_policy_.Admit(double(QpcNow()) / QpcFrequency()))
+    return Error{ErrorCode::kUnavailable, start_policy_.attempts() >= 3
+        ? "Browser 启动连续失败，已停止自动重启；请检查会话 GPU 和 Browser 日志"
+        : "Browser 启动失败，正在等待重试退避"};
+  startup_error_.reset();
+  return {};
+}
+Result<void> BrowserRuntime::HealthCheck() {
+  if (startup_error_)
+    return *startup_error_;
+  if (!rpc_.Control())
+    return Error{ErrorCode::kUnavailable, "Browser 进程仍在运行，控制管道尚未就绪"};
+  if (rpc_.NeedsHealthCheck()) {
+    // A bounded health check never authorizes killing a live connected Browser.
+    auto reply = rpc_.Request({{"method", "snapshot"}}, 0, 1000);
+    if (!reply)
+      return reply.error();
+  }
+  const auto now = QpcNow();
+  if (now >= next_health_check_) {
+    next_health_check_ = now + QpcFrequency();
+    auto status = rpc_.Request({{"method", "output.status"}}, 0, 1000);
+    if (!status && status.error().code == ErrorCode::kOutcomeUnknown)
+      return status.error();
+    if (status && status.value().contains("output")) {
+      const auto& output = status.value()["output"];
+      if (!output.value("error", std::string()).empty()) {
+        startup_error_ = Error{ErrorCode::kUnavailable,
+            output.value("message", output["error"].get<std::string>())};
+        return *startup_error_;
+      }
+    }
+  }
+  start_policy_.Healthy(double(now) / QpcFrequency());
+  return {};
+}
 Result<void> BrowserRuntime::NewIncarnation() {
   if (process_.Present())
     return Error{ErrorCode::kConflict, "browser process is retained"};
+  initialized_ = false;
   GUID value{};
   if (FAILED(CoCreateGuid(&value)))
     return Error{ErrorCode::kUnavailable, "browser incarnation generation failed"};
@@ -34,7 +72,9 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
       return {};
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
-  return Error{ErrorCode::kUnavailable, "browser control connect failed " + process_.Diagnostic()};
+  startup_error_ = Error{ErrorCode::kUnavailable,
+      "Browser 控制管道在 15 秒内未就绪；保留仍在运行的进程，" + process_.Diagnostic()};
+  return *startup_error_;
 }
 Result<void> BrowserRuntime::Stop() {
   incarnation_.clear();

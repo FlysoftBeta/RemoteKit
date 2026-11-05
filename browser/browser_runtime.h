@@ -14,11 +14,14 @@
 #include "browser/popup_registry.h"
 #include "browser/view_registry.h"
 #include "content/public/browser/browser_main_parts.h"
+#include "content/public/browser/gpu_data_manager_observer.h"
 #include "ui/display/screen.h"
 namespace remotekit::browser {
-class BrowserRuntime {
+class BrowserRuntime : public content::GpuDataManagerObserver {
  public:
+  BrowserRuntime();
   ~BrowserRuntime();
+  void OnGpuInfoUpdate() override;
   void RemoveView(WebViewId);
   void DrainClosed();
   Status CanDiscard(WebViewId) const;

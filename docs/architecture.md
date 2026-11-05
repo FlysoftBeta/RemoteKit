@@ -72,6 +72,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 - 每个边界只转换一次：HTTP 返回 `{error:{code,message}}` 和对应状态码；WS 返回 `{type:"error", id, error:{code,message}}`；Endpoint 管理回复 `{ok:false, error:{code,message}}`；Browser 控制回复 `{ok:false, code, error, detail}`。`message` 可以展示给用户；内部细节只进日志。
 - 意外异常在请求边界和线程入口被捕获：请求返回 `internal`，线程入口把所属组件标记为失败，而不是终止进程。
 - 不确定的 GPU 工作、编码任务和原生回调不靠超时"放弃"：资源保留到有证据为止，必要时保留到进程结束。
+- 控制 RPC 超时只使本次结果成为 `outcome_unknown`，不关闭 SDK 通道、不清除 Endpoint 的控制句柄。SDK 使用每通道请求 ID 匹配回复，丢弃迟到回复并释放其 Mojo 附件与本地资源句柄；后续健康检查有界等待。只有管道确实断开或进程退出才允许替换 Browser，连续失败最多启动三次，按 1/2/4 秒退避，健康运行一分钟后恢复额度。GPU 输出启动失败通过现有 Session 错误投影显示在标签页/工作区。
 
 ## 代码结构
 

@@ -81,3 +81,5 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke
 | `tests/e2e/` | 真实栈产品场景（Viewer + Control + Endpoint + Browser + H.264）：通用产品流、手势、键盘与移动 IME、文件库与相机、全屏、诊断、首帧 | 需要完整构建与浏览器 |
 
 CPU 单元测试、编译、真实 GPU 运行、实体设备验证是不同层级的证据，分开记录。
+
+RDP 启动回归：`remotekit_service_gpu_policy_probe` 将 primary vendor `0x1414` 输入 Chromium 正式 blocklist/功能决策，验证条目 74 在服务 GPU 策略前禁止硬件 GL OSR、策略后允许；随后用真实栈检查 Intel 串流。`remotekit_sdk_control_lifetime_probe` 用真实 Mojo 管道验证超时后续请求、迟到附件释放和断线；CTest `endpoint_control_reliability`、`endpoint_comp_pacing` 覆盖控制句柄语义、启动退避与缓存 Idle 身份。模拟不能代替真实 RDP 连接状态验证。

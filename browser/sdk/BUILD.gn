@@ -1,5 +1,12 @@
 import("//third_party/webrtc/webrtc.gni")
 
+executable("remotekit_service_gpu_policy_probe") {
+  testonly = true
+  sources = [ "service_gpu_policy_probe.cc" ]
+  include_dirs = [ "//remotekit" ]
+  deps = [ "//base", "//gpu/config", "//ui/gfx", "//ui/gl" ]
+}
+
 sdk_headers = [
   "../../sdk/include/remotekit_sdk.h",
   "../../sdk/include/remotekit_rtc.h",

@@ -49,6 +49,7 @@
 namespace remotekit::sdk {
 struct ControlChannel {
   std::mutex request_lock;
+  int next_request_id = 0;  // Wire IDs belong to the channel, including SDK helpers.
   std::mutex open_lock;
   remotekit::sdk::PendingRenderEndpoint pending_render;
   std::atomic<bool> closed{false};

@@ -2,6 +2,7 @@
 #include "media/server_trace.hpp"
 #include "protocol/control.h"
 #include <charconv>
+#include <chrono>
 
 namespace remotekit {
 void BrowserRpc::SetTrace(std::shared_ptr<media::ServerTrace> trace, DWORD pid) {
@@ -20,12 +21,18 @@ Result<void> BrowserRpc::Connect(const std::string& channel) {
   if (!handle)
     return Error{ErrorCode::kUnavailable, "browser control connect returned no handle"};
   control_ = handle;
+  disconnected_ = false;
+  needs_health_check_ = false;
   return {};
 }
 void BrowserRpc::Invalidate() {
   std::lock_guard lock(mutex_);
   if (auto handle = control_.exchange(0))
     sdk_.remotekit_sdk_control_close(handle);
+  // Explicit teardown ends this connection epoch. A later process which has
+  // not connected yet must not inherit proof that the previous pipe died.
+  disconnected_ = false;
+  needs_health_check_ = false;
 }
 Result<Json> BrowserRpc::Exchange(Json command,
                                   uint64_t expected_control,
@@ -67,23 +74,35 @@ Result<Json> BrowserRpc::Exchange(Json command,
   std::vector<char> response(1024 * 1024);
   size_t count = 0;
   record("input_rpc_sdk_call");
+  const auto started = std::chrono::steady_clock::now();
   const int status =
       sdk_.remotekit_sdk_control_request(Control(), encoded.data(), encoded.size(), response.data(),
                                          response.size(), &count, timeout_ms);
   record("input_rpc_sdk_return", status);
   const auto failed = [&](Error error) -> Result<Json> {
-    if (const auto handle = control_.exchange(0))
-      sdk_.remotekit_sdk_control_close(handle);
+    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED) {
+      disconnected_ = true;
+      if (const auto handle = control_.exchange(0))
+        sdk_.remotekit_sdk_control_close(handle);
+    }
+    fprintf(stderr, "browser RPC method=%s request_id=%llu elapsed_ms=%lld sdk_status=%d control=%llu error=%s\n",
+            command.value("method", std::string()).c_str(), serial_,
+            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count()), status, Control(),
+            error.message.c_str());
     return error;
   };
-  if (status)
+  if (status) {
+    needs_health_check_ = true;
     return failed(Error{media::SdkErrorCode(status, true),
                         "browser request transport SDK " + std::to_string(status)});
+  }
   if (count > response.size())
     return failed(Error{ErrorCode::kOutcomeUnknown, "browser response exceeds bound"});
   auto reply = Json::parse(response.data(), response.data() + count, nullptr, false);
   if (!reply.is_object() || !reply.contains("ok") || !reply["ok"].is_boolean())
     return failed(Error{ErrorCode::kOutcomeUnknown, "invalid browser response"});
+  needs_health_check_ = false;
   return reply;
 }
 Result<Json> BrowserRpc::Request(Json command,
@@ -145,13 +164,33 @@ bool BrowserRpc::IsBusyBeforeAdmission(const Json& reply) {
          !reply.value("inputAdmitted", false);
 }
 Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
-  std::lock_guard lock(mutex_);
+  std::unique_lock lock(mutex_);
   if (!Control())
     return Error{ErrorCode::kUnavailable, "browser control unavailable"};
+  const auto started = std::chrono::steady_clock::now();
   const int status =
       sdk_.remotekit_sdk_control_open_render(Control(), GetCurrentProcessId(), &setup, 15000);
-  if (status)
+  if (status) {
+    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED) {
+      disconnected_ = true;
+      if (const auto handle = control_.exchange(0))
+        sdk_.remotekit_sdk_control_close(handle);
+    }
+    needs_health_check_ = true;
+    fprintf(stderr, "browser RPC method=output.open/describe elapsed_ms=%lld sdk_status=%d control=%llu\n",
+            static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count()), status, Control());
+    lock.unlock();
+    if (Control() && status != REMOTEKIT_SDK_TIMEOUT) {
+      auto description = Request({{"method", "output.status"}}, 0, 1000);
+      if (description && description.value().contains("output")) {
+        const auto& output = description.value()["output"];
+        if (!output.value("error", std::string()).empty())
+          return Error{ErrorCode::kUnavailable, output.value("message", output["error"].get<std::string>())};
+      }
+    }
     return Error{media::SdkErrorCode(status), "browser render setup SDK " + std::to_string(status)};
+  }
   return {};
 }
 }  // namespace remotekit

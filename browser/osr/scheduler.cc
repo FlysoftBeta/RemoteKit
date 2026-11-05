@@ -115,7 +115,6 @@ void Scheduler::Pump() {
         break;
       }
     if (!plane.host || plane.retired || target_index == plane.targets.size()) {
-      work->unavailable = true;
       --work->pending;
       continue;
     }
@@ -136,16 +135,6 @@ void Scheduler::Pump() {
   issuing_ = false;
   if (!work->pending)
     owner_.CompleteWork();
-}
-
-bool Scheduler::HasFutureDemand() const {
-  for (const auto& [id, plane] : owner_.plane_pool_.planes_) {
-    if (!plane->enabled || !plane->host || plane->retired)
-      continue;
-    if (!plane->host->begin_frame_demand_known() || plane->host->needs_begin_frames())
-      return true;
-  }
-  return false;
 }
 
 void Scheduler::MaybeWake() {
@@ -224,6 +213,9 @@ base::DictValue Scheduler::Status() const {
       .Set("completionTime", "unmeasured")
       .Set("status", int(owner_.status_))
       .Set("error", owner_.error_)
+      .Set("reason", owner_.failed_ ? "hardware_output_unavailable" : "")
+      .Set("retryable", !owner_.failed_)
+      .Set("message", owner_.failed_ ? "当前会话没有可用的硬件 GPU 输出（RDP 会话默认使用 Microsoft Basic Render Driver）：" + owner_.error_ : "")
       .Set("slotCount", int(kRenderSlotCount))
       .Set("submitted", Number(submitted_))
       .Set("rejected", Number(rejected_))

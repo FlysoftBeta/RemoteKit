@@ -147,32 +147,81 @@ int ControlRequestInternal(uint64_t handle,
   if (channel->closed.load(std::memory_order_acquire))
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
   const auto fail = [&](int status) {
-    RetireChannel(handle, channel);
+    if (status == REMOTEKIT_SDK_CHANNEL_CLOSED)
+      RetireChannel(handle, channel);
     return status;
   };
   if (!output_size || size > kMaxMessageSize || (size && !input) || (capacity && !output) ||
       timeout_ms == 0 || timeout_ms > 30000) {
     return fail(REMOTEKIT_SDK_INVALID_ARGUMENT);
   }
-  const base::TimeTicks deadline = base::TimeTicks::Now() + base::Milliseconds(timeout_ms);
+  const auto bytes = UNSAFE_BUFFERS(std::string_view(static_cast<const char*>(input), size));
+  auto request = base::JSONReader::ReadDict(bytes, base::JSON_PARSE_RFC, 32);
+  if (!request || !request->FindInt("id") || channel->next_request_id == INT_MAX)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  const int caller_id = *request->FindInt("id");
+  const int wire_id = ++channel->next_request_id;
+  request->Set("id", wire_id);
+  const auto encoded = base::WriteJson(*request);
+  if (!encoded)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  const auto started = base::TimeTicks::Now();
+  const base::TimeTicks deadline = started + base::Milliseconds(timeout_ms);
   const auto pipe = channel->pipe.get();
-  if (mojo::WriteMessageRaw(pipe, input, size, nullptr, 0, MOJO_WRITE_MESSAGE_FLAG_NONE) !=
-      MOJO_RESULT_OK) {
-    return fail(REMOTEKIT_SDK_CHANNEL_CLOSED);
-  }
+  const auto written = mojo::WriteMessageRaw(pipe, encoded->data(), encoded->size(), nullptr, 0,
+                                             MOJO_WRITE_MESSAGE_FLAG_NONE);
+  if (written != MOJO_RESULT_OK)
+    return fail(written == MOJO_RESULT_FAILED_PRECONDITION ? REMOTEKIT_SDK_CHANNEL_CLOSED
+                                                         : REMOTEKIT_SDK_MOJO_ERROR);
   std::vector<uint8_t> response;
   std::vector<mojo::ScopedHandle> received_handles;
   for (;;) {
     if (channel->closed.load(std::memory_order_acquire))
       return REMOTEKIT_SDK_CHANNEL_CLOSED;
-    if (base::TimeTicks::Now() >= deadline)
-      return fail(REMOTEKIT_SDK_TIMEOUT);
+    if (base::TimeTicks::Now() >= deadline) {
+      LOG(WARNING) << "RemoteKit control timeout method="
+                   << (request->FindString("method") ? *request->FindString("method") : "")
+                   << " request_id=" << caller_id << " wire_id=" << wire_id
+                   << " elapsed_ms=" << (base::TimeTicks::Now() - started).InMilliseconds()
+                   << " sdk_status=" << REMOTEKIT_SDK_TIMEOUT;
+      return REMOTEKIT_SDK_TIMEOUT;
+    }
     const MojoResult result =
         mojo::ReadMessageRaw(pipe, &response, &received_handles, MOJO_READ_MESSAGE_FLAG_NONE);
-    if (result == MOJO_RESULT_OK)
+    if (result == MOJO_RESULT_OK) {
+      auto reply = base::JSONReader::ReadDict(base::as_string_view(base::span(response)),
+                                             base::JSON_PARSE_RFC, 32);
+      if (!reply)
+        return REMOTEKIT_SDK_DATA_MISMATCH;
+      const auto reply_id = reply->FindInt("id");
+      if (!reply_id || *reply_id <= 0 || *reply_id > wire_id) {
+        ReplyHandles discard(*reply);
+        return REMOTEKIT_SDK_DATA_MISMATCH;
+      }
+      if (*reply_id != wire_id) {
+        // A timed-out output.describe can carry both Mojo endpoints and native
+        // handles duplicated into this process. Drop both kinds of ownership.
+        ReplyHandles discard(*reply);
+        received_handles.clear();
+        response.clear();
+        continue;
+      }
+      reply->Set("id", caller_id);
+      const auto restored = base::WriteJson(*reply);
+      if (!restored)
+        return REMOTEKIT_SDK_DATA_MISMATCH;
+      if (restored->size() > capacity || (!attachments && !received_handles.empty())) {
+        ReplyHandles discard(*reply);
+        *output_size = restored->size();
+        return restored->size() > capacity ? REMOTEKIT_SDK_BUFFER_TOO_SMALL
+                                          : REMOTEKIT_SDK_DATA_MISMATCH;
+      }
+      response.assign(restored->begin(), restored->end());
       break;
+    }
     if (result != MOJO_RESULT_SHOULD_WAIT)
-      return fail(REMOTEKIT_SDK_CHANNEL_CLOSED);
+      return fail(result == MOJO_RESULT_FAILED_PRECONDITION ? REMOTEKIT_SDK_CHANNEL_CLOSED
+                                                          : REMOTEKIT_SDK_MOJO_ERROR);
     base::PlatformThread::Sleep(base::Milliseconds(1));
   }
   if (!attachments && !received_handles.empty())

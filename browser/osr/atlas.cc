@@ -1,4 +1,5 @@
 #include "remotekit/browser/osr/generation.h"
+#include "remotekit/browser/osr/cache_policy.h"
 #include "base/check.h"
 #include "base/containers/span.h"
 
@@ -127,14 +128,9 @@ void Atlas::CompleteWork() {
       missing = true;
   // Submitted writes must retain their target even when a sibling root has
   // no output. Cache owns those real writes; they are never guessed complete.
-  if (missing && !work->updated) {
-    owner_.FinishReject(RenderRejectReason::kNotReady);
-    return;
-  }
-  if (!work->updated && !work->begin.force && work->revision == published_revision_) {
-    owner_.FinishReject(work->unavailable || owner_.HasFutureDemand()
-                            ? RenderRejectReason::kNotReady
-                            : RenderRejectReason::kIdle);
+  if (auto reject = CachedWorkReject(missing, work->updated, work->begin.force,
+                                      work->revision == published_revision_)) {
+    owner_.FinishReject(*reject);
     return;
   }
   CHECK(work->state == RenderRequestState::kRendering);
@@ -253,7 +249,11 @@ void Atlas::PublishLayout() {
 
 base::DictValue Atlas::Describe(uint32_t pid) {
   if (owner_.failed_ || owner_.retirement_.stopping_)
-    return Failure(owner_.error_.empty() ? "OSR stopped" : owner_.error_);
+    return Failure(owner_.error_.empty() ? "OSR stopped" : owner_.error_)
+        .Set("code", static_cast<int>(ErrorCode::unavailable))
+        .Set("reason", owner_.failed_ ? "hardware_output_unavailable" : "output_stopped")
+        .Set("retryable", false)
+        .Set("detail", "当前会话没有可用的硬件 GPU 输出（RDP 会话默认使用 Microsoft Basic Render Driver）：" + owner_.error_);
   if (consumer_) {
     if (consumer_->pid == pid) {
       if (render_endpoint_delivered_)

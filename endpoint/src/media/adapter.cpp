@@ -50,6 +50,7 @@ Result<StreamingAdapter> SelectStreamingAdapter(Sdk& sdk, const RuntimeOptions& 
     }
   }
   return Error{ErrorCode::kUnavailable,
-               "no hardware H264 streaming adapter for " + options.encoder + failures};
+               "当前会话没有可用的硬件 GPU 编码器（RDP 会话默认使用 Microsoft Basic Render Driver）；" +
+                   options.encoder + failures};
 }
 }  // namespace remotekit

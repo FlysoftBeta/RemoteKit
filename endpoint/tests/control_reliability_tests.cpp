@@ -1,6 +1,7 @@
 #include "session/control_reliability.hpp"
 #include "rtc/outbox.hpp"
 #include "session/browser_rpc.hpp"
+#include "session/browser.hpp"
 #include "session/navigation_export.hpp"
 #include "media/presentation_barrier.hpp"
 #include <cstdlib>
@@ -73,7 +74,7 @@ void RpcLockAndStatusMapping() {
   sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void*, size_t, size_t*,
                                          uint32_t) { return 6; };
   const auto too_small = browser.Request(Json::object());
-  CHECK(!too_small && too_small.error().code == ErrorCode::kOutcomeUnknown && !browser.Control());
+  CHECK(!too_small && too_small.error().code == ErrorCode::kOutcomeUnknown && browser.Control());
 }
 
 void InputWireFailures() {
@@ -148,8 +149,47 @@ void InputWireFailures() {
                                          uint32_t) { return 5; };
   auto timeout = rpc(Json::object());
   CHECK(!timeout && timeout.error().code == remotekit::ErrorCode::kOutcomeUnknown);
+  CHECK(browser.Control() == 1 && !browser.Disconnected());
+  sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void*, size_t, size_t*,
+                                         uint32_t) -> int { return REMOTEKIT_SDK_CHANNEL_CLOSED; };
+  auto disconnected = rpc(Json::object());
+  CHECK(!disconnected && !browser.Control() && browser.Disconnected());
   auto unavailable = rpc(Json::object());
   CHECK(!unavailable && unavailable.error().code == remotekit::ErrorCode::kUnavailable);
+}
+void OpenRenderLifetimeAndStartupBackoff() {
+  remotekit::BrowserStartPolicy starts;
+  CHECK(starts.Admit(0) && !starts.Admit(.5));
+  CHECK(starts.Admit(1) && !starts.Admit(2));
+  CHECK(starts.Admit(3) && !starts.Admit(100));
+  starts.Healthy(63);
+  CHECK(starts.Admit(63));
+  remotekit::media::Sdk sdk;
+  sdk.remotekit_sdk_control_connect = [](const char*, uint64_t* handle) { *handle = 1; return 0; };
+  sdk.remotekit_sdk_control_close = [](uint64_t) { return 0; };
+  remotekit::BrowserRpc browser(sdk);
+  CHECK(browser.Connect("test"));
+  sdk.remotekit_sdk_control_open_render = [](uint64_t, uint32_t, remotekit_sdk_render_setup*, uint32_t) -> int {
+    return REMOTEKIT_SDK_TIMEOUT;
+  };
+  remotekit_sdk_render_setup setup{};
+  auto timeout = browser.OpenRender(setup);
+  CHECK(!timeout && timeout.error().code == remotekit::ErrorCode::kOutcomeUnknown);
+  CHECK(browser.Control() == 1 && browser.NeedsHealthCheck() && !browser.Disconnected());
+  sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void* output, size_t,
+                                        size_t* count, uint32_t) {
+    const std::string bytes = "{\"ok\":true}";
+    *count = bytes.size();
+    std::memcpy(output, bytes.data(), bytes.size());
+    return 0;
+  };
+  CHECK(browser.Request({{"method", "snapshot"}}) && !browser.NeedsHealthCheck());
+  sdk.remotekit_sdk_control_open_render = [](uint64_t, uint32_t, remotekit_sdk_render_setup*, uint32_t) -> int {
+    return REMOTEKIT_SDK_CHANNEL_CLOSED;
+  };
+  CHECK(!browser.OpenRender(setup) && !browser.Control() && browser.Disconnected());
+  browser.Invalidate();
+  CHECK(!browser.Disconnected());  // A new process cannot inherit old disconnect evidence.
 }
 
 void ControlBackpressure() {
@@ -385,6 +425,7 @@ void OversizedBrowserReplyIsApplicationError() {
 
 int main() {
   RpcLockAndStatusMapping();
+  OpenRenderLifetimeAndStartupBackoff();
   OversizedBrowserReplyIsApplicationError();
   InputWireFailures();
   ControlBackpressure();

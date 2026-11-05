@@ -19,6 +19,8 @@ class BrowserRpc {
   Result<void> Connect(const std::string& channel);
   void Invalidate();
   uint64_t Control() const { return control_.load(); }
+  bool Disconnected() const { return disconnected_.load(); }
+  bool NeedsHealthCheck() const { return needs_health_check_.load(); }
   // Sends one command and returns the Browser's reply object whether or not it
   // reports success. Only transport, identity and framing failures are errors.
   Result<Json> Exchange(Json command,
@@ -43,6 +45,7 @@ class BrowserRpc {
   media::Sdk& sdk_;
   std::timed_mutex mutex_;
   std::atomic<uint64_t> control_{0};
+  std::atomic<bool> disconnected_{false}, needs_health_check_{false};
   uint64_t serial_ = 0;
   std::atomic<std::shared_ptr<media::ServerTrace>> trace_;
   std::atomic<DWORD> producer_pid_{0};

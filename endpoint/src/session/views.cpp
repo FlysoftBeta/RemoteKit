@@ -87,39 +87,63 @@ Result<void> ViewController::AckClosed(const Json& views) {
 }
 
 Result<void> ViewController::Start() {
-  if (!browser.Stopping() && browser.Alive() && browser.Rpc().Control())
-    return {};
-  if (browser.Present())
-    fprintf(stderr, "session %s browser replacement control=%d stop_pending=%d peer=%llu %s\n",
-            id.c_str(), browser.Rpc().Control() != 0, browser.Stopping(), peer_controller.Handle(),
-            browser.Diagnostic().c_str());
-  auto stopped = stop_runtime();
-  if (!stopped)
-    return stopped.error();
-  auto prepared = registry.PrepareAdapter();
-  if (!prepared)
-    return prepared.error();
-  auto adapter = registry.Adapter();
-  auto started = browser.Launch(options, id, directory, *adapter, trace);
-  if (!started)
-    return started.error();
-  observed_closed.clear();
-  navigation.Reset();
+  const bool retained = !browser.Stopping() && browser.Alive() && browser.Rpc().Control();
+  if (retained) {
+    auto health = browser.HealthCheck();
+    if (!health)
+      return health.error();
+    if (browser.Initialized())
+      return {};
+  }
+  if (browser.Stopping())
+    return Error{ErrorCode::kUnavailable, "Browser 正在停止，等待进程退出"};
+  if (browser.Alive() && !browser.Rpc().Control() && !browser.Rpc().Disconnected())
+    return browser.HealthCheck();
+  if (!retained) {
+    auto admitted = browser.AdmitLaunch();
+    if (!admitted)
+      return admitted.error();
+    if (browser.Present())
+      fprintf(stderr, "session %s browser replacement reason=%s control=%d stop_pending=%d peer=%llu %s\n",
+              id.c_str(), browser.Exited() ? "process_exited" : "control_pipe_disconnected",
+              browser.Rpc().Control() != 0, browser.Stopping(), peer_controller.Handle(),
+              browser.Diagnostic().c_str());
+    auto stopped = stop_runtime();
+    if (!stopped)
+      return stopped.error();
+    auto prepared = registry.PrepareAdapter();
+    if (!prepared)
+      return prepared.error();
+    auto adapter = registry.Adapter();
+    auto started = browser.Launch(options, id, directory, *adapter, trace);
+    if (!started)
+      return started.error();
+    observed_closed.clear();
+    navigation.Reset();
+  }
   {
     auto session_sitePreferences_result = browser.Rpc().Request(
         {{"method", "session.sitePreferences"}, {"session", id}, {"sites", site_preferences}});
     if (!session_sitePreferences_result)
       return session_sitePreferences_result.error();
   }
+  std::set<std::string> existing;
   {
     auto browser_snapshot_result = browser.Snapshot();
     if (!browser_snapshot_result)
       return browser_snapshot_result.error();
+    for (const auto& session : browser_snapshot_result.value().at("sessions"))
+      for (const auto& view : session.at("views"))
+        existing.insert(view.at("view").get<std::string>());
   }
   if (!desired.empty()) {
     // Hidden construction never requires the previous/final atlas to fit an
     // intermediate set of specs. One transaction applies the complete layout.
     for (auto& [view, config] : desired) {
+      // Startup can resume after an outcome_unknown create. Observe its stable
+      // identity before issuing another create on the retained process.
+      if (existing.contains(view))
+        continue;
       auto create_view_result = CreateView(config, true);
       if (!create_view_result)
         return create_view_result.error();
@@ -128,12 +152,14 @@ Result<void> ViewController::Start() {
       auto desired_geometry_result = DesiredGeometry();
       if (!desired_geometry_result)
         return desired_geometry_result.error();
-      auto geometry_config_result = GeometryConfig(std::move(desired_geometry_result).value());
+      auto geometry_config_result = retained ? ReconcileOutput()
+                                            : GeometryConfig(std::move(desired_geometry_result).value());
       if (!geometry_config_result)
         return geometry_config_result.error();
     }
   }
   reconciliation_pending = false;
+  browser.MarkInitialized();
 
   return {};
 }

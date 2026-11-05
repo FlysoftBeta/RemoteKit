@@ -8,6 +8,7 @@
 #include "ui/gfx/geometry/size.h"
 namespace remotekit::browser::osr {
 using Microsoft::WRL::ComPtr;
+std::optional<LUID> ParseAdapterLuid(std::string_view value);
 class Device {
  public:
   std::string Initialize();

@@ -37,6 +37,7 @@ Comp 决定"要不要画"，Rend 决定"怎么画"。Browser 内没有自主的�
 `SkiaOutputDeviceRemoteKit` 是 Viz 的一个输出设备，把根绘制直接写进 Browser 分配的 plane 目标。
 
 - 后端为 ANGLE/D3D11 上的 Ganesh GL。设备要求 `ID3D11Device5`/`ID3D11DeviceContext4`，并校验 ANGLE 实际设备的 adapter LUID 与指定 LUID 一致。
+- Endpoint 枚举并验证硬件编码器与 D3D 适配器，把 LUID 传给 Browser。服务运行时使用 `ignore-gpu-blocklist`，避免 RDP 的默认 Microsoft Basic Render Driver（vendor `0x1414`）触发 Chromium 条目 74、禁用所选硬件的全部 GPU 功能；驱动缺陷规避仍保留。GPU 子进程启动前检查指定 LUID 存在且为硬件，禁止缺失时静默换卡；OSR 配置再次验证 ANGLE 实际 LUID。日志记录实际 ANGLE 名称、LUID、软硬件及 GL 合成/光栅化功能状态。
 - plane 目标必须是：BGRA8、`D3D11_USAGE_DEFAULT`、单 mip/单数组/单采样、可作 RT 与 SRV、NT 共享句柄、不使用 keyed mutex。通过 SharedImage 以 `DISPLAY_WRITE | DISPLAY_READ`、sRGB、左上原点、预乘 alpha 导入。
 - `supports_post_sub_buffer = false`：多个目标轮转，每次必须完整重绘根，否则下一个目标里会残留另一个历史帧的像素。
 - 一帧的顺序：`PreparePaint` 校验授权 token 与尺寸 → `BeginScopedWriteAccess` 等待 begin semaphore → Skia 提交 → 结束 SharedImage 访问 → 在 ANGLE 实际 immediate context 上 `Signal` 该目标的 ready Fence → Flush。结果 `kSubmitted` 只表示写入已排队，合成方仍需在 GPU 上 Wait 这个 Fence。
@@ -54,7 +55,9 @@ plane 目标与 atlas Slot 的生命周期是故意解开的：静态页面的�
 - `Plane.latest` 引用最新有效目标；正在进行的 Work 和 Slot 读租约各自另外引用目标。一个目标只有在没有读者、不在写入、且上一次 ready Fence 已完成时，才能被选为下次写入的目标。
 - 真实的 plane 写入即使所属的 atlas 工作已过期或被拒绝，也要保留到它的 Fence 完成。Reject 不会取消已排队的 GPU 写入。
 - 配置重试由后续 Begin 驱动，间隔 50ms，总期限 5 秒；重试复用已分配的句柄，不每次新建资源。
+- 配置失败封存输出；`output.describe` / `output.status` 返回 `hardware_output_unavailable`、原因和可展示消息。Endpoint 将消息投影为 Session 错误，保留仍连接的 Browser，避免反复替换。
 - `frame_id` 表示内容身份（版本），请求值（value）表示一次请求。强制重拷同一内容会得到新的 value，但 `frame_id` 不变。
+- 同一布局已有可用缓存、没有新像素且非强制请求时返回 Idle，并保留该次完整身份供 Wake 使用。需求未知或根暂未产出新帧不使缓存失效；NotReady 只表示缺像素或配置未就绪。强制尾帧仍合成缓存。
 
 ## 一次 Begin 的处理
 

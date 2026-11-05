@@ -1,4 +1,6 @@
 #include "media/comp_pacing.hpp"
+#include "browser/osr/cache_policy.h"
+#include "browser/osr_wake_state.h"
 #include <cstdio>
 #include <cstdlib>
 using remotekit::CompPacing;
@@ -9,6 +11,21 @@ void Require(bool value, const char* message) {
   }
 }
 int main() {
+  using namespace remotekit::browser::osr;
+  Require(CachedWorkReject(false, false, false, true) == remotekit::RenderRejectReason::kIdle,
+          "usable unchanged cached pixels are Idle even when producer demand is unknown");
+  Require(CachedWorkReject(true, false, false, true) == remotekit::RenderRejectReason::kNotReady,
+          "missing pixels remain NotReady");
+  Require(!CachedWorkReject(false, false, true, true), "forced tail composes cached pixels");
+  Require(!CachedWorkReject(false, false, false, false), "new layout composes cached pixels");
+  Require(!CachedWorkReject(false, true, false, true), "new producer pixels compose");
+  remotekit::browser::OsrWakeProof wake;
+  const remotekit::RenderIdentity idle_identity{7, 19, 2, 0};
+  wake.RecordIdle(idle_identity);
+  Require(wake.pending() && wake.pending()->value == 19 && wake.pending()->slot == 2,
+          "Idle retains exact identity for demand Wake");
+  Require(!wake.Delivered({7, 20, 2, 0}) && wake.Delivered(idle_identity),
+          "only exact Idle Wake discharges admission proof");
   remotekit::CompCadence cadence;
   Require(cadence.Update(1000000, 1, 60, 60, true, 0) == 1, "observed low fps starts cadence");
   uint32_t recovered = 0;

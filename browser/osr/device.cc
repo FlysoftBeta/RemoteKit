@@ -4,6 +4,7 @@
 #include <iterator>
 #include "base/command_line.h"
 #include "base/strings/string_number_conversions.h"
+#include "remotekit/browser/service_gpu_policy.h"
 
 namespace remotekit::browser::osr {
 constexpr char kUseAdapterLuid[] = "use-adapter-luid";
@@ -112,6 +113,8 @@ bool Device::InitializeShaders() {
 }
 std::string Device::Initialize() {
   const auto* command_line = base::CommandLine::ForCurrentProcess();
+  if (auto error = ValidateServiceGpuAdapter(*command_line); !error.empty())
+    return error;
   std::optional<LUID> requested_adapter;
   if (command_line->HasSwitch(kUseAdapterLuid)) {
     requested_adapter = ParseAdapterLuid(command_line->GetSwitchValueASCII(kUseAdapterLuid));

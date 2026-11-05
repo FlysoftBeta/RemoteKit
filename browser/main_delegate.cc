@@ -22,6 +22,7 @@
 #include "remotekit/browser/browser_runtime.h"
 #include "remotekit/browser/browser_context.h"
 #include "remotekit/browser/service_input_policy.h"
+#include "remotekit/browser/service_gpu_policy.h"
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "ui/base/l10n/l10n_util.h"
 #include "ui/base/resource/resource_bundle.h"
@@ -95,6 +96,7 @@ MainDelegate::~MainDelegate() = default;
 std::optional<int> MainDelegate::BasicStartupComplete() {
   auto& command = *base::CommandLine::ForCurrentProcess();
   ConfigureServiceScrollPolicy(command);
+  ConfigureServiceGpuPolicy(command);
   // Service Aura roots are offscreen; product visibility controls demand.
   command.AppendSwitch("disable-backgrounding-occluded-windows");
   std::string disabled = command.GetSwitchValueASCII("disable-features");
@@ -134,6 +136,13 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   const bool logging_ready = logging::InitLogging(settings);
   if (!command.HasSwitch("type"))
     LOG(INFO) << "RemoteKit startup InitLogging=" << logging_ready;
+  if (command.GetSwitchValueASCII("type") == "gpu-process") {
+    const auto error = ValidateServiceGpuAdapter(command);
+    if (!error.empty()) {
+      LOG(ERROR) << "RemoteKit GPU startup: " << error;
+      return 78;
+    }
+  }
   return std::nullopt;
 }
 void MainDelegate::PreSandboxStartup() {

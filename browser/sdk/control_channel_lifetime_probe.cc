@@ -55,13 +55,23 @@ void Reply(mojo::MessagePipeHandle pipe, const std::vector<uint8_t>& bytes) {
            MOJO_RESULT_OK);
 }
 
-int Request(uint64_t id, uint8_t byte) {
-  uint8_t output = 0;
+int Payload(const std::vector<uint8_t>& bytes) {
+  auto request = base::JSONReader::ReadDict(base::as_string_view(base::span(bytes)),
+                                           base::JSON_PARSE_RFC);
+  CHECK(request);
+  return *request->FindInt("probe");
+}
+int Request(uint64_t id, uint8_t byte, uint32_t timeout_ms = 5000) {
+  const auto input = base::WriteJson(base::DictValue().Set("id", int(byte)).Set("probe", int(byte)));
+  std::array<char, 512> output{};
   size_t size = 0;
-  const int status = remotekit_sdk_control_request(id, &byte, 1, &output, 1, &size, 5000);
+  const int status = remotekit_sdk_control_request(id, input->data(), input->size(),
+      output.data(), output.size(), &size, timeout_ms);
   if (status == REMOTEKIT_SDK_OK) {
-    CHECK_EQ(size, 1u);
-    CHECK_EQ(output, byte);
+    auto reply = base::JSONReader::ReadDict(std::string_view(output.data(), size), base::JSON_PARSE_RFC);
+    CHECK(reply);
+    CHECK_EQ(*reply->FindInt("probe"), int(byte));
+    CHECK_EQ(*reply->FindInt("id"), int(byte));
   }
   return status;
 }
@@ -71,7 +81,7 @@ void ParallelChannelsAndClose() {
   auto fast = NewChannel();
   int slow_status = -1;
   std::thread pending([&] { slow_status = Request(slow.id, 1); });
-  CHECK_EQ(Read(slow.peer.get()).front(), 1);
+  CHECK_EQ(Payload(Read(slow.peer.get())), 1);
   const auto start = std::chrono::steady_clock::now();
   CHECK_EQ(RemoteKitSdkBeginRtc(), REMOTEKIT_SDK_OK);
   RemoteKitSdkEndRtc();
@@ -104,7 +114,7 @@ void SameChannelSerializationAndQueuedClose() {
       MOJO_RESULT_SHOULD_WAIT);
   Reply(channel.peer.get(), first_bytes);
   auto second_bytes = Read(channel.peer.get());
-  CHECK_EQ(second_bytes.front(), 4);
+  CHECK_EQ(Payload(second_bytes), 4);
   Reply(channel.peer.get(), second_bytes);
   first.join();
   second.join();
@@ -386,6 +396,30 @@ void RawControlRejectsAttachments() {
   std::vector<uint8_t> bytes;
   CHECK_EQ(mojo::ReadMessageRaw(peer.get(), &bytes, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
            MOJO_RESULT_FAILED_PRECONDITION);
+  CHECK_EQ(remotekit_sdk_control_close(channel.id), REMOTEKIT_SDK_OK);
+}
+void TimeoutDiscardsLateReplyAndAttachments() {
+  auto channel = NewChannel();
+  CHECK_EQ(Request(channel.id, 21, 20), REMOTEKIT_SDK_TIMEOUT);
+  auto late = ReadJsonRequest(channel.peer.get());
+  HANDLE native = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+  CHECK(native);
+  late.Set("mapping_handle", base::NumberToString(reinterpret_cast<uintptr_t>(native)));
+  std::vector<mojo::ScopedMessagePipeHandle> endpoints;
+  mojo::ScopedMessagePipeHandle endpoint, peer;
+  CHECK_EQ(mojo::CreateMessagePipe(nullptr, &endpoint, &peer), MOJO_RESULT_OK);
+  endpoints.push_back(std::move(endpoint));
+  ReplyWithEndpoints(channel.peer.get(), late, &endpoints);
+  std::thread responder([&] { Reply(channel.peer.get(), Read(channel.peer.get())); });
+  CHECK_EQ(Request(channel.id, 22), REMOTEKIT_SDK_OK);
+  responder.join();
+  CHECK(!ValidHandle(reinterpret_cast<uintptr_t>(native)));
+  std::vector<uint8_t> bytes;
+  CHECK_EQ(mojo::ReadMessageRaw(peer.get(), &bytes, nullptr, MOJO_READ_MESSAGE_FLAG_NONE),
+           MOJO_RESULT_FAILED_PRECONDITION);
+  channel.peer.reset();
+  CHECK_EQ(Request(channel.id, 23), REMOTEKIT_SDK_CHANNEL_CLOSED);
+  CHECK(channel.lifetime.expired());
 }
 void ShutdownDrainsLeases() {
   auto channel = NewChannel();
@@ -432,6 +466,7 @@ int main() {
   NumericRenderFailure(false);
   UnclaimedControlClose();
   RawControlRejectsAttachments();
+  TimeoutDiscardsLateReplyAndAttachments();
   ShutdownDrainsLeases();
   std::puts("SDK channel concurrency, queued close, and shutdown lease tests passed");
 }

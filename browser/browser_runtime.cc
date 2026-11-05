@@ -18,6 +18,8 @@
 #include "base/timer/timer.h"
 #include "base/unguessable_token.h"
 #include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/gpu_data_manager.h"
+#include "gpu/config/gpu_info.h"
 #include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "components/headless/clipboard/headless_clipboard.h"
@@ -63,7 +65,22 @@ class ServiceIoClipboard final : public base::CurrentThread::DestructionObserver
 };
 }  // namespace
 
+BrowserRuntime::BrowserRuntime() {
+  content::GpuDataManager::GetInstance()->AddObserver(this);
+}
+void BrowserRuntime::OnGpuInfoUpdate() {
+  auto* manager = content::GpuDataManager::GetInstance();
+  const auto info = manager->GetGPUInfo();
+  const auto& active = info.active_gpu();
+  LOG(INFO) << "RemoteKit GPU init ANGLE=" << info.gl_renderer
+            << " adapter=" << active.device_string
+            << " luid=" << active.luid.HighPart << "," << active.luid.LowPart
+            << " hardware=" << (!active.IsSoftwareRenderer() && !info.UsesSwiftShader())
+            << " compositing=" << manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_ACCELERATED_GL)
+            << " rasterization=" << manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION);
+}
 BrowserRuntime::~BrowserRuntime() {
+  content::GpuDataManager::GetInstance()->RemoveObserver(this);
   // PostMainMessageLoopRun also runs after a partial PreMain startup failure.
   // Contexts must never be left to implicit member destruction order.
   CHECK(popups.pending.empty());

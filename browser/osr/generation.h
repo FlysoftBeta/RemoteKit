@@ -45,7 +45,6 @@ class Generation : public std::enable_shared_from_this<Generation> {
   void OnDemandChanged(base::WeakPtr<OffscreenHost> notified_host) {
     plane_pool_.OnDemandChanged(std::move(notified_host));
   }
-  bool HasFutureDemand() const { return scheduler_.HasFutureDemand(); }
   void MaybeWake() { scheduler_.MaybeWake(); }
   void FinishReject(RenderRejectReason reason) { scheduler_.FinishReject(reason); }
   void SchedulePump() { scheduler_.SchedulePump(); }
