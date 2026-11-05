@@ -8,8 +8,8 @@ async (host) => {
   qa.startSmoke = async () => {
     const page = qa.page;
     await qa.ready();
-    if (await qa.uiCount({ css: 'button', text: '新建窗口' }))
-      await qa.uiClick({ css: 'button', text: '新建窗口' });
+    await qa.uiClick({ css: 'button', text: '新建窗口' });
+    await page.waitForFunction(() => robustQA.state.workspace.tabs.length === 1);
     const start = await qa.sample('chrome' + qa.version + '-start');
     assert(
       start.state.workspace.tabs.length === 1 && start.state.workspace.tabs[0].kind === 'start',
@@ -27,7 +27,7 @@ async (host) => {
       robustQA.state.workspace.tabs.some((tab) => tab.kind === 'remote' && tab.url.includes('label=A')),
     );
     await qa.ready();
-    await page.waitForFunction(() => robustQA.transport().videoPlanes.size === 1);
+    await page.waitForFunction(() => robustQA.transport().presentation.videoPlanes.size === 1);
     let observed;
     for (let n = 0; n < 30; n++) {
       observed = await qa.inspect();

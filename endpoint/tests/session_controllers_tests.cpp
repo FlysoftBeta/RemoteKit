@@ -77,7 +77,7 @@ void RouterClassificationAndAdmission() {
   router.Drain();
   CHECK(replies.back()["type"] == "input.result");
   CHECK(replies.back()["clientSequence"] == "5");
-  CHECK(replies.back()["error"]["code"] == "invalid_request");
+  CHECK(replies.back()["ok"] == false && replies.back()["error"].is_string());
   stamp = 0;
   CHECK(receive({{"type", "media.presentation"}}));
   CHECK(receive({{"type", "product.action"}}));

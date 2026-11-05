@@ -76,6 +76,7 @@ WebRTC 通过 `SetRates` 报告观测输入 FPS。QSV 的码控按名义帧率�
 - 观测值严格高于当前时基的 125% 时，一次性恢复到 Configure 确定的合法上限。
 - 边界值保持不变。暂停取消待处理的窗口。
 - 后端报告低帧率窗口的到期时间，EncoderWorker 在在途编码排空后重放最后一次有效速率，不需要 WebRTC 再次发送相同参数，也不额外开定时线程。
+- 时基有下限：QSV 至少在 CPB 里预留两帧，名义帧率越低每帧预算越大。时基不低于 `ceil(2 × 最大码率 / level CPB)`，否则驱动会把实际 level 抬到协商值之上（曾在 1FPS、高 VBR 上限时初始化为 level 5.0 而协商的是 4.2，编码停止）。
 - 只改码率的 Reset 设置 `StartNewSequence=OFF`，保持序列；真正的时基变化设置 ON 并强制 IDR。
 - 单层 `maxFps` 上调不保证触发 WebRTC 的 Configure，名义上限以最近一次真正的 Configure 为准。
 

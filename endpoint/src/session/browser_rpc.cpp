@@ -1,5 +1,6 @@
 #include "session/browser_rpc.hpp"
 #include "media/server_trace.hpp"
+#include "protocol/control.h"
 #include <charconv>
 
 namespace remotekit {
@@ -26,11 +27,11 @@ void BrowserRpc::Invalidate() {
   if (auto handle = control_.exchange(0))
     sdk_.remotekit_sdk_control_close(handle);
 }
-Result<Json> BrowserRpc::Request(Json command,
-                                 uint64_t expected_control,
-                                 uint32_t timeout_ms,
-                                 bool opportunistic,
-                                 const std::function<bool()>& admitted) {
+Result<Json> BrowserRpc::Exchange(Json command,
+                                  uint64_t expected_control,
+                                  uint32_t timeout_ms,
+                                  bool opportunistic,
+                                  const std::function<bool()>& admitted) {
   const auto trace = trace_.load();
   uint64_t sequence = 0;
   if (trace && command.value("method", Json()) == "input" && command.contains("sequence") &&
@@ -83,19 +84,57 @@ Result<Json> BrowserRpc::Request(Json command,
   auto reply = Json::parse(response.data(), response.data() + count, nullptr, false);
   if (!reply.is_object() || !reply.contains("ok") || !reply["ok"].is_boolean())
     return failed(Error{ErrorCode::kOutcomeUnknown, "invalid browser response"});
-  if (!reply["ok"].get<bool>()) {
-    const auto browser_code = reply.value("code", Json());
-    return Error{browser_code == 6 ? ErrorCode::kBusy : ErrorCode::kRejected,
-                 "browser code=" + browser_code.dump() + " error=" +
-                     (reply.contains("error") ? reply["error"].is_string()
-                                                    ? reply["error"].get<std::string>()
-                                                    : reply["error"].dump()
-                                              : "command failed") +
-                     (reply.contains("detail") && reply["detail"].is_string()
-                          ? " detail=" + reply["detail"].get<std::string>()
-                          : std::string())};
-  }
   return reply;
+}
+Result<Json> BrowserRpc::Request(Json command,
+                                 uint64_t expected_control,
+                                 uint32_t timeout_ms,
+                                 bool opportunistic,
+                                 const std::function<bool()>& admitted) {
+  auto reply = Exchange(std::move(command), expected_control, timeout_ms, opportunistic, admitted);
+  if (!reply)
+    return reply;
+  return CheckReply(std::move(reply).value());
+}
+Result<Json> BrowserRpc::CheckReply(Json reply) {
+  if (reply.value("ok", false))
+    return reply;
+  const int browser_code = reply.value("code", 0);
+  ErrorCode code = ErrorCode::kRejected;
+  switch (static_cast<protocol::ErrorCode>(browser_code)) {
+    case protocol::ErrorCode::busy:
+      code = ErrorCode::kBusy;
+      break;
+    case protocol::ErrorCode::not_found:
+      code = ErrorCode::kNotFound;
+      break;
+    case protocol::ErrorCode::stale_identity:
+      code = ErrorCode::kConflict;
+      break;
+    case protocol::ErrorCode::invalid_request:
+      code = ErrorCode::kInvalidRequest;
+      break;
+    case protocol::ErrorCode::unavailable:
+      code = ErrorCode::kUnavailable;
+      break;
+    case protocol::ErrorCode::resource_limit:
+      code = ErrorCode::kLimitExceeded;
+      break;
+    default:
+      break;
+  }
+  std::string message = "browser code=" + std::to_string(browser_code);
+  if (reply.contains("error"))
+    message += " error=" + (reply["error"].is_string() ? reply["error"].get<std::string>()
+                                                       : reply["error"].dump());
+  if (reply.contains("detail") && reply["detail"].is_string())
+    message += " detail=" + reply["detail"].get<std::string>();
+  return Error{code, std::move(message)};
+}
+bool BrowserRpc::IsBusyBeforeAdmission(const Json& reply) {
+  return !reply.value("ok", false) &&
+         reply.value("code", 0) == static_cast<int>(protocol::ErrorCode::busy) &&
+         !reply.value("inputAdmitted", false);
 }
 Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
   std::lock_guard lock(mutex_);

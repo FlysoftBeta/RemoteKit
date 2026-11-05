@@ -19,11 +19,23 @@ class BrowserRpc {
   Result<void> Connect(const std::string& channel);
   void Invalidate();
   uint64_t Control() const { return control_.load(); }
+  // Sends one command and returns the Browser's reply object whether or not it
+  // reports success. Only transport, identity and framing failures are errors.
+  Result<Json> Exchange(Json command,
+                        uint64_t expected_control = 0,
+                        uint32_t timeout_ms = 10000,
+                        bool opportunistic = false,
+                        const std::function<bool()>& admitted = {});
+  // Exchange plus mapping of an `ok:false` reply to a typed error.
   Result<Json> Request(Json command,
                        uint64_t expected_control = 0,
                        uint32_t timeout_ms = 10000,
                        bool opportunistic = false,
                        const std::function<bool()>& admitted = {});
+  static Result<Json> CheckReply(Json reply);
+  // True for Browser's busy rejection before the input was admitted, the only
+  // input failure that may be retried with the same sequence.
+  static bool IsBusyBeforeAdmission(const Json& reply);
   Result<void> OpenRender(remotekit_sdk_render_setup& setup);
 
  private:

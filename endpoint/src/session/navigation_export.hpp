@@ -75,7 +75,10 @@ class NavigationExport {
     }
     auto& task = *task_;
     const auto command = [&](const char* method) {
-      return Json{{"method", method}, {"view", task.view}, {"transfer", task.transfer}};
+      Json request = {{"method", method}, {"view", task.view}};
+      if (!task.transfer.empty())
+        request["transfer"] = task.transfer;
+      return request;
     };
     const auto cancel = [&] {
       if (!task.transfer.empty())

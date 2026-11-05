@@ -514,7 +514,12 @@ try {
     );
   const isDisabled = (selector) => page.evaluate((css) => !!document.querySelector(css)?.disabled, selector);
   const fill = async (css, value) => {
+    await wait((css) => {
+      const input = document.querySelector(css);
+      return input && !input.disabled && !input.readOnly;
+    }, css);
     await page.focus(css);
+    await wait((css) => document.activeElement === document.querySelector(css), css);
     await page.keyboard.press('Control+A');
     await page.keyboard.insertText(value);
   };
@@ -942,7 +947,7 @@ try {
   await basketOrder(winner);
   await wait(() =>
     Array.from(document.querySelectorAll('[role="alert"]')).some((node) =>
-      node.textContent.includes('文件篮已更新'),
+      node.textContent.includes('状态已改变，请核对后重试'),
     ),
   );
   await screenshot('basket-conflict-rollback');

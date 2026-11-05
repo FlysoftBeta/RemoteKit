@@ -173,9 +173,6 @@ Result<std::string> LibraryController::ObserveSelection(const LibrarySelection& 
     return std::string("cancelled");
   if (!status.is_object())
     return std::string("unknown");
-  const auto error = status.value("error", std::string());
-  if (error == "stale_page_request_target" || error == "view_not_in_session")
-    return RetireUnsubmittedSelection(selection.id);
   const auto state = status.value("state", std::string("unknown"));
   const bool matched = status.value("selection_id", std::string()) == selection.id;
   if (state == "selected" && matched && current->state == LibraryState::submitted) {
@@ -410,6 +407,12 @@ Result<Json> LibraryController::LibraryCommand(const std::string& method, const 
           auto rpc_result_2 = browser.Rpc().Request(SelectionStatusCommand(*selection));
           if (!rpc_result_2) {
             const Error operation_error = rpc_result_2.error();
+            if (selection->state == LibraryState::pending &&
+                (operation_error.code == ErrorCode::kConflict ||
+                 operation_error.code == ErrorCode::kNotFound)) {
+              RK_ASSIGN_OR_RETURN(retired, RetireUnsubmittedSelection(selection->id));
+              return Json{{"state", retired}};
+            }
             return Json{{"state", "unknown"}};
           }
           status = std::move(rpc_result_2).value();

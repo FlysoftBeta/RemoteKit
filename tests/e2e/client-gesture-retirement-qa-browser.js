@@ -196,6 +196,18 @@ async (host) => {
   retired.layout = async () => {
     const id = `v${base.version}-retired-layout-${Date.now()}`;
     await qa.navigate({ id });
+    const resize = async (size) => {
+      await base.page.setViewportSize(size);
+      await base.page.waitForFunction(
+        ({ viewId, width }) =>
+          robustQA
+            .transport()
+            .presentation.layout?.views.some((view) => view.id === viewId && view.width === width),
+        { viewId: qa.viewId, width: size.width },
+        { timeout: 30000 },
+      );
+      await base.ready();
+    };
     await qa.trajectory(
       [
         { at: 0, type: 'touchStart', points: [{ x: 120, y: 650 }] },
@@ -204,15 +216,12 @@ async (host) => {
       { settleMs: 100 },
     );
     const size = base.page.viewportSize();
-    await base.page.setViewportSize({ width: size.width + 37, height: size.height });
-    await base.ready();
+    await resize({ width: size.width + 37, height: size.height });
     await qa.touch('touchEnd', []);
     await base.page.waitForTimeout(300);
     const e = await qa.sample(id);
     qa.assertClientPath(e);
-    await base.page.setViewportSize(size);
-    await base.ready();
-    await base.page.waitForTimeout(600);
+    await resize(size);
     await qa.tap();
     const recovery = await qa.sample(id + '-recovery');
     assert(root(recovery).clicks === 1, 'Layout invalidation did not recover tap');

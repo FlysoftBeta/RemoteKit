@@ -208,7 +208,7 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
       auto rpc_result = hooks_.rpc(retire, input_control, 10000, false, current);
       if (!rpc_result) {
         const Error error = rpc_result.error();
-        receipt->Finish("terminal-unconfirmed", false, error.message.c_str());
+        receipt->Finish("terminal-unconfirmed", false, error.message);
         return;
       }
       const auto reply = std::move(rpc_result).value();
@@ -300,8 +300,7 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
       if (receipt)
         receipt->Finish("terminal-unconfirmed", false, error.message);
       else if (admitted()) {
-        Json reply = {{"ok", false},
-                      {"error", {{"code", ErrorCodeName(error.code)}, {"message", error.message}}}};
+        Json reply = {{"ok", false}, {"error", error.message}};
         if (!touch_sequence.empty()) {
           reply["touchState"] = "terminal-unconfirmed";
           reply["touchSequenceId"] = touch_sequence;

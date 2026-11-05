@@ -47,9 +47,9 @@ endpoint.on('ready', (identity) => void control.reconciler.endpointReady(identit
 endpoint.on('offline', () => control.rtc.endpointOffline());
 const fixture = createServer(async (req, res) => {
   try {
-    res.setHeader('Access-createApplication-Allow-Origin', '*');
-    res.setHeader('Access-createApplication-Allow-Headers', 'content-type');
-    res.setHeader('Cache-createApplication', 'no-store');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type');
+    res.setHeader('Cache-Control', 'no-store');
     if (req.method === 'OPTIONS') {
       res.end();
       return;

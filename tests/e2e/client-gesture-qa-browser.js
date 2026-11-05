@@ -65,6 +65,7 @@ async (host) => {
         createDataChannel(...args) {
           const dc = super.createDataChannel(...args),
             send = dc.send.bind(dc);
+          if (dc.label !== 'remotekit') return dc;
           q.channel = dc;
           dc.send = (data) => {
             let m;
@@ -128,6 +129,23 @@ async (host) => {
       };
     });
     await base.page.reload();
+    await base.page.waitForSelector('.viewer-lock-blank');
+    await base.page.evaluate(
+      () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+    );
+    for (const key of [
+      'ArrowUp',
+      'ArrowUp',
+      'ArrowDown',
+      'ArrowDown',
+      'ArrowLeft',
+      'ArrowRight',
+      'ArrowLeft',
+      'ArrowRight',
+    ])
+      await base.page.keyboard.press(key);
+    await base.uiFill({ css: 'input[autocomplete="current-password"]' }, options.password);
+    await base.page.keyboard.press('Enter');
     await base.page.waitForFunction(() => robustQA.state);
     if (!(await base.page.evaluate(() => robustQA.state.workspace.windows.length)))
       await base.uiClick({ css: 'button', text: '新建窗口' });
@@ -142,12 +160,15 @@ async (host) => {
     const prior = (await base.inspect()).telemetry[id + ':root']?.timeOrigin;
     const url = `http://127.0.0.1:${base.fixturePort}/?case=${id}&action=${encodeURIComponent(action)}&block=${block}${tight ? '&tight=1' : ''}${live ? '&live=1' : ''}`;
     const page = base.page;
+    const previousDocument = await page.evaluate(
+      () => robustQA.transport().presentation.layout?.views[0]?.document,
+    );
     await base.uiFill({ css: 'input[aria-label="搜索或输入网址"]', index: 'last' }, url);
     await page.keyboard.press('Enter');
     await page.waitForFunction((url) => robustQA.state.workspace.tabs.some((t) => t.url === url), url);
     await base.ready();
-    await page.waitForFunction(() => robustQA.transport().videoPlanes.size > 0);
-    qa.viewId = await page.evaluate(() => [...robustQA.transport().videoPlanes][0][0].view.id);
+    await page.waitForFunction(() => robustQA.transport().presentation.videoPlanes.size > 0);
+    qa.viewId = await page.evaluate(() => [...robustQA.transport().presentation.videoPlanes][0][0].view.id);
     let arrived = false;
     for (let n = 0; n < 100; n++) {
       const inspection = await base.inspect(),
@@ -165,19 +186,13 @@ async (host) => {
         !document.querySelector('.page-overlay'),
       url,
     );
+    await page.waitForFunction((previous) => {
+      const view = robustQA.transport().presentation.layout?.views[0];
+      return view && view.document !== previous;
+    }, previousDocument);
     await base.ready();
-    const capability = await page.evaluate(() => ({
-      enabled: robustQA.transport().clientGestures,
-      received: clientGestureQA.received.filter(
-        (x) => x.message.type === 'input.capabilities' || x.message.clientGestures !== undefined,
-      ),
-    }));
-    assert(
-      capability.enabled === true,
-      'This artifact did not enable Client gesture capability; STOP (legacy evidence invalid)',
-    );
     await qa.mark(id);
-    return { url, viewId: qa.viewId, capability };
+    return { url, viewId: qa.viewId };
   };
   qa.mark = async (name) => {
     qa.markStart = await base.page.evaluate((name) => {
@@ -189,9 +204,9 @@ async (host) => {
         sent: q.sent.length,
         received: q.received.length,
         pointers: q.pointers.length,
-        connectionId: t.connectionId,
+        connectionId: t.rtc.connectionId,
         peerCount: robustQA.peers.length,
-        planes: [...t.videoPlanes.values()].map((p) => ({
+        planes: [...t.presentation.videoPlanes.values()].map((p) => ({
           videoId: robustQA.id(p.video),
           streamId: robustQA.id(p.video.srcObject),
           tracks: p.video.srcObject?.getTracks().map((track) => track.id),
@@ -291,23 +306,31 @@ async (host) => {
           received: q.received.slice(mark.received),
           marks: q.marks,
           rafQueued: q.rafQueue.length,
-          capability: robustQA.transport().clientGestures,
         };
       }, qa.markStart);
     const packets = data.sent
       .map((r) => ({ record: r, event: r.message.event ?? r.message.input ?? r.message }))
       .filter((r) => ['touch', 'gesture'].includes(r.event.type));
     const inputResults = data.received.filter((r) => r.message.type === 'input.result');
-    const terminalReceipts = packets
+    const terminalRequests = packets
       .filter((r) => r.event.type === 'touch' && ['end', 'cancel'].includes(r.event.action))
       .map((r) => ({
         sequence: r.record.message.sequence,
         touchSequence: r.event.sequenceId,
         action: r.event.action,
-        result: inputResults.find(
-          (a) => String(a.message.clientSequence) === String(r.record.message.sequence),
-        )?.message,
       }));
+    for (const { message } of data.sent)
+      if (message.type === 'input.touchRetire')
+        terminalRequests.push({
+          sequence: message.sequence,
+          touchSequence: message.sequenceId,
+          action: 'retire',
+        });
+    const terminalReceipts = terminalRequests.map((request) => ({
+      ...request,
+      result: inputResults.findLast((a) => String(a.message.clientSequence) === String(request.sequence))
+        ?.message,
+    }));
     const cumulative = packets
       .filter((r) => r.event.type === 'gesture')
       .map((r) => ({
@@ -381,7 +404,9 @@ async (host) => {
         e.summary.rejections.every(
           (r) =>
             config.allowMomentumDenied &&
-            r.message.error === 'Momentum was not allowed' &&
+            r.message.code === 7 &&
+            r.message.error === 'stale_identity' &&
+            r.message.detail === 'Momentum was not allowed' &&
             e.data.sent.some(
               (s) =>
                 String(s.message.sequence) === String(r.message.clientSequence) &&

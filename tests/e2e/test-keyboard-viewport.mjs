@@ -123,6 +123,26 @@ try {
       waitingEntries: 0,
       recoveryEntries: 0,
     });
+    probe.session = () => {
+      for (const element of document.querySelectorAll('*')) {
+        const key = Object.keys(element).find((key) => key.startsWith('__reactFiber$'));
+        for (let fiber = key && element[key]; fiber; fiber = fiber.return)
+          for (let hook = fiber.memoizedState; hook; hook = hook.next) {
+            const session = hook.memoizedState;
+            if (session?.presentation && session?.input) return session;
+          }
+      }
+    };
+    const NativeWebSocket = window.WebSocket;
+    window.WebSocket = class extends NativeWebSocket {
+      constructor(...args) {
+        super(...args);
+        this.addEventListener('message', (event) => {
+          const message = JSON.parse(event.data);
+          if (message.type === 'state') probe.state = message.state;
+        });
+      }
+    };
     const ids = new WeakMap();
     let nextId = 0;
     probe.id = (value) => {
@@ -225,7 +245,13 @@ try {
         probe.staleSent &&
         message.clientSequence === probe.staleSent.sequence
       ) {
-        probe.staleReply = { sequence: message.clientSequence, ok: message.ok, error: message.error };
+        probe.staleReply = {
+          sequence: message.clientSequence,
+          ok: message.ok,
+          code: message.code,
+          error: message.error,
+          detail: message.detail,
+        };
       }
       if (!['focus', 'input.editable'].includes(message.type)) return;
       probe.wire.push({
@@ -359,11 +385,19 @@ try {
     await page.mouse.click(point.x, point.y);
   };
   const fill = async (css, value) => {
+    await wait((css) => {
+      const input = document.querySelector(css);
+      return input && !input.disabled && !input.readOnly;
+    }, css);
     await page.focus(css);
+    await wait((css) => document.activeElement === document.querySelector(css), css);
     await page.keyboard.press('Control+A');
     await page.keyboard.insertText(value);
   };
   await wait(() => !!document.querySelector('.viewer-lock-blank'));
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
   for (const key of [
     'ArrowUp',
     'ArrowUp',
@@ -484,6 +518,12 @@ try {
       'Fixture did not receive ' + field + '=' + value,
     );
   const screenshot = (name) => page.screenshot({ path: join(run, name + '.png') });
+  const snapshotReady = () =>
+    wait(() => {
+      const presentation = keyboardQA.session()?.presentation;
+      const view = presentation?.layout?.views[0];
+      return view && presentation.getLastPresentation(view.id);
+    });
 
   await ready();
   await observe((event) => event.type === 'ready', 'Remote fixture did not load');
@@ -535,6 +575,7 @@ try {
     (event) => event.type === 'compositionstart' && event.field === 'text',
     'Remote composition did not start',
   );
+  await snapshotReady();
   await resize(665);
   await wait(() => document.querySelector('.remote-viewport')?.classList.contains('resize-waiting'));
   await resize(625);
@@ -712,7 +753,10 @@ try {
   await wait(() => !!keyboardQA.staleReply);
   const rejection = await page.evaluate(() => keyboardQA.staleReply);
   assert(
-    rejection.ok === false && rejection.error?.includes('Editable input target changed'),
+    rejection.ok === false &&
+      rejection.code === 7 &&
+      rejection.error === 'stale_identity' &&
+      rejection.detail === 'Editable input target changed',
     'Unexpected stale-target response: ' + JSON.stringify(rejection),
   );
   await page.keyboard.insertText('C');
@@ -736,8 +780,11 @@ try {
   );
   await log('remote-blur', await sample());
 
-  await page.setViewportSize({ width: 900, height: 690 });
-  await wait(() => !!document.querySelector('.remote-resize-freeze'));
+  await snapshotReady();
+  await Promise.all([
+    wait(() => !!document.querySelector('.remote-resize-freeze')),
+    page.setViewportSize({ width: 900, height: 690 }),
+  ]);
   const resized = await sample();
   await log('ordinary-resize', resized);
   assert(
@@ -1107,6 +1154,10 @@ try {
     (event) => event.type === 'ready' && event.documentId !== previousDocument,
     'Search replacement fixture did not load',
   );
+  await wait(
+    (url) => keyboardQA.state?.workspace.tabs.some((tab) => tab.url === url && !tab.loading),
+    fixtureOrigin + '/?replace-search',
+  );
   await ready();
   const openHeight = 520;
   const searchStart = fixtureEvents.length;
@@ -1198,6 +1249,17 @@ try {
             waitingEntries: keyboardQA.waitingEntries,
             recoveryEntries: keyboardQA.recoveryEntries,
             wire: keyboardQA.wire.slice(-60),
+            session: (() => {
+              const session = keyboardQA.session();
+              return (
+                session && {
+                  layout: session.presentation.layout,
+                  input: session.input.inputTrace,
+                  results: session.input.inputResults,
+                  editing: session.editing.getSnapshot(),
+                }
+              );
+            })(),
           },
       )
       .catch(() => undefined);

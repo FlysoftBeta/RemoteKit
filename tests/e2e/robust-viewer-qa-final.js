@@ -18,17 +18,17 @@ async (host) => {
       const q = robustQA,
         t = q.transport();
       return {
-        peer: q.id(t.peer),
-        connectionId: t.connectionId,
+        peer: q.id(t.rtc.peer),
+        connectionId: t.rtc.connectionId,
         peerCount: q.peers.length,
-        backend: t.getPresentationDiagnostics().rendering.backend,
+        backend: t.presentation.getPresentationDiagnostics().rendering.backend,
         draws: q.draws,
         mstp: q.mstp,
-        freezeCopies: t.getPresentationDiagnostics().rendering.freezeCopies,
+        freezeCopies: t.presentation.getPresentationDiagnostics().rendering.freezeCopies,
         freezeNodes: document.querySelectorAll('.remote-resize-freeze').length,
-        planes: [...t.videoPlanes].map(([r, p]) => ({
+        planes: [...t.presentation.videoPlanes].map(([r, p]) => ({
           viewId: r.view.id,
-          current: t.rendererCurrent(r),
+          current: t.presentation.rendererCurrent(r),
           video: q.id(p.video),
           stream: q.id(p.video.srcObject),
           tracks: p.video.srcObject?.getTracks().map((t) => t.id),
@@ -44,10 +44,10 @@ async (host) => {
     await qa.page.waitForFunction(
       () => {
         const t = robustQA.transport(),
-          current = [...t.videoPlanes].filter(([r]) => t.rendererCurrent(r));
+          current = [...t.presentation.videoPlanes].filter(([r]) => t.presentation.rendererCurrent(r));
         return (
-          t.channel?.readyState === 'open' &&
-          t.peer?.connectionState === 'connected' &&
+          t.endpoint.channel?.readyState === 'open' &&
+          t.rtc.peer?.connectionState === 'connected' &&
           current.length > 0 &&
           current.every(([, p]) => p.ready)
         );
@@ -94,7 +94,7 @@ async (host) => {
     qa.page.evaluate(() => {
       const q = robustQA,
         t = q.transport(),
-        a = t.audio,
+        a = t.observations.audio,
         c = a.context;
       if (!c) throw Error('No actual Viewer audio context');
       if (!q.finalAudio || q.finalAudio.context !== c) {

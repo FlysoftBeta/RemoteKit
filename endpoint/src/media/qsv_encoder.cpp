@@ -645,7 +645,14 @@ class Qsv final : public HardwareEncoder {
     }
     const auto next_max = maximum ? maximum : settings_.max_bitrate;
     bitrate = std::min(bitrate, next_max);
-    const auto fps = cadence_.Select(settings_.fps, observed_fps, std::chrono::steady_clock::now());
+    const auto level_budget = remotekit::H264RateLimits(settings_.level_idc);
+    // QSV reserves at least two frames in its coded-picture buffer. A lower
+    // timebase can force the driver above the negotiated level at the same rate.
+    const auto cpb_bits = uint64_t{level_budget.cpb_kb} * 8000;
+    const auto minimum_fps =
+        cpb_bits ? static_cast<uint32_t>((uint64_t{next_max} * 2 + cpb_bits - 1) / cpb_bits) : 1u;
+    const auto fps = std::max(minimum_fps, cadence_.Select(settings_.fps, observed_fps,
+                                                           std::chrono::steady_clock::now()));
     const bool cadence_changed = fps != settings_.fps;
     if (bitrate / 1000 == settings_.bitrate / 1000 && next_max == settings_.max_bitrate &&
         !cadence_changed)

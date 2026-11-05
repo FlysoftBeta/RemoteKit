@@ -108,7 +108,7 @@ try {
   assert.deepEqual(await rpc('admin.get', {}), { registrationCredentialConfigured: false });
   await assert.rejects(
     rpc('action', { type: 'window.create', url: 'about:blank' }),
-    (error) => error.code === 400 && /WebRTC/.test(error.message),
+    (error) => error.code === 'invalid_request' && /WebRTC/.test(error.message),
     'Browser actions must be rejected over WebSocket',
   );
   const clientTime = Date.now();

@@ -112,13 +112,12 @@ void DataRouter::Drain() {
       if (message.error) {
         if (!hooks_.current(event))
           return {};
-        Json reply = {
-            {"type", "error"},
-            {"ok", false},
-            {"error",
-             {{"code", ErrorCodeName(message.error->code)}, {"message", message.error->message}}}};
+        Json reply = {{"type", "error"}, {"message", message.error->message}};
         if (event.message.is_object() && event.message.value("type", Json()) == "input") {
           reply["type"] = "input.result";
+          reply.erase("message");
+          reply["ok"] = false;
+          reply["error"] = message.error->message;
           reply["clientSequence"] = event.message.value("sequence", Json());
         }
         hooks_.send(reply, event.authorization);
@@ -134,11 +133,7 @@ void DataRouter::Drain() {
       return {};
     });
     if (!result)
-      hooks_.send(
-          {{"type", "error"},
-           {"error",
-            {{"code", ErrorCodeName(result.error().code)}, {"message", result.error().message}}}},
-          event.authorization);
+      hooks_.send({{"type", "error"}, {"message", result.error().message}}, event.authorization);
   }
 }
 void DataRouter::Dispatch(const Message& message) {

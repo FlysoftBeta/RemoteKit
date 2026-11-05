@@ -298,8 +298,8 @@ async (host) => {
           const key = Object.keys(element).find((k) => k.startsWith('__reactFiber$'));
           for (let fiber = key && element[key]; fiber; fiber = fiber.return)
             for (let hook = fiber.memoizedState; hook; hook = hook.next) {
-              const current = hook.memoizedState?.current;
-              if (current && typeof current.getPresentationDiagnostics === 'function') return current;
+              const current = hook.memoizedState;
+              if (current?.presentation && current?.rtc && current?.endpoint) return current;
             }
         }
         throw Error('Production transport not mounted');
@@ -330,7 +330,7 @@ async (host) => {
         operationGeneration: q.state.operationGeneration,
         action,
       });
-      q.action = (action) => q.transport().productAction(q.operation(action));
+      q.action = (action) => q.transport().operations.action(action);
       const connect = AudioNode.prototype.connect;
       AudioNode.prototype.connect = function (...args) {
         if (args[0] instanceof AudioDestinationNode) {
@@ -382,9 +382,12 @@ async (host) => {
         try {
           const t = robustQA.transport();
           return (
-            t.channel?.readyState === 'open' &&
-            t.peer?.connectionState === 'connected' &&
-            [...t.videoPlanes.values()].every((plane) => plane.ready)
+            t.endpoint.channel?.readyState === 'open' &&
+            t.rtc.peer?.connectionState === 'connected' &&
+            !document.querySelector('.remote-viewport.resize-waiting') &&
+            [...t.presentation.videoPlanes].every(
+              ([renderer, plane]) => plane.ready && t.presentation.canInput(renderer.view.id),
+            )
           );
         } catch {
           return false;
@@ -408,15 +411,15 @@ async (host) => {
         at: performance.now(),
         state: q.state,
         peerCount: q.peers.length,
-        connectionId: t.connectionId,
+        connectionId: t.rtc.connectionId,
         peerStates: q.peers.map((peer) => peer.connectionState),
-        presentation: t.getPresentationDiagnostics(true),
-        layout: t.layout,
-        barrier: t.presentationBarrier,
+        presentation: t.presentation.getPresentationDiagnostics(true),
+        layout: t.presentation.layout,
+        barrier: t.presentation.presentationBarrier,
         draws: q.draws,
         mstp: q.mstp,
-        inputTrace: t.inputTrace,
-        planes: [...t.videoPlanes].map(([renderer, plane]) => ({
+        inputTrace: t.input.inputTrace,
+        planes: [...t.presentation.videoPlanes].map(([renderer, plane]) => ({
           viewId: renderer.view.id,
           videoId: q.id(plane.video),
           streamId: q.id(plane.video.srcObject),
@@ -480,7 +483,9 @@ async (host) => {
   qa.point = async (viewId, x, y) =>
     qa.page.evaluate(
       ({ viewId, x, y }) => {
-        const entry = [...robustQA.transport().videoPlanes].find(([renderer]) => renderer.view.id === viewId);
+        const entry = [...robustQA.transport().presentation.videoPlanes].find(
+          ([renderer]) => renderer.view.id === viewId,
+        );
         if (!entry) throw Error('Missing plane');
         const renderer = entry[0],
           box = renderer.canvas.getBoundingClientRect(),

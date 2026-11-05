@@ -210,7 +210,7 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
       };
       const bounds =
         inViewer || !vv
-          ? content
+          ? { left: content.left, top: content.top, width: content.width, height: content.height }
           : {
               ...visibleContentBounds(content, { ...vv, offsetLeft: 0, offsetTop: 0 }),
               left: Math.max(content.left, vv.offsetLeft),
@@ -293,8 +293,9 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
       this.setWaiting(true);
       return;
     }
-    if (!this.presentation.getLastPresentation(this.viewId) || performance.now() < this.preview.deadline)
-      return;
+    // Late RTP metadata can authorize this layout without identifying current
+    // pixels. Only the preview copy needs an exact compositor observation.
+    if (performance.now() < this.preview.deadline) return;
     state.ready(this.owner, `${layout.generation}:${layout.epoch}`, bounds);
     if (!state.freeze) {
       this.dispose();
