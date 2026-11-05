@@ -58,13 +58,14 @@ test('reconfigure preserves keyboard owner and composition, then uses the fresh 
   editable('3', '8', false);
   assert.equal(transport.mobileEditing.forKeyboard(transport.editingSurface('v')), undefined);
 });
-test('a different editable target or a hard empty layout revokes retained keyboard ownership', () => {
+test('early replacement keeps keyboard UI through reconfigure while a hard empty layout revokes it', () => {
   const { transport, surface, editable, receive } = setup();
   const layout = transport.layout!;
   editable('1');
   receive({ ...layout, generation: '0', epoch: '3', views: [], reconfiguring: true });
   editable('2', '8', true, '32');
-  assert.equal(transport.mobileEditing.forKeyboard(transport.editingSurface('v')), undefined);
+  assert.equal(transport.mobileEditing.forKeyboard(transport.editingSurface('v'))?.editable.target, '32');
+  assert.equal(transport.mobileEditing.forView(surface), undefined);
   const next = { ...surface, focus: '8' };
   receive({ ...layout, generation: '2', epoch: '4', views: [next] });
   assert.equal(transport.mobileEditing.forView(next)?.editable.target, '32');

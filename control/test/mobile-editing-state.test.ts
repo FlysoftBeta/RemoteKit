@@ -43,10 +43,11 @@ test('Chromium type mapping and malformed feedback never enable a keyboard', () 
 test('early focus feedback is bounded until matching ACK and expires without reopening', () => {
   const state = new MobileEditingState(), next = { ...view, focus: 'next' };
   state.receive(message('0'), [view], 0);
-  state.receive(message('1', next), [view], 0);
-  assert.ok(state.forKeyboard(view));
+  state.receive(message('1', next, true, '13'), [view], 0);
+  assert.equal(state.forKeyboard(view, 0)?.editable.target, '13');
   assert.equal(state.forView(view), undefined);
-  assert.equal(state.forView(view), undefined);
+  assert.equal(state.keyboardCandidateDeadline(view), 1500);
+  assert.equal(state.forKeyboard(view, 1500), undefined);
   state.reconcile([next], 100); assert.ok(state.forView(next));
   state.receive(message('2', view), [next], 200);
   state.reconcile([view], 1700); assert.equal(state.forView(view), undefined);

@@ -40,7 +40,6 @@ export class MobileEditingState {
     if (this.revision !== undefined && (value.revision.length < this.revision.length || value.revision.length === this.revision.length && value.revision <= this.revision)) return false;
     this.revision = value.revision;
     this.candidate = undefined;
-    const retained = this.current;
     this.current = undefined;
     // Consume the watermark even for a message whose old document is gone.
     if (value.view && (reconfiguring || !views.some(view => sameEditableView(view, value.view!)))) {
@@ -49,8 +48,6 @@ export class MobileEditingState {
         // Retain only the newest candidate briefly, never apply its token.
         this.candidate = { message: value, expires: reconfiguring ? Infinity : now + 1500 };
         this.needsFresh = true;
-        if (retained?.view && sameEditingDocument(retained.view, value.view) &&
-            retained.editable.target === value.editable.target && value.editable.active) this.current = retained;
       }
       return true;
     }
@@ -68,14 +65,21 @@ export class MobileEditingState {
     const view = candidate.message.view!;
     if (now >= candidate.expires || !views.some(next => sameEditingDocument(next, view))) this.candidate = undefined;
     else if (views.some(next => sameEditableView(next, view))) { this.current = candidate.message; this.candidate = undefined; this.needsFresh = false; }
+    else if (candidate.expires === Infinity) candidate.expires = now + 1500;
   }
-  forKeyboard(view: Surface | undefined) {
-    const value = this.current;
+  keyboardCandidateDeadline(view: Surface | undefined) {
+    const candidate = this.candidate;
+    return view && candidate?.message.view && sameEditingDocument(view, candidate.message.view) &&
+      Number.isFinite(candidate.expires) ? candidate.expires : undefined;
+  }
+  forKeyboard(view: Surface | undefined, now = Date.now()) {
+    const value = this.candidate && now < this.candidate.expires ? this.candidate.message : this.current;
     return view && value?.view && sameEditingDocument(view, value.view) && value.editable.active && editableInputMode(value.editable.type) !== 'none' ? value : undefined;
   }
   forView(view: Surface | undefined) {
-    const value = this.forKeyboard(view);
-    return !this.needsFresh && view && value?.view && sameEditableView(view, value.view) ? value : undefined;
+    const value = this.current;
+    return !this.needsFresh && view && value?.view && sameEditableView(view, value.view) &&
+      value.editable.active && editableInputMode(value.editable.type) !== 'none' ? value : undefined;
   }
   clear() { this.current = undefined; this.candidate = undefined; this.needsFresh = false; }
   reset() { this.clear(); this.revision = undefined; }

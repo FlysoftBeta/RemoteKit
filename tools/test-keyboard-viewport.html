@@ -22,7 +22,10 @@
   const contacts = document.getElementById('contacts');
   const targets = [document.getElementById('tl'), ...fields, contacts, document.getElementById('scroll')];
   const documentId = String(performance.timeOrigin);
+  const replaceSearch = new URLSearchParams(location.search).has('replace-search');
+  if (replaceSearch) fields[0].type = 'search';
   let resizeCount = 0;
+  let replacements = 0;
   const geometry = () => Object.fromEntries(targets.map(target => [target.id, target.getBoundingClientRect().toJSON()]));
   function report(type, details) {
     const [text, second, third] = fields.map(field => field.value);
@@ -33,7 +36,7 @@
         geometry: geometry(), text, second, third, ...details }),
     }).catch(() => {});
   }
-  for (const field of fields) {
+  function observeField(field) {
     for (const type of ['input', 'compositionstart', 'compositionupdate', 'compositionend', 'focus', 'blur']) {
       field.addEventListener(type, event => report(type === 'input' ? field.id : type, {
         field: field.id,
@@ -42,7 +45,26 @@
       }));
     }
   }
-  addEventListener('resize', () => { resizeCount++; report('resize'); });
+  fields.forEach(observeField);
+  addEventListener('resize', () => {
+    resizeCount++;
+    report('resize');
+    const field = fields[0];
+    if (!replaceSearch || document.activeElement !== field || replacements >= 5) return;
+    // A responsive search component may unmount its focused input during layout.
+    field.blur();
+    const replacement = field.cloneNode();
+    replacement.value = field.value;
+    fields[0] = replacement;
+    targets[1] = replacement;
+    observeField(replacement);
+    field.replaceWith(replacement);
+    replacements++;
+    setTimeout(() => {
+      replacement.focus({preventScroll:true});
+      report('search-replaced', {replacements});
+    }, 130);
+  });
   document.getElementById('tl').addEventListener('click', event => report('click', {trusted:event.isTrusted}));
   for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
     contacts.addEventListener(type, event => report(type, {

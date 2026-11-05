@@ -67,3 +67,33 @@ test('dictation insertion is supported, context-dependent replacement is explici
   assert.equal(result.unsupported,'insertReplacementText'); assert.deepEqual(result.events,[]);
   assert.deepEqual(input.edit('other','insertText','old',3,'input').events,[]);
 });
+
+test('target loss quarantines the old OS composition through end and trailing input', () => {
+  const input = new EditingInput();
+  input.focus('a'); input.start('a'); input.update('a', '旧');
+  input.invalidate();
+  assert.equal(input.update(undefined, '旧文'), undefined);
+  assert.deepEqual(input.edit(undefined, 'insertText', '旧文', 1, 'before').events, []);
+  input.focus('b');
+  assert.equal(input.composing, true);
+  assert.deepEqual(input.edit('b', 'insertText', '旧文', 2, 'before').events, []);
+  assert.equal(input.end('b', '旧文', 3), undefined);
+  assert.equal(input.composing, false);
+  assert.deepEqual(input.edit('b', 'insertText', '旧文', 4, 'before').events, []);
+  assert.deepEqual(input.edit('b', 'insertText', null, 5, 'input').events, []);
+  assert.deepEqual(input.edit('b', 'insertText', '新', 6, 'before').events, [{ type: 'ime_commit', text: '新' }]);
+});
+
+test('hard blur can omit compositionend without blocking subsequent Latin input', () => {
+  const input = new EditingInput();
+  input.focus('a'); input.start('a'); input.update('a', 'old');
+  input.invalidate();
+  input.blurred(10);
+  input.focus('b');
+  assert.equal(input.composing, false);
+  assert.deepEqual(input.edit('b', 'insertText', 'x', 12, 'before').events, [{ type: 'ime_commit', text: 'x' }]);
+  assert.equal(input.end('b', 'stale', 13), undefined);
+  assert.deepEqual(input.edit('b', 'insertText', 'stale', 14, 'input').events, []);
+  assert.equal(input.start('b'), true);
+  assert.deepEqual(input.end('b', '新', 15), { type: 'ime_commit', text: '新' });
+});

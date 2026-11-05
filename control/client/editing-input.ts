@@ -9,24 +9,57 @@ export function editingKey(key: string, action: 'down' | 'up', modifiers = 0) {
 export class EditingInput {
   private owner?: string;
   private composition?: { owner: string; text: string };
+  private revokedComposition?: { text: string };
+  private awaitingBlurEnd = false;
+  private revokedCommit?: { text: string; at: number };
   private committed?: { text: string; at: number };
   private physical?: { key: string; at: number };
   private before?: { type: string; data: string | null; at: number };
-  get composing() { return this.composition !== undefined; }
+  get composing() { return this.composition !== undefined || this.revokedComposition !== undefined; }
   focus(owner: string) { if (owner !== this.owner) { this.invalidate(); this.owner = owner; } }
   matches(owner: string | undefined) { return owner !== undefined && this.owner === owner; }
-  invalidate() { this.owner = undefined; this.composition = undefined; this.committed = undefined; this.physical = undefined; this.before = undefined; }
+  invalidate() {
+    if (this.composition) this.revokedComposition = { text: this.composition.text };
+    if (this.committed) this.revokedCommit = this.committed;
+    this.owner = undefined;
+    this.composition = undefined;
+    this.committed = undefined;
+    this.physical = undefined;
+    this.before = undefined;
+  }
+  blurred(at: number) {
+    if (this.revokedComposition) {
+      this.awaitingBlurEnd = true;
+      this.revokedCommit = { text: this.revokedComposition.text, at };
+      this.revokedComposition = undefined;
+    }
+  }
   start(owner: string | undefined) {
-    if (owner === undefined || !this.matches(owner)) return false;
+    // A new DOM compositionstart is an explicit boundary, including after a
+    // platform blur that dropped compositionend.
+    this.revokedCommit = undefined;
+    this.awaitingBlurEnd = false;
+    if (owner === undefined || !this.matches(owner)) {
+      this.revokedComposition = { text: '' };
+      return false;
+    }
+    this.revokedComposition = undefined;
     this.composition = { owner, text: '' };
     return true;
   }
   update(owner: string | undefined, text: string) {
+    if (this.revokedComposition) this.revokedComposition.text = text;
     if (!this.composition || this.composition.owner !== owner) return;
     this.composition.text = text;
     return { type: 'ime_set', text, selection_start: text.length, selection_end: text.length };
   }
   end(owner: string | undefined, text: string, at: number) {
+    if (this.revokedComposition || this.awaitingBlurEnd) {
+      this.revokedComposition = undefined;
+      this.awaitingBlurEnd = false;
+      this.revokedCommit = { text, at };
+      return;
+    }
     if (!this.composition || this.composition.owner !== owner) return;
     this.composition = undefined; this.committed = { text, at };
     return { type: 'ime_commit', text };
@@ -39,6 +72,9 @@ export class EditingInput {
   releasePhysicalKey(key: string) { if (this.physical?.key === key) this.physical = undefined; }
   /** beforeinput is authoritative when available; input remains the Chrome89 fallback. */
   edit(owner: string | undefined, type: string, data: string | null, at: number, phase: 'before' | 'input'): { events: Record<string, unknown>[]; unsupported?: string } {
+    // Some mobile browsers follow compositionend with plain insertText.
+    if (this.revokedCommit && at - this.revokedCommit.at < 100 &&
+        (type === 'insertText' || !type) && (data === null || data === this.revokedCommit.text)) return { events: [] };
     if (!this.matches(owner) || this.composing || type === 'insertCompositionText' || type === 'insertFromComposition' || type === 'deleteCompositionText') return { events: [] };
     if (phase === 'input' && this.before?.type === type && this.before.data === data && at - this.before.at < 1000) { this.before = undefined; return { events: [] }; }
     if (phase === 'before') this.before = { type, data, at };

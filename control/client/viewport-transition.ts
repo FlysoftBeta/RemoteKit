@@ -25,44 +25,103 @@ export function resizeSnapshotSize(width: number, height: number) {
   const scale = Math.min(1, Math.sqrt(FREEZE_MAX_PIXELS / pixels));
   return { width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)) };
 }
+export const KEYBOARD_SETTLE_MS = 140;
+const VIEWPORT_NOISE_PX = 2;
+const VISUAL_OCCLUSION_PX = 48;
+const LAYOUT_OCCLUSION_PX = 80;
+type ViewportChange = 'keyboard' | 'ordinary' | undefined;
+
+/** Classifies browser viewport geometry without touching editor focus. */
 export class KeyboardViewport {
-  private previous?: ViewportMetrics;
-  private openHeight?: number;
-  private restores = 0;
-  get open() { return this.openHeight !== undefined; }
-  get restoreCount() { return this.restores; }
-  measure(metrics: ViewportMetrics, focused: boolean, coarse: boolean) {
-    const previous = this.previous;
-    this.previous = metrics;
-    if (!previous) return false;
-    const visual = metrics.visual, oldVisual = previous.visual;
-    if (Math.abs(previous.layoutWidth - metrics.layoutWidth) >= 1 ||
-        Math.abs((oldVisual?.width ?? previous.layoutWidth) - (visual?.width ?? metrics.layoutWidth)) >= 1 ||
-        metrics.scale <= .98 || metrics.scale >= 1.02) {
-      this.openHeight = undefined;
-      return false;
+  private width?: number;
+  private height?: number;
+  private baseline?: number;
+  private restoreAt?: number;
+  private observedOpen = false;
+  dismissals = 0;
+
+  get open() { return this.observedOpen; }
+  get deadline() { return this.restoreAt; }
+
+  measure(metrics: ViewportMetrics, focused: boolean, coarse: boolean, now: number): ViewportChange {
+    const { visual, layoutWidth, layoutHeight, scale } = metrics;
+    const height = Math.min(visual?.height ?? layoutHeight, layoutHeight);
+    const width = Math.min(visual?.width ?? layoutWidth, layoutWidth);
+    const previous = this.height;
+    if (Math.abs(scale - 1) >= .02 || this.width !== undefined && Math.abs(this.width - width) > VIEWPORT_NOISE_PX) {
+      this.clear();
+      return 'ordinary';
     }
-    const visualHeight = visual?.height ?? metrics.layoutHeight;
-    const previousVisualHeight = oldVisual?.height ?? previous.layoutHeight;
-    const height = Math.min(visualHeight, metrics.layoutHeight);
-    const oldHeight = Math.min(previousVisualHeight, previous.layoutHeight);
-    if (Math.abs(visualHeight - previousVisualHeight) < 1 &&
-        Math.abs(metrics.layoutHeight - previous.layoutHeight) < 1) return false;
-    if (this.openHeight !== undefined) {
-      if (height >= this.openHeight - 1) {
-        this.openHeight = undefined;
-        ++this.restores;
-      }
-      return true;
+
+    this.width ??= width;
+    const occlusion = layoutHeight - height;
+    const meaningful = previous !== undefined && Math.abs(height - previous) > VIEWPORT_NOISE_PX;
+    if (previous === undefined || meaningful) this.height = height;
+
+    // Without a prior sample, the layout viewport still supplies the full
+    // height on browsers that resize only their visual viewport.
+    this.baseline ??= Math.max(height, layoutHeight);
+    if (this.open) {
+      if (height >= this.baseline - VIEWPORT_NOISE_PX) this.restoreAt ??= now + KEYBOARD_SETTLE_MS;
+      else this.restoreAt = undefined;
+      return meaningful ? 'keyboard' : undefined;
     }
-    const occluded = !!visual && visualHeight < metrics.layoutHeight - 24;
-    if (focused && (occluded || coarse) && oldHeight - height >= 1) {
-      this.openHeight = oldHeight;
-      return true;
+
+    const drop = this.baseline - height;
+    if (focused && (occlusion >= VISUAL_OCCLUSION_PX || coarse && drop >= LAYOUT_OCCLUSION_PX)) {
+      this.observedOpen = true;
+      return 'keyboard';
     }
-    return false;
+    // Preserve the unoccluded baseline through small steps during a possible
+    // keyboard animation. Grow it immediately for browser chrome restoration.
+    if (!focused || !coarse && occlusion <= VIEWPORT_NOISE_PX) this.baseline = height;
+    else this.baseline = Math.max(this.baseline, height);
+    return meaningful ? 'ordinary' : undefined;
   }
-  clear() { this.openHeight = this.previous = undefined; }
+
+  settle(now: number) {
+    if (this.restoreAt === undefined || now < this.restoreAt) return false;
+    this.observedOpen = false;
+    this.restoreAt = undefined;
+    ++this.dismissals;
+    return true;
+  }
+
+  clear() {
+    this.width = this.height = this.baseline = this.restoreAt = undefined;
+    this.observedOpen = false;
+  }
+}
+
+/** A viewport event may precede or follow the content observer in one resize. */
+export class ResizePreview {
+  private keyboardHintUntil = 0;
+  private changedUntil = 0;
+  keyboard = false;
+  get deadline() { return this.keyboard ? this.changedUntil : 0; }
+
+  measure(changed: boolean, change: ViewportChange, now: number) {
+    if (change === 'keyboard') {
+      this.keyboardHintUntil = now + KEYBOARD_SETTLE_MS;
+      if (this.changedUntil > now) {
+        this.keyboard = true;
+        this.changedUntil = this.keyboardHintUntil;
+      }
+    } else if (change === 'ordinary') {
+      this.keyboardHintUntil = 0;
+    }
+    if (changed) {
+      this.keyboard = this.keyboardHintUntil > now;
+      this.changedUntil = now + KEYBOARD_SETTLE_MS;
+      this.keyboardHintUntil = 0;
+    }
+    return this.keyboard;
+  }
+
+  clear() {
+    this.keyboard = false;
+    this.changedUntil = this.keyboardHintUntil = 0;
+  }
 }
 export const FREEZE_MAX_PIXELS = 4 * 1024 * 1024;
 export const FREEZE_MAX_MS = 1800;
@@ -81,6 +140,7 @@ export class ViewportTransition {
     return true;
   }
   ready(owner: string, layout: string, bounds: ViewportBounds) {
+    if (this.desired && !sameViewportSize(bounds, this.desired)) return false;
     this.confirmed = { owner, layout, bounds: { ...bounds } };
     if (this.freeze && (this.freeze.owner !== owner || (!this.desired || sameViewportBounds(bounds, this.desired)) &&
         (layout !== this.freeze.layout || sameViewportSize(this.freeze.bounds, bounds)))) this.freeze = undefined;

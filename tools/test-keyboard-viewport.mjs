@@ -129,6 +129,18 @@ try {
       document.addEventListener(type, event => {
         if (event.target.matches?.('.remote-input')) {
           probe.events.push({type, at:performance.now(), trusted:event.isTrusted});
+          const feedback = probe.keyboardFeedback;
+          if (!feedback || (type !== 'focusin' && type !== 'focusout')) return;
+          feedback.focus.push({type, at:performance.now(), mode:event.target.inputMode});
+          clearTimeout(feedback.timer);
+          feedback.timer = setTimeout(() => {
+            const editor = document.activeElement;
+            const open = editor?.matches('.remote-input') && editor.inputMode !== 'none';
+            const height = open ? feedback.openHeight : feedback.closedHeight;
+            if (viewport.height === height) return;
+            feedback.geometry.push({height, at:performance.now()});
+            probe.resize(height);
+          }, 110);
         }
       }, true);
     }
@@ -155,6 +167,19 @@ try {
       probe.wire.push({type:message.type, direction, at:performance.now(), focus:message.focus,
         epoch:message.layoutEpoch, request:message.focusRequestId, editable:message.editable?.type,
         target:message.editable?.target, focused:message.focused, revision:message.revision});
+      const feedback = probe.keyboardFeedback;
+      if (!feedback || direction !== 'in' || message.type !== 'input.editable') return;
+      feedback.latestEditable = message;
+      if (feedback.geometry.length === 1 && !feedback.graceInput && message.editable?.type === 0) {
+        setTimeout(() => {
+          const editor = document.activeElement;
+          if (feedback.graceInput || feedback.latestEditable !== message || !editor?.matches('.remote-input')) return;
+          feedback.graceInput = {at:performance.now(), revision:message.revision};
+          editor.dispatchEvent(new InputEvent('beforeinput', {
+            bubbles:true, cancelable:true, inputType:'insertText', data:'grace probe',
+          }));
+        }, 0);
+      }
     };
     const nativeSend = RTCDataChannel.prototype.send;
     RTCDataChannel.prototype.send = function(raw) {
@@ -640,6 +665,57 @@ try {
     !await page.evaluate(() => document.body.textContent.includes('触控结束尚未确认')),
     'Touch handling introduced a reconnect prompt, lost the original peer, or scrolled the Viewer');
   await log('touch-status-recovery', {recoveryWire, afterTouch});
+
+  // Follow actual local editor focus with synthetic keyboard occlusion. A
+  // remote search field that remounts on resize must not drive a feedback loop.
+  const previousDocument = fixtureEvents.findLast(event => event.type === 'ready').documentId;
+  await fill('.address-form input', fixtureOrigin + '/?replace-search');
+  await page.keyboard.press('Enter');
+  const searchPage = await observe(event => event.type === 'ready' && event.documentId !== previousDocument,
+    'Search replacement fixture did not load');
+  await ready();
+  const openHeight = 520;
+  const searchStart = fixtureEvents.length;
+  await page.evaluate(openHeight => {
+    keyboardQA.keyboardFeedback = {openHeight, closedHeight:visualViewport.height, wireStart:keyboardQA.wire.length,
+      focus:[], geometry:[]};
+  }, openHeight);
+  await tap('text');
+  await observe(event => event.type === 'search-replaced' && event.documentId === searchPage.documentId,
+    'Keyboard occlusion did not replace the focused search input');
+  await ready();
+  await pause(1300);
+  const afterSearch = await sample();
+  const readSearchFeedback = () => page.evaluate(() => {
+    const {focus, geometry, wireStart, closedHeight, graceInput} = keyboardQA.keyboardFeedback;
+    return {focus, geometry, closedHeight, graceInput, wire:keyboardQA.wire.slice(wireStart),
+      gracePackets:keyboardQA.editPackets.filter(packet => packet.event.text === 'grace probe')};
+  });
+  const searchFeedback = await readSearchFeedback();
+  const searchEvents = fixtureEvents.slice(searchStart).filter(event => event.documentId === searchPage.documentId);
+  const replacements = searchEvents.filter(event => event.type === 'search-replaced');
+  const searchEditors = searchFeedback.wire.filter(event => event.type === 'input.editable' && event.editable > 0);
+  const searchResizes = searchEvents.filter(event => event.type === 'resize');
+  await log('search-resize-feedback', {feedback:searchFeedback, replacements, searchResizes, afterSearch});
+  assert(replacements.length === 1 && searchResizes.length === 1 && searchFeedback.geometry.length === 1 &&
+    searchFeedback.geometry[0].height === openHeight && searchFeedback.focus.length === 1 &&
+    searchFeedback.focus[0].type === 'focusin' && afterSearch.focus && afterSearch.inputMode === 'search' &&
+    searchEditors.length > 1 && searchEditors[0].target !== searchEditors.at(-1).target &&
+    !searchFeedback.gracePackets.length && identity(before, afterSearch),
+    'Search replacement caused focus or viewport oscillation, delivered text during blur, or lost the new editor');
+  await page.keyboard.insertText('replacement editor');
+  await text('text', 'replacement editor');
+  await screenshot('search-replacement-stable');
+  await tap('tl');
+  await wait(() => !document.activeElement?.classList.contains('remote-input') && !document.querySelector('.remote-open-keyboard'));
+  await wait(() => keyboardQA.keyboardFeedback.geometry.length >= 2);
+  await ready();
+  const searchBlur = await readSearchFeedback();
+  assert(searchBlur.geometry.length === 2 && searchBlur.geometry[1].height === searchBlur.closedHeight &&
+    searchBlur.focus.length === 2 && searchBlur.focus[1].type === 'focusout' && identity(before, await sample()),
+    'Persistent remote blur did not close and restore the simulated keyboard once');
+  await log('search-resize-blur', searchBlur);
+  await screenshot('search-blur');
 } catch (error) {
   await log('failure', {message:error.message, stack:error.stack});
   if (page) {
