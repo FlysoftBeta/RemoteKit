@@ -1,8 +1,8 @@
+import { RemoteKitError } from '../shared/errors';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { ApiError } from './control';
 import { writeDiagnosticArchive, type ArchiveEntry } from './diagnostic-archive';
 import {
   diagnosticEnvironment,
@@ -70,7 +70,7 @@ export class DiagnosticSessions {
   ) {}
 
   start(viewer: DiagnosticViewer, environment: unknown) {
-    if (this.closing) throw new ApiError(503, '服务正在关闭');
+    if (this.closing) throw new RemoteKitError('unavailable', '服务正在关闭');
     const previous = this.active.get(viewer.tenant);
     if (previous) {
       if (!previous.viewer.allowed()) void this.finish(previous, 'authorization-changed');
@@ -85,9 +85,10 @@ export class DiagnosticSessions {
           startedAt: previous.startedAt,
           maxDurationMs,
         };
-      } else throw new ApiError(409, '当前会话已有诊断正在采集');
+      } else throw new RemoteKitError('conflict', '当前会话已有诊断正在采集');
     }
-    if (this.sessions.size >= maxActive) throw new ApiError(429, '诊断采集繁忙，请稍后重试');
+    if (this.sessions.size >= maxActive)
+      throw new RemoteKitError('limit_exceeded', '诊断采集繁忙，请稍后重试');
     const status = { id: randomUUID(), status: 'collecting' } as const;
     const session: Session = {
       viewer,
@@ -115,21 +116,22 @@ export class DiagnosticSessions {
   }
 
   async request(viewer: DiagnosticViewer, method: string, params: unknown) {
-    if (!viewer.allowed()) throw new ApiError(423, 'Viewer 已锁定');
+    if (!viewer.allowed()) throw new RemoteKitError('locked', 'Viewer 已锁定');
     if (params === null || typeof params !== 'object' || Array.isArray(params))
-      throw new ApiError(400, '需要诊断参数');
+      throw new RemoteKitError('invalid_request', '需要诊断参数');
     const body = params as Record<string, unknown>;
     if (method === 'diagnostics.start') return this.start(viewer, body.environment);
     if (!['diagnostics.sample', 'diagnostics.stop', 'diagnostics.status'].includes(method))
-      throw new ApiError(404, '接口不存在');
+      throw new RemoteKitError('not_found', '接口不存在');
     const id = body.id;
     if (
       typeof id !== 'string' ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
     )
-      throw new ApiError(404, '诊断记录不存在');
+      throw new RemoteKitError('not_found', '诊断记录不存在');
     const session = this.sessions.get(id);
-    if (session && session.viewer.tenant !== viewer.tenant) throw new ApiError(404, '诊断记录不存在');
+    if (session && session.viewer.tenant !== viewer.tenant)
+      throw new RemoteKitError('not_found', '诊断记录不存在');
     if (!session) return this.terminal(viewer.tenant, id);
     if (session.status.status === 'collecting' && !session.viewer.allowed())
       void this.finish(session, 'authorization-changed');
@@ -141,7 +143,7 @@ export class DiagnosticSessions {
       session.viewer.epoch !== viewer.epoch ||
       session.viewer.identity !== viewer.identity
     )
-      throw new ApiError(409, '诊断采集属于另一个 Viewer');
+      throw new RemoteKitError('conflict', '诊断采集属于另一个 Viewer');
     if (method === 'diagnostics.stop') return this.finish(session, 'user');
     const sequence = body.sequence;
     if (
@@ -152,7 +154,7 @@ export class DiagnosticSessions {
       typeof body.data !== 'object' ||
       Array.isArray(body.data)
     )
-      throw new ApiError(400, '无效的诊断样本');
+      throw new RemoteKitError('invalid_request', '无效的诊断样本');
     if (sequence <= session.sequence) return session.status;
     // Bound floods of tiny samples as well as retained bytes.
     if (session.entries.client.length >= 6000) {
@@ -345,9 +347,10 @@ export class DiagnosticSessions {
         if (archive.isFile() && stopReasons.includes(reason as StopReason))
           return { id, status: 'complete', bytes: archive.size, reason: reason as StopReason };
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new ApiError(502, '无法读取诊断记录');
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+          throw new RemoteKitError('rejected', '无法读取诊断记录');
       }
     }
-    throw new ApiError(404, '诊断记录不存在');
+    throw new RemoteKitError('not_found', '诊断记录不存在');
   }
 }

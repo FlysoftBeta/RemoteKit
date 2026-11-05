@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { LibraryMethods, LibrarySnapshot, SelectionState } from '../shared/file-library';
 import type { DcFileClient } from './dc-file-client';
 import { operationId } from './product-operations';
-import { ControlRequestError } from './control-connection';
+import { RemoteKitError } from '../shared/errors';
 import { usePhotoJobs } from './photo-jobs';
 import { FileThumbnails } from './file-thumbnails';
 
@@ -79,8 +79,8 @@ export function useFileLibrary(
     } catch (error) {
       if (
         (method === 'library.basket' || method === 'library.replace') &&
-        error instanceof ControlRequestError &&
-        error.code === 409
+        error instanceof RemoteKitError &&
+        error.code === 'conflict'
       ) {
         await refresh().catch(() => {});
         throw new Error(
@@ -109,8 +109,8 @@ export function useFileLibrary(
           transaction.selectionId = selectionId;
         } catch (error) {
           if (
-            error instanceof ControlRequestError &&
-            [400, 404, 409, 413].includes(error.code) &&
+            error instanceof RemoteKitError &&
+            ['invalid_request', 'not_found', 'conflict', 'limit_exceeded'].includes(error.code) &&
             checkouts.current.get(requestId) === transaction
           )
             checkouts.current.delete(requestId);

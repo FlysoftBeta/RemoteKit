@@ -1,3 +1,4 @@
+import { TestClock, testGateway } from './server-fixture';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -6,8 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { Control } from '../server/control';
-import type { Endpoint } from '../server/endpoint';
-import { Store } from '../server/store';
+import type { EndpointLink } from '../server/endpoint/link';
+import { ControlDatabase } from '../server/persistence/database';
 import type { FaceStatus } from '../shared/security';
 
 const password = 'password123';
@@ -20,15 +21,16 @@ const defer = () => {
   return { promise, resolve };
 };
 
-class AuthEndpoint implements Endpoint {
+class AuthEndpoint implements EndpointLink {
+  readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   connectionId?: string;
   faceStatus: FaceStatus = 'pending';
   faceReason?: string;
   statusGate?: ReturnType<typeof defer>;
   authGate?: ReturnType<typeof defer>;
-  private signal?: Parameters<NonNullable<Endpoint['onSignal']>>[0];
-  onSignal(listener: Parameters<NonNullable<Endpoint['onSignal']>>[0]) {
+  private signal?: Parameters<NonNullable<EndpointLink['onSignal']>>[0];
+  onSignal(listener: Parameters<NonNullable<EndpointLink['onSignal']>>[0]) {
     this.signal = listener;
     return () => {
       this.signal = undefined;
@@ -80,21 +82,22 @@ class AuthEndpoint implements Endpoint {
 }
 
 async function fixture(t: TestContext, path = ':memory:') {
-  const store = new Store(path),
+  const clock = new TestClock(),
+    store = new ControlDatabase(path, clock),
     endpoint = new AuthEndpoint(),
-    control = new Control(store, endpoint);
+    control = new Control(store, testGateway(endpoint), undefined, clock);
   t.after(async () => {
     await control.close();
     store.db.close();
   });
-  const { tenantId: tenant, user } = await store.register('account-auth', password);
+  const { tenantId: tenant, user } = await store.accounts.register('account-auth', password);
   const attach = (lease: string, unlocked = false) =>
     control.attachViewer(tenant, lease, () => {}, { identity: lease, valid: () => true }, unlocked);
   await attach('lease', true);
   const request = (method: string, params: object = {}, lease = 'lease') =>
     control.viewerRequest(tenant, lease, method, params);
   const offer = () => request('rtc.offer', { type: 'offer', sdp: 'v=0', attemptId: randomUUID() });
-  return { store, endpoint, control, tenant, user, attach, request, offer };
+  return { store, endpoint, control, tenant, user, attach, request, offer, clock };
 }
 
 test('locks existing peer, rejects product actions and uploads, and resumes with fresh peer epoch', async (t) => {
@@ -107,16 +110,16 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
   assert.equal(locked.locked, true);
   assert.equal(locked.peerEpoch, 2);
   for (const method of ['admin.get', 'operation.status', 'viewport', 'action'])
-    await assert.rejects(f.request(method), { status: 423 });
+    await assert.rejects(f.request(method), { code: 'locked' });
   const op = {
     tenantId: f.tenant,
     connectionId,
     operationId: randomUUID(),
-    operationGeneration: f.store.operationGeneration(f.tenant),
+    operationGeneration: f.store.operations.operationGeneration(f.tenant),
     action: { type: 'window.create' as const },
   };
   await f.control.handleEndpointAction({ ...op, authEpoch: 1 });
-  assert.equal(f.store.workspace(f.tenant).windows.length, 0);
+  assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
   assert.equal(typeof (await f.request('clock.ping')).serverTime, 'number');
   const unlocked = await f.request('auth.verify', { method: 'password', secret: password });
   assert.equal(unlocked.locked, false);
@@ -127,9 +130,9 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
     false,
   );
   await f.control.handleEndpointAction({ ...op, authEpoch: 1 });
-  assert.equal(f.store.workspace(f.tenant).windows.length, 0);
+  assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
   await f.control.handleEndpointAction({ ...op, authEpoch: 3 });
-  assert.equal(f.store.workspace(f.tenant).windows.length, 1);
+  assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 1);
   assert.equal(f.endpoint.calls.find((c) => c.method === 'rtc.actionResult')?.params.authEpoch, 3);
   f.control.endpointOffline();
   assert.equal((await f.request('auth.get')).locked, true);
@@ -144,7 +147,7 @@ test('late unlock acknowledgement cannot restore rights after a subsequent lock'
   await f.request('auth.lock');
   f.endpoint.authGate = defer();
   const pending = f.request('auth.verify', { method: 'password', secret: password });
-  const rejected = assert.rejects(pending, { status: 409 });
+  const rejected = assert.rejects(pending, { code: 'conflict' });
   while (!f.endpoint.calls.some((c) => c.method === 'rtc.authorize' && c.params.epoch === 3))
     await new Promise((resolve) => setTimeout(resolve, 5));
   await f.request('auth.lock');
@@ -162,28 +165,30 @@ test('settings require current password, PIN is hashed and failures are limited 
   assert.equal(initial.settings.idleSeconds, 300);
   assert.equal(initial.settings.lockOnHidden, true);
   await assert.rejects(f.request('auth.settings', { currentPassword: 'wrong', pin: '123456' }), {
-    status: 403,
+    code: 'forbidden',
   });
-  assert.equal(f.store.security(f.user.id).pin, undefined);
+  assert.equal(f.store.security.security(f.user.id).pin, undefined);
   await assert.rejects(f.request('auth.settings', { currentPassword: password, pin: '1234' }), {
-    status: 400,
+    code: 'invalid_request',
   });
   await f.request('auth.settings', {
     currentPassword: password,
     pin: '123456',
     settings: { lockOnHidden: false, idleSeconds: 60 },
   });
-  assert.notEqual(f.store.security(f.user.id).pin?.hash, '123456');
+  assert.notEqual(f.store.security.security(f.user.id).pin?.hash, '123456');
   await f.request('auth.password', { currentPassword: password, newPassword: 'changed-password' });
   await f.request('auth.lock');
   for (let i = 0; i < 6; i++)
-    await assert.rejects(f.request('auth.verify', { method: 'pin', secret: '654321' }), { status: 403 });
+    await assert.rejects(f.request('auth.verify', { method: 'pin', secret: '654321' }), {
+      code: 'forbidden',
+    });
   await f.attach('replacement');
   await assert.rejects(f.request('auth.verify', { method: 'pin', secret: '123456' }, 'replacement'), {
-    status: 429,
+    code: 'rate_limited',
   });
   await assert.rejects(f.request('auth.verify', { method: 'password', secret: password }, 'replacement'), {
-    status: 403,
+    code: 'forbidden',
   });
   const state = await f.request(
     'auth.verify',
@@ -202,24 +207,27 @@ test('face template is encrypted and late matches or enrollment results cannot c
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   await f.offer();
   await assert.rejects(f.request('auth.face.begin', { purpose: 'enroll', currentPassword: 'wrong' }), {
-    status: 403,
+    code: 'forbidden',
   });
   const first = await f.request('auth.face.begin', { purpose: 'enroll', currentPassword: password });
   assert.equal(first.face.status, 'pending');
-  const expire = () => ((f.control as any).viewers.get(f.tenant).security.challenge.expires = Date.now() - 1);
+  const expire = () => f.clock.advance(120001);
   expire();
   f.endpoint.faceStatus = 'enrolled';
   await f.control.pollFaceAuth();
   assert.equal((await f.request('auth.get')).face.status, 'expired');
-  assert.equal(f.store.security(f.user.id).face, undefined);
+  assert.equal(f.store.security.security(f.user.id).face, undefined);
   await f.request('auth.face.begin', { purpose: 'enroll', currentPassword: password });
   await f.control.pollFaceAuth();
-  const stored = f.store.security(f.user.id).face!;
+  const stored = f.store.security.security(f.user.id).face!;
   assert.ok(stored && !stored.sealed.includes(JSON.stringify(template)));
   assert.equal(readFileSync(path + '.face-key').length, 32);
-  const reopened = new Store(path);
+  const reopened = new ControlDatabase(path);
   try {
-    assert.deepEqual(reopened.faceVault.open(f.user.id, stored.sealed, stored.modelVersion), template);
+    assert.deepEqual(
+      reopened.security.faceVault.open(f.user.id, stored.sealed, stored.modelVersion),
+      template,
+    );
   } finally {
     reopened.db.close();
   }

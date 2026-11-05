@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../shared/errors';
 import type { SearchEngine } from '../shared/product';
 
 const searchUrls: Record<SearchEngine, string> = {
@@ -10,22 +11,25 @@ const searchUrls: Record<SearchEngine, string> = {
 /** User text is resolved only here, shared by address-bar and start-page actions. */
 export function resolveNavigation(value: unknown, engine: SearchEngine): string {
   const url = resolveInput(value, engine);
-  if (Buffer.byteLength(url, 'utf8') > 8192) throw new Error('网址或搜索内容编码后过长（最多 8192 字节）');
+  if (Buffer.byteLength(url, 'utf8') > 8192)
+    throw new RemoteKitError('invalid_request', '网址或搜索内容编码后过长（最多 8192 字节）');
   return url;
 }
 
 function resolveInput(value: unknown, engine: SearchEngine): string {
-  if (typeof value !== 'string' || value.length > 8192) throw new Error('无效网址或搜索内容');
+  if (typeof value !== 'string' || value.length > 8192)
+    throw new RemoteKitError('invalid_request', '无效网址或搜索内容');
   const text = value.trim();
-  if (!text) throw new Error('请输入网址或搜索内容');
+  if (!text) throw new RemoteKitError('invalid_request', '请输入网址或搜索内容');
   if (text === 'about:blank') return text;
   if (/^https?:\/\//i.test(text)) {
     try {
       const parsed = new URL(text);
-      if (!parsed.hostname || parsed.username || parsed.password || /[\s\\]/.test(text)) throw new Error();
+      if (!parsed.hostname || parsed.username || parsed.password || /[\s\\]/.test(text))
+        throw new RemoteKitError('invalid_request', '无效输入');
       return parsed.href;
     } catch {
-      throw new Error('请输入有效的 HTTP 或 HTTPS 网址');
+      throw new RemoteKitError('invalid_request', '请输入有效的 HTTP 或 HTTPS 网址');
     }
   }
   // A colon may be a bare host port, but no other explicit scheme is executable.

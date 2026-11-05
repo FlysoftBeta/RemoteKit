@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../shared/errors';
 import type { ReceiverPlayout } from './receiver-playout';
 import type { ReceiverBufferTiming, ReceiverVideoTiming } from './media-diagnostics';
 export type { ReceiverVideoTiming } from './media-diagnostics';
@@ -92,6 +93,7 @@ export async function request<T>(path: string, body?: unknown): Promise<T> {
       : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   });
   const value = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(value?.error?.message ?? value?.error ?? `请求失败 (${response.status})`);
+  if (!response.ok)
+    throw new RemoteKitError(value?.error?.code ?? 'internal', value?.error?.message ?? '请求失败');
   return value as T;
 }

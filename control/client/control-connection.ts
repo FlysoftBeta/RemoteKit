@@ -1,16 +1,10 @@
+import { RemoteKitError } from '../shared/errors';
 import { snapshotNewer } from './product-operations';
 import type { AuthState } from '../shared/security';
 import type { ProductState, SocketMessage, SocketMethods, RtcServerSignal } from '../shared/product';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'reconnecting' | 'failed' | 'revoked' | 'expired';
-export class ControlRequestError extends Error {
-  constructor(
-    message: string,
-    readonly code: number,
-  ) {
-    super(message);
-  }
-}
+
 export class ControlConnection {
   readonly lifecycle: { startedAt: number; marks: Record<string, number>; error?: string }[] = [];
   private latestState: ProductState | null = null;
@@ -93,8 +87,8 @@ export class ControlConnection {
         clearTimeout(task.timer);
         this.pending.delete(message.id);
         if (message.type === 'error') {
-          task.reject(new ControlRequestError(message.error.message, message.error.code));
-          if (message.error.code === 401) {
+          task.reject(new RemoteKitError(message.error.code, message.error.message));
+          if (message.error.code === 'unauthenticated') {
             this.status('expired');
             this.close();
           }
@@ -143,12 +137,12 @@ export class ControlConnection {
     params: SocketMethods[K]['params'],
   ): Promise<SocketMethods[K]['result']> {
     if (this.stopped || this.socket?.readyState !== WebSocket.OPEN)
-      return Promise.reject(new Error('连接尚未恢复，请稍后重试'));
+      return Promise.reject(new RemoteKitError('unavailable', '连接尚未恢复，请稍后重试'));
     const id = String(++this.sequence);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error('请求超时，请重试'));
+        reject(new RemoteKitError('outcome_unknown', '请求超时，请重试'));
       }, 20000);
       this.pending.set(id, { resolve, reject, timer });
       this.socket!.send(JSON.stringify({ id, method, params }));
@@ -172,7 +166,7 @@ export class ControlConnection {
   private rejectPending() {
     for (const task of this.pending.values()) {
       clearTimeout(task.timer);
-      task.reject(new Error('控制连接已断开'));
+      task.reject(new RemoteKitError('outcome_unknown', '控制连接已断开'));
     }
     this.pending.clear();
   }

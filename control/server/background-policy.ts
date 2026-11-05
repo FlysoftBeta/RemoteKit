@@ -1,4 +1,4 @@
-import { performance } from 'node:perf_hooks';
+import { systemClock, type Clock } from './util/clock';
 
 type BackgroundView = {
   actual?: number;
@@ -18,6 +18,7 @@ type Accounting = { eligibleMs: number; observedAt: number; freezeRequested: boo
 
 // Only Control-local monotonic durations are kept here; no timestamp crosses IPC.
 export class BackgroundPolicy {
+  constructor(private readonly clock: Clock = systemClock) {}
   private accounting = new Map<string, Accounting>();
 
   clear() {
@@ -43,7 +44,7 @@ export class BackgroundPolicy {
     protectedByProduct: boolean,
     current: BackgroundView | undefined,
     browserIncarnation: unknown,
-    now = performance.now(),
+    now = this.clock.monotonicMs(),
   ): 'freeze' | 'discard' | undefined {
     // Audio/capture (including their last observed active sample), dialogs,
     // recovery and close work reset the full safe-hidden interval. Consequently

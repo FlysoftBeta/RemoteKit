@@ -1,3 +1,5 @@
+import { RemoteKitError } from '../shared/errors';
+import { TestClock, testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
@@ -7,13 +9,14 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { WebSocket } from 'ws';
-import { Store } from '../server/store';
+import { ControlDatabase } from '../server/persistence/database';
 import { Control } from '../server/control';
 import { createHttp } from '../server/http';
-import type { Endpoint } from '../server/endpoint';
+import type { EndpointLink } from '../server/endpoint/link';
 import type { ProductAction } from '../shared/product';
 
-class ProductEndpoint implements Endpoint {
+class ProductEndpoint implements EndpointLink {
+  readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
   calls: { method: string; tenant: string; args: any }[] = [];
   views = new Map<string, Map<string, any>>();
   pending = false;
@@ -33,7 +36,7 @@ class ProductEndpoint implements Endpoint {
     let views = this.views.get(tenant);
     if (!views) this.views.set(tenant, (views = new Map()));
     if (method === 'session.sitePreferences') {
-      if (this.failSites) throw new Error('UA apply failed');
+      if (this.failSites) throw new RemoteKitError('unavailable', 'UA apply failed');
       return { accepted: true, applied: this.running };
     }
     if (method === 'session.mediaPolicy') return { accepted: true, applied: this.running };
@@ -51,9 +54,9 @@ class ProductEndpoint implements Endpoint {
         events: this.events,
       };
     if (args.requireRunning && this.stopBeforeMaintenance) this.running = false;
-    if (args.requireRunning && !this.running) throw new Error('Browser not running');
+    if (args.requireRunning && !this.running) throw new RemoteKitError('unavailable', 'Browser not running');
     if (method === 'session.events.ack') {
-      if (this.failAck) throw new Error('ack failed');
+      if (this.failAck) throw new RemoteKitError('outcome_unknown', 'ack failed');
       this.events = this.events.filter((e) => !args.eventIds.includes(e.eventId));
       return { accepted: true, remaining: this.events.length };
     }
@@ -63,7 +66,7 @@ class ProductEndpoint implements Endpoint {
         !views.has(args.viewId) &&
         !this.popups.some((p) => p.provisionalId === args.provisionalId && p.status === 'pending')
       )
-        throw new Error('popup_not_pending');
+        throw new RemoteKitError('not_found', 'popup_not_pending');
       views.set(args.viewId, {
         ...args,
         instance: '1',
@@ -75,7 +78,7 @@ class ProductEndpoint implements Endpoint {
       this.popups = this.popups.filter((p) => p.provisionalId !== args.provisionalId);
       if (this.loseAdoptReply) {
         this.loseAdoptReply = false;
-        throw new Error('response lost');
+        throw new RemoteKitError('outcome_unknown', 'response lost');
       }
       return { accepted: true, completed: true };
     }
@@ -90,7 +93,7 @@ class ProductEndpoint implements Endpoint {
       });
       if (this.loseEnsureReply) {
         this.loseEnsureReply = false;
-        throw new Error('ensure response lost');
+        throw new RemoteKitError('outcome_unknown', 'ensure response lost');
       }
     }
     if (method === 'view.navigate') Object.assign(views.get(args.viewId)!, { url: args.url });
@@ -98,7 +101,7 @@ class ProductEndpoint implements Endpoint {
     if (method === 'view.page.reply') {
       const v = views.get(args.viewId)!;
       if (String(v.instance) !== args.instance || String(v.document) !== args.document)
-        throw new Error('stale_page_request');
+        throw new RemoteKitError('conflict', 'stale_page_request');
       v.pageRequests.pending = v.pageRequests.pending.filter((p: any) => p.request !== args.requestId);
       return { accepted: true, browser: { ok: true, state: 'resolved' } };
     }
@@ -110,7 +113,7 @@ class ProductEndpoint implements Endpoint {
         args.instance !== view.instance ||
         args.document !== view.document
       )
-        throw new Error('stale_page_request_target');
+        throw new RemoteKitError('conflict', 'stale_page_request_target');
       view.fullscreen = false;
       return { ok: true };
     }
@@ -145,12 +148,13 @@ class ProductEndpoint implements Endpoint {
   }
 }
 async function fixture() {
-  const store = new Store(':memory:'),
+  const clock = new TestClock(),
+    store = new ControlDatabase(':memory:', clock),
     endpoint = new ProductEndpoint(),
-    control = new Control(store, endpoint);
-  const user = await store.register('testuser', 'password123');
-  await store.setRegistrationCredential(user.tenantId, 'test-registration');
-  return { store, endpoint, control, user };
+    control = new Control(store, testGateway(endpoint), undefined, clock);
+  const user = await store.accounts.register('testuser', 'password123');
+  await store.accounts.setRegistrationCredential(user.tenantId, 'test-registration');
+  return { store, endpoint, control, user, clock };
 }
 
 test('offline startup does not create Browsers; multi-window mutations preserve tab ownership and empty windows', async () => {
@@ -198,17 +202,17 @@ test('offline startup does not create Browsers; multi-window mutations preserve 
     assert.equal(next.state.workspace.tabs.find((t) => t.id === tabA.id)!.webviewId, tabA.webviewId);
     await control.productAction(user.tenantId, { type: 'tab.close', tabId: tabA.id }, 'lease');
     await control.productAction(user.tenantId, { type: 'tab.close', tabId: tabB.id }, 'lease');
-    assert.equal(store.workspace(user.tenantId).windows.length, 2);
-    assert.equal(store.workspace(user.tenantId).tabs.length, 0);
+    assert.equal(store.workspaces.workspace(user.tenantId).windows.length, 2);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 0);
     await control.productAction(user.tenantId, { type: 'window.close', windowId: a.id }, 'lease');
-    assert.equal(store.workspace(user.tenantId).windows.length, 1);
+    assert.equal(store.workspaces.workspace(user.tenantId).windows.length, 1);
     await control.tick();
-    const revision = store.workspace(user.tenantId).revision;
+    const revision = store.workspaces.workspace(user.tenantId).revision;
     await control.tick();
-    assert.equal(store.workspace(user.tenantId).revision, revision);
-    const invalid = store.workspace(user.tenantId);
+    assert.equal(store.workspaces.workspace(user.tenantId).revision, revision);
+    const invalid = store.workspaces.workspace(user.tenantId);
     invalid.windows[0].activeTabId = 'foreign-tab';
-    assert.throws(() => store.saveWorkspace(invalid), /归属/);
+    assert.throws(() => store.workspaces.saveWorkspace(invalid), { code: 'internal' });
   } finally {
     await control.detachViewer(user.tenantId, 'lease');
     store.db.close();
@@ -295,8 +299,11 @@ test('automatic Viewer fullscreen defaults off and saves an explicit boolean', a
   try {
     store.db
       .prepare('UPDATE user_settings SET data=? WHERE tenant=?')
-      .run(JSON.stringify({ ...store.workspace(tenantId).settings, searchEngine: 'bing' }), tenantId);
-    assert.equal(store.workspace(tenantId).settings.autoFullscreen, false);
+      .run(
+        JSON.stringify({ ...store.workspaces.workspace(tenantId).settings, searchEngine: 'bing' }),
+        tenantId,
+      );
+    assert.equal(store.workspaces.workspace(tenantId).settings.autoFullscreen, false);
     await control.attachViewer(
       tenantId,
       'lease',
@@ -314,7 +321,7 @@ test('automatic Viewer fullscreen defaults off and saves an explicit boolean', a
         type: 'settings.update',
         settings: { autoFullscreen: 'true' },
       }),
-      /全屏设置/,
+      { code: 'invalid_request' },
     );
     const attached = await control.attachViewer(
       tenantId,
@@ -359,15 +366,15 @@ test('remote page fullscreen follows the live document, with a document-bound ex
     const first = page()!;
     assert.equal(first.tabId, tab.id);
     assert.equal(first.windowId, tab.windowId);
-    assert.equal(store.workspace(tenantId).settings.autoFullscreen, false);
-    assert.equal('pageFullscreen' in store.workspace(tenantId), false);
+    assert.equal(store.workspaces.workspace(tenantId).settings.autoFullscreen, false);
+    assert.equal('pageFullscreen' in store.workspaces.workspace(tenantId), false);
     view.document = '2';
     await control.tick();
     const second = page()!;
     assert.notEqual(second.target, first.target);
     await assert.rejects(
       control.productAction(tenantId, { type: 'page.exitFullscreen', target: first.target }, 'lease'),
-      /页面已更换/,
+      { code: 'conflict' },
     );
     assert.equal(
       endpoint.calls.some((call) => call.method === 'view.page.exitFullscreen'),
@@ -409,7 +416,7 @@ test('remote page fullscreen follows the live document, with a document-bound ex
 });
 
 test('memory saver uses hidden age and canDiscard; activating a discarded page waits for actual live completion', async () => {
-  const { store, endpoint, control, user } = await fixture();
+  const { store, endpoint, control, user, clock } = await fixture();
   try {
     await control.attachViewer(
       user.tenantId,
@@ -431,9 +438,10 @@ test('memory saver uses hidden age and canDiscard; activating a discarded page w
     assert.equal(endpoint.calls.filter((c) => c.method === 'view.lifecycle').length, 0);
     view.canDiscard = true;
     await control.tick();
-    const accounting = (control as any).backgroundPolicy.accounting.get(user.tenantId + '/' + tab.webviewId);
-    accounting.eligibleMs = 121000;
-    await control.tick();
+    for (let i = 0; i < 13; i++) {
+      clock.advance(10000);
+      await control.tick();
+    }
     assert.equal(view.actual, 2);
     await control.viewerRequest(user.tenantId, 'lease', 'viewport', {
       devicePixelRatio: 1,
@@ -486,7 +494,7 @@ async function uncertainTab() {
     lifecycle_generation: '41',
     last_lifecycle: { generation: '41', action: 0, succeeded: false },
   });
-  const tabState = () => f.store.workspace(tenant).tabs[0];
+  const tabState = () => f.store.workspaces.workspace(tenant).tabs[0];
   const lifecycleCalls = () =>
     f.endpoint.calls.filter((call) => call.method === 'view.lifecycle').map((call) => call.args);
   return { ...f, tenant, tab, view, viewport, tabState, lifecycleCalls };
@@ -507,7 +515,7 @@ test('uncertain recovery uses matching unload and restore snapshot evidence afte
           last_lifecycle: { generation: '42', action: 2, succeeded: true },
         });
       else Object.assign(view, { pending: true, desired: 0, lifecycle_generation: '43', url: 'about:blank' });
-      throw new Error('lifecycle response lost');
+      throw new RemoteKitError('outcome_unknown', 'lifecycle response lost');
     };
     f.endpoint.calls = [];
     await f.control.tick();
@@ -563,14 +571,14 @@ test('unconfirmed unload survives Control restart and is retired on Browser inca
   let control = f.control;
   try {
     f.endpoint.guardedLifecycle = () => {
-      throw new Error('lifecycle response lost');
+      throw new RemoteKitError('outcome_unknown', 'lifecycle response lost');
     };
-    const workspace = f.store.workspace(f.tenant);
+    const workspace = f.store.workspaces.workspace(f.tenant);
     workspace.tabs[0].pendingUrl = 'https://unconfirmed.test/';
-    f.store.saveWorkspace(workspace);
+    f.store.workspaces.saveWorkspace(workspace);
     await control.tick();
     await control.close();
-    control = new Control(f.store, f.endpoint);
+    control = new Control(f.store, testGateway(f.endpoint));
     await control.attachViewer(
       f.tenant,
       'new-lease',
@@ -600,13 +608,13 @@ test('unsafe POST checkpoint leaves an explicit tab error and never repeats unlo
   const f = await uncertainTab();
   try {
     f.endpoint.guardedLifecycle = () => {
-      throw new Error('POST requires repost confirmation');
+      throw new RemoteKitError('rejected', 'POST requires repost confirmation');
     };
     f.endpoint.calls = [];
     await f.control.tick();
-    const revision = f.store.workspace(f.tenant).revision;
+    const revision = f.store.workspaces.workspace(f.tenant).revision;
     await f.control.tick();
-    assert.equal(f.store.workspace(f.tenant).revision, revision);
+    assert.equal(f.store.workspaces.workspace(f.tenant).revision, revision);
     assert.deepEqual(
       f.lifecycleCalls().map((c) => c.action),
       ['unload'],
@@ -626,7 +634,7 @@ test('unsafe POST checkpoint leaves an explicit tab error and never repeats unlo
 test('showStats defaults off, persists as a boolean and rejects other values', async () => {
   const { store, control, user } = await fixture();
   try {
-    assert.equal(store.workspace(user.tenantId).settings.showStats, false);
+    assert.equal(store.workspaces.workspace(user.tenantId).settings.showStats, false);
     const result = await control.productAction(user.tenantId, {
       type: 'settings.update',
       settings: { showStats: true },
@@ -677,7 +685,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
       'lease',
     );
     assert.equal(pending.application?.status, 'pending');
-    assert.equal(store.workspace(user.tenantId).sites['https://example.test'].tabletUa, true);
+    assert.equal(store.workspaces.workspace(user.tenantId).sites['https://example.test'].tabletUa, true);
     assert.equal(endpoint.calls.filter((c) => c.method === 'view.command').length, 0);
     endpoint.calls = [];
     const keyboard = await control.productAction(
@@ -703,7 +711,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
     );
     assert.notEqual(a.webviewId, b.webviewId);
     assert.equal(
-      store.workspace(user.tenantId).tabs.find((t) => t.id === b.id)!.pendingUaReloadOrigin,
+      store.workspaces.workspace(user.tenantId).tabs.find((t) => t.id === b.id)!.pendingUaReloadOrigin,
       undefined,
     );
     endpoint.calls = [];
@@ -726,10 +734,10 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
   const dir = await mkdtemp(join(tmpdir(), 'rk-site-settings-')),
     path = join(dir, 'control.db');
   const endpoint = new ProductEndpoint();
-  let store = new Store(path),
-    control = new Control(store, endpoint);
+  let store = new ControlDatabase(path),
+    control = new Control(store, testGateway(endpoint));
   try {
-    const { tenantId } = await store.register('site-settings', 'password123');
+    const { tenantId } = await store.accounts.register('site-settings', 'password123');
     const origin = 'https://example.test',
       unrelated = 'https://other.test';
     store.db
@@ -751,7 +759,7 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     const tabId = state.workspace.tabs[0].id;
     const keyboard = {
       operationId: randomUUID(),
-      operationGeneration: store.operationGeneration(tenantId),
+      operationGeneration: store.operations.operationGeneration(tenantId),
       action: {
         type: 'site.set',
         origin: 'https://EXAMPLE.test:443/path',
@@ -779,7 +787,10 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
 
     endpoint.calls = [];
     await control.productAction(tenantId, { type: 'site.set', origin, tabletUa: false, tabId }, 'lease');
-    assert.deepEqual(store.workspace(tenantId).sites[origin], { tabletUa: false, manualKeyboard: true });
+    assert.deepEqual(store.workspaces.workspace(tenantId).sites[origin], {
+      tabletUa: false,
+      manualKeyboard: true,
+    });
     const cleared = endpoint.calls.filter((c) => c.method === 'session.sitePreferences');
     assert.ok(cleared.length);
     for (const call of cleared) assert.deepEqual(call.args.sites, {});
@@ -794,7 +805,10 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
       { type: 'site.set', origin, tabletUa: true, manualKeyboard: false, tabId },
       'lease',
     );
-    assert.deepEqual(store.workspace(tenantId).sites[origin], { tabletUa: true, manualKeyboard: false });
+    assert.deepEqual(store.workspaces.workspace(tenantId).sites[origin], {
+      tabletUa: true,
+      manualKeyboard: false,
+    });
     const applied = endpoint.calls.filter((c) => c.method === 'session.sitePreferences');
     assert.ok(applied.length);
     for (const call of applied) assert.deepEqual(call.args.sites, { [origin]: { tabletUa: true } });
@@ -815,7 +829,7 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     ]) {
       await assert.rejects(
         control.productAction(tenantId, { type: 'site.set', origin, ...patch } as ProductAction, 'lease'),
-        (error: any) => error.status === 400,
+        (error: any) => error.code === 'invalid_request',
       );
     }
     await assert.rejects(
@@ -824,7 +838,7 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
         { type: 'site.set', origin: unrelated, manualKeyboard: false, tabId },
         'lease',
       ),
-      (error: any) => error.status === 400,
+      (error: any) => error.code === 'invalid_request',
     );
     await assert.rejects(
       control.productAction(
@@ -832,14 +846,14 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
         { type: 'site.set', origin: 'file:///tmp/a', manualKeyboard: true },
         'lease',
       ),
-      (error: any) => error.status === 400,
+      (error: any) => error.code === 'invalid_request',
     );
     assert.deepEqual(endpoint.calls, []);
 
     await control.detachViewer(tenantId, 'lease');
     store.db.close();
-    store = new Store(path);
-    control = new Control(store, endpoint);
+    store = new ControlDatabase(path);
+    control = new Control(store, testGateway(endpoint));
     await control.attachViewer(
       tenantId,
       'new-lease',
@@ -878,7 +892,9 @@ test('popup adoption persists identity first; background stays unfocused, new wi
       ).state.workspace,
       opener = initial.tabs[0];
     endpoint.onAdopt = (args) => {
-      const persisted = store.workspace(user.tenantId).tabs.find((t) => t.webviewId === args.viewId);
+      const persisted = store.workspaces
+        .workspace(user.tenantId)
+        .tabs.find((t) => t.webviewId === args.viewId);
       assert.equal(persisted?.popup?.provisionalId, args.provisionalId);
       assert.equal(persisted?.popup?.status, 'pending');
     };
@@ -894,7 +910,7 @@ test('popup adoption persists identity first; background stays unfocused, new wi
     ];
     endpoint.calls = [];
     await control.tick();
-    let state = store.workspace(user.tenantId),
+    let state = store.workspaces.workspace(user.tenantId),
       child = state.tabs.find((t) => t.popup?.provisionalId === 'background')!;
     assert.ok(child);
     assert.equal(child.kind, 'remote');
@@ -915,7 +931,7 @@ test('popup adoption persists identity first; background stays unfocused, new wi
       },
     ];
     await control.tick();
-    assert.equal(store.workspace(user.tenantId).tabs.length, 2);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 2);
     endpoint.popups = [
       {
         provisionalId: 'new-window',
@@ -928,13 +944,13 @@ test('popup adoption persists identity first; background stays unfocused, new wi
     ];
     endpoint.loseAdoptReply = true;
     await control.tick();
-    state = store.workspace(user.tenantId);
+    state = store.workspaces.workspace(user.tenantId);
     const newWindow = state.tabs.find((t) => t.popup?.provisionalId === 'new-window')!;
     assert.notEqual(newWindow.windowId, opener.windowId);
     assert.equal(state.windows.length, 2);
     endpoint.calls = [];
     await control.tick();
-    state = store.workspace(user.tenantId);
+    state = store.workspaces.workspace(user.tenantId);
     assert.equal(state.tabs.find((t) => t.id === newWindow.id)!.popup!.status, 'adopted');
     assert.equal(endpoint.calls.filter((c) => c.method === 'view.ensure').length, 0);
     assert.equal(state.tabs.length, 3);
@@ -949,7 +965,7 @@ test('popup adoption persists identity first; background stays unfocused, new wi
       },
     ];
     await control.tick();
-    assert.equal(store.workspace(user.tenantId).tabs.length, 3);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 3);
   } finally {
     await control.detachViewer(user.tenantId, 'lease');
     store.db.close();
@@ -979,10 +995,10 @@ test('expired pending popup is never URL-recreated; closing its product tab does
     };
     endpoint.popups = [popup];
     endpoint.onAdopt = () => {
-      throw new Error('temporary transport failure');
+      throw new RemoteKitError('outcome_unknown', 'temporary transport failure');
     };
     await control.tick();
-    const pending = store
+    const pending = store.workspaces
       .workspace(user.tenantId)
       .tabs.find((t) => t.popup?.provisionalId === popup.provisionalId)!;
     endpoint.onAdopt = undefined;
@@ -990,7 +1006,7 @@ test('expired pending popup is never URL-recreated; closing its product tab does
     endpoint.calls = [];
     await control.tick();
     assert.equal(
-      store.workspace(user.tenantId).tabs.find((t) => t.id === pending.id)!.popup!.status,
+      store.workspaces.workspace(user.tenantId).tabs.find((t) => t.id === pending.id)!.popup!.status,
       'failed',
     );
     assert.equal(
@@ -1000,7 +1016,7 @@ test('expired pending popup is never URL-recreated; closing its product tab does
     await control.productAction(user.tenantId, { type: 'tab.close', tabId: pending.id }, 'lease');
     popup.status = 'pending';
     await control.tick();
-    assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
   } finally {
     await control.detachViewer(user.tenantId, 'lease');
     store.db.close();
@@ -1026,19 +1042,19 @@ test('natural close commits removal before ack, retries failed ack and never rec
     ];
     endpoint.failAck = true;
     await control.tick();
-    assert.equal(store.workspace(user.tenantId).tabs.length, 0);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 0);
     assert.equal(endpoint.events.length, 1);
     endpoint.failAck = false;
     endpoint.calls = [];
     await control.tick();
     assert.equal(endpoint.events.length, 0);
-    assert.equal(store.workspace(user.tenantId).windows.length, 1);
+    assert.equal(store.workspaces.workspace(user.tenantId).windows.length, 1);
     assert.equal(endpoint.calls.filter((c) => c.method === 'view.ensure').length, 0);
     endpoint.events = [
       { eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId, reason: 'window.close' },
     ];
     await control.tick();
-    assert.equal(store.workspace(user.tenantId).tabs.length, 0);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 0);
     assert.equal(endpoint.events.length, 0);
   } finally {
     await control.detachViewer(user.tenantId, 'lease');
@@ -1079,13 +1095,13 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     const dialog = control.productState(user.tenantId).pageDialogs[0];
     assert.equal(dialog.kind, 'prompt');
     assert.equal(dialog.defaultPrompt, 'initial');
-    assert.ok(!JSON.stringify(store.workspace(user.tenantId)).includes('private dialog text'));
+    assert.ok(!JSON.stringify(store.workspaces.workspace(user.tenantId)).includes('private dialog text'));
     assert.ok(
       !(store.db.prepare('SELECT data FROM workspace_tabs WHERE tenant=?').all(user.tenantId) as any[]).some(
         (row) => row.data.includes('private dialog text'),
       ),
     );
-    const other = await store.register('another-user', 'password123', 'test-registration');
+    const other = await store.accounts.register('another-user', 'password123', 'test-registration');
     await assert.rejects(
       control.productAction(other.tenantId, { type: 'page.reply', dialogId: dialog.id, accept: true }),
     );
@@ -1095,7 +1111,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
       'lease',
     );
     assert.equal(control.productState(user.tenantId).pageDialogs.length, 0);
-    assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
     assert.equal(endpoint.calls.find((c) => c.method === 'view.page.reply')!.args.document, '2');
     await assert.rejects(
       control.productAction(
@@ -1103,7 +1119,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
         { type: 'page.reply', dialogId: dialog.id, accept: true },
         'lease',
       ),
-      /过期/,
+      { code: 'conflict' },
     );
     view.pageRequests.pending = [{ request: '8', kind: 'confirm', message: 'old document' }];
     await control.tick();
@@ -1111,7 +1127,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     view.document = '3';
     await assert.rejects(
       control.productAction(user.tenantId, { type: 'page.reply', dialogId: old.id, accept: true }, 'lease'),
-      /过期/,
+      { code: 'conflict' },
     );
     await control.tick();
     const previousBrowser = control.productState(user.tenantId).pageDialogs[0];
@@ -1122,9 +1138,9 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
         { type: 'page.reply', dialogId: previousBrowser.id, accept: true },
         'lease',
       ),
-      /过期/,
+      { code: 'conflict' },
     );
-    const state = store.workspace(user.tenantId);
+    const state = store.workspaces.workspace(user.tenantId);
     state.pendingClose = {
       id: tab.id,
       requestId: 'opaque-9',
@@ -1134,11 +1150,11 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
       document: String(view.document),
       awaiting: false,
     };
-    store.saveWorkspace(state);
+    store.workspaces.saveWorkspace(state);
     view.pageRequests.pending = [{ request: '9', kind: 'beforeunload', message: 'close' }];
     await control.tick();
     assert.equal(control.productState(user.tenantId).pageDialogs.length, 0);
-    assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
   } finally {
     await control.detachViewer(user.tenantId, 'lease');
     store.db.close();
@@ -1146,8 +1162,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
 });
 
 test('product media policy precedes ensure and feedback only updates diagnostic observations', async () => {
-  const { store, endpoint, control, user } = await fixture();
-  const originalNow = Date.now;
+  const { store, endpoint, control, user, clock } = await fixture();
   try {
     await control.attachViewer(
       user.tenantId,
@@ -1167,10 +1182,10 @@ test('product media policy precedes ensure and feedback only updates diagnostic 
       windows: [{ windowId: ws.windows[0].id, width: 800, height: 600, visible: true }],
     });
     endpoint.calls = [];
-    let now = originalNow();
-    Date.now = () => now;
+    let now = clock.wallMs();
     for (let sequence = 1; sequence <= 3; sequence++) {
-      now += 2000;
+      clock.advance(2000);
+      now = clock.wallMs();
       const result: any = await control.viewerRequest(user.tenantId, 'lease', 'feedback', {
         sequence,
         sourceCaptureId: String(sequence),
@@ -1188,10 +1203,9 @@ test('product media policy precedes ensure and feedback only updates diagnostic 
     assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, 1);
     assert.equal(endpoint.calls.length, 0);
     assert.equal(control.productState(user.tenantId).quality.estimatedLatencyMs, 400);
-    const other = await store.register('quality-other', 'password123', 'test-registration');
+    const other = await store.accounts.register('quality-other', 'password123', 'test-registration');
     assert.equal(control.productState(other.tenantId).quality.estimatedLatencyMs, null);
   } finally {
-    Date.now = originalNow;
     await control.detachViewer(user.tenantId, 'lease');
     store.db.close();
   }
@@ -1297,7 +1311,7 @@ test('offline observation never restarts a lost Browser or recreates missing vie
     await control.tick();
     await control.tick();
     assert.ok(endpoint.calls.every((c) => c.method === 'session.snapshot'));
-    assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
     endpoint.stopBeforeMaintenance = false;
     endpoint.views.get(user.tenantId)!.clear();
     endpoint.calls = [];
@@ -1315,7 +1329,7 @@ test('offline observation never restarts a lost Browser or recreates missing vie
     endpoint.calls = [];
     await control.tick();
     assert.ok(endpoint.calls.every((c) => c.method === 'session.snapshot'));
-    assert.equal(store.workspace(user.tenantId).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs.length, 1);
   } finally {
     store.db.close();
   }
@@ -1345,9 +1359,9 @@ function connect(url: string, cookie: string, origin = 'http://product.test') {
 }
 
 test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Viewer and hide on disconnect', async () => {
-  const store = new Store(':memory:'),
+  const store = new ControlDatabase(':memory:'),
     endpoint = new ProductEndpoint(),
-    control = new Control(store, endpoint),
+    control = new Control(store, testGateway(endpoint)),
     server = createHttp(control, { origins: ['http://product.test'], clientDir: '.' });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -1393,7 +1407,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     });
     assert.equal(
       (await post('/api/auth/register', { username: 'closed-user', password: 'password123' })).status,
-      400,
+      503,
     );
     const a = connect(socketUrl, cookieA);
     peers.push(a);
@@ -1424,10 +1438,10 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     );
     assert.equal(
       (await a.request('1', 'action', { type: 'window.create', url: 'about:blank' })).error.code,
-      400,
+      'invalid_request',
     );
     const stateA = (
-        await control.productAction(store.authenticated(cookieA.split('=')[1])!, {
+        await control.productAction(store.accounts.authenticated(cookieA.split('=')[1])!, {
           type: 'window.create',
           url: 'about:blank',
         })
@@ -1447,15 +1461,15 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
             isAdmin: true,
           })
         ).error.code,
-        403,
+        'forbidden',
       );
     const foreign = await b.request('2', 'action', { type: 'tab.activate', tabId: tab.id });
-    assert.equal(foreign.error.code, 400);
+    assert.equal(foreign.error.code, 'invalid_request');
     const scope = await b.request('3', 'action', {
       type: 'window.create',
       tenantId: stateA.workspace.tenantId,
     });
-    assert.equal(scope.error.code, 400);
+    assert.equal(scope.error.code, 'invalid_request');
     await a.request('4', 'viewport', {
       devicePixelRatio: 1,
       windows: [{ windowId: win.id, width: 900, height: 700, visible: true }],
@@ -1510,15 +1524,15 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
         await closed;
       }
     }
-    for (const tenant of store.all()) await control.serial(tenant, async () => {});
+    for (const tenant of store.workspaces.all()) await control.serial(tenant, async () => {});
     await new Promise<void>((resolve) => server.close(() => resolve()));
     store.db.close();
   }
 });
 
 test('cookie logout/login/register replacement cannot revoke another token Viewer of the same user', async () => {
-  const store = new Store(':memory:'),
-    control = new Control(store, new ProductEndpoint());
+  const store = new ControlDatabase(':memory:'),
+    control = new Control(store, testGateway(new ProductEndpoint()));
   const server = createHttp(control, { origins: ['http://product.test'], clientDir: '.' });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -1534,9 +1548,9 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
   try {
     for (const operation of ['logout', 'login', 'register']) {
       const name = 'scope-' + operation,
-        a = await store.register(name, 'password123', 'test-registration'),
-        b = await store.login(name, 'password123');
-      if (a.user.isAdmin) await store.setRegistrationCredential(a.tenantId, 'test-registration');
+        a = await store.accounts.register(name, 'password123', 'test-registration'),
+        b = await store.accounts.login(name, 'password123');
+      if (a.user.isAdmin) await store.accounts.setRegistrationCredential(a.tenantId, 'test-registration');
       const old = connect(url, `rk_session=${a.token}`);
       peers.push(old);
       await old.wait((m) => m.type === 'auth');
@@ -1556,7 +1570,7 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
         `rk_session=${a.token}`,
       );
       assert.equal(response.status, 200);
-      assert.equal(store.identity(a.token), undefined);
+      assert.equal(store.accounts.identity(a.token), undefined);
       const ping = await current.request(operation, 'clock.ping', {});
       assert.equal(ping.type, 'result');
       assert.equal(control.productState(b.tenantId).viewer.connected, true);
@@ -1583,7 +1597,7 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
         200,
       );
       await revoked;
-      assert.equal(store.identity(b.token), undefined);
+      assert.equal(store.accounts.identity(b.token), undefined);
       assert.equal(control.productState(b.tenantId).viewer.connected, false);
     }
   } finally {
@@ -1593,7 +1607,7 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
         ws.terminate();
         await closed;
       }
-    for (const tenant of store.all()) await control.serial(tenant, async () => {});
+    for (const tenant of store.workspaces.all()) await control.serial(tenant, async () => {});
     await new Promise<void>((resolve) => server.close(() => resolve()));
     store.db.close();
   }
@@ -1619,7 +1633,7 @@ test('lease authentication is checked inside queued operations and late old clos
     valid = false;
     release();
     await blocked;
-    await assert.rejects(pending, (e: any) => e.status === 401);
+    await assert.rejects(pending, (e: any) => e.code === 'unauthenticated');
     await control.attachViewer(
       user.tenantId,
       'new',
@@ -1662,7 +1676,7 @@ test('impossible viewport is rejected without replacing valid geometry; limited 
         devicePixelRatio: 1,
         windows: [{ windowId: w.id, width: 8192, height: 8192, visible: true }],
       }),
-      (error: any) => error.status === 400 && /minimum DPR/.test(error.message),
+      (error: any) => error.code === 'limit_exceeded',
     );
     assert.equal(endpoint.views.get(user.tenantId)!.get(tab.webviewId).width, 800);
     assert.equal(control.productState(user.tenantId).quality.resourceLimitation, null);
@@ -1817,9 +1831,9 @@ test('failed first navigation retains start and a retry navigates an already-cre
         { type: 'tab.navigate', tabId: tab.id, url: 'first query' },
         'lease',
       ),
-      /response lost/,
+      { code: 'outcome_unknown' },
     );
-    assert.equal(store.workspace(user.tenantId).tabs[0].kind, 'start');
+    assert.equal(store.workspaces.workspace(user.tenantId).tabs[0].kind, 'start');
     await control.tick();
     assert.equal(endpoint.views.get(user.tenantId)!.get(tab.webviewId).visible, false);
     const result = await control.productAction(

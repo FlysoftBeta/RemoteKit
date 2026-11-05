@@ -1,99 +1,24 @@
-import { mkdirSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { Store } from './store';
-import { EndpointProcess } from './endpoint';
-import { EndpointNode } from './endpoint-node';
+import { mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { runtimeConfig } from './config';
+import { open } from './persistence/database';
+import { LocalProcessLink } from './endpoint/local-process';
+import { RemoteNodeLink } from './endpoint/remote-node';
+import { EndpointGateway } from './endpoint/gateway';
 import { Control } from './control';
 import { createHttp } from './http';
-const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const dbPath = resolve(process.env.REMOTEKIT_CONTROL_DB ?? resolve(root, 'data/control.db'));
-mkdirSync(dirname(dbPath), { recursive: true });
-const store = new Store(dbPath);
-const endpointNode = process.env.REMOTEKIT_ENDPOINT_NODE_ID
-  ? new EndpointNode({
-      nodeId: process.env.REMOTEKIT_ENDPOINT_NODE_ID,
-      token: process.env.REMOTEKIT_ENDPOINT_TOKEN ?? '',
-      tlsProxy: process.env.REMOTEKIT_ENDPOINT_TLS_PROXY === '1',
-    })
-  : undefined;
-const endpoint =
-  endpointNode ??
-  new EndpointProcess(
-    process.env.REMOTEKIT_ENDPOINT ?? resolve(root, '../build/endpoint/endpoint/endpoint_service.exe'),
-    JSON.parse(process.env.REMOTEKIT_ENDPOINT_ARGS ?? '[]'),
-  );
-const control = new Control(store, endpoint);
-let closing = false;
-const background = new Set<Promise<unknown>>();
-function run(work: Promise<unknown>) {
-  background.add(work);
-  void work.then(
-    () => background.delete(work),
-    (error) => {
-      background.delete(work);
-      console.error(error);
-    },
-  );
-}
-const endpointReady = (identity?: { processChanged: boolean }) => {
-  if (!closing) run(control.endpointReady(identity));
-};
-endpoint.on('ready', endpointReady);
-const endpointOffline = () => {
-  if (!closing) control.endpointOffline();
-};
-endpoint.on('offline', endpointOffline);
-const port = Number(process.env.PORT ?? 3001);
-const host = process.env.REMOTEKIT_CONTROL_HOST ?? '127.0.0.1';
-const tlsKey = process.env.REMOTEKIT_HTTPS_KEY,
-  tlsCert = process.env.REMOTEKIT_HTTPS_CERT;
-if (!!tlsKey !== !!tlsCert)
-  throw new Error('REMOTEKIT_HTTPS_KEY and REMOTEKIT_HTTPS_CERT must be configured together');
-const tls = tlsKey && tlsCert ? { key: readFileSync(tlsKey), cert: readFileSync(tlsCert) } : undefined;
-const scheme = tls ? 'https' : 'http';
+import { startApplication } from './application';
+const config = runtimeConfig();
+mkdirSync(dirname(config.dbPath), { recursive: true });
+const database = open(config.dbPath);
+const endpointNode = config.node ? new RemoteNodeLink(config.node) : undefined;
+const link = endpointNode ?? new LocalProcessLink(config.endpoint, [...config.endpointArgs]);
+const control = new Control(database, new EndpointGateway(link));
 const server = createHttp(control, {
-  tls,
+  tls: config.tls,
   endpointNode,
-  origins: (
-    process.env.REMOTEKIT_CONTROL_ORIGINS ??
-    `${scheme}://127.0.0.1:${port},${scheme}://localhost:${port},http://127.0.0.1:5173,http://localhost:5173`
-  )
-    .split(',')
-    .map((value) => value.trim()),
-  clientDir: resolve(root, 'dist/client'),
-  diagnosticDir: resolve(process.env.REMOTEKIT_DIAGNOSTICS_DIR ?? resolve(dirname(dbPath), 'diagnostics')),
+  origins: [...config.origins],
+  clientDir: config.clientDir,
+  diagnosticDir: config.diagnosticDir,
 });
-const reconciliationTimer = setInterval(() => {
-  if (!closing) run(control.tick());
-}, 1500);
-server.listen(port, host, () => {
-  endpoint.start();
-  const address = server.address();
-  console.log(`RemoteKit Control ${scheme}://${host}:${typeof address === 'object' ? address?.port : port}`);
-});
-let closePromise: Promise<void> | undefined;
-function close(): Promise<void> {
-  if (closePromise) return closePromise;
-  closing = true;
-  clearInterval(reconciliationTimer);
-  endpoint.off('ready', endpointReady);
-  endpoint.off('offline', endpointOffline);
-  closePromise = (async () => {
-    await server.shutdown();
-    while (background.size) await Promise.allSettled([...background]);
-    await control.close();
-    await endpoint.stop();
-    store.db.close();
-  })();
-  return closePromise;
-}
-process.on('SIGINT', () => {
-  void close();
-});
-process.on('SIGTERM', () => {
-  void close();
-});
-process.once('disconnect', () => {
-  void close();
-});
+startApplication(config, database, link, control, server);

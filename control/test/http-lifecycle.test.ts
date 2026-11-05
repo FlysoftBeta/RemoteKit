@@ -20,7 +20,7 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC and de
   let detachCount = 0,
     signalsCleared = false;
   const control = Object.assign(new EventEmitter(), {
-    store: { identity: () => ({ tenantId: 'tenant' }) },
+    store: { accounts: { identity: () => ({ tenantId: 'tenant' }) } },
     attachViewer: async () => ({ workspace: { revision: 1 } }),
     productEpoch: () => undefined,
     productAllowed: () => true,

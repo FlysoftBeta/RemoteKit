@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { planAtlas, feasibleDpr } from '../server/atlas-plan';
 import { QualityState } from '../server/quality';
-import { emptyWorkspace } from '../server/store';
+import { emptyWorkspace } from '../server/persistence/workspaces';
 test('TS and C++ share exact packing/allocation fixtures', () => {
   for (const line of readFileSync(
     new URL('../../protocol/atlas-plan-fixtures.txt', import.meta.url),
@@ -47,6 +47,6 @@ test('axis constraints lower real DPR without shrinking DIP; minimum failure is 
         ],
         0.5,
       ),
-    /minimum DPR/,
+    { code: 'limit_exceeded' },
   );
 });

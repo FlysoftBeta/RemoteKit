@@ -8,7 +8,7 @@ import { FileLibraryContext, useFileLibrary } from '../client/file-library-state
 import { projectOperations } from '../client/product-operations';
 import type { RemoteTransport } from '../client/transport';
 import { WindowFrame } from '../client/window-frame';
-import { emptyWorkspace } from '../server/store';
+import { emptyWorkspace } from '../server/persistence/workspaces';
 import type { ProductState, ProductTab, ProductWindow } from '../shared/product';
 
 const windowWithTab: ProductWindow = { id: 'window-id', activeTabId: 'tab-id', weight: 1 };

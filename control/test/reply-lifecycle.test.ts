@@ -1,13 +1,16 @@
+import { RemoteKitError } from '../shared/errors';
+import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '../server/store';
+import { ControlDatabase } from '../server/persistence/database';
 import { Control } from '../server/control';
-import type { Endpoint } from '../server/endpoint';
+import type { EndpointLink } from '../server/endpoint/link';
 import { Readable } from 'node:stream';
 import { resolve } from 'node:path';
 
 /** Fault injection models the serialized Endpoint: a reply never calls Start. */
-class LifecycleEndpoint implements Endpoint {
+class LifecycleEndpoint implements EndpointLink {
+  readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
   running = true;
   browserIncarnation = 'browser-A';
   browserPid = 10;
@@ -68,7 +71,7 @@ class LifecycleEndpoint implements Endpoint {
         args.instance !== this.view.instance ||
         args.document !== this.view.document
       )
-        throw new Error('stale_page_request');
+        throw new RemoteKitError('conflict', 'stale_page_request');
       if (method === 'view.close.reply' && (this.wrongKind || this.view.close_state !== 'closing'))
         return { accepted: true, browser: { ok: false } };
       this.replies.push(args);
@@ -87,10 +90,10 @@ class LifecycleEndpoint implements Endpoint {
   }
 }
 async function fixture() {
-  const store = new Store(':memory:'),
+  const store = new ControlDatabase(':memory:'),
     endpoint = new LifecycleEndpoint(),
-    control = new Control(store, endpoint);
-  const { tenantId: tenant } = await store.register('lifecycle-user', 'password123');
+    control = new Control(store, testGateway(endpoint));
+  const { tenantId: tenant } = await store.accounts.register('lifecycle-user', 'password123');
   await control.attachViewer(
     tenant,
     'lease',
@@ -144,13 +147,13 @@ test('offline empty snapshot and replacement missing view preserve product tab a
     assert.ok(pending.state.workspace.pendingClose);
     endpoint.offlineNextSnapshot = true;
     await control.tick();
-    assert.equal(store.workspace(tenant).tabs.length, 1);
-    assert.equal(store.workspace(tenant).pendingClose, null);
-    assert.equal(store.workspace(tenant).pendingWindowCloseId, null);
+    assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(tenant).pendingClose, null);
+    assert.equal(store.workspaces.workspace(tenant).pendingWindowCloseId, null);
     endpoint.replace();
     endpoint.view = undefined;
     await control.tick();
-    assert.equal(store.workspace(tenant).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
   } finally {
     store.db.close();
   }
@@ -166,7 +169,7 @@ test('reply execution rejects Browser replacement after snapshot even when PID a
     endpoint.replaceBeforeReply = true;
     await assert.rejects(
       control.productAction(tenant, { type: 'page.reply', dialogId: dialog.id, accept: true }, 'lease'),
-      /stale/,
+      { code: 'conflict' },
     );
     assert.equal(endpoint.replies.length, 0);
     assert.equal(endpoint.starts, starts);
@@ -192,29 +195,29 @@ test('close replies bind full identity, reject stale UI tokens and require expli
     const oldToken = state.pendingClose!.requestId!;
     assert.notEqual(oldToken, '7');
     endpoint.replaceBeforeReply = true;
-    await assert.rejects(reply(oldToken, true), /stale/);
+    await assert.rejects(reply(oldToken, true), { code: 'conflict' });
     assert.equal(endpoint.replies.length, 0);
     await control.tick();
-    assert.equal(store.workspace(tenant).pendingClose, null);
+    assert.equal(store.workspaces.workspace(tenant).pendingClose, null);
     state = (await close()).state.workspace;
     const token = state.pendingClose!.requestId!;
     assert.notEqual(token, oldToken);
-    await assert.rejects(reply(oldToken, true), /失效/);
+    await assert.rejects(reply(oldToken, true), { code: 'conflict' });
     endpoint.wrongKind = true;
-    await assert.rejects(reply(token, true), /确认/);
-    assert.equal(store.workspace(tenant).pendingClose!.awaiting, false);
+    await assert.rejects(reply(token, true), { code: 'conflict' });
+    assert.equal(store.workspaces.workspace(tenant).pendingClose!.awaiting, false);
     endpoint.wrongKind = false;
     await reply(token, false);
-    assert.equal(store.workspace(tenant).pendingClose, null);
+    assert.equal(store.workspaces.workspace(tenant).pendingClose, null);
     state = (await close()).state.workspace;
     await reply(state.pendingClose!.requestId!, true);
-    assert.equal(store.workspace(tenant).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
     endpoint.view = undefined;
     await control.tick();
-    assert.equal(store.workspace(tenant).tabs.length, 1);
+    assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
     endpoint.events = [{ eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId }];
     await control.tick();
-    assert.equal(store.workspace(tenant).tabs.length, 0);
+    assert.equal(store.workspaces.workspace(tenant).tabs.length, 0);
     assert.deepEqual(endpoint.replies[0], {
       viewId: tab.webviewId,
       browserIncarnation: 'browser-B',

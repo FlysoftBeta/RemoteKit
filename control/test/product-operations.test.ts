@@ -1,8 +1,10 @@
+import { RemoteKitError } from '../shared/errors';
+import { testGateway } from './server-fixture';
 import { ControlConnection } from '../client/control-connection';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { Store } from '../server/store';
+import { ControlDatabase } from '../server/persistence/database';
 import { Control } from '../server/control';
 import { projectOperations, snapshotNewer } from '../client/product-operations';
 import type { ProductAction, ProductOperation } from '../shared/product';
@@ -29,12 +31,13 @@ class Endpoint {
         document: '1',
       });
     }
-    if (method === 'view.navigate' && this.failNavigate) throw Error('reply lost');
+    if (method === 'view.navigate' && this.failNavigate)
+      throw new RemoteKitError('outcome_unknown', 'reply lost');
     if (method === 'view.command') this.onCommand?.(args);
     if (method === 'view.configure') {
       if (args.visible === false && this.failHideOnce) {
         this.failHideOnce = false;
-        throw Error('hide reply lost');
+        throw new RemoteKitError('outcome_unknown', 'hide reply lost');
       }
       const view = this.views.find((view) => view.viewId === args.viewId);
       if (view) Object.assign(view, args);
@@ -52,10 +55,10 @@ class Endpoint {
   }
 }
 async function fixture() {
-  const store = new Store(':memory:'),
+  const store = new ControlDatabase(':memory:'),
     endpoint = new Endpoint(),
-    control = new Control(store, endpoint);
-  const { tenantId: tenant } = await store.register('operations', 'password123');
+    control = new Control(store, testGateway(endpoint));
+  const { tenantId: tenant } = await store.accounts.register('operations', 'password123');
   await control.attachViewer(
     tenant,
     'lease',
@@ -65,7 +68,7 @@ async function fixture() {
   );
   const op = (action: ProductAction): ProductOperation => ({
     operationId: randomUUID(),
-    operationGeneration: store.operationGeneration(tenant),
+    operationGeneration: store.operations.operationGeneration(tenant),
     action,
   });
   return { store, endpoint, control, tenant, op };
@@ -80,20 +83,20 @@ for (const initial of ['start', 'remote'] as const) {
         { type: 'window.create', ...(initial === 'remote' ? { url: 'https://old.test/' } : {}) },
         'lease',
       );
-      const tab = f.store.workspace(f.tenant).tabs[0];
+      const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
       await f.control.viewerRequest(f.tenant, 'lease', 'viewport', {
         devicePixelRatio: 1,
         windows: [{ windowId: tab.windowId, width: 900, height: 600, visible: true }],
       });
       const navigate = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://slow.test/' });
       await f.control.submitOperation(f.tenant, navigate, 'lease');
-      const owner = f.store.workspace(f.tenant).tabs[0].navigation,
+      const owner = f.store.workspaces.workspace(f.tenant).tabs[0].navigation,
         view = f.endpoint.views[0];
       // A new Native view has no committed URL while its first load is pending.
       view.url = initial === 'start' ? '' : 'https://old.test/';
       view.loading = true;
       await f.control.tick();
-      assert.equal(f.store.workspace(f.tenant).tabs[0].loading, true);
+      assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].loading, true);
       const stop = f.op({ type: 'tab.command', tabId: tab.id, command: 'stop' });
       f.endpoint.onCommand = (args) => {
         view.loading = false;
@@ -108,7 +111,7 @@ for (const initial of ['start', 'remote'] as const) {
         ];
       };
       assert.equal((await f.control.submitOperation(f.tenant, stop, 'lease')).status, 'committed');
-      const actual = f.store.workspace(f.tenant).tabs[0];
+      const actual = f.store.workspaces.workspace(f.tenant).tabs[0];
       assert.equal(actual.navigation?.operationId, owner?.operationId);
       assert.equal(actual.navigation?.previousKind, initial);
       assert.equal(actual.navigation?.status, 'rejected');
@@ -140,7 +143,7 @@ for (const initial of ['start', 'remote'] as const) {
       );
       await f.control.tick();
       assert.equal(f.control.operationStatus(f.tenant, stop).status, 'committed');
-      assert.equal(f.store.workspace(f.tenant).tabs[0].loading, false);
+      assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].loading, false);
       assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.command').length, 1);
     } finally {
       await f.control.close();
@@ -153,7 +156,7 @@ test('a stop receipt arriving before the cancelled navigation does not commit it
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       navigate = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://slow.test/' });
     await f.control.submitOperation(f.tenant, navigate, 'lease');
     const stop = f.op({ type: 'tab.command', tabId: tab.id, command: 'stop' }),
@@ -168,7 +171,7 @@ test('a stop receipt arriving before the cancelled navigation does not commit it
     };
     view.navigationOperations = [stopTerminal];
     await f.control.tick();
-    let actual = f.store.workspace(f.tenant).tabs[0];
+    let actual = f.store.workspaces.workspace(f.tenant).tabs[0];
     assert.equal(actual.navigation?.operationId, navigate.operationId);
     assert.equal(actual.pendingUrl, 'https://slow.test/');
     assert.equal(actual.url, '');
@@ -183,13 +186,13 @@ test('a stop receipt arriving before the cancelled navigation does not commit it
       },
     ];
     await f.control.tick();
-    actual = f.store.workspace(f.tenant).tabs[0];
+    actual = f.store.workspaces.workspace(f.tenant).tabs[0];
     assert.equal(actual.kind, 'start');
     assert.equal(actual.pendingUrl, undefined);
     // The stop result may be redelivered after the local start state is restored.
     view.navigationOperations = [stopTerminal];
     await f.control.tick();
-    assert.equal(f.store.workspace(f.tenant).tabs[0].kind, 'start');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'start');
     assert.ok(
       f.endpoint.calls.some(
         (call) => call.method === 'view.navigation.ack' && call.args.operationId === stop.operationId,
@@ -205,7 +208,7 @@ test('late old stop and cancelled navigation settle their receipts without rolli
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       old = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://slow.test/' });
     await f.control.submitOperation(f.tenant, old, 'lease');
     const stop = f.op({ type: 'tab.command', tabId: tab.id, command: 'stop' });
@@ -229,7 +232,7 @@ test('late old stop and cancelled navigation settle their receipts without rolli
       ];
     view.navigationOperations = late;
     await f.control.tick();
-    let actual = f.store.workspace(f.tenant).tabs[0];
+    let actual = f.store.workspaces.workspace(f.tenant).tabs[0];
     assert.equal(actual.navigation?.operationId, current.operationId);
     assert.equal(actual.pendingUrl, 'https://current.test/');
     assert.equal(f.control.operationStatus(f.tenant, old).status, 'rejected');
@@ -247,7 +250,7 @@ test('late old stop and cancelled navigation settle their receipts without rolli
     await f.control.tick();
     view.navigationOperations = late;
     await f.control.tick();
-    actual = f.store.workspace(f.tenant).tabs[0];
+    actual = f.store.workspaces.workspace(f.tenant).tabs[0];
     assert.equal(actual.url, view.url);
     assert.equal(actual.kind, 'remote');
     assert.equal(actual.pendingUrl, undefined);
@@ -262,7 +265,7 @@ test('a delayed stop terminal settles after the cancelled navigator has restored
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       navigate = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://slow.test/' });
     await f.control.submitOperation(f.tenant, navigate, 'lease');
     const stop = f.op({ type: 'tab.command', tabId: tab.id, command: 'stop' });
@@ -278,7 +281,7 @@ test('a delayed stop terminal settles after the cancelled navigator has restored
       },
     ];
     await f.control.tick();
-    assert.equal(f.store.workspace(f.tenant).tabs[0].kind, 'start');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'start');
     assert.equal(f.control.operationStatus(f.tenant, stop).status, 'applying');
     const ensureCount = f.endpoint.calls.filter((call) => call.method === 'view.ensure').length;
     view.navigationOperations = [
@@ -286,7 +289,7 @@ test('a delayed stop terminal settles after the cancelled navigator has restored
     ];
     await f.control.tick();
     assert.equal(f.control.operationStatus(f.tenant, stop).status, 'committed');
-    assert.equal(f.store.workspace(f.tenant).tabs[0].kind, 'start');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'start');
     assert.ok(
       f.endpoint.calls.some(
         (call) => call.method === 'view.navigation.ack' && call.args.operationId === stop.operationId,
@@ -303,18 +306,18 @@ test('lost stop reply stays unknown without replaying or replacing the pending n
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       navigate = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://slow.test/' });
     await f.control.submitOperation(f.tenant, navigate, 'lease');
-    const owner = f.store.workspace(f.tenant).tabs[0].navigation,
+    const owner = f.store.workspaces.workspace(f.tenant).tabs[0].navigation,
       stop = f.op({ type: 'tab.command', tabId: tab.id, command: 'stop' });
     f.endpoint.onCommand = () => {
-      throw Error('stop reply lost');
+      throw new RemoteKitError('outcome_unknown', 'stop reply lost');
     };
     assert.equal((await f.control.submitOperation(f.tenant, stop, 'lease')).status, 'unknown');
     await f.control.tick();
     await f.control.submitOperation(f.tenant, stop, 'lease');
-    assert.deepEqual(f.store.workspace(f.tenant).tabs[0].navigation, owner);
+    assert.deepEqual(f.store.workspaces.workspace(f.tenant).tabs[0].navigation, owner);
     assert.equal(f.control.operationStatus(f.tenant, stop).status, 'unknown');
     assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.command').length, 1);
   } finally {
@@ -328,7 +331,7 @@ for (const outcome of ['committed', 'failed'] as const) {
     const f = await fixture();
     try {
       await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-      const tab = f.store.workspace(f.tenant).tabs[0],
+      const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
         navigate = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://document.test/' });
       await f.control.submitOperation(f.tenant, navigate, 'lease');
       const view = f.endpoint.views[0];
@@ -350,7 +353,7 @@ for (const outcome of ['committed', 'failed'] as const) {
       };
       const stop = f.op({ type: 'tab.command', tabId: tab.id, command: 'stop' });
       assert.equal((await f.control.submitOperation(f.tenant, stop, 'lease')).status, 'committed');
-      const actual = f.store.workspace(f.tenant).tabs[0];
+      const actual = f.store.workspaces.workspace(f.tenant).tabs[0];
       assert.equal(actual.kind, 'remote');
       assert.equal(actual.url, view.url);
       assert.equal(actual.pendingUrl, undefined);
@@ -381,7 +384,7 @@ for (const initial of ['start', 'remote'] as const) {
         { type: 'window.create', ...(initial === 'remote' ? { url: 'https://old.test/' } : {}) },
         'lease',
       );
-      const tab = f.store.workspace(f.tenant).tabs[0],
+      const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
         url = 'http://127.0.0.1:33479/unreachable-start';
       const op = f.op({ type: 'tab.navigate', tabId: tab.id, url });
       assert.equal((await f.control.submitOperation(f.tenant, op, 'lease')).status, 'applying');
@@ -400,7 +403,7 @@ for (const initial of ['start', 'remote'] as const) {
         },
       ];
       await f.control.tick();
-      const actual = f.store.workspace(f.tenant).tabs[0];
+      const actual = f.store.workspaces.workspace(f.tenant).tabs[0];
       assert.equal(f.control.operationStatus(f.tenant, op).status, 'rejected');
       assert.equal(actual.kind, 'remote');
       assert.equal(actual.url, url);
@@ -418,7 +421,7 @@ for (const state of ['failed', 'cancelled'] as const) {
     const f = await fixture();
     try {
       await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-      const tab = f.store.workspace(f.tenant).tabs[0],
+      const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
         previousUrl = tab.url;
       const op = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://provisional.test/' });
       await f.control.submitOperation(f.tenant, op, 'lease');
@@ -427,7 +430,7 @@ for (const state of ['failed', 'cancelled'] as const) {
       view.title = 'not a committed document';
       view.navigationOperations = [{ ...op, state, documentCommitted: false }];
       await f.control.tick();
-      const actual = f.store.workspace(f.tenant).tabs[0];
+      const actual = f.store.workspaces.workspace(f.tenant).tabs[0];
       assert.equal(f.control.operationStatus(f.tenant, op).status, 'rejected');
       assert.equal(actual.kind, 'start');
       assert.equal(actual.url, previousUrl);
@@ -444,7 +447,7 @@ test('late committed-error terminal cannot replace a newer navigation or reverse
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0];
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
     const old = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://failed.test/' });
     await f.control.submitOperation(f.tenant, old, 'lease');
     const current = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://current.test/' });
@@ -460,7 +463,7 @@ test('late committed-error terminal cannot replace a newer navigation or reverse
     };
     view.navigationOperations = [stale];
     await f.control.tick();
-    let actual = f.store.workspace(f.tenant).tabs[0];
+    let actual = f.store.workspaces.workspace(f.tenant).tabs[0];
     assert.equal(actual.navigation?.operationId, current.operationId);
     assert.equal(actual.pendingUrl, 'https://current.test/');
     assert.equal(f.control.operationStatus(f.tenant, current).status, 'applying');
@@ -469,7 +472,7 @@ test('late committed-error terminal cannot replace a newer navigation or reverse
       { ...current, state: 'committed', url: view.url, documentCommitted: true },
     ];
     await f.control.tick();
-    actual = f.store.workspace(f.tenant).tabs[0];
+    actual = f.store.workspaces.workspace(f.tenant).tabs[0];
     assert.equal(actual.url, 'https://current.test/');
     assert.equal(actual.kind, 'remote');
     view.navigationOperations = [
@@ -478,7 +481,7 @@ test('late committed-error terminal cannot replace a newer navigation or reverse
     ];
     await f.control.tick();
     assert.equal(f.control.operationStatus(f.tenant, current).status, 'committed');
-    assert.equal(f.store.workspace(f.tenant).tabs[0].url, 'https://current.test/');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].url, 'https://current.test/');
   } finally {
     await f.control.close();
     f.store.db.close();
@@ -489,7 +492,7 @@ test('an unrelated Browser incarnation cannot settle a retired navigation with a
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create', url: 'https://old.test/' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       op = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://failed.test/' });
     await f.control.submitOperation(f.tenant, op, 'lease');
     f.endpoint.incarnation = 'browser-2';
@@ -499,7 +502,7 @@ test('an unrelated Browser incarnation cannot settle a retired navigation with a
       { ...op, state: 'failed', url: 'https://failed.test/', documentCommitted: true, isErrorPage: true },
     ];
     await f.control.tick();
-    const actual = f.store.workspace(f.tenant).tabs[0],
+    const actual = f.store.workspaces.workspace(f.tenant).tabs[0],
       receipt = f.control.operationStatus(f.tenant, op);
     assert.equal(receipt.status, 'unknown');
     assert.equal(receipt.resolution, 'target-retired');
@@ -521,7 +524,7 @@ test('provisional start rollback hides its existing Native plane, retries failur
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0];
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
     await f.control.viewerRequest(f.tenant, 'lease', 'viewport', {
       devicePixelRatio: 1,
       windows: [{ windowId: tab.windowId, width: 900, height: 600, visible: true }],
@@ -533,7 +536,7 @@ test('provisional start rollback hides its existing Native plane, retries failur
     view.navigationOperations = [{ ...op, state: 'failed', documentCommitted: false }];
     f.endpoint.failHideOnce = true;
     await f.control.tick();
-    assert.equal(f.store.workspace(f.tenant).tabs[0].kind, 'start');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'start');
     assert.equal(view.visible, true);
     await f.control.tick();
     assert.equal(view.visible, false);
@@ -562,7 +565,7 @@ test('provisional start rollback hides its existing Native plane, retries failur
     assert.equal(view.width, 900);
     assert.equal(view.height, 600);
     assert.equal(view.device.deviceScaleFactor, 1);
-    assert.equal(f.store.workspace(f.tenant).tabs[0].kind, 'remote');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'remote');
     assert.equal(f.endpoint.views.length, 1);
   } finally {
     await f.control.close();
@@ -574,7 +577,7 @@ test('a local start page hides an existing Native plane during resource limitati
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       before = f.endpoint.calls.filter((call) => call.method === 'view.ensure').length;
     await f.control.tick();
     assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.ensure').length, before);
@@ -591,7 +594,7 @@ test('a local start page hides an existing Native plane during resource limitati
     });
     await f.control.tick();
     assert.equal(f.endpoint.views[0].visible, false);
-    assert.equal(f.store.workspace(f.tenant).tabs[0].kind, 'start');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].kind, 'start');
     assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.ensure').length, before);
     assert.equal(
       f.endpoint.calls.some((call) => call.method === 'view.lifecycle' || call.method === 'view.close'),
@@ -612,14 +615,14 @@ test('durable same-ID receipt survives response loss and rejects payload conflic
     assert.equal(first.status, 'committed');
     const second = await f.control.submitOperation(f.tenant, op, 'lease');
     assert.deepEqual(second, first);
-    assert.equal(f.store.workspace(f.tenant).windows.length, 1);
+    assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 1);
     await assert.rejects(
       f.control.submitOperation(
         f.tenant,
         { ...op, action: { type: 'window.create', title: 'different' } },
         'lease',
       ),
-      /同一操作ID/,
+      { code: 'conflict' },
     );
     assert.equal(f.control.operationStatus(f.tenant, op).status, 'committed');
   } finally {
@@ -631,17 +634,17 @@ test('navigation accepted stays applying, stale loading=false cannot finish it, 
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create', url: 'https://old.test/' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0];
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0];
     const op = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://new.test/' });
     assert.equal((await f.control.submitOperation(f.tenant, op, 'lease')).status, 'applying');
-    assert.equal(f.store.workspace(f.tenant).tabs[0].pendingUrl, 'https://new.test/');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].pendingUrl, 'https://new.test/');
     await f.control.tick();
     assert.equal(f.control.operationStatus(f.tenant, op).status, 'applying');
     f.endpoint.views[0].navigationOperations = [{ ...op, state: 'cancelled' }];
     await f.control.tick();
     assert.equal(f.control.operationStatus(f.tenant, op).status, 'rejected');
-    assert.equal(f.store.workspace(f.tenant).tabs[0].url, 'https://old.test/');
-    assert.equal(f.store.workspace(f.tenant).tabs[0].pendingUrl, undefined);
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].url, 'https://old.test/');
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].pendingUrl, undefined);
     const call = f.endpoint.calls.find((call) => call.method === 'view.navigate')!;
     assert.match(call.args.operationSequence, /^[1-9][0-9]*$/);
     assert.ok(f.endpoint.calls.some((call) => call.method === 'view.navigation.ack'));
@@ -654,7 +657,7 @@ test('lost native navigation reply is unknown, status and tick never replay it, 
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create', url: 'https://old.test/' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       op = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://new.test/' });
     f.endpoint.failNavigate = true;
     assert.equal((await f.control.submitOperation(f.tenant, op, 'lease')).status, 'unknown');
@@ -691,9 +694,9 @@ test('lease is checked at queued acceptance; fast clock does not queue behind a 
     );
     release();
     await blocked;
-    await assert.rejects(queued, /接管/);
+    await assert.rejects(queued, { code: 'conflict' });
     await takeover;
-    assert.equal(f.store.workspace(f.tenant).tabs.length, 0);
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs.length, 0);
     let releaseClock!: () => void;
     const stalled = f.control.serial(
       f.tenant,
@@ -740,10 +743,10 @@ test('beforeunload close receipt stays applying until explicit cancellation, ret
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create', url: 'https://old.test/' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       op = f.op({ type: 'tab.close', tabId: tab.id });
     assert.equal((await f.control.submitOperation(f.tenant, op, 'lease')).status, 'applying');
-    const workspace = f.store.workspace(f.tenant);
+    const workspace = f.store.workspaces.workspace(f.tenant);
     assert.equal(workspace.tabs.length, 1);
     const cancel = f.op({
       type: 'tab.close',
@@ -753,7 +756,7 @@ test('beforeunload close receipt stays applying until explicit cancellation, ret
     });
     assert.equal((await f.control.submitOperation(f.tenant, cancel, 'lease')).status, 'committed');
     assert.equal(f.control.operationStatus(f.tenant, op).status, 'rejected');
-    assert.equal(f.store.workspace(f.tenant).tabs.length, 1);
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs.length, 1);
   } finally {
     await f.control.close();
     f.store.db.close();
@@ -763,7 +766,7 @@ test('beforeunload close receipt stays applying until explicit cancellation, ret
 test('terminal receipt capacity rotates generation explicitly while unresolved outcomes prohibit eviction', async () => {
   const f = await fixture();
   try {
-    const generation = f.store.operationGeneration(f.tenant);
+    const generation = f.store.operations.operationGeneration(f.tenant);
     f.store.db.transaction(() => {
       const insert = f.store.db.prepare('INSERT INTO operation_receipts VALUES (?,?,?,?)');
       for (let i = 0; i < 4096; i++)
@@ -776,12 +779,12 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
     })();
     const old = f.op({ type: 'window.create' });
     assert.equal((await f.control.submitOperation(f.tenant, old, 'lease')).status, 'expired');
-    assert.notEqual(f.store.operationGeneration(f.tenant), generation);
+    assert.notEqual(f.store.operations.operationGeneration(f.tenant), generation);
     assert.equal(f.control.operationStatus(f.tenant, old).status, 'expired');
-    assert.equal(f.store.workspace(f.tenant).windows.length, 0);
+    assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
     const next = f.op({ type: 'window.create' });
     assert.equal((await f.control.submitOperation(f.tenant, next, 'lease')).status, 'committed');
-    const currentGeneration = f.store.operationGeneration(f.tenant);
+    const currentGeneration = f.store.operations.operationGeneration(f.tenant);
     f.store.db.transaction(() => {
       const insert = f.store.db.prepare('INSERT INTO operation_receipts VALUES (?,?,?,?)');
       for (let i = 0; i < 4095; i++)
@@ -796,11 +799,10 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
           }),
         );
     })();
-    await assert.rejects(
-      f.control.submitOperation(f.tenant, f.op({ type: 'window.create' }), 'lease'),
-      /收据已满/,
-    );
-    assert.equal(f.store.operationGeneration(f.tenant), currentGeneration);
+    await assert.rejects(f.control.submitOperation(f.tenant, f.op({ type: 'window.create' }), 'lease'), {
+      code: 'limit_exceeded',
+    });
+    assert.equal(f.store.operations.operationGeneration(f.tenant), currentGeneration);
     f.store.db
       .prepare(
         "UPDATE operation_receipts SET receipt=json_set(receipt,'$.resolved',json('true')) WHERE tenant=? AND id='unresolved-0'",
@@ -815,7 +817,7 @@ test('terminal receipt capacity rotates generation explicitly while unresolved o
     f.store.db.close();
   }
 });
-test('SQLite completion fault rolls back the workspace mutation and leaves a queryable uncertain receipt', async () => {
+test('SQLite completion fault rolls back the workspace mutation and leaves a queryable rejection', async () => {
   const f = await fixture();
   try {
     f.store.db.exec(
@@ -823,10 +825,10 @@ test('SQLite completion fault rolls back the workspace mutation and leaves a que
     );
     const op = f.op({ type: 'window.create' });
     const result = await f.control.submitOperation(f.tenant, op, 'lease');
-    assert.equal(result.status, 'unknown');
-    assert.equal(f.store.workspace(f.tenant).windows.length, 0);
-    assert.equal(f.control.operationStatus(f.tenant, op).status, 'unknown');
-    assert.equal((await f.control.submitOperation(f.tenant, op, 'lease')).status, 'unknown');
+    assert.equal(result.status, 'rejected');
+    assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
+    assert.equal(f.control.operationStatus(f.tenant, op).status, 'rejected');
+    assert.equal((await f.control.submitOperation(f.tenant, op, 'lease')).status, 'rejected');
   } finally {
     await f.control.close();
     f.store.db.close();
@@ -900,7 +902,7 @@ test('retired Browser resolves resource eligibility while retaining unknown navi
   const f = await fixture();
   try {
     await f.control.productAction(f.tenant, { type: 'window.create', url: 'https://old.test/' }, 'lease');
-    const tab = f.store.workspace(f.tenant).tabs[0],
+    const tab = f.store.workspaces.workspace(f.tenant).tabs[0],
       op = f.op({ type: 'tab.navigate', tabId: tab.id, url: 'https://new.test/' });
     f.endpoint.failNavigate = true;
     await f.control.submitOperation(f.tenant, op, 'lease');
@@ -911,7 +913,7 @@ test('retired Browser resolves resource eligibility while retaining unknown navi
     assert.equal(receipt.status, 'unknown');
     assert.equal(receipt.resolved, true);
     assert.equal(receipt.resolution, 'target-retired');
-    assert.equal(f.store.workspace(f.tenant).tabs[0].pendingUrl, undefined);
+    assert.equal(f.store.workspaces.workspace(f.tenant).tabs[0].pendingUrl, undefined);
     assert.equal(f.endpoint.calls.filter((call) => call.method === 'view.navigate').length, 1);
     assert.equal(
       f.endpoint.calls.filter((call) => call.method === 'view.ensure').slice(-1)[0]?.args.url,

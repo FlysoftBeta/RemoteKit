@@ -1,3 +1,4 @@
+import { RemoteKitError, toRemoteKitError, httpStatus } from '../shared/errors';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { readFile } from 'node:fs/promises';
@@ -5,10 +6,9 @@ import { resolve, extname, sep } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import type { Socket } from 'node:net';
 import { WebSocketServer, WebSocket } from 'ws';
-import { ApiError, Control } from './control';
-import { AuthError } from './security-crypto';
+import { Control } from './control';
 import type { ProductState } from '../shared/product';
-import type { EndpointNode } from './endpoint-node';
+import type { RemoteNodeLink } from './endpoint/remote-node';
 import { DiagnosticSessions, diagnosticMessageLimit } from './diagnostic-sessions';
 
 export function createHttp(
@@ -18,14 +18,15 @@ export function createHttp(
     clientDir: string;
     diagnosticDir?: string;
     tls?: { key: Buffer; cert: Buffer };
-    endpointNode?: EndpointNode;
+    endpointNode?: RemoteNodeLink;
   },
 ) {
   let closing = false;
   const diagnosticSessions = options.diagnosticDir
     ? new DiagnosticSessions(options.diagnosticDir, {
         control: (tenant) => {
-          const { revision, layoutMode, settings, tabs, windows } = control.store.workspace(tenant);
+          const { revision, layoutMode, settings, tabs, windows } =
+            control.store.workspaces.workspace(tenant);
           return {
             revision,
             layoutMode,
@@ -43,8 +44,7 @@ export function createHttp(
             },
           };
         },
-        endpoint: (tenant) =>
-          control.endpoint.request('session.snapshot', tenant, { outputDiagnostics: true }),
+        endpoint: (tenant) => control.endpoint.snapshot(tenant, { outputDiagnostics: true }),
       })
     : undefined;
   const inflight = new Set<Promise<unknown>>();
@@ -61,50 +61,42 @@ export function createHttp(
     `rk_session=${token}; HttpOnly; SameSite=Strict; Path=/${options.tls ? '; Secure' : ''}${clear ? '; Max-Age=0' : '; Max-Age=2592000'}`;
   const checkOrigin = (req: IncomingMessage) => {
     if (!req.headers.origin || !options.origins.includes(req.headers.origin))
-      throw new ApiError(403, '请求来源不允许');
+      throw new RemoteKitError('forbidden', '请求来源不允许');
   };
   const handler = async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Cache-Control', 'no-store');
     try {
-      if (closing) throw new ApiError(503, '服务正在关闭');
+      if (closing) throw new RemoteKitError('unavailable', '服务正在关闭');
       const address = new URL(req.url ?? '/', 'http://localhost'),
         path = address.pathname,
         token = readToken(req);
       if (path === '/api/auth/registration' && req.method === 'GET')
-        return json(res, 200, control.store.registrationStatus());
+        return json(res, 200, control.store.accounts.registrationStatus());
       if (path === '/api/auth/me' && req.method === 'GET') {
-        const identity = control.store.identity(token);
-        if (!identity) throw new ApiError(401, '请先登录');
+        const identity = control.store.accounts.identity(token);
+        if (!identity) throw new RemoteKitError('unauthenticated', '请先登录');
         return json(res, 200, { authenticated: true, user: identity.user });
       }
       if (path.startsWith('/api/')) {
         if (!['/api/auth/register', '/api/auth/login', '/api/auth/logout'].includes(path))
-          throw new ApiError(404, 'Interface does not exist');
-        if (req.method !== 'POST') throw new ApiError(405, '不支持的方法');
+          throw new RemoteKitError('not_found', 'Interface does not exist');
+        if (req.method !== 'POST') throw new RemoteKitError('invalid_request', '不支持的方法');
         checkOrigin(req);
         if (!req.headers['content-type']?.startsWith('application/json'))
-          throw new ApiError(415, '需要 JSON 请求');
+          throw new RemoteKitError('invalid_request', '需要 JSON 请求');
         const body = await readBody(req);
         if (!body || typeof body !== 'object' || Array.isArray(body))
-          throw new ApiError(400, '需要 JSON 对象');
+          throw new RemoteKitError('invalid_request', '需要 JSON 对象');
         if (['tenantId', 'tenant', 'userId', 'user'].some((key) => key in body))
-          throw new ApiError(400, '客户端不能指定用户或租户');
+          throw new RemoteKitError('invalid_request', '客户端不能指定用户或租户');
         if (path === '/api/auth/register' || path === '/api/auth/login') {
-          let session;
-          try {
-            session = path.endsWith('register')
-              ? await control.store.register(body.username, body.password, body.serverCredential)
-              : await control.store.login(body.username, body.password);
-          } catch (error) {
-            throw new ApiError(
-              error instanceof AuthError && error.status === 429 ? 429 : path.endsWith('login') ? 401 : 400,
-              error instanceof Error ? error.message : String(error),
-            );
-          }
-          const previous = control.store.identity(token);
+          const session = path.endsWith('register')
+            ? await control.store.accounts.register(body.username, body.password, body.serverCredential)
+            : await control.store.accounts.login(body.username, body.password);
+          const previous = control.store.accounts.identity(token);
           if (previous) {
-            control.store.revoke(token);
+            control.store.accounts.revoke(token);
             await control.logout(previous.tenantId, authenticationIdentity(token!));
           }
           for (const [hash, expires] of firstViewer) if (expires <= Date.now()) firstViewer.delete(hash);
@@ -114,21 +106,22 @@ export function createHttp(
           return json(res, 200, { authenticated: true, user: session.user });
         }
         if (path === '/api/auth/logout') {
-          const previous = control.store.identity(token);
-          control.store.revoke(token);
+          const previous = control.store.accounts.identity(token);
+          control.store.accounts.revoke(token);
           if (previous) await control.logout(previous.tenantId, authenticationIdentity(token!));
           res.setHeader('Set-Cookie', cookie('', true));
           return json(res, 200, { loggedOut: true });
         }
-        throw new ApiError(404, '接口不存在');
+        throw new RemoteKitError('not_found', '接口不存在');
       }
-      if (req.method !== 'GET' && req.method !== 'HEAD') throw new ApiError(405, '不支持的方法');
+      if (req.method !== 'GET' && req.method !== 'HEAD')
+        throw new RemoteKitError('invalid_request', '不支持的方法');
       const root = resolve(options.clientDir),
         appEntry = path === '/',
         file = resolve(root, appEntry ? 'index.html' : `.${path}`);
-      if (!file.startsWith(root + sep)) throw new ApiError(403, '无效路径');
+      if (!file.startsWith(root + sep)) throw new RemoteKitError('forbidden', '无效路径');
       const content = await readFile(file).catch(() => {
-        throw new ApiError(404, '文件不存在，请先 npm run build');
+        throw new RemoteKitError('not_found', '文件不存在，请先 npm run build');
       });
       const mime: Record<string, string> = {
         '.html': 'text/html; charset=utf-8',
@@ -139,9 +132,8 @@ export function createHttp(
       res.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
       res.end(req.method === 'HEAD' ? undefined : content);
     } catch (error) {
-      json(res, error instanceof ApiError ? error.status : 502, {
-        error: { message: error instanceof Error ? error.message : String(error) },
-      });
+      const failure = toRemoteKitError(error);
+      json(res, httpStatus[failure.code], { error: { code: failure.code, message: failure.message } });
     }
   };
   const server = options.tls
@@ -181,14 +173,14 @@ export function createHttp(
   control.on('auth', auth);
   server.on('upgrade', (req, socket, head) => {
     try {
-      if (closing) throw new ApiError(503, '服务正在关闭');
+      if (closing) throw new RemoteKitError('unavailable', '服务正在关闭');
       if (options.endpointNode?.handleUpgrade(req, socket, head)) return;
       if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/api/socket')
-        throw new ApiError(404, '接口不存在');
+        throw new RemoteKitError('not_found', '接口不存在');
       checkOrigin(req);
       const token = readToken(req),
-        identity = control.store.identity(token);
-      if (!identity || !token) throw new ApiError(401, '请先登录');
+        identity = control.store.accounts.identity(token);
+      if (!identity || !token) throw new RemoteKitError('unauthenticated', '请先登录');
       sockets.handleUpgrade(req, socket, head, (ws) => {
         const lease = randomUUID(),
           peer = { tenant: identity.tenantId, lease, token, alive: true };
@@ -206,7 +198,7 @@ export function createHttp(
               send(ws, { type: 'lease', status: 'revoked', reason });
               ws.close(4001, reason);
             },
-            { identity: hash, valid: () => control.store.identity(token)?.tenantId === peer.tenant },
+            { identity: hash, valid: () => control.store.accounts.identity(token)?.tenantId === peer.tenant },
             initialUnlocked,
           ),
         );
@@ -224,7 +216,7 @@ export function createHttp(
           let request: any;
           const raw = data.toString();
           try {
-            if (binary) throw new Error();
+            if (binary) throw new RemoteKitError('invalid_request', '无效的 WebSocket 请求');
             request = JSON.parse(raw);
             if (
               !request ||
@@ -235,18 +227,22 @@ export function createHttp(
               pending.has(request.id) ||
               pending.size >= 32
             )
-              throw new Error();
+              throw new RemoteKitError('invalid_request', '无效的 WebSocket 请求');
           } catch {
             send(ws, {
               type: 'error',
               id: typeof request?.id === 'string' ? request.id : '',
-              error: { code: 400, message: '无效的 WebSocket 请求' },
+              error: { code: 'invalid_request', message: '无效的 WebSocket 请求' },
             });
             return;
           }
           const diagnosticRequest = request.method.startsWith('diagnostics.');
           if (diagnosticRequest && Buffer.byteLength(raw) > diagnosticMessageLimit) {
-            send(ws, { type: 'error', id: request.id, error: { code: 413, message: '诊断请求过大' } });
+            send(ws, {
+              type: 'error',
+              id: request.id,
+              error: { code: 'limit_exceeded', message: '诊断请求过大' },
+            });
             return;
           }
           pending.add(request.id);
@@ -254,21 +250,21 @@ export function createHttp(
           void track(
             (immediate ? Promise.resolve() : ready)
               .then(async () => {
-                const currentIdentity = control.store.identity(token);
-                if (!currentIdentity) throw new ApiError(401, '登录已过期');
+                const currentIdentity = control.store.accounts.identity(token);
+                if (!currentIdentity) throw new RemoteKitError('unauthenticated', '登录已过期');
                 const maintenance =
                   immediate || ['rtc.offer', 'rtc.ice', 'rtc.close'].includes(request.method);
                 const epoch = control.productEpoch(peer.tenant, lease);
                 let result: unknown;
                 if (diagnosticRequest) {
-                  if (!diagnosticSessions) throw new ApiError(404, '诊断采集未配置');
+                  if (!diagnosticSessions) throw new RemoteKitError('not_found', '诊断采集未配置');
                   const allowed = () =>
                     !closing &&
                     peers.has(ws) &&
                     control.productAllowed(peer.tenant, lease) &&
                     control.productEpoch(peer.tenant, lease) === epoch;
                   if (currentIdentity.tenantId !== peer.tenant || epoch === undefined || !allowed())
-                    throw new ApiError(423, 'Viewer 已锁定');
+                    throw new RemoteKitError('locked', 'Viewer 已锁定');
                   result = await diagnosticSessions.request(
                     { tenant: peer.tenant, lease, epoch, identity: hash, allowed },
                     request.method,
@@ -282,7 +278,7 @@ export function createHttp(
                   (!control.productAllowed(peer.tenant, lease) ||
                     control.productEpoch(peer.tenant, lease) !== epoch)
                 )
-                  throw new ApiError(423, 'Viewer 已锁定');
+                  throw new RemoteKitError('locked', 'Viewer 已锁定');
                 send(ws, { type: 'result', id: request.id, result });
               })
               .catch((error) =>
@@ -290,8 +286,8 @@ export function createHttp(
                   type: 'error',
                   id: request.id,
                   error: {
-                    code: error instanceof ApiError ? error.status : 502,
-                    message: error instanceof Error ? error.message : String(error),
+                    code: toRemoteKitError(error).code,
+                    message: toRemoteKitError(error).message,
                   },
                 }),
               )
@@ -300,7 +296,7 @@ export function createHttp(
         });
       });
     } catch (error) {
-      const status = error instanceof ApiError ? error.status : 500;
+      const status = httpStatus[toRemoteKitError(error).code];
       socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
     }
   });
@@ -310,7 +306,7 @@ export function createHttp(
   facePoll.unref();
   const heartbeat = setInterval(() => {
     for (const [ws, peer] of peers) {
-      if (!peer.alive || !control.store.identity(peer.token)) {
+      if (!peer.alive || !control.store.accounts.identity(peer.token)) {
         ws.terminate();
         continue;
       }
@@ -382,13 +378,13 @@ async function readBody(req: IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 1024 * 1024) throw new ApiError(413, '请求过大');
+    if (size > 1024 * 1024) throw new RemoteKitError('limit_exceeded', '请求过大');
     chunks.push(Buffer.from(chunk));
   }
   try {
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
-    throw new ApiError(400, 'JSON 格式错误');
+    throw new RemoteKitError('invalid_request', 'JSON 格式错误');
   }
 }
 

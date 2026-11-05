@@ -1,10 +1,13 @@
+import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '../server/store';
+import { ControlDatabase } from '../server/persistence/database';
 import { Control } from '../server/control';
-import type { Endpoint, RtcSignal } from '../server/endpoint';
+import type { EndpointLink } from '../server/endpoint/link';
+import type { RtcSignal } from '../server/endpoint/types';
 
-class SignalEndpoint implements Endpoint {
+class SignalEndpoint implements EndpointLink {
+  readonly state = { state: 'ready' as const, incarnation: 'test', connectionEpoch: 'test' };
   listener?: (event: RtcSignal) => void;
   calls: { method: string; tenant: string; args: any }[] = [];
   onSignal(listener: (event: RtcSignal) => void) {
@@ -34,13 +37,13 @@ async function offered(endpoint: SignalEndpoint, tenant: string) {
   throw new Error('offer not accepted');
 }
 test('pending trickle offers allow other tenants and bind early candidates to connection/attempt/lease', async () => {
-  const store = new Store(':memory:'),
+  const store = new ControlDatabase(':memory:'),
     endpoint = new SignalEndpoint(),
-    control = new Control(store, endpoint);
+    control = new Control(store, testGateway(endpoint));
   try {
-    const a = await store.register('signal-a', 'password-a');
-    await store.setRegistrationCredential(a.tenantId, 'signal-registration');
-    const b = await store.register('signal-b', 'password-b', 'signal-registration');
+    const a = await store.accounts.register('signal-a', 'password-a');
+    await store.accounts.setRegistrationCredential(a.tenantId, 'signal-registration');
+    const b = await store.accounts.register('signal-b', 'password-b', 'signal-registration');
     await control.attachViewer(
       a.tenantId,
       'lease-a',
@@ -81,7 +84,7 @@ test('pending trickle offers allow other tenants and bind early candidates to co
         attemptId: 'old',
         candidate,
       }),
-      /失效/,
+      { code: 'forbidden' },
     );
     await control.viewerRequest(a.tenantId, 'lease-a', 'rtc.ice', {
       connectionId: connection,
@@ -99,11 +102,11 @@ test('pending trickle offers allow other tenants and bind early candidates to co
   }
 });
 test('close cancels a pending answer immediately and late answers are ignored', async () => {
-  const store = new Store(':memory:'),
+  const store = new ControlDatabase(':memory:'),
     endpoint = new SignalEndpoint(),
-    control = new Control(store, endpoint);
+    control = new Control(store, testGateway(endpoint));
   try {
-    const a = await store.register('signal-c', 'password-c');
+    const a = await store.accounts.register('signal-c', 'password-c');
     await control.attachViewer(
       a.tenantId,
       'lease',
@@ -116,11 +119,11 @@ test('close cancels a pending answer immediately and late answers are ignored', 
       { type: 'offer', sdp: 'v=0\r\n', attemptId: 'cancel' },
       'lease',
     );
-    const failed = assert.rejects(pending, /取消/),
+    const failed = assert.rejects(pending, { code: 'unavailable' }),
       connection = await offered(endpoint, a.tenantId);
     await control
       .closeRtc(a.tenantId, { connectionId: connection }, 'lease')
-      .catch((error) => assert.match(String(error), /不属于/));
+      .catch((error) => assert.equal(error.code, 'forbidden'));
     await failed;
     endpoint.signal(a.tenantId, connection, { type: 'answer', sdp: 'v=0\r\n' });
   } finally {

@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../../shared/errors';
 import type Database from 'better-sqlite3';
 
 export function createSchema(db: Database.Database) {
@@ -27,6 +28,7 @@ export function createSchema(db: Database.Database) {
       CREATE INDEX IF NOT EXISTS file_library_open ON file_library_selections(tenant,terminal,checked);
       INSERT INTO schema_version(version) SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM schema_version);`);
     const rows = db.prepare('SELECT version FROM schema_version').all() as { version: bigint }[];
-    if (rows.length !== 1 || Number(rows[0].version) !== 1) throw new Error('Unsupported database schema');
+    if (rows.length !== 1 || Number(rows[0].version) !== 1)
+      throw new RemoteKitError('internal', 'Unsupported database schema');
   })();
 }

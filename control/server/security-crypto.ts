@@ -1,15 +1,8 @@
+import { systemClock, type Clock } from './util/clock';
+import { RemoteKitError } from '../shared/errors';
 import { createCipheriv, createDecipheriv, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { DEFAULT_IDLE_SECONDS, type AuthSettings } from '../shared/security';
-
-export class AuthError extends Error {
-  constructor(
-    readonly status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
 
 export const defaultAuthSettings = (): AuthSettings => ({
   lockOnHidden: true,
@@ -25,7 +18,7 @@ export interface SecretHash {
 }
 let kdfActive = 0;
 export async function deriveSecret(secret: string, salt: string): Promise<Buffer> {
-  if (kdfActive >= 4) throw new AuthError(429, '验证服务繁忙，请稍后再试');
+  if (kdfActive >= 4) throw new RemoteKitError('limit_exceeded', '验证服务繁忙，请稍后再试');
   kdfActive++;
   try {
     return await new Promise<Buffer>((resolve, reject) =>
@@ -45,14 +38,15 @@ export async function verifySecret(secret: string, saved?: SecretHash): Promise<
 }
 
 export class AuthAttempts {
+  constructor(private readonly clock: Clock = systemClock) {}
   private attempts = new Map<string, { count: number; until: number; inFlight: boolean }>();
   async run<T>(key: string, work: () => Promise<T>, limit = 6, interval = 60000): Promise<T> {
-    const now = Date.now();
+    const now = this.clock.monotonicMs();
     for (const [id, entry] of this.attempts)
       if (!entry.inFlight && entry.until <= now) this.attempts.delete(id);
     let entry = this.attempts.get(key);
     if (entry?.inFlight || (entry && entry.count >= limit) || (!entry && this.attempts.size >= 4096))
-      throw new AuthError(429, '尝试次数过多，请稍后再试');
+      throw new RemoteKitError('rate_limited', '尝试次数过多，请稍后再试');
     if (!entry) {
       entry = { count: 0, until: now + interval, inFlight: false };
       this.attempts.set(key, entry);
@@ -98,12 +92,12 @@ export class FaceVault {
     }
     if (this.key.length !== 32) {
       this.key = undefined;
-      throw new Error('人脸模板密钥无效');
+      throw new RemoteKitError('internal', '人脸模板密钥无效');
     }
     return this.key;
   }
   seal(user: string, template: number[], modelVersion: string) {
-    if (!validFaceTemplate(template)) throw new Error('人脸模板无效');
+    if (!validFaceTemplate(template)) throw new RemoteKitError('invalid_request', '人脸模板无效');
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.loadKey(true), iv);
     cipher.setAAD(Buffer.from(JSON.stringify([user, modelVersion])));
@@ -118,7 +112,7 @@ export class FaceVault {
     const template: unknown = JSON.parse(
       Buffer.concat([decipher.update(record.subarray(28)), decipher.final()]).toString(),
     );
-    if (!validFaceTemplate(template)) throw new Error('人脸模板无效');
+    if (!validFaceTemplate(template)) throw new RemoteKitError('invalid_request', '人脸模板无效');
     return template;
   }
 }

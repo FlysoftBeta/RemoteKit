@@ -1,3 +1,4 @@
+import type { WireError } from './errors';
 import type { LibraryMethods } from './file-library';
 import type { AuthMessage, AuthSocketMethods } from './security';
 import type { DiagnosticMethods } from './diagnostics';
@@ -288,5 +289,5 @@ export type SocketMessage =
   | RtcServerSignal
   | { type: 'state'; revision: number; state: ProductState }
   | { type: 'result'; id: string; result: unknown }
-  | { type: 'error'; id: string; error: { code: number; message: string } }
+  | { type: 'error'; id: string; error: WireError }
   | { type: 'lease'; status: 'revoked'; reason: 'another-viewer' | 'logout' };

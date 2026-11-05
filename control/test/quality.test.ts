@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { QualityState } from '../server/quality';
-import { emptyWorkspace } from '../server/store';
+import { emptyWorkspace } from '../server/persistence/workspaces';
 const workspace = () => ({
   ...emptyWorkspace('tenant'),
   windows: [{ id: 'w', activeTabId: 'tab', weight: 1 }],

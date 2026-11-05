@@ -3,7 +3,10 @@ import { EventEmitter } from 'node:events';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
-import type { Endpoint, RtcSignal, ClientActionEvent } from './endpoint';
+import type { EndpointLink, EndpointLinkState } from './link';
+import { readyTransition } from './link';
+import type { RtcSignal, ClientActionEvent } from './types';
+import { RemoteKitError } from '../../shared/errors';
 
 const MAX_MESSAGE = 1024 * 1024;
 interface Connection {
@@ -14,10 +17,10 @@ interface Connection {
 interface Pending {
   epoch: string;
   resolve: (value: any) => void;
-  reject: (error: Error) => void;
+  reject: (error: unknown) => void;
   timer: NodeJS.Timeout;
 }
-export interface EndpointNodeOptions {
+export interface RemoteNodeOptions {
   nodeId: string;
   token: string;
   tlsProxy?: boolean;
@@ -27,7 +30,8 @@ export interface EndpointNodeOptions {
 }
 
 /** One configured compute node. Connection replacement never replays an RPC. */
-export class EndpointNode extends EventEmitter implements Endpoint {
+export class RemoteNodeLink extends EventEmitter implements EndpointLink {
+  state: EndpointLinkState = { state: 'offline' };
   readonly nodeId: string;
   private readonly tokenHash: Buffer;
   private readonly sockets = new WebSocketServer({
@@ -41,10 +45,10 @@ export class EndpointNode extends EventEmitter implements Endpoint {
   private stopped = false;
   private readonly heartbeat: NodeJS.Timeout;
 
-  constructor(private readonly options: EndpointNodeOptions) {
+  constructor(private readonly options: RemoteNodeOptions) {
     super();
     if (!/^[a-zA-Z0-9_.-]{1,128}$/.test(options.nodeId) || !options.token || /[\r\n]/.test(options.token))
-      throw new Error('Endpoint node ID/token 配置无效');
+      throw new RemoteKitError('invalid_request', 'Endpoint node ID/token 配置无效');
     this.nodeId = options.nodeId;
     this.tokenHash = createHash('sha256').update(`Bearer ${options.token}`).digest();
     this.heartbeat = setInterval(() => {
@@ -101,6 +105,7 @@ export class EndpointNode extends EventEmitter implements Endpoint {
   }
 
   private accept(socket: WebSocket) {
+    if (!this.current) this.state = { state: 'connecting' };
     let connection: Connection | undefined;
     const handshake = setTimeout(() => socket.terminate(), this.options.handshakeTimeoutMs ?? 5000);
     handshake.unref();
@@ -111,6 +116,7 @@ export class EndpointNode extends EventEmitter implements Endpoint {
     socket.on('close', () => {
       clearTimeout(handshake);
       if (connection) this.disconnect(connection, 'Endpoint 已断开');
+      else if (!this.current) this.state = { state: 'offline' };
     });
     socket.on('pong', () => {
       if (connection && this.current === connection) connection.alive = true;
@@ -118,10 +124,10 @@ export class EndpointNode extends EventEmitter implements Endpoint {
     socket.on('message', (data, binary) => {
       if (this.stopped || (connection && this.current !== connection)) return;
       try {
-        if (binary) throw new Error('binary message');
+        if (binary) throw new RemoteKitError('invalid_request', 'binary message');
         const message = JSON.parse(data.toString());
         if (!message || typeof message !== 'object' || Array.isArray(message))
-          throw new Error('invalid message');
+          throw new RemoteKitError('invalid_request', 'invalid message');
         if (!connection) {
           if (
             message.type !== 'node.hello' ||
@@ -130,7 +136,7 @@ export class EndpointNode extends EventEmitter implements Endpoint {
             typeof message.endpointIncarnation !== 'string' ||
             !/^[a-zA-Z0-9_-]{16,128}$/.test(message.endpointIncarnation)
           )
-            throw new Error('invalid hello');
+            throw new RemoteKitError('invalid_request', 'invalid hello');
           clearTimeout(handshake);
           const previous = this.current;
           if (previous) {
@@ -140,9 +146,17 @@ export class EndpointNode extends EventEmitter implements Endpoint {
           connection = { socket, epoch: randomUUID(), alive: true };
           this.current = connection;
           socket.send(JSON.stringify({ type: 'node.ready', version: 1, connectionEpoch: connection.epoch }));
-          const processChanged = this.endpointIncarnation !== message.endpointIncarnation;
+          const transition = readyTransition(
+            this.endpointIncarnation,
+            message.endpointIncarnation,
+            connection.epoch,
+          );
+          this.state = transition.state;
           this.endpointIncarnation = message.endpointIncarnation;
-          this.emit('ready', { endpointIncarnation: this.endpointIncarnation, processChanged });
+          this.emit('ready', {
+            endpointIncarnation: this.endpointIncarnation,
+            processChanged: transition.processChanged,
+          });
           return;
         }
         if (message.type === 'node.ping') {
@@ -151,7 +165,7 @@ export class EndpointNode extends EventEmitter implements Endpoint {
         }
         if (message.event === 'client.action') {
           if (typeof message.tenantId !== 'string' || typeof message.connectionId !== 'string')
-            throw new Error('invalid action');
+            throw new RemoteKitError('invalid_request', 'invalid action');
           this.emit('client.action', message);
           return;
         }
@@ -162,25 +176,18 @@ export class EndpointNode extends EventEmitter implements Endpoint {
             !message.signal ||
             typeof message.signal !== 'object'
           )
-            throw new Error('invalid signal');
+            throw new RemoteKitError('invalid_request', 'invalid signal');
           this.emit('rtc.signal', message);
           return;
         }
         if (typeof message.id !== 'string' || typeof message.ok !== 'boolean')
-          throw new Error('invalid reply');
+          throw new RemoteKitError('invalid_request', 'invalid reply');
         const pending = this.pending.get(message.id);
         if (!pending || pending.epoch !== connection.epoch) return;
         this.pending.delete(message.id);
         clearTimeout(pending.timer);
         if (message.ok) pending.resolve(message.result);
-        else
-          pending.reject(
-            new Error(
-              typeof message.error === 'string'
-                ? message.error
-                : (message.error?.message ?? 'Endpoint 操作失败'),
-            ),
-          );
+        else pending.reject(message.error ?? { code: 'rejected', message: 'Endpoint 操作失败' });
       } catch {
         if (connection) this.disconnect(connection, 'Endpoint 协议错误');
         socket.terminate();
@@ -191,17 +198,18 @@ export class EndpointNode extends EventEmitter implements Endpoint {
   request(method: string, tenantId: string, args: Record<string, unknown> = {}): Promise<any> {
     const connection = this.current;
     if (this.stopped || !connection || connection.socket.readyState !== WebSocket.OPEN)
-      return Promise.reject(new Error('Endpoint 尚未就绪'));
+      return Promise.reject(new RemoteKitError('unavailable', 'Endpoint 尚未就绪'));
     if (this.pending.size >= 256 || connection.socket.bufferedAmount > 2 * MAX_MESSAGE)
-      return Promise.reject(new Error('Endpoint 请求繁忙'));
+      return Promise.reject(new RemoteKitError('unavailable', 'Endpoint 请求繁忙'));
     const id = randomUUID(),
       message = JSON.stringify({ ...args, id, method, tenantId });
-    if (Buffer.byteLength(message) > MAX_MESSAGE) return Promise.reject(new Error('Endpoint 请求过大'));
+    if (Buffer.byteLength(message) > MAX_MESSAGE)
+      return Promise.reject(new RemoteKitError('limit_exceeded', 'Endpoint 请求过大'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(
         () => {
           this.pending.delete(id);
-          reject(new Error(`Endpoint ${method} 超时`));
+          reject(new RemoteKitError('outcome_unknown', 'Endpoint 请求超时', method));
         },
         Math.max(1, Math.min(20000, this.options.requestTimeoutMs ?? 20000)),
       );
@@ -217,10 +225,11 @@ export class EndpointNode extends EventEmitter implements Endpoint {
   private disconnect(connection: Connection, reason: string) {
     if (this.current !== connection) return;
     this.current = undefined;
+    this.state = { state: 'offline' };
     for (const [id, pending] of this.pending) {
       if (pending.epoch !== connection.epoch) continue;
       clearTimeout(pending.timer);
-      pending.reject(new Error(reason));
+      pending.reject(new RemoteKitError('outcome_unknown', 'Endpoint 连接已断开', reason));
       this.pending.delete(id);
     }
     this.emit('offline');
@@ -228,6 +237,7 @@ export class EndpointNode extends EventEmitter implements Endpoint {
   stop() {
     if (this.stopped) return;
     this.stopped = true;
+    this.state = { state: 'offline' };
     clearInterval(this.heartbeat);
     if (this.current) this.disconnect(this.current, 'Control 正在关闭');
     for (const socket of this.sockets.clients) socket.terminate();

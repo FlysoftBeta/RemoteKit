@@ -1,3 +1,4 @@
+import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
@@ -7,7 +8,7 @@ import { existsSync } from 'node:fs';
 import { request } from 'node:https';
 import { resolve } from 'node:path';
 import { once } from 'node:events';
-import { Store } from '../server/store';
+import { ControlDatabase } from '../server/persistence/database';
 import { Control } from '../server/control';
 import { createHttp } from '../server/http';
 test('optional HTTPS serves trusted local test TLS, secure cookies and configured LAN bind', async (context) => {
@@ -50,8 +51,8 @@ test('optional HTTPS serves trusted local test TLS, secure cookies and configure
     }
     throw error;
   }
-  const store = new Store(':memory:'),
-    control = new Control(store, { request: async () => ({ views: [] }) }),
+  const store = new ControlDatabase(':memory:'),
+    control = new Control(store, testGateway({ request: async () => ({ views: [] }) })),
     origins: string[] = [];
   const cert = await readFile(certPath),
     server = createHttp(control, {

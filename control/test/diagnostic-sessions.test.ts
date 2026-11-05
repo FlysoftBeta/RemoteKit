@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../shared/errors';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -44,18 +45,22 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const snapshots: string[] = [];
   const control = Object.assign(emitter, {
     store: {
-      identity: (token: string) => (token ? { tenantId: token === 'new-token' ? 'one' : token } : undefined),
-      workspace: () => ({
-        revision: 4,
-        layoutMode: 'focused',
-        tabs: [{ title: 'sensitive-title' }],
-        windows: [],
-        settings: { qualityPreference: 'auto', unrelatedSetting: 'sensitive-setting' },
-      }),
+      accounts: {
+        identity: (token: string) =>
+          token ? { tenantId: token === 'new-token' ? 'one' : token } : undefined,
+      },
+      workspaces: {
+        workspace: () => ({
+          revision: 4,
+          layoutMode: 'focused',
+          tabs: [{ title: 'sensitive-title' }],
+          windows: [],
+          settings: { qualityPreference: 'auto', unrelatedSetting: 'sensitive-setting' },
+        }),
+      },
     },
     endpoint: {
-      request: async (method: string, tenant: string, options: unknown) => {
-        assert.equal(method, 'session.snapshot');
+      snapshot: async (tenant: string, options: unknown) => {
         assert.deepEqual(options, { outputDiagnostics: true });
         snapshots.push(tenant);
         return {
@@ -138,7 +143,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
             if (message.id !== id) return;
             ws.off('message', receive);
             if (message.type === 'result') resolve(message.result);
-            else reject(Object.assign(new Error(message.error.message), { status: message.error.code }));
+            else reject(new RemoteKitError(message.error.code, message.error.message));
           };
           ws.on('message', receive);
           ws.send(JSON.stringify({ id, method: 'diagnostics.' + method, params }));
@@ -149,10 +154,10 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const one = await viewer('one'),
     two = await viewer('two'),
     locked = await viewer('locked');
-  await assert.rejects(locked.request('start', {}), { status: 423 });
+  await assert.rejects(locked.request('start', {}), { code: 'locked' });
   const auth = leases.get('one')!;
   auth.allowed = false;
-  await assert.rejects(one.request('start', {}), { status: 423 });
+  await assert.rejects(one.request('start', {}), { code: 'locked' });
   auth.allowed = true;
   const started = await one.request('start', {
     environment: { platform: 'android', browserVersion: '139.0.1.2', userAgent: 'sensitive-UA' },
@@ -160,10 +165,10 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const { id } = started;
   assert.equal(started.status, 'collecting');
   assert.deepEqual(await one.request('start', {}), started);
-  await assert.rejects(two.request('status', { id }), { status: 404 });
-  await assert.rejects(two.request('stop', { id }), { status: 404 });
+  await assert.rejects(two.request('status', { id }), { code: 'not_found' });
+  await assert.rejects(two.request('stop', { id }), { code: 'not_found' });
   await assert.rejects(one.request('sample', { id, sequence: 1, data: { title: 'x'.repeat(128 * 1024) } }), {
-    status: 413,
+    code: 'limit_exceeded',
   });
   const data = {
     rtc: collectionRtcSample({
@@ -248,7 +253,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   auth.allowed = false;
   auth.epoch = 2;
   emitter.emit('auth', 'one', auth.lease, { locked: true });
-  await assert.rejects(one.request('sample', { id: second.id, sequence: 1, data }), { status: 423 });
+  await assert.rejects(one.request('sample', { id: second.id, sequence: 1, data }), { code: 'locked' });
   const replacement = await viewer('new-token');
   assert.equal((await replacement.request('stop', { id: second.id })).reason, 'authorization-changed');
   const third = await replacement.request('start', {});
@@ -261,7 +266,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const query = { tenant: 'one', identity: 'changed', lease: 'after-restart', epoch: 1, allowed: () => true };
   assert.deepEqual(await restarted.request(query, 'diagnostics.stop', { id }), complete);
   await assert.rejects(restarted.request({ ...query, tenant: 'two' }, 'diagnostics.status', { id }), {
-    status: 404,
+    code: 'not_found',
   });
 });
 
@@ -284,9 +289,9 @@ test('global capacity includes finalization, and shutdown drains even when Endpo
   const started = await Promise.all(
     ['a', 'b', 'c', 'd'].map((tenant) => manager.request(viewer(tenant), 'diagnostics.start', {})),
   );
-  await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { status: 429 });
+  await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { code: 'limit_exceeded' });
   const stopping = manager.request(viewer('a'), 'diagnostics.stop', { id: started[0].id });
-  await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { status: 429 });
+  await assert.rejects(manager.request(viewer('e'), 'diagnostics.start', {}), { code: 'limit_exceeded' });
   await manager.shutdown();
   assert.deepEqual(await stopping, { id: started[0].id, status: 'failed', reason: 'archive-write-failed' });
   assert.equal(

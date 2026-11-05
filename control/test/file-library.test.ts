@@ -1,3 +1,6 @@
+import { RemoteKitError } from '../shared/errors';
+import { LibraryRepository } from '../server/persistence/library';
+import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -44,7 +47,8 @@ function fixture() {
     async request(method: string, tenant: string, args: any = {}) {
       calls.push({ method, tenant, args });
       if (method === 'session.library.describe') {
-        if (tenant !== 'tenant' || !assets.has(args.assetId)) throw new Error('asset_missing');
+        if (tenant !== 'tenant' || !assets.has(args.assetId))
+          throw new RemoteKitError('not_found', 'asset_missing');
         return {
           assetId: args.assetId,
           hash: 'a'.repeat(64),
@@ -56,7 +60,7 @@ function fixture() {
         if (!states.has(args.selectionId)) states.set(args.selectionId, 'pending');
         if (losePrepare) {
           losePrepare = false;
-          throw new Error('response lost');
+          throw new RemoteKitError('outcome_unknown', 'response lost');
         }
       }
       if (method === 'session.library.selectionStatus')
@@ -65,7 +69,7 @@ function fixture() {
       return { accepted: true };
     },
   };
-  let manager = new FileLibrary(db, endpoint, limits);
+  let manager = new FileLibrary(new LibraryRepository(db), testGateway(endpoint), limits);
   const run = <T = LibrarySnapshot>(
     method: string,
     params: unknown = {},
@@ -77,7 +81,7 @@ function fixture() {
       'library.' + method,
       params,
       () => {
-        if (locked) throw new Error('locked');
+        if (locked) throw new RemoteKitError('locked', 'locked');
       },
       (id) => (tenant === 'tenant' && chooser?.id === id ? chooser : undefined),
     ) as Promise<T>;
@@ -97,7 +101,7 @@ function fixture() {
     run,
     add,
     reopen: () => {
-      manager = new FileLibrary(db, endpoint, limits);
+      manager = new FileLibrary(new LibraryRepository(db), testGateway(endpoint), limits);
     },
     losePrepare: () => {
       losePrepare = true;
@@ -127,18 +131,18 @@ test('file catalog validates scoped assets and ordered basket, reconciles remove
     f.calls.filter((c) => c.method === 'session.library.describe' && c.args.assetId === 'photo').length,
     1,
   );
-  await assert.rejects(f.add('photo', 'basket'), /同一操作ID/);
+  await assert.rejects(f.add('photo', 'basket'), { code: 'conflict' });
   await assert.rejects(
     f.run('basket', {
       operationId: 'dup',
       expectedRevision: second.revision,
       ids: [first.basket[0], first.basket[0]],
     }),
-    /重复/,
+    { code: 'invalid_request' },
   );
   await assert.rejects(
     f.run('basket', { operationId: 'foreign', expectedRevision: 0, ids: first.basket }, 'other'),
-    /文件不存在/,
+    { code: 'not_found' },
   );
   await assert.rejects(
     f.run(
@@ -146,7 +150,7 @@ test('file catalog validates scoped assets and ordered basket, reconciles remove
       { operationId: 'foreign', assetId: 'photo', name: 'photo.jpg', groupId: null, destination: 'library' },
       'other',
     ),
-    /asset_missing/,
+    { code: 'not_found' },
   );
   const archived = direct.entries[0].id;
   const removed = await f.run('basket', {
@@ -179,17 +183,17 @@ test('prepared selection retries its immutable manifest and consumes only confir
   const params = { operationId: 'prepare', requestId: 'chooser', entryIds: [draft], groupId };
   await assert.rejects(
     f.run('prepare', { ...params, entryIds: latest.basket }, 'tenant', { ...request, multiple: false }),
-    /数量/,
+    { code: 'invalid_request' },
   );
   await assert.rejects(
     f.run('prepare', { ...params, entryIds: latest.basket }, 'tenant', {
       ...request,
       limits: { ...limits, maxBatchBytes: 7 },
     }),
-    /大小/,
+    { code: 'limit_exceeded' },
   );
   f.losePrepare();
-  await assert.rejects(f.run('prepare', params), /response lost/);
+  await assert.rejects(f.run('prepare', params), { code: 'outcome_unknown' });
   f.reopen();
   const prepared = await f.run<{ selectionId: string }>('prepare', params);
   const calls = f.calls.filter((c) => c.method === 'session.library.prepare');
@@ -201,8 +205,8 @@ test('prepared selection retries its immutable manifest and consumes only confir
     binding: request.binding,
     files: [{ assetId: 'draft', name: 'draft.jpg', type: 'image/jpeg' }],
   });
-  await assert.rejects(f.run('prepare', { ...params, entryIds: [extra] }), /同一操作ID/);
-  await assert.rejects(f.run('finish', prepared, 'other'), /文件选择不存在/);
+  await assert.rejects(f.run('prepare', { ...params, entryIds: [extra] }), { code: 'conflict' });
+  await assert.rejects(f.run('finish', prepared, 'other'), { code: 'not_found' });
   f.states.set(prepared.selectionId, 'unknown');
   type Finish = { state: SelectionState; snapshot: LibrarySnapshot };
   const unknown = await f.run<Finish>('finish', prepared, 'tenant', null);
@@ -223,7 +227,7 @@ test('prepared selection retries its immutable manifest and consumes only confir
       expectedRevision: reordered.revision,
       ids: [draft, extra],
     }),
-    { status: 409 },
+    { code: 'conflict' },
   );
   f.reopen();
   assert.deepEqual(await f.run('basket', reorder), reconciled);
@@ -258,7 +262,7 @@ test('pending selections pin removed entries, cancelled selections release them,
   assert.deepEqual(reconciled.entries, []);
   assert.deepEqual(f.calls.filter((c) => c.method === 'session.library.references').pop()?.args.assetIds, []);
   f.lockOnRetain();
-  await assert.rejects(f.add('photo'), /locked/);
+  await assert.rejects(f.add('photo'), { code: 'locked' });
   f.unlock();
   assert.deepEqual(await f.run('get'), reconciled);
   assert.equal((await f.add('photo')).entries.length, 1);
@@ -278,7 +282,7 @@ test('explicit deletion is atomic and keeps assets referenced by another entry o
     groupId: null,
   });
   const deletion = { operationId: 'delete', ids: [first.id, duplicate.id] };
-  await assert.rejects(f.run('delete', deletion), { status: 409 });
+  await assert.rejects(f.run('delete', deletion), { code: 'conflict' });
   assert.deepEqual((await f.run('get')).basket, [first.id, duplicate.id]);
   f.states.set(prepared.selectionId, 'cancelled');
   await f.run('get');
@@ -322,10 +326,10 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
   assert.deepEqual(references(), ['draft', 'extra', 'original', 'photo']);
   await assert.rejects(
     f.add('photo', 'basket', { groupId, originalAssetId: 'original', photo: { ...photo, mode: 'photo' } }),
-    { status: 409 },
+    { code: 'conflict' },
   );
   const prepare = { operationId: 'prepare', requestId: 'chooser', entryIds: [entry.id], groupId };
-  await assert.rejects(f.run('prepare', prepare), { status: 409 });
+  await assert.rejects(f.run('prepare', prepare), { code: 'conflict' });
   const scanError = { mode: 'scan', pending: 'scan-error', warning: '扫描失败' };
   const choice = {
     operationId: 'choose',
@@ -342,7 +346,7 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
   ]);
   assert.deepEqual(chosen.basket, initial.basket);
   assert.deepEqual(references(), ['draft', 'extra', 'original']);
-  await assert.rejects(f.run('prepare', prepare), { status: 409 });
+  await assert.rejects(f.run('prepare', prepare), { code: 'conflict' });
   const confirm = {
     operationId: 'confirm',
     entryId: entry.id,
@@ -351,7 +355,9 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
     originalAssetId: 'original',
     photo: { mode: 'scan' },
   };
-  await assert.rejects(f.run('replace', { ...confirm, expectedRevision: initial.revision }), { status: 409 });
+  await assert.rejects(f.run('replace', { ...confirm, expectedRevision: initial.revision }), {
+    code: 'conflict',
+  });
   const confirmed = await f.run('replace', confirm);
   assert.deepEqual(confirmed.entries[0], { ...entry, assetId: 'original', size: 5, photo: confirm.photo });
   assert.deepEqual(references(), ['draft', 'original']);
@@ -359,16 +365,16 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
   const callsBeforeReplay = f.calls.length;
   assert.deepEqual(await f.run('replace', choice), confirmed);
   assert.equal(f.calls.length, callsBeforeReplay);
-  await assert.rejects(f.run('replace', { ...choice, originalAssetId: 'draft' }), { status: 409 });
+  await assert.rejects(f.run('replace', { ...choice, originalAssetId: 'draft' }), { code: 'conflict' });
   f.losePrepare();
-  await assert.rejects(f.run('prepare', prepare), /response lost/);
+  await assert.rejects(f.run('prepare', prepare), { code: 'outcome_unknown' });
   const replacement = {
     operationId: 'replace',
     entryId: entry.id,
     expectedRevision: confirmed.revision,
     assetId: 'photo',
   };
-  await assert.rejects(f.run('replace', replacement), { status: 409 });
+  await assert.rejects(f.run('replace', replacement), { code: 'conflict' });
   const prepared = await f.run<{ selectionId: string }>('prepare', prepare);
   assert.deepEqual(f.calls.filter((c) => c.method === 'session.library.prepare').pop()?.args.files, [
     { assetId: 'original', name: entry.name, type: 'image/jpeg' },
@@ -393,19 +399,19 @@ test('photo metadata validates candidate references and prunes them when an entr
   const f = fixture();
   t.after(() => f.db.close());
   await assert.rejects(f.add('photo', 'basket', { photo: { mode: 'scan', warning: 'x'.repeat(257) } }), {
-    status: 400,
+    code: 'invalid_request',
   });
   await assert.rejects(
     f.add('photo', 'basket', { photo: { mode: 'photo', candidateAssetIds: ['extra', 'extra'] } }),
-    { status: 400 },
+    { code: 'invalid_request' },
   );
   await assert.rejects(
     f.add('photo', 'basket', { photo: { mode: 'photo', candidateAssetIds: ['draft', 'extra', 'original'] } }),
-    { status: 400 },
+    { code: 'invalid_request' },
   );
   await assert.rejects(
     f.add('photo', 'basket', { photo: { mode: 'photo', candidateAssetIds: ['missing'] } }),
-    /asset_missing/,
+    { code: 'not_found' },
   );
   await f.add('draft', 'library', { originalAssetId: 'original' });
   const pending = await f.add('photo', 'basket', {
