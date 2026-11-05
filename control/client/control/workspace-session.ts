@@ -27,7 +27,10 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
         'observePeerAuthorization' | 'setProductLocked' | 'productReady'
       >;
       operations: Pick<OperationsStore, 'acceptSnapshot' | 'getSnapshot'>;
-      rtc: Pick<RtcSession, 'observeEndpointGeneration' | 'connect' | 'disconnect'>;
+      rtc: Pick<
+        RtcSession,
+        'observeEndpointGeneration' | 'connect' | 'disconnect' | 'restart' | 'confirmedAvSync' | 'getSnapshot'
+      >;
       control: Pick<ControlSession, 'request' | 'reconnect' | 'connect' | 'close'>;
       viewport: Pick<ViewportRequests, 'observe' | 'reset'>;
       setAudioChannels(channels: { left: boolean; right: boolean }): void;
@@ -130,9 +133,19 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
     this.ports.control.close();
   }
   operationsChanged = () => {
-    const state = this.ports.operations.getSnapshot().state;
+    const { state, authoritative } = this.ports.operations.getSnapshot();
     this.availabilityChanged();
-    if (state) this.ports.setAudioChannels(state.workspace.settings.audioChannels);
+    if (state) {
+      this.ports.setAudioChannels(state.workspace.settings.audioChannels);
+      const rtc = this.ports.rtc;
+      if (
+        rtc.getSnapshot().phase === 'connected' &&
+        rtc.confirmedAvSync !== undefined &&
+        authoritative &&
+        authoritative.workspace.settings.avSync !== rtc.confirmedAvSync
+      )
+        rtc.restart('音视频同步设置已变更');
+    }
   };
   availabilityChanged = () =>
     this.ports.viewport.observe(

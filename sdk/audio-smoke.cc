@@ -1,3 +1,5 @@
+// Signaling/ABI/timeline checks only: no GPU texture, OS audio, device or peer
+// playback is created. Actual RTP reception and AV remain runtime QA.
 #include "remotekit_rtc.h"
 #include <windows.h>
 #include <chrono>
@@ -78,70 +80,123 @@ std::string AudioOffer(std::string offer) {
          "a=mid:audio\r\na=recvonly\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 "
          "stereo=1;sprop-stereo=1;minptime=10;useinbandfec=1\r\n";
 }
+
+std::string MediaSection(const std::string& sdp, const std::string& media) {
+  const auto start = sdp.find("m=" + media + " ");
+  Require(start != std::string::npos);
+  const auto end = sdp.find("\r\nm=", start);
+  return sdp.substr(start, end == std::string::npos ? end : end - start);
+}
+
+std::string TimelineStats(uint64_t peer, Events& events) {
+  {
+    std::lock_guard lock(events.mutex);
+    events.stats.clear();
+  }
+  Require(remotekit_rtc_request_stats(peer) == 0);
+  Require(Wait(events, events.stats));
+  std::lock_guard lock(events.mutex);
+  const auto start = events.stats.find("\"audioTimeline\":{");
+  Require(start != std::string::npos);
+  const auto end = events.stats.find('}', start);
+  Require(end != std::string::npos);
+  return events.stats.substr(start, end - start + 1);
+}
 }  // namespace
-// Signaling/ABI/timeline checks only: no GPU texture, OS audio, device or peer
-// playback is created. Real Opus stereo reception and AV remain runtime QA.
 int main() try {
   Require(remotekit_sdk_initialize() == 0);
-  Events events;
-  remotekit_rtc_options options{};
-  options.struct_size = sizeof(options);
-  options.abi_version = REMOTEKIT_RTC_ABI_VERSION;
-  options.context = &events;
-  options.event = Event;
-  options.encoder = {sizeof(options.encoder), Create, Configure, Encode, Rates, nullptr, Destroy};
-  uint64_t source = 0, sender = 0;
-  Require(remotekit_rtc_create(&options, &source) == 0);
-  Require(remotekit_rtc_create(&options, &sender) == 0);
-  Require(remotekit_rtc_create_offer(source) == 0);
-  Require(Wait(events, events.offer));
-  const auto offer = AudioOffer(events.offer);
-  auto sending_offer = offer;
-  const auto audio_direction = sending_offer.rfind("a=recvonly");
-  Require(audio_direction != std::string::npos);
-  sending_offer.replace(audio_direction, 10, "a=sendonly");
-  Require(
-      remotekit_rtc_set_remote_description(sender, 1, sending_offer.data(), sending_offer.size()) ==
-      REMOTEKIT_SDK_INVALID_ARGUMENT);
-  auto mono_offer = offer;
-  mono_offer.replace(mono_offer.find("stereo=1"), 8, "stereo=0");
-  Require(remotekit_rtc_set_remote_description(sender, 1, mono_offer.data(), mono_offer.size()) ==
-          REMOTEKIT_SDK_INVALID_ARGUMENT);
-  Require(remotekit_rtc_set_remote_description(sender, 1, offer.data(), offer.size()) == 0);
-  Require(Wait(events, events.answer));
-  const auto audio = events.answer.substr(events.answer.find("m=audio "));
-  Require(audio.find("a=sendonly") != std::string::npos &&
-          audio.find("opus/48000/2") != std::string::npos &&
-          audio.find("stereo=1") != std::string::npos);
-  LARGE_INTEGER now, freq;
-  QueryPerformanceCounter(&now);
-  QueryPerformanceFrequency(&freq);
-  const auto origin = now.QuadPart - freq.QuadPart / 5;
-  int16_t pcm[960]{};
-  Require(remotekit_rtc_submit_audio(sender, pcm, 480, 1, 1, 0, origin, 1) == 0);
-  Require(remotekit_rtc_submit_audio(sender, pcm, 480, 1, 2, 480 * 3,
-                                     origin + freq.QuadPart * 3 / 100, 1) == 0);
-  Require(remotekit_rtc_submit_audio(sender, pcm, 480, 1, 3, 480 * 20, origin + freq.QuadPart / 5,
-                                     1) == 0);
-  Require(remotekit_rtc_submit_audio(sender, pcm, 480, 1, 4, 480, now.QuadPart, 1) ==
-          REMOTEKIT_SDK_INVALID_ARGUMENT);
-  Require(remotekit_rtc_submit_audio(sender, pcm, 480, 2, 1, 0, origin + freq.QuadPart * 21 / 100,
-                                     1) == 0);
-  Require(remotekit_rtc_request_stats(sender) == 0);
-  Require(Wait(events, events.stats));
-  Require(events.stats.find("\"silenceBlocks\":2") != std::string::npos &&
-          events.stats.find("\"gapRestarts\":1") != std::string::npos &&
-          events.stats.find("\"epochRestarts\":1") != std::string::npos);
-  std::atomic<int> submit_status{REMOTEKIT_SDK_BUSY};
-  std::thread submit([&] {
-    submit_status =
-        remotekit_rtc_submit_audio(sender, pcm, 480, 3, 1, 0, origin + freq.QuadPart * 22 / 100, 1);
-  });
-  const int close_status = remotekit_rtc_close(sender);
-  submit.join();
-  Require(close_status == 0 &&
-          (submit_status == 0 || submit_status == REMOTEKIT_SDK_INVALID_STATE));
-  Require(remotekit_rtc_close(source) == 0);
+  for (int synced : {0, 1}) {
+    Events events;
+    remotekit_rtc_options options{};
+    options.struct_size = sizeof(options);
+    options.abi_version = REMOTEKIT_RTC_ABI_VERSION;
+    options.context = &events;
+    options.event = Event;
+    options.encoder = {sizeof(options.encoder), Create, Configure, Encode, Rates, nullptr, Destroy};
+    uint64_t source = 0, sender = 0;
+    Require(remotekit_rtc_create(&options, &source) == 0);
+    Require(remotekit_rtc_create(&options, &sender) == 0);
+    for (int invalid : {-1, 2}) {
+      Require(remotekit_rtc_set_av_sync(sender, invalid) == REMOTEKIT_SDK_INVALID_ARGUMENT);
+      Require(remotekit_rtc_set_audio_enabled(sender, invalid) == REMOTEKIT_SDK_INVALID_ARGUMENT);
+    }
+    Require(remotekit_rtc_set_av_sync(UINT64_MAX, 0) == REMOTEKIT_SDK_INVALID_STATE);
+    Require(remotekit_rtc_set_audio_enabled(UINT64_MAX, 0) == REMOTEKIT_SDK_INVALID_STATE);
+    Require(remotekit_rtc_set_av_sync(sender, synced) == REMOTEKIT_SDK_OK);
+    Require(remotekit_rtc_create_offer(source) == 0);
+    Require(Wait(events, events.offer));
+    const auto offer = AudioOffer(events.offer);
+    auto sending_offer = offer;
+    const auto audio_direction = sending_offer.rfind("a=recvonly");
+    Require(audio_direction != std::string::npos);
+    sending_offer.replace(audio_direction, 10, "a=sendonly");
+    Require(remotekit_rtc_set_remote_description(sender, 1, sending_offer.data(),
+                                                 sending_offer.size()) ==
+            REMOTEKIT_SDK_INVALID_ARGUMENT);
+    auto mono_offer = offer;
+    mono_offer.replace(mono_offer.find("stereo=1"), 8, "stereo=0");
+    Require(remotekit_rtc_set_remote_description(sender, 1, mono_offer.data(), mono_offer.size()) ==
+            REMOTEKIT_SDK_INVALID_ARGUMENT);
+    Require(remotekit_rtc_set_remote_description(sender, 1, offer.data(), offer.size()) == 0);
+    Require(remotekit_rtc_set_av_sync(sender, synced) == REMOTEKIT_SDK_INVALID_STATE);
+    Require(Wait(events, events.answer));
+    std::string answer;
+    {
+      std::lock_guard lock(events.mutex);
+      answer = events.answer;
+    }
+    const auto audio = MediaSection(answer, "audio");
+    Require(audio.find(std::string("a=msid:") + (synced ? "remotekit-video" : "remotekit-audio") +
+                       " remotekit-audio\r\n") != std::string::npos);
+    if (offer.find("m=video ") != std::string::npos)
+      Require(MediaSection(answer, "video").find("a=msid:remotekit-video remotekit-atlas\r\n") !=
+              std::string::npos);
+    Require(audio.find("a=sendonly") != std::string::npos &&
+            audio.find("opus/48000/2") != std::string::npos &&
+            audio.find("stereo=1") != std::string::npos);
+    LARGE_INTEGER now, freq;
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    const auto origin = now.QuadPart - freq.QuadPart / 5;
+    int16_t pcm[960]{};
+    Require(remotekit_rtc_submit_audio(sender, pcm, 480, 1, 1, 0, origin, 1) == 0);
+    Require(remotekit_rtc_submit_audio(sender, pcm, 480, 1, 2, 480 * 3,
+                                       origin + freq.QuadPart * 3 / 100, 1) == 0);
+    Require(remotekit_rtc_submit_audio(sender, pcm, 480, 1, 3, 480 * 20, origin + freq.QuadPart / 5,
+                                       1) == 0);
+    Require(remotekit_rtc_submit_audio(sender, pcm, 480, 1, 4, 480, now.QuadPart, 1) ==
+            REMOTEKIT_SDK_INVALID_ARGUMENT);
+    Require(remotekit_rtc_submit_audio(sender, pcm, 480, 2, 1, 0, origin + freq.QuadPart * 21 / 100,
+                                       1) == 0);
+    const auto active = TimelineStats(sender, events);
+    Require(active.find("\"silenceBlocks\":2") != std::string::npos &&
+            active.find("\"gapRestarts\":1") != std::string::npos &&
+            active.find("\"epochRestarts\":1") != std::string::npos);
+    Require(remotekit_rtc_set_audio_enabled(sender, 0) == REMOTEKIT_SDK_OK);
+    for (uint64_t sequence = 1; sequence <= 3; ++sequence) {
+      Require(remotekit_rtc_submit_audio(sender, pcm, 480, 3, sequence, (sequence - 1) * 480,
+                                         origin + freq.QuadPart * (21 + sequence) / 100,
+                                         1) == REMOTEKIT_SDK_OK);
+      Require(TimelineStats(sender, events) == active);
+    }
+    Require(remotekit_rtc_set_audio_enabled(sender, 1) == REMOTEKIT_SDK_OK);
+    Require(remotekit_rtc_submit_audio(sender, pcm, 480, 3, 4, 1440,
+                                       origin + freq.QuadPart * 25 / 100, 1) == REMOTEKIT_SDK_OK);
+    const auto resumed = TimelineStats(sender, events);
+    Require(resumed.find("\"silenceBlocks\":2") != std::string::npos &&
+            resumed.find("\"gapRestarts\":1") != std::string::npos &&
+            resumed.find("\"epochRestarts\":2") != std::string::npos);
+    std::atomic<int> submit_status{REMOTEKIT_SDK_BUSY};
+    std::thread submit([&] {
+      submit_status = remotekit_rtc_submit_audio(sender, pcm, 480, 4, 1, 0,
+                                                 origin + freq.QuadPart * 26 / 100, 1);
+    });
+    const int close_status = remotekit_rtc_close(sender);
+    submit.join();
+    Require(close_status == 0 &&
+            (submit_status == 0 || submit_status == REMOTEKIT_SDK_INVALID_STATE));
+    Require(remotekit_rtc_close(source) == 0);
+  }
   Require(remotekit_sdk_shutdown() == 0);
   std::cout << "audio SDP/ABI/timeline smoke passed\n";
   return 0;

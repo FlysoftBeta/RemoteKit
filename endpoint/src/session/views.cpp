@@ -104,7 +104,8 @@ Result<void> ViewController::Start() {
     if (!admitted)
       return admitted.error();
     if (browser.Present())
-      fprintf(stderr, "session %s browser replacement reason=%s control=%d stop_pending=%d peer=%llu %s\n",
+      fprintf(stderr,
+              "session %s browser replacement reason=%s control=%d stop_pending=%d peer=%llu %s\n",
               id.c_str(), browser.Exited() ? "process_exited" : "control_pipe_disconnected",
               browser.Rpc().Control() != 0, browser.Stopping(), peer_controller.Handle(),
               browser.Diagnostic().c_str());
@@ -152,8 +153,8 @@ Result<void> ViewController::Start() {
       auto desired_geometry_result = DesiredGeometry();
       if (!desired_geometry_result)
         return desired_geometry_result.error();
-      auto geometry_config_result = retained ? ReconcileOutput()
-                                            : GeometryConfig(std::move(desired_geometry_result).value());
+      auto geometry_config_result =
+          retained ? ReconcileOutput() : GeometryConfig(std::move(desired_geometry_result).value());
       if (!geometry_config_result)
         return geometry_config_result.error();
     }
@@ -390,6 +391,7 @@ Result<Json> ViewController::CreateView(const Json& config, bool recovering) {
 Json ViewController::RtcSnapshot() const {
   const bool active = peer_controller.Handle() != 0;
   return {{"active", active},
+          {"avSync", active ? Json(peer_controller.AvSync()) : Json(nullptr)},
           {"connectionId", active ? Json(peer_controller.Connection()) : Json(nullptr)}};
 }
 

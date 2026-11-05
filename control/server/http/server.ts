@@ -40,6 +40,7 @@ export function createHttp(
               clientScaleOverride: settings.clientScaleOverride,
               memorySaverEnabled: settings.memorySaverEnabled,
               autoFullscreen: settings.autoFullscreen,
+              avSync: settings.avSync,
               audioChannels: settings.audioChannels,
             },
           };

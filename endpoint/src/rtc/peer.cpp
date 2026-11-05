@@ -9,7 +9,9 @@ PeerController::~PeerController() {
 Result<Json> PeerController::Offer(const Json& request,
                                    uint64_t generation,
                                    uint32_t fps,
-                                   uint32_t degradation) {
+                                   uint32_t degradation,
+                                   bool audio,
+                                   bool av_sync) {
   const auto connection = Required(request, "connectionId");
   const auto sdp = Required(request, "sdp");
   Close();
@@ -63,8 +65,11 @@ Result<Json> PeerController::Offer(const Json& request,
   } exit{*this};
   if (status != 0 || !handle)
     return Error{media::SdkErrorCode(status), "RTC create failed"};
+  if (sdk_.remotekit_rtc_set_av_sync(handle, av_sync) != 0)
+    return Error{ErrorCode::kRejected, "RTC AV sync rejected"};
+  av_sync_ = av_sync;
   hooks_.bind(handle, generation);
-  auto policy = Policy(fps, degradation);
+  auto policy = Policy(fps, degradation, audio);
   if (!policy)
     return policy.error();
   if (sdk_.remotekit_rtc_set_playout_delay(handle, RuntimeOptions::kRtcPlayoutMinMs,
@@ -80,12 +85,14 @@ Result<Json> PeerController::Offer(const Json& request,
   if (!started)
     return started.error();
   exit.accepted = true;
-  return Json{{"accepted", true}, {"pending", true}, {"connectionId", connection}};
+  return Json{
+      {"accepted", true}, {"pending", true}, {"connectionId", connection}, {"avSync", av_sync}};
 }
-Result<void> PeerController::Policy(uint32_t fps, uint32_t degradation) {
+Result<void> PeerController::Policy(uint32_t fps, uint32_t degradation, bool audio) {
   const auto handle = Handle();
   if (handle && (sdk_.remotekit_rtc_set_degradation_preference(handle, degradation) != 0 ||
-                 sdk_.remotekit_rtc_set_source_max_fps(handle, fps) != 0))
+                 sdk_.remotekit_rtc_set_source_max_fps(handle, fps) != 0 ||
+                 sdk_.remotekit_rtc_set_audio_enabled(handle, audio) != 0))
     return Error{ErrorCode::kRejected, "RTC media policy rejected"};
   return {};
 }
@@ -111,6 +118,7 @@ void PeerController::Close() {
   hooks_.drained();
   management_generation_ = 0;
   receive_level_ = 0;
+  av_sync_ = false;
   {
     std::lock_guard lock(mutex_);
     connection_.clear();

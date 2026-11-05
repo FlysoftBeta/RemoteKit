@@ -145,6 +145,7 @@ export class RtcSession {
   }
 
   private connectionId: string | undefined;
+  confirmedAvSync: boolean | undefined;
 
   private endpointGeneration: number | undefined;
 
@@ -155,6 +156,13 @@ export class RtcSession {
     this.retryTimer = undefined;
     this.retryCount = 0;
     await this.establish();
+  }
+
+  restart(reason: string) {
+    clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    diagnostics.record('rtc-restart', reason);
+    void this.establish();
   }
 
   private retryCount = 0;
@@ -326,6 +334,7 @@ export class RtcSession {
       const answer = await this.rtcRequest<
         RTCSessionDescriptionInit & {
           connectionId: string;
+          avSync: boolean;
           endpointGeneration?: number;
           signalingMode?: string;
         }
@@ -342,6 +351,7 @@ export class RtcSession {
         return;
       }
       this.connectionId = answer.connectionId;
+      this.confirmedAvSync = answer.avSync;
       if (this.remoteSignalConnection && this.remoteSignalConnection !== answer.connectionId)
         throw new RemoteKitError('unavailable', '媒体协商连接身份不一致');
       this.endpointGeneration = answer.endpointGeneration;
@@ -378,6 +388,7 @@ export class RtcSession {
 
   private closeLocal() {
     this.events.emit({ type: 'closed' });
+    this.confirmedAvSync = undefined;
     this.signalAttemptId = undefined;
     this.remoteSignalConnection = undefined;
     this.remoteDescriptionReady = false;

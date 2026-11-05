@@ -135,9 +135,14 @@ export class RtcSignaling {
         const accepted = await this.context.endpoint.offer(tenant, {
           connectionId,
           sdp: body.sdp,
+          avSync: this.context.store.workspaces.workspace(tenant).settings.avSync,
         });
         timings.endpointAcceptedMs = this.context.clock.monotonicMs() - receivedAt;
-        if (accepted?.accepted !== true || accepted.connectionId !== connectionId)
+        if (
+          accepted?.accepted !== true ||
+          accepted.connectionId !== connectionId ||
+          typeof accepted.avSync !== 'boolean'
+        )
           throw new RemoteKitError('rejected', 'Endpoint未接受媒体协商');
         const answer = { sdp: await pending };
         timings.answerReadyMs = this.context.clock.monotonicMs() - receivedAt;
@@ -153,6 +158,7 @@ export class RtcSignaling {
         this.services.pageRequests.authorizeFiles(tenant);
         return {
           type: 'answer',
+          avSync: accepted.avSync,
           sdp: answer.sdp,
           connectionId,
           endpointGeneration: this.context.tenants.mediaGeneration(tenant),

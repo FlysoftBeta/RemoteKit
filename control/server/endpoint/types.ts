@@ -56,7 +56,7 @@ export interface EndpointSnapshot {
   browserIncarnation?: string;
   browserPid?: number;
   views: ViewSnapshot[];
-  rtc?: { active: boolean; connectionId?: string };
+  rtc?: { active: boolean; connectionId?: string; avSync?: boolean | null };
   stats?: { mediaPolicy?: { applied?: AppliedMediaPolicy | null }; [key: string]: unknown };
   events?: Record<string, unknown>[];
   pendingPopups?: Record<string, unknown>[];

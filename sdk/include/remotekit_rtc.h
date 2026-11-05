@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define REMOTEKIT_RTC_ABI_VERSION 4u
+#define REMOTEKIT_RTC_ABI_VERSION 5u
 enum remotekit_rtc_event_type {
   REMOTEKIT_RTC_SDP_OFFER = 1,
   REMOTEKIT_RTC_SDP_ANSWER = 2,
@@ -124,6 +124,13 @@ REMOTEKIT_SDK_API int remotekit_rtc_close(uint64_t peer);
 /* Gates outgoing product video, audio and data. The authentication data
  * channel remains available. Old video completions are discarded. */
 REMOTEKIT_SDK_API int remotekit_rtc_set_media_authorized(uint64_t peer, int authorized);
+/* Creation-time, before set_remote_description; later calls return INVALID_STATE.
+ * synced must be 0 or 1. Default 0. Selects a shared audio/video stream id. */
+REMOTEKIT_SDK_API int remotekit_rtc_set_av_sync(uint64_t peer, int synced);
+/* Runtime; enabled must be 0 or 1. Default 1. Audio is active only when media
+ * is authorized and audio is enabled. Disabled submit_audio blocks are accepted
+ * and discarded without feeding PCM to the encoder. */
+REMOTEKIT_SDK_API int remotekit_rtc_set_audio_enabled(uint64_t peer, int enabled);
 enum remotekit_rtc_degradation_preference {
   REMOTEKIT_RTC_MAINTAIN_RESOLUTION = 0,
   REMOTEKIT_RTC_BALANCED = 1,

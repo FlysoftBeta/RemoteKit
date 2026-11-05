@@ -54,7 +54,7 @@ Client:   每个 video 观察到自己的真实 RTP 并匹配当前 epoch → �
 - 客户端对实际 receiver 设置 `jitterBufferTarget = 0`。Chrome89 没有标准属性，在可用时设置 `playoutDelayHint = 0`。能力、尝试设置的值和读回值分别报告。
 - Endpoint 在创建 peer 时请求 RTP playout-delay min 0 / max 50ms。Chromium157 中 min=0 且 0 < max ≤ 500ms 会进入低延迟分支，保留有界的合成队列；50ms 约等于 60Hz 下三帧的合成预算。
 - 这些都是请求，不是保证：min=0 时解码调度仍有约 8ms 的最小值；`jitterBufferTarget=0` 也不取消解码和抖动所需的等待。
-- 视频与音频使用不同的 stream id（`remotekit-video`、`remotekit-audio`），接收端不把它们放进同一同步组。同组时 RtpStreamsSynchronizer 会把视频最小播放延迟抬到 NetEq 的音频延迟（实测音频静音补偿时约 84–99ms，视频最小延迟 60–111ms，而包抖动只有 2–17ms），min 一旦大于 0 就离开上面的低延迟分支。代价是页面内音视频不做唇音同步，音频通常比画面晚几十毫秒。
+- 音视频同步默认关闭：视频与音频使用不同的 stream id（`remotekit-video`、`remotekit-audio`），接收端不把它们放进同一同步组。设置开启时音频也用 `remotekit-video`，换取唇音同步。同组时 RtpStreamsSynchronizer 会把视频最小播放延迟抬到 NetEq 的音频延迟（实测音频静音补偿时约 84–99ms，视频最小延迟 60–111ms，而包抖动只有 2–17ms），min 一旦大于 0 就离开上面的低延迟分支。关闭同步的代价是页面内音视频不对齐，音频通常比画面晚几十毫秒。stream id 写在 SDP 里，切换需要重建 peer（见[控制面](control-plane.md)）。
 - 0/50 对比未设置（同二进制，1936×1008，QSV，48Mbps/10ms）：合成 55.5→57.9FPS，丢帧 58/1172→9/1170，末包→合成 p95 78.5→50.4ms，实际缓冲均值 59.6→28.9ms，marker p95 115→92ms。
 - 0/10 被否决：末包→合成 p95 约 39→18ms，但合成帧率 45→38FPS，marker p95 没有改善，首段 rVFC 间隔 p95 38→74ms。更紧的预算导致有用的呈现丢失。
 - 0/0 是另一种原生行为，不能和 0/10、0/50 的结果混在一起。
@@ -84,4 +84,4 @@ rVFC 回调次数不是显示 FPS：Chromium157 一个 10 秒区间里有 600 �
 - `AudioTimeline::Plan` 校验 480 样本对齐、QPC 单调、generation 与 sequence，再决定连续、补静音或重启。最多补 8 块（80ms）静音；更大的缺口、epoch 变化和不连续都重启时间线。重启只在实际操作成功后提交。
 - SDK 的 `PageAudioSource` 以 16-bit/48kHz/立体声/480 帧和真实 time_ms 喂给 sink，不伪装成麦克风 ADM 设备。
 
-**传输与播放**：同一 PeerConnection 上的 Session 级 Opus 立体声 track；客户端 offer 的音频方向为 recvonly，不接受上行音频。客户端用一个 WebAudio 图：扬声器上混到两声道 → splitter → 左右独立增益 → merger。关闭左声道不会把右声道复制到两边。一个音量为 0 的 audio 元素负责激活远端解码，可听输出只来自 WebAudio，不会重复。增益为 0 时音频流和时钟继续推进，避免本地静音期间积累队列、取消静音时一次性放出。左右声道选择是整个 Viewer 的设置，由 Control 保存。锁定时音频 RTP 随产品媒体一起被停止，不只是本地静音。
+**传输与播放**：同一 PeerConnection 上的 Session 级 Opus 立体声 track；客户端 offer 的音频方向为 recvonly，不接受上行音频。客户端用一个 WebAudio 图：扬声器上混到两声道 → splitter → 左右独立增益 → merger。关闭左声道不会把右声道复制到两边。一个音量为 0 的 audio 元素负责激活远端解码，可听输出只来自 WebAudio，不会重复。增益为 0 时音频流和时钟继续推进，避免本地静音期间积累队列、取消静音时一次性放出。左右声道选择是整个 Viewer 的设置，由 Control 保存。"不播放"（两声道都关）时 Control 的媒体策略 `audio=false`，Endpoint 停用音频发送器并在 SDK 内丢弃 PCM，不发任何音频 RTP；重新选中声道时恢复，不需要重新协商。锁定时音频 RTP 随产品媒体一起被停止，不只是本地静音。

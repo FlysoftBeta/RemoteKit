@@ -210,6 +210,9 @@ class Peer : public webrtc::PeerConnectionObserver,
       audio_restarts_discontinuity{0};
   std::atomic<int> audio_last_restart{0};
   std::mutex audio_mutex;
+  bool av_sync = false, remote_description_started = false;
+  bool audio_enabled = true;  // Protected by audio_mutex and api_mutex.
+  bool ApplySenderActivity(bool authorized);
   scoped_refptr<webrtc::DataChannelInterface> data;
   scoped_refptr<webrtc::DataChannelInterface> auth_data;
   class AuthObserver : public webrtc::DataChannelObserver {

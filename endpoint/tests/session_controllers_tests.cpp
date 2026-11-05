@@ -4,6 +4,7 @@
 #include "rtc/peer.hpp"
 #include "media/presentation.hpp"
 #include "input/input.hpp"
+#include "session/session.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -230,7 +231,65 @@ void AuthorizationTokens() {
 struct PeerFixture {
   int fail = 0, closes = 0, stops_with_handle = 0;
   remotekit_rtc_options config{};
+  std::vector<std::string> calls;
+  bool av_sync = false, audio = true;
 };
+
+void MediaPolicyRequests() {
+  class Link final : public ManagementLink {
+   public:
+    bool Next(std::string&, uint64_t&, bool&) override { return false; }
+    bool Current(uint64_t) override { return true; }
+    bool SendReply(uint64_t, const Json&) override { return true; }
+    bool SendEvent(const Json&, uint64_t) override { return true; }
+    void OnDisconnect(Disconnect) override {}
+  } link;
+  const auto directory = fs::temp_directory_path() /
+                         ("remotekit-media-policy-" + std::to_string(GetCurrentProcessId()) + "-" +
+                          std::to_string(GetTickCount64()));
+  struct Cleanup {
+    fs::path directory;
+    ~Cleanup() {
+      std::error_code ignored;
+      fs::remove_all(directory, ignored);
+    }
+  } cleanup{directory};
+  std::string executable = "endpoint", data = "--data-path=" + directory.string();
+  char* arguments[] = {executable.data(), data.data()};
+  auto parsed = RuntimeOptions::Parse(2, arguments);
+  CHECK(parsed);
+  media::Sdk sdk;
+  Session session(sdk, parsed.value(), "tenant", "1", link);
+  const Json request = {{"maxFps", 30}, {"degradationPreference", "balanced"}, {"audio", false}};
+  CHECK(session.Media().ManageSessionMediaPolicy(request));
+  CHECK(!session.Media().Audio());
+  CHECK(session.Media().Snapshot().at("mediaPolicy").at("requested") == request);
+  for (const auto& invalid : {Json(), Json(0), Json("false"), Json::object()}) {
+    auto bad = request;
+    bad["audio"] = invalid;
+    auto result = session.Media().ManageSessionMediaPolicy(bad);
+    CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
+    CHECK(!session.Media().Audio());
+  }
+  auto missing = request;
+  missing.erase("audio");
+  auto result = session.Media().ManageSessionMediaPolicy(missing);
+  CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
+  auto enabled = request;
+  enabled["audio"] = true;
+  CHECK(session.Media().ManageSessionMediaPolicy(enabled));
+  CHECK(session.Media().Audio());
+  for (const auto& invalid : {Json(), Json(0), Json("false")}) {
+    auto bad = Json{{"connectionId", "connection"}, {"sdp", "offer"}, {"avSync", invalid}};
+    auto rejected = session.Channel().ManageRtcOffer(bad);
+    CHECK(!rejected && rejected.error().code == ErrorCode::kInvalidRequest);
+  }
+  CHECK(session.Channel()
+            .ManageRtcOffer({{"connectionId", "connection"}, {"sdp", "offer"}})
+            .error()
+            .code == ErrorCode::kInvalidRequest);
+}
+
 void PeerFailureCleanup() {
   static PeerFixture* active;
   PeerFixture fixture;
@@ -245,6 +304,16 @@ void PeerFailureCleanup() {
     ++active->closes;
     return 0;
   };
+  sdk.remotekit_rtc_set_av_sync = [](uint64_t, int synced) {
+    active->calls.push_back("avSync");
+    active->av_sync = synced;
+    return active->fail == 8 ? 1 : 0;
+  };
+  sdk.remotekit_rtc_set_audio_enabled = [](uint64_t, int enabled) {
+    active->calls.push_back("audio");
+    active->audio = enabled;
+    return active->fail == 9 ? 1 : 0;
+  };
   sdk.remotekit_rtc_set_degradation_preference = [](uint64_t, uint32_t) {
     return active->fail == 2 ? 1 : 0;
   };
@@ -255,6 +324,7 @@ void PeerFailureCleanup() {
     return active->fail == 4 ? 1 : 0;
   };
   sdk.remotekit_rtc_set_remote_description = [](uint64_t, int, const char*, size_t) {
+    active->calls.push_back("remote");
     return active->fail == 5 ? 1 : 0;
   };
   sdk.remotekit_rtc_get_receive_level = [](uint64_t, uint32_t* level) {
@@ -286,15 +356,21 @@ void PeerFailureCleanup() {
                      const Json& signal) { signals.emplace_back(generation, signal); }});
   owner = &controller;
   Json offer = {{"connectionId", "connection"}, {"sdp", "video offer"}};
-  for (int stage = 1; stage <= 7; ++stage) {
+  for (int stage = 1; stage <= 9; ++stage) {
     fixture.fail = stage;
-    CHECK(!controller.Offer(offer, 3, 60, 0));
+    CHECK(!controller.Offer(offer, 3, 60, 0, false, true));
     CHECK(fixture.closes == stage && fixture.stops_with_handle == stage);
     CHECK(controller.GetState() == PeerController::State::kNone);
     CHECK(!controller.Handle() && !controller.DataOpen() && controller.Connection().empty());
   }
   fixture.fail = 0;
-  CHECK(controller.Offer(offer, 3, 60, 0));
+  fixture.calls.clear();
+  auto accepted = controller.Offer(offer, 3, 60, 0, false, true);
+  CHECK(accepted && accepted.value().at("avSync") == true);
+  CHECK((fixture.calls == std::vector<std::string>{"avSync", "audio", "remote"}));
+  CHECK(fixture.av_sync && !fixture.audio && controller.AvSync());
+  CHECK(controller.Policy(30, 0, true));
+  CHECK(fixture.audio);
   CHECK(controller.GetState() == PeerController::State::kNegotiating);
   fixture.config.event(fixture.config.context, 17, REMOTEKIT_RTC_STATE, nullptr, 0, nullptr, 2);
   CHECK(controller.Connected());
@@ -314,7 +390,12 @@ void PeerFailureCleanup() {
   controller.FlushSignals();
   CHECK(signals.size() == 1 && signals[0].first == 3 && signals[0].second["type"] == "complete");
   controller.Close();
-  CHECK(fixture.closes == 8 && fixture.stops_with_handle == 8);
+  CHECK(fixture.closes == 10 && fixture.stops_with_handle == 10);
+  accepted = controller.Offer(offer, 3, 60, 0, true, false);
+  CHECK(accepted && accepted.value().at("avSync") == false);
+  CHECK(!fixture.av_sync && fixture.audio && !controller.AvSync());
+  controller.Close();
+  CHECK(fixture.closes == 11 && fixture.stops_with_handle == 11);
 }
 
 void OrderedTouchInput() {
@@ -396,6 +477,7 @@ int main() {
   OutboxPriorityAndEpoch();
   PresentationOwnership();
   AuthorizationTokens();
+  MediaPolicyRequests();
   PeerFailureCleanup();
   OrderedTouchInput();
 }

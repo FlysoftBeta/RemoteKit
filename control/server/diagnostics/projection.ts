@@ -173,6 +173,7 @@ export function diagnosticEndpointSnapshot(value: unknown, truncated: Set<string
   const data = {
     running: snapshot.running,
     rtcActive: rtc.active,
+    avSync: rtc.avSync,
     browserOutputAvailable: outputDiagnostics.ok === true,
     browserOutput: outputDiagnostics.ok === true ? outputDiagnostics.output : undefined,
     stats: snapshot.stats,

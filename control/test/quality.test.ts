@@ -39,7 +39,7 @@ test('quality choices only select WebRTC degradation preference', () => {
     state.settings.qualityPreference = preference;
     const result = quality.snapshot(state, measured, 100);
     assert.equal(result.effectiveDpr, 2);
-    assert.deepEqual(result.requested, { degradationPreference, maxFps: 60 });
+    assert.deepEqual(result.requested, { degradationPreference, maxFps: 60, audio: true });
     for (const obsolete of ['baseResolutionFactor', 'adaptiveResolutionFactor', 'pixelBudget', 'targetFps'])
       assert.equal(obsolete in result, false);
     assert.equal(measured.windows[0].width, 1920);
@@ -53,6 +53,7 @@ test('client display ceiling and explicit DPR override are independent of prefer
   const measured = { ...viewport, devicePixelRatio: 2, refreshHz: 120.9 };
   assert.deepEqual(quality.snapshot(state, measured).requested, {
     degradationPreference: 'balanced',
+    audio: true,
     maxFps: 120,
   });
   for (let sequence = 1; sequence <= 30; sequence++) {
@@ -79,6 +80,7 @@ test('high refresh displays retain their measured capability while policy respec
     const measured = { ...viewport, refreshHz };
     assert.deepEqual(quality.snapshot(state, measured).requested, {
       degradationPreference: 'balanced',
+      audio: true,
       maxFps: 240,
     });
     assert.equal(measured.refreshHz, refreshHz);
@@ -117,4 +119,14 @@ test('feedback validates fresh source, clock and visibility solely for diagnosti
   quality.resetFeedback();
   assert.equal(quality.snapshot(state, viewport, 108000).feedbackStatus, 'unknown');
   assert.equal(quality.observe(feedback(1, 110000), 110000, true), true);
+});
+
+test('audio policy follows either selected output channel', () => {
+  const state = workspace(),
+    quality = new QualityState();
+  for (const left of [false, true])
+    for (const right of [false, true]) {
+      state.settings.audioChannels = { left, right };
+      assert.equal(quality.snapshot(state, viewport).requested.audio, left || right);
+    }
 });

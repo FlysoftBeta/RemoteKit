@@ -127,6 +127,7 @@ export class ViewerSession {
     rtc.setControlRpc((method, params) => control.request(method, params as never));
 
     operations.subscribe(workspace.operationsChanged);
+    rtc.subscribe(workspace.operationsChanged);
     workspace.subscribe(workspace.availabilityChanged);
     authorization.subscribe(workspace.availabilityChanged);
     rtc.events.subscribe(authorization.onRtc);

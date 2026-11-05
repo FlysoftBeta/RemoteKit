@@ -22,6 +22,7 @@ export interface ProductSettings {
   memorySaverEnabled: boolean;
   showStats: boolean;
   autoFullscreen: boolean;
+  avSync: boolean;
   audioChannels: { left: boolean; right: boolean };
 }
 export interface LifecycleRecovery {
@@ -133,10 +134,12 @@ export interface FileRequest {
 }
 export type DegradationPreference = 'maintain-resolution' | 'balanced' | 'maintain-framerate';
 export interface MediaPolicy {
+  audio: boolean;
   degradationPreference: DegradationPreference;
   maxFps: number;
 }
 export interface AppliedMediaPolicy {
+  audio: boolean;
   degradationPreference: DegradationPreference;
   maxFps: number;
 }
@@ -262,6 +265,7 @@ export interface SocketMethods extends AuthSocketMethods, LibraryMethods, Diagno
     params: { type: 'offer'; sdp: string; attemptId: string };
     result: {
       type: 'answer';
+      avSync: boolean;
       sdp: string;
       connectionId: string;
       endpointGeneration: number;

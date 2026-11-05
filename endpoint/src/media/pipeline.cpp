@@ -494,6 +494,9 @@ uint32_t MediaPipeline::SamplingFps() const {
 }
 
 Result<Json> MediaPipeline::ManageSessionMediaPolicy(const Json& request) {
+  if (!request.contains("audio") || !request.at("audio").is_boolean())
+    return Error{ErrorCode::kInvalidRequest, "invalid media policy audio"};
+  const bool audio = request.at("audio").get<bool>();
   const auto& value = request.at("maxFps");
   if (!value.is_number_integer() || value.get<int64_t>() < 1 || value.get<int64_t>() > 240)
     return Error{ErrorCode::kInvalidRequest, "invalid media policy maxFps"};
@@ -509,13 +512,14 @@ Result<Json> MediaPipeline::ManageSessionMediaPolicy(const Json& request) {
     return Error{ErrorCode::kInvalidRequest, "invalid degradation preference"};
   {
     std::lock_guard lock(media_policy_mutex);
-    auto applied = peer_controller.Policy(value.get<uint32_t>(), degradation);
+    auto applied = peer_controller.Policy(value.get<uint32_t>(), degradation, audio);
     if (!applied)
       return applied.error();
     policy_max_fps = value.get<uint32_t>();
     policy_degradation = degradation;
-    requested_media_policy = {{"maxFps", policy_max_fps.load()},
-                              {"degradationPreference", preference}};
+    policy_audio = audio;
+    requested_media_policy = {
+        {"audio", audio}, {"maxFps", policy_max_fps.load()}, {"degradationPreference", preference}};
   }
   event_wake.notify_one();
   return Json{{"accepted", true}, {"applied", peer_controller.Handle() != 0}};
@@ -609,7 +613,8 @@ Json MediaPipeline::Snapshot() {
                                                                              : "balanced";
   return {{"mediaPolicy",
            {{"requested", requested},
-            {"applied", peer_controller.Handle() ? Json{{"maxFps", policy_max_fps.load()},
+            {"applied", peer_controller.Handle() ? Json{{"audio", policy_audio.load()},
+                                                        {"maxFps", policy_max_fps.load()},
                                                         {"degradationPreference", preference}}
                                                  : Json(nullptr)}}},
           {"effective_idle_ms", effective_idle_ms.load()},

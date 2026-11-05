@@ -38,7 +38,7 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
       preference: 'auto',
       clientScale: 1,
       effectiveDpr: 1,
-      requested: { degradationPreference: 'balanced', maxFps: 60 },
+      requested: { degradationPreference: 'balanced', maxFps: 60, audio: true },
       applied: null,
       estimatedLatencyMs: null,
       clockUncertaintyMs: null,

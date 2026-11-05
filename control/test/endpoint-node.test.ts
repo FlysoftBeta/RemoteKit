@@ -371,7 +371,7 @@ test(
           };
         if (message.method === 'rtc.offer') {
           peers.set(tenant, message.connectionId);
-          result = { accepted: true, connectionId: message.connectionId };
+          result = { accepted: true, avSync: message.avSync, connectionId: message.connectionId };
           socket.send(
             JSON.stringify({
               event: 'rtc.signal',

@@ -43,6 +43,7 @@ class MediaPipeline : private ControllerContext {
   void RequestRefresh(const RtcEvent& event);
   void Rates(uint32_t bitrate, uint32_t fps);
   void Reset();
+  bool Audio() const { return policy_audio; }
   uint32_t MaxFps() const { return policy_max_fps; }
   uint32_t Degradation() const { return policy_degradation; }
   Json Snapshot();
@@ -62,6 +63,7 @@ class MediaPipeline : private ControllerContext {
   Diagnostics& diagnostics;
   std::mutex media_policy_mutex;
   Json requested_media_policy = nullptr;
+  std::atomic<bool> policy_audio{true};
   std::atomic<uint32_t> policy_max_fps{60}, policy_degradation{REMOTEKIT_RTC_BALANCED};
 
   std::atomic<bool> refresh_connected{false};

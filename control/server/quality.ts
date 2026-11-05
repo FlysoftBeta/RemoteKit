@@ -93,7 +93,11 @@ export class QualityState {
       typeof hz === 'number' && Number.isFinite(hz) && hz >= 1 && hz <= 500
         ? Math.min(240, Math.floor(hz))
         : 60;
-    const requested = { degradationPreference: preferences[workspace.settings.qualityPreference], maxFps };
+    const requested = {
+      degradationPreference: preferences[workspace.settings.qualityPreference],
+      maxFps,
+      audio: workspace.settings.audioChannels.left || workspace.settings.audioChannels.right,
+    };
     return {
       resourceLimitation,
       mode: 'product',

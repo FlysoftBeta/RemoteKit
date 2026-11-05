@@ -58,7 +58,7 @@ class AuthEndpoint implements EndpointLink {
             signal: { type: 'answer', sdp: 'v=0' },
           }),
         );
-        return { accepted: true, connectionId: params.connectionId };
+        return { accepted: true, avSync: params.avSync, connectionId: params.connectionId };
       case 'rtc.close':
         this.connectionId = undefined;
         return { closed: true };

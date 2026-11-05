@@ -419,6 +419,25 @@ export function SettingsDialog({
             labelPlacement="start"
             control={
               <Switch
+                checked={settings.avSync}
+                disabled={!online || busy.avSync}
+                onChange={(_, checked) => void save('avSync', { avSync: checked })}
+              />
+            }
+            label="音视频同步"
+          />
+          <Typography variant="body2" color="text.secondary">
+            开启后声音与画面对齐，画面延迟会增加；切换时会重新建立媒体连接
+          </Typography>
+          {note('avSync')}
+        </div>
+        <Divider />
+        <div className="setting-section">
+          <FormControlLabel
+            className="setting-switch"
+            labelPlacement="start"
+            control={
+              <Switch
                 checked={settings.memorySaverEnabled}
                 disabled={!online || busy.memory}
                 onChange={(_, checked) => void save('memory', { memorySaverEnabled: checked })}

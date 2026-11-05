@@ -235,6 +235,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
               'audioChannels',
               'searchEngine',
               'autoFullscreen',
+              'avSync',
             ].includes(k),
         )
       )
@@ -254,6 +255,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         throw new RemoteKitError('invalid_request', '显示比例需0.5–4');
       if ('memorySaverEnabled' in value && typeof value.memorySaverEnabled !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的内存设置');
+      if ('avSync' in value && typeof value.avSync !== 'boolean')
+        throw new RemoteKitError('invalid_request', '无效的音视频同步设置');
       if ('autoFullscreen' in value && typeof value.autoFullscreen !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的全屏设置');
       if (

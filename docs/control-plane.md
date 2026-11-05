@@ -105,4 +105,4 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 
 ## 设置
 
-设置统一在"更多 → 设置"，全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、Client Scale（默认 Viewer DPR，可覆盖）、Memory Saver、搜索引擎、左右声道（多选；"不播放"即清空）、打开时全屏、锁定策略、统计叠层。每站点设置在"更多 → 网页兼容性处理"：平板版网站、不自动弹出键盘。Control 下发给 Endpoint 的媒体策略只有 `{degradationPreference, maxFps}`，maxFps 来自 Viewer 显式上报的刷新能力，未知时 60。
+设置统一在"更多 → 设置"，全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、Client Scale（默认 Viewer DPR，可覆盖）、Memory Saver、搜索引擎、左右声道（多选；"不播放"即清空）、音视频同步（默认关闭）、打开时全屏、锁定策略、统计叠层。每站点设置在"更多 → 网页兼容性处理"：平板版网站、不自动弹出键盘。Control 下发给 Endpoint 的媒体策略是 `{degradationPreference, maxFps, audio}`：maxFps 来自 Viewer 显式上报的刷新能力，未知时 60；audio 为左右声道至少选中一个。音视频同步不属于运行期策略，而是 peer 的创建参数：Control 在转发 offer 时读取当时的设置传给 Endpoint，Endpoint 在应答中回显该 peer 实际采用的值；Viewer 发现权威设置与当前 peer 不一致时立即重建 RTC 连接（不计入失败重试、不经过退避）。

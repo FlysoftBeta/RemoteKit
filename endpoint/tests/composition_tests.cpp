@@ -58,11 +58,11 @@ int main() {
     session.BeginManagementRequest(7);
     Check(session.ManagementCurrent(), "management generation wiring");
     auto policy = session.Media().ManageSessionMediaPolicy(
-        {{"maxFps", 30}, {"degradationPreference", "balanced"}});
+        {{"audio", true}, {"maxFps", 30}, {"degradationPreference", "balanced"}});
     Check(bool(policy) && session.Media().MaxFps() == 30,
           "media policy belongs to pipeline before peer creation");
     auto invalid = session.Media().ManageSessionMediaPolicy(
-        {{"maxFps", 0}, {"degradationPreference", "balanced"}});
+        {{"audio", true}, {"maxFps", 0}, {"degradationPreference", "balanced"}});
     Check(!invalid && invalid.error().code == ErrorCode::kInvalidRequest,
           "invalid policy preserves typed error");
     DcFileServices::Job stale;

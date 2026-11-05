@@ -110,7 +110,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
 | `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |
 | `session.sitePreferences` | 完整 origin→UA 规则表 |
-| `session.mediaPolicy` | `{degradationPreference, maxFps}` |
+| `session.mediaPolicy` | `{degradationPreference, maxFps, audio}`；`audio` 为 false 时音频发送器停用、PCM 不进编码器 |
 | `session.events.ack` | 确认已持久化的自然关闭事件 |
 | `session.files.authorize` | 授权原生选择器与文件库的 DC 文件操作 |
 | `session.library.describe/retain/references/prepare/selectionStatus` | 文件资产与选择事务 |
@@ -120,7 +120,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `view.close` / `view.close.reply` | 关闭；对 beforeunload 的回复带完整身份 |
 | `view.adopt` | 收养弹窗：provisionalId + 产品分配的 viewId |
 | `view.page.reply` / `view.page.exitFullscreen` | 对话框回复、退出网页全屏（精确绑定运行实例与文档） |
-| `rtc.offer` / `rtc.ice` / `rtc.close` | 信令 |
+| `rtc.offer` / `rtc.ice` / `rtc.close` | 信令；`rtc.offer` 必带 `avSync`，应答回显该 peer 实际采用的值 |
 | `rtc.authorize` | connectionId、epoch、unlocked |
 | `rtc.actionResult` | 产品动作的收据回传 |
 | `auth.face.capabilities/begin/status/cancel` | 人脸挑战 |
@@ -147,7 +147,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 
 ## SDK C ABI
 
-控制/渲染 ABI 2、RTC ABI 4、SharedRenderMapping v2——三者与 Browser、Endpoint 必须同时更新，不能混用旧版本。跨 DLL 只传 C 类型、整数句柄、显式长度的缓冲、定长结构（带 `struct_size`）和回调指针。
+控制/渲染 ABI 2、RTC ABI 5、SharedRenderMapping v2——三者与 Browser、Endpoint 必须同时更新，不能混用旧版本。跨 DLL 只传 C 类型、整数句柄、显式长度的缓冲、定长结构（带 `struct_size`）和回调指针。
 
 | 族 | 函数 |
 |---|---|
@@ -155,7 +155,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | 控制 | `remotekit_sdk_control_connect/request/close`、`control_command`、`control_command_token`、`control_open_render` |
 | 渲染 | `remotekit_sdk_render_connect/begin/observe_signal/stop/close` |
 | 键码 | `remotekit_sdk_windows_dom_code/dom_key` |
-| RTC | `remotekit_rtc_create/close/sample_clock`、`create_offer/set_remote_description/add_ice/get_receive_level`、`set_media_authorized/set_degradation_preference/set_source_max_fps/set_playout_delay`、`adapt_frame/submit_texture`、`submit_audio`、`send_data/send_auth_data`、`request_stats`、`encoded/encoder_drop` |
+| RTC | `remotekit_rtc_create/close/sample_clock`、`create_offer/set_remote_description/add_ice/get_receive_level`、`set_media_authorized/set_audio_enabled/set_av_sync/set_degradation_preference/set_source_max_fps/set_playout_delay`、`adapt_frame/submit_texture`、`submit_audio`、`send_data/send_auth_data`、`request_stats`、`encoded/encoder_drop` |
 
 要点：
 - 控制请求从工作线程调用；超时、输出缓冲不足、传输失败会关闭并作废该句柄（防止后续请求收到旧回复）。Browser 的应用拒绝（`ok:false`）是一次成功的传输，不作废句柄。
@@ -163,3 +163,4 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 - 每个被接受的编码时间戳恰有一次 `encoded` 或 `encoder_drop`；encoder ID 不复用，销毁后的迟到完成被拒绝。`encoded` 的第三个参数返回实际发出的 RTP 时间戳（WebRTC 会加随机偏移），接收端关联用它。
 - peer 关闭与 `render_close` 是回调屏障，不是 GPU 完成证明。
 - `set_playout_delay` 两个值都是 10ms 的倍数，`0 ≤ min ≤ max ≤ 40950`；已安装后不能取消（需重建 peer）。
+- `set_av_sync` 只能在 `set_remote_description` 之前调用，决定音频发送器的 stream id（与视频相同即接收端唇音同步），之后返回 INVALID_STATE。`set_audio_enabled` 运行期生效：音频发送器只在"媒体已授权且音频启用"时活动，禁用期间 `submit_audio` 接受并丢弃 PCM。

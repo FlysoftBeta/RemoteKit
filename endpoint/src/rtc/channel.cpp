@@ -174,11 +174,15 @@ bool ChannelController::ServiceMessage(const Event& event) {
 }
 
 Result<Json> ChannelController::Offer(const Json& request, uint64_t generation) {
+  if (!request.contains("avSync") || !request.at("avSync").is_boolean())
+    return Error{ErrorCode::kInvalidRequest, "invalid RTC avSync"};
+  const bool av_sync = request.at("avSync").get<bool>();
   auto started = views.Start();
   if (!started)
     return started.error();
   pipeline.Rates(options.encoding.bitrate, pipeline.MaxFps());
-  return peer_controller.Offer(request, generation, pipeline.MaxFps(), pipeline.Degradation());
+  return peer_controller.Offer(request, generation, pipeline.MaxFps(), pipeline.Degradation(),
+                               pipeline.Audio(), av_sync);
 }
 
 Result<Json> ChannelController::ManageRtcActionResult(const Json& request) {

@@ -67,8 +67,11 @@ export class EndpointGateway {
   async ensureSession(tenant: string): Promise<{ browserPid?: number; [key: string]: unknown }> {
     return this.invoke<{ browserPid?: number; [key: string]: unknown }>('session.ensure', tenant);
   }
-  async offer(tenant: string, args: { connectionId: string; sdp: string }): Promise<Accepted> {
-    return this.invoke<Accepted>('rtc.offer', tenant, { ...args, trickle: true });
+  async offer(
+    tenant: string,
+    args: { connectionId: string; sdp: string; avSync: boolean },
+  ): Promise<Accepted & { avSync: boolean }> {
+    return this.invoke<Accepted & { avSync: boolean }>('rtc.offer', tenant, { ...args, trickle: true });
   }
   async ice(tenant: string, args: { connectionId: string; candidate: unknown }): Promise<Accepted> {
     return this.invoke<Accepted>('rtc.ice', tenant, args);

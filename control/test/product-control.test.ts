@@ -295,7 +295,7 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
   }
 });
 
-test('automatic Viewer fullscreen defaults off and saves an explicit boolean', async () => {
+test('automatic Viewer fullscreen and AV sync default off and save explicit booleans', async () => {
   const {
     store,
     control,
@@ -309,6 +309,7 @@ test('automatic Viewer fullscreen defaults off and saves an explicit boolean', a
         tenantId,
       );
     assert.equal(store.workspaces.workspace(tenantId).settings.autoFullscreen, false);
+    assert.equal(store.workspaces.workspace(tenantId).settings.avSync, false);
     await control.viewers.attachViewer(
       tenantId,
       'lease',
@@ -318,7 +319,7 @@ test('automatic Viewer fullscreen defaults off and saves an explicit boolean', a
     );
     await control.operations.productAction(
       tenantId,
-      { type: 'settings.update', settings: { autoFullscreen: true } },
+      { type: 'settings.update', settings: { autoFullscreen: true, avSync: true } },
       'lease',
     );
     await assert.rejects(
@@ -328,6 +329,15 @@ test('automatic Viewer fullscreen defaults off and saves an explicit boolean', a
       }),
       { code: 'invalid_request' },
     );
+    for (const avSync of ['true', 1, null]) {
+      await assert.rejects(
+        requestViewer(control, tenantId, 'lease', 'action', {
+          type: 'settings.update',
+          settings: { avSync },
+        }),
+        { code: 'invalid_request' },
+      );
+    }
     const attached = await control.viewers.attachViewer(
       tenantId,
       'replacement',
@@ -336,6 +346,7 @@ test('automatic Viewer fullscreen defaults off and saves an explicit boolean', a
       true,
     );
     assert.equal(attached?.workspace.settings.autoFullscreen, true);
+    assert.equal(attached?.workspace.settings.avSync, true);
     assert.equal(attached?.workspace.settings.searchEngine, 'bing');
   } finally {
     await control.viewers.detachViewer(tenantId, 'replacement');
@@ -373,6 +384,7 @@ test('remote page fullscreen follows the live document, with a document-bound ex
     assert.equal(first.tabId, tab.id);
     assert.equal(first.windowId, tab.windowId);
     assert.equal(store.workspaces.workspace(tenantId).settings.autoFullscreen, false);
+    assert.equal(store.workspaces.workspace(tenantId).settings.avSync, false);
     assert.equal('pageFullscreen' in store.workspaces.workspace(tenantId), false);
     view.document = '2';
     await control.reconciler.tick();
@@ -1309,12 +1321,13 @@ test('quality preference updates only WebRTC degradation policy while client dis
         { type: 'settings.update', settings: { qualityPreference } },
         'lease',
       );
-      assert.deepEqual(result.state.quality.requested, { degradationPreference, maxFps: 120 });
+      assert.deepEqual(result.state.quality.requested, { degradationPreference, maxFps: 120, audio: true });
       assert.equal(result.state.quality.effectiveDpr, 2);
       assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, 2);
       const policies = endpoint.calls.filter((call) => call.method === 'session.mediaPolicy');
       assert.ok(policies.length > 0);
-      for (const policy of policies) assert.deepEqual(policy.args, { degradationPreference, maxFps: 120 });
+      for (const policy of policies)
+        assert.deepEqual(policy.args, { degradationPreference, maxFps: 120, audio: true });
       assert.ok(
         !endpoint.calls.some((call) => call.method === 'session.rtc.close' || call.method === 'view.resize'),
       );
@@ -1326,11 +1339,52 @@ test('quality preference updates only WebRTC degradation policy while client dis
   }
 });
 
+test('audio channel changes reapply the audio policy without replacing RTC', async () => {
+  const { store, endpoint, control, user } = await fixture();
+  try {
+    await control.viewers.attachViewer(
+      user.tenantId,
+      'lease',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
+    await control.operations.productAction(
+      user.tenantId,
+      { type: 'window.create', url: 'about:blank' },
+      'lease',
+    );
+    for (const [left, right] of [
+      [false, false],
+      [true, false],
+      [false, false],
+      [false, true],
+    ]) {
+      endpoint.calls = [];
+      const result = await control.operations.productAction(
+        user.tenantId,
+        { type: 'settings.update', settings: { audioChannels: { left, right } } },
+        'lease',
+      );
+      const policies = endpoint.calls.filter((call) => call.method === 'session.mediaPolicy');
+      assert.ok(policies.length > 0);
+      assert.equal(result.state.quality.requested.audio, left || right);
+      for (const policy of policies) assert.equal(policy.args.audio, left || right);
+      assert.ok(!endpoint.calls.some((call) => ['rtc.close', 'rtc.offer'].includes(call.method)));
+    }
+  } finally {
+    await control.viewers.detachViewer(user.tenantId, 'lease');
+    await control.close();
+    store.db.close();
+  }
+});
+
 test('explicit no-peer media policy clears the previous applied diagnostic', async () => {
   const { store, endpoint, control, user } = await fixture();
   const request = endpoint.request.bind(endpoint);
-  let applied: { degradationPreference: string; maxFps: number } | null = {
+  let applied: { degradationPreference: string; maxFps: number; audio: boolean } | null = {
     degradationPreference: 'balanced',
+    audio: true,
     maxFps: 60,
   };
   endpoint.request = async (method, tenant, args) => {

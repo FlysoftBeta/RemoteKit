@@ -91,6 +91,8 @@ int remotekit_rtc_submit_audio(uint64_t id,
   std::lock_guard lock(peer->audio_mutex);
   if (peer->closing.load() || peer->authorization->epoch.load() != authorization)
     return REMOTEKIT_SDK_INVALID_STATE;
+  if (!peer->audio_enabled)
+    return REMOTEKIT_SDK_OK;
   const auto advance = peer->audio_timeline.Plan(generation, sequence, sample_index,
                                                  first_sample_qpc, discontinuity != 0);
   if (advance.step == remotekit::AudioStep::reject)
@@ -125,11 +127,9 @@ int remotekit_rtc_submit_audio(uint64_t id,
         encoding.active = false;
       if (!peer->audio_sender->SetParameters(parameters).ok())
         return REMOTEKIT_SDK_INVALID_STATE;
-      parameters = peer->audio_sender->GetParameters();
-      for (auto& encoding : parameters.encodings)
-        encoding.active = true;
-      return peer->audio_sender->SetParameters(parameters).ok() ? REMOTEKIT_SDK_OK
-                                                                : REMOTEKIT_SDK_INVALID_STATE;
+      return peer->ApplySenderActivity(peer->authorization->epoch.load() & 1)
+                 ? REMOTEKIT_SDK_OK
+                 : REMOTEKIT_SDK_INVALID_STATE;
     });
     if (status != REMOTEKIT_SDK_OK)
       return status;

@@ -10,6 +10,7 @@ export const defaultSettings = () => ({
   memorySaverEnabled: true,
   showStats: false,
   autoFullscreen: false,
+  avSync: false,
   audioChannels: { left: true, right: true },
 });
 export function emptyWorkspace(tenantId: string): ProductWorkspace {
@@ -48,7 +49,7 @@ export class WorkspacesRepository {
       activeWindowId: row.active_window,
       layoutMode: row.layout_mode,
       ...JSON.parse(row.pending ?? '{}'),
-      settings: JSON.parse(settings.data),
+      settings: { ...defaultSettings(), ...JSON.parse(settings.data) },
       windows: (
         this.db
           .prepare('SELECT id,active_tab,weight FROM workspace_windows WHERE tenant=? ORDER BY position')

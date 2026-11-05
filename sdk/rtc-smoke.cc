@@ -219,8 +219,9 @@ int main(int argc, char** argv) {
     uint64_t other = e.peer == a ? b : a;
     if (e.peer == answerer) {
       if (e.type == REMOTEKIT_RTC_SDP_ANSWER) {
-        answer_sends_video = e.text.find("a=sendonly") != std::string::npos &&
-                             e.text.find("a=msid:remotekit remotekit-atlas") != std::string::npos;
+        answer_sends_video =
+            e.text.find("a=sendonly") != std::string::npos &&
+            e.text.find("a=msid:remotekit-video remotekit-atlas") != std::string::npos;
       }
       if (e.type == REMOTEKIT_RTC_ERROR) {
         std::fprintf(stderr, "answerer error: %s\n", e.text.c_str());

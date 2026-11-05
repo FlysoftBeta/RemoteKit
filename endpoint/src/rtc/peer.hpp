@@ -26,9 +26,14 @@ class PeerController {
   PeerController(media::Sdk& sdk, const RuntimeOptions& options, Hooks hooks)
       : sdk_(sdk), options_(options), hooks_(std::move(hooks)) {}
   ~PeerController();
-  Result<Json> Offer(const Json&, uint64_t, uint32_t, uint32_t);
+  Result<Json> Offer(const Json& request,
+                     uint64_t generation,
+                     uint32_t fps,
+                     uint32_t degradation,
+                     bool audio,
+                     bool av_sync);
   Result<Json> Ice(const Json&);
-  Result<void> Policy(uint32_t fps, uint32_t degradation);
+  Result<void> Policy(uint32_t fps, uint32_t degradation, bool audio);
   void Close();
   void FlushSignals();
   uint64_t Handle() const { return peer_.load(); }
@@ -39,6 +44,7 @@ class PeerController {
   }
   State GetState() const { return state_.load(); }
   bool Connected() const { return GetState() == State::kConnected; }
+  bool AvSync() const { return av_sync_.load(); }
   bool DataOpen() const { return data_open_.load(); }
   uint32_t ReceiveLevel() const { return receive_level_.load(); }
   void Failed() {
@@ -54,7 +60,7 @@ class PeerController {
   Hooks hooks_;
   std::atomic<uint64_t> peer_{0}, management_generation_{0};
   std::atomic<State> state_{State::kNone};
-  std::atomic<bool> data_open_{false};
+  std::atomic<bool> data_open_{false}, av_sync_{false};
   std::atomic<uint32_t> receive_level_{0};
   mutable std::mutex mutex_;
   std::string connection_;

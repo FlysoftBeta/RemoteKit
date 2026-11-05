@@ -44,6 +44,17 @@ bool SetSenderActive(webrtc::RtpSenderInterface* sender, bool active) {
   }
   return !changed || sender->SetParameters(parameters).ok();
 }
+bool Peer::ApplySenderActivity(bool authorized) {
+  const bool video = SetSenderActive(video_sender.get(), authorized);
+  // Stopping the audio sender drains ChannelSend's encoder queue and resets
+  // the encoder so queued PCM cannot reappear after authorization or enabling.
+  const bool audio = SetSenderActive(audio_sender.get(), authorized && audio_enabled);
+  if (authorized && (!video || !audio)) {
+    SetSenderActive(video_sender.get(), false);
+    SetSenderActive(audio_sender.get(), false);
+  }
+  return video && audio;
+}
 Peer::Peer(uint64_t id, const remotekit_rtc_options& options)
     : id(id),
       options(options),
@@ -305,8 +316,6 @@ int Peer::Start() {
     // JSEP only reuses unassociated transceivers created by AddTrack when
     // applying an incoming offer. AddTransceiver here would leave our sender
     // unassociated and create a second recvonly transceiver (inactive answer).
-    // Audio uses a different stream id. A shared stream makes the receiver
-    // lip-sync video to NetEq's delay, which disables the min=0 playout path.
     auto added = pc->AddTrack(track, {"remotekit-video"});
     if (!added.ok())
       return REMOTEKIT_SDK_INVALID_STATE;
@@ -319,7 +328,6 @@ int Peer::Start() {
     }
     auto parameters = sender->GetParameters();
     for (auto& encoding : parameters.encodings) {
-      encoding.active = !options.auth_required;
       encoding.max_framerate = 60.0;
       encoding.num_temporal_layers = 1;
       if (options.max_bitrate_bps)
@@ -327,6 +335,8 @@ int Peer::Start() {
     }
     parameters.degradation_preference = webrtc::DegradationPreference::BALANCED;
     if (!sender->SetParameters(parameters).ok())
+      return REMOTEKIT_SDK_INVALID_STATE;
+    if (!ApplySenderActivity(authorization->epoch.load() & 1))
       return REMOTEKIT_SDK_INVALID_STATE;
     webrtc::BitrateSettings bitrate;
     if (options.min_bitrate_bps)
@@ -426,17 +436,8 @@ int remotekit_rtc_set_media_authorized(uint64_t id, int authorized) {
     std::lock_guard lock(gate.completion_mutex);
     gate.epoch.store(++epoch);
   }
-  const bool applied = peer->signaling->BlockingCall([&] {
-    const bool video = SetSenderActive(peer->video_sender.get(), authorized != 0);
-    // Stopping the audio sender drains ChannelSend's encoder queue and resets
-    // the encoder so a queued PCM block cannot reappear after authorization.
-    const bool audio = SetSenderActive(peer->audio_sender.get(), authorized != 0);
-    if (authorized && (!video || !audio)) {
-      SetSenderActive(peer->video_sender.get(), false);
-      SetSenderActive(peer->audio_sender.get(), false);
-    }
-    return video && audio;
-  });
+  const bool applied =
+      peer->signaling->BlockingCall([&] { return peer->ApplySenderActivity(authorized != 0); });
   if (!applied)
     return REMOTEKIT_SDK_INVALID_STATE;
   if (authorized && !(epoch & 1)) {
@@ -446,10 +447,40 @@ int remotekit_rtc_set_media_authorized(uint64_t id, int authorized) {
   return REMOTEKIT_SDK_OK;
 }
 
+int remotekit_rtc_set_av_sync(uint64_t id, int synced) {
+  if (synced != 0 && synced != 1)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  return WithPeer(id, [&](Peer& p) {
+    if (p.remote_description_started)
+      return REMOTEKIT_SDK_INVALID_STATE;
+    p.av_sync = synced != 0;
+    return REMOTEKIT_SDK_OK;
+  });
+}
+
+int remotekit_rtc_set_audio_enabled(uint64_t id, int enabled) {
+  if (enabled != 0 && enabled != 1)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  auto peer = FindPeer(id);
+  if (!peer)
+    return REMOTEKIT_SDK_INVALID_STATE;
+  std::lock_guard api_lock(peer->api_mutex);
+  std::lock_guard audio_lock(peer->audio_mutex);
+  if (peer->closing.load())
+    return REMOTEKIT_SDK_INVALID_STATE;
+  peer->audio_enabled = enabled != 0;
+  return peer->signaling->BlockingCall([&] {
+    return peer->ApplySenderActivity(peer->authorization->epoch.load() & 1)
+               ? REMOTEKIT_SDK_OK
+               : REMOTEKIT_SDK_INVALID_STATE;
+  });
+}
+
 int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* bytes, size_t size) {
   if (!ValidBytes(bytes, size) || (offer != 0 && offer != 1))
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   return WithPeer(id, [&](Peer& p) {
+    p.remote_description_started = true;
     webrtc::SdpParseError error;
     auto sdp =
         webrtc::CreateSessionDescription(offer ? webrtc::SdpType::kOffer : webrtc::SdpType::kAnswer,
@@ -485,7 +516,8 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
     if (receives_audio && !p.audio_source) {
       p.audio_source = webrtc::make_ref_counted<PageAudioSource>();
       auto audio_track = p.factory->CreateAudioTrack("remotekit-audio", p.audio_source.get());
-      auto added = p.pc->AddTrack(audio_track, {"remotekit-audio"});
+      // A shared stream lip-syncs video to NetEq's delay, raising video playout delay.
+      auto added = p.pc->AddTrack(audio_track, {p.av_sync ? "remotekit-video" : "remotekit-audio"});
       if (!added.ok())
         return REMOTEKIT_SDK_INVALID_STATE;
       p.audio_sender = added.value();
@@ -493,7 +525,7 @@ int remotekit_rtc_set_remote_description(uint64_t id, int offer, const char* byt
         if (transceiver->sender() == added.value() &&
             !transceiver->SetDirectionWithError(webrtc::RtpTransceiverDirection::kSendOnly).ok())
           return REMOTEKIT_SDK_INVALID_STATE;
-      if (!(p.authorization->epoch.load() & 1) && !SetSenderActive(p.audio_sender.get(), false))
+      if (!p.ApplySenderActivity(p.authorization->epoch.load() & 1))
         return REMOTEKIT_SDK_INVALID_STATE;
     }
     // Level asymmetry lets our answer advertise a different receive level;

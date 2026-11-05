@@ -23,7 +23,8 @@ class SignalEndpoint implements EndpointLink {
     if (method === 'session.snapshot') return { running: true, views: [], browserPid: 1 };
     if (method === 'session.ensure') return { running: true, browserPid: 1 };
     if (method === 'rtc.authorize') return { applied: true, epoch: args.epoch };
-    if (method === 'rtc.offer') return { accepted: true, pending: true, connectionId: args.connectionId };
+    if (method === 'rtc.offer')
+      return { accepted: true, avSync: args.avSync, pending: true, connectionId: args.connectionId };
     return { accepted: true, applied: true, closed: true };
   }
   signal(tenant: string, connectionId: string, signal: RtcSignal['signal']) {
@@ -38,6 +39,41 @@ async function offered(endpoint: SignalEndpoint, tenant: string) {
   }
   throw new Error('offer not accepted');
 }
+test('stored settings without avSync load false and relay an offer with avSync false', async () => {
+  const store = new ControlDatabase(':memory:'),
+    endpoint = new SignalEndpoint(),
+    control = createApplication(store, testGateway(endpoint));
+  try {
+    const { tenantId } = await accountsFor(store).register('stored-settings', 'password');
+    const { avSync, ...settings } = store.workspaces.workspace(tenantId).settings;
+    settings.audioChannels = { left: false, right: true };
+    store.db
+      .prepare('UPDATE user_settings SET data=? WHERE tenant=?')
+      .run(JSON.stringify(settings), tenantId);
+    const loaded = store.workspaces.workspace(tenantId).settings;
+    assert.equal(loaded.avSync, false);
+    assert.deepEqual(loaded.audioChannels, settings.audioChannels);
+    await control.viewers.attachViewer(
+      tenantId,
+      'lease',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
+    const pending = control.rtc.offer(
+      tenantId,
+      { type: 'offer', sdp: 'v=0\r\n', attemptId: 'stored-settings' },
+      'lease',
+    );
+    const connection = await offered(endpoint, tenantId);
+    assert.equal(endpoint.calls.find((call) => call.method === 'rtc.offer')?.args.avSync, false);
+    endpoint.signal(tenantId, connection, { type: 'answer', sdp: 'v=0\r\n' });
+    assert.equal((await pending).avSync, false);
+  } finally {
+    control.rtc.clearSignals();
+    store.db.close();
+  }
+});
 test('pending trickle offers allow other tenants and bind early candidates to connection/attempt/lease', async () => {
   const store = new ControlDatabase(':memory:'),
     endpoint = new SignalEndpoint(),
@@ -60,6 +96,10 @@ test('pending trickle offers allow other tenants and bind early candidates to co
       { identity: 'test-account', valid: () => true },
       true,
     );
+    await requestViewer(control, a.tenantId, 'lease-a', 'action', {
+      type: 'settings.update',
+      settings: { avSync: true },
+    });
     const events: any[] = [];
     control.events.on('rtc.signal', (...event) => events.push(event));
     const first = control.rtc.offer(
@@ -68,6 +108,7 @@ test('pending trickle offers allow other tenants and bind early candidates to co
       'lease-a',
     );
     const connection = await offered(endpoint, a.tenantId);
+    assert.equal(endpoint.calls.find((c) => c.method === 'rtc.offer')?.args.avSync, true);
     await requestViewer(control, b.tenantId, 'lease-b', 'clock.ping', {});
     const candidate = {
       candidate: 'candidate:1 1 udp 1 127.0.0.1 9999 typ host',
@@ -94,7 +135,9 @@ test('pending trickle offers allow other tenants and bind early candidates to co
       candidate,
     });
     endpoint.signal(a.tenantId, connection, { type: 'answer', sdp: 'v=0\r\n' });
-    assert.equal((await first).signalingMode, 'trickle');
+    const reply = await first;
+    assert.equal(reply.signalingMode, 'trickle');
+    assert.equal(reply.avSync, true);
     await control.viewers.detachViewer(a.tenantId, 'lease-a');
     endpoint.signal(a.tenantId, connection, { type: 'ice', candidate });
     assert.equal(events.length, 1);
