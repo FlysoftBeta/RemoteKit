@@ -85,6 +85,45 @@ test('touch controller holds the owner through pending and unknown outcomes unti
   assert.equal(view.sample('start', { id: 2, x: 10, y: 20, pressure: 0.5 }, 60), true);
 });
 
+test('a sole rejected start releases locally without sending remote cleanup', (t) => {
+  const results = new Events<InputResult>();
+  const deliveries = new Events<InputDelivery>();
+  const sent: Record<string, unknown>[] = [];
+  const view = new TouchView(
+    {
+      input: {
+        inputIdentity: () => 'owner',
+        sendInput: (_surface, event) => {
+          sent.push(event);
+          return true;
+        },
+        subscribeInputResults: results.subscribe,
+        subscribeInputDelivery: deliveries.subscribe,
+        touchStartWall: () => undefined,
+      },
+      presentation: { layout },
+      touch: { touchRetirementCurrent: () => true, retireTouch: () => true, retryTouchTerminal: () => true },
+    },
+    '1',
+    { hasPointerCapture: () => false } as unknown as HTMLCanvasElement,
+  );
+  t.after(() => view.reset());
+  view.sample('start', { id: 1, x: 10, y: 20, pressure: 0.5 }, 0);
+  deliveries.emit({ surface, identity: 'owner', event: sent[0], phase: 'submitted' });
+  results.emit({
+    surface,
+    identity: 'owner',
+    event: sent[0],
+    sequence: '1',
+    ok: false,
+    touchState: 'rejected',
+    touchSequenceId: String(sent[0].sequenceId),
+  });
+  assert.equal(view.getSnapshot().phase, 'released');
+  assert.equal(sent.length, 1);
+  assert.equal(view.sample('start', { id: 2, x: 10, y: 20, pressure: 0.5 }, 50), true);
+});
+
 test('editing controller defers edits through presentation loss and expires them without a React timer', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   let view: EditingView;

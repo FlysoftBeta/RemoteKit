@@ -112,7 +112,7 @@ void InputWireFailures() {
   };
   remotekit::BrowserRpc browser(sdk);
   CHECK(browser.Connect("test"));
-  auto rpc = [&](const Json& request) { return browser.Request(request); };
+  auto rpc = [&](const Json& request) { return browser.Exchange(request); };
   auto dispatch = [&] {
     return remotekit::RetryBrowserInput(
         Json{{"method", "input"}, {"sequence", "41"}}, rpc, [&] { return identity; },
@@ -126,12 +126,11 @@ void InputWireFailures() {
   CHECK(calls == 4 && retries == 2);
   application = {{"ok", false}, {"code", 3}, {"error", "rejected"}, {"detail", "target mismatch"}};
   CHECK(remotekit::BrowserRpc::ReplyError(application).message == "target mismatch");
-  CHECK(dispatch().error().code == remotekit::ErrorCode::kRejected);
+  CHECK(dispatch().value() == application);
   CHECK(calls == 5 && retries == 2);
   auto rejected = dispatch();
-  CHECK(!rejected && rejected.error().message.find("3") != std::string::npos);
-  CHECK(rejected.error().message.find("rejected") != std::string::npos);
-  CHECK(rejected.error().message.find("target mismatch") != std::string::npos);
+  CHECK(rejected &&
+        remotekit::TouchFailureState(rejected.value(), "touch") == std::string("rejected"));
   application = {{"ok", false}, {"code", 6}};
   identity = false;
   CHECK(dispatch().error().code == remotekit::ErrorCode::kConflict);
@@ -144,12 +143,49 @@ void InputWireFailures() {
   const auto before = calls;
   CHECK(dispatch().error().code == remotekit::ErrorCode::kBusy);
   CHECK(calls - before == 51 && exhausted == 2);
+  application = {{"ok", false}, {"code", 6}, {"inputAdmitted", true}};
+  const auto admitted_calls = calls;
+  CHECK(dispatch().value() == application && calls == admitted_calls + 1);
+  application = {{"ok", false}, {"code", 6}, {"state", "pending"}, {"sequenceId", "retire"}};
+  auto pending = browser.Exchange({{"method", "input.touchRetire"}, {"sequence", "41"}});
+  CHECK(pending && pending.value().at("state") == "pending");
+  remotekit::TouchTerminalReceipt receipt;
+  receipt.sequence = "retire";
+  CHECK(!remotekit::ApplyTouchTerminalStatus(receipt, pending.value()));
   sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void*, size_t, size_t*,
                                          uint32_t) { return 5; };
   auto timeout = rpc(Json::object());
   CHECK(!timeout && timeout.error().code == remotekit::ErrorCode::kOutcomeUnknown);
   auto unavailable = rpc(Json::object());
   CHECK(!unavailable && unavailable.error().code == remotekit::ErrorCode::kUnavailable);
+}
+
+void TouchAdmissionProof() {
+  remotekit::TouchSequenceAdmissions admissions;
+  admissions.Bind(1, 2);
+  CHECK(!admissions.NeverAdmitted("unknown"));
+  admissions.Start("rejected-start");
+  CHECK(admissions.NeverAdmitted("rejected-start"));
+  admissions.MayBeAdmitted("rejected-start");
+  admissions.Start("rejected-start");
+  CHECK(!admissions.NeverAdmitted("rejected-start"));
+  admissions.Start("stale-layout");
+  CHECK(admissions.NeverAdmitted("stale-layout"));
+  admissions.Bind(1, 3);
+  CHECK(!admissions.NeverAdmitted("stale-layout"));
+  admissions.Start("old-peer");
+  admissions.Bind(2, 3);
+  CHECK(!admissions.NeverAdmitted("old-peer"));
+  admissions.Start("evicted");
+  for (size_t index = 0; index < admissions.kCapacity; ++index)
+    admissions.Start(std::to_string(index));
+  CHECK(!admissions.NeverAdmitted("evicted"));
+  CHECK(admissions.NeverAdmitted("63"));
+  CHECK(remotekit::TouchFailureState({{"inputAdmitted", true}}, "a") ==
+        std::string("terminal-unconfirmed"));
+  Json invalidated = {{"touchState", "terminal-invalidated"}, {"touchSequenceId", "a"}};
+  CHECK(remotekit::TouchFailureState(invalidated, "a") == std::string("terminal-invalidated"));
+  CHECK(remotekit::TouchFailureState(invalidated, "b") == std::string("rejected"));
 }
 
 void ControlBackpressure() {
@@ -377,6 +413,8 @@ void TouchTerminal() {
   old->Accept(100, 200);
   CHECK(receipts.Due(100) == old);
   CHECK(!remotekit::ApplyTouchTerminalStatus(*old, status("pending", old->sequence)));
+  CHECK(!remotekit::ApplyTouchTerminalStatus(*old, status("terminal-unconfirmed", old->sequence)));
+  CHECK(old->polling && !old->send_result);
   old->due = 105;
   // A pending native status yields to later dispatch and other due queries.
   auto* next = receipts.Reserve(make(2));
@@ -484,6 +522,7 @@ int main() {
   RpcLockAndStatusMapping();
   OversizedBrowserReplyIsApplicationError();
   TouchTerminal();
+  TouchAdmissionProof();
   InputWireFailures();
   ControlBackpressure();
   IncrementalExport();

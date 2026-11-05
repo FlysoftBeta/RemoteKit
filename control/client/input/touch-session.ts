@@ -33,6 +33,15 @@ export class TouchSession {
     this.scheduleTerminalQuery(sequence, entry);
     this.notify();
   }
+  acceptTerminal(sequence: string) {
+    const entry = this.terminalInput.get(sequence);
+    if (!entry) return;
+    entry.pending = true;
+    entry.retries = 0;
+    entry.unconfirmed = false;
+    this.queries.resolve(sequence, undefined);
+    this.scheduleTerminalQuery(sequence, entry);
+  }
   settleTouch(identity: string, sequenceId: string) {
     for (const [sequence, entry] of this.terminalInput)
       if (entry.identity === identity && entry.event.sequenceId === sequenceId) this.deleteTerminal(sequence);
@@ -83,14 +92,14 @@ export class TouchSession {
     void this.queries
       .request(
         sequence,
-        terminalQueryDelays[entry.retries] ?? 1000,
+        terminalQueryDelays[entry.retries] ?? 2000,
         () => {},
         undefined,
         () => {
           if (this.terminalInput.get(sequence) !== entry) return;
-          if (entry.retries === terminalQueryDelays.length) {
+          if (entry.retries >= terminalQueryDelays.length && !entry.unconfirmed) {
+            entry.unconfirmed = true;
             this.ports.report(entry, 'unconfirmed', sequence, 'terminal-query-timeout');
-            return;
           }
           const channel = this.ports.channel();
           if (
@@ -105,11 +114,11 @@ export class TouchSession {
                 clientSequence: sequence,
                 sequenceId: String(entry.event.sequenceId),
               });
+              entry.retries++;
             } catch (error) {
               diagnostics.record('touch-status', error);
             }
           }
-          entry.retries++;
           this.scheduleTerminalQuery(sequence, entry);
         },
       )
@@ -130,10 +139,10 @@ export class TouchSession {
       .find(([, request]) => request.identity === identity && request.event.sequenceId === sequenceId);
     if (!entry || entry[1].event.gestureMode !== 'client-v1') return false;
     const [sequence, request] = entry;
-    if (!this.queries.has(sequence)) {
-      request.retries = 0;
-      this.scheduleTerminalQuery(sequence, request);
-    }
+    this.queries.resolve(sequence, undefined);
+    request.retries = 0;
+    request.unconfirmed = false;
+    this.scheduleTerminalQuery(sequence, request);
     return true;
   }
 

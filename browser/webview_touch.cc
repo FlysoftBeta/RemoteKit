@@ -128,14 +128,16 @@ ClientTouchRetirement::State TouchController::RetireClientTouch(const InputToken
   using State = ClientTouchRetirement::State;
   RefreshClientTouchOwner();
   const auto prior = owner_.ClientTouchStatus(token, sequence);
-  if (prior != State::unknown || client_touch_token_ != token || client_touch_sequence_ != sequence)
+  if ((prior != State::unknown && prior != State::unconfirmed) || client_touch_token_ != token ||
+      client_touch_sequence_ != sequence ||
+      (client_gesture_bridge_ && client_gesture_bridge_->has_routed_terminal()))
     return prior;
   auto weak = weak_factory_.GetWeakPtr();
   if (AwaitingHitTest()) {
     // This owner has never routed a raw event.
     retired_client_touches_.Retire(token, sequence, true);
     CancelTouches(false);
-  } else if (!touches_.empty() && !OwnershipUnconfirmed() && TouchTargetAlive()) {
+  } else if (!touches_.empty() && TouchTargetAlive()) {
     // Cancel on the latched owner, with its last accepted positions/clock.
     // This path never remaps an event into the replacement layout.
     CancelTouches(true);

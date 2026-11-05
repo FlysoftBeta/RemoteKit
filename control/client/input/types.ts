@@ -35,6 +35,7 @@ export interface TerminalInput extends InputRequest {
   requiresTerminalState: boolean;
   pending: boolean;
   retries: number;
+  unconfirmed?: boolean;
   retirement?: boolean;
 }
 export const terminalQueryDelays = [250, 500, 1000, 2000];

@@ -384,13 +384,22 @@ export class TouchView extends Store<TouchOwnerState> {
         ? owner.identity
         : current && this.ports.input.inputIdentity(current);
     if (identity !== owner.identity) return;
+    if (
+      !result.ok &&
+      result.touchState === 'rejected' &&
+      result.event === owner.start &&
+      owner.submissions === 1
+    ) {
+      this.clearTouchOwner(owner, true);
+      return;
+    }
     const terminal = touchTerminalResult(owner, result, identity, this.touches.contactIds.length);
     if (terminal) {
       this.clearTouchOwner(owner, terminal === 'invalidated');
       return;
     }
     if (result.event === owner.packet && terminalState(owner)) {
-      if (result.touchState === 'accepted-pending' && terminalState(owner) !== 'unconfirmed') {
+      if (result.touchState === 'accepted-pending') {
         owner.state = transitionTouchOwner(owner.state, 'accepted-pending');
         this.setNotice();
       }

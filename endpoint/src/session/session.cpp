@@ -53,13 +53,8 @@ Session::Session(media::Sdk& api,
                          uint32_t timeout,
                          bool opportunistic,
                          const std::function<bool()>& admitted) {
-                    // Input replies carry admission and touch proof even when
-                    // ok is false; only pre-admission busy is an error here.
-                    auto reply = browser.Rpc().Exchange(std::move(request), control, timeout,
-                                                        opportunistic, admitted);
-                    if (reply && BrowserRpc::IsBusyBeforeAdmission(reply.value()))
-                      return Result<Json>(BrowserRpc::ReplyError(reply.value()));
-                    return reply;
+                    return browser.Rpc().Exchange(std::move(request), control, timeout,
+                                                  opportunistic, admitted);
                   },
               .send = [this](const Json& message, uint64_t stamp) { channel.Send(message, stamp); },
               .send_data =

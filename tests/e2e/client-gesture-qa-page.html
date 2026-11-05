@@ -206,6 +206,10 @@
     document.querySelector('#custom')?.addEventListener(
       'touchstart',
       (e) => {
+        if (block === 'ackdelay') {
+          const deadline = performance.now() + 2800;
+          while (performance.now() < deadline) {}
+        }
         if (block === 'start') {
           e.preventDefault();
           events.push({

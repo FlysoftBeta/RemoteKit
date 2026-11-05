@@ -34,7 +34,12 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
                                      const std::vector<TouchInput::Gesture>& candidates,
                                      int64_t source_elapsed_us) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
-  if (stopped_ || !router_ || !root_ || !target_ || !router_->IsViewInMap(root_.get()))
+  // Timeout shuts down gesture arbitration. An exact owner can still send its
+  // first raw cancellation and obtain canonical ACK proof without candidates.
+  const bool retirement = stopped_ && first_id_ && !terminal_routed_ &&
+                          event.GetType() == blink::WebInputEvent::Type::kTouchCancel;
+  if ((stopped_ && !retirement) || !router_ || !root_ || !target_ ||
+      !router_->IsViewInMap(root_.get()))
     return {ErrorCode::stale_identity, "Client touch owner lost"};
   if (pending_.size() >= 128)
     return {ErrorCode::busy, "Client touch ACK queue full"};
@@ -58,12 +63,14 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
     return {ErrorCode::busy, "Client touch router registrations full"};
   pending_.insert(event.unique_touch_event_id);
   auto weak = weak_factory_.GetWeakPtr();
-  if (filter_.OnGesturePacket(packet) != ui::TouchDispositionGestureFilter::SUCCESS) {
+  if (!retirement &&
+      filter_.OnGesturePacket(packet) != ui::TouchDispositionGestureFilter::SUCCESS) {
     router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
     pending_.erase(event.unique_touch_event_id);
     return {ErrorCode::invalid_request, "Invalid client gesture packet order"};
   }
-  if (!weak || stopped_ || !router_ || !root_ || !target_ || !router_->IsViewInMap(root_.get())) {
+  if (!weak || (stopped_ && !retirement) || !router_ || !root_ || !target_ ||
+      !router_->IsViewInMap(root_.get())) {
     if (router_)
       router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
     pending_.erase(event.unique_touch_event_id);
@@ -79,6 +86,7 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
   // OnGesturePacket can synchronously release a preceding packet's repair.
   // Recheck at the actual raw routing boundary as well.
   event.SetTimeStamp(NativeTimestamp(event.TimeStamp()));
+  terminal_routed_ = terminal_routed_ || event.IsTouchSequenceEnd();
   router_->RouteTouchEvent(root_.get(), &event, ui::LatencyInfo());
   return {};
 }

@@ -31,6 +31,7 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
   base::TimeTicks NativeTimestamp(base::TimeTicks sampled);
   Status Momentum(const GestureInput&);
   bool has_routed_raw() const { return first_id_ != 0; }
+  bool has_routed_terminal() const { return terminal_routed_; }
   void Cancel(bool deliver);
   void ForwardGestureEvent(const ui::GestureEventData&) override;
 
@@ -52,7 +53,7 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
   ClientGestureCandidateState candidate_state_;
   std::set<uint32_t> pending_;
   uint32_t first_id_{};
-  bool stopped_{}, bound_{}, scroll_{}, momentum_{}, fling_pending_{};
+  bool stopped_{}, bound_{}, scroll_{}, momentum_{}, fling_pending_{}, terminal_routed_{};
   std::optional<GestureInput> buffered_;
   double cumulative_x_{}, cumulative_y_{};
   ClientNativeInputClock<base::TimeTicks> native_clock_;

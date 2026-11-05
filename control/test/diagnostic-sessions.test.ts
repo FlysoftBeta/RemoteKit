@@ -193,7 +193,14 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
           text: 'sensitive-key',
         },
       ],
-      [{ at: 51, error: 'endpoint_backpressure', type: 'input.result', clientSequence: '4' }],
+      [
+        {
+          at: 51,
+          error: { code: 'unavailable', message: 'endpoint_backpressure' },
+          type: 'input.result',
+          clientSequence: '4',
+        },
+      ],
       0,
     ),
     connection: { peerState: 'connected', host: 'secret.invalid', sdp: 99 },

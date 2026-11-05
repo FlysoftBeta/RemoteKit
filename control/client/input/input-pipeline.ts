@@ -20,6 +20,7 @@ export interface InputPorts {
   terminals: {
     getTerminal(sequence: string): TerminalInput | undefined;
     trackTerminal(sequence: string, entry: TerminalInput): void;
+    acceptTerminal(sequence: string): void;
     reservedTerminalInput(): number;
     pruneTerminalInput(): void;
     deleteTerminal(sequence: string): void;
@@ -258,8 +259,10 @@ export class InputPipeline {
     )
       return;
     if (touchState === 'accepted-pending') {
-      if (!terminal || terminal.pending) return;
-      terminal.pending = true;
+      if (!terminal) return;
+      const alreadyPending = terminal.pending && !terminal.unconfirmed;
+      this.ports.terminals.acceptTerminal(sequence);
+      if (alreadyPending) return;
     } else if (terminal) {
       if (
         (!touchState && (!ok || terminal.pending || terminal.requiresTerminalState)) ||

@@ -76,6 +76,11 @@ async (host) => {
             }
             const e = m.event ?? m.input ?? m,
               isTouch = e.type === 'touch' || e.type === 'gesture';
+            if (e.type === 'touch' && e.action === 'start' && q.staleStartEpoch) {
+              m.layoutEpoch = q.staleStartEpoch;
+              q.staleStartEpoch = undefined;
+              data = JSON.stringify(m);
+            }
             const record = { at: performance.now(), wire: null, message: m };
             push(q.sent, record);
             if (!isTouch) {

@@ -47,6 +47,7 @@ class InputController {
   std::condition_variable input_wake;
   std::deque<Event> input_queue;
   remotekit::InputSequence input_sequence;
+  TouchSequenceAdmissions touch_admissions_;
   std::thread input_thread;
   std::atomic<bool> stop_input{false};
   std::atomic<uint64_t> input_rejected{0}, input_coalesced{0};

@@ -460,7 +460,7 @@ test('terminal timeout starts on submission, survives ordinary receipt churn, an
     sequenceId: 'terminal',
   });
   reply('terminal-unconfirmed', 'terminal', false);
-  for (const delay of [500, 1000, 2000, 1000]) t.mock.timers.tick(delay);
+  for (const delay of [500, 1000, 2000, 2000]) t.mock.timers.tick(delay);
   await Promise.resolve();
   assert.deepEqual(
     deliveries.map((item) => item.phase),
@@ -484,6 +484,102 @@ test('terminal timeout starts on submission, survives ordinary receipt churn, an
   );
   assert.equal(results[results.length - 1]?.event, end);
   assert.equal(transport.touch.retryTouchTerminal(transport.input.inputIdentity(surface), 'terminal'), false);
+});
+
+test('pending extends reconciliation and blocked or failed status sends consume no attempts', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { transport, surface, sent, channel } = setup(t);
+  const deliveries: InputDelivery[] = [];
+  transport.input.subscribeInputDelivery((delivery) => deliveries.push(delivery));
+  transport.input.sendInput(
+    surface,
+    {
+      type: 'touch',
+      gestureMode: 'client-v1',
+      action: 'end',
+      sequenceId: 'slow',
+    },
+    { touchTerminal: true },
+  );
+  const sequence = sent[0].sequence;
+  const entry = transport.touch.getTerminal(sequence)!;
+  channel.bufferedAmount = 300000;
+  for (let index = 0; index < 20; index++) t.mock.timers.tick(2000);
+  assert.equal(entry.retries, 0);
+  assert.equal(
+    deliveries.some((delivery) => delivery.phase === 'unconfirmed'),
+    false,
+  );
+  channel.bufferedAmount = 0;
+  const send = channel.send;
+  channel.send = () => {
+    throw Error('send failed');
+  };
+  t.mock.timers.tick(250);
+  assert.equal(entry.retries, 0);
+  channel.send = send;
+  for (const delay of [250, 500, 1000]) t.mock.timers.tick(delay);
+  assert.equal(entry.retries, 3);
+  channel.onmessage({
+    data: JSON.stringify({
+      type: 'input.result',
+      clientSequence: sequence,
+      ok: true,
+      touchState: 'accepted-pending',
+      touchSequenceId: 'slow',
+    }),
+  });
+  assert.equal(entry.retries, 0);
+  t.mock.timers.tick(250);
+  assert.equal(entry.retries, 1);
+  assert.equal(
+    deliveries.some((delivery) => delivery.phase === 'unconfirmed'),
+    false,
+  );
+});
+
+test('background reconciliation releases the owner and hides unresolved UI on late exact proof', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { transport, surface, sent, channel } = setup(t);
+  const view = transport.touch.createView(
+    {
+      input: transport.input,
+      presentation: transport.presentation,
+      touch: transport.touch,
+    },
+    surface.id,
+    { hasPointerCapture: () => false } as unknown as HTMLCanvasElement,
+  );
+  t.after(() => view.reset());
+  view.sample('start', point(20), 0);
+  view.sample('end', point(20), 30);
+  await Promise.resolve();
+  const end = sent.find((message) => message.event?.action === 'end');
+  assert.ok(end);
+  for (const delay of [250, 500, 1000, 2000, 2000]) t.mock.timers.tick(delay);
+  await Promise.resolve();
+  const unresolved = view.getSnapshot();
+  assert.equal('notice' in unresolved && unresolved.notice, 'unconfirmed');
+  const before = sent.filter((message) => message.type === 'input.touchStatus').length;
+  t.mock.timers.tick(2000);
+  assert.equal(sent.filter((message) => message.type === 'input.touchStatus').length, before + 1);
+  assert.equal(sent[sent.length - 1].type, 'input.touchStatus');
+  channel.onmessage({
+    data: JSON.stringify({
+      type: 'input.result',
+      clientSequence: end.sequence,
+      ok: false,
+      touchState: 'terminal-invalidated',
+      touchSequenceId: end.event.sequenceId,
+      error: { code: 'conflict', message: 'never_admitted' },
+    }),
+  });
+  assert.equal(view.getSnapshot().phase, 'released');
+  const settled = sent.length;
+  t.mock.timers.tick(10000);
+  assert.equal(sent.length, settled);
+  assert.equal(sent.filter((message) => message.event?.action === 'end').length, 1);
+  assert.equal(view.sample('start', point(20), 50), true);
 });
 
 test('ordinary partial release succeeds without a status query or releasing the other contact', (t) => {

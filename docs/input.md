@@ -102,11 +102,15 @@ Browser 的仲裁（patch 0010）：
 
 **Browser**（`client_touch_retirement.h`）：64 项账本，以完整原始 InputToken + 触摸 sequenceId 为键。可能同步回调的 raw 派发之前先登记。只有真实终止的 canonical ACK 及其之前的 ACK 全部完成，才记为 `processed`；网页消费了事件仍是 processed。终态由真实 raw 的 `IsTouchSequenceEnd()` 决定，不由客户端的 end 动作决定。状态：`pending`、`processed`、`terminal-invalidated`（原 owner 确实失效，或精确证明从未路由过 raw）、`terminal-unconfirmed`。未知、无目标、超时都不能升级为 processed。pending 项不会被历史挤出，已完成项按完成时间保留（曾经已完成项按插入顺序被立即淘汰）。
 
-**Endpoint**：为终止请求预留有界收据（64 项，与普通输入历史分开），受理时回 `input.result{touchState:"accepted-pending", clientSequence, touchSequenceId}`。输入线程在两次普通输入之间最多推进一项到期的状态查询（2 秒查询预算），不同步睡眠等待。SDK BUSY 时关键通知按原身份重试，布局事务优先。
+**Endpoint**：为终止请求预留有界收据（64 项，与普通输入历史分开），受理时回 `input.result{touchState:"accepted-pending", clientSequence, touchSequenceId}`。Browser 失败同样保留收据，区分 `rejected`、`terminal-unconfirmed`、精确的 `terminal-invalidated`。输入线程在两次普通输入之间最多推进一项到期的状态查询，最多持续 10 秒，超时前再读一次状态；已知结果立即通过可靠通知推送。状态/退役使用原始 Exchange 回复，只有普通 input 派发把受理前 BUSY 当作可重试错误。SDK BUSY 时关键通知按原身份重试，布局事务优先。
 
-**客户端**：区分 queued、submitted、最终确认。实际 DataChannel 发送之后才开始查询：`input.touchStatus{clientSequence, sequenceId}`，间隔 250/500/1000/2000ms。Endpoint 从保存的原命令取 token，不接受客户端改绑身份；该查询不带坐标，可以跨布局门禁。只有匹配原身份/序号的 processed 或精确的失效证据才释放 owner；迟到的旧回执不能释放新手势。
+Endpoint 另按 peer、授权代次和触摸 sequenceId 保存 64 项受理记录；peer 或授权更换时清空。只有观察到 start 且所有派发都明确未被 Browser 受理，才可对 end/cancel/retire/status 直接返回 `touchState:"terminal-invalidated"`，原因为 `never_admitted`。任何 `inputAdmitted`/成功回复或不确定的传输失败都会撤销此证明；未知或已淘汰的序列不能用缺席推断失效。唯一 start 被本地丢弃或 Endpoint 明确拒绝的客户端 owner 直接释放，无需远程清理。
+
+**客户端**：区分 queued、submitted、最终确认。实际 DataChannel 发送之后才开始查询：`input.touchStatus{clientSequence, sequenceId}`，间隔 250/500/1000/2000ms，只有成功发出的查询才计入次数。`accepted-pending` 重新延长确认期限。出现未确认提示后仍每 2 秒后台查询；迟到的 `processed` 或精确 `terminal-invalidated` 自动释放 owner 并关闭提示。Endpoint 从保存的原命令取 token，不接受客户端改绑身份；该查询不带坐标，可以跨布局门禁。只有匹配原身份/序号的 processed 或精确的失效证据才释放 owner；unknown 永不释放，end 永不重发，迟到的旧回执不能释放新手势。
 
 **旧布局退役**：layoutEpoch 变化不一定更换 Browser InputToken（例如整张 atlas 的编码采样调整）。客户端保留实际发送时的旧 token，通过同 peer、同授权代次的 `input.touchRetire{原 session/view/instance/document/focus, 旧 layoutEpoch, 新 sequence, sequenceId}` 清理旧 owner，不带坐标。Browser 只取消仍精确持有的旧 owner，或返回已有的完成/失效证据；对已在终止或已完成的序列只读账本，不再注入第二个 raw cancel。新触摸必须等旧租约确认。
+
+raw ACK 的 2 秒超时只停止手势候选，不构成释放证明。仍持有原目标且从未路由终止 raw 的 owner 可以退役，发送一次 raw cancel 并等待真实 ACK 全部排空后记为 `processed`；原目标失效则记为 `terminal-invalidated`。已路由终止 raw 的 owner 只继续查询。
 
 自动清理最多三次；仍未知时在原连接上提供"重试确认 / 重试结束"，键盘和其他控件仍可用，不弹整页重连。
 

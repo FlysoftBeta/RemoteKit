@@ -17,6 +17,94 @@ async (host) => {
       { settleMs: 100 },
     );
   const retired = (host._retirementQA = {});
+  const readyView = async () => {
+    await base.ready();
+    await base.page.waitForFunction(
+      (viewId) => !!robustQA.transport().presentation.canInput(viewId),
+      qa.viewId,
+    );
+  };
+  retired.rawAckTimeout = async () => {
+    const id = `v${base.version}-raw-ack-timeout-${Date.now()}`;
+    await qa.navigate({ id, block: 'ackdelay' });
+    await qa.touch('touchStart', [{ x: 800, y: 110 }]);
+    await base.page.evaluate(() => clientGestureQA.tail);
+    await base.page.waitForTimeout(2300);
+    const submitted = await base.page.evaluate(() => {
+      const touch = robustQA.transport().touch;
+      const owner = [...touch.views].map((view) => view.touchOwner).find(Boolean);
+      if (!owner?.lease) return false;
+      // Keep the target alive to exercise raw retirement after timeout. The
+      // request's old epoch grants no coordinates or replacement ownership.
+      const lease = { ...owner.lease, layoutEpoch: String(BigInt(owner.lease.layoutEpoch) - 1n) };
+      return touch.retireTouch(lease, { ...owner.packet, action: 'cancel', points: [], gestures: [] });
+    });
+    assert(submitted, 'Coordinate-free retirement was not submitted');
+    await qa.touch('touchEnd', []);
+    await base.page.waitForFunction(() => robustQA.transport().touch.getSnapshot().pendingTerminals === 0);
+    const retired = await qa.sample(id + '-retired');
+    assert(
+      retired.summary.terminalReceipts.some(
+        (receipt) => receipt.action === 'retire' && receipt.result?.touchState === 'processed',
+      ),
+      'Owner did not retire after delayed raw ACK',
+    );
+    await readyView();
+    await qa.tap();
+    const recovered = await qa.sample(id + '-recovered');
+    assert(root(recovered).clicks === 1, 'Tap failed after delayed raw ACK retirement');
+    assert(
+      !(await base.page.evaluate(() => document.body.innerText.includes('触控结束尚未确认'))),
+      'Delayed raw ACK left unresolved UI',
+    );
+    return [retired.summary, recovered.summary];
+  };
+  retired.neverAdmitted = async () => {
+    const id = `v${base.version}-never-admitted-${Date.now()}`;
+    await qa.navigate({ id });
+    const oldEpoch = await base.page.evaluate(() => robustQA.transport().presentation.layout.epoch);
+    const size = base.page.viewportSize();
+    await base.page.setViewportSize({ width: size.width + 31, height: size.height });
+    await base.page.waitForFunction(
+      (old) => robustQA.transport().presentation.layout?.epoch !== old,
+      oldEpoch,
+    );
+    await readyView();
+    await qa.holdInputResults(true);
+    await base.page.evaluate((epoch) => {
+      clientGestureQA.staleStartEpoch = epoch;
+    }, oldEpoch);
+    await quickTap();
+    const rejected = await qa.sample(id + '-rejected');
+    const failures = rejected.data.received.map((entry) => entry.message);
+    assert(
+      failures.some((message) => message.error?.message === 'stale_layout_epoch'),
+      'Touch start did not reproduce stale_layout_epoch',
+    );
+    assert(
+      failures.some(
+        (message) =>
+          message.touchState === 'terminal-invalidated' && message.error?.message === 'never_admitted',
+      ),
+      'Never-admitted terminal proof missing',
+    );
+    await qa.releaseInputResults();
+    await base.page.waitForTimeout(150);
+    assert(
+      !(await base.page.evaluate(() => document.body.innerText.includes('触控结束尚未确认'))),
+      'Never-admitted sequence left unresolved UI',
+    );
+    await qa.tap();
+    const recovered = await qa.sample(id + '-recovered');
+    assert(root(recovered).clicks === 1, 'Normal tap failed after stale-layout start');
+    assert(
+      !(await base.page.evaluate(() => document.body.innerText.includes('触控结束尚未确认'))),
+      'Normal tap left unresolved UI',
+    );
+    await base.page.setViewportSize(size);
+    await readyView();
+    return [rejected.summary, recovered.summary];
+  };
   retired.targetloss = async ({ lateOld = false } = {}) => {
     const id = `v${base.version}-retired-target-${Date.now()}`;
     await qa.navigate({ id, live: true });

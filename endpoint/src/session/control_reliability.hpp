@@ -2,6 +2,7 @@
 #include <json.hpp>
 #include "util/error.hpp"
 #include "util/wire_error.hpp"
+#include "session/browser_rpc.hpp"
 #include <array>
 #include <algorithm>
 #include <deque>
@@ -31,7 +32,13 @@ Result<ControlJson> RetryBrowserInput(const ControlJson& command,
                                       Wait wait,
                                       Retry retry,
                                       Exhausted exhausted) {
-  auto reply = rpc(command);
+  const auto dispatch = [&]() -> Result<ControlJson> {
+    auto reply = rpc(command);
+    if (reply && BrowserRpc::IsBusyBeforeAdmission(reply.value()))
+      return BrowserRpc::ReplyError(reply.value());
+    return reply;
+  };
+  auto reply = dispatch();
   unsigned retries = 0;
   while (!reply && reply.error().code == ErrorCode::kBusy) {
     if (retries >= 50 || expired()) {
@@ -49,9 +56,63 @@ Result<ControlJson> RetryBrowserInput(const ControlJson& command,
     }
     ++retries;
     retry();
-    reply = rpc(command);
+    reply = dispatch();
   }
   return reply;
+}
+
+// Absence is not proof. Only an observed start whose dispatches all failed
+// before Browser admission can establish that Browser never owned a sequence.
+class TouchSequenceAdmissions {
+  struct Entry {
+    std::string sequence;
+    bool possible_admission;
+  };
+
+ public:
+  static constexpr size_t kCapacity = 64;
+  void Bind(uint64_t peer, uint64_t authorization) {
+    if (peer_ != peer || authorization_ != authorization) {
+      records_.clear();
+      peer_ = peer;
+      authorization_ = authorization;
+    }
+  }
+  void Start(const std::string& sequence) {
+    if (sequence.empty() || sequence.size() > 128 || Find(sequence) != records_.end())
+      return;
+    if (records_.size() == kCapacity)
+      records_.pop_front();
+    records_.push_back({sequence, false});
+  }
+  void MayBeAdmitted(const std::string& sequence) {
+    const auto entry = Find(sequence);
+    if (entry != records_.end())
+      entry->possible_admission = true;
+  }
+  bool NeverAdmitted(const std::string& sequence) const {
+    const auto entry = Find(sequence);
+    return entry != records_.end() && !entry->possible_admission;
+  }
+
+ private:
+  std::deque<Entry>::const_iterator Find(const std::string& sequence) const {
+    return std::find_if(records_.begin(), records_.end(),
+                        [&](const auto& entry) { return entry.sequence == sequence; });
+  }
+  std::deque<Entry>::iterator Find(const std::string& sequence) {
+    return std::find_if(records_.begin(), records_.end(),
+                        [&](const auto& entry) { return entry.sequence == sequence; });
+  }
+  uint64_t peer_{}, authorization_{};
+  std::deque<Entry> records_;
+};
+
+inline const char* TouchFailureState(const ControlJson& reply, const std::string& sequence) {
+  if (reply.value("touchState", std::string()) == "terminal-invalidated" &&
+      reply.value("touchSequenceId", std::string()) == sequence)
+    return "terminal-invalidated";
+  return reply.value("inputAdmitted", false) ? "terminal-unconfirmed" : "rejected";
 }
 
 // Owned by the input worker. Admission reserves space for both the acceptance
@@ -103,7 +164,8 @@ inline bool ApplyTouchTerminalStatus(TouchTerminalReceipt& receipt, const Contro
     return true;
   }
   const auto state = status.value("state", std::string());
-  if (state == "pending")
+  if (state == "pending" ||
+      (state == "terminal-unconfirmed" && receipt.polling && receipt.acceptance.is_object()))
     return false;
   if (state == "processed" && status.value("ok", false))
     receipt.Finish("processed", true);
