@@ -49,7 +49,7 @@ export class WorkspacesRepository {
       activeWindowId: row.active_window,
       layoutMode: row.layout_mode,
       ...JSON.parse(row.pending ?? '{}'),
-      settings: { ...defaultSettings(), ...JSON.parse(settings.data) },
+      settings: JSON.parse(settings.data),
       windows: (
         this.db
           .prepare('SELECT id,active_tab,weight FROM workspace_windows WHERE tenant=? ORDER BY position')

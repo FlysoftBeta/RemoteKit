@@ -2,6 +2,8 @@
 
 Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、设置、站点偏好、文件目录和操作收据都只在 Control 的 SQLite 里。Endpoint 和 Browser 拥有"执行"：进程、WebContents、恢复数据、GPU 资源。Control 通过对账让执行趋向期望。
 
+SQLite 带 `schema_version`（当前 2）。打开时在同一事务里从存储的版本逐级执行迁移，再写入当前版本；比当前更新的版本拒绝启动。没有 `schema_version` 但已有表的库按版本 1 处理。读取路径只认当前格式，不在运行时补默认值。v1→v2：给已有设置补 `avSync=false`。
+
 ## 数据归属
 
 | 所有者 | 数据 |

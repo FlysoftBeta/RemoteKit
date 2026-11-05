@@ -39,41 +39,6 @@ async function offered(endpoint: SignalEndpoint, tenant: string) {
   }
   throw new Error('offer not accepted');
 }
-test('stored settings without avSync load false and relay an offer with avSync false', async () => {
-  const store = new ControlDatabase(':memory:'),
-    endpoint = new SignalEndpoint(),
-    control = createApplication(store, testGateway(endpoint));
-  try {
-    const { tenantId } = await accountsFor(store).register('stored-settings', 'password');
-    const { avSync, ...settings } = store.workspaces.workspace(tenantId).settings;
-    settings.audioChannels = { left: false, right: true };
-    store.db
-      .prepare('UPDATE user_settings SET data=? WHERE tenant=?')
-      .run(JSON.stringify(settings), tenantId);
-    const loaded = store.workspaces.workspace(tenantId).settings;
-    assert.equal(loaded.avSync, false);
-    assert.deepEqual(loaded.audioChannels, settings.audioChannels);
-    await control.viewers.attachViewer(
-      tenantId,
-      'lease',
-      () => {},
-      { identity: 'test-account', valid: () => true },
-      true,
-    );
-    const pending = control.rtc.offer(
-      tenantId,
-      { type: 'offer', sdp: 'v=0\r\n', attemptId: 'stored-settings' },
-      'lease',
-    );
-    const connection = await offered(endpoint, tenantId);
-    assert.equal(endpoint.calls.find((call) => call.method === 'rtc.offer')?.args.avSync, false);
-    endpoint.signal(tenantId, connection, { type: 'answer', sdp: 'v=0\r\n' });
-    assert.equal((await pending).avSync, false);
-  } finally {
-    control.rtc.clearSignals();
-    store.db.close();
-  }
-});
 test('pending trickle offers allow other tenants and bind early candidates to connection/attempt/lease', async () => {
   const store = new ControlDatabase(':memory:'),
     endpoint = new SignalEndpoint(),
