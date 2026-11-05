@@ -70,3 +70,14 @@ test('resize defers a bounded composition with the same focus owner and drops ol
   buffer.clear(); buffer.enqueue('peer/doc/focus', { type: 'ime_commit', text: 'expired' }, 0);
   assert.deepEqual(buffer.drain('peer/doc/focus', 3000), []);
 });
+
+test('explicit inactive feedback during an output barrier is not an unknown observation', () => {
+  const state = new MobileEditingState();
+  assert.equal(state.keyboardObservation(view), 'unknown');
+  state.receive(message('1'), [view]); state.suspendLayout();
+  assert.equal(state.keyboardObservation(view), 'active');
+  state.receive(message('2', { ...view, focus: 'next' }, false), [view], 0, true);
+  assert.equal(state.keyboardObservation(view, 1), 'inactive');
+  assert.equal(state.forKeyboard(view, 1), undefined);
+  assert.equal(state.forView(view), undefined);
+});

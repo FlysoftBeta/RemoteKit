@@ -2,23 +2,24 @@ import { useLayoutEffect, useRef, useState, type CSSProperties, type RefObject }
 import type { RemoteTransport } from './transport';
 import type { Surface } from './types';
 import {
-  FREEZE_MAX_MS, KeyboardViewport, ResizePreview, ViewportTransition, resizeSnapshotSize,
+  KeyboardViewport, ResizePreview, ViewportTransition, resizeSnapshotSize,
   visibleContentBounds, sameViewportBounds, sameViewportSize, surfaceMatchesViewport,
 } from './viewport-transition';
 
-/** Retain a bounded copy for the preview. Transport owns frame and input readiness. */
+/** Display continuity and coordinate authorization have separate lifetimes.
+ * Capture before transport revokes a presentation, keep one memory-bounded image
+ * until its replacement is actually presented, and never manipulate DOM focus.
+ */
 export function useViewportTransition(
   host: RefObject<HTMLElement | null>, transport: RemoteTransport, viewId: string,
   surface: Surface | undefined, frameReady: boolean, owner: string | undefined,
   editor: RefObject<HTMLTextAreaElement | null>,
 ) {
   const transition = useRef(new ViewportTransition());
-  const keyboardViewport = useRef(new KeyboardViewport());
+  const geometry = useRef(new KeyboardViewport());
   const preview = useRef(new ResizePreview());
   const bitmap = useRef<HTMLCanvasElement | undefined>(undefined);
-  const timeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const attempted = useRef(false);
-  const inputBlocked = useRef(false);
+  const blocked = useRef(false);
   const [measurement, measured] = useState(0);
   const [style, setStyle] = useState<CSSProperties>();
   const [frozen, setFrozen] = useState(false);
@@ -26,136 +27,99 @@ export function useViewportTransition(
   const [keyboard, setKeyboard] = useState(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
   const [keyboardDismissals, setKeyboardDismissals] = useState(0);
-  const latest = useRef({ frameReady, owner });
-  latest.current = { frameReady, owner };
 
-  const disposeBitmap = () => {
-    clearTimeout(timeout.current);
-    const node = bitmap.current;
-    if (node) {
-      node.remove();
-      node.width = node.height = 0;
-      bitmap.current = undefined;
-      setFrozen(false);
-    }
+  const dispose = () => {
+    const canvas = bitmap.current;
+    if (canvas) { canvas.remove(); canvas.width = canvas.height = 0; bitmap.current = undefined; }
+    setFrozen(false);
   };
   useLayoutEffect(() => {
-    transition.current.clear();
-    attempted.current = inputBlocked.current = false;
-    preview.current.clear();
-    disposeBitmap(); setWaiting(false); setKeyboard(false);
+    transition.current.clear(); preview.current.clear(); dispose();
+    blocked.current = false; setWaiting(false); setKeyboard(false);
+    // Occlusion describes the local OS, which may still animate the previous
+    // keyboard away after a remote document boundary.
   }, [owner, transport, viewId]);
 
   useLayoutEffect(() => {
     const node = host.current, parent = node?.parentElement;
     if (!node || !parent) return;
-    const inViewer = parent.classList.contains('window-content');
-    const viewport = window.visualViewport;
+    const inViewer = parent.classList.contains('window-content'), visual = window.visualViewport;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let timerAt = 0;
-    let previousPosition: { left: number; top: number; width: number; height: number } | undefined;
+    let position: { left: number; top: number; width: number; height: number } | undefined;
+    const paintPreview = () => {
+      const state = transition.current, image = bitmap.current;
+      if (!image || !state.freeze || !state.desired) return;
+      image.classList.toggle('keyboard-peek', preview.current.keyboard);
+      image.style.setProperty('--resize-peek-height', `${state.desired.width * state.freeze.bounds.height / state.freeze.bounds.width}px`);
+    };
+    const suspend = (mediaBarrier: boolean) => {
+      const state = transition.current, bounds = state.desired;
+      blocked.current = true; setWaiting(true);
+      if (!owner || !bounds || bitmap.current) return;
+      const frame = transport.getLastPresentation(viewId);
+      const source = frame && transport.getPresentedPlane(viewId, frame.rtpTimestamp);
+      const size = source && resizeSnapshotSize(source.sourceRect.width, source.sourceRect.height);
+      if (!source || !size || !state.begin(owner, bounds, size.width * size.height, true, mediaBarrier)) return;
+      const canvas = document.createElement('canvas');
+      try {
+        canvas.width = size.width; canvas.height = size.height;
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('resize snapshot context unavailable');
+        const rect = source.sourceRect;
+        context.drawImage(source.image, rect.x, rect.y, rect.width, rect.height, 0, 0, canvas.width, canvas.height);
+        canvas.className = 'remote-resize-freeze'; canvas.setAttribute('aria-hidden', 'true');
+        const old = state.freeze!.bounds;
+        canvas.style.setProperty('--resize-from-x', String(old.width / Math.max(1, bounds.width)));
+        canvas.style.setProperty('--resize-from-y', String(old.height / Math.max(1, bounds.height)));
+        bitmap.current = canvas; node.append(canvas); paintPreview();
+        transport.recordResizeFreezeCopy(); setFrozen(true);
+      } catch { canvas.width = canvas.height = 0; state.freeze = undefined; }
+    };
     const measure = () => {
       const content = parent.getBoundingClientRect();
-      const visual = viewport && { width: viewport.width, height: viewport.height, offsetLeft: viewport.offsetLeft, offsetTop: viewport.offsetTop };
-      // The Viewer shell already follows the visual viewport. In a standalone
-      // mount, pan the visible region without treating its offset as a resize.
-      const bounds = inViewer || !visual ? content : {
-        ...visibleContentBounds(content, { ...visual, offsetLeft: 0, offsetTop: 0 }),
-        left: Math.max(content.left, visual.offsetLeft), top: Math.max(content.top, visual.offsetTop),
+      const vv = visual && { width: visual.width, height: visual.height, offsetLeft: visual.offsetLeft, offsetTop: visual.offsetTop };
+      const bounds = inViewer || !vv ? content : {
+        ...visibleContentBounds(content, { ...vv, offsetLeft: 0, offsetTop: 0 }),
+        left: Math.max(content.left, vv.offsetLeft), top: Math.max(content.top, vv.offsetTop),
       };
-      const position = { left: bounds.left - content.left, top: bounds.top - content.top, width: bounds.width, height: bounds.height };
-      const state = transition.current, current = latest.current, geometry = keyboardViewport.current;
-      const now = performance.now();
+      const next = { left: bounds.left - content.left, top: bounds.top - content.top, width: bounds.width, height: bounds.height };
+      const state = transition.current, now = performance.now();
       const changed = !!state.desired && !sameViewportSize(state.desired, bounds);
       const focused = !!editor.current && editor.current.inputMode !== 'none' && document.activeElement === editor.current;
-      const change = geometry.measure({
-        visual: visual ?? undefined, scale: viewport?.scale ?? 1,
-        layoutWidth: window.innerWidth, layoutHeight: window.innerHeight,
-      }, focused, window.matchMedia('(pointer: coarse)').matches, now);
-      const peek = preview.current.measure(changed, change, now);
-      if (geometry.settle(now)) setKeyboardDismissals(geometry.dismissals);
-      setKeyboardOpen(geometry.open);
-
-      if (changed && current.owner && state.confirmed && !sameViewportSize(state.confirmed.bounds, bounds)) {
-        inputBlocked.current = true;
-        setWaiting(true);
-        if (!attempted.current) {
-          attempted.current = true;
-          const frame = transport.getLastPresentation(viewId);
-          const source = frame && transport.getPresentedPlane(viewId, frame.rtpTimestamp);
-          const size = source && resizeSnapshotSize(source.sourceRect.width, source.sourceRect.height);
-          if (source && size && state.begin(current.owner, bounds, now, size.width * size.height, current.frameReady)) {
-            try {
-              const canvas = document.createElement('canvas'), rect = source.sourceRect;
-              canvas.width = size.width; canvas.height = size.height;
-              const context = canvas.getContext('2d');
-              if (!context) throw new Error('resize snapshot context unavailable');
-              context.drawImage(source.image, rect.x, rect.y, rect.width, rect.height, 0, 0, canvas.width, canvas.height);
-              const old = state.freeze!.bounds;
-              canvas.className = 'remote-resize-freeze'; canvas.setAttribute('aria-hidden', 'true');
-              canvas.style.setProperty('--resize-from-x', String(old.width / Math.max(1, bounds.width)));
-              canvas.style.setProperty('--resize-from-y', String(old.height / Math.max(1, bounds.height)));
-              node.append(canvas); bitmap.current = canvas;
-              transport.recordResizeFreezeCopy(); setFrozen(true);
-              timeout.current = setTimeout(() => { state.freeze = undefined; disposeBitmap(); }, FREEZE_MAX_MS);
-            } catch {
-              state.freeze = undefined; disposeBitmap();
-            }
-          }
-        }
-      }
-      if (bitmap.current && state.freeze) {
-        bitmap.current.classList.toggle('keyboard-peek', peek);
-        bitmap.current.style.setProperty('--resize-peek-height', `${bounds.width * state.freeze.bounds.height / state.freeze.bounds.width}px`);
-      }
-      setKeyboard(inputBlocked.current && peek);
+      const change = geometry.current.measure({ visual: vv ?? undefined, scale: visual?.scale ?? 1,
+        layoutWidth: window.innerWidth, layoutHeight: window.innerHeight }, focused, window.matchMedia('(pointer: coarse)').matches, now);
+      preview.current.measure(changed, change, now);
+      if (geometry.current.settle(now)) setKeyboardDismissals(geometry.current.dismissals);
+      setKeyboardOpen(geometry.current.open);
       state.desired = bounds;
-      if (!previousPosition || !sameViewportBounds(previousPosition, position)) {
-        previousPosition = position;
-        setStyle({ inset: 'auto', ...position });
-      }
-
-      const deadlines = [geometry.deadline, preview.current.deadline].filter((at): at is number => at !== undefined && at > now);
-      const next = deadlines.length ? Math.min(...deadlines) : 0;
-      if (next !== timerAt) {
-        clearTimeout(timer);
-        timerAt = next;
-        if (next) timer = setTimeout(() => { timerAt = 0; measure(); measured(value => value + 1); }, Math.ceil(next - now));
-      }
+      if (changed && state.confirmed && !sameViewportSize(state.confirmed.bounds, bounds)) suspend(false);
+      paintPreview(); setKeyboard(blocked.current && preview.current.keyboard);
+      if (!position || !sameViewportBounds(position, next)) { position = next; setStyle({ inset: 'auto', ...next }); }
+      clearTimeout(timer);
+      const deadlines = [geometry.current.deadline, preview.current.deadline].filter((at): at is number => at !== undefined && at > now);
+      if (deadlines.length) timer = setTimeout(() => { measure(); measured(n => n + 1); }, Math.ceil(Math.min(...deadlines) - now));
     };
-    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : undefined;
-    observer?.observe(parent);
-    viewport?.addEventListener('resize', measure);
-    if (!inViewer) viewport?.addEventListener('scroll', measure);
+    const observer = new ResizeObserver(measure); observer.observe(parent);
+    visual?.addEventListener('resize', measure);
+    if (!inViewer) visual?.addEventListener('scroll', measure);
     window.addEventListener('resize', measure);
+    const unsubscribe = transport.subscribePresentationInvalidation(id => { if (id === viewId) suspend(true); });
     measure();
     return () => {
-      observer?.disconnect();
-      viewport?.removeEventListener('resize', measure);
-      if (!inViewer) viewport?.removeEventListener('scroll', measure);
+      observer.disconnect(); unsubscribe(); clearTimeout(timer);
+      visual?.removeEventListener('resize', measure); visual?.removeEventListener('scroll', measure);
       window.removeEventListener('resize', measure);
-      clearTimeout(timer);
     };
   }, [host, transport, viewId, editor, owner]);
 
   useLayoutEffect(() => {
-    const state = transition.current, desired = state.desired, layout = transport.layout;
-    if (!owner || !surface || !frameReady || !layout || !desired || !host.current) return;
-    if (!surfaceMatchesViewport(surface, desired)) {
-      inputBlocked.current = true;
-      setWaiting(true);
-      return;
-    }
+    const state = transition.current, bounds = state.desired, layout = transport.layout;
+    if (!owner || !surface || !frameReady || !layout || !bounds) return;
+    if (!surfaceMatchesViewport(surface, bounds)) { blocked.current = true; setWaiting(true); return; }
     if (!transport.getLastPresentation(viewId) || performance.now() < preview.current.deadline) return;
-    state.ready(owner, `${layout.generation}:${layout.epoch}`, desired);
-    if (!state.freeze) {
-      disposeBitmap();
-      attempted.current = false;
-      inputBlocked.current = false;
-      setWaiting(false); setKeyboard(false);
-    }
+    state.ready(owner, `${layout.generation}:${layout.epoch}`, bounds);
+    if (!state.freeze) { dispose(); preview.current.complete(); blocked.current = false; setWaiting(false); setKeyboard(false); }
   }, [frameReady, owner, surface, transport.layout?.epoch, transport.layout?.generation, style, measurement]);
-
-  useLayoutEffect(() => () => { disposeBitmap(); }, []);
-  return { style, frozen, waiting, keyboard, blocksInput: () => inputBlocked.current, keyboardOpen, keyboardDismissals };
+  useLayoutEffect(() => () => { dispose(); }, []);
+  return { style, frozen, waiting, keyboard, blocksInput: () => blocked.current, keyboardOpen, keyboardDismissals };
 }

@@ -95,48 +95,50 @@ export class KeyboardViewport {
 
 /** A viewport event may precede or follow the content observer in one resize. */
 export class ResizePreview {
-  private keyboardHintUntil = 0;
-  private changedUntil = 0;
+  private keyboardHint = false;
+  private active = false;
+  private settleAt = 0;
   keyboard = false;
-  get deadline() { return this.keyboard ? this.changedUntil : 0; }
+  get deadline() { return this.active && this.keyboard ? this.settleAt : 0; }
 
   measure(changed: boolean, change: ViewportChange, now: number) {
     if (change === 'keyboard') {
-      this.keyboardHintUntil = now + KEYBOARD_SETTLE_MS;
-      if (this.changedUntil > now) {
-        this.keyboard = true;
-        this.changedUntil = this.keyboardHintUntil;
-      }
+      this.keyboardHint = true;
+      if (this.active) this.keyboard = true;
+      this.settleAt = now + KEYBOARD_SETTLE_MS;
     } else if (change === 'ordinary') {
-      this.keyboardHintUntil = 0;
+      this.keyboardHint = this.keyboard = false;
     }
     if (changed) {
-      this.keyboard = this.keyboardHintUntil > now;
-      this.changedUntil = now + KEYBOARD_SETTLE_MS;
-      this.keyboardHintUntil = 0;
+      // An IME inset and the resulting content bounds need not arrive in the
+      // same frame. Keep the cause until presentation completes the transition.
+      this.keyboard = this.keyboardHint || this.active && this.keyboard;
+      this.active = true;
+      this.settleAt = now + KEYBOARD_SETTLE_MS;
+      this.keyboardHint = false;
     }
     return this.keyboard;
   }
 
   clear() {
-    this.keyboard = false;
-    this.changedUntil = this.keyboardHintUntil = 0;
+    this.active = this.keyboard = this.keyboardHint = false;
+    this.settleAt = 0;
   }
+  complete() { if (this.active) this.clear(); }
 }
 export const FREEZE_MAX_PIXELS = 4 * 1024 * 1024;
-export const FREEZE_MAX_MS = 1800;
-export interface ResizeFreeze { owner: string; layout: string; bounds: ViewportBounds; expires: number }
+export interface ResizeFreeze { owner: string; layout: string; bounds: ViewportBounds }
 /** A freeze only retains old pixels; it never supplies media/input readiness. */
 export class ViewportTransition {
   desired?: ViewportBounds;
   confirmed?: { owner: string; layout: string; bounds: ViewportBounds };
   freeze?: ResizeFreeze;
-  begin(owner: string, bounds: ViewportBounds, now: number, pixels: number, ready: boolean) {
+  begin(owner: string, bounds: ViewportBounds, pixels: number, ready: boolean, mediaBarrier = false) {
     this.desired = { ...bounds };
     if (this.freeze) return false; // One bounded copy for the complete keyboard animation.
     const previous = this.confirmed;
-    if (!ready || !previous || previous.owner !== owner || sameViewportSize(previous.bounds, bounds) || !Number.isFinite(pixels) || pixels <= 0 || pixels > FREEZE_MAX_PIXELS) return false;
-    this.freeze = { ...previous, bounds: { ...previous.bounds }, expires: now + FREEZE_MAX_MS };
+    if (!ready || !previous || previous.owner !== owner || !mediaBarrier && sameViewportSize(previous.bounds, bounds) || !Number.isFinite(pixels) || pixels <= 0 || pixels > FREEZE_MAX_PIXELS) return false;
+    this.freeze = { ...previous, bounds: { ...previous.bounds } };
     return true;
   }
   ready(owner: string, layout: string, bounds: ViewportBounds) {
@@ -145,8 +147,8 @@ export class ViewportTransition {
     if (this.freeze && (this.freeze.owner !== owner || (!this.desired || sameViewportBounds(bounds, this.desired)) &&
         (layout !== this.freeze.layout || sameViewportSize(this.freeze.bounds, bounds)))) this.freeze = undefined;
   }
-  invalidate(owner: string | undefined, now: number) {
-    if (this.freeze && (this.freeze.owner !== owner || now >= this.freeze.expires)) this.freeze = undefined;
+  invalidate(owner: string | undefined) {
+    if (this.freeze && this.freeze.owner !== owner) this.freeze = undefined;
     if (this.confirmed?.owner !== owner) this.confirmed = undefined;
   }
   clear() { this.freeze = undefined; this.confirmed = undefined; this.desired = undefined; }

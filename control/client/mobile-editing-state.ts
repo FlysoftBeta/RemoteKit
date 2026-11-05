@@ -1,4 +1,4 @@
-import type { Surface } from './types';
+import type { Layout, Surface } from './types';
 
 export interface EditableView { session: string; id: string; instance: string; document: string; focus: string }
 export interface RemoteEditable {
@@ -30,6 +30,22 @@ function validMessage(value: unknown): value is EditableMessage {
 }
 /** One ordered global editable owner per peer. Layout/media readiness is deliberately separate. */
 export class MobileEditingState {
+  // Document authority outlives media generations. generation=0 is an output
+  // barrier (also used for hidden-tab changes), not a list of destroyed views.
+  private documents: readonly Surface[] = [];
+  layoutPending = false;
+  get views() { return this.documents; }
+  surface(id: string) { return this.documents.find(view => view.id === id); }
+  acceptLayout(layout: Layout) {
+    if (layout.generation === '0' && !layout.views.length) {
+      if (!this.layoutPending) this.suspendLayout();
+      this.layoutPending = true;
+    } else {
+      this.documents = layout.views;
+      this.layoutPending = false;
+      this.reconcile(layout.views);
+    }
+  }
   private revision?: string;
   private candidate?: { message: EditableMessage; expires: number };
   private needsFresh = false;
@@ -72,6 +88,12 @@ export class MobileEditingState {
     return view && candidate?.message.view && sameEditingDocument(view, candidate.message.view) &&
       Number.isFinite(candidate.expires) ? candidate.expires : undefined;
   }
+  keyboardObservation(view: Surface | undefined, now = Date.now()): 'active' | 'inactive' | 'unknown' {
+    const value = this.candidate && now < this.candidate.expires ? this.candidate.message : this.current;
+    if (!value) return 'unknown';
+    return view && value.view && sameEditingDocument(view, value.view) && value.editable.active &&
+      editableInputMode(value.editable.type) !== 'none' ? 'active' : 'inactive';
+  }
   forKeyboard(view: Surface | undefined, now = Date.now()) {
     const value = this.candidate && now < this.candidate.expires ? this.candidate.message : this.current;
     return view && value?.view && sameEditingDocument(view, value.view) && value.editable.active && editableInputMode(value.editable.type) !== 'none' ? value : undefined;
@@ -82,7 +104,7 @@ export class MobileEditingState {
       value.editable.active && editableInputMode(value.editable.type) !== 'none' ? value : undefined;
   }
   clear() { this.current = undefined; this.candidate = undefined; this.needsFresh = false; }
-  reset() { this.clear(); this.revision = undefined; }
+  reset() { this.clear(); this.revision = undefined; this.documents = []; this.layoutPending = false; }
 }
 
 /** Layout barriers may pause IME delivery without changing its document owner. */

@@ -448,7 +448,7 @@ export function WindowFrame({
               !transport.presentationError && (active.restoring ||
                 (active.residency && active.residency !== "live")) && (
                 <div className="page-overlay" role="status">
-                  正在恢复页面…
+                  正在唤醒已休眠的标签页…
                 </div>
               )
             )}

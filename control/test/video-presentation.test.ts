@@ -142,6 +142,28 @@ test('video readback exposes both sampling axes while changed axes retire the ol
   assert.equal(s.internal.canInput('1'), true);
 });
 
+test('invalidation offers the last authorized ROI before retiring media and input', t => {
+  const s = environment(t, true);
+  s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
+  s.message({ type: 'presentation.prepare', ...key }); s.raf(); s.raf();
+  s.metadata(10); s.videos[1].frame(10);
+  let copies = 0;
+  const remove = s.transport.subscribePresentationInvalidation(id => {
+    if (id !== '1') return;
+    const frame = s.transport.getLastPresentation(id);
+    assert.ok(frame);
+    assert.ok(s.transport.getPresentedPlane(id, frame.rtpTimestamp));
+    copies++;
+  });
+  s.message({ ...layout, generation: '0', epoch: '21', views: [] });
+  assert.equal(copies, 1);
+  assert.equal(s.transport.getLastPresentation('1'), undefined);
+  assert.equal(s.internal.canInput('1'), false);
+  s.message({ ...layout, generation: '0', epoch: '22', views: [] });
+  assert.equal(copies, 1, 'repeated barriers must not recopy stale pixels');
+  remove();
+});
+
 test('duplicate layout/prepare transactions cannot starve hidden ACK or revoke ready videos', t => {
   const s = environment(t); s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   const repeat = () => { s.message(layout); s.message({ type: 'presentation.prepare', ...key }); };

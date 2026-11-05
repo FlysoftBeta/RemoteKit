@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { KeyboardViewport, ResizePreview, ViewportTransition, resizeSnapshotSize, visibleContentBounds, FREEZE_MAX_MS, FREEZE_MAX_PIXELS, surfaceMatchesViewport } from '../client/viewport-transition';
+import { KeyboardViewport, ResizePreview, ViewportTransition, resizeSnapshotSize, visibleContentBounds, FREEZE_MAX_PIXELS, surfaceMatchesViewport } from '../client/viewport-transition';
 
 const viewport = (height: number, layoutHeight = 844, width = 390) => ({
   visual: { height, width, offsetLeft: 0, offsetTop: 0 }, layoutWidth: width, layoutHeight, scale: 1,
@@ -28,22 +28,22 @@ test('visual viewport offset and size intersect actual content bounds', () => {
 });
 test('one fixed copy spans keyboard animation and clears only on the new desired presentation', () => {
   const state = new ViewportTransition(); state.ready('peer/doc', '1', old);
-  assert.ok(state.begin('peer/doc', small, 100, 390 * 764, true));
+  assert.ok(state.begin('peer/doc', small, 390 * 764, true));
   assert.deepEqual(state.freeze?.bounds, old);
-  assert.equal(state.begin('peer/doc', { ...small, height: 300 }, 200, 100, true), false);
+  assert.equal(state.begin('peer/doc', { ...small, height: 300 }, 100, true), false);
   assert.equal(state.ready('peer/doc', '2', small), false);
   assert.equal(state.confirmed?.layout, '1'); assert.ok(state.freeze);
   state.ready('peer/doc', '3', { ...small, height: 300 }); assert.equal(state.freeze, undefined);
 });
-test('freeze expiry, document/peer invalidation and pixel budget never manufacture ready', () => {
+test('slow recovery retains the preview; document/peer invalidation and pixel budget never manufacture ready', () => {
   const state = new ViewportTransition(); state.ready('peer/doc', '1', old);
-  assert.equal(state.begin('peer/doc', small, 0, FREEZE_MAX_PIXELS + 1, true), false);
-  assert.equal(state.begin('peer/doc', small, 0, 100, false), false);
-  assert.ok(state.begin('peer/doc', small, 0, 100, true));
-  state.invalidate('peer/doc', FREEZE_MAX_MS); assert.equal(state.freeze, undefined);
+  assert.equal(state.begin('peer/doc', small, FREEZE_MAX_PIXELS + 1, true), false);
+  assert.equal(state.begin('peer/doc', small, 100, false), false);
+  assert.ok(state.begin('peer/doc', small, 100, true));
+  state.invalidate('peer/doc'); assert.ok(state.freeze);
   assert.equal(state.confirmed?.layout, '1');
-  assert.ok(state.begin('peer/doc', small, 2000, 100, true));
-  state.invalidate('other-peer/doc', 2001); assert.equal(state.freeze, undefined); assert.equal(state.confirmed, undefined);
+  assert.equal(state.begin('peer/doc', small, 100, true), false);
+  state.invalidate('other-peer/doc'); assert.equal(state.freeze, undefined); assert.equal(state.confirmed, undefined);
 });
 
 test('viewport readiness checks both exact sampling axes and rejects old geometry', () => {
@@ -69,9 +69,12 @@ test('simultaneous layout and visual viewport shrink is classified on coarse poi
 test('viewport event followed by repeated geometry and then content resize keeps the peek', () => {
   const preview = new ResizePreview();
   assert.equal(preview.measure(false, 'keyboard', 1), false);
+  preview.complete(); // An old ready frame before content resize is not completion.
   assert.equal(preview.measure(false, undefined, 2), false);
   assert.equal(preview.measure(true, undefined, 3), true);
   assert.equal(preview.measure(false, undefined, 4), true);
+  assert.equal(preview.measure(true, undefined, 2000), true, 'delayed content updates retain the IME cause');
+  preview.clear(); // A matching new frame completes the transition.
   assert.equal(preview.measure(true, undefined, 200), false, 'unrelated content resize uses stretch');
 });
 
@@ -81,6 +84,14 @@ test('viewport event can reclassify a content-first preview without copying agai
   assert.equal(preview.measure(false, 'keyboard', 2), true);
   assert.equal(preview.measure(false, undefined, 3), true);
   assert.equal(preview.measure(true, 'ordinary', 4), false);
+});
+
+test('resize reversal can return to the authorized size without waiting for a new server layout', () => {
+  const state = new ViewportTransition(); state.ready('doc', '1', old);
+  assert.ok(state.begin('doc', small, 100, true));
+  assert.equal(state.begin('doc', old, 100, true), false);
+  state.ready('doc', '1', old);
+  assert.equal(state.freeze, undefined);
 });
 
 test('offset-only measurements preserve keyboard state without starting a new preview', () => {

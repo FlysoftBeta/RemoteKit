@@ -91,7 +91,7 @@ Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更�
 
 静态首帧metadata晚到可匹配同元素自己的最新观察，但必须保持相同已确认屏障、track、attempt和文档身份；恢复布局资格不能假称当前像素仍是该RTP，也不能增加呈现计数。文档前台、当前完整布局屏障已ACK、平面current/nonstale且客户端bounds为正时，未取得安全匹配继续限频请求`media.refresh`并保持Video及输入门禁，不因等待超时改走另一后端。隐藏或布局过渡撤销旧观察；恢复后重新等待本元素新帧，不复用旧ready。
 
-尺寸过渡只保留一次有界旧ROI快照，不赋予媒体或输入ready。软键盘遮挡/恢复使用顶部锚定、保持比例并裁剪的peek；普通窗口/分栏布局变化使用最后帧的模糊拉伸动画。快照裁剪在对应Window内容区内，新布局真实ready且匹配最终desired DIP后移除，文档/连接变化立即作废。这种一次copy与稳态video逐帧呈现分开计数。
+尺寸过渡在内容bounds变化或Transport撤销旧呈现之前保留一次旧ROI快照，最多4Mi像素，不赋予媒体或输入ready。软键盘遮挡/恢复使用顶部锚定、保持比例并裁剪的peek；普通窗口/分栏布局变化使用最后帧的模糊拉伸动画。过渡原因保留到事务完成，不依赖VV和ResizeObserver同时到达。快照裁剪在对应Window内容区内，新布局真实ready且匹配最终desired DIP后移除，不再按1.8秒超时删除；文档/连接变化立即作废。普通resize不显示页面恢复提示。这种一次copy与稳态video逐帧呈现分开计数。详见[移动输入状态机](mobile-input-state.zh-CN.md)。
 
 产品Viewer外壳固定在visualViewport内，宽高决定真实布局，offsetTop/Left只移动外壳。远端DIP取Window内容区实际大小；可视区域平移不提交resize、不启动新的输入屏障。输入代理锚在内容区顶部，标签切换只滚动本地标签条。独立自动化入口没有产品外壳时仍使用显式可视裁剪。
 
@@ -99,7 +99,7 @@ Endpoint在实际`remotekit_rtc_encoded`发送边界串行化屏障与布局更�
 
 同文档active A→B保持本地代理焦点，但不转移A的composition、按键或暂存文本。NONE立即撤销编辑资格，本地键盘外观最多等待200ms确认持续失焦；其间不向未知目标发文本，也不为未来目标暂存。确认失焦后收起，后续无用户激活的active不能自行重弹。文档/连接/锁定/Window失活立即撤销。视口几何仅观测键盘遮挡和恢复，不直接blur或完成IME；小幅尺寸噪音、offset平移、旋转和缩放不用于重新授权键盘。
 
-重建渲染资源时，仅`layout.reconfiguring:true`允许Client暂留同一编辑目标的本地键盘与composition；其generation仍为`"0"`、views为空，不可用作输入或画面授权。普通空layout、锁定、断链和文档替换仍硬撤销。Browser保留单纯布局变化下合法目标的composition，同时轮换原focus输入租约并终止旧pointer/held keys。Endpoint从权威latest-layout读取编辑状态：无有效元数据表示未知，不发送假失焦；像素stale不等于编辑目标失效，真实inactive仍即时发布。
+`generation:"0", views:[]`统一表示媒体输出屏障，不能作为编辑文档销毁证据；`reconfiguring`只是原因提示。Client独立保存最后确认的文档目录，暂停严格输入但保留同文档本地键盘与合法composition。非零generation中实际移除view、锁定、断链和文档替换仍硬撤销。Browser保留单纯布局变化下合法目标的composition，同时轮换原focus输入租约并终止旧pointer/held keys。Endpoint从权威latest-layout读取编辑状态：无有效元数据表示未知，不发送假失焦；像素stale不等于编辑目标失效，真实inactive仍即时发布。窗口blur且DOM代理仍聚焦不结束IME，页面真正hidden/DOM blur仍处理失焦。
 
 Client暂存编辑事件绑定attempt/session/view/instance/document/target，只有新layout、准确focus token、同target权威editable和新画面屏障都满足后才发送。早于focus ACK的新target候选只维持键盘UI，不获得编辑资格；原已确认target可在同文档布局屏障期间有界暂存。事件附`editableTarget`，Browser在最终派发前再次检查当前编辑目标；旧节点晚到的commit/cancel不能落到新输入框。真实失焦或target变化清除composition和暂存，旧本地composition结束及其附随文本仍被隔离。该编辑连续性不放宽旧layout坐标门禁，也不重建RTC、DataChannel或video。
 

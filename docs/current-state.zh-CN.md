@@ -2,13 +2,15 @@
 
 更新：2026-11-05。Windows x64；Chromium官方157.0.8103.15，基线`1aa07b638799e59656559ae6c6649d4b197f555e`。复用out/dev、out/rel增量构建，继续支持Chrome89。
 
-## 搜索框首次点击的软键盘循环
+## 移动软键盘与resize重写
 
-已在隔离真实QSV串流中复现：远端搜索框随resize替换节点，本地把target换代当作收起后重新弹出的依据；一次可信点击引发7次模拟键盘尺寸往返。已重写Client键盘意图与resize判定，自动打开许可独立于target/focus token/布局；同文档节点替换保持本地焦点，NONE立即停止旧编辑、仅UI最多等待200ms确认。旧composition和暂存文本不会转交新节点。几何恢复不再主动blur，VV与RO事件先后均保留键盘peek，普通resize及旧帧输入门禁保持。
+本轮以Android IME行为闭环模拟复现并修复：同Window两个普通远端tab，一次可信点击在6.5秒内导致6次键盘打开、6次关闭、12次普通空布局，peer/DC/video/track保持；远端页面不替换节点或脚本聚焦。模拟器由本地DOM焦点/inputmode驱动系统显隐与视口反馈，另覆盖候选面板、caret平移、Back保留焦点和IME窗口焦点变化。
 
-定向35项、类型检查与生产构建/启动通过。157/89真实H.264回归均通过首次点击→搜索节点替换、一次本地聚焦与一次键盘收缩、替换后输入及持续失焦收起；两版均捕获到NONE窗口的文本探针且无输入包发出。157另以mobile/触屏/DPR2、229按键与真实CDP组合输入、交错VV/innerHeight重现旧包循环；修后同条件目标替换无追加本地焦点事件，旧commit零包、新目标组合输入成功，模拟系统收起保留DOM焦点且不重开，可信按钮可重新显示。fine-pointer组确认持续NONE后仍可直接使用ArrowDown/Tab。实体系统键盘未验收。Bili真实顶栏基线与修后均进入编辑但本次未循环；Google结果页可见，隔离环境点击返回`Renderer widget required`，未取得实际编辑状态，不能宣称两个真实站点现场均已复现。[调查与本轮证据](../develop/docs/keyboard-search-investigation-20261105.md) · [Android行为核对](../develop/docs/mobile-ime-behavior-20261105.md)。
+已重写键盘会话与尺寸过渡：KeyboardSession显式消费用户意图，MobileEditingState独立持有文档目录及active/inactive/unknown观测，媒体generation0不再删除编辑会话或重新授权键盘。输入仍严格绑定目标、focus ACK、当前布局和新帧。resize保留一份最多4Mi像素的旧合法ROI，键盘顶部等比peek/普通模糊拉伸一直到新匹配帧接替，不再1.8秒后丢掉；普通resize不显示“正在恢复页面”。真正失焦、文档/授权边界仍终止编辑并清理快照。
 
-修复源码`e87e6e0`已推送。干净成品的570项清单、571项ZIP CRC/hash、Control及Native文件匹配与包内启动通过；包内157运行正式移动IME专项也通过，包括精确新target恰一次commit和Native compositionend。服务器于2026-11-05 12:50:37（UTC+8）已确认上传成功，取件码[248478](https://airportal.cn/248478/ra8Byw97bG)。随后用户要求先不要上传；停止指令送达时上传已完成，无在途传输可取消，12:51:13已关闭自建上传浏览器/helper。未重传、下载或撤回，本轮不再继续上传；本地成品保留。详见[交付与停止记录](../develop/docs/keyboard-search-delivery-20261105.md)。
+97项定向、最终生产构建/启动通过。157与89闭环均为1开0关，2.2秒延迟预览、Back/reopen、window blur和真实远端blur通过；157真实Blink候选/229模拟及目标换代专项通过，旧候选不串入新target。89为双视口/直接文本路径，未运行Android InputConnection。本轮不委派、不打包、不上传；实体用户设备仍待复测。[正式状态机](mobile-input-state.zh-CN.md) · [复现、失败与验证](../develop/docs/keyboard-state-rewrite-20261105.md)。
+
+上一版e87e6e0的节点替换测试未覆盖本轮多tab空布局路径，不能继续作为用户现场已修复的证据。此前248478上传与随后停止记录仅保留为历史：[旧交付记录](../develop/docs/keyboard-search-delivery-20261105.md)。
 
 ## 后续多轮筛选与保留项
 
@@ -76,7 +78,7 @@ Windows真实完成同UHD630/LUID的显示输出0→1及1→0，两组PID/peer/t
 
 更多菜单改为“网页兼容性处理”子菜单，按站点保存平板UA与“不自动弹出键盘”。键盘设置不刷新页面；悬浮按钮显示/隐藏本地键盘，手动隐藏完成同目标组合文本一次，真实远端失焦关闭输入法。同一目标的重复状态与resize不会重新弹出手动隐藏的键盘。
 
-Viewer外壳按visualViewport宽高布局，offset只移动，不改变远端DIP。内容真实大小变化继续保持键盘顶部保比例peek与普通布局最后帧模糊拉伸。沿用稳定编辑target、临时reconfigure保留及有界暂存，原focus/layout和新帧输入门禁不放宽。快照最多4Mi像素、1.8秒，不计入稳态video帧数。
+Viewer外壳按visualViewport宽高布局，offset只移动，不改变远端DIP。内容真实大小变化继续保持键盘顶部保比例peek与普通布局最后帧模糊拉伸。沿用稳定编辑target、临时reconfigure保留及有界暂存，原focus/layout和新帧输入门禁不放宽。该历史实现的1.8秒快照期限已由本轮resize事务替代；仍最多4Mi像素，不计入稳态video帧数。
 
 Browser依据真正最后触点登记精确终止账本；Endpoint异步跟进canonical ACK，关键回执遇到SDK BUSY保留重发；Client从实际发送开始有限查询，使用原请求恢复，已受理end不重放。双指部分抬起不阻塞全部输入。未知结果仍不授予新触控资格，但改为原连接上的确认重试，键盘和其他控件可用，不默认要求重连。
 

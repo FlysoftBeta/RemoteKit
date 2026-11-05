@@ -123,10 +123,8 @@ export class RemoteTransport {
   private inputDrainTimer?: ReturnType<typeof setTimeout>;
   private focusTimer?: ReturnType<typeof setTimeout>;
   private inputFocus = new Map<string, { token: string; identity: string; focused: boolean }>();
-  private editingSurfaces: readonly Surface[] = [];
   editingSurface(viewId: string) {
-    const views = this.layout?.reconfiguring ? this.editingSurfaces : this.layout?.views;
-    return views?.find(view => view.id === viewId);
+    return this.mobileEditing.surface(viewId);
   }
   inputIdentity(surface: Surface) { const known = this.inputFocus.get(surface.id); return `${this.attempt}:${surface.session}:${surface.id}:${surface.instance}:${surface.document}:${this.layout?.generation}:${this.layout?.epoch}:${known?.token === surface.focus ? known.identity : surface.focus}`; }
   editingIdentity(surface: Surface) { return `${this.attempt}:${surface.session}:${surface.id}:${surface.instance}:${surface.document}`; }
@@ -482,6 +480,7 @@ export class RemoteTransport {
   private hideVideoPlane(renderer: PlaneRenderer) {
     const plane = this.videoPlanes.get(renderer);
     if (!plane) return;
+    if (plane.ready) this.presentationInvalidations.forEach(listener => listener(renderer.view.id));
     plane.clip.style.opacity = '0'; plane.ready = false; plane.rtp = undefined; plane.pendingObservation = undefined; plane.observationSequence++; plane.stats.resetObservation();
     this.viewPresentations.delete(renderer.view.id); renderer.ready(false);
   }
@@ -706,6 +705,11 @@ export class RemoteTransport {
     return { renderer, remove };
   }
   subscribePresentedFrames = (listener: (frame: VideoPresentation) => void) => { this.presentedListeners.add(listener); return () => { this.presentedListeners.delete(listener); }; };
+  private presentationInvalidations = new Set<(viewId: string) => void>();
+  subscribePresentationInvalidation(listener: (viewId: string) => void) {
+    this.presentationInvalidations.add(listener);
+    return () => { this.presentationInvalidations.delete(listener); };
+  }
   getLastPresentation(viewId: string) {
     const current = this.videoPlaneFor(viewId), frame = this.viewPresentations.get(viewId);
     return current?.plane.ready && current.plane.rtp === frame?.rtpTimestamp ? frame : undefined;
@@ -1030,8 +1034,7 @@ export class RemoteTransport {
         if (message.type === 'clock.pong') { this.endpointClockProbe.pong(message, performance.now(), Date.now()); return; }
         if (this.productLocked) return;
         if (message.type === 'input.editable') {
-          const pending = this.layout?.reconfiguring === true;
-          if (this.mobileEditing.receive(message, pending ? this.editingSurfaces : this.layout?.views ?? [], Date.now(), pending)) this.notify();
+          if (this.mobileEditing.receive(message, this.mobileEditing.views, Date.now(), this.mobileEditing.layoutPending)) this.notify();
           return;
         }
         if (message.type === 'input.capabilities') this.clientGestures = message.clientGestures === 1;
@@ -1059,17 +1062,7 @@ export class RemoteTransport {
             this.presentationBarrierAcknowledged = false;
           }
           this.markConnection('firstLayout');
-          const reconfiguring = message.reconfiguring === true && message.generation === '0' && !message.views.length;
-          if (reconfiguring) {
-            if (!this.layout?.reconfiguring) {
-              this.editingSurfaces = this.layout?.views ?? [];
-              this.mobileEditing.suspendLayout();
-            }
-          } else {
-            this.editingSurfaces = [];
-            this.mobileEditing.reconcile(message.views);
-            if (message.reconfiguring !== undefined) delete message.reconfiguring;
-          }
+          this.mobileEditing.acceptLayout(message);
           this.layout = message;
           this.syncViewports();
           for (const renderer of this.renderers) if (!this.rendererCurrent(renderer)) { this.hideVideoPlane(renderer); renderer.ready(false); }

@@ -9,7 +9,7 @@ import { touchTerminalResult, type TouchOwner } from './touch-terminal';
 import { momentumPosition, type MomentumPacket, type MomentumPlan } from './client-gestures';
 import { EditingInput, EDITOR_SENTINEL } from './editing-input';
 import { DeferredEditingInput, editableInputMode } from './mobile-editing-state';
-import { KeyboardVisibility } from './keyboard-visibility';
+import { KeyboardSession } from './keyboard-session';
 import { useViewportTransition } from './use-viewport-transition';
 import type { Surface } from './types';
 import {
@@ -85,10 +85,8 @@ export function RemoteViewport({
   const ackedEditingOwner = useRef<string | undefined>(undefined);
   const previousEditing = useRef<{ document?: string; owner?: string; transport: RemoteTransport }>(undefined);
   const keyboardTouch = useRef<{ pointer: number; x: number; y: number; at: number }>(undefined);
-  const keyboardVisibility = useRef(new KeyboardVisibility());
+  const keyboardSession = useRef(new KeyboardSession());
   const [softInputFocused, setSoftInputFocused] = useState(false);
-  const [systemDismissed, setSystemDismissed] = useState(false);
-  const [keyboardRequested, setKeyboardRequested] = useState(false);
   const [, keyboardTick] = useState(0);
   const surface = transport.layout?.views.find((view) => view.id === viewId);
   const inputIdentity = surface && transport.inputIdentity(surface);
@@ -112,7 +110,7 @@ export function RemoteViewport({
   const resize = useViewportTransition(viewport, transport, viewId, surface, frameReady, editingIdentity, editor);
   const keyboardReady = keyboardEnabled && !!surface && frameReady && !resize.waiting && editableReady;
   const coarsePointer = window.matchMedia('(pointer: coarse)').matches;
-  const keyboardShown = softInputFocused && (resize.keyboardOpen || !systemDismissed && (!coarsePointer || keyboardRequested));
+  const keyboardShown = keyboardSession.current.shown(softInputFocused, resize.keyboardOpen, coarsePointer);
   const candidateDeadline = transport.mobileEditing.keyboardCandidateDeadline(editingSurface);
   const currentEditTarget = () => {
     const current = transport.editingSurface(viewId);
@@ -163,10 +161,8 @@ export function RemoteViewport({
     resetEditor();
   };
   const hideKeyboard = (dismiss = true) => {
-    if (dismiss) keyboardVisibility.current.dismiss();
+    if (dismiss) keyboardSession.current.dismiss();
     setSoftInputFocused(false);
-    setSystemDismissed(false);
-    setKeyboardRequested(false);
     const node = editor.current;
     if (!node || document.activeElement !== node) {
       editing.current.blurred(performance.now());
@@ -197,9 +193,9 @@ export function RemoteViewport({
     node.focus({ preventScroll: true });
     const focused = document.activeElement === node && wantsSoftKeyboard && inputMode !== 'none';
     setSoftInputFocused(focused);
-    if (focused && userRequested) {
-      setSystemDismissed(false);
-      setKeyboardRequested(true);
+    if (focused) {
+      keyboardSession.current.attached(userRequested);
+      if (userRequested) keyboardTick(tick => tick + 1);
     }
     return focused;
   };
@@ -302,7 +298,7 @@ export function RemoteViewport({
     retry();
     releaseTouchCaptures(ids);
   };
-  const releaseInput = () => {
+  const releaseInput = (endEditing = true) => {
     const wasOwner = editing.current.matches(editorOwner);
     for (const event of heldKeys.current.values())
       sendEdit({ ...event, action: "up", repeat: false, text: '', unmodified_text: '' });
@@ -324,12 +320,13 @@ export function RemoteViewport({
       mouseCapture.current = null;
     }
     cancelTouches();
+    if (!endEditing) return;
     if (editing.current.composing && editing.current.matches(editorOwner) && editableReady) send(withEditTarget({ type: 'ime_cancel' }));
     deferredEditing.current.clear(); editing.current.invalidate(); resetEditor();
     if (surface && wasOwner) transport.focus(surface, false);
   };
   const releaseRef = useRef(releaseInput);
-  releaseRef.current = () => { releaseInput(); hideKeyboard(); };
+  releaseRef.current = (endEditing = true) => { releaseInput(endEditing); if (endEditing) hideKeyboard(); };
   const syncTouchOwner = () => {
     const current = transport.layout?.views.find(view => view.id === viewId);
     const identity = current && transport.inputIdentity(current);
@@ -375,20 +372,20 @@ export function RemoteViewport({
     const node = editor.current;
     const focused = !!node && document.activeElement === node;
     if (replaced) {
-      keyboardVisibility.current = new KeyboardVisibility();
       keyboardTouch.current = undefined;
     }
-    const policy = keyboardVisibility.current;
+    const policy = keyboardSession.current;
     const observedDismissal = resize.keyboardDismissals !== systemDismissalSeen.current;
     systemDismissalSeen.current = resize.keyboardDismissals;
     const dismissedCurrentKeyboard = observedDismissal && !replaced && softInputFocused;
     if (dismissedCurrentKeyboard) {
-      policy.dismiss();
-      setSystemDismissed(true);
-      setKeyboardRequested(false);
+      policy.systemDismissed();
     }
     const now = performance.now();
-    const close = policy.sync(editingIdentity, keyboardEnabled, manualKeyboard, !!observedOwner, softInputFocused, now);
+    const command = policy.observe({ document: editingIdentity, enabled: keyboardEnabled, manual: manualKeyboard,
+      editor: transport.mobileEditing.keyboardObservation(editingSurface),
+      focused: softInputFocused, ready: keyboardReady && !resize.blocksInput(), now });
+    const close = command.close;
     const restore = restoreHardwareFocus.current;
     restoreHardwareFocus.current = undefined;
     const closing = focused && (replaced || !keyboardEnabled || close);
@@ -406,7 +403,7 @@ export function RemoteViewport({
         if (softInputFocused && remoteEditable && !editing.current.composing)
           node.inputMode = editableInputMode(remoteEditable.editable.type);
       }
-      if (!dismissedCurrentKeyboard && policy.takeAutoAttempt(keyboardReady && !resize.blocksInput()) && !softInputFocused)
+      if (!dismissedCurrentKeyboard && command.open && !softInputFocused)
         focusEditor(true);
     }
 
@@ -418,9 +415,7 @@ export function RemoteViewport({
     return () => clearTimeout(timer);
   });
   const activateKeyboard = () => {
-    const policy = keyboardVisibility.current;
-    policy.activate();
-    if (policy.takeAutoAttempt(keyboardReady && !resize.blocksInput()) && !keyboardShown)
+    if (keyboardSession.current.activate().open && !keyboardShown)
       focusEditor(true, true);
   };
   const resultRef = useRef((_result: InputResult) => {});
@@ -484,7 +479,9 @@ export function RemoteViewport({
   };
   useEffect(() => transport.subscribeInputDelivery(delivery => deliveryRef.current(delivery)), [transport]);
   useEffect(() => {
-    const blur = () => releaseRef.current();
+    // Android IME dialogs may take window focus while the DOM editor remains
+    // attached. Release held buttons/keys, but do not tear down its InputConnection.
+    const blur = () => releaseRef.current(document.hidden || document.activeElement !== editor.current);
     window.addEventListener("blur", blur);
     const visibility = () => { if (document.hidden) releaseRef.current(); };
     document.addEventListener('visibilitychange', visibility);
@@ -737,10 +734,8 @@ export function RemoteViewport({
         onFocus={() => { if (surface && editorOwner && frameReady && !resize.blocksInput()) { editing.current.focus(editorOwner); if (!editing.current.composing) resetEditor(); transport.ensureInputFocus(surface); } }}
         onBlur={() => {
           if (suppressBlur.current) return;
-          if (editor.current?.inputMode !== 'none') keyboardVisibility.current.dismiss();
+          if (editor.current?.inputMode !== 'none') keyboardSession.current.dismiss();
           setSoftInputFocused(false);
-          setSystemDismissed(false);
-          setKeyboardRequested(false);
           finishLocalEditing();
           if (editor.current) editor.current.inputMode = 'none';
         }}
@@ -764,7 +759,7 @@ export function RemoteViewport({
           onClick={() => {
             if (keyboardShown) { hideKeyboard(); return; }
             if (!surface || !keyboardReady || resize.blocksInput()) return;
-            keyboardVisibility.current.dismiss();
+            keyboardSession.current.activate(true);
             focusEditor(true, true);
             transport.ensureInputFocus(surface);
           }}
@@ -790,11 +785,9 @@ export function RemoteViewport({
           {transport.presentationError}
           {transport.canRetryPresentation && <Button sx={{ pointerEvents: 'auto' }} onClick={() => transport.retryPresentation()}>重试视频</Button>}
         </div>
-      ) : (!frameReady || resize.waiting) && !resize.frozen && (!resize.keyboard || transport.diagnostics.connection === "连接失败") && (
+      ) : (transport.diagnostics.connection === '连接失败' || transport.diagnostics.connection !== '已连接' && !resize.frozen) && (
         <div className="page-overlay" role="status">
-          {transport.diagnostics.connection === "已连接"
-            ? "正在恢复页面…"
-            : transport.diagnostics.connection === "连接失败"
+          {transport.diagnostics.connection === "连接失败"
               ? "画面连接中断"
               : "正在连接浏览器…"}
           {transport.diagnostics.connection === "连接失败" && (
