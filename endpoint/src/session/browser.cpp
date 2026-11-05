@@ -7,12 +7,11 @@
 
 namespace remotekit {
 Result<void> BrowserRuntime::AdmitLaunch() {
-  if (process_.Present() && process_.Exited()) {
-    const auto code = process_.ExitCode();
-    last_failure_ = Error{ErrorCode::kUnavailable, "Browser 进程退出，退出码 " +
-                                                       (code ? DescribeExitCode(*code) : "未知") +
-                                                       "；日志 " + Utf8(log_)};
-  }
+  // Stop() terminates the job with exit code 0; only unrequested exits are failures.
+  if (const auto code = process_.ExitCode(); code && *code != 0)
+    last_failure_ =
+        Error{ErrorCode::kUnavailable,
+              "Browser 进程退出，退出码 " + DescribeExitCode(*code) + "；日志 " + Utf8(log_)};
   if (!start_policy_.Admit(double(QpcNow()) / QpcFrequency())) {
     std::string message = start_policy_.attempts() >= 3 ? "Browser 启动连续失败，已停止自动重启"
                                                         : "Browser 启动失败，正在等待重试退避";
