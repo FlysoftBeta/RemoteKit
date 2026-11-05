@@ -1,0 +1,108 @@
+# Control：产品状态、操作与对账
+
+Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、设置、站点偏好、文件目录和操作收据都只在 Control 的 SQLite 里。Endpoint 和 Browser 拥有"执行"：进程、WebContents、恢复数据、GPU 资源。Control 通过对账让执行趋向期望。
+
+## 数据归属
+
+| 所有者 | 数据 |
+|---|---|
+| Control SQLite | 账户、口令/PIN hash、token hash、注册口令 hash、人脸模板（加密）；workspace（Window、Tab、active 关系、地址意图、恢复阶段）；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务 |
+| Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、Endpoint 连接状态、Memory Saver 计时 |
+| Endpoint Session | Browser 进程、期望的 view 配置（views.json）、自然关闭事件（events.json）、导航恢复文件、站点 UA 与媒体策略的运行缓存、文件资产与暂存、媒体/输入/GPU 资源 |
+| Browser | Profile 存储（cookie、缓存）、WebContents、history/PageState、sessionStorage 关联、页面回调与各种代次 |
+| Client | 服务端状态副本、地址草稿、待确认操作的内存投影、媒体缓冲；持久项只有 HttpOnly token |
+
+一个 User 对应一个 workspace，即一个 Tenant/Session。一个 workspace 有多个 Window（最多 8），每个 Window 有独立的 activeTab；Tab（最多 32）通过 `windowId` 归属。关闭最后一个 Tab 保留空 Window。窄屏只改变显示哪个 Window，不合并 Window，也不搬动 Tab。Tab 的 `kind` 为 `remote | start | files`：start（简易起始页）和 files（我的文件，每 Window 单例）在 Viewer 本地渲染，不产生远端渲染需求，但 Session 的数据通道仍在，首次导航直接创建远端页面，不插入伪造的 about:blank 历史。
+
+## 连接
+
+**Viewer ↔ Control**：WebSocket `/api/socket`，承载认证状态、产品快照、设置与文件目录等元数据服务、视口观测、RTC 信令、操作收据查询。
+
+**Viewer ↔ Endpoint**：WebRTC。视频、音频、输入、产品动作、文件字节、照片分析都走它。产品动作经 DataChannel 到 Endpoint，再由 Endpoint 经管理连接转交 Control 的唯一提交器（见下文"操作"）。
+
+**Control ↔ Endpoint**：两种部署共用同一套 JSON 请求/回复/事件：
+
+- 本地：Control 启动 `endpoint_service`，stdin/stdout UTF-8 JSONL（stdout 只输出协议，日志走 stderr），请求超时 20 秒，消息上限 1MiB。
+- 远端：Endpoint 主动连接 Control 的 `/api/endpoint`（WSS + Bearer token），握手 `node.hello{version, nodeId, endpointIncarnation}` → `node.ready{connectionEpoch}`；5 秒握手期限、15 秒心跳、最多 256 个在途请求。
+- `endpointIncarnation` 是 Endpoint 进程身份，跨 socket 重连保持；`connectionEpoch` 只代表一次管理连接。同一进程重连时，Control 保留 Viewer、RTC 租约和媒体代次，只做快照对账；只有进程真正被替换才整体失效。旧连接的回复不能完成新连接的请求，未知结果的变更不盲目重放。
+- 管理断线不销毁已有 Session 与 RTC，但立即撤销 Endpoint 侧的产品授权；恢复后以更高的授权代次重新授权（见[认证](auth.md)）。
+- Control 与 Endpoint 不共享文件系统、时钟或进程。
+
+**信令**：只用 trickle ICE。offer 不等完整候选收集，Endpoint 接受后异步发 `rtc.signal`（answer、candidate、complete、error），Control 按 Tenant、Viewer 租约、`connectionId`、`attemptId` 路由给对应 Viewer。早到的候选有界排队；候选不排在等待 answer 的 Tenant 队列后面，其他 Tenant 也不等这次协商；接管、退出或取消清除旧绑定。接收能力探测在页面启动时预热并缓存，鉴权不等待探测。
+
+**Viewer 租约**：每个账户同时只有一个活跃 Viewer。新连接接管旧连接，旧端收到 `lease revoked` 后停止媒体，不自动争抢。租约绑定 token 身份：注销某个 token 只撤销该 token 的租约，不会踢掉另一个 token 的新 Viewer（曾经按 Tenant 选择要踢的 Viewer，导致旧 token 注销踢掉了新登录）。排队中的工作在执行时重新校验租约和认证。
+
+## 操作
+
+产品交互既要即时反馈，又不能出现第二份产品真相。
+
+```
+Client  生成 operationId（UUID）+ operationGeneration，本地显示 pending 投影
+        → DC product.action{version:1, operationId, operationGeneration, action}
+Endpoint 校验当前 peer 与授权代次 → 管理事件 client.action → Control
+Control  每 Tenant 串行：
+         校验 connection/Viewer 租约
+         → 写入收据 accepted（同 ID 同 payload：直接返回原收据；同 ID 不同 payload：冲突）
+         → 分配 Tenant 内单调的 operationSequence
+         → applying → 执行（改 workspace + 调用 Endpoint）
+         → workspace 变更与收据在同一个 SQLite 事务中提交
+         → rtc.actionResult 回给 Endpoint → DC product.result 回给 Client
+         → 新的 workspace 快照经 WS 推送
+```
+
+收据状态：`accepted → applying → committed | rejected | unknown`，另有 `expired`（generation 已轮换）。
+
+- **unknown** 表示可能已经执行。Endpoint 转发后 15 秒没有结果、或 Native 调用超时，都是 unknown，而不是 rejected：曾经客户端把超时当作拒绝，停止查询并鼓励用户用新 ID 重做，造成重复副作用。unknown 通过 `operation.status` 查询收敛，从不用新 ID 重做。
+- 只有"确定没有执行"的失败才是 rejected：执行前的校验失败，或 Endpoint/Browser 明确拒绝。由错误码决定（`rejected` / `invalid_request` 等 → rejected；`outcome_unknown` → unknown），不由异常类型决定。
+- 导航和带确认的关闭在获得明确的 Native 证据前保持 applying。
+- 只改产品数据的操作可以先 committed，而 Endpoint 应用仍在 pending（例如站点偏好）。
+- Control 重启时，持久化的 accepted/applying 收据变为 unknown。每 Tenant 最多 4096 条收据；只有在没有未决执行时才轮换 generation；快照携带最近 64 条。
+- `unknown + resolved` 表示执行结果仍未知，但其目标已退役（例如 Tab 已关闭、Browser 已替换），不再阻塞。
+
+**快照是权威**：WS 快照携带 `serverIncarnation` 和单调的 `snapshotSequence`（独立于 workspace.revision），较旧的运行态快照不能覆盖较新的对话框、Endpoint 或 ready 观测。DC 回来的收据只更新对应 pending 操作的资格，不直接改 workspace。committed 的投影保留到权威 workspace revision 追上收据 revision。新 Viewer 不继承旧端的 pending 投影；已受理的旧操作可以完成，但迟到的结果不投给新 peer。UI 只在 committed 时显示"已保存"。
+
+历史问题：创建 Window 的回复丢失后用户重试，会因为传输层请求 ID 只在连接内有效而创建出第二个 Window——加长超时解决不了重复副作用，稳定的操作 ID 和可查询的 unknown 才能。导航曾在 Control 保存地址意图之前就在 Endpoint 执行，崩溃窗口内执行与产品状态不一致——现在意图在外部执行之前持久化，之后的结算绑定到 Native 导航身份。
+
+## 导航
+
+RPC 受理、导航开始、文档提交、资源加载完成是不同结果。
+
+- Browser 为每个产品命令绑定真实的 Chromium `NavigationHandle`：URL 导航用 `LoadURLWithParamsForResult` 的句柄；history 操作收集 controller 返回的所有句柄（包括只影响 iframe 的）；reload 绑定 void API 创建的主 frame `NavigationRequest`；redirect 更新已绑定的记录。
+- 导航消息携带 `operationId`、`operationGeneration`（各 ≤128 字节）和非零 u64 十进制 `operationSequence`。快照的 `navigationOperations` 报告 accepted/started/committed/cancelled/failed/superseded、navigationId、URL/错误和是否提交了文档。
+- 新命令取代旧的 pending；终态记录不能被迟到回调改写。`DidFinishNavigation` 结算真实的提交/错误/中止；beforeunload 等路径可能销毁句柄却不回调 finish，由 50ms 定时器检查失效的 WeakPtr。
+- 每个 view 最多 128 条未确认记录，满了拒绝新身份，不淘汰 pending 或终态证据。Control 持久化结果后发 `view.navigation.ack`，ACK 过的身份仍受 sequence 高水位保护。
+- `loading=false` 不是导航回执：它可能描述旧文档、取消或只影响 iframe 的操作。
+- 网络失败也可能提交一个 Chromium 错误文档：收据 failed 与 `documentCommitted=true` 同时成立，Tab 保持 remote 并显示真实失败 URL。只有未提交文档的失败或取消才恢复到之前的本地页（start/files）。错误页是转义后的静态 HTML（失败 URL、网络错误、提示用工具栏刷新），没有脚本、外部资源或隐藏重试。
+- `stop` 有自己的收据，不替换 Tab 当前的导航 owner 和之前的 kind/URL。首次远端导航在提交前被停止时，原 owner 回滚到 start 并清除 loading；已有的 Native 执行实例用 `requireRunning` 隐藏，而不是重新 ensure。
+- POST reload 明确返回 `reload_post_confirmation_unsupported`；导航恢复也拒绝 POST 历史。不悄悄把请求转成 GET，也不重放上传。
+- 地址栏与起始页共用 `resolveNavigation`：去空白，允许真实的 about:blank 和合法 HTTP(S)，识别裸域名/localhost/IP 主机，其他文本交给保存的搜索引擎（Google 默认，另有 Bing、DuckDuckGo、Baidu，`encodeURIComponent` 编码），不执行任意 scheme。输入上限 8192 个 UTF-16 单元，规范化/编码后的 URL 另限 8192 个 UTF-8 字节（Unicode 展开曾让合法长度的输入生成巨大的快照），超限在记录意图前拒绝而不是截断。组合输入中（isComposing / 229）的回车不提交。
+
+## 对账
+
+Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互不阻塞）：
+
+1. **在线**：先下发完整站点规则和媒体策略，再 `session.ensure`，再恢复或创建需要的 WebView。只在值变化时 `view.configure`，避免反复打断输出和输入。未确认的导航不会被普通 ensure 重复执行。
+2. **恢复**：Endpoint 优先使用自己的内部导航恢复数据；没有可用数据时才用 Control 保存的有限地址信息。恢复由 Endpoint 的定时状态机分步推进，`session.ensure` 立即返回 accepted，不逐页等待导航。恢复期间 Control 保留产品 URL 与导航意图，显示 restoring，不把中间的 about:blank 写回产品状态。
+3. **离线维护**：`session.snapshot` 只观察，不启动 Browser；Browser 已退出时返回 `running:false`。离线时不补建缺失的 WebView。对仍在运行的页面做隐藏/回收时带 `requireRunning`，避免快照之后进程退出、维护请求又把 Browser 拉起来。
+4. **缺失对象**：用有限的产品信息重建，并清理 orphan。自然关闭（`view.closed` 持久事件）与崩溃丢失用不同证据处理：缺页本身不是关闭证据。
+
+## 页面对话框、关闭与弹窗
+
+- alert/confirm/prompt 和导航 beforeunload 是临时的 `pageDialogs`。对话框身份绑定不可复用的 browserIncarnation、view、instance、document 和原生请求号；公开 ID 是完整身份的 hash，原生请求号只在服务端保存（PID 和本地计数器会重复）。回复前刷新快照校验，Endpoint 只发给同一个运行实例，Browser 执行点再校验一次。可见 activeTab 的请求用 MUI Dialog 处理，后台 Tab 显示待处理标记。
+- 关闭 Tab 的 beforeunload 走 pendingClose 流程（避免重复对话框）：`无 → 等待 prompt → 等待用户 → 等待关闭证据`。取消不删 Tab；离线或 Browser 替换时取消旧的关闭意图并保留 Tab。只有明确的关闭回复、状态或持久事件才删除 Tab。
+- **自然关闭**（`window.close`）是可重放的持久事件：Browser 产生 `view.closed`；Endpoint 先持久化事件和期望 view 移除，再 ACK Browser；Control 先持久化产品删除，再 ACK Endpoint。重放幂等。未确认事件达到 256 时拒绝新建 view，不静默丢事件。Browser 删除完整墓碑后保留本进程的紧凑关闭 ID 集合，防止旧 ID 复活。
+- **弹窗**：`window.open` 产生的真实 WebContents 先进入 pending 容器（不进入普通 orphan 集合），记录 provisionalId、opener view、disposition、URL、是否有用户手势。Control 先持久化产品 Tab/Window 和分配的 viewId 以及收养收据，再 `view.adopt` 绑定这个真实对象，保留 opener 和 sessionStorage。前台/后台 Tab 进入 opener 所在 Window；new window/popup 产生新 Window。pending 上限 16、30 秒过期；过期或已关闭的对象不会按 URL 重新打开来冒充收养成功——重新打开会丢失 opener/WindowProxy 和克隆的 sessionStorage。无用户手势的弹窗被阻止。真实的 about:blank 弹窗保持 remote（可以被 document.write），不会被识别成起始页。
+
+## 站点身份与全屏
+
+- **平板版网站**：按 origin 保存，只改变 UA 与 Client Hints（Android 平板，mobile=false），不改变 viewport、DPR、触控或指针特征。首次导航、redirect、history、reload 和 restore 在请求之前选择身份；子 frame 继承页面身份。只有 UA 实际变化才需要确认 Browser 已应用并刷新当前页（beforeunload 可以取消这次刷新），其他同站点页面下次导航生效。下发给 Browser 的站点映射只含 UA 规则，不含 Viewer 的键盘策略。
+- **Viewer 全屏**：设置"打开或激活时全屏"（默认关闭，Control 保存）。打开或回到前台时尝试 Fullscreen API；浏览器要求用户手势而拒绝时，等下一次可信的非 Esc 交互重试；用户主动退出后本次激活不再抢回。
+- **网页全屏**：网页自己的 Fullscreen API 只让该页面内容铺满整个 Viewer，隐藏外壳与其他 Window，不调用本地 Fullscreen API。状态绑定 browserIncarnation、instance、document，作为临时 `pageFullscreen` 投影，不写数据库。网页自己退出、悬浮退出按钮、Esc 都可结束；显式退出携带当前目标身份，旧文档的退出不影响新页面。导航、关页、锁定、断线清除投影；Native 状态随约 1.5 秒的周期对账同步。
+
+## 管理员与注册
+
+第一个正式账号免注册口令创建并成为管理员。管理员在"更多 → 管理员面板"设置服务器级注册口令（8–256 字符），之后的注册必须提供当前口令；未配置时注册关闭。登录只验证账户自己的密码，不受口令轮换影响。口令只存加盐 hash，界面只显示是否已设置，不回显，不进入设置、日志或发布包。并发首注与异步校验期间的口令变化在提交事务内再次确认。
+
+## 设置
+
+设置统一在"更多 → 设置"，全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、Client Scale（默认 Viewer DPR，可覆盖）、Memory Saver、搜索引擎、左右声道（多选；"不播放"即清空）、打开时全屏、锁定策略、统计叠层。每站点设置在"更多 → 网页兼容性处理"：平板版网站、不自动弹出键盘。Control 下发给 Endpoint 的媒体策略只有 `{degradationPreference, maxFps}`，maxFps 来自 Viewer 显式上报的刷新能力，未知时 60。
