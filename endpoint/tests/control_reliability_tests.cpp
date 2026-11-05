@@ -1,9 +1,13 @@
 #include "remotekit/control_reliability.hpp"
+#include "session/browser_rpc.hpp"
 #include "remotekit/navigation_export.hpp"
 #include "remotekit/presentation_barrier.hpp"
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <condition_variable>
+#include <thread>
+#include "remotekit/thread.hpp"
 
 #define CHECK(x)                                    \
   do {                                              \
@@ -14,70 +18,134 @@
   } while (false)
 using Json = nlohmann::json;
 
+void RpcLockAndStatusMapping() {
+  using remotekit::ErrorCode;
+  CHECK(remotekit::media::SdkErrorCode(6) == ErrorCode::kLimitExceeded);
+  CHECK(remotekit::media::SdkErrorCode(8) == ErrorCode::kBusy);
+  CHECK(remotekit::media::SdkErrorCode(6, true) == ErrorCode::kOutcomeUnknown);
+  CHECK(remotekit::media::SdkErrorCode(8, true) == ErrorCode::kUnavailable);
+  struct BlockingRequest {
+    std::mutex mutex;
+    std::condition_variable wake;
+    bool entered = false, released = false;
+  } blocking;
+  static BlockingRequest* current;
+  current = &blocking;
+  remotekit::media::Sdk sdk;
+  sdk.remotekit_sdk_control_connect = [](const char*, uint64_t* handle) {
+    *handle = 1;
+    return 0;
+  };
+  sdk.remotekit_sdk_control_close = [](uint64_t) { return 0; };
+  sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void* output, size_t,
+                                         size_t* count, uint32_t) {
+    std::unique_lock lock(current->mutex);
+    current->entered = true;
+    current->wake.notify_all();
+    current->wake.wait(lock, [] { return current->released; });
+    const std::string bytes = "{\"ok\":true}";
+    std::memcpy(output, bytes.data(), bytes.size());
+    *count = bytes.size();
+    return 0;
+  };
+  remotekit::BrowserRpc browser(sdk);
+  CHECK(browser.Connect("test"));
+  bool completed = false, failed = false;
+  std::thread worker([&] {
+    remotekit::RunThread(
+        "blocking RPC", [&] { completed = bool(browser.Request(Json::object())); },
+        [&] { failed = true; });
+  });
+  {
+    std::unique_lock lock(blocking.mutex);
+    blocking.wake.wait(lock, [&] { return blocking.entered; });
+  }
+  const auto busy = browser.Request(Json::object(), 0, 10000, true);
+  CHECK(!busy && busy.error().code == ErrorCode::kBusy && browser.Control() == 1);
+  {
+    std::lock_guard lock(blocking.mutex);
+    blocking.released = true;
+  }
+  blocking.wake.notify_all();
+  worker.join();
+  CHECK(completed && !failed);
+  sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void*, size_t, size_t*,
+                                         uint32_t) { return 6; };
+  const auto too_small = browser.Request(Json::object());
+  CHECK(!too_small && too_small.error().code == ErrorCode::kOutcomeUnknown && !browser.Control());
+}
+
 void InputWireFailures() {
-  uint64_t serial = 0;
   int calls = 0, retries = 0, waits = 0, exhausted = 0;
   bool identity = true, expired = false;
   Json application;
-  auto rpc = [&](const Json& request) {
-    return remotekit::BrowserRpc(
-        request, serial, [&](const std::string& encoded, std::vector<char>& bytes, size_t& count) {
-          const auto wire = Json::parse(encoded);
-          CHECK(wire.at("sequence") == "41");
-          CHECK(wire.at("version") == 1);
-          CHECK(wire.at("id") == ++calls);
-          const auto response =
-              application.is_null()
-                  ? (calls < 3 ? Json{{"ok", false}, {"code", 6}, {"error", "busy"}}
-                               : Json{{"ok", true}, {"accepted", true}})
-                  : application;
-          const auto text = response.dump();
-          count = text.size();
-          std::memcpy(bytes.data(), text.data(), count);
-          return 0;
-        });
+  remotekit::media::Sdk sdk;
+  sdk.remotekit_sdk_control_connect = [](const char*, uint64_t* handle) {
+    *handle = 1;
+    return 0;
   };
+  sdk.remotekit_sdk_control_close = [](uint64_t) { return 0; };
+  // The callback needs state without capturing because it mirrors the C ABI.
+  struct Fixture {
+    int* calls;
+    Json* application;
+  } fixture{&calls, &application};
+  static Fixture* current;
+  current = &fixture;
+  sdk.remotekit_sdk_control_request = [](uint64_t, const void* input, size_t size, void* output,
+                                         size_t, size_t* count, uint32_t) {
+    const auto wire =
+        Json::parse(static_cast<const char*>(input), static_cast<const char*>(input) + size);
+    CHECK(wire.at("sequence") == "41");
+    CHECK(wire.at("version") == 1);
+    CHECK(wire.at("id") == ++*current->calls);
+    const auto response =
+        current->application->is_null()
+            ? (*current->calls < 3 ? Json{{"ok", false}, {"code", 6}, {"error", "busy"}}
+                                   : Json{{"ok", true}, {"accepted", true}})
+            : *current->application;
+    auto bytes = response.dump();
+    *count = bytes.size();
+    std::memcpy(output, bytes.data(), bytes.size());
+    return 0;
+  };
+  remotekit::BrowserRpc browser(sdk);
+  CHECK(browser.Connect("test"));
+  auto rpc = [&](const Json& request) { return browser.Request(request); };
   auto dispatch = [&] {
     return remotekit::RetryBrowserInput(
         Json{{"method", "input"}, {"sequence", "41"}}, rpc, [&] { return identity; },
         [&] { return expired; }, [&] { ++waits; }, [&] { ++retries; }, [&] { ++exhausted; });
   };
-  CHECK(dispatch().at("ok") == true);
+  CHECK(dispatch().value().at("ok") == true);
   CHECK(calls == 3 && retries == 2 && waits == 2 && exhausted == 0);
   // An accepted injection's later status is not a pre-admission BUSY.
   application = {{"ok", true}, {"accepted", true}, {"injectionStatus", "failed"}, {"code", 6}};
-  CHECK(dispatch().at("accepted") == true);
+  CHECK(dispatch().value().at("accepted") == true);
   CHECK(calls == 4 && retries == 2);
   application = {{"ok", false}, {"code", 3}, {"error", "rejected"}};
-  CHECK(dispatch().at("code") == 3);
+  CHECK(dispatch().error().code == remotekit::ErrorCode::kRejected);
   CHECK(calls == 5 && retries == 2);
-  bool threw = false;
-  try {
-    remotekit::RequireBrowserOk(application);
-  } catch (const std::runtime_error&) {
-    threw = true;
-  }
-  CHECK(threw);
+  auto rejected = dispatch();
+  CHECK(!rejected && rejected.error().message.find("3") != std::string::npos);
   application = {{"ok", false}, {"code", 6}};
   identity = false;
-  CHECK(dispatch().at("error") == "input_identity_changed");
-  CHECK(calls == 6 && retries == 2);
+  CHECK(dispatch().error().code == remotekit::ErrorCode::kConflict);
+  CHECK(calls == 7 && retries == 2);
   identity = true;
   expired = true;
-  CHECK(dispatch().at("code") == 6);
-  CHECK(exhausted == 1 && calls == 7);
+  CHECK(dispatch().error().code == remotekit::ErrorCode::kBusy);
+  CHECK(exhausted == 1 && calls == 8);
   expired = false;
   const auto before = calls;
-  CHECK(dispatch().at("code") == 6);
+  CHECK(dispatch().error().code == remotekit::ErrorCode::kBusy);
   CHECK(calls - before == 51 && exhausted == 2);
-  // Timeout is transport failure, never an application retry.
-  threw = false;
-  try {
-    remotekit::BrowserRpc(Json::object(), serial, [](const auto&, auto&, auto&) { return 7; });
-  } catch (const std::runtime_error&) {
-    threw = true;
-  }
-  CHECK(threw);
+  sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void*, size_t, size_t*,
+                                         uint32_t) { return 5; };
+  auto timeout = rpc(Json::object());
+  CHECK(!timeout && timeout.error().code == remotekit::ErrorCode::kOutcomeUnknown);
+  auto unavailable = rpc(Json::object());
+  CHECK(!unavailable && unavailable.error().code == remotekit::ErrorCode::kUnavailable);
 }
 
 void ControlBackpressure() {
@@ -175,9 +243,10 @@ struct ExportFixture {
   std::string incarnation = "browser1";
   int begin = 0, chunks = 0, cancel = 0, reads = 0, writes = 0;
   bool disk_fail = false;
+  bool failed = false;
   void Observe() { exporter.Observe(current, incarnation, true); }
   void Tick() {
-    exporter.Tick(
+    auto result = exporter.Tick(
         incarnation,
         [&](const auto& view) -> Json {
           ++reads;
@@ -201,13 +270,15 @@ struct ExportFixture {
           return {{"ok", true}};
         },
         [](const auto&) { return 256 * 1024; },
-        [&](const auto& view, const Json& data) {
+        [&](const auto& view, const Json& data) -> remotekit::Result<void> {
           CHECK(view == "1");
           if (disk_fail)
-            throw std::runtime_error("disk failure");
+            return remotekit::Error{remotekit::ErrorCode::kUnavailable, "disk failure"};
           ++writes;
           saved = data;
+          return {};
         });
+    failed = !result;
   }
 };
 
@@ -275,13 +346,8 @@ void IncrementalExport() {
   for (int i = 0; i < 4; ++i)
     failed.Tick();
   failed.disk_fail = true;
-  bool threw = false;
-  try {
-    failed.Tick();
-  } catch (const std::runtime_error&) {
-    threw = true;
-  }
-  CHECK(threw && failed.saved.contains("previous") && !failed.exporter.Pending());
+  failed.Tick();
+  CHECK(failed.failed && failed.saved.contains("previous") && !failed.exporter.Pending());
   // Fairness between two views: bounded active transfer then next candidate.
   ExportFixture multiple;
   multiple.Observe();
@@ -392,47 +458,36 @@ void TouchTerminal() {
   CHECK(!full.Busy() && !full.Find(10, 20, "1", "physical-1"));
 }
 void OversizedBrowserReplyIsApplicationError() {
-  uint64_t serial = 72;
-  const auto reply = remotekit::BrowserRpc(
-      Json{{"method", "snapshot"}}, serial,
-      [&](const std::string& encoded, std::vector<char>& buffer, size_t& count) {
-        const auto request = Json::parse(encoded);
-        CHECK(request.at("id") == 73);
-        // Exact bounded envelope emitted by Browser WriteControlResponse.
-        const auto wire = Json{{"version", 1},
-                               {"id", request.at("id")},
-                               {"ok", false},
-                               {"error", "response_too_large"},
-                               {"message",
-                                "Browser state is too large to synchronize. Close or change the "
-                                "affected page and retry."}}
-                              .dump();
-        count = wire.size();
-        std::memcpy(buffer.data(), wire.data(), count);
-        return 0;
-      });
-  CHECK(reply.at("id") == 73 && reply.at("error") == "response_too_large");
-  bool rejected = false;
-  try {
-    remotekit::RequireBrowserOk(reply);
-  } catch (const std::runtime_error& error) {
-    rejected = std::string(error.what()) == "browser: response_too_large";
-  }
-  CHECK(rejected);
-  // A subsequent RPC can use the same live control rather than recreate Browser.
-  const auto next = remotekit::BrowserRpc(
-      Json{{"method", "snapshot"}}, serial,
-      [&](const std::string& encoded, std::vector<char>& buffer, size_t& count) {
-        const auto request = Json::parse(encoded);
-        CHECK(request.at("id") == 74);
-        const auto wire = Json{{"id", 74}, {"ok", true}}.dump();
-        count = wire.size();
-        std::memcpy(buffer.data(), wire.data(), count);
-        return 0;
-      });
-  CHECK(next.at("ok") == true);
+  remotekit::media::Sdk sdk;
+  sdk.remotekit_sdk_control_connect = [](const char*, uint64_t* handle) {
+    *handle = 1;
+    return 0;
+  };
+  sdk.remotekit_sdk_control_close = [](uint64_t) { return 0; };
+  sdk.remotekit_sdk_control_request = [](uint64_t, const void* input, size_t size, void* output,
+                                         size_t, size_t* count, uint32_t) {
+    const auto request =
+        Json::parse(static_cast<const char*>(input), static_cast<const char*>(input) + size);
+    const auto serial = request.at("id").get<uint64_t>();
+    const auto reply = serial == 1
+                           ? Json{{"ok", false}, {"code", 3}, {"error", "response_too_large"}}
+                           : Json{{"ok", true}, {"id", serial}};
+    const auto bytes = reply.dump();
+    *count = bytes.size();
+    std::memcpy(output, bytes.data(), bytes.size());
+    return 0;
+  };
+  remotekit::BrowserRpc browser(sdk);
+  CHECK(browser.Connect("test"));
+  auto rejected = browser.Request(Json{{"method", "snapshot"}});
+  CHECK(!rejected && rejected.error().code == remotekit::ErrorCode::kRejected);
+  CHECK(rejected.error().message.find("response_too_large") != std::string::npos);
+  auto next = browser.Request(Json{{"method", "snapshot"}});
+  CHECK(next && next.value().at("id") == 2);
 }
+
 int main() {
+  RpcLockAndStatusMapping();
   OversizedBrowserReplyIsApplicationError();
   StableWireLayout();
   TouchTerminal();

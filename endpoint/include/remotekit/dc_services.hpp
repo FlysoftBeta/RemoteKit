@@ -233,21 +233,5 @@ class DirectServices {
 
 // Consume a too-long line completely without retaining its tail. Return a
 // fixed invalid request so the caller can report an error and read the next line.
-inline bool ReadServiceLine(std::istream& input, std::string& line) {
-  line.clear();
-  bool overflow = false, any = false;
-  char c;
-  while (input.get(c)) {
-    any = true;
-    if (c == '\n')
-      break;
-    if (line.size() < 1024 * 1024)
-      line += c;
-    else
-      overflow = true;
-  }
-  if (overflow)
-    line = "{\"method\":\"__oversized_request\"}";
-  return any;
-}
+
 }  // namespace remotekit

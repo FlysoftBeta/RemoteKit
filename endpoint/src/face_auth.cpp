@@ -1,3 +1,4 @@
+#include "remotekit/thread.hpp"
 #include "remotekit/face_auth.hpp"
 
 #include <algorithm>
@@ -391,7 +392,14 @@ bool Faces::Begin(FaceChallenge challenge) {
   impl_->last_submit = now - 1s;
   impl_->deadline = now + std::chrono::milliseconds(impl_->challenge.timeout_ms);
   if (!impl_->worker.joinable()) {
-    impl_->worker = std::jthread([impl = impl_.get()](std::stop_token stop) { impl->Run(stop); });
+    impl_->worker = std::jthread([impl = impl_.get()](std::stop_token stop) {
+      remotekit::RunThread(
+          "face", [impl, stop] { impl->Run(stop); },
+          [impl] {
+            std::lock_guard lock(impl->mutex);
+            impl->Finish({FaceState::failed, {}, "face-worker-failed"});
+          });
+    });
   }
   impl_->changed.notify_one();
   return true;

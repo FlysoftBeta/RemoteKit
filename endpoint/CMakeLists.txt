@@ -19,14 +19,18 @@ if(WIN32 AND BUILD_TESTING)
   target_compile_definitions(endpoint_render_event_queue_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_features(endpoint_render_event_queue_tests PRIVATE cxx_std_20)
   add_test(NAME endpoint_render_event_queue COMMAND endpoint_render_event_queue_tests)
-  add_executable(endpoint_control_transport_tests tests/control_transport_tests.cpp src/control_transport.cpp)
-  target_include_directories(endpoint_control_transport_tests PRIVATE src ${RK_DEPS})
+  add_executable(endpoint_control_transport_tests tests/control_transport_tests.cpp src/management/remote_link.cpp)
+  target_include_directories(endpoint_control_transport_tests PRIVATE src include ${RK_DEPS})
   target_compile_definitions(endpoint_control_transport_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00 WINVER=0x0A00)
   target_compile_options(endpoint_control_transport_tests PRIVATE /W4 /utf-8)
   target_link_libraries(endpoint_control_transport_tests PRIVATE winhttp ole32)
   add_test(NAME endpoint_control_transport COMMAND endpoint_control_transport_tests)
-  add_executable(endpoint_control_reliability_tests tests/control_reliability_tests.cpp)
-  target_include_directories(endpoint_control_reliability_tests PRIVATE include ${RK_DEPS})
+  find_program(RK_NODE_EXECUTABLE node REQUIRED)
+  add_test(NAME endpoint_control_transport_integration
+    COMMAND ${RK_NODE_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tests/integration/test-endpoint-control-transport.mjs
+      $<TARGET_FILE:endpoint_control_transport_tests>)
+  add_executable(endpoint_control_reliability_tests tests/control_reliability_tests.cpp src/session/browser_rpc.cpp)
+  target_include_directories(endpoint_control_reliability_tests PRIVATE src include ${RK_DEPS} ${PROJECT_SOURCE_DIR}/sdk/include)
   target_compile_features(endpoint_control_reliability_tests PRIVATE cxx_std_20)
   add_test(NAME endpoint_control_reliability COMMAND endpoint_control_reliability_tests)
   add_executable(endpoint_audio_ring_tests tests/audio_ring_tests.cpp)
@@ -48,8 +52,8 @@ if(BUILD_TESTING)
   target_include_directories(endpoint_dc_file_services_tests PRIVATE include ${RK_DEPS})
   target_compile_features(endpoint_dc_file_services_tests PRIVATE cxx_std_20)
   add_test(NAME endpoint_dc_file_services COMMAND endpoint_dc_file_services_tests)
-  add_executable(endpoint_direct_services_tests tests/direct_services_tests.cpp)
-  target_include_directories(endpoint_direct_services_tests PRIVATE include ${RK_DEPS})
+  add_executable(endpoint_direct_services_tests tests/direct_services_tests.cpp src/management/stdio_link.cpp)
+  target_include_directories(endpoint_direct_services_tests PRIVATE src include ${RK_DEPS})
   target_compile_features(endpoint_direct_services_tests PRIVATE cxx_std_20)
   add_test(NAME endpoint_direct_services COMMAND endpoint_direct_services_tests)
   add_executable(endpoint_presentation_barrier_tests tests/presentation_barrier_tests.cpp)
@@ -160,26 +164,64 @@ if(WIN32)
       add_test(NAME endpoint_face_auth COMMAND endpoint_face_auth_tests "${RK_DEPS}/face-auth/face-models")
     endif()
   endif()
+  add_library(remotekit_storage STATIC src/persistence/session_store.cpp)
+  target_include_directories(remotekit_storage PUBLIC src include ${RK_DEPS})
+  target_compile_definitions(remotekit_storage PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_options(remotekit_storage PRIVATE /W4 /utf-8)
   add_library(remotekit_file_library STATIC src/file_library.cpp)
   target_include_directories(remotekit_file_library PUBLIC include ${RK_DEPS} ${PROJECT_SOURCE_DIR}/sdk/include)
   target_compile_features(remotekit_file_library PUBLIC cxx_std_20)
   target_compile_definitions(remotekit_file_library PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_options(remotekit_file_library PRIVATE /W4 /utf-8)
-  target_link_libraries(remotekit_file_library PUBLIC bcrypt)
+  target_link_libraries(remotekit_file_library PUBLIC bcrypt remotekit_storage)
   if(BUILD_TESTING)
     add_executable(endpoint_file_library_tests tests/file_library_tests.cpp src/file_upload.cpp)
     target_compile_definitions(endpoint_file_library_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
     target_link_libraries(endpoint_file_library_tests PRIVATE remotekit_file_library)
     add_test(NAME endpoint_file_library COMMAND endpoint_file_library_tests)
   endif()
-  add_executable(endpoint_service src/service.cpp src/file_upload.cpp src/control_transport.cpp
-    src/raw_camera.cpp)
-  target_link_libraries(endpoint_service PRIVATE remotekit_media remotekit_endpoint remotekit_face remotekit_file_library winmm crypt32 ole32 winhttp)
+  add_library(remotekit_runtime STATIC
+    src/service.cpp
+    src/options.cpp
+    src/common.cpp
+    src/management/methods.cpp
+    src/management/stdio_link.cpp
+    src/management/remote_link.cpp
+    src/platform/process.cpp
+    src/media/adapter.cpp
+    src/session/browser.cpp
+    src/session/browser_rpc.cpp
+    src/session/navigation_recovery.cpp
+    src/file_upload.cpp
+    src/raw_camera.cpp
+    src/session/session.cpp
+    src/session/session_audio.cpp
+    src/session/session_auth.cpp
+    src/session/session_encoders.cpp
+    src/session/session_files.cpp
+    src/session/session_input.cpp
+    src/session/session_management.cpp
+    src/session/session_media.cpp
+    src/session/session_output.cpp
+    src/session/session_rtc.cpp
+    src/session/session_views.cpp)
+  target_link_libraries(remotekit_runtime PUBLIC remotekit_media remotekit_endpoint remotekit_face remotekit_file_library winmm crypt32 ole32 winhttp)
   if(TARGET remotekit_photo)
-    target_compile_definitions(endpoint_service PRIVATE RK_FILE_PHOTO)
-    target_link_libraries(endpoint_service PRIVATE remotekit_photo)
+    target_compile_definitions(remotekit_runtime PUBLIC RK_FILE_PHOTO)
+    target_link_libraries(remotekit_runtime PUBLIC remotekit_photo)
   endif()
+  target_compile_options(remotekit_runtime PRIVATE /W4 /utf-8)
+  add_executable(endpoint_service src/main.cpp)
+  target_link_libraries(endpoint_service PRIVATE remotekit_runtime)
   target_compile_options(endpoint_service PRIVATE /W4 /utf-8)
+  if(BUILD_TESTING)
+    add_executable(endpoint_infrastructure_tests tests/infrastructure_tests.cpp)
+    target_compile_options(endpoint_infrastructure_tests PRIVATE /W4 /utf-8)
+    target_link_libraries(endpoint_infrastructure_tests PRIVATE remotekit_runtime)
+    add_custom_command(TARGET endpoint_infrastructure_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_infrastructure_tests>)
+    add_test(NAME endpoint_infrastructure COMMAND endpoint_infrastructure_tests)
+  endif()
   add_custom_command(TARGET endpoint_service POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_service>)
   if(RK_FACE_NATIVE_ENABLED)

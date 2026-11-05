@@ -236,17 +236,17 @@ int main() {
   auto atlas = PackAtlas(160, 128, 2, items);
   CHECK(atlas);
   auto again = PackAtlas(160, 128, 2, items);
-  CHECK(again && again.value.placements.size() == items.size());
-  for (std::size_t i = 0; i < atlas.value.placements.size(); ++i) {
-    auto a = atlas.value.placements[i];
-    CHECK(a.outer == again.value.placements[i].outer);
+  CHECK(again && again.value().placements.size() == items.size());
+  for (std::size_t i = 0; i < atlas.value().placements.size(); ++i) {
+    auto a = atlas.value().placements[i];
+    CHECK(a.outer == again.value().placements[i].outer);
     CHECK(a.outer.x >= 0 && a.outer.y >= 0 && a.outer.x + a.outer.width <= 160 &&
           a.outer.y + a.outer.height <= 128);
     for (std::size_t j = 0; j < i; ++j)
-      CHECK(!Overlap(a.outer, atlas.value.placements[j].outer));
+      CHECK(!Overlap(a.outer, atlas.value().placements[j].outer));
   }
-  CHECK(PackAtlas(10, 10, 0, {{1, 11, 1, 1}}).status.error == Error::no_space);
-  CHECK(PackAtlas(10, 10, 1, {{1, 9, 9, 1}}).status.error == Error::no_space);
+  CHECK(PackAtlas(10, 10, 0, {{1, 11, 1, 1}}).error().code == ErrorCode::kLimitExceeded);
+  CHECK(PackAtlas(10, 10, 1, {{1, 9, 9, 1}}).error().code == ErrorCode::kLimitExceeded);
   CHECK(!PackAtlas(10, 10, 0, {{1, 6, 10, 1}, {2, 6, 10, 1}}));
   CHECK(!PackAtlas(10, 10, 0, {{1, 1, 1, 1}, {1, 1, 1, 1}}));
   CHECK(!PackAtlas(10, 10, 0, {{1, 1, 1, 0}}));
@@ -258,9 +258,9 @@ int main() {
       small.push_back({static_cast<WebViewId>(i + 1), 3 + (i * 7) % 19, 3 + (i * 11) % 17, 1});
     auto packed = PackAtlas(256, 256, 1, small);
     CHECK(packed);
-    for (std::size_t i = 0; i < packed.value.placements.size(); ++i)
+    for (std::size_t i = 0; i < packed.value().placements.size(); ++i)
       for (std::size_t j = 0; j < i; ++j)
-        CHECK(!Overlap(packed.value.placements[i].outer, packed.value.placements[j].outer));
+        CHECK(!Overlap(packed.value().placements[i].outer, packed.value().placements[j].outer));
   }
   std::cout << "endpoint core tests passed\n";
 }

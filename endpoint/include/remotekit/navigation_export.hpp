@@ -1,10 +1,11 @@
 #pragma once
+#include "remotekit/error.hpp"
 #include <json.hpp>
 #include <map>
 #include <optional>
 #include <string>
 #include <algorithm>
-#include <stdexcept>
+#include <charconv>
 #include <chrono>
 
 namespace remotekit {
@@ -58,14 +59,14 @@ class NavigationExport {
   // ReadCurrent returns a fresh view (or null), including Browser incarnation
   // captured by the caller. Browser requests serialize with input via Rpc.
   template <class ReadCurrent, class Rpc, class Decode, class Save>
-  void Tick(const std::string& incarnation,
-            ReadCurrent read_current,
-            Rpc rpc,
-            Decode decoded_size,
-            Save save) {
+  Result<void> Tick(const std::string& incarnation,
+                    ReadCurrent read_current,
+                    Rpc rpc,
+                    Decode decoded_size,
+                    Save save) {
     if (!task_) {
       if (candidates_.empty())
-        return;
+        return {};
       auto selected = candidates_.upper_bound(cursor_);
       if (selected == candidates_.end())
         selected = candidates_.begin();
@@ -80,61 +81,73 @@ class NavigationExport {
       if (!task.transfer.empty())
         rpc(command("navigation.transfer.cancel"));
     };
-    try {
-      if (std::chrono::steady_clock::now() >= task.deadline)
-        throw std::runtime_error("navigation export deadline exceeded");
-      const auto current = read_current(task.view);
-      const auto identity = current.is_object() ? Identify(current, incarnation) : std::nullopt;
-      const auto candidate = candidates_.find(task.view);
-      if (candidate == candidates_.end() || !identity || *identity != task.identity ||
-          candidate->second != task.identity) {
-        cancel();
-        // Keep a newly observed revision for a later turn.
-        if (candidate != candidates_.end() && candidate->second == task.identity)
-          candidates_.erase(candidate);
-        task_.reset();
-        return;
-      }
-      if (task.transfer.empty()) {
-        auto begin = rpc(command("navigation.export.begin"));
-        task.transfer = begin.at("transfer").template get<std::string>();
-        task.size = std::stoull(begin.at("size").template get<std::string>());
-        if (!task.size || task.size > 64 * 1024 * 1024 ||
-            begin.at("navigationRevision") != task.identity.revision)
-          throw std::runtime_error("navigation export size/revision changed");
-        return;
-      }
-      if (task.offset < task.size) {
-        const auto count = std::min<uint64_t>(task.size - task.offset, 256 * 1024);
-        auto request = command("navigation.export.chunk");
-        request["offset"] = std::to_string(task.offset);
-        request["length"] = count;
-        auto chunk = rpc(request);
-        const auto data = chunk.at("data").template get<std::string>();
-        if (decoded_size(data) != count)
-          throw std::runtime_error("navigation export chunk length mismatch");
-        task.chunks.push_back({{"data", data}, {"bytes", count}});
-        task.offset += count;
-        return;
-      }
-      // This turn freshly revalidated identity after the final chunk. Publish only
-      // a complete snapshot; cancellation and failures preserve the previous file.
+    const auto fail = [&](Error error) -> Result<void> {
       cancel();
-      task.transfer.clear();
-      save(task.view, Json{{"size", std::to_string(task.size)},
-                           {"chunks", std::move(task.chunks)},
-                           {"navigationRevision", task.identity.revision}});
       candidates_.erase(task.view);
       task_.reset();
-    } catch (...) {
-      try {
-        cancel();
-      } catch (...) {
-      }
-      candidates_.erase(task.view);
+      return error;
+    };
+
+    if (std::chrono::steady_clock::now() >= task.deadline)
+      return fail(Error{ErrorCode::kUnavailable, "navigation export deadline exceeded"});
+    Result<Json> observed = read_current(task.view);
+    if (!observed)
+      return fail(observed.error());
+    const auto current = std::move(observed).value();
+    const auto identity = current.is_object() ? Identify(current, incarnation) : std::nullopt;
+    const auto candidate = candidates_.find(task.view);
+    if (candidate == candidates_.end() || !identity || *identity != task.identity ||
+        candidate->second != task.identity) {
+      cancel();
+      // Keep a newly observed revision for a later turn.
+      if (candidate != candidates_.end() && candidate->second == task.identity)
+        candidates_.erase(candidate);
       task_.reset();
-      throw;
+      return {};
     }
+    if (task.transfer.empty()) {
+      Result<Json> response = rpc(command("navigation.export.begin"));
+      if (!response)
+        return fail(response.error());
+      auto begin = std::move(response).value();
+      task.transfer = begin.at("transfer").template get<std::string>();
+      const auto size = begin.at("size").template get<std::string>();
+      const auto [end, error] = std::from_chars(size.data(), size.data() + size.size(), task.size);
+      if (error != std::errc{} || end != size.data() + size.size())
+        return fail(Error{ErrorCode::kRejected, "invalid navigation export size"});
+      if (!task.size || task.size > 64 * 1024 * 1024 ||
+          begin.at("navigationRevision") != task.identity.revision)
+        return fail(Error{ErrorCode::kRejected, "navigation export size/revision changed"});
+      return {};
+    }
+    if (task.offset < task.size) {
+      const auto count = std::min<uint64_t>(task.size - task.offset, 256 * 1024);
+      auto request = command("navigation.export.chunk");
+      request["offset"] = std::to_string(task.offset);
+      request["length"] = count;
+      Result<Json> response = rpc(request);
+      if (!response)
+        return fail(response.error());
+      auto chunk = std::move(response).value();
+      const auto data = chunk.at("data").template get<std::string>();
+      if (decoded_size(data) != count)
+        return fail(Error{ErrorCode::kRejected, "navigation export chunk length mismatch"});
+      task.chunks.push_back({{"data", data}, {"bytes", count}});
+      task.offset += count;
+      return {};
+    }
+    // This turn freshly revalidated identity after the final chunk. Publish only
+    // a complete snapshot; cancellation and failures preserve the previous file.
+    cancel();
+    task.transfer.clear();
+    auto saved = save(task.view, Json{{"size", std::to_string(task.size)},
+                                      {"chunks", std::move(task.chunks)},
+                                      {"navigationRevision", task.identity.revision}});
+    if (!saved)
+      return fail(saved.error());
+    candidates_.erase(task.view);
+    task_.reset();
+    return {};
   }
 };
 }  // namespace remotekit

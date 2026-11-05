@@ -45,6 +45,8 @@ class EncoderWorker {
       std::function<bool(const remotekit_rtc_frame&, bool, const std::function<bool()>&)> publish =
           {});
   ~EncoderWorker();
+  enum class State { kStopped, kRunning, kPaused, kStopping, kFailed };
+  State state();
   bool Configure(const remotekit_rtc_encoder_config&);
   bool Enqueue(const remotekit_rtc_frame&, bool keyframe);
   void Rates(uint32_t bitrate, uint32_t fps);

@@ -1,4 +1,6 @@
 #pragma once
+#include "remotekit/thread.hpp"
+#include "remotekit/error.hpp"
 #include "remotekit/dc_services.hpp"
 #include "remotekit/file_upload.hpp"
 #include "remotekit/photo_processing.hpp"
@@ -274,7 +276,7 @@ class DcFileServices {
     FileUploadStore::Binding binding;
     uint64_t grant{};
   };
-  using Execute = std::function<ServiceJson(const Job&)>;
+  using Execute = std::function<Result<ServiceJson>(const Job&)>;
   using Sweep = std::function<void()>;
 
  private:
@@ -327,62 +329,67 @@ class DcFileServices {
   ~DcFileServices() { Stop(); }
   void Start(Execute execute, Sweep sweep) {
     worker_ = std::thread([this, execute = std::move(execute), sweep = std::move(sweep)] {
-      for (;;) {
-        Job job;
-        {
-          std::unique_lock lock(mutex_);
-          wake_.wait_for(lock, std::chrono::seconds(1),
-                         [&] { return stop_ || sweep_requested_ || !jobs_.empty(); });
-          if (stop_)
-            return;
-          sweep_requested_ = false;
-          if (!jobs_.empty()) {
-            job = std::move(jobs_.front());
-            jobs_.pop_front();
-          }
-        }
-        try {
-          sweep();
-        } catch (...) {
-        }
-        if (!job.peer)
-          continue;
-        ServiceJson reply;
-        try {
-          if (!Current(job))
-            throw std::runtime_error("file_transfer_interrupted");
-          reply = Reply(job.message, true, execute(job));
-        } catch (const std::exception& error) {
-          std::string detail = error.what();
-          if (PhotoBurstMethod(job.message["method"]) || job.message["method"] == "photo.rank" ||
-              job.message["method"] == "photo.process" ||
-              job.message["method"] == "photo.thumbnail")
-            std::replace(detail.begin(), detail.end(), '-', '_');
-          const bool public_code =
-              !detail.empty() && detail.size() <= 128 &&
-              std::all_of(detail.begin(), detail.end(), [](unsigned char c) {
-                return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
-              });
-          reply = Reply(
-              job.message, false,
-              public_code ? detail : "file_operation_failed");  // Filesystem errors can contain
-                                                                // private absolute paths.
-        }
-        std::lock_guard lock(mutex_);
-        if (!CurrentLocked(job))
-          continue;
-        const auto key = job.message["requestId"].get<std::string>();
-        auto found = receipts_.find(key);
-        if (found == receipts_.end())
-          continue;
-        found->second.reply = reply;
-        history_.push_back(key);
-        QueueReply(reply, job.grant);
-        while (history_.size() > 128) {
-          receipts_.erase(history_.front());
-          history_.pop_front();
-        }
-      }
+      RunThread(
+          "disk",
+          [&] {
+            for (;;) {
+              Job job;
+              {
+                std::unique_lock lock(mutex_);
+                wake_.wait_for(lock, std::chrono::seconds(1),
+                               [&] { return stop_ || sweep_requested_ || !jobs_.empty(); });
+                if (stop_)
+                  return;
+                sweep_requested_ = false;
+                if (!jobs_.empty()) {
+                  job = std::move(jobs_.front());
+                  jobs_.pop_front();
+                }
+              }
+              sweep();
+              if (!job.peer)
+                continue;
+              ServiceJson reply;
+              try {
+                Result<ServiceJson> executed =
+                    Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
+                if (Current(job))
+                  executed = execute(job);
+                reply = executed ? Reply(job.message, true, executed.value())
+                                 : Reply(job.message, false, executed.error().message);
+              } catch (const ServiceJson::exception& error) {
+                fprintf(stderr, "file router invalid request: %s\n", error.what());
+                reply = Reply(job.message, false, "invalid_request");
+              } catch (const std::exception& error) {
+                fprintf(stderr, "file router internal: %s\n", error.what());
+                reply = Reply(job.message, false, "internal");
+              } catch (...) {
+                fprintf(stderr, "file router internal: unknown exception\n");
+                reply = Reply(job.message, false, "internal");
+              }
+              std::lock_guard lock(mutex_);
+              if (!CurrentLocked(job))
+                continue;
+              const auto key = job.message["requestId"].get<std::string>();
+              auto found = receipts_.find(key);
+              if (found == receipts_.end())
+                continue;
+              found->second.reply = reply;
+              history_.push_back(key);
+              QueueReply(reply, job.grant);
+              while (history_.size() > 128) {
+                receipts_.erase(history_.front());
+                history_.pop_front();
+              }
+            }
+          },
+          [this] {
+            std::lock_guard lock(mutex_);
+            stop_ = true;
+            jobs_.clear();
+            authorized_.clear();
+            outbox_.clear();
+          });
     });
   }
   void Stop() {

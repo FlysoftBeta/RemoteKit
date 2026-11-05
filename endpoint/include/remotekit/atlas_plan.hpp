@@ -66,7 +66,7 @@ inline std::optional<AtlasPlan> PlanAtlas(const std::vector<PackItem>& input,
     if (!packed)
       continue;
     int crop_width = 16, crop_height = 16;
-    for (const auto& placement : packed.value.placements) {
+    for (const auto& placement : packed.value().placements) {
       crop_width = std::max(crop_width, placement.outer.x + placement.outer.width);
       crop_height = std::max(crop_height, placement.outer.y + placement.outer.height);
     }

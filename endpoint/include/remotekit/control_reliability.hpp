@@ -1,5 +1,6 @@
 #pragma once
 #include <json.hpp>
+#include "remotekit/error.hpp"
 #include <array>
 #include <algorithm>
 #include <deque>
@@ -16,51 +17,26 @@ inline ControlJson LayoutCapabilities(ControlJson layout, bool client_gestures) 
   layout["clientGestures"] = client_gestures ? 1 : 0;
   return layout;
 }
-// The same wire adapter is used by Session and CPU failure-injection tests.
-// Application rejection is a reply; only transport/protocol failure throws.
-template <class Transport>
-ControlJson BrowserRpc(ControlJson command, uint64_t& serial, Transport transport) {
-  command["version"] = 1;
-  command["id"] = ++serial;
-  const auto encoded = command.dump();
-  std::vector<char> buffer(1024 * 1024);
-  size_t count = 0;
-  const int status = transport(encoded, buffer, count);
-  if (status)
-    throw std::runtime_error("browser request transport " + std::to_string(status));
-  if (count > buffer.size())
-    throw std::runtime_error("browser response exceeds bound");
-  auto reply = ControlJson::parse(buffer.data(), buffer.data() + count);
-  if (!reply.is_object() || !reply.contains("ok") || !reply["ok"].is_boolean())
-    throw std::runtime_error("invalid browser response");
-  return reply;
-}
-inline ControlJson RequireBrowserOk(ControlJson reply) {
-  if (!reply.value("ok", false))
-    throw std::runtime_error("browser: " + reply.value("error", std::string("command failed")));
-  return reply;
-}
 template <class Rpc, class Current, class Expired, class Wait, class Retry, class Exhausted>
-ControlJson RetryBrowserInput(const ControlJson& command,
-                              Rpc rpc,
-                              Current current,
-                              Expired expired,
-                              Wait wait,
-                              Retry retry,
-                              Exhausted exhausted) {
+Result<ControlJson> RetryBrowserInput(const ControlJson& command,
+                                      Rpc rpc,
+                                      Current current,
+                                      Expired expired,
+                                      Wait wait,
+                                      Retry retry,
+                                      Exhausted exhausted) {
   auto reply = rpc(command);
   unsigned retries = 0;
-  while (!reply.value("ok", false) && reply.value("code", 0) == 6 &&
-         !reply.value("inputAdmitted", false)) {
+  while (!reply && reply.error().code == ErrorCode::kBusy) {
     if (retries >= 50 || expired()) {
       exhausted();
       break;
     }
     if (!current())
-      return {{"ok", false}, {"error", "input_identity_changed"}};
+      return Error{ErrorCode::kConflict, "input_identity_changed"};
     wait();
     if (!current())
-      return {{"ok", false}, {"error", "input_identity_changed"}};
+      return Error{ErrorCode::kConflict, "input_identity_changed"};
     if (expired()) {
       exhausted();
       break;

@@ -1,4 +1,5 @@
 #include "remotekit/file_library.hpp"
+#include "persistence/session_store.hpp"
 
 #include <windows.h>
 #include <bcrypt.h>
@@ -107,39 +108,17 @@ bool Remove(const fs::path& path) {
   fs::remove(path, error);
   return !error;
 }
-void FlushPayload(const fs::path& file) {
-  const HANDLE handle = CreateFileW(file.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (handle == INVALID_HANDLE_VALUE)
-    throw std::runtime_error("file_flush_failed");
-  const bool flushed = FlushFileBuffers(handle);
-  CloseHandle(handle);
+void FlushPayload(const fs::path& path) {
+  auto flushed = FlushFile(path);
   if (!flushed)
-    throw std::runtime_error("file_flush_failed");
+    throw std::runtime_error(flushed.error().message);
 }
-void Save(const fs::path& file, const Json& value, const FileLibrary::Check& check = {}) {
-  auto temporary = file;
-  temporary += L".new";
-  try {
-    const auto text = value.dump();
-    {
-      std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-      output.write(text.data(), static_cast<std::streamsize>(text.size()));
-      output.close();
-      if (!output)
-        throw std::runtime_error("file_metadata_write_failed");
-    }
-    FlushPayload(temporary);
-    if (check)
-      check();
-    if (!MoveFileExW(temporary.c_str(), file.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-      throw std::runtime_error("file_metadata_commit_failed");
-  } catch (...) {
-    Remove(temporary);
-    throw;
-  }
+void Save(const fs::path& path, const Json& value, const FileLibrary::Check& check = {}) {
+  auto saved = WriteDurableJson(path, value, check);
+  if (!saved)
+    throw std::runtime_error(saved.error().message);
 }
+
 template <class Visit>
 void Records(const fs::path& directory, std::size_t maximum, Visit visit) {
   std::size_t count = 0;

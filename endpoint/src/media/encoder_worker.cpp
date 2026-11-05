@@ -1,3 +1,4 @@
+#include "remotekit/thread.hpp"
 #include "encoder_worker.hpp"
 #include "remotekit/sampling.hpp"
 #include "remotekit/tail_refresh.hpp"
@@ -231,7 +232,14 @@ bool EncoderWorker::Configure(const remotekit_rtc_encoder_config& config) {
   stopping_ = false;
   failed_ = false;
   configured_ = true;
-  thread_ = std::thread([this] { Run(); });
+  thread_ = std::thread([this] {
+    remotekit::RunThread(
+        "encoder", [this] { Run(); },
+        [this] {
+          std::lock_guard lock(mutex_);
+          failed_ = true;
+        });
+  });
   return true;
 }
 bool EncoderWorker::Enqueue(const remotekit_rtc_frame& frame, bool keyframe) {
@@ -599,6 +607,16 @@ void EncoderWorker::Run() {
     static_cast<ID3D11Texture2D*>(job.frame.d3d11_texture)->Release();
   }
   queue_.clear();
+}
+EncoderWorker::State EncoderWorker::state() {
+  std::lock_guard lock(mutex_);
+  if (failed_)
+    return State::kFailed;
+  if (stopping_)
+    return State::kStopping;
+  if (!configured_)
+    return State::kStopped;
+  return paused_ ? State::kPaused : State::kRunning;
 }
 void EncoderWorker::Stop() {
   {

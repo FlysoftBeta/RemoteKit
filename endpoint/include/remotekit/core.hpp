@@ -1,4 +1,5 @@
 #pragma once
+#include "remotekit/error.hpp"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -8,18 +9,6 @@
 
 namespace remotekit {
 using WebViewId = std::uint64_t;
-enum class Error { none, invalid, no_space };
-struct Status {
-  Error error{Error::none};
-  std::string message;
-  explicit operator bool() const { return error == Error::none; }
-};
-template <class T>
-struct Result {
-  T value{};
-  Status status{};
-  explicit operator bool() const { return static_cast<bool>(status); }
-};
 struct KeyInput {
   enum class Action { down, up, character };
   Action action{};
@@ -106,7 +95,7 @@ using InputPayload = std::variant<KeyInput,
                                   ImeCommit,
                                   ImeCancel,
                                   ImeFinish>;
-Status ValidateInput(const InputPayload&);
+Result<void> ValidateInput(const InputPayload&);
 struct PixelRect {
   int x{}, y{}, width{}, height{};
   bool operator==(const PixelRect&) const = default;

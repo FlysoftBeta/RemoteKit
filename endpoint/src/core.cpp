@@ -8,7 +8,7 @@
 
 namespace remotekit {
 namespace {
-Status Fail(Error e, const char* m) {
+Error Fail(ErrorCode e, const char* m) {
   return {e, m};
 }
 bool Utf16(const std::u16string& s) {
@@ -29,7 +29,7 @@ bool Finite(double a, double b) {
   return std::isfinite(a) && std::isfinite(b);
 }
 }  // namespace
-Status ValidateInput(const InputPayload& p) {
+Result<void> ValidateInput(const InputPayload& p) {
   bool ok = std::visit(
       [](const auto& v) {
         using T = std::decay_t<decltype(v)>;
@@ -98,7 +98,8 @@ Status ValidateInput(const InputPayload& p) {
           return true;
       },
       p);
-  return ok ? Status{} : Fail(Error::invalid, "Invalid input payload or UTF-16 selection");
+  return ok ? Result<void>{}
+            : Fail(ErrorCode::kInvalidRequest, "Invalid input payload or UTF-16 selection");
 }
 namespace {
 bool Intersects(const PixelRect& a, const PixelRect& b) {
@@ -111,18 +112,18 @@ bool Contains(const PixelRect& a, const PixelRect& b) {
 }  // namespace
 Result<Atlas> PackAtlas(int width, int height, int padding, const std::vector<PackItem>& items) {
   if (width <= 0 || height <= 0 || padding < 0)
-    return {{}, Fail(Error::invalid, "Invalid atlas bounds")};
+    return Fail(ErrorCode::kInvalidRequest, "Invalid atlas bounds");
   Atlas atlas{width, height, padding, {}};
   std::vector<PixelRect> free{{0, 0, width, height}};
   std::set<WebViewId> ids;
   for (const auto& item : items) {
     if (!ids.insert(item.view).second || item.width <= 0 || item.height <= 0 ||
         !std::isfinite(item.scale) || item.scale <= 0)
-      return {{}, Fail(Error::invalid, "Invalid or duplicate pack item")};
+      return Fail(ErrorCode::kInvalidRequest, "Invalid or duplicate pack item");
     const auto wide = static_cast<std::int64_t>(item.width) + 2LL * padding,
                high = static_cast<std::int64_t>(item.height) + 2LL * padding;
     if (wide > width || high > height)
-      return {{}, Fail(Error::no_space, "Item exceeds atlas bounds")};
+      return Fail(ErrorCode::kLimitExceeded, "Item exceeds atlas bounds");
     int w = static_cast<int>(wide), h = static_cast<int>(high);
     std::optional<PixelRect> chosen;
     auto best = std::tuple{std::numeric_limits<int>::max(), std::numeric_limits<int>::max(),
@@ -137,7 +138,7 @@ Result<Atlas> PackAtlas(int width, int height, int padding, const std::vector<Pa
         }
       }
     if (!chosen)
-      return {{}, Fail(Error::no_space, "Atlas packing failed")};
+      return Fail(ErrorCode::kLimitExceeded, "Atlas packing failed");
     const auto used = *chosen;
     std::vector<PixelRect> next;
     for (const auto& f : free) {
@@ -170,6 +171,6 @@ Result<Atlas> PackAtlas(int width, int height, int padding, const std::vector<Pa
                                 {used.x + padding, used.y + padding, item.width, item.height},
                                 item.scale});
   }
-  return {atlas, {}};
+  return atlas;
 }
 }  // namespace remotekit

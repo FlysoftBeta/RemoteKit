@@ -1,10 +1,43 @@
 #pragma once
 #include "remotekit_sdk.h"
+#include "remotekit/error.hpp"
 #include "remotekit_rtc.h"
 #include <windows.h>
 #include <filesystem>
 #include <stdexcept>
 namespace remotekit::media {
+inline ErrorCode SdkErrorCode(int status, bool control_request = false) {
+  if (control_request) {
+    switch (status) {
+      case REMOTEKIT_SDK_INVALID_ARGUMENT:
+      case REMOTEKIT_SDK_INVALID_STATE:
+      case REMOTEKIT_SDK_BUSY:
+        return ErrorCode::kUnavailable;
+      default:
+        return ErrorCode::kOutcomeUnknown;
+    }
+  }
+  switch (status) {
+    case REMOTEKIT_SDK_INVALID_ARGUMENT:
+      return ErrorCode::kInvalidRequest;
+    case REMOTEKIT_SDK_INVALID_STATE:
+      return ErrorCode::kConflict;
+    case REMOTEKIT_SDK_MOJO_ERROR:
+      return ErrorCode::kUnavailable;
+    case REMOTEKIT_SDK_DATA_MISMATCH:
+      return ErrorCode::kRejected;
+    case REMOTEKIT_SDK_TIMEOUT:
+      return ErrorCode::kOutcomeUnknown;
+    case REMOTEKIT_SDK_BUFFER_TOO_SMALL:
+      return ErrorCode::kLimitExceeded;
+    case REMOTEKIT_SDK_CHANNEL_CLOSED:
+      return ErrorCode::kUnavailable;
+    case REMOTEKIT_SDK_BUSY:
+      return ErrorCode::kBusy;
+    default:
+      return ErrorCode::kInternal;
+  }
+}
 struct Sdk {
   HMODULE module = nullptr;
   int (*encoder_drop)(uint64_t, uint32_t) = nullptr;
@@ -38,23 +71,24 @@ struct Sdk {
   RK_SDK_FUNCTION(remotekit_rtc_submit_audio)
   RK_SDK_FUNCTION(remotekit_rtc_encoded)
 #undef RK_SDK_FUNCTION
-  void Open(const std::filesystem::path& path) {
+  Result<void> Open(const std::filesystem::path& path) {
     module = LoadLibraryExW(path.c_str(), nullptr,
                             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!module)
-      throw std::runtime_error("Cannot load SDK runtime beside browser: Windows " +
-                               std::to_string(GetLastError()));
+      return Error{ErrorCode::kUnavailable, "Cannot load SDK runtime beside browser: Windows " +
+                                                std::to_string(GetLastError())};
 #define RK_LOAD(name)                                                     \
   name = reinterpret_cast<decltype(name)>(GetProcAddress(module, #name)); \
   if (!name)                                                              \
-    throw std::runtime_error("SDK missing " #name);
+    return Error{ErrorCode::kUnavailable, "SDK missing " #name};
     RK_LOAD(remotekit_sdk_initialize)
     RK_LOAD(remotekit_sdk_shutdown)
     RK_LOAD(remotekit_sdk_control_connect)
     RK_LOAD(remotekit_sdk_control_close)
-    RK_LOAD(remotekit_sdk_control_request) RK_LOAD(remotekit_sdk_control_open_render)
-        RK_LOAD(remotekit_rtc_create) RK_LOAD(remotekit_rtc_close) RK_LOAD(
-            remotekit_rtc_set_media_authorized) RK_LOAD(remotekit_rtc_set_remote_description)
+    RK_LOAD(remotekit_sdk_control_request)
+    RK_LOAD(remotekit_sdk_control_open_render)
+    RK_LOAD(remotekit_rtc_create) RK_LOAD(remotekit_rtc_close)
+        RK_LOAD(remotekit_rtc_set_media_authorized) RK_LOAD(remotekit_rtc_set_remote_description)
             RK_LOAD(remotekit_rtc_add_ice) RK_LOAD(remotekit_rtc_send_data) RK_LOAD(
                 remotekit_rtc_send_auth_data) RK_LOAD(remotekit_rtc_get_receive_level)
                 RK_LOAD(remotekit_sdk_render_connect) RK_LOAD(remotekit_sdk_render_begin)
@@ -73,7 +107,8 @@ struct Sdk {
     encoder_drop = reinterpret_cast<decltype(encoder_drop)>(
         GetProcAddress(module, "remotekit_rtc_encoder_drop"));
     if (remotekit_sdk_initialize() != 0)
-      throw std::runtime_error("SDK initialization failed");
+      return Error{ErrorCode::kUnavailable, "SDK initialization failed"};
+    return {};
   }
   ~Sdk() {
     if (module) {

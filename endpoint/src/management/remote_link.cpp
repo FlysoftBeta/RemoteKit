@@ -1,4 +1,5 @@
-#include "control_transport.hpp"
+#include "management/remote_link.hpp"
+#include "remotekit/thread.hpp"
 #include <windows.h>
 #include <winhttp.h>
 #include <objbase.h>
@@ -19,26 +20,23 @@ namespace {
 using Json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 constexpr size_t kMaxMessage = 1024 * 1024, kMaxQueuedBytes = 4 * kMaxMessage;
-const std::string& EndpointIncarnation() {
-  static const std::string incarnation = [] {
-    GUID value{};
-    if (FAILED(CoCreateGuid(&value)))
-      throw std::runtime_error("endpoint incarnation generation failed");
-    const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
-    std::string result;
-    for (size_t i = 0; i < sizeof(value); ++i) {
-      result += "0123456789abcdef"[bytes[i] >> 4];
-      result += "0123456789abcdef"[bytes[i] & 15];
-    }
-    return result;
-  }();
-  return incarnation;
+Result<std::string> EndpointIncarnation() {
+  GUID value{};
+  if (FAILED(CoCreateGuid(&value)))
+    return Error{ErrorCode::kUnavailable, "endpoint incarnation generation failed"};
+  const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
+  std::string result;
+  for (size_t i = 0; i < sizeof(value); ++i) {
+    result += "0123456789abcdef"[bytes[i] >> 4];
+    result += "0123456789abcdef"[bytes[i] & 15];
+  }
+  return result;
 }
-std::wstring Wide(const std::string& value) {
-  int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
-                                 static_cast<int>(value.size()), nullptr, 0);
+Result<std::wstring> Wide(const std::string& value) {
+  const int size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(),
+                                       static_cast<int>(value.size()), nullptr, 0);
   if (!size)
-    throw std::runtime_error("invalid control configuration encoding");
+    return Error{ErrorCode::kInvalidRequest, "invalid control configuration encoding"};
   std::wstring result(size, 0);
   MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()),
                       result.data(), size);
@@ -52,13 +50,13 @@ struct Handle {
   }
 };
 }  // namespace
-struct ControlTransport::Impl {
+struct RemoteLink::Impl {
   std::wstring host, path, authorization;
   INTERNET_PORT port = 0;
   bool tls = false, stopping = false;
   std::string node;
-  const std::string endpoint_incarnation = EndpointIncarnation();
-  std::mutex mutex, socket_mutex;
+  std::string endpoint_incarnation;
+  std::mutex mutex, socket_mutex, callback_mutex;
   std::condition_variable wake;
   struct Message {
     uint64_t generation;
@@ -73,55 +71,58 @@ struct ControlTransport::Impl {
   std::thread receiver, sender;
 
   std::function<void(uint64_t)> disconnected;
-  Impl(std::string url,
-       std::string id,
-       std::string token,
-       std::function<void(uint64_t)> on_disconnect)
-      : node(std::move(id)), disconnected(std::move(on_disconnect)) {
+  Result<void> Initialize(std::string url, std::string id, std::string token) {
+    node = std::move(id);
+    auto incarnation = EndpointIncarnation();
+    if (!incarnation)
+      return incarnation.error();
+    endpoint_incarnation = std::move(incarnation).value();
     if (node.empty() || node.size() > 128 ||
         !std::all_of(node.begin(), node.end(), [](unsigned char c) {
           return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
                  c == '-' || c == '_';
         }))
-      throw std::runtime_error("remote control requires a valid --node-id");
+      return Error{ErrorCode::kInvalidRequest, "remote control requires a valid --node-id"};
     if (token.empty() || token.size() > 4096 ||
         !std::all_of(token.begin(), token.end(),
                      [](unsigned char c) { return c >= 0x21 && c <= 0x7e; }))
-      throw std::runtime_error("remote control requires REMOTEKIT_ENDPOINT_TOKEN");
-    auto wide = Wide(url);
+      return Error{ErrorCode::kInvalidRequest, "remote control requires REMOTEKIT_ENDPOINT_TOKEN"};
+    auto parsed_url = Wide(url);
+    if (!parsed_url)
+      return parsed_url.error();
+    auto wide = std::move(parsed_url).value();
     URL_COMPONENTS parts{};
     parts.dwStructSize = sizeof(parts);
     parts.dwHostNameLength = parts.dwUrlPathLength = parts.dwExtraInfoLength =
         parts.dwUserNameLength = parts.dwPasswordLength = static_cast<DWORD>(-1);
     if (!WinHttpCrackUrl(wide.c_str(), 0, 0, &parts) || parts.dwUserNameLength ||
         parts.dwPasswordLength || parts.dwExtraInfoLength)
-      throw std::runtime_error("invalid control URL");
+      return Error{ErrorCode::kInvalidRequest, "invalid control URL"};
     host.assign(parts.lpszHostName, parts.dwHostNameLength);
     path.assign(parts.lpszUrlPath, parts.dwUrlPathLength);
     port = parts.nPort;
     tls = parts.nScheme == INTERNET_SCHEME_HTTPS;
     if ((parts.nScheme != INTERNET_SCHEME_HTTP && !tls) || path != L"/api/endpoint")
-      throw std::runtime_error("control URL must be http(s)://host/api/endpoint");
+      return Error{ErrorCode::kInvalidRequest, "control URL must be http(s)://host/api/endpoint"};
     std::wstring lower = host;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
     // Numeric loopback only: a configurable DNS hostname cannot turn plaintext into remote traffic.
     if (!tls && lower != L"127.0.0.1" && lower != L"::1" && lower != L"[::1]")
-      throw std::runtime_error("remote control requires TLS; HTTP is limited to numeric loopback");
-    authorization = L"Authorization: Bearer " + Wide(token) + L"\r\n";
-    receiver = std::thread([this] { ReceiveLoop(); });
-    try {
-      sender = std::thread([this] { SendLoop(); });
-    } catch (...) {
-      {
-        std::lock_guard lock(mutex);
-        stopping = true;
-      }
-      wake.notify_all();
-      Disconnect();
-      receiver.join();
-      throw;
-    }
+      return Error{ErrorCode::kInvalidRequest,
+                   "remote control requires TLS; HTTP is limited to numeric loopback"};
+    auto parsed_token = Wide(token);
+    if (!parsed_token)
+      return parsed_token.error();
+    authorization = L"Authorization: Bearer " + std::move(parsed_token).value() + L"\r\n";
+    return {};
+  }
+  void Start() {
+    receiver = std::thread(
+        [this] { RunThread("management receive", [this] { ReceiveLoop(); }, [this] { Fail(); }); });
+
+    sender = std::thread(
+        [this] { RunThread("management send", [this] { SendLoop(); }, [this] { Fail(); }); });
   }
   ~Impl() {
     {
@@ -133,26 +134,39 @@ struct ControlTransport::Impl {
     }
     wake.notify_all();
     Disconnect();
-    sender.join();
-    receiver.join();
+    if (sender.joinable())
+      sender.join();
+    if (receiver.joinable())
+      receiver.join();
+  }
+  void Fail() {
+    {
+      std::lock_guard lock(mutex);
+      stopping = true;
+    }
+    wake.notify_all();
+    Disconnect();
   }
   // A sender and receiver may run concurrently per WinHTTP's WebSocket contract.
   // Close is serialized against sends, and cancels the blocking receive.
   void Disconnect(uint64_t expected = 0) {
     std::lock_guard socket_lock(socket_mutex);
     uint64_t lost = 0;
+    std::lock_guard callback_lock(callback_mutex);
+    ManagementLink::Disconnect callback;
     {
       std::lock_guard lock(mutex);
       if (expected && expected != link)
         return;
       lost = active;
+      callback = disconnected;
       active = link = 0;
       incoming.clear();
       outgoing.clear();
       incoming_bytes = outgoing_bytes = 0;
     }
-    if (lost && disconnected)
-      disconnected(lost);
+    if (lost && callback)
+      callback(lost);
     if (socket) {
       WinHttpCloseHandle(socket);
       socket = nullptr;
@@ -354,19 +368,24 @@ struct ControlTransport::Impl {
     }
   }
 };
-ControlTransport::ControlTransport(std::string url,
-                                   std::string node,
-                                   std::string token,
-                                   std::function<void(uint64_t)> disconnected)
-    : impl_(std::make_unique<Impl>(std::move(url),
-                                   std::move(node),
-                                   std::move(token),
-                                   std::move(disconnected))) {}
-ControlTransport::~ControlTransport() = default;
-bool ControlTransport::Next(std::string& message, uint64_t& generation) {
+RemoteLink::RemoteLink(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+Result<std::unique_ptr<RemoteLink>> RemoteLink::Create(std::string url,
+                                                       std::string node,
+                                                       std::string token) {
+  auto impl = std::make_unique<Impl>();
+  auto initialized = impl->Initialize(std::move(url), std::move(node), std::move(token));
+  if (!initialized)
+    return initialized.error();
+  impl->Start();
+  return std::unique_ptr<RemoteLink>(new RemoteLink(std::move(impl)));
+}
+RemoteLink::~RemoteLink() = default;
+bool RemoteLink::Next(std::string& message, uint64_t& generation, bool& eof) {
+  eof = false;
   std::unique_lock lock(impl_->mutex);
   impl_->wake.wait_for(lock, std::chrono::milliseconds(20),
-                       [&] { return !impl_->incoming.empty(); });
+                       [&] { return impl_->stopping || !impl_->incoming.empty(); });
+  eof = impl_->stopping;
   if (impl_->incoming.empty())
     return false;
   auto next = std::move(impl_->incoming.front());
@@ -376,15 +395,15 @@ bool ControlTransport::Next(std::string& message, uint64_t& generation) {
   generation = next.generation;
   return true;
 }
-bool ControlTransport::Current(uint64_t generation) {
+bool RemoteLink::Current(uint64_t generation) {
   std::lock_guard lock(impl_->mutex);
   return generation && impl_->active == generation;
 }
-bool ControlTransport::TrySend(std::string message, uint64_t generation) {
+bool RemoteLink::TrySend(std::string message, uint64_t generation) {
   bool accepted = false;
   {
     std::lock_guard lock(impl_->mutex);
-    if (!impl_->active || (generation && generation != impl_->active))
+    if (!generation || !impl_->active || generation != impl_->active)
       return false;
     if (message.size() > kMaxMessage || impl_->outgoing.size() >= 256 ||
         impl_->outgoing_bytes + message.size() > kMaxQueuedBytes) {
@@ -399,7 +418,15 @@ bool ControlTransport::TrySend(std::string message, uint64_t generation) {
   impl_->wake.notify_all();
   return accepted;
 }
-void ControlTransport::Send(std::string message, uint64_t generation) {
-  (void)TrySend(std::move(message), generation);
+bool RemoteLink::SendReply(uint64_t generation, const Json& reply) {
+  return TrySend(reply.dump(), generation);
+}
+bool RemoteLink::SendEvent(const Json& event, uint64_t generation) {
+  return TrySend(event.dump(), generation);
+}
+void RemoteLink::OnDisconnect(Disconnect callback) {
+  std::lock_guard callback_lock(impl_->callback_mutex);
+  std::lock_guard lock(impl_->mutex);
+  impl_->disconnected = std::move(callback);
 }
 }  // namespace remotekit
