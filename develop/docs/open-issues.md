@@ -4,6 +4,7 @@
 
 - KEYBOARD-3（基础与移动IME模拟通过，实体设备待验）：用户确认Google二次搜索/Bili顶部搜索第一次点开即偶发循环。真实RTC可控搜索页基线一次触控触发7次模拟键盘尺寸往返；Client已分离键盘意图与严格IME target，重写几何分类及VV/RO过渡，同文档节点替换不主动blur/reopen，持续NONE关闭，旧文本不跨target。35项定向、生产构建与157/89真实RTC首击替换/继续输入/持续blur通过。157 mobile/DPR2/229/CDP候选与交错视口模拟也重现旧版、修后保焦，旧commit零包、新composition成功，系统收起不自动重弹且可信show可恢复。不是实体键盘已验收。[证据与边界](keyboard-search-investigation-20261105.md)。
 - GOOGLE-INPUT-REPRO（复现阻碍，未修）：本轮Google搜索结果页可显示，但可信触控明确收到`Renderer widget required`，鼠标对照也未取得editable，故不能核对用户Google键盘循环的真实起点。Bili顶栏可进入编辑，本次6秒对照没有循环。本批不猜测或绕过缺失的原生输入路径。
+- KEYBOARD-DELIVERY：干净`e87e6e0`包完整清单/ZIP hash/CRC、包内启动与157移动IME专项通过。上传于12:50:37（UTC+8）已成功，生成248478；用户随后要求先不上传，指令送达时无在途传输，已关闭自建上传会话，不重传或继续上传，保留本地包。[交付与停止记录](keyboard-search-delivery-20261105.md)。
 
 ## 后续本地筛选（2026-11-05）
 

@@ -8,6 +8,8 @@
 
 定向35项、类型检查与生产构建/启动通过。157/89真实H.264回归均通过首次点击→搜索节点替换、一次本地聚焦与一次键盘收缩、替换后输入及持续失焦收起；两版均捕获到NONE窗口的文本探针且无输入包发出。157另以mobile/触屏/DPR2、229按键与真实CDP组合输入、交错VV/innerHeight重现旧包循环；修后同条件目标替换无追加本地焦点事件，旧commit零包、新目标组合输入成功，模拟系统收起保留DOM焦点且不重开，可信按钮可重新显示。fine-pointer组确认持续NONE后仍可直接使用ArrowDown/Tab。实体系统键盘未验收。Bili真实顶栏基线与修后均进入编辑但本次未循环；Google结果页可见，隔离环境点击返回`Renderer widget required`，未取得实际编辑状态，不能宣称两个真实站点现场均已复现。[调查与本轮证据](../develop/docs/keyboard-search-investigation-20261105.md) · [Android行为核对](../develop/docs/mobile-ime-behavior-20261105.md)。
 
+修复源码`e87e6e0`已推送。干净成品的570项清单、571项ZIP CRC/hash、Control及Native文件匹配与包内启动通过；包内157运行正式移动IME专项也通过，包括精确新target恰一次commit和Native compositionend。服务器于2026-11-05 12:50:37（UTC+8）已确认上传成功，取件码[248478](https://airportal.cn/248478/ra8Byw97bG)。随后用户要求先不要上传；停止指令送达时上传已完成，无在途传输可取消，12:51:13已关闭自建上传浏览器/helper。未重传、下载或撤回，本轮不再继续上传；本地成品保留。详见[交付与停止记录](../develop/docs/keyboard-search-delivery-20261105.md)。
+
 ## 后续多轮筛选与保留项
 
 最终保留原生screenshare pacing factor 1.1，仅在没有显式冲突trial时设置，GCC继续管理目标码率。相同输入的基线→1.1→返回基线，首段marker p95为299→171→359ms，第二段174→146→180ms；发送队列均值49.4→23.2→57.6ms及20.7→12.4→20.7ms，提交约46–47FPS保持。2/15Hz停稳质量通过。接收等待仍略高，尚未达到100ms目标；1.5因明显丢包/RTX/RTT代价已撤回，不留产品开关。[发送实验与边界](../develop/docs/ud710-pacing-20261105.md)。
