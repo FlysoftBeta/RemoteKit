@@ -8,7 +8,6 @@ struct RtcEvent {
   int32_t value;
   uint64_t peer;
   uint64_t authorization = 0;
-  const char* input_rejection = nullptr;
   uint64_t trace_input_sequence = 0;
   uint64_t management_generation = 0;
   Json message;

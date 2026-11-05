@@ -21,7 +21,6 @@ struct ProfileCommandRequest;
 struct PageControlRequest;
 struct ExitFullscreenRequest;
 struct NavigationTransferRequest;
-struct TouchStatusRequest;
 struct FocusRequest;
 struct VisibleRequest;
 struct NavigateRequest;
@@ -49,7 +48,6 @@ class ControlDispatcher {
   ControlResult HandlePageRequest(const PageControlRequest&);
   ControlResult HandleExitFullscreen(const ExitFullscreenRequest&);
   ControlResult HandleNavigationTransfer(const NavigationTransferRequest&);
-  ControlResult HandleTouchStatus(const TouchStatusRequest&);
   ControlResult HandleFocus(const FocusRequest&);
   ControlResult HandleVisible(const VisibleRequest&);
   ControlResult HandleNavigate(const NavigateRequest&);

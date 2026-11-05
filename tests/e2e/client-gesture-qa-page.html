@@ -203,6 +203,15 @@
       clicks++;
       post();
     });
+    document.querySelector('#tap')?.addEventListener(
+      'touchstart',
+      () => {
+        if (block !== 'ackpending') return;
+        const deadline = performance.now() + 600;
+        while (performance.now() < deadline) {}
+      },
+      { passive: false },
+    );
     document.querySelector('#custom')?.addEventListener(
       'touchstart',
       (e) => {
@@ -238,7 +247,7 @@
       },
       { passive: false },
     );
-    // The retirement test waits for actual child ownership before deleting it. Opt-in
+    // The target removal test waits for actual child ownership before deleting it. Opt-in
     // telemetry observes the DOM after dispatch without changing event consumption.
     if (p.has('live'))
       for (const type of ['touchstart', 'touchmove'])

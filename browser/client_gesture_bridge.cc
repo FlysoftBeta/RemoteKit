@@ -34,11 +34,10 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
                                      const std::vector<TouchInput::Gesture>& candidates,
                                      int64_t source_elapsed_us) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
-  // Timeout shuts down gesture arbitration. An exact owner can still send its
-  // first raw cancellation and obtain canonical ACK proof without candidates.
-  const bool retirement = stopped_ && first_id_ && !terminal_routed_ &&
-                          event.GetType() == blink::WebInputEvent::Type::kTouchCancel;
-  if ((stopped_ && !retirement) || !router_ || !root_ || !target_ ||
+  // An ACK timeout stops arbitration; superseding still closes raw contacts.
+  const bool cancellation = stopped_ && first_id_ && !terminal_routed_ &&
+                            event.GetType() == blink::WebInputEvent::Type::kTouchCancel;
+  if ((stopped_ && !cancellation) || !router_ || !root_ || !target_ ||
       !router_->IsViewInMap(root_.get()))
     return {ErrorCode::stale_identity, "Client touch owner lost"};
   if (pending_.size() >= 128)
@@ -63,13 +62,13 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
     return {ErrorCode::busy, "Client touch router registrations full"};
   pending_.insert(event.unique_touch_event_id);
   auto weak = weak_factory_.GetWeakPtr();
-  if (!retirement &&
+  if (!cancellation &&
       filter_.OnGesturePacket(packet) != ui::TouchDispositionGestureFilter::SUCCESS) {
     router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
     pending_.erase(event.unique_touch_event_id);
     return {ErrorCode::invalid_request, "Invalid client gesture packet order"};
   }
-  if (!weak || (stopped_ && !retirement) || !router_ || !root_ || !target_ ||
+  if (!weak || (stopped_ && !cancellation) || !router_ || !root_ || !target_ ||
       !router_->IsViewInMap(root_.get())) {
     if (router_)
       router_->WithdrawUnroutedClientTouch(root_.get(), event.unique_touch_event_id);
@@ -138,7 +137,7 @@ void ClientGestureBridge::ForwardGestureEvent(const ui::GestureEventData& data) 
     // Keep the router's scroll target and touch-action state. Never invoke the
     // native FlingController (which would add boosting and a second curve).
     auto* input_router = target_ ? target_->GetViewRenderInputRouter()->input_router() : nullptr;
-    momentum_ = bound_ && scroll_ && target_ && root_ && input_router &&
+    momentum_ = momentum_allowed_ && bound_ && scroll_ && target_ && root_ && input_router &&
                 input_router->ActiveTouchAction().has_value();
     if (momentum_)
       input_router->SetClientMomentumActive(true);
@@ -217,6 +216,7 @@ Status ClientGestureBridge::Momentum(const GestureInput& value) {
   return {};
 }
 void ClientGestureBridge::EndMomentum() {
+  const bool was_momentum = momentum_;
   momentum_ = false;
   fling_pending_ = false;
   buffered_.reset();
@@ -229,10 +229,14 @@ void ClientGestureBridge::EndMomentum() {
     end.data.scroll_end.inertial_phase = blink::WebGestureEvent::InertialPhaseState::kMomentum;
     Route(end);
   }
-  if (target_)
+  if (was_momentum && target_)
     target_->GetViewRenderInputRouter()->input_router()->SetClientMomentumActive(false);
   if (pending_.empty())
     timeout_.Stop();
+}
+void ClientGestureBridge::StopMomentum() {
+  momentum_allowed_ = false;
+  EndMomentum();
 }
 void ClientGestureBridge::Cancel(bool deliver) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
@@ -240,8 +244,10 @@ void ClientGestureBridge::Cancel(bool deliver) {
     return;
   if (deliver)
     EndMomentum();
-  else if (target_)
+  else if (momentum_ && target_) {
+    momentum_ = false;
     target_->GetViewRenderInputRouter()->input_router()->SetClientMomentumActive(false);
+  }
   stopped_ = true;
   filter_.Shutdown();
   if (pending_.empty())
@@ -256,6 +262,8 @@ void ClientGestureBridge::Cancel(bool deliver) {
 void ClientGestureBridge::Timeout() {
   const bool raw_pending = !pending_.empty();
   Cancel(true);
+  pending_.clear();
+  timeout_.Stop();
   if (raw_pending)
     processed_.Run(ClientTouchAckState::timeout, false, false);
 }

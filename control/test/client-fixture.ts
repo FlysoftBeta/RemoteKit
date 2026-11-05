@@ -21,7 +21,6 @@ export function inputFixture() {
   };
   const editing = new EditingSession({ rtc });
   const endpoint = new EndpointChannel({ authorization });
-  let touch: TouchSession;
   const input = new InputPipeline({
     canInput: (id) => {
       const surface = presentation.layout?.views.find((view) => view.id === id);
@@ -42,21 +41,8 @@ export function inputFixture() {
     },
     clearEditing: () => editing.clear(),
     reconcileEditing: (views) => editing.reconcile(views),
-    get terminals() {
-      return touch;
-    },
   });
-  touch = new TouchSession({
-    queuedTerminalCount: () => input.queuedTerminalCount(),
-    nextSequence: () => input.nextSequence(),
-    identity: (surface) => input.inputIdentity(surface),
-    report: (request, phase, sequence, reason) => input.reportInputDelivery(request, phase, sequence, reason),
-    layout: () => presentation.layout,
-    scope: () => ({ locked: authorization.productLocked, epoch: authorization.peerAuthEpoch }),
-    attempt: () => rtc.attempt,
-    channel: () => endpoint.channel,
-    send: (message) => endpoint.send(message),
-  });
+  const touch = new TouchSession();
   endpoint.events.subscribe((event) => {
     if (event.type === 'writable') input.drainInput();
   });

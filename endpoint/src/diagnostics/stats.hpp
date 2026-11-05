@@ -11,6 +11,7 @@ class ViewController;
 class InputController;
 class ConnectionTiming;
 class ChannelController;
+class FaceController;
 class Diagnostics : private ControllerContext {
  public:
   Diagnostics(ControllerContext context,
@@ -23,7 +24,8 @@ class Diagnostics : private ControllerContext {
               ViewController& views,
               InputController& input,
               ConnectionTiming& timing,
-              ChannelController& channel)
+              ChannelController& channel,
+              FaceController& face)
       : ControllerContext(context),
         peer_controller(peer_controller),
         presentation(presentation),
@@ -34,7 +36,8 @@ class Diagnostics : private ControllerContext {
         views(views),
         input(input),
         timing(timing),
-        channel(channel) {}
+        channel(channel),
+        face(face) {}
 
   void Publish(Json report);
   Json Stats();
@@ -50,5 +53,6 @@ class Diagnostics : private ControllerContext {
   InputController& input;
   ConnectionTiming& timing;
   ChannelController& channel;
+  FaceController& face;
 };
 }  // namespace remotekit

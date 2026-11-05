@@ -1,6 +1,6 @@
 # 客户端输入
 
-输入从 Viewer 的 DOM 事件开始，经可靠有序的 DataChannel 到 Endpoint，再通过本地控制 RPC 交给 Browser，由 Chromium 的输入路由派发到页面。本文讲身份与门禁、键鼠与 IME 语义、触控与客户端手势、触控终止账本以及坐标换算。移动端软键盘与编辑状态见[移动编辑与尺寸过渡](mobile-editing.md)。
+输入从 Viewer 的 DOM 事件开始，经可靠有序的 DataChannel 到 Endpoint，再通过本地控制 RPC 交给 Browser，由 Chromium 的输入路由派发到页面。本文讲身份与门禁、键鼠与 IME 语义、触控与客户端手势、Browser 触控序列化以及坐标换算。移动端软键盘与编辑状态见[移动编辑与尺寸过渡](mobile-editing.md)。
 
 ## 设计意图
 
@@ -96,23 +96,17 @@ Browser 的仲裁（patch 0010）：
 
 把客户端速度交给原生 FlingController 被否决：它会再放大速度，并按 Browser 动画时间推进自己的曲线，仍依赖到达时间。服务进程固定关闭 renderer 的 `ResamplingScrollEvents`：客户端已经算好了直接与惯性两段位移，第二个预测器会在直接→惯性边界改变距离。Chromium157 的预测器在首个 Momentum GSU 时停用重采样但不补偿已预测的差，同一段 220 DIP 的直接位移按帧相位不同会得到 199.4/213.1/226.9 DIP，误差可正可负，无法用固定值补偿。
 
-## 触控终止账本
+## Browser 触控序列化
 
-问题：一条触摸序列的结束需要确认——确认之前，新触摸不能开始，否则两条序列会在页面里交错；但 end 的回执可能丢失，而一个已经产生点击的 end 不能重发。
+Browser 是唯一掌握 Chromium 原始触控队列、canonical ACK、目标文档和惯性状态的一端，因此由 `TouchController` 串行接管每个 WebView 的 client-v1 触控序列。客户端发送新的 start 时，不等待上一序列的结束证明。
 
-**Browser**（`client_touch_retirement.h`）：64 项账本，以完整原始 InputToken + 触摸 sequenceId 为键。可能同步回调的 raw 派发之前先登记。只有真实终止的 canonical ACK 及其之前的 ACK 全部完成，才记为 `processed`；网页消费了事件仍是 processed。终态由真实 raw 的 `IsTouchSequenceEnd()` 决定，不由客户端的 end 动作决定。状态：`pending`、`processed`、`terminal-invalidated`（原 owner 确实失效，或精确证明从未路由过 raw）、`terminal-unconfirmed`。未知、无目标、超时都不能升级为 processed。pending 项不会被历史挤出，已完成项按完成时间保留（曾经已完成项按插入顺序被立即淘汰）。
+新的 sequenceId 或同文档的新 focus 身份进入时，Browser 先停止旧 owner 的惯性。旧目标仍存活且还有 contacts 时，用旧目标、旧坐标和旧时钟注入一次 canonical raw cancel，然后让新 start 入队。旧 terminal 已经入队、只是在等待 canonical ACK 时，不再注入 cancel；保留其手势仲裁器直到 ACK 完成，让原 tap 正常产生一次 click。旧 ACK 按 owner 代次隔离，不能改变新序列。Chromium 的触控队列保证 raw cancel/end 在新 start 之前处理，客户端不参与等待。
 
-**Endpoint**：为终止请求预留有界收据（64 项，与普通输入历史分开），受理时回 `input.result{touchState:"accepted-pending", clientSequence, touchSequenceId}`。Browser 失败同样保留收据，区分 `rejected`、`terminal-unconfirmed`、精确的 `terminal-invalidated`。输入线程在两次普通输入之间最多推进一项到期的状态查询，最多持续 10 秒，超时前再读一次状态；已知结果立即通过可靠通知推送。状态/退役使用原始 Exchange 回复，只有普通 input 派发把受理前 BUSY 当作可重试错误。SDK BUSY 时关键通知按原身份重试，布局事务优先。
+文档、instance 更换或目标销毁时直接丢弃旧 owner，不把旧坐标重新命中到替代目标。raw ACK 超时会停止旧仲裁，下一次 start 接管剩余 contacts。canonical ACK 拦截、TouchDispositionGestureFilter 仲裁和惯性期间的 touch-action 固定仍保留。
 
-Endpoint 另按 peer、授权代次和触摸 sequenceId 保存 64 项受理记录；peer 或授权更换时清空。只有观察到 start 且所有派发都明确未被 Browser 受理，才可对 end/cancel/retire/status 直接返回 `touchState:"terminal-invalidated"`，原因为 `never_admitted`。任何 `inputAdmitted`/成功回复或不确定的传输失败都会撤销此证明；未知或已淘汰的序列不能用缺席推断失效。唯一 start 被本地丢弃或 Endpoint 明确拒绝的客户端 owner 直接释放，无需远程清理。
+layoutEpoch 变化时，旧 move/end 仍按过期坐标拒绝。客户端丢弃旧布局的本地采样，新布局的下一次 start 由 Browser 接管旧 owner；没有坐标外的退役协议。
 
-**客户端**：区分 queued、submitted、最终确认。实际 DataChannel 发送之后才开始查询：`input.touchStatus{clientSequence, sequenceId}`，间隔 250/500/1000/2000ms，只有成功发出的查询才计入次数。`accepted-pending` 重新延长确认期限。出现未确认提示后仍每 2 秒后台查询；迟到的 `processed` 或精确 `terminal-invalidated` 自动释放 owner 并关闭提示。Endpoint 从保存的原命令取 token，不接受客户端改绑身份；该查询不带坐标，可以跨布局门禁。只有匹配原身份/序号的 processed 或精确的失效证据才释放 owner；unknown 永不释放，end 永不重发，迟到的旧回执不能释放新手势。
-
-**旧布局退役**：layoutEpoch 变化不一定更换 Browser InputToken（例如整张 atlas 的编码采样调整）。客户端保留实际发送时的旧 token，通过同 peer、同授权代次的 `input.touchRetire{原 session/view/instance/document/focus, 旧 layoutEpoch, 新 sequence, sequenceId}` 清理旧 owner，不带坐标。Browser 只取消仍精确持有的旧 owner，或返回已有的完成/失效证据；对已在终止或已完成的序列只读账本，不再注入第二个 raw cancel。新触摸必须等旧租约确认。
-
-raw ACK 的 2 秒超时只停止手势候选，不构成释放证明。仍持有原目标且从未路由终止 raw 的 owner 可以退役，发送一次 raw cancel 并等待真实 ACK 全部排空后记为 `processed`；原目标失效则记为 `terminal-invalidated`。已路由终止 raw 的 owner 只继续查询。
-
-自动清理最多三次；仍未知时在原连接上提供"重试确认 / 重试结束"，键盘和其他控件仍可用，不弹整页重连。
+客户端只负责采样、源时钟、合并历史、gesture candidates、惯性动画，以及 pointercancel、失焦、卸载时的一次全序列 cancel。最后一个 end 入本地发送队列后立即释放本地 owner，不查询状态、不重发 end、不做后台对账，也没有等待结束确认的界面。Endpoint 把触控作为普通有序输入：验证身份、输入序号及布局，派发后返回 `input.result{clientSequence, ok, error?}`；仅 Browser 受理前的 BUSY 可以重试同一命令。
 
 ## 坐标
 
@@ -124,7 +118,7 @@ raw ACK 的 2 秒超时只停止手势候选，不构成释放证明。仍持有
 
 ## 代码位置
 
-- 客户端：`control/client/input/`（`input-pipeline.ts` 焦点与队列、`touch-session.ts` 触控 owner 与终止账本、`client-gestures.ts`、`coordinates.ts`、`keys.ts`）、`control/client/editing/`
-- Endpoint：`endpoint/src/input/`（InputController、序号、校验）、`endpoint/src/session/control_reliability.hpp`（终止收据）、`protocol/touch_clock.hpp`
-- Browser：`browser/control_input.cc`、`control_input_codec.*`、`webview_input.*`、`webview_touch.*`、`client_gesture_*`、`client_touch_retirement.h`、`service_input_policy.h`
+- 客户端：`control/client/input/`（`input-pipeline.ts` 焦点与队列、`touch-session.ts` 本地触控视图、`client-gestures.ts`、`coordinates.ts`、`keys.ts`）、`control/client/editing/`
+- Endpoint：`endpoint/src/input/`（InputController、序号、校验）、`endpoint/src/session/control_reliability.hpp`（受理前 BUSY 重试）、`protocol/touch_clock.hpp`
+- Browser：`browser/control_input.cc`、`control_input_codec.*`、`webview_input.*`、`webview_touch.*`、`client_gesture_*`、`service_input_policy.h`
 - 补丁：0010（客户端手势仲裁、惯性期间保持 touch-action）。只接受 `client-v1` 触控；早期基于 TouchEmulator 的服务端手势识别路径及其配套补丁已删除。

@@ -24,8 +24,6 @@ void RouterClassificationAndAdmission() {
                                                         {"presentation.ready", Kind::kPresentation},
                                                         {"input", Kind::kInput},
                                                         {"focus", Kind::kInput},
-                                                        {"input.touchStatus", Kind::kInput},
-                                                        {"input.touchRetire", Kind::kInput},
                                                         {"files.request", Kind::kFiles},
                                                         {"clock.ping", Kind::kClock},
                                                         {"media.feedback", Kind::kFeedback},
@@ -319,134 +317,78 @@ void PeerFailureCleanup() {
   CHECK(fixture.closes == 8 && fixture.stops_with_handle == 8);
 }
 
-void TouchInputReceipts() {
+void OrderedTouchInput() {
   std::mutex mutex;
   std::condition_variable wake;
-  std::vector<Json> replies;
-  std::atomic<unsigned> input_calls{0}, retire_calls{0}, status_calls{0};
-  std::atomic<bool> complete{false};
-  const auto send = [&](const Json& reply, uint64_t) {
-    std::lock_guard lock(mutex);
-    replies.push_back(reply);
-    wake.notify_all();
-  };
+  std::vector<Json> replies, dispatched;
+  std::atomic<unsigned> input_calls{0};
   InputController controller(
-      "1",
-      {.peer = [] { return 1; },
-       .control = [] { return 3; },
-       .input_stamp = [] { return 2; },
-       .frame_stamp = [] { return 2; },
-       .epoch = [] { return 5; },
-       .data_open = [] { return true; },
-       .current = [](uint64_t stamp) { return stamp == 2; },
-       .admitted = [](const auto&) { return true; },
-       .admission = [] { return AuthorizationController::AdmissionToken{1, 2, 1}; },
-       .revalidate = [](const auto&) { return true; },
-       .allows = [](const auto&, uint64_t) { return true; },
-       .rpc = [&](Json request, uint64_t, uint32_t, bool,
-                  const std::function<bool()>&) -> Result<Json> {
-         const auto method = request.at("method");
-         if (method == "input") {
-           ++input_calls;
-           const auto action = request.at("event").at("action");
-           if (action == "end")
-             return Json{{"ok", false}, {"code", 3}, {"error", "terminal_rejected"}};
-           return Json{{"ok", true}, {"inputAdmitted", true}};
-         }
-         if (method == "input.touchRetire")
-           ++retire_calls;
-         else
-           ++status_calls;
-         return Json{{"ok", complete.load()},
-                     {"code", 6},
-                     {"state", complete           ? "processed"
-                               : status_calls > 2 ? "terminal-unconfirmed"
-                                                  : "pending"},
-                     {"sequenceId", request.at("sequenceId")}};
-       },
-       .send = send,
-       .send_data =
-           [&](uint64_t, uint64_t stamp, const auto& bytes) {
-             send(Json::parse(bytes), stamp);
-             return 0;
-           },
-       .notice = [](uint64_t, uint64_t, const auto& bytes, const auto& deliver) { deliver(bytes); },
-       .flush = [] {},
-       .failed = [] { CHECK(false); },
-       .trace = [] { return std::shared_ptr<media::ServerTrace>(); }});
+      "1", {.control = [] { return 3; },
+            .input_stamp = [] { return 2; },
+            .epoch = [] { return 5; },
+            .admitted = [](const auto&) { return true; },
+            .admission = [] { return AuthorizationController::AdmissionToken{1, 2, 1}; },
+            .revalidate = [](const auto&) { return true; },
+            .allows = [](const auto&, uint64_t) { return true; },
+            .rpc = [&](Json request, uint64_t, uint32_t, bool,
+                       const std::function<bool()>&) -> Result<Json> {
+              CHECK(request.at("method") == "input");
+              ++input_calls;
+              dispatched.push_back(request);
+              if (input_calls == 1)
+                return Json{{"ok", false}, {"code", 6}, {"inputAdmitted", false}};
+              return Json{{"ok", true}, {"inputAdmitted", true}};
+            },
+            .send =
+                [&](const Json& reply, uint64_t) {
+                  std::lock_guard lock(mutex);
+                  replies.push_back(reply);
+                  wake.notify_all();
+                },
+            .failed = [] { CHECK(false); },
+            .trace = [] { return std::shared_ptr<media::ServerTrace>(); }});
   controller.Start(1);
   uint64_t serial = 0;
-  const auto enqueue = [&](Json request) {
+  const auto touch = [&](const char* sequence, const char* action, const char* epoch = "5") {
     RtcEvent event{};
     event.peer = 1;
     event.authorization = 2;
-    event.message = std::move(request);
+    event.message = {{"type", "input"},
+                     {"session", "1"},
+                     {"view", "2"},
+                     {"instance", "3"},
+                     {"document", "4"},
+                     {"focus", "5"},
+                     {"layoutEpoch", epoch},
+                     {"sequence", std::to_string(++serial)},
+                     {"event",
+                      {{"type", "touch"},
+                       {"gestureMode", "client-v1"},
+                       {"sequenceId", sequence},
+                       {"action", action}}}};
     controller.QueueInput(event);
   };
-  const auto touch = [&](const std::string& sequence, const char* action, const char* epoch = "5") {
-    Json request = {{"type", "input"},
-                    {"session", "1"},
-                    {"view", "2"},
-                    {"instance", "3"},
-                    {"document", "4"},
-                    {"focus", "5"},
-                    {"layoutEpoch", epoch},
-                    {"sequence", std::to_string(++serial)},
-                    {"event",
-                     {{"type", "touch"},
-                      {"gestureMode", "client-v1"},
-                      {"sequenceId", sequence},
-                      {"action", action}}}};
-    enqueue(request);
-    return request;
-  };
-  const auto wait_for = [&](const std::string& client_sequence, const char* state, int count = 1) {
+  touch("old", "start");
+  touch("old", "end", "4");
+  touch("next", "start");
+  touch("next", "end");
+  {
     std::unique_lock lock(mutex);
-    CHECK(wake.wait_for(lock, std::chrono::seconds(5), [&] {
-      return std::count_if(replies.begin(), replies.end(), [&](const auto& reply) {
-               return reply.value("clientSequence", std::string()) == client_sequence &&
-                      reply.value("touchState", std::string()) == state;
-             }) >= count;
-    }));
-  };
-  auto stale = touch("never", "start", "4");
-  wait_for(stale.at("sequence"), "rejected");
-  auto end = touch("never", "end");
-  wait_for(end.at("sequence"), "terminal-invalidated");
-  CHECK(input_calls == 0 && retire_calls == 0 && status_calls == 0);
-  enqueue({{"type", "input.touchStatus"}, {"clientSequence", "100"}, {"sequenceId", "never"}});
-  wait_for("100", "terminal-invalidated");
-  auto stale_client = stale;
-  stale_client["layoutEpoch"] = "5";
-  stale_client["event"]["sequenceId"] = "stale-client";
-  enqueue(stale_client);
-  enqueue(
-      {{"type", "input.touchStatus"}, {"clientSequence", "101"}, {"sequenceId", "stale-client"}});
-  wait_for("101", "terminal-invalidated");
-  CHECK(input_calls == 0);
-  touch("owned", "start");
-  end = touch("owned", "end");
-  wait_for(end.at("sequence"), "rejected");
-  enqueue({{"type", "input.touchStatus"},
-           {"clientSequence", end.at("sequence")},
-           {"sequenceId", "owned"}});
-  wait_for(end.at("sequence"), "rejected", 2);
-  const auto retirement_sequence = std::to_string(++serial);
-  enqueue({{"type", "input.touchRetire"},
-           {"session", "1"},
-           {"view", "2"},
-           {"instance", "3"},
-           {"document", "4"},
-           {"focus", "5"},
-           {"layoutEpoch", "4"},
-           {"sequence", retirement_sequence},
-           {"sequenceId", "owned"}});
-  wait_for(retirement_sequence, "accepted-pending");
-  std::this_thread::sleep_for(std::chrono::milliseconds(2200));
-  complete = true;
-  wait_for(retirement_sequence, "processed");
-  CHECK(retire_calls == 1 && status_calls > 1);
+    CHECK(wake.wait_for(lock, std::chrono::seconds(5), [&] { return replies.size() == 4; }));
+  }
   controller.Stop();
+  CHECK(dispatched.size() == 4 && dispatched[0] == dispatched[1]);
+  CHECK(dispatched[2].at("event").at("sequenceId") == "next");
+  CHECK(dispatched[3].at("event").at("action") == "end");
+  CHECK(replies[0].at("ok") == true);
+  CHECK(replies[1].at("error").at("message") == "stale_layout_epoch");
+  CHECK(replies[2].at("ok") == true && replies[3].at("ok") == true);
+  for (size_t index = 0; index < replies.size(); ++index) {
+    CHECK(replies[index].at("type") == "input.result");
+    CHECK(replies[index].at("clientSequence") == std::to_string(index + 1));
+    CHECK(!replies[index].contains("touchState"));
+  }
+  CHECK(controller.Snapshot().at("inputBusyRetries") == 1);
 }
 
 int main() {
@@ -455,5 +397,5 @@ int main() {
   PresentationOwnership();
   AuthorizationTokens();
   PeerFailureCleanup();
-  TouchInputReceipts();
+  OrderedTouchInput();
 }

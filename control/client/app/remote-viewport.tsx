@@ -65,11 +65,6 @@ export function RemoteViewport({
     controller?.editing.subscribe ?? emptySubscribe,
     controller?.editing.getSnapshot ?? emptyEditing,
   );
-  const touch = useSyncExternalStore(
-    controller?.touch.subscribe ?? emptySubscribe,
-    controller?.touch.getSnapshot ?? emptyTouch,
-  );
-  const touchNotice = 'notice' in touch ? touch.notice : undefined;
   return (
     <section
       ref={viewport}
@@ -108,33 +103,6 @@ export function RemoteViewport({
           {editing.error}
         </div>
       )}
-      {touchNotice && (
-        <div role="status" className="input-notice">
-          {touchNotice === 'cleanup'
-            ? '触控结束暂未送达。'
-            : touchNotice === 'confirming'
-              ? '正在确认触控…'
-              : '触控结束尚未确认。'}
-          {touchNotice === 'unconfirmed' && (
-            <Button
-              size="small"
-              onPointerDown={(event) => event.preventDefault()}
-              onClick={controller?.touch.retryProof}
-            >
-              重试确认
-            </Button>
-          )}
-          {touchNotice !== 'confirming' && (
-            <Button
-              size="small"
-              onPointerDown={(event) => event.preventDefault()}
-              onClick={controller?.touch.retryEnd}
-            >
-              重试结束
-            </Button>
-          )}
-        </div>
-      )}
       {snapshot.presentation.error ? (
         <div className="page-overlay" role="alert">
           {formatError(snapshot.presentation.error)}
@@ -161,5 +129,3 @@ export function RemoteViewport({
 const emptySubscribe = () => () => {};
 const initialEditing = { keyboardEnabled: false, keyboardShown: false, keyboardReady: false };
 const emptyEditing = (): import('../editing/editing-view').EditingViewSnapshot => initialEditing;
-const initialTouch = { phase: 'idle' as const };
-const emptyTouch = (): import('../input/touch-view').TouchOwnerState => initialTouch;

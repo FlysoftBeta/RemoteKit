@@ -5,7 +5,6 @@ import assert from 'node:assert/strict';
 import { inputFixture } from './client-fixture';
 import { TouchInput } from '../client/input/touch-input';
 import type { Surface } from '../client/presentation/types';
-import { touchTerminalResult, type TouchOwner } from '../client/input/touch-terminal';
 import type { InputDelivery, InputResult } from '../client/input/types';
 
 function setup(t: TestContext) {
@@ -41,7 +40,7 @@ function setup(t: TestContext) {
   transport.endpoint.bindChannel(channel);
   t.after(() => {
     transport.input.reset();
-    transport.touch.clearTerminalInput();
+    transport.touch.reset();
   });
   return {
     transport,
@@ -54,135 +53,6 @@ function setup(t: TestContext) {
   };
 }
 const point = (y: number) => ({ id: 1, x: 10, y, pressure: 0.5 });
-test('destroyed target receipts retire exact old touch through production transport and allow next tap', (t) => {
-  const { transport, surface, sent, channel } = setup(t);
-  const touch = new TouchInput('destroyed'),
-    identity = transport.input.inputIdentity(surface);
-  let owner: TouchOwner | undefined;
-  const results: InputResult[] = [];
-  transport.input.subscribeInputResults((result) => {
-    results.push(result);
-    if (
-      owner &&
-      touchTerminalResult(owner, result, transport.input.inputIdentity(surface), touch.contactIds.length)
-    ) {
-      touch.reset();
-      owner = undefined;
-    }
-  });
-  const start = touch.sample(identity, 'start', point(0), 0, undefined)!;
-  owner = { surface: { ...surface }, identity, packet: start };
-  transport.input.sendInput(surface, start);
-  const move = touch.sample(identity, 'move', point(30), 30)!;
-  owner.packet = move;
-  transport.input.sendInput(surface, move);
-  const end = touch.sample(identity, 'end', point(30), 40)!;
-  owner.packet = end;
-  transport.input.sendInput(surface, end);
-  touch.accepted(end);
-  const oldOwner = owner;
-  const reply = (index: number, extra: object) =>
-    channel.onmessage({
-      data: JSON.stringify({
-        type: 'input.result',
-        clientSequence: sent[index].sequence,
-        ok: false,
-        ...extra,
-      }),
-    });
-  reply(1, {
-    error: { code: 'conflict', message: 'touch owner destroyed' },
-    touchState: 'terminal-invalidated',
-    touchSequenceId: move.sequenceId,
-  });
-  assert.equal(owner, undefined);
-  assert.equal(results[0].ok, false); // retirement is not delivery success
-  const next = touch.sample(identity, 'start', point(10), 100, undefined)!;
-  assert.notEqual(next.sequenceId, start.sequenceId);
-  owner = { surface: { ...surface }, identity, packet: next };
-  transport.input.sendInput(surface, next);
-  reply(2, {
-    error: { code: 'conflict', message: 'touch owner destroyed' },
-    touchState: 'terminal-invalidated',
-    touchSequenceId: end.sequenceId,
-  });
-  assert.equal(owner.packet, next); // late end for retired owner cannot clear new contact
-  assert.equal(touchTerminalResult(oldOwner, results[0], `new-attempt:${identity}`, 0), undefined);
-  const nextEnd = touch.sample(identity, 'end', point(10), 110)!;
-  owner.packet = nextEnd;
-  transport.input.sendInput(surface, nextEnd, { touchTerminal: true });
-  touch.accepted(nextEnd);
-  const heldOwner = owner;
-  assert.ok(heldOwner); // local queue admission and no ACK keep the owner unresolved
-  reply(4, {
-    error: { code: 'outcome_unknown', message: 'touch_terminal_timeout' },
-    touchState: 'terminal-unconfirmed',
-    touchSequenceId: nextEnd.sequenceId,
-  });
-  assert.equal(owner, heldOwner); // timeout must not pretend completion
-  reply(0, {
-    error: { code: 'conflict', message: 'touch owner destroyed' },
-    touchState: 'terminal-invalidated',
-    touchSequenceId: start.sequenceId,
-  });
-  assert.equal(owner, heldOwner);
-  channel.onmessage({
-    data: JSON.stringify({ type: 'input.result', clientSequence: sent[4].sequence, ok: true }),
-  });
-  assert.equal(owner, heldOwner);
-  channel.onmessage({
-    data: JSON.stringify({
-      type: 'input.result',
-      clientSequence: sent[4].sequence,
-      ok: true,
-      touchState: 'processed',
-      touchSequenceId: nextEnd.sequenceId,
-    }),
-  });
-  assert.equal(owner, undefined);
-});
-
-test('move end and cancel require explicit matching retirement proof and full owner identity', (t) => {
-  const { transport, surface, sent, channel } = setup(t),
-    identity = transport.input.inputIdentity(surface);
-  const touch = new TouchInput('terminal');
-  const start = touch.sample(identity, 'start', point(0), 0, undefined)!;
-  const owner: TouchOwner = { surface: { ...surface }, identity, packet: start };
-  const results: InputResult[] = [];
-  transport.input.subscribeInputResults((result) => results.push(result));
-  for (const action of ['move', 'end', 'cancel'] as const) {
-    const packet = { ...start, action };
-    transport.input.sendInput(surface, packet);
-    channel.onmessage({
-      data: JSON.stringify({
-        type: 'input.result',
-        clientSequence: sent[sent.length - 1].sequence,
-        ok: false,
-        error: { code: 'conflict', message: 'touch owner destroyed' },
-        touchState: 'terminal-invalidated',
-        touchSequenceId: start.sequenceId,
-      }),
-    });
-    const result = results[results.length - 1];
-    assert.equal(touchTerminalResult(owner, result, identity, 1), 'invalidated');
-    assert.equal(
-      touchTerminalResult(owner, { ...result, touchSequenceId: 'unknown' }, identity, 1),
-      undefined,
-    );
-    assert.equal(touchTerminalResult(owner, { ...result, touchState: undefined }, identity, 1), undefined);
-    for (const field of ['session', 'id', 'instance', 'document'] as const)
-      assert.equal(
-        touchTerminalResult(
-          owner,
-          { ...result, surface: { ...result.surface, [field]: 'other' } },
-          identity,
-          1,
-        ),
-        undefined,
-      );
-    assert.equal(touchTerminalResult(owner, { ...result, identity: 'other' }, identity, 1), undefined);
-  }
-});
 test('DC backpressure batches recent sampling history and reliably drains start/move/end in order', (t) => {
   const { transport, surface, sent, channel } = setup(t);
   channel.bufferedAmount = 300000;
@@ -413,345 +283,6 @@ test('client candidate backlog refuses overflow without silently discarding raw 
   );
 });
 
-test('terminal timeout starts on submission, survives ordinary receipt churn, and queries the original request', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { transport, surface, sent, channel } = setup(t);
-  const deliveries: InputDelivery[] = [];
-  const results: InputResult[] = [];
-  transport.input.subscribeInputDelivery((delivery) => deliveries.push(delivery));
-  transport.input.subscribeInputResults((result) => results.push(result));
-  const end = { type: 'touch', gestureMode: 'client-v1', action: 'end', sequenceId: 'terminal' };
-  channel.bufferedAmount = 300000;
-  assert.equal(transport.input.sendInput(surface, end, { touchTerminal: true }), true);
-  t.mock.timers.tick(5000);
-  await Promise.resolve();
-  assert.deepEqual(
-    deliveries.map((item) => item.phase),
-    ['queued'],
-  );
-  assert.equal(sent.length, 0);
-  channel.bufferedAmount = 0;
-  channel.onbufferedamountlow();
-  const original = sent[0].sequence;
-  const reply = (touchState: string, touchSequenceId: string, ok = true) =>
-    channel.onmessage({
-      data: JSON.stringify({
-        type: 'input.result',
-        clientSequence: original,
-        ok,
-        touchState,
-        touchSequenceId,
-        ...(ok ? {} : { error: { code: 'outcome_unknown', message: 'touch_terminal_unconfirmed' } }),
-      }),
-    });
-  reply('accepted-pending', 'terminal');
-  reply('accepted-pending', 'terminal');
-  for (let i = 0; i < 260; i++)
-    assert.equal(transport.input.sendInput(surface, { type: 'ime_commit', text: 'x' }), true);
-  reply('processed', 'old');
-  assert.deepEqual(
-    results.map((item) => item.touchState),
-    ['accepted-pending'],
-  );
-  t.mock.timers.tick(250);
-  assert.deepEqual(sent[sent.length - 1], {
-    type: 'input.touchStatus',
-    clientSequence: original,
-    sequenceId: 'terminal',
-  });
-  reply('terminal-unconfirmed', 'terminal', false);
-  for (const delay of [500, 1000, 2000, 2000]) t.mock.timers.tick(delay);
-  await Promise.resolve();
-  assert.deepEqual(
-    deliveries.map((item) => item.phase),
-    ['queued', 'submitted', 'unconfirmed'],
-  );
-  assert.equal(transport.touch.retryTouchTerminal(transport.input.inputIdentity(surface), 'terminal'), true);
-  t.mock.timers.tick(250);
-  assert.deepEqual(sent[sent.length - 1], {
-    type: 'input.touchStatus',
-    clientSequence: original,
-    sequenceId: 'terminal',
-  });
-  assert.equal(
-    sent.filter((item) => item.type === 'input' && item.event?.sequenceId === 'terminal').length,
-    1,
-  );
-  reply('processed', 'terminal');
-  assert.deepEqual(
-    results.map((item) => item.touchState),
-    ['accepted-pending', 'terminal-unconfirmed', 'processed'],
-  );
-  assert.equal(results[results.length - 1]?.event, end);
-  assert.equal(transport.touch.retryTouchTerminal(transport.input.inputIdentity(surface), 'terminal'), false);
-});
-
-test('pending extends reconciliation and blocked or failed status sends consume no attempts', (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { transport, surface, sent, channel } = setup(t);
-  const deliveries: InputDelivery[] = [];
-  transport.input.subscribeInputDelivery((delivery) => deliveries.push(delivery));
-  transport.input.sendInput(
-    surface,
-    {
-      type: 'touch',
-      gestureMode: 'client-v1',
-      action: 'end',
-      sequenceId: 'slow',
-    },
-    { touchTerminal: true },
-  );
-  const sequence = sent[0].sequence;
-  const entry = transport.touch.getTerminal(sequence)!;
-  channel.bufferedAmount = 300000;
-  for (let index = 0; index < 20; index++) t.mock.timers.tick(2000);
-  assert.equal(entry.retries, 0);
-  assert.equal(
-    deliveries.some((delivery) => delivery.phase === 'unconfirmed'),
-    false,
-  );
-  channel.bufferedAmount = 0;
-  const send = channel.send;
-  channel.send = () => {
-    throw Error('send failed');
-  };
-  t.mock.timers.tick(250);
-  assert.equal(entry.retries, 0);
-  channel.send = send;
-  for (const delay of [250, 500, 1000]) t.mock.timers.tick(delay);
-  assert.equal(entry.retries, 3);
-  channel.onmessage({
-    data: JSON.stringify({
-      type: 'input.result',
-      clientSequence: sequence,
-      ok: true,
-      touchState: 'accepted-pending',
-      touchSequenceId: 'slow',
-    }),
-  });
-  assert.equal(entry.retries, 0);
-  t.mock.timers.tick(250);
-  assert.equal(entry.retries, 1);
-  assert.equal(
-    deliveries.some((delivery) => delivery.phase === 'unconfirmed'),
-    false,
-  );
-});
-
-test('background reconciliation releases the owner and hides unresolved UI on late exact proof', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { transport, surface, sent, channel } = setup(t);
-  const view = transport.touch.createView(
-    {
-      input: transport.input,
-      presentation: transport.presentation,
-      touch: transport.touch,
-    },
-    surface.id,
-    { hasPointerCapture: () => false } as unknown as HTMLCanvasElement,
-  );
-  t.after(() => view.reset());
-  view.sample('start', point(20), 0);
-  view.sample('end', point(20), 30);
-  await Promise.resolve();
-  const end = sent.find((message) => message.event?.action === 'end');
-  assert.ok(end);
-  for (const delay of [250, 500, 1000, 2000, 2000]) t.mock.timers.tick(delay);
-  await Promise.resolve();
-  const unresolved = view.getSnapshot();
-  assert.equal('notice' in unresolved && unresolved.notice, 'unconfirmed');
-  const before = sent.filter((message) => message.type === 'input.touchStatus').length;
-  t.mock.timers.tick(2000);
-  assert.equal(sent.filter((message) => message.type === 'input.touchStatus').length, before + 1);
-  assert.equal(sent[sent.length - 1].type, 'input.touchStatus');
-  channel.onmessage({
-    data: JSON.stringify({
-      type: 'input.result',
-      clientSequence: end.sequence,
-      ok: false,
-      touchState: 'terminal-invalidated',
-      touchSequenceId: end.event.sequenceId,
-      error: { code: 'conflict', message: 'never_admitted' },
-    }),
-  });
-  assert.equal(view.getSnapshot().phase, 'released');
-  const settled = sent.length;
-  t.mock.timers.tick(10000);
-  assert.equal(sent.length, settled);
-  assert.equal(sent.filter((message) => message.event?.action === 'end').length, 1);
-  assert.equal(view.sample('start', point(20), 50), true);
-});
-
-test('ordinary partial release succeeds without a status query or releasing the other contact', (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { transport, surface, sent, channel } = setup(t);
-  const identity = transport.input.inputIdentity(surface);
-  const touch = new TouchInput('partial');
-  touch.sample(identity, 'start', point(0), 0, undefined);
-  touch.sample(identity, 'start', { ...point(0), id: 2 }, 1);
-  const end = touch.sample(identity, 'end', point(0), 2)!;
-  const results: InputResult[] = [];
-  transport.input.subscribeInputResults((result) => results.push(result));
-  transport.input.sendInput(surface, end, { touchTerminal: false });
-  channel.onmessage({
-    data: JSON.stringify({ type: 'input.result', clientSequence: sent[0].sequence, ok: true }),
-  });
-  t.mock.timers.tick(5000);
-  assert.equal(sent.length, 1);
-  assert.equal(results.length, 1);
-  assert.equal(touchTerminalResult({ identity, surface, packet: end }, results[0], identity, 1), undefined);
-});
-
-test('exact cleanup settles a lost terminal and a late original result cannot clear the next touch', (t) => {
-  const { transport, surface, sent, channel } = setup(t),
-    identity = transport.input.inputIdentity(surface);
-  const touch = new TouchInput('cleanup');
-  const results: InputResult[] = [];
-  transport.input.subscribeInputResults((result) => results.push(result));
-  const receive = (clientSequence: string, touchSequenceId: string, touchState: string, ok: boolean) =>
-    channel.onmessage({
-      data: JSON.stringify({
-        type: 'input.result',
-        clientSequence,
-        touchSequenceId,
-        touchState,
-        ok,
-        ...(ok ? {} : { error: { code: 'outcome_unknown', message: 'touch_terminal_unconfirmed' } }),
-      }),
-    });
-  for (let index = 0; index < 50; ++index) {
-    const start = touch.sample(identity, 'start', point(0), index * 10, undefined)!;
-    assert.equal(transport.input.sendInput(surface, start), true);
-    const end = touch.sample(identity, 'end', point(0), index * 10 + 1)!;
-    assert.equal(transport.input.sendInput(surface, end, { touchTerminal: true }), true);
-    const original = sent[sent.length - 1].sequence;
-    touch.accepted(end);
-    receive(original, end.sequenceId, 'terminal-unconfirmed', false);
-    const cancel = { ...end, action: 'cancel' as const, points: [], gestures: [] };
-    assert.equal(transport.input.sendInput(surface, cancel), true);
-    const cleanup = sent[sent.length - 1].sequence;
-    const owner = { identity, surface, packet: cancel };
-    assert.equal(touchTerminalResult(owner, results[results.length - 1], identity, 0), undefined);
-    receive(cleanup, 'wrong-owner', 'processed', true);
-    assert.equal(results[results.length - 1]?.touchState, 'terminal-unconfirmed');
-    receive(index % 2 === 0 ? cleanup : original, end.sequenceId, 'processed', true);
-    assert.equal(touchTerminalResult(owner, results[results.length - 1], identity, 0), 'processed');
-    assert.equal(transport.touch.retryTouchTerminal(identity, end.sequenceId), false);
-    const count = results.length;
-    receive(index % 2 === 0 ? original : cleanup, end.sequenceId, 'processed', true);
-    assert.equal(results.length, count);
-  }
-  assert.deepEqual(sent.map((message) => message.event.action).slice(-3), ['start', 'end', 'cancel']);
-});
-
-test('layout replacement retires only a submitted touch with its acknowledged focus token', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { transport, surface, sent, channel, setReady } = setup(t);
-  const receive = (message: object) => channel.onmessage({ data: JSON.stringify(message) });
-  const layout = (epoch: string) =>
-    receive({ type: 'layout', generation: '1', epoch, width: 640, height: 480, views: [{ ...surface }] });
-  const deliveries: InputDelivery[] = [];
-  const results: InputResult[] = [];
-  transport.input.subscribeInputDelivery((delivery) => deliveries.push(delivery));
-  transport.input.subscribeInputResults((result) => results.push(result));
-
-  transport.input.ensureInputFocus(surface);
-  let current = transport.presentation.layout!.views[0];
-  const start = (id: string) => ({
-    type: 'touch',
-    action: 'start',
-    gestureMode: 'client-v1',
-    sequenceId: id,
-    inputIdentity: transport.input.inputIdentity(current),
-  });
-  assert.equal(transport.input.sendInput(current, start('never-submitted')), true);
-  layout('3');
-  await Promise.resolve();
-  assert.deepEqual(
-    deliveries.map((delivery) => delivery.phase),
-    ['queued', 'discarded'],
-  );
-  assert.deepEqual(
-    sent.map((message) => message.type),
-    ['focus'],
-  );
-
-  current = transport.presentation.layout!.views[0];
-  transport.input.ensureInputFocus(current);
-  const focus = sent[sent.length - 1];
-  assert.equal(transport.input.sendInput(current, start('lost-original-start')), true);
-  receive({
-    type: 'focus',
-    focusRequestId: focus.focusRequestId,
-    layoutEpoch: '3',
-    ok: true,
-    token: {
-      view: current.id,
-      session: current.session,
-      instance: current.instance,
-      document: current.document,
-      focus: '8',
-    },
-  });
-  await Promise.resolve();
-  const submitted = deliveries[deliveries.length - 1];
-  assert.equal(submitted.phase, 'submitted');
-  assert.equal(submitted.surface.focus, '8');
-  const lease = {
-    surface: submitted.surface,
-    identity: submitted.identity,
-    layoutEpoch: submitted.layoutEpoch!,
-    authorization: submitted.authorization,
-  };
-  const cancel = { ...submitted.event, action: 'cancel', points: [] };
-  assert.equal(transport.touch.retireTouch(lease, cancel), false); // requires a replacement epoch
-  setReady(false);
-  layout('4'); // same output generation, different sampling/layout epoch
-  assert.equal(transport.input.sendInput(current, { ...submitted.event, action: 'move' }), false);
-  assert.equal(transport.touch.retireTouch(lease, cancel), true); // no coordinate paint required
-  const request = sent[sent.length - 1];
-  assert.deepEqual(request, {
-    type: 'input.touchRetire',
-    view: '1',
-    session: 's',
-    instance: 'i',
-    document: 'd',
-    focus: '8',
-    layoutEpoch: '3',
-    sequence: request.sequence,
-    sequenceId: 'lost-original-start',
-  });
-  receive({
-    type: 'input.result',
-    clientSequence: request.sequence,
-    ok: true,
-    touchState: 'accepted-pending',
-    touchSequenceId: request.sequenceId,
-  });
-  layout('5'); // another layout cannot prune the outstanding retirement receipt
-  t.mock.timers.tick(250);
-  assert.deepEqual(sent[sent.length - 1], {
-    type: 'input.touchStatus',
-    clientSequence: request.sequence,
-    sequenceId: request.sequenceId,
-  });
-  receive({
-    type: 'input.result',
-    clientSequence: request.sequence,
-    ok: false,
-    error: { code: 'conflict', message: 'touch owner destroyed' },
-    touchState: 'terminal-invalidated',
-    touchSequenceId: request.sequenceId,
-  });
-  assert.deepEqual(
-    results.map((result) => result.touchState),
-    ['accepted-pending', 'terminal-invalidated'],
-  );
-  assert.equal(results[1].identity, lease.identity);
-  assert.equal(results[1].surface.focus, '8');
-  assert.equal(transport.touch.retryTouchTerminal(lease.identity, request.sequenceId), false);
-});
-
 test('focus timeout and rejected focus explicitly discard queued events with original identity', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { transport, surface, sent, channel } = setup(t);
@@ -768,7 +299,7 @@ test('focus timeout and rejected focus explicitly discard queued events with ori
       inputIdentity: identity,
       sequenceId: 'focus',
     };
-    assert.equal(transport.input.sendInput(surface, end, { touchTerminal: true }), true);
+    assert.equal(transport.input.sendInput(surface, end), true);
     if (reject)
       channel.onmessage({
         data: JSON.stringify({
@@ -796,25 +327,6 @@ test('focus timeout and rejected focus explicitly discard queued events with ori
   );
 });
 
-test('unresolved terminal storage reserves end and cancel capacity and leaves keyboard available', (t) => {
-  const { transport, surface, sent } = setup(t);
-  const end = (index: number) => ({
-    type: 'touch',
-    gestureMode: 'client-v1',
-    action: 'end',
-    sequenceId: String(index),
-  });
-  for (let i = 0; i < 48; i++) assert.equal(transport.input.sendInput(surface, end(i)), true);
-  assert.equal(transport.input.sendInput(surface, { ...end(100), action: 'start' }), false);
-  for (let i = 48; i < 56; i++) assert.equal(transport.input.sendInput(surface, end(i)), true);
-  assert.equal(transport.input.sendInput(surface, end(56)), false);
-  for (let i = 56; i < 64; i++)
-    assert.equal(transport.input.sendInput(surface, { ...end(i), action: 'cancel' }), true);
-  assert.equal(transport.input.sendInput(surface, { ...end(64), action: 'cancel' }), false);
-  assert.equal(transport.input.sendInput(surface, { type: 'ime_commit', text: 'x' }), true);
-  assert.equal(sent.length, 65);
-});
-
 test('a local channel send failure reports discarded touch packets and drops dependent queued input', async (t) => {
   const { transport, surface, sent, channel } = setup(t);
   const deliveries: InputDelivery[] = [];
@@ -823,7 +335,7 @@ test('a local channel send failure reports discarded touch packets and drops dep
   const end = { ...start, action: 'end' };
   channel.bufferedAmount = 300000;
   assert.equal(transport.input.sendInput(surface, start), true);
-  assert.equal(transport.input.sendInput(surface, end, { touchTerminal: true }), true);
+  assert.equal(transport.input.sendInput(surface, end), true);
   assert.equal(transport.input.sendInput(surface, { type: 'ime_commit', text: 'still queued' }), true);
   const send = channel.send;
   channel.send = () => {
@@ -847,5 +359,26 @@ test('a local channel send failure reports discarded touch packets and drops dep
     sent.map((item) => item.event.type),
     ['ime_commit'],
   );
-  assert.equal(transport.touch.retryTouchTerminal(transport.input.inputIdentity(surface), 'failed'), false);
+});
+
+test('unacknowledged terminals never block successive touch starts or poll', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { transport, surface, sent } = setup(t);
+  const touch = new TouchInput('rapid');
+  const identity = transport.input.inputIdentity(surface);
+  for (let i = 0; i < 100; ++i) {
+    const start = touch.sample(identity, 'start', point(0), i * 100)!;
+    assert.equal(transport.input.sendInput(surface, start), true);
+    touch.accepted(start);
+    const end = touch.sample(identity, 'end', point(0), i * 100 + 20)!;
+    assert.equal(transport.input.sendInput(surface, end), true);
+    touch.accepted(end);
+  }
+  t.mock.timers.tick(30000);
+  assert.equal(sent.length, 200);
+  assert.ok(sent.every((message) => message.type === 'input'));
+  assert.equal(
+    new Set(sent.filter((m) => m.event.action === 'start').map((m) => m.event.sequenceId)).size,
+    100,
+  );
 });

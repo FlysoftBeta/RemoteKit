@@ -121,7 +121,6 @@ try {
       touchWire: [],
       epochs: [],
       waitingEntries: 0,
-      recoveryEntries: 0,
     });
     probe.session = () => {
       for (const element of document.querySelectorAll('*')) {
@@ -173,14 +172,6 @@ try {
           !record.target.classList.contains('resize-waiting')
         )
           probe.waitingEntries++;
-        for (const node of record.addedNodes) {
-          if (
-            node.nodeType === 1 &&
-            (node.matches('[role=status]') || node.querySelector('[role=status]')) &&
-            node.textContent.includes('触控结束尚未确认')
-          )
-            probe.recoveryEntries++;
-        }
       }
       if (document.querySelector('.remote-viewport.resize-waiting')) probe.waitingEntries++;
     }).observe(document, {
@@ -217,14 +208,6 @@ try {
       if (direction === 'in' && message.type === 'layout') {
         if (probe.epochs[probe.epochs.length - 1] !== message.epoch) probe.epochs.push(message.epoch);
       }
-      if (direction === 'out' && message.type === 'input.touchStatus') {
-        probe.touchWire.push({
-          type: 'query',
-          at: performance.now(),
-          client: message.clientSequence,
-          id: message.sequenceId,
-        });
-      }
       if (direction === 'out' && message.type === 'input' && message.event?.type === 'touch') {
         const { sequenceId, action, points } = message.event;
         probe.touchWire.push({
@@ -235,10 +218,6 @@ try {
           action,
           points: points.map((point) => point.id),
         });
-        if (probe.withholdNextEnd && action === 'end') {
-          probe.withholdNextEnd = false;
-          probe.withheld = { client: message.sequence, id: sequenceId, until: performance.now() + 2250 };
-        }
       }
       if (
         message.type === 'input.result' &&
@@ -322,35 +301,6 @@ try {
       createDataChannel(...args) {
         const channel = super.createDataChannel(...args);
         probe.channels.push(channel);
-        // Mask only the production receiver. The browser's native messages still reach the observer.
-        const handler = Object.getOwnPropertyDescriptor(RTCDataChannel.prototype, 'onmessage');
-        Object.defineProperty(channel, 'onmessage', {
-          get() {
-            return handler.get.call(this);
-          },
-          set(receive) {
-            handler.set.call(
-              this,
-              receive &&
-                function (event) {
-                  let message;
-                  try {
-                    message = JSON.parse(event.data);
-                  } catch {}
-                  if (message?.type === 'input.result' && message.touchSequenceId) {
-                    const { clientSequence: client, touchSequenceId: id, touchState: state } = message;
-                    const at = performance.now();
-                    const held = probe.withheld;
-                    const masked =
-                      state === 'processed' && held?.client === client && held.id === id && at < held.until;
-                    probe.touchWire.push({ type: 'result', at, client, id, state, masked });
-                    if (masked) return;
-                  }
-                  return receive.call(this, event);
-                },
-            );
-          },
-        });
         if (channel.label !== 'remotekit-auth')
           channel.addEventListener('message', (event) => {
             try {
@@ -447,7 +397,7 @@ try {
         wire,
         events,
       } = keyboardQA;
-      const { epochs, waitingEntries, recoveryEntries } = keyboardQA;
+      const { epochs, waitingEntries } = keyboardQA;
       return {
         focus: !!editor && document.activeElement === editor,
         inputMode: editor?.inputMode,
@@ -456,7 +406,6 @@ try {
         scroll: [scrollX, scrollY],
         epochs,
         waitingEntries,
-        recoveryEntries,
         waiting: section?.classList.contains('resize-waiting'),
         video: id(video),
         stream: id(video?.srcObject),
@@ -978,30 +927,9 @@ try {
   const gesture = (type, touchPoints = []) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
   const touchMark = () => page.evaluate(() => keyboardQA.touchWire.length);
   const touchRecords = (mark) => page.evaluate((mark) => keyboardQA.touchWire.slice(mark), mark);
-  const waitForTerminal = async (mark) =>
-    await (
-      await wait((mark) => {
-        const records = keyboardQA.touchWire.slice(mark);
-        const final = records.filter((event) => event.type === 'input' && event.action === 'end').pop();
-        return (
-          final &&
-          records.some(
-            (event) =>
-              event.type === 'result' &&
-              event.state === 'processed' &&
-              !event.masked &&
-              event.client === final.client &&
-              event.id === final.id,
-          ) &&
-          final
-        );
-      }, mark)
-    ).jsonValue();
   const tapAndWait = async () => {
-    const mark = await touchMark();
     const start = fixtureEvents.length;
     await tap('tl');
-    await waitForTerminal(mark);
     await afterFixture(
       start,
       (event) => event.type === 'click' && event.trusted,
@@ -1048,7 +976,6 @@ try {
       event.changed[0] === remainingMove.changed[0],
     'Final release did not end the remote touch',
   );
-  await waitForTerminal(multiMark);
   const multiWire = (await touchRecords(multiMark)).filter((event) => event.type === 'input');
   assert(
     JSON.stringify(multiWire.map((event) => event.action)) ===
@@ -1071,7 +998,6 @@ try {
   }
   await pause(130);
   await gesture('touchEnd');
-  await waitForTerminal(dragMark);
   const remoteScroll = await afterFixture(
     dragStart,
     (event) => event.type === 'scroll' && event.scrollY > 30,
@@ -1080,67 +1006,28 @@ try {
   await tapAndWait();
   await log('remote-touch-scroll', { remoteScroll, wire: await touchRecords(dragMark) });
 
-  const recoveryMark = await touchMark();
-  await page.evaluate(() => {
-    keyboardQA.withholdNextEnd = true;
-  });
+  const successiveMark = await touchMark();
   const clickStart = fixtureEvents.length;
+  await tap('tl');
   await tap('tl');
   await afterFixture(
     clickStart,
-    (event) => event.type === 'click' && event.trusted,
-    'Touch with a masked receipt did not execute remotely',
+    () => fixtureEvents.slice(clickStart).filter((event) => event.type === 'click').length === 2,
+    'Successive taps did not deliver exactly two remote clicks',
   );
-  const recovered = await waitForTerminal(recoveryMark);
-  const recoveryWire = await touchRecords(recoveryMark);
-  const masked = recoveryWire.find(
-    (event) =>
-      event.type === 'result' &&
-      event.client === recovered.client &&
-      event.id === recovered.id &&
-      event.masked,
-  );
-  const delivered = recoveryWire.find(
-    (event) =>
-      event.type === 'result' &&
-      event.client === recovered.client &&
-      event.id === recovered.id &&
-      event.state === 'processed' &&
-      !event.masked,
-  );
+  const successiveWire = (await touchRecords(successiveMark)).filter((event) => event.type === 'input');
   assert(
-    masked &&
-      delivered &&
-      delivered.at - recovered.at >= 2250 &&
-      recoveryWire.some(
-        (event) =>
-          event.type === 'query' &&
-          event.client === recovered.client &&
-          event.id === recovered.id &&
-          event.at > masked.at &&
-          event.at < delivered.at,
-      ),
-    'Masked native terminal result was not recovered through a matching read-only touch status request',
+    JSON.stringify(successiveWire.map((event) => event.action)) ===
+      JSON.stringify(['start', 'end', 'start', 'end']) &&
+      new Set(successiveWire.map((event) => event.id)).size === 2,
+    'Successive taps did not retain distinct touch sequences',
   );
-  assert(
-    JSON.stringify(
-      recoveryWire
-        .filter((event) => event.type === 'input' && event.id === recovered.id)
-        .map((event) => event.action),
-    ) === JSON.stringify(['start', 'end']) &&
-      fixtureEvents.slice(clickStart).filter((event) => event.type === 'click').length === 1,
-    'Recovery replayed the terminal input or duplicated its effect',
-  );
-  await tapAndWait();
   const afterTouch = await sample();
   assert(
-    identity(before, afterTouch) &&
-      afterTouch.recoveryEntries === 0 &&
-      afterTouch.scroll.every((value) => value === 0) &&
-      !(await page.evaluate(() => document.body.textContent.includes('触控结束尚未确认'))),
-    'Touch handling introduced a reconnect prompt, lost the original peer, or scrolled the Viewer',
+    identity(before, afterTouch) && afterTouch.scroll.every((value) => value === 0),
+    'Touch handling lost the original peer or scrolled the Viewer',
   );
-  await log('touch-status-recovery', { recoveryWire, afterTouch });
+  await log('successive-touch', { successiveWire, afterTouch });
 
   // Follow actual local editor focus with synthetic keyboard occlusion. A
   // remote search field that remounts on resize must not drive a feedback loop.
@@ -1244,7 +1131,6 @@ try {
             touchWire: keyboardQA.touchWire,
             epochs: keyboardQA.epochs,
             waitingEntries: keyboardQA.waitingEntries,
-            recoveryEntries: keyboardQA.recoveryEntries,
             wire: keyboardQA.wire.slice(-60),
             session: (() => {
               const session = keyboardQA.session();

@@ -1,7 +1,6 @@
 // CPU only: production packet helper and the official disposition/action filters.
 #include "browser/client_gesture_packet.h"
 #include "browser/client_input_timing.h"
-#include "browser/client_touch_retirement.h"
 #include <algorithm>
 #include <vector>
 #include "base/at_exit.h"
@@ -21,44 +20,6 @@ using T = G::Type;
 using E = ui::EventType;
 using A = ui::MotionEvent::Action;
 void TestClientInputTiming() {
-  remotekit::browser::ClientTouchRetirement retired;
-  remotekit::InputToken owner{1, 2, 3, 4, 5};
-  CHECK(!retired.Contains(owner, "unknown"));
-  retired.Retire(owner, "live-target-cancel-pending", false);
-  CHECK(!retired.Contains(owner, "live-target-cancel-pending"));
-  retired.Retire(owner, "destroyed-target", true);
-  CHECK(retired.Contains(owner, "destroyed-target"));
-  CHECK(!retired.Contains(owner, "new-owner"));
-  for (int field = 0; field < 5; ++field) {
-    auto changed = owner;
-    if (field == 0)
-      ++changed.session;
-    if (field == 1)
-      ++changed.view;
-    if (field == 2)
-      ++changed.instance;
-    if (field == 3)
-      ++changed.document;
-    if (field == 4)
-      ++changed.focus;
-    CHECK(!retired.Contains(changed, "destroyed-target"));
-  }
-  using State = remotekit::browser::ClientTouchRetirement::State;
-  retired.Begin(owner, "awaiting-ack");
-  for (size_t i = 0; i < retired.kCapacity; ++i)
-    retired.Retire(owner, std::to_string(i), true);
-  CHECK(!retired.Contains(owner, "destroyed-target"));
-  CHECK(retired.Contains(owner, "31"));
-  CHECK(retired.Find(owner, "awaiting-ack") == State::pending);
-  retired.Resolve(owner, "awaiting-ack", State::unconfirmed);
-  retired.Resolve(owner, "awaiting-ack", State::processed);
-  retired.Retire(owner, "awaiting-ack", true);
-  auto next_owner = owner;
-  ++next_owner.focus;
-  retired.Begin(next_owner, "awaiting-ack");
-  CHECK(retired.Find(owner, "awaiting-ack") == State::processed);
-  CHECK(retired.Find(next_owner, "awaiting-ack") == State::pending);
-  CHECK(retired.Find(next_owner, "unknown") == State::unknown);
   blink::WebTouchEvent end(blink::WebInputEvent::Type::kTouchEnd, 0, base::TimeTicks());
   end.touches_length = 2;
   end.touches[0].state = blink::WebTouchPoint::State::kStateReleased;
@@ -132,7 +93,8 @@ void Packet(ui::TouchDispositionGestureFilter& filter,
             uint32_t id,
             A action,
             const std::vector<G>& gestures,
-            bool consumed) {
+            bool consumed,
+            bool acknowledge = true) {
   ui::PointerProperties pointer(100, 100, 1);
   pointer.id = 0;
   pointer.tool_type = ui::MotionEvent::ToolType::FINGER;
@@ -142,7 +104,8 @@ void Packet(ui::TouchDispositionGestureFilter& filter,
   const auto packet = remotekit::browser::MakeClientGesturePacket(event, gestures, 1);
   CHECK_EQ(packet.unique_touch_event_id(), id);
   CHECK_EQ(filter.OnGesturePacket(packet), ui::TouchDispositionGestureFilter::SUCCESS);
-  filter.OnTouchEventAck(id, consumed, true);
+  if (acknowledge)
+    filter.OnTouchEventAck(id, consumed, true);
 }
 struct ActionSink : input::TouchActionFilterClient {
   void OnUnconfirmedTapConvertedToTap() override {}
@@ -327,6 +290,37 @@ int main(int argc, char** argv) {
            false);
     CHECK(sink.Has(E::kScrollFlingCancel));
     Packet(filter, 5, A::UP, {{T::tap}}, false);
+  }
+  {
+    Sink sink;
+    ui::TouchDispositionGestureFilter previous(&sink), next(&sink);
+    Packet(previous, 1, A::DOWN, {{T::tap_down}}, false);
+    Packet(previous, 2, A::UP, {{T::tap}}, false, false);
+    Packet(next, 3, A::DOWN, {{T::tap_down}}, false, false);
+    CHECK(!sink.Has(E::kGestureTap));
+    previous.OnTouchEventAck(2, false, true);
+    next.OnTouchEventAck(3, false, true);
+    Packet(next, 4, A::UP, {{T::tap}}, false);
+    CHECK_EQ(std::ranges::count_if(
+                 sink.events, [](const auto& event) { return event.type() == E::kGestureTap; }),
+             2);
+    CHECK(!sink.Has(E::kGestureTapCancel));
+  }
+  {
+    Sink sink;
+    ui::TouchDispositionGestureFilter previous(&sink), next(&sink);
+    Packet(previous, 1, A::DOWN, {{T::tap_down}}, false);
+    Packet(previous, 2, A::CANCEL, {}, false);
+    previous.Shutdown();
+    Packet(next, 3, A::DOWN, {{T::tap_down}}, false);
+    Packet(next, 4, A::UP, {{T::tap}}, false);
+    CHECK_EQ(
+        std::ranges::count_if(
+            sink.events, [](const auto& event) { return event.type() == E::kGestureTapCancel; }),
+        1);
+    CHECK_EQ(std::ranges::count_if(
+                 sink.events, [](const auto& event) { return event.type() == E::kGestureTap; }),
+             1);
   }
   remotekit::browser::ClientGestureCandidateState state;
   CHECK(!state.Accept({{T::scroll_update}}, true, false));

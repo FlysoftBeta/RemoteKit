@@ -22,7 +22,7 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
       return Error{ErrorCode::kInvalidRequest, "gestureMode must be client-v1"};
     return Kind::kInput;
   }
-  if (type == "focus" || type == "input.touchStatus" || type == "input.touchRetire")
+  if (type == "focus")
     return Kind::kInput;
   if (type == "files.request")
     return Kind::kFiles;

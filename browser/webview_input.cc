@@ -279,8 +279,7 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
                  blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
                  blink::WebInputEvent::kForwardButtonDown));
   owner_.touch_->RefreshClientTouchOwner();
-  const bool cancel_reads_receipt = owner_.touch_->ReadsTerminalReceipt(input);
-  if (!cancel_reads_receipt && owner_.touch_->AdmissionPending())
+  if (!owner_.touch_->StartsNewSequence(input) && owner_.touch_->AdmissionPending())
     return Fail(ErrorCode::busy,
                 "Resolving/draining touch; retry this input with the same sequence");
   if (!input_commit_navigations_.empty())
@@ -319,7 +318,7 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
           : nullptr;
   if (std::holds_alternative<WheelInput>(input.payload) && !wheel_phase_handler)
     return Fail(ErrorCode::unavailable, "Mouse wheel phase handling unavailable");
-  if (const auto status = owner_.touch_->PrepareInput(input, cancel_reads_receipt, admitted))
+  if (const auto status = owner_.touch_->PrepareInput(input))
     return *status;
   auto representable = std::visit(
       [](const auto& value) {

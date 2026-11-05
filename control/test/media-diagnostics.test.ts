@@ -310,7 +310,6 @@ test('collection projects broad browser and Endpoint stats and only bounded rece
         type: 'input.result',
         clientSequence: '27',
         ok: false,
-        touchState: 'rejected',
         error: { code: 'conflict', message: 'stale_layout' },
       },
       {

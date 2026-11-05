@@ -60,7 +60,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `presentation.prepare` | `{version:1, barrierId, outputGeneration, layoutEpoch}` |
 | `frame` | 实际 wire RTP、layoutEpoch、编码信息；有有效源完成时间时附 captureWallTimeMs 等 |
 | `focus` | 焦点请求结果与新 token |
-| `input.result` | clientSequence、browserSequence、ok/error，触控终止状态 |
+| `input.result` | clientSequence、browserSequence、ok/error；触控使用普通有序输入结果 |
 | `input.editable` | revision、页面编辑身份、type/flags/selection/composition/caret、`editable.target` |
 | `product.result` | 操作收据 |
 | `files.result` | 文件 RPC 结果 |
@@ -77,8 +77,6 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `media.feedback` | 约 1.5 秒一次的诊断反馈（不驱动码率/DPR） |
 | `focus` | focusRequestId、页面完整身份、layoutEpoch、focused |
 | `input` | 完整身份、outputGeneration、layoutEpoch、sequence、event |
-| `input.touchStatus` | clientSequence、sequenceId |
-| `input.touchRetire` | 原身份、旧 layoutEpoch、新 sequence、sequenceId（无坐标） |
 | `product.action` | `{version:1, operationId, operationGeneration, action}` |
 | `files.request` | `{version:1, requestId, method, params}`：asset.begin/chunk/seal/cancel/describe/read、selection.commit、photo.burst.begin/sample/end/cancel、photo.thumbnail/process |
 | `clock.ping` | requestId |
@@ -139,7 +137,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 回复  {version:1, id, ok:true, ...} | {version:1, id, ok:false, code, error, detail}
 ```
 
-`code` 是 `protocol/control.h` 中的 Browser 错误码（busy=6 等）。方法：`snapshot`、`shutdown`、`session.sitePreferences`、`view.create/adopt/configure/recreate/close/closed.ack`、`focus`、`visible`、`navigate`、`lifecycle`、`input`、`input.touchStatus`、`input.touchRetire`、`page.requests/reply/fileStatus/command/exitFullscreen`、`profile.permissions/downloads`（参数放在 `command` 对象里，避免与 envelope 的 id 冲突）、`navigation.ack`、`navigation.export.begin/chunk`、`navigation.import.begin/chunk/commit`、`navigation.transfer.cancel`、`output.open/describe/configure/status/close`、`audio.open/close`。
+`code` 是 `protocol/control.h` 中的 Browser 错误码（busy=6 等）。方法：`snapshot`、`shutdown`、`session.sitePreferences`、`view.create/adopt/configure/recreate/close/closed.ack`、`focus`、`visible`、`navigate`、`lifecycle`、`input`、`page.requests/reply/fileStatus/command/exitFullscreen`、`profile.permissions/downloads`（参数放在 `command` 对象里，避免与 envelope 的 id 冲突）、`navigation.ack`、`navigation.export.begin/chunk`、`navigation.import.begin/chunk/commit`、`navigation.transfer.cancel`、`output.open/describe/configure/status/close`、`audio.open/close`。
 
 `output.configure`：width/height（DIP）、device_scale（0.5–4）、enabled、viewConfigs；尺寸/scale/viewConfigs 变化前须先关闭输出。实际物理尺寸 = `ceil(DIP × scale)` 向上取偶，单轴 ≤8192、面积 ≤16,777,216，超出返回资源预算错误。`output.describe` 返回映射、4 个 Slot 纹理、4 个 ready Fence、4 个 consumed Fence 的句柄（复制进调用方进程），并一次性移交渲染管道。
 

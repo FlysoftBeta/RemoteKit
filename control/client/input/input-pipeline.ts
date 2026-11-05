@@ -17,20 +17,10 @@ export interface InputPorts {
   grantFocus(viewId: string, token: string): void;
   clearEditing(): void;
   reconcileEditing(views: Surface[]): void;
-  terminals: {
-    getTerminal(sequence: string): TerminalInput | undefined;
-    trackTerminal(sequence: string, entry: TerminalInput): void;
-    acceptTerminal(sequence: string): void;
-    reservedTerminalInput(): number;
-    pruneTerminalInput(): void;
-    deleteTerminal(sequence: string): void;
-    settleTouch(identity: string, sequenceId: string): void;
-  };
 }
 
 import { type Incoming, type Outgoing } from '../rtc/protocol';
-import type { InputDelivery, InputRequest, InputResult, QueuedInput, TerminalInput } from './types';
-import { tracksTerminal } from './types';
+import type { InputDelivery, InputRequest, InputResult, QueuedInput } from './types';
 
 export type FocusLease =
   | { phase: 'none' }
@@ -45,13 +35,6 @@ export class InputPipeline {
   nextSequence() {
     return String(++this.sequence);
   }
-  queuedTerminalCount() {
-    return (
-      this.queuedInput.filter((item) => tracksTerminal(item.event)).length +
-      (this.pendingFocus?.events.filter((item) => tracksTerminal(item.event)).length ?? 0)
-    );
-  }
-
   private focusLease: FocusLease = { phase: 'none' };
   constructor(private readonly ports: InputPorts) {}
   readonly touchInputStats = {
@@ -183,7 +166,7 @@ export class InputPipeline {
   }
 
   reportInputDelivery(
-    request: InputRequest & { epoch?: string },
+    request: InputRequest,
     phase: InputDelivery['phase'],
     sequence?: string,
     reason?: string,
@@ -196,8 +179,6 @@ export class InputPipeline {
       event: request.event,
       sequence,
       reason,
-      layoutEpoch: request.epoch,
-      authorization: this.ports.scope().epoch,
     };
     queueMicrotask(() => this.inputDeliveryListeners.forEach((listener) => listener(delivery)));
   }
@@ -239,51 +220,10 @@ export class InputPipeline {
 
   private receiveInputResult(message: import('../rtc/protocol').InputResultMessage) {
     const sequence = String(message.clientSequence);
-    const terminal = this.ports.terminals.getTerminal(sequence);
-    const sent = terminal ?? this.sentInput.get(sequence);
+    const sent = this.sentInput.get(sequence);
     if (!sent) return;
-    const ok = message.ok === true;
-    const touchSequenceId = typeof message.touchSequenceId === 'string' ? message.touchSequenceId : undefined;
-    const state = message.touchState;
-    const touchState: InputResult['touchState'] =
-      ((state === 'accepted-pending' || state === 'processed') && ok) ||
-      ((state === 'terminal-invalidated' || state === 'terminal-unconfirmed' || state === 'rejected') && !ok)
-        ? state
-        : undefined;
-    if (
-      state !== undefined &&
-      (!touchState ||
-        sent.event.type !== 'touch' ||
-        !touchSequenceId ||
-        touchSequenceId !== sent.event.sequenceId)
-    )
-      return;
-    if (touchState === 'accepted-pending') {
-      if (!terminal) return;
-      const alreadyPending = terminal.pending && !terminal.unconfirmed;
-      this.ports.terminals.acceptTerminal(sequence);
-      if (alreadyPending) return;
-    } else if (terminal) {
-      if (
-        (!touchState && (!ok || terminal.pending || terminal.requiresTerminalState)) ||
-        (terminal.pending && touchState === 'rejected')
-      )
-        return;
-      // An unresolved original request remains available to later status replies.
-      if (touchState !== 'terminal-unconfirmed') {
-        this.ports.terminals.deleteTerminal(sequence);
-      }
-    } else {
-      this.sentInput.delete(sequence);
-    }
-    if (
-      touchState === 'terminal-invalidated' ||
-      (touchState === 'processed' && terminal?.requiresTerminalState)
-    ) {
-      // An exact settled sequence also retires previous timed-out attempts.
-      // Their mutations are never replayed, and their timers need no more reads.
-      this.ports.terminals.settleTouch(sent.identity, touchSequenceId!);
-    }
+    this.sentInput.delete(sequence);
+    const ok = message.ok;
     const error = message.error ? new RemoteKitError(message.error.code, message.error.message) : undefined;
     for (const listener of this.inputResultListeners)
       listener({
@@ -293,13 +233,11 @@ export class InputPipeline {
         sequence,
         ok,
         error,
-        touchState,
-        touchSequenceId,
       });
-    if (!ok && touchState !== 'terminal-unconfirmed') this.ports.report({ error: formatError(error) });
+    if (!ok) this.ports.report({ error: formatError(error) });
   }
 
-  sendInput(surface: Surface, event: Record<string, unknown>, options?: { touchTerminal: boolean }) {
+  sendInput(surface: Surface, event: Record<string, unknown>) {
     if (this.ports.scope().locked || this.ports.scope().epoch === 0) return false;
     const terminalTouch =
       (event.type === 'touch' || event.type === 'gesture') &&
@@ -336,14 +274,6 @@ export class InputPipeline {
       this.traceInput('blocked', surface, event, 'blur-pending');
       return false;
     }
-    if (tracksTerminal(event) || (event.type === 'touch' && event.action === 'start')) {
-      const capacity = event.action === 'cancel' ? 64 : event.action === 'end' ? 56 : 48;
-      if (this.ports.terminals.reservedTerminalInput() >= capacity) {
-        this.traceInput('blocked', surface, event, 'terminal-capacity');
-        this.touchInputStats.dropped++;
-        return false;
-      }
-    }
     if (event.type === 'touch') {
       if (event.action === 'start' && event.sampleElapsedUs === 0) {
         if (event.clockMode === 'source') this.touchInputStats.sourceGestures++;
@@ -357,8 +287,6 @@ export class InputPipeline {
       event,
       epoch: this.ports.layout()!.epoch,
       generation: this.ports.layout()!.generation,
-      requiresTerminalState:
-        event.gestureMode === 'client-v1' && (event.action === 'cancel' || options?.touchTerminal === true),
     };
     const queue = pending?.events ?? this.queuedInput;
     const previous = queue[queue.length - 1];
@@ -438,13 +366,8 @@ export class InputPipeline {
         }
         break;
       }
-      if (tracksTerminal(item.event)) {
-        const entry = { ...item, pending: false, retries: 0 };
-        this.ports.terminals.trackTerminal(sequence, entry);
-      } else {
-        this.sentInput.set(sequence, item);
-        while (this.sentInput.size > 256) this.sentInput.delete(this.sentInput.keys().next().value!);
-      }
+      this.sentInput.set(sequence, item);
+      while (this.sentInput.size > 256) this.sentInput.delete(this.sentInput.keys().next().value!);
       this.reportInputDelivery(item, 'submitted', sequence);
       this.traceInput('sent', current, item.event, undefined, sequence);
     }
@@ -495,7 +418,6 @@ export class InputPipeline {
       events: [],
     };
     this.discardQueuedInput('focus-changed', true);
-    this.ports.terminals.pruneTerminalInput();
     this.notify();
     this.focusTimer = setTimeout(() => {
       if (
@@ -595,7 +517,6 @@ export class InputPipeline {
     )
       this.cancelPendingFocus(pending.requestId);
     this.discardQueuedInput('layout-changed', true);
-    this.ports.terminals.pruneTerminalInput();
     this.flushFocusedInput();
     this.notify();
   }

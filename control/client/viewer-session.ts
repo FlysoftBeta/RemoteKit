@@ -58,22 +58,8 @@ export class ViewerSession {
       grantFocus: (id, token) => presentation.acceptFocus(id, token),
       clearEditing: () => editing.clear(),
       reconcileEditing: (views) => editing.reconcile(views),
-      get terminals() {
-        return touch;
-      },
     });
-    touch = this.touch = new TouchSession({
-      queuedTerminalCount: () => input.queuedTerminalCount(),
-      nextSequence: () => input.nextSequence(),
-      identity: (surface) => input.inputIdentity(surface),
-      report: (request, phase, sequence, reason) =>
-        input.reportInputDelivery(request, phase, sequence, reason),
-      layout: () => presentation.layout,
-      scope: () => ({ locked: authorization.productLocked, epoch: authorization.peerAuthEpoch }),
-      attempt: () => rtc.attempt,
-      channel: () => endpoint.channel,
-      send: (message) => endpoint.send(message),
-    });
+    touch = this.touch = new TouchSession();
     observations = this.observations = new MediaObservations({
       get rtc() {
         return rtc;
@@ -164,7 +150,7 @@ export class ViewerSession {
     presentation.observations.subscribe(observations.onPresentation);
     authorization.resets.subscribe(presentation.reset.bind(presentation));
     authorization.resets.subscribe(input.reset.bind(input));
-    authorization.resets.subscribe(touch.clearTerminalInput.bind(touch));
+    authorization.resets.subscribe(touch.reset.bind(touch));
     authorization.resets.subscribe(editing.reset.bind(editing));
     authorization.resets.subscribe(observations.resetMediaDiagnostics.bind(observations));
     authorization.resets.subscribe(operations.reset.bind(operations));

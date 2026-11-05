@@ -32,6 +32,9 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
   Status Momentum(const GestureInput&);
   bool has_routed_raw() const { return first_id_ != 0; }
   bool has_routed_terminal() const { return terminal_routed_; }
+  bool awaiting_ack() const { return !pending_.empty(); }
+  size_t pending_ack_count() const { return pending_.size(); }
+  void StopMomentum();
   void Cancel(bool deliver);
   void ForwardGestureEvent(const ui::GestureEventData&) override;
 
@@ -54,6 +57,7 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
   std::set<uint32_t> pending_;
   uint32_t first_id_{};
   bool stopped_{}, bound_{}, scroll_{}, momentum_{}, fling_pending_{}, terminal_routed_{};
+  bool momentum_allowed_{true};
   std::optional<GestureInput> buffered_;
   double cumulative_x_{}, cumulative_y_{};
   ClientNativeInputClock<base::TimeTicks> native_clock_;

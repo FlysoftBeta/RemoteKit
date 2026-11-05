@@ -42,10 +42,10 @@ base::DictValue ControlResult::Failure(int id,
 base::DictValue ControlResult::Failure(int id, std::string_view detail, base::DictValue fields) {
   auto code = protocol::ErrorCode::invalid_request;
   if (detail == "view_closing" || detail.starts_with("close_output_before") ||
-      detail == "output_pending" || detail == "touch_terminal_pending" ||
+      detail == "output_pending" ||
       detail.ends_with("_already_pending"))
     code = protocol::ErrorCode::busy;
-  else if (detail.starts_with("stale_") || detail == "touch_owner_invalidated" ||
+  else if (detail.starts_with("stale_") ||
            detail.ends_with("identity_mismatch"))
     code = protocol::ErrorCode::stale_identity;
   else if (detail == "atlas_no_space" || detail.ends_with("_limit") || detail == "queue_full" ||
@@ -59,7 +59,7 @@ base::DictValue ControlResult::Failure(int id, std::string_view detail, base::Di
   else if (detail == "unsupported_method" || detail.starts_with("unsupported_"))
     code = protocol::ErrorCode::unsupported;
   else if (detail == "output_not_open" || detail == "output_gpu_fault_sealed" ||
-           detail == "popup_not_pending" || detail == "touch_terminal_unconfirmed")
+           detail == "popup_not_pending")
     code = protocol::ErrorCode::unavailable;
   return Failure(id, code, detail, std::move(fields));
 }

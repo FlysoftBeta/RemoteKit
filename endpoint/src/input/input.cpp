@@ -16,8 +16,6 @@ void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp
     reply["layoutEpoch"] = request.value("layoutEpoch", Json());
   } else if (request.is_object() && request.contains("sequence")) {
     reply["clientSequence"] = request["sequence"];
-  } else if (request.is_object() && request.contains("clientSequence")) {
-    reply["clientSequence"] = request["clientSequence"];
   }
   if (!reply.value("ok", false) && reply.contains("code")) {
     reply["error"] = WireError(BrowserRpc::ReplyError(reply));
@@ -27,129 +25,13 @@ void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp
   hooks_.send(reply, stamp);
 }
 
-std::string InputController::ClientTouchSequence(const Json& request) {
-  if (request.value("type", std::string()) == "input.touchRetire")
-    return request.value("sequenceId", std::string());
-  const auto raw = request.find("event");
-  if (raw == request.end() || !raw->is_object() || raw->value("type", std::string()) != "touch" ||
-      raw->value("gestureMode", std::string()) != "client-v1")
-    return {};
-  return raw->value("sequenceId", std::string());
-}
-
-std::string InputController::ClientTouchTerminal(const Json& request) {
-  const auto sequence = ClientTouchSequence(request);
-  if (sequence.empty() || sequence.size() > 128)
-    return {};
-  const auto client_sequence = request.value("sequence", std::string());
-  if (client_sequence.empty() || client_sequence.size() > 20)
-    return {};
-  if (request.value("type", std::string()) == "input.touchRetire")
-    return sequence;
-  const auto action = request.at("event").value("action", std::string());
-  if (action != "end" && action != "cancel")
-    return {};
-  return sequence;
-}
-
-remotekit::TouchTerminalReceipt* InputController::ReserveTouchTerminal(
-    remotekit::TouchTerminalReceipts& terminals,
-    const Event& event,
-    const Json& request,
-    const std::string& sequence,
-    uint64_t input_control) {
-  remotekit::TouchTerminalReceipt candidate;
-  candidate.peer = event.peer;
-  candidate.authorization = event.authorization;
-  candidate.control = input_control;
-  candidate.client_sequence = request.value("sequence", std::string());
-  candidate.sequence = sequence;
-  candidate.query = {{"method", "input.touchStatus"}, {"sequenceId", sequence}};
-  for (const auto* key : {"session", "view", "instance", "document", "focus"})
-    if (request.contains(key))
-      candidate.query[key] = request[key];
-  return terminals.Reserve(std::move(candidate));
-}
-
-void InputController::RejectInput(const char* error,
-                                  const Json& request,
-                                  const Event& event,
-                                  remotekit::TouchTerminalReceipts* terminals) {
+void InputController::RejectInput(const char* error, const Json& request, const Event& event) {
   ++input_rejected;
-  const auto terminal = ClientTouchTerminal(request);
-  const bool never_admitted =
-      terminals && !terminal.empty() && touch_admissions_.NeverAdmitted(terminal);
-  const auto* state = never_admitted ? "terminal-invalidated" : "rejected";
-  if (never_admitted)
-    error = "never_admitted";
-  if (terminals) {
-    const auto sequence = ClientTouchTerminal(request);
-    if (!sequence.empty()) {
-      const auto client_sequence = request.value("sequence", std::string());
-      // A stale duplicate may never overwrite the original request's receipt.
-      if (terminals->Find(event.peer, event.authorization, client_sequence, sequence))
-        return;
-      remotekit::TouchTerminalReceipt rejection;
-      rejection.peer = event.peer;
-      rejection.authorization = event.authorization;
-      rejection.client_sequence = client_sequence;
-      rejection.sequence = sequence;
-      if (auto* receipt = terminals->Reserve(std::move(rejection))) {
-        receipt->Finish(state, false, error, InputRejectionCode(error));
-        return;
-      }
-    }
-  }
-  Json reply = {{"ok", false}, {"error", WireError({InputRejectionCode(error), error})}};
-  if (const auto sequence = ClientTouchSequence(request); !sequence.empty()) {
-    reply["touchState"] = state;
-    reply["touchSequenceId"] = sequence;
-  }
-  ReplyInput(std::move(reply), request, event.authorization);
+  ReplyInput({{"ok", false}, {"error", WireError({InputRejectionCode(error), error})}}, request,
+             event.authorization);
 }
 
-void InputController::PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt) {
-  const auto current = [&] {
-    return hooks_.peer() == receipt.peer && hooks_.current(receipt.authorization) &&
-           hooks_.control() == receipt.control;
-  };
-  if (!current()) {
-    receipt.Finish("terminal-unconfirmed", false, "touch_terminal_identity_changed");
-    return;
-  }
-  auto status = hooks_.rpc(receipt.query, receipt.control, 10000, true, current);
-  if (!status) {
-    if (status.error().code == ErrorCode::kBusy && QpcNow() < receipt.deadline)
-      receipt.due = QpcNow() + QpcFrequency() / 200;
-    else
-      receipt.Finish("terminal-unconfirmed", false, status.error().message, status.error().code);
-    return;
-  }
-  if (!current())
-    receipt.Finish("terminal-unconfirmed", false, "touch_terminal_identity_changed");
-  else if (!remotekit::ApplyTouchTerminalStatus(receipt, status.value())) {
-    if (QpcNow() >= receipt.deadline)
-      receipt.Finish("terminal-unconfirmed", false, "touch_terminal_timeout");
-    else
-      receipt.due = QpcNow() + QpcFrequency() / 200;
-  }
-}
-
-void InputController::FlushTouchTerminals(remotekit::TouchTerminalReceipts& terminals) {
-  hooks_.flush();
-  terminals.Flush([&](const auto& receipt, const Json& message) {
-    bool sent = false;
-    hooks_.notice(receipt.peer, receipt.authorization, message.dump(),
-                  [&](const std::string& encoded) {
-                    sent = hooks_.peer() == receipt.peer && hooks_.data_open() &&
-                           hooks_.frame_stamp() == receipt.authorization &&
-                           hooks_.send_data(receipt.peer, receipt.authorization, encoded) == 0;
-                  });
-    return sent;
-  });
-}
-
-void InputController::HandleData(const Event& event, remotekit::TouchTerminalReceipts& terminals) {
+void InputController::HandleData(const Event& event) {
   const auto token = hooks_.admission();
   const auto current_token = [&] {
     return event.peer == token.peer && event.authorization == token.stamp &&
@@ -162,107 +44,22 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
   if (command.is_discarded() || !command.is_object())
     return;
   auto type = command.value("type", std::string());
-  touch_admissions_.Bind(event.peer, event.authorization);
-  const auto touch_sequence = ClientTouchSequence(command);
-  if (!touch_sequence.empty() && type == "input" &&
-      command.at("event").value("action", std::string()) == "start")
-    touch_admissions_.Start(touch_sequence);
-  if (type == "input.touchStatus") {
-    const auto client_sequence = command.value("clientSequence", std::string());
-    const auto sequence = command.value("sequenceId", std::string());
-    if (client_sequence.empty() || client_sequence.size() > 20 || sequence.empty() ||
-        sequence.size() > 128)
-      return;
-    if (touch_admissions_.NeverAdmitted(sequence)) {
-      ReplyInput({{"ok", false},
-                  {"error", WireError({ErrorCode::kConflict, "never_admitted"})},
-                  {"touchState", "terminal-invalidated"},
-                  {"touchSequenceId", sequence}},
-                 command, event.authorization);
-      return;
-    }
-    if (auto* receipt =
-            terminals.Find(event.peer, event.authorization, client_sequence, sequence)) {
-      const auto state = receipt->result.is_object()
-                             ? receipt->result.value("touchState", std::string())
-                             : std::string();
-      if (receipt->polling)
-        receipt->send_acceptance = receipt->acceptance.is_object();
-      else if (state == "terminal-unconfirmed" && receipt->control == hooks_.control())
-        receipt->Schedule(QpcNow(), 10 * QpcFrequency());
-      else
-        receipt->send_result = true;
-    } else
-      ReplyInput({{"ok", false},
-                  {"error", WireError({ErrorCode::kNotFound, "unknown_touch_terminal"})},
-                  {"touchState", "terminal-unconfirmed"},
-                  {"touchSequenceId", sequence}},
-                 command, event.authorization);
-    return;
-  }
-  if (type != "input" && type != "focus" && type != "input.touchRetire")
+  if (type != "input" && type != "focus")
     return;
   const auto request = command;
-  if (!ClientTouchTerminal(request).empty() && touch_admissions_.NeverAdmitted(touch_sequence)) {
-    RejectInput("never_admitted", request, event, &terminals);
-    return;
-  }
-  if (event.input_rejection) {
-    RejectInput(event.input_rejection, request, event, &terminals);
-    return;
-  }
-  if (type == "input.touchRetire") {
-    const auto sequence = ClientTouchTerminal(request);
-    uint64_t old_epoch = 0, token_id = 0;
-    if (sequence.empty() || !DataRouter::Number(request, "layoutEpoch", old_epoch) ||
-        old_epoch >= hooks_.epoch() || request.value("session", std::string()) != session_id_ ||
-        !DataRouter::Number(request, "view", token_id) ||
-        !DataRouter::Number(request, "instance", token_id) ||
-        !DataRouter::Number(request, "document", token_id) ||
-        !DataRouter::Number(request, "focus", token_id)) {
-      RejectInput("invalid_touch_retirement_identity", request, event, &terminals);
-      return;
-    }
-    const auto input_control = hooks_.control();
-    auto* receipt = ReserveTouchTerminal(terminals, event, request, sequence, input_control);
-    if (!receipt) {
-      RejectInput("touch_terminal_queue_busy", request, event);
-      return;
-    }
-    auto retire = receipt->query;
-    retire["method"] = "input.touchRetire";
-    // This command has no coordinates and only operates on the exact old
-    // Browser owner. Keep the normal coordinate/keyframe gates below.
-    const auto current = [&] { return current_token() && input_control == hooks_.control(); };
-    {
-      auto rpc_result = hooks_.rpc(retire, input_control, 10000, false, current);
-      if (!rpc_result) {
-        const Error error = rpc_result.error();
-        receipt->Finish("terminal-unconfirmed", false, error.message, error.code);
-        return;
-      }
-      const auto reply = std::move(rpc_result).value();
-      if (!current())
-        receipt->Finish("terminal-unconfirmed", false, "touch_terminal_identity_changed");
-      else if (!remotekit::ApplyTouchTerminalStatus(*receipt, reply))
-        receipt->Accept(QpcNow(), 10 * QpcFrequency());
-    }
-
-    return;
-  }
   if (!admitted()) {
-    RejectInput("input_not_authorized", request, event, &terminals);
+    RejectInput("input_not_authorized", request, event);
     return;
   }
   const auto request_epoch = hooks_.epoch();
   if (command.value("layoutEpoch", std::string()) != std::to_string(request_epoch)) {
-    RejectInput("stale_layout_epoch", request, event, &terminals);
+    RejectInput("stale_layout_epoch", request, event);
     return;
   }
   command.erase("layoutEpoch");
   command.erase("focusRequestId");
   if (command.value("session", std::string()) != session_id_) {
-    RejectInput("wrong_session", request, event, &terminals);
+    RejectInput("wrong_session", request, event);
     return;
   }
   if (type == "input" && command.contains("event") && command["event"].is_object()) {
@@ -270,7 +67,7 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
     if ((event_type == "mouse" || event_type == "wheel" || event_type == "touch" ||
          event_type == "gesture") &&
         !hooks_.allows(command.value("view", std::string()), request_epoch)) {
-      RejectInput("view_not_ready", request, event, &terminals);
+      RejectInput("view_not_ready", request, event);
       return;
     }
   }
@@ -279,7 +76,7 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
   if (type == "input") {
     const auto sequence = input_sequence.NextBrowser();
     if (!sequence) {
-      RejectInput("input_sequence_exhausted", request, event, &terminals);
+      RejectInput("input_sequence_exhausted", request, event);
       return;
     }
     command["sequence"] = std::to_string(*sequence);
@@ -297,17 +94,6 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
   // This connection is already bound to this Session by authenticated Control.
   // The browser validates membership and all token/sequence/output generations.
   const auto input_control = hooks_.control();
-  remotekit::TouchTerminalReceipt* receipt = nullptr;
-  if (!touch_sequence.empty()) {
-    const auto action = request.at("event").value("action", std::string());
-    if (action == "end" || action == "cancel") {
-      receipt = ReserveTouchTerminal(terminals, event, request, touch_sequence, input_control);
-      if (!receipt) {
-        RejectInput("touch_terminal_queue_busy", request, event);
-        return;
-      }
-    }
-  }
   {
     // Only Browser's pre-admission BUSY is retryable. Keep the exact browser
     // sequence; an accepted asynchronous injection is never replayed.
@@ -326,49 +112,11 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
             : hooks_.rpc(command, 0, 10000, 0, admitted);
     if (!response) {
       const auto& error = response.error();
-      if (error.code != ErrorCode::kBusy)
-        touch_admissions_.MayBeAdmitted(touch_sequence);
-      const auto* state = error.code == ErrorCode::kBusy ? "rejected" : "terminal-unconfirmed";
-      if (receipt)
-        receipt->Finish(state, false, error.message, error.code);
-      else if (admitted()) {
-        Json reply = {{"ok", false}, {"error", WireError(error)}};
-        if (!touch_sequence.empty()) {
-          reply["touchState"] = state;
-          reply["touchSequenceId"] = touch_sequence;
-        }
-        ReplyInput(std::move(reply), request, event.authorization);
-      }
+      if (admitted())
+        ReplyInput({{"ok", false}, {"error", WireError(error)}}, request, event.authorization);
       return;
     }
     auto reply = std::move(response).value();
-    if (reply.value("ok", false) || reply.value("inputAdmitted", false))
-      touch_admissions_.MayBeAdmitted(touch_sequence);
-    const auto invalidated = reply.value("touchState", std::string()) == "terminal-invalidated" &&
-                             reply.value("touchSequenceId", std::string()) == touch_sequence;
-    if (receipt && !invalidated && reply.value("touchTerminal", false) &&
-        (reply.value("ok", false) || reply.value("inputAdmitted", false))) {
-      if (reply.value("touchSequenceId", std::string()) == touch_sequence)
-        receipt->Accept(QpcNow(), 10 * QpcFrequency());
-      else
-        receipt->Finish("terminal-unconfirmed", false, "touch_terminal_identity_mismatch");
-      return;
-    }
-
-    if (!touch_sequence.empty() && !reply.value("ok", false)) {
-      const auto* state = TouchFailureState(reply, touch_sequence);
-      if (receipt) {
-        const auto error = BrowserRpc::ReplyError(reply);
-        receipt->Finish(state, false, error.message, error.code);
-        return;
-      }
-      reply["touchState"] = state;
-      reply["touchSequenceId"] = touch_sequence;
-    }
-    if (receipt) {
-      terminals.Remove(receipt);
-      receipt = nullptr;
-    }
     if (type == "input")
       reply["browserSequence"] = command["sequence"];
     if (admitted())
@@ -387,29 +135,19 @@ void InputController::QueueInput(const Event& event) {
   auto parsed = event.message;
   if (!parsed.is_object())
     return;
-  const auto reject = [&](const char* error) {
-    // Process touch rejections on the worker so rejected starts participate in
-    // admission proof and terminal results survive SDK BUSY.
-    if (input_queue.size() < 256 + remotekit::TouchTerminalReceipts::kCapacity &&
-        !ClientTouchSequence(parsed).empty()) {
-      input_queue.push_back(event);
-      input_queue.back().input_rejection = error;
-      input_wake.notify_one();
-    } else
-      RejectInput(error, parsed, event);
-  };
   const auto type = parsed.value("type", std::string());
-  if (type != "input.touchStatus" && type != "input.touchRetire" &&
-      hooks_.input_stamp() != event.authorization) {
-    reject("input_not_authorized");
+  if (type != "input" && type != "focus")
+    return;
+  if (hooks_.input_stamp() != event.authorization) {
+    RejectInput("input_not_authorized", parsed, event);
     return;
   }
   // Validate arrival order before move coalescing can replace a newer packet.
   // The Browser keeps its independent Session counter across RTC reconnects.
-  if ((type == "input" || type == "input.touchRetire") &&
+  if (type == "input" &&
       (!parsed.contains("sequence") || !parsed["sequence"].is_string() ||
        !input_sequence.Admit(event.peer, parsed["sequence"].get<std::string>()))) {
-    reject("stale_client_sequence");
+    RejectInput("stale_client_sequence", parsed, event);
     return;
   }
   bool move = !parsed.is_discarded() && parsed.value("type", std::string()) == "input" &&
@@ -429,7 +167,7 @@ void InputController::QueueInput(const Event& event) {
     }
   }
   if (input_queue.size() >= 256) {
-    reject("input_queue_busy");
+    RejectInput("input_queue_busy", parsed, event);
     return;
   }
   if (event.trace_input_sequence) {
@@ -442,17 +180,12 @@ void InputController::QueueInput(const Event& event) {
 }
 
 void InputController::InputLoop() {
-  touch_admissions_ = {};
-  remotekit::TouchTerminalReceipts terminals;
   while (true) {
     std::optional<Event> event;
     {
       std::unique_lock lock(input_mutex);
       const auto ready = [&] { return stop_input || !input_queue.empty(); };
-      if (terminals.Busy())
-        input_wake.wait_for(lock, std::chrono::milliseconds(5), ready);
-      else
-        input_wake.wait(lock, ready);
+      input_wake.wait(lock, ready);
       if (stop_input)
         break;
       if (!input_queue.empty()) {
@@ -460,9 +193,6 @@ void InputController::InputLoop() {
         input_queue.pop_front();
       }
     }
-    terminals.Prune([&](const auto& receipt) {
-      return hooks_.peer() == receipt.peer && hooks_.current(receipt.authorization);
-    });
     if (event) {
       if (event->trace_input_sequence) {
         RK_SERVER_TRACE(hooks_.trace(), "input_worker_begin", TraceIds{},
@@ -470,7 +200,7 @@ void InputController::InputLoop() {
                         rk_record.client_sequence = event->trace_input_sequence;);
       }
       auto handled = DataRouter::Boundary([&]() -> Result<void> {
-        HandleData(*event, terminals);
+        HandleData(*event);
         return {};
       });
       if (!handled && hooks_.admitted(*event)) {
@@ -482,12 +212,6 @@ void InputController::InputLoop() {
                    event->message, event->authorization);
       }
     }
-    // One due status read per input turn. A pending sequence does not hold
-    // dispatch while waiting for its next query.
-    if (auto* receipt = terminals.Due(QpcNow()))
-      PollTouchTerminal(*receipt);
-    if (terminals.HasNotices())
-      FlushTouchTerminals(terminals);
   }
 }
 InputController::InputController(std::string session, Hooks hooks)

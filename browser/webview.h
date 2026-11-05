@@ -15,7 +15,6 @@
 #include "base/timer/timer.h"
 #include "base/values.h"
 #include "browser/navigation_operations.h"
-#include "browser/client_touch_retirement.h"
 #include "content/browser/renderer_host/text_input_manager.h"  // nogncheck
 #include "content/public/browser/devtools_agent_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
@@ -96,15 +95,11 @@ class WebView final : public content::WebContentsObserver,
   SharedAtlasTextInput TextInputState();
   Status DispatchInput(const InputEvent&, bool* admitted = nullptr);
   // Acceptance/processing status, never a renderer/JavaScript execution ACK.
-  // A first touch start resolves its OOPIF target asynchronously. All remote
-  // input is busy during that resolution; callers must retry rejected input.
+  // A first touch start resolves its OOPIF target asynchronously. A new touch
+  // sequence supersedes it; other input retries BUSY during target resolution.
   Status TouchInjectionStatus() const;
   bool TouchProcessingPending() const;
-  ClientTouchRetirement::State ClientTouchStatus(const InputToken& token,
-                                                 const std::string& sequence) const;
   void RefreshClientTouchOwner();
-  ClientTouchRetirement::State RetireClientTouch(const InputToken&, const std::string& sequence);
-  bool ClientTouchRetired(const InputToken& token, const std::string& sequence) const;
   // UI-sequence diagnostic snapshot; absent fields mean no current native view
   // or submitted frame. Reads cached state without requesting frame reports.
   base::DictValue CompositorDiagnostics() const;

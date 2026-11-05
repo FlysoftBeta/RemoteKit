@@ -28,71 +28,17 @@ const layout: Layout = {
   views: [surface],
 };
 
-test('touch controller holds the owner through pending and unknown outcomes until exact proof', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
-  const results = new Events<InputResult>(),
-    deliveries = new Events<InputDelivery>();
-  const sent: Record<string, unknown>[] = [];
-  const view = new TouchView(
-    {
-      input: {
-        inputIdentity: () => 'owner',
-        sendInput: (_surface, event) => {
-          sent.push(event);
-          return true;
-        },
-        subscribeInputResults: results.subscribe,
-        subscribeInputDelivery: deliveries.subscribe,
-        touchStartWall: () => undefined,
-      },
-      presentation: { layout },
-      touch: { touchRetirementCurrent: () => true, retireTouch: () => true, retryTouchTerminal: () => true },
-    },
-    '1',
-    { hasPointerCapture: () => false } as unknown as HTMLCanvasElement,
-  );
-  t.after(() => view.reset());
-  view.sample('start', { id: 1, x: 10, y: 20, pressure: 0.5 }, 0);
-  view.sample('end', { id: 1, x: 10, y: 20, pressure: 0.5 }, 30);
-  const packet = sent[1];
-  deliveries.emit({
-    surface,
-    identity: 'owner',
-    event: packet,
-    phase: 'submitted',
-    sequence: '2',
-    layoutEpoch: '2',
-  });
-  assert.equal(view.getSnapshot().phase, 'submitted');
-  const result: InputResult = {
-    surface,
-    identity: 'owner',
-    event: packet,
-    sequence: '2',
-    ok: true,
-    touchState: 'accepted-pending',
-    touchSequenceId: String(packet.sequenceId),
-  };
-  results.emit(result);
-  assert.equal(view.getSnapshot().phase, 'awaitingProof');
-  results.emit({ ...result, ok: false, touchState: 'terminal-unconfirmed' });
-  assert.equal(view.getSnapshot().phase, 'awaitingProof');
-  assert.equal(view.sample('start', { id: 2, x: 10, y: 20, pressure: 0.5 }, 50), false);
-  results.emit({ ...result, touchState: 'processed', touchSequenceId: 'stale' });
-  assert.equal(view.getSnapshot().phase, 'awaitingProof');
-  results.emit({ ...result, touchState: 'processed' });
-  assert.equal(view.getSnapshot().phase, 'released');
-  assert.equal(view.sample('start', { id: 2, x: 10, y: 20, pressure: 0.5 }, 60), true);
-});
-
-test('a sole rejected start releases locally without sending remote cleanup', (t) => {
+function touchFixture(t: import('node:test').TestContext) {
   const results = new Events<InputResult>();
   const deliveries = new Events<InputDelivery>();
   const sent: Record<string, unknown>[] = [];
+  const presentation = { layout: { ...layout, views: [{ ...surface }] } as Layout | null };
+  const captured = new Set<number>();
+  const released: number[] = [];
   const view = new TouchView(
     {
       input: {
-        inputIdentity: () => 'owner',
+        inputIdentity: () => `${presentation.layout?.epoch}:${presentation.layout?.views[0].document}`,
         sendInput: (_surface, event) => {
           sent.push(event);
           return true;
@@ -101,27 +47,82 @@ test('a sole rejected start releases locally without sending remote cleanup', (t
         subscribeInputDelivery: deliveries.subscribe,
         touchStartWall: () => undefined,
       },
-      presentation: { layout },
-      touch: { touchRetirementCurrent: () => true, retireTouch: () => true, retryTouchTerminal: () => true },
+      presentation,
     },
     '1',
-    { hasPointerCapture: () => false } as unknown as HTMLCanvasElement,
+    {
+      hasPointerCapture: (id: number) => captured.has(id),
+      releasePointerCapture: (id: number) => {
+        captured.delete(id);
+        released.push(id);
+      },
+    } as unknown as HTMLCanvasElement,
   );
-  t.after(() => view.reset());
-  view.sample('start', { id: 1, x: 10, y: 20, pressure: 0.5 }, 0);
-  deliveries.emit({ surface, identity: 'owner', event: sent[0], phase: 'submitted' });
-  results.emit({
-    surface,
-    identity: 'owner',
-    event: sent[0],
-    sequence: '1',
-    ok: false,
-    touchState: 'rejected',
-    touchSequenceId: String(sent[0].sequenceId),
-  });
+  t.after(() => view.dispose());
+  return { view, sent, results, deliveries, presentation, captured, released };
+}
+const touchPoint = (id = 1) => ({ id, x: 10, y: 20, pressure: 0.5 });
+
+test('touch end immediately releases local ownership and late results cannot block the next gesture', (t) => {
+  const { view, sent, results } = touchFixture(t);
+  assert.equal(view.sample('start', touchPoint(), 0), true);
+  assert.equal(view.sample('end', touchPoint(), 30), true);
   assert.equal(view.getSnapshot().phase, 'released');
-  assert.equal(sent.length, 1);
-  assert.equal(view.sample('start', { id: 2, x: 10, y: 20, pressure: 0.5 }, 50), true);
+  assert.equal(view.sample('start', touchPoint(2), 50), true);
+  results.emit({ surface, identity: '2:d', event: sent[1], sequence: '2', ok: false });
+  assert.equal(view.getSnapshot().phase, 'active');
+  assert.deepEqual(
+    sent.map((packet) => packet.action),
+    ['start', 'end', 'start'],
+  );
+  assert.notEqual(sent[0].sequenceId, sent[2].sequenceId);
+});
+
+test('pointer cancellation and unmount send one whole-sequence cancel without retries', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { view, sent, captured, released } = touchFixture(t);
+  view.sample('start', touchPoint(), 0);
+  view.sample('start', touchPoint(2), 10);
+  captured.add(1);
+  captured.add(2);
+  view.cancelTouches();
+  view.cancelTouches();
+  view.dispose();
+  t.mock.timers.tick(30000);
+  assert.deepEqual(
+    sent.map((packet) => packet.action),
+    ['start', 'start', 'cancel'],
+  );
+  assert.deepEqual(released, [1, 2]);
+  assert.equal(view.getSnapshot().phase, 'released');
+});
+
+test('layout replacement drops stale local coordinates and admits the next start immediately', (t) => {
+  const { view, sent, presentation } = touchFixture(t);
+  view.sample('start', touchPoint(), 0);
+  presentation.layout!.epoch = '3';
+  view.syncTouchOwner();
+  assert.equal(view.sample('move', touchPoint(), 20), false);
+  assert.equal(view.sample('start', touchPoint(2), 30), true);
+  assert.deepEqual(
+    sent.map((packet) => packet.action),
+    ['start', 'start'],
+  );
+  presentation.layout = null;
+  view.syncTouchOwner();
+  presentation.layout = { ...layout, views: [{ ...surface, document: 'next' }] };
+  assert.equal(view.sample('start', touchPoint(3), 40), true);
+});
+
+test('partial release preserves the other contact without requiring a result', (t) => {
+  const { view } = touchFixture(t);
+  view.sample('start', touchPoint(), 0);
+  view.sample('start', touchPoint(2), 10);
+  view.sample('end', touchPoint(), 20);
+  assert.deepEqual(view.contactIds, [2]);
+  assert.equal(view.getSnapshot().phase, 'active');
+  assert.equal(view.sample('end', touchPoint(2), 30), true);
+  assert.equal(view.getSnapshot().phase, 'released');
 });
 
 test('editing controller defers edits through presentation loss and expires them without a React timer', (t) => {

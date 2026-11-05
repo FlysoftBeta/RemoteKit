@@ -1,301 +1,113 @@
-// Load only through host-managed browser_run_code_unsafe after both QA helpers.
-// No service/browser is launched by preparation. Each method is one bounded group.
 async (host) => {
-  const qa = host._clientGestureQA,
-    base = qa.base;
+  const qa = host._clientGestureQA;
+  const base = qa.base;
   const assert = (value, message) => {
     if (!value) throw Error(message);
   };
-  const unwrap = (r) => r.message.event ?? r.message.input ?? r.message;
   const root = (e) => e.common.fixture.telemetry[e.case + ':root'];
   const quickTap = () =>
     qa.trajectory(
       [
         { at: 0, type: 'touchStart', points: [{ x: 120, y: 110 }] },
-        { at: 70, type: 'touchEnd', points: [] },
+        { at: 40, type: 'touchEnd', points: [] },
       ],
-      { settleMs: 100 },
+      { settleMs: 80 },
     );
-  const retired = (host._retirementQA = {});
-  const readyView = async () => {
+  const ready = async () => {
     await base.ready();
-    await base.page.waitForFunction(
-      (viewId) => !!robustQA.transport().presentation.canInput(viewId),
-      qa.viewId,
-    );
+    await base.page.waitForFunction((id) => !!robustQA.transport().presentation.canInput(id), qa.viewId);
   };
-  retired.rawAckTimeout = async () => {
-    const id = `v${base.version}-raw-ack-timeout-${Date.now()}`;
+  const recover = async (id, clicks) => {
+    await ready();
+    await quickTap();
+    await base.page.waitForTimeout(300);
+    const tap = await qa.sample(id + '-tap');
+    assert(root(tap).clicks === clicks, 'Recovery tap missing or duplicated');
+    const before = root(tap).positions.rootY;
+    await qa.swipe();
+    const scroll = await qa.sample(id + '-scroll');
+    assert(root(scroll).positions.rootY > before + 100, 'Recovery scroll did not advance');
+    assert(root(scroll).clicks === clicks, 'Scroll generated an extra click');
+    assert(
+      scroll.data.sent.every(({ message }) => !message.type.startsWith('input.')),
+      'Touch sent an auxiliary control message',
+    );
+    return [tap.summary, scroll.summary];
+  };
+  const cases = (host._retirementQA = {});
+  cases.rapidSuccessive = async () => {
+    const id = `v${base.version}-successive-${Date.now()}`;
+    await qa.navigate({ id });
+    await qa.holdInputResults(true);
+    for (let i = 0; i < 6; ++i) await quickTap();
+    await base.page.waitForTimeout(400);
+    const held = await qa.sample(id + '-held');
+    assert(root(held).clicks === 6, 'Held input results blocked or duplicated taps');
+    const starts = held.data.sent.filter(
+      ({ message }) => message.event?.type === 'touch' && message.event.action === 'start',
+    );
+    assert(
+      starts.length === 6 && new Set(starts.map(({ message }) => message.event.sequenceId)).size === 6,
+      'Successive touches did not get distinct sequences',
+    );
+    await qa.releaseInputResults();
+    await base.page.waitForTimeout(300);
+    const late = await qa.sample(id + '-late');
+    assert(root(late).clicks === 6, 'Late results replayed a click');
+    return [held.summary, late.summary, ...(await recover(id, 7))];
+  };
+  cases.activeContacts = async () => {
+    const id = `v${base.version}-supersede-active-${Date.now()}`;
+    await qa.navigate({ id });
+    await base.page.evaluate(() => {
+      clientGestureQA.dropNextEnd = true;
+    });
+    await quickTap();
+    await base.page.waitForTimeout(200);
+    const abandoned = await qa.sample(id + '-abandoned');
+    assert(root(abandoned).clicks === 0, 'Abandoned start generated a click');
+    await quickTap();
+    await base.page.waitForTimeout(300);
+    const replaced = await qa.sample(id + '-replaced');
+    assert(root(replaced).counts.touchcancel === 1, 'Superseding did not emit exactly one raw cancel');
+    assert(root(replaced).clicks === 1, 'New start failed or duplicated the abandoned tap');
+    return [replaced.summary, ...(await recover(id, 2))];
+  };
+  cases.pendingTerminal = async () => {
+    const id = `v${base.version}-pending-terminal-${Date.now()}`;
+    // Keep both terminals pending within the ACK deadline. Timeout recovery is
+    // exercised separately below; it deliberately stops gesture arbitration.
+    await qa.navigate({ id, block: 'ackpending' });
+    await qa.trajectory(
+      [
+        { at: 0, type: 'touchStart', points: [{ x: 120, y: 110 }] },
+        { at: 50, type: 'touchEnd', points: [] },
+      ],
+      { settleMs: 0 },
+    );
+    await quickTap();
+    await base.page.waitForTimeout(1800);
+    const replaced = await qa.sample(id + '-replaced');
+    assert(!root(replaced).counts.touchcancel, 'Queued terminal received an extra cancel');
+    assert(root(replaced).clicks === 2, 'Queued terminal or successive tap failed or duplicated');
+    return [replaced.summary, ...(await recover(id, 3))];
+  };
+  cases.rawAckTimeout = async () => {
+    const id = `v${base.version}-ack-timeout-${Date.now()}`;
     await qa.navigate({ id, block: 'ackdelay' });
-    await qa.touch('touchStart', [{ x: 800, y: 110 }]);
+    await qa.touch('touchStart', [{ x: 820, y: 110 }]);
     await base.page.evaluate(() => clientGestureQA.tail);
     await base.page.waitForTimeout(2300);
-    const submitted = await base.page.evaluate(() => {
-      const touch = robustQA.transport().touch;
-      const owner = [...touch.views].map((view) => view.touchOwner).find(Boolean);
-      if (!owner?.lease) return false;
-      // Keep the target alive to exercise raw retirement after timeout. The
-      // request's old epoch grants no coordinates or replacement ownership.
-      const lease = { ...owner.lease, layoutEpoch: String(BigInt(owner.lease.layoutEpoch) - 1n) };
-      return touch.retireTouch(lease, { ...owner.packet, action: 'cancel', points: [], gestures: [] });
+    await base.page.evaluate(() => {
+      clientGestureQA.dropNextEnd = true;
     });
-    assert(submitted, 'Coordinate-free retirement was not submitted');
     await qa.touch('touchEnd', []);
-    await base.page.waitForFunction(() => robustQA.transport().touch.getSnapshot().pendingTerminals === 0);
-    const retired = await qa.sample(id + '-retired');
-    assert(
-      retired.summary.terminalReceipts.some(
-        (receipt) => receipt.action === 'retire' && receipt.result?.touchState === 'processed',
-      ),
-      'Owner did not retire after delayed raw ACK',
-    );
-    await readyView();
-    await qa.tap();
-    const recovered = await qa.sample(id + '-recovered');
-    assert(root(recovered).clicks === 1, 'Tap failed after delayed raw ACK retirement');
-    assert(
-      !(await base.page.evaluate(() => document.body.innerText.includes('触控结束尚未确认'))),
-      'Delayed raw ACK left unresolved UI',
-    );
-    return [retired.summary, recovered.summary];
+    await base.page.evaluate(() => clientGestureQA.tail);
+    return recover(id, 1);
   };
-  retired.neverAdmitted = async () => {
-    const id = `v${base.version}-never-admitted-${Date.now()}`;
+  cases.layout = async () => {
+    const id = `v${base.version}-resize-gesture-${Date.now()}`;
     await qa.navigate({ id });
-    const oldEpoch = await base.page.evaluate(() => robustQA.transport().presentation.layout.epoch);
-    const size = base.page.viewportSize();
-    await base.page.setViewportSize({ width: size.width + 31, height: size.height });
-    await base.page.waitForFunction(
-      (old) => robustQA.transport().presentation.layout?.epoch !== old,
-      oldEpoch,
-    );
-    await readyView();
-    await qa.holdInputResults(true);
-    await base.page.evaluate((epoch) => {
-      clientGestureQA.staleStartEpoch = epoch;
-    }, oldEpoch);
-    await quickTap();
-    const rejected = await qa.sample(id + '-rejected');
-    const failures = rejected.data.received.map((entry) => entry.message);
-    assert(
-      failures.some((message) => message.error?.message === 'stale_layout_epoch'),
-      'Touch start did not reproduce stale_layout_epoch',
-    );
-    assert(
-      failures.some(
-        (message) =>
-          message.touchState === 'terminal-invalidated' && message.error?.message === 'never_admitted',
-      ),
-      'Never-admitted terminal proof missing',
-    );
-    await qa.releaseInputResults();
-    await base.page.waitForTimeout(150);
-    assert(
-      !(await base.page.evaluate(() => document.body.innerText.includes('触控结束尚未确认'))),
-      'Never-admitted sequence left unresolved UI',
-    );
-    await qa.tap();
-    const recovered = await qa.sample(id + '-recovered');
-    assert(root(recovered).clicks === 1, 'Normal tap failed after stale-layout start');
-    assert(
-      !(await base.page.evaluate(() => document.body.innerText.includes('触控结束尚未确认'))),
-      'Normal tap left unresolved UI',
-    );
-    await base.page.setViewportSize(size);
-    await readyView();
-    return [rejected.summary, recovered.summary];
-  };
-  retired.targetloss = async ({ lateOld = false } = {}) => {
-    const id = `v${base.version}-retired-target-${Date.now()}`;
-    await qa.navigate({ id, live: true });
-    await base.page.waitForTimeout(250);
-    await qa.trajectory(
-      [
-        { at: 0, type: 'touchStart', points: [{ x: 400, y: 500 }] },
-        { at: 40, type: 'touchMove', points: [{ x: 400, y: 485 }] },
-        { at: 80, type: 'touchMove', points: [{ x: 400, y: 470 }] },
-        { at: 120, type: 'touchMove', points: [{ x: 400, y: 455 }] },
-      ],
-      { settleMs: 100 },
-    );
-    let owned = false;
-    for (let i = 0; i < 12; i++) {
-      const c = (await base.inspect()).telemetry[id + ':child'];
-      if (c?.counts.touchstart && c.counts.touchmove && c.positions.rootY >= 25) {
-        owned = true;
-        break;
-      }
-      await base.page.waitForTimeout(50);
-    }
-    const before = await qa.sample(id + '-owned');
-    assert(owned, 'Child raw touch + actual scroll not observed before deletion');
-    const sequence = before.data.sent
-      .map(unwrap)
-      .find((e) => e.type === 'touch' && e.action === 'start')?.sequenceId;
-    assert(sequence, 'Owned sequence missing');
-    assert(
-      root(before).positions.rootY === 0 && !root(before).counts.touchstart,
-      'Root received child sequence',
-    );
-    const r = await base.page.request.post(`http://127.0.0.1:${base.fixturePort}/command?id=${id}`, {
-      data: { type: 'remove-child' },
-    });
-    assert(r.ok(), 'Fixture deletion command rejected');
-    let removed = false;
-    for (let i = 0; i < 20; i++) {
-      if (
-        (await base.inspect()).telemetry[id + ':root']?.events.some((e) => e.type === 'fixture-remove-child')
-      ) {
-        removed = true;
-        break;
-      }
-      await base.page.waitForTimeout(50);
-    }
-    assert(removed, 'Child deletion not observed');
-    await qa.touch('touchMove', [{ x: 400, y: 430 }]);
-    await qa.touch('touchEnd', []);
-    await base.page.waitForTimeout(350);
-    const after = await qa.sample(id + '-invalidated');
-    // A precise invalidation on MOVE may retire the owner before physical UP.
-    // In that case Client must not invent an END packet for an already retired owner.
-    assert(
-      after.summary.allClientV1 && after.summary.trustedPointerCount > 0 && after.summary.mediaStable,
-      'Invalidation lost real Client path or media identity',
-    );
-    assert(
-      after.summary.rejections.some(
-        (r) => r.message.touchState === 'terminal-invalidated' && r.message.touchSequenceId === sequence,
-      ),
-      'No exact terminal invalidation proof',
-    );
-    assert(
-      root(after).positions.rootY === 0 && !root(after).counts.touchstart && !root(after).counts.touchmove,
-      'Old child input reached root',
-    );
-    await qa.tap();
-    const recovery = await qa.sample(id + '-recovery');
-    qa.assertClientPath(recovery);
-    assert(root(recovery).clicks === 1, 'Same-document new tap failed after invalidation');
-    const starts = recovery.data.sent.map(unwrap).filter((e) => e.type === 'touch' && e.action === 'start');
-    assert(starts.length === 2 && starts[1].sequenceId !== sequence, 'New owner not established');
-    const fresh = recovery.summary.terminalReceipts.filter((t) => t.touchSequence !== sequence);
-    assert(
-      fresh.length && fresh.every((t) => t.result?.ok && t.result.touchState === 'processed'),
-      'New owner terminal not processed',
-    );
-    const banner = await base.page.evaluate(() => document.body.innerText.includes('触控结束尚未确认'));
-    assert(!banner, 'Unconfirmed-touch recovery overlay remains');
-    const samples = [before, after, recovery];
-    if (lateOld) {
-      await qa.holdInputResults(true);
-      await quickTap();
-      const old = after.summary.rejections.find(
-        (r) => r.message.touchState === 'terminal-invalidated',
-      ).message;
-      await base.page.evaluate((old) => {
-        const q = clientGestureQA;
-        q.holdResults = false;
-        q.channel.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(old) }));
-        q.holdResults = true;
-      }, old);
-      await quickTap();
-      const blocked = await qa.sample(id + '-late-old-blocked');
-      assert(
-        blocked.data.sent.map(unwrap).filter((p) => p.type === 'touch' && p.action === 'start').length ===
-          3 && root(blocked).clicks === 2,
-        'Late old invalidation cleared newer held owner',
-      );
-      await qa.releaseInputResults();
-      await base.page.waitForTimeout(100);
-      await quickTap();
-      const released = await qa.sample(id + '-late-old-released');
-      assert(root(released).clicks === 3, 'New owner failed after own canonical ACK release');
-      qa.assertClientPath(released);
-      samples.push(blocked, released);
-    }
-    return samples.map((e) => ({
-      name: e.name,
-      summary: e.summary,
-      root: root(e).positions,
-      clicks: root(e).clicks,
-    }));
-  };
-  retired.held = async () => {
-    const id = `v${base.version}-retired-held-${Date.now()}`;
-    await qa.navigate({ id });
-    await qa.holdInputResults(true);
-    await quickTap();
-    let e = await qa.sample(id + '-before');
-    const first = e.data.sent.map(unwrap).find((p) => p.type === 'touch' && p.action === 'start')?.sequenceId;
-    assert(first, 'Held owner missing');
-    assert(root(e).clicks === 1, 'First held tap missing');
-    await quickTap();
-    e = await qa.sample(id + '-blocked');
-    assert(
-      e.data.sent.map(unwrap).filter((p) => p.type === 'touch' && p.action === 'start').length === 1 &&
-        root(e).clicks === 1,
-      'New owner escaped canonical terminal gate',
-    );
-    await qa.releaseInputResults();
-    await base.page.waitForTimeout(100);
-    await quickTap();
-    e = await qa.sample(id + '-released');
-    qa.assertClientPath(e);
-    assert(root(e).clicks === 2, 'New tap failed after release');
-    assert(
-      e.summary.terminalReceipts.every((r) => r.result.ok && r.result.touchState === 'processed'),
-      'Ordinary terminal not processed',
-    );
-    return e.summary;
-  };
-  retired.cancel = async () => {
-    const id = `v${base.version}-retired-cancel-${Date.now()}`;
-    await qa.navigate({ id });
-    await qa.holdInputResults(true);
-    await qa.trajectory(
-      [
-        { at: 0, type: 'touchStart', points: [{ x: 120, y: 600 }] },
-        { at: 40, type: 'touchMove', points: [{ x: 120, y: 560 }] },
-        { at: 70, type: 'touchCancel', points: [] },
-      ],
-      { settleMs: 200 },
-    );
-    let e = await qa.sample(id + '-held');
-    assert(
-      e.summary.terminalReceipts.some(
-        (t) => t.action === 'cancel' && t.result?.ok && t.result.touchState === 'processed',
-      ),
-      'Canonical cancel result missing',
-    );
-    await quickTap();
-    e = await qa.sample(id + '-blocked');
-    assert(
-      e.data.sent.map(unwrap).filter((p) => p.type === 'touch' && p.action === 'start').length === 1,
-      'Cancel released owner before canonical ACK',
-    );
-    await qa.releaseInputResults();
-    await base.page.waitForTimeout(100);
-    await quickTap();
-    e = await qa.sample(id + '-released');
-    qa.assertClientPath(e);
-    assert(root(e).clicks === 1, 'Cancel release did not recover same document');
-    return e.summary;
-  };
-  retired.layout = async () => {
-    const id = `v${base.version}-retired-layout-${Date.now()}`;
-    await qa.navigate({ id });
-    const resize = async (size) => {
-      await base.page.setViewportSize(size);
-      await base.page.waitForFunction(
-        ({ viewId, width }) =>
-          robustQA
-            .transport()
-            .presentation.layout?.views.some((view) => view.id === viewId && view.width === width),
-        { viewId: qa.viewId, width: size.width },
-        { timeout: 30000 },
-      );
-      await base.ready();
-    };
     await qa.trajectory(
       [
         { at: 0, type: 'touchStart', points: [{ x: 120, y: 650 }] },
@@ -304,64 +116,67 @@ async (host) => {
       { settleMs: 100 },
     );
     const size = base.page.viewportSize();
-    await resize({ width: size.width + 37, height: size.height });
+    const oldEpoch = await base.page.evaluate(() => robustQA.transport().presentation.layout.epoch);
+    await base.page.setViewportSize({ width: size.width + 37, height: size.height });
+    await base.page.waitForFunction(
+      (old) => robustQA.transport().presentation.layout.epoch !== old,
+      oldEpoch,
+    );
+    await ready();
     await qa.touch('touchEnd', []);
-    await base.page.waitForTimeout(300);
-    const e = await qa.sample(id);
-    qa.assertClientPath(e);
-    await resize(size);
-    await qa.tap();
-    const recovery = await qa.sample(id + '-recovery');
-    assert(root(recovery).clicks === 1, 'Layout invalidation did not recover tap');
-    return [e.summary, recovery.summary];
+    const result = await recover(id, 1);
+    await base.page.setViewportSize(size);
+    await ready();
+    return result;
   };
-  retired.document = async () => {
-    const id = `v${base.version}-retired-doc-${Date.now()}`;
-    await qa.navigate({ id: id + '-before' });
-    const mark = qa.markStart;
+  cases.targetloss = async () => {
+    const id = `v${base.version}-target-removal-${Date.now()}`;
+    await qa.navigate({ id, live: true });
     await qa.trajectory(
       [
-        { at: 0, type: 'touchStart', points: [{ x: 120, y: 650 }] },
-        { at: 40, type: 'touchMove', points: [{ x: 120, y: 600 }] },
+        { at: 0, type: 'touchStart', points: [{ x: 400, y: 500 }] },
+        { at: 40, type: 'touchMove', points: [{ x: 400, y: 470 }] },
+        { at: 80, type: 'touchMove', points: [{ x: 400, y: 440 }] },
       ],
-      { settleMs: 100 },
+      { settleMs: 200 },
     );
-    await qa.navigate({ id: id + '-after' });
-    qa.markStart = mark;
+    const before = await qa.sample(id + '-before');
+    assert(
+      before.common.fixture.telemetry[id + ':child']?.counts.touchstart,
+      'Child did not own raw touch before removal',
+    );
+    const response = await base.page.request.post(`http://127.0.0.1:${base.fixturePort}/command?id=${id}`, {
+      data: { type: 'remove-child' },
+    });
+    assert(response.ok(), 'Target removal command failed');
+    let removed = false;
+    for (let i = 0; i < 40; ++i) {
+      if (
+        (await base.inspect()).telemetry[id + ':root']?.events.some((e) => e.type === 'fixture-remove-child')
+      ) {
+        removed = true;
+        break;
+      }
+      await base.page.waitForTimeout(50);
+    }
+    assert(removed, 'Target removal was not observed');
+    await qa.touch('touchMove', [{ x: 400, y: 420 }]);
     await qa.touch('touchEnd', []);
     await base.page.waitForTimeout(300);
-    const e = await qa.sample(id);
+    const removedState = await qa.sample(id + '-removed');
     assert(
-      !root(e).counts.touchstart && !root(e).counts.touchmove && root(e).positions.rootY === 0,
-      'Old owner reached new document',
+      !root(removedState).counts.touchstart && !root(removedState).counts.touchmove,
+      'Old coordinates reached the replacement target',
     );
-    assert(e.summary.mediaStable, 'Navigation rebuilt media identity');
-    await qa.tap();
-    const recovery = await qa.sample(id + '-recovery');
-    assert(root(recovery).clicks === 1, 'Document invalidation did not recover tap');
-    return [e.summary, recovery.summary];
+    return recover(id, 1);
   };
-  retired.everymove = async () => {
-    const id = `v${base.version}-retired-everymove-${Date.now()}`;
-    await qa.navigate({ id, block: 'everymove' });
-    await qa.swipe({ x: 820, y: 240, dy: -140 });
-    const e = await qa.sample(id);
-    qa.assertClientPath(e);
-    const f = root(e),
-      moves = f.events.filter((x) => x.type === 'handler-preventDefault' && x.source === 'touchmove');
-    assert(
-      moves.length === (f.counts.touchmove ?? 0) &&
-        moves.length >= 6 &&
-        moves.every((x) => x.defaultPrevented),
-      'Every touchmove consumption not proved',
-    );
-    assert(f.positions.customY === 0 && f.positions.rootY === 0, 'Continuously consumed moves scrolled');
-    assert(
-      f.counts.touchend &&
-        e.summary.terminalReceipts.every((t) => t.result.ok && t.result.touchState === 'processed'),
-      'Consumed terminal incomplete',
-    );
-    return { name: e.name, summary: e.summary, moves: moves.length, positions: f.positions };
+  cases.document = async () => {
+    const id = `v${base.version}-document-gesture-${Date.now()}`;
+    await qa.navigate({ id: id + '-old' });
+    await qa.touch('touchStart', [{ x: 120, y: 650 }]);
+    await qa.navigate({ id: id + '-new' });
+    await qa.touch('touchEnd', []);
+    return recover(id, 1);
   };
-  return { prepared: true, started: false, methods: Object.keys(retired) };
+  return { prepared: true, cases: Object.keys(cases) };
 };

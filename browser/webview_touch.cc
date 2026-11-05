@@ -9,54 +9,22 @@
 namespace remotekit::browser {
 TouchController::TouchController(WebView& owner) : owner_(owner) {}
 TouchController::~TouchController() = default;
-bool TouchController::ReadsTerminalReceipt(const InputEvent& input) const {
-  using TouchState = ClientTouchRetirement::State;
-  const auto* incoming_touch = std::get_if<TouchInput>(&input.payload);
-  bool cancel_reads_receipt = false;
-  if (incoming_touch && incoming_touch->clock &&
-      incoming_touch->action == TouchInput::Action::cancel) {
-    const auto state = owner_.ClientTouchStatus(input.token, incoming_touch->clock->sequence_id);
-    cancel_reads_receipt = state == TouchState::pending || state == TouchState::processed;
-  }
-  return cancel_reads_receipt;
+bool TouchController::StartsNewSequence(const InputEvent& input) const {
+  const auto* touch = std::get_if<TouchInput>(&input.payload);
+  return touch && touch->clock && touch->action == TouchInput::Action::start &&
+         (client_touch_token_ != input.token ||
+          client_touch_sequence_ != touch->clock->sequence_id);
 }
-std::optional<Status> TouchController::PrepareInput(const InputEvent& input,
-                                                    bool cancel_reads_receipt,
-                                                    bool* admitted) {
-  std::map<std::uint32_t, TouchPoint> next_touches;
+std::optional<Status> TouchController::PrepareInput(const InputEvent& input) {
   if (const auto* touch = std::get_if<TouchInput>(&input.payload)) {
-    if (touch->clock) {
-      const auto prior = owner_.ClientTouchStatus(input.token, touch->clock->sequence_id);
-      if (touch->action == TouchInput::Action::start &&
-          prior != ClientTouchRetirement::State::unknown)
-        return Fail(ErrorCode::invalid_request,
-                    "Completed or retiring client touch cannot restart");
-      if (cancel_reads_receipt) {
-        // A routed terminal owns the sequence until its canonical ACK. A
-        // second cleanup only observes that receipt, even during cleanup.
-        auto accepted = owner_.model_->AcceptInput(owner_.session_, input);
-        if (accepted && admitted)
-          *admitted = true;
-        return accepted;
-      }
-    }
-    if (touch->clock && owner_.ClientTouchRetired(input.token, touch->clock->sequence_id)) {
-      auto accepted = owner_.model_->AcceptInput(owner_.session_, input);
-      if (!accepted)
-        return accepted;
-      if (touch->action == TouchInput::Action::start)
-        return Fail(ErrorCode::invalid_request, "Retired client touch sequence cannot restart");
-      return Fail(ErrorCode::stale_identity, "Client touch owner explicitly invalidated");
-    }
-    if (touch->clock && client_touch_token_ &&
-        (!touches_.empty() || touch->action != TouchInput::Action::start) &&
+    const bool new_sequence = StartsNewSequence(input);
+    if (!new_sequence && touch->clock && client_touch_token_ &&
         (*client_touch_token_ != input.token ||
          touch->clock->sequence_id != client_touch_sequence_))
       return Fail(ErrorCode::stale_identity,
                   "Client touch sequence does not own the current contacts");
-    if (OwnershipUnconfirmed())
-      return Fail(ErrorCode::unavailable,
-                  "Touch ownership became uncertain; reload WebView required");
+    if (!new_sequence && OwnershipUnconfirmed())
+      return Fail(ErrorCode::unavailable, "Touch ACK timed out; start a new touch sequence");
     if (HasDevToolsConflict())
       return Fail(ErrorCode::unsupported, "Remote touch is exclusive with attached DevTools");
     std::size_t changed_points = touch->points.size();
@@ -64,15 +32,69 @@ std::optional<Status> TouchController::PrepareInput(const InputEvent& input,
       changed_points += sample.points.size();
     if (changed_points > 64)
       return Fail(ErrorCode::invalid_request, "Too many touch history contacts");
-    if (touch_pending_callbacks_ + changed_points + 1 > 128 ||
-        (touch->action == TouchInput::Action::start && touches_.empty() &&
-         touch_pending_callbacks_))
+    std::size_t pending = client_gesture_bridge_ ? client_gesture_bridge_->pending_ack_count() : 0;
+    for (const auto& bridge : draining_gesture_bridges_)
+      pending += bridge->pending_ack_count();
+    const auto cancellation = new_sequence && !touches_.empty() ? 1u : 0u;
+    if (pending + changed_points + cancellation + 1 > 128)
       return Fail(ErrorCode::busy, "Touch ACK queue busy; retry this input with the same sequence");
-    auto status = BuildTouchState(*touch, &next_touches);
+    std::map<std::uint32_t, TouchPoint> next_touches;
+    auto status = BuildTouchState(*touch, new_sequence, &next_touches);
     if (!status)
       return status;
   }
   return std::nullopt;
+}
+Status TouchController::SupersedeClientTouch() {
+  auto weak = weak_factory_.GetWeakPtr();
+  auto bridge = client_gesture_bridge_;
+  if (bridge) {
+    if (TouchTargetAlive()) {
+      bridge->StopMomentum();
+      if (!weak)
+        return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+      if (!touches_.empty() && !bridge->has_routed_terminal()) {
+        TouchInput cancel;
+        cancel.action = TouchInput::Action::cancel;
+        cancel.clock = touch_clock_;
+        const auto status = InjectTouches(cancel);
+        if (!weak)
+          return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+        if (!status)
+          return status;
+        bridge->Cancel(true);
+        if (!weak)
+          return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+      }
+      // A queued terminal retains arbitration until its canonical ACK so an
+      // admitted tap can produce its click before the next sequence's gestures.
+      if (bridge->awaiting_ack())
+        draining_gesture_bridges_.push_back(std::move(bridge));
+    } else {
+      bridge->Cancel(false);
+      if (!weak)
+        return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+    }
+  }
+  client_gesture_bridge_.reset();
+  owner_state_ = OwnerState::kIdle;
+  touch_hit_test_timer_.Stop();
+  ++touch_epoch_;
+  ++touch_ack_epoch_;
+  touch_cleanup_pending_ = false;
+  touch_pending_callbacks_ = 0;
+  client_touch_ack_mismatch_ = false;
+  client_touch_token_.reset();
+  client_touch_sequence_.clear();
+  touches_.clear();
+  touch_pointer_ids_.clear();
+  touch_clock_.reset();
+  touch_target_view_.reset();
+  touch_target_frame_.reset();
+  touch_target_document_.reset();
+  touch_root_offset_x_ = touch_root_offset_y_ = 0;
+  touch_status_ = {};
+  return {};
 }
 Status TouchController::Momentum(const GestureInput& gesture) {
   if (!TouchTargetAlive() || !client_gesture_bridge_)
@@ -80,8 +102,11 @@ Status TouchController::Momentum(const GestureInput& gesture) {
   return client_gesture_bridge_->Momentum(gesture);
 }
 Status TouchController::BuildTouchState(const TouchInput& input,
+                                        bool new_sequence,
                                         std::map<std::uint32_t, TouchPoint>* next) const {
-  *next = owner_.input_->PointerTargetAlive() ? touches_ : std::map<std::uint32_t, TouchPoint>{};
+  *next = !new_sequence && owner_.input_->PointerTargetAlive()
+              ? touches_
+              : std::map<std::uint32_t, TouchPoint>{};
   for (const auto& sample : input.samples)
     for (const auto& point : sample.points)
       if (!next->contains(point.id) || !FloatFits(point.x) || !FloatFits(point.y))
@@ -123,27 +148,6 @@ void TouchController::RefreshClientTouchOwner() {
     touch_status_ = Fail(ErrorCode::stale_identity, "Client touch target/document invalidated");
   }
 }
-ClientTouchRetirement::State TouchController::RetireClientTouch(const InputToken& token,
-                                                                const std::string& sequence) {
-  using State = ClientTouchRetirement::State;
-  RefreshClientTouchOwner();
-  const auto prior = owner_.ClientTouchStatus(token, sequence);
-  if ((prior != State::unknown && prior != State::unconfirmed) || client_touch_token_ != token ||
-      client_touch_sequence_ != sequence ||
-      (client_gesture_bridge_ && client_gesture_bridge_->has_routed_terminal()))
-    return prior;
-  auto weak = weak_factory_.GetWeakPtr();
-  if (AwaitingHitTest()) {
-    // This owner has never routed a raw event.
-    retired_client_touches_.Retire(token, sequence, true);
-    CancelTouches(false);
-  } else if (!touches_.empty() && TouchTargetAlive()) {
-    // Cancel on the latched owner, with its last accepted positions/clock.
-    // This path never remaps an event into the replacement layout.
-    CancelTouches(true);
-  }
-  return weak ? owner_.ClientTouchStatus(token, sequence) : State::unknown;
-}
 void TouchController::DevToolsAgentHostAttached(content::DevToolsAgentHost* host) {
   if (!owner_.contents() || host->GetWebContents() != owner_.contents())
     return;
@@ -181,10 +185,14 @@ void TouchController::ResetExecution() {
 void TouchController::CancelTouches(bool deliver) {
   auto weak_self = weak_factory_.GetWeakPtr();
   const bool invalidated = !TouchTargetAlive();
+  if (invalidated || !deliver) {
+    for (const auto& bridge : draining_gesture_bridges_)
+      bridge->Cancel(false);
+    draining_gesture_bridges_.clear();
+  }
+
   if (invalidated)
     owner_state_ = OwnerState::kInvalidated;
-  if (client_touch_token_)
-    retired_client_touches_.Retire(*client_touch_token_, client_touch_sequence_, invalidated);
   if (client_gesture_bridge_) {
     if (invalidated) {
       touch_pending_callbacks_ = 0;
@@ -231,34 +239,32 @@ void TouchController::CancelTouches(bool deliver) {
   touch_target_document_.reset();
   touch_root_offset_x_ = touch_root_offset_y_ = 0;
 }
-void TouchController::OnClientTouchProcessed(InputToken token,
+void TouchController::OnClientTouchProcessed(std::uint64_t epoch,
+                                             InputToken token,
                                              const std::string& sequence,
                                              ClientTouchAckState ack,
                                              bool terminal,
                                              bool drained) {
-  if (client_touch_token_ != token || client_touch_sequence_ != sequence)
+  std::erase_if(draining_gesture_bridges_,
+                [](const auto& bridge) { return !bridge->awaiting_ack(); });
+  if (touch_ack_epoch_ != epoch || client_touch_token_ != token ||
+      client_touch_sequence_ != sequence)
     return;
-  using State = ClientTouchRetirement::State;
-  if (ack != ClientTouchAckState::timeout && touch_pending_callbacks_)
+  if (ack == ClientTouchAckState::timeout)
+    touch_pending_callbacks_ = 0;
+  else if (touch_pending_callbacks_)
     --touch_pending_callbacks_;
   if (ack != ClientTouchAckState::canonical) {
     const bool invalidated = !TouchTargetAlive();
     if (ack == ClientTouchAckState::target_mismatch)
       client_touch_ack_mismatch_ = true;
-    if (invalidated)
-      retired_client_touches_.Retire(token, sequence, true);
-    else
-      retired_client_touches_.Resolve(token, sequence, State::unconfirmed);
     owner_state_ = invalidated ? OwnerState::kInvalidated : OwnerState::kUnconfirmed;
     touch_status_ = Fail(ErrorCode::stale_identity, "Client touch owner/ACK invalidated");
     if (invalidated)
       CancelTouches(false);
   } else if (terminal && drained && !touch_pending_callbacks_ && !client_touch_ack_mismatch_) {
-    retired_client_touches_.Resolve(token, sequence, State::processed);
-    if (owner_.ClientTouchStatus(token, sequence) == State::processed) {
-      owner_state_ = OwnerState::kProcessed;
-      touch_status_ = {};
-    }
+    owner_state_ = OwnerState::kProcessed;
+    touch_status_ = {};
   }
   if (touch_cleanup_pending_ && !touch_pending_callbacks_) {
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
@@ -325,27 +331,27 @@ Status TouchController::PrepareTouchClock(const TouchInput& touch) {
   return {};
 }
 Status TouchController::DispatchTouches(const TouchInput& touch, const InputToken& token) {
+  if (touch.action == TouchInput::Action::start &&
+      (client_touch_token_ != token || client_touch_sequence_ != touch.clock->sequence_id)) {
+    auto weak = weak_factory_.GetWeakPtr();
+    const auto status = SupersedeClientTouch();
+    if (!weak)
+      return Fail(ErrorCode::stale_identity, "Touch owner destroyed");
+    if (!status)
+      return status;
+  }
   const bool first = touch.action == TouchInput::Action::start && touches_.empty();
   if (first) {
-    if (client_gesture_bridge_)
-      client_gesture_bridge_->Cancel(true);
-    client_gesture_bridge_.reset();
     client_touch_ack_mismatch_ = false;
     client_touch_token_ = token;
     client_touch_sequence_ = touch.clock ? touch.clock->sequence_id : std::string();
   }
   auto clock = PrepareTouchClock(touch);
-  if (!clock) {
-    if (first)
-      retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
+  if (!clock)
     return clock;
-  }
   if (touch.action == TouchInput::Action::start && touches_.empty()) {
-    if (touch_pending_callbacks_)
-      return Fail(ErrorCode::unavailable, "Previous touch sequence is still being acknowledged");
     auto* root = owner_.input_->pointer_root_widget_.get();
     if (!root || !root->delegate()) {
-      retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
       return Fail(ErrorCode::unavailable, "Touch hit testing unavailable");
     }
     owner_state_ = OwnerState::kAwaitingHitTest;
@@ -357,11 +363,6 @@ Status TouchController::DispatchTouches(const TouchInput& touch, const InputToke
             [](base::WeakPtr<TouchController> self, std::uint64_t expected) {
               if (!self || self->touch_epoch_ != expected)
                 return;
-              // The first raw event cannot route until
-              // this hit test completes.
-              if (self->client_touch_token_)
-                self->retired_client_touches_.Retire(*self->client_touch_token_,
-                                                     self->client_touch_sequence_, true);
               self->CancelTouches(true);
               self->touch_status_ = Fail(ErrorCode::unavailable, "Touch hit test timed out");
             },
@@ -396,10 +397,8 @@ void TouchController::OnTouchTarget(std::uint64_t epoch,
   if (AwaitingHitTest())
     owner_state_ = OwnerState::kIdle;
   touch_hit_test_timer_.Stop();
-  // A failed initial hit test has never routed a raw touch. Retire only this
-  // requested owner, so a later exact cleanup can recover from a lost reply.
   const auto reject = [&](ErrorCode error, const char* reason) {
-    retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
+    owner_state_ = OwnerState::kInvalidated;
     touch_status_ = Fail(error, reason);
   };
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
@@ -441,13 +440,10 @@ void TouchController::OnTouchTarget(std::uint64_t epoch,
       owner_.input_->pointer_root_view_.get(), touch_target_view_.get(), touch.clock->sequence_id,
       touch_clock_origin_,
       base::BindRepeating(&TouchController::OnClientTouchProcessed, weak_factory_.GetWeakPtr(),
-                          token, touch.clock->sequence_id));
+                          touch_ack_epoch_, token, touch.clock->sequence_id));
 
   auto weak = weak_factory_.GetWeakPtr();
-  auto bridge = client_gesture_bridge_;
   const auto result = InjectTouches(touch);
-  if (weak && !result && bridge && !bridge->has_routed_raw())
-    retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
   if (weak)
     touch_status_ = result;
 }
@@ -526,12 +522,8 @@ Status TouchController::InjectTouches(const TouchInput& touch) {
       gesture.x += touch_root_offset_x_;
       gesture.y += touch_root_offset_y_;
     }
-    const auto terminal_owner = event.IsTouchSequenceEnd() ? client_touch_token_ : std::nullopt;
-    const auto terminal_sequence = terminal_owner ? client_touch_sequence_ : std::string();
-    if (terminal_owner)
+    if (event.IsTouchSequenceEnd())
       owner_state_ = OwnerState::kTerminalPending;
-    if (terminal_owner)
-      retired_client_touches_.Begin(*terminal_owner, terminal_sequence);
     ++touch_pending_callbacks_;
     auto result = client_gesture_bridge_->Dispatch(event, gestures, touch.clock->elapsed_us);
     if (!weak_self)
@@ -539,9 +531,7 @@ Status TouchController::InjectTouches(const TouchInput& touch) {
     if (!result) {
       if (touch_pending_callbacks_)
         --touch_pending_callbacks_;
-      if (terminal_owner)
-        retired_client_touches_.Resolve(*terminal_owner, terminal_sequence,
-                                        ClientTouchRetirement::State::unconfirmed);
+      owner_state_ = OwnerState::kUnconfirmed;
     }
     return result;
   };

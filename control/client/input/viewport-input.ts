@@ -29,7 +29,7 @@ export interface ViewportInputPorts {
     EditingSession,
     'mobileEditing' | 'editingSurface' | 'editingIdentity' | 'subscribe' | 'createView'
   >;
-  touch: Pick<TouchSession, 'touchRetirementCurrent' | 'retireTouch' | 'retryTouchTerminal' | 'createView'>;
+  touch: Pick<TouchSession, 'createView'>;
 }
 
 export class ViewportInput {

@@ -50,15 +50,11 @@ import type { MediaFeedback } from '../media/media-feedback';
 import type { PresentationBarrier } from '../presentation/video-presentation';
 
 type Authorized = { authEpoch?: number };
-export type TouchState =
-  'accepted-pending' | 'processed' | 'terminal-invalidated' | 'terminal-unconfirmed' | 'rejected';
 export type InputResultMessage = {
   type: 'input.result';
   clientSequence: string;
   ok: boolean;
   error?: WireError;
-  touchState?: TouchState;
-  touchSequenceId?: string;
 };
 export type FocusMessage = {
   type: 'focus';
@@ -143,8 +139,6 @@ export type Outgoing = Authorized &
         sequence: string;
         event: Record<string, unknown>;
       } & InputTarget)
-    | { type: 'input.touchStatus'; clientSequence: string; sequenceId: string }
-    | ({ type: 'input.touchRetire'; sequence: string; sequenceId: string } & InputTarget)
     | ({ type: 'focus'; focusRequestId: string; focused: boolean } & InputTarget)
     | (CameraBinding & {
         type: 'auth.camera.ready';
@@ -232,26 +226,7 @@ function valid(v: Record<string, unknown>): boolean {
       );
     }
     case 'input.result':
-      return (
-        string(v.clientSequence) &&
-        typeof v.ok === 'boolean' &&
-        resultError(v) &&
-        optional(v, 'touchSequenceId', string) &&
-        optional(v, 'touchState', (value) =>
-          [
-            'accepted-pending',
-            'processed',
-            'terminal-invalidated',
-            'terminal-unconfirmed',
-            'rejected',
-          ].includes(String(value)),
-        ) &&
-        (v.touchState === undefined ||
-          (string(v.touchSequenceId) &&
-            (['accepted-pending', 'processed'].includes(String(v.touchState))
-              ? v.ok === true
-              : v.ok === false)))
-      );
+      return string(v.clientSequence) && typeof v.ok === 'boolean' && resultError(v);
     case 'focus':
       return (
         strings(v, ['focusRequestId', 'layoutEpoch']) &&

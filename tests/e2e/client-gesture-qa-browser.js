@@ -83,6 +83,12 @@ async (host) => {
             }
             const record = { at: performance.now(), wire: null, message: m };
             push(q.sent, record);
+            if (q.dropNextEnd && e.type === 'touch' && e.action === 'end') {
+              q.dropNextEnd = false;
+              push(q.marks, { type: 'dropped-end', sequence: e.sequenceId });
+              return;
+            }
+
             if (!isTouch) {
               record.wire = performance.now();
               return send(data);
@@ -324,14 +330,7 @@ async (host) => {
         touchSequence: r.event.sequenceId,
         action: r.event.action,
       }));
-    for (const { message } of data.sent)
-      if (message.type === 'input.touchRetire')
-        terminalRequests.push({
-          sequence: message.sequence,
-          touchSequence: message.sequenceId,
-          action: 'retire',
-        });
-    const terminalReceipts = terminalRequests.map((request) => ({
+    const terminalResults = terminalRequests.map((request) => ({
       ...request,
       result: inputResults.findLast((a) => String(a.message.clientSequence) === String(request.sequence))
         ?.message,
@@ -363,7 +362,7 @@ async (host) => {
         allClientV1: packets.every((r) => r.event.gestureMode === 'client-v1'),
         trustedPointerCount: data.pointers.filter((p) => p.trusted).length,
         inputResultCount: inputResults.length,
-        terminalReceipts,
+        terminalResults,
         mediaStable,
         rejections: inputResults.filter((r) => r.message.ok === false),
         deltaX: scroll.reduce((s, g) => s + (g.deltaX ?? 0), 0),
@@ -388,7 +387,7 @@ async (host) => {
     assert(e.summary.trustedPointerCount > 0, 'No trusted Viewer pointer events');
     assert(e.summary.inputResultCount > 0, 'No final input.result recorded');
     assert(
-      e.summary.terminalReceipts.length > 0 && e.summary.terminalReceipts.every((r) => r.result),
+      e.summary.terminalResults.length > 0 && e.summary.terminalResults.every((r) => r.result),
       'Physical terminal missing matching final input.result',
     );
     assert(e.summary.mediaStable, 'Gesture rebuilt peer/video/stream/track identity');
@@ -512,7 +511,7 @@ async (host) => {
           );
           assert((f.counts.touchend ?? 0) > 0, 'Custom raw lifecycle did not reach touchend');
           assert(
-            e.summary.terminalReceipts.every((r) => r.result.ok && r.result.touchState === 'processed'),
+            e.summary.terminalResults.every((r) => r.result?.ok),
             'Consumed raw terminal was not processed',
           );
         },
@@ -686,10 +685,10 @@ async (host) => {
     await qa.trajectory(tap, { settleMs: 100 });
     e = await qa.sample(`v${base.version}-terminal-held-newdown`);
     assert(
-      !e.data.sent
+      e.data.sent
         .map(unwrap)
         .some((p) => p.type === 'touch' && p.action === 'start' && p.sequenceId !== first),
-      'New sequence sent before terminal ACK',
+      'New sequence blocked by held input results',
     );
     await qa.releaseInputResults();
     await base.page.waitForTimeout(100);
@@ -699,7 +698,7 @@ async (host) => {
       e.data.sent
         .map(unwrap)
         .some((p) => p.type === 'touch' && p.action === 'start' && p.sequenceId !== first),
-      'New sequence failed after terminal ACK',
+      'New sequence failed after late input results',
     );
     output.push(e.summary);
     await qa.navigate({ id: `v${base.version}-momentum-cancel` });

@@ -115,14 +115,6 @@ struct NavigationTransferRequest : RequestEnvelope {
 
   std::optional<NavigationOperations::Identity> operation;
 };
-struct TouchStatusRequest : RequestEnvelope {
-  std::optional<std::string> sequenceId;
-  std::optional<uint64_t> instance;
-  std::optional<uint64_t> document;
-  std::optional<uint64_t> focus;
-  std::optional<uint64_t> session;
-  std::optional<uint64_t> view;
-};
 struct FocusRequest : RequestEnvelope {
   std::optional<bool> focused;
   std::optional<uint64_t> focus;
@@ -253,7 +245,6 @@ Result<ExitFullscreenRequest> DecodeExitFullscreen(const base::DictValue& wire,
                                                    RequestEnvelope envelope);
 Result<NavigationTransferRequest> DecodeNavigationTransfer(const base::DictValue& wire,
                                                            RequestEnvelope envelope);
-Result<TouchStatusRequest> DecodeTouchStatus(const base::DictValue& wire, RequestEnvelope envelope);
 Result<FocusRequest> DecodeFocus(const base::DictValue& wire, RequestEnvelope envelope);
 Result<VisibleRequest> DecodeVisible(const base::DictValue& wire, RequestEnvelope envelope);
 Result<NavigateRequest> DecodeNavigate(const base::DictValue& wire, RequestEnvelope envelope);

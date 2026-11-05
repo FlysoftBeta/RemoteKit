@@ -659,7 +659,6 @@ export function collectionInputSample(
           'unmatched-or-unpainted-frame',
           'stale-surface',
           'blur-pending',
-          'terminal-capacity',
         ]),
         sourceClock: diagnosticLabel(row.sourceClock, ['source', 'arrival-fallback']),
         sampleElapsedUs: finite(row.sampleElapsedUs),
@@ -673,18 +672,11 @@ export function collectionInputSample(
         type: diagnosticLabel(row.type, ['focus', 'input.result']),
         sequence: row.type === 'input.result' ? diagnosticSequence(row.clientSequence) : undefined,
         ok: diagnosticBoolean(row.ok),
-        touchState: diagnosticLabel(row.touchState, [
-          'accepted-pending',
-          'processed',
-          'terminal-invalidated',
-          'terminal-unconfirmed',
-          'rejected',
-        ]),
         reason: diagnosticLabel(
           row.error && typeof row.error === 'object'
             ? (row.error as Record<string, unknown>).message
             : undefined,
-          ['unknown_touch_terminal', 'stale_surface', 'stale_layout', 'endpoint_backpressure'],
+          ['stale_surface', 'stale_layout', 'endpoint_backpressure'],
         ),
       })),
   };

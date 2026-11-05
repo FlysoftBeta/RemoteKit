@@ -113,10 +113,6 @@ Status WebView::TouchInjectionStatus() const {
 void WebView::RefreshClientTouchOwner() {
   return touch_->RefreshClientTouchOwner();
 }
-ClientTouchRetirement::State WebView::RetireClientTouch(const InputToken& token,
-                                                        const std::string& sequence) {
-  return touch_->RetireClientTouch(token, sequence);
-}
 base::DictValue WebView::CompositorDiagnostics() const {
   return execution_->CompositorDiagnostics();
 }
@@ -207,12 +203,5 @@ std::uint64_t WebView::navigation_revision() const {
 bool WebView::TouchProcessingPending() const {
   return touch_->AwaitingHitTest() || touch_->touch_cleanup_pending_ ||
          touch_->touch_pending_callbacks_;
-}
-ClientTouchRetirement::State WebView::ClientTouchStatus(const InputToken& token,
-                                                        const std::string& sequence) const {
-  return touch_->retired_client_touches_.Find(token, sequence);
-}
-bool WebView::ClientTouchRetired(const InputToken& token, const std::string& sequence) const {
-  return touch_->retired_client_touches_.Contains(token, sequence);
 }
 }  // namespace remotekit::browser

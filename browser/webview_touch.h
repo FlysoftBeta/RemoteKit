@@ -10,20 +10,22 @@ class TouchController {
   bool AwaitingHitTest() const { return owner_state_ == OwnerState::kAwaitingHitTest; }
   bool OwnershipUnconfirmed() const { return owner_state_ == OwnerState::kUnconfirmed; }
   bool AdmissionPending() const { return AwaitingHitTest() || touch_cleanup_pending_; }
-  bool ReadsTerminalReceipt(const InputEvent&) const;
-  std::optional<Status> PrepareInput(const InputEvent&, bool cancel_reads_receipt, bool* admitted);
+  std::optional<Status> PrepareInput(const InputEvent&);
+  bool StartsNewSequence(const InputEvent&) const;
+  Status SupersedeClientTouch();
   Status Momentum(const GestureInput&);
-  Status BuildTouchState(const TouchInput& input, std::map<std::uint32_t, TouchPoint>* next) const;
+  Status BuildTouchState(const TouchInput& input,
+                         bool new_sequence,
+                         std::map<std::uint32_t, TouchPoint>* next) const;
   Status TouchInjectionStatus() const;
   void RefreshClientTouchOwner();
-  ClientTouchRetirement::State RetireClientTouch(const InputToken& token,
-                                                 const std::string& sequence);
   void DevToolsAgentHostAttached(content::DevToolsAgentHost* host);
   bool HasDevToolsConflict() const;
   bool TouchTargetAlive() const;
   void CancelTouches(bool deliver);
   void ResetExecution();
-  void OnClientTouchProcessed(InputToken token,
+  void OnClientTouchProcessed(std::uint64_t epoch,
+                              InputToken token,
                               const std::string& sequence,
                               ClientTouchAckState ack,
                               bool terminal,
@@ -63,7 +65,7 @@ class TouchController {
       touch_cancelled_{}, touch_samples_{};
   double touch_last_dispatch_wall_ms_{}, touch_last_source_age_ms_{};
   scoped_refptr<ClientGestureBridge> client_gesture_bridge_;
-  ClientTouchRetirement retired_client_touches_;
+  std::vector<scoped_refptr<ClientGestureBridge>> draining_gesture_bridges_;
   std::optional<InputToken> client_touch_token_;
   std::string client_touch_sequence_;
   bool client_touch_ack_mismatch_{};

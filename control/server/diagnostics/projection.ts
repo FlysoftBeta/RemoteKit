@@ -24,11 +24,10 @@ const labels: Record<string, ReadonlySet<string>> = {
   phase: words('blocked sent unload unloaded restore'),
   eventType: words('pointer mouse wheel key text composition touch gesture'),
   action: words('start move end cancel down up update commit momentum momentumEnd'),
-  reason: words(`channel unmatched-or-unpainted-frame stale-surface blur-pending terminal-capacity
-    unknown_touch_terminal stale_surface stale_layout endpoint_backpressure`),
+  reason: words(`channel unmatched-or-unpainted-frame stale-surface blur-pending
+    stale_surface stale_layout endpoint_backpressure`),
   sourceClock: words('source arrival-fallback'),
   type: words('focus input.result'),
-  touchState: words('accepted-pending processed terminal-invalidated terminal-unconfirmed rejected'),
   clock: words('endpoint-webrtc-report browser-rtc-stats'),
   clientClock: words('browser-performance'),
   connectionTimingOrigin: words('endpoint-offer-monotonic'),
@@ -64,7 +63,7 @@ const clientFields = words(`
   generation epoch reconfiguring planes deviceScaleFactor mediaScaleX mediaScaleY stale ready selected
   backend backendReason barrierAcknowledged barrierLayoutEpoch barrierOutputGeneration metadata atMs rtpTimestamp layoutEpoch encodedBytes keyframe freezeCopies mediaRefreshRequests getStatsWaitMs
   frames presentedFrames expectedDisplayTimeMs presentationTimeMs receiveTimeMs processingDurationSeconds
-  trace results phase eventType action reason sourceClock sampleElapsedUs type ok touchState
+  trace results phase eventType action reason sourceClock sampleElapsedUs type ok
   video audio playout comp sender inboundVideo inboundAudio selectedPair outbound nominated state stream clock sampleTimeUs
   bytesReceived jitterBufferEmittedCount jitterBufferDelay jitterBufferTargetDelay jitterBufferMinimumDelay framesDecoded totalDecodeTime
   totalProcessingDelay totalAssemblyTime framesAssembledFromMultiplePackets framesDropped packetsLost packetsReceived retransmittedPacketsReceived

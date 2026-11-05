@@ -18,7 +18,6 @@ executable("remotekit_browser") {
     "client_gesture_packet.cc",
     "client_gesture_packet.h",
     "client_input_timing.h",
-    "client_touch_retirement.h",
     "closed_views.cc",
     "closed_views.h",
     "compat.cc",
@@ -251,7 +250,6 @@ executable("remotekit_client_gesture_probe") {
     "client_gesture_packet.h",
     "client_gesture_probe.cc",
     "client_input_timing.h",
-    "client_touch_retirement.h",
   ]
   include_dirs = [ "//remotekit" ]
   deps = [

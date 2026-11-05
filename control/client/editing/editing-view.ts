@@ -294,17 +294,12 @@ export class EditingView extends Store<EditingViewSnapshot> {
       this.ports.input.ensureInputFocus(this.surface);
     }
   };
-  send = (
-    event: Record<string, unknown>,
-    options?: {
-      touchTerminal: boolean;
-    },
-  ) => {
+  send = (event: Record<string, unknown>) => {
     return !!(
       this.surface &&
       ((this.frameReady && !this.resize.blocksInput()) ||
         (event.type === 'touch' && event.action === 'cancel')) &&
-      this.ports.input.sendInput(this.surface, event, options)
+      this.ports.input.sendInput(this.surface, event)
     );
   };
   withEditTarget = (event: Record<string, unknown>) =>

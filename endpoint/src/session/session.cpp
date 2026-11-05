@@ -32,13 +32,9 @@ Session::Session(media::Sdk& api,
       input(
           config.id,
           InputController::Hooks{
-              .peer = [this] { return peer_controller.Handle(); },
               .control = [this] { return browser.Rpc().Control(); },
               .input_stamp = [this] { return authorization.Input(); },
-              .frame_stamp = [this] { return authorization.Frame(); },
               .epoch = [this] { return presentation.Epoch(); },
-              .data_open = [this] { return peer_controller.DataOpen(); },
-              .current = [this](uint64_t stamp) { return authorization.Current(stamp); },
               .admitted = [this](const RtcEvent& event) { return channel.ProductCurrent(event); },
               .admission = [this] { return authorization.Admit(); },
               .revalidate =
@@ -57,18 +53,6 @@ Session::Session(media::Sdk& api,
                                                   opportunistic, admitted);
                   },
               .send = [this](const Json& message, uint64_t stamp) { channel.Send(message, stamp); },
-              .send_data =
-                  [this](uint64_t peer, uint64_t stamp, const std::string& encoded) {
-                    return channel.SendData(peer, stamp, encoded);
-                  },
-              .notice =
-                  [this](uint64_t peer,
-                         uint64_t stamp,
-                         const std::string& encoded,
-                         const std::function<void(const std::string&)>& send) {
-                    control_outbox.Notice({peer, stamp}, encoded, send);
-                  },
-              .flush = [this] { channel.FlushControl(); },
               .failed = [this] { authorization.SetInput(0); },
               .trace = [this] { return trace; }}),
       presentation(PresentationController::Hooks{
@@ -156,7 +140,8 @@ Session::Session(media::Sdk& api,
                   views,
                   input,
                   timing,
-                  channel),
+                  channel,
+                  face),
       channel(context,
               peer_controller,
               authorization,
