@@ -29,6 +29,31 @@
 
 **SDK 导出**：`tools/export-sdk.py --out C:/src/chromium/src/out/dev --destination sdk/dist/dev` 导出公共头、import lib、DLL 以及 GN 生成的 `remotekit_sdk.runtime_deps` 中的全部文件（component 构建需要整套依赖 DLL），并写 manifest（Chromium HEAD、args.gn hash、PE 架构、编译器、ABI 版本）。`tools\verify-sdk.cmd` 用独立的 CMake 消费者（`sdk/`）构建并运行 SDK smoke。Browser、SDK、Endpoint 的 ABI 与映射版本必须一起更新。
 
+## Chromium 配置
+
+`chromium.py gen/build` 保留已有 `args.gn`，只补齐 RemoteKit 的 `root_extra_deps`，不从模板覆盖配置。生产包默认使用 `out/rel`，参数如下：
+
+```gn
+is_debug = false
+is_component_build = false
+is_official_build = false
+dcheck_always_on = false
+symbol_level = 0
+blink_symbol_level = 0
+v8_symbol_level = 0
+is_chrome_branded = false
+use_siso = true
+proprietary_codecs = true
+ffmpeg_branding = "Chrome"
+rtc_use_h264 = true
+root_extra_deps = [
+  "//remotekit/browser:remotekit_browser",
+  "//remotekit/browser/sdk:remotekit_sdk",
+]
+```
+
+开发配置 `out/dev` 继续使用 `is_component_build = true`、`dcheck_always_on = true`、`symbol_level = 1`，其余功能参数与发布配置相同；两者都不配置额外 DRM 模块。`is_official_build = false` 保留本地非官方构建，发布包关闭 DCHECK 与调试符号。
+
 ## 运行
 
 ```powershell
@@ -59,14 +84,33 @@ Endpoint 侧：`REMOTEKIT_BROWSER`（Browser 可执行文件）、`REMOTEKIT_DAT
 ## 发布包
 
 ```powershell
-C:\src\depot_tools\python3.bat tools/chromium.py build --target remotekit_browser --target remotekit_sdk
-C:\src\depot_tools\python3.bat tools/export-sdk.py --out C:/src/chromium/src/out/dev --destination sdk/dist/dev
+C:\src\depot_tools\python3.bat tools/chromium.py stage
+C:\src\depot_tools\python3.bat tools/chromium.py build --out rel --target remotekit_browser --target remotekit_sdk
+C:\src\depot_tools\python3.bat tools/export-sdk.py --out C:/src/chromium/src/out/rel --destination sdk/dist/rel
 tools\build-endpoint.cmd package
 npm --prefix control run build
-C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke
+C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke --node C:/path/to/node-runtime/node.exe
 ```
 
-`tools/package-runtime.py` 把 Browser/SDK 运行依赖、Release Endpoint 与 CRT、Node、Control 生产 bundle 与最小 node_modules（better-sqlite3 的原生 ABI 与 Node 一起校验）、oneVPL 依赖、人脸模型与许可证组装成目录、ZIP 和 SHA-256，输出在 `develop/tmp`。完整解压后运行 `run.cmd`，打开 `http://127.0.0.1:3001` 创建首个管理员账号。首次运行在包外创建 data；包里不含开发账号、Profile、凭据、数据库、日志、PDB 或构建输入。`--smoke` 在临时数据目录启动包内服务，检查静态资源、注册、鉴权 WS、SQLite 与时钟接口，并确认 WS 无法绕过 WebRTC 提交产品动作；它不验证媒体链路。manifest 记录源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。注意：manifest 里的源码 HEAD 是打包时的源码，不证明每个增量产物都由它重新构建——曾经只拷贝了 Browser EXE 而漏掉了包含修复的 Viz 组件 DLL。
+`tools/package-runtime.py` 默认使用 `--out rel`，把 Browser/SDK 运行依赖、Release Endpoint 与 CRT、Node、Control 生产 bundle 与最小 node_modules（better-sqlite3 的原生 ABI 与 Node 一起校验）、oneVPL 依赖、人脸模型与许可证组装成目录、`.tar.zst` 和 `.tar.zst.sha256`，输出在 `develop/tmp`。完整解压后运行 `run.cmd`，打开 `http://127.0.0.1:3001` 创建首个管理员账号。首次运行创建包内 `data/`；归档不含开发账号、Profile、凭据、数据库、日志、PDB 或构建输入。`--smoke` 在临时数据目录启动包内服务，检查静态资源、注册、鉴权 WS、SQLite 与时钟接口，并确认 WS 无法绕过 WebRTC 提交产品动作；它不验证媒体链路。manifest 记录源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。manifest 的源码 HEAD 是打包时的源码，不证明每个增量产物都由它重新构建。
+
+打包使用 Node 24 内置 zstd（level 12、全部逻辑 CPU），tar 以固定 32 MiB 缓冲流入压缩器，输出标准串联 zstd frames，不生成中间 tar，也不把整个包读入内存。逐 frame 使用同步结束指令，避开 Node 24 异步多线程 zstd 的提前 EOF 问题；每个 frame 内仍由原生 zstd 多线程压缩。`--node` 必须指向带官方 `LICENSE` 的真实 Node runtime，且 ABI 匹配 Control 的 SQLite 原生模块。`--out dev` 显式生成开发包。manifest 的 `browser_configuration` 标记 `rel`/`dev`，`archive` 记录完整归档名。
+
+Endpoint 编译直接包含仓库 `sdk/include` 公共头，不链接 SDK import lib；运行时通过 `LoadLibraryExW` 加载 Browser 同目录的 `remotekit_sdk.dll` 并解析 C ABI。发布 SDK 导出到独立 `sdk/dist/rel`；非 component 构建的 runtime deps 缩减后，打包仍从 GN 图收集 Browser 和 SDK 的完整运行依赖，不沿用开发 DLL 目录。
+
+解压支持 7-Zip ≥ 24（先解压 zstd，再解包 tar）或内置 zstd 支持的 tar。部分 Windows 11 的 tar 不支持 zstd；不要只凭操作系统版本判断。本机 `C:\Windows\System32\tar.exe --version` 为 bsdtar 3.8.9 / libzstd 1.5.7，已用归档往返验证；7-Zip 为 26.05。
+
+```powershell
+# 使用支持 zstd 的 tar；目标目录须已存在。
+C:\Windows\System32\tar.exe -xf "RemoteKit-win-x64-....tar.zst" -C "C:\RemoteKit"
+# 或用 7-Zip 两步解包（产生中间 .tar）。
+& "C:\Program Files\7-Zip\7z.exe" x "RemoteKit-win-x64-....tar.zst" -oC:\RemoteKit
+& "C:\Program Files\7-Zip\7z.exe" x "C:\RemoteKit\RemoteKit-win-x64-....tar" -oC:\RemoteKit
+# 验证归档 hash 并解压到隔离目录，然后运行启动检查。
+C:\src\depot_tools\python3.bat tests/e2e/test-streaming-package.py --archive "RemoteKit-win-x64-....tar.zst"
+# 对解压后的独立副本检查注册、窗口、H.264 解码、可信点击与滚动；结果写入 evidence。
+node tools/tests/streaming-package-real-stack.mjs "C:/RemoteKit/RemoteKit-win-x64-..." "C:/path/to/playwright" "C:/path/to/msedge.exe" "develop/tmp/package-real-stack"
+```
 
 ## 测试
 

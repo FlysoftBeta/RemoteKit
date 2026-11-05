@@ -5,14 +5,32 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 def main():
  p=argparse.ArgumentParser(description=__doc__)
- p.add_argument('--package',type=Path,required=True)
+ source=p.add_mutually_exclusive_group(required=True)
+ source.add_argument('--package',type=Path)
+ source.add_argument('--archive',type=Path,help='Extract and validate a .tar.zst using zstd-capable tar')
+ p.add_argument('--tar',default=str(Path(os.environ.get('SystemRoot','C:/Windows'))/'System32/tar.exe') if os.name=='nt' else 'tar')
  p.add_argument('--work-dir',type=Path,default=ROOT/'develop/tmp/package-smoke')
- a=p.parse_args();package=a.package.resolve()
+ a=p.parse_args();package=a.package.resolve() if a.package else None
  run=a.work_dir.resolve()/str(time.time_ns());run.mkdir(parents=True)
  result={'passed':False,'package':str(package),'evidence':str(run),
    'scope':'startup: bundled Node + production UI assets + SQLite first-admin registration + authenticated WebSocket state + clock/admin + Endpoint management reconciliation and face model availability + Viewer reattachment lock and password recovery + rejected WS browser action with unchanged workspace; no RTC product operations or media',
    'validationKind':'startup','browserProductOperationsTested':False,'rtcMediaTested':False};child=None
  try:
+  if a.archive:
+   archive=a.archive.resolve()
+   if not archive.name.endswith('.tar.zst'):raise ValueError('Expected .tar.zst archive')
+   expected=archive.with_name(archive.name+'.sha256').read_text(encoding='ascii').split()[0]
+   with archive.open('rb') as stream:actual=hashlib.file_digest(stream,'sha256').hexdigest()
+   if actual!=expected:raise ValueError('Archive SHA-256 mismatch')
+   extracted=run/'extracted';extracted.mkdir()
+   subprocess.run([a.tar,'-xf',str(archive),'-C',str(extracted)],check=True,capture_output=True)
+   package=extracted/archive.name.removesuffix('.tar.zst')
+   result.update(package=str(package),archive=str(archive),archiveSha256=actual)
+  if (package/'manifest.json').is_file():
+   manifest=json.loads((package/'manifest.json').read_text(encoding='utf-8'))
+   if manifest['archive']!=package.name+'.tar.zst':raise ValueError('Manifest archive name mismatch')
+   if manifest['browser_configuration'] not in ['dev','rel']:raise ValueError('Unknown browser configuration')
+   result['browserConfiguration']=manifest['browser_configuration']
   for relative in ['bin/node.exe','bin/endpoint_service.exe','bin/remotekit_browser.exe','control/dist/server.mjs','control/dist/client/index.html']:
    if not (package/relative).is_file():raise FileNotFoundError(relative)
   result['endpointSha256']=hashlib.sha256((package/'bin/endpoint_service.exe').read_bytes()).hexdigest()

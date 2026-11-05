@@ -10,9 +10,78 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import zipfile
+import tarfile
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def create_archive(package, node):
+    """Stream tar into bounded, concatenated zstd frames; no intermediate tar."""
+    archive = package.with_name(package.name + '.tar.zst')
+    script = r'''
+const { pipeline } = require('node:stream/promises');
+const { zstdCompressSync, constants: c } = require('node:zlib');
+const options = {params: {
+  [c.ZSTD_c_compressionLevel]: 12,
+  [c.ZSTD_c_nbWorkers]: Number(process.argv[1]),
+  [c.ZSTD_c_checksumFlag]: 1,
+}};
+// Node 24's async zstd stream can signal EOF with unconsumed input when
+// nbWorkers > 0. Complete bounded frames use the blocking end directive,
+// retaining native zstd worker threads. Concatenated frames are standard zstd.
+async function* compressFrames(source) {
+  const frame = Buffer.allocUnsafe(32 * 1024 * 1024);
+  let used = 0;
+  for await (const chunk of source) {
+    let offset = 0;
+    while (offset < chunk.length) {
+      const count = Math.min(frame.length - used, chunk.length - offset);
+      chunk.copy(frame, used, offset, offset + count);
+      used += count;
+      offset += count;
+      if (used === frame.length) {
+        yield zstdCompressSync(frame, options);
+        used = 0;
+      }
+    }
+  }
+  if (used) yield zstdCompressSync(frame.subarray(0, used), options);
+}
+pipeline(process.stdin, compressFrames, process.stdout)
+  .catch(error => { console.error(error); process.exitCode = 1; });
+'''
+    with archive.open('xb') as output:
+        try:
+            with tempfile.TemporaryFile() as errors:
+                with subprocess.Popen([str(node), '-e', script, str(os.cpu_count() or 1)],
+                                      stdin=subprocess.PIPE, stdout=output,
+                                      stderr=errors) as compressor:
+                    writing_error = None
+                    try:
+                        with tarfile.open(fileobj=compressor.stdin, mode='w|', format=tarfile.PAX_FORMAT) as tar:
+                            tar.add(package, arcname=package.name)
+                    except OSError as error:
+                        writing_error = error
+                    finally:
+                        try:
+                            compressor.stdin.close()
+                        except OSError as error:
+                            writing_error = writing_error or error
+                    code = compressor.wait()
+                    errors.seek(0)
+                    if code:
+                        raise RuntimeError('zstd compression failed: ' + errors.read().decode('utf-8', errors='replace'))
+                    if writing_error:
+                        raise writing_error
+        except Exception:
+            output.close()
+            archive.unlink(missing_ok=True)
+            raise
+    checksum = digest(archive)
+    archive.with_name(archive.name + '.sha256').write_text(
+        checksum + '  ' + archive.name + '\n', encoding='ascii')
+    return archive, checksum
 
 
 def digest(path):
@@ -67,7 +136,7 @@ def run_startup_smoke(package, *, work_dir=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--chromium-root', type=Path, default=Path(r'C:\src\chromium\src'))
-    parser.add_argument('--out', choices=['dev', 'rel'], default='dev')
+    parser.add_argument('--out', choices=['dev', 'rel'], default='rel')
     parser.add_argument('--destination', type=Path, default=ROOT / 'develop/tmp')
     parser.add_argument('--endpoint', type=Path)
     parser.add_argument('--node', type=Path)
@@ -237,6 +306,10 @@ def main():
         'browser_endpoint_per_frame_success_ipc': False,
         'endpoint_client_frame_metadata': True, 'chromium_internal_frame_ipc': True,
         'endpoint_configuration': 'Release', 'browser_configuration': args.out,
+        'archive': package_name + '.tar.zst',
+        'archive_format': 'tar.zst',
+        'archive_compression': {'implementation': 'Node zstd', 'level': 12,
+                                'workers': os.cpu_count() or 1, 'frame_bytes': 32 * 1024 * 1024},
         'runtime_launched': bool(validation and validation.get('passed')),
         'runtime_validation': ({key: validation[key] for key in ['passed', 'validationKind', 'scope',
             'browserProductOperationsTested', 'rtcMediaTested', 'endpointManagementReachable',
@@ -245,20 +318,10 @@ def main():
         'excluded_runtime_graph_entries': sorted(set(excluded)),
     }
     (package / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
-    archive = destination / (package_name + '.zip')
-    sevenzip = Path(r'C:\Program Files\7-Zip\7z.exe')
-    print('Creating ZIP...', flush=True)
-    if sevenzip.is_file():
-        subprocess.run([str(sevenzip), 'a', '-tzip', '-mx=1', '-mmt=on',
-                        str(archive), package_name], cwd=destination, check=True,
-                       stdout=subprocess.DEVNULL)
-    else:
-        with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=1) as zipped:
-            for file in sorted(package.rglob('*')):
-                if file.is_file(): zipped.write(file, file.relative_to(destination))
-    checksum = digest(archive)
-    archive.with_suffix('.zip.sha256').write_text(checksum + '  ' + archive.name + '\n', encoding='ascii')
+    print('Creating tar.zst (level 12, all logical CPUs)...', flush=True)
+    archive, checksum = create_archive(package, node)
     print(json.dumps({'directory': str(package), 'archive': str(archive),
+                      'directory_mib': round(sum(p.stat().st_size for p in package.rglob('*') if p.is_file()) / 1048576, 1),
                       'archive_mib': round(archive.stat().st_size / 1048576, 1),
                       'sha256': checksum}, indent=2), flush=True)
 

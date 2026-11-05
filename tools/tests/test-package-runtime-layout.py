@@ -4,6 +4,9 @@ import importlib.util
 import os
 from pathlib import Path
 import tempfile
+import shutil
+import subprocess
+import json
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +15,38 @@ packager = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packager)
 
 class EndpointLayout(unittest.TestCase):
+    def test_zstd_archive_roundtrip_and_checksum(self):
+        node = os.environ.get('REMOTEKIT_TEST_NODE') or shutil.which('node')
+        self.assertIsNotNone(node, 'Node with built-in zstd is required')
+        with tempfile.TemporaryDirectory(prefix='rk archive ') as temporary:
+            root = Path(temporary)
+            package = root / 'RemoteKit fixture'
+            (package / 'bin').mkdir(parents=True)
+            (package / 'empty directory').mkdir()
+            # Cross frame boundaries with incompressible bytes to expose early
+            # EOF/data-loss failures hidden by small, compressible fixtures.
+            contents = { 'bin/runtime.dll': os.urandom(34 * 1024 * 1024),
+                         'manifest.json': json.dumps({'archive':package.name+'.tar.zst'}).encode(),
+                         '名字.txt': b'Unicode and spaced paths' }
+            for name, data in contents.items():
+                (package / name).write_bytes(data)
+            archive, checksum = packager.create_archive(package, node)
+            self.assertEqual(archive.name, package.name + '.tar.zst')
+            self.assertEqual(archive.read_bytes()[:4], b'\x28\xb5\x2f\xfd')
+            self.assertEqual(checksum, packager.digest(archive))
+            self.assertEqual(archive.with_name(archive.name+'.sha256').read_text().strip(),
+                             checksum + '  ' + archive.name)
+            extracted = root / 'extracted'
+            extracted.mkdir()
+            tar = str(Path(os.environ.get('SystemRoot', 'C:/Windows'))/'System32/tar.exe') if os.name == 'nt' else 'tar'
+            subprocess.run([tar, '-xf', str(archive), '-C', str(extracted)], check=True)
+            for name, data in contents.items():
+                self.assertEqual((extracted / package.name / name).read_bytes(), data)
+            self.assertTrue((extracted / package.name / 'empty directory').is_dir())
+            with self.assertRaises(FileExistsError):
+                packager.create_archive(package, node)
+            self.assertEqual(checksum, packager.digest(archive))
+
     def test_override_paths_are_copied_to_launchable_standard_names(self):
         for standard in ['endpoint_service.exe']:
             for name in [standard, 'custom service.exe']:
