@@ -20,7 +20,7 @@
 #include "content/public/browser/devtools_agent_host_observer.h"
 #include "content/public/browser/web_contents_observer.h"
 #include "content/public/browser/web_contents.h"
-#include "remotekit/core.hpp"
+#include "remotekit/browser/view_model.h"
 #include "remotekit/shared_render_slots.h"
 #include "third_party/blink/public/common/tokens/tokens.h"
 #include "ui/gfx/geometry/point_f.h"
@@ -34,9 +34,6 @@ class RenderFrameHostImpl;
 class RenderViewHostImpl;
 class RenderWidgetHostViewBase;
 }  // namespace content
-namespace blink::web_pref {
-struct WebPreferences;
-}
 namespace input {
 class TouchEmulator;
 }
@@ -49,7 +46,7 @@ class OffscreenHost;
 class ClientGestureBridge;
 enum class ClientTouchAckState;
 
-// UI-sequence-only execution adapter. BrowserContext and Endpoint outlive this.
+// UI-sequence-only execution adapter. BrowserContext and ViewModel outlive this.
 // Unload restore retains complete committed history/PageState and same-process
 // sessionStorage namespaces. Discard restore retains the same controller.
 // Live DOM/JS heaps and cross-browser sessionStorage recovery are not preserved.
@@ -62,10 +59,9 @@ class WebView final : public content::WebContentsObserver,
  public:
   using Completion = std::function<void(Status)>;
   WebView(content::BrowserContext*,
-          Endpoint*,
+          ViewModel*,
           SessionId,
           WebViewId,
-          bool offscreen_host = false,
           std::unique_ptr<content::WebContents> adopted = {});
   ~WebView() override;
   WebView(const WebView&) = delete;
@@ -84,18 +80,11 @@ class WebView final : public content::WebContentsObserver,
   void RestoreNavigationOperations(NavigationOperations operations);
   Status SetVisible(bool);
   Status Focus(bool);
-  void SetNativeFocusEnabled(bool enabled);
-  void ConfigureDevice(int width,
-                       int height,
-                       bool tablet,
-                       float scale = 1,
-                       bool match_page_backing = false);
-  // Service rendering follows page DPR; demo rendering follows native DPI.
-  // Also called from the existing output timer to notice host-DPI changes.
+  void ConfigureDevice(int width, int height, float scale = 1);
+  // Keep page DPR applied as render views and backing hosts change.
   void RefreshBackingScale();
   void SetRenderDemand(bool enabled);
   void InvalidateLayoutInput(bool remains_visible);
-  static void OverridePreferences(content::WebContents*, blink::web_pref::WebPreferences*);
   SharedAtlasTextInput TextInputState();
   Status DispatchInput(const InputEvent&, bool* admitted = nullptr);
   // Acceptance/processing status, never a renderer/JavaScript execution ACK.
@@ -144,8 +133,6 @@ class WebView final : public content::WebContentsObserver,
   void ReadyToCommitNavigation(content::NavigationHandle*) override;
   void RenderViewReady() override;
   void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
-  void OnWebContentsFocused(content::RenderWidgetHost*) override;
-  void OnWebContentsLostFocus(content::RenderWidgetHost*) override;
   void RenderFrameDeleted(content::RenderFrameHost*) override;
   void RenderFrameHostChanged(content::RenderFrameHost*, content::RenderFrameHost*) override;
   void CreateContents(std::unique_ptr<content::WebContents> adopted = {});
@@ -214,7 +201,7 @@ class WebView final : public content::WebContentsObserver,
   void PollNavigationOperations();
 
   content::BrowserContext* context_;
-  Endpoint* endpoint_;
+  ViewModel* model_;
   SessionId session_;
   WebViewId view_;
   std::unique_ptr<content::WebContents> contents_;
@@ -223,17 +210,13 @@ class WebView final : public content::WebContentsObserver,
   std::optional<NavigationOperations::Identity> issuing_navigation_;
   std::map<std::int64_t, base::WeakPtr<content::NavigationHandle>> navigation_handles_;
   base::RepeatingTimer navigation_operation_timer_;
-  const bool use_offscreen_host_;
   std::unique_ptr<OffscreenHost> offscreen_host_;
   bool render_demand_ = false;
   int viewport_width_ = 0, viewport_height_ = 0;
-  bool tablet_ = false;
   float device_scale_ = 1;
-  bool match_page_backing_ = false;
   float backing_host_scale_ = 0;
   base::WeakPtr<content::RenderWidgetHostViewBase> backing_view_;
   bool visible_{false};
-  bool native_focus_enabled_{true};
   std::unique_ptr<NavigationState> navigation_state_;
   std::optional<LifecycleRequest> lifecycle_request_;
   PendingKind pending_kind_{PendingKind::none};

@@ -2,10 +2,10 @@
 #include <memory>
 #include "content/public/browser/browser_main_parts.h"
 namespace remotekit::browser {
-class HarnessMainParts final : public content::BrowserMainParts {
+class RemoteKitMainParts final : public content::BrowserMainParts {
  public:
-  HarnessMainParts();
-  ~HarnessMainParts() override;
+  RemoteKitMainParts();
+  ~RemoteKitMainParts() override;
   void PostCreateMainMessageLoop() override;
   int PostCreateThreads() override;
   int PreMainMessageLoopRun() override;

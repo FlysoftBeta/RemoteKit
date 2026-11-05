@@ -1,4 +1,4 @@
-#include "remotekit/browser/harness.h"
+#include "remotekit/browser/browser_runtime.h"
 #include "remotekit/browser/audio_target.h"
 
 #include <algorithm>
@@ -8,13 +8,10 @@
 #include <set>
 #include <string_view>
 #include "base/base64.h"
-#include "base/base_paths.h"
 #include "base/command_line.h"
 #include "base/functional/bind.h"
-#include "base/path_service.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
-#include "base/strings/string_split.h"
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/current_thread.h"
@@ -31,33 +28,19 @@
 #include "content/public/browser/web_contents_delegate.h"
 #include "remotekit/browser/browser_context.h"
 #include "remotekit/browser/control_server.h"
-#include "remotekit/browser/devtools.h"
 #include "remotekit/browser/osr_renderer.h"
 #include "remotekit/browser/page_requests.h"
 #include "remotekit/browser/offscreen_host.h"
 #include "remotekit/browser/webview.h"
-#include "remotekit/endpoint/include/remotekit/core.hpp"
+#include "remotekit/browser/view_model.h"
 #include "remotekit/endpoint/include/remotekit/atlas_dimensions.hpp"
-#include "remotekit/endpoint/include/remotekit/atlas_plan.hpp"
 #include "remotekit/protocol/control.h"
-#include "ui/aura/window.h"
-#include "ui/aura/window_tree_host.h"
 #include "ui/display/screen.h"
-#include "ui/views/controls/webview/webview.h"
-#include "ui/views/view.h"
-#include "ui/views/views_delegate.h"
-#include "ui/views/widget/desktop_aura/desktop_native_widget_aura.h"
-#include "ui/views/widget/desktop_aura/desktop_screen.h"
-#include "ui/views/widget/widget.h"
-#include "ui/views/widget/widget_delegate.h"
-#include "ui/views/widget/widget_observer.h"
-#include "ui/wm/core/wm_state.h"
 #include "url/gurl.h"
 
 namespace remotekit::browser {
 static_assert(static_cast<int>(Error::busy) == protocol::kBusyError);
 namespace {
-#if !defined(REMOTEKIT_DEMO_HARNESS)
 // Keep the IO clipboard installed until the IO loop itself is destroyed, so
 // late Chromium teardown cannot lazily recreate the Windows clipboard.
 class ServiceIoClipboard final : public base::CurrentThread::DestructionObserver {
@@ -72,30 +55,9 @@ class ServiceIoClipboard final : public base::CurrentThread::DestructionObserver
     delete this;
   }
 };
-#endif
-class HarnessViewsDelegate final : public views::ViewsDelegate {
- public:
-  void OnBeforeWidgetInit(views::Widget::InitParams* params,
-                          views::internal::NativeWidgetDelegate* delegate) override {
-    if (!params->native_widget)
-      params->native_widget = new views::DesktopNativeWidgetAura(delegate);
-  }
-};
-// Owns only the harness window. BrowserContext and WebContents are owned by State.
-class WindowObserver final : public views::WidgetObserver {
- public:
-  explicit WindowObserver(base::RepeatingClosure close) : close_(std::move(close)) {}
-  void OnWidgetDestroying(views::Widget* widget) override {
-    widget->RemoveObserver(this);
-    close_.Run();
-  }
-
- private:
-  base::RepeatingClosure close_;
-};
 }  // namespace
 
-struct HarnessMainParts::State {
+struct RemoteKitMainParts::State {
   ~State() {
     // PostMainMessageLoopRun also runs after a partial PreMain startup failure.
     // Contexts must never be left to implicit member destruction order.
@@ -104,19 +66,13 @@ struct HarnessMainParts::State {
     CHECK(contexts.empty());
   }
   bool shutting_down = false;
-  wm::WMState wm_state;
   std::unique_ptr<display::Screen> screen;
-  HarnessViewsDelegate views_delegate;
-  Endpoint endpoint;
-  bool demo = false;
-  bool offscreen = false;
-  raw_ptr<views::View> root = nullptr;
+  ViewModel view_model;
   struct ViewSpec {
     int width = 480, height = 360;
-    bool tablet = false;
     std::string url;
     bool visible = true;
-    float page_dsf = 0;  // Unspecified demo views inherit output/native DPI.
+    float page_dsf = 0;
     bool operator==(const ViewSpec&) const = default;
   };
   std::vector<ViewSpec> specs;
@@ -149,14 +105,9 @@ struct HarnessMainParts::State {
       const bool visible = found != atlas.placements.end();
       contents[i]->InvalidateLayoutInput(visible);
       const auto rect = visible ? found->content : PixelRect{0, 0, specs[i].width, specs[i].height};
-      if (native_views[i]) {
-        native_views[i]->SetBounds(rect.x, rect.y, rect.width, rect.height);
-        native_views[i]->SetVisible(visible);
-      }
       CHECK(contents[i]->SetVisible(visible));
       placements.emplace_back(rect.x, rect.y, rect.width, rect.height);
-      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet,
-                                   PageScale(specs[i]), !demo);
+      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, PageScale(specs[i]));
     }
     UpdateOutput();
   }
@@ -176,18 +127,13 @@ struct HarnessMainParts::State {
     paused_output.insert(view);
     UpdateOutput();
     page_requests[index]->Bind(nullptr);
-    if (native_views[index]) {
-      native_views[index]->SetWebContents(nullptr);
-      root->RemoveChildViewT(native_views[index].get());
-    }
-    native_views.erase(native_views.begin() + index);
     page_requests.erase(page_requests.begin() + index);
     contents.erase(contents.begin() + index);
     specs.erase(specs.begin() + index);
     placements.erase(placements.begin() + index);
     transfers.erase(view);
     paused_output.erase(view);
-    endpoint.RemoveWebView(session, view);
+    view_model.RemoveWebView(session, view);
     auto layout = Layout(specs);
     if (layout)
       ApplyLayout(layout.value);
@@ -198,7 +144,7 @@ struct HarnessMainParts::State {
       if (page_requests[i - 1]->close_state() == "closed")
         RemoveView(i - 1);
   }
-  std::vector<SessionId> sessions;
+  SessionId session_id = 0;
   struct PendingPopup {
     SessionId session;
     WebViewId opener;
@@ -254,7 +200,6 @@ struct HarnessMainParts::State {
   std::vector<std::unique_ptr<BrowserContext>> contexts;
   std::vector<std::unique_ptr<PageRequests>> page_requests;
   std::vector<std::unique_ptr<WebView>> contents;
-  std::vector<raw_ptr<views::WebView>> native_views;
   std::unique_ptr<ControlServer> control;
   std::unique_ptr<OsrRenderer> output;
   base::RepeatingTimer output_timer;
@@ -274,9 +219,6 @@ struct HarnessMainParts::State {
   };
   std::map<WebViewId, Transfer> transfers;
   uint64_t next_transfer = 1;
-  std::unique_ptr<views::WidgetDelegate> window_delegate;
-  raw_ptr<views::Widget> widget = nullptr;
-  std::unique_ptr<WindowObserver> observer;
   base::RepeatingClosure quit;
 
   base::DictValue HandleControl(const base::DictValue& request);
@@ -294,7 +236,7 @@ struct HarnessMainParts::State {
       if (adapter->offscreen_host())
         adapter->offscreen_host()->SetOutputScale(output_scale);
       adapter->RefreshBackingScale();
-      const auto* model = endpoint.FindWebView(adapter->session_id(), adapter->view_id());
+      const auto* model = view_model.FindWebView(adapter->session_id(), adapter->view_id());
       adapter->SetRenderDemand(output && output_enabled && specs[i].visible && model &&
                                model->actual == Residency::live && !model->pending &&
                                !paused_output.contains(adapter->view_id()));
@@ -306,8 +248,8 @@ struct HarnessMainParts::State {
       if (!specs[i].visible)
         continue;
       auto& adapter = *contents[i];
-      const auto token = endpoint.Token(adapter.session_id(), adapter.view_id());
-      const auto* model = endpoint.FindWebView(adapter.session_id(), adapter.view_id());
+      const auto token = view_model.Token(adapter.session_id(), adapter.view_id());
+      const auto* model = view_model.FindWebView(adapter.session_id(), adapter.view_id());
       if (!token || !model)
         continue;
       const auto& p = placements[i];
@@ -324,7 +266,6 @@ struct HarnessMainParts::State {
       view.metadata.atlas_pixels_per_dip = output_scale;
       view.metadata.page_device_scale_factor = PageScale(specs[i]);
       view.metadata.text_input = adapter.TextInputState();
-      view.contents = adapter.contents();
       view.offscreen_host = adapter.offscreen_host();
       view.render_enabled = adapter.contents() && model->actual == Residency::live &&
                             !model->pending && output_enabled &&
@@ -346,8 +287,7 @@ struct HarnessMainParts::State {
   void OnControlClosed() {
     if (shutting_down)
       return;
-    if (offscreen)
-      output_enabled = false;
+    output_enabled = false;
     for (const auto& adapter : contents)
       adapter->SetRenderDemand(false);
     if (output)
@@ -357,14 +297,6 @@ struct HarnessMainParts::State {
       contents[i]->Focus(false);
     }
     transfers.clear();
-  }
-
-  void OnWindowClosed() {
-    widget = nullptr;
-    root = nullptr;
-    native_views.clear();
-    if (quit)
-      quit.Run();
   }
 };
 
@@ -392,7 +324,7 @@ std::optional<double> Number(const base::DictValue& object, std::string_view key
 }
 }  // namespace
 
-base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& request) {
+base::DictValue RemoteKitMainParts::State::HandleControl(const base::DictValue& request) {
   const int id = request.FindInt("id").value_or(0);
   base::DictValue reply;
   reply.Set("version", 1);
@@ -459,7 +391,6 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
           return error("invalid_view_transaction_configuration");
         spec.width = *width;
         spec.height = *height;
-        spec.tablet = demo && *device == "tablet";
         spec.page_dsf = static_cast<float>(*page_scale);
         spec.visible = *visible;
         if (page_requests[index]->close_state() == "closing" && spec != specs[index])
@@ -499,7 +430,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     // product visibility. A persistent view is not necessarily resident/live.
     for (size_t i = 0; i < contents.size(); ++i) {
       const auto& adapter = contents[i];
-      const auto* model = endpoint.FindWebView(adapter->session_id(), adapter->view_id());
+      const auto* model = view_model.FindWebView(adapter->session_id(), adapter->view_id());
       if (!model)
         return error("view_missing");
       if (next_specs[i].visible && (!adapter->contents() || adapter->lifecycle_uncertain() ||
@@ -515,16 +446,11 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     output_scale = next_scale;
     allocation_alignment = next_alignment;
     for (size_t i = 0; i < contents.size(); ++i)
-      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, specs[i].tablet,
-                                   PageScale(specs[i]), !demo);
+      contents[i]->ConfigureDevice(specs[i].width, specs[i].height, PageScale(specs[i]));
     output_enabled = next_enabled;
     output_width = dimensions->width;
     output_height = dimensions->height;
     if (layout_changed) {
-      if (root)
-        root->SetPreferredSize(gfx::Size(logical_width, logical_height));
-      if (widget)
-        widget->SetSize(gfx::Size(logical_width, logical_height));
       ApplyLayout(next_layout.value);
     }
     UpdateOutput();
@@ -582,7 +508,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     uint64_t generation = 0, session = 0;
     const auto* name = request.FindString("mapping");
     if (!name || !ReadId(request, "generation", &generation) ||
-        !ReadId(request, "session", &session) || sessions.size() != 1 || sessions[0] != session ||
+        !ReadId(request, "session", &session) || session_id != session ||
         !OpenAudioTarget(*name, generation, session))
       return error("invalid_audio_target");
     reply.Set("ok", true);
@@ -599,7 +525,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     const auto* ids = request.FindList("views");
     const auto current =
         base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII("browser-incarnation");
-    if (!ReadId(request, "session", &session) || !endpoint.FindSession(session) || !incarnation ||
+    if (!ReadId(request, "session", &session) || !view_model.FindSession(session) || !incarnation ||
         current.empty() || *incarnation != current || !ids || ids->size() > 256)
       return error("invalid_closed_ack_target");
     std::vector<uint64_t> parsed;
@@ -621,100 +547,97 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   }
   if (*method == "snapshot") {
     base::ListValue list;
-    for (SessionId session_id : sessions) {
-      const auto* session = endpoint.FindSession(session_id);
-      base::ListValue views;
-      for (const auto& [view_id, model] : session->views) {
-        auto value = TokenValue(endpoint.Token(session_id, view_id).value);
-        value.Set("profile", base::NumberToString(model.profile));
-        value.Set("actual", static_cast<int>(model.actual));
-        value.Set("desired", static_cast<int>(model.desired));
-        value.Set("pending", model.pending.has_value());
-        value.Set("focused", model.focused);
-        value.Set("lifecycle_generation", base::NumberToString(model.lifecycle_generation));
-        if (model.last_lifecycle) {
-          base::DictValue result;
-          result.Set("generation", base::NumberToString(model.last_lifecycle->generation));
-          result.Set("action", static_cast<int>(model.last_lifecycle->action));
-          result.Set("succeeded", model.last_lifecycle->succeeded);
-          result.Set("detail", model.last_lifecycle->detail);
-          value.Set("last_lifecycle", std::move(result));
-        }
-        for (size_t i = 0; i < contents.size(); ++i) {
-          const auto& adapter = contents[i];
-          if (adapter->view_id() != view_id)
-            continue;
-          value.Set("close_state", page_requests[i]->close_state());
-          value.Set("close_reason", page_requests[i]->close_reason());
-          value.Set("width", specs[i].width);
-          value.Set("height", specs[i].height);
-          value.Set("device", specs[i].tablet ? "tablet" : "desktop");
-          value.Set("deviceScaleFactor", PageScale(specs[i]));
-          auto compositor = adapter->CompositorDiagnostics();
-          if (output)
-            compositor.Set("osr", output->RenderStatus(view_id));
-          value.Set("compositor", std::move(compositor));
-          value.Set("navigationRevision", base::NumberToString(adapter->navigation_revision()));
-          value.Set("navigationOperations", adapter->NavigationOperationSnapshot());
-          value.Set("visible", specs[i].visible);
-          value.Set("lifecycle_uncertain", adapter->lifecycle_uncertain());
-          auto discard = CanDiscard(i);
-          value.Set("canDiscard", static_cast<bool>(discard));
-          value.Set("discardBlockReason", discard.message);
-          auto touch = adapter->TouchInjectionStatus();
-          value.Set("touch_code", static_cast<int>(touch.error));
-          value.Set("touch_detail", touch.message);
-          value.Set("pending_page_requests", static_cast<int>(page_requests[i]->pending_count()));
-          if (auto* page = adapter->contents()) {
-            value.Set("url", page->GetLastCommittedURL().spec());
-            value.Set("title", base::UTF16ToUTF8(page->GetTitle()));
-            value.Set("loading", page->IsLoading());
-            value.Set("canGoBack", page->GetController().CanGoBack());
-            value.Set("canGoForward", page->GetController().CanGoForward());
-            value.Set("audible", page->IsCurrentlyAudible());
-            value.Set("captured", page->IsBeingCaptured());
-            value.Set("crashed", page->IsCrashed());
-            value.Set("fullscreen", page_requests[i]->fullscreen() && !page->IsCrashed());
-            std::set<base::ProcessId> pids;
-            page->GetPrimaryMainFrame()->ForEachRenderFrameHost(
-                [&](content::RenderFrameHost* frame) {
-                  const auto& process = frame->GetProcess()->GetProcess();
-                  if (process.IsValid())
-                    pids.insert(process.Pid());
-                });
-            base::ListValue processes;
-            for (auto pid : pids)
-              processes.Append(base::NumberToString(pid));
-            value.Set("renderer_pids", std::move(processes));
-          }
-        }
-        views.Append(std::move(value));
+    const auto* session = view_model.FindSession(session_id);
+    base::ListValue views;
+    for (const auto& [view_id, model] : session->views) {
+      auto value = TokenValue(view_model.Token(session_id, view_id).value);
+      value.Set("profile", base::NumberToString(model.profile));
+      value.Set("actual", static_cast<int>(model.actual));
+      value.Set("desired", static_cast<int>(model.desired));
+      value.Set("pending", model.pending.has_value());
+      value.Set("focused", model.focused);
+      value.Set("lifecycle_generation", base::NumberToString(model.lifecycle_generation));
+      if (model.last_lifecycle) {
+        base::DictValue result;
+        result.Set("generation", base::NumberToString(model.last_lifecycle->generation));
+        result.Set("action", static_cast<int>(model.last_lifecycle->action));
+        result.Set("succeeded", model.last_lifecycle->succeeded);
+        result.Set("detail", model.last_lifecycle->detail);
+        value.Set("last_lifecycle", std::move(result));
       }
-      for (const auto& [closed_view_id, tombstone] : closed_views)
-        if (*tombstone.FindString("session") == base::NumberToString(session_id))
-          views.Append(tombstone.Clone());
-      base::DictValue session_value;
-      session_value.Set("session", base::NumberToString(session_id));
-      session_value.Set("tenant", session->tenant);
-      session_value.Set("views", std::move(views));
-      base::ListValue popups;
-      for (const auto& [key, popup] : pending_popups) {
-        if (popup.session != session_id)
+      for (size_t i = 0; i < contents.size(); ++i) {
+        const auto& adapter = contents[i];
+        if (adapter->view_id() != view_id)
           continue;
-        base::DictValue item;
-        item.Set("provisionalId", key);
-        item.Set("openerViewId", base::NumberToString(popup.opener));
-        item.Set("url", popup.contents && !popup.contents->GetLastCommittedURL().is_empty()
-                            ? popup.contents->GetLastCommittedURL().spec()
-                            : popup.url.spec());
-        item.Set("disposition", static_cast<int>(popup.disposition));
-        item.Set("userGesture", popup.user_gesture);
-        item.Set("status", popup.status);
-        popups.Append(std::move(item));
+        value.Set("close_state", page_requests[i]->close_state());
+        value.Set("close_reason", page_requests[i]->close_reason());
+        value.Set("width", specs[i].width);
+        value.Set("height", specs[i].height);
+        value.Set("device", "desktop");
+        value.Set("deviceScaleFactor", PageScale(specs[i]));
+        auto compositor = adapter->CompositorDiagnostics();
+        if (output)
+          compositor.Set("osr", output->RenderStatus(view_id));
+        value.Set("compositor", std::move(compositor));
+        value.Set("navigationRevision", base::NumberToString(adapter->navigation_revision()));
+        value.Set("navigationOperations", adapter->NavigationOperationSnapshot());
+        value.Set("visible", specs[i].visible);
+        value.Set("lifecycle_uncertain", adapter->lifecycle_uncertain());
+        auto discard = CanDiscard(i);
+        value.Set("canDiscard", static_cast<bool>(discard));
+        value.Set("discardBlockReason", discard.message);
+        auto touch = adapter->TouchInjectionStatus();
+        value.Set("touch_code", static_cast<int>(touch.error));
+        value.Set("touch_detail", touch.message);
+        value.Set("pending_page_requests", static_cast<int>(page_requests[i]->pending_count()));
+        if (auto* page = adapter->contents()) {
+          value.Set("url", page->GetLastCommittedURL().spec());
+          value.Set("title", base::UTF16ToUTF8(page->GetTitle()));
+          value.Set("loading", page->IsLoading());
+          value.Set("canGoBack", page->GetController().CanGoBack());
+          value.Set("canGoForward", page->GetController().CanGoForward());
+          value.Set("audible", page->IsCurrentlyAudible());
+          value.Set("captured", page->IsBeingCaptured());
+          value.Set("crashed", page->IsCrashed());
+          value.Set("fullscreen", page_requests[i]->fullscreen() && !page->IsCrashed());
+          std::set<base::ProcessId> pids;
+          page->GetPrimaryMainFrame()->ForEachRenderFrameHost([&](content::RenderFrameHost* frame) {
+            const auto& process = frame->GetProcess()->GetProcess();
+            if (process.IsValid())
+              pids.insert(process.Pid());
+          });
+          base::ListValue processes;
+          for (auto pid : pids)
+            processes.Append(base::NumberToString(pid));
+          value.Set("renderer_pids", std::move(processes));
+        }
       }
-      session_value.Set("pendingPopups", std::move(popups));
-      list.Append(std::move(session_value));
+      views.Append(std::move(value));
     }
+    for (const auto& [closed_view_id, tombstone] : closed_views)
+      if (*tombstone.FindString("session") == base::NumberToString(session_id))
+        views.Append(tombstone.Clone());
+    base::DictValue session_value;
+    session_value.Set("session", base::NumberToString(session_id));
+    session_value.Set("tenant", session->tenant);
+    session_value.Set("views", std::move(views));
+    base::ListValue popups;
+    for (const auto& [key, popup] : pending_popups) {
+      if (popup.session != session_id)
+        continue;
+      base::DictValue item;
+      item.Set("provisionalId", key);
+      item.Set("openerViewId", base::NumberToString(popup.opener));
+      item.Set("url", popup.contents && !popup.contents->GetLastCommittedURL().is_empty()
+                          ? popup.contents->GetLastCommittedURL().spec()
+                          : popup.url.spec());
+      item.Set("disposition", static_cast<int>(popup.disposition));
+      item.Set("userGesture", popup.user_gesture);
+      item.Set("status", popup.status);
+      popups.Append(std::move(item));
+    }
+    session_value.Set("pendingPopups", std::move(popups));
+    list.Append(std::move(session_value));
     reply.Set("ok", true);
     reply.Set("sessions", std::move(list));
     reply.Set("clientGestures", 1);
@@ -725,11 +648,10 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     const auto* sites = request.FindDict("sites");
     if (!ReadId(request, "session", &session) || !sites)
       return error("session_and_sites_required");
-    const auto owner = std::ranges::find(sessions, session);
-    if (owner == sessions.end())
+    if (session != session_id)
       return error("session_not_found");
     std::string detail;
-    if (!contexts[owner - sessions.begin()]->SetSitePreferences(*sites, &detail))
+    if (!contexts.front()->SetSitePreferences(*sites, &detail))
       return error(detail);
     reply.Set("ok", true);
     reply.Set("accepted", true);
@@ -739,7 +661,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   if (*method == "view.create" || *method == "view.adopt") {
     uint64_t session = 0, view = 0;
     if (!ReadId(request, "session", &session) || !ReadId(request, "view", &view) ||
-        !endpoint.FindSession(session) || (!demo && session != sessions.front()))
+        !view_model.FindSession(session) || session != session_id)
       return error("invalid_session_or_view");
     if (retired_views.contains(view))
       return error("view_id_closed");
@@ -753,7 +675,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       reply.Set("ok", true);
       reply.Set("accepted", true);
       reply.Set("completed", true);
-      reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+      reply.Set("token", TokenValue(view_model.Token(session, view).value));
       return reply;
     }
     PrunePopups();
@@ -780,7 +702,6 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       spec.page_dsf = static_cast<float>(*scale);
     }
     spec.url = *url;
-    spec.tablet = demo && device && *device == "tablet";
     for (size_t i = 0; i < contents.size(); ++i) {
       if (contents[i]->view_id() != view)
         continue;
@@ -796,7 +717,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       reply.Set("ok", true);
       reply.Set("accepted", true);
       reply.Set("completed", true);
-      reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+      reply.Set("token", TokenValue(view_model.Token(session, view).value));
       if (request.Find("operationId"))
         reply.Set("completed", false);
       return reply;
@@ -808,10 +729,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     auto layout = Layout(next, view);
     if (!layout)
       return error("atlas_no_space");
-    size_t owner = 0;
-    while (owner < sessions.size() && sessions[owner] != session)
-      ++owner;
-    auto created = endpoint.CreateWebView(session, profiles[owner], view);
+    auto created = view_model.CreateWebView(session, profiles.front(), view);
     if (!created)
       return error(created.status.message);
     std::unique_ptr<content::WebContents> adopted;
@@ -821,22 +739,14 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       popup.requests.reset();
       adopted = std::move(popup.contents);
     }
-    auto adapter = std::make_unique<WebView>(contexts[owner].get(), &endpoint, session, view,
-                                             offscreen, std::move(adopted));
-    adapter->SetNativeFocusEnabled(
-        demo && !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
-    adapter->ConfigureDevice(spec.width, spec.height, spec.tablet, PageScale(spec), !demo);
+    auto adapter = std::make_unique<WebView>(contexts.front().get(), &view_model, session, view,
+                                             std::move(adopted));
+    adapter->ConfigureDevice(spec.width, spec.height, PageScale(spec));
     auto requests = std::make_unique<PageRequests>();
     requests->Bind(adapter->contents());
     WirePopups(requests.get(), session, view);
-    views::WebView* native = nullptr;
-    if (!offscreen) {
-      native = root->AddChildView(std::make_unique<views::WebView>(contexts[owner].get()));
-      native->SetWebContents(adapter->contents());
-    }
     contents.push_back(std::move(adapter));
     page_requests.push_back(std::move(requests));
-    native_views.push_back(native);
     specs = std::move(next);
     ApplyLayout(layout.value);
     contents.back()->SetVisible(spec.visible);
@@ -852,7 +762,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     reply.Set("ok", true);
     reply.Set("accepted", true);
     reply.Set("completed", true);
-    reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+    reply.Set("token", TokenValue(view_model.Token(session, view).value));
     if (request.Find("operationId"))
       reply.Set("completed", false);
     return reply;
@@ -860,7 +770,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   if (*method == "view.close") {
     uint64_t session = 0, view = 0;
     if (!ReadId(request, "session", &session) || !ReadId(request, "view", &view) ||
-        !endpoint.FindSession(session))
+        !view_model.FindSession(session))
       return error("invalid_session_or_view");
     if (retired_views.contains(view)) {
       reply.Set("ok", true);
@@ -888,7 +798,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   }
   uint64_t session = 0, view = 0;
   if (!ReadId(request, "session", &session) || !ReadId(request, "view", &view) ||
-      !endpoint.FindWebView(session, view))
+      !view_model.FindWebView(session, view))
     return error("view_not_in_session");
   size_t index = 0;
   for (; index < contents.size(); ++index)
@@ -909,7 +819,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
         return error(existing->message);
       reply.Set("ok", true);
       reply.Set("accepted", true);
-      reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+      reply.Set("token", TokenValue(view_model.Token(session, view).value));
       return reply;
     }
     transfers.erase(view);
@@ -918,34 +828,28 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     paused_output.insert(view);
     UpdateOutput();
     page_requests[index]->Bind(nullptr);
-    if (native_views[index])
-      native_views[index]->SetWebContents(nullptr);
-    const auto profile = endpoint.FindWebView(session, view)->profile;
+    const auto profile = view_model.FindWebView(session, view)->profile;
     const auto owner = std::ranges::find(profiles, profile);
     if (owner == profiles.end())
       return error("profile_missing");
     auto navigation_operations = contents[index]->ReleaseNavigationOperations();
     contents[index].reset();
-    endpoint.ResetWebView(session, view);
-    contents[index] = std::make_unique<WebView>(contexts[owner - profiles.begin()].get(), &endpoint,
-                                                session, view, offscreen);
+    view_model.ResetWebView(session, view);
+    contents[index] = std::make_unique<WebView>(contexts[owner - profiles.begin()].get(),
+                                                &view_model, session, view);
     contents[index]->RestoreNavigationOperations(std::move(navigation_operations));
-    contents[index]->SetNativeFocusEnabled(
-        demo && !base::CommandLine::ForCurrentProcess()->HasSwitch("gpu-output"));
-    contents[index]->ConfigureDevice(specs[index].width, specs[index].height, specs[index].tablet,
-                                     PageScale(specs[index]), !demo);
+    contents[index]->ConfigureDevice(specs[index].width, specs[index].height,
+                                     PageScale(specs[index]));
     page_requests[index] = std::make_unique<PageRequests>();
     page_requests[index]->Bind(contents[index]->contents());
     WirePopups(page_requests[index].get(), session, view);
-    if (native_views[index])
-      native_views[index]->SetWebContents(contents[index]->contents());
     contents[index]->SetVisible(specs[index].visible);
     const auto status = contents[index]->Navigate(GURL(*url), &request);
     paused_output.erase(view);
     UpdateOutput();
     reply.Set("ok", static_cast<bool>(status));
     reply.Set("accepted", static_cast<bool>(status));
-    reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+    reply.Set("token", TokenValue(view_model.Token(session, view).value));
     return reply;
   }
   if (*method == "view.configure") {
@@ -964,7 +868,6 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     if (const auto* device = request.FindString("device")) {
       if (*device != "desktop" && *device != "tablet")
         return error("invalid_device");
-      spec.tablet = demo && *device == "tablet";
     } else if (request.Find("device"))
       return error("invalid_device");
     if (request.Find("device_scale_factor")) {
@@ -979,7 +882,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       reply.Set("ok", true);
       reply.Set("accepted", true);
       reply.Set("completed", true);
-      reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+      reply.Set("token", TokenValue(view_model.Token(session, view).value));
       return reply;
     }
     auto next = specs;
@@ -995,14 +898,14 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     reply.Set("ok", true);
     reply.Set("accepted", true);
     reply.Set("completed", true);
-    reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+    reply.Set("token", TokenValue(view_model.Token(session, view).value));
     return reply;
   }
   if (*method == "profile.permissions" || *method == "profile.downloads") {
     const auto* command = request.FindDict("command");
     if (!command)
       return error("profile_command_required");
-    auto profile = endpoint.FindWebView(session, view)->profile;
+    auto profile = view_model.FindWebView(session, view)->profile;
     auto found = std::find(profiles.begin(), profiles.end(), profile);
     if (found == profiles.end())
       return error("profile_missing");
@@ -1015,7 +918,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   }
   if (*method == "page.requests" || *method == "page.reply" || *method == "page.command" ||
       *method == "page.fileStatus") {
-    const auto token = endpoint.Token(session, view).value;
+    const auto token = view_model.Token(session, view).value;
     PageRequests::SelectionBinding binding{token.instance, token.document};
     bool terminal_only = false;
     if (*method == "page.reply" || *method == "page.fileStatus") {
@@ -1081,7 +984,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   if (page_requests[index]->close_state() == "closing")
     return error("view_closing");
   if (*method == "page.exitFullscreen") {
-    const auto token = endpoint.Token(session, view).value;
+    const auto token = view_model.Token(session, view).value;
     uint64_t instance = 0, document = 0;
     if (!ReadId(request, "instance", &instance) || !ReadId(request, "document", &document) ||
         instance != token.instance || document != token.document || !adapter.contents())
@@ -1099,7 +1002,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       reply.Set("ok", true);
       return reply;
     }
-    auto token = endpoint.Token(session, view).value;
+    auto token = view_model.Token(session, view).value;
     if (*method == "navigation.export.begin") {
       auto saved = adapter.ExportNavigation();
       if (!saved)
@@ -1220,9 +1123,9 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     return reply;
   }
   if (*method == "focus") {
-    if (!demo && !request.Find("focus"))
+    if (!request.Find("focus"))
       return error("focus_token_required");
-    const auto current = endpoint.Token(session, view).value;
+    const auto current = view_model.Token(session, view).value;
     for (auto [key, expected] :
          {std::pair{"instance", current.instance}, std::pair{"document", current.document},
           std::pair{"focus", current.focus}}) {
@@ -1279,7 +1182,7 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
     const bool recover_uncertain = guarded && *operation == Lifecycle::unload;
     if (guarded) {
       uint64_t generation = 0;
-      const auto* model = endpoint.FindWebView(session, view);
+      const auto* model = view_model.FindWebView(session, view);
       if (!ReadId(request, "expected_lifecycle_generation", &generation) || !model ||
           model->lifecycle_generation != generation || model->pending ||
           page_requests[index]->close_state() == "closing" ||
@@ -1305,17 +1208,13 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
       UpdateOutput();
     }
     page_requests[index]->CancelAll("lifecycle_transition");
-    if (*operation == Lifecycle::unload && native_views[index])
-      native_views[index]->SetWebContents(nullptr);
     page_requests[index]->Bind(nullptr);
     status = adapter.RequestLifecycle(*operation, {}, recover_uncertain);
     page_requests[index]->Bind(adapter.contents());
-    if (native_views[index])
-      native_views[index]->SetWebContents(adapter.contents());
     paused_output.erase(view);
     UpdateOutput();
     reply.Set("accepted", static_cast<bool>(status));
-    const auto* lifecycle = endpoint.FindWebView(session, view);
+    const auto* lifecycle = view_model.FindWebView(session, view);
     reply.Set("pending", lifecycle->pending.has_value());
     reply.Set("completed", static_cast<bool>(status) && !lifecycle->pending);
     reply.Set("lifecycleGeneration", base::NumberToString(lifecycle->lifecycle_generation));
@@ -1583,212 +1482,55 @@ base::DictValue HarnessMainParts::State::HandleControl(const base::DictValue& re
   reply.Set("code", static_cast<int>(status.error));
   if (!status)
     reply.Set("error", status.message);
-  reply.Set("token", TokenValue(endpoint.Token(session, view).value));
+  reply.Set("token", TokenValue(view_model.Token(session, view).value));
   UpdateOutput();
   return reply;
 }
 
-HarnessMainParts::HarnessMainParts() = default;
-HarnessMainParts::~HarnessMainParts() = default;
-void HarnessMainParts::PostCreateMainMessageLoop() {
-#if !defined(REMOTEKIT_DEMO_HARNESS)
+RemoteKitMainParts::RemoteKitMainParts() = default;
+RemoteKitMainParts::~RemoteKitMainParts() = default;
+void RemoteKitMainParts::PostCreateMainMessageLoop() {
   // Install before content's thread/service startup. Content owns and destroys
   // this UI-thread clipboard after browser teardown (BrowserMainLoop dtor).
   headless::SetHeadlessClipboardForCurrentThread();
-#endif
 }
-int HarnessMainParts::PostCreateThreads() {
-#if !defined(REMOTEKIT_DEMO_HARNESS)
+int RemoteKitMainParts::PostCreateThreads() {
   CHECK(content::GetIOThreadTaskRunner({})->PostTask(
       FROM_HERE, base::BindOnce([] { new ServiceIoClipboard; })));
-#endif
   return 0;
 }
-int HarnessMainParts::PreMainMessageLoopRun() {
+int RemoteKitMainParts::PreMainMessageLoopRun() {
   LOG(INFO) << "RemoteKit startup PreMain entered";
   state_ = std::make_unique<State>();
   const auto& command = *base::CommandLine::ForCurrentProcess();
-#if defined(REMOTEKIT_DEMO_HARNESS)
-  state_->demo = true;
-#endif
-  const auto host_mode = command.GetSwitchValueASCII("remotekit-render-host");
-  if (!host_mode.empty() && host_mode != "offscreen" && host_mode != "window")
-    return 2;
-#if !defined(REMOTEKIT_DEMO_HARNESS)
-  if (host_mode == "window") {
-    LOG(ERROR) << "Native window render host is unsupported by the service Browser";
-    return 2;
-  }
-  state_->offscreen = true;
-#else
-  state_->offscreen = false;
-#endif
-  if (state_->offscreen) {
-    CHECK(!display::Screen::HasScreen());
-    state_->screen = CreateOffscreenScreen();
-    display::Screen::SetScreenInstance(state_->screen.get());
-  } else if (!display::Screen::HasScreen()) {
-    state_->screen = views::CreateDesktopScreen();
-  }
-  base::FilePath data = command.GetSwitchValuePath("data-path");
-  if (data.empty()) {
-    CHECK(base::PathService::Get(base::DIR_LOCAL_APP_DATA, &data));
-    data = data.AppendASCII("RemoteKit").AppendASCII("demo");
-  }
-#if defined(REMOTEKIT_DEMO_HARNESS)
-  state_->demo = true;
-#endif
+  CHECK(!display::Screen::HasScreen());
+  state_->screen = CreateOffscreenScreen();
+  display::Screen::SetScreenInstance(state_->screen.get());
+  const base::FilePath data = command.GetSwitchValuePath("data-path");
   uint64_t service_session = 0;
-  if (!state_->demo &&
-      (!command.HasSwitch("control-channel") ||
-       !base::StringToUint64(command.GetSwitchValueASCII("session-id"), &service_session) ||
-       service_session == 0 || command.GetSwitchValueASCII("tenant-id").empty() ||
-       !data.IsAbsolute() || !command.HasSwitch("data-path") || command.HasSwitch("sessions")))
+  if (!command.HasSwitch("control-channel") ||
+      !base::StringToUint64(command.GetSwitchValueASCII("session-id"), &service_session) ||
+      service_session == 0 || command.GetSwitchValueASCII("tenant-id").empty() ||
+      !data.IsAbsolute())
     return 2;
-  int session_count = 1;
-#if defined(REMOTEKIT_DEMO_HARNESS)
-  if (command.HasSwitch("sessions")) {
-    CHECK(base::StringToInt(command.GetSwitchValueASCII("sessions"), &session_count));
-    CHECK(session_count >= 1 && session_count <= 8);
-  }
-#endif
-  for (int i = 0; i < session_count; ++i) {
-    auto session =
-        state_->endpoint.CreateSession(state_->demo ? "tenant-" + base::NumberToString(i + 1)
-                                                    : command.GetSwitchValueASCII("tenant-id"),
-                                       state_->demo ? 0 : service_session);
-    CHECK(session);
-    auto profile = state_->endpoint.AddProfile(session.value, "default");
-    CHECK(profile);
-    state_->sessions.push_back(session.value);
-    state_->profiles.push_back(profile.value);
-    state_->contexts.push_back(std::make_unique<BrowserContext>(
-        data.AppendASCII("session-" + base::NumberToString(session.value))
-            .AppendASCII("profile-" + base::NumberToString(profile.value))));
-  }
+  auto session =
+      state_->view_model.CreateSession(command.GetSwitchValueASCII("tenant-id"), service_session);
+  CHECK(session);
+  auto profile = state_->view_model.AddProfile(session.value, "default");
+  CHECK(profile);
+  state_->session_id = session.value;
+  state_->profiles.push_back(profile.value);
+  state_->contexts.push_back(std::make_unique<BrowserContext>(
+      data.AppendASCII("session-" + base::NumberToString(session.value))
+          .AppendASCII("profile-" + base::NumberToString(profile.value))));
   LOG(INFO) << "RemoteKit startup Profile ready";
-  if (state_->demo)
-    StartDevTools(data);
-#if defined(REMOTEKIT_DEMO_HARNESS)
-  auto urls = base::SplitString(command.GetSwitchValueASCII("urls"), "|", base::TRIM_WHITESPACE,
-                                base::SPLIT_WANT_NONEMPTY);
-  if (urls.empty())
-    urls = {"https://example.com", "https://example.org"};
-#else
-  std::vector<std::string> urls;
-#endif
-  if (urls.size() > 8)
+  int width = 1920, height = 1080;
+  if ((command.HasSwitch("atlas-width") &&
+       !base::StringToInt(command.GetSwitchValueASCII("atlas-width"), &width)) ||
+      (command.HasSwitch("atlas-height") &&
+       !base::StringToInt(command.GetSwitchValueASCII("atlas-height"), &height)) ||
+      width < 16 || height < 16 || width > 8192 || height > 8192)
     return 2;
-  std::vector<PackItem> items;
-  for (size_t i = 0; i < urls.size(); ++i) {
-    const size_t owner = i % state_->sessions.size();
-    auto view = state_->endpoint.CreateWebView(state_->sessions[owner], state_->profiles[owner]);
-    CHECK(view);
-    items.push_back({view.value, 480, 360, 1.0});
-  }
-  // Pick a compact atlas shape, then use MaxRects for the actual placement.
-  const int columns =
-      urls.size() <= 2 ? std::max(1, static_cast<int>(urls.size())) : (urls.size() <= 4 ? 2 : 3);
-  const int rows = (static_cast<int>(urls.size()) + columns - 1) / columns;
-  int atlas_width = columns * 488, atlas_height = rows * 368;
-  if (!state_->demo) {
-    atlas_width = 1920;
-    atlas_height = 1080;
-    if ((command.HasSwitch("atlas-width") &&
-         !base::StringToInt(command.GetSwitchValueASCII("atlas-width"), &atlas_width)) ||
-        (command.HasSwitch("atlas-height") &&
-         !base::StringToInt(command.GetSwitchValueASCII("atlas-height"), &atlas_height)) ||
-        atlas_width < 16 || atlas_height < 16 || atlas_width > 8192 || atlas_height > 8192)
-      return 2;
-  }
-  auto packed = PackAtlas(atlas_width, atlas_height, 4, items);
-  CHECK(packed);
-  int width = 0, height = 0;
-  auto root = state_->offscreen ? nullptr : std::make_unique<views::View>();
-  state_->root = root.get();
-  for (size_t i = 0; i < urls.size(); ++i) {
-    const size_t owner = i % state_->sessions.size();
-    auto* context = state_->contexts[owner].get();
-    auto contents = std::make_unique<WebView>(context, &state_->endpoint, state_->sessions[owner],
-                                              items[i].view);
-    contents->SetNativeFocusEnabled(!command.HasSwitch("gpu-output"));
-    auto requests = std::make_unique<PageRequests>();
-    requests->Bind(contents->contents());
-    state_->page_requests.push_back(std::move(requests));
-    auto* view = root->AddChildView(std::make_unique<views::WebView>(context));
-    state_->native_views.push_back(view);
-    view->SetWebContents(contents->contents());
-    const auto& p = packed.value.placements[i];
-    view->SetBounds(p.content.x, p.content.y, p.content.width, p.content.height);
-    context->GetClientHintsControllerDelegate()->SetMostRecentMainFrameViewportSize(
-        gfx::Size(p.content.width, p.content.height));
-    state_->placements.emplace_back(p.content.x, p.content.y, p.content.width, p.content.height);
-    width = std::max(width, p.outer.x + p.outer.width);
-    height = std::max(height, p.outer.y + p.outer.height);
-    CHECK(contents->SetVisible(true));
-    CHECK(contents->Navigate(GURL(urls[i])));
-    state_->specs.push_back({480, 360, false, urls[i]});
-    state_->contents.push_back(std::move(contents));
-  }
-  if (!state_->demo) {
-    width = atlas_width;
-    height = atlas_height;
-  }
-  if (!state_->offscreen) {
-    root->SetPreferredSize(gfx::Size(width, height));
-    auto delegate = std::make_unique<views::WidgetDelegate>();
-    delegate->SetTitle(u"RemoteKit — content embedder harness");
-    const bool embedded = command.HasSwitch("parent-window");
-    const bool frame_less = embedded || !state_->demo;
-    delegate->SetHasWindowSizeControls(!frame_less);
-    delegate->SetContentsView(std::move(root));
-    auto* widget = new views::Widget();
-    // Embedded and service HWNDs have no non-client area. Choose the Views
-    // type before Init instead of leaving a titled widget's frame layout behind
-    // when changing the Win32 style during reparenting.
-    views::Widget::InitParams params(views::Widget::InitParams::NATIVE_WIDGET_OWNS_WIDGET,
-                                     frame_less ? views::Widget::InitParams::TYPE_WINDOW_FRAMELESS
-                                                : views::Widget::InitParams::TYPE_WINDOW);
-    params.remove_standard_frame = frame_less;
-    state_->window_delegate = std::move(delegate);
-    params.delegate = state_->window_delegate.get();
-    params.bounds = gfx::Rect(state_->demo ? 40 : -20000, state_->demo ? 40 : -20000,
-                              width + (state_->demo ? 20 : 0), height + (state_->demo ? 50 : 0));
-    widget->Init(std::move(params));
-    state_->widget = widget;
-    state_->observer = std::make_unique<WindowObserver>(
-        base::BindRepeating(&State::OnWindowClosed, base::Unretained(state_.get())));
-    widget->AddObserver(state_->observer.get());
-    if (embedded) {
-      uint64_t parent_value = 0;
-      CHECK(base::StringToUint64(command.GetSwitchValueASCII("parent-window"), &parent_value));
-      HWND parent = reinterpret_cast<HWND>(static_cast<uintptr_t>(parent_value));
-      CHECK(IsWindow(parent));
-      CHECK(AreDpiAwarenessContextsEqual(GetWindowDpiAwarenessContext(parent),
-                                         GetThreadDpiAwarenessContext()))
-          << "Endpoint and browser must use the same Per-Monitor V2 DPI context";
-      HWND child = widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget();
-      LONG_PTR style = GetWindowLongPtr(child, GWL_STYLE);
-      SetWindowLongPtr(child, GWL_STYLE,
-                       (style & ~(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU)) | WS_CHILD);
-      SetLastError(0);
-      HWND previous_parent = SetParent(child, parent);
-      CHECK(previous_parent || GetLastError() == 0);
-      RECT bounds;
-      CHECK(GetClientRect(parent, &bounds));
-      CHECK(SetWindowPos(child, nullptr, command.HasSwitch("gpu-output") ? -bounds.right * 2 : 0, 0,
-                         bounds.right, bounds.bottom,
-                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED));
-    }
-    if (!command.HasSwitch("no-window-show"))
-      widget->Show();
-    state_->output_scale =
-        state_->demo
-            ? GetDpiForWindow(widget->GetNativeWindow()->GetHost()->GetAcceleratedWidget()) / 96.0f
-            : 1.0f;
-  } else {
-    state_->output_scale = 1.f;
-  }
   state_->logical_width = width;
   state_->logical_height = height;
   const auto dimensions =
@@ -1804,20 +1546,18 @@ int HarnessMainParts::PreMainMessageLoopRun() {
                                    state->UpdateOutput();
                                  },
                                  base::Unretained(state_.get())));
-  if (command.HasSwitch("control-channel")) {
-    state_->control = std::make_unique<ControlServer>(
-        command.GetSwitchValueASCII("control-channel"),
-        base::BindRepeating(&State::HandleControl, base::Unretained(state_.get())),
-        base::BindRepeating(&State::TakeControlAttachment, base::Unretained(state_.get())),
-        base::BindOnce(&State::OnControlClosed, base::Unretained(state_.get())));
-    LOG(INFO) << "RemoteKit startup control ready";
-  }
+  state_->control = std::make_unique<ControlServer>(
+      command.GetSwitchValueASCII("control-channel"),
+      base::BindRepeating(&State::HandleControl, base::Unretained(state_.get())),
+      base::BindRepeating(&State::TakeControlAttachment, base::Unretained(state_.get())),
+      base::BindOnce(&State::OnControlClosed, base::Unretained(state_.get())));
+  LOG(INFO) << "RemoteKit startup control ready";
   return 0;
 }
-void HarnessMainParts::WillRunMainMessageLoop(std::unique_ptr<base::RunLoop>& run_loop) {
+void RemoteKitMainParts::WillRunMainMessageLoop(std::unique_ptr<base::RunLoop>& run_loop) {
   state_->quit = run_loop->QuitClosure();
 }
-void HarnessMainParts::PostMainMessageLoopRun() {
+void RemoteKitMainParts::PostMainMessageLoopRun() {
   if (!state_)
     return;
   state_->shutting_down = true;
@@ -1839,21 +1579,6 @@ void HarnessMainParts::PostMainMessageLoopRun() {
   }
   state_->page_requests.clear();
   state_->pending_popups.clear();
-  StopDevTools();
-  if (state_->widget)
-    for (auto& view : state_->native_views)
-      if (view)
-        view->SetWebContents(nullptr);
-  state_->native_views.clear();
-  if (state_->widget && state_->observer)
-    state_->widget->RemoveObserver(state_->observer.get());
-  state_->observer.reset();
-  auto* widget = state_->widget.get();
-  state_->widget = nullptr;
-  state_->root = nullptr;
-  if (widget)
-    widget->CloseNow();
-  state_->window_delegate.reset();
   state_->contents.clear();
   // Offscreen compositor teardown can make sync Mojo calls. Run the deferred
   // deletions after WebContents destruction and before its virtual Screen dies.

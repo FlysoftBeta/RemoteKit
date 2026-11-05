@@ -17,7 +17,7 @@ index 2ce358d68a..f397d71ab1 100644
  gfx::Vector2dF FlingScheduler::GetPixelsPerInch(
      const gfx::PointF& position_in_screen) {
 +  // The service embedder has no client physical monitor. Keep logical input
-+  // metrics separate from page DPR and native demo monitor characteristics.
++  // metrics separate from page DPR and host monitor characteristics.
 +  if (base::CommandLine::ForCurrentProcess()->HasSwitch(
 +          "remotekit-service-input")) {
 +    return gfx::Vector2dF(input::kDefaultPixelsPerInch,

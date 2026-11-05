@@ -9,7 +9,7 @@
 #include "base/memory/weak_ptr.h"
 #include "components/sessions/core/serialized_navigation_entry.h"
 #include "content/public/browser/session_storage_namespace_handle.h"
-#include "remotekit/core.hpp"
+#include "remotekit/browser/view_model.h"
 
 namespace content {
 class BrowserContext;

@@ -64,7 +64,6 @@ class PageRequests final : public content::WebContentsDelegate,
   void CloseContents(content::WebContents*) override;
   using content::WebContentsObserver::BeforeUnloadFired;
   void BeforeUnloadFired(content::WebContents*, bool, bool*) override;
-  void ReportTooltip(const std::u16string& text);
   using PopupHandler = std::function<content::WebContents*(std::unique_ptr<content::WebContents>,
                                                            const GURL&,
                                                            WindowOpenDisposition,

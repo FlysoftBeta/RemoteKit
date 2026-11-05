@@ -18,7 +18,6 @@
 #include "content/public/browser/host_zoom_map.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/navigation_handle.h"
-#include "content/public/browser/reload_type.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/weak_document_ptr.h"
 #include "content/public/browser/web_contents.h"
@@ -474,11 +473,6 @@ bool PageRequests::HandleContextMenu(content::RenderFrameHost& frame,
   Add(std::move(request));
   return true;
 }
-void PageRequests::ReportTooltip(const std::u16string& text) {
-  auto event = Kind("tooltip");
-  event.Set("text", Text(text));
-  Event(std::move(event));
-}
 bool PageRequests::CanEnterFullscreenModeForTab(content::RenderFrameHost*) {
   return true;
 }
@@ -728,20 +722,7 @@ base::DictValue PageRequests::Command(const base::DictValue& command) {
     return Result("action_required");
   auto result = Result();
   result.Set("state", "submitted");
-  auto& controller = contents->GetController();
-  if (*action == "back") {
-    if (!controller.CanGoBack())
-      return Result("no_back_entry");
-    controller.GoBack();
-  } else if (*action == "forward") {
-    if (!controller.CanGoForward())
-      return Result("no_forward_entry");
-    controller.GoForward();
-  } else if (*action == "reload") {
-    controller.Reload(content::ReloadType::NORMAL, true);
-  } else if (*action == "stop") {
-    contents->Stop();
-  } else if (*action == "find") {
+  if (*action == "find") {
     if (!Live(contents->GetPrimaryMainFrame()))
       return Result("document_invalidated");
     const auto* text = command.FindString("text");

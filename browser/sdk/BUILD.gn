@@ -4,14 +4,17 @@ shared_library("remotekit_sdk") {
   configs -= [ "//build/config/clang:find_bad_constructs" ]
   output_name = "remotekit_sdk"
   sources = [
-    "../../sdk/include/remotekit_sdk.h",
     "../../sdk/include/remotekit_rtc.h",
+    "../../sdk/include/remotekit_sdk.h",
     "remotekit_rtc.cc",
     "remotekit_sdk.cc",
-    "rtc_silent_audio.h",
+    "render_generation_state_probe.cc",
+    "render_slots_abi_probe.cc",
     "rtc_audio_source.h",
+    "rtc_silent_audio.h",
     "rtc_trace.h",
   ]
+  include_dirs = [ "//remotekit" ]
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
   libs = [ "ws2_32.lib" ]
 

@@ -13,14 +13,12 @@
 #include "components/embedder_support/user_agent_utils.h"
 #include "content/public/browser/browser_main_parts.h"
 #include "content/public/browser/content_browser_client.h"
-#include "content/public/browser/devtools_manager_delegate.h"
 #include "content/public/common/content_client.h"
 #include "content/public/common/content_features.h"
 #include "content/public/renderer/content_renderer_client.h"
 #include "remotekit/browser/compat.h"
 #include "remotekit/browser/compat_renderer.h"
-#include "remotekit/browser/harness.h"
-#include "remotekit/browser/webview.h"
+#include "remotekit/browser/browser_runtime.h"
 #include "remotekit/browser/browser_context.h"
 #include "remotekit/browser/service_input_policy.h"
 #include "services/network/public/mojom/network_context.mojom.h"
@@ -47,12 +45,10 @@ class ContentClient final : public content::ContentClient {
 };
 class BrowserClient final : public content::ContentBrowserClient {
  public:
-#if !defined(REMOTEKIT_DEMO_HARNESS)
   std::unique_ptr<media::AudioManager> CreateAudioManager(media::AudioLogFactory* log) override {
     return CreateAudioTarget(log);
   }
   bool OverridesAudioManager() override { return true; }
-#endif
   void OnWebContentsCreated(content::WebContents* contents) override {
     BrowserContext::InstallSiteIdentity(contents);
   }
@@ -72,16 +68,8 @@ class BrowserClient final : public content::ContentBrowserClient {
     *no_javascript_access = false;
     return user_gesture;
   }
-  std::unique_ptr<content::DevToolsManagerDelegate> CreateDevToolsManagerDelegate() override {
-    return std::make_unique<content::DevToolsManagerDelegate>();
-  }
   std::unique_ptr<content::BrowserMainParts> CreateBrowserMainParts(bool) override {
-    return std::make_unique<HarnessMainParts>();
-  }
-  void OverrideWebPreferences(content::WebContents* contents,
-                              content::SiteInstance&,
-                              blink::web_pref::WebPreferences* prefs) override {
-    WebView::OverridePreferences(contents, prefs);
+    return std::make_unique<RemoteKitMainParts>();
   }
   std::string GetUserAgent() override { return ChromeUserAgent(); }
   std::string GetProduct() override { return embedder_support::GetProductAndVersion(); }
@@ -105,40 +93,26 @@ MainDelegate::MainDelegate() = default;
 MainDelegate::~MainDelegate() = default;
 std::optional<int> MainDelegate::BasicStartupComplete() {
   auto& command = *base::CommandLine::ForCurrentProcess();
-#if defined(REMOTEKIT_DEMO_HARNESS)
-  command.AppendSwitch("demo-harness");
-#else
-  if (command.HasSwitch("demo-harness") || command.HasSwitch("sessions") ||
-      command.HasSwitch("urls") || command.HasSwitch("parent-window"))
-    return 2;
-  command.AppendSwitch("gpu-output");
   // Service input uses logical metrics, independent of this host's monitor and
-  // native touch preferences. The explicit demo keeps its native host policy.
+  // native touch preferences.
   command.AppendSwitch("remotekit-service-input");
   ConfigureServiceScrollPolicy(command);
-#endif
-  if (command.HasSwitch("gpu-output")) {
-    // Service Aura roots are offscreen; product visibility controls demand.
-    command.AppendSwitch("disable-backgrounding-occluded-windows");
-    std::string disabled = command.GetSwitchValueASCII("disable-features");
-    if (!disabled.empty())
-      disabled += ",";
-    disabled += "CalculateNativeWinOcclusion";
-#if !defined(REMOTEKIT_DEMO_HARNESS)
-    // Our AudioManager owns the in-process playback target. Device monitoring
-    // also routes by this feature, so it must match the actual service placement.
+  // Service Aura roots are offscreen; product visibility controls demand.
+  command.AppendSwitch("disable-backgrounding-occluded-windows");
+  std::string disabled = command.GetSwitchValueASCII("disable-features");
+  if (!disabled.empty())
     disabled += ",";
-    disabled += features::kAudioServiceOutOfProcess.name;
-#endif
-    command.AppendSwitchASCII("disable-features", disabled);
-  }
+  disabled += "CalculateNativeWinOcclusion";
+  // Our AudioManager owns the in-process playback target. Device monitoring
+  // also routes by this feature, so it must match the actual service placement.
+  disabled += ",";
+  disabled += features::kAudioServiceOutOfProcess.name;
+  command.AppendSwitchASCII("disable-features", disabled);
   std::string enabled = command.GetSwitchValueASCII("enable-features");
   if (!enabled.empty())
     enabled += ",";
   enabled += features::kWebContentsDiscard.name;
-#if !defined(REMOTEKIT_DEMO_HARNESS)
   enabled += ",RemoteKitOsrOutput";
-#endif
   command.AppendSwitchASCII("enable-features", enabled);
   logging::LoggingSettings settings;
   settings.logging_dest = logging::LOG_TO_STDERR;

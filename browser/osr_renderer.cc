@@ -2,7 +2,7 @@
 #include "remotekit/browser/offscreen_host.h"
 #include "remotekit/browser/render_channel.h"
 #include "remotekit/browser/osr_wake_state.h"
-#include "remotekit/core.hpp"
+#include "remotekit/browser/view_model.h"
 
 #include <d3d11_4.h>
 #include <d3dcompiler.h>

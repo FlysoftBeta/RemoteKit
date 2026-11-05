@@ -3,7 +3,7 @@
 #include <deque>
 #include <algorithm>
 #include <string>
-#include "remotekit/core.hpp"
+#include "remotekit/browser/view_model.h"
 namespace remotekit::browser {
 // Exact, bounded evidence of an owner explicitly retired by WebView. Unknown
 // sequences and identities never acquire terminal semantics from absence.

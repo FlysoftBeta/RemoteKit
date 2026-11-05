@@ -1,7 +1,7 @@
 #ifndef REMOTEKIT_BROWSER_CLIENT_GESTURE_PACKET_H_
 #define REMOTEKIT_BROWSER_CLIENT_GESTURE_PACKET_H_
 #include "base/functional/callback.h"
-#include "remotekit/core.hpp"
+#include "remotekit/browser/view_model.h"
 #include "ui/events/gesture_detection/gesture_event_data_packet.h"
 #include "ui/events/velocity_tracker/motion_event.h"
 namespace remotekit::browser {

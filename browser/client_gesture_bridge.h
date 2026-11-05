@@ -7,7 +7,7 @@
 #include "base/memory/weak_ptr.h"
 #include "base/timer/timer.h"
 #include "components/input/render_widget_host_input_event_router.h"
-#include "remotekit/core.hpp"
+#include "remotekit/browser/view_model.h"
 #include "browser/client_gesture_packet.h"
 #include "browser/client_input_timing.h"
 #include "third_party/blink/public/common/input/web_gesture_event.h"
@@ -33,8 +33,6 @@ class ClientGestureBridge final : public ui::TouchDispositionGestureFilterClient
   bool has_routed_raw() const { return first_id_ != 0; }
   void Cancel(bool deliver);
   void ForwardGestureEvent(const ui::GestureEventData&) override;
-  const std::string& sequence() const { return sequence_; }
-  bool pending() const { return !pending_.empty(); }
 
  private:
   friend class base::RefCounted<ClientGestureBridge>;

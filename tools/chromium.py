@@ -12,11 +12,16 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = '1aa07b638799e59656559ae6c6649d4b197f555e'
-OVERLAY_TREES = ('browser', 'endpoint/include', 'endpoint/src', 'protocol', 'sdk/include')
+OVERLAY_TREES = ('browser', 'endpoint/include', 'protocol', 'sdk/include')
+RETIRED_OVERLAY_TREES = ('endpoint/src',)
 # Git HEAD content (normalized LF) for this migration's explicitly removed files.
 # Retain these entries after the first manifest so a prior partial stage can
 # still remove old files once their content is verified.
 LEGACY_REMOVED = {
+    'browser/harness.cc': 'cc18300f2e8831d76d37cadbae54abea855a7393b4e014850cd968ecc78f1589',
+    'browser/harness.h': '72abedaca6332bef86127dd2b6fddff21bdca00fb59353e7da924aa3b3612d46',
+    'browser/devtools.cc': 'a0d1e584542d757afd51881b7a26a4e894e67d2a6b9e94cb49dca29003512771',
+    'browser/devtools.h': '3e0037e1c1024da87addba7e496c00e7788a526d7a4c08b2c8fe3025a4a6da94',
     'browser/capture_delivery_probe.cc': 'f428742730f057c136b5c7daa85837cf170f008c35bbf6dd9a58ab8978345d84',
     'browser/capture_render_rate_probe.cc': '9e5ba24a7506590b8a37f262815eb30b86590f61065c9b32e2df70ee4abc53fa',
     'browser/gpu_atlas.cc': '5b5d973fe90b2a0c0bea5b342ed81a35350b350139e105af29d8615fbaa96b12',
@@ -32,10 +37,11 @@ LEGACY_REMOVED = {
 def digest(path):
     return hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
 
-def owned_path(destination, relative):
+def owned_path(destination, relative, *, cleanup=False):
     path = Path(relative)
+    trees = OVERLAY_TREES + RETIRED_OVERLAY_TREES if cleanup else OVERLAY_TREES
     if path.is_absolute() or '..' in path.parts or not any(
-            path == Path(tree) or Path(tree) in path.parents for tree in OVERLAY_TREES):
+            path == Path(tree) or Path(tree) in path.parents for tree in trees):
         raise ValueError(f'invalid overlay manifest path: {relative}')
     target = destination / path
     if not target.resolve().is_relative_to(destination.resolve()):
@@ -96,9 +102,9 @@ def main():
                     if copy_if_changed(path, target):
                         if path.suffix == '.gn': gn_changed = True
     for relative, expected in previous.items():
-        if relative in current or (ROOT / relative).exists():
+        if relative in current:
             continue
-        target = owned_path(destination, relative)
+        target = owned_path(destination, relative, cleanup=True)
         if target.exists():
             if not target.is_file() or digest(target) != expected:
                 p.error(f'refusing to delete modified overlay file {target}')
@@ -111,12 +117,12 @@ def main():
     gn_args = output / 'args.gn'
     old = gn_args.read_text(encoding='utf-8')
     root_targets = ['//remotekit/browser:remotekit_browser',
-                    '//remotekit/browser:remotekit_browser_demo',
                     '//remotekit/browser/sdk:remotekit_sdk']
     match = re.search(r'root_extra_deps\s*=\s*\[([^\]]*)\]', old, re.DOTALL)
     existing = match.group(1) if match else ''
+    existing = re.sub(r'\s*"//remotekit/browser:remotekit_browser_demo"\s*,?', '', existing)
     missing = [target for target in root_targets if '"' + target + '"' not in existing]
-    if missing:
+    if missing or (match and existing != match.group(1)):
         backup = output / 'args.before-remotekit.gn'
         if not backup.exists(): backup.write_text(old, encoding='utf-8')
         body = existing.rstrip()

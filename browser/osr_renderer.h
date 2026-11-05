@@ -11,23 +11,19 @@
 #include "mojo/public/cpp/system/message_pipe.h"
 #include "remotekit/shared_render_slots.h"
 
-namespace content {
-class WebContents;
-}
 namespace remotekit {
 struct InputEvent;
 }
 namespace remotekit::browser {
 class OffscreenHost;
 
-// UI-sequence-only GPU producer. The borrowed WebContents must be stopped or
-// reported through SetViews before its execution instance is replaced.
+// UI-sequence-only GPU producer. Borrowed hosts must be stopped or reported
+// through SetViews before their execution instances are replaced.
 class OsrRenderer final {
  public:
   struct View {
     // Both output pixels/DIP and the independent page DPR are published unchanged.
     SharedAtlasView metadata{};
-    raw_ptr<content::WebContents> contents = nullptr;
     bool render_enabled = false;
     // Explicit service-host identity. Native-window output is unsupported.
     raw_ptr<OffscreenHost> offscreen_host = nullptr;

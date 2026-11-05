@@ -15,15 +15,11 @@
 #include "base/feature_list.h"
 #include "base/functional/bind.h"
 #include "base/location.h"
-#include "base/no_destructor.h"
 #include "base/pickle.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "components/input/native_web_keyboard_event.h"
-#include "components/embedder_support/user_agent_utils.h"
-#include "components/version_info/version_info.h"
-#include "third_party/blink/public/common/web_preferences/web_preferences.h"
 #include "third_party/blink/public/common/widget/device_emulation_params.h"
 #include "third_party/blink/public/mojom/page/widget.mojom.h"
 #include "components/input/render_widget_host_input_event_router.h"
@@ -73,10 +69,6 @@
 
 namespace remotekit::browser {
 namespace {
-std::vector<WebView*>& DeviceAdapters() {
-  static base::NoDestructor<std::vector<WebView*>> adapters;
-  return *adapters;
-}
 Status Fail(Error error, const char* message) {
   return {error, message};
 }
@@ -193,27 +185,20 @@ gfx::PointF ViewportToScreen(content::RenderWidgetHostViewBase* view, gfx::Point
 }  // namespace
 
 WebView::WebView(content::BrowserContext* context,
-                 Endpoint* endpoint,
+                 ViewModel* view_model,
                  SessionId session,
                  WebViewId view,
-                 bool offscreen_host,
                  std::unique_ptr<content::WebContents> adopted)
-    : context_(context),
-      endpoint_(endpoint),
-      session_(session),
-      view_(view),
-      use_offscreen_host_(offscreen_host) {
-  DeviceAdapters().push_back(this);
+    : context_(context), model_(view_model), session_(session), view_(view) {
   CHECK(context_);
-  CHECK(endpoint_);
+  CHECK(model_);
   content::DevToolsAgentHost::AddObserver(this);
-  CHECK(endpoint_->FindWebView(session_, view_));
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  CHECK(model_->FindWebView(session_, view_));
+  const auto* model = model_->FindWebView(session_, view_);
   if (model->actual == Residency::live)
     CreateContents(std::move(adopted));
 }
 WebView::~WebView() {
-  std::erase(DeviceAdapters(), this);
   content::DevToolsAgentHost::RemoveObserver(this);
   weak_factory_.InvalidateWeakPtrs();
   lifecycle_timer_.Stop();
@@ -225,8 +210,8 @@ WebView::~WebView() {
   DropContents();
   auto callback = std::move(completion_);
   if (lifecycle_request_)
-    endpoint_->CompleteLifecycle(session_, *lifecycle_request_, false);
-  endpoint_->InvalidateInstance(session_, view_);
+    model_->CompleteLifecycle(session_, *lifecycle_request_, false);
+  model_->InvalidateInstance(session_, view_);
   if (callback)
     callback(Fail(Error::unavailable, "WebView adapter destroyed"));
 }
@@ -251,7 +236,7 @@ void WebView::CreateContents(std::unique_ptr<content::WebContents> adopted) {
   implementation->GetTouchEmulator(true);
 }
 void WebView::AttachOffscreenHost() {
-  if (!use_offscreen_host_ || !contents_)
+  if (!contents_)
     return;
   offscreen_host_ = std::make_unique<OffscreenHost>(
       contents_.get(), gfx::Size(std::max(1, viewport_width_ ? viewport_width_ : 480),
@@ -269,27 +254,8 @@ void WebView::DropContents() {
 }
 void WebView::SetRenderDemand(bool enabled) {
   render_demand_ = enabled;
-  if (!use_offscreen_host_)
-    return;
   if (offscreen_host_)
     offscreen_host_->SetRenderDemand(enabled && visible_);
-}
-void WebView::OverridePreferences(content::WebContents* contents,
-                                  blink::web_pref::WebPreferences* prefs) {
-  for (auto* adapter : DeviceAdapters()) {
-    if (adapter->contents() != contents || !adapter->tablet_)
-      continue;
-    prefs->touch_event_feature_detection_enabled = true;
-    prefs->pointer_events_max_touch_points = 10;
-    prefs->available_pointer_types =
-        static_cast<int>(blink::mojom::PointerType::kPointerCoarseType);
-    prefs->primary_pointer_type = blink::mojom::PointerType::kPointerCoarseType;
-    prefs->available_hover_types = static_cast<int>(blink::mojom::HoverType::kHoverNone);
-    prefs->primary_hover_type = blink::mojom::HoverType::kHoverNone;
-    prefs->viewport_enabled = true;
-    prefs->viewport_meta_enabled = true;
-    prefs->shrinks_viewport_contents_to_fit = true;
-  }
 }
 void WebView::InvalidateLayoutInput(bool remains_visible) {
   if (!remains_visible) {
@@ -308,25 +274,13 @@ void WebView::InvalidateLayoutInput(bool remains_visible) {
     }
   }
   ReleasePointer(true);
-  endpoint_->InvalidateInput(session_, view_);
+  model_->InvalidateInput(session_, view_);
 }
-void WebView::ConfigureDevice(int width,
-                              int height,
-                              bool tablet,
-                              float scale,
-                              bool match_page_backing) {
-  const bool mode_changed = tablet_ != tablet;
-  const bool changed = viewport_width_ != width || viewport_height_ != height || mode_changed ||
-                       device_scale_ != scale || match_page_backing_ != match_page_backing;
-  if (match_page_backing_ && !match_page_backing) {
-    if (auto* native_view = RootView(contents_.get()))
-      native_view->SetScaleOverrideForCapture(1.0f);
-    backing_view_.reset();
-  }
-  match_page_backing_ = match_page_backing;
+void WebView::ConfigureDevice(int width, int height, float scale) {
+  const bool changed =
+      viewport_width_ != width || viewport_height_ != height || device_scale_ != scale;
   viewport_width_ = width;
   viewport_height_ = height;
-  tablet_ = tablet;
   device_scale_ = scale;
   if (offscreen_host_)
     offscreen_host_->SetViewport(gfx::Size(width, height));
@@ -339,7 +293,7 @@ void WebView::RefreshBackingScale() {
   ApplyBackingScale(RootView(contents_.get()));
 }
 void WebView::ApplyBackingScale(content::RenderWidgetHostViewBase* native_view) {
-  if (!match_page_backing_ || !native_view)
+  if (!native_view)
     return;
   auto* window = native_view->GetNativeView();
   const auto* host = window ? window->GetHost() : nullptr;
@@ -376,8 +330,7 @@ void WebView::ApplyDevice(content::RenderFrameHost* frame) {
   if (!widget)
     return;
   blink::DeviceEmulationParams params;
-  params.screen_type = tablet_ ? blink::mojom::EmulatedScreenType::kMobile
-                               : blink::mojom::EmulatedScreenType::kDesktop;
+  params.screen_type = blink::mojom::EmulatedScreenType::kDesktop;
   params.screen_size = gfx::Size(viewport_width_, viewport_height_);
   params.view_size = params.screen_size;
   params.device_scale_factor = device_scale_;
@@ -385,15 +338,12 @@ void WebView::ApplyDevice(content::RenderFrameHost* frame) {
                                        ? display::mojom::ScreenOrientation::kLandscapePrimary
                                        : display::mojom::ScreenOrientation::kPortraitPrimary;
   params.screen_orientation_angle = viewport_width_ > viewport_height_ ? 90 : 0;
-  params.force_viewport_meta = tablet_;
-  params.force_text_size_adjust = tablet_;
-  params.force_android_overlay_scrollbar = tablet_;
   widget->EnableDeviceEmulation(params, blink::mojom::DeviceEmulationCacheBehavior::kKeepCache);
 }
 Result<std::string> WebView::ExportNavigation() const {
   if (lifecycle_request_ || lifecycle_uncertain_)
     return {{}, Fail(Error::busy, "Navigation state is transitioning or uncertain")};
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (!model)
     return {{}, Fail(Error::not_found, "WebView model missing")};
   Result<std::string> payload;
@@ -421,7 +371,7 @@ Result<std::string> WebView::ExportNavigation() const {
   return {std::string(envelope.AsStringView()), {}};
 }
 Status WebView::ImportNavigation(std::string_view bytes) {
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (contents_ || lifecycle_request_ || !model || model->actual != Residency::unloaded)
     return Fail(Error::unavailable, "Navigation import requires an unloaded WebView");
   if (bytes.size() < sizeof(std::uint32_t) || bytes.size() > kMaxOwnedNavigationBytes)
@@ -553,7 +503,7 @@ Status WebView::RunNavigation(const std::string& action,
     operation = navigation_operations_.Find(*identity);
     operation->url = url.spec();
   }
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (lifecycle_uncertain_ || !contents_ || !model || model->actual != Residency::live ||
       model->pending) {
     if (operation)
@@ -599,8 +549,7 @@ Status WebView::RunNavigation(const std::string& action,
   bool cancelled_during_start = false;
   if (action == "navigate") {
     content::NavigationController::LoadURLParams params(url);
-    params.override_user_agent = tablet_ ? content::NavigationController::UA_OVERRIDE_TRUE
-                                         : content::NavigationController::UA_OVERRIDE_FALSE;
+    params.override_user_agent = content::NavigationController::UA_OVERRIDE_FALSE;
     auto result = controller.LoadURLWithParamsForResult(params);
     if (result.has_value())
       handles.push_back(result.value());
@@ -688,7 +637,7 @@ Status WebView::SetVisible(bool visible) {
   }
   if (!contents_)
     return Fail(Error::unavailable, "WebView is unloaded");
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (visible &&
       (lifecycle_uncertain_ || !model || model->actual != Residency::live || model->pending))
     return Fail(Error::unavailable, "Restore must complete before showing the WebView");
@@ -713,9 +662,6 @@ content::RenderWidgetHostImpl* WebView::FocusedWidget() const {
   if (!InputFrameReady(frame))
     return nullptr;
   return content::RenderWidgetHostImpl::From(frame->GetRenderWidgetHost());
-}
-void WebView::SetNativeFocusEnabled(bool enabled) {
-  native_focus_enabled_ = enabled;
 }
 bool WebView::KeyboardTargetAlive() const {
   if (!(input_widget_ && input_frame_ && input_document_ && InputFrameReady(input_frame_.get()) &&
@@ -827,7 +773,7 @@ void WebView::ReleasePointer(bool deliver) {
   pointer_document_.reset();
 }
 const ui::mojom::TextInputState* WebView::UpdateEditableTarget(content::TextInputManager* manager) {
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   auto* active = manager ? manager->GetActiveWidget() : nullptr;
   auto* focused = contents_ ? contents_->GetFocusedFrame() : nullptr;
   const auto* state = active ? manager->GetTextInputState() : nullptr;
@@ -915,11 +861,11 @@ Status WebView::Focus(bool focused) {
     }
     ReleasePointer(true);
   }
-  auto status = endpoint_->SetFocus(session_, view_, focused);
+  auto status = model_->SetFocus(session_, view_, focused);
   if (!status)
     return status;
   if (contents_) {
-    if (focused && (native_focus_enabled_ || offscreen_host_))
+    if (focused)
       contents_->Focus();
     if (!focused && offscreen_host_)
       offscreen_host_->ClearFocus();
@@ -932,19 +878,6 @@ Status WebView::Focus(bool focused) {
     }
   }
   return {};
-}
-void WebView::OnWebContentsFocused(content::RenderWidgetHost*) {
-  if (!native_focus_enabled_)
-    return;
-  endpoint_->SetFocus(session_, view_, true);
-}
-void WebView::OnWebContentsLostFocus(content::RenderWidgetHost*) {
-  if (!native_focus_enabled_)
-    return;
-  editable_target_.reset();
-  ReleaseKeyboard(true, true);
-  ReleasePointer(true);
-  endpoint_->SetFocus(session_, view_, false);
 }
 void WebView::RenderFrameDeleted(content::RenderFrameHost* frame) {
   if (input_frame_.get() == frame)
@@ -996,12 +929,8 @@ base::DictValue WebView::CompositorDiagnostics() const {
   timing.Set("samples", static_cast<double>(touch_samples_));
   timing.Set("lastDispatchWallMs", touch_last_dispatch_wall_ms_);
   timing.Set("lastSourceAgeMs", touch_last_source_age_ms_);
-#if defined(REMOTEKIT_DEMO_HARNESS)
-  timing.Set("configuration", "current-platform");
-#else
   timing.Set("configuration", "generic-desktop");
   timing.Set("logicalPixelsPerInch", 96.0);
-#endif
   result.Set("touchTiming", std::move(timing));
   if (offscreen_host_)
     result.Set("renderHost", offscreen_host_->Diagnostics());
@@ -1139,11 +1068,7 @@ Status WebView::EnsureTouchEmulator() {
     return Fail(Error::unavailable,
                 "Touch emulator already enabled by another owner; reload required");
   emulator->Enable(input::TouchEmulator::Mode::kInjectingTouchEvents,
-#if defined(REMOTEKIT_DEMO_HARNESS)
-                   ui::GestureProviderConfigType::CURRENT_PLATFORM);
-#else
                    ui::GestureProviderConfigType::GENERIC_DESKTOP);
-#endif
   touch_emulator_ = emulator->GetWeakPtr();
   touch_emulator_owned_ = true;
   return {};
@@ -1464,7 +1389,7 @@ void WebView::OnTouchTarget(std::uint64_t epoch,
       retired_client_touches_.Retire(token, touch.clock->sequence_id, true);
     touch_status_ = Fail(error, reason);
   };
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (!PointerTargetAlive() || !input_commit_navigations_.empty() || !model ||
       model->instance != token.instance || model->document != token.document ||
       model->focus_generation != token.focus || !model->focused || model->pending ||
@@ -1722,7 +1647,7 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
   if (hover && (!visible_ || !InputFrameReady(contents_->GetPrimaryMainFrame())))
     return Fail(Error::unavailable, "Hover requires a visible live WebView");
   if (hover && !pressed_mouse_buttons_.empty()) {
-    const auto* model = endpoint_->FindWebView(session_, view_);
+    const auto* model = model_->FindWebView(session_, view_);
     if (!model || !model->focused)
       return Fail(Error::unavailable, "Mouse drag requires focus");
   }
@@ -1749,7 +1674,7 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
       if (cancel_reads_receipt) {
         // A routed terminal owns the sequence until its canonical ACK. A
         // second cleanup only observes that receipt, even during cleanup.
-        auto accepted = endpoint_->AcceptInput(session_, input);
+        auto accepted = model_->AcceptInput(session_, input);
         if (accepted && admitted)
           *admitted = true;
         return accepted;
@@ -1757,7 +1682,7 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
     }
     if (touch->client_gestures && touch->clock &&
         ClientTouchRetired(input.token, touch->clock->sequence_id)) {
-      auto accepted = endpoint_->AcceptInput(session_, input);
+      auto accepted = model_->AcceptInput(session_, input);
       if (!accepted)
         return accepted;
       if (touch->action == TouchInput::Action::start)
@@ -1817,7 +1742,7 @@ Status WebView::DispatchInput(const InputEvent& input, bool* admitted) {
     actual_editable_target = last_editable_target_id_;
   if (input.editable_target && input.editable_target != actual_editable_target)
     return Fail(Error::stale, "Editable input target changed");
-  auto accepted = endpoint_->AcceptInput(session_, input);
+  auto accepted = model_->AcceptInput(session_, input);
   if (!accepted)
     return accepted;
   if (admitted)
@@ -1983,7 +1908,7 @@ Status WebView::CanDiscard() const {
     return Fail(Error::busy, "Lifecycle transition pending");
   if (lifecycle_uncertain_)
     return Fail(Error::unavailable, "Browser lifecycle state uncertain; unload required");
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (!model)
     return Fail(Error::not_found, "WebView model missing");
   if (model->pending)
@@ -2096,7 +2021,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion, bool r
     if (touch_owner_lost_)
       return Fail(Error::unavailable, "Touch cleanup uncertain; unload required");
   }
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (!model)
     return Fail(Error::not_found, "WebView model missing");
   if (action == Lifecycle::discard) {
@@ -2150,7 +2075,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion, bool r
   // Snapshot before modifying the browser/model. A failed discard/freeze can
   // then be safely unloaded using the last stable complete controller state.
   if (recover_uncertain) {
-    // The guarded Harness request has checked that the retained checkpoint is
+    // The guarded runtime request has checked that the retained checkpoint is
     // automatically restorable before detaching output and page requests.
     if (action != Lifecycle::unload || !lifecycle_uncertain_ || !navigation_state_)
       return Fail(Error::unavailable, "Lifecycle recovery checkpoint is no longer available");
@@ -2162,7 +2087,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion, bool r
     else if (!lifecycle_uncertain_ || !navigation_state_)
       return captured.status;
   }
-  auto request = endpoint_->RequestLifecycle(session_, view_, action);
+  auto request = model_->RequestLifecycle(session_, view_, action);
   if (!request)
     return request.status;
   if (auto* focused = FocusedWidget())
@@ -2179,7 +2104,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion, bool r
     CancelTouches(false);
     input_commit_navigations_.clear();
     lifecycle_uncertain_ = false;
-    auto result = endpoint_->CompleteLifecycle(session_, request.value, true);
+    auto result = model_->CompleteLifecycle(session_, request.value, true);
     if (completion)
       completion(result);
     return {};
@@ -2225,7 +2150,7 @@ Status WebView::RequestLifecycle(Lifecycle action, Completion completion, bool r
   const int configured_width = viewport_width_;
   const int configured_height = viewport_height_;
   viewport_width_ = 0;
-  ConfigureDevice(configured_width, configured_height, tablet_, device_scale_, match_page_backing_);
+  ConfigureDevice(configured_width, configured_height, device_scale_);
   visible_ = false;
   auto* implementation = static_cast<content::WebContentsImpl*>(contents_.get());
   if (auto* manager = implementation->GetTextInputManager())
@@ -2242,8 +2167,7 @@ Status WebView::FinishLifecycle(bool success, Status status, bool uncertain) {
   if (!lifecycle_request_)
     return Fail(Error::stale, "No pending lifecycle operation");
   lifecycle_timer_.Stop();
-  auto result =
-      endpoint_->CompleteLifecycle(session_, *lifecycle_request_, success, status.message);
+  auto result = model_->CompleteLifecycle(session_, *lifecycle_request_, success, status.message);
   lifecycle_request_.reset();
   pending_kind_ = PendingKind::none;
   freeze_cancelled_ = false;
@@ -2264,7 +2188,7 @@ void WebView::PollLifecycle() {
     lifecycle_timer_.Stop();
     return;
   }
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (!model || !model->pending || model->pending->generation != lifecycle_request_->generation) {
     FinishLifecycle(false, Fail(Error::stale, "Lifecycle operation invalidated externally"));
     return;
@@ -2410,7 +2334,7 @@ void WebView::DidFinishNavigation(content::NavigationHandle* navigation) {
     ReleaseKeyboard(false, false);
   if (!navigation->IsInPrimaryMainFrame())
     return;
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   // Discard commits an internal empty document. It is not a remote navigation
   // and must not advance the logical document generation a second time.
   if (pending_kind_ == PendingKind::discard ||
@@ -2434,12 +2358,12 @@ void WebView::DidFinishNavigation(content::NavigationHandle* navigation) {
                      ? Status{}
                      : Fail(Error::unavailable, "Restore navigation did not commit successfully"));
     if (success)
-      endpoint_->CommitDocument(session_, view_);
+      model_->CommitDocument(session_, view_);
     PostCompletion(std::move(callback), status);
     return;
   }
   if (committed && !lifecycle_uncertain_) {
-    endpoint_->CommitDocument(session_, view_);
+    model_->CommitDocument(session_, view_);
   }
 }
 
@@ -2449,7 +2373,7 @@ void WebView::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {
   ReleasePointer(false);
   // Discard can legitimately shut down an otherwise unused renderer after its
   // ack. The retained controller remains the restore boundary in that state.
-  const auto* model = endpoint_->FindWebView(session_, view_);
+  const auto* model = model_->FindWebView(session_, view_);
   if (pending_kind_ == PendingKind::discard && discard_acknowledged_)
     return;
   if (model && model->actual == Residency::discarded && !lifecycle_request_)
@@ -2466,7 +2390,7 @@ void WebView::PrimaryMainFrameRenderProcessGone(base::TerminationStatus) {
     // A frozen renderer can no longer acknowledge thaw. Its pre-freeze
     // checkpoint remains available to the guarded recovery request.
     lifecycle_uncertain_ = true;
-  endpoint_->InvalidateInstance(session_, view_);
+  model_->InvalidateInstance(session_, view_);
   PostCompletion(std::move(callback),
                  Fail(Error::unavailable, "Renderer exited during lifecycle transition"));
 }
