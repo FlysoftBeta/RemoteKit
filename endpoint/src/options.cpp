@@ -20,7 +20,7 @@ const std::map<std::string, std::pair<uint32_t, uint32_t>> ranges{
 struct OptionValues {
   std::string control_url, node_id;
   fs::path browser, data, browser_trace_directory;
-  std::string encoder = "qsv";
+  std::string encoder = "auto";
   EncoderSettings encoding;
   uint32_t idle_idr_ms = 150, max_encode_width = 4096, max_encode_height = 4096;
   bool qsv_low_power_explicit = false;
@@ -30,7 +30,7 @@ struct OptionValues {
     browser = Utf8Path(Env("REMOTEKIT_BROWSER",
                            Utf8(fs::path(executable).parent_path() / "remotekit_browser.exe")));
     data = Utf8Path(Env("REMOTEKIT_DATA_PATH", Env("LOCALAPPDATA", ".") + "/RemoteKit/streaming"));
-    encoder = Env("REMOTEKIT_ENCODER", "qsv");
+    encoder = Env("REMOTEKIT_ENCODER", "auto");
     encoding.bitrate = 36000000;
     encoding.max_bitrate = 48000000;
   }
