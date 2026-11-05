@@ -56,9 +56,11 @@ class BrowserRuntime {
  private:
   BrowserProcess process_;
   BrowserRpc rpc_;
+  fs::path log_;
   std::string incarnation_, process_incarnation_;
   BrowserStartPolicy start_policy_;
   std::optional<Error> startup_error_;
+  std::optional<Error> last_failure_;
   int64_t next_health_check_ = 0;
   bool initialized_ = false;
 };

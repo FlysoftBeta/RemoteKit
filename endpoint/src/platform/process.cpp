@@ -1,4 +1,5 @@
 #include "platform/process.hpp"
+#include <iomanip>
 #include <sstream>
 
 namespace remotekit {
@@ -8,6 +9,34 @@ Error ProcessError(const char* message) {
           std::string(message) + " Windows " + std::to_string(GetLastError())};
 }
 }  // namespace
+std::string DescribeExitCode(DWORD code) {
+  std::ostringstream detail;
+  detail << "0x" << std::uppercase << std::hex << std::setw(8) << std::setfill('0') << code;
+  switch (code) {
+    case 0xC0000135:
+      detail << "（缺少 DLL）";
+      break;
+    case 0xC0000139:
+      detail << "（DLL 入口点缺失）";
+      break;
+    case 0xC0000142:
+      detail << "（DLL 初始化失败）";
+      break;
+    case 0xC0000005:
+      detail << "（访问冲突崩溃）";
+      break;
+    case 0x80000003:
+      detail << "（断言/CHECK 失败）";
+      break;
+    case 0xC0000409:
+      detail << "（栈缓冲区检查/快速失败）";
+      break;
+    case 0xC0000417:
+      detail << "（CRT 无效参数）";
+      break;
+  }
+  return detail.str();
+}
 BrowserProcess::~BrowserProcess() {
   if (job_)
     CloseHandle(job_);
@@ -90,6 +119,12 @@ bool BrowserProcess::Alive() const {
 bool BrowserProcess::Exited() const {
   return process_ && WaitForSingleObject(process_, 0) == WAIT_OBJECT_0;
 }
+std::optional<DWORD> BrowserProcess::ExitCode() const {
+  DWORD code = 0;
+  if (!Exited() || !GetExitCodeProcess(process_, &code))
+    return std::nullopt;
+  return code;
+}
 Result<void> BrowserProcess::Terminate() {
   if (!Present()) {
     state_ = State::kStopped;
@@ -127,9 +162,8 @@ std::string BrowserProcess::Diagnostic() const {
          << (Alive()    ? "running"
              : Exited() ? "exited"
                         : "query-failed");
-  DWORD code = 0;
-  if (GetExitCodeProcess(process_, &code))
-    detail << " exit_code=0x" << std::hex << code;
+  if (const auto code = ExitCode())
+    detail << " exit_code=" << DescribeExitCode(*code);
   return detail.str();
 }
 }  // namespace remotekit

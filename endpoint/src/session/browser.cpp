@@ -7,10 +7,19 @@
 
 namespace remotekit {
 Result<void> BrowserRuntime::AdmitLaunch() {
-  if (!start_policy_.Admit(double(QpcNow()) / QpcFrequency()))
-    return Error{ErrorCode::kUnavailable, start_policy_.attempts() >= 3
-        ? "Browser 启动连续失败，已停止自动重启；请检查会话 GPU 和 Browser 日志"
-        : "Browser 启动失败，正在等待重试退避"};
+  if (process_.Present() && process_.Exited()) {
+    const auto code = process_.ExitCode();
+    last_failure_ = Error{ErrorCode::kUnavailable, "Browser 进程退出，退出码 " +
+                                                       (code ? DescribeExitCode(*code) : "未知") +
+                                                       "；日志 " + Utf8(log_)};
+  }
+  if (!start_policy_.Admit(double(QpcNow()) / QpcFrequency())) {
+    std::string message = start_policy_.attempts() >= 3 ? "Browser 启动连续失败，已停止自动重启"
+                                                        : "Browser 启动失败，正在等待重试退避";
+    if (last_failure_)
+      message += "；最近一次失败：" + last_failure_->message;
+    return Error{ErrorCode::kUnavailable, std::move(message)};
+  }
   startup_error_.reset();
   return {};
 }
@@ -36,6 +45,7 @@ Result<void> BrowserRuntime::HealthCheck() {
       if (!output.value("error", std::string()).empty()) {
         startup_error_ = Error{ErrorCode::kUnavailable,
             output.value("message", output["error"].get<std::string>())};
+        last_failure_ = startup_error_;
         return *startup_error_;
       }
     }
@@ -72,8 +82,17 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
       return {};
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
   }
-  startup_error_ = Error{ErrorCode::kUnavailable,
-      "Browser 控制管道在 15 秒内未就绪；保留仍在运行的进程，" + process_.Diagnostic()};
+  if (!process_.Alive()) {
+    const auto code = process_.ExitCode();
+    startup_error_ = Error{ErrorCode::kUnavailable, "Browser 进程在控制管道就绪前退出，退出码 " +
+                                                        (code ? DescribeExitCode(*code) : "未知") +
+                                                        "；日志 " + Utf8(log_)};
+  } else {
+    startup_error_ =
+        Error{ErrorCode::kUnavailable, "Browser 控制管道在 15 秒内未就绪；保留仍在运行的进程，" +
+                                           process_.Diagnostic() + "；日志 " + Utf8(log_)};
+  }
+  last_failure_ = startup_error_;
   return *startup_error_;
 }
 Result<void> BrowserRuntime::Stop() {
@@ -89,6 +108,7 @@ Result<void> BrowserRuntime::Launch(const RuntimeOptions& options,
                                     const fs::path& directory,
                                     const StreamingAdapter& adapter,
                                     const std::shared_ptr<media::ServerTrace>& trace) {
+  log_ = directory / "browser.log";
   const auto luid = AdapterLuid(adapter.luid);
   std::string channel = "RemoteKit.service." + std::to_string(GetCurrentProcessId()) + "." + id +
                         "." + std::to_string(QpcNow());

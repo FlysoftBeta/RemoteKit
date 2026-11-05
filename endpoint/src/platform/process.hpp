@@ -1,9 +1,11 @@
 #pragma once
 #include "util/common.hpp"
 #include "util/error.hpp"
+#include <optional>
 #include <windows.h>
 
 namespace remotekit {
+std::string DescribeExitCode(DWORD code);
 class BrowserProcess {
  public:
   enum class State { kStopped, kLaunching, kRunning, kStopping, kExited };
@@ -13,6 +15,7 @@ class BrowserProcess {
   void ReleaseExited();
   bool Alive() const;
   bool Exited() const;
+  std::optional<DWORD> ExitCode() const;
   bool Present() const { return process_ || job_; }
   DWORD Pid() const { return process_ ? GetProcessId(process_) : 0; }
   State state() const;
