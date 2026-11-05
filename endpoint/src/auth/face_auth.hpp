@@ -10,6 +10,20 @@
 
 namespace rk::auth {
 
+enum class FaceGate {
+  none,
+  no_qualified_face,
+  multiple_faces,
+  boundary,
+  nonfinite,
+  live_v1se,
+  live_v2,
+  live_mean,
+  embedding,
+  count
+};
+inline constexpr size_t kFaceGateCount = static_cast<size_t>(FaceGate::count);
+
 using FaceTemplate = std::array<float, 128>;
 
 enum class FacePurpose { enroll, verify, presence };
@@ -45,6 +59,7 @@ class Faces {
   std::optional<FaceResult> Status(uint64_t epoch, std::string_view challenge_id);
   bool Cancel(uint64_t epoch, std::string_view challenge_id);
   void Cancel();
+  std::array<uint64_t, kFaceGateCount> GateFailures();
 
  private:
   struct Impl;

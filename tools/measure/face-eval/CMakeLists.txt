@@ -1,0 +1,22 @@
+cmake_minimum_required(VERSION 3.24)
+project(face_eval LANGUAGES CXX)
+get_filename_component(RK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+set(OpenCV_DIR "${RK_ROOT}/build/dependencies/face-auth/opencv-static/cmake")
+find_package(OpenCV 4.11.0 EXACT REQUIRED CONFIG COMPONENTS core imgproc dnn objdetect
+  PATHS "${OpenCV_DIR}" NO_DEFAULT_PATH)
+add_executable(face-eval main.cpp "${RK_ROOT}/endpoint/src/auth/face_engine.cpp")
+target_include_directories(face-eval PRIVATE "${RK_ROOT}/endpoint/src" "${RK_ROOT}")
+file(READ "${RK_ROOT}/tools/face-auth-deps.json" RK_FACE_CATALOG_JSON)
+string(JSON RK_FACE_YUNET_SHA GET "${RK_FACE_CATALOG_JSON}" zoo yunet.onnx 1)
+string(JSON RK_FACE_SFACE_SHA GET "${RK_FACE_CATALOG_JSON}" zoo sface.onnx 1)
+string(JSON RK_FACE_MINIFAS_V1SE_SHA GET "${RK_FACE_CATALOG_JSON}" converted minifas-v1se.onnx)
+string(JSON RK_FACE_MINIFAS_V2_SHA GET "${RK_FACE_CATALOG_JSON}" converted minifas-v2.onnx)
+target_compile_definitions(face-eval PRIVATE RK_FACE_OPENCV
+  RK_FACE_YUNET_SHA="${RK_FACE_YUNET_SHA}" RK_FACE_SFACE_SHA="${RK_FACE_SFACE_SHA}"
+  RK_FACE_MINIFAS_V1SE_SHA="${RK_FACE_MINIFAS_V1SE_SHA}" RK_FACE_MINIFAS_V2_SHA="${RK_FACE_MINIFAS_V2_SHA}")
+target_compile_features(face-eval PRIVATE cxx_std_20)
+target_compile_definitions(face-eval PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(face-eval PRIVATE /W4 /utf-8)
+target_include_directories(face-eval SYSTEM PRIVATE ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(face-eval PRIVATE ${OpenCV_LIBS} bcrypt windowscodecs ole32 oleaut32)
+set_property(TARGET face-eval PROPERTY MSVC_RUNTIME_LIBRARY MultiThreadedDLL)

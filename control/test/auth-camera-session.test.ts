@@ -200,3 +200,51 @@ test('explicit camera failures expose typed errors', async (t) => {
     (error: unknown) => error instanceof RemoteKitError && error.code === 'unavailable',
   );
 });
+
+test('browser camera requests 480 by 360 at five fps without audio', async (t) => {
+  const track = Object.assign(new EventTarget(), { readyState: 'live', stop() {} });
+  const stream = { getTracks: () => [track], getVideoTracks: () => [track] } as unknown as MediaStream;
+  let constraints: MediaStreamConstraints | undefined;
+  const document = Object.assign(new EventTarget(), { hidden: false });
+  const navigator = {
+    mediaDevices: {
+      getUserMedia: async (requested: MediaStreamConstraints) => {
+        constraints = requested;
+        return stream;
+      },
+    },
+  };
+  const restoreGlobals: (() => void)[] = [];
+  for (const [name, value] of Object.entries({ document, navigator })) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, { configurable: true, value });
+    restoreGlobals.push(() =>
+      previous ? Object.defineProperty(globalThis, name, previous) : Reflect.deleteProperty(globalThis, name),
+    );
+  }
+  const session = new AuthCameraSession(
+    { authCameraReady: true, setAuthCamera() {}, recentAuthCameraFrame: () => false },
+    (async () => auth()) as AuthRequest,
+  );
+  t.after(() => {
+    session.dispose();
+    for (const restore of restoreGlobals) restore();
+  });
+  session.configure({
+    auth: auth(),
+    online: true,
+    manualLock: false,
+    allowAutomaticVerification: false,
+    onDepartureObserved() {},
+  });
+  await session.start('verify');
+  assert.deepEqual(constraints, {
+    video: {
+      facingMode: { ideal: 'user' },
+      width: { ideal: 480, max: 640 },
+      height: { ideal: 360, max: 480 },
+      frameRate: { ideal: 5, max: 5 },
+    },
+    audio: false,
+  });
+});

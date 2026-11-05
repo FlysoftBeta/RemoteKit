@@ -23,6 +23,7 @@ class FaceController : private ControllerContext {
   void WakeCamera();
   void CameraLoop();
   static Json FaceCapabilities();
+  Json Stats();
   Result<Json> FaceCommand(const std::string& method,
                            const Json& request,
                            uint64_t generation,

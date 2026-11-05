@@ -61,6 +61,17 @@ Json FaceController::FaceCapabilities() {
   return result;
 }
 
+Json FaceController::Stats() {
+  const auto failures = faces.GateFailures();
+  Json gates = Json::object();
+  constexpr const char* names[] = {"none",     "noQualifiedFace", "multipleFaces",
+                                   "boundary", "nonfinite",       "liveV1SE",
+                                   "liveV2",   "liveMean",        "embedding"};
+  for (size_t i = 1; i < failures.size(); ++i)
+    gates[names[i]] = failures[i];
+  return {{"gateFailures", std::move(gates)}};
+}
+
 Result<Json> FaceController::FaceCommand(const std::string& method,
                                          const Json& request,
                                          uint64_t generation,

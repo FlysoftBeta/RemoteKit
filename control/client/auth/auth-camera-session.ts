@@ -33,8 +33,8 @@ const browserCamera: CameraEnvironment = {
     return navigator.mediaDevices.getUserMedia({
       video: {
         facingMode: { ideal: 'user' },
-        width: { ideal: 320, max: 640 },
-        height: { ideal: 240, max: 480 },
+        width: { ideal: 480, max: 640 },
+        height: { ideal: 360, max: 480 },
         frameRate: { ideal: 5, max: 5 },
       },
       audio: false,
