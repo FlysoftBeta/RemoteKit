@@ -9,7 +9,7 @@
 
 namespace remotekit {
 namespace {
-Status Fail(Error e, const char* m) {
+Status Fail(ErrorCode e, const char* m) {
   return {e, m};
 }
 bool Utf16(const std::u16string& s) {
@@ -45,8 +45,7 @@ Status ValidateInput(const InputPayload& p) {
         else if constexpr (std::is_same_v<T, WheelInput>)
           return Finite(v.x, v.y) && Finite(v.delta_x, v.delta_y);
         else if constexpr (std::is_same_v<T, TouchInput>) {
-          if (v.gestures.size() > 8 || (!v.client_gestures && !v.gestures.empty()) ||
-              (v.client_gestures && !v.clock))
+          if (v.gestures.size() > 8 || !v.clock)
             return false;
           for (const auto& g : v.gestures)
             if (g.type < TouchInput::Gesture::Type::tap_down ||
@@ -99,18 +98,19 @@ Status ValidateInput(const InputPayload& p) {
           return true;
       },
       p);
-  return ok ? Status{} : Fail(Error::invalid, "Invalid input payload or UTF-16 selection");
+  return ok ? Status{}
+            : Fail(ErrorCode::invalid_request, "Invalid input payload or UTF-16 selection");
 }
 Result<SessionId> ViewModel::CreateSession(std::string tenant, SessionId requested_id) {
   if (tenant.empty())
-    return {{}, Fail(Error::invalid, "Tenant cannot be empty")};
+    return {{}, Fail(ErrorCode::invalid_request, "Tenant cannot be empty")};
   if (tenants_.contains(tenant))
-    return {{}, Fail(Error::already_exists, "Tenant already has a session")};
+    return {{}, Fail(ErrorCode::invalid_request, "Tenant already has a session")};
   if (!requested_id && next_session_ == UINT64_MAX)
-    return {{}, Fail(Error::unavailable, "Session ID space exhausted")};
+    return {{}, Fail(ErrorCode::unavailable, "Session ID space exhausted")};
   auto id = requested_id ? requested_id : next_session_++;
   if (sessions_.contains(id))
-    return {{}, Fail(Error::already_exists, "Session ID already exists")};
+    return {{}, Fail(ErrorCode::invalid_request, "Session ID already exists")};
   if (requested_id && requested_id >= next_session_)
     next_session_ = requested_id == UINT64_MAX ? UINT64_MAX : requested_id + 1;
   sessions_.emplace(id, Session{id, tenant, {}, {}});
@@ -120,9 +120,9 @@ Result<SessionId> ViewModel::CreateSession(std::string tenant, SessionId request
 Result<ProfileId> ViewModel::AddProfile(SessionId s, std::string name) {
   auto it = sessions_.find(s);
   if (it == sessions_.end())
-    return {{}, Fail(Error::not_found, "Session not found")};
+    return {{}, Fail(ErrorCode::not_found, "Session not found")};
   if (!it->second.profiles.empty())
-    return {{}, Fail(Error::unsupported, "Multiple profiles per session are not implemented")};
+    return {{}, Fail(ErrorCode::unsupported, "Multiple profiles per session are not implemented")};
   auto id = next_profile_++;
   it->second.profiles.emplace(id, Profile{id, std::move(name)});
   return {id, {}};
@@ -130,15 +130,15 @@ Result<ProfileId> ViewModel::AddProfile(SessionId s, std::string name) {
 Result<WebViewId> ViewModel::CreateWebView(SessionId s, ProfileId p, WebViewId requested_id) {
   auto it = sessions_.find(s);
   if (it == sessions_.end())
-    return {{}, Fail(Error::not_found, "Session not found")};
+    return {{}, Fail(ErrorCode::not_found, "Session not found")};
   if (!it->second.profiles.contains(p))
-    return {{}, Fail(Error::wrong_session, "Profile does not belong to session")};
+    return {{}, Fail(ErrorCode::stale_identity, "Profile does not belong to session")};
   if (!requested_id && next_view_ == UINT64_MAX)
-    return {{}, Fail(Error::unavailable, "WebView ID space exhausted")};
+    return {{}, Fail(ErrorCode::unavailable, "WebView ID space exhausted")};
   auto id = requested_id ? requested_id : next_view_++;
   for (const auto& [session_id, session] : sessions_)
     if (session.views.contains(id))
-      return {{}, Fail(Error::already_exists, "WebView ID already exists")};
+      return {{}, Fail(ErrorCode::invalid_request, "WebView ID already exists")};
   if (requested_id && requested_id >= next_view_)
     next_view_ = requested_id == UINT64_MAX ? UINT64_MAX : requested_id + 1;
   WebView v;
@@ -150,7 +150,7 @@ Result<WebViewId> ViewModel::CreateWebView(SessionId s, ProfileId p, WebViewId r
 Status ViewModel::ResetWebView(SessionId session, WebViewId view) {
   auto* model = MutableView(session, view);
   if (!model)
-    return Fail(Error::not_found, "WebView not found in session");
+    return Fail(ErrorCode::not_found, "WebView not found in session");
   InvalidateInstance(session, view);
   model->actual = model->desired = Residency::live;
   model->last_lifecycle.reset();
@@ -159,7 +159,7 @@ Status ViewModel::ResetWebView(SessionId session, WebViewId view) {
 Status ViewModel::RemoveWebView(SessionId session, WebViewId view) {
   auto it = sessions_.find(session);
   if (it == sessions_.end() || !it->second.views.erase(view))
-    return Fail(Error::not_found, "WebView not found in session");
+    return Fail(ErrorCode::not_found, "WebView not found in session");
   return {};
 }
 const Session* ViewModel::FindSession(SessionId s) const {
@@ -183,9 +183,9 @@ WebView* ViewModel::MutableView(SessionId s, WebViewId v) {
 Status ViewModel::SetFocus(SessionId s, WebViewId id, bool focused) {
   auto v = MutableView(s, id);
   if (!v)
-    return Fail(Error::not_found, "WebView not found in session");
+    return Fail(ErrorCode::not_found, "WebView not found in session");
   if (focused && (v->actual != Residency::live || v->pending))
-    return Fail(Error::unavailable, "WebView is not available");
+    return Fail(ErrorCode::unavailable, "WebView is not available");
   if (focused)
     for (auto& [other_id, other] : sessions_.at(s).views)
       if (other_id != id && other.focused) {
@@ -201,27 +201,27 @@ Status ViewModel::SetFocus(SessionId s, WebViewId id, bool focused) {
 Status ViewModel::InvalidateInput(SessionId session, WebViewId view) {
   auto* model = MutableView(session, view);
   if (!model)
-    return Fail(Error::not_found, "WebView not found in session");
+    return Fail(ErrorCode::not_found, "WebView not found in session");
   ++model->focus_generation;
   return {};
 }
 Status ViewModel::CommitDocument(SessionId s, WebViewId id) {
   auto v = MutableView(s, id);
   if (!v)
-    return Fail(Error::not_found, "WebView not found in session");
+    return Fail(ErrorCode::not_found, "WebView not found in session");
   // A renderer can commit during freeze/thaw. Preserve the new document's
   // identity while the pending lifecycle request continues to gate input.
   if ((v->actual != Residency::live && v->actual != Residency::frozen) ||
       (v->pending && v->pending->action != Lifecycle::freeze &&
        !(v->pending->action == Lifecycle::restore && v->actual == Residency::frozen)))
-    return Fail(Error::unavailable, "WebView does not have a live document");
+    return Fail(ErrorCode::unavailable, "WebView does not have a live document");
   ++v->document;
   return {};
 }
 Status ViewModel::InvalidateInstance(SessionId s, WebViewId id) {
   auto v = MutableView(s, id);
   if (!v)
-    return Fail(Error::not_found, "WebView not found in session");
+    return Fail(ErrorCode::not_found, "WebView not found in session");
   ++v->instance;
   ++v->document;
   ++v->focus_generation;
@@ -233,7 +233,7 @@ Status ViewModel::InvalidateInstance(SessionId s, WebViewId id) {
 Result<InputToken> ViewModel::Token(SessionId s, WebViewId id) const {
   auto v = FindWebView(s, id);
   if (!v)
-    return {{}, Fail(Error::not_found, "WebView not found in session")};
+    return {{}, Fail(ErrorCode::not_found, "WebView not found in session")};
   return {{s, id, v->instance, v->document, v->focus_generation}, {}};
 }
 bool IsHoverInput(const InputPayload& payload) {
@@ -245,14 +245,14 @@ bool IsHoverInput(const InputPayload& payload) {
 }
 Status ViewModel::AcceptInput(SessionId s, const InputEvent& e) {
   if (s != e.token.session)
-    return Fail(Error::wrong_session, "Input token session mismatch");
+    return Fail(ErrorCode::stale_identity, "Input token session mismatch");
   auto v = MutableView(s, e.token.view);
   if (!v)
-    return Fail(Error::not_found, "WebView not found in session");
+    return Fail(ErrorCode::not_found, "WebView not found in session");
   if (e.token != Token(s, v->id).value || e.sequence <= v->last_sequence)
-    return Fail(Error::stale, "Stale token or sequence");
+    return Fail(ErrorCode::stale_identity, "Stale token or sequence");
   if (v->actual != Residency::live || v->pending || (!v->focused && !IsHoverInput(e.payload)))
-    return Fail(Error::unavailable, "WebView cannot receive input");
+    return Fail(ErrorCode::unavailable, "WebView cannot receive input");
   auto result = ValidateInput(e.payload);
   if (!result)
     return result;
@@ -262,19 +262,19 @@ Status ViewModel::AcceptInput(SessionId s, const InputEvent& e) {
 Result<LifecycleRequest> ViewModel::RequestLifecycle(SessionId s, WebViewId id, Lifecycle action) {
   auto v = MutableView(s, id);
   if (!v)
-    return {{}, Fail(Error::not_found, "WebView not found in session")};
+    return {{}, Fail(ErrorCode::not_found, "WebView not found in session")};
   if (v->pending)
-    return {{}, Fail(Error::busy, "Lifecycle operation pending")};
+    return {{}, Fail(ErrorCode::busy, "Lifecycle operation pending")};
   Residency target;
   switch (action) {
     case Lifecycle::freeze:
       if (v->actual != Residency::live)
-        return {{}, Fail(Error::invalid, "Freeze requires live state")};
+        return {{}, Fail(ErrorCode::invalid_request, "Freeze requires live state")};
       target = Residency::frozen;
       break;
     case Lifecycle::discard:
       if (v->actual != Residency::live && v->actual != Residency::frozen)
-        return {{}, Fail(Error::invalid, "Discard requires live or frozen state")};
+        return {{}, Fail(ErrorCode::invalid_request, "Discard requires live or frozen state")};
       target = Residency::discarded;
       break;
     case Lifecycle::unload:
@@ -282,11 +282,11 @@ Result<LifecycleRequest> ViewModel::RequestLifecycle(SessionId s, WebViewId id, 
       break;
     case Lifecycle::restore:
       if (v->actual == Residency::live)
-        return {{}, Fail(Error::invalid, "Already live")};
+        return {{}, Fail(ErrorCode::invalid_request, "Already live")};
       target = Residency::live;
       break;
     default:
-      return {{}, Fail(Error::invalid, "Unknown lifecycle operation")};
+      return {{}, Fail(ErrorCode::invalid_request, "Unknown lifecycle operation")};
   }
   v->desired = target;
   v->pending = LifecycleRequest{id, ++v->lifecycle_generation, action, target};
@@ -301,10 +301,10 @@ Status ViewModel::CompleteLifecycle(SessionId s,
                                     std::string detail) {
   auto v = MutableView(s, r.view);
   if (!v)
-    return Fail(Error::not_found, "WebView not found in session");
+    return Fail(ErrorCode::not_found, "WebView not found in session");
   if (!v->pending || v->pending->generation != r.generation || v->pending->action != r.action ||
       v->pending->target != r.target)
-    return Fail(Error::stale, "Stale lifecycle completion");
+    return Fail(ErrorCode::stale_identity, "Stale lifecycle completion");
   if (succeeded) {
     if (r.target == Residency::discarded || r.target == Residency::unloaded) {
       ++v->instance;
@@ -334,18 +334,18 @@ std::vector<PackItem> OrderAtlasItems(std::vector<PackItem> items) {
 }
 Result<Atlas> PackAtlas(int width, int height, int padding, const std::vector<PackItem>& items) {
   if (width <= 0 || height <= 0 || padding < 0)
-    return {{}, Fail(Error::invalid, "Invalid atlas bounds")};
+    return {{}, Fail(ErrorCode::invalid_request, "Invalid atlas bounds")};
   Atlas atlas{width, height, padding, {}};
   std::vector<PixelRect> free{{0, 0, width, height}};
   std::set<WebViewId> ids;
   for (const auto& item : items) {
     if (!ids.insert(item.view).second || item.width <= 0 || item.height <= 0 ||
         !std::isfinite(item.scale) || item.scale <= 0)
-      return {{}, Fail(Error::invalid, "Invalid or duplicate pack item")};
+      return {{}, Fail(ErrorCode::invalid_request, "Invalid or duplicate pack item")};
     const auto wide = static_cast<std::int64_t>(item.width) + 2LL * padding,
                high = static_cast<std::int64_t>(item.height) + 2LL * padding;
     if (wide > width || high > height)
-      return {{}, Fail(Error::no_space, "Item exceeds atlas bounds")};
+      return {{}, Fail(ErrorCode::resource_limit, "Item exceeds atlas bounds")};
     int w = static_cast<int>(wide), h = static_cast<int>(high);
     std::optional<PixelRect> chosen;
     auto best = std::tuple{std::numeric_limits<int>::max(), std::numeric_limits<int>::max(),
@@ -360,7 +360,7 @@ Result<Atlas> PackAtlas(int width, int height, int padding, const std::vector<Pa
         }
       }
     if (!chosen)
-      return {{}, Fail(Error::no_space, "Atlas packing failed")};
+      return {{}, Fail(ErrorCode::resource_limit, "Atlas packing failed")};
     const auto used = *chosen;
     std::vector<PixelRect> next;
     for (const auto& f : free) {

@@ -280,11 +280,10 @@ void PageRequests::FileResult(std::uint64_t id,
     file_results_.erase(file_results_.begin());
 }
 base::DictValue PageRequests::FileStatus(const std::string& key,
-                                         const base::Value* selection,
+                                         const std::string* selection_id,
                                          SelectionBinding binding,
                                          bool terminal_only) {
-  const auto* selection_id = selection ? selection->GetIfString() : nullptr;
-  if (selection && !ValidSelectionId(selection_id))
+  if (selection_id && !ValidSelectionId(selection_id))
     return Result("invalid_selection_id");
   const auto weak = weak_factory_.GetWeakPtr();
   if (!terminal_only)

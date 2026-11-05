@@ -136,7 +136,7 @@ def main():
     env = os.environ
     env.setdefault('DEPOT_TOOLS_WIN_TOOLCHAIN', '0')
     env.setdefault('vs2026_install', r'C:\Program Files\Microsoft Visual Studio\18\Community')
-    if args.command == 'gen' or gn_changed or not (output / 'build.ninja').exists():
+    if args.command in ('gen', 'build') or gn_changed or not (output / 'build.ninja').exists():
         run([source / 'buildtools/win/gn.exe', 'gen', output], source)
     if args.command == 'build':
         run([source.parent.parent / 'depot_tools/autoninja.bat', '-C', output,

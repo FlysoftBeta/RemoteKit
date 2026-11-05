@@ -54,10 +54,8 @@ void ControlServer::OnReadable(MojoResult result) {
     auto parsed = base::JSONReader::ReadDict(request, base::JSON_PARSE_RFC, 32);
     base::DictValue reply;
     if (!parsed) {
-      reply.Set("version", 1);
-      reply.Set("id", 0);
-      reply.Set("ok", false);
-      reply.Set("error", "invalid_json");
+      reply =
+          ControlResult::Failure(0, protocol::ErrorCode::invalid_request, "Invalid control JSON");
     } else {
       reply = handler_.Run(*parsed);
     }

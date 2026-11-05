@@ -21,7 +21,7 @@ constexpr std::size_t kMaxStateBytes = 64 * 1024 * 1024;
 constexpr int kMaxRedirects = 1024;
 constexpr int kMaxExtendedFields = 1024;
 constexpr int kFormatVersion = 1;
-Status Fail(Error error, const char* message) {
+Status Fail(ErrorCode error, const char* message) {
   return {error, message};
 }
 
@@ -43,11 +43,11 @@ Status DecodeEntry(const sessions::SerializedNavigationEntry& entry, bool* has_p
   if (entry.encoded_page_state().empty() ||
       !blink::DecodePageState(entry.encoded_page_state(), &page) || !page.top.url_string ||
       !GURL(*page.top.url_string).is_valid())
-    return Fail(Error::invalid, "Invalid encoded navigation PageState");
+    return Fail(ErrorCode::invalid_request, "Invalid encoded navigation PageState");
   std::size_t frames = 0;
   *has_post = entry.has_post_data();
   if (!InspectFrame(page.top, 0, &frames, has_post))
-    return Fail(Error::invalid, "PageState frame depth/count exceeds bounds");
+    return Fail(ErrorCode::invalid_request, "PageState frame depth/count exceeds bounds");
   return {};
 }
 
@@ -94,7 +94,7 @@ Status ValidateNavigationState(const NavigationState& state) {
   if (state.entries_.empty() || state.entries_.size() > kMaxEntries || state.selected_index_ < 0 ||
       state.selected_index_ >= state.entry_count() ||
       state.redirect_chains_.size() != state.entries_.size())
-    return Fail(Error::invalid, "Invalid navigation entry count or selected index");
+    return Fail(ErrorCode::invalid_request, "Invalid navigation entry count or selected index");
   std::size_t total = 0;
   for (std::size_t i = 0; i < state.entries_.size(); ++i) {
     const auto& entry = state.entries_[i];
@@ -103,12 +103,12 @@ Status ValidateNavigationState(const NavigationState& state) {
         bytes > kMaxEntryBytes || total > kMaxStateBytes - bytes ||
         entry.extended_info_map().size() > kMaxExtendedFields ||
         state.redirect_chains_[i].size() > kMaxRedirects)
-      return Fail(Error::invalid, "Navigation entry encoding/metadata exceeds bounds");
+      return Fail(ErrorCode::invalid_request, "Navigation entry encoding/metadata exceeds bounds");
     total += bytes;
     for (const auto& url : state.redirect_chains_[i]) {
       if (!url.is_valid() || url.spec().size() > kMaxEntryBytes ||
           total > kMaxStateBytes - url.spec().size())
-        return Fail(Error::invalid, "Invalid or oversized redirect chain");
+        return Fail(ErrorCode::invalid_request, "Invalid or oversized redirect chain");
       total += url.spec().size();
     }
     bool post = false;
@@ -130,7 +130,7 @@ Status CheckAutomaticNavigationRestore(const NavigationState& state) {
       return decoded;
     if (post)
       return Fail(
-          Error::unsupported,
+          ErrorCode::unsupported,
           "Navigation history contains POST data; repost confirmation is required and unsupported");
   }
   return {};
@@ -139,17 +139,18 @@ Status CheckAutomaticNavigationRestore(const NavigationState& state) {
 Result<NavigationState> CaptureNavigationState(content::WebContents& contents) {
   auto& controller = contents.GetController();
   if (contents.HasUncommittedNavigationInPrimaryMainFrame() || controller.GetPendingEntry())
-    return {{}, Fail(Error::busy, "Cannot snapshot navigation history with a pending navigation")};
+    return {{},
+            Fail(ErrorCode::busy, "Cannot snapshot navigation history with a pending navigation")};
   NavigationState state;
   const int count = controller.GetEntryCount();
   if (count < 1 || count > kMaxEntries)
-    return {{}, Fail(Error::invalid, "Navigation history count exceeds bounds")};
+    return {{}, Fail(ErrorCode::invalid_request, "Navigation history count exceeds bounds")};
   state.selected_index_ = controller.GetCurrentEntryIndex();
   std::size_t captured_bytes = 0;
   for (int i = 0; i < count; ++i) {
     auto* entry = controller.GetEntryAtIndex(i);
     if (!entry)
-      return {{}, Fail(Error::invalid, "Navigation history contains a missing entry")};
+      return {{}, Fail(ErrorCode::invalid_request, "Navigation history contains a missing entry")};
     auto saved = sessions::ContentSerializedNavigationBuilder::FromNavigationEntry(i, entry);
     if (count == 1 && entry->IsInitialEntry()) {
       // An unused controller's initial empty entry has no committed PageState.
@@ -161,7 +162,8 @@ Result<NavigationState> CaptureNavigationState(content::WebContents& contents) {
     }
     const auto entry_bytes = saved.EstimateMemoryUsage();
     if (entry_bytes > kMaxEntryBytes || captured_bytes > kMaxStateBytes - entry_bytes)
-      return {{}, Fail(Error::invalid, "Captured navigation encoding exceeds size bounds")};
+      return {{},
+              Fail(ErrorCode::invalid_request, "Captured navigation encoding exceeds size bounds")};
     captured_bytes += entry_bytes;
     state.redirect_chains_.push_back(saved.redirect_chain());
     state.entries_.push_back(std::move(saved));
@@ -192,7 +194,7 @@ Result<std::string> ExportNavigationState(const NavigationState& state) {
     // separately because its normal POST serializer strips password form data.
     entry.WriteToPickle(std::numeric_limits<int>::max(), &record);
     if (record.AsBytes().size() > kMaxEntryBytes)
-      return {{}, Fail(Error::invalid, "Serialized entry exceeds bound")};
+      return {{}, Fail(ErrorCode::invalid_request, "Serialized entry exceeds bound")};
     out.WriteString(record.AsStringView());
     out.WriteString(entry.encoded_page_state());
     out.WriteString(entry.favicon_url().spec());
@@ -200,18 +202,18 @@ Result<std::string> ExportNavigationState(const NavigationState& state) {
     for (const auto& url : state.redirect_chains_[i])
       out.WriteString(url.spec());
     if (out.AsBytes().size() > kMaxStateBytes)
-      return {{}, Fail(Error::invalid, "Serialized navigation state exceeds 64 MiB")};
+      return {{}, Fail(ErrorCode::invalid_request, "Serialized navigation state exceeds 64 MiB")};
   }
   return {std::string(out.AsStringView()), {}};
 }
 
 Result<NavigationState> ImportNavigationState(std::string_view bytes) {
   if (bytes.size() > kMaxStateBytes)
-    return {{}, Fail(Error::invalid, "Navigation state exceeds 64 MiB")};
+    return {{}, Fail(ErrorCode::invalid_request, "Navigation state exceeds 64 MiB")};
   auto in = base::PickleIterator::WithData(base::as_byte_span(bytes));
   if (bytes.size() < sizeof(std::uint32_t) ||
       in.RemainingBytes() != bytes.size() - sizeof(std::uint32_t))
-    return {{}, Fail(Error::invalid, "Invalid navigation-state pickle header")};
+    return {{}, Fail(ErrorCode::invalid_request, "Invalid navigation-state pickle header")};
   NavigationState state;
   std::string magic;
   int version, count;
@@ -219,32 +221,32 @@ Result<NavigationState> ImportNavigationState(std::string_view bytes) {
       version != kFormatVersion || !in.ReadInt(&state.selected_index_) || !in.ReadInt(&count) ||
       count < 1 || count > kMaxEntries || state.selected_index_ < 0 ||
       state.selected_index_ >= count)
-    return {{}, Fail(Error::invalid, "Invalid navigation-state header/version/index")};
+    return {{}, Fail(ErrorCode::invalid_request, "Invalid navigation-state header/version/index")};
   for (int i = 0; i < count; ++i) {
     std::string record, page_state, favicon;
     int redirects;
     if (!in.ReadString(&record) || !ValidateEntryPickle(record) || !in.ReadString(&page_state) ||
         page_state.size() > kMaxEntryBytes || !in.ReadString(&favicon) || !in.ReadInt(&redirects) ||
         redirects < 0 || redirects > kMaxRedirects)
-      return {{}, Fail(Error::invalid, "Invalid encoded navigation entry")};
+      return {{}, Fail(ErrorCode::invalid_request, "Invalid encoded navigation entry")};
     auto record_in = base::PickleIterator::WithData(base::as_byte_span(record));
     sessions::SerializedNavigationEntry entry;
     if (!entry.ReadFromPickle(&record_in) || !record_in.ReachedEnd() || entry.index() != i)
-      return {{}, Fail(Error::invalid, "Invalid serialized navigation entry index")};
+      return {{}, Fail(ErrorCode::invalid_request, "Invalid serialized navigation entry index")};
     entry.set_encoded_page_state(std::move(page_state));
     entry.set_favicon_url(GURL(favicon));
     std::vector<GURL> chain;
     for (int j = 0; j < redirects; ++j) {
       std::string url;
       if (!in.ReadString(&url) || !GURL(url).is_valid())
-        return {{}, Fail(Error::invalid, "Invalid redirect URL")};
+        return {{}, Fail(ErrorCode::invalid_request, "Invalid redirect URL")};
       chain.emplace_back(url);
     }
     state.entries_.push_back(std::move(entry));
     state.redirect_chains_.push_back(std::move(chain));
   }
   if (!in.ReachedEnd())
-    return {{}, Fail(Error::invalid, "Trailing navigation-state payload")};
+    return {{}, Fail(ErrorCode::invalid_request, "Trailing navigation-state payload")};
   auto valid = ValidateNavigationState(state);
   if (!valid)
     return {{}, valid};
@@ -258,32 +260,33 @@ Result<std::unique_ptr<content::WebContents>> CreateRestoredWebContents(
     NavigationState& state,
     bool initially_hidden) {
   if (!context)
-    return {{}, Fail(Error::invalid, "BrowserContext required")};
+    return {{}, Fail(ErrorCode::invalid_request, "BrowserContext required")};
   auto valid = CheckAutomaticNavigationRestore(state);
   if (!valid)
     return {{}, valid};
   if (state.namespace_owner_)
-    return {
-        {},
-        Fail(Error::busy, "Previous WebContents namespace owner must be destroyed before restore")};
+    return {{},
+            Fail(ErrorCode::busy,
+                 "Previous WebContents namespace owner must be destroyed before restore")};
   if (state.namespace_context_ && state.namespace_context_ != context)
     return {{},
-            Fail(Error::wrong_session,
+            Fail(ErrorCode::stale_identity,
                  "Retained sessionStorage belongs to a different BrowserContext")};
   auto entries =
       sessions::ContentSerializedNavigationBuilder::ToNavigationEntries(state.entries_, context);
   if (entries.size() != state.entries_.size())
-    return {{}, Fail(Error::invalid, "Navigation conversion failed")};
+    return {{}, Fail(ErrorCode::invalid_request, "Navigation conversion failed")};
   for (std::size_t i = 0; i < entries.size(); ++i) {
     if (!entries[i])
-      return {{}, Fail(Error::invalid, "Navigation conversion returned an empty entry")};
+      return {{},
+              Fail(ErrorCode::invalid_request, "Navigation conversion returned an empty entry")};
     entries[i]->SetRedirectChain(state.redirect_chains_[i]);
   }
   content::WebContents::CreateParams params(context);
   params.initially_hidden = initially_hidden;
   auto contents = content::WebContents::CreateWithSessionStorage(params, state.namespaces_);
   if (!contents)
-    return {{}, Fail(Error::unavailable, "WebContents creation failed")};
+    return {{}, Fail(ErrorCode::unavailable, "WebContents creation failed")};
   state.namespace_owner_ = contents->GetWeakPtr();
   contents->GetController().Restore(state.selected_index_, content::RestoreType::kRestored,
                                     &entries);

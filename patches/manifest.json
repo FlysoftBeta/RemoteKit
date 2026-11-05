@@ -3,16 +3,6 @@
   "base_revision": "1aa07b638799e59656559ae6c6649d4b197f555e",
   "patches": [
     {
-      "id": "touch-injection-dispatch-result",
-      "path": "0008-touch-injection-dispatch-result.patch",
-      "sha256": "9b339df08086930cf7773bd99245f0ae291ed4ab33a78622de5ba02063d69a92"
-    },
-    {
-      "id": "headless-fling-physical-metrics",
-      "path": "0009-headless-fling-physical-metrics.patch",
-      "sha256": "e73fbb4c2d45e476bc11514836eb7f7f46874a050341882b912e08f39457b693"
-    },
-    {
       "id": "client-gesture-arbitration",
       "path": "0010-client-gesture-arbitration.patch",
       "sha256": "16df2524ba35d9b7c8cac410480efe2de69f28ad483b95da1c7118bd7d8b42c0"

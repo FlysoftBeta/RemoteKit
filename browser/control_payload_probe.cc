@@ -1,5 +1,6 @@
 // CPU-only: calls the exact production response writer and accept exporter.
 #include "remotekit/browser/control_response.h"
+#include "browser/control_input_codec.h"
 #include "remotekit/browser/file_chooser_accept.h"
 
 #include <cstdio>
@@ -11,6 +12,41 @@
 #include "base/json/json_writer.h"
 
 namespace {
+void ControlContract() {
+  using namespace remotekit;
+  using namespace remotekit::browser;
+  auto busy = ControlResult::Failure(19, protocol::ErrorCode::busy, "Page request pending");
+  CHECK(busy.FindBool("ok") == false && busy.FindInt("code") == 6);
+  CHECK(*busy.FindString("error") == "busy" &&
+        *busy.FindString("detail") == "Page request pending");
+  base::DictValue subsystem;
+  subsystem.Set("ok", false);
+  subsystem.Set("error", "page_manager_destroyed");
+  const auto failure = ControlResult::FromFields(20, std::move(subsystem));
+  CHECK(failure.FindBool("ok") == false && failure.FindInt("code").has_value());
+  CHECK(failure.FindString("detail"));
+  base::DictValue wire;
+  wire.Set("instance", "1");
+  wire.Set("document", "1");
+  wire.Set("focus", "1");
+  wire.Set("sequence", "1");
+  base::DictValue touch;
+  touch.Set("type", "touch");
+  touch.Set("action", "cancel");
+  touch.Set("points", base::ListValue());
+  wire.Set("event", touch.Clone());
+  CHECK(!DecodeControlInput(wire, 1, 1));
+  touch.Set("gestureMode", "legacy");
+  wire.Set("event", touch.Clone());
+  CHECK(!DecodeControlInput(wire, 1, 1));
+  touch.Set("gestureMode", "client-v1");
+  touch.Set("gestures", base::ListValue());
+  touch.Set("clockMode", "arrival-fallback");
+  touch.Set("sequenceId", "gesture-1");
+  touch.Set("sampleElapsedUs", 0);
+  wire.Set("event", std::move(touch));
+  CHECK(DecodeControlInput(wire, 1, 1));
+}
 void Responses() {
   base::DictValue request;
   request.Set("id", 73);
@@ -40,8 +76,8 @@ void Responses() {
   const auto error = base::JSONReader::ReadDict(wire, base::JSON_PARSE_RFC);
   CHECK(error && error->FindInt("id") == 73 && error->FindInt("version") == 1);
   CHECK(error->FindBool("ok") == false);
-  CHECK(error->FindString("error") && *error->FindString("error") == "response_too_large");
-  CHECK(error->FindString("message") && !error->FindString("message")->empty());
+  CHECK(error->FindString("error") && *error->FindString("error") == "resource_limit");
+  CHECK(error->FindString("detail") && !error->FindString("detail")->empty());
   // No truncation or mutation of the original reply/operation data.
   CHECK(reply.FindBool("ok") == true && reply.FindString("data")->size() == 1024 * 1024);
   reply.Remove("data");
@@ -130,6 +166,7 @@ void AcceptHints() {
 }  // namespace
 int main() {
   base::AtExitManager at_exit;
+  ControlContract();
   Responses();
   RenderEndpointResponses();
   AcceptHints();

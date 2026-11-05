@@ -6,8 +6,6 @@
 |---|---|
 | 0003-offscreen-root | 显式offscreen root适配；正式服务使用null-widget Aura root |
 | 0006-continuous-video-frame-callbacks | 持续视频帧回调的既有修正 |
-| 0008-touch-injection-dispatch-result | 官方touch受理结果，不替代canonical ACK |
-| 0009-headless-fling-physical-metrics | 服务固定逻辑PPI，不读宿主显示器物理指标 |
 | 0010-client-gesture-arbitration | touch-action/preventDefault与逐包ACK仲裁 |
 | 0013-remotekit-osr-output | 专用OSR、完整token、Begin到GPU顺序、完整画面、真实ANGLE Fence，整合旧0011/12完成保护 |
 | 0014-webrtc-screenshare-adaptation | RemoteKit专属screenshare适配门禁与H264 parser组件导出 |

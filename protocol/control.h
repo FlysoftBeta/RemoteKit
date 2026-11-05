@@ -1,21 +1,42 @@
 #pragma once
 
-namespace remotekit {
-enum class Error {
+#include <string_view>
+
+namespace remotekit::protocol {
+inline constexpr int kControlVersion = 1;
+enum class ErrorCode {
   none = 0,
   not_found = 1,
-  wrong_session = 2,
-  already_exists = 3,
   unsupported = 4,
-  invalid = 5,
+  invalid_request = 5,
   busy = 6,
-  stale = 7,
+  stale_identity = 7,
   unavailable = 8,
-  no_space = 9
+  resource_limit = 9,
+  internal = 10
 };
-
-namespace protocol {
-inline constexpr int kControlVersion = 1;
-inline constexpr int kBusyError = static_cast<int>(Error::busy);
-}  // namespace protocol
-}  // namespace remotekit
+inline constexpr int kBusyError = static_cast<int>(ErrorCode::busy);
+constexpr std::string_view ErrorName(ErrorCode code) {
+  switch (code) {
+    case ErrorCode::none:
+      return "none";
+    case ErrorCode::not_found:
+      return "not_found";
+    case ErrorCode::unsupported:
+      return "unsupported";
+    case ErrorCode::invalid_request:
+      return "invalid_request";
+    case ErrorCode::busy:
+      return "busy";
+    case ErrorCode::stale_identity:
+      return "stale_identity";
+    case ErrorCode::unavailable:
+      return "unavailable";
+    case ErrorCode::resource_limit:
+      return "resource_limit";
+    case ErrorCode::internal:
+      return "internal";
+  }
+  return "internal";
+}
+}  // namespace remotekit::protocol

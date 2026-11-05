@@ -45,7 +45,7 @@ class PageRequests final : public content::WebContentsDelegate,
   };
   base::DictValue Reply(const base::DictValue& reply, SelectionBinding binding);
   base::DictValue FileStatus(const std::string& request,
-                             const base::Value* selection,
+                             const std::string* selection_id,
                              SelectionBinding binding,
                              bool terminal_only);
   struct SelectedFile {

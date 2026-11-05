@@ -28,8 +28,6 @@ class BrowserContext final : public content::BrowserContext {
   base::DictValue DownloadsCommand(const base::DictValue&);
   bool SetSitePreferences(const base::DictValue&, std::string* error);
   bool TabletUaFor(const GURL&) const;
-  // Attach before the first navigation, including provisional popup contents.
-  static void InstallSiteIdentity(content::WebContents*);
   void ConfigureNetworkContext(bool in_memory,
                                const base::FilePath& relative_partition_path,
                                network::mojom::NetworkContextParams* params);

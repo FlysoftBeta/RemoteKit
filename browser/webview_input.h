@@ -1,0 +1,65 @@
+#pragma once
+#include "browser/webview.h"
+
+namespace remotekit::browser {
+class InputController {
+ public:
+  using Completion = WebView::Completion;
+  explicit InputController(WebView& owner);
+  ~InputController();
+  void InvalidateLayoutInput(bool remains_visible);
+  content::RenderWidgetHostImpl* FocusedWidget() const;
+  bool KeyboardTargetAlive() const;
+  bool PointerTargetAlive() const;
+  void ReleaseKeyboard(bool finish_composition, bool deliver);
+  void ReleaseHeldKeys(bool deliver);
+  void PrepareKeyboardTarget(content::RenderWidgetHostImpl* widget);
+  void RememberPointerTarget();
+  void ReleasePointer(bool deliver);
+  const ui::mojom::TextInputState* UpdateEditableTarget(content::TextInputManager* manager);
+  void OnUpdateTextInputStateCalled(content::TextInputManager* manager,
+                                    content::RenderWidgetHostViewBase*,
+                                    bool);
+  SharedAtlasTextInput TextInputState();
+  Status Focus(bool focused);
+  void RenderFrameDeleted(content::RenderFrameHost* frame);
+  void RenderFrameHostChanged(content::RenderFrameHost* old_frame,
+                              content::RenderFrameHost* new_frame);
+  Status DispatchInput(const InputEvent& input, bool* admitted);
+  void DidStartNavigation(content::NavigationHandle*, bool in_primary_page);
+  void DidFinishNavigation(content::NavigationHandle*, bool discard_document);
+  void PrimaryMainFrameRenderProcessGone();
+  void ReadyToCommitNavigation(content::NavigationHandle* navigation);
+
+ private:
+  friend class WebView;
+  friend class WebViewExecution;
+  friend class DeviceConfiguration;
+  friend class NavigationCoordinator;
+  friend class TouchController;
+  friend class LifecycleCoordinator;
+  WebView& owner_;
+  base::WeakPtr<content::RenderWidgetHostImpl> input_widget_;
+  base::WeakPtr<content::RenderFrameHostImpl> input_frame_;
+  std::optional<blink::DocumentToken> input_document_;
+  struct EditableTarget {
+    base::WeakPtr<content::RenderWidgetHostImpl> widget;
+    base::WeakPtr<content::RenderFrameHostImpl> frame;
+    blink::DocumentToken document;
+    std::int32_t node_id;
+  };
+  std::optional<EditableTarget> editable_target_;
+  std::uint64_t last_editable_target_id_{};
+  std::uint64_t keyboard_editable_target_id_{};
+  base::ScopedObservation<content::TextInputManager, content::TextInputManager::Observer>
+      text_input_observation_{&owner_};
+  std::map<std::uint32_t, KeyInput> pressed_keys_;
+  base::WeakPtr<content::RenderWidgetHostImpl> pointer_root_widget_;
+  base::WeakPtr<content::RenderWidgetHostViewBase> pointer_root_view_;
+  base::WeakPtr<content::RenderFrameHostImpl> pointer_frame_;
+  std::optional<blink::DocumentToken> pointer_document_;
+  std::set<std::uint8_t> pressed_mouse_buttons_;
+  MouseInput last_mouse_;
+  std::set<std::int64_t> input_commit_navigations_;
+};
+}  // namespace remotekit::browser

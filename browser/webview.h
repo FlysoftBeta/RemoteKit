@@ -34,13 +34,16 @@ class RenderFrameHostImpl;
 class RenderViewHostImpl;
 class RenderWidgetHostViewBase;
 }  // namespace content
-namespace input {
-class TouchEmulator;
-}
 namespace blink {
 class WebTouchEvent;
 }
 namespace remotekit::browser {
+class WebViewExecution;
+class DeviceConfiguration;
+class NavigationCoordinator;
+class InputController;
+class TouchController;
+class LifecycleCoordinator;
 class NavigationState;
 class OffscreenHost;
 class ClientGestureBridge;
@@ -67,17 +70,22 @@ class WebView final : public content::WebContentsObserver,
   WebView(const WebView&) = delete;
   WebView& operator=(const WebView&) = delete;
 
-  content::WebContents* contents() const { return contents_.get(); }
-  OffscreenHost* offscreen_host() const { return offscreen_host_.get(); }
+  content::WebContents* contents() const;
+  OffscreenHost* offscreen_host() const;
   SessionId session_id() const { return session_; }
   WebViewId view_id() const { return view_; }
-  Status Navigate(const GURL&, const base::DictValue* operation = nullptr);
-  Status NavigationCommand(const base::DictValue&);
-  Status AcknowledgeNavigation(const base::DictValue&);
+  Status Navigate(const GURL&,
+                  std::optional<NavigationOperations::Identity> operation = std::nullopt);
+  Status NavigationCommand(const std::string& action,
+                           std::optional<NavigationOperations::Identity> operation);
+  Status AcknowledgeNavigation(const NavigationOperations::Identity&);
   base::ListValue NavigationOperationSnapshot() const;
-  std::optional<Status> ExistingNavigationOperation(const GURL&, const base::DictValue&);
+  std::optional<Status> ExistingNavigationOperation(
+      const GURL&,
+      const std::optional<NavigationOperations::Identity>& operation);
   NavigationOperations ReleaseNavigationOperations();
   void RestoreNavigationOperations(NavigationOperations operations);
+  Status CanShow() const;
   Status SetVisible(bool);
   Status Focus(bool);
   void ConfigureDevice(int width, int height, float scale = 1);
@@ -91,26 +99,20 @@ class WebView final : public content::WebContentsObserver,
   // A first touch start resolves its OOPIF target asynchronously. All remote
   // input is busy during that resolution; callers must retry rejected input.
   Status TouchInjectionStatus() const;
-  bool TouchProcessingPending() const {
-    return touch_hit_test_pending_ || touch_cleanup_pending_ || touch_pending_callbacks_;
-  }
+  bool TouchProcessingPending() const;
   ClientTouchRetirement::State ClientTouchStatus(const InputToken& token,
-                                                 const std::string& sequence) const {
-    return retired_client_touches_.Find(token, sequence);
-  }
+                                                 const std::string& sequence) const;
   void RefreshClientTouchOwner();
   ClientTouchRetirement::State RetireClientTouch(const InputToken&, const std::string& sequence);
-  bool ClientTouchRetired(const InputToken& token, const std::string& sequence) const {
-    return retired_client_touches_.Contains(token, sequence);
-  }
+  bool ClientTouchRetired(const InputToken& token, const std::string& sequence) const;
   // UI-sequence diagnostic snapshot; absent fields mean no current native view
   // or submitted frame. Reads cached state without requesting frame reports.
   base::DictValue CompositorDiagnostics() const;
-  bool lifecycle_uncertain() const { return lifecycle_uncertain_; }
+  bool lifecycle_uncertain() const;
   // Opaque navigation-only persistence, no external file I/O. Import requires
   // an unloaded adapter and carries no cross-process sessionStorage contents.
   Result<std::string> ExportNavigation() const;
-  std::uint64_t navigation_revision() const { return navigation_revision_; }
+  std::uint64_t navigation_revision() const;
   Status ImportNavigation(std::string_view);
   // Return value reports whether a request was accepted. Completion runs once
   // for accepted operations (possibly synchronously). Rejected requests never
@@ -122,6 +124,15 @@ class WebView final : public content::WebContentsObserver,
   Status CanDiscard() const;
 
  private:
+  friend class WebViewExecution;
+  friend class DeviceConfiguration;
+  friend class NavigationCoordinator;
+  friend class InputController;
+  friend class TouchController;
+  friend class LifecycleCoordinator;
+  void OnUpdateTextInputStateCalled(content::TextInputManager*,
+                                    content::RenderWidgetHostViewBase*,
+                                    bool) override;
   void DevToolsAgentHostAttached(content::DevToolsAgentHost*) override;
   void DidFinishNavigation(content::NavigationHandle*) override;
   void NavigationEntryCommitted(const content::LoadCommittedDetails&) override;
@@ -135,153 +146,18 @@ class WebView final : public content::WebContentsObserver,
   void PrimaryMainFrameRenderProcessGone(base::TerminationStatus) override;
   void RenderFrameDeleted(content::RenderFrameHost*) override;
   void RenderFrameHostChanged(content::RenderFrameHost*, content::RenderFrameHost*) override;
-  void CreateContents(std::unique_ptr<content::WebContents> adopted = {});
-  void AttachOffscreenHost();
-  void DropContents();
-  void ApplyDevice(content::RenderFrameHost* frame = nullptr);
-  void ApplyBackingScale(content::RenderWidgetHostViewBase*);
-  content::RenderWidgetHostImpl* FocusedWidget() const;
-  void CancelTouches(bool deliver);
-  bool HasTouchEmulatorConflict() const;
-  bool TouchTargetAlive() const;
-  Status EnsureTouchEmulator();
-  Status DispatchTouches(const TouchInput&, const InputToken&);
-  void OnTouchTarget(std::uint64_t,
-                     InputToken,
-                     TouchInput,
-                     base::WeakPtr<content::RenderWidgetHostViewBase>,
-                     std::optional<gfx::PointF>);
-  Status InjectTouches(const TouchInput&);
-  Status PrepareTouchClock(const TouchInput&);
-  Status SendTouchEvent(const blink::WebTouchEvent&);
-  void OnTouchProcessed(std::uint64_t);
-  void OnClientTouchProcessed(InputToken,
-                              const std::string&,
-                              ClientTouchAckState,
-                              bool terminal,
-                              bool drained);
-  void FinishTouchCleanup(std::uint64_t);
-  void PrepareKeyboardTarget(content::RenderWidgetHostImpl*);
-  const ui::mojom::TextInputState* UpdateEditableTarget(content::TextInputManager*);
-  void OnUpdateTextInputStateCalled(content::TextInputManager*,
-                                    content::RenderWidgetHostViewBase*,
-                                    bool) override;
-  bool KeyboardTargetAlive() const;
-  bool PointerTargetAlive() const;
-  void ReleaseKeyboard(bool finish_composition, bool deliver);
-  void ReleaseHeldKeys(bool deliver);
-  void ReleasePointer(bool deliver);
-  void RememberPointerTarget();
-  enum class PendingKind {
-    none,
-    freeze,
-    thaw,
-    cancel_freeze,
-    discard,
-    restore_unloaded,
-    restore_discarded
-  };
-  struct LifecycleView {
-    base::WeakPtr<content::RenderViewHostImpl> host;
-    std::uint64_t broadcast_generation;
-    std::uint64_t request;
-    bool acknowledged = false;
-  };
-  Status FinishLifecycle(bool success, Status, bool uncertain = true);
-  Status CheckQuiescent() const;
-  bool UpdateLifecycleViews(bool frozen);
-  void OnLifecycleViewAcknowledged(base::WeakPtr<content::RenderViewHostImpl>,
-                                   std::uint64_t request);
-  void PollLifecycle();
-  void OnDiscarded(std::uint64_t generation);
-  void StartLifecycleTimer();
-  Status BuildTouchState(const TouchInput&, std::map<std::uint32_t, TouchPoint>*) const;
-  Status RunNavigation(const std::string& action, const GURL&, const base::DictValue*);
-  void BindNavigation(content::NavigationHandle*, bool started);
-  void PollNavigationOperations();
 
   content::BrowserContext* context_;
   ViewModel* model_;
   SessionId session_;
   WebViewId view_;
-  std::unique_ptr<content::WebContents> contents_;
-  std::uint64_t navigation_revision_ = 1;
-  NavigationOperations navigation_operations_;
-  std::optional<NavigationOperations::Identity> issuing_navigation_;
-  std::map<std::int64_t, base::WeakPtr<content::NavigationHandle>> navigation_handles_;
-  base::RepeatingTimer navigation_operation_timer_;
-  std::unique_ptr<OffscreenHost> offscreen_host_;
-  bool render_demand_ = false;
-  int viewport_width_ = 0, viewport_height_ = 0;
-  float device_scale_ = 1;
-  float backing_host_scale_ = 0;
-  base::WeakPtr<content::RenderWidgetHostViewBase> backing_view_;
-  bool visible_{false};
-  std::unique_ptr<NavigationState> navigation_state_;
-  std::optional<LifecycleRequest> lifecycle_request_;
-  PendingKind pending_kind_{PendingKind::none};
-  bool lifecycle_uncertain_{false};
-  bool freeze_cancelled_{false};
-  std::uint64_t lifecycle_view_request_ = 0;
-  std::map<content::RenderViewHostImpl*, LifecycleView> lifecycle_views_;
-  bool discard_acknowledged_{false};
-  std::int64_t restore_navigation_{-1};
-  base::TimeTicks lifecycle_deadline_;
-  base::RepeatingTimer lifecycle_timer_;
-  Completion completion_;
-  std::map<std::uint32_t, TouchPoint> touches_;
-  std::optional<TouchInput::Clock> touch_clock_;
-  base::TimeTicks touch_clock_origin_;
-  std::uint64_t touch_source_gestures_{}, touch_fallback_gestures_{}, touch_clock_rejected_{},
-      touch_cancelled_{}, touch_samples_{};
-  double touch_last_dispatch_wall_ms_{}, touch_last_source_age_ms_{};
-  // This is the WebContents' shared emulator, not an adapter-owned emulator.
-  // Claim it only while disabled, and never change it while CDP is attached.
-  base::WeakPtr<input::TouchEmulator> touch_emulator_;
-  scoped_refptr<ClientGestureBridge> client_gesture_bridge_;
-  ClientTouchRetirement retired_client_touches_;
-  std::optional<InputToken> client_touch_token_;
-  std::string client_touch_sequence_;
-  bool client_touch_mode_{};
-  bool client_touch_ack_mismatch_{};
-  base::WeakPtr<content::RenderWidgetHostViewBase> touch_target_view_;
-  base::WeakPtr<content::RenderFrameHostImpl> touch_target_frame_;
-  std::optional<blink::DocumentToken> touch_target_document_;
-  std::map<std::uint32_t, int> touch_pointer_ids_;
-  std::uint64_t touch_epoch_{};
-  std::uint64_t touch_ack_epoch_{};
-  std::size_t touch_pending_callbacks_{};
-  bool touch_hit_test_pending_{false};
-  bool touch_emulator_owned_{false};
-  bool touch_cleanup_pending_{false};
-  bool touch_owner_lost_{false};
-  double touch_root_offset_x_{}, touch_root_offset_y_{};
-  Status touch_status_;
-  base::OneShotTimer touch_hit_test_timer_;
-  base::WeakPtr<content::RenderWidgetHostImpl> input_widget_;
-  base::WeakPtr<content::RenderFrameHostImpl> input_frame_;
-  std::optional<blink::DocumentToken> input_document_;
-  struct EditableTarget {
-    base::WeakPtr<content::RenderWidgetHostImpl> widget;
-    base::WeakPtr<content::RenderFrameHostImpl> frame;
-    blink::DocumentToken document;
-    std::int32_t node_id;
-  };
-  std::optional<EditableTarget> editable_target_;
-  std::uint64_t last_editable_target_id_{};
-  std::uint64_t keyboard_editable_target_id_{};
-  base::ScopedObservation<content::TextInputManager, content::TextInputManager::Observer>
-      text_input_observation_{this};
-  std::map<std::uint32_t, KeyInput> pressed_keys_;
-  base::WeakPtr<content::RenderWidgetHostImpl> pointer_root_widget_;
-  base::WeakPtr<content::RenderWidgetHostViewBase> pointer_root_view_;
-  base::WeakPtr<content::RenderFrameHostImpl> pointer_frame_;
-  std::optional<blink::DocumentToken> pointer_document_;
-  std::set<std::uint8_t> pressed_mouse_buttons_;
-  MouseInput last_mouse_;
-  std::set<std::int64_t> input_commit_navigations_;
-  // Must be last: pending timer/discard callbacks cannot outlive the adapter.
-  base::WeakPtrFactory<WebView> weak_factory_{this};
+
+  std::unique_ptr<WebViewExecution> execution_;
+  std::unique_ptr<DeviceConfiguration> device_;
+  std::unique_ptr<NavigationCoordinator> navigation_;
+  std::unique_ptr<InputController> input_;
+  std::unique_ptr<TouchController> touch_;
+  std::unique_ptr<LifecycleCoordinator> lifecycle_;
 };
 }  // namespace remotekit::browser
 #endif

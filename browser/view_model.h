@@ -10,14 +10,15 @@
 #include <vector>
 
 namespace remotekit {
+using protocol::ErrorCode;
 using TenantId = std::string;
 using SessionId = std::uint64_t;
 using ProfileId = std::uint64_t;
 using WebViewId = std::uint64_t;
 struct Status {
-  Error error{Error::none};
+  ErrorCode error{ErrorCode::none};
   std::string message;
-  explicit operator bool() const { return error == Error::none; }
+  explicit operator bool() const { return error == ErrorCode::none; }
 };
 template <class T>
 struct Result {
@@ -123,7 +124,6 @@ struct TouchInput {
     Type type{};
     double x{}, y{}, delta_x{}, delta_y{}, scale{1}, velocity_x{}, velocity_y{};
   };
-  bool client_gestures{};
   std::vector<Gesture> gestures;
 };
 struct GestureInput {

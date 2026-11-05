@@ -1,3 +1,4 @@
+#include "browser/device_configuration.h"
 #include "remotekit/browser/main_delegate.h"
 #include "remotekit/browser/audio_target.h"
 #include "media/audio/audio_manager.h"
@@ -50,7 +51,7 @@ class BrowserClient final : public content::ContentBrowserClient {
   }
   bool OverridesAudioManager() override { return true; }
   void OnWebContentsCreated(content::WebContents* contents) override {
-    BrowserContext::InstallSiteIdentity(contents);
+    DeviceConfiguration::InstallSiteIdentity(contents);
   }
   bool CanCreateWindow(content::RenderFrameHost*,
                        const GURL&,
@@ -93,9 +94,6 @@ MainDelegate::MainDelegate() = default;
 MainDelegate::~MainDelegate() = default;
 std::optional<int> MainDelegate::BasicStartupComplete() {
   auto& command = *base::CommandLine::ForCurrentProcess();
-  // Service input uses logical metrics, independent of this host's monitor and
-  // native touch preferences.
-  command.AppendSwitch("remotekit-service-input");
   ConfigureServiceScrollPolicy(command);
   // Service Aura roots are offscreen; product visibility controls demand.
   command.AppendSwitch("disable-backgrounding-occluded-windows");

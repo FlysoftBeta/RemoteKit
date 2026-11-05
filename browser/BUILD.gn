@@ -19,16 +19,26 @@ executable("remotekit_browser") {
     "client_gesture_packet.h",
     "client_input_timing.h",
     "client_touch_retirement.h",
+    "closed_views.cc",
+    "closed_views.h",
     "compat.cc",
     "compat.h",
     "compat_renderer.cc",
     "compat_renderer.h",
+    "control_dispatcher.cc",
+    "control_dispatcher.h",
+    "control_input_codec.cc",
+    "control_input_codec.h",
     "control_response.cc",
     "control_response.h",
     "control_server.cc",
     "control_server.h",
+    "device_configuration.cc",
+    "device_configuration.h",
     "file_chooser_accept.cc",
     "file_chooser_accept.h",
+    "layout_transaction.cc",
+    "layout_transaction.h",
     "main.cc",
     "main_delegate.cc",
     "main_delegate.h",
@@ -36,6 +46,8 @@ executable("remotekit_browser") {
     "navigation_operations.h",
     "navigation_state.cc",
     "navigation_state.h",
+    "navigation_transfer.cc",
+    "navigation_transfer.h",
     "offscreen_host.cc",
     "offscreen_host.h",
     "osr_renderer.cc",
@@ -43,6 +55,8 @@ executable("remotekit_browser") {
     "osr_wake_state.h",
     "page_requests.cc",
     "page_requests.h",
+    "popup_registry.cc",
+    "popup_registry.h",
     "profile_network_state.cc",
     "profile_network_state.h",
     "profile_services.cc",
@@ -51,8 +65,21 @@ executable("remotekit_browser") {
     "render_channel.h",
     "view_model.cc",
     "view_model.h",
+    "view_registry.cc",
+    "view_registry.h",
     "webview.cc",
     "webview.h",
+    "webview_execution.cc",
+    "webview_execution.h",
+    "webview_input.cc",
+    "webview_input.h",
+    "webview_internal.h",
+    "webview_lifecycle.cc",
+    "webview_lifecycle.h",
+    "webview_navigation.cc",
+    "webview_navigation.h",
+    "webview_touch.cc",
+    "webview_touch.h",
   ]
   include_dirs = [
     "//remotekit",
@@ -125,10 +152,13 @@ executable("remotekit_view_model_probe") {
 
 executable("remotekit_control_payload_probe") {
   testonly = true
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
   sources = [
+    "control_input_codec.cc",
     "control_payload_probe.cc",
     "control_response.cc",
     "file_chooser_accept.cc",
+    "view_model.cc",
   ]
   include_dirs = [ "//remotekit" ]
   deps = [
@@ -244,4 +274,15 @@ repack("pak") {
     "//ui/strings",
   ]
   output = "$root_out_dir/remotekit.pak"
+}
+
+executable("remotekit_navigation_operations_probe") {
+  testonly = true
+  configs -= [ "//build/config/clang:find_bad_constructs" ]
+  sources = [ "navigation_operations_tests.cc" ]
+}
+
+executable("remotekit_navigation_error_page_probe") {
+  testonly = true
+  sources = [ "navigation_error_page_tests.cc" ]
 }
