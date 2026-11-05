@@ -17,21 +17,31 @@ Service::Service(media::Sdk& sdk, const RuntimeOptions& options, ManagementLink&
 }
 Service::~Service() {
   link_.OnDisconnect({});
-  Clear();
+  auto closed = Clear();
+  if (!closed)
+    fprintf(stderr, "service shutdown: %s\n", closed.error().message.c_str());
 }
-void Service::Clear() {
+Result<void> Service::Clear() {
+  for (auto& [tenant, session] : sessions_) {
+    auto stopped = session->Stop();
+    if (!stopped)
+      return stopped.error();
+  }
   decltype(sessions_) closing;
   {
     std::lock_guard lock(mutex_);
     closing.swap(sessions_);
   }
+  return {};
 }
 Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
   if (!request.is_object() || !request.contains("method") || !request["method"].is_string())
     return Error{ErrorCode::kInvalidRequest, "invalid request envelope"};
   const auto method = request["method"].get<std::string>();
   if (method == "shutdown") {
-    Clear();
+    auto closed = Clear();
+    if (!closed)
+      return closed.error();
     return Json{{"closed", true}};
   }
   const auto handler = ManagementMethods::Find(method);
@@ -118,7 +128,11 @@ int Service::Run() {
       selected->second->MaintainRecovery();
     }
   }
-  Clear();
-  return 0;
+  auto closed = Clear();
+  if (!closed) {
+    fprintf(stderr, "service shutdown: %s\n", closed.error().message.c_str());
+    return 1;
+  }
+  return failed_ ? 1 : 0;
 }
 }  // namespace remotekit

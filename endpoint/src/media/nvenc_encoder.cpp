@@ -215,6 +215,16 @@ class Nvenc final : public HardwareEncoder {
   }
 
  public:
+  State GetState() const override {
+    if (!terminal_error_.empty())
+      return State::kFailed;
+    if (eos_completed_)
+      return State::kDrained;
+    if (eos_)
+      return State::kDraining;
+    return initialized_ ? State::kReady : State::kStopped;
+  }
+
   Nvenc() = default;
   Nvenc(const NV_ENCODE_API_FUNCTION_LIST& api,
         void* session,

@@ -22,7 +22,7 @@ Result<void> FlushFile(const fs::path& path) {
 }
 Result<void> WriteDurableJson(const fs::path& path,
                               const Json& value,
-                              const std::function<void()>& before_commit) {
+                              const std::function<Result<void>()>& before_commit) {
   std::error_code directory_error;
   fs::create_directories(path.parent_path(), directory_error);
   if (directory_error)
@@ -48,8 +48,11 @@ Result<void> WriteDurableJson(const fs::path& path,
   auto flushed = FlushFile(temporary);
   if (!flushed)
     return flushed.error();
-  if (before_commit)
-    before_commit();
+  if (before_commit) {
+    auto current = before_commit();
+    if (!current)
+      return current.error();
+  }
   if (!MoveFileExW(temporary.c_str(), path.c_str(),
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return IoError("state commit failed");

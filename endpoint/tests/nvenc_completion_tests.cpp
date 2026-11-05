@@ -51,6 +51,7 @@ struct RateState {
   }
 };
 class RateBackend final : public HardwareEncoder {
+  State GetState() const override { return State::kReady; }
   std::shared_ptr<RateState> state_;
   EncoderSettings settings_;
 

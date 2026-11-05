@@ -14,7 +14,7 @@
 #include <cmath>
 #include <fstream>
 #include <numeric>
-#include <stdexcept>
+#include "remotekit/result_macros.hpp"
 #include <utility>
 
 namespace remotekit {
@@ -33,30 +33,34 @@ constexpr ULONG kMaxThumbnailBytes = 64 * 1024;
 constexpr char kThumbnailOutputError[] = "photo_output_failed";
 constexpr int kSignatureSize = 24;
 
-void Check(HRESULT result, const char* error = "invalid-photo") {
+Result<void> Check(HRESULT result, const char* error = "invalid-photo") {
   if (FAILED(result))
-    throw std::runtime_error(error);
+    return Error{ErrorCode::kInvalidRequest, error};
+
+  return {};
 }
 
-void CheckCancelled(const PhotoCancelled& cancelled) {
+Result<void> CheckCancelled(const PhotoCancelled& cancelled) {
   if (cancelled && cancelled())
-    throw std::runtime_error("cancelled");
+    return Error{ErrorCode::kInvalidRequest, "cancelled"};
+
+  return {};
 }
 
 class Imaging {
  public:
-  explicit Imaging(const char* error = "photo-imaging-unavailable") {
+  Result<void> Open(const char* error = "photo-imaging-unavailable") {
     const auto result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (result != RPC_E_CHANGED_MODE)
-      Check(result, error);
+      RK_RETURN_IF_ERROR(Check(result, error));
     initialized_ = SUCCEEDED(result);
     const auto factory_result = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
                                                  CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
     if (FAILED(factory_result)) {
-      if (initialized_)
-        CoUninitialize();
-      Check(factory_result, error);
+      RK_RETURN_IF_ERROR(Check(factory_result, error));
     }
+
+    return {};
   }
   ~Imaging() {
     factory.Reset();
@@ -157,53 +161,54 @@ void Orient(cv::Mat& image, unsigned orientation) {
   }
 }
 
-cv::Mat DecodeMemory(IWICImagingFactory& factory,
-                     std::span<const BYTE> compressed,
-                     const PhotoCancelled& cancelled,
-                     bool thumbnail,
-                     bool analysis) {
+Result<cv::Mat> DecodeMemory(IWICImagingFactory& factory,
+                             std::span<const BYTE> compressed,
+                             const PhotoCancelled& cancelled,
+                             bool thumbnail,
+                             bool analysis) {
   const char* invalid = thumbnail ? "invalid_photo" : "invalid-photo";
   const char* too_large = thumbnail ? "photo_too_large" : "photo-too-large";
-  CheckCancelled(cancelled);
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   if (compressed.size() < 8)
-    throw std::runtime_error(invalid);
+    return Error{ErrorCode::kInvalidRequest, invalid};
   constexpr std::array<BYTE, 8> png_signature{137, 80, 78, 71, 13, 10, 26, 10};
   const bool jpeg = compressed[0] == 0xff && compressed[1] == 0xd8 && compressed[2] == 0xff;
   if (!jpeg &&
       (analysis || !std::equal(png_signature.begin(), png_signature.end(), compressed.begin())))
-    throw std::runtime_error(invalid);
+    return Error{ErrorCode::kInvalidRequest, invalid};
 
   ComPtr<IWICStream> stream;
   ComPtr<IWICBitmapDecoder> decoder;
   ComPtr<IWICBitmapFrameDecode> frame;
-  Check(factory.CreateStream(&stream), invalid);
+  RK_RETURN_IF_ERROR(Check(factory.CreateStream(&stream), invalid));
   // The decoder only reads this caller-owned buffer.
-  Check(stream->InitializeFromMemory(const_cast<BYTE*>(compressed.data()),
-                                     static_cast<DWORD>(compressed.size())),
-        invalid);
+  RK_RETURN_IF_ERROR(Check(stream->InitializeFromMemory(const_cast<BYTE*>(compressed.data()),
+                                                        static_cast<DWORD>(compressed.size())),
+                           invalid));
   Check(factory.CreateDecoder(jpeg ? GUID_ContainerFormatJpeg : GUID_ContainerFormatPng,
                               &GUID_VendorMicrosoft, &decoder),
         invalid);
-  Check(decoder->Initialize(stream.Get(), WICDecodeMetadataCacheOnDemand), invalid);
+  RK_RETURN_IF_ERROR(
+      Check(decoder->Initialize(stream.Get(), WICDecodeMetadataCacheOnDemand), invalid));
   UINT frame_count = 0;
-  Check(decoder->GetFrameCount(&frame_count), invalid);
+  RK_RETURN_IF_ERROR(Check(decoder->GetFrameCount(&frame_count), invalid));
   if (frame_count != 1)
-    throw std::runtime_error(invalid);
-  Check(decoder->GetFrame(0, &frame), invalid);
+    return Error{ErrorCode::kInvalidRequest, invalid};
+  RK_RETURN_IF_ERROR(Check(decoder->GetFrame(0, &frame), invalid));
   UINT width = 0, height = 0;
-  Check(frame->GetSize(&width, &height), invalid);
+  RK_RETURN_IF_ERROR(Check(frame->GetSize(&width, &height), invalid));
   const UINT max_dimension = analysis ? kAnalysisSide : thumbnail ? 16384 : kMaxDimension;
   const auto max_pixels = thumbnail ? 32 * 1024 * 1024 : kMaxPixels;
   if (width > max_dimension || height > max_dimension ||
       static_cast<std::uint64_t>(width) * height > max_pixels)
-    throw std::runtime_error(too_large);
+    return Error{ErrorCode::kLimitExceeded, too_large};
   const UINT min_dimension = thumbnail ? 1 : analysis ? 16 : 32;
   if (width < min_dimension || height < min_dimension)
-    throw std::runtime_error(invalid);
-  CheckCancelled(cancelled);
+    return Error{ErrorCode::kInvalidRequest, invalid};
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   ComPtr<IWICFormatConverter> converter;
   const bool flatten_alpha = !jpeg;
-  Check(factory.CreateFormatConverter(&converter), invalid);
+  RK_RETURN_IF_ERROR(Check(factory.CreateFormatConverter(&converter), invalid));
   Check(
       converter->Initialize(
           frame.Get(), flatten_alpha ? GUID_WICPixelFormat32bppPBGRA : GUID_WICPixelFormat24bppBGR,
@@ -215,21 +220,22 @@ cv::Mat DecodeMemory(IWICImagingFactory& factory,
   if (thumbnail && longest > kThumbnailSide) {
     width = ScaleSide(width, longest, kThumbnailSide);
     height = ScaleSide(height, longest, kThumbnailSide);
-    Check(factory.CreateBitmapScaler(&scaler), invalid);
+    RK_RETURN_IF_ERROR(Check(factory.CreateBitmapScaler(&scaler), invalid));
     Check(scaler->Initialize(pixels, width, height, WICBitmapInterpolationModeFant), invalid);
     pixels = scaler.Get();
   }
   cv::Mat image(static_cast<int>(height), static_cast<int>(width),
                 flatten_alpha ? CV_8UC4 : CV_8UC3);
-  Check(pixels->CopyPixels(nullptr, static_cast<UINT>(image.step),
-                           static_cast<UINT>(image.total() * image.elemSize()), image.data),
-        invalid);
-  CheckCancelled(cancelled);
+  RK_RETURN_IF_ERROR(
+      Check(pixels->CopyPixels(nullptr, static_cast<UINT>(image.step),
+                               static_cast<UINT>(image.total() * image.elemSize()), image.data),
+            invalid));
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   if (flatten_alpha) {
     cv::Mat opaque(image.size(), CV_8UC3);
     for (int y = 0; y < image.rows; ++y) {
       if (y % 32 == 0)
-        CheckCancelled(cancelled);
+        RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
       const auto* src = image.ptr<cv::Vec4b>(y);
       auto* dst = opaque.ptr<cv::Vec3b>(y);
       for (int x = 0; x < image.cols; ++x) {
@@ -247,87 +253,95 @@ cv::Mat DecodeMemory(IWICImagingFactory& factory,
   return image;
 }
 
-cv::Mat Decode(IWICImagingFactory& factory,
-               const std::filesystem::path& path,
-               const PhotoCancelled& cancelled,
-               bool thumbnail = false) {
+Result<cv::Mat> Decode(IWICImagingFactory& factory,
+                       const std::filesystem::path& path,
+                       const PhotoCancelled& cancelled,
+                       bool thumbnail = false) {
   const char* invalid = thumbnail ? "invalid_photo" : "invalid-photo";
-  CheckCancelled(cancelled);
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   std::ifstream input(path, std::ios::binary | std::ios::ate);
   if (!input || input.tellg() < 8)
-    throw std::runtime_error(invalid);
+    return Error{ErrorCode::kInvalidRequest, invalid};
   const std::streamoff bytes = input.tellg();
   if (bytes > kMaxCompressedBytes)
-    throw std::runtime_error(thumbnail ? "photo_too_large" : "photo-too-large");
+    return Error{ErrorCode::kLimitExceeded, thumbnail ? "photo_too_large" : "photo-too-large"};
   std::vector<BYTE> compressed(static_cast<std::size_t>(bytes));
   input.seekg(0);
   if (!input.read(reinterpret_cast<char*>(compressed.data()), bytes))
-    throw std::runtime_error(invalid);
+    return Error{ErrorCode::kInvalidRequest, invalid};
   return DecodeMemory(factory, compressed, cancelled, thumbnail, false);
 }
 
-void EncodeJpeg(IWICImagingFactory& factory,
-                IStream& stream,
-                const cv::Mat& image,
-                float compression_quality,
-                const char* error) {
+Result<void> EncodeJpeg(IWICImagingFactory& factory,
+                        IStream& stream,
+                        const cv::Mat& image,
+                        float compression_quality,
+                        const char* error) {
   ComPtr<IWICBitmapEncoder> encoder;
   ComPtr<IWICBitmapFrameEncode> frame;
   ComPtr<IPropertyBag2> properties;
-  Check(factory.CreateEncoder(GUID_ContainerFormatJpeg, &GUID_VendorMicrosoft, &encoder), error);
+  RK_RETURN_IF_ERROR(Check(
+      factory.CreateEncoder(GUID_ContainerFormatJpeg, &GUID_VendorMicrosoft, &encoder), error));
   Check(encoder->Initialize(&stream, WICBitmapEncoderNoCache), error);
-  Check(encoder->CreateNewFrame(&frame, &properties), error);
+  RK_RETURN_IF_ERROR(Check(encoder->CreateNewFrame(&frame, &properties), error));
   wchar_t quality_name[] = L"ImageQuality";
   PROPBAG2 option{};
   option.pstrName = quality_name;
   VARIANT quality{};
   quality.vt = VT_R4;
   quality.fltVal = compression_quality;
-  Check(properties->Write(1, &option, &quality), error);
+  RK_RETURN_IF_ERROR(Check(properties->Write(1, &option, &quality), error));
   Check(frame->Initialize(properties.Get()), error);
-  Check(frame->SetSize(image.cols, image.rows), error);
+  RK_RETURN_IF_ERROR(Check(frame->SetSize(image.cols, image.rows), error));
   WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
-  Check(frame->SetPixelFormat(&format), error);
+  RK_RETURN_IF_ERROR(Check(frame->SetPixelFormat(&format), error));
   if (format != GUID_WICPixelFormat24bppBGR)
-    throw std::runtime_error(error);
-  Check(frame->WritePixels(image.rows, static_cast<UINT>(image.step),
-                           static_cast<UINT>(image.total() * image.elemSize()), image.data),
-        error);
+    return Error{ErrorCode::kInvalidRequest, error};
+  RK_RETURN_IF_ERROR(
+      Check(frame->WritePixels(image.rows, static_cast<UINT>(image.step),
+                               static_cast<UINT>(image.total() * image.elemSize()), image.data),
+            error));
   Check(frame->Commit(), error);
-  Check(encoder->Commit(), error);
+  RK_RETURN_IF_ERROR(Check(encoder->Commit(), error));
+
+  return {};
 }
 
-void EncodePng(IWICImagingFactory& factory,
-               const std::filesystem::path& path,
-               const cv::Mat& image,
-               const PhotoCancelled& cancelled) {
+Result<void> EncodePng(IWICImagingFactory& factory,
+                       const std::filesystem::path& path,
+                       const cv::Mat& image,
+                       const PhotoCancelled& cancelled) {
   constexpr char error[] = "photo-output-failed";
   ComPtr<IWICStream> stream;
-  Check(factory.CreateStream(&stream), error);
+  RK_RETURN_IF_ERROR(Check(factory.CreateStream(&stream), error));
   Check(stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE), error);
   ComPtr<IWICBitmapEncoder> encoder;
   ComPtr<IWICBitmapFrameEncode> frame;
-  Check(factory.CreateEncoder(GUID_ContainerFormatPng, &GUID_VendorMicrosoft, &encoder), error);
+  RK_RETURN_IF_ERROR(Check(
+      factory.CreateEncoder(GUID_ContainerFormatPng, &GUID_VendorMicrosoft, &encoder), error));
   Check(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache), error);
-  Check(encoder->CreateNewFrame(&frame, nullptr), error);
+  RK_RETURN_IF_ERROR(Check(encoder->CreateNewFrame(&frame, nullptr), error));
   Check(frame->Initialize(nullptr), error);
-  Check(frame->SetSize(image.cols, image.rows), error);
+  RK_RETURN_IF_ERROR(Check(frame->SetSize(image.cols, image.rows), error));
   auto format = GUID_WICPixelFormat24bppBGR;
-  Check(frame->SetPixelFormat(&format), error);
+  RK_RETURN_IF_ERROR(Check(frame->SetPixelFormat(&format), error));
   if (format != GUID_WICPixelFormat24bppBGR)
-    throw std::runtime_error(error);
+    return Error{ErrorCode::kInvalidRequest, error};
   const auto stride = static_cast<UINT>(image.step);
   for (int y = 0; y < image.rows; y += 64) {
-    CheckCancelled(cancelled);
+    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
     const auto rows = static_cast<UINT>(std::min(64, image.rows - y));
-    Check(frame->WritePixels(rows, stride, rows * stride, const_cast<BYTE*>(image.ptr(y))), error);
+    RK_RETURN_IF_ERROR(Check(
+        frame->WritePixels(rows, stride, rows * stride, const_cast<BYTE*>(image.ptr(y))), error));
   }
   Check(frame->Commit(), error);
-  Check(encoder->Commit(), error);
+  RK_RETURN_IF_ERROR(Check(encoder->Commit(), error));
   STATSTG info{};
-  Check(stream->Stat(&info, STATFLAG_NONAME), error);
+  RK_RETURN_IF_ERROR(Check(stream->Stat(&info, STATFLAG_NONAME), error));
   if (info.cbSize.QuadPart > kMaxCompressedBytes)
-    throw std::runtime_error(error);
+    return Error{ErrorCode::kInvalidRequest, error};
+
+  return {};
 }
 
 cv::Mat LimitSide(const cv::Mat& image, int side) {
@@ -341,10 +355,10 @@ cv::Mat LimitSide(const cv::Mat& image, int side) {
   return result;
 }
 
-void WriteThumbnail(IWICImagingFactory& factory,
-                    const std::filesystem::path& output,
-                    cv::Mat& image,
-                    const PhotoCancelled& cancelled) {
+Result<void> WriteThumbnail(IWICImagingFactory& factory,
+                            const std::filesystem::path& output,
+                            cv::Mat& image,
+                            const PhotoCancelled& cancelled) {
   for (const int side : {kThumbnailSide, 240, 160}) {
     const int longest = std::max(image.cols, image.rows);
     if (longest > side) {
@@ -353,33 +367,34 @@ void WriteThumbnail(IWICImagingFactory& factory,
       cv::resize(image, image, size, 0, 0, cv::INTER_AREA);
     }
     for (const float quality : {0.88f, 0.73f}) {
-      CheckCancelled(cancelled);
+      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
       ComPtr<IStream> stream;
-      Check(CreateStreamOnHGlobal(nullptr, TRUE, &stream), kThumbnailOutputError);
-      EncodeJpeg(factory, *stream.Get(), image, quality, kThumbnailOutputError);
+      RK_RETURN_IF_ERROR(
+          Check(CreateStreamOnHGlobal(nullptr, TRUE, &stream), kThumbnailOutputError));
+      RK_RETURN_IF_ERROR(EncodeJpeg(factory, *stream.Get(), image, quality, kThumbnailOutputError));
       STATSTG info{};
-      Check(stream->Stat(&info, STATFLAG_NONAME), kThumbnailOutputError);
+      RK_RETURN_IF_ERROR(Check(stream->Stat(&info, STATFLAG_NONAME), kThumbnailOutputError));
       if (info.cbSize.QuadPart > kMaxThumbnailBytes)
         continue;
       const auto size = static_cast<ULONG>(info.cbSize.QuadPart);
       if (!size)
-        throw std::runtime_error(kThumbnailOutputError);
+        return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
       std::vector<char> encoded(size);
-      Check(stream->Seek({}, STREAM_SEEK_SET, nullptr), kThumbnailOutputError);
+      RK_RETURN_IF_ERROR(Check(stream->Seek({}, STREAM_SEEK_SET, nullptr), kThumbnailOutputError));
       ULONG read = 0;
-      Check(stream->Read(encoded.data(), size, &read), kThumbnailOutputError);
+      RK_RETURN_IF_ERROR(Check(stream->Read(encoded.data(), size, &read), kThumbnailOutputError));
       if (read != size)
-        throw std::runtime_error(kThumbnailOutputError);
-      CheckCancelled(cancelled);
+        return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
+      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
       std::ofstream file(output, std::ios::binary | std::ios::trunc);
       file.write(encoded.data(), size);
       file.close();
       if (!file)
-        throw std::runtime_error(kThumbnailOutputError);
-      return;
+        return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
+      return {};
     }
   }
-  throw std::runtime_error(kThumbnailOutputError);
+  return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
 }
 
 double Median(std::vector<double> values) {
@@ -642,21 +657,21 @@ std::optional<Quad> DetectDocument(const cv::Mat& image, bool conservative) {
   return quad;
 }
 
-Quad ManualQuad(const cv::Mat& image, const std::array<PhotoPoint, 4>& corners) {
+Result<Quad> ManualQuad(const cv::Mat& image, const std::array<PhotoPoint, 4>& corners) {
   Quad quad;
   for (std::size_t i = 0; i < quad.size(); ++i) {
     const auto [x, y] = corners[i];
     if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || x > 1 || y < 0 || y > 1)
-      throw std::runtime_error("invalid-corners");
+      return Error{ErrorCode::kInvalidRequest, "invalid-corners"};
     quad[i] = {static_cast<float>(x * (image.cols - 1)), static_cast<float>(y * (image.rows - 1))};
   }
   if (!ValidQuad(quad, 32 * 32, 24))
-    throw std::runtime_error("invalid-corners");
+    return Error{ErrorCode::kInvalidRequest, "invalid-corners"};
   StartAtTopLeft(quad);
   return quad;
 }
 
-cv::Mat Rectify(const cv::Mat& image, const Quad& quad) {
+Result<cv::Mat> Rectify(const cv::Mat& image, const Quad& quad) {
   const int width = cvRound(std::max(Length(quad[1] - quad[0]), Length(quad[2] - quad[3])));
   const int height = cvRound(std::max(Length(quad[3] - quad[0]), Length(quad[2] - quad[1])));
   const double scale = std::min({1.0, std::sqrt(static_cast<double>(kMaxPixels) / (width * height)),
@@ -664,7 +679,7 @@ cv::Mat Rectify(const cv::Mat& image, const Quad& quad) {
   const int out_width = static_cast<int>(width * scale);
   const int out_height = static_cast<int>(height * scale);
   if (out_width < 32 || out_height < 32)
-    throw std::runtime_error("invalid-corners");
+    return Error{ErrorCode::kInvalidRequest, "invalid-corners"};
   const float x = static_cast<float>(out_width - 1), y = static_cast<float>(out_height - 1);
   const Quad destination{{{0, 0}, {x, 0}, {x, y}, {0, y}}};
   cv::Mat result;
@@ -734,10 +749,10 @@ TextDirection EstimateTextDirection(const std::vector<cv::Point2d>& letters) {
   return {index * 0.5 - 15, *best / competing, lines[index]};
 }
 
-std::optional<double> DeskewAngle(const cv::Mat& image, const PhotoCancelled& cancelled) {
+Result<std::optional<double>> DeskewAngle(const cv::Mat& image, const PhotoCancelled& cancelled) {
   const auto gray = SmallGray(image);
   if (std::min(gray.cols, gray.rows) < 96)
-    return {};
+    return std::optional<double>{};
   cv::Mat dark;
   cv::morphologyEx(gray, dark, cv::MORPH_BLACKHAT,
                    cv::getStructuringElement(cv::MORPH_RECT, {9, 9}));
@@ -762,19 +777,19 @@ std::optional<double> DeskewAngle(const cv::Mat& image, const PhotoCancelled& ca
       ++lower;
   }
   if (left.size() < 35 || right.size() < 35 || upper < 24 || lower < 24)
-    return {};
-  CheckCancelled(cancelled);
+    return std::optional<double>{};
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   const auto full = EstimateTextDirection(letters);
   if (std::abs(full.degrees) < 1 || std::abs(full.degrees) > 13 || full.dominance < 1.18 ||
       full.lines < 3)
-    return {};
+    return std::optional<double>{};
   for (const auto* region : {&left, &right}) {
     const auto direction = EstimateTextDirection(*region);
     if (direction.dominance < 1.10 || direction.lines < 3 ||
         std::abs(direction.degrees - full.degrees) > 1.5)
-      return {};
+      return std::optional<double>{};
   }
-  return full.degrees;
+  return std::optional<double>{full.degrees};
 }
 
 cv::Mat Deskew(const cv::Mat& image, double angle) {
@@ -799,7 +814,7 @@ cv::Mat Deskew(const cv::Mat& image, double angle) {
   return result;
 }
 
-void EnhanceScan(cv::Mat& image, const PhotoCancelled& cancelled) {
+Result<void> EnhanceScan(cv::Mat& image, const PhotoCancelled& cancelled) {
   cv::Mat paper = SmallGray(image);
   const int neighborhood = std::clamp(std::min(paper.cols, paper.rows) / 10, 7, 25) | 1;
   cv::morphologyEx(paper, paper, cv::MORPH_CLOSE,
@@ -807,7 +822,7 @@ void EnhanceScan(cv::Mat& image, const PhotoCancelled& cancelled) {
   cv::GaussianBlur(paper, paper, {}, std::max(1.0, neighborhood / 8.0));
   const float reference = static_cast<float>(std::min(242u, Percentile(paper, 0.85)));
   if (reference < 96)
-    return;
+    return {};
   cv::Mat high, low;
   const auto edge_kernel = cv::getStructuringElement(cv::MORPH_RECT, {5, 5});
   cv::dilate(paper, high, edge_kernel);
@@ -823,11 +838,11 @@ void EnhanceScan(cv::Mat& image, const PhotoCancelled& cancelled) {
       gain.at<std::uint8_t>(y, x) = cv::saturate_cast<std::uint8_t>(255 * lift * confidence);
     }
   }
-  CheckCancelled(cancelled);
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   cv::resize(gain, gain, image.size(), 0, 0, cv::INTER_LINEAR);
   for (int y = 0; y < image.rows; ++y) {
     if (y % 32 == 0)
-      CheckCancelled(cancelled);
+      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
     auto* pixels = image.ptr<cv::Vec3b>(y);
     const auto* lifts = gain.ptr<std::uint8_t>(y);
     for (int x = 0; x < image.cols; ++x) {
@@ -844,6 +859,8 @@ void EnhanceScan(cv::Mat& image, const PhotoCancelled& cancelled) {
       pixels[x] = pixel * scale;
     }
   }
+
+  return {};
 }
 
 }  // namespace
@@ -861,9 +878,9 @@ struct PhotoBurstAnalyzer::Impl {
     });
   }
 
-  PhotoBurstDecision Decide(bool high_quality_agreement) const {
+  Result<PhotoBurstDecision> Decide(bool high_quality_agreement) const {
     if (observations.empty())
-      throw std::runtime_error("invalid-photo-count");
+      return Error{ErrorCode::kInvalidRequest, "invalid-photo-count"};
     constexpr double kLowQuality = 0.26;
     constexpr double kCloseQuality = 0.095;
     const auto& best = observations.front().candidate;
@@ -897,23 +914,24 @@ struct PhotoBurstAnalyzer::Impl {
 PhotoBurstAnalyzer::PhotoBurstAnalyzer() : impl_(std::make_unique<Impl>()) {}
 PhotoBurstAnalyzer::~PhotoBurstAnalyzer() = default;
 
-PhotoBurstDecision PhotoBurstAnalyzer::Observe(const std::string& frame_id,
-                                               std::span<const std::uint8_t> encoded,
-                                               const std::vector<std::string>& available,
-                                               const PhotoCancelled& cancelled) {
+Result<PhotoBurstDecision> PhotoBurstAnalyzer::Observe(const std::string& frame_id,
+                                                       std::span<const std::uint8_t> encoded,
+                                                       const std::vector<std::string>& available,
+                                                       const PhotoCancelled& cancelled) {
   if (impl_->seen.size() >= 20)
-    throw std::runtime_error("invalid-photo-count");
+    return Error{ErrorCode::kInvalidRequest, "invalid-photo-count"};
   if (frame_id.empty() || frame_id.size() > 128 || available.size() > 3 ||
       std::find(available.begin(), available.end(), frame_id) == available.end() ||
       std::find(impl_->seen.begin(), impl_->seen.end(), frame_id) != impl_->seen.end())
-    throw std::runtime_error("invalid-photo-frame");
+    return Error{ErrorCode::kInvalidRequest, "invalid-photo-frame"};
   if (encoded.size() > kMaxAnalysisBytes)
-    throw std::runtime_error("photo-too-large");
+    return Error{ErrorCode::kInvalidRequest, "photo-too-large"};
   Imaging imaging;
-  const auto image = DecodeMemory(*imaging.factory.Get(), encoded, cancelled, false, true);
+  RK_RETURN_IF_ERROR(imaging.Open());
+  RK_ASSIGN_OR_RETURN(image, DecodeMemory(*imaging.factory.Get(), encoded, cancelled, false, true));
   const double score = MeasureBurstQuality(image);
   const auto signature = CompositionSignature(image);
-  CheckCancelled(cancelled);
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   impl_->seen.push_back(frame_id);
   impl_->Prune(available);
   auto& observations = impl_->observations;
@@ -943,27 +961,28 @@ PhotoBurstDecision PhotoBurstAnalyzer::Observe(const std::string& frame_id,
   return impl_->Decide(agrees_with_best);
 }
 
-PhotoBurstDecision PhotoBurstAnalyzer::Finish(const std::vector<std::string>& available) {
+Result<PhotoBurstDecision> PhotoBurstAnalyzer::Finish(const std::vector<std::string>& available) {
   if (available.size() > 3)
-    throw std::runtime_error("invalid-photo-frame");
+    return Error{ErrorCode::kInvalidRequest, "invalid-photo-frame"};
   impl_->Prune(available);
   return impl_->Decide(false);
 }
 
-PhotoRankResult RankPhotos(std::span<const std::filesystem::path> inputs,
-                           const PhotoCancelled& cancelled) {
+Result<PhotoRankResult> RankPhotos(std::span<const std::filesystem::path> inputs,
+                                   const PhotoCancelled& cancelled) {
   if (inputs.empty() || inputs.size() > 6)
-    throw std::runtime_error("invalid-photo-count");
-  CheckCancelled(cancelled);
+    return Error{ErrorCode::kInvalidRequest, "invalid-photo-count"};
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   Imaging imaging;
+  RK_RETURN_IF_ERROR(imaging.Open());
   std::vector<Quality> qualities;
   qualities.reserve(inputs.size());
   for (std::size_t i = 0; i < inputs.size(); ++i) {
-    const auto image = Decode(*imaging.factory.Get(), inputs[i], cancelled);
-    CheckCancelled(cancelled);
+    RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), inputs[i], cancelled));
+    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
     qualities.push_back(Measure(image, i));
   }
-  CheckCancelled(cancelled);
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   std::stable_sort(qualities.begin(), qualities.end(),
                    [](const Quality& a, const Quality& b) { return a.rank.score > b.rank.score; });
   const auto& best = qualities.front().rank;
@@ -994,59 +1013,68 @@ PhotoRankResult RankPhotos(std::span<const std::filesystem::path> inputs,
   return result;
 }
 
-PhotoProcessResult ProcessPhoto(const std::filesystem::path& input,
-                                const std::filesystem::path& output,
-                                PhotoMode mode,
-                                const std::optional<std::array<PhotoPoint, 4>>& corners,
-                                const PhotoCancelled& cancelled) {
-  CheckCancelled(cancelled);
+Result<PhotoProcessResult> ProcessPhoto(const std::filesystem::path& input,
+                                        const std::filesystem::path& output,
+                                        PhotoMode mode,
+                                        const std::optional<std::array<PhotoPoint, 4>>& corners,
+                                        const PhotoCancelled& cancelled) {
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   std::error_code equivalent_error;
   if (std::filesystem::equivalent(input, output, equivalent_error))
-    throw std::runtime_error("photo-output-failed");
+    return Error{ErrorCode::kUnavailable, "photo-output-failed"};
   Imaging imaging;
-  auto image = Decode(*imaging.factory.Get(), input, cancelled);
-  CheckCancelled(cancelled);
-  const auto quad = corners ? std::optional{ManualQuad(image, *corners)}
-                            : DetectDocument(image, mode == PhotoMode::kScan);
-  CheckCancelled(cancelled);
+  RK_RETURN_IF_ERROR(imaging.Open());
+  RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), input, cancelled));
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  std::optional<Quad> quad;
+  if (corners) {
+    RK_ASSIGN_OR_RETURN(manual, ManualQuad(image, *corners));
+    quad = manual;
+  } else
+    quad = DetectDocument(image, mode == PhotoMode::kScan);
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   std::string geometry = "unchanged";
   std::optional<double> angle;
   if (quad) {
-    image = Rectify(image, *quad);
+    RK_ASSIGN_OR_RETURN(rectified, Rectify(image, *quad));
+    image = std::move(rectified);
     geometry = "perspective";
   } else if (mode == PhotoMode::kRectify) {
-    throw std::runtime_error("no-document");
+    return Error{ErrorCode::kInvalidRequest, "no-document"};
   } else {
-    angle = DeskewAngle(image, cancelled);
+    RK_ASSIGN_OR_RETURN(deskew_angle, DeskewAngle(image, cancelled));
+    angle = deskew_angle;
   }
   if (mode == PhotoMode::kScan) {
-    CheckCancelled(cancelled);
-    EnhanceScan(image, cancelled);
+    RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+    RK_RETURN_IF_ERROR(EnhanceScan(image, cancelled));
     if (angle) {
-      CheckCancelled(cancelled);
+      RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
       image = Deskew(image, *angle);
       geometry = "deskew";
     }
   }
-  CheckCancelled(cancelled);
-  EncodePng(*imaging.factory.Get(), output, image, cancelled);
-  CheckCancelled(cancelled);
-  return {static_cast<std::uint32_t>(image.cols), static_cast<std::uint32_t>(image.rows),
-          std::move(geometry)};
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  RK_RETURN_IF_ERROR(EncodePng(*imaging.factory.Get(), output, image, cancelled));
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  return PhotoProcessResult{static_cast<std::uint32_t>(image.cols),
+                            static_cast<std::uint32_t>(image.rows), std::move(geometry)};
 }
 
-PhotoProcessResult CreatePhotoThumbnail(const std::filesystem::path& input,
-                                        const std::filesystem::path& output,
-                                        const PhotoCancelled& cancelled) {
-  CheckCancelled(cancelled);
+Result<PhotoProcessResult> CreatePhotoThumbnail(const std::filesystem::path& input,
+                                                const std::filesystem::path& output,
+                                                const PhotoCancelled& cancelled) {
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
   std::error_code equivalent_error;
   if (std::filesystem::equivalent(input, output, equivalent_error))
-    throw std::runtime_error(kThumbnailOutputError);
-  Imaging imaging("photo_imaging_unavailable");
-  auto image = Decode(*imaging.factory.Get(), input, cancelled, true);
-  WriteThumbnail(*imaging.factory.Get(), output, image, cancelled);
-  CheckCancelled(cancelled);
-  return {static_cast<std::uint32_t>(image.cols), static_cast<std::uint32_t>(image.rows), {}};
+    return Error{ErrorCode::kInvalidRequest, kThumbnailOutputError};
+  Imaging imaging;
+  RK_RETURN_IF_ERROR(imaging.Open("photo_imaging_unavailable"));
+  RK_ASSIGN_OR_RETURN(image, Decode(*imaging.factory.Get(), input, cancelled, true));
+  RK_RETURN_IF_ERROR(WriteThumbnail(*imaging.factory.Get(), output, image, cancelled));
+  RK_RETURN_IF_ERROR(CheckCancelled(cancelled));
+  return PhotoProcessResult{
+      static_cast<std::uint32_t>(image.cols), static_cast<std::uint32_t>(image.rows), {}};
 }
 
 }  // namespace remotekit

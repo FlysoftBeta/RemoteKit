@@ -1,0 +1,88 @@
+#include "session/session.hpp"
+
+#include <cstdlib>
+#include <iostream>
+
+namespace {
+using namespace remotekit;
+
+void Check(bool value, const char* message) {
+  if (!value) {
+    std::cerr << message << '\n';
+    std::exit(1);
+  }
+}
+
+class Link final : public ManagementLink {
+ public:
+  bool Next(std::string&, uint64_t&, bool&) override { return false; }
+  bool Current(uint64_t generation) override { return generation == 7; }
+  bool SendReply(uint64_t, const Json&) override { return true; }
+  bool SendEvent(const Json&, uint64_t) override { return true; }
+  void OnDisconnect(Disconnect) override {}
+};
+}  // namespace
+
+int main() {
+  using namespace remotekit;
+  const auto directory = fs::temp_directory_path() /
+                         ("remotekit-composition-" + std::to_string(GetCurrentProcessId()) + "-" +
+                          std::to_string(GetTickCount64()));
+  struct Cleanup {
+    fs::path directory;
+    ~Cleanup() {
+      std::error_code ignored;
+      fs::remove_all(directory, ignored);
+    }
+  } cleanup{directory};
+  std::string executable = "endpoint", data = "--data-path=" + directory.string();
+  char* arguments[] = {executable.data(), data.data()};
+  auto parsed = RuntimeOptions::Parse(2, arguments);
+  Check(bool(parsed), "composition options");
+  SessionStore store(directory / "sessions" / "1");
+  Check(bool(store.Save("views.json", Json::array({{{"viewId", "1"}}, {{"viewId", "2"}}}))),
+        "persist desired views");
+  Check(bool(store.Save(
+            "events.json",
+            {{"next", 2},
+             {"events",
+              Json::array({{{"eventId", "1"}, {"type", "view.closed"}, {"viewId", "1"}}})}})),
+        "persist close event before desired-state reconciliation");
+  media::Sdk sdk;
+  Link link;
+  {
+    Session session(sdk, parsed.value(), "tenant", "1", link);
+    Check(bool(session.Initialize()), "initialize controller composition");
+    Check(!session.Views().Contains("1") && session.Views().Contains("2"),
+          "replay durable close events into desired views");
+    session.BeginManagementRequest(7);
+    Check(session.ManagementCurrent(), "management generation wiring");
+    auto policy = session.Media().ManageSessionMediaPolicy(
+        {{"maxFps", 30}, {"degradationPreference", "balanced"}});
+    Check(bool(policy) && session.Media().MaxFps() == 30,
+          "media policy belongs to pipeline before peer creation");
+    auto invalid = session.Media().ManageSessionMediaPolicy(
+        {{"maxFps", 0}, {"degradationPreference", "balanced"}});
+    Check(!invalid && invalid.error().code == ErrorCode::kInvalidRequest,
+          "invalid policy preserves typed error");
+    DcFileServices::Job stale;
+    auto file = session.Files().DirectFileCommand(stale);
+    Check(!file && file.error().code == ErrorCode::kForbidden,
+          "retired file work returns an operational error");
+    auto snapshot = session.Views().Snapshot();
+    Check(bool(snapshot) && !snapshot.value().at("running").get<bool>() &&
+              snapshot.value().at("events").size() == 1 &&
+              snapshot.value().at("stats").at("audio").at("submitted") == 0,
+          "inactive diagnostics assemble controller snapshots without launching browser");
+    const auto desired = session.Views().Desired("2");
+    auto configured = session.Views().ApplyView(
+        {{"viewId", "2"}, {"visible", true}, {"width", 800}, {"height", 600}}, false);
+    Check(!configured && configured.error().code == ErrorCode::kUnavailable &&
+              session.Views().Desired("2") == desired && session.Views().ReconciliationPending(),
+          "failed output configuration preserves desired views and schedules reconciliation");
+    Check(bool(session.Stop()) && bool(session.Stop()), "shutdown is idempotent");
+  }
+  const auto saved = store.Load("views.json");
+  Check(saved.size() == 1 && saved.at(0).at("viewId") == "2",
+        "close reconciliation is durable across composition shutdown");
+}

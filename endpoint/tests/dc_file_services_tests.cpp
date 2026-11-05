@@ -13,14 +13,25 @@ using namespace remotekit;
     }                                            \
   } while (false)
 template <class F>
-bool Throws(F f) {
-  try {
-    f();
-  } catch (...) {
-    return true;
-  }
-  return false;
+bool Fails(F operation) {
+  return !operation();
 }
+
+template <class T>
+T Take(remotekit::Result<T> result) {
+  if (!result) {
+    std::cerr << result.error().message << '\n';
+    std::exit(1);
+  }
+  return std::move(result).value();
+}
+inline void Take(remotekit::Result<void> result) {
+  if (!result) {
+    std::cerr << result.error().message << '\n';
+    std::exit(1);
+  }
+}
+
 template <class F>
 void Until(F ready) {
   const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(3);
@@ -86,14 +97,14 @@ void CheckSelectionCancellationGrant() {
   services.Stop();
 }
 struct TestBurstAnalyzer {
-  PhotoBurstDecision Observe(const std::string& frame,
-                             std::span<const std::uint8_t>,
-                             const std::vector<std::string>&,
-                             const PhotoCancelled& cancelled) {
+  Result<PhotoBurstDecision> Observe(const std::string& frame,
+                                     std::span<const std::uint8_t>,
+                                     const std::vector<std::string>&,
+                                     const PhotoCancelled& cancelled) {
     CHECK(!cancelled());
     return Decide(frame);
   }
-  PhotoBurstDecision Finish(const std::vector<std::string>& available) {
+  Result<PhotoBurstDecision> Finish(const std::vector<std::string>& available) {
     return Decide(available.front());
   }
   static PhotoBurstDecision Decide(const std::string& frame) {
@@ -103,12 +114,15 @@ struct TestBurstAnalyzer {
 void CheckBursts() {
   PhotoBurstSessions<TestBurstAnalyzer> bursts;
   const auto live = [] { return false; };
-  const auto begin = [&] {
-    return bursts.Execute(11, "photo.burst.begin", {}, live)["burstId"].get<std::string>();
+  auto begin = [&]() -> Result<std::string> {
+    auto result = bursts.Execute(11, "photo.burst.begin", ServiceJson::object(), live);
+    if (!result)
+      return result.error();
+    return result.value().at("burstId").get<std::string>();
   };
-  const auto first = begin(), second = begin();
+  const auto first = Take(begin()), second = Take(begin());
   CHECK(first != second);
-  CHECK(Throws(begin));
+  CHECK(Fails(begin));
   auto sample = [&](const std::string& frame, const std::vector<std::string>& available,
                     const std::string& data = "YWJj") {
     return bursts.Execute(
@@ -116,66 +130,63 @@ void CheckBursts() {
         {{"burstId", first}, {"frameId", frame}, {"availableFrameIds", available}, {"data", data}},
         live);
   };
-  CHECK(Throws([&] { sample("1", {"1", "future"}); }));
-  CHECK(Throws([&] { sample("1", {"1", "1"}); }));
-  CHECK(Throws([&] { sample("1", {"1", "2", "3", "4"}); }));
-  CHECK(Throws([&] { sample("invalid\n", {"invalid\n"}); }));
-  const auto decision = sample("1", {"1"});
+  CHECK(Fails([&] { return sample("1", {"1", "future"}); }));
+  CHECK(Fails([&] { return sample("1", {"1", "1"}); }));
+  CHECK(Fails([&] { return sample("1", {"1", "2", "3", "4"}); }));
+  CHECK(Fails([&] { return sample("invalid\n", {"invalid\n"}); }));
+  const auto decision = Take(sample("1", {"1"}));
   CHECK(decision["selectedFrameId"] == "1" && decision["keepFrameIds"].size() == 1 &&
         decision["candidates"][0]["score"] == 0.75);
-  CHECK(Throws([&] { sample("1", {"1"}, "ZGVm"); }));
-  CHECK(sample("2", {"1", "2"})["selectedFrameId"] == "2");
-  CHECK(sample("3", {"2", "3"})["selectedFrameId"] == "3");
-  CHECK(Throws([&] { sample("4", {"1", "4"}); }));
+  CHECK(Fails([&] { return sample("1", {"1"}, "ZGVm"); }));
+  CHECK(Take(sample("2", {"1", "2"}))["selectedFrameId"] == "2");
+  CHECK(Take(sample("3", {"2", "3"}))["selectedFrameId"] == "3");
+  CHECK(Fails([&] { return sample("4", {"1", "4"}); }));
   for (unsigned i = 4; i <= 20; ++i) {
     const auto id = std::to_string(i);
-    CHECK(sample(id, {id})["selectedFrameId"] == id);
+    CHECK(Take(sample(id, {id}))["selectedFrameId"] == id);
   }
-  CHECK(Throws([&] { sample("21", {"21"}); }));
+  CHECK(Fails([&] { return sample("21", {"21"}); }));
   const ServiceJson end = {{"burstId", first}, {"availableFrameIds", {"20"}}};
-  const auto result = bursts.Execute(11, "photo.burst.end", end, live);
+  const auto result = Take(bursts.Execute(11, "photo.burst.end", end, live));
   CHECK(result["selectedFrameId"] == "20");
-  CHECK(bursts.Execute(11, "photo.burst.end", end, live) == result);
-  CHECK(Throws([&] { bursts.Execute(12, "photo.burst.end", end, live); }));
+  CHECK(Take(bursts.Execute(11, "photo.burst.end", end, live)) == result);
+  CHECK(Fails([&] { return bursts.Execute(12, "photo.burst.end", end, live); }));
   auto conflict = end;
   conflict["availableFrameIds"] = {"19"};
-  CHECK(Throws([&] { bursts.Execute(11, "photo.burst.end", conflict, live); }));
+  CHECK(Fails([&] { return bursts.Execute(11, "photo.burst.end", conflict, live); }));
   const ServiceJson cancel = {{"burstId", second}};
-  CHECK(bursts.Execute(12, "photo.burst.cancel", cancel, live)["cancelled"] == true);
-  const auto third = begin();
-  CHECK(Throws(begin));
-  CHECK(bursts.Execute(11, "photo.burst.cancel", cancel, live)["cancelled"] == true);
-  CHECK(bursts.Execute(11, "photo.burst.cancel", cancel, live)["cancelled"] == true);
+  CHECK(Take(bursts.Execute(12, "photo.burst.cancel", cancel, live))["cancelled"] == true);
+  const auto third = Take(begin());
+  CHECK(Fails(begin));
+  CHECK(Take(bursts.Execute(11, "photo.burst.cancel", cancel, live))["cancelled"] == true);
+  CHECK(Take(bursts.Execute(11, "photo.burst.cancel", cancel, live))["cancelled"] == true);
   const ServiceJson empty_end = {{"burstId", third}, {"availableFrameIds", ServiceJson::array()}};
   for (int i = 0; i < 2; ++i) {
-    try {
-      bursts.Execute(11, "photo.burst.end", empty_end, live);
-      CHECK(false);
-    } catch (const std::runtime_error& error) {
-      CHECK(std::string(error.what()) == "photo_burst_no_samples");
-    }
+    const auto failed = bursts.Execute(11, "photo.burst.end", empty_end, live);
+    CHECK(!failed && failed.error().message == "photo_burst_no_samples");
   }
-  const auto expiring = begin();
+  const auto expiring = Take(begin());
   bursts.Sweep([](uint64_t) { return true; },
                decltype(bursts)::Clock::now() + std::chrono::seconds(6));
-  CHECK(Throws([&] {
-    bursts.Execute(11, "photo.burst.end",
-                   {{"burstId", expiring}, {"availableFrameIds", ServiceJson::array()}}, live);
+  CHECK(Fails([&] {
+    return bursts.Execute(11, "photo.burst.end",
+                          {{"burstId", expiring}, {"availableFrameIds", ServiceJson::array()}},
+                          live);
   }));
   bursts.Sweep([](uint64_t) { return false; });
-  CHECK(Throws([&] { bursts.Execute(11, "photo.burst.end", end, live); }));
+  CHECK(Fails([&] { return bursts.Execute(11, "photo.burst.end", end, live); }));
 }
 int main() {
   CheckSelectionCancellationGrant();
   CheckBursts();
-  CHECK(DecodeFileChunk("YWJj") == std::vector<std::uint8_t>({'a', 'b', 'c'}));
-  CHECK(DecodeFileChunk("YQ==") == std::vector<std::uint8_t>({'a'}));
-  CHECK(DecodeFileChunk("YWI=") == std::vector<std::uint8_t>({'a', 'b'}));
+  CHECK(Take(DecodeFileChunk("YWJj")) == std::vector<std::uint8_t>({'a', 'b', 'c'}));
+  CHECK(Take(DecodeFileChunk("YQ==")) == std::vector<std::uint8_t>({'a'}));
+  CHECK(Take(DecodeFileChunk("YWI=")) == std::vector<std::uint8_t>({'a', 'b'}));
   CHECK(EncodeFileChunk({}) == "");
   CHECK(EncodeFileChunk({'a', 'b'}) == "YWI=");
   for (const auto* text : {"", "a", "====", "YQ=+", "YQ==YQ==", "YR==", "YWJ=", " YQ=", "!!!!"})
-    CHECK(Throws([&] { DecodeFileChunk(text); }));
-  CHECK(Throws([] { DecodeFileChunk(std::string(21848, 'A')); }));
+    CHECK(Fails([&] { return DecodeFileChunk(text); }));
+  CHECK(Fails([] { return DecodeFileChunk(std::string(21848, 'A')); }));
   const auto a = Request("00000000-0000-4000-8000-000000000001");
   CHECK(FileRequestEnvelope(a, a.dump().size()));
   CHECK(!FileRequestEnvelope(a, 24577));
@@ -192,10 +203,12 @@ int main() {
     CHECK(!FileRequestEnvelope(small, 24577));
   }
   constexpr auto sample_bytes = PhotoBurstSessions<TestBurstAnalyzer>::kMaxSampleBytes;
-  CHECK(DecodeFileChunk(EncodeFileChunk(std::vector<std::uint8_t>(sample_bytes)), sample_bytes)
-            .size() == sample_bytes);
-  CHECK(Throws([&] {
-    DecodeFileChunk(EncodeFileChunk(std::vector<std::uint8_t>(sample_bytes + 1)), sample_bytes);
+  CHECK(
+      Take(DecodeFileChunk(EncodeFileChunk(std::vector<std::uint8_t>(sample_bytes)), sample_bytes))
+          .size() == sample_bytes);
+  CHECK(Fails([&] {
+    return DecodeFileChunk(EncodeFileChunk(std::vector<std::uint8_t>(sample_bytes + 1)),
+                           sample_bytes);
   }));
   auto malformed = a;
   malformed["requestId"] = "g0000000-0000-4000-8000-000000000001";
@@ -276,7 +289,7 @@ int main() {
     return 0;
   });
   CHECK(replies.size() == count);
-  CHECK(Throws([&] { services.Authorize("connection", 99, {{"opaque", binding}}); }));
+  CHECK(Fails([&] { return services.Authorize("connection", 99, {{"opaque", binding}}); }));
   services.Admit(7, a);
   services.Flush(8, [&](const std::string&) {
     CHECK(false);

@@ -1,10 +1,17 @@
-#include "session/session.hpp"
+#include "media/audio.hpp"
+#include "diagnostics/timing.hpp"
+#include "rtc/authorization.hpp"
+#include "rtc/peer.hpp"
 namespace remotekit {
-Result<void> Session::OpenAudio() {
+using ConnectionPhase = ConnectionTiming::ConnectionPhase;
+using Event = RtcEvent;
+Result<void> AudioOutput::OpenAudio() {
   const uint64_t generation = static_cast<uint64_t>(QpcNow());
   const std::string name =
       "Local\\RemoteKit.audio." + browser.Incarnation() + "." + std::to_string(generation);
-  audio_ring.Open(name, generation, std::stoull(id));
+  auto mapped = audio_ring.Open(name, generation, std::stoull(id));
+  if (!mapped)
+    return mapped.error();
   {
     {
       auto audio_open_result = browser.Rpc().Request({{"method", "audio.open"},
@@ -22,13 +29,13 @@ Result<void> Session::OpenAudio() {
   audio_gaps = 0;
   audio_submitted = 0;
   audio_rejected = 0;
-  stop_audio = false;
+  state = State::kRunning;
   audio_thread = std::thread([this, generation] {
     RunThread(
         "audio",
         [this, generation] {
           uint64_t gaps = 0, stale = 0;
-          while (!stop_audio.load()) {
+          while (state == State::kRunning) {
             remotekit::AudioPacket packet{};
             if (!audio_ring.Poll(packet, gaps)) {
               std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -58,11 +65,34 @@ Result<void> Session::OpenAudio() {
           }
         },
         [this] {
-          stop_audio = true;
+          state = State::kFailed;
           ++audio_rejected;
         });
   });
 
   return {};
 }
+}  // namespace remotekit
+
+namespace remotekit {
+
+void AudioOutput::Stop() {
+  const bool had_audio = audio_ring.IsOpen();
+  state = State::kStopping;
+  if (audio_thread.joinable())
+    audio_thread.join();
+  if (had_audio && browser.Rpc().Control() && browser.Alive()) {
+    auto closed = browser.Rpc().Request({{"method", "audio.close"}});
+    if (!closed)
+      fprintf(stderr, "audio close: %s\n", closed.error().message.c_str());
+  }
+  audio_ring.Close();
+  state = State::kStopped;
+}
+Json AudioOutput::Snapshot() const {
+  return {{"submitted", audio_submitted.load()},
+          {"gaps", audio_gaps.load()},
+          {"rejected", audio_rejected.load()}};
+}
+
 }  // namespace remotekit

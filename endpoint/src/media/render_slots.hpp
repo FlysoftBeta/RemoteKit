@@ -13,7 +13,9 @@ class RenderSlots {
  public:
   RenderSlots();
   ~RenderSlots();
+  enum class Phase { kClosed, kRunning, kStopping, kFailed };
   struct StatsSnapshot {
+    Phase phase = Phase::kClosed;
     bool idle = false;
     uint64_t wakes = 0, idleEntries = 0;
     uint64_t begins = 0, rejectIdle = 0, rejectNotReady = 0, rejectStopped = 0, readyObserved = 0,

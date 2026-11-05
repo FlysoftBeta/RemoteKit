@@ -1,17 +1,27 @@
-#include "session/session.hpp"
+#include "media/pipeline.hpp"
+#include "diagnostics/stats.hpp"
+#include "diagnostics/timing.hpp"
+#include "media/encoders.hpp"
+#include "media/output.hpp"
+#include "media/presentation.hpp"
+#include "media/render_slots.hpp"
+#include "rtc/authorization.hpp"
+#include "rtc/peer.hpp"
 namespace remotekit {
-void Session::MediaLoop() {
+using ConnectionPhase = ConnectionTiming::ConnectionPhase;
+using Event = RtcEvent;
+void MediaPipeline::MediaLoop() {
   std::shared_ptr<remotekit::TailIdrAttempt> tail_attempt;
   // All exits, including early return and source/Begin failure, stop this
   // generation. Block-local locks unwind before this function-scope guard.
   struct RenderExit {
-    Session& owner;
+    MediaPipeline& owner;
     std::shared_ptr<remotekit::TailIdrAttempt>& tail;
     ~RenderExit() {
       if (tail)
         tail->CancelWaiting();
       std::string error;
-      if (!owner.pool.Close(error))
+      if (!owner.output.Slots().Close(error))
         fprintf(stderr, "media exit render drain: %s\n", error.c_str());
     }
   } render_exit{*this, tail_attempt};
@@ -29,18 +39,17 @@ void Session::MediaLoop() {
       CreateWaitableTimerExW(nullptr, nullptr, 0x2, TIMER_MODIFY_STATE | SYNCHRONIZE);
   if (!pace_timer) {
     presentation.InvalidateLayout("comp-timer-unavailable");
-    std::lock_guard lock(stats->mutex);
-    stats->error = "high resolution Comp timer unavailable";
+    registry.SetError("high resolution Comp timer unavailable");
     return;
   }
   struct TimerCloser {
     HANDLE value;
     ~TimerCloser() { CloseHandle(value); }
   } timer_closer{pace_timer};
-  uint64_t observed_wakes = pool.Stats().wakes;
+  uint64_t observed_wakes = output.Slots().Stats().wakes;
   remotekit::CompBeginSchedule begin_schedule;
   auto observe_wake = [&] {
-    const auto wakes = pool.Stats().wakes;
+    const auto wakes = output.Slots().Stats().wakes;
     if (wakes != observed_wakes) {
       observed_wakes = wakes;
       begin_schedule.Wake();
@@ -49,8 +58,8 @@ void Session::MediaLoop() {
   int64_t last_stats = QpcNow();
   uint32_t official_max_fps = 240, codec_max_fps = 240;
   remotekit::CompCadence cadence;
-  uint64_t previous_encoded = stats->completed.load(), previous_bytes = stats->bytes.load();
-  uint64_t previous_delivered = pool.delivered_frames();
+  uint64_t previous_encoded = registry.Completed(), previous_bytes = registry.Bytes();
+  uint64_t previous_delivered = output.Slots().delivered_frames();
   remotekit::IdleIdrPolicy idle(options.idle_idr_ms);
   bool has_current_view = false;
 
@@ -65,7 +74,7 @@ void Session::MediaLoop() {
   authorization.SetFrame(active_authorization);
   auto update_refresh = [&](uint64_t handle, double now_ms) {
     std::optional<remotekit::PresentationRefresh::Scope> scope;
-    if (has_current_view && !output_suspended && authorization.Current(active_authorization)) {
+    if (has_current_view && !output.Suspended() && authorization.Current(active_authorization)) {
       if (auto key = presentation.RefreshKey(handle, presentation.Epoch()))
         scope = remotekit::PresentationRefresh::Scope{handle, active_authorization, *key};
     }
@@ -73,7 +82,7 @@ void Session::MediaLoop() {
     if (scope)
       presentation_refresh.Update(refresh_connected.exchange(false), now_ms);
   };
-  while (!stop_media) {
+  while (state == State::kRunning) {
     const auto stamp = authorization.Stamp();
     if (stamp != active_authorization) {
       authorization.SetFrame(0);
@@ -87,9 +96,9 @@ void Session::MediaLoop() {
       presentation.InvalidateLayout(stamp ? "authorization-resuming" : "authorization-locked");
       if (peer_controller.Connected()) {
         {
-          if (pool.EventHandle()) {
+          if (output.Slots().EventHandle()) {
             {
-              auto output_close_result = browser.Rpc().Request({{"method", "output.close"}});
+              auto output_close_result = output.Close();
               if (!output_close_result) {
                 const Error error = output_close_result.error();
                 fprintf(stderr, "authorization output transition: %s\n", error.message.c_str());
@@ -97,14 +106,14 @@ void Session::MediaLoop() {
               }
             }
             std::string drain_error;
-            if (!pool.Close(drain_error)) {
+            if (!output.Slots().Close(drain_error)) {
               Error error{ErrorCode::kRejected, drain_error};
               fprintf(stderr, "authorization output transition: %s\n", error.message.c_str());
               return;
             };
           }
           if (stamp && authorization.Current(stamp)) {
-            auto open_output_result = OpenOutput();
+            auto open_output_result = output.OpenOutput();
             if (!open_output_result) {
               const Error error = open_output_result.error();
               fprintf(stderr, "authorization output transition: %s\n", error.message.c_str());
@@ -118,14 +127,15 @@ void Session::MediaLoop() {
       if (stamp)
         refresh_connected = true;
     }
-    sampling_fps = cadence.Update(comp_bitrate.load(), comp_fps.load(), policy_max_fps.load(),
-                                  std::min(official_max_fps, codec_max_fps), pool.HasCapacity(),
-                                  static_cast<int64_t>(1000000.0 * QpcNow() / QpcFrequency()));
+    sampling_fps =
+        cadence.Update(comp_bitrate.load(), comp_fps.load(), policy_max_fps.load(),
+                       std::min(official_max_fps, codec_max_fps), output.Slots().HasCapacity(),
+                       static_cast<int64_t>(1000000.0 * QpcNow() / QpcFrequency()));
     {
       std::lock_guard lock(comp_diagnostics_mutex);
       comp_diagnostics.targetFps = peer_controller.Connected() &&
                                            authorization.Current(active_authorization) &&
-                                           !output_suspended.load()
+                                           !output.Suspended()
                                        ? sampling_fps
                                        : 0;
       comp_diagnostics.officialMaxFps = official_max_fps;
@@ -142,17 +152,7 @@ void Session::MediaLoop() {
     for (auto& event : incoming) {
       if (event.peer != peer_controller.Handle())
         continue;
-      if (event.type == 0x10000 && ProductCurrent(event)) {
-        auto message = Json::parse(event.bytes, nullptr, false);
-        if (!message.is_discarded())
-          Send(message, event.authorization);
-      } else if (event.type == REMOTEKIT_RTC_STATS) {
-        auto sample = Json::parse(event.bytes, nullptr, false);
-        if (sample.is_object()) {
-          std::lock_guard lock(stats->mutex);
-          stats->sender_rtc_stats = std::move(sample);
-        }
-      } else if (event.type == REMOTEKIT_RTC_REFRESH_REQUEST) {
+      if (event.type == REMOTEKIT_RTC_REFRESH_REQUEST) {
         refresh_connected = true;
       } else if (event.type == REMOTEKIT_RTC_STATE) {
         const bool connected = event.value == 2;
@@ -168,16 +168,15 @@ void Session::MediaLoop() {
           {
             if (connected) {
               if (authorization.Current(active_authorization)) {
-                auto open_output_result_2 = OpenOutput();
+                auto open_output_result_2 = output.OpenOutput();
                 if (!open_output_result_2) {
                   const Error failure = open_output_result_2.error();
                   {
-                    std::lock_guard lock(stats->mutex);
-                    stats->error = failure.message.c_str();
+                    registry.SetError(failure.message.c_str());
                   }
                   presentation.InvalidateLayout("rtc-output-error");
                   {
-                    auto closed = browser.Rpc().Request({{"method", "output.close"}});
+                    auto closed = output.Close();
                     if (!closed)
                       fprintf(stderr, "output close: %s\n", closed.error().message.c_str());
                   }
@@ -190,16 +189,15 @@ void Session::MediaLoop() {
               refresh_connected = true;
             } else {
               {
-                auto output_close_result_2 = browser.Rpc().Request({{"method", "output.close"}});
+                auto output_close_result_2 = output.Close();
                 if (!output_close_result_2) {
                   const Error failure = output_close_result_2.error();
                   {
-                    std::lock_guard lock(stats->mutex);
-                    stats->error = failure.message.c_str();
+                    registry.SetError(failure.message.c_str());
                   }
                   presentation.InvalidateLayout("rtc-output-error");
                   {
-                    auto closed = browser.Rpc().Request({{"method", "output.close"}});
+                    auto closed = output.Close();
                     if (!closed)
                       fprintf(stderr, "output close: %s\n", closed.error().message.c_str());
                   }
@@ -210,7 +208,7 @@ void Session::MediaLoop() {
                 }
               }
               std::string drain_error;
-              if (!pool.Close(drain_error))
+              if (!output.Slots().Close(drain_error))
                 fprintf(stderr, "disconnected render drain: %s\n", drain_error.c_str());
             }
           }
@@ -218,20 +216,20 @@ void Session::MediaLoop() {
       } else if (event.type == REMOTEKIT_RTC_ERROR)
         fprintf(stderr, "RTC %s: %s\n", id.c_str(), event.bytes.c_str());
     }
-    FlushControl();
     if (!peer_controller.Connected() || !authorization.Current(active_authorization)) {
       std::unique_lock lock(event_mutex);
       event_wake.wait_for(lock, std::chrono::milliseconds(20),
-                          [&] { return stop_media || !events.empty(); });
+                          [&] { return state != State::kRunning || !events.empty(); });
       continue;
     }
     remotekit_rtc_frame frame{};
     remotekit::SharedAtlasFrame metadata{};
     std::string error;
-    auto result = output_suspended ? RenderSlots::Result::idle : pool.Poll(frame, metadata, error);
+    auto result = output.Suspended() ? RenderSlots::Result::idle
+                                     : output.Slots().Poll(frame, metadata, error);
     observe_wake();
     if (first_source && result == RenderSlots::Result::ready) {
-      MarkConnection(ConnectionPhase::source_frame);
+      timing.MarkConnection(ConnectionPhase::source_frame);
       first_source = false;
     }
     if (result == RenderSlots::Result::reconfigure) {
@@ -251,28 +249,24 @@ void Session::MediaLoop() {
         if (++consecutive_reconfigures > 3)
           return Error{ErrorCode::kUnavailable,
                        "atlas repeatedly requested reconfiguration before a frame"};
-        if (stop_media.load())
+        if (state != State::kRunning)
           return {};
-        auto closed = browser.Rpc().Request({{"method", "output.close"}});
+        auto closed = output.Close();
         if (!closed)
           return closed.error();
-        if (stop_media.load())
+        if (state != State::kRunning)
           return {};
-        return OpenOutput(true);
+        return output.OpenOutput(true);
       }();
-      if (stop_media.load())
+      if (state != State::kRunning)
         break;
       if (reconfigured) {
-        previous_delivered = pool.delivered_frames();
-        previous_encoded = stats->completed.load();
-        previous_bytes = stats->bytes.load();
+        previous_delivered = output.Slots().delivered_frames();
+        previous_encoded = registry.Completed();
+        previous_bytes = registry.Bytes();
         last_stats = QpcNow();
         refresh_connected = true;
-        {
-          std::lock_guard lock(encoder_mutex);
-          for (auto& [encoder, worker] : encoders)
-            worker->Keyframe();
-        }
+        registry.Keyframes();
         continue;
       }
       error = "atlas reconfigure failed: " + reconfigured.error().message;
@@ -282,7 +276,7 @@ void Session::MediaLoop() {
       presentation.InvalidateLayout("fatal");
       {
         {
-          auto output_close_result_3 = browser.Rpc().Request({{"method", "output.close"}});
+          auto output_close_result_3 = output.Close();
           if (!output_close_result_3) {
             const Error close_error = output_close_result_3.error();
             fprintf(stderr, "session %s fatal output stop: %s\n", id.c_str(),
@@ -292,13 +286,12 @@ void Session::MediaLoop() {
       }
 
       {
-        std::lock_guard lock(stats->mutex);
-        stats->error = error;
+        registry.SetError(error);
       }
       fprintf(stderr, "session %s media: %s\n", id.c_str(), error.c_str());
       break;
     }
-    if (output_suspended) {
+    if (output.Suspended()) {
       if (!presentation.IsInvalid("no-visible-views"))
         presentation.InvalidateLayout("no-visible-views");
     }
@@ -320,19 +313,18 @@ void Session::MediaLoop() {
     }
     const bool tail_ready = idle.TailDue(now_ms) && !tail_attempt &&
                             now_ms >= next_tail_attempt_ms && !presentation_refresh.Pending();
-    if (!output_suspended && comp_bitrate.load() && sampling_fps && begin_schedule.Due(now)) {
+    if (!output.Suspended() && comp_bitrate.load() && sampling_fps && begin_schedule.Due(now)) {
       const auto interval = static_cast<uint32_t>((1000000ull + sampling_fps - 1) / sampling_fps);
-      pool.Pressure(stats->pending.load() > 1);
+      output.Slots().Pressure(registry.Pending() > 1);
       bool sent = false;
       const bool force_tail = tail_ready && tail_begins < 3;
       const bool force_refresh =
           result != RenderSlots::Result::ready && presentation_refresh.CanForce(now_ms);
-      if (!pool.Begin(interval, force_tail || force_refresh, error, &sent)) {
+      if (!output.Slots().Begin(interval, force_tail || force_refresh, error, &sent)) {
         if (frame.release)
           frame.release(frame.release_context, frame.frame_id);
         {
-          std::lock_guard lock(stats->mutex);
-          stats->error = error;
+          registry.SetError(error);
         }
         presentation.InvalidateLayout("render-begin-failed");
         break;
@@ -360,7 +352,7 @@ void Session::MediaLoop() {
       }
       remotekit_rtc_adaptation adapted{};
       adapted.struct_size = sizeof(adapted);
-      const auto stamp = pool.MonotonicMicros();
+      const auto stamp = output.Slots().MonotonicMicros();
       const auto adapt_begin = trace ? QpcNow() : 0;
       const auto adaptation_status =
           handle && stamp ? sdk.remotekit_rtc_adapt_frame(handle, metadata.width_pixels,
@@ -409,14 +401,13 @@ void Session::MediaLoop() {
                                       std::to_string(hard.height) +
                                       " level=" + std::to_string(peer_controller.ReceiveLevel());
           {
-            std::lock_guard lock(stats->mutex);
-            stats->error = failure;
+            registry.SetError(failure);
           }
           presentation.InvalidateLayout("codec-capability-error");
           fprintf(stderr, "session %s media: %s\n", id.c_str(), failure.c_str());
           {
             {
-              auto output_close_result_4 = browser.Rpc().Request({{"method", "output.close"}});
+              auto output_close_result_4 = output.Close();
               if (!output_close_result_4) {
                 const Error close_error = output_close_result_4.error();
                 fprintf(stderr, "codec failure output stop: %s\n", close_error.message.c_str());
@@ -433,11 +424,12 @@ void Session::MediaLoop() {
           comp_diagnostics.resumeMaxFps =
               std::min({policy_max_fps.load(), official_max_fps, codec_max_fps});
         }
-        sampling = hard;
-        sampling.scale = std::min(double(hard.width) / metadata.width_pixels,
-                                  double(hard.height) / metadata.height_pixels);
-        frame.width = sampling.width;
-        frame.height = sampling.height;
+        auto sample = hard;
+        sample.scale = std::min(double(hard.width) / metadata.width_pixels,
+                                double(hard.height) / metadata.height_pixels);
+        SetSampling(sample);
+        frame.width = Sampling().width;
+        frame.height = Sampling().height;
         {
           std::lock_guard lock(comp_diagnostics_mutex);
           auto& d = comp_diagnostics;
@@ -471,7 +463,7 @@ void Session::MediaLoop() {
           frame = wrapped;
         }
         if (first_submit) {
-          MarkConnection(ConnectionPhase::submit);
+          timing.MarkConnection(ConnectionPhase::submit);
           first_submit = false;
         }
         const int status = authorization.Current(active_authorization)
@@ -488,34 +480,33 @@ void Session::MediaLoop() {
         trace->WallClock();
       if (handle && sdk.request_stats)
         sdk.request_stats(handle);
-      auto report = Stats();
+      auto report = diagnostics.Stats();
       report["type"] = "stats";
       const double seconds = static_cast<double>(now - last_stats) / QpcFrequency();
-      const auto encoded = stats->completed.load(), bytes = stats->bytes.load();
+      const auto encoded = registry.Completed(), bytes = registry.Bytes();
       report["encodedFps"] = (encoded - previous_encoded) / seconds;
       report["encodedBitrateBps"] = 8.0 * (bytes - previous_bytes) / seconds;
-      const auto delivered = pool.delivered_frames();
+      const auto delivered = output.Slots().delivered_frames();
       report["atlasDeliveredFrames"] = delivered;
       report["atlasDeliveredFps"] = (delivered - previous_delivered) / seconds;
       previous_delivered = delivered;
       previous_encoded = encoded;
       previous_bytes = bytes;
-      const auto current_metadata = output_suspended ? SharedAtlasFrame{} : pool.LatestMetadata();
+      const auto current_metadata =
+          output.Suspended() ? SharedAtlasFrame{} : output.Slots().LatestMetadata();
       report["sourceAtlasWidth"] = current_metadata.width_pixels;
       report["sourceAtlasHeight"] = current_metadata.height_pixels;
-      report["mediaScale"] = sampling.scale;
+      report["mediaScale"] = Sampling().scale;
       report["negotiatedReceiveLevel"] = peer_controller.ReceiveLevel();
       report["samplingFpsBudget"] = SamplingFps();
-      report["resolutionLimitation"] = sampling.limitation;
-      report["samplingMaxFrameMacroblocks"] = sampling.max_frame_macroblocks;
-      report["samplingMaxMacroblocksPerSecond"] = sampling.max_macroblocks_per_second;
-      report["receiveLevel"] = peer_controller.ReceiveLevel();
-      report.update(input.Snapshot());
-      const auto latency = pool.capture_to_ready_ms();
+      report["resolutionLimitation"] = Sampling().limitation;
+      report["samplingMaxFrameMacroblocks"] = Sampling().max_frame_macroblocks;
+      report["samplingMaxMacroblocksPerSecond"] = Sampling().max_macroblocks_per_second;
+      const auto latency = output.Slots().capture_to_ready_ms();
       report["captureToReadyMs"] = latency ? Json(*latency) : Json(nullptr);
       report["captureClock"] = latency ? "measured SDK TimeTicks to QPC mapping" : "unavailable";
-      report["clockUncertaintyUs"] = pool.clock_uncertainty_us();
-      Send(report);
+      report["clockUncertaintyUs"] = output.Slots().clock_uncertainty_us();
+      diagnostics.Publish(std::move(report));
       last_stats = now;
     }
     const auto remaining = std::max<int64_t>(0, begin_schedule.deadline() - QpcNow());
@@ -523,14 +514,145 @@ void Session::MediaLoop() {
         1000, remaining ? std::max<int64_t>(1, remaining * 1000000 / QpcFrequency()) : 1000);
     LARGE_INTEGER due{};
     due.QuadPart = -wait_us * 10;
-    const HANDLE wait_handles[] = {pace_timer, output_suspended ? nullptr : pool.EventHandle()};
+    const HANDLE wait_handles[] = {pace_timer,
+                                   output.Suspended() ? nullptr : output.Slots().EventHandle()};
     if (!SetWaitableTimerEx(pace_timer, &due, 0, nullptr, nullptr, nullptr, 0) ||
         WaitForMultipleObjects(wait_handles[1] ? 2 : 1, wait_handles, FALSE, 2) == WAIT_FAILED) {
       presentation.InvalidateLayout("comp-pacing-failed");
-      std::lock_guard lock(stats->mutex);
-      stats->error = "Comp pacing wait failed";
+      registry.SetError("Comp pacing wait failed");
       break;
     }
   }
 }
+
+uint32_t MediaPipeline::SamplingFps() const {
+  return sampling_fps;
+}
+
+Result<Json> MediaPipeline::ManageSessionMediaPolicy(const Json& request) {
+  const auto& value = request.at("maxFps");
+  if (!value.is_number_integer() || value.get<int64_t>() < 1 || value.get<int64_t>() > 240)
+    return Error{ErrorCode::kInvalidRequest, "invalid media policy maxFps"};
+  const auto preference = Required(request, "degradationPreference");
+  uint32_t degradation;
+  if (preference == "maintain-resolution")
+    degradation = REMOTEKIT_RTC_MAINTAIN_RESOLUTION;
+  else if (preference == "balanced")
+    degradation = REMOTEKIT_RTC_BALANCED;
+  else if (preference == "maintain-framerate")
+    degradation = REMOTEKIT_RTC_MAINTAIN_FRAMERATE;
+  else
+    return Error{ErrorCode::kInvalidRequest, "invalid degradation preference"};
+  {
+    std::lock_guard lock(media_policy_mutex);
+    auto applied = peer_controller.Policy(value.get<uint32_t>(), degradation);
+    if (!applied)
+      return applied.error();
+    policy_max_fps = value.get<uint32_t>();
+    policy_degradation = degradation;
+    requested_media_policy = {{"maxFps", policy_max_fps.load()},
+                              {"degradationPreference", preference}};
+  }
+  event_wake.notify_one();
+  return Json{{"accepted", true}, {"applied", peer_controller.Handle() != 0}};
+}
+}  // namespace remotekit
+
+namespace remotekit {
+
+void MediaPipeline::Start() {
+  if (media_thread.joinable())
+    return;
+  state = State::kRunning;
+  media_thread = std::thread([this] {
+    RunThread(
+        "media",
+        [this] {
+          MediaLoop();
+          if (state == State::kRunning) {
+            state = State::kFailed;
+            peer_controller.Failed();
+          }
+        },
+        [this] {
+          state = State::kFailed;
+          peer_controller.Failed();
+        });
+  });
+}
+bool MediaPipeline::Join() {
+  const bool running = media_thread.joinable();
+  state = State::kStopping;
+  Wake();
+  if (running)
+    media_thread.join();
+  state = State::kStopped;
+  return running;
+}
+void MediaPipeline::Wake() {
+  event_wake.notify_all();
+}
+void MediaPipeline::Queue(const RtcEvent& event) {
+  {
+    std::lock_guard lock(event_mutex);
+    if (events.size() < 1024)
+      events.push_back(event);
+  }
+  Wake();
+}
+void MediaPipeline::Refresh() {
+  refresh_connected = true;
+  Wake();
+}
+void MediaPipeline::RequestRefresh(const RtcEvent& event) {
+  if (event.bytes.size() > 256)
+    return;
+  const auto now = QpcNow();
+  auto previous = last_media_refresh_qpc.load();
+  if ((!previous || now - previous >= QpcFrequency()) &&
+      last_media_refresh_qpc.compare_exchange_strong(previous, now))
+    Refresh();
+}
+void MediaPipeline::Rates(uint32_t bitrate, uint32_t fps) {
+  comp_bitrate = bitrate;
+  comp_fps = fps;
+  Wake();
+}
+void MediaPipeline::Reset() {
+  std::lock_guard lock(event_mutex);
+  events.clear();
+  refresh_connected = false;
+  last_media_refresh_qpc = 0;
+  effective_idle_ms = std::min(1000u, options.idle_idr_ms);
+}
+MediaSampling MediaPipeline::Sampling() const {
+  std::lock_guard lock(sampling_mutex);
+  return sampling;
+}
+void MediaPipeline::SetSampling(MediaSampling value) {
+  std::lock_guard lock(sampling_mutex);
+  sampling = std::move(value);
+}
+Json MediaPipeline::Snapshot() {
+  Json requested;
+  {
+    std::lock_guard lock(media_policy_mutex);
+    requested = requested_media_policy;
+  }
+  const auto degradation = policy_degradation.load();
+  const char* preference = degradation == REMOTEKIT_RTC_MAINTAIN_RESOLUTION  ? "maintain-resolution"
+                           : degradation == REMOTEKIT_RTC_MAINTAIN_FRAMERATE ? "maintain-framerate"
+                                                                             : "balanced";
+  return {{"mediaPolicy",
+           {{"requested", requested},
+            {"applied", peer_controller.Handle() ? Json{{"maxFps", policy_max_fps.load()},
+                                                        {"degradationPreference", preference}}
+                                                 : Json(nullptr)}}},
+          {"effective_idle_ms", effective_idle_ms.load()},
+          {"tail_submissions", tail_submissions.load()},
+          {"tail_completions", tail_completions.load()},
+          {"source_interval_ms", source_interval_ms.load()},
+          {"last_tail_age_ms", last_tail_age_ms.load()}};
+}
+
 }  // namespace remotekit

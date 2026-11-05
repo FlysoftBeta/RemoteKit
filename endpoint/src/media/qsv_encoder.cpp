@@ -218,6 +218,14 @@ class Qsv final : public HardwareEncoder {
   }
 
  public:
+  State GetState() const override {
+    if (!deferred_error_.empty())
+      return State::kFailed;
+    if (flush_packet_)
+      return State::kDraining;
+    return initialized_ ? State::kReady : State::kStopped;
+  }
+
   std::optional<QsvLowPowerInfo> LowPowerInfo() const override { return low_power_; }
   std::optional<QsvRateControlInfo> RateControlInfo() const override { return rate_control_; }
   ~Qsv() override {

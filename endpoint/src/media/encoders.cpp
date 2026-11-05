@@ -1,7 +1,16 @@
-#include "session/session.hpp"
+#include "media/encoders.hpp"
+#include "diagnostics/timing.hpp"
+#include "media/output.hpp"
+#include "media/pipeline.hpp"
+#include "media/presentation.hpp"
+#include "rtc/authorization.hpp"
+#include "rtc/channel.hpp"
+#include "rtc/peer.hpp"
 namespace remotekit {
-int Session::CreateEncoder(void* context, uint64_t encoder_peer, uint64_t encoder) {
-  auto* self = static_cast<Session*>(context);
+using ConnectionPhase = ConnectionTiming::ConnectionPhase;
+using Event = RtcEvent;
+int EncoderRegistry::CreateEncoder(void* context, uint64_t encoder_peer, uint64_t encoder) {
+  auto* self = static_cast<EncoderRegistry*>(context);
   std::lock_guard lock(self->encoder_mutex);
   if (!self->streaming_adapter)
     return 1;
@@ -19,7 +28,7 @@ int Session::CreateEncoder(void* context, uint64_t encoder_peer, uint64_t encode
               return;
             if (first_encoded) {
               if (encoder_peer == self->peer_controller.Handle())
-                self->MarkConnection(ConnectionPhase::encoded);
+                self->timing.MarkConnection(ConnectionPhase::encoded);
               first_encoded = false;
             }
             // Enqueue only: signaling-thread destroy joins this encoder worker.
@@ -39,16 +48,13 @@ int Session::CreateEncoder(void* context, uint64_t encoder_peer, uint64_t encode
             if (auto clock = remotekit::MapCaptureClock(
                     source.capture_qpc, source.qpc_frequency, before.QuadPart, after.QuadPart,
                     double(ticks.QuadPart - 116444736000000000ULL) / 10000.0,
-                    self->capture_clock_uncertainty_ms.load())) {
+                    self->output.ClockUncertaintyMs())) {
               message["captureWallTimeMs"] = clock->wall_ms;
               message["captureMonotonicMs"] = clock->monotonic_ms;
               message["captureClockUncertaintyMs"] = clock->uncertainty_ms;
               message["sourceCaptureId"] = std::to_string(source.capture_qpc);
             }
-            std::lock_guard event_lock(self->event_mutex);
-            if (self->events.size() < 1024)
-              self->events.push_back(Event{0x10000, message.dump(), "", 0, encoder_peer, stamp});
-            self->event_wake.notify_one();
+            self->channel.Queue(Event{0x10000, message.dump(), "", 0, encoder_peer, stamp});
           },
           self->trace, encoder_peer,
           [self, encoder_peer](const remotekit_rtc_frame& source, bool keyframe,
@@ -69,23 +75,26 @@ int Session::CreateEncoder(void* context, uint64_t encoder_peer, uint64_t encode
   return 0;
 }
 
-int Session::ConfigureEncoder(void* context,
-                              uint64_t encoder,
-                              const remotekit_rtc_encoder_config* config) {
-  auto* self = static_cast<Session*>(context);
+int EncoderRegistry::ConfigureEncoder(void* context,
+                                      uint64_t encoder,
+                                      const remotekit_rtc_encoder_config* config) {
+  auto* self = static_cast<EncoderRegistry*>(context);
   std::lock_guard lock(self->encoder_mutex);
   auto found = self->encoders.find(encoder);
   if (found == self->encoders.end())
     return 1;
   auto limited = *config;
-  self->MarkConnection(ConnectionPhase::encoder_configure_start);
+  self->timing.MarkConnection(ConnectionPhase::encoder_configure_start);
   const bool ok = found->second->Configure(limited);
-  self->MarkConnection(ConnectionPhase::encoder_configure_end);
+  self->timing.MarkConnection(ConnectionPhase::encoder_configure_end);
   return ok ? 0 : 1;
 }
 
-int Session::Encode(void* context, uint64_t encoder, const remotekit_rtc_frame* frame, int key) {
-  auto* self = static_cast<Session*>(context);
+int EncoderRegistry::Encode(void* context,
+                            uint64_t encoder,
+                            const remotekit_rtc_frame* frame,
+                            int key) {
+  auto* self = static_cast<EncoderRegistry*>(context);
   std::lock_guard lock(self->encoder_mutex);
   // A source-queue timeout/new source can supersede a tail before Encode runs.
   // Reject that old tag before GPU work; independent PLI requests already went
@@ -100,27 +109,25 @@ int Session::Encode(void* context, uint64_t encoder, const remotekit_rtc_frame* 
   return REMOTEKIT_SDK_BUSY;
 }
 
-void Session::Rates(void* context, uint64_t encoder, uint32_t bitrate, uint32_t fps) {
-  auto* self = static_cast<Session*>(context);
-  self->comp_bitrate = bitrate;
-  self->comp_fps = fps;
-  self->event_wake.notify_one();
+void EncoderRegistry::Rates(void* context, uint64_t encoder, uint32_t bitrate, uint32_t fps) {
+  auto* self = static_cast<EncoderRegistry*>(context);
+  self->pipeline.Rates(bitrate, fps);
   std::lock_guard lock(self->encoder_mutex);
   auto found = self->encoders.find(encoder);
   if (found != self->encoders.end())
     found->second->Rates(bitrate, fps);
 }
 
-void Session::Keyframe(void* context, uint64_t encoder) {
-  auto* self = static_cast<Session*>(context);
+void EncoderRegistry::Keyframe(void* context, uint64_t encoder) {
+  auto* self = static_cast<EncoderRegistry*>(context);
   std::lock_guard lock(self->encoder_mutex);
   auto found = self->encoders.find(encoder);
   if (found != self->encoders.end())
     found->second->Keyframe();
 }
 
-void Session::DestroyEncoder(void* context, uint64_t encoder) {
-  auto* self = static_cast<Session*>(context);
+void EncoderRegistry::DestroyEncoder(void* context, uint64_t encoder) {
+  auto* self = static_cast<EncoderRegistry*>(context);
   std::unique_ptr<EncoderWorker> worker;
   {
     std::lock_guard lock(self->encoder_mutex);
@@ -133,4 +140,47 @@ void Session::DestroyEncoder(void* context, uint64_t encoder) {
   if (worker)
     worker->Stop();
 }
+}  // namespace remotekit
+
+namespace remotekit {
+
+Result<void> EncoderRegistry::PrepareAdapter() {
+  auto selected = SelectStreamingAdapter(sdk, options);
+  if (!selected)
+    return selected.error();
+  std::lock_guard lock(encoder_mutex);
+  streaming_adapter = std::move(selected).value();
+  return {};
+}
+std::optional<StreamingAdapter> EncoderRegistry::Adapter() const {
+  std::lock_guard lock(encoder_mutex);
+  return streaming_adapter;
+}
+void EncoderRegistry::ReleaseAdapter() {
+  std::lock_guard lock(encoder_mutex);
+  streaming_adapter.reset();
+}
+void EncoderRegistry::Drain() {
+  std::map<uint64_t, std::unique_ptr<EncoderWorker>> remaining;
+  {
+    std::lock_guard lock(encoder_mutex);
+    remaining.swap(encoders);
+  }
+  remaining.clear();
+  SenderStats(nullptr);
+}
+void EncoderRegistry::Keyframes() {
+  std::lock_guard lock(encoder_mutex);
+  for (auto& [id, worker] : encoders)
+    worker->Keyframe();
+}
+void EncoderRegistry::SetError(const std::string& error) {
+  std::lock_guard lock(stats->mutex);
+  stats->error = error;
+}
+void EncoderRegistry::SenderStats(Json value) {
+  std::lock_guard lock(stats->mutex);
+  stats->sender_rtc_stats = std::move(value);
+}
+
 }  // namespace remotekit

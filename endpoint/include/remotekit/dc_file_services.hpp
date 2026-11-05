@@ -1,4 +1,5 @@
 #pragma once
+#include "remotekit/result_macros.hpp"
 #include "remotekit/thread.hpp"
 #include "remotekit/error.hpp"
 #include "remotekit/dc_services.hpp"
@@ -37,13 +38,13 @@ inline std::string EncodeFileChunk(const std::vector<std::uint8_t>& bytes) {
   }
   return result;
 }
-inline std::vector<std::uint8_t> DecodeFileChunk(const ServiceJson& value,
-                                                 size_t max_bytes = 16384) {
+inline Result<std::vector<std::uint8_t>> DecodeFileChunk(const ServiceJson& value,
+                                                         size_t max_bytes = 16384) {
   if (!value.is_string())
-    throw std::runtime_error("invalid_file_chunk_encoding");
+    return Error{ErrorCode::kInvalidRequest, "invalid_file_chunk_encoding"};
   const auto& text = value.get_ref<const std::string&>();
   if (text.empty() || text.size() > (max_bytes + 2) / 3 * 4 || text.size() % 4)
-    throw std::runtime_error("invalid_file_chunk_encoding");
+    return Error{ErrorCode::kInvalidRequest, "invalid_file_chunk_encoding"};
   auto digit = [](unsigned char c) -> int {
     if (c >= 'A' && c <= 'Z')
       return c - 'A';
@@ -65,7 +66,7 @@ inline std::vector<std::uint8_t> DecodeFileChunk(const ServiceJson& value,
     const int c = pad2 ? 0 : digit(text[i + 2]), d = pad3 ? 0 : digit(text[i + 3]);
     if (a < 0 || b < 0 || c < 0 || d < 0 || ((pad2 || pad3) && !last) || (pad2 && !pad3) ||
         (pad2 && (b & 15)) || (pad3 && !pad2 && (c & 3)))
-      throw std::runtime_error("invalid_file_chunk_encoding");
+      return Error{ErrorCode::kInvalidRequest, "invalid_file_chunk_encoding"};
     bytes.push_back(static_cast<std::uint8_t>((a << 2) | (b >> 4)));
     if (!pad2)
       bytes.push_back(static_cast<std::uint8_t>((b << 4) | (c >> 2)));
@@ -73,7 +74,7 @@ inline std::vector<std::uint8_t> DecodeFileChunk(const ServiceJson& value,
       bytes.push_back(static_cast<std::uint8_t>((c << 6) | d));
   }
   if (bytes.size() > max_bytes)
-    throw std::runtime_error("file_chunk_too_large");
+    return Error{ErrorCode::kLimitExceeded, "file_chunk_too_large"};
   return bytes;
 }
 inline bool FileRequestEnvelope(const ServiceJson& message, size_t bytes) {
@@ -113,54 +114,57 @@ class PhotoBurstSessions {
     std::erase_if(terminal_, expired);
   }
 
-  ServiceJson Execute(uint64_t grant,
-                      const std::string& method,
-                      const ServiceJson& params,
-                      const PhotoCancelled& cancelled) {
+  Result<ServiceJson> Execute(uint64_t grant,
+                              const std::string& method,
+                              const ServiceJson& params,
+                              const PhotoCancelled& cancelled) {
     if (cancelled())
-      throw std::runtime_error("file_transfer_interrupted");
+      return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
     const auto now = Clock::now();
     if (method == "photo.burst.begin") {
       if (active_.size() >= 2)
-        throw std::runtime_error("photo_burst_busy");
+        return Error{ErrorCode::kBusy, "photo_burst_busy"};
       const auto id = std::to_string(++sequence_);
       active_.try_emplace(id, grant, now + std::chrono::seconds(5));
-      return {{"burstId", id}};
+      return ServiceJson{{"burstId", id}};
     }
-    const auto id = ReadId(params.value("burstId", ServiceJson()));
+    RK_ASSIGN_OR_RETURN(id, ReadId(params.value("burstId", ServiceJson())));
     auto active = active_.find(id);
     if (method == "photo.burst.cancel") {
       if (active != active_.end() && active->second.grant == grant)
         active_.erase(active);
-      return {{"cancelled", true}};
+      return ServiceJson{{"cancelled", true}};
     }
-    const auto available = ReadPool(params.value("availableFrameIds", ServiceJson()));
+    RK_ASSIGN_OR_RETURN(available, ReadPool(params.value("availableFrameIds", ServiceJson())));
     const bool ending = method == "photo.burst.end";
     if (ending) {
       const auto terminal = terminal_.find(id);
       if (terminal != terminal_.end() && terminal->second.grant == grant &&
           now < terminal->second.deadline) {
         if (terminal->second.available != available)
-          throw std::runtime_error("photo_burst_end_conflict");
+          return Error{ErrorCode::kConflict, "photo_burst_end_conflict"};
         return Replay(terminal->second);
       }
     }
     if (active == active_.end() || active->second.grant != grant || now >= active->second.deadline)
-      throw std::runtime_error("unknown_photo_burst");
+      return Error{ErrorCode::kNotFound, "unknown_photo_burst"};
     auto& burst = active->second;
     if (ending) {
-      ValidatePool(burst, available, {});
+      RK_RETURN_IF_ERROR(ValidatePool(burst, available, {}));
       Terminal terminal{grant, now + std::chrono::seconds(30), available, {}, {}};
-      try {
-        if (available.empty())
-          throw std::runtime_error("photo_burst_no_samples");
-        terminal.result = WireDecision(burst.analyzer.Finish(available), available);
-      } catch (const std::runtime_error& error) {
-        terminal.error = error.what();
+      Result<ServiceJson> result = Error{ErrorCode::kInvalidRequest, "photo_burst_no_samples"};
+      if (!available.empty()) {
+        auto decision = burst.analyzer.Finish(available);
+        result = decision ? WireDecision(decision.value(), available)
+                          : Result<ServiceJson>(decision.error());
       }
+      if (result)
+        terminal.result = std::move(result).value();
+      else
+        terminal.error = result.error();
       active_.erase(active);
       if (cancelled())
-        throw std::runtime_error("file_transfer_interrupted");
+        return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
       if (terminal_.size() >= 32) {
         const auto oldest = std::min_element(
             terminal_.begin(), terminal_.end(),
@@ -170,21 +174,23 @@ class PhotoBurstSessions {
       return Replay(terminal_.emplace(id, std::move(terminal)).first->second);
     }
     if (burst.seen.size() >= 20 || burst.stopped)
-      throw std::runtime_error("photo_burst_sample_limit");
-    const auto frame = ReadId(params.value("frameId", ServiceJson()));
+      return Error{ErrorCode::kLimitExceeded, "photo_burst_sample_limit"};
+    RK_ASSIGN_OR_RETURN(frame, ReadId(params.value("frameId", ServiceJson())));
     if (burst.seen.contains(frame))
-      throw std::runtime_error("photo_burst_frame_replay");
+      return Error{ErrorCode::kConflict, "photo_burst_frame_replay"};
     if (std::find(available.begin(), available.end(), frame) == available.end())
-      throw std::runtime_error("invalid_photo_burst_pool");
-    ValidatePool(burst, available, frame);
+      return Error{ErrorCode::kInvalidRequest, "invalid_photo_burst_pool"};
+    RK_RETURN_IF_ERROR(ValidatePool(burst, available, frame));
     burst.seen.insert(frame);
-    const auto data = DecodeFileChunk(params.value("data", ServiceJson()), kMaxSampleBytes);
-    const auto decision = burst.analyzer.Observe(
-        frame, data, available, [&] { return Clock::now() >= burst.deadline || cancelled(); });
+    RK_ASSIGN_OR_RETURN(data,
+                        DecodeFileChunk(params.value("data", ServiceJson()), kMaxSampleBytes));
+    RK_ASSIGN_OR_RETURN(decision, burst.analyzer.Observe(frame, data, available, [&] {
+      return Clock::now() >= burst.deadline || cancelled();
+    }));
     if (cancelled())
-      throw std::runtime_error("file_transfer_interrupted");
+      return Error{ErrorCode::kForbidden, "file_transfer_interrupted"};
     if (Clock::now() >= burst.deadline)
-      throw std::runtime_error("unknown_photo_burst");
+      return Error{ErrorCode::kNotFound, "unknown_photo_burst"};
     auto result = WireDecision(decision, available);
     burst.available = available;
     burst.stopped = decision.stop;
@@ -206,63 +212,65 @@ class PhotoBurstSessions {
     Clock::time_point deadline;
     std::vector<std::string> available;
     ServiceJson result;
-    std::string error;
+    std::optional<Error> error;
   };
   uint64_t sequence_{};
   std::map<std::string, Burst> active_;
   std::map<std::string, Terminal> terminal_;
 
-  static std::string ReadId(const ServiceJson& value) {
+  static Result<std::string> ReadId(const ServiceJson& value) {
     if (!BoundedServiceId(value, 64))
-      throw std::runtime_error("invalid_photo_burst_id");
+      return Error{ErrorCode::kInvalidRequest, "invalid_photo_burst_id"};
     return value.get<std::string>();
   }
-  static std::vector<std::string> ReadPool(const ServiceJson& value) {
+  static Result<std::vector<std::string>> ReadPool(const ServiceJson& value) {
     if (!value.is_array() || value.size() > 3)
-      throw std::runtime_error("invalid_photo_burst_pool");
+      return Error{ErrorCode::kInvalidRequest, "invalid_photo_burst_pool"};
     std::vector<std::string> pool;
     for (const auto& item : value) {
-      const auto id = ReadId(item);
+      RK_ASSIGN_OR_RETURN(id, ReadId(item));
       if (std::find(pool.begin(), pool.end(), id) != pool.end())
-        throw std::runtime_error("invalid_photo_burst_pool");
+        return Error{ErrorCode::kInvalidRequest, "invalid_photo_burst_pool"};
       pool.push_back(id);
     }
     return pool;
   }
-  static void ValidatePool(const Burst& burst,
-                           const std::vector<std::string>& pool,
-                           const std::string& current) {
+  static Result<void> ValidatePool(const Burst& burst,
+                                   const std::vector<std::string>& pool,
+                                   const std::string& current) {
     for (const auto& id : pool)
       if (id != current &&
           std::find(burst.available.begin(), burst.available.end(), id) == burst.available.end())
-        throw std::runtime_error("invalid_photo_burst_pool");
+        return Error{ErrorCode::kInvalidRequest, "invalid_photo_burst_pool"};
+
+    return {};
   }
-  static ServiceJson Replay(const Terminal& terminal) {
-    if (!terminal.error.empty())
-      throw std::runtime_error(terminal.error);
+  static Result<ServiceJson> Replay(const Terminal& terminal) {
+    if (terminal.error)
+      return *terminal.error;
     return terminal.result;
   }
-  static ServiceJson WireDecision(const PhotoBurstDecision& decision,
-                                  const std::vector<std::string>& available) {
+  static Result<ServiceJson> WireDecision(const PhotoBurstDecision& decision,
+                                          const std::vector<std::string>& available) {
     const auto present = [&](const std::string& id) {
       return std::find(available.begin(), available.end(), id) != available.end();
     };
     if (!present(decision.selected_frame_id) || decision.keep_frame_ids.size() > 2 ||
         decision.candidates.size() > 2 ||
         !std::all_of(decision.keep_frame_ids.begin(), decision.keep_frame_ids.end(), present))
-      throw std::runtime_error("invalid_photo_burst_decision");
+      return Error{ErrorCode::kInvalidRequest, "invalid_photo_burst_decision"};
     ServiceJson candidates = ServiceJson::array();
     for (const auto& candidate : decision.candidates) {
       if (!present(candidate.frame_id))
-        throw std::runtime_error("invalid_photo_burst_decision");
+        return Error{ErrorCode::kInvalidRequest, "invalid_photo_burst_decision"};
       candidates.push_back({{"frameId", candidate.frame_id}, {"score", candidate.score}});
     }
-    return {{"selectedFrameId", decision.selected_frame_id},
-            {"keepFrameIds", decision.keep_frame_ids},
-            {"candidates", std::move(candidates)},
-            {"uncertain", decision.uncertain},
-            {"stop", decision.stop},
-            {"reason", decision.reason}};
+    return ServiceJson{{"selectedFrameId", decision.selected_frame_id},
+                       {"keepFrameIds", decision.keep_frame_ids},
+                       {"candidates", std::move(candidates)},
+                       {"uncertain", decision.uncertain},
+                       {"stop", decision.stop},
+                       {"reason", decision.reason}};
   }
 };
 
@@ -420,13 +428,13 @@ class DcFileServices {
     sweep_requested_ = true;
     wake_.notify_all();
   }
-  void Authorize(const std::string& connection,
-                 uint64_t control,
-                 const std::map<std::string, FileUploadStore::Binding>& requests,
-                 bool library = false) {
+  Result<void> Authorize(const std::string& connection,
+                         uint64_t control,
+                         const std::map<std::string, FileUploadStore::Binding>& requests,
+                         bool library = false) {
     std::lock_guard lock(mutex_);
     if (connection != connection_ || !peer_)
-      throw std::runtime_error("stale_file_authorization");
+      return Error{ErrorCode::kForbidden, "stale_file_authorization"};
     std::map<std::string, Grant> next;
     const auto add = [&](const std::string& id, const FileUploadStore::Binding& binding) {
       const auto previous = authorized_.find(id);
@@ -466,6 +474,7 @@ class DcFileServices {
     control_ = control;
     authorized_ = std::move(next);
     wake_.notify_all();
+    return {};
   }
   bool Current(const Job& job) const {
     std::lock_guard lock(mutex_);

@@ -1,4 +1,5 @@
 #pragma once
+#include "remotekit/error.hpp"
 #include "remotekit/file_upload.hpp"
 #include "remotekit/dc_services.hpp"
 #include <filesystem>
@@ -13,7 +14,7 @@ namespace remotekit {
 // derivative writer. Control may read/retain assets and prepare selections.
 class FileLibrary {
  public:
-  using Check = std::function<void()>;
+  using Check = std::function<Result<void>()>;
   struct Asset {
     std::string id, type;
     std::uint64_t size{};
@@ -34,37 +35,40 @@ class FileLibrary {
     std::uint32_t width, height;
   };
   enum class DerivativeFormat { jpeg, png };
-  using Render = std::function<Derivative(const std::filesystem::path&)>;
+  using Render = std::function<Result<Derivative>(const std::filesystem::path&)>;
 
   explicit FileLibrary(std::filesystem::path root);
-  ServiceJson Begin(std::uint64_t grant,
-                    const std::string& operation,
-                    const FileUploadStore::Spec&,
-                    const Check&);
-  std::uint64_t Chunk(std::uint64_t grant,
-                      const std::string& upload,
-                      std::uint64_t offset,
-                      const std::vector<std::uint8_t>&,
-                      const Check&);
-  Asset Seal(std::uint64_t grant, const std::string& upload, const Check&);
-  void Cancel(std::uint64_t grant, const std::string& upload, const Check&);
-  Asset Describe(const std::string& asset) const;
-  std::filesystem::path Path(const std::string& asset) const;
-  std::pair<Asset, std::vector<std::uint8_t>> Read(const std::string& asset,
-                                                   std::uint64_t offset) const;
-  void Retain(const std::vector<std::string>& assets);
-  void References(std::uint64_t revision, const std::vector<std::string>& assets);
-  Asset CreateDerivative(const Render&, const Check&, DerivativeFormat = DerivativeFormat::jpeg);
-  void Sweep();
+  Result<void> Initialize();
+  Result<ServiceJson> Begin(std::uint64_t grant,
+                            const std::string& operation,
+                            const FileUploadStore::Spec&,
+                            const Check&);
+  Result<std::uint64_t> Chunk(std::uint64_t grant,
+                              const std::string& upload,
+                              std::uint64_t offset,
+                              const std::vector<std::uint8_t>&,
+                              const Check&);
+  Result<Asset> Seal(std::uint64_t grant, const std::string& upload, const Check&);
+  Result<void> Cancel(std::uint64_t grant, const std::string& upload, const Check&);
+  Result<Asset> Describe(const std::string& asset) const;
+  Result<std::filesystem::path> Path(const std::string& asset) const;
+  Result<std::pair<Asset, std::vector<std::uint8_t>>> Read(const std::string& asset,
+                                                           std::uint64_t offset) const;
+  Result<void> Retain(const std::vector<std::string>& assets);
+  Result<void> References(std::uint64_t revision, const std::vector<std::string>& assets);
+  Result<Asset> CreateDerivative(const Render&,
+                                 const Check&,
+                                 DerivativeFormat = DerivativeFormat::jpeg);
+  Result<void> Sweep();
 
-  void Prepare(const Selection&);
+  Result<void> Prepare(const Selection&);
   std::optional<Selection> FindSelection(const std::string& id) const;
-  std::optional<Selection::State> CancelPendingSelections(const FileUploadStore::Binding&,
-                                                          const Check&);
-  bool Claim(const std::string& id, const Check&);
-  Selection::State Finish(const std::string& id,
-                          Selection::State,
-                          std::optional<Selection::State> expected = std::nullopt);
+  Result<std::optional<Selection::State>> CancelPendingSelections(const FileUploadStore::Binding&,
+                                                                  const Check&);
+  Result<bool> Claim(const std::string& id, const Check&);
+  Result<Selection::State> Finish(const std::string& id,
+                                  Selection::State,
+                                  std::optional<Selection::State> expected = std::nullopt);
 
  private:
   struct Entry {
@@ -89,12 +93,12 @@ class FileLibrary {
 
   std::filesystem::path Payload(const std::string& id) const;
   std::filesystem::path DraftData(const std::string& id) const;
-  const Entry& RequireAsset(const std::string& id) const;
-  Draft& RequireDraft(std::uint64_t grant, const std::string& id);
-  void SaveDraft(const Draft&, const Check&) const;
-  void SaveEntry(const Entry&, const Check& = {}) const;
-  void SaveSelection(const Selection&, const Check& = {}) const;
+  Result<const Entry*> RequireAsset(const std::string& id) const;
+  Result<Draft*> RequireDraft(std::uint64_t grant, const std::string& id);
+  Result<void> SaveDraft(const Draft&, const Check&) const;
+  Result<void> SaveEntry(const Entry&, const Check& = {}) const;
+  Result<void> SaveSelection(const Selection&, const Check& = {}) const;
   bool EraseDraft(std::map<std::string, Draft>::iterator);
-  Asset Publish(const std::filesystem::path&, Asset, const Check&);
+  Result<Asset> Publish(const std::filesystem::path&, Asset, const Check&);
 };
 }  // namespace remotekit

@@ -1,4 +1,6 @@
 #include "session/browser.hpp"
+#include "remotekit/file_io.hpp"
+#include "remotekit/result_macros.hpp"
 #include <chrono>
 #include <objbase.h>
 #include <thread>
@@ -38,5 +40,50 @@ Result<void> BrowserRuntime::Stop() {
   incarnation_.clear();
   rpc_.Invalidate();
   return process_.Terminate();
+}
+}  // namespace remotekit
+
+namespace remotekit {
+Result<void> BrowserRuntime::Launch(const RuntimeOptions& options,
+                                    const std::string& id,
+                                    const fs::path& directory,
+                                    const StreamingAdapter& adapter,
+                                    const std::shared_ptr<media::ServerTrace>& trace) {
+  const auto luid = AdapterLuid(adapter.luid);
+  std::string channel = "RemoteKit.service." + std::to_string(GetCurrentProcessId()) + "." + id +
+                        "." + std::to_string(QpcNow());
+  auto incarnation = NewIncarnation();
+  if (!incarnation)
+    return incarnation.error();
+  std::wstring command = BrowserProcess::Quote(options.browser.wstring());
+  auto append = [&](std::wstring arg) { command += L" " + BrowserProcess::Quote(arg); };
+  append(L"--use-adapter-luid=" + std::wstring(luid.begin(), luid.end()));
+  append(L"--control-channel=" + std::wstring(channel.begin(), channel.end()));
+  append(L"--browser-incarnation=" + std::wstring(Incarnation().begin(), Incarnation().end()));
+  append(L"--session-id=" + std::wstring(id.begin(), id.end()));
+  append(L"--tenant-id=" + std::wstring(id.begin(), id.end()));
+  append(L"--data-path=" + directory.wstring());
+  append(L"--atlas-width=1920");
+  append(L"--atlas-height=1080");
+  if (!options.browser_trace_directory.empty()) {
+    RK_RETURN_IF_ERROR(CreateDirectories(options.browser_trace_directory));
+    const auto file = options.browser_trace_directory /
+                      ("session-" + id + "-" + std::to_string(QpcNow()) + ".json");
+    append(
+        L"--trace-startup=gpu.capture,viz,gpu,toplevel,toplevel.flow,disabled-by-default-gpu."
+        L"service,disabled-by-default-gpu.device");
+    append(L"--trace-startup-duration=16");
+    append(L"--trace-startup-format=json");
+    append(L"--trace-startup-file=" + file.wstring());
+    append(L"--trace-startup-record-mode=record-until-full");
+    append(L"--default-trace-buffer-size-limit-in-kb=32768");
+  }
+  fprintf(stderr, "session %s browser command %s\n", id.c_str(), Utf8(fs::path(command)).c_str());
+  auto started = Start(options.browser, std::move(command), channel);
+  if (!started)
+    return started.error();
+  Rpc().SetTrace(trace, Pid());
+
+  return {};
 }
 }  // namespace remotekit

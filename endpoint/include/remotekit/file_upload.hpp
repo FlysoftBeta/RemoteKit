@@ -1,4 +1,5 @@
 #pragma once
+#include "remotekit/error.hpp"
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -45,19 +46,20 @@ class FileUploadStore {
   FileUploadStore(std::filesystem::path root, Limits limits);
   // root is Session-owned. Call ConfirmBrowserStopped only on confirmed exit,
   // never merely a lost control channel. Destructor does not delete selections.
-  const Batch& Stage(const Binding&,
-                     const std::vector<Source>&,
-                     const std::function<void()>& check);
-  void MarkSubmitted(const std::string& id);
-  bool Cancel(const std::string& id);
-  void ConfirmBrowserStopped(const std::string& incarnation);
+  Result<void> Initialize();
+  Result<Batch> Stage(const Binding&,
+                      const std::vector<Source>&,
+                      const std::function<Result<void>()>& check);
+  Result<void> MarkSubmitted(const std::string& id);
+  Result<bool> Cancel(const std::string& id);
+  Result<void> ConfirmBrowserStopped(const std::string& incarnation);
   std::uint64_t reserved_bytes() const { return reserved_bytes_; }
   std::uint64_t reserved_files() const { return reserved_files_; }
 
  private:
-  const Batch& Begin(const Binding&, const std::vector<Spec>&);
-  const Batch& Seal(const std::string& id, const Binding&);
-  void Erase(std::map<std::string, Batch>::iterator);
+  Result<Batch> Begin(const Binding&, const std::vector<Spec>&);
+  Result<Batch> Seal(const std::string& id, const Binding&);
+  Result<void> Erase(std::map<std::string, Batch>::iterator);
   std::filesystem::path root_;
   Limits limits_;
   std::map<std::string, Batch> batches_;

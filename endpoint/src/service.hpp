@@ -19,7 +19,7 @@ class Service {
 
  private:
   Result<Json> Dispatch(const Json& request, uint64_t generation);
-  void Clear();
+  Result<void> Clear();
   media::Sdk& sdk_;
   const RuntimeOptions& options_;
   ManagementLink& link_;

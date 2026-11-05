@@ -8,7 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <mutex>
-#include <stdexcept>
+#include "remotekit/result_macros.hpp"
 #include <thread>
 #include <vector>
 
@@ -21,6 +21,9 @@
 #endif
 
 namespace rk::auth {
+using remotekit::Error;
+using remotekit::ErrorCode;
+using remotekit::Result;
 namespace {
 using Clock = std::chrono::steady_clock;
 using namespace std::chrono_literals;
@@ -66,22 +69,22 @@ struct Frame {
 };
 
 #if defined(RK_FACE_OPENCV)
-std::vector<uchar> Model(const std::filesystem::path& root,
-                         const char* name,
-                         std::string_view expected_sha) {
+Result<std::vector<uchar>> Model(const std::filesystem::path& root,
+                                 const char* name,
+                                 std::string_view expected_sha) {
   std::ifstream stream(root / name, std::ios::binary | std::ios::ate);
   const auto size = stream.tellg();
   if (size <= 0 || size > 64 * 1024 * 1024)
-    throw std::runtime_error("missing or invalid model");
+    return Error{ErrorCode::kUnavailable, "missing or invalid model"};
   std::vector<uchar> bytes(static_cast<size_t>(size));
   stream.seekg(0);
   if (!stream.read(reinterpret_cast<char*>(bytes.data()), size))
-    throw std::runtime_error("failed to read model");
+    return Error{ErrorCode::kUnavailable, "failed to read model"};
   std::array<uint8_t, 32> hash{};
   if (BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0, bytes.data(),
                  static_cast<ULONG>(bytes.size()), hash.data(),
                  static_cast<ULONG>(hash.size())) != 0)
-    throw std::runtime_error("failed to hash model");
+    return Error{ErrorCode::kUnavailable, "failed to hash model"};
   constexpr char digits[] = "0123456789abcdef";
   std::array<char, 64> hex{};
   for (size_t i = 0; i < hash.size(); ++i) {
@@ -89,26 +92,25 @@ std::vector<uchar> Model(const std::filesystem::path& root,
     hex[2 * i + 1] = digits[hash[i] & 15];
   }
   if (expected_sha != std::string_view(hex.data(), hex.size()))
-    throw std::runtime_error("model hash mismatch");
+    return Error{ErrorCode::kUnavailable, "model hash mismatch"};
   return bytes;
 }
 
 class Engine {
  public:
-  explicit Engine(const std::filesystem::path& root)
-      : detector_(cv::FaceDetectorYN::create("onnx",
-                                             Model(root, "yunet.onnx", RK_FACE_YUNET_SHA),
-                                             {},
-                                             {320, 320},
-                                             0.75f,
-                                             0.3f,
-                                             100)),
-        recognizer_(
-            cv::FaceRecognizerSF::create("onnx", Model(root, "sface.onnx", RK_FACE_SFACE_SHA), {})),
-        v1se_(cv::dnn::readNetFromONNX(Model(root, "minifas-v1se.onnx", RK_FACE_MINIFAS_V1SE_SHA))),
-        v2_(cv::dnn::readNetFromONNX(Model(root, "minifas-v2.onnx", RK_FACE_MINIFAS_V2_SHA))) {}
+  Result<void> Initialize(const std::filesystem::path& root) {
+    RK_ASSIGN_OR_RETURN(yunet, Model(root, "yunet.onnx", RK_FACE_YUNET_SHA));
+    RK_ASSIGN_OR_RETURN(sface, Model(root, "sface.onnx", RK_FACE_SFACE_SHA));
+    RK_ASSIGN_OR_RETURN(v1se, Model(root, "minifas-v1se.onnx", RK_FACE_MINIFAS_V1SE_SHA));
+    RK_ASSIGN_OR_RETURN(v2, Model(root, "minifas-v2.onnx", RK_FACE_MINIFAS_V2_SHA));
+    detector_ = cv::FaceDetectorYN::create("onnx", yunet, {}, {320, 320}, 0.75f, 0.3f, 100);
+    recognizer_ = cv::FaceRecognizerSF::create("onnx", sface, {});
+    v1se_ = cv::dnn::readNetFromONNX(v1se);
+    v2_ = cv::dnn::readNetFromONNX(v2);
+    return {};
+  }
 
-  std::optional<FaceTemplate> Infer(const Frame& frame) {
+  Result<std::optional<FaceTemplate>> Infer(const Frame& frame) {
     std::lock_guard lock(mutex_);
     cv::Mat rgb(frame.height, frame.width, CV_8UC3, const_cast<uint8_t*>(frame.data.data()));
     cv::Mat bgr;
@@ -117,34 +119,34 @@ class Engine {
     cv::Mat detections;
     detector_->detect(bgr, detections);
     if (detections.rows != 1)
-      return std::nullopt;
+      return std::optional<FaceTemplate>{};
     const float* face = detections.ptr<float>();
     for (int i = 0; i < 15; ++i) {
       if (!std::isfinite(face[i]))
-        return std::nullopt;
+        return std::optional<FaceTemplate>{};
     }
     if (face[0] < 0 || face[1] < 0 || face[2] < 64 || face[3] < 64 ||
         face[0] + face[2] >= bgr.cols || face[1] + face[3] >= bgr.rows || face[14] < 0.9f)
-      return std::nullopt;
-    const float real1 = RealProbability(v1se_, bgr, face, 4.0f);
-    const float real2 = RealProbability(v2_, bgr, face, 2.7f);
+      return std::optional<FaceTemplate>{};
+    RK_ASSIGN_OR_RETURN(real1, RealProbability(v1se_, bgr, face, 4.0f));
+    RK_ASSIGN_OR_RETURN(real2, RealProbability(v2_, bgr, face, 2.7f));
     if (real1 < 0.70f || real2 < 0.70f || (real1 + real2) * 0.5f < 0.90f)
-      return std::nullopt;
+      return std::optional<FaceTemplate>{};
     cv::Mat aligned, features;
     recognizer_->alignCrop(bgr, detections.row(0), aligned);
     recognizer_->feature(aligned, features);
     FaceTemplate value;
     if (features.total() != value.size() || features.type() != CV_32F || !features.isContinuous())
-      throw std::runtime_error("invalid SFace output");
+      return Error{ErrorCode::kUnavailable, "invalid SFace output"};
     std::copy_n(features.ptr<float>(), value.size(), value.begin());
     return Normalize(value) ? std::optional(value) : std::nullopt;
   }
 
  private:
-  static float RealProbability(cv::dnn::Net& net,
-                               const cv::Mat& frame,
-                               const float* face,
-                               float scale) {
+  static Result<float> RealProbability(cv::dnn::Net& net,
+                                       const cv::Mat& frame,
+                                       const float* face,
+                                       float scale) {
     const int x = int(face[0]), y = int(face[1]);
     const int w = int(face[2]), h = int(face[3]);
     scale = std::min({scale, float(frame.cols - 1) / w, float(frame.rows - 1) / h});
@@ -159,10 +161,10 @@ class Engine {
     net.setInput(cv::dnn::blobFromImage(frame(crop), 1.0, {80, 80}));
     const cv::Mat output = net.forward();
     if (output.total() != 3 || output.type() != CV_32F || !output.isContinuous())
-      throw std::runtime_error("invalid MiniFAS output");
+      return Error{ErrorCode::kUnavailable, "invalid MiniFAS output"};
     const float* logits = output.ptr<float>();
     if (!std::isfinite(logits[0]) || !std::isfinite(logits[1]) || !std::isfinite(logits[2]))
-      throw std::runtime_error("invalid MiniFAS logits");
+      return Error{ErrorCode::kUnavailable, "invalid MiniFAS logits"};
     const float peak = std::max({logits[0], logits[1], logits[2]});
     const float real = std::exp(logits[1] - peak);
     return real / (std::exp(logits[0] - peak) + real + std::exp(logits[2] - peak));
@@ -174,7 +176,7 @@ class Engine {
   cv::dnn::Net v1se_, v2_;
 };
 
-std::shared_ptr<Engine> GetEngine(const std::filesystem::path& models) {
+Result<std::shared_ptr<Engine>> GetEngine(const std::filesystem::path& models) {
   static std::mutex mutex;
   static std::once_flag worker_limit;
   static std::filesystem::path loaded_path;
@@ -182,7 +184,8 @@ std::shared_ptr<Engine> GetEngine(const std::filesystem::path& models) {
   std::call_once(worker_limit, [] { cv::setNumThreads(2); });
   std::lock_guard lock(mutex);
   if (!loaded || models != loaded_path) {
-    auto engine = std::make_shared<Engine>(models);
+    auto engine = std::make_shared<Engine>();
+    RK_RETURN_IF_ERROR(engine->Initialize(models));
     loaded_path = models;
     loaded = std::move(engine);
   }
@@ -311,16 +314,22 @@ struct Faces::Impl {
       lock.unlock();
       std::optional<FaceTemplate> value;
       bool failed = false;
-      try {
 #if defined(RK_FACE_OPENCV)
-        if (Clock::now() - frame.received <= 1s)
-          value = GetEngine(models)->Infer(frame);
-#else
-        failed = true;
-#endif
-      } catch (const std::exception&) {
-        failed = true;
+      if (Clock::now() - frame.received <= 1s) {
+        auto engine = GetEngine(models);
+        if (!engine)
+          failed = true;
+        else {
+          auto inferred = engine.value()->Infer(frame);
+          if (inferred)
+            value = std::move(inferred).value();
+          else
+            failed = true;
+        }
       }
+#else
+      failed = true;
+#endif
       const auto frame_hash = value ? Fingerprint(frame.data) : 0;
       lock.lock();
       const auto now = Clock::now();
@@ -365,12 +374,10 @@ Faces::~Faces() = default;
 
 FaceCapabilities Faces::Capabilities(const std::filesystem::path& models) {
 #if defined(RK_FACE_OPENCV)
-  try {
-    GetEngine(models);
-    return {true, {}, kModelVersion};
-  } catch (const std::exception&) {
+  auto engine = GetEngine(models);
+  if (!engine)
     return {false, "face-models-unavailable", kModelVersion};
-  }
+  return {true, {}, kModelVersion};
 #else
   (void)models;
   return {false, "face-inference-unavailable", {}};
@@ -415,12 +422,7 @@ void Faces::SubmitRGB24(int width, int height, const uint8_t* rgb, int stride) {
       now - impl_->last_submit < 180ms)
     return;
   Frame& frame = impl_->latest ? *impl_->latest : impl_->latest.emplace();
-  try {
-    frame.data.resize(size_t(width) * height * 3);
-  } catch (const std::bad_alloc&) {
-    impl_->latest.reset();
-    return;
-  }
+  frame.data.resize(size_t(width) * height * 3);
   impl_->last_submit = now;
   frame.width = width;
   frame.height = height;

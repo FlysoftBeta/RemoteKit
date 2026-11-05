@@ -42,6 +42,7 @@ if(WIN32 AND BUILD_TESTING)
   target_include_directories(endpoint_file_upload_tests PRIVATE include)
   target_compile_definitions(endpoint_file_upload_tests PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_features(endpoint_file_upload_tests PRIVATE cxx_std_20)
+  target_link_libraries(endpoint_file_upload_tests PRIVATE bcrypt)
   if(MSVC)
     target_compile_options(endpoint_file_upload_tests PRIVATE /W4 /utf-8)
   endif()
@@ -195,21 +196,23 @@ if(WIN32)
     src/file_upload.cpp
     src/raw_camera.cpp
     src/session/session.cpp
+    src/session/views.cpp
+    src/media/output.cpp
+    src/media/pipeline.cpp
+    src/media/encoders.cpp
+    src/media/audio.cpp
+    src/auth/face.cpp
+    src/files/files.cpp
+    src/diagnostics/stats.cpp
+    src/diagnostics/timing.cpp
+    src/rtc/channel.cpp
     src/rtc/peer.cpp
     src/rtc/authorization.cpp
     src/rtc/data_router.cpp
     src/rtc/outbox.cpp
     src/media/presentation.cpp
-    src/input/input.cpp
-    src/session/session_audio.cpp
-    src/session/session_auth.cpp
-    src/session/session_encoders.cpp
-    src/session/session_files.cpp
-    src/session/session_management.cpp
-    src/session/session_media.cpp
-    src/session/session_output.cpp
-    src/session/session_rtc.cpp
-    src/session/session_views.cpp)
+    src/input/input.cpp)
+
   target_link_libraries(remotekit_runtime PUBLIC remotekit_media remotekit_endpoint remotekit_face remotekit_file_library winmm crypt32 ole32 winhttp)
   if(TARGET remotekit_photo)
     target_compile_definitions(remotekit_runtime PUBLIC RK_FILE_PHOTO)
@@ -220,6 +223,12 @@ if(WIN32)
   target_link_libraries(endpoint_service PRIVATE remotekit_runtime)
   target_compile_options(endpoint_service PRIVATE /W4 /utf-8)
   if(BUILD_TESTING)
+    add_executable(endpoint_composition_tests tests/composition_tests.cpp)
+    target_compile_options(endpoint_composition_tests PRIVATE /W4 /utf-8)
+    target_link_libraries(endpoint_composition_tests PRIVATE remotekit_runtime)
+    add_custom_command(TARGET endpoint_composition_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:VPL> $<TARGET_FILE_DIR:endpoint_composition_tests>)
+    add_test(NAME endpoint_composition COMMAND endpoint_composition_tests)
     add_executable(endpoint_session_controllers_tests tests/session_controllers_tests.cpp)
     target_compile_options(endpoint_session_controllers_tests PRIVATE /W4 /utf-8)
     target_link_libraries(endpoint_session_controllers_tests PRIVATE remotekit_runtime)

@@ -6,7 +6,7 @@ namespace remotekit {
 Result<void> FlushFile(const fs::path& path);
 Result<void> WriteDurableJson(const fs::path& path,
                               const Json& value,
-                              const std::function<void()>& before_commit = {});
+                              const std::function<Result<void>()>& before_commit = {});
 class SessionStore {
  public:
   explicit SessionStore(fs::path directory) : directory_(std::move(directory)) {}

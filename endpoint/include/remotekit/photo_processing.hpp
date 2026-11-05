@@ -1,4 +1,5 @@
 #pragma once
+#include "remotekit/error.hpp"
 
 #include <array>
 #include <cstddef>
@@ -58,32 +59,33 @@ class PhotoBurstAnalyzer {
  public:
   PhotoBurstAnalyzer();
   ~PhotoBurstAnalyzer();
-  PhotoBurstDecision Observe(const std::string& frame_id,
-                             std::span<const std::uint8_t> encoded,
-                             const std::vector<std::string>& available,
-                             const PhotoCancelled& cancelled = {});
-  PhotoBurstDecision Finish(const std::vector<std::string>& available);
+  Result<PhotoBurstDecision> Observe(const std::string& frame_id,
+                                     std::span<const std::uint8_t> encoded,
+                                     const std::vector<std::string>& available,
+                                     const PhotoCancelled& cancelled = {});
+  Result<PhotoBurstDecision> Finish(const std::vector<std::string>& available);
 
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
 };
 
-PhotoRankResult RankPhotos(std::span<const std::filesystem::path> inputs,
-                           const PhotoCancelled& cancelled = {});
+Result<PhotoRankResult> RankPhotos(std::span<const std::filesystem::path> inputs,
+                                   const PhotoCancelled& cancelled = {});
 
 // Writes PNG to a caller-owned staging path. The caller cleans up on failure
 // and publishes the result only on success. Corners are in displayed image
 // coordinates, normalized clockwise.
-PhotoProcessResult ProcessPhoto(const std::filesystem::path& input,
-                                const std::filesystem::path& output,
-                                PhotoMode mode,
-                                const std::optional<std::array<PhotoPoint, 4>>& corners = {},
-                                const PhotoCancelled& cancelled = {});
+Result<PhotoProcessResult> ProcessPhoto(
+    const std::filesystem::path& input,
+    const std::filesystem::path& output,
+    PhotoMode mode,
+    const std::optional<std::array<PhotoPoint, 4>>& corners = {},
+    const PhotoCancelled& cancelled = {});
 
 // Produces a display-oriented JPEG up to 320 pixels per side and 64 KiB.
-PhotoProcessResult CreatePhotoThumbnail(const std::filesystem::path& input,
-                                        const std::filesystem::path& output,
-                                        const PhotoCancelled& cancelled = {});
+Result<PhotoProcessResult> CreatePhotoThumbnail(const std::filesystem::path& input,
+                                                const std::filesystem::path& output,
+                                                const PhotoCancelled& cancelled = {});
 
 }  // namespace remotekit

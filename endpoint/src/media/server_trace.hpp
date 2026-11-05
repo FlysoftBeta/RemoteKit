@@ -1,4 +1,5 @@
 #pragma once
+#include "remotekit/file_io.hpp"
 #include "remotekit_rtc.h"
 #include <windows.h>
 #include <json.hpp>
@@ -53,13 +54,17 @@ class ServerTrace {
     auto root = std::filesystem::path(path);
     if (root == L"1")
       root = std::filesystem::path(L"develop/tmp/server-trace");
+    auto created = CreateDirectories(root);
+    if (!created) {
+      fprintf(stderr, "server trace: %s\n", created.error().message.c_str());
+      return {};
+    }
     return std::shared_ptr<ServerTrace>(new ServerTrace(root, tenant, session));
   }
   ~ServerTrace() {
-    try {
-      Flush();
-    } catch (...) {
-    }
+    auto flushed = Flush();
+    if (!flushed)
+      fprintf(stderr, "server trace: %s\n", flushed.error().message.c_str());
   }
   void Add(TraceRecord record) {
     if (!record.qpc) {
@@ -96,7 +101,7 @@ class ServerTrace {
     record.high_resolution = sample.high_resolution;
     Add(record);
   }
-  void Flush() {
+  Result<void> Flush() {
     std::vector<TraceRecord> copy;
     uint64_t total;
     {
@@ -109,10 +114,8 @@ class ServerTrace {
     }
     std::lock_guard file_lock(file_mutex_);
     std::ofstream out(path_, std::ios::trunc);
-    if (!out) {
-      fprintf(stderr, "server trace: cannot write output\n");
-      return;
-    }
+    if (!out)
+      return Error{ErrorCode::kUnavailable, "cannot open trace output"};
     out << nlohmann::json{{"event", "trace_header"},
                           {"schema", "trace-v1"},
                           {"pid", GetCurrentProcessId()},
@@ -191,12 +194,15 @@ class ServerTrace {
         value["high_resolution"] = r.high_resolution;
       out << value.dump() << '\n';
     }
+    out.flush();
+    if (!out)
+      return Error{ErrorCode::kUnavailable, "cannot write trace output"};
+    return {};
   }
 
  private:
   ServerTrace(const std::filesystem::path& root, std::string tenant, std::string session)
       : tenant_(std::move(tenant)), session_(std::move(session)), records_(65536) {
-    std::filesystem::create_directories(root);
     LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency);
     frequency_ = frequency.QuadPart;

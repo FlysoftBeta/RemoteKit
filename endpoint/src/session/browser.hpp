@@ -1,5 +1,7 @@
 #pragma once
 #include "platform/process.hpp"
+#include "options.hpp"
+#include "media/adapter.hpp"
 #include "session/browser_rpc.hpp"
 
 namespace remotekit {
@@ -7,6 +9,11 @@ class BrowserRuntime {
  public:
   explicit BrowserRuntime(media::Sdk& sdk) : rpc_(sdk) {}
   Result<void> Start(const fs::path& executable, std::wstring command, const std::string& channel);
+  Result<void> Launch(const RuntimeOptions&,
+                      const std::string&,
+                      const fs::path&,
+                      const StreamingAdapter&,
+                      const std::shared_ptr<media::ServerTrace>&);
   Result<void> NewIncarnation();
   Result<void> Stop();
   void ReleaseExited() { process_.ReleaseExited(); }

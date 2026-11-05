@@ -33,15 +33,23 @@ void Check(HRESULT result) {
 
 template <typename F>
 void RequireError(F operation, std::string_view expected) {
-  try {
-    operation();
-  } catch (const std::runtime_error& error) {
-    if (expected == error.what())
-      return;
-    std::cerr << "Expected " << expected << ", got " << error.what() << '\n';
-    throw;
+  auto result = operation();
+  Require(!result && result.error().message == expected, "unexpected result error");
+}
+
+template <class T>
+T Take(remotekit::Result<T> result) {
+  if (!result) {
+    std::cerr << result.error().message << '\n';
+    std::exit(1);
   }
-  throw std::runtime_error("expected an error");
+  return std::move(result).value();
+}
+inline void Take(remotekit::Result<void> result) {
+  if (!result) {
+    std::cerr << result.error().message << '\n';
+    std::exit(1);
+  }
 }
 
 class Fixtures {
@@ -156,7 +164,7 @@ void CheckBurst(Fixtures& fixtures) {
   PhotoBurstAnalyzer scores;
   auto analyze = [](const auto& bytes) {
     PhotoBurstAnalyzer analyzer;
-    const auto result = analyzer.Observe("first", bytes, {"first"});
+    const auto result = Take(analyzer.Observe("first", bytes, {"first"}));
     Require(!result.stop, "one sample must not certify stable quality");
     return result.candidates.front().score;
   };
@@ -164,20 +172,20 @@ void CheckBurst(Fixtures& fixtures) {
   Require(clear_score > analyze(blur_bytes) + 0.16 && clear_score > analyze(dark_bytes) + 0.16 &&
               clear_score > analyze(noise_bytes) + 0.16,
           "512 px quality must separate clear detail from blur, dark detail and random noise");
-  scores.Observe("blur", blur_bytes, {"blur"});
-  const auto good = scores.Observe("clear", clear_bytes, {"blur", "clear"});
+  Take(scores.Observe("blur", blur_bytes, {"blur"}));
+  const auto good = Take(scores.Observe("clear", clear_bytes, {"blur", "clear"}));
   Require(good.selected_frame_id == "clear" && !good.stop && !good.uncertain,
           "a single sharp frame can displace blur without certifying stable quality");
   cv::Mat similar;
   sharp.convertTo(similar, -1, 1, 4);
   const auto near_bytes = jpeg("burst-near.jpg", similar);
-  const auto stop = scores.Observe("near", near_bytes, {"clear", "near"});
+  const auto stop = Take(scores.Observe("near", near_bytes, {"clear", "near"}));
   Require(stop.stop && stop.candidates.size() == 1 && stop.keep_frame_ids.size() == 1 &&
               !stop.uncertain,
           "two clear, equivalent frames should stop early with one retained candidate");
-  Require(scores.Finish(stop.keep_frame_ids).selected_frame_id == stop.selected_frame_id,
+  Require(Take(scores.Finish(stop.keep_frame_ids)).selected_frame_id == stop.selected_frame_id,
           "finish must select the acknowledged retained frame");
-  RequireError([&] { scores.Finish({"unseen"}); }, "invalid-photo-count");
+  RequireError([&] { return scores.Finish({"unseen"}); }, "invalid-photo-count");
 
   cv::Mat blue, orange;
   cv::resize(DetailFixture({255, 174, 193}, {92, 25, 31}), blue, sharp.size());
@@ -185,23 +193,27 @@ void CheckBurst(Fixtures& fixtures) {
   const auto blue_bytes = jpeg("burst-blue.jpg", blue);
   const auto orange_bytes = jpeg("burst-orange.jpg", orange);
   PhotoBurstAnalyzer distinct;
-  distinct.Observe("blue", blue_bytes, {"blue"});
-  const auto choice = distinct.Observe("orange", orange_bytes, {"blue", "orange"});
+  Take(distinct.Observe("blue", blue_bytes, {"blue"}));
+  const auto choice = Take(distinct.Observe("orange", orange_bytes, {"blue", "orange"}));
   Require(!choice.stop && choice.uncertain && choice.keep_frame_ids.size() == 2 &&
               choice.candidates.size() == 2,
           "distinct close-quality scenes should retain both original frame IDs");
-  Require(distinct.Finish({"orange"}).selected_frame_id == "orange",
+  Require(Take(distinct.Finish({"orange"})).selected_frame_id == "orange",
           "finish must not select an evicted winner");
-  RequireError([&] { distinct.Observe("blue", blue_bytes, {"blue"}); }, "invalid-photo-frame");
-  RequireError([&] { distinct.Observe("missing", clear_bytes, {"orange"}); },
+  RequireError([&] { return distinct.Observe("blue", blue_bytes, {"blue"}); },
+               "invalid-photo-frame");
+  RequireError([&] { return distinct.Observe("missing", clear_bytes, {"orange"}); },
                "invalid-photo-frame");
   const cv::Mat wide(64, 513, CV_8UC3, cv::Scalar::all(160));
-  RequireError([&] { distinct.Observe("wide", jpeg("burst-wide.jpg", wide), {"wide"}); },
-               "photo-too-large");
-  RequireError([&] { distinct.Observe("big", std::vector<std::uint8_t>(44 * 1024 + 1), {"big"}); },
+  RequireError([&] { return distinct.Observe("wide", jpeg("burst-wide.jpg", wide), {"wide"}); },
                "photo-too-large");
   RequireError(
-      [&] { distinct.Observe("cancelled", clear_bytes, {"cancelled"}, [] { return true; }); },
+      [&] { return distinct.Observe("big", std::vector<std::uint8_t>(44 * 1024 + 1), {"big"}); },
+      "photo-too-large");
+  RequireError(
+      [&] {
+        return distinct.Observe("cancelled", clear_bytes, {"cancelled"}, [] { return true; });
+      },
       "cancelled");
 }
 
@@ -215,10 +227,10 @@ void CheckRank(Fixtures& fixtures) {
   cv::RNG random(12345);
   random.fill(noisy, cv::RNG::NORMAL, cv::Scalar::all(128), cv::Scalar::all(37));
   const auto noise = fixtures.Png("noise.png", noisy);
-  const auto ranked = RankPhotos(std::array{blurred, noise, crisp});
+  const auto ranked = Take(RankPhotos(std::array{blurred, noise, crisp}));
   Require(ranked.selected_index == 2 && !ranked.uncertain && ranked.reason == "clear-winner",
           "clear structured detail must beat blur and random noise");
-  const auto similar = RankPhotos(std::array{crisp, crisp});
+  const auto similar = Take(RankPhotos(std::array{crisp, crisp}));
   Require(similar.selected_index == 0 && !similar.uncertain && similar.reason == "near-identical" &&
               similar.candidates.size() == 1,
           "equivalent frames should choose a stable winner");
@@ -226,7 +238,7 @@ void CheckRank(Fixtures& fixtures) {
   // Approximately equal luminance contrast, very different chroma.
   const auto blue = fixtures.Png("blue.png", DetailFixture({255, 174, 193}, {92, 25, 31}));
   const auto orange = fixtures.Png("orange.png", DetailFixture({94, 184, 235}, {0, 19, 69}));
-  const auto distinct = RankPhotos(std::array{blue, orange, orange, blue});
+  const auto distinct = Take(RankPhotos(std::array{blue, orange, orange, blue}));
   Require(
       distinct.uncertain && distinct.reason == "close-quality" && distinct.candidates.size() == 2,
       "close but distinct frames should expose deduplicated alternatives");
@@ -234,12 +246,13 @@ void CheckRank(Fixtures& fixtures) {
   const auto dark = fixtures.Png("dark.png", cv::Mat(sharp.size(), CV_8UC3, cv::Scalar::all(0)));
   const auto white =
       fixtures.Png("white.png", cv::Mat(sharp.size(), CV_8UC3, cv::Scalar::all(255)));
-  const auto low = RankPhotos(std::array{dark, white});
+  const auto low = Take(RankPhotos(std::array{dark, white}));
   Require(low.reason == "low-quality" && !low.uncertain && low.candidates.size() == 1,
           "poor frames should warn without forced alternatives");
-  RequireError([&] { RankPhotos(std::array{crisp}, [] { return true; }); }, "cancelled");
-  RequireError([&] { RankPhotos(std::array{crisp, crisp, crisp, crisp, crisp, crisp, crisp}); },
-               "invalid-photo-count");
+  RequireError([&] { return RankPhotos(std::array{crisp}, [] { return true; }); }, "cancelled");
+  RequireError(
+      [&] { return RankPhotos(std::array{crisp, crisp, crisp, crisp, crisp, crisp, crisp}); },
+      "invalid-photo-count");
 }
 
 void CheckDocuments(Fixtures& fixtures) {
@@ -255,7 +268,7 @@ void CheckDocuments(Fixtures& fixtures) {
   const auto input = fixtures.Png("document.png", page);
   const auto rectified = fixtures.dir / "rectified.temp";
   const auto scanned = fixtures.dir / "scanned.temp";
-  const auto corrected = ProcessPhoto(input, rectified, PhotoMode::kRectify);
+  const auto corrected = Take(ProcessPhoto(input, rectified, PhotoMode::kRectify));
   Require(corrected.width >= 470 && corrected.width <= 500 && corrected.height >= 342 &&
               corrected.height <= 370,
           "auto detection should use the complete perspective boundary");
@@ -267,7 +280,7 @@ void CheckDocuments(Fixtures& fixtures) {
   std::array<PhotoPoint, 4> manual;
   for (std::size_t i = 0; i < manual.size(); ++i)
     manual[i] = {quad[i].x / 639.0, quad[i].y / 479.0};
-  const auto clean = ProcessPhoto(input, scanned, PhotoMode::kScan, manual);
+  const auto clean = Take(ProcessPhoto(input, scanned, PhotoMode::kScan, manual));
   const auto scan = fixtures.Read(scanned, GUID_ContainerFormatPng);
   Require(scan.cols == clean.width && scan.rows == clean.height && clean.width >= 480 &&
               clean.geometry == "perspective",
@@ -279,28 +292,30 @@ void CheckDocuments(Fixtures& fixtures) {
   Require(left > 170 && right > 170 && std::abs(left - right) < 15 &&
               cv::countNonZero(gray < 55) > 1000,
           "scan should normalize uneven paper and preserve dark lines");
-  Require(ProcessPhoto(input, scanned, PhotoMode::kScan).geometry == "perspective",
+  Require(Take(ProcessPhoto(input, scanned, PhotoMode::kScan)).geometry == "perspective",
           "clear complete page should support automatic perspective in scan mode");
-  Require(RankPhotos(std::array{input}).candidates.size() == 1,
+  Require(Take(RankPhotos(std::array{input})).candidates.size() == 1,
           "processing should preserve the original asset");
   std::swap(manual[1], manual[2]);
   const auto invalid = fixtures.dir / "invalid.temp";
-  RequireError([&] { ProcessPhoto(input, invalid, PhotoMode::kScan, manual); }, "invalid-corners");
+  RequireError([&] { return ProcessPhoto(input, invalid, PhotoMode::kScan, manual); },
+               "invalid-corners");
   const auto flat = fixtures.Png("flat.png", cv::Mat(size, CV_8UC3, cv::Scalar::all(170)));
-  RequireError([&] { ProcessPhoto(flat, invalid, PhotoMode::kRectify); }, "no-document");
+  RequireError([&] { return ProcessPhoto(flat, invalid, PhotoMode::kRectify); }, "no-document");
   Require(!std::filesystem::exists(invalid), "rejected crop must produce no output");
 
   cv::Mat two(size, CV_8UC3, cv::Scalar::all(28));
   cv::rectangle(two, {24, 70}, {300, 420}, cv::Scalar::all(225), cv::FILLED);
   cv::rectangle(two, {340, 70}, {616, 420}, cv::Scalar::all(225), cv::FILLED);
   const auto ambiguous = fixtures.Png("two-documents.png", two);
-  RequireError([&] { ProcessPhoto(ambiguous, invalid, PhotoMode::kRectify); }, "no-document");
+  RequireError([&] { return ProcessPhoto(ambiguous, invalid, PhotoMode::kRectify); },
+               "no-document");
   const auto oversized =
       fixtures.Png("oversized.png", cv::Mat(2897, 2897, CV_8UC3, cv::Scalar::all(165)));
-  RequireError([&] { RankPhotos(std::array{oversized}); }, "photo-too-large");
+  RequireError([&] { return RankPhotos(std::array{oversized}); }, "photo-too-large");
   const auto broken = fixtures.dir / "broken.png";
   std::ofstream(broken, std::ios::binary) << "not an image";
-  RequireError([&] { RankPhotos(std::array{broken}); }, "invalid-photo");
+  RequireError([&] { return RankPhotos(std::array{broken}); }, "invalid-photo");
 }
 
 void CheckPartialDocuments(Fixtures& fixtures) {
@@ -314,7 +329,7 @@ void CheckPartialDocuments(Fixtures& fixtures) {
   cv::rectangle(page, {500, 566}, {530, 573}, {162, 164, 166}, cv::FILLED);
   const auto full = fixtures.Png("partial-flat.png", page);
   const auto output = fixtures.dir / "partial-scan.temp";
-  const auto flat = ProcessPhoto(full, output, PhotoMode::kScan);
+  const auto flat = Take(ProcessPhoto(full, output, PhotoMode::kScan));
   Require(flat.geometry == "unchanged" && flat.width == page.cols && flat.height == page.rows,
           "aligned partial page should keep its whole view");
   const auto scanned = fixtures.Read(output, GUID_ContainerFormatPng);
@@ -339,7 +354,7 @@ void CheckPartialDocuments(Fixtures& fixtures) {
     cv::rectangle(angled, {angled.cols - 15, 292}, {angled.cols - 1, 310}, {34, 170, 35},
                   cv::FILLED);
     const auto rotated = fixtures.Png(tilt > 0 ? "plus.png" : "minus.png", angled);
-    const auto deskewed = ProcessPhoto(rotated, output, PhotoMode::kScan);
+    const auto deskewed = Take(ProcessPhoto(rotated, output, PhotoMode::kScan));
     Require(
         deskewed.geometry == "deskew" && deskewed.width > page.cols && deskewed.height > page.rows,
         "partial page with consistent slanted text should be deskewed with expanded canvas");
@@ -364,7 +379,7 @@ void CheckPartialDocuments(Fixtures& fixtures) {
   for (int y = 110; y < 340; y += 43)
     cv::line(ambiguous, {67, y}, {540, y}, {45, 54, 63}, 2);
   const auto table = fixtures.Png("table-without-page-boundary.png", ambiguous);
-  const auto kept = ProcessPhoto(table, output, PhotoMode::kScan);
+  const auto kept = Take(ProcessPhoto(table, output, PhotoMode::kScan));
   Require(
       kept.geometry == "unchanged" && kept.width == ambiguous.cols && kept.height == ambiguous.rows,
       "an internal table border must not be used as a page boundary");
@@ -374,17 +389,18 @@ void CheckThumbnails(Fixtures& fixtures) {
   const auto big =
       fixtures.Png("large-preview.png", cv::Mat(1800, 2800, CV_8UC3, cv::Scalar(130, 205, 165)));
   const auto output = fixtures.dir / "thumb.temp";
-  const auto result = CreatePhotoThumbnail(big, output);
+  const auto result = Take(CreatePhotoThumbnail(big, output));
   Require(result.width == 320 && result.height == 206 &&
               std::filesystem::file_size(output) <= 64 * 1024,
           "thumbnail must resize large sources proportionally within the byte limit");
   Require(fixtures.Read(output).size() == cv::Size{320, 206}, "thumbnail JPEG dimensions");
-  Require(RankPhotos(std::array{big}).selected_index == 0, "8 Mi-pixel budget accepts 5 MP input");
+  Require(Take(RankPhotos(std::array{big})).selected_index == 0,
+          "8 Mi-pixel budget accepts 5 MP input");
 
   cv::Mat transparent(20, 28, CV_8UC4, cv::Scalar(0, 0, 0, 0));
   cv::rectangle(transparent, {9, 5}, {18, 14}, {0, 0, 220, 255}, cv::FILLED);
   const auto alpha = fixtures.Png("transparent.png", transparent);
-  const auto tiny = CreatePhotoThumbnail(alpha, output);
+  const auto tiny = Take(CreatePhotoThumbnail(alpha, output));
   const auto flattened = fixtures.Read(output);
   Require(tiny.width == 28 && tiny.height == 20 && flattened.at<cv::Vec3b>(1, 1)[0] > 245 &&
               flattened.at<cv::Vec3b>(10, 13)[2] > 190 && flattened.at<cv::Vec3b>(10, 13)[0] < 40,
@@ -406,7 +422,7 @@ void CheckThumbnails(Fixtures& fixtures) {
   tagged.write(reinterpret_cast<const char*>(app1.data()), app1.size());
   tagged.write(jpeg_bytes.data() + 2, jpeg_bytes.size() - 2);
   tagged.close();
-  const auto rotated = CreatePhotoThumbnail(oriented, output);
+  const auto rotated = Take(CreatePhotoThumbnail(oriented, output));
   const auto rotated_jpeg = fixtures.Read(output);
   Require(rotated.width == 107 && rotated.height == 320 &&
               rotated_jpeg.at<cv::Vec3b>(30, 45)[0] < 60 &&
@@ -418,15 +434,16 @@ void CheckThumbnails(Fixtures& fixtures) {
   cv::RNG random(4412);
   random.fill(random_image, cv::RNG::UNIFORM, 0, 256);
   fixtures.Png("noisy.png", random_image);
-  CreatePhotoThumbnail(noisy, output);
+  Take(CreatePhotoThumbnail(noisy, output));
   Require(std::filesystem::file_size(output) <= 64 * 1024, "busy thumbnails obey byte limit");
   const auto too_wide =
       fixtures.Png("too-wide.png", cv::Mat(1, 16385, CV_8UC3, cv::Scalar::all(120)));
   const auto absent = fixtures.dir / "absent.temp";
-  RequireError([&] { CreatePhotoThumbnail(too_wide, absent); }, "photo_too_large");
-  RequireError([&] { CreatePhotoThumbnail(fixtures.dir / "broken.png", absent); }, "invalid_photo");
-  RequireError([&] { CreatePhotoThumbnail(big, absent, [] { return true; }); }, "cancelled");
-  RequireError([&] { CreatePhotoThumbnail(big, big); }, "photo_output_failed");
+  RequireError([&] { return CreatePhotoThumbnail(too_wide, absent); }, "photo_too_large");
+  RequireError([&] { return CreatePhotoThumbnail(fixtures.dir / "broken.png", absent); },
+               "invalid_photo");
+  RequireError([&] { return CreatePhotoThumbnail(big, absent, [] { return true; }); }, "cancelled");
+  RequireError([&] { return CreatePhotoThumbnail(big, big); }, "photo_output_failed");
   Require(!std::filesystem::exists(absent), "rejected thumbnails must create no output");
 }
 

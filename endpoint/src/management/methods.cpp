@@ -6,127 +6,135 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
   static const std::map<std::string, Handler> methods{
       {"session.library.references",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.LibraryCommand("session.library.references", request);
+         return session.Files().Library().LibraryCommand("session.library.references", request);
        }},
       {"auth.face.begin",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageAuthFaceBegin(request);
+         return session.Face().FaceCommand(Required(request, "method"), request,
+                                           session.ManagementGeneration(),
+                                           [&session] { return session.ManagementCurrent(); });
        }},
       {"auth.face.cancel",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageAuthFaceCancel(request);
+         return session.Face().FaceCommand(Required(request, "method"), request,
+                                           session.ManagementGeneration(),
+                                           [&session] { return session.ManagementCurrent(); });
        }},
       {"auth.face.capabilities",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageAuthFaceCapabilities(request);
+         return session.Face().FaceCapabilities();
        }},
       {"auth.face.status",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageAuthFaceStatus(request);
+         return session.Face().FaceCommand(Required(request, "method"), request,
+                                           session.ManagementGeneration(),
+                                           [&session] { return session.ManagementCurrent(); });
        }},
       {"rtc.actionResult",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageRtcActionResult(request);
+         return session.Channel().ManageRtcActionResult(request);
        }},
       {"rtc.authorize",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageRtcAuthorize(request);
+         return session.Authorization().Authorize(
+             request, session.ManagementGeneration(),
+             [&session] { return session.ManagementCurrent(); });
        }},
       {"rtc.close",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageRtcClose(request);
+         return session.Channel().ManageRtcClose(request);
        }},
       {"rtc.ice",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageRtcIce(request);
+         return session.Channel().ManageRtcIce(request);
        }},
       {"rtc.offer",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageRtcOffer(request);
+         return session.Channel().ManageRtcOffer(request);
        }},
       {"session.ensure",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionEnsure(request);
+         return session.Views().ManageSessionEnsure(request);
        }},
       {"session.events.ack",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionEventsAck(request);
+         return session.Views().ManageSessionEventsAck(request);
        }},
       {"session.files.authorize",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionFilesAuthorize(request);
+         return session.Files().AuthorizeFiles(request);
        }},
       {"session.library.describe",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionLibraryDescribe(request);
+         return session.Files().Library().LibraryCommand(Required(request, "method"), request);
        }},
       {"session.library.prepare",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionLibraryPrepare(request);
+         return session.Files().Library().LibraryCommand(Required(request, "method"), request);
        }},
       {"session.library.retain",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionLibraryRetain(request);
+         return session.Files().Library().LibraryCommand(Required(request, "method"), request);
        }},
       {"session.library.selectionStatus",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionLibrarySelectionStatus(request);
+         return session.Files().Library().LibraryCommand(Required(request, "method"), request);
        }},
       {"session.mediaPolicy",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionMediaPolicy(request);
+         return session.Media().ManageSessionMediaPolicy(request);
        }},
       {"session.sitePreferences",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionSitePreferences(request);
+         return session.Views().ManageSessionSitePreferences(request);
        }},
       {"session.snapshot",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageSessionSnapshot(request);
+         return session.Views().ManageSessionSnapshot(request);
        }},
       {"view.adopt",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewEnsure(request);
+         return session.Views().ManageViewEnsure(request);
        }},
       {"view.close",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewClose(request);
+         return session.Views().ManageViewClose(request);
        }},
       {"view.close.reply",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewCloseReply(request);
+         return session.Views().ManageViewCloseReply(request);
        }},
       {"view.command",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewCommand(request);
+         return session.Views().ManageViewCommand(request);
        }},
       {"view.configure",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewConfigure(request);
+         return session.Views().ManageViewConfigure(request);
        }},
       {"view.ensure",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewEnsure(request);
+         return session.Views().ManageViewEnsure(request);
        }},
       {"view.lifecycle",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewLifecycle(request);
+         return session.Views().ManageViewLifecycle(request);
        }},
       {"view.navigate",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewNavigate(request);
+         return session.Views().ManageViewNavigate(request);
        }},
       {"view.navigation.ack",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewNavigationAck(request);
+         return session.Views().ManageViewNavigationAck(request);
        }},
       {"view.page.exitFullscreen",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewPageExitFullscreen(request);
+         return session.Views().ManageViewPageExitFullscreen(request);
        }},
       {"view.page.reply",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.ManageViewPageReply(request);
+         return session.Views().ManageViewPageReply(request);
        }},
   };
   auto found = methods.find(name);

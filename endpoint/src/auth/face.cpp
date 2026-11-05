@@ -1,15 +1,26 @@
-#include "session/session.hpp"
+#include "auth/face.hpp"
+#include "diagnostics/timing.hpp"
+#include "rtc/authorization.hpp"
+#include "rtc/peer.hpp"
 namespace remotekit {
-int64_t Session::CameraNow() {
+using ConnectionPhase = ConnectionTiming::ConnectionPhase;
+using Event = RtcEvent;
+fs::path FaceController::FaceModels() {
+  wchar_t executable[32768]{};
+  GetModuleFileNameW(nullptr, executable, 32768);
+  return fs::path(executable).parent_path() / "face-models";
+}
+
+int64_t FaceController::CameraNow() {
   return static_cast<int64_t>(1000.0 * QpcNow() / QpcFrequency());
 }
 
-bool Session::FacePending(uint64_t epoch, std::string_view challenge) {
+bool FaceController::FacePending(uint64_t epoch, std::string_view challenge) {
   const auto result = faces.Status(epoch, challenge);
   return result && result->state == rk::auth::FaceState::pending;
 }
 
-void Session::WakeCamera() {
+void FaceController::WakeCamera() {
   {
     std::lock_guard lock(camera_mutex);
     camera_changed = true;
@@ -17,11 +28,11 @@ void Session::WakeCamera() {
   camera_wake.notify_one();
 }
 
-void Session::CameraLoop() {
+void FaceController::CameraLoop() {
   const auto pending = [&](uint64_t epoch, std::string_view challenge) {
     return FacePending(epoch, challenge);
   };
-  while (!stop_camera) {
+  while (state == State::kRunning) {
     {
       if (auto message = raw_camera.Next(CameraNow(), pending)) {
         if (sdk.remotekit_rtc_send_auth_data(message->peer, message->json.data(),
@@ -33,7 +44,7 @@ void Session::CameraLoop() {
     }
     const bool active = raw_camera.Active();
     std::unique_lock lock(camera_mutex);
-    const auto ready = [&] { return stop_camera || camera_changed; };
+    const auto ready = [&] { return state != State::kRunning || camera_changed; };
     if (active)
       camera_wake.wait_for(lock, std::chrono::milliseconds(20), ready);
     else
@@ -41,7 +52,8 @@ void Session::CameraLoop() {
     camera_changed = false;
   }
 }
-Json Session::FaceCapabilities() {
+
+Json FaceController::FaceCapabilities() {
   const auto capability = rk::auth::Faces::Capabilities(FaceModels());
   Json result = {{"available", capability.available}, {"modelVersion", capability.model_version}};
   if (!capability.reason.empty())
@@ -49,10 +61,10 @@ Json Session::FaceCapabilities() {
   return result;
 }
 
-Result<Json> Session::FaceCommand(const std::string& method,
-                                  const Json& request,
-                                  uint64_t generation,
-                                  const std::function<bool()>& management_current) {
+Result<Json> FaceController::FaceCommand(const std::string& method,
+                                         const Json& request,
+                                         uint64_t generation,
+                                         const std::function<bool()>& management_current) {
   auto transition = authorization.LockTransition();
   {
     auto require_auth_peer_result_2 = authorization.RequireAuthPeer(request);
@@ -158,10 +170,53 @@ Result<Json> Session::FaceCommand(const std::string& method,
   raw_camera.Cancel();
   if (!faces.Begin(std::move(face_challenge)))
     return Error{ErrorCode::kUnavailable, "face_challenge_unavailable"};
-  raw_camera.Begin(peer_controller.Handle(), epoch, challenge,
+  raw_camera.Begin(authorization.Admit().peer, epoch, challenge,
                    CameraNow() + timeout.get<uint32_t>());
   WakeCamera();
   return Json{{"accepted", true}};
+}
+}  // namespace remotekit
+
+namespace remotekit {
+
+void FaceController::Start(uint64_t peer) {
+  raw_camera.Bind(peer);
+  state = State::kRunning;
+  camera_thread = std::thread([this] {
+    RunThread(
+        "camera", [this] { CameraLoop(); },
+        [this] {
+          state = State::kFailed;
+          raw_camera.Cancel();
+        });
+  });
+}
+void FaceController::Stop() {
+  state = State::kStopping;
+  raw_camera.Bind(0);
+  WakeCamera();
+  if (camera_thread.joinable())
+    camera_thread.join();
+  state = State::kStopped;
+}
+void FaceController::Cancel() {
+  raw_camera.Cancel();
+  faces.Cancel();
+  WakeCamera();
+}
+void FaceController::Receive(const RtcEvent& event) {
+  if (event.type == REMOTEKIT_RTC_AUTH_DATA_STATE)
+    raw_camera.State(event.peer, event.value == 1);
+  else
+    raw_camera.Receive(
+        event.peer, event.value == 1, event.bytes.data(), event.bytes.size(), CameraNow(),
+        [this](uint64_t epoch, std::string_view challenge) {
+          return FacePending(epoch, challenge);
+        },
+        [this](int width, int height, const uint8_t* rgb, int stride) {
+          faces.SubmitRGB24(width, height, rgb, stride);
+        });
+  WakeCamera();
 }
 
 }  // namespace remotekit

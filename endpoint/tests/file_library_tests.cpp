@@ -15,21 +15,34 @@ namespace fs = std::filesystem;
       std::exit(1);                              \
     }                                            \
   } while (false)
-template <class Action>
-bool Throws(Action action) {
-  try {
-    action();
-  } catch (const std::exception&) {
-    return true;
-  }
-  return false;
+template <class F>
+bool Fails(F operation) {
+  return !operation();
 }
+
+template <class T>
+T Take(remotekit::Result<T> result) {
+  if (!result) {
+    std::cerr << result.error().message << '\n';
+    std::exit(1);
+  }
+  return std::move(result).value();
+}
+inline void Take(remotekit::Result<void> result) {
+  if (!result) {
+    std::cerr << result.error().message << '\n';
+    std::exit(1);
+  }
+}
+
 int main() {
   const auto root = fs::temp_directory_path() /
                     ("remotekit-file-library-" +
                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-  const auto live = [] {};
-  const auto retired = [] { throw std::runtime_error("file_transfer_interrupted"); };
+  const auto live = []() -> remotekit::Result<void> { return {}; };
+  const auto retired = []() -> remotekit::Result<void> {
+    return remotekit::Error{remotekit::ErrorCode::kForbidden, "file_transfer_interrupted"};
+  };
   const auto session = root / "session";
   const std::string hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
   const FileUploadStore::Spec spec{"photo.jpeg", "image/jpeg", 3};
@@ -45,104 +58,109 @@ int main() {
   unsubmitted.binding.request = "5";
   {
     FileLibrary library(session);
-    const auto draft = library.Begin(1, "operation", spec, live);
+    CHECK(library.Initialize());
+    const auto draft = Take(library.Begin(1, "operation", spec, live));
     upload = draft["uploadId"];
     CHECK(draft["offset"] == 0);
-    CHECK(Throws([&] { library.Begin(1, "operation", {"different", "", 3}, live); }));
-    CHECK(Throws([&] { library.Chunk(1, upload, 1, {'a'}, live); }));
-    CHECK(library.Chunk(1, upload, 0, {'a'}, live) == 1);
-    CHECK(Throws([&] { library.Seal(1, upload, live); }));
-    CHECK(Throws([&] { library.Chunk(1, upload, 1, {'b'}, retired); }));
-    CHECK(Throws([&] { library.Chunk(2, upload, 1, {'b'}, live); }));
+    CHECK(Fails([&] { return library.Begin(1, "operation", {"different", "", 3}, live); }));
+    CHECK(Fails([&] { return library.Chunk(1, upload, 1, {'a'}, live); }));
+    CHECK(Take(library.Chunk(1, upload, 0, {'a'}, live)) == 1);
+    CHECK(Fails([&] { return library.Seal(1, upload, live); }));
+    CHECK(Fails([&] { return library.Chunk(1, upload, 1, {'b'}, retired); }));
+    CHECK(Fails([&] { return library.Chunk(2, upload, 1, {'b'}, live); }));
   }
   {
     FileLibrary library(session);
-    CHECK(Throws([&] { library.Chunk(1, upload, 1, {'b'}, live); }));
-    CHECK(library.Begin(1, "operation", spec, live)["offset"] == 1);
-    CHECK(library.Chunk(1, upload, 0, {'a', 'b', 'c'}, live) == 3);
-    CHECK(library.Chunk(1, upload, 0, {'a', 'b', 'c'}, live) == 3);
-    CHECK(Throws([&] { library.Chunk(1, upload, 0, {'x'}, live); }));
-    CHECK(Throws([&] { library.Seal(1, upload, retired); }));
-    CHECK(library.Seal(1, upload, live).id == hash);
-    CHECK(library.Seal(1, upload, live).id == hash);
-    CHECK(library.Read(hash, 1).second == std::vector<std::uint8_t>({'b', 'c'}));
-    CHECK(library.Read(hash, 3).second.empty());
-    const auto derivative = library.CreateDerivative(
-        [&](const fs::path& path) {
+    CHECK(library.Initialize());
+    CHECK(Fails([&] { return library.Chunk(1, upload, 1, {'b'}, live); }));
+    CHECK(Take(library.Begin(1, "operation", spec, live))["offset"] == 1);
+    CHECK(Take(library.Chunk(1, upload, 0, {'a', 'b', 'c'}, live)) == 3);
+    CHECK(Take(library.Chunk(1, upload, 0, {'a', 'b', 'c'}, live)) == 3);
+    CHECK(Fails([&] { return library.Chunk(1, upload, 0, {'x'}, live); }));
+    CHECK(Fails([&] { return library.Seal(1, upload, retired); }));
+    CHECK(Take(library.Seal(1, upload, live)).id == hash);
+    CHECK(Take(library.Seal(1, upload, live)).id == hash);
+    CHECK(Take(library.Read(hash, 1)).second == std::vector<std::uint8_t>({'b', 'c'}));
+    CHECK(Take(library.Read(hash, 3)).second.empty());
+    const auto derivative = Take(library.CreateDerivative(
+        [&](const fs::path& path) -> remotekit::Result<FileLibrary::Derivative> {
           CHECK(path.extension() == ".png");
           std::ofstream output(path, std::ios::binary);
           output.write(reinterpret_cast<const char*>(png_signature.data()), png_signature.size());
           return FileLibrary::Derivative{800, 600};
         },
-        live, FileLibrary::DerivativeFormat::png);
+        live, FileLibrary::DerivativeFormat::png));
     CHECK(derivative.type == "image/png" && derivative.width == 800 && derivative.height == 600);
     derivative_id = derivative.id;
-    CHECK(library.Read(derivative_id, 0).second == png_signature);
-    CHECK(Throws([&] { library.Read(hash, 4); }));
+    CHECK(Take(library.Read(derivative_id, 0)).second == png_signature);
+    CHECK(Fails([&] { return library.Read(hash, 4); }));
     FileLibrary other(root / "other-session");
-    CHECK(Throws([&] { other.Describe(hash); }));
+    CHECK(other.Initialize());
+    CHECK(Fails([&] { return other.Describe(hash); }));
     const auto duplicate =
-        library.Begin(1, "different-operation", spec, live)["uploadId"].get<std::string>();
-    library.Chunk(1, duplicate, 0, {'a', 'b', 'c'}, live);
-    CHECK(library.Seal(1, duplicate, live).id == hash);
-    CHECK(Throws([&] { library.Prepare(selection); }));
-    library.Retain({hash});
-    library.References(7, {hash});
-    library.References(7, {hash});
-    CHECK(Throws([&] { library.References(7, {}); }));
-    library.References(6, {});
-    library.Prepare(selection);
-    library.Prepare(selection);
+        Take(library.Begin(1, "different-operation", spec, live))["uploadId"].get<std::string>();
+    Take(library.Chunk(1, duplicate, 0, {'a', 'b', 'c'}, live));
+    CHECK(Take(library.Seal(1, duplicate, live)).id == hash);
+    CHECK(Fails([&] { return library.Prepare(selection); }));
+    Take(library.Retain({hash}));
+    Take(library.References(7, {hash}));
+    Take(library.References(7, {hash}));
+    CHECK(Fails([&] { return library.References(7, {}); }));
+    Take(library.References(6, {}));
+    Take(library.Prepare(selection));
+    Take(library.Prepare(selection));
     auto conflict = selection;
     conflict.files[0].name = "different";
-    CHECK(Throws([&] { library.Prepare(conflict); }));
-    CHECK(Throws([&] { library.Claim(selection.id, retired); }));
+    CHECK(Fails([&] { return library.Prepare(conflict); }));
+    CHECK(Fails([&] { return library.Claim(selection.id, retired); }));
     auto competing = selection;
     competing.id = "11111111111111111111111111111111";
     competing.request_id = "other-chooser-token";
-    library.Prepare(competing);
-    CHECK(library.Claim(selection.id, live));
-    CHECK(!library.Claim(selection.id, live));
+    Take(library.Prepare(competing));
+    CHECK(Take(library.Claim(selection.id, live)));
+    CHECK(!Take(library.Claim(selection.id, live)));
     using State = FileLibrary::Selection::State;
-    CHECK(library.CancelPendingSelections(selection.binding, live) == State::submitted);
+    CHECK(Take(library.CancelPendingSelections(selection.binding, live)) == State::submitted);
     CHECK(library.FindSelection("11111111111111111111111111111111")->state == State::pending);
-    CHECK(library.Finish(selection.id, State::cancelled, State::pending) == State::submitted);
-    library.Prepare(unsubmitted);
+    CHECK(Take(library.Finish(selection.id, State::cancelled, State::pending)) == State::submitted);
+    Take(library.Prepare(unsubmitted));
     auto wrong_binding = unsubmitted.binding;
     wrong_binding.document = "other";
-    CHECK(!library.CancelPendingSelections(wrong_binding, live));
-    CHECK(Throws([&] { library.CancelPendingSelections(unsubmitted.binding, retired); }));
+    CHECK(!Take(library.CancelPendingSelections(wrong_binding, live)));
+    CHECK(Fails([&] { return library.CancelPendingSelections(unsubmitted.binding, retired); }));
     CHECK(library.FindSelection(unsubmitted.id)->state == State::pending);
-    CHECK(library.CancelPendingSelections(unsubmitted.binding, live) == State::cancelled);
-    CHECK(library.CancelPendingSelections(unsubmitted.binding, live) == State::cancelled);
-    CHECK(!library.Claim(unsubmitted.id, live));
+    CHECK(Take(library.CancelPendingSelections(unsubmitted.binding, live)) == State::cancelled);
+    CHECK(Take(library.CancelPendingSelections(unsubmitted.binding, live)) == State::cancelled);
+    CHECK(!Take(library.Claim(unsubmitted.id, live)));
   }
   {
     FileLibrary library(session);
+    CHECK(library.Initialize());
     using State = FileLibrary::Selection::State;
-    CHECK(library.Describe(hash).size == 3);
-    CHECK(library.Describe(derivative_id).type == "image/png");
-    CHECK(library.Begin(1, "operation", spec, live)["offset"] == 3);
-    CHECK(library.Seal(1, upload, live).id == hash);
+    CHECK(Take(library.Describe(hash)).size == 3);
+    CHECK(Take(library.Describe(derivative_id)).type == "image/png");
+    CHECK(Take(library.Begin(1, "operation", spec, live))["offset"] == 3);
+    CHECK(Take(library.Seal(1, upload, live)).id == hash);
     CHECK(library.FindSelection(selection.id)->state == State::submitted);
     CHECK(library.FindSelection(unsubmitted.id)->state == State::cancelled);
-    CHECK(!library.Claim(selection.id, live));
-    library.Finish(selection.id, State::selected);
-    library.Finish(selection.id, State::cancelled);
+    CHECK(!Take(library.Claim(selection.id, live)));
+    Take(library.Finish(selection.id, State::selected));
+    Take(library.Finish(selection.id, State::cancelled));
     CHECK(library.FindSelection(selection.id)->state == State::selected);
-    library.References(8, {});
+    Take(library.References(8, {}));
     FileUploadStore staging(root / "staging");
-    const auto source = library.Path(hash);
-    const auto& batch = staging.Stage(selection.binding, {{spec, source}}, live);
+    CHECK(staging.Initialize());
+    const auto source = Take(library.Path(hash));
+    const auto batch = Take(staging.Stage(selection.binding, {{spec, source}}, live));
     const auto staged = batch.files.front().path;
-    CHECK(Throws([&] { staging.Stage(selection.binding, {{spec, source}}, live); }));
-    staging.MarkSubmitted(batch.id);
+    CHECK(Fails([&] { return staging.Stage(selection.binding, {{spec, source}}, live); }));
+    Take(staging.MarkSubmitted(batch.id));
     CHECK(fs::exists(staged));
     fs::remove(source);
     std::ifstream input(staged, std::ios::binary);
     CHECK(std::string(std::istreambuf_iterator<char>(input), {}) == "abc");
     input.close();
-    staging.ConfirmBrowserStopped("browser");
+    Take(staging.ConfirmBrowserStopped("browser"));
     CHECK(!fs::exists(staged));
   }
   {
@@ -150,6 +168,7 @@ int main() {
     const auto& metadata = session / "assets" / (hash + ".json");
     fs::remove(metadata);
     FileLibrary library(session);
+    CHECK(library.Initialize());
     CHECK(library.FindSelection(selection.id)->state == FileLibrary::Selection::State::selected);
   }
   fs::remove_all(root);

@@ -1,25 +1,25 @@
 #pragma once
 #include "remotekit/shared_audio.h"
-#include <stdexcept>
+#include "remotekit/error.hpp"
 #include <string>
 namespace remotekit::media {
 class AudioRing {
  public:
   ~AudioRing() { Close(); }
-  void Open(const std::string& name, uint64_t generation, uint64_t session) {
+  Result<void> Open(const std::string& name, uint64_t generation, uint64_t session) {
     Close();
     handle_ = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
                                  sizeof(SharedAudio), name.c_str());
     const auto error = GetLastError();
     if (!handle_ || error == ERROR_ALREADY_EXISTS) {
       Close();
-      throw std::runtime_error("audio mapping creation failed");
+      return Error{ErrorCode::kUnavailable, "audio mapping creation failed"};
     }
     ring_ = static_cast<SharedAudio*>(
         MapViewOfFile(handle_, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedAudio)));
     if (!ring_) {
       Close();
-      throw std::runtime_error("audio mapping view failed");
+      return Error{ErrorCode::kUnavailable, "audio mapping view failed"};
     }
     std::memset(ring_, 0, sizeof(*ring_));
     ring_->magic = kAudioMagic;
@@ -32,6 +32,7 @@ class AudioRing {
     QueryPerformanceFrequency(&frequency);
     ring_->qpc_frequency = frequency.QuadPart;
     next_ = 1;
+    return {};
   }
   void Close() {
     if (ring_)

@@ -196,6 +196,10 @@ RenderSlots::StatsSnapshot RenderSlots::Stats() const {
 }
 void RenderSlots::PublishStats() {
   auto value = counters_;
+  value.phase = !state_           ? Phase::kClosed
+                : state_->fatal   ? Phase::kFailed
+                : state_->closing ? Phase::kStopping
+                                  : Phase::kRunning;
   value.idle = state_ ? state_->pacing.idle() : false;
   value.occupied = state_ ? state_->pacing.occupied() : 0;
   value.retiredOccupied = 0;
