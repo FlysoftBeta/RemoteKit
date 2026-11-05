@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
 import {
   AUTH_CAMERA_HEADER_BYTES,
@@ -204,6 +205,9 @@ export class AuthCameraChannel {
       if (message.type === 'decode-error') {
         diagnostics.record('malformed-message', message.reason);
         return;
+      }
+      if (message.type === 'error' && message.authEpoch === binding.authEpoch) {
+        throw new RemoteKitError(message.error.code, message.error.message);
       }
       if (message.type !== 'auth.camera.config' && message.type !== 'auth.camera.frame') return;
       if (

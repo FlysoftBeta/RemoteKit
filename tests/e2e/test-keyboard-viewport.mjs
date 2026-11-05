@@ -248,9 +248,7 @@ try {
         probe.staleReply = {
           sequence: message.clientSequence,
           ok: message.ok,
-          code: message.code,
           error: message.error,
-          detail: message.detail,
         };
       }
       if (!['focus', 'input.editable'].includes(message.type)) return;
@@ -754,9 +752,8 @@ try {
   const rejection = await page.evaluate(() => keyboardQA.staleReply);
   assert(
     rejection.ok === false &&
-      rejection.code === 7 &&
-      rejection.error === 'stale_identity' &&
-      rejection.detail === 'Editable input target changed',
+      rejection.error?.code === 'conflict' &&
+      rejection.error?.message === 'Editable input target changed',
     'Unexpected stale-target response: ' + JSON.stringify(rejection),
   );
   await page.keyboard.insertText('C');

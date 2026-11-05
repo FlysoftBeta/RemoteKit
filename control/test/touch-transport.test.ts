@@ -1,3 +1,5 @@
+import { RemoteKitError } from '../shared/errors';
+import { formatError } from '../client/util/format-error';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { inputFixture } from './client-fixture';
@@ -89,7 +91,7 @@ test('destroyed target receipts retire exact old touch through production transp
       }),
     });
   reply(1, {
-    error: 'touch owner destroyed',
+    error: { code: 'conflict', message: 'touch owner destroyed' },
     touchState: 'terminal-invalidated',
     touchSequenceId: move.sequenceId,
   });
@@ -99,7 +101,11 @@ test('destroyed target receipts retire exact old touch through production transp
   assert.notEqual(next.sequenceId, start.sequenceId);
   owner = { surface: { ...surface }, identity, packet: next };
   transport.input.sendInput(surface, next);
-  reply(2, { touchState: 'terminal-invalidated', touchSequenceId: end.sequenceId });
+  reply(2, {
+    error: { code: 'conflict', message: 'touch owner destroyed' },
+    touchState: 'terminal-invalidated',
+    touchSequenceId: end.sequenceId,
+  });
   assert.equal(owner.packet, next); // late end for retired owner cannot clear new contact
   assert.equal(touchTerminalResult(oldOwner, results[0], `new-attempt:${identity}`, 0), undefined);
   const nextEnd = touch.sample(identity, 'end', point(10), 110)!;
@@ -109,12 +115,16 @@ test('destroyed target receipts retire exact old touch through production transp
   const heldOwner = owner;
   assert.ok(heldOwner); // local queue admission and no ACK keep the owner unresolved
   reply(4, {
-    error: 'touch_terminal_timeout',
+    error: { code: 'outcome_unknown', message: 'touch_terminal_timeout' },
     touchState: 'terminal-unconfirmed',
     touchSequenceId: nextEnd.sequenceId,
   });
   assert.equal(owner, heldOwner); // timeout must not pretend completion
-  reply(0, { touchState: 'terminal-invalidated', touchSequenceId: start.sequenceId });
+  reply(0, {
+    error: { code: 'conflict', message: 'touch owner destroyed' },
+    touchState: 'terminal-invalidated',
+    touchSequenceId: start.sequenceId,
+  });
   assert.equal(owner, heldOwner);
   channel.onmessage({
     data: JSON.stringify({ type: 'input.result', clientSequence: sent[4].sequence, ok: true }),
@@ -148,6 +158,7 @@ test('move end and cancel require explicit matching retirement proof and full ow
         type: 'input.result',
         clientSequence: sent[sent.length - 1].sequence,
         ok: false,
+        error: { code: 'conflict', message: 'touch owner destroyed' },
         touchState: 'terminal-invalidated',
         touchSequenceId: start.sequenceId,
       }),
@@ -250,7 +261,7 @@ test('input results associate rejection with original event and immutable target
       type: 'input.result',
       clientSequence: request.sequence,
       ok: false,
-      error: 'busy',
+      error: { code: 'busy', message: 'busy' },
     }),
   });
   assert.equal(results.length, 1);
@@ -258,7 +269,7 @@ test('input results associate rejection with original event and immutable target
   assert.equal(results[0].event, event);
   assert.equal(results[0].ok, false);
   unsubscribe();
-  assert.equal(transport.observations.diagnostics.error, 'busy');
+  assert.equal(transport.observations.diagnostics.error, formatError(new RemoteKitError('busy', 'busy')));
 });
 test('focus ACK preserves gesture identity and second contact does not renew focus', (t) => {
   const { transport, surface, sent, channel } = setup(t);
@@ -430,6 +441,7 @@ test('terminal timeout starts on submission, survives ordinary receipt churn, an
         ok,
         touchState,
         touchSequenceId,
+        ...(ok ? {} : { error: { code: 'outcome_unknown', message: 'touch_terminal_unconfirmed' } }),
       }),
     });
   reply('accepted-pending', 'terminal');
@@ -502,7 +514,14 @@ test('exact cleanup settles a lost terminal and a late original result cannot cl
   transport.input.subscribeInputResults((result) => results.push(result));
   const receive = (clientSequence: string, touchSequenceId: string, touchState: string, ok: boolean) =>
     channel.onmessage({
-      data: JSON.stringify({ type: 'input.result', clientSequence, touchSequenceId, touchState, ok }),
+      data: JSON.stringify({
+        type: 'input.result',
+        clientSequence,
+        touchSequenceId,
+        touchState,
+        ok,
+        ...(ok ? {} : { error: { code: 'outcome_unknown', message: 'touch_terminal_unconfirmed' } }),
+      }),
     });
   for (let index = 0; index < 50; ++index) {
     const start = touch.sample(identity, 'start', point(0), index * 10, undefined)!;
@@ -624,6 +643,7 @@ test('layout replacement retires only a submitted touch with its acknowledged fo
     type: 'input.result',
     clientSequence: request.sequence,
     ok: false,
+    error: { code: 'conflict', message: 'touch owner destroyed' },
     touchState: 'terminal-invalidated',
     touchSequenceId: request.sequenceId,
   });
@@ -660,6 +680,7 @@ test('focus timeout and rejected focus explicitly discard queued events with ori
           focusRequestId: request.focusRequestId,
           layoutEpoch: '2',
           ok: false,
+          error: { code: 'conflict', message: 'stale_focus' },
         }),
       });
     else t.mock.timers.tick(2000);

@@ -53,7 +53,7 @@ export class FileChannel {
     this.syncScope();
     if (message.ok) this.pending.resolve(message.requestId, message.result);
     else
-      this.pending.reject(message.requestId, new RemoteKitError('rejected', message.error ?? '文件发送失败'));
+      this.pending.reject(message.requestId, new RemoteKitError(message.error!.code, message.error!.message));
     return true;
   }
   disconnect() {

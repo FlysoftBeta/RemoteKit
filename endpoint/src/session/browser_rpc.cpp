@@ -96,9 +96,7 @@ Result<Json> BrowserRpc::Request(Json command,
     return reply;
   return CheckReply(std::move(reply).value());
 }
-Result<Json> BrowserRpc::CheckReply(Json reply) {
-  if (reply.value("ok", false))
-    return reply;
+Error BrowserRpc::ReplyError(const Json& reply) {
   const int browser_code = reply.value("code", 0);
   ErrorCode code = ErrorCode::kRejected;
   switch (static_cast<protocol::ErrorCode>(browser_code)) {
@@ -123,6 +121,16 @@ Result<Json> BrowserRpc::CheckReply(Json reply) {
     default:
       break;
   }
+  auto message = reply.value("detail", std::string());
+  if (message.empty())
+    message = reply.value("error", std::string());
+  return {code, std::move(message)};
+}
+Result<Json> BrowserRpc::CheckReply(Json reply) {
+  if (reply.value("ok", false))
+    return reply;
+  const auto code = ReplyError(reply).code;
+  const int browser_code = reply.value("code", 0);
   std::string message = "browser code=" + std::to_string(browser_code);
   if (reply.contains("error"))
     message += " error=" + (reply["error"].is_string() ? reply["error"].get<std::string>()

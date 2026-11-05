@@ -311,9 +311,15 @@ test('collection projects broad browser and Endpoint stats and only bounded rece
         clientSequence: '27',
         ok: false,
         touchState: 'rejected',
-        error: 'stale_layout',
+        error: { code: 'conflict', message: 'stale_layout' },
       },
-      { at: 29, type: 'input.result', clientSequence: secret, token: secret, error: secret },
+      {
+        at: 29,
+        type: 'input.result',
+        clientSequence: secret,
+        token: secret,
+        error: { code: 'internal', message: secret },
+      },
     ],
     5,
   );

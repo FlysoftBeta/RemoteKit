@@ -1,3 +1,5 @@
+import { RemoteKitError } from '../../shared/errors';
+import { formatError } from '../util/format-error';
 import { samePlane } from '../presentation/plane-source';
 import type { InputAuthority } from '../presentation/presentation-session';
 import { type Diagnostics } from '../media/types';
@@ -279,7 +281,7 @@ export class InputPipeline {
       // Their mutations are never replayed, and their timers need no more reads.
       this.ports.terminals.settleTouch(sent.identity, touchSequenceId!);
     }
-    const error = typeof message.error === 'string' ? message.error : undefined;
+    const error = message.error ? new RemoteKitError(message.error.code, message.error.message) : undefined;
     for (const listener of this.inputResultListeners)
       listener({
         surface: sent.surface,
@@ -291,7 +293,7 @@ export class InputPipeline {
         touchState,
         touchSequenceId,
       });
-    if (!ok && touchState !== 'terminal-unconfirmed') this.ports.report({ error: error ?? '远程输入被拒绝' });
+    if (!ok && touchState !== 'terminal-unconfirmed') this.ports.report({ error: formatError(error) });
   }
 
   sendInput(surface: Surface, event: Record<string, unknown>, options?: { touchTerminal: boolean }) {
@@ -548,7 +550,9 @@ export class InputPipeline {
           this.ports.layout()!.generation === pending.generation;
         if (matches && message.ok === false) {
           this.cancelPendingFocus(pending.requestId, 'focus-rejected');
-          this.ports.report({ error: String(message.error ?? '远程焦点请求被拒绝') });
+          this.ports.report({
+            error: formatError(new RemoteKitError(message.error!.code, message.error!.message)),
+          });
         }
         if (
           matches &&

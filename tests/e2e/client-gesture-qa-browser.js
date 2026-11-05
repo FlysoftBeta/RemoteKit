@@ -404,9 +404,8 @@ async (host) => {
         e.summary.rejections.every(
           (r) =>
             config.allowMomentumDenied &&
-            r.message.code === 7 &&
-            r.message.error === 'stale_identity' &&
-            r.message.detail === 'Momentum was not allowed' &&
+            r.message.error?.code === 'conflict' &&
+            r.message.error?.message === 'Momentum was not allowed' &&
             e.data.sent.some(
               (s) =>
                 String(s.message.sequence) === String(r.message.clientSequence) &&

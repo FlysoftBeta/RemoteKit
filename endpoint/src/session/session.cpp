@@ -58,7 +58,7 @@ Session::Session(media::Sdk& api,
                     auto reply = browser.Rpc().Exchange(std::move(request), control, timeout,
                                                         opportunistic, admitted);
                     if (reply && BrowserRpc::IsBusyBeforeAdmission(reply.value()))
-                      return Result<Json>(Error{ErrorCode::kBusy, "browser busy"});
+                      return Result<Json>(BrowserRpc::ReplyError(reply.value()));
                     return reply;
                   },
               .send = [this](const Json& message, uint64_t stamp) { channel.Send(message, stamp); },

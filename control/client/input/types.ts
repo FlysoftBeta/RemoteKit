@@ -1,3 +1,4 @@
+import type { RemoteKitError } from '../../shared/errors';
 import type { Surface } from '../presentation/types';
 export interface InputRequest {
   surface: Surface;
@@ -12,7 +13,7 @@ export interface QueuedInput extends InputRequest {
 export interface InputResult extends InputRequest {
   sequence: string;
   ok: boolean;
-  error?: string;
+  error?: RemoteKitError;
   touchState?:
     'accepted-pending' | 'processed' | 'terminal-invalidated' | 'terminal-unconfirmed' | 'rejected';
   touchSequenceId?: string;

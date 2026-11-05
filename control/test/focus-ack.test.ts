@@ -1,3 +1,5 @@
+import { RemoteKitError } from '../shared/errors';
+import { formatError } from '../client/util/format-error';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { inputFixture } from './client-fixture';
@@ -97,13 +99,16 @@ test('matched rejected focus drops queued input and reports the rejection', () =
   const { transport, a, sent, ack } = setup();
   transport.input.focus(a, true);
   transport.input.sendInput(a, { type: 'ime_commit', text: 'reject' });
-  ack(sent[0], { ok: false, error: 'stale_focus' });
+  ack(sent[0], { ok: false, error: { code: 'conflict', message: 'stale_focus' } });
   assert.equal(sent.length, 1);
-  assert.equal(transport.observations.diagnostics.error, 'stale_focus');
+  assert.equal(
+    transport.observations.diagnostics.error,
+    formatError(new RemoteKitError('conflict', 'stale_focus')),
+  );
   transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2);
   assert.notEqual(sent[1].focusRequestId, sent[0].focusRequestId);
-  ack(sent[0], { ok: false });
+  ack(sent[0], { ok: false, error: { code: 'conflict', message: 'stale_focus' } });
   transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2, 'old rejection preserves the new pending request');
   ack(sent[1]);

@@ -7,6 +7,7 @@ export type ErrorCode =
   | 'conflict'
   | 'limit_exceeded'
   | 'rate_limited'
+  | 'busy'
   | 'unavailable'
   | 'rejected'
   | 'outcome_unknown'
@@ -38,6 +39,7 @@ export const httpStatus: Record<ErrorCode, number> = {
   conflict: 409,
   limit_exceeded: 413,
   rate_limited: 429,
+  busy: 503,
   unavailable: 503,
   rejected: 422,
   outcome_unknown: 504,

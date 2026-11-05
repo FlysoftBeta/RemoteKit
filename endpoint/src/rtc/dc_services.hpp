@@ -1,5 +1,6 @@
 #pragma once
 #include "protocol/shared_render_slots.h"
+#include "util/wire_error.hpp"
 #include <json.hpp>
 #include <algorithm>
 #include <cmath>
@@ -74,7 +75,8 @@ class DirectServices {
             {"connectionId", connection_},
             {"operationGeneration", request.at("operationGeneration")},
             {"ok", unknown},
-            {"error", error},
+            {"error",
+             WireError({unknown ? ErrorCode::kOutcomeUnknown : ErrorCode::kUnavailable, error})},
             {"result",
              {{"operationId", request.at("operationId")},
               {"operationGeneration", request.at("operationGeneration")},

@@ -32,6 +32,7 @@ class BrowserRpc {
                        uint32_t timeout_ms = 10000,
                        bool opportunistic = false,
                        const std::function<bool()>& admitted = {});
+  static Error ReplyError(const Json& reply);
   static Result<Json> CheckReply(Json reply);
   // True for Browser's busy rejection before the input was admitted, the only
   // input failure that may be retried with the same sequence.

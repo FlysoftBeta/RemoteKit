@@ -225,6 +225,13 @@ try {
             error: message.error,
             replied: performance.now(),
           });
+        if (
+          message.ok &&
+          ['photo.burst.begin', 'photo.burst.sample'].includes(request?.method) &&
+          qa.advanceCameraFrame
+        ) {
+          setTimeout(qa.advanceCameraFrame, 80);
+        }
         const source = qa.thumbnails.get(message.requestId);
         if (source && message.ok && message.result?.assetId) qa.thumbnails.set(source, message.result);
         if (message.ok && message.result?.assetId && message.result?.hash)
@@ -414,14 +421,23 @@ try {
           }
           drawing.filter = 'none';
         };
-        const stream = canvas.captureStream(60);
+        const manual = qa.cameraFixture === 'alternate';
+        const stream = canvas.captureStream(manual ? 0 : 60);
         const track = stream.getVideoTracks()[0];
         qa.cameraTracks.push(track);
         const stop = track.stop.bind(track);
         render();
-        const timer = setInterval(render, 1000 / 60);
+        const timer = manual ? undefined : setInterval(render, 1000 / 60);
+        if (manual) {
+          qa.advanceCameraFrame = () => {
+            render();
+            track.requestFrame();
+          };
+          track.requestFrame();
+        }
         track.stop = () => {
           clearInterval(timer);
+          if (manual) delete qa.advanceCameraFrame;
           stop();
         };
         return stream;

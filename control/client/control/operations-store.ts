@@ -64,14 +64,18 @@ export class OperationsStore extends Store<OperationsSnapshot> {
         entry.operationGeneration === message.operationGeneration,
     );
     if (!entry) return;
-    const receipt = message.result ?? {
-      operationId: message.operationId,
-      operationGeneration: message.operationGeneration,
-      status: 'rejected',
-      error: message.error,
-    };
-    this.requests.resolve(entry.operationId, receipt);
-    this.receipt(receipt);
+    if (!message.result) {
+      const error = new RemoteKitError(message.error.code, message.error.message);
+      this.requests.reject(entry.operationId, error);
+      this.update(
+        this.getSnapshot().pending.filter((item) => item !== entry),
+        undefined,
+        error,
+      );
+      return;
+    }
+    this.requests.resolve(entry.operationId, message.result);
+    this.receipt(message.result);
   }
 
   action = async (command: ProductAction): Promise<OperationReceipt> => {
@@ -111,7 +115,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     } catch (error) {
       if (scope !== this.scope) throw error;
       diagnostics.record('product-action', error);
-      if (!sent) {
+      if (!sent || (error instanceof RemoteKitError && error.code !== 'outcome_unknown')) {
         this.update(
           this.getSnapshot().pending.filter((entry) => entry.operationId !== operation.operationId),
         );

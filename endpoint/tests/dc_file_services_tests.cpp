@@ -83,7 +83,9 @@ void CheckSelectionCancellationGrant() {
   CHECK(replies.empty());
   services.Admit(7, request);
   flush();
-  CHECK(replies.size() == 1 && replies.back()["error"] == "stale_library_authorization");
+  CHECK(replies.size() == 1 &&
+        replies.back()["error"]["message"] == "stale_library_authorization" &&
+        replies.back()["error"]["code"] == "forbidden");
   services.Authorize("connection", 99, {{"opaque", binding}}, true);
   services.Admit(7, request);
   Until([&] {
@@ -267,14 +269,16 @@ int main() {
   conflict["params"]["selectionId"] = "conflict";
   services.Admit(7, conflict);
   flush();
-  CHECK(replies.back()["error"] == "file_request_id_conflict");
+  CHECK(replies.back()["error"]["message"] == "file_request_id_conflict" &&
+        replies.back()["error"]["code"] == "conflict");
   // Document/navigation authorization changes invalidate queued work and sweep
   // independently of media. An old peer cannot discover a new peer's receipts.
   services.Authorize("connection", 99, {});
   auto b = Request("00000000-0000-4000-8000-000000000002");
   services.Admit(7, b);
   flush();
-  CHECK(replies.back()["error"] == "stale_file_request");
+  CHECK(replies.back()["error"]["message"] == "stale_file_request" &&
+        replies.back()["error"]["code"] == "forbidden");
   services.Authorize("connection", 99, {{"opaque", binding}});
   hold = true;
   entered = false;
@@ -330,12 +334,14 @@ int main() {
   library.Authorize("library-peer", 99, {{"opaque", binding}});
   library.Admit(9, asset);
   drain();
-  CHECK(replies.back()["error"] == "stale_file_request");
+  CHECK(replies.back()["error"]["message"] == "stale_file_request" &&
+        replies.back()["error"]["code"] == "forbidden");
   library.Authorize("library-peer", 99, {{"opaque", binding}}, true);
   library.Admit(9, chooser_asset);
   library.Admit(9, library_commit);
   drain();
-  CHECK(replies.size() == 3 && replies.back()["error"] == "stale_file_request");
+  CHECK(replies.size() == 3 && replies.back()["error"]["message"] == "stale_file_request" &&
+        replies.back()["error"]["code"] == "forbidden");
   hold = true;
   library.Admit(9, asset);
   Until([&] { return entered.load(); });
@@ -364,7 +370,8 @@ int main() {
   chooser_describe["requestId"] = "00000000-0000-4000-8000-000000000005";
   library.Admit(9, chooser_describe);
   drain();
-  CHECK(replies.size() == 6 && replies.back()["error"] == "stale_file_request");
+  CHECK(replies.size() == 6 && replies.back()["error"]["message"] == "stale_file_request" &&
+        replies.back()["error"]["code"] == "forbidden");
   chooser_describe["params"]["requestId"] = "library";
   library.Admit(9, chooser_describe);
   Until([&] {

@@ -49,6 +49,8 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 
 一个 PeerConnection：H.264 视频 track（atlas）、Opus 立体声音频 track（客户端 recvonly），以及两条可靠有序 DataChannel：`remotekit`（JSON）与 `remotekit-auth`（人脸图像）。产品消息双向附带 `authEpoch`，接收和执行时都拒绝旧代次，重试保留原代次。
 
+DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic failures use `{type:"error",error:{code,message}}`, including the auth channel. Operation receipt `status` / `error` descriptions keep their domain format.
+
 **Endpoint → Viewer**
 
 | type | 内容 |

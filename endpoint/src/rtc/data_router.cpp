@@ -1,4 +1,5 @@
 #include "rtc/data_router.hpp"
+#include "util/wire_error.hpp"
 #include "rtc/dc_services.hpp"
 #include <charconv>
 #include <cstdio>
@@ -112,12 +113,10 @@ void DataRouter::Drain() {
       if (message.error) {
         if (!hooks_.current(event))
           return {};
-        Json reply = {{"type", "error"}, {"message", message.error->message}};
+        Json reply = {{"type", "error"}, {"error", WireError(*message.error)}};
         if (event.message.is_object() && event.message.value("type", Json()) == "input") {
           reply["type"] = "input.result";
-          reply.erase("message");
           reply["ok"] = false;
-          reply["error"] = message.error->message;
           reply["clientSequence"] = event.message.value("sequence", Json());
         }
         hooks_.send(reply, event.authorization);
@@ -133,7 +132,7 @@ void DataRouter::Drain() {
       return {};
     });
     if (!result)
-      hooks_.send({{"type", "error"}, {"message", result.error().message}}, event.authorization);
+      hooks_.send({{"type", "error"}, {"error", WireError(result.error())}}, event.authorization);
   }
 }
 void DataRouter::Dispatch(const Message& message) {

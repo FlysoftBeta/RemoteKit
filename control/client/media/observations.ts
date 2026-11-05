@@ -1,3 +1,5 @@
+import { RemoteKitError } from '../../shared/errors';
+import { formatError } from '../util/format-error';
 import { type Diagnostics } from './types';
 import { ViewerAudioOutput } from './audio-output';
 import { CaptureLatency } from './capture-latency';
@@ -465,7 +467,8 @@ export class MediaObservations {
       this.endpointStatsAtMs = performance.now();
       this.update({ endpoint: message });
     }
-    if (message.type === 'error') this.update({ error: String(message.message ?? 'Endpoint 返回错误') });
+    if (message.type === 'error')
+      this.update({ error: formatError(new RemoteKitError(message.error.code, message.error.message)) });
   }
 
   reset() {

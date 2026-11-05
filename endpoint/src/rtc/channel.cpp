@@ -1,5 +1,6 @@
 #include "rtc/channel.hpp"
 #include "auth/face.hpp"
+#include "util/wire_error.hpp"
 #include "diagnostics/timing.hpp"
 #include "files/files.hpp"
 #include "input/input.hpp"
@@ -167,7 +168,7 @@ bool ChannelController::ServiceMessage(const Event& event) {
           {"connectionId", peer_controller.Connection()},
           {"operationGeneration", message["operationGeneration"]},
           {"ok", false},
-          {"error", "endpoint_backpressure"}},
+          {"error", WireError({ErrorCode::kBusy, "endpoint_backpressure"})}},
          event.authorization);
   return true;
 }

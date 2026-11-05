@@ -680,12 +680,12 @@ export function collectionInputSample(
           'terminal-unconfirmed',
           'rejected',
         ]),
-        reason: diagnosticLabel(row.error, [
-          'unknown_touch_terminal',
-          'stale_surface',
-          'stale_layout',
-          'endpoint_backpressure',
-        ]),
+        reason: diagnosticLabel(
+          row.error && typeof row.error === 'object'
+            ? (row.error as Record<string, unknown>).message
+            : undefined,
+          ['unknown_touch_terminal', 'stale_surface', 'stale_layout', 'endpoint_backpressure'],
+        ),
       })),
   };
 }

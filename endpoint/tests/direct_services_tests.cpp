@@ -69,7 +69,9 @@ int main() {
     sent.push_back(Json::parse(bytes));
     return 0;
   });
-  Check(sent.back()["error"] == "control_unavailable", "explicit management disconnect");
+  Check(sent.back()["error"]["code"] == "unavailable" &&
+            sent.back()["error"]["message"] == "control_unavailable",
+        "explicit management disconnect");
   Check(sent.back()["result"]["status"] == "rejected", "never forwarded is explicitly rejected");
   services.Admit(1, Action(2), 0);
   services.DispatchPending(1, 1, [](auto) { return true; });
@@ -78,7 +80,8 @@ int main() {
     sent.push_back(Json::parse(bytes));
     return 0;
   });
-  Check(sent.back()["error"] == "control_result_unknown",
+  Check(sent.back()["error"]["code"] == "outcome_unknown" &&
+            sent.back()["error"]["message"] == "control_result_unknown",
         "ambiguous accepted message expires without replay");
   std::ifstream fixture(std::filesystem::path(__FILE__).parent_path() /
                         "fixtures/product-action-timeout.json");
@@ -105,7 +108,8 @@ int main() {
     return 0;
   });
   Check(sent.back()["result"]["status"] == "rejected" &&
-            sent.back()["error"] == "control_unavailable",
+            sent.back()["error"]["code"] == "unavailable" &&
+            sent.back()["error"]["message"] == "control_unavailable",
         "undispatched expiration is known failure");
   for (unsigned n = 0; n < 64; ++n)
     Check(services.Admit(1, Action(n), 0), "bounded capacity admission");

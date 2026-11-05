@@ -5,7 +5,10 @@
   "operationGeneration": "generation",
   "connectionId": "connection",
   "ok": true,
-  "error": "control_result_unknown",
+  "error": {
+    "code": "outcome_unknown",
+    "message": "control_result_unknown"
+  },
   "result": {
     "operationId": "00000000-0000-4000-8000-000000000002",
     "operationGeneration": "generation",

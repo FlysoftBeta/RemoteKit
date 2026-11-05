@@ -1,3 +1,4 @@
+import { RemoteKitError } from '../shared/errors';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { FileChannel } from '../client/files/file-channel';
@@ -222,4 +223,29 @@ test('chooser cancellation uses the authenticated selection command without an u
   assert.equal(messages[0].method, 'selection.cancel');
   assert.deepEqual(messages[0].params, { requestId: 'chooser' });
   assert.equal(messages[0].authEpoch, 7);
+});
+
+test('file failures retain the Endpoint code and public message', async () => {
+  const channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    send(raw: string) {
+      const request = JSON.parse(raw);
+      queueMicrotask(() =>
+        client.handle({
+          type: 'files.result',
+          version: 1,
+          requestId: request.requestId,
+          ok: false,
+          error: { code: 'busy', message: 'file_transfer_busy' },
+        }),
+      );
+    },
+  } as unknown as RTCDataChannel;
+  const client = new FileChannel(() => channel);
+  await assert.rejects(
+    client.cancelSelection('chooser'),
+    (error: unknown) =>
+      error instanceof RemoteKitError && error.code === 'busy' && error.message === 'file_transfer_busy',
+  );
 });

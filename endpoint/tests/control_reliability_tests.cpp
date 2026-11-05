@@ -125,6 +125,7 @@ void InputWireFailures() {
   CHECK(dispatch().value().at("accepted") == true);
   CHECK(calls == 4 && retries == 2);
   application = {{"ok", false}, {"code", 3}, {"error", "rejected"}, {"detail", "target mismatch"}};
+  CHECK(remotekit::BrowserRpc::ReplyError(application).message == "target mismatch");
   CHECK(dispatch().error().code == remotekit::ErrorCode::kRejected);
   CHECK(calls == 5 && retries == 2);
   auto rejected = dispatch();
@@ -418,7 +419,7 @@ void TouchTerminal() {
   // reply, without creating an acceptance or invoking Browser input.
   auto* early = receipts.Reserve(make(3));
   CHECK(early);
-  early->Finish("rejected", false, "input_queue_busy");
+  early->Finish("rejected", false, "input_queue_busy", remotekit::ErrorCode::kBusy);
   sdk_busy = true;
   receipts.Flush(send);
   CHECK(sent.size() == 4 && early->Busy());
@@ -430,7 +431,8 @@ void TouchTerminal() {
   queried->send_result = true;
   receipts.Flush(send);
   CHECK(sent.size() == 6 && sent[4] == sent[5]);
-  CHECK(sent[5].at("touchState") == "rejected" && sent[5].at("error") == "input_queue_busy");
+  CHECK(sent[5].at("touchState") == "rejected" && sent[5].at("error").at("code") == "busy" &&
+        sent[5].at("error").at("message") == "input_queue_busy");
 
   TouchTerminalReceipts full;
   for (size_t index = 0; index < full.kCapacity; ++index) {

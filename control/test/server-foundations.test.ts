@@ -41,7 +41,10 @@ test('gateway normalizes identity and preserves execution certainty across nativ
   ]);
   for (const code of Object.keys(httpStatus)) {
     failure = { code, message: '拒绝请求' };
-    await assert.rejects(gateway.snapshot('tenant'), { code, message: '拒绝请求' });
+    await assert.rejects(gateway.snapshot('tenant'), {
+      code: code === 'busy' ? 'unavailable' : code,
+      message: '拒绝请求',
+    });
   }
   failure = { code: 'busy', message: '繁忙' };
   await assert.rejects(gateway.snapshot('tenant'), { code: 'unavailable' });

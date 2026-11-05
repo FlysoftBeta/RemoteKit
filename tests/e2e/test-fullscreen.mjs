@@ -133,9 +133,10 @@ try {
     args: ['--no-first-run', '--no-default-browser-check', '--autoplay-policy=no-user-gesture-required'],
   });
   page = context.pages()[0] ?? (await context.newPage());
+  page.on('pageerror', (error) => void log('client-error', { message: error.message, stack: error.stack }));
   page.setDefaultTimeout(5000);
   await page.addInitScript(() => {
-    const probe = (window.fullscreenQA = { attempts: [], peers: [], channels: [], events: [] });
+    const probe = (window.fullscreenQA = { attempts: [], peers: [], channels: [], events: [], input: [] });
     const record = (event) => {
       probe.events.push({
         type: event.type,
@@ -185,6 +186,22 @@ try {
       createDataChannel(...args) {
         const channel = super.createDataChannel(...args);
         probe.channels.push(channel);
+        if (channel.label === 'remotekit') {
+          const recordInput = (raw, direction) => {
+            if (typeof raw !== 'string') return;
+            const message = JSON.parse(raw);
+            if (!['focus', 'input', 'input.result', 'layout', 'presentation.prepare'].includes(message.type))
+              return;
+            probe.input.push({ direction, at: performance.now(), message });
+            if (probe.input.length > 96) probe.input.shift();
+          };
+          channel.addEventListener('message', (event) => recordInput(event.data, 'in'));
+          const send = channel.send.bind(channel);
+          channel.send = (raw) => {
+            recordInput(raw, 'out');
+            return send(raw);
+          };
+        }
         return channel;
       }
     };
@@ -195,6 +212,7 @@ try {
       return {
         attempts: probe.attempts,
         events: probe.events,
+        input: probe.input,
         native: !!document.fullscreenElement,
         focused: document.hasFocus(),
         visibility: document.visibilityState,
@@ -395,6 +413,21 @@ try {
         'Input did not hit remote button ' + button,
       );
       assert.equal(received.trusted, true);
+      if (button === 'hit') {
+        const sent = (await sample()).input.findLast(
+          (row) =>
+            row.direction === 'out' && row.message.type === 'input' && row.message.event.action === 'up',
+        ).message;
+        await until(async () => {
+          const state = await sample();
+          const layout = state.input.findLast(
+            (row) => row.direction === 'in' && row.message.type === 'layout',
+          )?.message;
+          return layout?.views.some(
+            (view) => view.id === sent.view && view.document === sent.document && view.focus === sent.focus,
+          );
+        }, 'Focus metadata did not settle before switching panes');
+      }
       assert(
         Math.abs(received.x - box.x - box.width / 2) <= 3 &&
           Math.abs(received.y - box.y - box.height / 2) <= 3,
@@ -416,7 +449,20 @@ try {
         'Remote document did not enter fullscreen',
       );
       assert.equal(remote.trusted, true);
-      const active = await allReady(1);
+      const active = await until(async () => {
+        const state = await sample();
+        return (
+          state?.visibleWindows === 1 &&
+          state.panes.length === 1 &&
+          state.panes[0].ready &&
+          state.toolbar === 0 &&
+          state.tabs === 0 &&
+          ['x', 'y', 'width', 'height'].every(
+            (key) => Math.abs(state.panes[0].bounds[key] - state.viewport[key]) <= 1,
+          ) &&
+          state
+        );
+      }, 'Fullscreen viewport did not settle with decoded video');
       assert.equal(active.toolbar, 0);
       assert.equal(active.tabs, 0);
       assert.equal(active.native, false);
@@ -561,6 +607,7 @@ try {
     await read('document.querySelector(\'input[autocomplete="current-password"]\').form.requestSubmit()');
   }
   await allReady(outerWindowCount);
+  await page.bringToFront();
   const startupRejected = await until(
     async () => (await sample()).attempts.find((attempt) => !attempt.active && attempt.result === 'rejected'),
     'Viewer activation without transient gesture did not attempt native fullscreen',

@@ -1,5 +1,7 @@
 #include "media/gpu_device.hpp"
 #include "input/input.hpp"
+#include "session/browser_rpc.hpp"
+#include "util/wire_error.hpp"
 #include "rtc/data_router.hpp"
 #include "util/thread.hpp"
 namespace remotekit {
@@ -16,6 +18,11 @@ void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp
     reply["clientSequence"] = request["sequence"];
   } else if (request.is_object() && request.contains("clientSequence")) {
     reply["clientSequence"] = request["clientSequence"];
+  }
+  if (!reply.value("ok", false) && reply.contains("code")) {
+    reply["error"] = WireError(BrowserRpc::ReplyError(reply));
+    reply.erase("code");
+    reply.erase("detail");
   }
   hooks_.send(reply, stamp);
 }
@@ -82,12 +89,12 @@ void InputController::RejectInput(const char* error,
       rejection.client_sequence = client_sequence;
       rejection.sequence = sequence;
       if (auto* receipt = terminals->Reserve(std::move(rejection))) {
-        receipt->Finish("rejected", false, error);
+        receipt->Finish("rejected", false, error, InputRejectionCode(error));
         return;
       }
     }
   }
-  Json reply = {{"ok", false}, {"error", error}};
+  Json reply = {{"ok", false}, {"error", WireError({InputRejectionCode(error), error})}};
   if (const auto sequence = ClientTouchSequence(request); !sequence.empty()) {
     reply["touchState"] = "rejected";
     reply["touchSequenceId"] = sequence;
@@ -113,7 +120,7 @@ void InputController::PollTouchTerminal(remotekit::TouchTerminalReceipt& receipt
     if (status.error().code == ErrorCode::kBusy)
       receipt.due = QpcNow() + QpcFrequency() / 200;
     else
-      receipt.Finish("terminal-unconfirmed", false, status.error().message);
+      receipt.Finish("terminal-unconfirmed", false, status.error().message, status.error().code);
     return;
   }
   if (!current())
@@ -168,7 +175,7 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
         receipt->send_result = true;
     } else
       ReplyInput({{"ok", false},
-                  {"error", "unknown_touch_terminal"},
+                  {"error", WireError({ErrorCode::kNotFound, "unknown_touch_terminal"})},
                   {"touchState", "terminal-unconfirmed"},
                   {"touchSequenceId", sequence}},
                  command, event.authorization);
@@ -208,7 +215,7 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
       auto rpc_result = hooks_.rpc(retire, input_control, 10000, false, current);
       if (!rpc_result) {
         const Error error = rpc_result.error();
-        receipt->Finish("terminal-unconfirmed", false, error.message);
+        receipt->Finish("terminal-unconfirmed", false, error.message, error.code);
         return;
       }
       const auto reply = std::move(rpc_result).value();
@@ -298,9 +305,9 @@ void InputController::HandleData(const Event& event, remotekit::TouchTerminalRec
     if (!response) {
       const auto& error = response.error();
       if (receipt)
-        receipt->Finish("terminal-unconfirmed", false, error.message);
+        receipt->Finish("terminal-unconfirmed", false, error.message, error.code);
       else if (admitted()) {
-        Json reply = {{"ok", false}, {"error", error.message}};
+        Json reply = {{"ok", false}, {"error", WireError(error)}};
         if (!touch_sequence.empty()) {
           reply["touchState"] = "terminal-unconfirmed";
           reply["touchSequenceId"] = touch_sequence;

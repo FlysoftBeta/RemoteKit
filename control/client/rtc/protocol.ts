@@ -13,6 +13,7 @@ export type FileMethod =
   | 'photo.process'
   | 'selection.cancel'
   | 'selection.commit';
+import { httpStatus, type WireError } from '../../shared/errors';
 import type { Layout, Surface } from '../presentation/types';
 export interface EditableView {
   session: string;
@@ -55,7 +56,7 @@ export type InputResultMessage = {
   type: 'input.result';
   clientSequence: string;
   ok: boolean;
-  error?: string;
+  error?: WireError;
   touchState?: TouchState;
   touchSequenceId?: string;
 };
@@ -65,7 +66,7 @@ export type FocusMessage = {
   layoutEpoch: string;
   ok: boolean;
   token?: { view: string; session: string; instance: string; document: string; focus: string };
-  error?: string;
+  error?: WireError;
 };
 export type FrameMessage = {
   type: 'frame';
@@ -80,16 +81,14 @@ export type FileResult = {
   requestId: string;
   ok: boolean;
   result?: unknown;
-  error?: string;
+  error?: WireError;
 };
 export type ProductResult = {
   type: 'product.result';
   version: 1;
   operationId: string;
   operationGeneration: string;
-  result?: OperationReceipt;
-  error?: string;
-};
+} & ({ result: OperationReceipt; error?: WireError } | { result?: undefined; error: WireError });
 type CameraBinding = { version: 1; authEpoch: number; challengeId: string };
 export type Incoming = Authorized &
   (
@@ -104,7 +103,7 @@ export type Incoming = Authorized &
     | { type: 'presentation.mode'; version: 1; backend: 'video' }
     | ({ type: 'presentation.prepare' } & PresentationBarrier)
     | ({ type: 'stats' } & Record<string, unknown>)
-    | { type: 'error'; message: string }
+    | { type: 'error'; error: WireError }
     | (CameraBinding & {
         type: 'auth.camera.config';
         width: number;
@@ -160,6 +159,13 @@ export type Outgoing = Authorized &
 export type DecodeError = { type: 'decode-error'; reason: string };
 const object = (v: unknown): v is Record<string, unknown> =>
   !!v && typeof v === 'object' && !Array.isArray(v);
+const wireError = (v: unknown): v is WireError =>
+  object(v) &&
+  typeof v.code === 'string' &&
+  Object.prototype.hasOwnProperty.call(httpStatus, v.code) &&
+  typeof v.message === 'string';
+const resultError = (v: Record<string, unknown>) =>
+  v.ok === false ? wireError(v.error) : optional(v, 'error', wireError);
 const string = (v: unknown): v is string => typeof v === 'string';
 const number = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
 const sequence = (v: unknown): v is string => string(v) && /^(0|[1-9]\d{0,19})$/.test(v);
@@ -229,7 +235,7 @@ function valid(v: Record<string, unknown>): boolean {
       return (
         string(v.clientSequence) &&
         typeof v.ok === 'boolean' &&
-        optional(v, 'error', string) &&
+        resultError(v) &&
         optional(v, 'touchSequenceId', string) &&
         optional(v, 'touchState', (value) =>
           [
@@ -250,7 +256,7 @@ function valid(v: Record<string, unknown>): boolean {
       return (
         strings(v, ['focusRequestId', 'layoutEpoch']) &&
         typeof v.ok === 'boolean' &&
-        optional(v, 'error', string) &&
+        resultError(v) &&
         optional(
           v,
           'token',
@@ -270,9 +276,7 @@ function valid(v: Record<string, unknown>): boolean {
         optional(v, 'sourceCaptureId', sequence)
       );
     case 'files.result':
-      return (
-        v.version === 1 && string(v.requestId) && typeof v.ok === 'boolean' && optional(v, 'error', string)
-      );
+      return v.version === 1 && string(v.requestId) && typeof v.ok === 'boolean' && resultError(v);
     case 'product.result':
       return (
         v.version === 1 &&
@@ -282,7 +286,8 @@ function valid(v: Record<string, unknown>): boolean {
           (object(v.result) &&
             v.result.operationId === v.operationId &&
             v.result.operationGeneration === v.operationGeneration)) &&
-        optional(v, 'error', string)
+        (v.result !== undefined || wireError(v.error)) &&
+        optional(v, 'error', wireError)
       );
     case 'clock.pong':
       return v.version === 1 && string(v.requestId) && numbers(v, ['serverTimeMs', 'serverMonotonicMs']);
@@ -295,7 +300,7 @@ function valid(v: Record<string, unknown>): boolean {
     case 'stats':
       return true;
     case 'error':
-      return string(v.message);
+      return wireError(v.error);
     case 'auth.camera.config':
       return (
         v.version === 1 &&

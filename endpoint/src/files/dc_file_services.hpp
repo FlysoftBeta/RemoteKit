@@ -2,6 +2,7 @@
 #include "util/result_macros.hpp"
 #include "util/thread.hpp"
 #include "util/error.hpp"
+#include "util/wire_error.hpp"
 #include "rtc/dc_services.hpp"
 #include "files/file_upload.hpp"
 #include "files/photo_processing.hpp"
@@ -369,16 +370,17 @@ class DcFileServices {
                 if (Current(job))
                   executed = execute(job);
                 reply = executed ? Reply(job.message, true, executed.value())
-                                 : Reply(job.message, false, executed.error().message);
+                                 : Reply(job.message, false, WireError(executed.error()));
               } catch (const ServiceJson::exception& error) {
                 fprintf(stderr, "file router invalid request: %s\n", error.what());
-                reply = Reply(job.message, false, "invalid_request");
+                reply = Reply(job.message, false,
+                              WireError({ErrorCode::kInvalidRequest, "invalid_request"}));
               } catch (const std::exception& error) {
                 fprintf(stderr, "file router internal: %s\n", error.what());
-                reply = Reply(job.message, false, "internal");
+                reply = Reply(job.message, false, WireError({ErrorCode::kInternal, "internal"}));
               } catch (...) {
                 fprintf(stderr, "file router internal: unknown exception\n");
-                reply = Reply(job.message, false, "internal");
+                reply = Reply(job.message, false, WireError({ErrorCode::kInternal, "internal"}));
               }
               std::lock_guard lock(mutex_);
               if (!CurrentLocked(job))
@@ -490,25 +492,27 @@ class DcFileServices {
     if (peer != peer_ || !peer_)
       return;
     const auto key = message["requestId"].get<std::string>(), fingerprint = message.dump();
-    auto failure = [&](const char* error) { QueueReply(Reply(message, false, error), 0); };
+    auto failure = [&](ErrorCode code, const char* error) {
+      QueueReply(Reply(message, false, WireError({code, error})), 0);
+    };
     const auto id = message["params"].value("requestId", std::string());
     const auto found = authorized_.find(id);
     if (found == authorized_.end() || ((id == "library") != LibraryFileMethod(message["method"]))) {
-      failure("stale_file_request");
+      failure(ErrorCode::kForbidden, "stale_file_request");
       return;
     }
     uint64_t library_grant = 0;
     if (message["method"] == "selection.cancel") {
       const auto library = authorized_.find("library");
       if (library == authorized_.end()) {
-        failure("stale_library_authorization");
+        failure(ErrorCode::kForbidden, "stale_library_authorization");
         return;
       }
       library_grant = library->second.serial;
     }
     if (const auto found = receipts_.find(key); found != receipts_.end()) {
       if (found->second.fingerprint != fingerprint)
-        failure("file_request_id_conflict");
+        failure(ErrorCode::kConflict, "file_request_id_conflict");
       else if (!found->second.reply.is_null())
         QueueReply(found->second.reply, found->second.grant, found->second.library_grant);
       return;
@@ -518,7 +522,7 @@ class DcFileServices {
         (chunk && std::count_if(receipts_.begin(), receipts_.end(), [](const auto& item) {
                     return item.second.chunk && item.second.reply.is_null();
                   }) >= 4)) {
-      failure("file_transfer_busy");
+      failure(ErrorCode::kBusy, "file_transfer_busy");
       return;
     }
     receipts_.emplace(key,

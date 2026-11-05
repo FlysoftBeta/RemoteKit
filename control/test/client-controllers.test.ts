@@ -273,3 +273,33 @@ test('control requests map send failures and structured errors without leaving d
   control.close();
   assert.equal(control.getSnapshot().phase, 'stopped');
 });
+
+test('product transport rejection retains its code without querying an unadmitted operation', async (t) => {
+  let operation!: Extract<Outgoing, { type: 'product.action' }>;
+  const store = new OperationsStore({
+    ready: () => true,
+    send: (message) => {
+      if (message.type === 'product.action') operation = message;
+    },
+    status: async () => {
+      throw new Error('unadmitted operation must not be queried');
+    },
+  });
+  t.after(() => store.reset());
+  store.acceptSnapshot(productSnapshot());
+  const response = store.action({ type: 'window.create' });
+  store.handle({
+    type: 'product.result',
+    version: 1,
+    operationId: operation.operationId,
+    operationGeneration: operation.operationGeneration,
+    error: { code: 'busy', message: 'endpoint_backpressure' },
+  });
+  await assert.rejects(
+    response,
+    (error: unknown) =>
+      error instanceof RemoteKitError && error.code === 'busy' && error.message === 'endpoint_backpressure',
+  );
+  assert.equal(store.getSnapshot().pending.length, 0);
+  assert.equal(store.getSnapshot().error?.code, 'busy');
+});

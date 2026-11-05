@@ -144,6 +144,7 @@ try {
     ],
   });
   page = context.pages()[0] ?? (await context.newPage());
+  page.on('pageerror', (error) => void log('client-error', { message: error.message, stack: error.stack }));
   page.setDefaultTimeout(5000);
 
   await page.addInitScript(
@@ -547,7 +548,11 @@ try {
     }, 'Control did not restart with the original account');
     await page.goto(origin, { timeout: 12000 });
     await until(
-      () => read('Boolean(document.querySelector(".viewer-shell, .viewer-lock-blank"))'),
+      () =>
+        read(`Boolean(document.querySelector('.viewer-shell') ||
+          (document.querySelector('.viewer-lock-blank') &&
+            diagnosticQA.controlSocket?.readyState === WebSocket.OPEN &&
+            diagnosticQA.channels.filter(channel => channel.readyState === 'open').length === 2))`),
       'Viewer did not reattach',
     );
     if (await read('Boolean(document.querySelector(".viewer-lock-blank"))')) {

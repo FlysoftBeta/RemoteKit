@@ -1,6 +1,7 @@
 #pragma once
 #include <json.hpp>
 #include "util/error.hpp"
+#include "util/wire_error.hpp"
 #include <array>
 #include <algorithm>
 #include <deque>
@@ -11,6 +12,17 @@
 
 namespace remotekit {
 using ControlJson = nlohmann::json;
+inline ErrorCode InputRejectionCode(std::string_view message) {
+  if (message == "input_queue_busy" || message == "touch_terminal_queue_busy")
+    return ErrorCode::kBusy;
+  if (message == "input_not_authorized" || message == "wrong_session")
+    return ErrorCode::kForbidden;
+  if (message == "invalid_touch_retirement_identity")
+    return ErrorCode::kInvalidRequest;
+  if (message == "input_sequence_exhausted")
+    return ErrorCode::kLimitExceeded;
+  return ErrorCode::kConflict;
+}
 template <class Rpc, class Current, class Expired, class Wait, class Retry, class Exhausted>
 Result<ControlJson> RetryBrowserInput(const ControlJson& command,
                                       Rpc rpc,
@@ -51,14 +63,17 @@ struct TouchTerminalReceipt {
   bool send_acceptance{}, send_result{}, polling{};
   int64_t due{}, deadline{};
 
-  ControlJson Notice(const char* state, bool ok, const std::string& error = {}) const {
+  ControlJson Notice(const char* state,
+                     bool ok,
+                     const std::string& error = {},
+                     ErrorCode code = ErrorCode::kOutcomeUnknown) const {
     ControlJson reply = {{"type", "input.result"},
                          {"clientSequence", client_sequence},
                          {"touchSequenceId", sequence},
                          {"touchState", state},
                          {"ok", ok}};
-    if (!error.empty())
-      reply["error"] = error;
+    if (!ok)
+      reply["error"] = WireError({code, error});
     return reply;
   }
   void Accept(int64_t now, int64_t budget) {
@@ -71,9 +86,12 @@ struct TouchTerminalReceipt {
     due = now;
     deadline = now + budget;
   }
-  void Finish(const char* state, bool ok, const std::string& error = {}) {
+  void Finish(const char* state,
+              bool ok,
+              const std::string& error = {},
+              ErrorCode code = ErrorCode::kOutcomeUnknown) {
     polling = false;
-    result = Notice(state, ok, error);
+    result = Notice(state, ok, error, code);
     send_result = true;
   }
   bool Busy() const { return polling || send_acceptance || send_result; }
@@ -91,7 +109,8 @@ inline bool ApplyTouchTerminalStatus(TouchTerminalReceipt& receipt, const Contro
     receipt.Finish("processed", true);
   else if (state == "terminal-invalidated")
     receipt.Finish("terminal-invalidated", false,
-                   status.value("error", std::string("touch_owner_invalidated")));
+                   status.value("error", std::string("touch_owner_invalidated")),
+                   ErrorCode::kConflict);
   else
     receipt.Finish("terminal-unconfirmed", false,
                    status.value("error", std::string("touch_terminal_unconfirmed")));
