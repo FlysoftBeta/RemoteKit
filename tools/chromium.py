@@ -18,6 +18,8 @@ RETIRED_OVERLAY_TREES = ('endpoint/src',)
 # Retain these entries after the first manifest so a prior partial stage can
 # still remove old files once their content is verified.
 LEGACY_REMOVED = {
+    'browser/sdk/remotekit_rtc.cc': '38d4b5038fb39a833defc492d8db403e9438c7b075ce56519cbc257372b7b71c',
+    'browser/sdk/remotekit_sdk.cc': '94df5d35cb09b20b19334cffb3e9205b337f28b75c7820d65b3a5fe785b42923',
     'browser/harness.cc': 'cc18300f2e8831d76d37cadbae54abea855a7393b4e014850cd968ecc78f1589',
     'browser/harness.h': '72abedaca6332bef86127dd2b6fddff21bdca00fb59353e7da924aa3b3612d46',
     'browser/devtools.cc': 'a0d1e584542d757afd51881b7a26a4e894e67d2a6b9e94cb49dca29003512771',

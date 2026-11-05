@@ -25,6 +25,14 @@ void ControlContract() {
   const auto failure = ControlResult::FromFields(20, std::move(subsystem));
   CHECK(failure.FindBool("ok") == false && failure.FindInt("code").has_value());
   CHECK(failure.FindString("detail"));
+  auto fields = failure.Clone();
+  fields.Set("id", 20);
+  ControlResult result(std::move(fields));
+  auto normalized = std::move(result).TakeFields();
+  CHECK(normalized.FindInt("id") == 20);
+  CHECK(normalized.FindInt("code") == static_cast<int>(protocol::ErrorCode::internal));
+  CHECK(normalized.FindBool("ok") == false);
+
   base::DictValue wire;
   wire.Set("instance", "1");
   wire.Set("document", "1");

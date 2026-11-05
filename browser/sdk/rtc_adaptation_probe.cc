@@ -1,6 +1,7 @@
 // CPU-only production source-adapter and in-place RTP preference regression.
 // The native test frame has no GPU object: no encoding or GPU access occurs.
-#include "remotekit_rtc.cc"
+#include "rtc_internal.h"
+using namespace remotekit::rtc;
 
 #include "base/at_exit.h"
 #include "base/check.h"

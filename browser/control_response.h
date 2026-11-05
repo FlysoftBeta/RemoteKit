@@ -9,6 +9,8 @@
 namespace remotekit::browser {
 class ControlResult {
  public:
+  ControlResult(base::DictValue fields);
+  base::DictValue TakeFields() &&;
   static base::DictValue Success(int id, base::DictValue fields = {});
   static base::DictValue Failure(int id,
                                  protocol::ErrorCode,
@@ -16,6 +18,9 @@ class ControlResult {
                                  base::DictValue fields = {});
   static base::DictValue Failure(int id, std::string_view detail, base::DictValue fields = {});
   static base::DictValue FromFields(int id, base::DictValue fields);
+
+ private:
+  base::DictValue fields_;
 };
 // Returns false only when JSON encoding or the actual transport write fails.
 // Oversized application replies produce a bounded error on the same channel.

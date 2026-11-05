@@ -27,12 +27,19 @@ executable("remotekit_browser") {
     "compat_renderer.h",
     "control_dispatcher.cc",
     "control_dispatcher.h",
+    "control_input.cc",
     "control_input_codec.cc",
     "control_input_codec.h",
+    "control_navigation.cc",
+    "control_output.cc",
+    "control_page.cc",
+    "control_requests.h",
     "control_response.cc",
     "control_response.h",
     "control_server.cc",
     "control_server.h",
+    "control_snapshot.cc",
+    "control_views.cc",
     "device_configuration.cc",
     "device_configuration.h",
     "file_chooser_accept.cc",
@@ -50,6 +57,18 @@ executable("remotekit_browser") {
     "navigation_transfer.h",
     "offscreen_host.cc",
     "offscreen_host.h",
+    "osr/atlas.cc",
+    "osr/atlas.h",
+    "osr/device.cc",
+    "osr/device.h",
+    "osr/generation.h",
+    "osr/plane_pool.cc",
+    "osr/plane_pool.h",
+    "osr/retirement.cc",
+    "osr/retirement.h",
+    "osr/scheduler.cc",
+    "osr/scheduler.h",
+    "osr/trace.h",
     "osr_renderer.cc",
     "osr_renderer.h",
     "osr_wake_state.h",
@@ -285,4 +304,11 @@ executable("remotekit_navigation_operations_probe") {
 executable("remotekit_navigation_error_page_probe") {
   testonly = true
   sources = [ "navigation_error_page_tests.cc" ]
+}
+
+executable("remotekit_render_wire_probe") {
+  testonly = true
+  sources = [ "render_wire_probe.cc" ]
+  include_dirs = [ "//remotekit" ]
+  deps = [ "//base" ]
 }

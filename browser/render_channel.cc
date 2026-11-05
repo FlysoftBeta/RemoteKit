@@ -1,5 +1,5 @@
 #include "remotekit/browser/render_channel.h"
-#include <cstring>
+#include "remotekit/protocol/render_wire.h"
 #include <vector>
 #include "base/check.h"
 #include "base/compiler_specific.h"
@@ -35,8 +35,7 @@ void RenderChannel::Close() {
 bool RenderChannel::Reject(const RenderIdentity& identity, RenderRejectReason reason) {
   if (!pipe_.is_valid())
     return false;
-  if (generation_state_.stopped() || !ValidRenderIdentity(identity) ||
-      static_cast<uint32_t>(reason) < 1 || static_cast<uint32_t>(reason) > 4) {
+  if (generation_state_.stopped()) {
     Close();
     return false;
   }
@@ -44,8 +43,9 @@ bool RenderChannel::Reject(const RenderIdentity& identity, RenderRejectReason re
   message.type = RenderWireType::kReject;
   message.reason = static_cast<uint32_t>(reason);
   message.begin.identity = identity;
-  if (mojo::WriteMessageRaw(pipe_.get(), &message, sizeof(message), nullptr, 0,
-                            MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
+  const auto bytes = EncodeRenderWire(message);
+  if (!bytes || mojo::WriteMessageRaw(pipe_.get(), bytes->data(), bytes->size(), nullptr, 0,
+                                      MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
     Close();
     return false;
   }
@@ -64,8 +64,9 @@ bool RenderChannel::Wake(const RenderIdentity& identity) {
   RenderWireMessage message;
   message.type = RenderWireType::kWake;
   message.begin.identity = identity;
-  if (mojo::WriteMessageRaw(pipe_.get(), &message, sizeof(message), nullptr, 0,
-                            MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
+  const auto bytes = EncodeRenderWire(message);
+  if (!bytes || mojo::WriteMessageRaw(pipe_.get(), bytes->data(), bytes->size(), nullptr, 0,
+                                      MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
     Close();
     return false;
   }
@@ -77,8 +78,9 @@ bool RenderChannel::Stopped(uint64_t generation) {
   RenderWireMessage message;
   message.type = RenderWireType::kStopped;
   message.begin.identity.generation = generation;
-  if (mojo::WriteMessageRaw(pipe_.get(), &message, sizeof(message), nullptr, 0,
-                            MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
+  const auto bytes = EncodeRenderWire(message);
+  if (!bytes || mojo::WriteMessageRaw(pipe_.get(), bytes->data(), bytes->size(), nullptr, 0,
+                                      MOJO_WRITE_MESSAGE_FLAG_NONE) != MOJO_RESULT_OK) {
     Close();
     return false;
   }
@@ -96,29 +98,21 @@ void RenderChannel::OnReadable(MojoResult result) {
         mojo::ReadMessageRaw(pipe_.get(), &bytes, &handles, MOJO_READ_MESSAGE_FLAG_NONE);
     if (read == MOJO_RESULT_SHOULD_WAIT)
       return;
-    if (read != MOJO_RESULT_OK || bytes.size() != sizeof(RenderWireMessage) || !handles.empty()) {
+    const auto decoded = DecodeRenderWire(bytes, handles.size());
+    if (read != MOJO_RESULT_OK || !decoded) {
       Close();
       return;
     }
-    RenderWireMessage message;
-    // SAFETY: the preceding check proves bytes contains exactly sizeof(message)
-    // bytes, and message is a complete trivially-copyable wire object.
-    UNSAFE_BUFFERS(std::memcpy(&message, bytes.data(), sizeof(message)));
-    if (message.magic != kRenderWireMagic || message.version != kRenderWireVersion) {
-      Close();
-      return;
-    }
+    const auto& message = *decoded;
     const auto weak = weak_factory_.GetWeakPtr();
     if (message.type == RenderWireType::kStop) {
-      if (!ValidRenderGenerationControl(message) ||
-          !generation_state_.RecordStop(message.begin.identity.generation)) {
+      if (!generation_state_.RecordStop(message.begin.identity.generation)) {
         Close();
         return;
       }
       stop_handler_.Run(message.begin.identity.generation);
     } else {
-      if (message.type != RenderWireType::kBegin || message.reason ||
-          !ValidRenderBegin(message.begin) || message.begin.identity.value <= last_value_ ||
+      if (message.type != RenderWireType::kBegin || message.begin.identity.value <= last_value_ ||
           !generation_state_.RecordBegin(message.begin.identity.generation)) {
         Close();
         return;

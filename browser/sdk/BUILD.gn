@@ -1,19 +1,38 @@
 import("//third_party/webrtc/webrtc.gni")
 
+sdk_headers = [
+  "../../sdk/include/remotekit_sdk.h",
+  "../../sdk/include/remotekit_rtc.h",
+]
+
+sdk_sources = [
+  "sdk_control.cc",
+  "sdk_internal.h",
+  "sdk_render.cc",
+  "sdk_resources.cc",
+  "sdk_resources.h",
+  "sdk_runtime.cc",
+]
+rtc_sources = [
+  "rtc_audio.cc",
+  "rtc_audio_source.h",
+  "rtc_encoder.cc",
+  "rtc_internal.h",
+  "rtc_peer.cc",
+  "rtc_silent_audio.h",
+  "rtc_stats.cc",
+  "rtc_trace.h",
+  "rtc_video_source.cc",
+]
+
 shared_library("remotekit_sdk") {
   configs -= [ "//build/config/clang:find_bad_constructs" ]
   output_name = "remotekit_sdk"
   sources = [
-    "../../sdk/include/remotekit_rtc.h",
-    "../../sdk/include/remotekit_sdk.h",
-    "remotekit_rtc.cc",
-    "remotekit_sdk.cc",
-    "render_generation_state_probe.cc",
-    "render_slots_abi_probe.cc",
-    "rtc_audio_source.h",
-    "rtc_silent_audio.h",
-    "rtc_trace.h",
-  ]
+              "../osr_wake_state.h",
+              "render_generation_state_probe.cc",
+              "render_slots_abi_probe.cc",
+            ] + sdk_headers + sdk_sources + rtc_sources
   include_dirs = [ "//remotekit" ]
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
   libs = [ "ws2_32.lib" ]
@@ -36,7 +55,7 @@ shared_library("remotekit_sdk") {
 executable("remotekit_sdk_control_lifetime_probe") {
   testonly = true
   configs -= [ "//build/config/clang:find_bad_constructs" ]
-  sources = [ "control_channel_lifetime_probe.cc" ]
+  sources = [ "control_channel_lifetime_probe.cc" ] + sdk_headers + sdk_sources
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
   deps = [
     "//base",
@@ -54,7 +73,7 @@ executable("remotekit_sdk_control_lifetime_probe") {
 executable("remotekit_rtc_adaptation_probe") {
   testonly = true
   configs -= [ "//build/config/clang:find_bad_constructs" ]
-  sources = [ "rtc_adaptation_probe.cc" ]
+  sources = [ "rtc_adaptation_probe.cc" ] + sdk_headers + rtc_sources
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
   libs = [ "ws2_32.lib" ]
   deps = [

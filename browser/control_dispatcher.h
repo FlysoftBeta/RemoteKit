@@ -2,6 +2,7 @@
 #include "base/values.h"
 namespace remotekit::browser {
 class BrowserRuntime;
+class ControlResult;
 struct ShutdownRequest;
 struct OutputConfigureRequest;
 struct OutputOpenRequest;
@@ -30,30 +31,30 @@ class ControlDispatcher {
  public:
   explicit ControlDispatcher(BrowserRuntime& runtime) : runtime_(runtime) {}
   base::DictValue Dispatch(const base::DictValue&);
-  base::DictValue HandleShutdown(const ShutdownRequest&);
-  base::DictValue HandleOutputConfigure(const OutputConfigureRequest&);
-  base::DictValue HandleOutputOpen(const OutputOpenRequest&);
-  base::DictValue HandleOutputStatus(const OutputStatusRequest&);
-  base::DictValue HandleOutputClose(const OutputCloseRequest&);
-  base::DictValue HandleAudioOpen(const AudioOpenRequest&);
-  base::DictValue HandleAudioClose(const AudioCloseRequest&);
-  base::DictValue HandleClosedAck(const ClosedAckRequest&);
-  base::DictValue HandleSnapshot(const SnapshotRequest&);
-  base::DictValue HandleSitePreferences(const SitePreferencesRequest&);
-  base::DictValue HandleCreateView(const CreateViewRequest&);
-  base::DictValue HandleCloseView(const CloseViewRequest&);
-  base::DictValue HandleRecreateView(const RecreateViewRequest&);
-  base::DictValue HandleConfigureView(const ConfigureViewRequest&);
-  base::DictValue HandleProfileCommand(const ProfileCommandRequest&);
-  base::DictValue HandlePageRequest(const PageControlRequest&);
-  base::DictValue HandleExitFullscreen(const ExitFullscreenRequest&);
-  base::DictValue HandleNavigationTransfer(const NavigationTransferRequest&);
-  base::DictValue HandleTouchStatus(const TouchStatusRequest&);
-  base::DictValue HandleFocus(const FocusRequest&);
-  base::DictValue HandleVisible(const VisibleRequest&);
-  base::DictValue HandleNavigate(const NavigateRequest&);
-  base::DictValue HandleLifecycle(const LifecycleControlRequest&);
-  base::DictValue HandleInput(const InputRequest&);
+  ControlResult HandleShutdown(const ShutdownRequest&);
+  ControlResult HandleOutputConfigure(const OutputConfigureRequest&);
+  ControlResult HandleOutputOpen(const OutputOpenRequest&);
+  ControlResult HandleOutputStatus(const OutputStatusRequest&);
+  ControlResult HandleOutputClose(const OutputCloseRequest&);
+  ControlResult HandleAudioOpen(const AudioOpenRequest&);
+  ControlResult HandleAudioClose(const AudioCloseRequest&);
+  ControlResult HandleClosedAck(const ClosedAckRequest&);
+  ControlResult HandleSnapshot(const SnapshotRequest&);
+  ControlResult HandleSitePreferences(const SitePreferencesRequest&);
+  ControlResult HandleCreateView(const CreateViewRequest&);
+  ControlResult HandleCloseView(const CloseViewRequest&);
+  ControlResult HandleRecreateView(const RecreateViewRequest&);
+  ControlResult HandleConfigureView(const ConfigureViewRequest&);
+  ControlResult HandleProfileCommand(const ProfileCommandRequest&);
+  ControlResult HandlePageRequest(const PageControlRequest&);
+  ControlResult HandleExitFullscreen(const ExitFullscreenRequest&);
+  ControlResult HandleNavigationTransfer(const NavigationTransferRequest&);
+  ControlResult HandleTouchStatus(const TouchStatusRequest&);
+  ControlResult HandleFocus(const FocusRequest&);
+  ControlResult HandleVisible(const VisibleRequest&);
+  ControlResult HandleNavigate(const NavigateRequest&);
+  ControlResult HandleLifecycle(const LifecycleControlRequest&);
+  ControlResult HandleInput(const InputRequest&);
 
  private:
   BrowserRuntime& runtime_;

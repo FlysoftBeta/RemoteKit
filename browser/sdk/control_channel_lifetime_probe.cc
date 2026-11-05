@@ -1,6 +1,7 @@
-// This probe includes the production implementation to register real local Mojo
-// peers without adding test hooks or C ABI exports to the shipped SDK.
-#include "remotekit_sdk.cc"
+// Register local Mojo peers through internal types and link production objects.
+#include "sdk_internal.h"
+#include "sdk_resources.h"
+using namespace remotekit::sdk;
 
 #include <chrono>
 #include <cstdio>
@@ -229,6 +230,12 @@ void OpenRenderAttachmentContract(size_t attachment_count) {
     accepted.Set("id", *open.FindInt("id"));
     accepted.Set("ok", true);
     accepted.Set("accepted", true);
+    if (attachment_count == 1) {
+      accepted.Set("ok", false);
+      accepted.Set("pending", true);
+      accepted.Set("code", static_cast<int>(remotekit::protocol::ErrorCode::busy));
+      accepted.Set("error", "busy");
+    }
     std::vector<mojo::ScopedMessagePipeHandle> none;
     ReplyWithEndpoints(control.peer.get(), accepted, &none);
     auto describe = ReadJsonRequest(control.peer.get());
@@ -313,6 +320,36 @@ void OpenRenderAttachmentContract(size_t attachment_count) {
   }
   CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
 }
+void NumericRenderFailure(bool opening) {
+  auto control = NewChannel();
+  std::thread responder([&] {
+    auto request = ReadJsonRequest(control.peer.get());
+    std::vector<mojo::ScopedMessagePipeHandle> none;
+    if (!opening) {
+      base::DictValue accepted;
+      accepted.Set("version", 1);
+      accepted.Set("id", *request.FindInt("id"));
+      accepted.Set("ok", true);
+      accepted.Set("accepted", true);
+      ReplyWithEndpoints(control.peer.get(), accepted, &none);
+      request = ReadJsonRequest(control.peer.get());
+    }
+    base::DictValue failure;
+    failure.Set("version", 1);
+    failure.Set("id", *request.FindInt("id"));
+    failure.Set("ok", false);
+    failure.Set("code", static_cast<int>(remotekit::protocol::ErrorCode::busy));
+    failure.Set("error", "busy");
+    failure.Set("detail", "Output is occupied");
+    ReplyWithEndpoints(control.peer.get(), failure, &none);
+  });
+  remotekit_sdk_render_setup setup{};
+  setup.struct_size = sizeof(setup);
+  CHECK_EQ(remotekit_sdk_control_open_render(control.id, GetCurrentProcessId(), &setup, 5000),
+           REMOTEKIT_SDK_BUSY);
+  responder.join();
+  CHECK_EQ(remotekit_sdk_control_close(control.id), REMOTEKIT_SDK_OK);
+}
 void UnclaimedControlClose() {
   auto control = NewChannel();
   mojo::ScopedMessagePipeHandle endpoint, producer;
@@ -391,6 +428,8 @@ int main() {
   OpenRenderAttachmentContract(0);
   OpenRenderAttachmentContract(2);
   OpenRenderAttachmentContract(1);
+  NumericRenderFailure(true);
+  NumericRenderFailure(false);
   UnclaimedControlClose();
   RawControlRejectsAttachments();
   ShutdownDrainsLeases();

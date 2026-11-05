@@ -16,6 +16,9 @@ struct InputEvent;
 }
 namespace remotekit::browser {
 class OffscreenHost;
+namespace osr {
+class Generation;
+}
 
 // UI-sequence-only GPU producer. Borrowed hosts must be stopped or reported
 // through SetViews before their execution instances are replaced.
@@ -45,8 +48,7 @@ class OsrRenderer final {
   void Stop();
 
  private:
-  class State;
-  std::shared_ptr<State> state_;
+  std::shared_ptr<osr::Generation> state_;
 };
 }  // namespace remotekit::browser
 #endif

@@ -4,6 +4,13 @@
 #include <algorithm>
 
 namespace remotekit::browser {
+ControlResult::ControlResult(base::DictValue fields) {
+  const int id = fields.FindInt("id").value_or(0);
+  fields_ = FromFields(id, std::move(fields));
+}
+base::DictValue ControlResult::TakeFields() && {
+  return std::move(fields_);
+}
 base::DictValue ControlResult::Success(int id, base::DictValue fields) {
   fields.Set("version", protocol::kControlVersion);
   fields.Set("id", id);
