@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EditingInput, editingKey } from '../client/editing-input';
+import { EditingInput, editingKey } from '../client/editing/editing-input';
 
 test('local keyboard dismissal commits the pending composition once on its current target', () => {
   const input = new EditingInput();

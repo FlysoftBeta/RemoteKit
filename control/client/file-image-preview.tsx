@@ -1,4 +1,3 @@
-import React, { useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -9,9 +8,10 @@ import {
   DialogTitle,
   LinearProgress,
 } from '@mui/material';
+import { useEffect, useRef, useState } from 'react';
 import type { LibraryEntry } from '../shared/file-library';
-import { useLibrary } from './file-library-state';
 import { fileError } from './file-library-controls';
+import { useLibrary } from './file-library-state';
 
 export function canPreviewFile(entry: Pick<LibraryEntry, 'type' | 'size'>) {
   return /^(image\/jpeg|image\/png)$/i.test(entry.type) && entry.size > 0 && entry.size <= 64 * 1024 * 1024;

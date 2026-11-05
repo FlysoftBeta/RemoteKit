@@ -1,14 +1,131 @@
-import type { Control } from './control';
-import type { ControlDatabase } from './persistence/database';
+import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { FILE_LIMITS } from '../shared/product';
+import { AccountService } from './auth/accounts';
+import { ViewerSecurity } from './auth/viewer-security';
+import type { RuntimeConfig } from './config';
+import type { EndpointGateway } from './endpoint/gateway';
 import type { LocalProcessLink } from './endpoint/local-process';
 import type { RemoteNodeLink } from './endpoint/remote-node';
-import type { createHttp } from './http';
-import type { RuntimeConfig } from './config';
+import { FileLibrary } from './files/library';
+import type { createHttp } from './http/server';
+import type { ControlDatabase } from './persistence/database';
+import { TenantRegistry } from './tenants/tenant-registry';
+import { systemClock, type Clock } from './util/clock';
+import { RtcSignaling } from './viewers/rtc-signaling';
+import { ViewerHub } from './viewers/viewer-hub';
+import { UncertainRecovery } from './workspace/lifecycle';
+import { Navigation } from './workspace/navigation';
+import { OperationPipeline } from './workspace/operations';
+import { PageRequests, type FileLimits } from './workspace/page-requests';
+import { Popups } from './workspace/popups';
+import { Reconciler } from './workspace/reconciler';
+import { SitePolicy } from './workspace/site-policy';
+
+export interface DomainContext {
+  store: ControlDatabase;
+  endpoint: EndpointGateway;
+  tenants: TenantRegistry;
+  clock: Clock;
+  fileLimits: FileLimits;
+  events: EventEmitter;
+  serverIncarnation: string;
+  closed: boolean;
+}
+export interface DomainServices extends DomainContext {
+  navigation: Navigation;
+  viewers: ViewerHub;
+  rtc: RtcSignaling;
+  operations: OperationPipeline;
+  reconciler: Reconciler;
+  pageRequests: PageRequests;
+  lifecycle: UncertainRecovery;
+  popups: Popups;
+  policy: SitePolicy;
+  security: ViewerSecurity;
+  library: FileLibrary;
+  accounts: AccountService;
+  close(): Promise<void>;
+}
+export function createApplication(
+  store: ControlDatabase,
+  endpoint: EndpointGateway,
+  fileLimits: FileLimits = FILE_LIMITS,
+  clock: Clock = systemClock,
+): DomainServices {
+  const context: DomainContext = {
+    store,
+    endpoint,
+    fileLimits,
+    clock,
+    tenants: new TenantRegistry(clock),
+    events: new EventEmitter(),
+    serverIncarnation: randomUUID(),
+    closed: false,
+  };
+  const services = context as DomainServices;
+  services.navigation = new Navigation(context, services);
+  services.viewers = new ViewerHub(context, services);
+  services.rtc = new RtcSignaling(context, services);
+  services.operations = new OperationPipeline(context, services);
+  services.reconciler = new Reconciler(context, services);
+  services.pageRequests = new PageRequests(context, services);
+  services.lifecycle = new UncertainRecovery(context, services);
+  services.popups = new Popups(context, services);
+  services.policy = new SitePolicy(context);
+  services.accounts = new AccountService(store);
+  services.library = new FileLibrary(store.library, endpoint, fileLimits);
+  services.security = new ViewerSecurity(
+    store,
+    endpoint,
+    (tenant, viewer, workspace) => {
+      const lease = context.tenants.get(tenant).viewer?.id;
+      if (!lease || !services.viewers.validSecurity(tenant, viewer)) return;
+      context.events.emit('auth', tenant, lease, services.viewers.authState(tenant, viewer));
+      if (workspace) {
+        services.viewers.push(tenant);
+        services.pageRequests.authorizeFiles(tenant);
+        void context.tenants
+          .serial(tenant, () => services.reconciler.reconcileProduct(tenant))
+          .catch(() => {});
+      }
+    },
+    (tenant, viewer) => services.viewers.validSecurity(tenant, viewer),
+    (tenant, viewer) => {
+      const runtime = context.tenants.get(tenant);
+      if (!runtime.viewer || !services.viewers.validSecurity(tenant, viewer)) return;
+      services.pageRequests.clearAuthorization(tenant);
+      if (viewer.locked) services.pageRequests.clearFullscreen(tenant);
+      runtime.quality.resetFeedback();
+      void context.tenants
+        .serial(tenant, async () => {
+          if (!services.viewers.validSecurity(tenant, viewer)) return;
+          if (!viewer.locked) services.pageRequests.authorizeFiles(tenant);
+          if (viewer.locked) await services.reconciler.reconcileProduct(tenant);
+        })
+        .catch(() => {});
+    },
+    clock,
+  );
+  const unsubscribeActions = endpoint.onClientAction?.((event) => {
+    void services.operations.handleEndpointAction(event).catch(() => {});
+  });
+  const unsubscribeSignals = endpoint.onSignal?.((event) => services.rtc.receiveSignal(event));
+  services.close = async () => {
+    context.closed = true;
+    unsubscribeActions?.();
+    unsubscribeSignals?.();
+    await context.tenants.close();
+    context.events.removeAllListeners();
+  };
+  return services;
+}
+
 export function startApplication(
   config: RuntimeConfig,
   store: ControlDatabase,
   link: LocalProcessLink | RemoteNodeLink,
-  control: Control,
+  control: DomainServices,
   server: ReturnType<typeof createHttp>,
 ) {
   let closing = false;
@@ -24,15 +141,15 @@ export function startApplication(
     );
   }
   const endpointReady = (identity?: { processChanged: boolean }) => {
-    if (!closing) run(control.endpointReady(identity));
+    if (!closing) run(control.reconciler.endpointReady(identity));
   };
   link.on('ready', endpointReady);
   const endpointOffline = () => {
-    if (!closing) control.endpointOffline();
+    if (!closing) control.rtc.endpointOffline();
   };
   link.on('offline', endpointOffline);
   const reconciliationTimer = setInterval(() => {
-    if (!closing) run(control.tick());
+    if (!closing) run(control.reconciler.tick());
   }, 1500);
   server.listen(config.port, config.host, () => {
     link.start();

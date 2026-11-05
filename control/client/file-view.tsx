@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { IconButton, Tooltip } from '@mui/material';
 import { GridView, ViewList } from '@mui/icons-material';
+import { IconButton, Tooltip } from '@mui/material';
+import { useState } from 'react';
 import type { FileView } from './sortable-file-items';
 
 export function useFileView(items: { type: string }[]) {

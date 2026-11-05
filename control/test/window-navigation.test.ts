@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ViewerAudioOutput } from '../client/audio-output';
-import { DcFileClient } from '../client/dc-file-client';
+import { ViewerAudioOutput } from '../client/media/audio-output';
+import { FileChannel } from '../client/files/file-channel';
 import { FileLibraryContext, useFileLibrary } from '../client/file-library-state';
-import { projectOperations } from '../client/product-operations';
-import type { RemoteTransport } from '../client/transport';
+import { projectOperations } from '../client/control/product-operations';
+import type { ViewerSession } from '../client/viewer-session';
 import { WindowFrame } from '../client/window-frame';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import type { ProductState, ProductTab, ProductWindow } from '../shared/product';
@@ -56,9 +56,9 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
 function Frame({ state, online }: { state: ProductState; online: boolean }) {
   const unexpected = (): never => assert.fail('Rendering must not dispatch any operation');
   const transport = {
-    audio: new ViewerAudioOutput(unexpected),
-    files: new DcFileClient(() => null),
-  } satisfies Pick<RemoteTransport, 'audio' | 'files'>;
+    observations: { audio: new ViewerAudioOutput(unexpected) },
+    files: new FileChannel(() => null),
+  };
   const library = useFileLibrary(unexpected, transport.files, false, false, undefined, []);
   const win = state.workspace.windows.find((window) => window.id === state.workspace.activeWindowId)!;
   return createElement(
@@ -67,7 +67,7 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
     createElement(WindowFrame, {
       win,
       state,
-      transport: transport as RemoteTransport,
+      transport: transport as unknown as ViewerSession,
       online,
       action: unexpected,
       report: unexpected,

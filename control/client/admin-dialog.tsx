@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import Close from '@mui/icons-material/Close';
 import {
   Alert,
   Box,
@@ -11,8 +11,9 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import Close from '@mui/icons-material/Close';
-import { errorMessage } from './product-dialogs';
+import { useEffect, useRef, useState } from 'react';
+import { formatError } from './format-error';
+
 import type { AdminStatus } from '../shared/product';
 
 export function AdminDialog({
@@ -49,7 +50,7 @@ export function AdminDialog({
         if (active) setConfiguration(result);
       })
       .catch((e) => {
-        if (active) setError(errorMessage(e));
+        if (active) setError(formatError(e));
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -81,7 +82,7 @@ export function AdminDialog({
             setCredential('');
             setSaved(true);
           } catch (e) {
-            setError(errorMessage(e));
+            setError(formatError(e));
           } finally {
             submitting.current = false;
             setBusy(false);

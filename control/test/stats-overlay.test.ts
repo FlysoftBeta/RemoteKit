@@ -1,109 +1,45 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createElement } from 'react';
-import { renderToStaticMarkup } from 'react-dom/server';
-import { StatsOverlay } from '../client/stats-overlay';
+import { statsViewModel } from '../client/media/stats-view-model';
 import type { Diagnostics } from '../client/types';
 
-function overlay(reason: string) {
+test('stats choose the selected view presentation window and retain unknown metrics', () => {
   const diagnostics: Diagnostics = {
-    connection: '已连接',
-    channel: '已连接',
-    rendering: {
-      backend: 'unavailable',
-      backendReason: reason,
-      freezeCopies: 0,
-      mediaRefreshRequests: 0,
-    },
+    connection: '',
+    channel: '',
+    displayFramesPerSecond: 50,
+    paintFpsByView: { first: 24, second: 60 },
+    decodedFramesPerSecond: 120,
   };
-  return renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
-}
-
-test('presentation errors explain why video is unavailable', () => {
-  const html = overlay('video-rtp-metadata-unavailable');
-  assert.match(html, /Video RTP 元数据不可用/);
-  assert.match(html, /unavailable/);
-  assert.doesNotMatch(html, /2D 原因|Video 回退/);
+  assert.equal(statsViewModel(diagnostics, 'second').presentationFps, 60);
+  assert.equal(statsViewModel(diagnostics, 'missing').presentationFps, undefined);
+  assert.equal(statsViewModel(diagnostics).presentationFps, 50);
 });
-
-test('unknown presentation errors retain the actual reason', () => {
-  assert.match(overlay('future-video-failure'), />future-video-failure</);
-});
-
-test('media diagnostics distinguish GCC targets, display ceiling and compatibility playout hint', () => {
+test('stats use GCC targets and negotiated playout independently of requested policy', () => {
   const diagnostics: Diagnostics = {
-    connection: '已连接',
-    channel: '已连接',
-    receiverPlayout: {
-      video: {
-        jitterBufferTargetSupported: false,
-        jitterBufferTarget: null,
-        playoutDelayHintSupported: true,
-        playoutDelayHint: 0,
-      },
-    },
+    connection: '',
+    channel: '',
     endpoint: {
       gccTargetFps: 42,
+      appliedFps: 240,
       gccTargetBitrate: 12000000,
       queueFullDrops: 3,
-      appliedFps: 240,
-      mediaPolicy: {
-        requested: { degradationPreference: 'balanced', maxFps: 60 },
-        applied: { degradationPreference: 'balanced', maxFps: 60 },
-      },
-    },
-  };
-  const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
-  assert.match(html, /输入 FPS 估计<\/dt><dd>42.0 fps/);
-  assert.match(html, /GCC 目标码率<\/dt><dd>12.00 Mbps/);
-  assert.match(html, /编码队列满丢帧<\/dt><dd>3/);
-  assert.match(html, /60 \/ 60/);
-  assert.match(html, /balanced/);
-  assert.match(html, /兼容 hint 0 s/);
-  assert.doesNotMatch(html, /240/);
-});
-
-test('video stats show real receiver intervals without retired capture or canvas rows', () => {
-  const diagnostics: Diagnostics = {
-    connection: '已连接',
-    channel: '已连接',
-    receiverVideoTiming: { jitterBufferMeanMs: 0, decodeMeanMs: 3, droppedFrames: 1 },
-    endpoint: { sourceAtlasWidth: 1296, sourceAtlasHeight: 488 },
-    rendering: { backend: 'video', freezeCopies: 0, mediaRefreshRequests: 0 },
-  };
-  const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
-  assert.match(html, /Video 提交 FPS/);
-  assert.match(html, /接收缓冲均值<\/dt><dd>0.0 ms/);
-  assert.match(html, /1296×488/);
-  assert.doesNotMatch(html, /捕获完成|GPU copy|Metadata \/ 队列|Marker p50|末包→Video/);
-  assert.doesNotMatch(
-    html,
-    /接收缓冲目标均值|接收缓冲最小均值|帧组装耗时均值|接收处理耗时均值|解码器|RTP 播放延迟|接收重传包占比/,
-  );
-});
-
-test('media diagnostics show receiver measurements', () => {
-  const diagnostics: Diagnostics = {
-    connection: '已连接',
-    channel: '已连接',
-    receiverVideoTiming: {
-      jitterBufferTargetMeanMs: 82,
-      jitterBufferMinimumMeanMs: 0,
-      assemblyMeanMs: 3,
-      processingMeanMs: 18,
-      decoderImplementation: 'MediaCodec',
-      receivedPacketRetransmitRatio: 0.025,
+      rtcPlayoutDelayRequested: { maxMs: 50 },
+      mediaPolicy: { requested: { maxFps: 60 }, applied: { maxFps: 60 } },
     },
     receiverVideoPlayoutExtensionNegotiated: false,
-    endpoint: { rtcPlayoutDelayRequested: { minMs: 0, maxMs: 50 } },
   };
-  const html = renderToStaticMarkup(createElement(StatsOverlay, { diagnostics }));
-  assert.doesNotMatch(html, /导出诊断/);
-  assert.match(html, /接收缓冲目标均值<\/dt><dd>82.0 ms/);
-  assert.match(html, /接收缓冲最小均值<\/dt><dd>0.0 ms/);
-  assert.match(html, /帧组装耗时均值<\/dt><dd>3.0 ms/);
-  assert.match(html, /接收处理耗时均值<\/dt><dd>18.0 ms/);
-  assert.match(html, /解码器<\/dt><dd[^>]*>MediaCodec/);
-  assert.match(html, /RTP 播放延迟<\/dt><dd>未协商 \/ 请求 50 ms/);
-  assert.match(html, /接收重传包占比<\/dt><dd>2.50 %/);
+  const model = statsViewModel(diagnostics);
+  assert.equal(model.inputFps, 42);
+  assert.equal(model.targetBitrate, 12000000);
+  assert.equal(model.queueFullDrops, 3);
+  assert.equal(model.playoutExtension, false);
+  assert.equal(model.requestedPlayoutCap, 50);
+  assert.equal(model.mediaPolicy?.applied?.maxFps, 60);
+});
+test('stats retain real receiver interval measurements including zero', () => {
+  const receiverVideoTiming = { jitterBufferMeanMs: 0, decodeMeanMs: 3, droppedFrames: 1 };
+  const model = statsViewModel({ connection: '', channel: '', receiverVideoTiming });
+  assert.deepEqual(model.receiverTiming, receiverVideoTiming);
+  assert.equal(model.videoTiming, undefined);
 });

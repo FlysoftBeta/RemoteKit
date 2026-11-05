@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mouseButtonModifiers } from '../client/keys';
+import { mouseButtonModifiers } from '../client/input/keys';
 
 test('DOM held mouse buttons map to Blink flags rather than keypad/autorepeat flags', () => {
   assert.equal(mouseButtonModifiers(0), 0);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { configureReceiverPlayout } from '../client/receiver-playout';
+import { configureReceiverPlayout } from '../client/media/receiver-playout';
 
 test('standard jitter buffer target is set to zero without applying the legacy hint', () => {
   const receiver = { jitterBufferTarget: 100, playoutDelayHint: 0.2 };

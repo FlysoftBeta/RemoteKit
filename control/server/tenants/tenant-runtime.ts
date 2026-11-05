@@ -1,30 +1,19 @@
-import type {
-  OperationReceipt,
-  ViewerViewport,
-  PageDialog,
-  PageFullscreen,
-  AppliedMediaPolicy,
-} from '../../shared/product';
-import type { InternalFileRequest } from '../file-requests';
-import type { ViewerSecurity } from '../viewer-auth';
-import { QualityState } from '../quality';
-import { BackgroundPolicy } from '../background-policy';
-import type { Clock } from '../util/clock';
 import { RemoteKitError } from '../../shared/errors';
+import type { AppliedMediaPolicy, PageDialog, PageFullscreen, ViewerViewport } from '../../shared/product';
+import type { ViewerSecurityState } from '../auth/viewer-security';
+import type { PageIdentity } from '../endpoint/types';
+import { QualityState } from '../quality';
+import type { Clock } from '../util/clock';
+import { MemorySaverViews } from '../workspace/lifecycle';
+import type { InternalFileRequest } from '../workspace/page-requests';
 export interface ViewerLease {
   id: string;
   authentication: { identity: string; valid: () => boolean };
   revoke: (reason: 'another-viewer' | 'logout') => void;
   viewport?: ViewerViewport;
-  security: ViewerSecurity;
+  security: ViewerSecurityState;
 }
-export type FullscreenBinding = {
-  page: PageFullscreen;
-  viewId: string;
-  browserIncarnation: string;
-  instance: string;
-  document: string;
-};
+export type FullscreenBinding = PageIdentity & { page: PageFullscreen };
 export type SignalBinding = {
   tenant: string;
   lease: string;
@@ -40,10 +29,10 @@ export type RtcConnection =
   | { phase: 'active'; connectionId: string; leaseId: string };
 export type PolicyApplication = { encoded: string; applied: boolean; browserPid?: number };
 export class TenantRuntime {
+  reconciliation: { inflight?: Promise<void> } = {};
   viewer?: ViewerLease;
   lastViewport?: ViewerViewport;
   snapshotSequence = 0;
-  applyingOperation?: OperationReceipt;
   lastError?: string;
   mediaGeneration?: number;
   pendingRtcCheck = false;
@@ -62,23 +51,17 @@ export class TenantRuntime {
   } = { configurations: new Map() };
   quality = new QualityState();
   pageRequests: {
-    dialogs?: (PageDialog & {
-      viewId: string;
-      requestId: string;
-      browserIncarnation: string;
-      instance: string;
-      document: string;
-    })[];
+    dialogs?: (PageDialog & PageIdentity & { requestId: string })[];
     fullscreen?: FullscreenBinding;
     authorization?: string;
     files?: InternalFileRequest[];
   } = {};
-  lifecycle: { transitions: Map<string, { action: string; at: number }>; background: BackgroundPolicy };
+  lifecycle: { transitions: Map<string, { action: string; at: number }>; background: MemorySaverViews };
   constructor(
     readonly tenantId: string,
     clock: Clock,
   ) {
-    this.lifecycle = { transitions: new Map(), background: new BackgroundPolicy(clock) };
+    this.lifecycle = { transitions: new Map(), background: new MemorySaverViews(clock) };
   }
   get connectionId() {
     return this.rtc.connection.phase === 'idle' ? undefined : this.rtc.connection.connectionId;
@@ -128,10 +111,10 @@ export class TenantRuntime {
   }
   dispose() {
     this.resetEndpoint();
+    this.reconciliation = {};
     this.snapshotSequence = 0;
     this.viewer = undefined;
     this.lastViewport = undefined;
-    this.applyingOperation = undefined;
     this.lastError = undefined;
     this.quality.resetFeedback();
   }

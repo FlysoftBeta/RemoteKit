@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { MediaFeedbackSampler, type FeedbackCounters } from '../client/media-feedback';
+import { MediaFeedbackSampler, type FeedbackCounters } from '../client/media/media-feedback';
 
 function harness() {
   let now = 0,

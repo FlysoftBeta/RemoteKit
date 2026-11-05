@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { stereoOpusOffer, ViewerAudioOutput } from '../client/audio-output';
+import { stereoOpusOffer, ViewerAudioOutput } from '../client/media/audio-output';
 
 test('stereo Opus modifies audio only and preserves codec parameters idempotently', () => {
   const video =

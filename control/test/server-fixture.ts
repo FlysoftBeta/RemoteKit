@@ -27,3 +27,26 @@ export class TestClock implements Clock {
     this.wall += ms;
   }
 }
+
+import type { DomainServices } from '../server/application';
+import { dispatchViewerRequest } from '../server/http/viewer-socket';
+export function requestViewer(
+  services: DomainServices,
+  tenantId: string,
+  leaseId: string,
+  method: string,
+  params: any,
+): Promise<any> {
+  return dispatchViewerRequest(
+    services,
+    { tenantId, leaseId, epoch: services.viewers.productEpoch(tenantId, leaseId)! },
+    method,
+    params,
+  );
+}
+
+import { AccountService } from '../server/auth/accounts';
+import type { ControlDatabase } from '../server/persistence/database';
+export function accountsFor(store: ControlDatabase) {
+  return new AccountService(store);
+}

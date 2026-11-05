@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { request as httpRequest } from 'node:http';
 import { WebSocket } from 'ws';
-import { createHttp } from '../server/http';
-import type { Control } from '../server/control';
+import { createHttp } from '../server/http/server';
+import { createApplication, type DomainServices } from '../server/application';
 
 const gate = () => {
   let resolve!: () => void;
@@ -19,25 +19,31 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC and de
     rpcEntered = gate();
   let detachCount = 0,
     signalsCleared = false;
-  const control = Object.assign(new EventEmitter(), {
-    store: { accounts: { identity: () => ({ tenantId: 'tenant' }) } },
-    attachViewer: async () => ({ workspace: { revision: 1 } }),
-    productEpoch: () => undefined,
-    productAllowed: () => true,
-    pollFaceAuth: async () => {},
-    detachViewer: async () => {
-      detachCount++;
-      await detached.promise;
+  const control = {
+    events: new EventEmitter(),
+    accounts: { identity: () => ({ tenantId: 'tenant' }) },
+    viewers: {
+      attachViewer: async () => ({ workspace: { revision: 1 } }),
+      productEpoch: () => undefined,
+      productAllowed: () => true,
+      pollFaceAuth: async () => {},
+      assertViewer() {},
+      detachViewer: async () => {
+        detachCount++;
+        await detached.promise;
+      },
     },
-    viewerRequest: async () => {
-      rpcEntered.resolve();
-      await rpc.promise;
-      return {};
+    rtc: {
+      offer: async () => {
+        rpcEntered.resolve();
+        await rpc.promise;
+        return {};
+      },
+      clearSignals: () => {
+        signalsCleared = true;
+      },
     },
-    clearSignals: () => {
-      signalsCleared = true;
-    },
-  }) as unknown as Control;
+  } as unknown as DomainServices;
   const server = createHttp(control, { origins: ['http://test.local'], clientDir: '.' });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -54,7 +60,7 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC and de
     }),
   ];
   await Promise.all(clients.map((client) => once(client, 'open')));
-  clients[0].send(JSON.stringify({ id: '1', method: 'clock.ping', params: {} }));
+  clients[0].send(JSON.stringify({ id: '1', method: 'rtc.offer', params: {} }));
   await rpcEntered.promise;
   const closed = clients.map((client) => once(client, 'close'));
   let complete = false;
@@ -63,8 +69,8 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC and de
   void shutdown.then(() => {
     complete = true;
   });
-  assert.equal(control.listenerCount('state'), 0);
-  assert.equal(control.listenerCount('rtc.signal'), 0);
+  assert.equal(control.events.listenerCount('state'), 0);
+  assert.equal(control.events.listenerCount('rtc.signal'), 0);
   await Promise.all(closed);
   assert.equal(complete, false);
   assert.equal(detachCount, 2);

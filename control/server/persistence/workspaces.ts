@@ -1,8 +1,8 @@
-import { transaction } from './database';
 import type Database from 'better-sqlite3';
-import { RemoteKitError } from '../../shared/errors';
 import { isDeepStrictEqual } from 'node:util';
+import { RemoteKitError } from '../../shared/errors';
 import type { ProductWorkspace } from '../../shared/product';
+import { transaction } from './database';
 export const defaultSettings = () => ({
   searchEngine: 'google' as const,
   qualityPreference: 'auto' as const,

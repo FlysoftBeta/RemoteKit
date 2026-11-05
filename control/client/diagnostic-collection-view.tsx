@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import {
   Alert,
   Button,
@@ -10,6 +9,7 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
+import { useState } from 'react';
 import type { DiagnosticState } from './diagnostic-collection';
 
 export function DiagnosticSettings({

@@ -1,10 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { RemoteKitError } from '../../shared/errors';
 import type { EndpointLink, EndpointLinkState } from './link';
 import { readyTransition } from './link';
-import type { RtcSignal, ClientActionEvent } from './types';
-import { RemoteKitError } from '../../shared/errors';
+import type { ClientActionEvent, RtcSignal } from './types';
 export class LocalProcessLink extends EventEmitter implements EndpointLink {
   state: EndpointLinkState = { state: 'offline' };
   private child?: ChildProcessWithoutNullStreams;

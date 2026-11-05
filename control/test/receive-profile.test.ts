@@ -5,7 +5,7 @@ import {
   chooseReceiveProfile,
   loadReceiveProfile,
   supportsExperimentalH264Level42,
-} from '../client/receive-profile';
+} from '../client/media/receive-profile';
 test('product receive defaults never read persisted experimental settings', (t) => {
   const oldWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const oldNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
@@ -134,7 +134,7 @@ test('only the verified desktop Chrome build defaults to 4.2 and saved choices t
     'native',
   );
 });
-import { selectProductReceiveProfile } from '../client/receive-profile';
+import { selectProductReceiveProfile } from '../client/media/receive-profile';
 test('product prefers decoder-probed level5.2 and falls back to verified level4.2', async () => {
   const codecs = [
     { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' },

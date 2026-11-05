@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import Close from '@mui/icons-material/Close';
 import {
   Alert,
   Box,
@@ -10,7 +10,7 @@ import {
   ToggleButtonGroup,
   Typography,
 } from '@mui/material';
-import Close from '@mui/icons-material/Close';
+import React, { useEffect, useState } from 'react';
 import type { AuthState } from '../shared/security';
 import type { AuthCamera, AuthRequest } from './auth-camera';
 

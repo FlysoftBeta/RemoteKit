@@ -9,8 +9,8 @@ import { readyTransition, type EndpointLinkState } from '../server/endpoint/link
 import { TenantRegistry } from '../server/tenants/tenant-registry';
 import { KeyedSerialQueue } from '../server/util/serial-queue';
 import { runtimeConfig } from '../server/config';
-import { createHttp } from '../server/http';
-import type { Control } from '../server/control';
+import { createHttp } from '../server/http/server';
+import { createApplication, type DomainServices } from '../server/application';
 import { TestClock } from './server-fixture';
 
 test('gateway normalizes identity and preserves execution certainty across native errors', async () => {
@@ -148,25 +148,26 @@ test('configuration validates input and freezes parsed runtime values', () => {
 
 test('HTTP and socket boundaries expose code and message without diagnostic details', async () => {
   let failure: unknown = new RemoteKitError('forbidden', '需要权限', 'private detail');
-  const control = Object.assign(new EventEmitter(), {
-    store: {
-      accounts: {
-        registrationStatus() {
-          throw failure;
-        },
-        identity: () => ({ tenantId: 'tenant' }),
+  const control = {
+    events: new EventEmitter(),
+    accounts: {
+      registrationStatus() {
+        throw failure;
+      },
+      identity: () => ({ tenantId: 'tenant' }),
+    },
+    viewers: {
+      attachViewer: async () => {},
+      detachViewer: async () => {},
+      pollFaceAuth: async () => {},
+      productEpoch: () => 1,
+      productAllowed: () => true,
+      assertViewer: () => {
+        throw failure;
       },
     },
-    attachViewer: async () => {},
-    detachViewer: async () => {},
-    pollFaceAuth: async () => {},
-    productEpoch: () => 1,
-    productAllowed: () => true,
-    viewerRequest: async () => {
-      throw failure;
-    },
-    clearSignals() {},
-  }) as unknown as Control;
+    rtc: { clearSignals() {} },
+  } as unknown as DomainServices;
   const server = createHttp(control, { origins: ['http://test.local'], clientDir: '.' });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');

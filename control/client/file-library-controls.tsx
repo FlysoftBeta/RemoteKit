@@ -1,8 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
 import { Box, Button, Dialog, MenuItem, TextField, Typography } from '@mui/material';
+import React, { useEffect, useRef, useState } from 'react';
 import type { LibraryEntry, LibraryGroup, LibrarySnapshot } from '../shared/file-library';
 import { FILE_LIMITS } from '../shared/product';
-import { operationId } from './product-operations';
+import { operationId } from './control/product-operations';
 import { useLibrary } from './file-library-state';
 
 export function fileError(error: unknown) {

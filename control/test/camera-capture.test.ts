@@ -6,7 +6,7 @@ import {
   type CaptureStats,
   type PhotoBurstDecision,
 } from '../client/camera-capture';
-import type { DcFileClient } from '../client/dc-file-client';
+import type { FileChannel } from '../client/files/file-channel';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -143,17 +143,17 @@ const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 function burstRpc(methods: {
   canSamplePhotoBurst?: () => boolean;
-  beginPhotoBurst?: DcFileClient['beginPhotoBurst'];
-  samplePhotoBurst: DcFileClient['samplePhotoBurst'];
-  endPhotoBurst: DcFileClient['endPhotoBurst'];
-  cancelPhotoBurst?: DcFileClient['cancelPhotoBurst'];
+  beginPhotoBurst?: FileChannel['beginPhotoBurst'];
+  samplePhotoBurst: FileChannel['samplePhotoBurst'];
+  endPhotoBurst: FileChannel['endPhotoBurst'];
+  cancelPhotoBurst?: FileChannel['cancelPhotoBurst'];
 }) {
   return {
     canSamplePhotoBurst: () => true,
     beginPhotoBurst: async () => ({ burstId: 'burst' }),
     cancelPhotoBurst: async () => {},
     ...methods,
-  } as DcFileClient;
+  } as FileChannel;
 }
 
 test('cover uses the centered source region, keeps small frames unscaled and caps output pixels', () => {

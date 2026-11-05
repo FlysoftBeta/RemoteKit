@@ -1,7 +1,8 @@
 import { RemoteKitError } from '../shared/errors';
-import type { ReceiverPlayout } from './receiver-playout';
-import type { ReceiverBufferTiming, ReceiverVideoTiming } from './media-diagnostics';
-export type { ReceiverVideoTiming } from './media-diagnostics';
+import { diagnostics } from './media/diagnostics';
+import type { ReceiverBufferTiming, ReceiverVideoTiming } from './media/media-diagnostics';
+import type { ReceiverPlayout } from './media/receiver-playout';
+export type { ReceiverVideoTiming } from './media/media-diagnostics';
 export interface Surface {
   id: string;
   session: string;
@@ -86,13 +87,21 @@ export interface Diagnostics {
   marker?: { kind: 'input' | 'render'; p50: number; p95: number; samples: number };
 }
 export async function request<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(path, {
-    credentials: 'same-origin',
-    ...(body === undefined
-      ? {}
-      : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      credentials: 'same-origin',
+      ...(body === undefined
+        ? {}
+        : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+    });
+  } catch (error) {
+    throw new RemoteKitError('unavailable', '连接不可用', String(error));
+  }
+  const value = await response.json().catch((error: unknown) => {
+    diagnostics.record('http-response', error);
+    return null;
   });
-  const value = await response.json().catch(() => null);
   if (!response.ok)
     throw new RemoteKitError(value?.error?.code ?? 'internal', value?.error?.message ?? '请求失败');
   return value as T;

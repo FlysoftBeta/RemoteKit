@@ -1,4 +1,5 @@
-﻿import test from 'node:test';
+import { accountsFor } from './server-fixture';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -32,7 +33,7 @@ test('current tables without a schema version reopen with accounts, workspace an
   const path = join(directory, 'control.db');
   let store = new ControlDatabase(path);
   try {
-    const account = await store.accounts.register('schema-user', 'schema-password123');
+    const account = await accountsFor(store).register('schema-user', 'schema-password123');
     const firstView = store.workspaces.viewId();
     const workspace = store.workspaces.workspace(account.tenantId);
     workspace.windows.push({ id: 'window', activeTabId: 'tab', weight: 1 });
@@ -56,7 +57,10 @@ test('current tables without a schema version reopen with accounts, workspace an
     assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 1n }]);
     store.db.close();
     store = new ControlDatabase(path);
-    assert.equal((await store.accounts.login('schema-user', 'schema-password123')).user.id, account.user.id);
+    assert.equal(
+      (await accountsFor(store).login('schema-user', 'schema-password123')).user.id,
+      account.user.id,
+    );
     assert.equal(
       (store.db.prepare('SELECT count(*) AS count FROM schema_version').get() as { count: bigint }).count,
       1n,

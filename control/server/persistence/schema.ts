@@ -1,5 +1,5 @@
-import { RemoteKitError } from '../../shared/errors';
 import type Database from 'better-sqlite3';
+import { RemoteKitError } from '../../shared/errors';
 
 export function createSchema(db: Database.Database) {
   db.transaction(() => {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { fileChooserAccept, validateSelection } from '../client/file-selection';
-import { foregroundRequest } from '../client/foreground-request';
+import { selectVisibility } from '../client/visibility';
 import type { FileRequest, ProductState } from '../shared/product';
 const request: FileRequest = {
   id: 'opaque',
@@ -41,8 +41,8 @@ test('one foreground modal uses active visible window; background requests wait'
     pageDialogs: [{ id: 'page', tabId: 'a' }],
     fileRequests: [{ ...request, id: 'file', tabId: 'b' }],
   } as unknown as ProductState;
-  assert.deepEqual(foregroundRequest(state, 1440), { kind: 'file', id: 'file' });
+  assert.deepEqual(selectVisibility(state, 1440).foreground, { kind: 'file', id: 'file' });
   state.fileRequests = [];
-  assert.deepEqual(foregroundRequest(state, 1440), { kind: 'page', id: 'page' });
-  assert.equal(foregroundRequest(state, 390), null);
+  assert.deepEqual(selectVisibility(state, 1440).foreground, { kind: 'page', id: 'page' });
+  assert.equal(selectVisibility(state, 390).foreground, null);
 });

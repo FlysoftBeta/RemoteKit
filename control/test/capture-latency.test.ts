@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CaptureLatency } from '../client/capture-latency';
-import { ClockDomain } from '../client/clock-domain';
+import { CaptureLatency } from '../client/media/capture-latency';
+import { ClockDomain } from '../client/media/clock-domain';
 const controlClock = () => {
   const c = new ClockDomain();
   c.calibrate(0, 900, 10, 910, 1005);

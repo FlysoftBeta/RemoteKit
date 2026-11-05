@@ -1,3 +1,4 @@
+import { diagnostics } from './media/diagnostics';
 import { useCallback, useEffect, useState } from 'react';
 import { DEFAULT_IDLE_SECONDS, type AuthState } from '../shared/security';
 
@@ -39,7 +40,7 @@ export function useAutoLock(auth: AuthState | null, lock: (reason: string) => vo
         result.addEventListener('change', update);
         update();
       })
-      .catch(() => {});
+      .catch((error) => diagnostics.record('auth-idle', error));
     return () => {
       live = false;
       watched?.removeEventListener('change', update);
@@ -64,7 +65,7 @@ export function useAutoLock(auth: AuthState | null, lock: (reason: string) => vo
           change();
         }
       })
-      .catch(() => {});
+      .catch((error) => diagnostics.record('auth-idle', error));
     return () => {
       controller.abort();
       monitor.removeEventListener('change', change);

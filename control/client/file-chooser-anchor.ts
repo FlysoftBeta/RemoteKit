@@ -1,7 +1,7 @@
 import type { FileRequestAnchor } from '../shared/product';
-import { surfaceDipSize } from './coordinates';
+import { surfaceDipSize } from './input/coordinates';
+import { surfaceMatchesViewport } from './presentation/viewport-transition';
 import type { Layout, Surface } from './types';
-import { surfaceMatchesViewport } from './viewport-transition';
 
 type Bounds = Pick<DOMRectReadOnly, 'left' | 'top' | 'width' | 'height'>;
 export function projectFileInput(

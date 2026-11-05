@@ -3,10 +3,10 @@ import { EventEmitter } from 'node:events';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
+import { RemoteKitError } from '../../shared/errors';
 import type { EndpointLink, EndpointLinkState } from './link';
 import { readyTransition } from './link';
-import type { RtcSignal, ClientActionEvent } from './types';
-import { RemoteKitError } from '../../shared/errors';
+import type { ClientActionEvent, RtcSignal } from './types';
 
 const MAX_MESSAGE = 1024 * 1024;
 interface Connection {

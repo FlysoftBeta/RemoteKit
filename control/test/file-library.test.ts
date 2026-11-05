@@ -5,8 +5,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { createSchema } from '../server/persistence/schema';
-import { FileLibrary } from '../server/file-library';
-import type { InternalFileRequest } from '../server/file-requests';
+import { FileLibrary } from '../server/files/library';
+import type { InternalFileRequest } from '../server/workspace/page-requests';
 import type { LibrarySnapshot, SelectionState } from '../shared/file-library';
 
 const limits = { maxFileBytes: 5, maxBatchBytes: 8, maxFiles: 3, sessionBytes: 100 };

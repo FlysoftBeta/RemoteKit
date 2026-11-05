@@ -1,4 +1,4 @@
-import type { RtcSignal, ClientActionEvent } from './types';
+import type { ClientActionEvent, RtcSignal } from './types';
 export type EndpointLinkState =
   | { state: 'offline' }
   | { state: 'connecting' }

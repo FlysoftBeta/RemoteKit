@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Box, Skeleton, Typography, type SxProps, type Theme } from '@mui/material';
 import { ImageOutlined, InsertDriveFileOutlined } from '@mui/icons-material';
+import { Box, Skeleton, Typography, type SxProps, type Theme } from '@mui/material';
+import { useEffect, useRef, useState } from 'react';
 import { useLibrary } from './file-library-state';
 
 export function FileThumbnail({

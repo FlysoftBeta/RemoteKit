@@ -1,3 +1,5 @@
+import { accountsFor } from './server-fixture';
+import { requestViewer } from './server-fixture';
 import { TestClock, testGateway } from './server-fixture';
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
@@ -6,7 +8,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { Control } from '../server/control';
+import { createApplication, type DomainServices } from '../server/application';
 import type { EndpointLink } from '../server/endpoint/link';
 import { ControlDatabase } from '../server/persistence/database';
 import type { FaceStatus } from '../shared/security';
@@ -85,17 +87,17 @@ async function fixture(t: TestContext, path = ':memory:') {
   const clock = new TestClock(),
     store = new ControlDatabase(path, clock),
     endpoint = new AuthEndpoint(),
-    control = new Control(store, testGateway(endpoint), undefined, clock);
+    control = createApplication(store, testGateway(endpoint), undefined, clock);
   t.after(async () => {
     await control.close();
     store.db.close();
   });
-  const { tenantId: tenant, user } = await store.accounts.register('account-auth', password);
+  const { tenantId: tenant, user } = await accountsFor(store).register('account-auth', password);
   const attach = (lease: string, unlocked = false) =>
-    control.attachViewer(tenant, lease, () => {}, { identity: lease, valid: () => true }, unlocked);
+    control.viewers.attachViewer(tenant, lease, () => {}, { identity: lease, valid: () => true }, unlocked);
   await attach('lease', true);
   const request = (method: string, params: object = {}, lease = 'lease') =>
-    control.viewerRequest(tenant, lease, method, params);
+    requestViewer(control, tenant, lease, method, params);
   const offer = () => request('rtc.offer', { type: 'offer', sdp: 'v=0', attemptId: randomUUID() });
   return { store, endpoint, control, tenant, user, attach, request, offer, clock };
 }
@@ -105,7 +107,7 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
     { connectionId } = await f.offer();
   const first = await f.request('auth.get');
   assert.equal(first.peerEpoch, 1);
-  assert.equal(f.endpoint.calls.find((c) => c.method === 'rtc.offer')?.params.authRequired, true);
+  assert.equal(f.endpoint.calls.find((c) => c.method === 'rtc.offer')?.params.trickle, true);
   const locked = await f.request('auth.lock');
   assert.equal(locked.locked, true);
   assert.equal(locked.peerEpoch, 2);
@@ -118,7 +120,7 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
     operationGeneration: f.store.operations.operationGeneration(f.tenant),
     action: { type: 'window.create' as const },
   };
-  await f.control.handleEndpointAction({ ...op, authEpoch: 1 });
+  await f.control.operations.handleEndpointAction({ ...op, authEpoch: 1 });
   assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
   assert.equal(typeof (await f.request('clock.ping')).serverTime, 'number');
   const unlocked = await f.request('auth.verify', { method: 'password', secret: password });
@@ -129,15 +131,15 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
     f.endpoint.calls.some((c) => c.method === 'rtc.close'),
     false,
   );
-  await f.control.handleEndpointAction({ ...op, authEpoch: 1 });
+  await f.control.operations.handleEndpointAction({ ...op, authEpoch: 1 });
   assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);
-  await f.control.handleEndpointAction({ ...op, authEpoch: 3 });
+  await f.control.operations.handleEndpointAction({ ...op, authEpoch: 3 });
   assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 1);
   assert.equal(f.endpoint.calls.find((c) => c.method === 'rtc.actionResult')?.params.authEpoch, 3);
-  f.control.endpointOffline();
+  f.control.rtc.endpointOffline();
   assert.equal((await f.request('auth.get')).locked, true);
   assert.equal((await f.request('auth.get')).peerEpoch, 0);
-  await f.control.endpointReady({ processChanged: false });
+  await f.control.reconciler.endpointReady({ processChanged: false });
   assert.equal((await f.request('auth.get')).peerEpoch, 4);
 });
 
@@ -214,11 +216,11 @@ test('face template is encrypted and late matches or enrollment results cannot c
   const expire = () => f.clock.advance(120001);
   expire();
   f.endpoint.faceStatus = 'enrolled';
-  await f.control.pollFaceAuth();
+  await f.control.viewers.pollFaceAuth();
   assert.equal((await f.request('auth.get')).face.status, 'expired');
   assert.equal(f.store.security.security(f.user.id).face, undefined);
   await f.request('auth.face.begin', { purpose: 'enroll', currentPassword: password });
-  await f.control.pollFaceAuth();
+  await f.control.viewers.pollFaceAuth();
   const stored = f.store.security.security(f.user.id).face!;
   assert.ok(stored && !stored.sealed.includes(JSON.stringify(template)));
   assert.equal(readFileSync(path + '.face-key').length, 32);
@@ -239,7 +241,7 @@ test('face template is encrypted and late matches or enrollment results cannot c
   assert.equal(begin?.params.epoch, verify.peerEpoch);
   f.endpoint.faceStatus = 'matched';
   f.endpoint.statusGate = defer();
-  const status = f.control.pollFaceAuth();
+  const status = f.control.viewers.pollFaceAuth();
   expire();
   f.endpoint.statusGate.resolve();
   await status;
@@ -248,7 +250,7 @@ test('face template is encrypted and late matches or enrollment results cannot c
   await f.request('auth.face.begin', { purpose: 'presence' });
   f.endpoint.faceStatus = 'absent';
   f.endpoint.faceReason = 'no-matching-face';
-  await f.control.pollFaceAuth();
+  await f.control.viewers.pollFaceAuth();
   const absent = await f.request('auth.get');
   assert.equal(absent.locked, true);
   assert.equal(absent.face.status, 'absent');
@@ -256,10 +258,10 @@ test('face template is encrypted and late matches or enrollment results cannot c
   await f.request('auth.face.begin', { purpose: 'presence' });
   assert.equal((await f.request('auth.get')).face.reason, undefined);
   f.endpoint.faceReason = 'private endpoint error path';
-  await f.control.pollFaceAuth();
+  await f.control.viewers.pollFaceAuth();
   assert.equal((await f.request('auth.get')).face.reason, undefined);
   await f.request('auth.face.begin', { purpose: 'verify' });
   f.endpoint.faceStatus = 'matched';
-  await f.control.pollFaceAuth();
+  await f.control.viewers.pollFaceAuth();
   assert.equal((await f.request('auth.get')).locked, false);
 });

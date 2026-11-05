@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ClockDomain, ClockProbe } from '../client/clock-domain';
-import { CaptureLatency } from '../client/capture-latency';
+import { ClockDomain, ClockProbe } from '../client/media/clock-domain';
+import { CaptureLatency } from '../client/media/capture-latency';
 import { QualityState } from '../server/quality';
 
 test('independent Control +500ms and Endpoint -300ms retain true 100ms latency and Control freshness', () => {

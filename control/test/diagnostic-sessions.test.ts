@@ -8,10 +8,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { zstdDecompressSync } from 'node:zlib';
 import { WebSocket } from 'ws';
-import { createHttp } from '../server/http';
-import { DiagnosticSessions } from '../server/diagnostic-sessions';
-import type { Control } from '../server/control';
-import { collectionInputSample, collectionRtcSample } from '../client/media-diagnostics';
+import { createHttp } from '../server/http/server';
+import { DiagnosticSessions } from '../server/diagnostics/sessions';
+import { createApplication, type DomainServices } from '../server/application';
+import { collectionInputSample, collectionRtcSample } from '../client/media/media-diagnostics';
 import type { DiagnosticReply } from '../shared/diagnostics';
 
 function entries(archive: Buffer) {
@@ -43,7 +43,8 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const leases = new Map<string, { lease: string; epoch?: number; allowed: boolean }>();
   const emitter = new EventEmitter();
   const snapshots: string[] = [];
-  const control = Object.assign(emitter, {
+  const control = {
+    events: emitter,
     store: {
       accounts: {
         identity: (token: string) =>
@@ -101,19 +102,23 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
         };
       },
     },
-    attachViewer: async (tenant: string, lease: string) => {
-      leases.set(tenant, { lease, epoch: tenant === 'locked' ? undefined : 1, allowed: true });
+    viewers: {
+      assertViewer() {},
+      attachViewer: async (tenant: string, lease: string) => {
+        leases.set(tenant, { lease, epoch: tenant === 'locked' ? undefined : 1, allowed: true });
+      },
+      detachViewer: async () => {},
+      productAllowed: (tenant: string, lease: string) =>
+        leases.get(tenant)?.lease === lease && leases.get(tenant)?.allowed,
+      productEpoch: (tenant: string, lease: string) =>
+        leases.get(tenant)?.lease === lease ? leases.get(tenant)?.epoch : undefined,
+      pollFaceAuth: async () => {},
     },
-    detachViewer: async () => {},
-    productAllowed: (tenant: string, lease: string) =>
-      leases.get(tenant)?.lease === lease && leases.get(tenant)?.allowed,
-    productEpoch: (tenant: string, lease: string) =>
-      leases.get(tenant)?.lease === lease ? leases.get(tenant)?.epoch : undefined,
-    pollFaceAuth: async () => {},
-    viewerRequest: async () => {
-      throw new Error('diagnostics escaped its dedicated handler');
+    rtc: { clearSignals() {} },
+    accounts: {
+      identity: (token: string) => (token ? { tenantId: token === 'new-token' ? 'one' : token } : undefined),
     },
-  }) as unknown as Control;
+  } as unknown as DomainServices;
   const server = createHttp(control, {
     origins: ['http://test.local'],
     clientDir: '.',

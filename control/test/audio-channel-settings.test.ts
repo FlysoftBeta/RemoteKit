@@ -1,8 +1,10 @@
+import { accountsFor } from './server-fixture';
+import { requestViewer } from './server-fixture';
 import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ControlDatabase } from '../server/persistence/database';
-import { Control } from '../server/control';
+import { createApplication, type DomainServices } from '../server/application';
 
 const endpoint = {
   async request(method: string) {
@@ -12,11 +14,11 @@ const endpoint = {
 };
 test('audio output channels default on and persist the complete shared pair atomically', async () => {
   const store = new ControlDatabase(':memory:'),
-    control = new Control(store, testGateway(endpoint));
+    control = createApplication(store, testGateway(endpoint));
   try {
-    const account = await store.accounts.register('audio-settings', 'password123'),
+    const account = await accountsFor(store).register('audio-settings', 'password123'),
       tenant = account.tenantId;
-    await control.attachViewer(
+    await control.viewers.attachViewer(
       tenant,
       'viewer',
       () => {},
@@ -26,12 +28,15 @@ test('audio output channels default on and persist the complete shared pair atom
     assert.deepEqual(store.workspaces.workspace(tenant).settings.audioChannels, { left: true, right: true });
     for (const left of [false, true])
       for (const right of [false, true]) {
-        const result = await control.viewerRequest(tenant, 'viewer', 'action', {
+        const result = await requestViewer(control, tenant, 'viewer', 'action', {
           type: 'settings.update',
           settings: { audioChannels: { left, right } },
         });
         assert.deepEqual(result.state.workspace.settings.audioChannels, { left, right });
-        assert.deepEqual(control.productState(tenant).workspace.settings.audioChannels, { left, right });
+        assert.deepEqual(control.viewers.productState(tenant).workspace.settings.audioChannels, {
+          left,
+          right,
+        });
         assert.deepEqual(store.workspaces.workspace(tenant).settings.audioChannels, { left, right });
       }
     for (const channels of [
@@ -42,7 +47,7 @@ test('audio output channels default on and persist the complete shared pair atom
       null,
     ]) {
       await assert.rejects(
-        control.viewerRequest(tenant, 'viewer', 'action', {
+        requestViewer(control, tenant, 'viewer', 'action', {
           type: 'settings.update',
           settings: { audioChannels: channels },
         }),
@@ -53,35 +58,36 @@ test('audio output channels default on and persist the complete shared pair atom
         right: true,
       });
     }
-    await control.attachViewer(
+    await control.viewers.attachViewer(
       tenant,
       'replacement',
       () => {},
       { identity: 'test-account', valid: () => true },
       true,
     );
-    assert.deepEqual(control.productState(tenant).workspace.settings.audioChannels, {
+    assert.deepEqual(control.viewers.productState(tenant).workspace.settings.audioChannels, {
       left: true,
       right: true,
     });
     await assert.rejects(
-      control.viewerRequest(tenant, 'viewer', 'action', {
+      requestViewer(control, tenant, 'viewer', 'action', {
         type: 'settings.update',
         settings: { audioChannels: { left: false, right: false } },
       }),
       { code: 'conflict' },
     );
   } finally {
+    await control.close();
     store.db.close();
   }
 });
 test('audio defaults enable both outputs and failed persistence preserves confirmed channels', async () => {
   const store = new ControlDatabase(':memory:'),
-    control = new Control(store, testGateway(endpoint));
+    control = createApplication(store, testGateway(endpoint));
   try {
-    const { tenantId: tenant } = await store.accounts.register('audio-persistence', 'password123');
+    const { tenantId: tenant } = await accountsFor(store).register('audio-persistence', 'password123');
     assert.deepEqual(store.workspaces.workspace(tenant).settings.audioChannels, { left: true, right: true });
-    await control.attachViewer(
+    await control.viewers.attachViewer(
       tenant,
       'viewer',
       () => {},
@@ -93,18 +99,19 @@ test('audio defaults enable both outputs and failed persistence preserves confir
       throw Error('sqlite fault');
     };
     await assert.rejects(
-      control.viewerRequest(tenant, 'viewer', 'action', {
+      requestViewer(control, tenant, 'viewer', 'action', {
         type: 'settings.update',
         settings: { audioChannels: { left: false, right: false } },
       }),
       { code: 'internal' },
     );
     store.workspaces.saveWorkspace = original;
-    assert.deepEqual(control.productState(tenant).workspace.settings.audioChannels, {
+    assert.deepEqual(control.viewers.productState(tenant).workspace.settings.audioChannels, {
       left: true,
       right: true,
     });
   } finally {
+    await control.close();
     store.db.close();
   }
 });

@@ -1,8 +1,10 @@
+import { accountsFor } from './server-fixture';
+import { requestViewer } from './server-fixture';
 import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ControlDatabase } from '../server/persistence/database';
-import { Control } from '../server/control';
+import { createApplication, type DomainServices } from '../server/application';
 import type { EndpointLink } from '../server/endpoint/link';
 import type { RtcSignal } from '../server/endpoint/types';
 
@@ -39,19 +41,19 @@ async function offered(endpoint: SignalEndpoint, tenant: string) {
 test('pending trickle offers allow other tenants and bind early candidates to connection/attempt/lease', async () => {
   const store = new ControlDatabase(':memory:'),
     endpoint = new SignalEndpoint(),
-    control = new Control(store, testGateway(endpoint));
+    control = createApplication(store, testGateway(endpoint));
   try {
-    const a = await store.accounts.register('signal-a', 'password-a');
-    await store.accounts.setRegistrationCredential(a.tenantId, 'signal-registration');
-    const b = await store.accounts.register('signal-b', 'password-b', 'signal-registration');
-    await control.attachViewer(
+    const a = await accountsFor(store).register('signal-a', 'password-a');
+    await accountsFor(store).setRegistrationCredential(a.tenantId, 'signal-registration');
+    const b = await accountsFor(store).register('signal-b', 'password-b', 'signal-registration');
+    await control.viewers.attachViewer(
       a.tenantId,
       'lease-a',
       () => {},
       { identity: 'test-account', valid: () => true },
       true,
     );
-    await control.attachViewer(
+    await control.viewers.attachViewer(
       b.tenantId,
       'lease-b',
       () => {},
@@ -59,14 +61,14 @@ test('pending trickle offers allow other tenants and bind early candidates to co
       true,
     );
     const events: any[] = [];
-    control.on('rtc.signal', (...event) => events.push(event));
-    const first = control.offer(
+    control.events.on('rtc.signal', (...event) => events.push(event));
+    const first = control.rtc.offer(
       a.tenantId,
       { type: 'offer', sdp: 'v=0\r\n', attemptId: 'attempt-a' },
       'lease-a',
     );
     const connection = await offered(endpoint, a.tenantId);
-    await control.viewerRequest(b.tenantId, 'lease-b', 'clock.ping', {});
+    await requestViewer(control, b.tenantId, 'lease-b', 'clock.ping', {});
     const candidate = {
       candidate: 'candidate:1 1 udp 1 127.0.0.1 9999 typ host',
       sdpMid: '0',
@@ -79,55 +81,55 @@ test('pending trickle offers allow other tenants and bind early candidates to co
     assert.equal(events[0][1], 'lease-a');
     assert.equal(events[0][2].attemptId, 'attempt-a');
     await assert.rejects(
-      control.viewerRequest(a.tenantId, 'lease-a', 'rtc.ice', {
+      requestViewer(control, a.tenantId, 'lease-a', 'rtc.ice', {
         connectionId: connection,
         attemptId: 'old',
         candidate,
       }),
       { code: 'forbidden' },
     );
-    await control.viewerRequest(a.tenantId, 'lease-a', 'rtc.ice', {
+    await requestViewer(control, a.tenantId, 'lease-a', 'rtc.ice', {
       connectionId: connection,
       attemptId: 'attempt-a',
       candidate,
     });
     endpoint.signal(a.tenantId, connection, { type: 'answer', sdp: 'v=0\r\n' });
     assert.equal((await first).signalingMode, 'trickle');
-    await control.detachViewer(a.tenantId, 'lease-a');
+    await control.viewers.detachViewer(a.tenantId, 'lease-a');
     endpoint.signal(a.tenantId, connection, { type: 'ice', candidate });
     assert.equal(events.length, 1);
   } finally {
-    control.clearSignals();
+    control.rtc.clearSignals();
     store.db.close();
   }
 });
 test('close cancels a pending answer immediately and late answers are ignored', async () => {
   const store = new ControlDatabase(':memory:'),
     endpoint = new SignalEndpoint(),
-    control = new Control(store, testGateway(endpoint));
+    control = createApplication(store, testGateway(endpoint));
   try {
-    const a = await store.accounts.register('signal-c', 'password-c');
-    await control.attachViewer(
+    const a = await accountsFor(store).register('signal-c', 'password-c');
+    await control.viewers.attachViewer(
       a.tenantId,
       'lease',
       () => {},
       { identity: 'test-account', valid: () => true },
       true,
     );
-    const pending = control.offer(
+    const pending = control.rtc.offer(
       a.tenantId,
       { type: 'offer', sdp: 'v=0\r\n', attemptId: 'cancel' },
       'lease',
     );
     const failed = assert.rejects(pending, { code: 'unavailable' }),
       connection = await offered(endpoint, a.tenantId);
-    await control
+    await control.rtc
       .closeRtc(a.tenantId, { connectionId: connection }, 'lease')
       .catch((error) => assert.equal(error.code, 'forbidden'));
     await failed;
     endpoint.signal(a.tenantId, connection, { type: 'answer', sdp: 'v=0\r\n' });
   } finally {
-    control.clearSignals();
+    control.rtc.clearSignals();
     store.db.close();
   }
 });

@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AuthCameraChannel, packAuthCameraChunk } from '../client/auth-camera-channel';
+import { AuthCameraChannel } from '../client/auth/auth-camera-channel';
+import { encodeAuthCameraChunk } from '../client/rtc/protocol';
 
 const binding = { authEpoch: 0x1_1234_5678, challengeId: '12345678-1234-4234-8234-123456789abc' };
 
 test('RGB24 wire omits alpha and writes the grant header little endian', () => {
   const rgba = new Uint8ClampedArray([1, 2, 3, 0, 4, 5, 6, 255]);
-  const packet = packAuthCameraChunk({ ...binding, captureId: 10, width: 2, height: 1 }, rgba, 3, 3);
+  const packet = encodeAuthCameraChunk({ ...binding, captureId: 10, width: 2, height: 1 }, rgba, 3, 3);
   const header = new DataView(packet);
   assert.equal(header.getUint32(0, true), 0x46414b52);
   assert.equal(header.getUint16(4, true), 1);

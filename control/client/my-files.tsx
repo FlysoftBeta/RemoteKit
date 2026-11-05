@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { diagnostics } from './media/diagnostics';
+import { Add } from '@mui/icons-material';
 import {
   Alert,
   Box,
@@ -18,8 +19,14 @@ import {
   Typography,
   useMediaQuery,
 } from '@mui/material';
-import { Add } from '@mui/icons-material';
+import { useEffect, useRef, useState } from 'react';
 import type { LibraryEntry, LibraryGroup } from '../shared/file-library';
+import { fileGrid } from './archive-picker';
+import { compactPreview, fileSize } from './basket-rows';
+import { operationId } from './control/product-operations';
+import { FileCard } from './file-card';
+import { FileBasketDialog } from './file-chooser-dialog';
+import { canPreviewFile, FileImagePreview } from './file-image-preview';
 import {
   basketEntries,
   DeviceImport,
@@ -28,17 +35,11 @@ import {
   GroupField,
   GroupPicker,
 } from './file-library-controls';
-import { compactPreview, fileSize } from './basket-rows';
-import { FileCard } from './file-card';
+import { useLibrary } from './file-library-state';
 import { FileThumbnail } from './file-thumbnail';
 import { FileViewButton, useFileView } from './file-view';
-import { fileGrid } from './archive-picker';
-import { canPreviewFile, FileImagePreview } from './file-image-preview';
-import { useLibrary } from './file-library-state';
 import { PhotoCapture } from './photo-library-capture';
-import { FileBasketDialog } from './file-chooser-dialog';
 import { PhotoOptions } from './photo-options';
-import { operationId } from './product-operations';
 
 const PAGE_SIZE = 50;
 const dates = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' });
@@ -90,7 +91,7 @@ export function MyFiles({ visible }: { visible: boolean }) {
   const disabled = !online || busy || uploading || !snapshot;
   const systemNarrow = useMediaQuery('(max-width:599px)');
   useEffect(() => {
-    if (online && visible) void refresh().catch(() => {});
+    if (online && visible) void refresh().catch((error) => diagnostics.record('my-files', error));
   }, [online, visible]);
   useEffect(() => {
     const node = pane.current;

@@ -1,5 +1,5 @@
-import React, { useRef } from 'react';
 import { Box, ButtonBase, Typography } from '@mui/material';
+import React, { useRef } from 'react';
 import { FileThumbnail } from './file-thumbnail';
 import type { SortActivator } from './sortable-file-items';
 

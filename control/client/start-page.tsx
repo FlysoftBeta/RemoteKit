@@ -1,6 +1,6 @@
-import { useRef, useState } from 'react';
-import { IconButton, InputBase, Typography } from '@mui/material';
 import { ArrowForward, Search } from '@mui/icons-material';
+import { IconButton, InputBase, Typography } from '@mui/material';
+import { useRef, useState } from 'react';
 
 export function StartPage({
   engineLabel,

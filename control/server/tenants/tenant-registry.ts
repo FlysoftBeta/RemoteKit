@@ -1,7 +1,11 @@
-import { TenantRuntime } from './tenant-runtime';
-import { KeyedSerialQueue } from '../util/serial-queue';
 import { systemClock, type Clock } from '../util/clock';
+import { KeyedSerialQueue } from '../util/serial-queue';
+import { TenantRuntime } from './tenant-runtime';
 export class TenantRegistry {
+  endpointGeneration = 0;
+  mediaGeneration(tenantId: string) {
+    return this.get(tenantId).mediaGeneration ?? this.endpointGeneration;
+  }
   private readonly runtimes = new Map<string, TenantRuntime>();
   private readonly queue = new KeyedSerialQueue();
   constructor(private readonly clock: Clock = systemClock) {}

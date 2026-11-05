@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { diagnostics } from './media/diagnostics';
 import {
   Alert,
   Button,
@@ -13,6 +13,7 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
+import React, { useEffect, useRef, useState } from 'react';
 import type { AuthSettings, AuthState } from '../shared/security';
 import type { AuthCamera, AuthRequest } from './auth-camera';
 import type { useAutoLock } from './auth-idle';
@@ -33,7 +34,7 @@ function CameraPreview({ stream }: { stream?: MediaStream }) {
     const element = video.current;
     if (!element) return;
     element.srcObject = stream ?? null;
-    if (stream) void element.play().catch(() => {});
+    if (stream) void element.play().catch((error) => diagnostics.record('security-settings', error));
     return () => {
       element.srcObject = null;
     };

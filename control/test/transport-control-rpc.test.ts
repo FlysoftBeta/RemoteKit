@@ -1,603 +1,211 @@
-import test, { type TestContext } from 'node:test';
+﻿import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { RemoteTransport, type ControlRpc } from '../client/transport';
-import { readFileSync } from 'node:fs';
-import { requireAcceptedReceipt, type ProductActionHandler } from '../client/product-operations';
-import type { OperationReceipt } from '../shared/product';
-
-for (const status of ['applying', 'committed', 'unknown'] as const)
-  test(`product action ${status} wire is an execution receipt without a workspace`, async (t) => {
-    environment(t);
-    const transport = new RemoteTransport();
-    t.after(() => transport.disconnect());
-    const sent: unknown[] = [];
-    const channel: any = {
-      readyState: 'open',
-      bufferedAmount: 0,
-      send(value: string) {
-        sent.push(JSON.parse(value));
-      },
-      close() {
-        this.readyState = 'closed';
-      },
-    };
-    (transport as any).bindChannel(channel);
-    const receipt: OperationReceipt = {
-      operationId: 'forward-operation',
-      operationGeneration: 'generation-1',
-      status,
-      ...(status === 'applying'
-        ? { application: { status: 'pending' as const, reason: 'navigation_pending' } }
-        : {}),
-      ...(status === 'committed' ? { revision: 12 } : {}),
-    };
-    const action: ProductActionHandler = async (command) =>
-      requireAcceptedReceipt(
-        await transport.productAction({
-          operationId: receipt.operationId,
-          operationGeneration: receipt.operationGeneration,
-          action: command,
-        }),
-      );
-    const pending = action({ type: 'tab.command', tabId: 'tab-1', command: 'forward' });
-    channel.onmessage({
-      data: JSON.stringify({
-        type: 'product.result',
-        version: 1,
-        operationId: receipt.operationId,
-        operationGeneration: receipt.operationGeneration,
-        result: receipt,
-      }),
-    });
-    assert.deepEqual(await pending, receipt);
-    assert.equal('state' in receipt, false);
-    assert.equal(sent.length, 1, 'pending or unknown receipt must not replay the action');
-  });
-
-test('receipt submission rejects only explicit rejected/expired outcomes', () => {
-  for (const status of ['rejected', 'expired'] as const)
-    assert.throws(
-      () =>
-        requireAcceptedReceipt({
-          operationId: 'operation',
-          operationGeneration: 'generation',
-          status,
-          error: 'explicit rejection',
-        }),
-      /explicit rejection/,
-    );
-});
-
-test('locking retires pending product work and old authorization cannot complete new work', async (t) => {
-  environment(t);
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  transport.setControlRpc(async () => ({}));
-  transport.observePeerAuthorization(1);
-  transport.setProductLocked(false);
-  const sent: any[] = [];
-  const channel: any = {
-    readyState: 'open',
-    bufferedAmount: 0,
-    send(value: string) {
-      sent.push(JSON.parse(value));
-    },
-  };
-  (transport as any).bindChannel(channel);
-  const operation = {
-    operationId: 'open-window',
-    operationGeneration: 'generation',
-    action: { type: 'window.create' as const },
-  };
-  const first = transport.productAction(operation);
-  const interrupted = assert.rejects(first, { operationSent: true });
-  transport.setProductLocked(true);
-  await interrupted;
-  await assert.rejects(transport.productAction(operation), { operationSent: false });
-  transport.observePeerAuthorization(3);
-  transport.setProductLocked(false);
-  const second = transport.productAction(operation);
-  const emit = (authEpoch: number, status: 'rejected' | 'committed') =>
-    channel.onmessage({
-      data: JSON.stringify({
-        type: 'product.result',
-        version: 1,
-        authEpoch,
-        ...operation,
-        result: { ...operation, status },
-      }),
-    });
-  emit(1, 'rejected');
-  emit(3, 'committed');
-  assert.equal((await second).status, 'committed');
-  assert.deepEqual(
-    sent.filter((value) => value.type === 'product.action').map((value) => value.authEpoch),
-    [1, 3],
-  );
-  assert.equal((transport as any).channel, channel);
-});
+import { RtcSession, type RtcEvent } from '../client/rtc/rtc-session';
+import type { ControlRpc } from '../client/rtc/session-port';
 
 function environment(t: TestContext) {
-  const values: Record<string, unknown> = {
-    document: {
-      visibilityState: 'visible',
-      createElement: () => ({ pause() {}, remove() {} }),
-      addEventListener() {},
-      removeEventListener() {},
-    },
-    navigator: { userAgent: 'Chrome/157.0' },
-    RTCRtpReceiver: { getCapabilities: () => ({ codecs: [] }) },
-    requestAnimationFrame: () => 1,
-    cancelAnimationFrame() {},
-    RTCPeerConnection: class {
-      iceGatheringState = 'complete';
-      localDescription: unknown;
-      signalingState = 'stable';
-      addTransceiver() {
-        return {};
-      }
-      createDataChannel(label: string) {
-        return { label, close() {} };
-      }
-      async createOffer() {
-        return { type: 'offer', sdp: 'v=0\r\n' };
-      }
-      async setLocalDescription(value: unknown) {
-        this.localDescription = value;
-      }
-      async setRemoteDescription() {}
-      async addIceCandidate(_candidate: unknown) {}
-      close() {
-        this.signalingState = 'closed';
-      }
-    },
-  };
-  for (const [name, value] of Object.entries(values)) {
-    const old = Object.getOwnPropertyDescriptor(globalThis, name);
-    Object.defineProperty(globalThis, name, { configurable: true, value });
-    t.after(() => {
-      if (old) Object.defineProperty(globalThis, name, old);
-      else Reflect.deleteProperty(globalThis, name);
-    });
-  }
-  t.mock.method(globalThis, 'fetch', async () => {
-    throw new Error('Unexpected HTTP fallback');
-  });
-}
-
-test('receivers configure zero playout target on transceiver creation and again on track delivery', async (t) => {
-  environment(t);
-  const initial: { jitterBufferTarget: number }[] = [];
-  t.mock.method(RTCPeerConnection.prototype, 'addTransceiver', () => {
-    const receiver = { jitterBufferTarget: 100 };
-    initial.push(receiver);
-    return { receiver } as unknown as RTCRtpTransceiver;
-  });
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  transport.setControlRpc(async (method) =>
-    method === 'rtc.offer' ? { type: 'answer', sdp: 'v=0\r\n', connectionId: 'p' } : { closed: true },
-  );
-  await transport.connect();
-  assert.deepEqual(
-    initial.map((receiver) => receiver.jitterBufferTarget),
-    [0, 0],
-  );
-  const peer = (transport as any).peer as RTCPeerConnection;
-  const receiver = { playoutDelayHint: 0.5 };
-  // Pending video presentation returns before attaching a real MediaStream.
-  (transport as any).presentationBackend = 'pending';
-  peer.ontrack!({ track: { kind: 'video' }, receiver } as unknown as RTCTrackEvent);
-  assert.equal(receiver.playoutDelayHint, 0);
-  assert.equal('jitterBufferTarget' in receiver, false);
-  assert.equal(transport.diagnostics.receiverPlayout?.video?.jitterBufferTargetSupported, false);
-  assert.equal(transport.diagnostics.receiverPlayout?.video?.playoutDelayHint, 0);
-  transport.disconnect();
-});
-
-test('Native forwarded timeout wire preserves unknown receipt without Client replay', async (t) => {
-  environment(t);
-  // The Native DirectServices CPU test compares its actual timeout output to
-  // this same fixture, so this exercises the complete cross-language contract.
-  const wire = JSON.parse(
-    readFileSync(
-      new URL('../../endpoint/tests/fixtures/product-action-timeout.json', import.meta.url),
-      'utf8',
-    ),
-  );
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  const sent: any[] = [],
-    channel: any = {
-      readyState: 'open',
-      bufferedAmount: 0,
-      send(value: string) {
-        sent.push(JSON.parse(value));
-      },
-      close() {
-        this.readyState = 'closed';
-      },
-    };
-  (transport as any).bindChannel(channel);
-  const pending = transport.productAction({
-    operationId: wire.operationId,
-    operationGeneration: wire.operationGeneration,
-    action: { type: 'window.create' },
-  });
-  channel.onmessage({ data: JSON.stringify(wire) });
-  assert.deepEqual(await pending, wire.result);
-  assert.equal(sent.filter((message) => message.type === 'product.action').length, 1);
-  assert.equal((transport as any).productPending.size, 0);
-});
-
-test('transport separates Endpoint DC clock from Control RPC and expires pending probes across replacement', async (t) => {
-  environment(t);
-  let now = 0;
-  t.mock.method(performance, 'now', () => now);
-  t.mock.method(Date, 'now', () => 1000 + now);
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  const state = transport as any;
-  const replies: ((value: unknown) => void)[] = [];
-  transport.setControlRpc(async (method) =>
-    method === 'clock.ping' ? new Promise((resolve) => replies.push(resolve)) : {},
-  );
-  transport.observePeerAuthorization(1);
-  transport.setProductLocked(false);
-  const peer = { close() {} };
-  state.peer = peer;
-  const sent: any[] = [];
-  const channel = () =>
-    ({
-      readyState: 'open',
-      bufferedAmount: 0,
-      send(value: string) {
-        sent.push(JSON.parse(value));
-      },
-    }) as any;
-  const old = channel();
-  state.bindChannel(old);
-  state.productionFeedback(peer);
-  assert.equal(sent[0].type, 'clock.ping');
-  assert.equal(replies.length, 1);
-  now = 10;
-  old.onmessage({
-    data: JSON.stringify({ ...sent[0], type: 'clock.pong', serverTimeMs: 705, serverMonotonicMs: 500 }),
-  });
-  assert.equal(state.latency.endpointClock.mapping(now, 1010).wall, 710);
-  assert.equal(state.controlClock.mapping(now, 1010), undefined);
-  // A hung Control RPC cannot block bounded resampling.
-  now = 5000;
-  state.productionFeedback(peer);
-  assert.equal(replies.length, 2);
-  now = 5010;
-  replies[0]({ serverTime: 1505 });
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.equal(state.controlClock.mapping(now, 6010), undefined);
-  replies[1]({ serverTime: 6505 });
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.equal(state.controlClock.mapping(now, 6010).wall, 6510);
-  const replacement = channel();
-  state.bindChannel(replacement);
-  assert.equal(state.latency.endpointClock.mapping(now, 6010), undefined);
-  old.onmessage({
-    data: JSON.stringify({ ...sent[1], type: 'clock.pong', serverTimeMs: 5705, serverMonotonicMs: 5500 }),
-  });
-  assert.equal(state.latency.endpointClock.mapping(now, 6010), undefined);
-  state.sampleEndpointClock();
-  const fresh = sent[sent.length - 1];
-  now = 5020;
-  replacement.onmessage({
-    data: JSON.stringify({ ...fresh, type: 'clock.pong', serverTimeMs: 5715, serverMonotonicMs: 5510 }),
-  });
-  assert.equal(state.latency.endpointClock.mapping(now, 6020).wall, 5720);
-});
-
-test('product offer and disconnect use injected RPC and preserve SDP diagnostics', async (t) => {
-  environment(t);
-  const calls: { method: string; params: unknown }[] = [];
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  transport.setControlRpc(async (method, params) => {
-    calls.push({ method, params });
-    return method === 'rtc.offer'
-      ? { type: 'answer', sdp: 'v=0\r\n', connectionId: 'first', endpointGeneration: 1 }
-      : { closed: true };
-  });
-  await transport.connect();
-  assert.equal(calls[0].method, 'rtc.offer');
-  assert.equal(transport.signaling?.answerSdp, 'v=0\r\n');
-  assert.equal(transport.diagnostics.connectionId, 'first');
-  assert.equal((transport as any).channel.label, 'remotekit');
-  assert.equal((transport as any).authCamera.channel.label, 'remotekit-auth');
-  transport.disconnect();
-  assert.deepEqual(calls[1], { method: 'rtc.close', params: { connectionId: 'first' } });
-});
-
-test('manual authorization transitions retain the negotiated peer and both channels', async (t) => {
-  environment(t);
-  const methods: string[] = [];
-  const transport = new RemoteTransport();
-  transport.setControlRpc(async (method) => {
-    methods.push(method);
-    return method === 'rtc.offer'
-      ? { type: 'answer', sdp: 'v=0\r\n', connectionId: 'retained', endpointGeneration: 1 }
-      : { closed: true };
-  });
-  try {
-    await transport.connect();
-    const internal = transport as any;
-    const { peer, channel } = internal;
-    const authChannel = internal.authCamera.channel;
-    transport.observeEndpointGeneration(1);
-    transport.observePeerAuthorization(1);
-    transport.setProductLocked(false);
-    // Mirror the optimistic local lock, confirmed server epoch, and then the
-    // unlocked server epoch followed by a fresh product snapshot.
-    transport.setProductLocked(true);
-    transport.setAuthCamera();
-    transport.observePeerAuthorization(2);
-    transport.observeEndpointGeneration(1);
-    transport.observePeerAuthorization(3);
-    transport.setProductLocked(false);
-    assert.equal(internal.peer, peer);
-    assert.equal(internal.channel, channel);
-    assert.equal(internal.authCamera.channel, authChannel);
-    assert.equal(transport.diagnostics.connectionId, 'retained');
-    assert.deepEqual(methods, ['rtc.offer']);
-  } finally {
-    transport.disconnect();
-  }
-});
-
-test('trickle sends an ungathered offer, queues early remote ICE, and flushes local ICE after answer', async (t) => {
-  environment(t);
-  const received: unknown[] = [],
-    calls: { method: string; params: any }[] = [];
-  t.mock.method(RTCPeerConnection.prototype, 'addIceCandidate', async (candidate: RTCIceCandidateInit) => {
-    received.push(candidate);
-  });
-  t.mock.method(
-    RTCPeerConnection.prototype,
-    'setLocalDescription',
-    async function (this: RTCPeerConnection, value: unknown) {
-      Object.assign(this, { localDescription: value, iceGatheringState: 'gathering' });
-      this.onicecandidate?.({
-        candidate: { toJSON: () => ({ candidate: 'local', sdpMid: '0', sdpMLineIndex: 0 }) },
-      } as RTCPeerConnectionIceEvent);
-    },
-  );
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  const candidate = { candidate: 'remote', sdpMid: '0', sdpMLineIndex: 0 };
-  transport.setControlRpc(async (method, params: any) => {
-    calls.push({ method, params });
-    if (method === 'rtc.offer') {
-      assert.equal(typeof params.attemptId, 'string');
-      transport.receiveServerSignal({
-        type: 'rtc.signal',
-        connectionId: 'p',
-        attemptId: params.attemptId,
-        signal: { type: 'ice', candidate },
-      });
-      transport.receiveServerSignal({
-        type: 'rtc.signal',
-        connectionId: 'old',
-        attemptId: 'stale',
-        signal: { type: 'ice', candidate: { ...candidate, candidate: 'stale' } },
-      });
-      assert.equal(received.length, 0);
-      return { type: 'answer', sdp: 'v=0\r\n', connectionId: 'p', signalingMode: 'trickle' };
+  const peers: Peer[] = [];
+  class Peer {
+    localDescription?: RTCSessionDescriptionInit;
+    connectionState = 'new';
+    iceConnectionState = 'new';
+    signalingState = 'stable';
+    closed = false;
+    candidates: RTCIceCandidateInit[] = [];
+    channels: { label: string }[] = [];
+    onicecandidate?: (event: { candidate: { toJSON(): RTCIceCandidateInit } | null }) => void;
+    onconnectionstatechange?: () => void;
+    ontrack?: (event: { track: MediaStreamTrack; receiver: RTCRtpReceiver }) => void;
+    constructor() {
+      peers.push(this);
     }
-    return { accepted: true };
-  });
-  await transport.connect();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(received, [candidate]);
-  assert.equal(calls[0].method, 'rtc.offer');
-  assert.equal(calls[1].method, 'rtc.ice');
-  assert.equal(calls[1].params.connectionId, 'p');
-  assert.equal(calls[1].params.attemptId, calls[0].params.attemptId);
-  assert.equal(transport.connectionAttempts[0].signalingMode, 'trickle');
-  transport.disconnect();
-});
+    addTransceiver() {
+      return { receiver: {} };
+    }
+    createDataChannel(label: string) {
+      const channel = { label };
+      this.channels.push(channel);
+      return channel;
+    }
+    async createOffer() {
+      return { type: 'offer' as const, sdp: 'v=0\r\n' };
+    }
+    async setLocalDescription(value: RTCSessionDescriptionInit) {
+      this.localDescription = value;
+    }
+    async setRemoteDescription() {}
+    async addIceCandidate(candidate: RTCIceCandidateInit) {
+      this.candidates.push(candidate);
+    }
+    close() {
+      this.closed = true;
+      this.signalingState = 'closed';
+    }
+  }
+  for (const [name, value] of Object.entries({
+    navigator: { userAgent: 'Chrome/89.0' },
+    RTCPeerConnection: Peer,
+    RTCRtpReceiver: { getCapabilities: () => ({ codecs: [] }) },
+  })) {
+    const previous = Object.getOwnPropertyDescriptor(globalThis, name);
+    Object.defineProperty(globalThis, name, { configurable: true, value });
+    t.after(() =>
+      previous ? Object.defineProperty(globalThis, name, previous) : Reflect.deleteProperty(globalThis, name),
+    );
+  }
+  const rtc = new RtcSession();
+  t.after(() => rtc.disconnect());
+  const events: RtcEvent[] = [];
+  rtc.events.subscribe((event) => events.push(event));
+  return { rtc, peers, events };
+}
+const answer = { type: 'answer', sdp: 'v=0\r\n', connectionId: 'connection', endpointGeneration: 1 };
+const flush = async () => {
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+};
 
-test('a network timeout never changes a decoder-verified receive profile', async (t) => {
-  environment(t);
-  const codec = {
-    mimeType: 'video/H264',
-    clockRate: 90000,
-    sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f',
-  };
-  t.mock.method(RTCRtpReceiver, 'getCapabilities', () => ({ codecs: [codec], headerExtensions: [] }));
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  (transport as any).productReceiveSelection = { profile: 'h264-level52', reason: 'verified decoder' };
-  t.mock.method(RTCPeerConnection.prototype, 'createOffer', async () => ({
-    type: 'offer' as const,
-    sdp: 'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 108\r\na=rtpmap:108 H264/90000\r\na=fmtp:108 packetization-mode=1;profile-level-id=42e01f\r\n',
-  }));
-  transport.setControlRpc(async () => {
-    throw new Error('ICE gathering timeout');
-  });
-  await transport.connect();
-  assert.equal((transport as any).productReceiveSelection.profile, 'h264-level52');
-});
-
-test('explicit codec failures fall through level5.2 then 5.1 before verified level4.2', async (t) => {
-  environment(t);
-  const codec = {
-    mimeType: 'video/H264',
-    clockRate: 90000,
-    sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f',
-  };
-  t.mock.method(RTCRtpReceiver, 'getCapabilities', () => ({ codecs: [codec], headerExtensions: [] }));
-  const sdp =
-    'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 108\r\na=rtpmap:108 H264/90000\r\na=fmtp:108 packetization-mode=1;profile-level-id=42e01f\r\n';
-  t.mock.method(RTCPeerConnection.prototype, 'createOffer', async () => ({ type: 'offer' as const, sdp }));
-  let attempts = 0;
-  t.mock.method(RTCPeerConnection.prototype, 'setRemoteDescription', async () => {
-    if (++attempts < 3) throw new Error('unsupported SDP codec');
-  });
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  (transport as any).productReceiveSelection = { profile: 'h264-level52', reason: 'verified decoder' };
-  transport.setControlRpc(async (method) =>
-    method === 'rtc.offer' ? { type: 'answer', sdp, connectionId: 'p' } : { closed: true },
-  );
-  await transport.connect();
-  assert.equal((transport as any).productReceiveSelection.profile, 'h264-level51');
-  await transport.connect();
-  assert.equal((transport as any).productReceiveSelection.profile, 'h264-level42-experimental');
-  await transport.connect();
-  assert.equal(transport.receiveProfile, 'h264-level42-experimental');
-  transport.disconnect();
-});
-
-test('lease revocation during pending offer closes its late answer without reconnecting', async (t) => {
-  environment(t);
-  let answer!: (value: unknown) => void;
-  let offered!: () => void;
-  const offerStarted = new Promise<void>((resolve) => {
-    offered = resolve;
-  });
+test('RTC publishes channels, receivers and tracks independently of presentation', async (t) => {
+  const { rtc, peers, events } = environment(t);
   const calls: string[] = [];
-  const transport = new RemoteTransport();
-  transport.setControlRpc((method) => {
+  rtc.setControlRpc(async (method) => {
     calls.push(method);
-    if (method !== 'rtc.offer') return Promise.resolve({ closed: true });
-    offered();
-    return new Promise((resolve) => {
-      answer = resolve;
-    });
+    return method === 'rtc.offer' ? answer : {};
   });
-  const connecting = transport.connect();
-  await offerStarted;
-  transport.disconnect();
-  answer({ type: 'answer', sdp: 'v=0\r\n', connectionId: 'late' });
-  await connecting;
-  assert.deepEqual(calls, ['rtc.offer', 'rtc.close']);
-  const internal = transport as unknown as { reconnect: { wanted: boolean }; retryTimer?: unknown };
-  assert.equal(internal.reconnect.wanted, false);
-  assert.equal(internal.retryTimer, undefined);
-  assert.equal(transport.diagnostics.connectionId, undefined);
-});
-
-test('ordinary transport has no implicit HTTP signaling', async (t) => {
-  environment(t);
-  const transport = new RemoteTransport();
-  const internal = transport as unknown as { rtcRequest: ControlRpc };
-  await assert.rejects(internal.rtcRequest('rtc.offer', {}), /WebSocket/);
-});
-
-test('failed automatic level4.2 negotiation downgrades once and keeps original SDP evidence', async (t) => {
-  environment(t);
-  const codec = {
-    mimeType: 'video/H264',
-    clockRate: 90000,
-    sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f',
-  };
-  t.mock.method(RTCRtpReceiver, 'getCapabilities', () => ({ codecs: [codec], headerExtensions: [] }));
-  const oldDecoder = Object.getOwnPropertyDescriptor(globalThis, 'VideoDecoder');
-  let probes = 0;
-  Object.defineProperty(globalThis, 'VideoDecoder', {
-    configurable: true,
-    value: {
-      isConfigSupported: async (config: { codec: string }) => {
-        probes++;
-        return { supported: config.codec === 'avc1.42e02a' };
-      },
-    },
-  });
-  t.after(() => {
-    if (oldDecoder) Object.defineProperty(globalThis, 'VideoDecoder', oldDecoder);
-    else Reflect.deleteProperty(globalThis, 'VideoDecoder');
-  });
-  const sdp =
-    'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 108\r\na=rtpmap:108 H264/90000\r\na=fmtp:108 packetization-mode=1;profile-level-id=42e01f\r\n';
-  t.mock.method(RTCPeerConnection.prototype, 'createOffer', async () => ({ type: 'offer' as const, sdp }));
-  let descriptions = 0;
-  t.mock.method(RTCPeerConnection.prototype, 'setRemoteDescription', async () => {
-    if (++descriptions === 1) throw new Error('unsupported SDP codec answer');
-  });
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  transport.setControlRpc(async (method) =>
-    method === 'rtc.offer' ? { type: 'answer', sdp, connectionId: 'p' } : { closed: true },
+  await rtc.connect();
+  assert.equal(rtc.getSnapshot().phase, 'establishing');
+  assert.deepEqual(
+    peers[0].channels.map((channel) => channel.label),
+    ['remotekit', 'remotekit-auth'],
   );
-  await transport.connect();
-  await transport.connect();
-  assert.equal(transport.receiveProfile, 'native');
-  assert.equal(probes, 3);
-  assert.match(String(transport.diagnostics.receiveSelection?.reason), /negotiation failed/);
-  const previous = transport.signaling?.previousNegotiationFailure as Record<string, unknown>;
-  assert.equal(previous.originalOfferSdp, sdp);
-  assert.match(String(previous.effectiveOfferSdp), /42e02a/);
-  transport.disconnect();
+  assert.equal(events.filter((event) => event.type === 'receiver').length, 2);
+  const track = { kind: 'video' } as MediaStreamTrack;
+  peers[0].ontrack?.({ track, receiver: {} as RTCRtpReceiver });
+  assert.ok(events.some((event) => event.type === 'track' && event.track === track));
+  peers[0].connectionState = 'connected';
+  peers[0].onconnectionstatechange?.();
+  assert.equal(rtc.getSnapshot().phase, 'connected');
+  rtc.disconnect();
+  assert.equal(rtc.getSnapshot().phase, 'stopped');
+  assert.equal(peers[0].closed, true);
+  assert.deepEqual(calls, ['rtc.offer', 'rtc.close']);
 });
 
-test('start-page actions wait in memory for data-only RTC and first navigation preserves the same peer/channel', async (t) => {
-  environment(t);
-  const transport = new RemoteTransport();
-  t.after(() => transport.disconnect());
-  const sent: any[] = [],
-    channel: any = {
-      readyState: 'connecting',
-      bufferedAmount: 0,
-      send(value: string) {
-        sent.push(JSON.parse(value));
-      },
-      close() {
-        this.readyState = 'closed';
-      },
-    };
-  (transport as any).bindChannel(channel);
-  const first = {
-    operationId: '12345678-1234-4234-8234-123456789abc',
-    operationGeneration: 'generation',
-    action: { type: 'window.create' as const },
+test('trickle queues early remote ICE and sends local ICE after the matching answer', async (t) => {
+  const { rtc, peers } = environment(t);
+  let finish!: (value: unknown) => void;
+  let attemptId = '';
+  const ice: unknown[] = [];
+  rtc.setControlRpc(async (method, params) => {
+    if (method === 'rtc.offer') {
+      attemptId = (params as { attemptId: string }).attemptId;
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    }
+    if (method === 'rtc.ice') ice.push(params);
+    return {};
+  });
+  const job = rtc.connect();
+  await flush();
+  const candidate = { candidate: 'candidate:1', sdpMid: '0' };
+  peers[0].onicecandidate?.({ candidate: { toJSON: () => candidate } });
+  rtc.receiveServerSignal({
+    type: 'rtc.signal',
+    attemptId,
+    connectionId: 'connection',
+    signal: { type: 'ice', candidate },
+  });
+  assert.deepEqual(peers[0].candidates, []);
+  assert.deepEqual(ice, []);
+  finish(answer);
+  await job;
+  await flush();
+  assert.deepEqual(peers[0].candidates, [candidate]);
+  assert.equal(ice.length, 1);
+  rtc.receiveServerSignal({
+    type: 'rtc.signal',
+    attemptId: 'stale',
+    connectionId: 'connection',
+    signal: { type: 'ice', candidate },
+  });
+  await flush();
+  assert.equal(peers[0].candidates.length, 1);
+});
+
+test('stopping an establishing peer closes a late answer and prevents retries', async (t) => {
+  const { rtc, peers } = environment(t);
+  let finish!: (value: unknown) => void;
+  const closed: unknown[] = [];
+  rtc.setControlRpc(async (method, params) => {
+    if (method === 'rtc.offer')
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    if (method === 'rtc.close') closed.push(params);
+    return {};
+  });
+  const job = rtc.connect();
+  await flush();
+  rtc.disconnect();
+  finish(answer);
+  await job;
+  assert.equal(rtc.getSnapshot().phase, 'stopped');
+  assert.equal(peers[0].closed, true);
+  assert.deepEqual(closed, [{ connectionId: 'connection' }]);
+});
+
+test('RTC retries bounded attempts and manual connect starts a fresh attempt', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { rtc } = environment(t);
+  let offers = 0;
+  const rpc: ControlRpc = async () => {
+    offers++;
+    throw new Error('offline');
   };
-  const pending = transport.productAction(first);
-  assert.equal(sent.length, 0);
-  channel.readyState = 'open';
-  channel.onopen();
-  const wire = sent.find((message) => message.type === 'product.action');
-  assert.equal(wire.operationId, first.operationId);
-  assert.equal(wire.version, 1);
-  channel.onmessage({
-    data: JSON.stringify({
-      type: 'product.result',
-      version: 1,
-      operationId: first.operationId,
-      operationGeneration: first.operationGeneration,
-      result: { ...first, action: undefined, status: 'committed', revision: 1 },
-    }),
+  rtc.setControlRpc(rpc);
+  await rtc.connect();
+  assert.equal(rtc.getSnapshot().phase, 'retryWait');
+  for (const delay of [2000, 5000, 10000]) {
+    t.mock.timers.tick(delay);
+    await flush();
+  }
+  assert.equal(rtc.getSnapshot().phase, 'exhausted');
+  assert.equal(offers, 4);
+  await rtc.connect();
+  assert.equal(rtc.getSnapshot().phase, 'retryWait');
+  assert.equal(offers, 5);
+});
+
+test('connected peers reset the outage budget and stopped sessions ignore delayed recovery', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { rtc, peers } = environment(t);
+  let offers = 0;
+  rtc.setControlRpc(async (method) => {
+    if (method === 'rtc.offer') {
+      offers++;
+      return { ...answer, connectionId: `connection-${offers}` };
+    }
+    return {};
   });
-  assert.equal((await pending).status, 'committed');
-  const peer = (transport as any).peer,
-    next = {
-      ...first,
-      operationId: '22345678-1234-4234-8234-123456789abc',
-      action: { type: 'tab.navigate' as const, tabId: 'tab', url: 'https://example.test/' },
-    };
-  const navigation = transport.productAction(next);
-  assert.equal((transport as any).channel, channel);
-  assert.equal((transport as any).peer, peer);
-  channel.onmessage({
-    data: JSON.stringify({
-      type: 'product.result',
-      version: 1,
-      operationId: next.operationId,
-      operationGeneration: next.operationGeneration,
-      result: {
-        operationId: next.operationId,
-        operationGeneration: next.operationGeneration,
-        status: 'applying',
-      },
-    }),
-  });
-  assert.equal((await navigation).status, 'applying');
-  assert.equal(sent.filter((message) => message.type === 'product.action').length, 2);
+  await rtc.connect();
+  peers[0].connectionState = 'connected';
+  peers[0].onconnectionstatechange?.();
+  peers[0].connectionState = 'disconnected';
+  peers[0].onconnectionstatechange?.();
+  peers[0].onconnectionstatechange?.();
+  t.mock.timers.tick(2000);
+  await flush();
+  assert.equal(offers, 2);
+  peers[1].connectionState = 'connected';
+  peers[1].onconnectionstatechange?.();
+  peers[1].connectionState = 'failed';
+  peers[1].onconnectionstatechange?.();
+  t.mock.timers.tick(2000);
+  await flush();
+  assert.equal(offers, 3);
+  rtc.disconnect();
+  t.mock.timers.tick(10000);
+  await flush();
+  assert.equal(rtc.getSnapshot().phase, 'stopped');
+  assert.equal(offers, 3);
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { DcFileClient } from '../client/dc-file-client';
+import { FileChannel } from '../client/files/file-channel';
 
 test('library asset transfer resumes from the Endpoint offset and uses the library binding only', async () => {
   const data = new Uint8Array(40000).map((_, index) => index % 251);
@@ -35,7 +35,7 @@ test('library asset transfer resumes from the Endpoint offset and uses the libra
       );
     },
   } as unknown as RTCDataChannel;
-  const client = new DcFileClient(
+  const client = new FileChannel(
     () => channel,
     () => 9,
   );
@@ -69,7 +69,7 @@ test('library asset uploads fill four ordered chunk slots and seal only after ev
       notify?.();
     },
   } as unknown as RTCDataChannel;
-  const client = new DcFileClient(() => channel);
+  const client = new FileChannel(() => channel);
   function ack(message: any, result: unknown) {
     client.handle({ type: 'files.result', version: 1, requestId: message.requestId, ok: true, result });
   }
@@ -128,7 +128,7 @@ test('photo burst admits a 44 KiB sample, rejects oversized analysis data and di
       );
     },
   } as unknown as RTCDataChannel;
-  const client = new DcFileClient(
+  const client = new FileChannel(
     () => channel,
     () => epoch,
   );
@@ -181,7 +181,7 @@ test('original preview permits PNGs through 64 MiB while thumbnails remain limit
       );
     },
   } as unknown as RTCDataChannel;
-  const client = new DcFileClient(() => channel);
+  const client = new FileChannel(() => channel);
   const signal = new AbortController().signal;
   assert.deepEqual(await client.describeAsset('original', signal), original);
   await assert.rejects(client.describeAsset('different', signal), /文件信息无效/);
@@ -210,7 +210,7 @@ test('chooser cancellation uses the authenticated selection command without an u
       );
     },
   } as unknown as RTCDataChannel;
-  const client = new DcFileClient(
+  const client = new FileChannel(
     () => channel,
     () => 7,
   );

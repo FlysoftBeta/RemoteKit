@@ -1,5 +1,6 @@
-import type { Diagnostics, Surface } from './types';
 import { useEffect, useRef, useState } from 'react';
+import { statsViewModel } from './media/stats-view-model';
+import type { Diagnostics, Surface } from './types';
 const measured = (value: unknown, suffix: string, digits = 1) =>
   typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(digits)} ${suffix}` : '—';
 const row = (label: string, value: unknown, suffix: string, title?: string, digits = 1) =>
@@ -49,8 +50,9 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
     return () => observer.disconnect();
   }, []);
   const endpoint = diagnostics.endpoint;
-  const videoTiming = surface ? diagnostics.videoTimingByView?.[surface.id] : undefined;
-  const receiverTiming = diagnostics.receiverVideoTiming;
+  const model = statsViewModel(diagnostics, surface?.id);
+  const videoTiming = model.videoTiming;
+  const receiverTiming = model.receiverTiming;
   const playoutExtension = diagnostics.receiverVideoPlayoutExtensionNegotiated;
   const requestedPlayout = endpoint?.rtcPlayoutDelayRequested as { maxMs?: number } | undefined;
   const requestedCap = requestedPlayout?.maxMs;
@@ -76,12 +78,7 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
         <dt title={diagnostics.receiveSelection?.reason}>接收档</dt>
         <dd>{diagnostics.receiveSelection?.profile ?? '—'}</dd>
         <dt title="同轮采样的每平面 video compositor presentedFrames 增量，表示视频帧提交">Video 提交 FPS</dt>
-        <dd>
-          {measured(
-            surface ? diagnostics.paintFpsByView?.[surface.id] : diagnostics.displayFramesPerSecond,
-            'fps',
-          )}
-        </dd>
+        <dd>{measured(model.presentationFps, 'fps')}</dd>
         <dt title="相邻 WebRTC 入站统计采样的解码帧增量">解码 FPS</dt>
         <dd>{measured(diagnostics.decodedFramesPerSecond, 'fps')}</dd>
         {row(
@@ -255,11 +252,11 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
             : '—'}
         </dd>
         <dt title="WebRTC估计的输入帧率，经SetRates传给编码器；不是实际输出FPS">输入 FPS 估计</dt>
-        <dd>{measured(endpoint?.gccTargetFps, 'fps')}</dd>
+        <dd>{measured(model.inputFps, 'fps')}</dd>
         <dt>GCC 目标码率</dt>
         <dd>
           {measured(
-            typeof endpoint?.gccTargetBitrate === 'number' ? endpoint.gccTargetBitrate / 1000000 : undefined,
+            typeof model.targetBitrate === 'number' ? model.targetBitrate / 1000000 : undefined,
             'Mbps',
             2,
           )}

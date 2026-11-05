@@ -8,7 +8,7 @@ import {
   visibleContentBounds,
   FREEZE_MAX_PIXELS,
   surfaceMatchesViewport,
-} from '../client/viewport-transition';
+} from '../client/presentation/viewport-transition';
 
 const viewport = (height: number, layoutHeight = 844, width = 390) => ({
   visual: { height, width, offsetLeft: 0, offsetTop: 0 },

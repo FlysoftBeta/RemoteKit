@@ -1,8 +1,10 @@
+import { accountsFor } from './server-fixture';
+import { requestViewer } from './server-fixture';
 import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ControlDatabase } from '../server/persistence/database';
-import { Control } from '../server/control';
+import { createApplication, type DomainServices } from '../server/application';
 import type { EndpointLink } from '../server/endpoint/link';
 
 class RecoveryEndpoint implements EndpointLink {
@@ -36,9 +38,9 @@ class RecoveryEndpoint implements EndpointLink {
 async function fixture() {
   const store = new ControlDatabase(':memory:'),
     endpoint = new RecoveryEndpoint(),
-    control = new Control(store, testGateway(endpoint));
-  const { tenantId: tenant } = await store.accounts.register('recovery-observer', 'password123');
-  await control.attachViewer(
+    control = createApplication(store, testGateway(endpoint));
+  const { tenantId: tenant } = await accountsFor(store).register('recovery-observer', 'password123');
+  await control.viewers.attachViewer(
     tenant,
     'lease',
     () => {},
@@ -46,7 +48,11 @@ async function fixture() {
     true,
   );
   const tab = (
-    await control.productAction(tenant, { type: 'window.create', url: 'https://saved.test/history' }, 'lease')
+    await control.operations.productAction(
+      tenant,
+      { type: 'window.create', url: 'https://saved.test/history' },
+      'lease',
+    )
   ).state.workspace.tabs[0];
   const state = store.workspaces.workspace(tenant);
   Object.assign(state.tabs[0], { title: 'Saved title', canGoBack: true, canGoForward: true });
@@ -69,7 +75,7 @@ async function fixture() {
 test('pending recovery preserves product URL/title/history and desired visibility until complete', async () => {
   const { store, endpoint, control, tenant, tab } = await fixture();
   try {
-    await control.viewerRequest(tenant, 'lease', 'viewport', {
+    await requestViewer(control, tenant, 'lease', 'viewport', {
       devicePixelRatio: 1,
       windows: [{ windowId: tab.windowId, width: 1000, height: 600, visible: true }],
     });
@@ -83,7 +89,7 @@ test('pending recovery preserves product URL/title/history and desired visibilit
     assert.equal(endpoint.view.visible, false);
     assert.equal(endpoint.view.recovery.pending, true);
     const count = endpoint.configured.length;
-    await control.tick();
+    await control.reconciler.tick();
     assert.equal(endpoint.configured.length, count);
     Object.assign(endpoint.view, {
       recovery: { pending: false, phase: 'complete', error: '' },
@@ -94,7 +100,7 @@ test('pending recovery preserves product URL/title/history and desired visibilit
       title: 'Restored title',
       canGoForward: false,
     });
-    await control.tick();
+    await control.reconciler.tick();
     current = store.workspaces.workspace(tenant).tabs[0];
     assert.equal(current.url, 'https://restored.test/selected');
     assert.equal(current.title, 'Restored title');
@@ -102,9 +108,10 @@ test('pending recovery preserves product URL/title/history and desired visibilit
     assert.equal(current.restoring, false);
     endpoint.view.url = 'https://ordinary.test/loading';
     endpoint.view.loading = true;
-    await control.tick();
+    await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(tenant).tabs[0].url, 'https://ordinary.test/loading');
   } finally {
+    await control.close();
     store.db.close();
   }
 });
@@ -113,7 +120,11 @@ test('new navigation intent during recovery survives blank snapshot and normal c
   const { store, endpoint, control, tenant, tab } = await fixture();
   try {
     const address = 'https://new-intent.test/target';
-    await control.productAction(tenant, { type: 'tab.navigate', tabId: tab.id, url: address }, 'lease');
+    await control.operations.productAction(
+      tenant,
+      { type: 'tab.navigate', tabId: tab.id, url: address },
+      'lease',
+    );
     let current = store.workspaces.workspace(tenant).tabs[0];
     assert.equal(endpoint.navigated, address);
     assert.equal(current.url, address);
@@ -128,17 +139,18 @@ test('new navigation intent during recovery survives blank snapshot and normal c
       actual: 0,
       loading: true,
     });
-    await control.tick();
+    await control.reconciler.tick();
     current = store.workspaces.workspace(tenant).tabs[0];
     assert.equal(current.url, address);
     assert.equal(current.pendingUrl, address);
     Object.assign(endpoint.view, { url: address, loading: false });
-    await control.tick();
+    await control.reconciler.tick();
     current = store.workspaces.workspace(tenant).tabs[0];
     assert.equal(current.url, address);
     assert.equal(current.pendingUrl, undefined);
     assert.equal(current.restoring, false);
   } finally {
+    await control.close();
     store.db.close();
   }
 });

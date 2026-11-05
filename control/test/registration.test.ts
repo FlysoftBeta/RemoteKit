@@ -1,3 +1,5 @@
+import { accountsFor } from './server-fixture';
+import { requestViewer } from './server-fixture';
 import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -6,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { ControlDatabase } from '../server/persistence/database';
-import { Control } from '../server/control';
+import { createApplication, type DomainServices } from '../server/application';
 import type { EndpointLink } from '../server/endpoint/link';
 
 const password = 'password123',
@@ -15,29 +17,31 @@ const password = 'password123',
 test('first registration is the only administrator under concurrency', async () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.accounts.registrationStatus(), {
+    assert.deepEqual(accountsFor(store).registrationStatus(), {
       hasAdmin: false,
       credentialRequired: false,
       registrationOpen: true,
     });
     const results = await Promise.allSettled([
-      store.accounts.register('first-user', password),
-      store.accounts.register('second-user', password),
+      accountsFor(store).register('first-user', password),
+      accountsFor(store).register('second-user', password),
     ]);
     assert.equal(results.filter((r) => r.status === 'fulfilled').length, 1);
     assert.equal((store.db.prepare('SELECT count(*) AS n FROM users WHERE is_admin=1').get() as any).n, 1n);
     const winner = results.find((r) => r.status === 'fulfilled') as PromiseFulfilledResult<
-      Awaited<ReturnType<ControlDatabase['accounts']['register']>>
+      Awaited<ReturnType<ReturnType<typeof accountsFor>['register']>>
     >;
     assert.equal(winner.value.user.isAdmin, true);
     assert.equal(store.accounts.identity(winner.value.token)?.user.isAdmin, true);
-    assert.equal((await store.accounts.login(winner.value.user.username, password)).user.isAdmin, true);
-    assert.deepEqual(store.accounts.registrationStatus(), {
+    assert.equal((await accountsFor(store).login(winner.value.user.username, password)).user.isAdmin, true);
+    assert.deepEqual(accountsFor(store).registrationStatus(), {
       hasAdmin: true,
       credentialRequired: true,
       registrationOpen: false,
     });
-    await assert.rejects(store.accounts.register('blocked', password, credential), { code: 'unavailable' });
+    await assert.rejects(accountsFor(store).register('blocked', password, credential), {
+      code: 'unavailable',
+    });
   } finally {
     store.db.close();
   }
@@ -48,21 +52,21 @@ test('registration credential persists hashed, rotates independently of account 
     path = join(dir, 'control.db');
   let store = new ControlDatabase(path);
   try {
-    const admin = await store.accounts.register('administrator', password);
+    const admin = await accountsFor(store).register('administrator', password);
     for (const value of ['', 'short', 'a'.repeat(257), null])
-      await assert.rejects(store.accounts.setRegistrationCredential(admin.tenantId, value), {
+      await assert.rejects(accountsFor(store).setRegistrationCredential(admin.tenantId, value), {
         code: 'invalid_request',
       });
-    assert.deepEqual(await store.accounts.setRegistrationCredential(admin.tenantId, credential), {
+    assert.deepEqual(await accountsFor(store).setRegistrationCredential(admin.tenantId, credential), {
       registrationCredentialConfigured: true,
     });
-    await assert.rejects(store.accounts.register('missing', password), { code: 'invalid_request' });
-    await assert.rejects(store.accounts.register('wrong', password, 'incorrect-secret'), {
+    await assert.rejects(accountsFor(store).register('missing', password), { code: 'invalid_request' });
+    await assert.rejects(accountsFor(store).register('wrong', password, 'incorrect-secret'), {
       code: 'forbidden',
     });
-    const user = await store.accounts.register('ordinary', password, credential);
+    const user = await accountsFor(store).register('ordinary', password, credential);
     assert.equal(user.user.isAdmin, false);
-    await assert.rejects(store.accounts.setRegistrationCredential(user.tenantId, 'unauthorized-secret'), {
+    await assert.rejects(accountsFor(store).setRegistrationCredential(user.tenantId, 'unauthorized-secret'), {
       code: 'forbidden',
     });
     const stored = store.db.prepare('SELECT * FROM registration_policy').get() as any;
@@ -70,22 +74,24 @@ test('registration credential persists hashed, rotates independently of account 
     assert.equal(stored.credential_hash.length, 128);
     assert.ok(stored.salt);
     const publicData = JSON.stringify([
-      store.accounts.registrationStatus(),
-      store.accounts.adminStatus(),
+      accountsFor(store).registrationStatus(),
+      accountsFor(store).adminStatus(),
       store.accounts.identity(admin.token),
       user,
       store.accounts.userForTenant(admin.tenantId),
     ]);
     for (const secret of [credential, stored.salt, stored.credential_hash])
       assert.equal(publicData.includes(secret), false);
-    await store.accounts.setRegistrationCredential(admin.tenantId, 'rotated-secret');
-    await assert.rejects(store.accounts.register('old-secret', password, credential), { code: 'forbidden' });
+    await accountsFor(store).setRegistrationCredential(admin.tenantId, 'rotated-secret');
+    await assert.rejects(accountsFor(store).register('old-secret', password, credential), {
+      code: 'forbidden',
+    });
     store.db.close();
     store = new ControlDatabase(path);
     assert.equal(store.accounts.identity(admin.token)?.user.isAdmin, true);
-    assert.equal((await store.accounts.login('ordinary', password)).user.isAdmin, false);
+    assert.equal((await accountsFor(store).login('ordinary', password)).user.isAdmin, false);
     assert.equal(
-      (await store.accounts.register('new-secret', password, 'rotated-secret')).user.isAdmin,
+      (await accountsFor(store).register('new-secret', password, 'rotated-secret')).user.isAdmin,
       false,
     );
   } finally {
@@ -97,9 +103,9 @@ test('registration credential persists hashed, rotates independently of account 
 test('registration revalidates policy after asynchronous password hashing', async () => {
   const store = new ControlDatabase(':memory:');
   try {
-    const admin = await store.accounts.register('administrator', password);
-    await store.accounts.setRegistrationCredential(admin.tenantId, credential);
-    const pending = store.accounts.register('stale-policy', password, credential);
+    const admin = await accountsFor(store).register('administrator', password);
+    await accountsFor(store).setRegistrationCredential(admin.tenantId, credential);
+    const pending = accountsFor(store).register('stale-policy', password, credential);
     // A committed policy rotation while both scrypt operations are still pending.
     store.db.prepare('UPDATE registration_policy SET salt=? WHERE id=1').run('replaced-policy-salt');
     await assert.rejects(pending, { code: 'conflict' });
@@ -112,13 +118,13 @@ test('registration revalidates policy after asynchronous password hashing', asyn
 test('admin methods check server role, scoped params, current lease and post-hash authentication', async () => {
   const store = new ControlDatabase(':memory:'),
     endpoint = { request: async () => ({ running: false, views: [] }) } as unknown as EndpointLink,
-    control = new Control(store, testGateway(endpoint));
+    control = createApplication(store, testGateway(endpoint));
   try {
-    const admin = await store.accounts.register('administrator', password);
-    await store.accounts.setRegistrationCredential(admin.tenantId, credential);
-    const user = await store.accounts.register('ordinary', password, credential);
+    const admin = await accountsFor(store).register('administrator', password);
+    await accountsFor(store).setRegistrationCredential(admin.tenantId, credential);
+    const user = await accountsFor(store).register('ordinary', password, credential);
     let valid = true;
-    await control.attachViewer(
+    await control.viewers.attachViewer(
       admin.tenantId,
       'admin-lease',
       () => {},
@@ -128,41 +134,45 @@ test('admin methods check server role, scoped params, current lease and post-has
       },
       true,
     );
-    await control.attachViewer(
+    await control.viewers.attachViewer(
       user.tenantId,
       'user-lease',
       () => {},
       { identity: 'test-account', valid: () => true },
       true,
     );
-    assert.equal(control.productState(admin.tenantId).user.isAdmin, true);
-    assert.equal(control.productState(user.tenantId).user.isAdmin, false);
+    assert.equal(control.viewers.productState(admin.tenantId).user.isAdmin, true);
+    assert.equal(control.viewers.productState(user.tenantId).user.isAdmin, false);
     for (const method of ['admin.get', 'admin.setRegistrationCredential'])
       await assert.rejects(
-        control.viewerRequest(user.tenantId, 'user-lease', method, {
+        requestViewer(control, user.tenantId, 'user-lease', method, {
           serverCredential: 'unauthorized-secret',
           isAdmin: true,
         }),
         (error: any) => error.code === 'forbidden',
       );
     await assert.rejects(
-      control.viewerRequest(admin.tenantId, 'stale', 'admin.get', {}),
+      requestViewer(control, admin.tenantId, 'stale', 'admin.get', {}),
       (error: any) => error.code === 'conflict',
     );
     await assert.rejects(
-      control.viewerRequest(admin.tenantId, 'admin-lease', 'admin.get', { tenant: user.tenantId }),
+      requestViewer(control, admin.tenantId, 'admin-lease', 'admin.get', { tenant: user.tenantId }),
       (error: any) => error.code === 'invalid_request',
     );
-    assert.deepEqual(await control.viewerRequest(admin.tenantId, 'admin-lease', 'admin.get', {}), {
+    assert.deepEqual(await requestViewer(control, admin.tenantId, 'admin-lease', 'admin.get', {}), {
       registrationCredentialConfigured: true,
     });
-    const pending = control.viewerRequest(admin.tenantId, 'admin-lease', 'admin.setRegistrationCredential', {
+    const pending = requestViewer(control, admin.tenantId, 'admin-lease', 'admin.setRegistrationCredential', {
       serverCredential: 'expired-lease-secret',
     });
     valid = false;
     await assert.rejects(pending, (error: any) => error.code === 'unauthenticated');
-    assert.equal((await store.accounts.register('still-original', password, credential)).user.isAdmin, false);
+    assert.equal(
+      (await accountsFor(store).register('still-original', password, credential)).user.isAdmin,
+      false,
+    );
   } finally {
+    await control.close();
     store.db.close();
   }
 });

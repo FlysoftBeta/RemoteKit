@@ -1,14 +1,14 @@
-import React from 'react';
-import { Alert, Box, Button, CircularProgress, IconButton, Radio, Tooltip, Typography } from '@mui/material';
 import { Add, Close, DeleteOutline, VisibilityOutlined } from '@mui/icons-material';
+import { Alert, Box, Button, CircularProgress, IconButton, Radio, Tooltip, Typography } from '@mui/material';
+import React from 'react';
 import type { LibraryEntry } from '../shared/file-library';
 import { FileCard } from './file-card';
 import { canPreviewFile, FileImagePreview } from './file-image-preview';
-import { FileThumbnail } from './file-thumbnail';
-import { SortableFileItems, type FileView } from './sortable-file-items';
 import { useLibrary } from './file-library-state';
-import { PhotoOptions } from './photo-options';
+import { FileThumbnail } from './file-thumbnail';
 import type { PhotoJob } from './photo-jobs';
+import { PhotoOptions } from './photo-options';
+import { SortableFileItems, type FileView } from './sortable-file-items';
 
 export const fileSize = (size: number) => `${(size / 1024).toFixed(1)} KB`;
 export const compactPreview = {

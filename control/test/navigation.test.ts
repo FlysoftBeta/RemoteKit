@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveNavigation } from '../server/navigation';
+import { resolveNavigation } from '../server/navigation-url';
 
 test('navigation uses fixed providers and encodes search text as one query value', () => {
   const text = '中文 & a+b #x? / 100%';

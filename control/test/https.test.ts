@@ -9,8 +9,8 @@ import { request } from 'node:https';
 import { resolve } from 'node:path';
 import { once } from 'node:events';
 import { ControlDatabase } from '../server/persistence/database';
-import { Control } from '../server/control';
-import { createHttp } from '../server/http';
+import { createApplication, type DomainServices } from '../server/application';
+import { createHttp } from '../server/http/server';
 test('optional HTTPS serves trusted local test TLS, secure cookies and configured LAN bind', async (context) => {
   const openssl =
     process.env.REMOTEKIT_TEST_OPENSSL ??
@@ -52,7 +52,7 @@ test('optional HTTPS serves trusted local test TLS, secure cookies and configure
     throw error;
   }
   const store = new ControlDatabase(':memory:'),
-    control = new Control(store, testGateway({ request: async () => ({ views: [] }) })),
+    control = createApplication(store, testGateway({ request: async () => ({ views: [] }) })),
     origins: string[] = [];
   const cert = await readFile(certPath),
     server = createHttp(control, {

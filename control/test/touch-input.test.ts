@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TouchInput, mergeTouchMoves, pointerSampleTime } from '../client/touch-input';
-import { CaptureLatency } from '../client/capture-latency';
+import { TouchInput, mergeTouchMoves, pointerSampleTime } from '../client/input/touch-input';
+import { CaptureLatency } from '../client/media/capture-latency';
 
 const point = (y: number, id = 1) => ({ id, x: 10, y, pressure: 0.5 });
 test('source clock is fixed for a gesture and sampling intervals survive delivery stalls', () => {
@@ -52,12 +52,13 @@ test('multi-touch cancel is exactly one packet and clock/identity violations are
 test('move batches retain bounded recent source history and cannot cross terminals or gestures', () => {
   const touch = new TouchInput('batch');
   touch.sample('a', 'start', point(0), 0, 1000);
-  let batch = touch.sample('a', 'move', point(1), 1)!;
-  for (let i = 2; i <= 100; i++) batch = mergeTouchMoves(batch, touch.sample('a', 'move', point(i), i)!)!;
+  let batch = touch.sample('a', 'move', point(0.001), 1)!;
+  for (let i = 2; i <= 100; i++)
+    batch = mergeTouchMoves(batch, touch.sample('a', 'move', point(i / 1000), i)!)!;
   assert.equal(batch.samples!.length, 32);
   assert.equal(batch.samples![0].sampleElapsedUs, 68000);
   assert.equal(batch.sampleElapsedUs, 100000);
-  const end = touch.sample('a', 'end', point(100), 101)!;
+  const end = touch.sample('a', 'end', point(0.1), 101)!;
   assert.equal(mergeTouchMoves(batch, end), undefined);
   touch.accepted(end);
   const next = touch.sample('a', 'start', point(0), 102)!;

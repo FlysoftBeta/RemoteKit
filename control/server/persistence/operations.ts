@@ -1,8 +1,9 @@
-import { transaction } from './database';
 import type Database from 'better-sqlite3';
-import { RemoteKitError } from '../../shared/errors';
 import { randomUUID } from 'node:crypto';
-import type { ProductWorkspace, OperationReceipt } from '../../shared/product';
+import { RemoteKitError } from '../../shared/errors';
+import type { OperationReceipt, ProductWorkspace } from '../../shared/product';
+import { settle } from '../workspace/operations';
+import { transaction } from './database';
 import type { WorkspacesRepository } from './workspaces';
 
 export class OperationsRepository {
@@ -18,7 +19,7 @@ export class OperationsRepository {
     }[]) {
       const receipt = JSON.parse(row.receipt);
       if (['accepted', 'applying'].includes(receipt.status)) {
-        receipt.status = 'unknown';
+        settle(receipt, { status: 'unknown' });
         receipt.error = 'Control重启，执行结果待对账';
         this.db
           .prepare('UPDATE operation_receipts SET receipt=? WHERE tenant=? AND id=?')

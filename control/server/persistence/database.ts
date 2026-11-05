@@ -1,11 +1,11 @@
 import Sqlite from 'better-sqlite3';
-import { createSchema } from './schema';
+import { systemClock, type Clock } from '../util/clock';
 import { AccountsRepository } from './accounts';
+import { LibraryRepository } from './library';
+import { OperationsRepository } from './operations';
+import { createSchema } from './schema';
 import { SecurityRepository } from './security';
 import { WorkspacesRepository } from './workspaces';
-import { OperationsRepository } from './operations';
-import { LibraryRepository } from './library';
-import { systemClock, type Clock } from '../util/clock';
 export class ControlDatabase {
   readonly db: Sqlite.Database;
   readonly accounts: AccountsRepository;
@@ -20,7 +20,7 @@ export class ControlDatabase {
     createSchema(this.db);
     this.workspaces = new WorkspacesRepository(this.db);
     this.security = new SecurityRepository(this.db, path, clock);
-    this.accounts = new AccountsRepository(this.db, this.security, this.workspaces);
+    this.accounts = new AccountsRepository(this.db);
     this.operations = new OperationsRepository(this.db, this.workspaces);
     this.library = new LibraryRepository(this.db);
   }

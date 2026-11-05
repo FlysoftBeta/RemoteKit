@@ -1,3 +1,4 @@
+import { diagnostics } from './media/diagnostics';
 import { useEffect } from 'react';
 
 /** Arm once on opening or reactivating the Viewer. A browser may require a gesture. */
@@ -15,8 +16,8 @@ export function useAutoFullscreen(enabled: boolean) {
       try {
         await target.requestFullscreen();
         armed = false;
-      } catch {
-        // Keep this activation armed for the next trusted interaction.
+      } catch (error) {
+        diagnostics.record('use-auto-fullscreen', error);
       } finally {
         pending = false;
       }

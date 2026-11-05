@@ -1,6 +1,7 @@
-import { PhotoBurstBackpressureError, type DcFileClient, type PhotoBurstDecision } from './dc-file-client';
+import { diagnostics } from './media/diagnostics';
+import { PhotoBurstBackpressureError, type FileChannel, type PhotoBurstDecision } from './files/file-channel';
 
-export type { PhotoBurstDecision } from './dc-file-client';
+export type { PhotoBurstDecision } from './files/file-channel';
 
 export interface CaptureStats {
   samplingMs: number;
@@ -135,7 +136,7 @@ function validateDecision(decision: PhotoBurstDecision, available: Map<string, S
 export async function capturePhotoBurst(
   video: HTMLVideoElement,
   signal: AbortSignal,
-  rpc: DcFileClient,
+  rpc: FileChannel,
   options: CaptureOptions,
 ): Promise<CapturedBurst> {
   if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -161,16 +162,16 @@ export async function capturePhotoBurst(
   const aborted = new Promise<never>((_, reject) => {
     rejectAbort = reject;
   });
-  void aborted.catch(() => {});
+  void aborted.catch((error) => diagnostics.record('camera-capture', error));
   const opening = rpc.beginPhotoBurst(signal).then((result) => {
     if (signal.aborted || retired) {
-      void rpc.cancelPhotoBurst(result.burstId).catch(() => {});
+      void rpc.cancelPhotoBurst(result.burstId).catch((error) => diagnostics.record('camera-capture', error));
       throw new DOMException('Aborted', 'AbortError');
     }
     burstId = result.burstId;
     return burstId;
   });
-  void opening.catch(() => {});
+  void opening.catch((error) => diagnostics.record('camera-capture', error));
   const timer = setTimeout(() => stop('deadline'), Math.max(0, deadline - performance.now()));
 
   function stop(reason: CaptureStats['stopReason']) {
@@ -347,7 +348,8 @@ export async function capturePhotoBurst(
     retired = true;
     signal.removeEventListener('abort', abort);
     releaseSnapshots();
-    if (burstId) void rpc.cancelPhotoBurst(burstId).catch(() => {});
+    if (burstId)
+      void rpc.cancelPhotoBurst(burstId).catch((error) => diagnostics.record('camera-capture', error));
     if (!stats) stop('error');
   }
 }

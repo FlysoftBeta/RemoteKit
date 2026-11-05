@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { KeyboardSession, type KeyboardContext } from '../client/keyboard-session';
+import { KeyboardSession, type KeyboardContext } from '../client/editing/keyboard-session';
 const initial: KeyboardContext = {
   document: 'doc',
   enabled: true,

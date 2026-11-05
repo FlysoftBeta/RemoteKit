@@ -1,9 +1,10 @@
+import { accountsFor } from './server-fixture';
 import { RemoteKitError } from '../shared/errors';
 import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ControlDatabase } from '../server/persistence/database';
-import { Control } from '../server/control';
+import { createApplication, type DomainServices } from '../server/application';
 import type { EndpointLink } from '../server/endpoint/link';
 import { Readable } from 'node:stream';
 import { resolve } from 'node:path';
@@ -92,16 +93,20 @@ class LifecycleEndpoint implements EndpointLink {
 async function fixture() {
   const store = new ControlDatabase(':memory:'),
     endpoint = new LifecycleEndpoint(),
-    control = new Control(store, testGateway(endpoint));
-  const { tenantId: tenant } = await store.accounts.register('lifecycle-user', 'password123');
-  await control.attachViewer(
+    control = createApplication(store, testGateway(endpoint));
+  const { tenantId: tenant } = await accountsFor(store).register('lifecycle-user', 'password123');
+  await control.viewers.attachViewer(
     tenant,
     'lease',
     () => {},
     { identity: 'test-account', valid: () => true },
     true,
   );
-  const created = await control.productAction(tenant, { type: 'window.create', url: 'about:blank' }, 'lease');
+  const created = await control.operations.productAction(
+    tenant,
+    { type: 'window.create', url: 'about:blank' },
+    'lease',
+  );
   const tab = created.state.workspace.tabs[0];
   return { store, endpoint, control, tenant, tab };
 }
@@ -121,17 +126,18 @@ test('file requests bind Browser identity and stay separate from dialogs', async
         },
       ],
     };
-    await control.tick();
-    const request = control.productState(tenant).fileRequests[0];
+    await control.reconciler.tick();
+    const request = control.viewers.productState(tenant).fileRequests[0];
     assert.ok(request);
-    assert.equal(control.productState(tenant).pageDialogs.length, 0);
+    assert.equal(control.viewers.productState(tenant).pageDialogs.length, 0);
     assert.equal('binding' in request, false);
     assert.deepEqual(request.accept, ['.txt']);
     assert.equal(request.acceptTypesOmitted, true);
     endpoint.replace();
-    await control.tick();
-    assert.notEqual(control.productState(tenant).fileRequests[0].id, request.id);
+    await control.reconciler.tick();
+    assert.notEqual(control.viewers.productState(tenant).fileRequests[0].id, request.id);
   } finally {
+    await control.close();
     store.db.close();
   }
 });
@@ -139,22 +145,23 @@ test('file requests bind Browser identity and stay separate from dialogs', async
 test('offline empty snapshot and replacement missing view preserve product tab and cancel old close intent', async () => {
   const { store, endpoint, control, tenant, tab } = await fixture();
   try {
-    const pending = await control.productAction(
+    const pending = await control.operations.productAction(
       tenant,
       { type: 'window.close', windowId: tab.windowId },
       'lease',
     );
     assert.ok(pending.state.workspace.pendingClose);
     endpoint.offlineNextSnapshot = true;
-    await control.tick();
+    await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
     assert.equal(store.workspaces.workspace(tenant).pendingClose, null);
     assert.equal(store.workspaces.workspace(tenant).pendingWindowCloseId, null);
     endpoint.replace();
     endpoint.view = undefined;
-    await control.tick();
+    await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
   } finally {
+    await control.close();
     store.db.close();
   }
 });
@@ -163,20 +170,25 @@ test('reply execution rejects Browser replacement after snapshot even when PID a
   const { store, endpoint, control, tenant } = await fixture();
   try {
     endpoint.view.pageRequests = { pending: [{ request: '7', kind: 'confirm' }] };
-    await control.tick();
-    const dialog = control.productState(tenant).pageDialogs[0],
+    await control.reconciler.tick();
+    const dialog = control.viewers.productState(tenant).pageDialogs[0],
       starts = endpoint.starts;
     endpoint.replaceBeforeReply = true;
     await assert.rejects(
-      control.productAction(tenant, { type: 'page.reply', dialogId: dialog.id, accept: true }, 'lease'),
+      control.operations.productAction(
+        tenant,
+        { type: 'page.reply', dialogId: dialog.id, accept: true },
+        'lease',
+      ),
       { code: 'conflict' },
     );
     assert.equal(endpoint.replies.length, 0);
     assert.equal(endpoint.starts, starts);
     assert.equal(endpoint.view.pageRequests.pending.length, 1);
-    await control.tick();
-    assert.notEqual(control.productState(tenant).pageDialogs[0].id, dialog.id);
+    await control.reconciler.tick();
+    assert.notEqual(control.viewers.productState(tenant).pageDialogs[0].id, dialog.id);
   } finally {
+    await control.close();
     store.db.close();
   }
 });
@@ -184,9 +196,10 @@ test('reply execution rejects Browser replacement after snapshot even when PID a
 test('close replies bind full identity, reject stale UI tokens and require explicit closed evidence', async () => {
   const { store, endpoint, control, tenant, tab } = await fixture();
   try {
-    const close = () => control.productAction(tenant, { type: 'tab.close', tabId: tab.id }, 'lease');
+    const close = () =>
+      control.operations.productAction(tenant, { type: 'tab.close', tabId: tab.id }, 'lease');
     const reply = (requestId: string, accept: boolean) =>
-      control.productAction(
+      control.operations.productAction(
         tenant,
         { type: 'tab.close', tabId: tab.id, requestId, ...(accept ? { confirm: true } : { cancel: true }) },
         'lease',
@@ -197,7 +210,7 @@ test('close replies bind full identity, reject stale UI tokens and require expli
     endpoint.replaceBeforeReply = true;
     await assert.rejects(reply(oldToken, true), { code: 'conflict' });
     assert.equal(endpoint.replies.length, 0);
-    await control.tick();
+    await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(tenant).pendingClose, null);
     state = (await close()).state.workspace;
     const token = state.pendingClose!.requestId!;
@@ -213,10 +226,10 @@ test('close replies bind full identity, reject stale UI tokens and require expli
     await reply(state.pendingClose!.requestId!, true);
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
     endpoint.view = undefined;
-    await control.tick();
+    await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 1);
     endpoint.events = [{ eventId: 'closed-1', type: 'view.closed', viewId: tab.webviewId }];
-    await control.tick();
+    await control.reconciler.tick();
     assert.equal(store.workspaces.workspace(tenant).tabs.length, 0);
     assert.deepEqual(endpoint.replies[0], {
       viewId: tab.webviewId,
@@ -227,6 +240,7 @@ test('close replies bind full identity, reject stale UI tokens and require expli
       accept: false,
     });
   } finally {
+    await control.close();
     store.db.close();
   }
 });

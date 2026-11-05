@@ -1,27 +1,27 @@
-import type { MediaPolicy } from '../../shared/product';
 import {
   RemoteKitError,
+  httpStatus,
   isRemoteKitError,
   toRemoteKitError,
-  httpStatus,
   type ErrorCode,
 } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
+import type { MediaPolicy } from '../../shared/product';
 import type { EndpointLink } from './link';
 import type {
-  RtcSignal,
+  Accepted,
+  ActionResult,
   ClientActionEvent,
   EndpointSnapshot,
-  Accepted,
-  ViewConfiguration,
-  OperationIdentity,
   FaceBinding,
   FaceStatusReply,
-  PageIdentity,
-  ActionResult,
   FileAuthorization,
-  PrepareSelection,
   LifecycleRequest,
+  OperationIdentity,
+  PageIdentity,
+  PrepareSelection,
+  RtcSignal,
+  ViewConfiguration,
 } from './types';
 export class EndpointGateway {
   constructor(private readonly link: EndpointLink) {}
@@ -34,7 +34,10 @@ export class EndpointGateway {
   private async invoke<T>(method: string, tenant: string, args?: object): Promise<T> {
     if (this.link.state.state !== 'ready') throw new RemoteKitError('unavailable', 'Endpoint 尚未就绪');
     try {
-      return (await this.link.request(method, tenant, args as Record<string, unknown>)) as T;
+      const reply = await this.link.request(method, tenant, args as Record<string, unknown>);
+      if (reply && typeof reply === 'object' && 'accepted' in reply && reply.accepted === false)
+        throw new RemoteKitError('rejected', 'Endpoint 拒绝请求');
+      return reply as T;
     } catch (error) {
       if (isRemoteKitError(error)) throw error;
       if (typeof error === 'string') throw new RemoteKitError('rejected', 'Endpoint 拒绝请求', error);
@@ -64,11 +67,8 @@ export class EndpointGateway {
   async ensureSession(tenant: string): Promise<{ browserPid?: number; [key: string]: unknown }> {
     return this.invoke<{ browserPid?: number; [key: string]: unknown }>('session.ensure', tenant);
   }
-  async offer(
-    tenant: string,
-    args: { connectionId: string; sdp: string; trickle: boolean; authRequired: boolean },
-  ): Promise<Accepted> {
-    return this.invoke<Accepted>('rtc.offer', tenant, args);
+  async offer(tenant: string, args: { connectionId: string; sdp: string }): Promise<Accepted> {
+    return this.invoke<Accepted>('rtc.offer', tenant, { ...args, trickle: true });
   }
   async ice(tenant: string, args: { connectionId: string; candidate: unknown }): Promise<Accepted> {
     return this.invoke<Accepted>('rtc.ice', tenant, args);

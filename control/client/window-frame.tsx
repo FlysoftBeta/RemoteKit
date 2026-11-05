@@ -1,4 +1,20 @@
-import React, { useEffect, useRef, useState } from 'react';
+import { diagnostics } from './media/diagnostics';
+import {
+  Add,
+  ArrowBack,
+  ArrowForward,
+  BedtimeOutlined,
+  Check,
+  ChevronRight,
+  Close,
+  Language,
+  MoreVert,
+  OpenInNew,
+  Refresh,
+  Stop,
+  Tab as TabIcon,
+  ViewColumn,
+} from '@mui/icons-material';
 import {
   Box,
   CircularProgress,
@@ -6,38 +22,23 @@ import {
   IconButton,
   InputBase,
   Menu,
+  MenuItem,
   MenuList,
   Popover,
-  MenuItem,
   Switch,
   Tooltip,
   Typography,
 } from '@mui/material';
-import {
-  Add,
-  ArrowBack,
-  ArrowForward,
-  Close,
-  Language,
-  MoreVert,
-  Refresh,
-  Stop,
-  ViewColumn,
-  Tab as TabIcon,
-  Check,
-  OpenInNew,
-  BedtimeOutlined,
-  ChevronRight,
-} from '@mui/icons-material';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ProductState, ProductTab, ProductWindow } from '../shared/product';
-import { RemoteTransport } from './transport';
-import { RemoteViewport } from './remote-viewport';
-import type { Action } from './product-dialogs';
-import { StartPage } from './start-page';
-import { MyFiles } from './my-files';
 import { isLocalTab, SEARCH_ENGINES } from '../shared/product';
 import { AudioControls } from './audio-controls';
-import type { AudioChannels } from './audio-output';
+import type { AudioChannels } from './media/audio-output';
+import { MyFiles } from './my-files';
+import type { Action } from './product-dialogs';
+import { RemoteViewport } from './remote-viewport';
+import { StartPage } from './start-page';
+import { ViewerSession } from './viewer-session';
 export function Tool({
   title,
   children,
@@ -81,7 +82,7 @@ export function WindowFrame({
 }: {
   win: ProductWindow;
   state: ProductState;
-  transport: RemoteTransport;
+  transport: ViewerSession;
   action: Action;
   online: boolean;
   onSettings: () => void;
@@ -191,7 +192,9 @@ export function WindowFrame({
   try {
     const parsed = new URL(active?.url ?? '');
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') origin = parsed.origin;
-  } catch {}
+  } catch (error) {
+    diagnostics.record('window-frame', error);
+  }
   const sitePreferences = state.workspace.sites[origin];
   const closeMore = () => {
     setMenu(null);
@@ -456,7 +459,7 @@ export function WindowFrame({
                 {active.lifecycleRecoveryError}
               </div>
             ) : (
-              !transport.presentationError &&
+              !transport.presentation.presentationError &&
               (active.restoring || (active.residency && active.residency !== 'live')) && (
                 <div className="page-overlay" role="status">
                   正在唤醒已休眠的标签页…
@@ -595,8 +598,8 @@ export function WindowFrame({
             <AudioControls
               channels={state.workspace.settings.audioChannels ?? { left: true, right: true }}
               online={online}
-              playback={transport.audio.state}
-              resume={() => transport.audio.resume()}
+              playback={transport.observations.audio.state}
+              resume={() => transport.observations.audio.resume()}
               save={saveAudio}
               busy={audioSaving}
               error={audioError}

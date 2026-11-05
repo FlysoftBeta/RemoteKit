@@ -1,4 +1,10 @@
-import React, { useEffect, useRef, useState } from 'react';
+import {
+  ArrowBack,
+  CameraAltOutlined,
+  CameraswitchOutlined,
+  CollectionsOutlined,
+  PhotoCameraOutlined,
+} from '@mui/icons-material';
 import {
   Alert,
   Badge,
@@ -10,13 +16,7 @@ import {
   ToggleButtonGroup,
   Typography,
 } from '@mui/material';
-import {
-  ArrowBack,
-  CameraAltOutlined,
-  CameraswitchOutlined,
-  CollectionsOutlined,
-  PhotoCameraOutlined,
-} from '@mui/icons-material';
+import { useEffect, useRef, useState } from 'react';
 import type { LibraryEntry, PhotoMetadata } from '../shared/file-library';
 import { capturePhotoBurst } from './camera-capture';
 import { fileError } from './file-library-controls';

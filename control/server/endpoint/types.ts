@@ -1,10 +1,4 @@
-import type {
-  ProductOperation,
-  AppliedMediaPolicy,
-  OperationReceipt,
-  MediaPolicy,
-} from '../../shared/product';
-import type { Asset, SelectionState } from '../../shared/file-library';
+import type { AppliedMediaPolicy, OperationReceipt, ProductOperation } from '../../shared/product';
 export interface RtcSignal {
   tenantId: string;
   connectionId: string;

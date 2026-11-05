@@ -1,8 +1,8 @@
-import { transaction } from './database';
 import type Database from 'better-sqlite3';
-import type { LibrarySnapshot, LibraryEntry, SelectionState } from '../../shared/file-library';
-import type { FileBinding } from '../endpoint/types';
 import { RemoteKitError } from '../../shared/errors';
+import type { LibraryEntry, LibrarySnapshot, SelectionState } from '../../shared/file-library';
+import type { FileBinding } from '../endpoint/types';
+import { transaction } from './database';
 type TerminalState = Extract<SelectionState, 'selected' | 'cancelled'>;
 export interface Selection {
   selectionId: string;

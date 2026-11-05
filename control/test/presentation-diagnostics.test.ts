@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { PresentationDiagnostics } from '../client/presentation-diagnostics';
+import { PresentationDiagnostics } from '../client/media/presentation-diagnostics';
 test('presentation counters distinguish late metadata, overwritten frames and duplicate observations', () => {
   const metrics = new PresentationDiagnostics();
   metrics.video(10, 100, '1', undefined, { presentedFrames: 1, decoded: 1 });

@@ -1,12 +1,12 @@
+import { decodeIncoming, type EditableMessage } from '../client/rtc/protocol';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DeferredEditingInput,
   MobileEditingState,
   editableInputMode,
-  type EditableMessage,
-} from '../client/mobile-editing-state';
-import { EditingInput } from '../client/editing-input';
+} from '../client/editing/mobile-editing-state';
+import { EditingInput } from '../client/editing/editing-input';
 import type { Surface } from '../client/types';
 const view: Surface = {
   session: 's',
@@ -95,8 +95,8 @@ test('Chromium type mapping and malformed feedback never enable a keyboard', () 
   ]);
   const state = new MobileEditingState();
   assert.equal(
-    state.receive({ ...message('1'), editable: { ...message('1').editable, caretX: NaN } }, [view]),
-    false,
+    decodeIncoming({ ...message('1'), editable: { ...message('1').editable, caretX: NaN } }).type,
+    'decode-error',
   );
   assert.equal(state.receive(message('1', { ...view, focus: 'old' }), [view]), true);
   assert.equal(state.forView(view), undefined);

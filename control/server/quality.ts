@@ -1,5 +1,3 @@
-import { isLocalTab } from '../shared/product';
-import { feasibleDpr } from './atlas-plan';
 import type {
   AppliedMediaPolicy,
   DegradationPreference,
@@ -8,6 +6,8 @@ import type {
   ProductWorkspace,
   ViewerViewport,
 } from '../shared/product';
+import { isLocalTab } from '../shared/product';
+import { feasibleDpr } from './atlas-plan';
 const preferences: Record<ProductWorkspace['settings']['qualityPreference'], DegradationPreference> = {
   quality: 'maintain-resolution',
   auto: 'balanced',

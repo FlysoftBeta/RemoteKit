@@ -1,22 +1,26 @@
+import { accountsFor } from './server-fixture';
+import { requestViewer } from './server-fixture';
 import { RemoteKitError } from '../shared/errors';
 import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { WebSocket } from 'ws';
-import { createHttp } from '../server/http';
+import { createHttp } from '../server/http/server';
 import { RemoteNodeLink, type RemoteNodeOptions } from '../server/endpoint/remote-node';
-import { Control } from '../server/control';
+import { createApplication, type DomainServices } from '../server/application';
 import { ControlDatabase } from '../server/persistence/database';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 
 async function harness(options: Partial<RemoteNodeOptions> = {}, enabled = true) {
   const endpoint = new RemoteNodeLink({ nodeId: 'compute-1', token: 'test-node-secret', ...options });
-  const control = Object.assign(new EventEmitter(), {
-    store: { identity: () => undefined },
-    clearSignals() {},
-  }) as unknown as Control;
+  const control = {
+    events: new EventEmitter(),
+    accounts: { identity: () => undefined },
+    viewers: { pollFaceAuth: async () => {} },
+    rtc: { clearSignals() {} },
+  } as unknown as DomainServices;
   const server = createHttp(control, {
     origins: ['http://test.local'],
     clientDir: '.',
@@ -272,13 +276,16 @@ test(
       const socket = await h.connect();
       const request = once(socket, 'message');
       let rejected: Error | undefined;
-      Object.assign(h.control, {
-        store: { accounts: { identity: () => ({ tenantId: 'tenant' }) } },
+      Object.assign(h.control.accounts, { identity: () => ({ tenantId: 'tenant' }) });
+      Object.assign(h.control.viewers, {
         attachViewer: async () => ({ workspace: { revision: 1 } }),
         productEpoch: () => undefined,
         productAllowed: () => true,
         detachViewer: async () => {},
-        viewerRequest: () =>
+        assertViewer() {},
+      });
+      Object.assign(h.control.rtc, {
+        offer: () =>
           h.endpoint.request('session.snapshot', 'tenant').catch((error) => {
             rejected = error;
             throw error;
@@ -290,7 +297,7 @@ test(
         headers: { cookie: 'rk_session=test' },
       });
       await once(viewer, 'open');
-      viewer.send(JSON.stringify({ id: 'rpc', method: 'state', params: {} }));
+      viewer.send(JSON.stringify({ id: 'rpc', method: 'rtc.offer', params: {} }));
       await request;
       const messages: string[] = [];
       socket.on('message', (data) => messages.push(String(data)));
@@ -321,7 +328,7 @@ test(
   async () => {
     const endpoint = new RemoteNodeLink({ nodeId: 'compute-1', token: 'test-secret' });
     const store = new ControlDatabase(':memory:'),
-      control = new Control(store, testGateway(endpoint));
+      control = createApplication(store, testGateway(endpoint));
     const server = createServer();
     server.on('upgrade', (req, socket, head) => endpoint.handleUpgrade(req, socket, head));
     server.listen(0, '127.0.0.1');
@@ -337,7 +344,7 @@ test(
       failSnapshotTenant: string | undefined;
     endpoint.on('ready', (identity) => {
       identities.push(identity);
-      reconciliation = control.endpointReady(identity);
+      reconciliation = control.reconciler.endpointReady(identity);
     });
     async function connect(incarnation = 'endpoint-process-0001') {
       const socket = new WebSocket(url, { headers: { authorization: 'Bearer test-secret' } });
@@ -410,17 +417,18 @@ test(
     try {
       let socket = await connect();
       assert.equal(identities[0].processChanged, true);
-      const a = (await store.accounts.register('reconnect-a', 'password123')).tenantId;
-      await store.accounts.setRegistrationCredential(a, 'registration-test');
-      const b = (await store.accounts.register('reconnect-b', 'password123', 'registration-test')).tenantId;
-      await control.attachViewer(
+      const a = (await accountsFor(store).register('reconnect-a', 'password123')).tenantId;
+      await accountsFor(store).setRegistrationCredential(a, 'registration-test');
+      const b = (await accountsFor(store).register('reconnect-b', 'password123', 'registration-test'))
+        .tenantId;
+      await control.viewers.attachViewer(
         a,
         'lease-a',
         () => {},
         { identity: 'test-account', valid: () => true },
         true,
       );
-      await control.attachViewer(
+      await control.viewers.attachViewer(
         b,
         'lease-b',
         () => {},
@@ -428,31 +436,37 @@ test(
         true,
       );
       const offer = async (tenant: string, lease: string) =>
-        control.offer(tenant, { type: 'offer', sdp: 'v=0\r\n', attemptId: randomUUID() }, lease);
+        control.rtc.offer(tenant, { type: 'offer', sdp: 'v=0\r\n', attemptId: randomUUID() }, lease);
       const aa = await offer(a, 'lease-a'),
         bb = await offer(b, 'lease-b');
-      const generation = control.productState(a).endpointGeneration;
+      const generation = control.viewers.productState(a).endpointGeneration;
       const firstEpoch = endpoint.state.state === 'ready' ? endpoint.state.connectionEpoch : undefined;
-      const auth = (tenant: string, lease: string) => control.viewerRequest(tenant, lease, 'auth.get', {});
+      const auth = (tenant: string, lease: string) => requestViewer(control, tenant, lease, 'auth.get', {});
       const offline = once(endpoint, 'offline');
       socket.terminate();
       await offline;
-      control.endpointOffline();
-      assert.equal(control.productAllowed(a, 'lease-a'), false);
+      control.rtc.endpointOffline();
+      assert.equal(control.viewers.productAllowed(a, 'lease-a'), false);
       socket = await connect();
-      await control.viewerRequest(a, 'lease-a', 'auth.verify', { method: 'password', secret: 'password123' });
-      await control.viewerRequest(b, 'lease-b', 'auth.verify', { method: 'password', secret: 'password123' });
+      await requestViewer(control, a, 'lease-a', 'auth.verify', {
+        method: 'password',
+        secret: 'password123',
+      });
+      await requestViewer(control, b, 'lease-b', 'auth.verify', {
+        method: 'password',
+        secret: 'password123',
+      });
       assert.equal(identities[identities.length - 1].processChanged, false);
       assert.notEqual(
         endpoint.state.state === 'ready' ? endpoint.state.connectionEpoch : undefined,
         firstEpoch,
       );
-      assert.equal(control.productState(a).endpointGeneration, generation);
+      assert.equal(control.viewers.productState(a).endpointGeneration, generation);
       assert.ok((await auth(a, 'lease-a')).peerEpoch > 0);
-      control.assertViewer(a, 'lease-a');
+      control.viewers.assertViewer(a, 'lease-a');
       const op = operation(a),
         receipt = once(socket, 'message');
-      // Use the authenticated remote socket event, not a direct Control method.
+      // Use the authenticated remote socket event, not a direct DomainServices method.
       socket.send(
         JSON.stringify({
           ...op,
@@ -465,38 +479,45 @@ test(
       // Reconciliation is serialized with the action; await its receipt publication.
       for (let i = 0; i < 50 && !store.operations.operation(a, op.operationId); i++)
         await new Promise((resolve) => setImmediate(resolve));
-      await control.serial(a, async () => {});
+      await control.tenants.serial(a, async () => {});
       await receipt;
-      assert.equal(control.operationStatus(a, op).status, 'committed');
+      assert.equal(control.operations.operationStatus(a, op).status, 'committed');
       peers.delete(a);
       failSnapshotTenant = a;
       socket = await connect();
-      assert.equal(control.productState(a).endpointGeneration, generation);
+      assert.equal(control.viewers.productState(a).endpointGeneration, generation);
       assert.ok((await auth(a, 'lease-a')).peerEpoch > 0);
-      await control.tick();
-      assert.equal((control as any).endpointGeneration, generation);
-      assert.ok(control.productState(a).endpointGeneration > generation);
-      assert.equal(control.productState(b).endpointGeneration, generation);
+      await control.reconciler.tick();
+      assert.equal(control.viewers.productState(b).endpointGeneration, generation);
+      assert.ok(control.viewers.productState(a).endpointGeneration > generation);
+      assert.equal(control.viewers.productState(b).endpointGeneration, generation);
       assert.equal((await auth(a, 'lease-a')).peerEpoch, 0);
       assert.ok((await auth(b, 'lease-b')).peerEpoch > 0);
       const restored = await offer(a, 'lease-a');
-      await control.productAction(a, { type: 'window.create', url: 'https://before.test/' }, 'lease-a');
+      await control.operations.productAction(
+        a,
+        { type: 'window.create', url: 'https://before.test/' },
+        'lease-a',
+      );
       const tab = store.workspaces.workspace(a).tabs.find((tab) => tab.kind === 'remote')!;
       const lost = operation(a, { type: 'tab.navigate', tabId: tab.id, url: 'https://after.test/' });
       loseNavigationReply = true;
-      const unknown = await control.submitOperation(a, lost, 'lease-a');
+      const unknown = await control.operations.submitOperation(a, lost, 'lease-a');
       assert.equal(unknown.status, 'unknown');
       loseNavigationReply = false;
       socket = await connect();
-      assert.equal(control.operationStatus(a, lost).status, 'unknown');
+      assert.equal(control.operations.operationStatus(a, lost).status, 'unknown');
       assert.equal(calls.filter((call) => call.method === 'view.navigate').length, 1);
       assert.ok((await auth(a, 'lease-a')).peerEpoch > 0);
       socket = await connect('endpoint-process-0002');
       assert.equal(identities[identities.length - 1].processChanged, true);
       assert.equal((await auth(a, 'lease-a')).peerEpoch, 0);
       assert.equal((await auth(b, 'lease-b')).peerEpoch, 0);
-      assert.ok(control.productState(a).endpointGeneration > restored.endpointGeneration);
-      assert.equal(control.productState(a).endpointGeneration, control.productState(b).endpointGeneration);
+      assert.ok(control.viewers.productState(a).endpointGeneration > restored.endpointGeneration);
+      assert.equal(
+        control.viewers.productState(a).endpointGeneration,
+        control.viewers.productState(b).endpointGeneration,
+      );
       const fresh = await offer(a, 'lease-a');
       assert.notEqual(fresh.connectionId, restored.connectionId);
     } finally {

@@ -1,20 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RemoteTransport } from '../client/transport';
-import { EditingInput } from '../client/editing-input';
-import { DeferredEditingInput } from '../client/mobile-editing-state';
+import { inputFixture } from './client-fixture';
+import { EditingInput } from '../client/editing/editing-input';
+import { DeferredEditingInput } from '../client/editing/mobile-editing-state';
 import type { Surface } from '../client/types';
 
 function setup() {
-  const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
-  Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => ({}) } });
-  let transport: RemoteTransport;
-  try {
-    transport = new RemoteTransport();
-  } finally {
-    if (previous) Object.defineProperty(globalThis, 'document', previous);
-    else Reflect.deleteProperty(globalThis, 'document');
-  }
+  const transport = inputFixture();
+  transport.presentation.canInput = () => false;
   const surface: Surface = {
     session: 's',
     id: 'v',
@@ -27,7 +20,7 @@ function setup() {
     height: 764,
     deviceScaleFactor: 1,
   };
-  transport.layout = {
+  transport.presentation.layout = {
     type: 'layout',
     generation: '1',
     epoch: '2',
@@ -35,14 +28,14 @@ function setup() {
     height: 768,
     views: [surface],
   };
-  transport.mobileEditing.acceptLayout(transport.layout);
+  transport.editing.mobileEditing.acceptLayout(transport.presentation.layout);
   const sent: any[] = [];
   const channel: any = {
     readyState: 'open',
     bufferedAmount: 0,
     send: (text: string) => sent.push(JSON.parse(text)),
   };
-  (transport as any).bindChannel(channel);
+  transport.endpoint.bindChannel(channel);
   const receive = (value: unknown) => channel.onmessage({ data: JSON.stringify(value) });
   const editable = (revision: string, focus = '7', active = true, target = active ? '31' : '0') =>
     receive({
@@ -69,81 +62,91 @@ function setup() {
 }
 test('editable feedback only updates peer editing state and never opens frame/input/RTC barriers', () => {
   const { transport, surface, editable } = setup();
-  const layout = transport.layout,
+  const layout = transport.presentation.layout,
     peer = { close: () => assert.fail('RTC must remain intact') };
-  (transport as any).peer = peer;
-  assert.equal(transport.displayReady, false);
+  transport.rtc.peer = peer;
+  assert.equal(transport.presentation.displayReady, false);
   editable('1');
-  assert.ok(transport.mobileEditing.forView(surface));
-  assert.equal(transport.layout, layout);
+  assert.ok(transport.editing.mobileEditing.forView(surface));
+  assert.equal(transport.presentation.layout, layout);
   assert.equal(surface.focus, '7');
-  assert.equal(transport.displayReady, false);
-  assert.equal((transport as any).peer, peer);
-  assert.equal(transport.sendInput(surface, { type: 'ime_commit', text: 'blocked' }), false);
+  assert.equal(transport.presentation.displayReady, false);
+  assert.equal(transport.rtc.peer, peer);
+  assert.equal(transport.input.sendInput(surface, { type: 'ime_commit', text: 'blocked' }), false);
   editable('2', '7', false);
-  assert.equal(transport.mobileEditing.forView(surface), undefined);
+  assert.equal(transport.editing.mobileEditing.forView(surface), undefined);
   editable('1');
-  assert.equal(transport.mobileEditing.forView(surface), undefined);
+  assert.equal(transport.editing.mobileEditing.forView(surface), undefined);
 });
 test('reconfigure preserves keyboard owner and composition, then uses the fresh exact lease', () => {
   const { transport, surface, editable, receive } = setup();
-  const layout = transport.layout!;
+  const layout = transport.presentation.layout!;
   const input = new EditingInput(),
     queue = new DeferredEditingInput();
   editable('1');
-  const identity = transport.editingIdentity(surface);
+  const identity = transport.editing.editingIdentity(surface);
   input.focus(identity);
   assert.ok(input.start(identity));
   receive({ ...layout, generation: '0', epoch: '3', views: [], reconfiguring: true });
-  assert.deepEqual(transport.layout!.views, []);
-  assert.equal(transport.editingSurface('v'), surface);
-  const owner = transport.mobileEditing.forKeyboard(transport.editingSurface('v'))?.editable.target;
+  assert.deepEqual(transport.presentation.layout!.views, []);
+  assert.equal(transport.editing.editingSurface('v'), surface);
+  const owner = transport.editing.mobileEditing.forKeyboard(transport.editing.editingSurface('v'))?.editable
+    .target;
   assert.equal(owner, '31');
-  assert.equal(transport.mobileEditing.forView(surface), undefined);
-  assert.equal(transport.sendInput(surface, { type: 'ime_set', text: '你', editableTarget: owner }), false);
+  assert.equal(transport.editing.mobileEditing.forView(surface), undefined);
+  assert.equal(
+    transport.input.sendInput(surface, { type: 'ime_set', text: '你', editableTarget: owner }),
+    false,
+  );
   assert.ok(queue.enqueue(owner!, { ...input.update(identity, '你'), editableTarget: owner }));
   editable('2', '8');
-  assert.equal(transport.mobileEditing.forKeyboard(transport.editingSurface('v'))?.editable.target, owner);
-  assert.equal(transport.mobileEditing.forView(surface), undefined);
+  assert.equal(
+    transport.editing.mobileEditing.forKeyboard(transport.editing.editingSurface('v'))?.editable.target,
+    owner,
+  );
+  assert.equal(transport.editing.mobileEditing.forView(surface), undefined);
   const next = { ...surface, focus: '8', height: 340 };
   receive({ ...layout, generation: '2', epoch: '4', views: [next] });
-  assert.equal(transport.mobileEditing.forView(next)?.editable.target, owner);
+  assert.equal(transport.editing.mobileEditing.forView(next)?.editable.target, owner);
   assert.deepEqual(queue.drain(owner!), [
     { type: 'ime_set', text: '你', selection_start: 1, selection_end: 1, editableTarget: owner },
   ]);
   assert.deepEqual(input.end(identity, '你好', 1), { type: 'ime_commit', text: '你好' });
-  assert.equal(transport.displayReady, false);
+  assert.equal(transport.presentation.displayReady, false);
   editable('3', '8', false);
-  assert.equal(transport.mobileEditing.forKeyboard(transport.editingSurface('v')), undefined);
+  assert.equal(transport.editing.mobileEditing.forKeyboard(transport.editing.editingSurface('v')), undefined);
 });
 test('all output barriers preserve editing; only an authoritative view removal revokes it', () => {
   const { transport, surface, editable, receive } = setup();
-  const layout = transport.layout!;
+  const layout = transport.presentation.layout!;
   editable('1');
   receive({ ...layout, generation: '0', epoch: '3', views: [], reconfiguring: true });
   editable('2', '8', true, '32');
-  assert.equal(transport.mobileEditing.forKeyboard(transport.editingSurface('v'))?.editable.target, '32');
-  assert.equal(transport.mobileEditing.forView(surface), undefined);
+  assert.equal(
+    transport.editing.mobileEditing.forKeyboard(transport.editing.editingSurface('v'))?.editable.target,
+    '32',
+  );
+  assert.equal(transport.editing.mobileEditing.forView(surface), undefined);
   const next = { ...surface, focus: '8' };
   receive({ ...layout, generation: '2', epoch: '4', views: [next] });
-  assert.equal(transport.mobileEditing.forView(next)?.editable.target, '32');
+  assert.equal(transport.editing.mobileEditing.forView(next)?.editable.target, '32');
   receive({ ...layout, generation: '0', epoch: '5', views: [], reconfiguring: true });
   receive({ ...layout, generation: '0', epoch: '6', views: [] });
-  assert.deepEqual(transport.editingSurface('v'), next);
-  assert.equal(transport.mobileEditing.forKeyboard(next)?.editable.target, '32');
-  assert.equal(transport.mobileEditing.forView(next), undefined);
+  assert.deepEqual(transport.editing.editingSurface('v'), next);
+  assert.equal(transport.editing.mobileEditing.forKeyboard(next)?.editable.target, '32');
+  assert.equal(transport.editing.mobileEditing.forView(next), undefined);
   receive({ ...layout, generation: '3', epoch: '7', views: [] });
-  assert.equal(transport.editingSurface('v'), undefined);
-  assert.equal(transport.mobileEditing.forKeyboard(next), undefined);
+  assert.equal(transport.editing.editingSurface('v'), undefined);
+  assert.equal(transport.editing.mobileEditing.forKeyboard(next), undefined);
 });
 test('focus ACK reevaluates one early editable candidate without modifying token from feedback', () => {
   const { transport, surface, editable, receive, sent } = setup();
-  (transport as any).canInput = () => true;
-  transport.ensureInputFocus(surface);
+  transport.presentation.canInput = () => true;
+  transport.input.ensureInputFocus(surface);
   const request = sent[0];
   editable('1', '8');
   assert.equal(surface.focus, '7');
-  assert.equal(transport.mobileEditing.forView(surface), undefined);
+  assert.equal(transport.editing.mobileEditing.forView(surface), undefined);
   receive({
     type: 'focus',
     ok: true,
@@ -152,8 +155,8 @@ test('focus ACK reevaluates one early editable candidate without modifying token
     token: { view: 'v', session: 's', instance: 'i', document: 'd', focus: '8' },
   });
   assert.equal(surface.focus, '8');
-  assert.ok(transport.mobileEditing.forView(surface));
-  transport.focus(surface, false);
-  assert.equal(transport.mobileEditing.forView(surface), undefined);
-  clearTimeout((transport as any).focusTimer);
+  assert.ok(transport.editing.mobileEditing.forView(surface));
+  transport.input.focus(surface, false);
+  assert.equal(transport.editing.mobileEditing.forView(surface), undefined);
+  transport.input.reset();
 });

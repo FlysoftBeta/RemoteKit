@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import Close from '@mui/icons-material/Close';
 import {
   Alert,
   Box,
@@ -8,26 +8,27 @@ import {
   DialogContent,
   DialogTitle,
   Divider,
-  FormControlLabel,
   FormControl,
-  InputLabel,
-  Select,
-  MenuItem,
+  FormControlLabel,
   IconButton,
+  InputLabel,
+  MenuItem,
   Radio,
   RadioGroup,
+  Select,
   Switch,
   TextField,
   Typography,
   useMediaQuery,
 } from '@mui/material';
-import Close from '@mui/icons-material/Close';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { ProductSettings, ProductState, ProductUser, RegistrationStatus } from '../shared/product';
 import { SEARCH_ENGINES } from '../shared/product';
+import type { ProductActionHandler as Action } from './control/product-operations';
+import { formatError } from './format-error';
 import { request } from './types';
-export type { ProductActionHandler as Action } from './product-operations';
-import type { ProductActionHandler as Action } from './product-operations';
-export const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+export type { ProductActionHandler as Action } from './control/product-operations';
+
 export function AuthView({
   onLogin,
   close,
@@ -62,7 +63,7 @@ export function AuthView({
       const result = await request<RegistrationStatus>('/api/auth/registration');
       if (sequence === registrationRequest.current) setRegistration(result);
     } catch (e) {
-      if (sequence === registrationRequest.current) setRegistrationError(errorMessage(e));
+      if (sequence === registrationRequest.current) setRegistrationError(formatError(e));
     }
   }, []);
   useEffect(() => {
@@ -102,7 +103,7 @@ export function AuthView({
             );
             onLogin(result.user);
           } catch (e) {
-            setError(errorMessage(e));
+            setError(formatError(e));
             if (register) void refreshRegistration();
           } finally {
             submitting.current = false;
@@ -238,10 +239,18 @@ export function SettingsDialog({
     setBusy((p) => ({ ...p, [key]: true }));
     setResult((p) => ({ ...p, [key]: '' }));
     try {
-      await action({ type: 'settings.update', settings: value });
-      setResult((p) => ({ ...p, [key]: '已保存' }));
+      const receipt = await action({ type: 'settings.update', settings: value });
+      setResult((p) => ({
+        ...p,
+        [key]:
+          receipt.status === 'committed'
+            ? '已保存'
+            : receipt.status === 'unknown'
+              ? '结果未知，请核对'
+              : '正在同步',
+      }));
     } catch (e) {
-      setResult((p) => ({ ...p, [key]: `未保存，请重试：${errorMessage(e)}` }));
+      setResult((p) => ({ ...p, [key]: `未保存，请重试：${formatError(e)}` }));
     } finally {
       setBusy((p) => ({ ...p, [key]: false }));
     }
@@ -454,19 +463,9 @@ export function PageDialogs({
 }: {
   state: ProductState;
   action: Action;
-  activeId?: string | null;
+  activeId: string | null;
 }) {
-  const visible = state.workspace.windows
-    .filter(
-      (w) =>
-        (state.workspace.layoutMode === 'side-by-side' &&
-          window.innerWidth >= Math.max(720, state.workspace.windows.length * 365 - 5)) ||
-        w.id === state.workspace.activeWindowId,
-    )
-    .map((w) => w.activeTabId);
-  const dialog = state.pageDialogs?.find((d) =>
-    activeId === undefined ? visible.includes(d.tabId) : d.id === activeId,
-  );
+  const dialog = state.pageDialogs?.find((dialog) => dialog.id === activeId);
   return dialog ? <PageDialogForm key={dialog.id} dialog={dialog} action={action} /> : null;
 }
 function PageDialogForm({
@@ -491,7 +490,7 @@ function PageDialogForm({
         ...(dialog.kind === 'prompt' ? { text } : {}),
       });
     } catch (e) {
-      setError(errorMessage(e));
+      setError(formatError(e));
       setBusy(false);
     }
   };

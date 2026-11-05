@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { FrameEpochGate } from '../client/frame-epoch';
+import { FrameEpochGate } from '../client/presentation/frame-epoch';
 test('timestamp map is bounded and validates uint32 RTP timestamps and epochs', () => {
   const gate = new FrameEpochGate(2);
   gate.record(0xffffffff, '9');

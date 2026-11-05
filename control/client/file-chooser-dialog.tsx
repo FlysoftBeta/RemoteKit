@@ -1,4 +1,5 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { diagnostics } from './media/diagnostics';
+import { Add, Close, MoreHoriz, Send } from '@mui/icons-material';
 import {
   Alert,
   Badge,
@@ -11,19 +12,19 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { Add, Close, MoreHoriz, Send } from '@mui/icons-material';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LibraryEntry } from '../shared/file-library';
 import type { FileRequest } from '../shared/product';
-import { fileChooserAccept, validateSelection } from './file-selection';
-import { basketEntries, DeviceImport, fileError, GroupConfirm, touchButton } from './file-library-controls';
-import { BasketRows, type BasketItemPanel } from './basket-rows';
 import { ArchiveContents } from './archive-picker';
-import { useLibrary } from './file-library-state';
-import { PhotoCapture } from './photo-library-capture';
-import { operationId } from './product-operations';
+import { BasketRows, type BasketItemPanel } from './basket-rows';
+import { operationId } from './control/product-operations';
 import { placeFileChooser } from './file-chooser-anchor';
+import { basketEntries, DeviceImport, fileError, GroupConfirm, touchButton } from './file-library-controls';
+import { useLibrary } from './file-library-state';
+import { fileChooserAccept, validateSelection } from './file-selection';
 import { FileViewButton, useFileView } from './file-view';
-import type { RemoteTransport } from './transport';
+import { PhotoCapture } from './photo-library-capture';
+import type { ViewerSession } from './viewer-session';
 
 type Panel = 'add' | 'more' | 'group' | 'archive' | BasketItemPanel;
 type Camera = { afterId?: string; replace?: LibraryEntry };
@@ -31,7 +32,7 @@ type Camera = { afterId?: string; replace?: LibraryEntry };
 export function FileChooserDialog(props: {
   request: FileRequest;
   viewId?: string;
-  transport: RemoteTransport;
+  transport: ViewerSession;
 }) {
   return <FileBasketDialog {...props} />;
 }
@@ -44,7 +45,7 @@ export function FileBasketDialog({
 }: {
   request?: FileRequest;
   viewId?: string;
-  transport?: RemoteTransport;
+  transport?: ViewerSession;
   onClose?: () => void;
 }) {
   const { rpc, online, snapshot, refresh, mutate, select, checkout, photos } = useLibrary();
@@ -85,10 +86,11 @@ export function FileBasketDialog({
   const canAdd = !toolbarDisabled && basket.length + pending.length < 64;
 
   useEffect(() => {
-    if (online) void refresh().catch(() => {});
+    if (online) void refresh().catch((error) => diagnostics.record('file-chooser-dialog', error));
   }, [online, request?.id]);
   const measure = () => {
-    const anchor = viewId && request?.anchor && transport?.fileInputBounds(viewId, request.anchor);
+    const anchor =
+      viewId && request?.anchor && transport?.presentation.fileInputBounds(viewId, request.anchor);
     const visual = window.visualViewport;
     const height = visual?.height ?? window.innerHeight;
     setViewportHeight(height);

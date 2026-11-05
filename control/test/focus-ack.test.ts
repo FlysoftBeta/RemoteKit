@@ -1,18 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RemoteTransport } from '../client/transport';
+import { inputFixture } from './client-fixture';
 import type { Surface } from '../client/types';
 
 function setup() {
-  const previous = Object.getOwnPropertyDescriptor(globalThis, 'document');
-  Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => ({}) } });
-  let transport: RemoteTransport;
-  try {
-    transport = new RemoteTransport();
-  } finally {
-    if (previous) Object.defineProperty(globalThis, 'document', previous);
-    else Reflect.deleteProperty(globalThis, 'document');
-  }
+  const transport = inputFixture();
   const surface = (id: string): Surface => ({
     id,
     session: 's',
@@ -33,13 +25,17 @@ function setup() {
     bufferedAmount: 0,
     send: (data: string) => sent.push(JSON.parse(data)),
   };
-  transport.layout = { type: 'layout', generation: '1', epoch: '2', width: 1280, height: 480, views: [a, b] };
-  Object.defineProperty(transport, 'displayReady', { get: () => true });
+  transport.presentation.layout = {
+    type: 'layout',
+    generation: '1',
+    epoch: '2',
+    width: 1280,
+    height: 480,
+    views: [a, b],
+  };
   // These tests isolate focus ACK ordering; rendering readiness has its own tests.
-  (transport as any).canInput = () => true;
-  (transport as any).viewPresentations.set('1', { layoutEpoch: '2' });
-  (transport as any).viewPresentations.set('2', { layoutEpoch: '2' });
-  (transport as any).bindChannel(channel);
+  transport.presentation.canInput = () => true;
+  transport.endpoint.bindChannel(channel);
   const ack = (request: Record<string, any>, extras: Record<string, unknown> = {}) =>
     channel.onmessage({
       data: JSON.stringify({
@@ -62,29 +58,29 @@ function setup() {
 
 test('already-focused ACK releases input even when the focus token remains unchanged', () => {
   const { transport, a, sent, ack } = setup();
-  transport.focus(a, true);
+  transport.input.focus(a, true);
   const request = sent[0];
-  transport.sendInput(a, { type: 'ime_commit', text: 'first' });
+  transport.input.sendInput(a, { type: 'ime_commit', text: 'first' });
   assert.equal(sent.length, 1);
-  transport.focus(a, true);
+  transport.input.focus(a, true);
   assert.equal(sent.length, 1, 'duplicate pending focus preserves its queue');
   ack(request);
   assert.equal(sent[1].event.text, 'first');
   assert.equal(sent[1].focus, '7');
-  transport.focus(a, true);
-  transport.sendInput(a, { type: 'ime_commit', text: 'second' });
+  transport.input.focus(a, true);
+  transport.input.sendInput(a, { type: 'ime_commit', text: 'second' });
   ack(sent[2]);
   assert.equal(sent[3].event.text, 'second');
 });
 
 test('rapid A to B to A ignores old ACK and rejects mismatched epoch or identity', () => {
   const { transport, a, b, sent, ack } = setup();
-  transport.focus(a, true);
+  transport.input.focus(a, true);
   const old = sent[0];
-  transport.focus(b, true);
-  transport.focus(a, true);
+  transport.input.focus(b, true);
+  transport.input.focus(a, true);
   const current = sent[2];
-  transport.sendInput(a, { type: 'ime_commit', text: 'current' });
+  transport.input.sendInput(a, { type: 'ime_commit', text: 'current' });
   ack(old);
   ack(current, { layoutEpoch: '1' });
   ack(current, {
@@ -99,19 +95,19 @@ test('rapid A to B to A ignores old ACK and rejects mismatched epoch or identity
 
 test('matched rejected focus drops queued input and reports the rejection', () => {
   const { transport, a, sent, ack } = setup();
-  transport.focus(a, true);
-  transport.sendInput(a, { type: 'ime_commit', text: 'reject' });
+  transport.input.focus(a, true);
+  transport.input.sendInput(a, { type: 'ime_commit', text: 'reject' });
   ack(sent[0], { ok: false, error: 'stale_focus' });
   assert.equal(sent.length, 1);
-  assert.equal(transport.diagnostics.error, 'stale_focus');
-  transport.ensureInputFocus(a);
+  assert.equal(transport.observations.diagnostics.error, 'stale_focus');
+  transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2);
   assert.notEqual(sent[1].focusRequestId, sent[0].focusRequestId);
   ack(sent[0], { ok: false });
-  transport.ensureInputFocus(a);
+  transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2, 'old rejection preserves the new pending request');
   ack(sent[1]);
-  transport.ensureInputFocus(a);
+  transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2, 'successful ACK preserves established focus');
 });
 
@@ -123,24 +119,24 @@ test('focus timeout revokes only its own optimistic identity and permits a new r
   }) as any);
   t.mock.method(globalThis, 'clearTimeout', (() => {}) as any);
   const { transport, a, b, sent, ack } = setup();
-  transport.ensureInputFocus(a);
-  transport.sendInput(a, { type: 'ime_commit', text: 'expired' });
+  transport.input.ensureInputFocus(a);
+  transport.input.sendInput(a, { type: 'ime_commit', text: 'expired' });
   timers[0]();
-  transport.ensureInputFocus(a);
+  transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2);
   assert.notEqual(sent[0].focusRequestId, sent[1].focusRequestId);
   timers[0]();
-  transport.ensureInputFocus(a);
+  transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2, 'old timeout leaves new request intact');
   ack(sent[1]);
   timers[1]();
-  transport.ensureInputFocus(a);
+  transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 2, 'queued old timeout cannot revoke ACK');
-  transport.focus(b, true);
+  transport.input.focus(b, true);
   const old = timers[timers.length - 1]!;
-  transport.focus(a, true);
+  transport.input.focus(a, true);
   old();
-  transport.ensureInputFocus(a);
+  transport.input.ensureInputFocus(a);
   assert.equal(sent.length, 4);
   ack(sent[3]);
   assert.equal(

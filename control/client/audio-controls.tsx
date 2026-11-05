@@ -1,6 +1,5 @@
-import React from 'react';
 import { Box, Button, FormControlLabel, Switch, Typography } from '@mui/material';
-import type { AudioChannels, AudioPlaybackState } from './audio-output';
+import type { AudioChannels, AudioPlaybackState } from './media/audio-output';
 export function AudioControls({
   channels,
   online,

@@ -1,8 +1,9 @@
+import { diagnostics } from './media/diagnostics';
 import { useEffect, useRef, useState } from 'react';
 import type { LibraryEntry, LibraryMethods, LibrarySnapshot, PhotoMetadata } from '../shared/file-library';
-import type { DcFileClient } from './dc-file-client';
 import type { CapturedBurst } from './camera-capture';
-import { operationId } from './product-operations';
+import { operationId } from './control/product-operations';
+import type { FileChannel } from './files/file-channel';
 
 interface PhotoServices {
   mutate<K extends 'library.import' | 'library.replace'>(
@@ -10,7 +11,7 @@ interface PhotoServices {
     params: LibraryMethods[K]['params'],
   ): Promise<LibrarySnapshot>;
   latestSnapshot: () => LibrarySnapshot | undefined;
-  rpc: DcFileClient;
+  rpc: FileChannel;
 }
 // At most two retained bursts, each with two lossless images from an 8 Mi pixel source.
 const maxEncodedBytesPerJob = 72 * 1024 * 1024;
@@ -222,7 +223,7 @@ export function usePhotoJobs(services: PhotoServices, available: boolean, identi
   function capture(id: string, result: Promise<CapturedBurst>) {
     const task = tasks.current.get(id);
     if (!task) {
-      void result.catch(() => {});
+      void result.catch((error) => diagnostics.record('photo-jobs', error));
       return;
     }
     // Attach before earlier jobs complete, including when the capture rejects.

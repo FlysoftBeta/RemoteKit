@@ -1,6 +1,7 @@
+import { diagnostics } from './media/diagnostics';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AuthSocketMethods, AuthState, FacePurpose } from '../shared/security';
-import type { RemoteTransport } from './transport';
+import type { ViewerSession } from './viewer-session';
 
 export type AuthRequest = <K extends keyof AuthSocketMethods>(
   method: K,
@@ -21,7 +22,7 @@ function cameraError(error: unknown) {
 }
 
 export function useAuthCamera(
-  media: RemoteTransport,
+  media: ViewerSession,
   request: AuthRequest,
   auth: AuthState | null,
   online: boolean,
@@ -37,11 +38,11 @@ export function useAuthCamera(
   const manualPresence = useRef<string | undefined>(undefined);
   const automaticPending = useRef(false);
   const retryAt = useRef(0);
-  const channelReady = media.authCameraReady;
+  const channelReady = media.authorization.authCameraReady;
 
   const stop = useCallback(() => {
     generation.current++;
-    media.setAuthCamera();
+    media.authorization.setAuthCamera();
     stopStream(active.current);
     active.current = undefined;
     setStream(undefined);
@@ -52,7 +53,10 @@ export function useAuthCamera(
     challenge.current = undefined;
     setExplicit(undefined);
     stop();
-    if (id) void request('auth.face.cancel', { challengeId: id }).catch(() => {});
+    if (id)
+      void request('auth.face.cancel', { challengeId: id }).catch((error) =>
+        diagnostics.record('auth-camera', error),
+      );
   }, [request, stop]);
 
   const open = useCallback(
@@ -109,12 +113,17 @@ export function useAuthCamera(
       try {
         await open(true, current);
         if (current !== generation.current) return;
-        if (old) await request('auth.face.cancel', { challengeId: old }).catch(() => {});
+        if (old)
+          await request('auth.face.cancel', { challengeId: old }).catch((error) =>
+            diagnostics.record('auth-camera', error),
+          );
         if (current !== generation.current) return;
         const next = await request('auth.face.begin', { purpose, currentPassword });
         if (current !== generation.current) {
           if (next.face.challengeId)
-            void request('auth.face.cancel', { challengeId: next.face.challengeId }).catch(() => {});
+            void request('auth.face.cancel', { challengeId: next.face.challengeId }).catch((error) =>
+              diagnostics.record('auth-camera', error),
+            );
           return;
         }
         challenge.current = next.face.challengeId;
@@ -168,7 +177,7 @@ export function useAuthCamera(
       id === manualPresence.current
     ) {
       const track = active.current?.getVideoTracks()[0];
-      if (track?.readyState === 'live' && !track.muted && media.recentAuthCameraFrame(id))
+      if (track?.readyState === 'live' && !track.muted && media.authorization.recentAuthCameraFrame(id))
         onDepartureObserved();
     }
   }, [id, manualLock, media, onDepartureObserved, purpose, reason, status]);
@@ -183,8 +192,8 @@ export function useAuthCamera(
   }, [explicit, purpose, status, stop]);
   useEffect(() => {
     if (online && channelReady && stream && id && status === 'pending' && peerEpoch && !document.hidden)
-      media.setAuthCamera(stream, { challengeId: id, authEpoch: peerEpoch });
-    else media.setAuthCamera();
+      media.authorization.setAuthCamera(stream, { challengeId: id, authEpoch: peerEpoch });
+    else media.authorization.setAuthCamera();
   }, [channelReady, id, media, online, peerEpoch, status, stream]);
 
   useEffect(() => {
@@ -217,18 +226,22 @@ export function useAuthCamera(
         await open(false, current);
         if (disposed || current !== generation.current) return;
         if (id && status === 'pending')
-          await request('auth.face.cancel', { challengeId: id }).catch(() => {});
+          await request('auth.face.cancel', { challengeId: id }).catch((error) =>
+            diagnostics.record('auth-camera', error),
+          );
         if (disposed || current !== generation.current) return;
         const next = await request('auth.face.begin', { purpose: desired });
         if (current !== generation.current) {
           if (next.face.challengeId)
-            void request('auth.face.cancel', { challengeId: next.face.challengeId }).catch(() => {});
+            void request('auth.face.cancel', { challengeId: next.face.challengeId }).catch((error) =>
+              diagnostics.record('auth-camera', error),
+            );
           return;
         }
         challenge.current = next.face.challengeId;
         if (manualLock && desired === 'presence') manualPresence.current = next.face.challengeId;
-      } catch {
-        // Permission may only be requested from the visible, explicit flow.
+      } catch (error) {
+        diagnostics.record('auth-camera', error);
       } finally {
         retryAt.current = performance.now() + 2500;
         automaticPending.current = false;

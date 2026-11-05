@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
+import type { AuthSettings } from '../../shared/security';
 import {
   AuthAttempts,
   FaceVault,
@@ -7,8 +8,7 @@ import {
   hashSecret,
   verifySecret,
   type SecretHash,
-} from '../security-crypto';
-import type { AuthSettings } from '../../shared/security';
+} from '../auth/crypto';
 import type { Clock } from '../util/clock';
 
 export class SecurityRepository {

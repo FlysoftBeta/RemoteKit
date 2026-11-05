@@ -7,9 +7,9 @@ import {
   InboundMediaSampler,
   MediaDiagnosticsHistory,
   type InboundMediaStats,
-} from '../client/media-diagnostics';
-import { negotiatedReceiverPlayout } from '../client/receiver-playout';
-import { PresentationDiagnostics } from '../client/presentation-diagnostics';
+} from '../client/media/media-diagnostics';
+import { negotiatedReceiverPlayout } from '../client/media/receiver-playout';
+import { PresentationDiagnostics } from '../client/media/presentation-diagnostics';
 
 function report(timestamp: number, fields: Partial<InboundMediaStats> = {}): InboundMediaStats {
   return { id: 'inbound', type: 'inbound-rtp', timestamp, ...fields };

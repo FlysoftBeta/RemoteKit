@@ -5,8 +5,8 @@ import {
   momentumPosition,
   GESTURE_SLOP_DIP,
   MOMENTUM_MAX_US,
-} from '../client/client-gestures';
-import { TouchInput, mergeTouchMoves, mergeGestureMomentum } from '../client/touch-input';
+} from '../client/input/client-gestures';
+import { TouchInput, mergeTouchMoves, mergeGestureMomentum } from '../client/input/touch-input';
 const p = (x: number, y = 0, id = 1) => ({ id, x, y, pressure: 0.5 });
 
 test('client tap keeps tapDown target binding and explicit tap click candidate', () => {
@@ -42,7 +42,7 @@ test('source pan includes pre-slop distance and leaves both axes for Browser arb
 test('interleaved pointer history uses current contact collection and incremental pinch scale', () => {
   const t = new TouchInput('pinch');
   const take = (action: 'start' | 'move' | 'end', point: ReturnType<typeof p>, at: number) =>
-    t.sample('identity', action, point, at, 1000000, true)!;
+    t.sample('identity', action, point, at, 1000000)!;
   take('start', p(0), 0);
   assert.deepEqual(
     take('start', p(100, 0, 2), 1).gestures?.map((g) => g.type),
@@ -51,7 +51,7 @@ test('interleaved pointer history uses current contact collection and incrementa
   const first = take('move', p(-10), 20);
   assert.ok(first.gestures?.some((g) => g.type === 'pinchBegin'));
   assert.equal(first.gestures?.find((g) => g.type === 'pinchUpdate')?.scale, 1.1);
-  assert.equal(t.sample('identity', 'move', p(105, 0, 2), 10, undefined, true), undefined);
+  assert.equal(t.sample('identity', 'move', p(105, 0, 2), 10, undefined), undefined);
   const second = take('move', p(110, 0, 2), 21);
   assert.ok(Math.abs(second.gestures!.find((g) => g.type === 'pinchUpdate')!.scale! - 120 / 110) < 1e-12);
   assert.ok(second.gestures!.some((g) => g.type === 'scrollUpdate'));
@@ -60,10 +60,9 @@ test('interleaved pointer history uses current contact collection and incrementa
 test('source velocity and analytic momentum survive batched delivery and paused rAF', () => {
   const run = () => {
     const t = new TouchInput('trajectory');
-    const packets = [t.sample('a', 'start', p(0), 0, 1000, true)!];
-    for (let n = 1; n <= 10; n++)
-      packets.push(t.sample('a', 'move', p(n * 10, n * 3), n * 10, undefined, true)!);
-    packets.push(t.sample('a', 'end', p(100, 30), 110, undefined, true)!);
+    const packets = [t.sample('a', 'start', p(0), 0, 1000)!];
+    for (let n = 1; n <= 10; n++) packets.push(t.sample('a', 'move', p(n * 10, n * 3), n * 10, undefined)!);
+    packets.push(t.sample('a', 'end', p(100, 30), 110, undefined)!);
     return { packets, plan: t.takeMomentum()! };
   };
   const a = run(),
@@ -123,9 +122,9 @@ test('source-time stationary release suppresses fling and velocity remains bound
 });
 test('bounded merging preserves transitions and rejects identity or sequence changes', () => {
   const t = new TouchInput('queue');
-  t.sample('a', 'start', p(0), 0, 1000, true);
-  const a = t.sample('a', 'move', p(20), 20, undefined, true)!;
-  const b = t.sample('a', 'move', p(40), 40, undefined, true)!;
+  t.sample('a', 'start', p(0), 0, 1000);
+  const a = t.sample('a', 'move', p(20), 20, undefined)!;
+  const b = t.sample('a', 'move', p(40), 40, undefined)!;
   assert.equal(mergeTouchMoves({ ...a, gestures: Array(8).fill(a.gestures![0]) }, b), undefined);
   assert.equal(mergeTouchMoves(a, b)!.gestures!.length, 4);
   const progress = {
@@ -150,5 +149,5 @@ test('bounded merging preserves transitions and rejects identity or sequence cha
   assert.equal(cancelled.gestures![cancelled.gestures!.length - 1].type, 'scrollEnd');
   t.reset();
   assert.equal(t.takeMomentum(), undefined);
-  assert.equal(t.sample('new', 'start', p(0), 50, undefined, true)!.inputIdentity, 'new');
+  assert.equal(t.sample('new', 'start', p(0), 50, undefined)!.inputIdentity, 'new');
 });

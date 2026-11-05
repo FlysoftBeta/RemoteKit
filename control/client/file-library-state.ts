@@ -1,10 +1,11 @@
+import { diagnostics } from './media/diagnostics';
 import { createContext, useContext, useEffect, useRef, useState } from 'react';
-import type { LibraryMethods, LibrarySnapshot, SelectionState } from '../shared/file-library';
-import type { DcFileClient } from './dc-file-client';
-import { operationId } from './product-operations';
 import { RemoteKitError } from '../shared/errors';
-import { usePhotoJobs } from './photo-jobs';
+import type { LibraryMethods, LibrarySnapshot, SelectionState } from '../shared/file-library';
+import { operationId } from './control/product-operations';
 import { FileThumbnails } from './file-thumbnails';
+import type { FileChannel } from './files/file-channel';
+import { usePhotoJobs } from './photo-jobs';
 
 export type LibraryRequest = <K extends keyof LibraryMethods>(
   method: K,
@@ -23,7 +24,7 @@ interface Checkout {
 
 export function useFileLibrary(
   request: LibraryRequest,
-  rpc: DcFileClient,
+  rpc: FileChannel,
   online: boolean,
   enabled: boolean,
   identity: string | undefined,
@@ -82,7 +83,7 @@ export function useFileLibrary(
         error instanceof RemoteKitError &&
         error.code === 'conflict'
       ) {
-        await refresh().catch(() => {});
+        await refresh().catch((error) => diagnostics.record('file-library-state', error));
         throw new Error(
           method === 'library.basket' ? '文件篮已更新，请检查当前顺序后重试' : '文件已更新，请重新打开后重试',
         );
@@ -120,7 +121,9 @@ export function useFileLibrary(
       if (currentIdentity.current !== identity || !active.current || authorization.current !== epoch) return;
       if (submit) {
         // Even a lost RTC response can correspond to a successful native callback.
-        await rpc.commitSelection(requestId, transaction.selectionId).catch(() => {});
+        await rpc
+          .commitSelection(requestId, transaction.selectionId)
+          .catch((error) => diagnostics.record('file-library-state', error));
       }
       const result = await request('library.finish', { selectionId: transaction.selectionId });
       transaction.state = result.state;
@@ -170,12 +173,12 @@ export function useFileLibrary(
           !checkout.active &&
           Date.now() >= checkout.nextCheck
         ) {
-          void confirm(id, checkout, false).catch(() => {});
+          void confirm(id, checkout, false).catch((error) => diagnostics.record('file-library-state', error));
           break;
         }
       }
     };
-    void refresh().catch(() => {});
+    void refresh().catch((error) => diagnostics.record('file-library-state', error));
     const timer = setInterval(reconcile, 1500);
     return () => clearInterval(timer);
   }, [request, rpc, enabled, online, identity]);

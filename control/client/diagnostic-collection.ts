@@ -1,3 +1,4 @@
+import { diagnostics } from './media/diagnostics';
 import type { DiagnosticEnvironment, DiagnosticMethods, DiagnosticReply } from '../shared/diagnostics';
 
 export function diagnosticEnvironment(): DiagnosticEnvironment {
@@ -181,7 +182,9 @@ export class DiagnosticCollection {
     let data: object | undefined;
     try {
       data = this.capture(this.since);
-    } catch {}
+    } catch (error) {
+      diagnostics.record('diagnostic-collection', error);
+    }
     if (!data) {
       this.update({ ...current, missingSamples: current.missingSamples + 1 });
       this.schedule(() => this.sample());
