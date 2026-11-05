@@ -36,17 +36,22 @@ async (host) => {
     try {
       await context.addInitScript(() => {
         const q = (window.osrProfile = { frames: [], markers: [], inputs: [], sends: [], meta: [] });
-        q.transport = () => {
+        q.session = () => {
           for (const element of document.querySelectorAll('.remote-viewport, video, canvas')) {
             const key = Object.keys(element).find((k) => k.startsWith('__reactFiber$'));
             for (let fiber = key && element[key]; fiber; fiber = fiber.return) {
               for (let hook = fiber.memoizedState; hook; hook = hook.next) {
-                const transport = hook.memoizedState?.current;
-                if (typeof transport?.getPresentationDiagnostics === 'function') return transport;
+                const session = hook.memoizedState;
+                if (
+                  session?.rtc &&
+                  session?.observations &&
+                  typeof session?.presentation?.getPresentationDiagnostics === 'function'
+                )
+                  return session;
               }
             }
           }
-          throw Error('Production transport unavailable');
+          throw Error('Production Viewer session unavailable');
         };
         const WS = window.WebSocket;
         window.WebSocket = class extends WS {
@@ -107,7 +112,7 @@ async (host) => {
                     view.width / (view.deviceScaleFactor * (view.mediaScaleX ?? view.mediaScale ?? 1));
                   const stimulus = Math.floor((m.event.x * 20) / width) + 1;
                   const focusRequestId =
-                    q.markerMode === 'worker' ? q.transportInstance.pendingFocus?.requestId : undefined;
+                    q.markerMode === 'worker' ? q.sessionInstance.input.pendingFocus?.requestId : undefined;
                   q.sends.push({ at: performance.now(), sequence: m.sequence, stimulus, focusRequestId });
                 } else if (q.markerMode === 'worker' && m.type === 'focus') {
                   q.focusEvents.push({
@@ -246,10 +251,10 @@ async (host) => {
           try {
             if (!osrProfile.state.workspace.tabs.some((tab) => tab.url === url && !tab.pendingUrl))
               return false;
-            const transport = osrProfile.transport();
+            const session = osrProfile.session();
             return (
-              transport.getPresentationDiagnostics().rendering.backend === 'video' &&
-              [...transport.videoPlanes.values()].some((plane) => plane.ready)
+              session.presentation.getPresentationDiagnostics().rendering.backend === 'video' &&
+              [...session.presentation.videoPlanes.values()].some((plane) => plane.ready)
             );
           } catch {
             return false;
@@ -261,9 +266,16 @@ async (host) => {
 
       await page.evaluate(async (markerMode) => {
         const q = osrProfile,
-          transport = q.transport();
-        const [renderer, plane] = [...transport.videoPlanes].find(([, candidate]) => candidate.ready);
-        Object.assign(q, { transportInstance: transport, renderer, plane, initialLayout: transport.layout });
+          session = q.session();
+        const [renderer, plane] = [...session.presentation.videoPlanes].find(
+          ([, candidate]) => candidate.ready,
+        );
+        Object.assign(q, {
+          sessionInstance: session,
+          renderer,
+          plane,
+          initialLayout: session.presentation.layout,
+        });
         const { decodeMarker, percentiles } = await import('/marker-codec.js');
         Object.assign(q, {
           percentiles,
@@ -279,7 +291,7 @@ async (host) => {
         if (markerMode === 'worker') {
           const { BenchmarkMarkerReadback } = await import('/benchmark-marker-readback.js');
           q.reader = await new BenchmarkMarkerReadback({ maxPending, timeoutMs: 1000 }).start();
-          transport.subscribeInputDelivery?.((event) => {
+          session.input.subscribeInputDelivery?.((event) => {
             if (q.active && (event.phase === 'queued' || event.phase === 'submitted')) {
               q.inputDelivery.push({
                 phase: event.phase,
@@ -292,8 +304,8 @@ async (host) => {
           });
           // The delivery subscription emits only touch/gesture. Observe the mouse
           // call boundary separately and let the unmodified method admit it.
-          const sendInput = transport.sendInput;
-          transport.sendInput = function (surface, event, ...options) {
+          const sendInput = session.input.sendInput;
+          session.input.sendInput = function (surface, event, ...options) {
             if (!q.active || event.type !== 'mouse' || event.action !== 'down') {
               return sendInput.call(this, surface, event, ...options);
             }
@@ -334,8 +346,8 @@ async (host) => {
             wall = Date.now(),
             view = renderer.view;
           const current =
-            transport.layout?.epoch === q.initialLayout.epoch &&
-            transport.layout?.generation === q.initialLayout.generation;
+            session.presentation.layout?.epoch === q.initialLayout.epoch &&
+            session.presentation.layout?.generation === q.initialLayout.generation;
           const visible =
             current &&
             plane.ready &&
@@ -434,7 +446,7 @@ async (host) => {
           acceptMarker(marker, identity);
         };
         q.sampleStats = async () => {
-          const peer = transport.peer;
+          const peer = session.rtc.peer;
           const stats = peer ? await peer.getStats().catch(() => new Map()) : new Map();
           const playback = plane.video.getVideoPlaybackQuality?.();
           const receiver = peer?.getReceivers().find((candidate) => candidate.track?.kind === 'video');
@@ -444,12 +456,12 @@ async (host) => {
               ['inbound-rtp', 'candidate-pair', 'codec', 'transport'].includes(s.type),
             ),
             peer: {
-              connectionId: transport.connectionId,
+              connectionId: session.rtc.connectionId,
               state: peer?.connectionState,
-              initialVideoCurrent: transport.videoPlanes.get(renderer) === plane,
+              initialVideoCurrent: session.presentation.videoPlanes.get(renderer) === plane,
               documentVisibility: document.visibilityState,
               trackId: receiver?.track.id,
-              dataChannel: transport.channel?.readyState,
+              dataChannel: session.endpoint.channel?.readyState,
             },
             playback: playback
               ? {
@@ -464,8 +476,8 @@ async (host) => {
                   playoutDelayHint: receiver.playoutDelayHint ?? null,
                 }
               : null,
-            rendering: transport.getPresentationDiagnostics().rendering,
-            diagnostics: transport.diagnostics,
+            rendering: session.presentation.getPresentationDiagnostics().rendering,
+            diagnostics: session.observations.diagnostics,
           };
         };
         const clocks = [];
@@ -572,7 +584,7 @@ async (host) => {
         return await page.evaluate(
           async ({ conditions, shaping, rtcSamples, version, viewer, headless, inputCount }) => {
             const q = osrProfile,
-              transport = q.transportInstance;
+              session = q.sessionInstance;
             q.active = false;
             const ended = performance.now(),
               after = await q.sampleStats(),
@@ -627,10 +639,10 @@ async (host) => {
               elapsedMs,
               conditions,
               shaping,
-              actualLayout: transport.layout,
+              actualLayout: session.presentation.layout,
               viewer: { ...viewer, headless },
               visibility: document.visibilityState,
-              presentation: transport.getPresentationDiagnostics(),
+              presentation: session.presentation.getPresentationDiagnostics(),
               visibleCompositorFps: (compositorDelta * 1000) / elapsedMs,
               visibleCallbackFps: (frameIds.length * 1000) / elapsedMs,
               playbackQualityDelta,
@@ -703,8 +715,8 @@ async (host) => {
             box = q.renderer.canvas.getBoundingClientRect();
           q.trackTouch = true;
           q.touchWire = [];
-          q.touchPeer = q.transportInstance.peer;
-          q.touchChannel = q.transportInstance.channel;
+          q.touchPeer = q.sessionInstance.rtc.peer;
+          q.touchChannel = q.sessionInstance.endpoint.channel;
           q.touchStream = q.plane.video.srcObject;
           q.touchFrames = q.plane.video.getVideoPlaybackQuality().totalVideoFrames;
           return { x: box.left + box.width / 2, y: box.top + box.height * 0.65 };
@@ -731,17 +743,17 @@ async (host) => {
         );
         touch = await page.evaluate(() => {
           const q = osrProfile,
-            transport = q.transportInstance;
+            session = q.sessionInstance;
           q.trackTouch = false;
           return {
             trustedDown: q.touchTrustedDown,
             wire: q.touchWire,
-            samePeer: transport.peer === q.touchPeer,
-            sameChannel: transport.channel === q.touchChannel,
-            sameVideo: transport.videoPlanes.get(q.renderer) === q.plane,
+            samePeer: session.rtc.peer === q.touchPeer,
+            sameChannel: session.endpoint.channel === q.touchChannel,
+            sameVideo: session.presentation.videoPlanes.get(q.renderer) === q.plane,
             sameStream: q.plane.video.srcObject === q.touchStream,
             frameDelta: q.plane.video.getVideoPlaybackQuality().totalVideoFrames - q.touchFrames,
-            backend: transport.getPresentationDiagnostics().rendering.backend,
+            backend: session.presentation.getPresentationDiagnostics().rendering.backend,
           };
         });
         const touchPost = await postEvidence('/touch-report', touch);

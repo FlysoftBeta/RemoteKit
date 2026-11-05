@@ -73,7 +73,7 @@ const fingerprints = await Promise.all(
 await mkdir(dirname(evidence), { recursive: true });
 await mkdir(evidence);
 await writeFile(join(evidence, 'artifact-hashes.json'), JSON.stringify(fingerprints, null, 2));
-await copyFile(join(root, 'tools', 'osr-video-profile-browser.js'), join(evidence, 'driver.js'));
+await copyFile(join(root, 'tools', 'measure', 'osr-video-profile-browser.js'), join(evidence, 'driver.js'));
 if (!options['live-build'])
   await copyFile(join(pkg, 'manifest.json'), join(evidence, 'package-manifest.json'));
 
