@@ -25,8 +25,6 @@ npm run client
 | REMOTEKIT_ENDPOINT_NODE_ID / REMOTEKIT_ENDPOINT_TOKEN | 配置一个远端Native节点ID及独立管理Bearer密钥；设置NODE_ID后不启动本地Endpoint |
 | REMOTEKIT_ENDPOINT_TLS_PROXY=1 | 网关位于本机TLS反向代理后；仅接受loopback代理且X-Forwarded-Proto=https |
 | REMOTEKIT_HTTPS_KEY / REMOTEKIT_HTTPS_CERT | 成对配置TLS私钥/证书 |
-| REMOTEKIT_METRICS_DIR | metrics输出目录 |
-| REMOTEKIT_DIAGNOSTICS=1 | 显式开启隔离测试入口，正式包默认关闭 |
 
 局域网部署同时配置监听地址、正确Origin和TLS；浏览器能力会受安全上下文影响。不要把实验配置、凭据或本机Profile放入客户端持久存储。
 
@@ -35,5 +33,3 @@ npm run client
 ## 验证与诊断
 
 `npm test`验证模型、协议、媒体与策略；`npm run build`执行类型检查、Vite、最小server runtime和独立部署启动检查。真实H264、输入及视觉检查另记，不能由这些单元检查替代。
-
-专用诊断实例开启REMOTEKIT_DIAGNOSTICS后，`/automation`提供无控件、下放配置的测试页面，`/diagnostics`提供观测。使用独立browser context和临时用户；不能混用正常账号cookie。两条入口都不接产品自动画质策略。正式工具与指标口径见[实验与测量](../docs/streaming-experiments.zh-CN.md)，退休选项集中在[历史归档](../docs/experiments-archive.zh-CN.md)。

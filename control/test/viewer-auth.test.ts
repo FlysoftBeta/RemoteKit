@@ -27,6 +27,13 @@ class AuthEndpoint implements Endpoint {
   faceReason?: string;
   statusGate?: ReturnType<typeof defer>;
   authGate?: ReturnType<typeof defer>;
+  private signal?: Parameters<NonNullable<Endpoint['onSignal']>>[0];
+  onSignal(listener: Parameters<NonNullable<Endpoint['onSignal']>>[0]) {
+    this.signal = listener;
+    return () => {
+      this.signal = undefined;
+    };
+  }
   async request(method: string, _tenant: string, params: Record<string, unknown> = {}): Promise<any> {
     this.calls.push({ method, params });
     switch (method) {
@@ -40,7 +47,14 @@ class AuthEndpoint implements Endpoint {
         return { applied: true, accepted: true };
       case 'rtc.offer':
         this.connectionId = String(params.connectionId);
-        return { sdp: 'v=0' };
+        queueMicrotask(() =>
+          this.signal?.({
+            tenantId: _tenant,
+            connectionId: String(params.connectionId),
+            signal: { type: 'answer', sdp: 'v=0' },
+          }),
+        );
+        return { accepted: true, connectionId: params.connectionId };
       case 'rtc.close':
         this.connectionId = undefined;
         return { closed: true };
@@ -79,7 +93,7 @@ async function fixture(t: TestContext, path = ':memory:') {
   await attach('lease', true);
   const request = (method: string, params: object = {}, lease = 'lease') =>
     control.viewerRequest(tenant, lease, method, params);
-  const offer = () => request('rtc.offer', { type: 'offer', sdp: 'v=0' });
+  const offer = () => request('rtc.offer', { type: 'offer', sdp: 'v=0', attemptId: randomUUID() });
   return { store, endpoint, control, tenant, user, attach, request, offer };
 }
 
@@ -92,11 +106,8 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
   const locked = await f.request('auth.lock');
   assert.equal(locked.locked, true);
   assert.equal(locked.peerEpoch, 2);
-  for (const method of ['admin.get', 'operation.status', 'files.begin', 'viewport', 'action'])
+  for (const method of ['admin.get', 'operation.status', 'viewport', 'action'])
     await assert.rejects(f.request(method), { status: 423 });
-  await assert.rejects(f.control.receiveFileUpload(f.tenant, 'lease', 'fake-ticket', Readable.from([])), {
-    status: 423,
-  });
   const op = {
     tenantId: f.tenant,
     connectionId,

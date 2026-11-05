@@ -12,7 +12,7 @@ import {
 } from './security-crypto';
 import type { AuthSettings } from '../shared/security';
 import { isDeepStrictEqual } from 'node:util';
-import type { ControlState } from '../client/types';
+import { createSchema } from './persistence/schema';
 import type { ProductUser, ProductWorkspace, OperationReceipt } from '../shared/product';
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -27,7 +27,6 @@ export const defaultSettings = () => ({
 });
 export function emptyWorkspace(tenantId: string): ProductWorkspace {
   return {
-    schemaVersion: 2,
     tenantId,
     revision: 0,
     tabs: [],
@@ -40,35 +39,6 @@ export function emptyWorkspace(tenantId: string): ProductWorkspace {
     pendingWindowCloseId: null,
   };
 }
-export function migrateLegacy(state: ControlState): ProductWorkspace {
-  const result = emptyWorkspace(state.tenantId),
-    first = randomUUID(),
-    second = randomUUID();
-  const split =
-    state.splitTabId &&
-    state.splitTabId !== state.activeTabId &&
-    state.tabs.some((t) => t.id === state.splitTabId)
-      ? state.splitTabId
-      : null;
-  result.windows = [
-    {
-      id: first,
-      activeTabId: state.tabs.some((t) => t.id === state.activeTabId)
-        ? state.activeTabId
-        : (state.tabs.find((t) => t.id !== split)?.id ?? null),
-      weight: 1,
-    },
-  ];
-  if (split) result.windows.push({ id: second, activeTabId: split, weight: 1 });
-  result.activeWindowId = first;
-  result.tabs = state.tabs.map((tab) => ({
-    ...tab,
-    webviewId: tab.webviewId ?? '',
-    windowId: tab.id === split ? second : first,
-  }));
-  result.pendingClose = state.pendingClose ?? null;
-  return result;
-}
 export class Store {
   readonly db: Database.Database;
   readonly authAttempts = new AuthAttempts();
@@ -78,30 +48,7 @@ export class Store {
     this.db = new Database(path);
     this.db.defaultSafeIntegers(true);
     this.db.pragma('journal_mode = WAL');
-    this.db.exec(`CREATE TABLE IF NOT EXISTS tenants (id TEXT PRIMARY KEY, state TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS sessions (token TEXT PRIMARY KEY, tenant TEXT NOT NULL REFERENCES tenants(id));
-      CREATE TABLE IF NOT EXISTS view_ids (id INTEGER PRIMARY KEY AUTOINCREMENT);
-      CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, tenant TEXT NOT NULL UNIQUE, salt TEXT, password_hash TEXT, legacy INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE IF NOT EXISTS auth_tokens (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
-      CREATE TABLE IF NOT EXISTS workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_window TEXT, layout_mode TEXT NOT NULL, pending TEXT);
-      CREATE TABLE IF NOT EXISTS workspace_windows (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, active_tab TEXT, weight REAL NOT NULL);
-      CREATE TABLE IF NOT EXISTS workspace_tabs (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, window_id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS user_settings (tenant TEXT PRIMARY KEY, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS site_preferences (tenant TEXT NOT NULL, origin TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tenant,origin));
-      CREATE TABLE IF NOT EXISTS diagnostic_devices (tenant TEXT PRIMARY KEY, data TEXT NOT NULL);`);
-    if (
-      !(this.db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).some(
-        (column) => column.name === 'is_admin',
-      )
-    )
-      this.db.exec('ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0');
-    this.db
-      .exec(`CREATE TABLE IF NOT EXISTS registration_policy (id INTEGER PRIMARY KEY CHECK(id=1), salt TEXT NOT NULL, credential_hash TEXT NOT NULL);
-      CREATE UNIQUE INDEX IF NOT EXISTS single_admin ON users(is_admin) WHERE is_admin=1;`);
-    this.db
-      .exec(`CREATE TABLE IF NOT EXISTS operation_sequences (tenant TEXT PRIMARY KEY, sequence TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS operation_generations (tenant TEXT PRIMARY KEY, generation TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS operation_receipts (tenant TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY(tenant,id));`);
+    createSchema(this.db);
     // A process restart cannot prove whether an in-flight native side effect ran.
     for (const row of this.db.prepare('SELECT tenant,id,receipt FROM operation_receipts').all() as {
       tenant: string;
@@ -117,84 +64,6 @@ export class Store {
           .run(JSON.stringify(receipt), row.tenant, row.id);
       }
     }
-    this.db.exec(
-      'CREATE TABLE IF NOT EXISTS user_security (user_id TEXT PRIMARY KEY REFERENCES users(id), settings TEXT NOT NULL, pin_salt TEXT, pin_hash TEXT, face_ciphertext TEXT, face_model TEXT)',
-    );
-    this.db.exec(
-      'CREATE TABLE IF NOT EXISTS popup_receipts (tenant TEXT NOT NULL, provisional_id TEXT NOT NULL, tab_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,provisional_id))',
-    );
-    this.db.transaction(() => {
-      const legacyRows = this.db.prepare('SELECT id,state FROM tenants').all() as {
-        id: string;
-        state: string;
-      }[];
-      let legacyMax = 0n;
-      for (const row of legacyRows)
-        for (const tab of JSON.parse(row.state).tabs ?? [])
-          if (/^[1-9][0-9]*$/.test(tab.webviewId))
-            legacyMax = BigInt(tab.webviewId) > legacyMax ? BigInt(tab.webviewId) : legacyMax;
-      if (legacyMax > 0n) this.db.prepare('INSERT OR IGNORE INTO view_ids(id) VALUES (?)').run(legacyMax);
-      for (const row of legacyRows) {
-        if (this.db.prepare('SELECT tenant FROM workspaces WHERE tenant=?').get(row.id)) continue;
-        const old = JSON.parse(row.state) as ControlState;
-        this.db
-          .prepare(
-            'INSERT OR IGNORE INTO users(id,username,tenant,salt,password_hash,legacy) VALUES (?,?,?,?,?,1)',
-          )
-          .run(randomUUID(), `legacy-${row.id}`, row.id, null, null);
-        const migrated = migrateLegacy(old);
-        for (const tab of migrated.tabs) if (!tab.webviewId) tab.webviewId = this.viewId();
-        this.writeWorkspace(migrated);
-        this.db
-          .prepare('INSERT OR REPLACE INTO diagnostic_devices VALUES (?,?)')
-          .run(row.id, JSON.stringify(old.device));
-        const owner = this.userForTenant(row.id)!;
-        for (const session of this.db.prepare('SELECT token FROM sessions WHERE tenant=?').all(row.id) as {
-          token: string;
-        }[])
-          this.db
-            .prepare('INSERT OR IGNORE INTO auth_tokens VALUES (?,?,?)')
-            .run(tokenHash(session.token), owner.id, Date.now() + 30 * 86400000);
-      }
-      if (!this.hasAdmin())
-        this.db
-          .prepare(
-            'UPDATE users SET is_admin=1 WHERE rowid=(SELECT rowid FROM users WHERE legacy=0 ORDER BY rowid LIMIT 1)',
-          )
-          .run();
-      let max = 0n;
-      for (const row of this.db.prepare('SELECT data FROM workspace_tabs').all() as { data: string }[]) {
-        const id = JSON.parse(row.data).webviewId;
-        if (/^[1-9][0-9]*$/.test(id)) max = BigInt(id) > max ? BigInt(id) : max;
-      }
-      if (max > 0n) this.db.prepare('INSERT OR IGNORE INTO view_ids(id) VALUES (?)').run(max);
-      for (const row of this.db.prepare('SELECT tenant,data FROM user_settings').all() as {
-        tenant: string;
-        data: string;
-      }[]) {
-        const settings = JSON.parse(row.data);
-        if (settings.showStats === undefined || settings.searchEngine === undefined)
-          this.db
-            .prepare('UPDATE user_settings SET data=? WHERE tenant=?')
-            .run(JSON.stringify({ ...defaultSettings(), ...settings }), row.tenant);
-      }
-    })();
-  }
-  session(token?: string): { token: string; tenantId: string; fresh: boolean } {
-    const tenant = this.authenticated(token);
-    if (tenant) return { token: token!, tenantId: tenant, fresh: false };
-    return this.db.transaction(() => {
-      const tenantId = randomUUID(),
-        userId = randomUUID(),
-        token = randomBytes(32).toString('hex');
-      this.db.prepare('INSERT INTO tenants VALUES (?,?)').run(tenantId, '{}');
-      this.db
-        .prepare('INSERT INTO users(id,username,tenant,salt,password_hash,legacy) VALUES (?,?,?,?,?,1)')
-        .run(userId, `diagnostic-${userId}`, tenantId, null, null);
-      this.writeWorkspace(emptyWorkspace(tenantId));
-      this.issueToken(userId, token);
-      return { token, tenantId, fresh: true };
-    })();
   }
   private issueToken(userId: string, value = randomBytes(32).toString('hex')) {
     this.db
@@ -202,19 +71,18 @@ export class Store {
       .run(tokenHash(value), userId, Date.now() + 30 * 86400000);
     return value;
   }
-  identity(token?: string): { user: ProductUser; tenantId: string; legacy: boolean } | undefined {
+  identity(token?: string): { user: ProductUser; tenantId: string } | undefined {
     if (!token || token.length > 256) return;
     const row = this.db
       .prepare(
-        'SELECT u.id,u.username,u.tenant,u.legacy,u.is_admin FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=? AND t.expires_at>?',
+        'SELECT u.id,u.username,u.tenant,u.is_admin FROM auth_tokens t JOIN users u ON u.id=t.user_id WHERE t.hash=? AND t.expires_at>?',
       )
       .get(tokenHash(token), Date.now()) as
-      { id: string; username: string; tenant: string; legacy: bigint; is_admin: bigint } | undefined;
+      { id: string; username: string; tenant: string; is_admin: bigint } | undefined;
     return row
       ? {
           user: { id: row.id, username: row.username, isAdmin: !!row.is_admin },
           tenantId: row.tenant,
-          legacy: !!row.legacy,
         }
       : undefined;
   }
@@ -225,11 +93,6 @@ export class Store {
     const row = this.db.prepare('SELECT id,username,is_admin FROM users WHERE tenant=?').get(tenant) as
       { id: string; username: string; is_admin: bigint } | undefined;
     return row ? { id: row.id, username: row.username, isAdmin: !!row.is_admin } : undefined;
-  }
-  isLegacy(tenant: string): boolean {
-    return !!(
-      this.db.prepare('SELECT legacy FROM users WHERE tenant=?').get(tenant) as { legacy: bigint } | undefined
-    )?.legacy;
   }
   revoke(token?: string) {
     if (token) this.db.prepare('DELETE FROM auth_tokens WHERE hash=?').run(tokenHash(token));
@@ -295,11 +158,8 @@ export class Store {
       const id = randomUUID(),
         tenantId = randomUUID(),
         isAdmin = !hasAdmin;
-      this.db.prepare('INSERT INTO tenants VALUES (?,?)').run(tenantId, '{}');
       this.db
-        .prepare(
-          'INSERT INTO users(id,username,tenant,salt,password_hash,legacy,is_admin) VALUES (?,?,?,?,?,0,?)',
-        )
+        .prepare('INSERT INTO users(id,username,tenant,salt,password_hash,is_admin) VALUES (?,?,?,?,?,?)')
         .run(id, name, tenantId, salt, hash.toString('hex'), Number(isAdmin));
       this.writeWorkspace(emptyWorkspace(tenantId));
       return { token: this.issueToken(id), tenantId, user: { id, username: name, isAdmin } };
@@ -309,7 +169,7 @@ export class Store {
     const name = this.credentials(username, password);
     const row = this.db
       .prepare(
-        'SELECT id,username,tenant,salt,password_hash,is_admin FROM users WHERE username=? COLLATE NOCASE AND legacy=0',
+        'SELECT id,username,tenant,salt,password_hash,is_admin FROM users WHERE username=? COLLATE NOCASE',
       )
       .get(name) as
       | {
@@ -336,9 +196,8 @@ export class Store {
     });
   }
   private passwordHash(user: string): SecretHash | undefined {
-    return this.db
-      .prepare('SELECT salt, password_hash AS hash FROM users WHERE id=? AND legacy=0')
-      .get(user) as SecretHash | undefined;
+    return this.db.prepare('SELECT salt, password_hash AS hash FROM users WHERE id=?').get(user) as
+      SecretHash | undefined;
   }
   async verifyPassword(user: string, secret: unknown) {
     if (typeof secret !== 'string' || secret.length > 256) throw new AuthError(400, '密码格式无效');
@@ -427,13 +286,12 @@ export class Store {
       data: string;
     };
     return {
-      schemaVersion: 2,
       tenantId: tenant,
       revision: Number(row.revision),
       activeWindowId: row.active_window,
       layoutMode: row.layout_mode,
       ...JSON.parse(row.pending ?? '{}'),
-      settings: { ...defaultSettings(), ...JSON.parse(settings.data) },
+      settings: JSON.parse(settings.data),
       windows: (
         this.db
           .prepare('SELECT id,active_tab,weight FROM workspace_windows WHERE tenant=? ORDER BY position')
@@ -488,18 +346,16 @@ export class Store {
     return true;
   }
   private writeWorkspace(state: ProductWorkspace) {
-    this.db
-      .prepare('INSERT OR REPLACE INTO workspaces VALUES (?,?,?,?,?)')
-      .run(
-        state.tenantId,
-        state.revision,
-        state.activeWindowId,
-        state.layoutMode,
-        JSON.stringify({
-          pendingClose: state.pendingClose ?? null,
-          pendingWindowCloseId: state.pendingWindowCloseId ?? null,
-        }),
-      );
+    this.db.prepare('INSERT OR REPLACE INTO workspaces VALUES (?,?,?,?,?)').run(
+      state.tenantId,
+      state.revision,
+      state.activeWindowId,
+      state.layoutMode,
+      JSON.stringify({
+        pendingClose: state.pendingClose ?? null,
+        pendingWindowCloseId: state.pendingWindowCloseId ?? null,
+      }),
+    );
     for (const table of ['workspace_windows', 'workspace_tabs', 'site_preferences'])
       this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(state.tenantId);
     state.windows.forEach((w, i) =>
@@ -519,33 +375,6 @@ export class Store {
       this.db
         .prepare('INSERT INTO site_preferences VALUES (?,?,?)')
         .run(state.tenantId, origin, JSON.stringify(data));
-  }
-  state(id: string): ControlState {
-    const ws = this.workspace(id),
-      active = ws.windows.find((w) => w.id === ws.activeWindowId) ?? ws.windows[0];
-    const device = this.db.prepare('SELECT data FROM diagnostic_devices WHERE tenant=?').get(id) as
-      { data: string } | undefined;
-    return {
-      tenantId: id,
-      tabs: ws.tabs,
-      activeTabId: active?.activeTabId ?? null,
-      splitTabId: ws.windows.find((w) => w.id !== active?.id)?.activeTabId ?? null,
-      device: device
-        ? JSON.parse(device.data)
-        : { mode: 'desktop', width: 1440, height: 900, deviceScaleFactor: 1 },
-      pendingClose: ws.pendingClose,
-    };
-  }
-  save(state: ControlState) {
-    const next = migrateLegacy(state);
-    const current = this.workspace(state.tenantId);
-    next.revision = current.revision;
-    next.settings = current.settings;
-    next.sites = current.sites;
-    this.saveWorkspace(next);
-    this.db
-      .prepare('INSERT OR REPLACE INTO diagnostic_devices VALUES (?,?)')
-      .run(state.tenantId, JSON.stringify(state.device));
   }
   all(): string[] {
     return (this.db.prepare('SELECT tenant FROM workspaces').all() as { tenant: string }[]).map(

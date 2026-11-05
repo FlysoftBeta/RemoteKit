@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { createSchema } from '../server/persistence/schema';
 import { FileLibrary } from '../server/file-library';
-import type { InternalFileRequest } from '../server/file-uploads';
+import type { InternalFileRequest } from '../server/file-requests';
 import type { LibrarySnapshot, SelectionState } from '../shared/file-library';
 
 const limits = { maxFileBytes: 5, maxBatchBytes: 8, maxFiles: 3, sessionBytes: 100 };
@@ -27,6 +28,7 @@ const request: InternalFileRequest = {
 function fixture() {
   const db = new Database(':memory:');
   db.defaultSafeIntegers(true);
+  createSchema(db);
   const calls: { method: string; tenant: string; args: any }[] = [];
   const states = new Map<string, SelectionState>();
   const assets = new Map([

@@ -1,14 +1,5 @@
-import type { FileUploadResult } from '../shared/product';
 import type { Asset, SelectionState } from '../shared/file-library';
-import type { DcFileBegin, FileRpc } from './file-upload';
 import { operationId } from './product-operations';
-
-export interface PhotoRank {
-  selectedAssetId: string;
-  uncertain: boolean;
-  candidates: { assetId: string; score: number }[];
-  reason: string;
-}
 
 export interface PhotoBurstDecision {
   selectedFrameId: string;
@@ -39,12 +30,11 @@ function checkAbort(signal: AbortSignal) {
 
 /** File bytes and transaction commands share the current authenticated RTC peer.
  * A new peer interrupts the transfer; drafts are never silently resumed there. */
-export class DcFileClient implements FileRpc {
+export class DcFileClient {
   private pending = new Map<
     string,
     Binding & { resolve: (value: any) => void; reject: (error: Error) => void }
   >();
-  private uploads = new Map<string, { requestId: string; channel: RTCDataChannel }>();
   private photoBursts = new Map<string, Binding>();
   private assetChunksInFlight = 0;
   constructor(
@@ -62,7 +52,6 @@ export class DcFileClient implements FileRpc {
   }
   disconnect() {
     for (const entry of this.pending.values()) entry.reject(new Error('连接中断，请重新选择文件'));
-    this.uploads.clear();
     this.photoBursts.clear();
   }
   private currentBinding(): Binding {
@@ -102,10 +91,7 @@ export class DcFileClient implements FileRpc {
       authEpoch,
     });
     // Wire byte bound includes multibyte filenames and MIME strings.
-    if (
-      new TextEncoder().encode(encoded).byteLength >
-      (method === 'begin' || method === 'photo.burst.sample' ? 61440 : 24576)
-    )
+    if (new TextEncoder().encode(encoded).byteLength > (method === 'photo.burst.sample' ? 61440 : 24576))
       throw new Error('文件信息过长，请减少文件数量');
     const signal = options.finishSentRequest ? undefined : options.signal;
     const response = new Promise<T>((resolve, reject) => {
@@ -162,85 +148,6 @@ export class DcFileClient implements FileRpc {
     options?: RequestOptions,
   ): Promise<T> {
     return (await this.send<T>(method, params, options)).response;
-  }
-  async begin(requestId: string, files: File[]): Promise<DcFileBegin> {
-    const channel = this.getChannel();
-    const authEpoch = this.getAuthEpoch();
-    const result = await this.call<DcFileBegin>('begin', {
-      requestId,
-      files: files.map((file) => ({ name: file.name, type: file.type, size: file.size })),
-    });
-    if (
-      !result ||
-      typeof result.uploadId !== 'string' ||
-      !Array.isArray(result.offsets) ||
-      result.offsets.length !== files.length ||
-      result.offsets.some(
-        (offset, index) => !Number.isSafeInteger(offset) || offset < 0 || offset > files[index].size,
-      )
-    )
-      throw new Error('文件发送状态无效');
-    if (channel !== this.getChannel() || authEpoch !== this.getAuthEpoch() || !channel)
-      throw new Error('连接中断，请重新选择文件');
-    this.uploads.set(result.uploadId, { requestId, channel });
-    return result;
-  }
-  private binding(uploadId: string) {
-    const value = this.uploads.get(uploadId);
-    if (!value || value.channel !== this.getChannel()) throw new Error('文件发送已中断，请取消后重新选择');
-    return { requestId: value.requestId, uploadId };
-  }
-  async upload(
-    uploadId: string,
-    fileIndex: number,
-    file: File,
-    offset: number,
-    signal: AbortSignal,
-    progress: (bytes: number) => void,
-  ) {
-    const binding = this.binding(uploadId);
-    const authEpoch = this.getAuthEpoch();
-    // One chunk per file is in flight. This also preserves sequential disk
-    // offsets; the protocol admits up to four concurrent chunks per client.
-    for (let position = offset; position < file.size;) {
-      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      const bytes = new Uint8Array(await file.slice(position, position + 16384).arrayBuffer());
-      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (authEpoch !== this.getAuthEpoch() || !this.uploads.has(uploadId))
-        throw new Error('连接中断，请重新选择文件');
-      let text = '';
-      for (const byte of bytes) text += String.fromCharCode(byte);
-      const result = await this.call<{ offset: number }>('chunk', {
-        ...binding,
-        fileIndex,
-        offset: position,
-        data: btoa(text),
-      });
-      if (result.offset !== position + bytes.length) throw new Error('文件接收进度不一致，请重试');
-      position = result.offset;
-      progress(position);
-    }
-    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
-    progress(file.size);
-  }
-  async commit(uploadId: string): Promise<FileUploadResult> {
-    const result = await this.call<FileUploadResult>('commit', this.binding(uploadId));
-    if (result.state === 'selected' || result.state === 'cancelled') this.uploads.delete(uploadId);
-    return result;
-  }
-  async status(uploadId: string): Promise<{ state: string; offsets: number[] }> {
-    return this.call('status', this.binding(uploadId));
-  }
-  async cancel(requestId: string, uploadId?: string): Promise<FileUploadResult> {
-    // Binding cancellation works after a lost begin reply or reconnection;
-    // an old uploadId must not claim another peer's draft.
-    const owned = uploadId ? this.uploads.get(uploadId) : undefined;
-    const result = await this.call<FileUploadResult>('cancel', {
-      requestId,
-      ...(owned?.channel === this.getChannel() ? { uploadId } : {}),
-    });
-    if (result.state !== 'validating' && uploadId) this.uploads.delete(uploadId);
-    return result;
   }
   async uploadAsset(file: File, operationId: string, signal: AbortSignal): Promise<Asset> {
     const binding = this.currentBinding();
@@ -452,9 +359,6 @@ export class DcFileClient implements FileRpc {
     this.photoBursts.delete(burstId);
     await this.call('photo.burst.cancel', { ...libraryBinding, burstId }, { binding });
   }
-  rankPhotos(assetIds: string[]): Promise<PhotoRank> {
-    return this.call('photo.rank', { ...libraryBinding, assetIds });
-  }
   async photoThumbnail(assetId: string, signal: AbortSignal): Promise<Blob> {
     const binding = this.currentBinding();
     const asset = await this.call<Asset>(
@@ -474,6 +378,9 @@ export class DcFileClient implements FileRpc {
   }
   processPhoto(assetId: string, mode: 'rectify' | 'scan', signal?: AbortSignal): Promise<Asset> {
     return this.call('photo.process', { ...libraryBinding, assetId, mode }, { signal });
+  }
+  cancelSelection(requestId: string): Promise<{ state: 'cancelled' | 'validating' }> {
+    return this.call('selection.cancel', { requestId });
   }
   commitSelection(
     requestId: string,

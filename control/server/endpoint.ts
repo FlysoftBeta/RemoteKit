@@ -33,7 +33,6 @@ export class EndpointProcess extends EventEmitter implements Endpoint {
   constructor(
     private command: string,
     private args: string[] = [],
-    private diagnosticLoopback = false,
   ) {
     super();
   }
@@ -52,7 +51,6 @@ export class EndpointProcess extends EventEmitter implements Endpoint {
     const child = spawn(this.command, this.args, {
       windowsHide: true,
       stdio: 'pipe',
-      env: this.diagnosticLoopback ? { ...process.env, REMOTEKIT_RTC_LOOPBACK_TEST: '1' } : undefined,
     });
     this.child = child;
     let buffer = '';

@@ -28,7 +28,7 @@ const layout: Layout = {
 };
 const key = { version: 1, barrierId: '10000000000000001', outputGeneration: '12', layoutEpoch: '20' };
 
-function environment(t: TestContext, stableViewport = false) {
+function environment(t: TestContext) {
   let cleanup = () => {};
   t.after(() => cleanup());
   class Element {
@@ -159,13 +159,7 @@ function environment(t: TestContext, stableViewport = false) {
   const removers = canvases.map((canvas, index) => {
     canvas.parentElement = new Element('section');
     const readyChanged = (value: boolean) => (ready[index] = value);
-    return stableViewport
-      ? transport.registerViewport(layout.views[index].id, canvas as any, readyChanged)
-      : transport.registerPlane(
-          { view: layout.views[index], layoutEpoch: '20', layoutGeneration: '12' },
-          canvas as any,
-          readyChanged,
-        );
+    return transport.registerViewport(layout.views[index].id, canvas as any, readyChanged);
   });
   const raf = () => {
     const pending = [...rafs.values()];
@@ -321,7 +315,7 @@ test('each video needs its own matched RTP before input, without canvas copies o
 });
 
 test('video readback exposes both sampling axes while changed axes retire the old input plane', (t) => {
-  const s = environment(t, true),
+  const s = environment(t),
     adapted = { ...first, mediaScale: 0.495, mediaScaleX: 0.5, mediaScaleY: 0.495 };
   s.message({ ...layout, views: [adapted, second] });
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
@@ -339,7 +333,7 @@ test('video readback exposes both sampling axes while changed axes retire the ol
 });
 
 test('invalidation offers the last authorized ROI before retiring media and input', (t) => {
-  const s = environment(t, true);
+  const s = environment(t);
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key });
   s.raf();
@@ -396,7 +390,7 @@ test('duplicate layout/prepare transactions cannot starve hidden ACK or revoke r
 });
 
 test('viewport focus-only layouts preserve media authorization and queued drag/wheel input', (t) => {
-  const s = environment(t, true);
+  const s = environment(t);
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key });
   s.raf();
@@ -450,7 +444,7 @@ test('viewport focus-only layouts preserve media authorization and queued drag/w
 });
 
 test('viewport document and epoch changes retain video but require the new barrier and own RTP', (t) => {
-  const s = environment(t, true);
+  const s = environment(t);
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key });
   s.raf();
@@ -487,7 +481,7 @@ test('viewport document and epoch changes retain video but require the new barri
 });
 
 test('viewport registrations survive RTC replacement while old receiver callbacks stay inert', (t) => {
-  const s = environment(t, true);
+  const s = environment(t);
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key });
   s.raf();
@@ -525,7 +519,7 @@ test('viewport registrations survive RTC replacement while old receiver callback
 });
 
 test('split to narrow retains hidden receivers without timing out current video; return requires own fresh frame', (t) => {
-  const s = environment(t, true);
+  const s = environment(t);
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key });
   s.raf();
@@ -622,7 +616,7 @@ test('static late metadata recovers own layout and input without inventing curre
 });
 
 test('latest own observation wins; old candidate, hidden and replacement barriers cannot authorize', (t) => {
-  const s = environment(t, true);
+  const s = environment(t);
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key });
   s.raf();
@@ -665,7 +659,7 @@ test('unmatched static observations keep recovering on video after the old fallb
     video = s.videos[1];
   video.frame(80);
   const refreshCount = () => s.sent.filter((message) => message.type === 'media.refresh').length;
-  let now = 1000;
+  let now = performance.now() + 1010;
   t.mock.method(performance, 'now', () => now);
   const before = refreshCount();
   for (let retry = 0; retry < 8; retry++) {
@@ -702,23 +696,6 @@ test('an unsupported browser reports a stable video error on the existing peer',
   assert.equal(s.transport.canRetryPresentation, false);
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   assert.equal(s.transport.presentationDiagnostics.rendering.backendReason, 'video-capability-unavailable');
-  assert.equal(s.internal.canInput('1'), false);
-});
-
-test('diagnostic HTTP still negotiates video and rejects an incompatible Endpoint on the same peer', (t) => {
-  const s = environment(t),
-    peer = s.internal.peer;
-  s.transport.enableDiagnosticHttp();
-  s.internal.peerAuthEpoch = undefined;
-  s.sent.length = 0;
-  s.channel.onopen();
-  assert.deepEqual(
-    s.sent.find((message) => message.type === 'media.presentation'),
-    { type: 'media.presentation', version: 1, backend: 'video' },
-  );
-  s.message({ type: 'presentation.mode', version: 1, backend: 'canvas' });
-  assert.equal(s.internal.peer, peer);
-  assert.equal(s.transport.presentationDiagnostics.rendering.backendReason, 'invalid-presentation-mode');
   assert.equal(s.internal.canInput('1'), false);
 });
 
@@ -774,7 +751,7 @@ test('hidden viewports suspend refresh and resume without authorizing retained p
 });
 
 test('metadata watchdog waits for the current barrier ACK and positive client bounds', (t) => {
-  const s = environment(t, true);
+  const s = environment(t);
   s.message({ type: 'presentation.mode', version: 1, backend: 'video' });
   s.message({ type: 'presentation.prepare', ...key });
   s.metadata(80);

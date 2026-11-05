@@ -56,7 +56,13 @@ async function fixture() {
     endpoint = new Endpoint(),
     control = new Control(store, endpoint);
   const { tenantId: tenant } = await store.register('operations', 'password123');
-  await control.attachViewer(tenant, 'lease', () => {});
+  await control.attachViewer(
+    tenant,
+    'lease',
+    () => {},
+    { identity: 'test-account', valid: () => true },
+    true,
+  );
   const op = (action: ProductAction): ProductOperation => ({
     operationId: randomUUID(),
     operationGeneration: store.operationGeneration(tenant),
@@ -676,7 +682,13 @@ test('lease is checked at queued acceptance; fast clock does not queue behind a 
     );
     await new Promise((resolve) => setImmediate(resolve));
     const queued = f.control.submitOperation(f.tenant, f.op({ type: 'window.create' }), 'lease');
-    const takeover = f.control.attachViewer(f.tenant, 'new', () => {});
+    const takeover = f.control.attachViewer(
+      f.tenant,
+      'new',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
     release();
     await blocked;
     await assert.rejects(queued, /接管/);

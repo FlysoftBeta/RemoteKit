@@ -245,11 +245,6 @@ button:focus-visible,
 .remote-open-keyboard.MuiButton-root:hover {
   background: #fff;
 }
-.shared-plane-canvas {
-  position: fixed;
-  pointer-events: none;
-  z-index: 1;
-}
 .remote-input {
   position: absolute;
   top: 8px;
@@ -359,9 +354,6 @@ button:focus-visible,
 .menu-icon-space {
   width: 20px;
   display: inline-block;
-}
-.connection-notice {
-  flex-shrink: 0;
 }
 .stats-overlay {
   pointer-events: none;

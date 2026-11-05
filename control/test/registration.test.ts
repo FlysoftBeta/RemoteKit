@@ -11,11 +11,9 @@ import type { Endpoint } from '../server/endpoint';
 const password = 'password123',
   credential = 'registration-secret';
 
-test('first formal registration is the only administrator under concurrency, diagnostic users do not count', async () => {
+test('first registration is the only administrator under concurrency', async () => {
   const store = new Store(':memory:');
   try {
-    const diagnostic = store.session();
-    assert.equal(store.identity(diagnostic.token)?.user.isAdmin, false);
     assert.deepEqual(store.registrationStatus(), {
       hasAdmin: false,
       credentialRequired: false,
@@ -86,34 +84,6 @@ test('registration credential persists hashed, rotates independently of account 
   }
 });
 
-test('upgrade appoints earliest formal row, skips legacy rows, and reopens idempotently', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'rk-admin-upgrade-')),
-    path = join(dir, 'control.db');
-  const old = new Database(path);
-  old.exec(
-    'CREATE TABLE users(id TEXT PRIMARY KEY,username TEXT NOT NULL UNIQUE COLLATE NOCASE,tenant TEXT NOT NULL UNIQUE,salt TEXT,password_hash TEXT,legacy INTEGER NOT NULL DEFAULT 0)',
-  );
-  for (const [id, legacy] of [
-    ['diagnostic', 1],
-    ['earliest', 0],
-    ['later', 0],
-  ] as const)
-    old.prepare('INSERT INTO users VALUES (?,?,?,?,?,?)').run(id, id, id, null, null, legacy);
-  old.close();
-  let store = new Store(path);
-  try {
-    assert.equal(store.userForTenant('diagnostic')?.isAdmin, false);
-    assert.equal(store.userForTenant('earliest')?.isAdmin, true);
-    assert.equal(store.userForTenant('later')?.isAdmin, false);
-    store.db.close();
-    store = new Store(path);
-    assert.equal(store.userForTenant('earliest')?.isAdmin, true);
-  } finally {
-    store.db.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test('registration revalidates policy after asynchronous password hashing', async () => {
   const store = new Store(':memory:');
   try {
@@ -138,11 +108,23 @@ test('admin methods check server role, scoped params, current lease and post-has
     await store.setRegistrationCredential(admin.tenantId, credential);
     const user = await store.register('ordinary', password, credential);
     let valid = true;
-    await control.attachViewer(admin.tenantId, 'admin-lease', () => {}, {
-      identity: 'admin-token',
-      valid: () => valid,
-    });
-    await control.attachViewer(user.tenantId, 'user-lease', () => {});
+    await control.attachViewer(
+      admin.tenantId,
+      'admin-lease',
+      () => {},
+      {
+        identity: 'admin-token',
+        valid: () => valid,
+      },
+      true,
+    );
+    await control.attachViewer(
+      user.tenantId,
+      'user-lease',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
     assert.equal(control.productState(admin.tenantId).user.isAdmin, true);
     assert.equal(control.productState(user.tenantId).user.isAdmin, false);
     for (const method of ['admin.get', 'admin.setRegistrationCredential'])

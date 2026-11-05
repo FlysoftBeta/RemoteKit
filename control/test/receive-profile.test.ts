@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   configureReceiveOffer,
-  originalGatheredOffer,
   chooseReceiveProfile,
   loadReceiveProfile,
   supportsExperimentalH264Level42,
@@ -42,8 +41,6 @@ test('Chrome89 4.2 profile is explicit, constrained-baseline mode1 only and pres
   assert.equal(effective.changes.length, 1);
   assert.match(effective.sdp, /a=fmtp:108 .*profile-level-id=42e02a/);
   assert.match(effective.sdp, /a=fmtp:110 .*profile-level-id=42e01f/);
-  const gathered = effective.sdp + 'a=candidate:raw-host\r\n';
-  assert.equal(originalGatheredOffer(gathered, original), original + 'a=candidate:raw-host\r\n');
   assert.match(
     configureReceiveOffer(original, 'chrome89-h264-51', 'Chrome/89.0').sdp,
     /a=fmtp:108 .*profile-level-id=42e033/,
@@ -67,7 +64,6 @@ test('Chromium157 can explicitly select capability-checked level4.2 without chan
   assert.equal(configured.changes.length, 1);
   assert.match(configured.sdp, /a=fmtp:108 .*profile-level-id=42e02a/);
   assert.match(configured.sdp, /a=fmtp:110 .*profile-level-id=42e01f/);
-  assert.equal(originalGatheredOffer(configured.sdp, offer), offer);
   assert.throws(() => configureReceiveOffer(offer, 'chrome89-h264-42', ua, codecs), /Chrome 89/);
 });
 

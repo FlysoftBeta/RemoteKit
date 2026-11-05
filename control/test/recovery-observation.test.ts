@@ -36,7 +36,13 @@ async function fixture() {
     endpoint = new RecoveryEndpoint(),
     control = new Control(store, endpoint);
   const { tenantId: tenant } = await store.register('recovery-observer', 'password123');
-  await control.attachViewer(tenant, 'lease', () => {});
+  await control.attachViewer(
+    tenant,
+    'lease',
+    () => {},
+    { identity: 'test-account', valid: () => true },
+    true,
+  );
   const tab = (
     await control.productAction(tenant, { type: 'window.create', url: 'https://saved.test/history' }, 'lease')
   ).state.workspace.tabs[0];

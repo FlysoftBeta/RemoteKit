@@ -13,14 +13,12 @@ const gate = () => {
   });
   return { promise, resolve };
 };
-test('shutdown closes upgraded sockets, removes listeners, and drains RPC/detach/aborted HTTP before returning', async () => {
+test('shutdown closes upgraded sockets, removes listeners, and drains RPC and detach before returning', async () => {
   const rpc = gate(),
     detached = gate(),
-    rpcEntered = gate(),
-    fileEntered = gate();
+    rpcEntered = gate();
   let detachCount = 0,
-    fileFinished = false,
-    relayClosed = false;
+    signalsCleared = false;
   const control = Object.assign(new EventEmitter(), {
     store: { identity: () => ({ tenantId: 'tenant' }) },
     attachViewer: async () => ({ workspace: { revision: 1 } }),
@@ -36,25 +34,11 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC/detach
       await rpc.promise;
       return {};
     },
-    receiveFileUpload: async (
-      _tenant: string,
-      _auth: string,
-      _ticket: string,
-      source: AsyncIterable<unknown>,
-    ) => {
-      fileEntered.resolve();
-      try {
-        for await (const _ of source) {
-        }
-      } finally {
-        fileFinished = true;
-      }
-    },
-    closeRelays: () => {
-      relayClosed = true;
+    clearSignals: () => {
+      signalsCleared = true;
     },
   }) as unknown as Control;
-  const server = createHttp(control, { origins: ['http://test.local'], clientDir: '.', metricsDir: '.' });
+  const server = createHttp(control, { origins: ['http://test.local'], clientDir: '.' });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const port = (server.address() as { port: number }).port;
@@ -70,23 +54,8 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC/detach
     }),
   ];
   await Promise.all(clients.map((client) => once(client, 'open')));
-  clients[0].send(JSON.stringify({ id: '1', method: 'action', params: {} }));
+  clients[0].send(JSON.stringify({ id: '1', method: 'clock.ping', params: {} }));
   await rpcEntered.promise;
-  const upload = httpRequest({
-    hostname: '127.0.0.1',
-    port,
-    path: '/api/files/abcdefghijklmnop',
-    method: 'POST',
-    headers: {
-      origin: 'http://test.local',
-      cookie: 'rk_session=token',
-      'content-type': 'application/octet-stream',
-      'content-length': '100',
-    },
-  });
-  upload.on('error', () => {});
-  upload.write('a');
-  await fileEntered.promise;
   const closed = clients.map((client) => once(client, 'close'));
   let complete = false;
   const shutdown = server.shutdown();
@@ -102,7 +71,6 @@ test('shutdown closes upgraded sockets, removes listeners, and drains RPC/detach
   rpc.resolve();
   detached.resolve();
   await shutdown;
-  assert.equal(fileFinished, true);
-  assert.equal(relayClosed, true);
+  assert.equal(signalsCleared, true);
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
 });

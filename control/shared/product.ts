@@ -79,7 +79,6 @@ export interface SitePreferences {
   manualKeyboard?: boolean;
 }
 export interface ProductWorkspace {
-  schemaVersion: 2;
   tenantId: string;
   revision: number;
   tabs: ProductTab[];
@@ -131,18 +130,6 @@ export interface FileRequest {
   state: 'pending' | 'validating';
   limits: { maxFileBytes: number; maxBatchBytes: number; maxFiles: number; sessionBytes: number };
 }
-export interface UploadFileSpec {
-  name: string;
-  size: number;
-  type: string;
-}
-export interface FileUploadBegin {
-  uploadId: string;
-  files: { ticket: string; url: string }[];
-}
-export interface FileUploadResult {
-  state: 'selected' | 'validating' | 'cancelled';
-}
 export type DegradationPreference = 'maintain-resolution' | 'balanced' | 'maintain-framerate';
 export interface MediaPolicy {
   degradationPreference: DegradationPreference;
@@ -166,7 +153,7 @@ export interface ProductFeedback {
 }
 export interface ProductQuality {
   resourceLimitation: string | null;
-  mode: 'product' | 'manual';
+  mode: 'product';
   preference: ProductSettings['qualityPreference'];
   clientScale: number;
   effectiveDpr: number;
@@ -195,7 +182,7 @@ export interface ProductState {
   quality: ProductQuality;
   endpointGeneration: number;
   endpointError: string | null;
-  viewer: { connected: boolean; trickleIce?: boolean };
+  viewer: { connected: boolean };
   integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean };
   constraints: { clientScaleMin: number; clientScaleMax: number };
 }
@@ -261,20 +248,17 @@ export interface AdminStatus {
   registrationCredentialConfigured: boolean;
 }
 export interface SocketMethods extends AuthSocketMethods, LibraryMethods, DiagnosticMethods {
-  'files.begin': { params: { requestId: string; files: UploadFileSpec[] }; result: FileUploadBegin };
-  'files.commit': { params: { uploadId: string }; result: FileUploadResult };
-  'files.cancel': { params: { requestId: string; uploadId?: string }; result: FileUploadResult };
   'admin.get': { params: Record<string, never>; result: AdminStatus };
   'admin.setRegistrationCredential': { params: { serverCredential: string }; result: AdminStatus };
   'operation.status': {
     params: { operationId: string; operationGeneration: string };
     result: OperationReceipt;
   };
-  action: { params: ProductAction; result: ProductActionResult };
+  action: { params: Extract<ProductAction, { type: 'settings.update' }>; result: ProductActionResult };
   viewport: { params: ViewerViewport; result: ProductState };
   feedback: { params: ProductFeedback; result: { accepted: boolean } };
   'rtc.offer': {
-    params: { type: 'offer'; sdp: string; trickle?: boolean; attemptId?: string };
+    params: { type: 'offer'; sdp: string; attemptId: string };
     result: {
       type: 'answer';
       sdp: string;

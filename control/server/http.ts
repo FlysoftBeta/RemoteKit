@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
-import { readFile, appendFile, mkdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { resolve, extname, sep } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import type { Socket } from 'node:net';
@@ -16,8 +16,6 @@ export function createHttp(
   options: {
     origins: string[];
     clientDir: string;
-    metricsDir: string;
-    diagnostics?: boolean;
     diagnosticDir?: string;
     tls?: { key: Buffer; cert: Buffer };
     endpointNode?: EndpointNode;
@@ -59,7 +57,6 @@ export function createHttp(
     return promise;
   };
   const firstViewer = new Map<string, number>();
-  let metricsWrite: Promise<void> = Promise.resolve();
   const cookie = (token: string, clear = false) =>
     `rk_session=${token}; HttpOnly; SameSite=Strict; Path=/${options.tls ? '; Secure' : ''}${clear ? '; Max-Age=0' : '; Max-Age=2592000'}`;
   const checkOrigin = (req: IncomingMessage) => {
@@ -74,7 +71,6 @@ export function createHttp(
       const address = new URL(req.url ?? '/', 'http://localhost'),
         path = address.pathname,
         token = readToken(req);
-      const diagnostic = options.diagnostics === true;
       if (path === '/api/auth/registration' && req.method === 'GET')
         return json(res, 200, control.store.registrationStatus());
       if (path === '/api/auth/me' && req.method === 'GET') {
@@ -82,35 +78,11 @@ export function createHttp(
         if (!identity) throw new ApiError(401, '请先登录');
         return json(res, 200, { authenticated: true, user: identity.user });
       }
-      if (path === '/api/state' && req.method === 'GET') {
-        if (!diagnostic) throw new ApiError(404, '正常 Viewer 请使用 WebSocket');
-        const identity = control.store.identity(token);
-        if (identity && !identity.legacy) throw new ApiError(409, '请在独立会话打开诊断页面');
-        const session = control.store.session(token);
-        if (session.fresh) res.setHeader('Set-Cookie', cookie(session.token));
-        return json(res, 200, await control.getState(session.tenantId));
-      }
       if (path.startsWith('/api/')) {
+        if (!['/api/auth/register', '/api/auth/login', '/api/auth/logout'].includes(path))
+          throw new ApiError(404, 'Interface does not exist');
         if (req.method !== 'POST') throw new ApiError(405, '不支持的方法');
         checkOrigin(req);
-        if (path.startsWith('/api/files/')) {
-          const identity = control.store.identity(token);
-          if (!identity || !token) throw new ApiError(401, '请先登录');
-          if (req.headers['content-type'] !== 'application/octet-stream')
-            throw new ApiError(415, '需要原始文件内容');
-          const ticket = path.slice('/api/files/'.length);
-          if (!/^[a-zA-Z0-9_-]{16,128}$/.test(ticket)) throw new ApiError(404, '文件ticket不存在');
-          await control.receiveFileUpload(
-            identity.tenantId,
-            authenticationIdentity(token),
-            ticket,
-            req,
-            req.headers['content-length'],
-          );
-          res.statusCode = 204;
-          res.end();
-          return;
-        }
         if (!req.headers['content-type']?.startsWith('application/json'))
           throw new ApiError(415, '需要 JSON 请求');
         const body = await readBody(req);
@@ -148,31 +120,11 @@ export function createHttp(
           res.setHeader('Set-Cookie', cookie('', true));
           return json(res, 200, { loggedOut: true });
         }
-        const identity = control.store.identity(token);
-        if (!identity) throw new ApiError(401, '请先登录');
-        const tenant = identity.tenantId;
-        if (path === '/api/metrics') {
-          const record =
-            JSON.stringify({ receivedAt: new Date().toISOString(), tenantId: tenant, metrics: body }) + '\n';
-          const write = metricsWrite.then(async () => {
-            await mkdir(options.metricsDir, { recursive: true });
-            await appendFile(resolve(options.metricsDir, 'client-metrics.jsonl'), record);
-          });
-          metricsWrite = write.catch(() => {});
-          await write;
-          return json(res, 200, { stored: true });
-        }
-        if (!diagnostic || !identity.legacy) throw new ApiError(404, '正常 Viewer 请使用 WebSocket');
-        if (path === '/api/actions') return json(res, 200, await control.action(tenant, body));
-        if (path === '/api/rtc/offer') return json(res, 200, await control.offer(tenant, body));
-        if (path === '/api/rtc/ice') return json(res, 200, await control.ice(tenant, body));
-        if (path === '/api/rtc/close') return json(res, 200, await control.closeRtc(tenant, body));
-        if (path === '/api/rtc/network') return json(res, 200, control.networkStats(tenant, body));
         throw new ApiError(404, '接口不存在');
       }
       if (req.method !== 'GET' && req.method !== 'HEAD') throw new ApiError(405, '不支持的方法');
       const root = resolve(options.clientDir),
-        appEntry = ['/', '/diagnostics', '/automation'].includes(path),
+        appEntry = path === '/',
         file = resolve(root, appEntry ? 'index.html' : `.${path}`);
       if (!file.startsWith(root + sep)) throw new ApiError(403, '无效路径');
       const content = await readFile(file).catch(() => {
@@ -255,7 +207,7 @@ export function createHttp(
               ws.close(4001, reason);
             },
             { identity: hash, valid: () => control.store.identity(token)?.tenantId === peer.tenant },
-            identity.legacy ? undefined : initialUnlocked,
+            initialUnlocked,
           ),
         );
         void ready.catch(() => ws.close(1011, 'Viewer unavailable'));
@@ -315,12 +267,7 @@ export function createHttp(
                     peers.has(ws) &&
                     control.productAllowed(peer.tenant, lease) &&
                     control.productEpoch(peer.tenant, lease) === epoch;
-                  if (
-                    currentIdentity.legacy ||
-                    currentIdentity.tenantId !== peer.tenant ||
-                    epoch === undefined ||
-                    !allowed()
-                  )
+                  if (currentIdentity.tenantId !== peer.tenant || epoch === undefined || !allowed())
                     throw new ApiError(423, 'Viewer 已锁定');
                   result = await diagnosticSessions.request(
                     { tenant: peer.tenant, lease, epoch, identity: hash, allowed },
@@ -404,8 +351,7 @@ export function createHttp(
       await httpClosed;
       while (inflight.size) await Promise.allSettled([...inflight]);
       await archivesClosed;
-      await metricsWrite;
-      control.closeRelays?.();
+      control.clearSignals?.();
     })();
     return shutdownPromise;
   };

@@ -142,7 +142,7 @@ export function FileBasketDialog({
     }
     void run(async () => {
       if (final) return;
-      const result = await rpc.cancel(request.id);
+      const result = await rpc.cancelSelection(request.id);
       if (result.state !== 'validating') setCancelled(true);
       else setError('页面正在确认文件，稍后可再次检查');
     });

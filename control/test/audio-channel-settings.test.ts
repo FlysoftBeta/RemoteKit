@@ -15,7 +15,13 @@ test('audio output channels default on and persist the complete shared pair atom
   try {
     const account = await store.register('audio-settings', 'password123'),
       tenant = account.tenantId;
-    await control.attachViewer(tenant, 'viewer', () => {});
+    await control.attachViewer(
+      tenant,
+      'viewer',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
     assert.deepEqual(store.workspace(tenant).settings.audioChannels, { left: true, right: true });
     for (const left of [false, true])
       for (const right of [false, true]) {
@@ -43,7 +49,13 @@ test('audio output channels default on and persist the complete shared pair atom
       );
       assert.deepEqual(store.workspace(tenant).settings.audioChannels, { left: true, right: true });
     }
-    await control.attachViewer(tenant, 'replacement', () => {});
+    await control.attachViewer(
+      tenant,
+      'replacement',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
     assert.deepEqual(control.productState(tenant).workspace.settings.audioChannels, {
       left: true,
       right: true,
@@ -59,24 +71,19 @@ test('audio output channels default on and persist the complete shared pair atom
     store.db.close();
   }
 });
-test('pre-audio settings migrate with both outputs on and failed persistence does not change confirmed channels', async () => {
+test('audio defaults enable both outputs and failed persistence preserves confirmed channels', async () => {
   const store = new Store(':memory:'),
     control = new Control(store, endpoint);
   try {
-    const { tenantId: tenant } = await store.register('audio-migrate', 'password123');
-    store.db
-      .prepare('UPDATE user_settings SET data=? WHERE tenant=?')
-      .run(
-        JSON.stringify({
-          qualityPreference: 'auto',
-          clientScaleOverride: null,
-          memorySaverEnabled: true,
-          showStats: false,
-        }),
-        tenant,
-      );
+    const { tenantId: tenant } = await store.register('audio-persistence', 'password123');
     assert.deepEqual(store.workspace(tenant).settings.audioChannels, { left: true, right: true });
-    await control.attachViewer(tenant, 'viewer', () => {});
+    await control.attachViewer(
+      tenant,
+      'viewer',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
     const original = store.saveWorkspace.bind(store);
     store.saveWorkspace = () => {
       throw Error('sqlite fault');

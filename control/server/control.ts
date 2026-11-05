@@ -19,15 +19,12 @@ import type {
 import { resolveNavigation } from './navigation';
 import { SEARCH_ENGINES, FILE_LIMITS, isLocalTab } from '../shared/product';
 import { FileLibrary } from './file-library';
-import { FileUploads, FileUploadError, type InternalFileRequest, type UploadLimits } from './file-uploads';
-import type { Readable } from 'node:stream';
+import { FileRequestError, type InternalFileRequest, type FileLimits } from './file-requests';
 import { QualityState } from './quality';
-import type { ControlState, Device } from '../client/types';
 import type { Endpoint, RtcSignal } from './endpoint';
 import { Store } from './store';
 import { AuthError } from './security-crypto';
 import { ViewerAuth, type ViewerSecurity } from './viewer-auth';
-import { LoopbackRelay, rewriteSdp, selectLocalCandidate, type NetworkSimulation } from './network-sim.mjs';
 function operationPayload(value: unknown): string {
   const canonical = (input: any): any =>
     Array.isArray(input)
@@ -121,17 +118,15 @@ export class Control extends EventEmitter {
   private mediaGeneration(tenant: string) {
     return this.tenantEndpointGenerations.get(tenant) ?? this.endpointGeneration;
   }
-  private relays = new Map<string, LoopbackRelay>();
-  private diagnosticTenants = new Set<string>();
   private readonly viewerAuth: ViewerAuth;
   private viewers = new Map<
     string,
     {
       id: string;
-      authentication?: { identity: string; valid: () => boolean };
+      authentication: { identity: string; valid: () => boolean };
       revoke: (reason: 'another-viewer' | 'logout') => void;
       viewport?: ViewerViewport;
-      security?: ViewerSecurity;
+      security: ViewerSecurity;
     }
   >();
   private lastViewports = new Map<string, ViewerViewport>();
@@ -156,13 +151,11 @@ export class Control extends EventEmitter {
   private browserIncarnations = new Map<string, string>();
   private fileAuthorizations = new Map<string, string>();
   private fileRequests = new Map<string, InternalFileRequest[]>();
-  private uploads: FileUploads;
   private readonly library: FileLibrary;
   constructor(
     readonly store: Store,
     readonly endpoint: Endpoint,
-    private simulation?: NetworkSimulation,
-    fileLimits: UploadLimits = FILE_LIMITS,
+    private readonly fileLimits: FileLimits = FILE_LIMITS,
   ) {
     super();
     this.unsubscribeActions = endpoint.onClientAction?.((event) => {
@@ -191,7 +184,6 @@ export class Control extends EventEmitter {
         this.qualityState(tenant).resetFeedback();
         void this.serial(tenant, async () => {
           if (!this.validSecurity(tenant, viewer)) return;
-          await this.uploads.revoke(tenant, lease);
           if (!viewer.locked) {
             this.fileAuthorizations.delete(tenant);
             this.authorizeFiles(tenant);
@@ -201,16 +193,6 @@ export class Control extends EventEmitter {
       },
     );
     this.library = new FileLibrary(store.db, endpoint, fileLimits);
-    this.uploads = new FileUploads(
-      endpoint,
-      (tenant, lease, authentication) => {
-        this.assertProductViewer(tenant, lease);
-        if ((this.viewers.get(tenant)?.authentication?.identity ?? '') !== authentication)
-          throw new ApiError(401, '上传登录身份已改变');
-      },
-      (tenant, id) => this.fileRequests.get(tenant)?.find((request) => request.id === id),
-      fileLimits,
-    );
   }
   private receiveSignal(event: RtcSignal) {
     const binding = this.signalBindings.get(event.connectionId);
@@ -258,137 +240,15 @@ export class Control extends EventEmitter {
       .catch(() => {});
     return next;
   }
-  state(tenant: string) {
-    return {
-      ...this.store.state(tenant),
-      endpointError: this.errors.get(tenant) ?? null,
-      endpointGeneration: this.mediaGeneration(tenant),
-      ...(this.simulation ? { networkSimulation: this.simulation } : {}),
-    };
-  }
-  async getState(tenant: string) {
-    this.diagnosticTenants.add(tenant);
-    return this.serial(tenant, async () => {
-      const state = this.store.state(tenant);
-      if (state.pendingClose?.awaiting) {
-        try {
-          const snapshot = await this.endpoint.request('session.snapshot', tenant);
-          await this.observe(state, snapshot);
-        } catch (error) {
-          this.errors.set(tenant, String(error));
-        }
-      }
-      return this.state(tenant);
-    });
-  }
-  private async observe(state: ControlState, snapshot: any) {
-    if (!Array.isArray(snapshot?.views)) return;
-    const before = JSON.stringify(state);
-    const events = (Array.isArray(snapshot.events) ? snapshot.events : []).filter(
-      (event: any) =>
-        event?.type === 'view.closed' &&
-        typeof event.eventId === 'string' &&
-        typeof event.viewId === 'string',
-    );
-    for (const tab of [...state.tabs]) {
-      const view = snapshot.views.find((view: any) => String(view.viewId ?? view.id) === tab.webviewId);
-      if (events.some((event: any) => event.viewId === tab.webviewId) || view?.close_state === 'closed') {
-        state.tabs = state.tabs.filter((item) => item.id !== tab.id);
-        if (state.pendingClose?.id === tab.id) state.pendingClose = null;
-        if (state.activeTabId === tab.id) state.activeTabId = state.tabs[0]?.id ?? null;
-        if (state.splitTabId === tab.id) state.splitTabId = null;
-        continue;
-      }
-      if (state.pendingClose?.id === tab.id) {
-        this.observePendingClose(state, snapshot, view);
-      }
-      if (!view) continue;
-      if (typeof view.title === 'string') tab.title = view.title.slice(0, 120);
-      if (typeof view.canGoBack === 'boolean') tab.canGoBack = view.canGoBack;
-      if (typeof view.canGoForward === 'boolean') tab.canGoForward = view.canGoForward;
-      if (typeof view.loading === 'boolean') tab.loading = view.loading;
-      if (typeof view.url === 'string' && /^(https?:\/\/|about:blank$)/.test(view.url)) {
-        if (
-          !tab.pendingUrl ||
-          view.url === tab.pendingUrl ||
-          view.loading === false ||
-          view.navigationStatus === 'completed'
-        ) {
-          tab.url = view.url;
-          delete tab.pendingUrl;
-        }
-      }
-    }
-    if (JSON.stringify(state) !== before) this.store.save(state);
-    if (events.length) {
-      const result = await this.endpoint.request('session.events.ack', state.tenantId, {
-        eventIds: events.map((event: any) => event.eventId),
-      });
-      if (result?.accepted !== true) throw new Error('Endpoint关闭事件尚未确认');
-    }
-  }
-  async reconcile(tenant: string) {
-    if (!this.diagnosticTenants.has(tenant)) return this.reconcileProduct(tenant);
-    const state = this.store.state(tenant);
-    try {
-      await this.endpoint.request('session.ensure', tenant);
-      const snapshot = await this.endpoint.request('session.snapshot', tenant);
-      await this.observe(state, snapshot);
-      const actual: { viewId?: string; id?: string }[] = snapshot?.views ?? [];
-      // Hide old foreground views before showing new ones, avoiding transient atlas overflow.
-      const ordered = [...state.tabs].sort(
-        (a, b) =>
-          Number(a.id === state.activeTabId || a.id === state.splitTabId) -
-          Number(b.id === state.activeTabId || b.id === state.splitTabId),
-      );
-      for (const tab of ordered) {
-        if (state.pendingClose?.awaiting && state.pendingClose.id === tab.id) continue;
-        const config = {
-          viewId: tab.webviewId,
-          width: state.device.width,
-          height: state.device.height,
-          device: state.device,
-          visible: tab.id === state.activeTabId || tab.id === state.splitTabId,
-        };
-        const key = tenant + '/' + tab.webviewId;
-        const encoded = JSON.stringify(config);
-        const exists = actual.some((view) => String(view.viewId ?? view.id) === tab.webviewId);
-        if (!exists) {
-          this.configurations.delete(key);
-          await this.endpoint.request('view.ensure', tenant, { ...config, url: tab.pendingUrl ?? tab.url });
-        }
-        if (this.configurations.get(key) !== encoded) {
-          await this.endpoint.request('view.configure', tenant, config);
-          this.configurations.set(key, encoded);
-        }
-      }
-      for (const view of actual) {
-        const viewId = String(view.viewId ?? view.id);
-        if (!state.tabs.some((tab) => tab.webviewId === viewId))
-          await this.endpoint.request('view.close', tenant, { viewId, force: true, orphan: true });
-      }
-      this.errors.delete(tenant);
-    } catch (error) {
-      this.errors.set(tenant, error instanceof Error ? error.message : String(error));
-      throw error;
-    }
-  }
   async tick() {
     if (this.ticking) return;
     this.ticking = true;
     try {
       await Promise.all(
-        [
-          ...new Set([
-            ...this.diagnosticTenants,
-            ...this.viewers.keys(),
-            ...this.started,
-            ...this.pendingRtcChecks,
-          ]),
-        ].map((tenant) =>
+        [...new Set([...this.viewers.keys(), ...this.started, ...this.pendingRtcChecks])].map((tenant) =>
           this.serial(tenant, async () => {
             if (this.pendingRtcChecks.has(tenant)) await this.checkReconnectedRtc(tenant);
-            await this.reconcile(tenant);
+            await this.reconcileProduct(tenant);
           }).catch(() => {}),
         ),
       );
@@ -403,20 +263,16 @@ export class Control extends EventEmitter {
     this.unsubscribeSignals?.();
     this.unsubscribeSignals = undefined;
     await Promise.allSettled([...this.queues.values()]);
-    this.closeRelays();
+    this.clearSignals();
   }
-  closeRelays() {
+  clearSignals() {
     for (const id of this.signalBindings.keys()) this.clearSignal(id);
-    for (const relay of this.relays.values()) relay.close();
-    this.relays.clear();
   }
   private async checkReconnectedRtc(tenant: string) {
     const snapshot = await this.endpoint.request('session.snapshot', tenant);
     const connectionId = this.connections.get(tenant);
     if (connectionId && (snapshot?.rtc?.active !== true || snapshot.rtc.connectionId !== connectionId)) {
       this.clearSignal(connectionId);
-      this.relays.get(connectionId)?.close();
-      this.relays.delete(connectionId);
       this.connections.delete(tenant);
       const security = this.viewers.get(tenant)?.security;
       if (security) this.viewerAuth.forgetPeer(tenant, security);
@@ -441,11 +297,11 @@ export class Control extends EventEmitter {
     this.siteApplications.clear();
     this.mediaApplications.clear();
     for (const tenant of this.connections.keys()) this.pendingRtcChecks.add(tenant);
-    for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys(), ...this.started])) {
+    for (const tenant of new Set([...this.viewers.keys(), ...this.started])) {
       await this.serial(tenant, async () => {
         try {
           await this.checkReconnectedRtc(tenant);
-          await this.reconcile(tenant);
+          await this.reconcileProduct(tenant);
         } catch (error) {
           this.errors.set(tenant, error instanceof Error ? error.message : String(error));
         }
@@ -458,7 +314,7 @@ export class Control extends EventEmitter {
       Math.max(this.endpointGeneration, ...this.tenantEndpointGenerations.values()) + 1;
     this.tenantEndpointGenerations.clear();
     this.pendingRtcChecks.clear();
-    this.closeRelays();
+    this.clearSignals();
     this.connections.clear();
     for (const [tenant, viewer] of this.viewers)
       if (viewer.security) this.viewerAuth.forgetPeer(tenant, viewer.security);
@@ -473,136 +329,18 @@ export class Control extends EventEmitter {
     this.actualMediaPolicies.clear();
     this.pageFullscreen.clear();
     this.dialogs.clear();
-    for (const tenant of new Set([...this.diagnosticTenants, ...this.viewers.keys()]))
+    for (const tenant of new Set([...this.viewers.keys()]))
       await this.serial(tenant, async () => {
-        if (this.diagnosticTenants.has(tenant)) {
-          const state = this.store.state(tenant);
-          state.pendingClose = null;
-          this.store.save(state);
-        }
         const viewer = this.viewers.get(tenant);
         if (viewer?.security) {
           this.emit('auth', tenant, viewer.id, this.authState(tenant, viewer.security));
           void this.viewerAuth.capabilities(tenant, viewer.security);
         }
-        await this.reconcile(tenant);
+        await this.reconcileProduct(tenant);
         this.push(tenant);
       }).catch(() => {});
   }
-  async action(tenant: string, body: any) {
-    this.diagnosticTenants.add(tenant);
-    return this.serial(tenant, async () => {
-      const state = this.store.state(tenant);
-      let reloadDevicePages = false;
-      const tab = state.tabs.find((tab) => tab.id === body.id);
-      const requireTab = () => {
-        if (!tab) throw new ApiError(404, '标签页不存在');
-        return tab;
-      };
-      switch (body.type) {
-        case 'tab.create': {
-          if (state.tabs.length >= 16) throw new ApiError(400, '最多支持 16 个标签页');
-          const id = randomUUID();
-          state.tabs.push({
-            id,
-            title: String(body.title ?? '新标签页').slice(0, 120),
-            url: url(body.url),
-            webviewId: this.store.viewId(),
-          });
-          state.activeTabId = id;
-          break;
-        }
-        case 'tab.navigate': {
-          const current = requireTab();
-          const address = url(body.url);
-          await this.endpoint.request('view.navigate', tenant, { viewId: current.webviewId, url: address });
-          current.url = address;
-          current.pendingUrl = address;
-          break;
-        }
-        case 'tab.command': {
-          const current = requireTab();
-          if (!['back', 'forward', 'reload', 'stop'].includes(body.command))
-            throw new ApiError(400, '未知导航命令');
-          await this.endpoint.request('view.command', tenant, {
-            viewId: current.webviewId,
-            command: body.command,
-          });
-          break;
-        }
-        case 'tab.close': {
-          const current = requireTab();
-          if (state.pendingClose && state.pendingClose.id !== current.id)
-            throw new ApiError(409, '请先处理当前页面的关闭请求');
-          const replying = body.confirm === true || body.cancel === true;
-          if (
-            replying &&
-            (state.pendingClose?.id !== current.id ||
-              !body.requestId ||
-              state.pendingClose.requestId !== body.requestId)
-          )
-            throw new ApiError(409, '关闭请求已失效');
-          const result = replying
-            ? await this.replyClose(tenant, current.webviewId!, state.pendingClose!, body.confirm === true)
-            : await this.endpoint.request('view.close', tenant, { viewId: current.webviewId, force: false });
-          if (body.cancel === true) {
-            state.pendingClose = null;
-            this.store.save(state);
-            return this.state(tenant);
-          }
-          if (
-            result?.pending ||
-            result?.accepted ||
-            result?.status === 'pending' ||
-            result?.status === 'accepted'
-          ) {
-            state.pendingClose = replying
-              ? { ...state.pendingClose!, awaiting: true }
-              : this.pendingClose(current.id, result);
-            this.store.save(state);
-            return this.state(tenant);
-          }
-          if (!(result?.closed === true || result?.status === 'closed'))
-            throw new ApiError(409, 'Endpoint 尚未确认页面关闭');
-          state.tabs = state.tabs.filter((item) => item.id !== current.id);
-          state.pendingClose = null;
-          if (state.activeTabId === current.id) state.activeTabId = state.tabs[0]?.id ?? null;
-          if (state.splitTabId === current.id) state.splitTabId = null;
-          break;
-        }
-        case 'tab.activate':
-          state.activeTabId = requireTab().id;
-          if (state.splitTabId === state.activeTabId) state.splitTabId = null;
-          break;
-        case 'split.set':
-          if (body.id !== null) requireTab();
-          state.splitTabId = body.id === state.activeTabId ? null : body.id;
-          break;
-        case 'device.set': {
-          const next = device(body.device);
-          reloadDevicePages = next.mode !== state.device.mode;
-          state.device = next;
-          break;
-        }
-        default:
-          throw new ApiError(400, '未知操作');
-      }
-      this.store.save(state);
-      try {
-        await this.reconcile(tenant);
-        if (reloadDevicePages)
-          for (const item of state.tabs)
-            await this.endpoint.request('view.command', tenant, {
-              viewId: item.webviewId,
-              command: 'reload',
-            });
-      } catch (error) {
-        this.errors.set(tenant, error instanceof Error ? error.message : String(error));
-      }
-      return this.state(tenant);
-    });
-  }
-  async offer(tenant: string, body: any, lease?: string) {
+  async offer(tenant: string, body: any, lease: string) {
     if (
       body.type !== 'offer' ||
       typeof body.sdp !== 'string' ||
@@ -613,111 +351,76 @@ export class Control extends EventEmitter {
     const receivedAt = performance.now();
     return this.serial(tenant, async () => {
       const timings: Record<string, number> = { queueMs: performance.now() - receivedAt };
-      if (lease) this.assertViewer(tenant, lease);
-      if (!this.diagnosticTenants.has(tenant)) this.qualityState(tenant).resetFeedback();
-      await this.reconcile(tenant);
+      this.assertViewer(tenant, lease);
+      this.qualityState(tenant).resetFeedback();
+      await this.reconcileProduct(tenant);
       timings.reconcileEndMs = performance.now() - receivedAt;
-      const security = lease ? this.viewers.get(tenant)?.security : undefined;
+      const security = this.viewers.get(tenant)!.security;
       const previous = this.connections.get(tenant);
       if (previous) {
         this.clearSignal(previous);
         try {
           await this.endpoint.request('rtc.close', tenant, { connectionId: previous });
         } finally {
-          this.relays.get(previous)?.close();
-          this.relays.delete(previous);
           this.connections.delete(tenant);
         }
       }
-      if (security) this.viewerAuth.forgetPeer(tenant, security);
+      this.viewerAuth.forgetPeer(tenant, security);
       const connectionId = randomUUID();
-      let relay: LoopbackRelay | undefined;
       try {
-        let offerSdp = body.sdp;
-        if (this.simulation) {
-          relay = await new LoopbackRelay(this.simulation, selectLocalCandidate(offerSdp)).bind();
-          offerSdp = rewriteSdp(offerSdp, relay.serverAddress);
-        }
-        const trickle = body.trickle === true && !!lease && !!this.endpoint.onSignal && !this.simulation;
-        if (body.trickle === true && !trickle) throw new ApiError(400, '当前连接要求完整 ICE 收集');
-        let answer;
-        if (trickle) {
-          if (typeof body.attemptId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(body.attemptId))
-            throw new ApiError(400, '无效媒体连接尝试');
-          this.connections.set(tenant, connectionId);
-          let resolve!: (sdp: string) => void, reject!: (error: Error) => void;
-          const pending = new Promise<string>((yes, no) => {
-            resolve = yes;
-            reject = no;
-          });
-          // Observe rejection immediately, including cancellation while the acceptance RPC is pending.
-          void pending.catch(() => {});
-          const timer = setTimeout(() => reject(new Error('RTC answer 等待超时')), 15000);
-          this.signalBindings.set(connectionId, {
-            tenant,
-            lease: lease!,
-            attemptId: body.attemptId,
-            resolve,
-            reject,
-            timer,
-            answered: false,
-          });
-          const accepted = await this.endpoint.request('rtc.offer', tenant, {
-            connectionId,
-            sdp: offerSdp,
-            trickle: true,
-            ...(security ? { authRequired: true } : {}),
-          });
-          timings.endpointAcceptedMs = performance.now() - receivedAt;
-          if (accepted?.accepted !== true || accepted.connectionId !== connectionId)
-            throw new ApiError(502, 'Endpoint未接受媒体协商');
-          answer = { sdp: await pending };
-          timings.answerReadyMs = performance.now() - receivedAt;
-          this.assertViewer(tenant, lease!);
-        } else
-          answer = await this.endpoint.request('rtc.offer', tenant, {
-            connectionId,
-            sdp: offerSdp,
-            ...(security ? { authRequired: true } : {}),
-          });
+        if (typeof body.attemptId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(body.attemptId))
+          throw new ApiError(400, '无效媒体连接尝试');
+        this.connections.set(tenant, connectionId);
+        let resolve!: (sdp: string) => void, reject!: (error: Error) => void;
+        const pending = new Promise<string>((yes, no) => {
+          resolve = yes;
+          reject = no;
+        });
+        // Observe rejection immediately, including cancellation while the acceptance RPC is pending.
+        void pending.catch(() => {});
+        const timer = setTimeout(() => reject(new Error('RTC answer 等待超时')), 15000);
+        this.signalBindings.set(connectionId, {
+          tenant,
+          lease: lease,
+          attemptId: body.attemptId,
+          resolve,
+          reject,
+          timer,
+          answered: false,
+        });
+        const accepted = await this.endpoint.request('rtc.offer', tenant, {
+          connectionId,
+          sdp: body.sdp,
+          trickle: true,
+          authRequired: true,
+        });
+        timings.endpointAcceptedMs = performance.now() - receivedAt;
+        if (accepted?.accepted !== true || accepted.connectionId !== connectionId)
+          throw new ApiError(502, 'Endpoint未接受媒体协商');
+        const answer = { sdp: await pending };
+        timings.answerReadyMs = performance.now() - receivedAt;
+        this.assertViewer(tenant, lease);
+
         if (typeof answer?.sdp !== 'string' || !answer.sdp.startsWith('v=0'))
           throw new ApiError(502, 'Endpoint 未返回有效 answer');
-        // Full-gather can finish after a Viewer takeover too. Publish both the
-        // connection and its action authority only for the current Viewer.
-        if (lease) this.assertViewer(tenant, lease);
-        let answerSdp = answer.sdp;
-        if (relay) {
-          relay.setServer(selectLocalCandidate(answerSdp, { requireLoopback: true }));
-          answerSdp = rewriteSdp(answerSdp, relay.clientAddress);
-          this.relays.set(connectionId, relay);
-        }
         this.connections.set(tenant, connectionId);
-        if (security) await this.viewerAuth.bind(tenant, security, connectionId);
-        if (lease) {
-          this.assertViewer(tenant, lease);
-          this.connectionLeases.set(connectionId, lease);
-        }
+        await this.viewerAuth.bind(tenant, security, connectionId);
+        this.assertViewer(tenant, lease);
+        this.connectionLeases.set(connectionId, lease);
         this.fileAuthorizations.delete(tenant);
         this.authorizeFiles(tenant);
         return {
           type: 'answer',
-          sdp: answerSdp,
+          sdp: answer.sdp,
           connectionId,
           endpointGeneration: this.mediaGeneration(tenant),
           negotiationTiming: timings,
-          signalingMode: trickle
-            ? 'trickle'
-            : this.simulation
-              ? 'full-gather-simulation'
-              : 'full-gather-compatibility',
-          ...(relay ? { networkSimulation: relay.snapshot() } : {}),
+          signalingMode: 'trickle',
         };
       } catch (error) {
-        if (security) this.viewerAuth.forgetPeer(tenant, security);
+        this.viewerAuth.forgetPeer(tenant, security);
         this.clearSignal(connectionId);
         if (this.connections.get(tenant) === connectionId) this.connections.delete(tenant);
-        relay?.close();
-        this.relays.delete(connectionId);
         await this.endpoint.request('rtc.close', tenant, { connectionId }).catch(() => {});
         throw error;
       }
@@ -726,7 +429,6 @@ export class Control extends EventEmitter {
   async ice(tenant: string, body: any) {
     if (!body.connectionId || this.connections.get(tenant) !== body.connectionId)
       throw new ApiError(403, '连接不属于当前会话');
-    if (this.simulation) throw new ApiError(400, '网络实验使用完整 gathered SDP，拒绝额外 trickle 候选');
     const binding = this.signalBindings.get(body.connectionId);
     if (binding && body.attemptId !== binding.attemptId) throw new ApiError(403, '媒体连接尝试已失效');
     if (
@@ -742,12 +444,12 @@ export class Control extends EventEmitter {
       candidate: body.candidate,
     });
   }
-  async closeRtc(tenant: string, body: any, lease?: string) {
-    if (lease) this.assertViewer(tenant, lease);
+  async closeRtc(tenant: string, body: any, lease: string) {
+    this.assertViewer(tenant, lease);
     const owned = this.connections.get(tenant) === body.connectionId;
     if (owned) this.clearSignal(body.connectionId);
     return this.serial(tenant, async () => {
-      if (lease) this.assertViewer(tenant, lease);
+      this.assertViewer(tenant, lease);
       if (this.connections.get(tenant) !== body.connectionId) {
         if (owned) return { closed: true };
         throw new ApiError(403, '连接不属于当前会话');
@@ -762,16 +464,10 @@ export class Control extends EventEmitter {
       try {
         await this.endpoint.request('rtc.close', tenant, { connectionId: body.connectionId });
       } finally {
-        this.relays.get(body.connectionId)?.close();
-        this.relays.delete(body.connectionId);
         this.connections.delete(tenant);
       }
       return { closed: true };
     });
-  }
-  networkStats(tenant: string, body: any) {
-    if (this.connections.get(tenant) !== body.connectionId) throw new ApiError(403, '连接不属于当前会话');
-    return this.relays.get(body.connectionId)?.snapshot() ?? { enabled: false };
   }
   productState(tenant: string): ProductState {
     this.snapshotSequences.set(tenant, (this.snapshotSequences.get(tenant) ?? 0) + 1);
@@ -793,7 +489,6 @@ export class Control extends EventEmitter {
       endpointError: this.errors.get(tenant) ?? null,
       viewer: {
         connected: this.viewers.has(tenant),
-        trickleIce: !!this.endpoint.onSignal && !this.simulation,
       },
       integrations: { siteUa: true, lifecycle: true, popupAdoption: true },
       constraints: { clientScaleMin: 0.5, clientScaleMax: 4 },
@@ -895,22 +590,14 @@ export class Control extends EventEmitter {
     return viewer?.security === security && viewer.authentication?.valid() === true;
   }
   private authState(tenant: string, security: ViewerSecurity) {
-    return this.viewerAuth.state(
-      security,
-      !!this.endpoint.onSignal && !this.simulation,
-      this.mediaGeneration(tenant),
-    );
+    return this.viewerAuth.state(security, this.mediaGeneration(tenant));
   }
   productEpoch(tenant: string, lease: string) {
     return this.viewers.get(tenant)?.id === lease ? this.viewers.get(tenant)?.security?.epoch : undefined;
   }
   productAllowed(tenant: string, lease: string) {
     const viewer = this.viewers.get(tenant);
-    return (
-      viewer?.id === lease &&
-      (!viewer.authentication || viewer.authentication.valid()) &&
-      !viewer.security?.locked
-    );
+    return viewer?.id === lease && viewer.authentication.valid() && !viewer.security?.locked;
   }
   private assertProductViewer(tenant: string, lease: string, epoch?: number) {
     this.assertViewer(tenant, lease);
@@ -936,8 +623,8 @@ export class Control extends EventEmitter {
     tenant: string,
     id: string,
     revoke: (reason: 'another-viewer' | 'logout') => void,
-    authentication?: { identity: string; valid: () => boolean },
-    initialUnlocked?: boolean,
+    authentication: { identity: string; valid: () => boolean },
+    initialUnlocked = false,
   ) {
     this.qualityState(tenant).resetFeedback();
     const old = this.viewers.get(tenant);
@@ -946,16 +633,15 @@ export class Control extends EventEmitter {
       this.viewerAuth.forgetPeer(tenant, old.security);
     }
     const user = this.store.userForTenant(tenant);
-    const security =
-      user && initialUnlocked !== undefined ? this.viewerAuth.create(user, initialUnlocked) : undefined;
+    if (!user) throw new ApiError(401, 'Account does not exist');
+    const security = this.viewerAuth.create(user, initialUnlocked);
     this.pageFullscreen.delete(tenant);
     this.viewers.set(tenant, { id, revoke, authentication, security });
     old?.revoke('another-viewer');
-    if (security) this.emit('auth', tenant, id, this.authState(tenant, security));
+    this.emit('auth', tenant, id, this.authState(tenant, security));
     const previous = this.connections.get(tenant);
     if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
-      if (old) await this.uploads.revoke(tenant, old.id);
       this.assertViewer(tenant, id);
       await this.closeMedia(tenant);
       try {
@@ -963,9 +649,9 @@ export class Control extends EventEmitter {
       } catch {
         /* State carries Endpoint error; controls still work offline. */
       }
-      if (security) void this.viewerAuth.capabilities(tenant, security);
+      void this.viewerAuth.capabilities(tenant, security);
       this.push(tenant);
-      return security?.locked ? undefined : this.productState(tenant);
+      return security.locked ? undefined : this.productState(tenant);
     });
   }
   async detachViewer(tenant: string, id: string) {
@@ -980,7 +666,6 @@ export class Control extends EventEmitter {
     const previous = this.connections.get(tenant);
     if (previous) this.clearSignal(previous);
     return this.serial(tenant, async () => {
-      await this.uploads.revoke(tenant, id);
       // A replacement owns media now; an old close must not hide or close it.
       if (this.viewers.has(tenant)) return;
       await this.closeMedia(tenant);
@@ -1006,8 +691,6 @@ export class Control extends EventEmitter {
     } catch {
     } finally {
       this.connections.delete(tenant);
-      this.relays.get(previous)?.close();
-      this.relays.delete(previous);
     }
   }
   async viewerRequest(tenant: string, lease: string, method: string, params: any) {
@@ -1063,7 +746,7 @@ export class Control extends EventEmitter {
           (id) => this.fileRequests.get(tenant)?.find((request) => request.id === id),
         );
       } catch (error) {
-        if (error instanceof FileUploadError) throw new ApiError(error.status, error.message);
+        if (error instanceof FileRequestError) throw new ApiError(error.status, error.message);
         throw error;
       }
     }
@@ -1075,36 +758,7 @@ export class Control extends EventEmitter {
     if (method === 'viewport') return this.viewport(tenant, params, lease, epoch);
     return this.serial(tenant, async () => {
       this.assertProductViewer(tenant, lease, epoch);
-      if (['files.begin', 'files.commit', 'files.cancel'].includes(method)) {
-        if (security) throw new ApiError(400, '产品文件必须通过WebRTC数据通道');
-        try {
-          const authentication = this.viewers.get(tenant)?.authentication?.identity ?? '';
-          const result =
-            method === 'files.begin'
-              ? await this.uploads.begin(tenant, lease, authentication, params)
-              : method === 'files.commit'
-                ? await this.uploads.commit(tenant, lease, authentication, params)
-                : await this.uploads.cancel(tenant, lease, authentication, params);
-          try {
-            this.collectDialogs(
-              tenant,
-              this.store.workspace(tenant),
-              await this.endpoint.request('session.snapshot', tenant),
-            );
-          } catch {}
-          return result;
-        } catch (error) {
-          if (error instanceof FileUploadError) throw new ApiError(error.status, error.message);
-          throw error;
-        }
-      }
-      if (method === 'clock.ping')
-        return {
-          serverTime: Date.now(),
-          ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}),
-        };
       if (method === 'feedback') {
-        if (this.diagnosticTenants.has(tenant)) return { accepted: false };
         const state = this.store.workspace(tenant),
           viewport = this.viewers.get(tenant)?.viewport;
         const visible = !!viewport?.windows.some(
@@ -1890,7 +1544,6 @@ export class Control extends EventEmitter {
     state.pendingWindowCloseId = null;
   }
   private async reconcileProduct(tenant: string) {
-    if (this.diagnosticTenants.has(tenant)) return;
     if (!this.viewers.has(tenant) && !this.started.has(tenant)) return;
     try {
       if (!this.viewers.has(tenant)) {
@@ -2316,7 +1969,6 @@ export class Control extends EventEmitter {
       this.pageFullscreen.delete(tenant);
       this.dialogs.delete(tenant);
       this.fileRequests.delete(tenant);
-      this.uploads.retireMissing(tenant, new Set());
       this.errors.set(tenant, error instanceof Error ? error.message : String(error));
       this.push(tenant);
       throw error;
@@ -2339,7 +1991,6 @@ export class Control extends EventEmitter {
     await this.consumeClosedEvents(state, snapshot);
     this.dialogs.delete(tenant);
     this.fileRequests.delete(tenant);
-    this.uploads.retireMissing(tenant, new Set());
     if (state.pendingClose) {
       const tab = state.tabs.find((t) => t.id === state.pendingClose?.id);
       this.observePendingClose(
@@ -2588,7 +2239,6 @@ export class Control extends EventEmitter {
       workspace,
       this.viewers.get(tenant)?.viewport ?? this.lastViewports.get(tenant),
       Date.now(),
-      this.diagnosticTenants.has(tenant),
       this.actualMediaPolicies.get(tenant) ?? null,
     );
   }
@@ -2610,12 +2260,12 @@ export class Control extends EventEmitter {
     const connectionId = this.connections.get(tenant),
       viewer = this.viewers.get(tenant);
     if (!connectionId || !viewer || !this.productAllowed(tenant, viewer.id)) return;
-    const authEpoch = viewer.security?.peer?.appliedEpoch;
-    if (viewer.security && (!authEpoch || viewer.security.peer?.connectionId !== connectionId)) return;
+    const authEpoch = viewer.security.peer?.appliedEpoch;
+    if (!authEpoch || viewer.security.peer?.connectionId !== connectionId) return;
     const requests = (this.fileRequests.get(tenant) ?? [])
       .slice(0, 64)
       .map((request) => ({ id: request.id, binding: request.binding }));
-    const params = { connectionId, requests, library: true, ...(authEpoch ? { authEpoch } : {}) };
+    const params = { connectionId, requests, library: true, authEpoch };
     const encoded = JSON.stringify(params);
     if (this.fileAuthorizations.get(tenant) === encoded) return;
     this.fileAuthorizations.set(tenant, encoded);
@@ -2679,7 +2329,7 @@ export class Control extends EventEmitter {
                   .slice(0, 64)
               : [],
             state: request.state === 'validating' ? 'validating' : 'pending',
-            limits: { ...this.uploads.limits },
+            limits: { ...this.fileLimits },
             binding: {
               browserIncarnation: snapshot.browserIncarnation,
               view: viewId,
@@ -2731,24 +2381,7 @@ export class Control extends EventEmitter {
     this.dialogs.set(tenant, found);
     this.fileRequests.set(tenant, files);
     this.authorizeFiles(tenant);
-    this.uploads.retireMissing(tenant, new Set(files.map((request) => request.id)));
     if (changed) this.push(tenant);
-  }
-  async receiveFileUpload(
-    tenant: string,
-    authentication: string,
-    ticket: string,
-    source: Readable,
-    contentLength?: string,
-  ) {
-    const viewer = this.viewers.get(tenant);
-    if (viewer?.security?.locked) throw new ApiError(423, 'Viewer 已锁定');
-    try {
-      await this.uploads.stream(tenant, authentication, ticket, source, contentLength);
-    } catch (error) {
-      if (error instanceof FileUploadError) throw new ApiError(error.status, error.message);
-      throw error;
-    }
   }
   private async applySites(tenant: string, state: ProductWorkspace, force = false, browserPid?: number) {
     const sites = Object.fromEntries(
@@ -2855,27 +2488,4 @@ function url(value: unknown) {
   } catch {
     throw new ApiError(400, '请输入 HTTP 或 HTTPS 网址');
   }
-}
-function device(value: any): Device {
-  if (
-    !value ||
-    !['desktop', 'tablet'].includes(value.mode) ||
-    !Number.isInteger(value.width) ||
-    value.width < 320 ||
-    value.width > 4096 ||
-    !Number.isInteger(value.height) ||
-    value.height < 240 ||
-    value.height > 4096 ||
-    typeof value.deviceScaleFactor !== 'number' ||
-    value.deviceScaleFactor < 0.5 ||
-    value.deviceScaleFactor > 4 ||
-    value.width * value.height * value.deviceScaleFactor ** 2 > 16777216
-  )
-    throw new ApiError(400, '设备尺寸或像素密度超出范围');
-  return {
-    mode: value.mode,
-    width: value.width,
-    height: value.height,
-    deviceScaleFactor: value.deviceScaleFactor,
-  };
 }

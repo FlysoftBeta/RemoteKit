@@ -55,10 +55,8 @@ test('optional HTTPS serves trusted local test TLS, secure cookies and configure
     origins: string[] = [];
   const cert = await readFile(certPath),
     server = createHttp(control, {
-      diagnostics: true,
       origins,
       clientDir: resolve(process.cwd(), 'dist/client'),
-      metricsDir: directory,
       tls: { key: await readFile(keyPath), cert },
     });
   server.listen(0, '0.0.0.0');
@@ -70,23 +68,27 @@ test('optional HTTPS serves trusted local test TLS, secure cookies and configure
   origins.push(origin);
   try {
     const result = await new Promise<{ status: number; cookie: string; body: string }>((resolve, reject) => {
-      request(origin + '/api/state', { ca: cert }, (response) => {
-        let body = '';
-        response.on('data', (chunk) => {
-          body += chunk;
-        });
-        response.on('end', () =>
-          resolve({ status: response.statusCode!, cookie: response.headers['set-cookie']![0], body }),
-        );
-      })
+      request(
+        origin + '/api/auth/register',
+        { ca: cert, method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' } },
+        (response) => {
+          let body = '';
+          response.on('data', (chunk) => {
+            body += chunk;
+          });
+          response.on('end', () =>
+            resolve({ status: response.statusCode!, cookie: response.headers['set-cookie']![0], body }),
+          );
+        },
+      )
         .on('error', reject)
-        .end();
+        .end(JSON.stringify({ username: 'tls-user', password: 'tls-password123' }));
     });
     assert.equal(result.status, 200);
     assert.match(result.cookie, /HttpOnly/);
     assert.match(result.cookie, /SameSite=Strict/);
     assert.match(result.cookie, /; Secure/);
-    assert.ok(JSON.parse(result.body).tenantId);
+    assert.ok(JSON.parse(result.body).user.id);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     store.db.close();

@@ -14,11 +14,10 @@ import { CaptureLatency } from './capture-latency';
 import { ClockDomain, ClockProbe } from './clock-domain';
 import { ViewerAudioOutput, stereoOpusOffer } from './audio-output';
 import { mergeTouchMoves, mergeGestureMomentum } from './touch-input';
-import { request, type Diagnostics, type Layout, type Surface, type VideoPresentation } from './types';
+import { type Diagnostics, type Layout, type Surface, type VideoPresentation } from './types';
 import { FrameEpochGate } from './frame-epoch';
 import {
   configureReceiveOffer,
-  originalGatheredOffer,
   probeReceiveCapabilities,
   loadReceiveProfile,
   selectProductReceiveProfile,
@@ -316,7 +315,6 @@ export class RemoteTransport {
   touchStartWall(sampleAt: number) {
     return this.latency.inputStart(sampleAt, performance.now(), Date.now());
   }
-  trickleIce = false;
   readonly connectionAttempts: {
     attemptId: string;
     signalingMode: string;
@@ -390,7 +388,6 @@ export class RemoteTransport {
       });
   }
   private controlRpc: ControlRpc | undefined;
-  private diagnosticHttp = false;
   private productReceiveSelection?: ProductReceiveSelection;
   private receiveFallback?: Record<string, unknown>;
   private latency = new CaptureLatency();
@@ -428,18 +425,12 @@ export class RemoteTransport {
   setControlRpc(callback: ControlRpc) {
     this.observePeerAuthorization(0);
     this.controlRpc = callback;
-    this.diagnosticHttp = false;
-  }
-  enableDiagnosticHttp() {
-    this.diagnosticHttp = true;
-    this.controlRpc = undefined;
   }
   private rtcRequest<T>(
     method: 'rtc.offer' | 'rtc.ice' | 'rtc.close' | 'clock.ping' | 'feedback',
     params: unknown,
   ): Promise<T> {
     if (this.controlRpc) return this.controlRpc(method, params) as Promise<T>;
-    if (this.diagnosticHttp) return request<T>('/api/' + method.replace('.', '/'), params);
     return Promise.reject(new Error('Control WebSocket 未连接'));
   }
   receiveProfile: ReceiveProfile = loadReceiveProfile();
@@ -520,9 +511,6 @@ export class RemoteTransport {
     this.mediaRefreshRequests = 0;
     this.presentation = new PresentationDiagnostics();
     this.encodedFrameSamples.length = 0;
-  }
-  recordClientRaf(at: number) {
-    this.presentation.clientRaf(at);
   }
   recordPresentationCost(name: string, at: number, durationMs: number, view: string | null = null) {
     this.presentation.cost(name, at, durationMs, view);
@@ -688,7 +676,6 @@ export class RemoteTransport {
   }
   private timer: ReturnType<typeof setInterval> | undefined;
   private statsReadingPeer: RTCPeerConnection | undefined;
-  private networkRead: { peer: RTCPeerConnection; connectionId: string } | undefined;
   private mediaFeedback = new MediaFeedbackSampler({
     now: () => performance.now(),
     visible: () => document.visibilityState === 'visible',
@@ -1273,9 +1260,6 @@ export class RemoteTransport {
       }
     }
   }
-  registerPlane(identity: PlaneIdentity, canvas: HTMLCanvasElement, ready: (ready: boolean) => void) {
-    return this.registerPlaneRenderer(identity, canvas, ready).remove;
-  }
   private registerPlaneRenderer(
     identity: PlaneIdentity,
     canvas: HTMLCanvasElement,
@@ -1432,7 +1416,7 @@ export class RemoteTransport {
     this.signalAttemptId = `${Date.now()}-${attempt}`;
     this.connectionAttempts.push({
       attemptId: this.signalAttemptId,
-      signalingMode: this.trickleIce ? 'trickle' : 'full-gather-compatibility',
+      signalingMode: 'trickle',
       startedAt: performance.now(),
       marks: {},
     });
@@ -1448,7 +1432,6 @@ export class RemoteTransport {
           return;
         }
         this.markConnection('localFirstCandidate');
-        if (!this.trickleIce) return;
         if (this.localIce.length >= 256) {
           this.connectionFailed('本地 ICE 候选超过上限');
           return;
@@ -1509,13 +1492,12 @@ export class RemoteTransport {
           for (const renderer of this.renderers) this.attachVideoPlane(renderer);
       };
       this.bindChannel(peer.createDataChannel('remotekit', { ordered: true }));
-      if (this.controlRpc && !this.diagnosticHttp)
-        this.authCamera.bind(peer.createDataChannel('remotekit-auth', { ordered: true }));
+      if (this.controlRpc) this.authCamera.bind(peer.createDataChannel('remotekit-auth', { ordered: true }));
       peer.ondatachannel = (event) => {
         if (this.peer === peer && this.attempt === attempt && event.channel.label === 'remotekit')
           this.bindChannel(event.channel);
       };
-      if (this.controlRpc && !this.diagnosticHttp) {
+      if (this.controlRpc) {
         this.markConnection('receiveProbeStart');
         if (!this.productReceiveSelection)
           this.productReceiveSelection = await selectProductReceiveProfile(navigator.userAgent, codecs);
@@ -1545,37 +1527,12 @@ export class RemoteTransport {
       };
       await peer.setLocalDescription({ type: 'offer', sdp: effectiveOffer.sdp });
       this.markConnection('setLocalEnd');
-      if (!this.trickleIce)
-        await new Promise<void>((resolve, reject) => {
-          if (peer.iceGatheringState === 'complete') {
-            resolve();
-            return;
-          }
-          const timeout = setTimeout(() => {
-            cleanup();
-            reject(new Error('ICE 收集超时，请检查网络后重试。'));
-          }, 12000);
-          const changed = () => {
-            if (peer.iceGatheringState === 'complete' || peer.signalingState === 'closed') {
-              cleanup();
-              resolve();
-            }
-          };
-          const cleanup = () => {
-            clearTimeout(timeout);
-            peer.removeEventListener('icegatheringstatechange', changed);
-            peer.removeEventListener('signalingstatechange', changed);
-          };
-          peer.addEventListener('icegatheringstatechange', changed);
-          peer.addEventListener('signalingstatechange', changed);
-        });
       if (attempt !== this.attempt) return;
       this.signaling = {
         receiveSelection: this.productReceiveSelection,
         previousNegotiationFailure: this.receiveFallback,
         receiveProfile: this.receiveProfile,
         originalOfferSdp: originalOffer.sdp,
-        originalGatheredSdp: originalGatheredOffer(peer.localDescription?.sdp ?? '', originalOffer.sdp ?? ''),
         effectiveOfferSdp: peer.localDescription?.sdp,
         changes: effectiveOffer.changes,
       };
@@ -1585,12 +1542,11 @@ export class RemoteTransport {
           connectionId: string;
           endpointGeneration?: number;
           signalingMode?: string;
-          networkSimulation?: Record<string, unknown>;
         }
       >('rtc.offer', {
         type: 'offer',
         sdp: peer.localDescription?.sdp,
-        ...(this.trickleIce ? { trickle: true, attemptId: this.signalAttemptId } : {}),
+        attemptId: this.signalAttemptId,
       });
       this.markConnection('answerReceived');
       if (attempt !== this.attempt) {
@@ -1606,7 +1562,7 @@ export class RemoteTransport {
       this.signaling.connectionTiming = this.connectionAttempts[this.connectionAttempts.length - 1];
       if (answer.signalingMode)
         this.connectionAttempts[this.connectionAttempts.length - 1].signalingMode = answer.signalingMode;
-      this.update({ connectionId: answer.connectionId, networkSimulation: answer.networkSimulation });
+      this.update({ connectionId: answer.connectionId });
       await peer.setRemoteDescription(answer);
       this.markConnection('setRemoteEnd');
       this.remoteDescriptionReady = true;
@@ -1615,13 +1571,10 @@ export class RemoteTransport {
       negotiating = false;
       if (attempt !== this.attempt) return;
       this.mediaFeedback.start();
-      this.timer = setInterval(
-        () => {
-          this.sampleEndpointClock();
-          void this.readStats(peer);
-        },
-        this.controlRpc ? 1000 : 1500,
-      );
+      this.timer = setInterval(() => {
+        this.sampleEndpointClock();
+        void this.readStats(peer);
+      }, 1000);
     } catch (error) {
       if (attempt !== this.attempt) return;
       const trace = this.connectionAttempts[this.connectionAttempts.length - 1];
@@ -1632,7 +1585,6 @@ export class RemoteTransport {
       if (
         negotiating &&
         this.controlRpc &&
-        !this.diagnosticHttp &&
         ['h264-level42-experimental', 'h264-level51', 'h264-level52'].includes(
           this.productReceiveSelection?.profile ?? '',
         ) &&
@@ -2506,7 +2458,6 @@ export class RemoteTransport {
         if (feedback && !this.productLocked && this.channel.bufferedAmount <= 65536)
           this.sendChannel(this.channel, feedback);
       }
-      this.refreshNetworkStats(peer);
       this.productionFeedback(peer);
     } catch {
       /* A closed peer no longer has stats. */
@@ -2517,7 +2468,7 @@ export class RemoteTransport {
   private productionFeedback(peer: RTCPeerConnection) {
     const rpc = this.controlRpc,
       attempt = this.attempt;
-    if (!rpc || this.diagnosticHttp || peer !== this.peer) return;
+    if (!rpc || peer !== this.peer) return;
     const now = performance.now();
     this.sampleEndpointClock();
     const wall = Date.now(),
@@ -2562,31 +2513,6 @@ export class RemoteTransport {
         /* The next bounded sample retries if the channel remains open. */
       }
     }
-  }
-  private refreshNetworkStats(peer: RTCPeerConnection) {
-    const connectionId = this.connectionId;
-    if (
-      !this.diagnosticHttp ||
-      peer !== this.peer ||
-      !this.diagnostics.networkSimulation ||
-      !connectionId ||
-      (this.networkRead?.peer === peer && this.networkRead.connectionId === connectionId)
-    )
-      return;
-    const sample = { peer, connectionId };
-    this.networkRead = sample;
-    // Relay diagnostics must not extend the native media counter window or block feedback.
-    void request<Record<string, unknown>>('/api/rtc/network', { connectionId })
-      .then((networkSimulation) => {
-        if (this.networkRead === sample && this.peer === peer && this.connectionId === connectionId)
-          this.update({ networkSimulation });
-      })
-      .catch(() => {
-        /* Keep the last relay observation while native media feedback continues. */
-      })
-      .finally(() => {
-        if (this.networkRead === sample) this.networkRead = undefined;
-      });
   }
   disconnect() {
     this.reconnect.stop();
@@ -2639,7 +2565,6 @@ export class RemoteTransport {
     this.displayHzEstimate = undefined;
     this.mediaFeedback.stop();
     this.statsReadingPeer = undefined;
-    this.networkRead = undefined;
     this.frameGate.clear();
     this.resetMediaDiagnostics();
     this.viewPresentations.clear();

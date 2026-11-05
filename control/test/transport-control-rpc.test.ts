@@ -371,12 +371,11 @@ test('trickle sends an ungathered offer, queues early remote ICE, and flushes lo
   );
   const transport = new RemoteTransport();
   t.after(() => transport.disconnect());
-  transport.trickleIce = true;
   const candidate = { candidate: 'remote', sdpMid: '0', sdpMLineIndex: 0 };
   transport.setControlRpc(async (method, params: any) => {
     calls.push({ method, params });
     if (method === 'rtc.offer') {
-      assert.equal(params.trickle, true);
+      assert.equal(typeof params.attemptId, 'string');
       transport.receiveServerSignal({
         type: 'rtc.signal',
         connectionId: 'p',

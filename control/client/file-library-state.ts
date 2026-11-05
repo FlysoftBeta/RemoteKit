@@ -92,11 +92,6 @@ export function useFileLibrary(
   }
 
   const refresh = async () => publish(await request('library.get', {}));
-  function rememberPreview(assetId: string, blob: Blob) {
-    if (currentIdentity.current === identity && active.current && authorization.current === epoch)
-      thumbnails.remember(assetId, blob);
-  }
-
   async function confirm(requestId: string, transaction: Checkout, submit: boolean) {
     if (transaction.active) return;
     transaction.active = true;
@@ -197,7 +192,6 @@ export function useFileLibrary(
     select,
     photos,
     checkout: (id: string) => checkouts.current.get(id),
-    rememberPreview,
     thumbnails,
     rpc,
     online,

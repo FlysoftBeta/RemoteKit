@@ -16,7 +16,7 @@ export interface PlaneIdentity {
 export interface PresentedPlaneSource {
   image: CanvasImageSource;
   sourceRect: PixelRect;
-  kind: 'atlas' | 'plane';
+  kind: 'atlas';
   viewId: string;
   rtpTimestamp: number;
   layoutEpoch: string;

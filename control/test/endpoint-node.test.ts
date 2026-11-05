@@ -13,12 +13,11 @@ async function harness(options: Partial<EndpointNodeOptions> = {}, enabled = tru
   const endpoint = new EndpointNode({ nodeId: 'compute-1', token: 'test-node-secret', ...options });
   const control = Object.assign(new EventEmitter(), {
     store: { identity: () => undefined },
-    closeRelays() {},
+    clearSignals() {},
   }) as unknown as Control;
   const server = createHttp(control, {
     origins: ['http://test.local'],
     clientDir: '.',
-    metricsDir: '.',
     endpointNode: enabled ? endpoint : undefined,
   });
   server.listen(0, '127.0.0.1');
@@ -358,8 +357,17 @@ test(
           };
         if (message.method === 'rtc.offer') {
           peers.set(tenant, message.connectionId);
-          result = { sdp: 'v=0\r\n' };
+          result = { accepted: true, connectionId: message.connectionId };
+          socket.send(
+            JSON.stringify({
+              event: 'rtc.signal',
+              tenantId: tenant,
+              connectionId: message.connectionId,
+              signal: { type: 'answer', sdp: 'v=0\r\n' },
+            }),
+          );
         }
+        if (message.method === 'rtc.authorize') result = { applied: true, epoch: message.epoch };
         if (message.method === 'rtc.close' && peers.get(tenant) === message.connectionId)
           peers.delete(tenant);
         if (message.method === 'view.ensure') {
@@ -398,23 +406,28 @@ test(
       const a = (await store.register('reconnect-a', 'password123')).tenantId;
       await store.setRegistrationCredential(a, 'registration-test');
       const b = (await store.register('reconnect-b', 'password123', 'registration-test')).tenantId;
-      await control.attachViewer(a, 'lease-a', () => {});
-      await control.attachViewer(b, 'lease-b', () => {});
+      await control.attachViewer(
+        a,
+        'lease-a',
+        () => {},
+        { identity: 'test-account', valid: () => true },
+        true,
+      );
+      await control.attachViewer(
+        b,
+        'lease-b',
+        () => {},
+        { identity: 'test-account', valid: () => true },
+        true,
+      );
       const offer = async (tenant: string, lease: string) =>
-        control.offer(tenant, { type: 'offer', sdp: 'v=0\r\n' }, lease);
+        control.offer(tenant, { type: 'offer', sdp: 'v=0\r\n', attemptId: randomUUID() }, lease);
       const aa = await offer(a, 'lease-a'),
         bb = await offer(b, 'lease-b');
       const generation = control.productState(a).endpointGeneration;
       const firstEpoch = (endpoint as any).current.epoch;
       const leases = (control as any).connectionLeases;
       const viewers = (control as any).viewers;
-      let relayClosed = false;
-      const relay = {
-        close() {
-          relayClosed = true;
-        },
-      };
-      (control as any).relays.set(bb.connectionId, relay);
       const offline = once(endpoint, 'offline');
       socket.terminate();
       await offline;
@@ -426,13 +439,17 @@ test(
       assert.equal(leases.get(aa.connectionId), 'lease-a');
       assert.equal((control as any).viewers, viewers);
       control.assertViewer(a, 'lease-a');
-      assert.equal((control as any).relays.get(bb.connectionId), relay);
-      assert.equal(relayClosed, false);
       const op = operation(a),
         receipt = once(socket, 'message');
       // Use the authenticated remote socket event, not a direct Control method.
       socket.send(
-        JSON.stringify({ ...op, event: 'client.action', tenantId: a, connectionId: aa.connectionId }),
+        JSON.stringify({
+          ...op,
+          event: 'client.action',
+          tenantId: a,
+          connectionId: aa.connectionId,
+          authEpoch: viewers.get(a).security.peer.appliedEpoch,
+        }),
       );
       // Reconciliation is serialized with the action; await its receipt publication.
       for (let i = 0; i < 50 && !store.operation(a, op.operationId); i++)
@@ -451,7 +468,6 @@ test(
       assert.equal(control.productState(b).endpointGeneration, generation);
       assert.equal(leases.has(aa.connectionId), false);
       assert.equal(leases.get(bb.connectionId), 'lease-b');
-      assert.equal(relayClosed, false);
       const restored = await offer(a, 'lease-a');
       await control.productAction(a, { type: 'window.create', url: 'https://before.test/' }, 'lease-a');
       const tab = store.workspace(a).tabs.find((tab) => tab.kind === 'remote')!;
@@ -466,7 +482,6 @@ test(
       assert.equal(leases.get(restored.connectionId), 'lease-a');
       socket = await connect('endpoint-process-0002');
       assert.equal(identities[identities.length - 1].processChanged, true);
-      assert.equal(relayClosed, true);
       assert.equal(leases.size, 0);
       assert.equal((control as any).connections.size, 0);
       assert.ok(control.productState(a).endpointGeneration > restored.endpointGeneration);

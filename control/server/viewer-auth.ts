@@ -45,7 +45,7 @@ export class ViewerAuth {
     return { user, locked: !unlocked, epoch: 1, face: { available: false }, polling: false, mutating: false };
   }
 
-  state(viewer: ViewerSecurity, trickleIce: boolean, endpointGeneration: number): AuthState {
+  state(viewer: ViewerSecurity, endpointGeneration: number): AuthState {
     const { settings, pin, face } = this.store.security(viewer.user.id);
     const { modelVersion, ...status } = viewer.face;
     return {
@@ -60,7 +60,6 @@ export class ViewerAuth {
         face: !!face && settings.faceEnabled && status.available && face.modelVersion === modelVersion,
       },
       face: { ...status, enrolled: !!face },
-      trickleIce,
       endpointGeneration,
     };
   }

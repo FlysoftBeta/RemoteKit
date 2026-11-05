@@ -1,0 +1,146 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>RemoteKit keyboard viewport fixture</title>
+<style>
+  body {
+    margin: 0;
+    background: #dae6f0;
+    font:
+      16px Arial,
+      sans-serif;
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 16px;
+    background: #16365c;
+    color: white;
+  }
+  label {
+    display: inline-flex;
+    flex-direction: column;
+    margin: 4px;
+  }
+  button,
+  input {
+    padding: 8px;
+    font: inherit;
+  }
+  #contacts {
+    width: 240px;
+    height: 96px;
+    margin: 8px;
+    background: #ecf5ff;
+    touch-action: none;
+  }
+  #scroll {
+    height: 180vh;
+    background: repeating-linear-gradient(35deg, #184469 0 25px, #82b4d8 25px 50px, #ecf5ff 50px 75px);
+  }
+</style>
+<header>
+  <button id="tl">Leave editor</button>
+  <label>Field A<input id="text" /></label>
+  <label>Field B<input id="second" /></label>
+  <label>Field C<input id="third" /></label>
+</header>
+<div id="contacts">Touch contacts</div>
+<div id="scroll"></div>
+<script>
+  const fields = ['text', 'second', 'third'].map((id) => document.getElementById(id));
+  const contacts = document.getElementById('contacts');
+  const targets = [document.getElementById('tl'), ...fields, contacts, document.getElementById('scroll')];
+  const documentId = String(performance.timeOrigin);
+  const replaceSearch = new URLSearchParams(location.search).has('replace-search');
+  if (replaceSearch) fields[0].type = 'search';
+  let resizeCount = 0;
+  let replacements = 0;
+  const geometry = () =>
+    Object.fromEntries(targets.map((target) => [target.id, target.getBoundingClientRect().toJSON()]));
+  function report(type, details) {
+    const [text, second, third] = fields.map((field) => field.value);
+    return fetch('/event', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        type,
+        documentId,
+        resizeCount,
+        scrollY,
+        width: innerWidth,
+        height: innerHeight,
+        geometry: geometry(),
+        text,
+        second,
+        third,
+        ...details,
+      }),
+    }).catch(() => {});
+  }
+  function observeField(field) {
+    for (const type of [
+      'input',
+      'compositionstart',
+      'compositionupdate',
+      'compositionend',
+      'focus',
+      'blur',
+    ]) {
+      field.addEventListener(type, (event) =>
+        report(type === 'input' ? field.id : type, {
+          field: field.id,
+          data: event.data,
+          selection: [field.selectionStart, field.selectionEnd],
+        }),
+      );
+    }
+  }
+  fields.forEach(observeField);
+  addEventListener('resize', () => {
+    resizeCount++;
+    report('resize');
+    const field = fields[0];
+    if (!replaceSearch || document.activeElement !== field || replacements >= 5) return;
+    // A responsive search component may unmount its focused input during layout.
+    field.blur();
+    const replacement = field.cloneNode();
+    replacement.value = field.value;
+    fields[0] = replacement;
+    targets[1] = replacement;
+    observeField(replacement);
+    field.replaceWith(replacement);
+    replacements++;
+    setTimeout(() => {
+      replacement.focus({ preventScroll: true });
+      report('search-replaced', { replacements });
+    }, 130);
+  });
+  document
+    .getElementById('tl')
+    .addEventListener('click', (event) => report('click', { trusted: event.isTrusted }));
+  for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+    contacts.addEventListener(
+      type,
+      (event) =>
+        report(type, {
+          active: Array.from(event.touches, (point) => point.identifier),
+          changed: Array.from(event.changedTouches, (point) => point.identifier),
+          trusted: event.isTrusted,
+        }),
+      { passive: true },
+    );
+  }
+  let scrollReported = false;
+  addEventListener(
+    'scroll',
+    () => {
+      if (!scrollReported && scrollY > 30) {
+        scrollReported = true;
+        report('scroll');
+      }
+    },
+    { passive: true },
+  );
+  report('ready');
+</script>

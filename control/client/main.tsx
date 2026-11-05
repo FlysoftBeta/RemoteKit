@@ -162,7 +162,7 @@ function Workspace({ logout, expired }: { logout: () => void; expired: () => voi
       setLocalLock(reason);
       if (reason === 'manual') setManualLock(true);
       clearWorkspace();
-      void authRequest('auth.lock', { reason }).catch(() => connection.current?.reconnect());
+      void authRequest('auth.lock', {}).catch(() => connection.current?.reconnect());
     },
     [authRequest, clearWorkspace],
   );
@@ -316,7 +316,6 @@ function Workspace({ logout, expired }: { logout: () => void; expired: () => voi
         setAuth(next);
         media.observePeerAuthorization(next.peerEpoch);
         if (!next.locked && next.peerEpoch > 0 && latest.current) media.setProductLocked(false);
-        media.trickleIce = next.trickleIce;
         if (generation.current !== next.endpointGeneration) {
           media.observeEndpointGeneration(next.endpointGeneration);
           generation.current = next.endpointGeneration;
@@ -859,14 +858,6 @@ function App() {
     </ThemeProvider>
   );
 }
-if (location.pathname === '/automation' || location.pathname === '/diagnostics')
-  void import('./automation-entry').then((m) =>
-    m.mountAutomation(document.getElementById('root')!, {
-      diagnostics: location.pathname === '/diagnostics',
-    }),
-  );
-else {
-  const root = createRoot(document.getElementById('root')!);
-  root.render(<App />);
-  import.meta.hot?.dispose(() => root.unmount());
-}
+const root = createRoot(document.getElementById('root')!);
+root.render(<App />);
+import.meta.hot?.dispose(() => root.unmount());

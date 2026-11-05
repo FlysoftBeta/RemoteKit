@@ -6,12 +6,10 @@ import { EndpointProcess } from './endpoint';
 import { EndpointNode } from './endpoint-node';
 import { Control } from './control';
 import { createHttp } from './http';
-import { parseNetworkSimulation } from './network-sim.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const dbPath = resolve(process.env.REMOTEKIT_CONTROL_DB ?? resolve(root, 'data/control.db'));
 mkdirSync(dirname(dbPath), { recursive: true });
 const store = new Store(dbPath);
-const simulation = parseNetworkSimulation(process.env.REMOTEKIT_NETWORK_SIM);
 const endpointNode = process.env.REMOTEKIT_ENDPOINT_NODE_ID
   ? new EndpointNode({
       nodeId: process.env.REMOTEKIT_ENDPOINT_NODE_ID,
@@ -24,9 +22,8 @@ const endpoint =
   new EndpointProcess(
     process.env.REMOTEKIT_ENDPOINT ?? resolve(root, '../build/endpoint/endpoint/endpoint_service.exe'),
     JSON.parse(process.env.REMOTEKIT_ENDPOINT_ARGS ?? '[]'),
-    !!simulation,
   );
-const control = new Control(store, endpoint, simulation);
+const control = new Control(store, endpoint);
 let closing = false;
 const background = new Set<Promise<unknown>>();
 function run(work: Promise<unknown>) {
@@ -58,7 +55,6 @@ const scheme = tls ? 'https' : 'http';
 const server = createHttp(control, {
   tls,
   endpointNode,
-  diagnostics: process.env.REMOTEKIT_DIAGNOSTICS === '1',
   origins: (
     process.env.REMOTEKIT_CONTROL_ORIGINS ??
     `${scheme}://127.0.0.1:${port},${scheme}://localhost:${port},http://127.0.0.1:5173,http://localhost:5173`
@@ -66,7 +62,6 @@ const server = createHttp(control, {
     .split(',')
     .map((value) => value.trim()),
   clientDir: resolve(root, 'dist/client'),
-  metricsDir: resolve(process.env.REMOTEKIT_METRICS_DIR ?? resolve(root, '../develop/tmp/metrics')),
   diagnosticDir: resolve(process.env.REMOTEKIT_DIAGNOSTICS_DIR ?? resolve(dirname(dbPath), 'diagnostics')),
 });
 const reconciliationTimer = setInterval(() => {

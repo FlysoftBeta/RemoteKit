@@ -91,27 +91,21 @@ async function fixture() {
     endpoint = new LifecycleEndpoint(),
     control = new Control(store, endpoint);
   const { tenantId: tenant } = await store.register('lifecycle-user', 'password123');
-  await control.attachViewer(tenant, 'lease', () => {});
+  await control.attachViewer(
+    tenant,
+    'lease',
+    () => {},
+    { identity: 'test-account', valid: () => true },
+    true,
+  );
   const created = await control.productAction(tenant, { type: 'window.create', url: 'about:blank' }, 'lease');
   const tab = created.state.workspace.tabs[0];
   return { store, endpoint, control, tenant, tab };
 }
 
-test('file requests bind Browser identity, stay separate from dialogs and revoke old lease tickets without cancelling the chooser', async () => {
+test('file requests bind Browser identity and stay separate from dialogs', async () => {
   const { store, endpoint, control, tenant } = await fixture();
   try {
-    const calls: any[] = [],
-      original = endpoint.request.bind(endpoint);
-    endpoint.request = async (method, tenant, args = {}) => {
-      if (!method.startsWith('session.files.')) return original(method, tenant, args);
-      calls.push({ method, args });
-      if (method === 'session.files.begin')
-        return {
-          uploadId: 'allocated-upload',
-          files: [{ ticket: 'one-time-ticket-123456', path: resolve('private-upload.part') }],
-        };
-      return { state: 'cancelled' };
-    };
     endpoint.view.pageRequests = {
       pending: [
         {
@@ -131,39 +125,9 @@ test('file requests bind Browser identity, stay separate from dialogs and revoke
     assert.equal('binding' in request, false);
     assert.deepEqual(request.accept, ['.txt']);
     assert.equal(request.acceptTypesOmitted, true);
-    const starts = endpoint.starts;
-    const begun = await control.viewerRequest(tenant, 'lease', 'files.begin', {
-      requestId: request.id,
-      files: [{ name: 'file.txt', size: 3, type: 'text/plain' }],
-    });
-    assert.deepEqual(calls.find((call) => call.method === 'session.files.begin').args.binding, {
-      browserIncarnation: 'browser-A',
-      view: endpoint.view.viewId,
-      instance: '1',
-      document: '2',
-      request: '7',
-    });
-    assert.equal(endpoint.starts, starts);
-    await control.attachViewer(tenant, 'replacement', () => {});
-    await assert.rejects(
-      control.receiveFileUpload(tenant, '', begun.files[0].ticket, Readable.from(['abc'])),
-      /不存在/,
-    );
-    assert.equal(endpoint.view.pageRequests.pending.length, 1);
-    assert.equal(
-      calls.some((call) => call.method === 'session.files.cancel' && call.args.cancelRequest),
-      false,
-    );
     endpoint.replace();
     await control.tick();
     assert.notEqual(control.productState(tenant).fileRequests[0].id, request.id);
-    await assert.rejects(
-      control.viewerRequest(tenant, 'replacement', 'files.begin', {
-        requestId: request.id,
-        files: [{ name: 'file.txt', size: 3, type: '' }],
-      }),
-      /失效/,
-    );
   } finally {
     store.db.close();
   }
@@ -259,45 +223,6 @@ test('close replies bind full identity, reject stale UI tokens and require expli
       requestId: '7',
       accept: false,
     });
-  } finally {
-    store.db.close();
-  }
-});
-
-test('diagnostic close observation preserves offline tabs and commits durable close before ACK', async () => {
-  const store = new Store(':memory:'),
-    endpoint = new LifecycleEndpoint(),
-    control = new Control(store, endpoint),
-    tenant = store.session().tenantId;
-  try {
-    const created = await control.action(tenant, { type: 'tab.create', url: 'about:blank' }),
-      tab = created.tabs[0];
-    let state = await control.action(tenant, { type: 'tab.close', id: tab.id });
-    await control.action(tenant, {
-      type: 'tab.close',
-      id: tab.id,
-      requestId: state.pendingClose!.requestId,
-      confirm: true,
-    });
-    endpoint.offlineNextSnapshot = true;
-    state = await control.getState(tenant);
-    assert.equal(state.tabs.length, 1);
-    assert.equal(state.pendingClose, null);
-    endpoint.running = true;
-    endpoint.replace();
-    await control.tick();
-    state = await control.action(tenant, { type: 'tab.close', id: tab.id });
-    await control.action(tenant, {
-      type: 'tab.close',
-      id: tab.id,
-      requestId: state.pendingClose!.requestId,
-      confirm: true,
-    });
-    endpoint.view = undefined;
-    endpoint.events = [{ eventId: 'closed-diagnostic', type: 'view.closed', viewId: tab.webviewId }];
-    endpoint.onAck = () => assert.equal(store.state(tenant).tabs.length, 0);
-    assert.equal((await control.getState(tenant)).tabs.length, 0);
-    assert.equal(endpoint.events.length, 0);
   } finally {
     store.db.close();
   }

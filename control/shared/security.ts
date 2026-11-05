@@ -28,13 +28,12 @@ export interface AuthState {
     purpose?: FacePurpose;
     status?: FaceStatus;
   };
-  trickleIce: boolean;
   endpointGeneration: number;
 }
 
 export interface AuthSocketMethods {
   'auth.get': { params: Record<string, never>; result: AuthState };
-  'auth.lock': { params: { reason?: string }; result: AuthState };
+  'auth.lock': { params: Record<string, never>; result: AuthState };
   'auth.verify': { params: { method: 'password' | 'pin'; secret: string }; result: AuthState };
   'auth.settings': {
     params: { currentPassword: string; settings?: Partial<AuthSettings>; pin?: string | null };

@@ -5,7 +5,7 @@ import type { Layout, Surface } from '../client/types';
 import type { MediaFeedbackSampler } from '../client/media-feedback';
 
 test(
-  'transport feedback is independent of delayed/failed relay HTTP and disconnect discards stale completions',
+  'transport feedback samples current media and disconnect discards stale completions',
   { timeout: 2000 },
   async (t) => {
     let now = 0,
@@ -54,7 +54,9 @@ test(
       }
     });
     const transport = new RemoteTransport();
-    transport.enableDiagnosticHttp();
+    transport.setControlRpc(async () => ({ closed: true }));
+    transport.observePeerAuthorization(1);
+    transport.setProductLocked(false);
     type Internals = {
       peer: RTCPeerConnection;
       channel: RTCDataChannel;
@@ -67,19 +69,6 @@ test(
     };
     const connected = transport as unknown as Internals;
     const sent: Record<string, any>[] = [];
-    const network: { resolve: (body: Record<string, unknown>) => void; reject: (error: Error) => void }[] =
-      [];
-    t.mock.method(globalThis, 'fetch', async (url: string | URL | Request) => {
-      if (url === '/api/rtc/close') return { ok: true, json: async () => ({ closed: true }) } as Response;
-      assert.equal(url, '/api/rtc/network');
-      return new Promise<Response>((resolve, reject) => {
-        network.push({
-          resolve: (body) => resolve({ ok: true, json: async () => body } as Response),
-          reject,
-        });
-      });
-    });
-    const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
     let decoded = 100,
       closed = false,
       pending: (() => void) | undefined,
@@ -110,11 +99,13 @@ test(
     } as unknown as RTCPeerConnection;
     connected.peer = peer;
     connected.connectionId = 'connection-1';
-    transport.diagnostics.networkSimulation = { enabled: true };
     connected.channel = {
       readyState: 'open',
       bufferedAmount: 0,
-      send: (value: string) => sent.push(JSON.parse(value)),
+      send: (value: string) => {
+        const message = JSON.parse(value);
+        if (message.type === 'media.feedback') sent.push(message);
+      },
     } as unknown as RTCDataChannel;
     const view = (id: string): Surface => ({
       id,
@@ -154,14 +145,12 @@ test(
     connected.mediaFeedback.start();
     now = 1500;
     await connected.readStats(peer);
-    assert.equal(network.length, 1); // Native feedback did not wait for this unresolved HTTP request.
     assert.deepEqual(sent[0].planes, [{ view: 'main' }, { view: 'split' }]);
     assert.equal('decodedFrames' in sent[0], false);
     assert.equal(sent[0].roundTripTimeMs, 10);
     decoded = 175;
     now = 3000;
     await connected.readStats(peer);
-    assert.equal(network.length, 1); // A slow diagnostic does not accumulate parallel HTTP requests.
     assert.equal(sent[1].decodedFrames, 75);
     assert.equal('videoFrames' in sent[1], false);
     assert.equal('packetsLost' in sent[1], false);
@@ -178,27 +167,19 @@ test(
     assert.equal(collection?.availability.sourceCaptureTiming, false);
     assert.doesNotMatch(JSON.stringify(collection), /connection-1|"id":/);
     now = 3200;
-    network[0].resolve({ enabled: true, observation: 'delayed' });
-    await flush();
-    assert.equal(transport.diagnostics.networkSimulation?.observation, 'delayed');
     decoded = 200;
     now = 4500;
     await connected.readStats(peer);
     assert.equal(sent[2].windowMs, 1500);
     assert.equal(sent[2].decodedFrames, 25);
-    assert.equal(network.length, 2);
-    network[1].reject(new Error('relay unavailable'));
-    await flush();
     decoded = 225;
     now = 6000;
     inboundId = 'video-replacement';
     await connected.readStats(peer);
     assert.equal(sent[3].windowMs, 1500);
     assert.equal(sent[3].decodedFrames, 25);
-    assert.equal(network.length, 3);
     assert.equal(transport.diagnostics.decodedFramesPerSecond, undefined);
     assert.equal(transport.diagnostics.receiverVideoTiming, undefined);
-    assert.equal(transport.diagnostics.networkSimulation?.observation, 'delayed');
     assert.equal(transport.exportMediaDiagnostics().samples.length, 4);
     // A getStats completion from the old peer must never restart observation or send.
     peer.getStats = () =>
@@ -217,12 +198,7 @@ test(
     assert.equal(callbacks.size, 0);
     assert.deepEqual(transport.exportMediaDiagnostics().samples, []);
     assert.equal(transport.getDiagnosticCollectionSample(), undefined);
-    // An HTTP response from the disconnected peer cannot overwrite a new connection.
     connected.peer = {} as RTCPeerConnection;
     connected.connectionId = 'connection-2';
-    transport.diagnostics.networkSimulation = { enabled: true, observation: 'replacement' };
-    network[2].resolve({ enabled: true, observation: 'stale' });
-    await flush();
-    assert.equal(transport.diagnostics.networkSimulation?.observation, 'replacement');
   },
 );

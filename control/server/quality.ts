@@ -62,7 +62,6 @@ export class QualityState {
     workspace: ProductWorkspace,
     viewport?: ViewerViewport,
     now = Date.now(),
-    manual = false,
     applied: AppliedMediaPolicy | null = null,
   ): ProductQuality {
     const scale = workspace.settings.clientScaleOverride ?? viewport?.devicePixelRatio ?? 1;
@@ -80,7 +79,7 @@ export class QualityState {
       ) ?? [];
     let effectiveDpr = scale,
       resourceLimitation: string | null = null;
-    if (!manual) {
+    {
       try {
         effectiveDpr = feasibleDpr(visible, scale);
       } catch (error) {
@@ -97,7 +96,7 @@ export class QualityState {
     const requested = { degradationPreference: preferences[workspace.settings.qualityPreference], maxFps };
     return {
       resourceLimitation,
-      mode: manual ? 'manual' : 'product',
+      mode: 'product',
       preference: workspace.settings.qualityPreference,
       clientScale: scale,
       effectiveDpr,
@@ -106,11 +105,7 @@ export class QualityState {
       estimatedLatencyMs: valid ? this.last!.value.presentationLatencyMs : null,
       clockUncertaintyMs: valid ? this.last!.value.clockUncertaintyMs : null,
       feedbackStatus: valid ? 'valid' : this.last ? 'stale' : 'unknown',
-      reason: resourceLimitation
-        ? 'resource-limited'
-        : manual
-          ? 'diagnostic-fixed-configuration'
-          : 'webrtc-congestion-control',
+      reason: resourceLimitation ? 'resource-limited' : 'webrtc-congestion-control',
     };
   }
 }

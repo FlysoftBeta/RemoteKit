@@ -95,18 +95,6 @@ export function configureReceiveOffer(
     throw new Error('原始 offer 没有 constrained-baseline / mode1，无法应用此实验接收档。');
   return { sdp: lines.join('\r\n'), changes };
 }
-export function originalGatheredOffer(effective: string, original: string) {
-  const fmtp = new Map(
-    original
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith('a=fmtp:'))
-      .map((line) => [line.split(' ')[0], line]),
-  );
-  return effective
-    .split(/\r?\n/)
-    .map((line) => (line.startsWith('a=fmtp:') ? (fmtp.get(line.split(' ')[0]) ?? line) : line))
-    .join('\r\n');
-}
 export async function probeReceiveCapabilities() {
   const configurations = [
     {

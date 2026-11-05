@@ -10,11 +10,11 @@ import type {
 } from '../shared/file-library';
 import type { Endpoint } from './endpoint';
 import {
-  FileUploadError,
+  FileRequestError,
   type FileBinding,
   type InternalFileRequest,
-  type UploadLimits,
-} from './file-uploads';
+  type FileLimits,
+} from './file-requests';
 
 type LibraryMethod = keyof LibraryMethods;
 type Params<K extends LibraryMethod> = LibraryMethods[K]['params'];
@@ -34,7 +34,7 @@ const MAX_GROUPS = 256;
 const RECONCILE_BATCH = 8;
 const operationHash = (...fields: unknown[]) =>
   createHash('sha256').update(JSON.stringify(fields)).digest('hex');
-const invalid = (message: string) => new FileUploadError(400, message);
+const invalid = (message: string) => new FileRequestError(400, message);
 
 function id(value: unknown): string {
   if (typeof value !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(value)) throw invalid('无效的文件库标识');
@@ -95,14 +95,14 @@ function groupName(value: unknown): string {
 function group(snapshot: LibrarySnapshot, value: unknown): string | null {
   if (value === null) return null;
   const groupId = id(value);
-  if (!snapshot.groups.some((item) => item.id === groupId)) throw new FileUploadError(404, '分组不存在');
+  if (!snapshot.groups.some((item) => item.id === groupId)) throw new FileRequestError(404, '分组不存在');
   return groupId;
 }
 function entries(snapshot: LibrarySnapshot, entryIds: string[]) {
   const catalog = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
   return entryIds.map((entryId) => {
     const entry = catalog.get(entryId);
-    if (!entry) throw new FileUploadError(404, '文件不存在');
+    if (!entry) throw new FileRequestError(404, '文件不存在');
     return entry;
   });
 }
@@ -114,16 +114,8 @@ export class FileLibrary {
   constructor(
     private db: Database.Database,
     private endpoint: Endpoint,
-    private limits: UploadLimits,
-  ) {
-    db.exec(`CREATE TABLE IF NOT EXISTS file_library (tenant TEXT PRIMARY KEY, snapshot TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS file_library_operations (
-        tenant TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, selection_id TEXT, PRIMARY KEY(tenant,id));
-      CREATE TABLE IF NOT EXISTS file_library_selections (
-        tenant TEXT NOT NULL, id TEXT NOT NULL, manifest TEXT NOT NULL, terminal TEXT, checked INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY(tenant,id));
-      CREATE INDEX IF NOT EXISTS file_library_open ON file_library_selections(tenant,terminal,checked);`);
-  }
+    private limits: FileLimits,
+  ) {}
   private snapshot(tenant: string): LibrarySnapshot {
     const row = this.db.prepare('SELECT snapshot FROM file_library WHERE tenant=?').get(tenant) as
       { snapshot: string } | undefined;
@@ -137,7 +129,7 @@ export class FileLibrary {
     const row = this.db
       .prepare('SELECT payload,selection_id FROM file_library_operations WHERE tenant=? AND id=?')
       .get(tenant, operationId) as { payload: string; selection_id: string | null } | undefined;
-    if (row && row.payload !== payload) throw new FileUploadError(409, '同一操作ID不能用于不同内容');
+    if (row && row.payload !== payload) throw new FileRequestError(409, '同一操作ID不能用于不同内容');
     return row;
   }
   private remember(tenant: string, operationId: string, payload: string, selectionId: string | null = null) {
@@ -173,7 +165,7 @@ export class FileLibrary {
       Buffer.byteLength(value.type) > 255 ||
       /[\x00-\x1f\x7f]/.test(value.type)
     )
-      throw new FileUploadError(502, 'Endpoint未返回有效文件信息');
+      throw new FileRequestError(502, 'Endpoint未返回有效文件信息');
     return value;
   }
   private async retainAssets(
@@ -187,7 +179,7 @@ export class FileLibrary {
     authorize();
     const retained = await this.endpoint.request('session.library.retain', tenant, { assetIds: references });
     authorize();
-    if (retained?.accepted !== true) throw new FileUploadError(502, 'Endpoint未确认保留文件');
+    if (retained?.accepted !== true) throw new FileRequestError(502, 'Endpoint未确认保留文件');
     return asset;
   }
   private async import(tenant: string, params: Params<'library.import'>, authorize: () => void) {
@@ -207,11 +199,11 @@ export class FileLibrary {
     if (this.operation(tenant, operationId, payload)) return this.snapshot(tenant);
     const validate = (snapshot: LibrarySnapshot) => {
       const groupId = group(snapshot, requestedGroup);
-      if (snapshot.entries.length >= MAX_CATALOG) throw new FileUploadError(409, '文件库已达上限');
+      if (snapshot.entries.length >= MAX_CATALOG) throw new FileRequestError(409, '文件库已达上限');
       if (destination === 'basket' && snapshot.basket.length >= MAX_BASKET)
-        throw new FileUploadError(409, '文件篮已满');
+        throw new FileRequestError(409, '文件篮已满');
       if (afterId !== undefined && !snapshot.basket.includes(afterId))
-        throw new FileUploadError(409, '插入位置已改变');
+        throw new FileRequestError(409, '插入位置已改变');
       return groupId;
     };
     validate(this.snapshot(tenant));
@@ -249,10 +241,10 @@ export class FileLibrary {
     if (this.operation(tenant, operationId, payload)) return this.snapshot(tenant);
     const validate = (snapshot: LibrarySnapshot) => {
       if (snapshot.revision !== expectedRevision)
-        throw new FileUploadError(409, '文件篮已更新，请刷新后重试');
+        throw new FileRequestError(409, '文件篮已更新，请刷新后重试');
       const [entry] = entries(snapshot, [entryId]);
       if (this.pendingEntries(tenant).has(entryId))
-        throw new FileUploadError(409, '文件选择尚未确认，暂不能替换');
+        throw new FileRequestError(409, '文件选择尚未确认，暂不能替换');
       return entry;
     };
     validate(this.snapshot(tenant));
@@ -305,7 +297,7 @@ export class FileLibrary {
     const row = this.db
       .prepare('SELECT manifest,terminal FROM file_library_selections WHERE tenant=? AND id=?')
       .get(tenant, selectionId) as { manifest: string; terminal: TerminalState | null } | undefined;
-    if (!row) throw new FileUploadError(404, '文件选择不存在');
+    if (!row) throw new FileRequestError(404, '文件选择不存在');
     return { manifest: JSON.parse(row.manifest) as Selection, terminal: row.terminal };
   }
   private async prepare(
@@ -327,17 +319,17 @@ export class FileLibrary {
       manifest = row.manifest;
     } else {
       const request = resolve(requestId);
-      if (!request || request.state !== 'pending') throw new FileUploadError(409, '文件选择请求已失效');
+      if (!request || request.state !== 'pending') throw new FileRequestError(409, '文件选择请求已失效');
       if ((!request.multiple && entryIds.length !== 1) || entryIds.length > request.limits.maxFiles)
         throw invalid('文件数量超出页面限制');
       const snapshot = this.snapshot(tenant),
         selected = entries(snapshot, entryIds);
-      if (selected.some((entry) => entry.photo?.pending)) throw new FileUploadError(409, '照片尚未确认');
+      if (selected.some((entry) => entry.photo?.pending)) throw new FileRequestError(409, '照片尚未确认');
       if (
         selected.some((entry) => entry.size > request.limits.maxFileBytes) ||
         selected.reduce((sum, entry) => sum + entry.size, 0) > request.limits.maxBatchBytes
       )
-        throw new FileUploadError(413, '文件大小超过限制');
+        throw new FileRequestError(413, '文件大小超过限制');
       const groupId = group(snapshot, requestedGroup);
       manifest = {
         selectionId: randomUUID().replace(/-/g, ''),
@@ -363,7 +355,7 @@ export class FileLibrary {
       requestId,
     });
     authorize();
-    if (accepted?.accepted !== true) throw new FileUploadError(502, 'Endpoint未确认文件选择');
+    if (accepted?.accepted !== true) throw new FileRequestError(502, 'Endpoint未确认文件选择');
     manifest.prepared = true;
     this.db
       .prepare('UPDATE file_library_selections SET manifest=? WHERE tenant=? AND id=?')
@@ -485,7 +477,7 @@ export class FileLibrary {
           operationHash('basket', expectedRevision, basket),
           (snapshot) => {
             if (snapshot.revision !== expectedRevision)
-              throw new FileUploadError(409, '文件篮已更新，请刷新后重试');
+              throw new FileRequestError(409, '文件篮已更新，请刷新后重试');
             entries(snapshot, basket);
             snapshot.basket = basket;
             this.prune(tenant, snapshot);
@@ -504,11 +496,11 @@ export class FileLibrary {
           operationHash('group', groupId, name),
           (snapshot) => {
             if (groupId === undefined) {
-              if (snapshot.groups.length >= MAX_GROUPS) throw new FileUploadError(409, '分组已达上限');
+              if (snapshot.groups.length >= MAX_GROUPS) throw new FileRequestError(409, '分组已达上限');
               snapshot.groups.push({ id: randomUUID(), name });
             } else {
               const item = snapshot.groups.find((entry) => entry.id === groupId);
-              if (!item) throw new FileUploadError(404, '分组不存在');
+              if (!item) throw new FileRequestError(404, '分组不存在');
               item.name = name;
             }
           },
@@ -537,7 +529,7 @@ export class FileLibrary {
             entries(snapshot, entryIds);
             const pending = this.pendingEntries(tenant);
             if (entryIds.some((entryId) => pending.has(entryId)))
-              throw new FileUploadError(409, '文件选择尚未确认，暂不能删除');
+              throw new FileRequestError(409, '文件选择尚未确认，暂不能删除');
             const removed = new Set(entryIds);
             snapshot.entries = snapshot.entries.filter((entry) => !removed.has(entry.id));
             snapshot.basket = snapshot.basket.filter((entryId) => !removed.has(entryId));

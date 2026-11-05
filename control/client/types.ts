@@ -1,33 +1,6 @@
-import type { PendingClose } from '../shared/product';
 import type { ReceiverPlayout } from './receiver-playout';
 import type { ReceiverBufferTiming, ReceiverVideoTiming } from './media-diagnostics';
 export type { ReceiverVideoTiming } from './media-diagnostics';
-export interface Tab {
-  id: string;
-  title: string;
-  url: string;
-  webviewId: string | null;
-  pendingUrl?: string;
-  canGoBack?: boolean;
-  canGoForward?: boolean;
-  loading?: boolean;
-}
-export interface Device {
-  mode: 'desktop' | 'tablet';
-  width: number;
-  height: number;
-  deviceScaleFactor: number;
-}
-export interface ControlState {
-  tenantId: string;
-  tabs: Tab[];
-  activeTabId: string | null;
-  splitTabId: string | null;
-  device: Device;
-  endpointGeneration?: number;
-  endpointError?: string | null;
-  pendingClose?: PendingClose | null;
-}
 export interface Surface {
   id: string;
   session: string;
@@ -107,7 +80,6 @@ export interface Diagnostics {
   videoHeight?: number;
   endpoint?: Record<string, unknown>;
   error?: string;
-  networkSimulation?: Record<string, unknown>;
   selectedCandidates?: unknown;
   connectionId?: string;
   marker?: { kind: 'input' | 'render'; p50: number; p95: number; samples: number };

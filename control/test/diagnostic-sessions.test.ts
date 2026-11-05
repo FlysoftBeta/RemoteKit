@@ -44,8 +44,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const snapshots: string[] = [];
   const control = Object.assign(emitter, {
     store: {
-      identity: (token: string) =>
-        token ? { tenantId: token === 'new-token' ? 'one' : token, legacy: token === 'legacy' } : undefined,
+      identity: (token: string) => (token ? { tenantId: token === 'new-token' ? 'one' : token } : undefined),
       workspace: () => ({
         revision: 4,
         layoutMode: 'focused',
@@ -98,7 +97,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
       },
     },
     attachViewer: async (tenant: string, lease: string) => {
-      leases.set(tenant, { lease, epoch: tenant === 'legacy' ? undefined : 1, allowed: true });
+      leases.set(tenant, { lease, epoch: tenant === 'locked' ? undefined : 1, allowed: true });
     },
     detachViewer: async () => {},
     productAllowed: (tenant: string, lease: string) =>
@@ -113,7 +112,6 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const server = createHttp(control, {
     origins: ['http://test.local'],
     clientDir: '.',
-    metricsDir: '.',
     diagnosticDir: directory,
   });
   t.after(async () => {
@@ -150,8 +148,8 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   }
   const one = await viewer('one'),
     two = await viewer('two'),
-    legacy = await viewer('legacy');
-  await assert.rejects(legacy.request('start', {}), { status: 423 });
+    locked = await viewer('locked');
+  await assert.rejects(locked.request('start', {}), { status: 423 });
   const auth = leases.get('one')!;
   auth.allowed = false;
   await assert.rejects(one.request('start', {}), { status: 423 });

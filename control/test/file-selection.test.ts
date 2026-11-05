@@ -1,13 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  cameraFormat,
-  fileChooserAccept,
-  acceptsFile,
-  mergeSelection,
-  combineSelection,
-  validateSelection,
-} from '../client/file-selection';
+import { fileChooserAccept, validateSelection } from '../client/file-selection';
 import { foregroundRequest } from '../client/foreground-request';
 import type { FileRequest, ProductState } from '../shared/product';
 const request: FileRequest = {
@@ -25,23 +18,14 @@ test('omitted file hints do not restrict selection to an incomplete accept list'
   assert.deepEqual(fileChooserAccept(request), request.accept);
   const partial = { ...request, accept: ['application/pdf'], acceptTypesOmitted: true };
   assert.deepEqual(fileChooserAccept(partial), []);
-  assert.equal(cameraFormat(fileChooserAccept(partial)), 'image/jpeg');
   assert.equal(validateSelection([new File(['bytes'], 'unlisted.txt')], partial), '');
   assert.deepEqual(partial.accept, ['application/pdf']);
 });
-test('file accept/multiple/limits and camera format follow request', () => {
-  assert.equal(cameraFormat(['application/pdf']), null);
-  assert.equal(cameraFormat(['image/*']), 'image/jpeg');
-  assert.equal(cameraFormat(['.png']), 'image/png');
-  assert.ok(acceptsFile({ name: 'hello.JPG', type: '' }, request.accept));
+test('file selection respects multiple and size limits', () => {
   const a = new File(['data'], 'a.jpg', { type: 'image/jpeg', lastModified: 1 }),
     b = new File(['data'], 'b.png', { type: 'image/png', lastModified: 1 });
   assert.equal(validateSelection([a], request), '');
   assert.match(validateSelection([a, b], request), /数量/);
-  assert.equal(mergeSelection([a], [a, b], true).length, 2);
-  assert.deepEqual(mergeSelection([a], [b], false), [b]);
-  assert.deepEqual(combineSelection([a], [], false), [a]);
-  assert.deepEqual(combineSelection([a], [b], false), [b]);
   assert.match(validateSelection([new File([new Uint8Array(101)], 'large.jpg')], request), /单个/);
 });
 test('one foreground modal uses active visible window; background requests wait', () => {

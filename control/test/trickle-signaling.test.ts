@@ -17,6 +17,7 @@ class SignalEndpoint implements Endpoint {
     this.calls.push({ method, tenant, args });
     if (method === 'session.snapshot') return { running: true, views: [], browserPid: 1 };
     if (method === 'session.ensure') return { running: true, browserPid: 1 };
+    if (method === 'rtc.authorize') return { applied: true, epoch: args.epoch };
     if (method === 'rtc.offer') return { accepted: true, pending: true, connectionId: args.connectionId };
     return { accepted: true, applied: true, closed: true };
   }
@@ -40,14 +41,25 @@ test('pending trickle offers allow other tenants and bind early candidates to co
     const a = await store.register('signal-a', 'password-a');
     await store.setRegistrationCredential(a.tenantId, 'signal-registration');
     const b = await store.register('signal-b', 'password-b', 'signal-registration');
-    await control.attachViewer(a.tenantId, 'lease-a', () => {});
-    await control.attachViewer(b.tenantId, 'lease-b', () => {});
-    assert.equal(control.productState(a.tenantId).viewer.trickleIce, true);
+    await control.attachViewer(
+      a.tenantId,
+      'lease-a',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
+    await control.attachViewer(
+      b.tenantId,
+      'lease-b',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
     const events: any[] = [];
     control.on('rtc.signal', (...event) => events.push(event));
     const first = control.offer(
       a.tenantId,
-      { type: 'offer', sdp: 'v=0\r\n', trickle: true, attemptId: 'attempt-a' },
+      { type: 'offer', sdp: 'v=0\r\n', attemptId: 'attempt-a' },
       'lease-a',
     );
     const connection = await offered(endpoint, a.tenantId);
@@ -82,7 +94,7 @@ test('pending trickle offers allow other tenants and bind early candidates to co
     endpoint.signal(a.tenantId, connection, { type: 'ice', candidate });
     assert.equal(events.length, 1);
   } finally {
-    control.closeRelays();
+    control.clearSignals();
     store.db.close();
   }
 });
@@ -92,10 +104,16 @@ test('close cancels a pending answer immediately and late answers are ignored', 
     control = new Control(store, endpoint);
   try {
     const a = await store.register('signal-c', 'password-c');
-    await control.attachViewer(a.tenantId, 'lease', () => {});
+    await control.attachViewer(
+      a.tenantId,
+      'lease',
+      () => {},
+      { identity: 'test-account', valid: () => true },
+      true,
+    );
     const pending = control.offer(
       a.tenantId,
-      { type: 'offer', sdp: 'v=0\r\n', trickle: true, attemptId: 'cancel' },
+      { type: 'offer', sdp: 'v=0\r\n', attemptId: 'cancel' },
       'lease',
     );
     const failed = assert.rejects(pending, /取消/),
@@ -106,7 +124,7 @@ test('close cancels a pending answer immediately and late answers are ignored', 
     await failed;
     endpoint.signal(a.tenantId, connection, { type: 'answer', sdp: 'v=0\r\n' });
   } finally {
-    control.closeRelays();
+    control.clearSignals();
     store.db.close();
   }
 });
