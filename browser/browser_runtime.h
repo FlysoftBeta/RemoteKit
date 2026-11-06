@@ -10,6 +10,7 @@
 #include "browser/control_server.h"
 #include "browser/layout_transaction.h"
 #include "browser/navigation_transfer.h"
+#include "browser/storage_import.h"
 #include "browser/osr_renderer.h"
 #include "browser/popup_registry.h"
 #include "browser/view_registry.h"
@@ -49,6 +50,7 @@ class BrowserRuntime : public content::GpuDataManagerObserver {
   bool output_enabled = true;
   uint64_t output_generation = 0;
   NavigationTransfer navigation_transfers;
+  StorageImportJobs storage_import_jobs;
   base::RepeatingClosure quit;
 
  private:

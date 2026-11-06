@@ -1,0 +1,6 @@
+smtp.host=smtp.example.com
+smtp.port=465
+smtp.security=tls
+smtp.username=import@example.com
+smtp.password=replace-me
+smtp.from=import@example.com

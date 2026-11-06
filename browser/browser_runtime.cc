@@ -282,6 +282,7 @@ void RemoteKitMainParts::PostMainMessageLoopRun() {
   state_->output_timer.Stop();
   state_->control.reset();
   state_->dispatcher.reset();
+  state_->storage_import_jobs.Clear();
   state_->output.reset();
   state_->views.Clear();
   state_->popups.Clear();

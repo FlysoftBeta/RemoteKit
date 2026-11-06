@@ -3,6 +3,7 @@ import type { LibraryMethods } from './file-library';
 import type { AuthMessage, AuthSocketMethods } from './security';
 import type { DiagnosticMethods } from './diagnostics';
 import type { AdminSocketMethods } from './admin';
+import type { SessionImportSocketMethods } from './session-import';
 /** Persistent product state belongs to Control; clients keep only an HttpOnly token. */
 export interface ProductUser {
   id: string;
@@ -247,7 +248,12 @@ export interface SetupStatus {
   setupRequired: boolean;
 }
 export interface SocketMethods
-  extends AuthSocketMethods, LibraryMethods, DiagnosticMethods, AdminSocketMethods {
+  extends
+    AuthSocketMethods,
+    LibraryMethods,
+    DiagnosticMethods,
+    AdminSocketMethods,
+    SessionImportSocketMethods {
   'operation.status': {
     params: { operationId: string; operationGeneration: string };
     result: OperationReceipt;

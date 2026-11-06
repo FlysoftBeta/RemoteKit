@@ -583,6 +583,54 @@ Result<Json> ViewController::ManageSessionEnsure(const Json& request) {
               {"recovery", navigation.RecoverySnapshot()}};
 }
 
+Result<Json> ViewController::ManageSessionStorageImport(const Json& request) {
+  if (!request.contains("cookies") || !request["cookies"].is_array() ||
+      !request.contains("localStorage") || !request["localStorage"].is_array())
+    return Error{ErrorCode::kInvalidRequest, "cookies and localStorage arrays required"};
+  auto started = Start();
+  if (!started)
+    return started.error();
+  const auto incarnation = browser.Incarnation();
+  auto reply = browser.Rpc().Request({{"method", protocol::kStorageImport},
+                                      {"session", id},
+                                      {"cookies", request["cookies"]},
+                                      {"localStorage", request["localStorage"]}});
+  if (!reply)
+    return reply.error();
+  return Json{
+      {"accepted", true}, {"job", reply.value().at("job")}, {"browserIncarnation", incarnation}};
+}
+
+Result<Json> ViewController::ManageSessionStorageImportStatus(const Json& request) {
+  if (!request.contains("job") || !request["job"].is_string() ||
+      !request.contains("browserIncarnation") || !request["browserIncarnation"].is_string())
+    return Error{ErrorCode::kInvalidRequest, "job and browserIncarnation strings required"};
+  if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping() ||
+      browser.Incarnation().empty() || request["browserIncarnation"] != browser.Incarnation())
+    return Error{ErrorCode::kConflict, "stale_browser_incarnation"};
+  auto reply = browser.Rpc().Request(
+      {{"method", protocol::kStorageImportStatus}, {"session", id}, {"job", request["job"]}});
+  if (!reply)
+    return reply.error();
+  Json result = {{"accepted", true}, {"state", reply.value().at("state")}};
+  for (const auto* field : {"cookies", "localStorage"})
+    if (reply.value().contains(field))
+      result[field] = reply.value()[field];
+  return result;
+}
+
+Result<Json> ViewController::ManageSessionIdentity(const Json&) {
+  auto started = Start();
+  if (!started)
+    return started.error();
+  auto reply = browser.Rpc().Request({{"method", protocol::kIdentity}, {"session", id}});
+  if (!reply)
+    return reply.error();
+  return Json{{"accepted", true},
+              {"userAgent", reply.value().at("userAgent")},
+              {"metadata", reply.value().at("metadata")}};
+}
+
 Result<Json> ViewController::ManageSessionEventsAck(const Json& request) {
   const auto ids = request.at("eventIds");
   if (!ids.is_array() || ids.size() > 256)

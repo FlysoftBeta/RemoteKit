@@ -7,6 +7,7 @@ import { OperationsRepository } from './operations';
 import { createSchema } from './schema';
 import { SecurityRepository } from './security';
 import { WorkspacesRepository } from './workspaces';
+import { SessionImportsRepository } from './session-imports';
 export class ControlDatabase {
   readonly db: Sqlite.Database;
   readonly atRestKey: AtRestKey;
@@ -15,6 +16,7 @@ export class ControlDatabase {
   readonly workspaces: WorkspacesRepository;
   readonly operations: OperationsRepository;
   readonly library: LibraryRepository;
+  readonly sessionImports: SessionImportsRepository;
   constructor(path: string, clock: Clock = systemClock) {
     this.db = new Sqlite(path);
     this.db.defaultSafeIntegers(true);
@@ -31,6 +33,7 @@ export class ControlDatabase {
     this.accounts = new AccountsRepository(this.db);
     this.operations = new OperationsRepository(this.db, this.workspaces);
     this.library = new LibraryRepository(this.db);
+    this.sessionImports = new SessionImportsRepository(this.db, this.atRestKey);
   }
   transaction<T>(fn: () => T): T {
     return transaction(this.db, fn);

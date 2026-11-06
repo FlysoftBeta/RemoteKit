@@ -56,6 +56,9 @@ class ViewController : private ControllerContext {
   static void AddCloseRequest(Json& output, const Json& requests);
   Result<std::string> PrepareViewCommand(const Json& request, const std::string& method);
   Result<Json> ManageSessionEnsure(const Json& request);
+  Result<Json> ManageSessionStorageImport(const Json& request);
+  Result<Json> ManageSessionStorageImportStatus(const Json& request);
+  Result<Json> ManageSessionIdentity(const Json& request);
   Result<Json> ManageSessionEventsAck(const Json& request);
   Result<Json> ManageSessionSitePreferences(const Json& request);
   Result<Json> ManageViewNavigationAck(const Json& request);

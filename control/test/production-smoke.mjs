@@ -5,6 +5,8 @@ import { cp, mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:net';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { WebSocket } from 'ws';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scratchRoot = resolve(root, '../develop/tmp');
@@ -18,12 +20,23 @@ await cp(resolve(root, 'dist/runtime/node_modules'), resolve(deployment, 'node_m
   recursive: true,
 });
 const configPath = resolve(scratch, 'control.json');
+let imapConnections = 0;
+const imap = createServer((socket) => {
+  imapConnections++;
+  socket.destroy();
+});
+imap.listen(0, '127.0.0.1');
+await once(imap, 'listening');
 await writeFile(
   configPath,
   JSON.stringify({
     http: { host: '127.0.0.1', port: 0, origins: ['http://production.test'] },
     database: resolve(deployment, 'data/control.db'),
     nodes: { production: {} },
+    sessionImport: {
+      mailbox: 'production@example.test',
+      imap: { host: '127.0.0.1', port: imap.address().port, user: 'test', password: 'test' },
+    },
   }),
 );
 const child = spawn(process.execPath, [resolve(deployment, 'dist/server.mjs')], {
@@ -89,6 +102,36 @@ try {
     });
     assert.equal(auth.user.id, user.id);
     assert.equal(auth.locked, false);
+    let sequence = 0;
+    const importState = () =>
+      new Promise((resolve, reject) => {
+        const id = 'import-' + ++sequence;
+        const timer = setTimeout(() => {
+          socket.off('message', receive);
+          reject(new Error('Import state timeout'));
+        }, 5000);
+        const receive = (data) => {
+          const message = JSON.parse(String(data));
+          if (message.id !== id) return;
+          clearTimeout(timer);
+          socket.off('message', receive);
+          if (message.type === 'error') reject(new Error(JSON.stringify(message.error)));
+          else resolve(message.result);
+        };
+        socket.on('message', receive);
+        socket.send(JSON.stringify({ id, method: 'sessionImport.state', params: {} }));
+      });
+    let state;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      state = await importState();
+      if (state.mailbox.lastErrorAt) break;
+      await sleep(50);
+    }
+    assert.ok(imapConnections > 0, 'Bundled ImapFlow client reached the local TCP server');
+    assert.equal(state.mailbox.configured, true);
+    assert.ok(state.mailbox.lastErrorAt);
+    assert.match(state.mailbox.lastError, /TLS|socket|closed|ECONNRESET/i);
+    assert.doesNotMatch(state.mailbox.lastError, /Dynamic require|Cannot find module|not defined/);
   } finally {
     socket.terminate();
   }
@@ -104,4 +147,5 @@ try {
   const kill = setTimeout(() => child.kill(), 4000);
   await exited;
   clearTimeout(kill);
+  await new Promise((resolve) => imap.close(resolve));
 }

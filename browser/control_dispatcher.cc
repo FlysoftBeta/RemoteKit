@@ -29,6 +29,13 @@ base::DictValue ControlDispatcher::Dispatch(const base::DictValue& request) {
     base::DictValue (*handler)(ControlDispatcher&, const base::DictValue&, RequestEnvelope);
   };
   static constexpr Method methods[] = {
+      {protocol::kIdentity,
+       &Invoke<IdentityRequest, DecodeIdentity, &ControlDispatcher::HandleIdentity>},
+      {protocol::kStorageImport,
+       &Invoke<StorageImportRequest, DecodeStorageImport, &ControlDispatcher::HandleStorageImport>},
+      {protocol::kStorageImportStatus,
+       &Invoke<StorageImportStatusRequest, DecodeStorageImportStatus,
+               &ControlDispatcher::HandleStorageImportStatus>},
       {protocol::kBrowserShutdown,
        &Invoke<ShutdownRequest, DecodeShutdown, &ControlDispatcher::HandleShutdown>},
       {protocol::kStorageScavenge, &Invoke<StorageScavengeRequest, DecodeStorageScavenge,

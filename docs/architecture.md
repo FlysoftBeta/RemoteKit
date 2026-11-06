@@ -92,6 +92,7 @@ control/
     tenants/       每租户运行时状态
     viewers/       Viewer 租约与 RTC 信令
     workspace/     纯命令、操作管线、对账、导航、生命周期与 Memory Saver、页面请求、弹窗、站点策略
+    session-import/  会话导入：HPKE 信封、IMAP 拉取、配对与写入
     files/ diagnostics/ quality.ts atlas-plan.ts navigation-url.ts
   client/
     main.tsx, viewer-session.ts          入口与控制器组装
@@ -129,6 +130,7 @@ browser/
   osr_renderer.*, osr/（device, plane_pool, scheduler, atlas, retirement）, offscreen_host.*, render_channel.*
   page_requests.*, profile_*, browser_context.*, navigation_*, audio_target.*, compat*, view_model.*
   sdk/             sdk_{runtime,control,render,resources}.cc、rtc_{peer,encoder,video_source,audio,stats}.cc
+android/           会话导入 App（Kotlin、Compose）
 protocol/          跨组件契约：控制版本与错误码、渲染线格式、Slot 与音频共享内存、触控时钟、atlas 规划与 fixture、集群 Noise 测试向量
 sdk/               公共 C 头与独立的 SDK 消费者 smoke
 patches/           有序的 Chromium 补丁与 manifest
@@ -151,6 +153,7 @@ tests/             e2e/（真实栈产品场景）、integration/（原生 Endpo
 | [移动编辑](mobile-editing.md) | 编辑目标、键盘会话、resize 事务 |
 | [文件与相机](files-and-camera.md) | 原生文件选择、文件库、拍照选帧、文档扫描 |
 | [认证](auth.md) | 账户、锁屏、授权代次、人脸验证 |
+| [会话导入](session-import.md) | 配对、HPKE 信封、邮箱队列、Control 导入与写入、Android App |
 | [兼容性](compatibility.md) | UA/Client Hints、window.chrome、Chrome89 |
 | [诊断与测量](diagnostics.md) | 诊断收集、追踪、测量方法 |
 | [调优经验](tuning.md) | 被否决的方案与原因 |

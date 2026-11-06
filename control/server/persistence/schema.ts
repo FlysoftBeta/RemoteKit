@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 
-const version = 1;
+const version = 2;
 
 function tableExists(db: Database.Database, name: string) {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
@@ -62,6 +62,17 @@ export function createSchema(db: Database.Database) {
       CREATE TABLE object_inventory_orphans (
         node_id TEXT NOT NULL, tenant TEXT NOT NULL, id TEXT NOT NULL, first_seen INTEGER NOT NULL,
         PRIMARY KEY(node_id,tenant,id));`);
+    db.exec(`CREATE TABLE session_import_keys (
+      id INTEGER PRIMARY KEY CHECK(id=1), public_key BLOB NOT NULL, private_key TEXT NOT NULL, key_id TEXT NOT NULL);
+      CREATE TABLE session_import_pairings (
+        user_id TEXT PRIMARY KEY REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
+      CREATE TABLE session_imports (
+        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, site_name TEXT NOT NULL, site_url TEXT NOT NULL,
+        device TEXT NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','applied','rejected','failed')), payload TEXT,
+        cookies INTEGER NOT NULL, origins INTEGER NOT NULL, rejected_items INTEGER NOT NULL,
+        error TEXT, finished_at INTEGER);
+      CREATE INDEX session_imports_tenant ON session_imports(tenant,state,received_at);`);
     db.exec(`CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=${version}));
       INSERT INTO schema_version(version) VALUES (${version});`);
   })();

@@ -236,7 +236,7 @@ struct PeerFixture {
   bool av_sync = false, audio = true;
 };
 
-void MediaPolicyRequests() {
+void SessionManagementRequests() {
   class Link final : public ManagementLink {
    public:
     bool Next(std::string&, uint64_t&, bool&) override { return false; }
@@ -264,6 +264,32 @@ void MediaPolicyRequests() {
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
                   cluster::Key{}, link, objects, objects::Keys{});
+  for (const auto* field : {"cookies", "localStorage"}) {
+    for (const auto& invalid : {Json(), Json(0), Json("array"), Json::object()}) {
+      Json request = {{"cookies", Json::array()}, {"localStorage", Json::array()}};
+      request[field] = invalid;
+      auto result = session.Views().ManageSessionStorageImport(request);
+      CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
+    }
+    Json missing = {{"cookies", Json::array()}, {"localStorage", Json::array()}};
+    missing.erase(field);
+    CHECK(session.Views().ManageSessionStorageImport(missing).error().code ==
+          ErrorCode::kInvalidRequest);
+  }
+  for (const auto* field : {"job", "browserIncarnation"}) {
+    Json missing = {{"job", "1"}, {"browserIncarnation", "old"}};
+    missing.erase(field);
+    CHECK(session.Views().ManageSessionStorageImportStatus(missing).error().code ==
+          ErrorCode::kInvalidRequest);
+    Json invalid = {{"job", "1"}, {"browserIncarnation", "old"}};
+    invalid[field] = 1;
+    CHECK(session.Views().ManageSessionStorageImportStatus(invalid).error().code ==
+          ErrorCode::kInvalidRequest);
+  }
+  const auto stale = session.Views().ManageSessionStorageImportStatus(
+      {{"job", "1"}, {"browserIncarnation", "old"}});
+  CHECK(!stale && stale.error().code == ErrorCode::kConflict &&
+        stale.error().message == "stale_browser_incarnation");
   const Json request = {{"maxFps", 30}, {"degradationPreference", "balanced"}, {"audio", false}};
   CHECK(session.Media().ManageSessionMediaPolicy(request));
   CHECK(!session.Media().Audio());
@@ -481,7 +507,7 @@ int main() {
   OutboxPriorityAndEpoch();
   PresentationOwnership();
   AuthorizationTokens();
-  MediaPolicyRequests();
+  SessionManagementRequests();
   PeerFailureCleanup();
   OrderedTouchInput();
 }

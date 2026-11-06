@@ -7,6 +7,12 @@ import {
 } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
 import type { MediaPolicy } from '../../shared/product';
+import type {
+  BrowserIdentity,
+  ImportChunk,
+  StorageImportJob,
+  StorageImportStatus,
+} from '../../shared/session-import';
 import type { NodeRegistry } from '../cluster/node-link';
 import type { Placement, SessionPlacement } from '../cluster/placement';
 import type {
@@ -25,6 +31,18 @@ import type {
   ViewConfiguration,
 } from './types';
 export class EndpointGateway {
+  storageImport(tenant: string, args: ImportChunk): Promise<StorageImportJob> {
+    return this.invoke('session.storage.import', tenant, args);
+  }
+  storageImportStatus(
+    tenant: string,
+    args: { job: string; browserIncarnation: string },
+  ): Promise<StorageImportStatus> {
+    return this.invoke('session.storage.importStatus', tenant, args);
+  }
+  identity(tenant: string): Promise<BrowserIdentity> {
+    return this.invoke('session.identity', tenant);
+  }
   readonly hibernating = new Map<string, Promise<number>>();
   private readonly opened = new Map<
     string,

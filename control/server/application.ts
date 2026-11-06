@@ -7,7 +7,8 @@ import { EventEmitter } from 'node:events';
 import { FILE_LIMITS } from '../shared/product';
 import { AccountService } from './auth/accounts';
 import { ViewerSecurity } from './auth/viewer-security';
-import { defaultQuotas, type RuntimeConfig } from './config';
+import { defaultQuotas, type RuntimeConfig, type SessionImportConfig } from './config';
+import { SessionImporter } from './session-import/importer';
 import type { EndpointGateway } from './endpoint/gateway';
 import type { NodeRegistry } from './cluster/node-link';
 import { FileLibrary } from './files/library';
@@ -36,6 +37,7 @@ export interface DomainContext {
   closed: boolean;
 }
 export interface DomainServices extends DomainContext {
+  sessionImporter: SessionImporter;
   objects: ObjectIndex;
   nodeAdmin: NodeAdmin;
   sessionPurge: SessionPurge;
@@ -60,6 +62,7 @@ export function createApplication(
   fileLimits: FileLimits = FILE_LIMITS,
   clock: Clock = systemClock,
   tenantObjectBytes = defaultQuotas.tenantObjectBytes,
+  sessionImport?: SessionImportConfig,
 ): DomainServices {
   const context: DomainContext = {
     store,
@@ -72,6 +75,7 @@ export function createApplication(
     closed: false,
   };
   const services = context as DomainServices;
+  services.sessionImporter = new SessionImporter(store, endpoint, sessionImport, undefined, clock);
   services.objects = new ObjectIndex(
     store,
     endpoint.nodes,
@@ -133,6 +137,7 @@ export function createApplication(
     context.closed = true;
     unsubscribeActions?.();
     unsubscribeSignals?.();
+    await services.sessionImporter.stop();
     await context.tenants.close();
     await services.objects.close();
     await services.sessionPurge.close();
@@ -176,6 +181,7 @@ export function startApplication(
   }, 1500);
   server.listen(config.port, config.host, () => {
     nodes.start();
+    control.sessionImporter.start();
     const address = server.address();
     console.log(
       `RemoteKit Control ${config.tls ? 'https' : 'http'}://${config.host}:${typeof address === 'object' ? address?.port : config.port}`,

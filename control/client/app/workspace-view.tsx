@@ -24,6 +24,7 @@ import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import type { AudioChannels } from '../media/audio-output';
 import { PageDialogs, SettingsDialog, type Action } from './product-dialogs';
 import { SecuritySettings } from '../auth/security-settings';
+import { SessionImportSettings, type SessionImportCall } from './session-import';
 import { UnlockView } from '../auth/unlock-view';
 import { useAutoFullscreen } from './use-auto-fullscreen';
 import { useViewerSession } from './use-viewer-session';
@@ -137,6 +138,10 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
       });
   };
   const adminCall = useCallback<AdminCall>(
+    (method, params) => connection.current!.request(method, params),
+    [],
+  );
+  const sessionImportCall = useCallback<SessionImportCall>(
     (method, params) => connection.current!.request(method, params),
     [],
   );
@@ -394,6 +399,17 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
           onClose={() => setSettings(false)}
           action={action}
           logout={logout}
+          sessionImport={
+            settings && (
+              <SessionImportSettings
+                online={productReady}
+                call={sessionImportCall}
+                action={action}
+                windowId={state.workspace.activeWindowId}
+                opened={() => setSettings(false)}
+              />
+            )
+          }
           diagnostics={
             settings && (
               <DiagnosticSettings

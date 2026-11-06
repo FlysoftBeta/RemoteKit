@@ -164,6 +164,7 @@ export function SettingsDialog({
   logout,
   security,
   diagnostics,
+  sessionImport,
 }: {
   state: ProductState;
   online: boolean;
@@ -173,6 +174,7 @@ export function SettingsDialog({
   logout: () => void;
   security?: React.ReactNode;
   diagnostics?: React.ReactNode;
+  sessionImport?: React.ReactNode;
 }) {
   const compact = useMediaQuery('(max-width:600px)'),
     settings = state.workspace.settings;
@@ -414,6 +416,7 @@ export function SettingsDialog({
         </div>
         <Divider />
         {diagnostics}
+        {sessionImport}
         {security}
         <div className="account-row">
           <Typography color="text.secondary">{state.user.username}</Typography>

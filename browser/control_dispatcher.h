@@ -5,6 +5,9 @@ class BrowserRuntime;
 class ControlResult;
 struct ShutdownRequest;
 struct StorageScavengeRequest;
+struct IdentityRequest;
+struct StorageImportRequest;
+struct StorageImportStatusRequest;
 struct OutputConfigureRequest;
 struct OutputOpenRequest;
 struct OutputStatusRequest;
@@ -32,6 +35,9 @@ class ControlDispatcher {
   explicit ControlDispatcher(BrowserRuntime& runtime) : runtime_(runtime) {}
   base::DictValue Dispatch(const base::DictValue&);
   ControlResult HandleShutdown(const ShutdownRequest&);
+  ControlResult HandleIdentity(const IdentityRequest&);
+  ControlResult HandleStorageImport(const StorageImportRequest&);
+  ControlResult HandleStorageImportStatus(const StorageImportStatusRequest&);
   ControlResult HandleStorageScavenge(const StorageScavengeRequest&);
   ControlResult HandleOutputConfigure(const OutputConfigureRequest&);
   ControlResult HandleOutputOpen(const OutputOpenRequest&);

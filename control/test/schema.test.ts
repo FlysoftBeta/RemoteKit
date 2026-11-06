@@ -7,16 +7,25 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { ControlDatabase } from '../server/persistence/database';
 
-test('fresh schema is version 1 with account state and no registration credential', () => {
+test('fresh schema is version 2 with account and session import state', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 1n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 2n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
       ),
     );
-    for (const name of ['users', 'auth_tokens', 'workspaces', 'file_library', 'session_deletions'])
+    for (const name of [
+      'users',
+      'auth_tokens',
+      'workspaces',
+      'file_library',
+      'session_deletions',
+      'session_imports',
+      'session_import_pairings',
+      'session_import_keys',
+    ])
       assert.ok(tables.has(name), name);
     assert.equal(tables.has('registration_policy'), false);
     const columns = (store.db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map(
@@ -67,8 +76,8 @@ test('databases of any other schema are rejected rather than migrated', async ()
   try {
     for (const [name, setup] of [
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
-      ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (0)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (2)'],
+      ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (3)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',

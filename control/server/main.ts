@@ -24,6 +24,7 @@ const control = createApplication(
   undefined,
   undefined,
   config.quotas.tenantObjectBytes,
+  config.sessionImport,
 );
 const server = createHttp(control, {
   tls: config.tls,

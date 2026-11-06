@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createApplication } from '../server/application';
 import { ControlDatabase } from '../server/persistence/database';
 import type { EndpointLink } from '../server/endpoint/link';
+import { importPayload } from './session-import-fixture';
 
 const password = 'password123';
 
@@ -204,6 +205,8 @@ test('deleting a user removes every row of its tenant and queues node data delet
     const leaving = await accountsFor(h.store).login('leaving', password);
     await h.attach(leaving);
     const user = h.store.accounts.byUsername('leaving')!;
+    h.store.sessionImports.pair(user.id, 'pairing-hash', Date.now());
+    h.store.sessionImports.insert(user.tenant, importPayload(), Date.now());
     const placement = h.control.endpoint.placement.resolve(leaving.tenantId);
     h.store.db
       .prepare('INSERT INTO user_security VALUES (?,?,?,?,?,?)')

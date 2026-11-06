@@ -12,6 +12,9 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node22',
+  banner: {
+    js: "import { createRequire as bundledCreateRequire } from 'node:module'; const require = bundledCreateRequire(import.meta.url);",
+  },
   external: ['better-sqlite3', 'ws'],
   sourcemap: false,
 });

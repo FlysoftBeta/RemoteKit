@@ -1,0 +1,8 @@
+-keep class com.sun.mail.** { *; }
+-keep class javax.mail.** { *; }
+-keep class javax.activation.** { *; }
+-keep class com.sun.activation.** { *; }
+-keep class org.bouncycastle.crypto.hpke.** { *; }
+-dontwarn java.awt.**
+-dontwarn java.beans.**
+-dontwarn javax.security.auth.**

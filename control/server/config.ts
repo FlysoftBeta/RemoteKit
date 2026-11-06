@@ -34,6 +34,7 @@ export interface ConfiguredNode {
   readonly launch?: Readonly<{ executable: string; root: string }>;
 }
 export interface RuntimeConfig {
+  readonly sessionImport?: SessionImportConfig;
   readonly configPath: string;
   readonly root: string;
   readonly buildId: string;
@@ -47,6 +48,12 @@ export interface RuntimeConfig {
   readonly cluster: Readonly<{ keyFile: string; key: string; advertiseUrl?: string }>;
   readonly quotas: Readonly<{ tenantObjectBytes: number }>;
   readonly nodes: Readonly<Record<string, ConfiguredNode>>;
+}
+export interface SessionImportConfig {
+  readonly mailbox: string;
+  readonly imap: Readonly<{ host: string; port: number; user: string; password: string }>;
+  readonly folder: string;
+  readonly pollSeconds: number;
 }
 export const defaultQuotas = Object.freeze({ tenantObjectBytes: 4 * 1024 ** 3 });
 export const nodeDefaults: Omit<NodeConfig, 'nodeId'> = Object.freeze({
@@ -201,10 +208,28 @@ export function runtimeConfig(
   }
   const source = object(
     parsed,
-    ['http', 'database', 'diagnostics', 'cluster', 'nodeDefaults', 'nodes', 'quotas'],
+    ['http', 'database', 'diagnostics', 'cluster', 'nodeDefaults', 'nodes', 'quotas', 'sessionImport'],
     'config',
   );
   const http = object(fallback(source.http, {}), ['host', 'port', 'origins', 'tls'], 'http');
+  let sessionImport: SessionImportConfig | undefined;
+  if (source.sessionImport !== undefined) {
+    const value = object(source.sessionImport, ['mailbox', 'imap', 'folder', 'pollSeconds'], 'sessionImport');
+    const imap = object(value.imap, ['host', 'port', 'user', 'password'], 'sessionImport.imap');
+    const mailbox = string(value.mailbox, 'sessionImport.mailbox');
+    if (!/^[^\s@<>]+@[^\s@<>]+$/.test(mailbox)) invalid('Invalid sessionImport.mailbox');
+    sessionImport = Object.freeze({
+      mailbox,
+      imap: Object.freeze({
+        host: string(imap.host, 'sessionImport.imap.host'),
+        port: integer(fallback(imap.port, 993), 1, 65535, 'sessionImport.imap.port'),
+        user: string(imap.user, 'sessionImport.imap.user'),
+        password: string(imap.password, 'sessionImport.imap.password'),
+      }),
+      folder: string(fallback(value.folder, 'INBOX'), 'sessionImport.folder'),
+      pollSeconds: integer(fallback(value.pollSeconds, 60), 15, 3600, 'sessionImport.pollSeconds'),
+    });
+  }
   const host = string(fallback(http.host, '127.0.0.1'), 'http.host');
   const port = integer(fallback(http.port, 3001), 0, 65535, 'http.port');
   const origins = fallback(http.origins, [
@@ -303,6 +328,7 @@ export function runtimeConfig(
   }
   for (const node of Object.values(nodes)) if (node.launch) mkdirSync(node.launch.root, { recursive: true });
   return Object.freeze({
+    sessionImport,
     configPath,
     root,
     buildId: readBuildId(root),

@@ -57,6 +57,18 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Views().ManageSessionEventsAck(request);
        }},
+      {"session.storage.import",
+       [](Session& session, const Json& request) -> Result<Json> {
+         return session.Views().ManageSessionStorageImport(request);
+       }},
+      {"session.storage.importStatus",
+       [](Session& session, const Json& request) -> Result<Json> {
+         return session.Views().ManageSessionStorageImportStatus(request);
+       }},
+      {"session.identity",
+       [](Session& session, const Json& request) -> Result<Json> {
+         return session.Views().ManageSessionIdentity(request);
+       }},
       {"session.files.authorize",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Files().AuthorizeFiles(request);

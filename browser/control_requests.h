@@ -2,6 +2,7 @@
 
 #include "browser/view_model.h"
 #include "browser/navigation_operations.h"
+#include "browser/storage_import.h"
 #include "base/values.h"
 #include "base/strings/string_number_conversions.h"
 #include <type_traits>
@@ -13,6 +14,13 @@ struct RequestEnvelope {
 };
 struct ShutdownRequest : RequestEnvelope {};
 struct StorageScavengeRequest : RequestEnvelope {};
+struct IdentityRequest : RequestEnvelope {};
+struct StorageImportRequest : RequestEnvelope {
+  StorageImportData data;
+};
+struct StorageImportStatusRequest : RequestEnvelope {
+  uint64_t job = 0;
+};
 struct ViewConfiguration {
   SessionId session = 0;
   WebViewId view = 0;
@@ -221,6 +229,11 @@ Result<std::optional<NavigationOperations::Identity>> DecodeNavigationOperation(
     bool acknowledge);
 
 Result<ShutdownRequest> DecodeShutdown(const base::DictValue& wire, RequestEnvelope envelope);
+Result<IdentityRequest> DecodeIdentity(const base::DictValue& wire, RequestEnvelope envelope);
+Result<StorageImportRequest> DecodeStorageImport(const base::DictValue& wire,
+                                                 RequestEnvelope envelope);
+Result<StorageImportStatusRequest> DecodeStorageImportStatus(const base::DictValue& wire,
+                                                             RequestEnvelope envelope);
 Result<StorageScavengeRequest> DecodeStorageScavenge(const base::DictValue& wire,
                                                      RequestEnvelope envelope);
 Result<OutputConfigureRequest> DecodeOutputConfigure(const base::DictValue& wire,

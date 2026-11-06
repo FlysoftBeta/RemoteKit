@@ -10,6 +10,7 @@ import type { ViewerAuthority } from '../viewers/viewer-hub';
 
 type DiagnosticAuthority = { sessions?: DiagnosticSessions; identity: string; allowed: () => boolean };
 type RequestContext = {
+  host?: string;
   services: DomainServices;
   authority: ViewerAuthority;
   diagnostics?: DiagnosticAuthority;
@@ -38,6 +39,20 @@ const library: Handler = product(({ services, authority }, params) =>
   ),
 );
 const handlers: Record<string, Handler> = {
+  'sessionImport.state': product(({ services, authority }) =>
+    services.sessionImporter.state(authority.tenantId),
+  ),
+  'sessionImport.pair': product(({ services, authority, host }) =>
+    services.sessionImporter.pair(authority.tenantId, host ?? '', () =>
+      services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch),
+    ),
+  ),
+  'sessionImport.unpair': product(({ services, authority }) =>
+    services.sessionImporter.unpair(authority.tenantId),
+  ),
+  'sessionImport.delete': product(({ services, authority }, params) =>
+    services.sessionImporter.delete(authority.tenantId, params.id),
+  ),
   'clock.ping': ({ services }, params) => ({
     serverTime: services.clock.wallMs(),
     ...(typeof params.clientTime === 'number' ? { clientTime: params.clientTime } : {}),
@@ -196,6 +211,7 @@ export async function dispatchViewerRequest(
   method: string,
   params: any,
   diagnostics?: DiagnosticAuthority,
+  host?: string,
 ): Promise<any> {
   services.viewers.assertViewer(authority.tenantId, authority.leaseId);
   if (!params || typeof params !== 'object' || Array.isArray(params))
@@ -205,7 +221,7 @@ export async function dispatchViewerRequest(
   const handler = Object.prototype.hasOwnProperty.call(handlers, method) ? handlers[method] : undefined;
   if (!handler) throw new RemoteKitError('invalid_request', '未知 WebSocket 方法');
   try {
-    return await handler({ services, authority, diagnostics }, params);
+    return await handler({ services, authority, diagnostics, host }, params);
   } catch (error) {
     throw toRemoteKitError(error);
   }
@@ -356,6 +372,7 @@ export function attachViewerSocket(
                       control.viewers.productAllowed(peer.tenant, lease) &&
                       control.viewers.productEpoch(peer.tenant, lease) === epoch,
                   },
+                  req.headers.host,
                 );
                 if (
                   !maintenance &&
