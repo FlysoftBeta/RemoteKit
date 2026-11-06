@@ -91,12 +91,9 @@ try {
       authStates.push(check);
       check();
     });
-  const initial = await waitState(() => true);
+  const initial = await waitState((state) => state.endpointError === null);
   assert.equal(auth?.locked, false, 'Registration must grant initial access');
   assert.equal(initial.quality.mode, 'product');
-  assert.equal(initial.endpointError, null, 'Endpoint management reconciliation must be reachable');
-  const face = await waitAuth((state) => state.face.available || state.face.reason);
-  assert.equal(face.face.available, true, face.face.reason);
   assert.deepEqual((await rpc('admin.users', {})).map((user) => user.username), ['package-smoke']);
   await assert.rejects(
     rpc('action', { type: 'window.create', url: 'about:blank' }),
@@ -114,10 +111,13 @@ try {
     socket.close();
   });
   latest = undefined;
+  auth = undefined;
   await connect();
   assert.equal((await rpc('auth.get', {})).locked, true, 'Reattached Viewer must begin locked');
   assert.equal(latest, undefined, 'Locked Viewer must receive no product snapshot');
   assert.equal((await rpc('auth.verify', { method: 'password', secret: password })).locked, false);
+  const face = await waitAuth((state) => state.face.available || state.face.reason);
+  assert.equal(face.face.available, true, face.face.reason);
   const state = await waitState(() => true);
   assert.deepEqual(
     state.workspace,
