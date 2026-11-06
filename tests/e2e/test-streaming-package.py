@@ -39,6 +39,7 @@ def main():
   binary=run/'local/runtime'/build_id/'bin'
   result['endpointSha256']=hashlib.sha256((binary/'endpoint_service.exe').read_bytes()).hexdigest()
   with socket.socket() as probe:probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
+  with socket.socket() as probe:probe.bind(('127.0.0.1',0));peer_port=probe.getsockname()[1]
   origin='http://127.0.0.1:'+str(port);env=os.environ.copy()
   opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
   for name in ['NODE_PATH','NODE_OPTIONS']:env.pop(name,None)
@@ -46,7 +47,8 @@ def main():
   config.write_text(json.dumps({
     'http':{'host':'127.0.0.1','port':port,'origins':[origin]},
     'database':str(run/'control.db'),'diagnostics':str(run/'diagnostics'),
-    'nodeDefaults':{'browser':str(binary/'remotekit_browser.exe'),'dataPath':str(run/'endpoint')},
+    'nodeDefaults':{'browser':str(binary/'remotekit_browser.exe'),'dataPath':str(run/'endpoint'),
+                    'peer':{'listen':'127.0.0.1:'+str(peer_port)}},
     'nodes':{'local':{'launch':{'executable':str(binary/'endpoint_service.exe'),'root':str(run/'node')}}}
   }),encoding='utf-8')
   env['REMOTEKIT_CONTROL_CONFIG']=str(config)
