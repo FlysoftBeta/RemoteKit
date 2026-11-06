@@ -50,6 +50,9 @@ export function testGateway(
     underPressure: () => false,
     commitCheckpoint: () => 1,
     markWarm: () => {},
+    activeSessions: (nodeId) =>
+      [...placements.values()].filter((p) => p.nodeId === nodeId && p.state === 'active').length,
+    evacuate: () => {},
   });
 }
 export class TestClock implements Clock {

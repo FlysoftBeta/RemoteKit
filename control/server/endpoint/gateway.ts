@@ -34,7 +34,14 @@ export class EndpointGateway {
     readonly nodes: NodeRegistry,
     readonly placement: Pick<
       Placement,
-      'peek' | 'resolve' | 'keys' | 'commitCheckpoint' | 'underPressure' | 'markWarm'
+      | 'peek'
+      | 'resolve'
+      | 'keys'
+      | 'commitCheckpoint'
+      | 'underPressure'
+      | 'markWarm'
+      | 'activeSessions'
+      | 'evacuate'
     >,
   ) {}
   isReady(tenant: string) {

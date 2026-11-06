@@ -245,20 +245,20 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     assert.equal(beta.objects.has('tenant:' + id(3)), false);
     assert.equal(alpha.objects.has('tenant:' + id(3)), false);
     assert.ok(h.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id(1)));
-    assert.throws(() => h.control.objects.removeNode('beta'), { code: 'conflict' });
+    assert.throws(() => h.control.nodeAdmin.remove('beta'), { code: 'conflict' });
     const gone = once(h.nodes.get('beta')!, 'offline');
     beta.close();
     await gone;
-    h.control.objects.removeNode('beta');
+    h.control.nodeAdmin.remove('beta');
     assert.equal(h.placement.peek('tenant')!.state, 'hibernated');
     assert.equal(h.placement.peek('tenant')!.placementEpoch, 3);
     assert.equal(h.placement.peek('tenant')!.checkpoint, id(2));
     assert.equal(h.store.db.prepare('SELECT 1 FROM object_replicas WHERE node_id=?').get('beta'), undefined);
     assert.equal((await h.connect('beta')).helloReply.code, 'unknown_node');
-    assert.throws(() => h.control.objects.readdNode('missing'), { code: 'not_found' });
-    h.control.objects.readdNode('beta');
+    assert.throws(() => h.control.nodeAdmin.readd('missing'), { code: 'not_found' });
+    h.control.nodeAdmin.readd('beta');
     assert.equal((await h.connect('beta')).helloReply.type, 'node.ready');
-    assert.equal(h.control.objects.listNodes().find((node) => node.nodeId === 'beta')!.state, 'ready');
+    assert.equal(h.control.nodeAdmin.list().find((node) => node.nodeId === 'beta')!.state, 'ready');
   } finally {
     await h.close();
   }

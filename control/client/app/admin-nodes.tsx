@@ -17,6 +17,13 @@ import { useEffect, useState } from 'react';
 import type { AdminNode } from '../../shared/product';
 import { formatError } from '../util/format-error';
 
+const stateLabels: Record<AdminNode['state'], string> = {
+  ready: '在线',
+  connecting: '连接中',
+  offline: '离线',
+  removed: '已移除',
+};
+
 export function AdminNodes({
   online,
   load,
@@ -66,7 +73,7 @@ export function AdminNodes({
             {nodes.map((node) => (
               <TableRow key={node.nodeId}>
                 <TableCell>{node.nodeId}</TableCell>
-                <TableCell>{node.state}</TableCell>
+                <TableCell>{stateLabels[node.state]}</TableCell>
                 <TableCell sx={{ maxWidth: 120, overflowWrap: 'anywhere' }}>{node.buildId ?? '—'}</TableCell>
                 <TableCell>{node.pressure === null ? '—' : `${Math.round(node.pressure * 100)}%`}</TableCell>
                 <TableCell>{node.sessions}</TableCell>

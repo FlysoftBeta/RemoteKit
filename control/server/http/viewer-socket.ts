@@ -74,11 +74,11 @@ for (const method of ['admin.nodes', 'admin.removeNode', 'admin.readdNode']) {
   handlers[method] = product(({ services, authority }, params) => {
     if (!services.store.accounts.userForTenant(authority.tenantId)?.isAdmin)
       throw new RemoteKitError('forbidden', '需要管理员权限');
-    if (method === 'admin.nodes') return services.objects.listNodes();
+    if (method === 'admin.nodes') return services.nodeAdmin.list();
     if (typeof params.nodeId !== 'string') throw new RemoteKitError('invalid_request', 'Invalid node id');
     return method === 'admin.removeNode'
-      ? services.objects.removeNode(params.nodeId)
-      : services.objects.readdNode(params.nodeId);
+      ? services.nodeAdmin.remove(params.nodeId)
+      : services.nodeAdmin.readd(params.nodeId);
   });
 }
 for (const method of [

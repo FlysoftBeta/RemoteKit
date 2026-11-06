@@ -1,3 +1,4 @@
+import { NodeAdmin } from './cluster/node-admin';
 import { ObjectIndex } from './cluster/objects';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -34,6 +35,7 @@ export interface DomainContext {
 }
 export interface DomainServices extends DomainContext {
   objects: ObjectIndex;
+  nodeAdmin: NodeAdmin;
   navigation: Navigation;
   viewers: ViewerHub;
   rtc: RtcSignaling;
@@ -73,6 +75,7 @@ export function createApplication(
     (tenant, node) => endpoint.isPlacedOn(tenant, node),
     (tenant) => endpoint.hibernating.has(tenant),
   );
+  services.nodeAdmin = new NodeAdmin(store, endpoint.nodes, endpoint.placement, services.objects);
   services.navigation = new Navigation(context, services);
   services.viewers = new ViewerHub(context, services);
   services.rtc = new RtcSignaling(context, services);

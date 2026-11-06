@@ -1,5 +1,4 @@
 import { RemoteKitError } from '../../shared/errors';
-import type { AdminNode } from '../../shared/product';
 import type { ControlDatabase } from '../persistence/database';
 import type { NodeLink, NodeRegistry } from './node-link';
 
@@ -477,50 +476,9 @@ export class ObjectIndex {
     });
     return this.maintenance;
   }
-  listNodes(): AdminNode[] {
-    return this.nodes.all().map((node) => ({
-      nodeId: node.nodeId,
-      state: this.nodes.isRemoved(node.nodeId) ? 'removed' : node.state.state,
-      buildId: node.buildId ?? null,
-      pressure: node.metrics.latest()?.pressure ?? null,
-      sessions:
-        node.metrics.latest()?.value.sessions ??
-        Number(
-          (
-            this.store.db
-              .prepare("SELECT count(*) AS count FROM session_placements WHERE node_id=? AND state='active'")
-              .get(node.nodeId) as { count: bigint }
-          ).count,
-        ),
-    }));
-  }
-  removeNode(nodeId: string) {
-    const node = this.nodes.get(nodeId);
-    if (!node) throw new RemoteKitError('not_found', 'Node is not configured');
-    if (node.state.state === 'ready') throw new RemoteKitError('conflict', 'Ready nodes cannot be removed');
-    this.store.transaction(() => {
-      if (this.nodes.isRemoved(nodeId)) return;
-      this.store.db.prepare('INSERT INTO removed_nodes VALUES (?,?)').run(nodeId, Date.now());
-      this.store.db
-        .prepare(
-          `UPDATE session_placements SET state='hibernated',placement_epoch=placement_epoch+1,
-        checkpoint_id=(SELECT max(id) FROM checkpoints WHERE tenant=session_placements.tenant) WHERE node_id=?`,
-        )
-        .run(nodeId);
-      this.store.db.prepare('DELETE FROM object_replicas WHERE node_id=?').run(nodeId);
-      this.store.db.prepare('DELETE FROM warm_session_copies WHERE node_id=?').run(nodeId);
-      this.store.db.prepare('DELETE FROM object_inventory_orphans WHERE node_id=?').run(nodeId);
-    });
-    node.evict();
-    this.track(this.tick());
-    return this.listNodes();
-  }
-  readdNode(nodeId: string) {
-    const node = this.nodes.get(nodeId);
-    if (!node) throw new RemoteKitError('not_found', 'Node is not configured');
-    this.store.db.prepare('DELETE FROM removed_nodes WHERE node_id=?').run(nodeId);
-    node.start();
-    return this.listNodes();
+  forgetNode(nodeId: string) {
+    this.store.db.prepare('DELETE FROM object_replicas WHERE node_id=?').run(nodeId);
+    this.store.db.prepare('DELETE FROM object_inventory_orphans WHERE node_id=?').run(nodeId);
   }
   async close() {
     this.closed = true;

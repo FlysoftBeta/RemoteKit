@@ -20,8 +20,6 @@ export class Placement {
     private readonly store: ControlDatabase,
     private readonly nodes: NodeRegistry,
   ) {
-    nodes.isRemoved = (nodeId) =>
-      !!store.db.prepare('SELECT 1 FROM removed_nodes WHERE node_id=?').get(nodeId);
     nodes.fencing = (nodeId) =>
       (
         store.db
@@ -50,6 +48,22 @@ export class Placement {
       }
     );
   }
+  activeSessions(nodeId: string) {
+    const row = this.store.db
+      .prepare("SELECT count(*) AS count FROM session_placements WHERE node_id=? AND state='active'")
+      .get(nodeId) as { count: bigint };
+    return Number(row.count);
+  }
+  // A removed node's sessions resume elsewhere from their latest checkpoint.
+  evacuate(nodeId: string) {
+    this.store.db
+      .prepare(
+        `UPDATE session_placements SET state='hibernated',placement_epoch=placement_epoch+1,
+      checkpoint_id=(SELECT max(id) FROM checkpoints WHERE tenant=session_placements.tenant) WHERE node_id=?`,
+      )
+      .run(nodeId);
+    this.store.db.prepare('DELETE FROM warm_session_copies WHERE node_id=?').run(nodeId);
+  }
   underPressure(tenant: string) {
     const placement = this.peek(tenant);
     return !!placement && !!this.nodes.get(placement.nodeId)?.metrics.underPressure();
@@ -64,15 +78,12 @@ export class Placement {
       }
       const candidates = this.nodes.all().filter((node) => {
         const sample = node.metrics.latest();
-        const row = this.store.db
-          .prepare("SELECT count(*) AS count FROM session_placements WHERE node_id=? AND state='active'")
-          .get(node.nodeId) as { count: bigint };
         return (
           node.state.state === 'ready' &&
           !node.diskDraining &&
           !this.nodes.isRemoved(node.nodeId) &&
           sample &&
-          Math.max(Number(row.count), sample.value.sessions) < node.config.maxSessions &&
+          Math.max(this.activeSessions(node.nodeId), sample.value.sessions) < node.config.maxSessions &&
           sample.value.disk.free >= node.config.diskReserveBytes &&
           sample.value.memory.available >= node.config.sessionMemoryBytes
         );

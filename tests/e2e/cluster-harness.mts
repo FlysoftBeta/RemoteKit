@@ -1,11 +1,14 @@
-import { runtimeConfig } from '../../control/server/config';
-import { NodeRegistry } from '../../control/server/cluster/node-link';
-import { Placement } from '../../control/server/cluster/placement';
-import { loadRelease } from '../../control/server/cluster/release';
-import { EndpointGateway } from '../../control/server/endpoint/gateway';
-import { open } from '../../control/server/persistence/database';
-import { createApplication, startApplication } from '../../control/server/application';
-import { createHttp } from '../../control/server/http/server';
+import { runtimeConfig } from "../../control/server/config";
+import { NodeRegistry } from "../../control/server/cluster/node-link";
+import { Placement } from "../../control/server/cluster/placement";
+import { loadRelease } from "../../control/server/cluster/release";
+import { EndpointGateway } from "../../control/server/endpoint/gateway";
+import { open } from "../../control/server/persistence/database";
+import {
+  createApplication,
+  startApplication,
+} from "../../control/server/application";
+import { createHttp } from "../../control/server/http/server";
 
 const config = runtimeConfig();
 const store = open(config.dbPath);
@@ -16,44 +19,60 @@ const nodes = new NodeRegistry({
   release: loadRelease(config.root, config.buildId),
 });
 let elapsed = 0;
-const clock = { monotonicMs: () => performance.now() + elapsed, wallMs: () => Date.now() };
+const clock = {
+  monotonicMs: () => performance.now() + elapsed,
+  wallMs: () => Date.now(),
+};
 const control = createApplication(
   store,
   new EndpointGateway(nodes, new Placement(store, nodes)),
   undefined,
   clock,
 );
-const server = createHttp(control, { nodes, origins: [...config.origins], clientDir: config.clientDir });
+const server = createHttp(control, {
+  nodes,
+  origins: [...config.origins],
+  clientDir: config.clientDir,
+});
 startApplication(config, store, nodes, control, server);
-nodes.on('ready', (identity) =>
-  process.send?.({ event: 'node.ready', ...identity, buildId: nodes.get(identity.nodeId)?.buildId }),
+nodes.on("ready", (identity) =>
+  process.send?.({
+    event: "node.ready",
+    ...identity,
+    buildId: nodes.get(identity.nodeId)?.buildId,
+  }),
 );
-nodes.on('offline', (nodeId) => process.send?.({ event: 'node.offline', nodeId }));
-const locate = nodes.handlers.get('object.locate')!;
-nodes.handlers.set('object.locate', (node, request) => {
-  process.send?.({ event: 'object.locate', nodeId: node.nodeId, request });
+nodes.on("offline", (nodeId) =>
+  process.send?.({ event: "node.offline", nodeId }),
+);
+const locate = nodes.handlers.get("object.locate")!;
+nodes.handlers.set("object.locate", (node, request) => {
+  process.send?.({ event: "object.locate", nodeId: node.nodeId, request });
   return locate(node, request);
 });
-process.on('message', (message: any) => {
+process.on("message", (message: any) => {
   void (async () => {
-    if (message.method === 'advance') {
+    if (message.method === "advance") {
       elapsed += message.ms;
       await control.reconciler.tick();
       return { elapsed };
     }
-    if (message.method === 'inspect') {
+    if (message.method === "inspect") {
       return {
-        nodes: control.objects
-          .listNodes()
-          .map((node) => ({ ...node, metrics: nodes.get(node.nodeId)?.metrics.latest()?.value })),
-        users: store.db.prepare('SELECT username,tenant FROM users').all(),
+        nodes: control.nodeAdmin
+          .list()
+          .map((node) => ({
+            ...node,
+            metrics: nodes.get(node.nodeId)?.metrics.latest()?.value,
+          })),
+        users: store.db.prepare("SELECT username,tenant FROM users").all(),
         placements: store.db
           .prepare(
-            'SELECT tenant,session_id,node_id,placement_epoch,state,checkpoint_id FROM session_placements',
+            "SELECT tenant,session_id,node_id,placement_epoch,state,checkpoint_id FROM session_placements",
           )
           .all(),
-        checkpoints: store.db.prepare('SELECT * FROM checkpoints').all(),
-        replicas: store.db.prepare('SELECT * FROM object_replicas').all(),
+        checkpoints: store.db.prepare("SELECT * FROM checkpoints").all(),
+        replicas: store.db.prepare("SELECT * FROM object_replicas").all(),
         runtimes: control.tenants.values().map((runtime) => ({
           tenant: runtime.tenantId,
           viewer: !!runtime.viewer,
@@ -62,18 +81,22 @@ process.on('message', (message: any) => {
         })),
       };
     }
-    if (message.method === 'evict') {
+    if (message.method === "evict") {
       // Retain the catalog entry so background replication cannot race the demand read.
-      await nodes.get(message.nodeId)!.request('object.delete', message.tenant, { ids: [message.objectId] });
+      await nodes
+        .get(message.nodeId)!
+        .request("object.delete", message.tenant, { ids: [message.objectId] });
       return { evicted: true };
     }
-    throw Error('Unknown harness command');
+    throw Error("Unknown harness command");
   })().then(
     (result) =>
       process.send?.({
         id: message.id,
         result: JSON.parse(
-          JSON.stringify(result, (_, value) => (typeof value === 'bigint' ? Number(value) : value)),
+          JSON.stringify(result, (_, value) =>
+            typeof value === "bigint" ? Number(value) : value,
+          ),
         ),
       }),
     (error) => process.send?.({ id: message.id, error: String(error) }),

@@ -249,7 +249,7 @@ export interface RegistrationStatus {
 }
 export interface AdminNode {
   nodeId: string;
-  state: string;
+  state: 'ready' | 'connecting' | 'offline' | 'removed';
   buildId: string | null;
   pressure: number | null;
   sessions: number;

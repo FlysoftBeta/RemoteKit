@@ -97,4 +97,4 @@ Endpoint 每 5 秒发 `node.metrics`：系统 CPU 忙碌比例、内存总量/�
 
 ## 节点移除
 
-管理员面板列出节点（状态、buildId、压力、Session 数）。只能移除未就绪的节点，需确认：记录到 `removed_nodes`，该节点上的 Tenant epoch 加一并以最新 checkpoint（没有则为空 Profile，按 Control 的有限产品信息重建工作区）变为 `hibernated`，它的副本从索引移除；被移除的节点握手时得到 `unknown_node`，直到管理员重新加入。节点列表只来自配置文件。节点失联本身不会自动触发重新放置：最近 checkpoint 之后的数据只在那台机器上。
+管理员面板列出节点（状态、buildId、压力、Session 数）。只能移除未就绪的节点，需确认：记录到 `removed_nodes`，该节点上的 Tenant epoch 加一并以最新 checkpoint（没有则为空 Profile，按 Control 的有限产品信息重建工作区）变为 `hibernated`，它的副本从索引移除；被移除的节点握手时得到 `unknown_node`，直到管理员重新加入。`removed_nodes` 由 `NodeAdmin`（`control/server/cluster/node-admin.ts`）独占，它在一个事务里调用 Placement 的 `evacuate` 与对象索引的 `forgetNode`，各自只清理自己的表。节点列表只来自配置文件。节点失联本身不会自动触发重新放置：最近 checkpoint 之后的数据只在那台机器上。
