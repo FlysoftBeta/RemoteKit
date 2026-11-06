@@ -1,15 +1,12 @@
 package app.remotekit.importer.ui
 
 import android.app.Application
-import android.net.Uri
-import android.webkit.WebView
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.webkit.Profile
 import app.remotekit.importer.ImporterApplication
 import app.remotekit.importer.UserMessage
-import app.remotekit.importer.export.ExportScope
-import app.remotekit.importer.export.SessionExporters
+import app.remotekit.importer.export.SessionExporter
 import app.remotekit.importer.mail.MailWork
 import app.remotekit.importer.payload.*
 import app.remotekit.importer.store.*
@@ -90,42 +87,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         runtime.releaseProfile(id) { notify(errorText(it)) }
     }
 
-    fun exportSites(view: WebView, profile: Profile, chosen: List<SiteVisit>, done: () -> Unit) {
+    fun exportSites(id: String, profile: Profile, chosen: List<SiteVisit>, done: () -> Unit) {
         if (exporting.value || chosen.isEmpty() || !authorize()) return
         viewModelScope.launch {
             exporting.value = true
             try {
-                val captures =
-                    chosen.map { visit ->
-                        val url = Uri.parse(visit.url)
-                        val exporter = requireNotNull(SessionExporters.forUrl(url)) { "该站点尚未适配导出" }
-                        exporter.export(ExportScope(view, profile, url))
-                    }
+                val origins = visits(id).requests.within(chosen.map { it.key }.toSet())
+                val capture = SessionExporter(getApplication(), profile).export(origins)
                 val sites = chosen.map { SiteRef(it.name, it.url, it.icon?.let(::encodeIcon)) }
                 val payload =
                     ImportPayload(
                         id = UUID.randomUUID().toString(),
                         sites = sites.map { ImportSite(it.name, it.url) },
-                        cookies =
-                            captures
-                                .flatMap { it.cookies }
-                                .associateBy { Triple(it.name, it.domain, it.path) }
-                                .values
-                                .toList(),
-                        localStorage =
-                            captures
-                                .flatMap { it.localStorage }
-                                .groupBy { it.origin }
-                                .map { (origin, parts) ->
-                                    OriginStorage(
-                                        origin,
-                                        parts
-                                            .flatMap { it.items }
-                                            .associateBy { it[0] }
-                                            .values
-                                            .toList(),
-                                    )
-                                },
+                        cookies = capture.cookies,
+                        localStorage = capture.localStorage,
                     )
                 withContext(Dispatchers.IO) { store.addImport(payload, sites) }
                 done()

@@ -23,7 +23,8 @@ class ProfileSessions(private val store: AppStore) {
 
     fun supported(): Boolean =
         WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE) &&
-            WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA)
+            WebViewFeature.isFeatureSupported(WebViewFeature.USER_AGENT_METADATA) &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.GET_COOKIE_INFO)
 
     fun deletePendingBeforeWebViews() {
         val profiles = ProfileStore.getInstance()

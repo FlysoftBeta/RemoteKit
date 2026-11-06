@@ -110,7 +110,7 @@ App 需要的部署信息在构建时内置，没有运行时的发现步骤。�
 
 - `sites` 1–16 项、`url` 互不相同；cookies 与 localStorage 是这些站点导出结果的合集。`expires` 为 Unix 毫秒，`null` 表示会话 cookie；`hostOnly=true` 时 `domain` 是不带前导点的主机名。`url`、`origin` 只接受 http/https，`origin` 是序列化后的 origin（无路径）。
 - cookies ≤ 4096 条，单条 name+value ≤ 4096 字节；origin ≤ 256 个，每个 origin 的 key+value 合计 ≤ 10 MiB，单个条目按其 JSON 序列化（`["key","value"]` 的 UTF-8 字节数）≤ 256 KiB；条目不跨块拆分。username 1–64 字符、password 1–256 字符。
-- 怎样从网站取得这些状态由 App 里按站点适配的导出器决定，不属于本契约。
+- 怎样从网站取得这些状态（见下文 Android App 的"导出"）不属于本契约。
 
 Control → 设备（`ref` 是所回复的设备事件 seq）：
 
@@ -233,8 +233,12 @@ WS 方法（均要求产品租约）：`sessionImport.state` → `{receiving, pa
 - **设备密钥**：首次启动用 BouncyCastle 生成 X25519 密钥对，私钥用 Android Keystore 中不可导出的 AES-GCM 密钥加密后存 App 私有目录。"解除配对并清除数据"删除全部本地数据并轮换设备密钥，Control 视之为新设备。
 - **配对**：未配对时首页是配对表单：服务器名（来自部署配置）、用户名、密码、5 个配对码单词（按词表自动补全，输入时校验）、设备名。提交生成 `pair` 事件入队。密码只存在于这个尚未确认的事件里，收到 `paired` 或 `pairRejected` 后随事件内容一起删除。
 - **授权门禁**：任何需要授权的操作（新建登录、重试、撤回）都要求已配对，或存在一个尚未被拒绝的在途 `pair` 事件。配对被拒绝后回到配对表单，原因显示在表单上方；失败的导入保留在 timeline 上，重新配对后可以重试。
-- **一次性浏览器**：新建登录打开一个全新的隔离 WebView Profile（androidx.webkit `ProfileStore`），UA/Client Hints 设为部署配置里的桌面 Chrome 元数据；设备不支持 `MULTI_PROFILE` 或 `USER_AGENT_METADATA` 时提示更新 Android System WebView。起始页提供 Bing、百度、Google 入口和地址栏；没有历史记录、书签与会话恢复。点"完成登录"后从这次浏览推断出的站点里勾选、导出，生成 `import` 事件入队。无论导出还是放弃，这个 Profile 都立即销毁（清空 cookie 与 Web Storage 后删除；本进程已加载而不能删除时记下，下次启动在创建任何 WebView 之前删除）；App 被杀时同样在下次启动删除。
-- **站点推断**：记录这次浏览的顶层导航（含 SPA 的 history 变化），按近似的可注册域名归并（两字母国家顶级域名前是 `com`/`edu`/`gov`/`ac`/`co` 等时取三段，否则取两段），每个站点保留最后访问的 URL、网页图标与名称。名称依次取页面声明的 `og:site_name`/`application-name`/`apple-mobile-web-app-title`、标题里含域名主标签的最短片段、多段标题的最后一段、较短的完整标题，最后退回域名主标签。可导出的站点排前，搜索引擎排后，当前页所在站点默认勾选；没有 `SessionExporter` 适配的站点变灰并注明"尚未适配导出"。
+- **一次性浏览器**：新建登录打开一个全新的隔离 WebView Profile（androidx.webkit `ProfileStore`），UA/Client Hints 设为部署配置里的桌面 Chrome 元数据；设备不支持 `MULTI_PROFILE`、`USER_AGENT_METADATA` 或 `GET_COOKIE_INFO` 时提示更新 Android System WebView。起始页提供 Bing、百度、Google 入口和地址栏；没有历史记录、书签与会话恢复。点"完成登录"后从这次浏览推断出的站点里勾选、导出，生成 `import` 事件入队。无论导出还是放弃，这个 Profile 都立即销毁（清空 cookie 与 Web Storage 后删除；本进程已加载而不能删除时记下，下次启动在创建任何 WebView 之前删除）；App 被杀时同样在下次启动删除。
+- **站点推断**：记录这次浏览的顶层导航（含 SPA 的 history 变化），按近似的可注册域名归并（两字母国家顶级域名前是 `com`/`edu`/`gov`/`ac`/`co` 等时取三段，否则取两段），每个站点保留最后访问的 URL、网页图标与名称。名称依次取页面声明的 `og:site_name`/`application-name`/`apple-mobile-web-app-title`、标题里含域名主标签的最短片段、多段标题的最后一段、较短的完整标题，最后退回域名主标签。搜索引擎排后，当前页所在站点默认勾选。
+- **导出**：所有站点走同一套通用导出，不按站点适配。登录浏览器把每个 http(s) 请求（`shouldInterceptRequest`，加上不发请求的 history 变化）按 origin 记下路径，每个 origin 最多 256 条。导出时取 host 归属所选站点的 origin：
+  - cookies：在这些 URL 上逐个调用 `CookieManagerCompat.getCookieInfo`，拿到带完整属性的 cookie 行（WebView 用 `CanonicalCookie::BuildCookieAttributesLine` 生成：domain 带前导点即域 cookie，否则 host-only；expires 为 HTTP 日期；secure/httponly/samesite）。按请求 URL 查询，作用于子域或子路径的 cookie 在站点实际用过的地方都能取到。同 (name, domain, path) 去重。无名 cookie 契约无法表达，partitioned cookie 写回时会变成非分区，这两类都跳过。
+  - localStorage：用同一 Profile 的隐藏 WebView，对每个 origin 以 `loadDataWithBaseURL` 打开空文档，在该 origin 下枚举 `localStorage`。不发网络请求，也不执行站点脚本；空的 origin 不放进载荷。
+  - 结果交给载荷校验，超出契约上限时提示失败，不截断。
 - **请求与本地数据**：请求的载荷（cookies、localStorage）用 Keystore 密钥加密存盘，直到收到 `importApplied`/`importDiscarded` 或用户删除该请求，以便失败后重试；站点名、URL 与 64px 图标作为请求元数据保留供 timeline 显示。删除尚未写入的请求同时发出 `withdraw`。
 - **timeline**：首页即 timeline，按 seq 倒序列出本设备的请求卡片（配对、导入、撤回），Control 的回复挂在卡片下方。卡片状态：待发送、已发送、已收到·等待写入、已导入、失败、已放弃；点开查看详情（站点、数量、各事件时间、原因）。失败（`importFailed` 且 `retryable`、配对被拒后未处理的导入、发信失败）的卡片有"重试"；顶部有"同步"。发信失败的事件留在队列里，由 WorkManager 按退避自动重发。
 - **收信**：App 在前台、timeline 可见且有未完成的请求时每 60 秒用 IMAP 收一次，打开 App 与下拉刷新时立即收；有未完成请求时另有 15 分钟周期的后台任务。收到的事件按 seq 应用；乱序到达的消息解密后加密暂存，等缺口补上再应用。

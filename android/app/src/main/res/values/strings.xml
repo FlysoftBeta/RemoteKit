@@ -51,7 +51,5 @@
     <string name="start_title">从搜索引擎找到要登录的网站，或直接输入网址。</string>
     <string name="pick_title">选择要导入的站点</string>
     <string name="pick_hint">根据这次浏览整理，名称和图标为自动推断。</string>
-    <string name="pick_none_supported">这些站点都尚未适配导出，暂时无法导入。</string>
-    <string name="pick_unsupported">%1$s · 尚未适配导出</string>
     <string name="export_count">导出 %1$d 个站点</string>
 </resources>

@@ -3,6 +3,7 @@ package app.remotekit.importer.ui
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -25,7 +26,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -43,7 +43,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.remotekit.importer.R
 import app.remotekit.importer.deployment.ContractJson
-import app.remotekit.importer.export.SessionExporters
 import app.remotekit.importer.web.LoginChromeClient
 import app.remotekit.importer.web.SITE_NAME_SCRIPT
 import app.remotekit.importer.web.SearchEngines
@@ -74,6 +73,14 @@ fun LoginScreen(vm: AppViewModel, id: String) {
                     view: WebView,
                     request: WebResourceRequest,
                 ): Boolean = request.url.scheme !in listOf("http", "https")
+
+                override fun shouldInterceptRequest(
+                    view: WebView,
+                    request: WebResourceRequest,
+                ): WebResourceResponse? {
+                    history.requests.record(request.url.toString())
+                    return null
+                }
 
                 override fun doUpdateVisitedHistory(
                     view: WebView,
@@ -211,7 +218,7 @@ fun LoginScreen(vm: AppViewModel, id: String) {
             exporting = exporting,
             onDismiss = { if (!exporting) picking = false },
             onExport = { chosen ->
-                vm.exportSites(webView, session.second, chosen) { picking = false }
+                vm.exportSites(id, session.second, chosen) { picking = false }
             },
         )
 }
@@ -393,23 +400,13 @@ private fun SitePickerSheet(
     onDismiss: () -> Unit,
     onExport: (List<SiteVisit>) -> Unit,
 ) {
-    val rows =
-        remember(visits) {
-            visits
-                .map { it to (SessionExporters.forUrl(Uri.parse(it.url)) != null) }
-                .sortedWith(compareBy({ !it.second }, { it.first.searchEngine }))
-        }
+    val rows = remember(visits) { visits.sortedBy { it.searchEngine } }
     var chosen by remember {
         mutableStateOf(
-            rows
-                .filter { (visit, supported) ->
-                    supported && visit.key == current && !visit.searchEngine
-                }
-                .map { it.first.key }
-                .toSet()
+            rows.filter { it.key == current && !it.searchEngine }.map { it.key }.toSet()
         )
     }
-    val selected = rows.map { it.first }.filter { it.key in chosen }
+    val selected = rows.filter { it.key in chosen }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -421,16 +418,13 @@ private fun SitePickerSheet(
                     style = MaterialTheme.typography.titleLarge,
                 )
                 Text(
-                    stringResource(
-                        if (rows.any { it.second }) R.string.pick_hint
-                        else R.string.pick_none_supported
-                    ),
+                    stringResource(R.string.pick_hint),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
             LazyColumn(Modifier.weight(1f, fill = false).padding(vertical = 8.dp)) {
-                items(rows, key = { it.first.key }) { (visit, supported) ->
+                items(rows, key = { it.key }) { visit ->
                     val toggle = {
                         chosen = if (visit.key in chosen) chosen - visit.key else chosen + visit.key
                     }
@@ -442,25 +436,18 @@ private fun SitePickerSheet(
                             Text(visit.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         },
                         supportingContent = {
-                            Text(
-                                if (supported) visit.key
-                                else stringResource(R.string.pick_unsupported, visit.key),
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                            Text(visit.key, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         },
                         trailingContent = {
-                            if (supported)
-                                Checkbox(
-                                    checked = visit.key in chosen,
-                                    onCheckedChange = { toggle() },
-                                    enabled = !exporting,
-                                )
+                            Checkbox(
+                                checked = visit.key in chosen,
+                                onCheckedChange = { toggle() },
+                                enabled = !exporting,
+                            )
                         },
                         modifier =
                             Modifier.padding(horizontal = 8.dp)
-                                .alpha(if (supported) 1f else 0.6f)
-                                .clickable(enabled = supported && !exporting) { toggle() },
+                                .clickable(enabled = !exporting) { toggle() },
                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     )
                 }

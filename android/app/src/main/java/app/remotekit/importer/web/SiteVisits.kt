@@ -29,8 +29,10 @@ data class SiteVisit(
 class SiteVisits {
     private val mutable = MutableStateFlow<List<SiteVisit>>(emptyList())
     val visits: StateFlow<List<SiteVisit>> = mutable.asStateFlow()
+    val requests = RequestLog()
 
     fun navigated(url: String) {
+        requests.record(url)
         val key = keyOf(url) ?: return
         val now = System.currentTimeMillis()
         val current = mutable.value.find { it.key == key }
