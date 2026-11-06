@@ -7,6 +7,7 @@
 #include "persistence/session_store.hpp"
 #include "session/browser.hpp"
 #include "util/thread.hpp"
+#include "objects/service.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -22,6 +23,10 @@ struct SessionConfig {
   const RuntimeOptions options;
   const std::string tenant, id;
   const fs::path directory;
+  const uint64_t placement_epoch;
+  cluster::Key profile_key;
+  objects::Keys object_keys;
+  ~SessionConfig() { SecureZeroMemory(profile_key.data(), profile_key.size()); }
 };
 struct ControllerContext {
   media::Sdk& sdk;
@@ -33,5 +38,7 @@ struct ControllerContext {
   SessionStore& store;
   ManagementLink& management;
   const std::shared_ptr<media::ServerTrace> trace;
+  objects::ObjectService& objects;
+  const objects::Keys& object_keys;
 };
 }  // namespace remotekit

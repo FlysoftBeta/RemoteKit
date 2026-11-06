@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import uuid
+from cluster_bridge import endpoint_command
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -34,7 +35,7 @@ def main():
     messages = queue.Queue()
     evidence = []
     with (run / 'stderr.log').open('wb') as log:
-        child = subprocess.Popen([str(args.endpoint), '--browser=' + str(args.browser), '--data-path=' + str(run / 'state')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        child = subprocess.Popen(endpoint_command(args.endpoint, args.browser, run / 'state'), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
         def read():
             for line in child.stdout:

@@ -82,6 +82,7 @@ class ProfileDownloads final : public content::DownloadManagerDelegate,
   // action=snapshot|cancel|pause|resume; mutations use id(decimal string).
   // file_reference is relative to profile_path and present only after COMPLETE.
   base::DictValue Command(const base::DictValue&);
+  size_t InProgressCount() const;
   void Shutdown() override;
   void GetNextId(content::DownloadIdCallback) override;
   bool DetermineDownloadTarget(download::DownloadItem*, download::DownloadTargetCallback*) override;

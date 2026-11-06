@@ -131,20 +131,22 @@ class TargetManager final : public media::AudioManagerBase {
     return true;
   }
   void ShutdownOnAudioThread() override {
-    timer_.Stop();
+    // The timer is bound to the audio thread; the manager is destroyed on the main thread.
+    timer_.reset();
     mapping_.reset();
     AudioManagerBase::ShutdownOnAudioThread();
   }
 
  private:
   void Wake() {
-    if (!timer_.IsRunning()) {
+    if (timer_ && !timer_->IsRunning()) {
       next_ = base::TimeTicks::Now() + base::Milliseconds(10);
       Schedule();
     }
   }
   void Schedule() {
-    timer_.Start(FROM_HERE, next_, this, &TargetManager::Tick, base::subtle::DelayPolicy::kPrecise);
+    timer_->Start(FROM_HERE, next_, this, &TargetManager::Tick,
+                  base::subtle::DelayPolicy::kPrecise);
   }
   void Tick() {
     if (active_.empty() && !mapping_)
@@ -223,7 +225,7 @@ class TargetManager final : public media::AudioManagerBase {
   static constexpr uint32_t kSilentTailBlocks = 100;
   std::vector<TargetStream*> active_;
   std::unique_ptr<media::AudioBus> bus_, mix_;
-  base::DeadlineTimer timer_;
+  std::unique_ptr<base::DeadlineTimer> timer_ = std::make_unique<base::DeadlineTimer>();
   base::TimeTicks next_;
   std::shared_ptr<Mapping> mapping_;
   uint64_t sequence_ = 0, sample_index_ = 0;

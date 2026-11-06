@@ -47,6 +47,7 @@ Browser 的 `CanDiscard` 暴露资格，并在执行点用 `CheckQuiescent` 再�
 - 计时绑定 Browser incarnation 与执行实例；对象缺失、重新显示、设置关闭、超过 15 秒的观察间断都清零——宿主休眠或长时间失联不能被当成持续的安全闲置。计时不持久化，也不以绝对时间跨机器传递。音频或导航结束后重新开始一个安全区间，而不是立即回收。
 - 维护周期约 1.5 秒；生命周期请求另有 12 秒的节流。
 - 重新可见时先恢复：等待 actual=live 且 pending=false 再显示。失败或不确定时保留原因显示在 Tab 上，不伪装成功。
+- 整个 Browser 的休眠：Viewer 断开满 10 分钟（节点有压力时 2 分钟）且没有阻塞项时，Control 让 Endpoint 优雅关闭该 Tenant 的整个 Browser 并生成 checkpoint；Tab 保留产品状态并显示为已丢弃，下次需要时在负载最合适的节点上重新打开（见[多节点 · Checkpoint 与休眠](cluster.md#checkpoint-与休眠)）。
 
 曾经 Browser 实现了 freeze，但 Endpoint 的允许动作列表里漏了它，策略根本执行不了：辅助函数存在不代表端到端的方法被放行。
 
@@ -71,7 +72,9 @@ lifecycle_uncertain
 
 ## 导航状态导出与恢复
 
-**捕获**（Browser `NavigationState`）：已提交的历史条目、选中索引、redirect 链和 renderer 报告的 PageState（用 Chromium 的序列化导航构建器），外层信封绑定格式版本、Chromium revision、Session 和 Profile。只恢复导航状态，不恢复任意 DOM、JS 堆或网络连接。同一 BrowserContext 内的卸载可以保留 sessionStorage namespace 关联；跨 Browser 的导出不恢复 sessionStorage。
+**捕获**（Browser `NavigationState`）：已提交的历史条目、选中索引、redirect 链和 renderer 报告的 PageState（用 Chromium 的序列化导航构建器），以及 view 的 sessionStorage namespace id 与 StoragePartitionConfig；外层信封绑定格式版本（2）、Chromium revision、Session 和 Profile，旧版本信封直接拒绝。只恢复导航状态和 sessionStorage，不恢复任意 DOM、JS 堆或网络连接。
+
+**sessionStorage**：content 层只把 `SetShouldPersist(true)` 的 namespace 写入 `Session Storage/`。Browser 优雅关闭时把所有保留的 namespace 标记为持久；导入时先 `RecreateSessionStorage(id)` 再用得到的 namespace 创建 WebContents，所以跨 Browser 进程、跨节点都能恢复。被产品关闭的 view 取消持久化。一个 Browser incarnation 的全部恢复完成后，Endpoint 发一次 `storage.scavenge` 清理不再使用的 namespace；在此之前清理会删掉尚未恢复的数据。
 
 **限制**：传输分块 256KiB，总量 64MiB；最多 1024 条历史、每条 16MiB、1024 条 redirect/扩展字段、PageState 深度 128 / frame 数 4096，在解码前检查。导入要求 view 处于 unloaded。
 
@@ -83,9 +86,10 @@ lifecycle_uncertain
 
 ## Profile 持久化
 
-- `ProfileNetworkState` 拥有 OSCryptAsync、DPAPI 密钥提供者、cookie 加密绑定和 StoragePartition 网络路径。只有 Profile 目录并不会有持久 cookie：NetworkContext 需要显式的 cookie 数据库路径。
-- 每 Profile 的 AES 密钥用 DPAPI 包装，存于网络沙箱目录之外的 `NetworkKey.json`。密钥损坏，或缺少密钥但已有网络存储，都使初始化失败，不轮换密钥，也不退回明文或内存存储。
-- 会话 cookie 的寿命与进程会话相同（persist/restore_old 关闭）。正常关闭最多等 5 秒 `FlushCookieStore`。
+- `ProfileNetworkState` 拥有 OSCryptAsync、RemoteKit 的 `ProfileKeyProvider`、cookie 加密绑定和 StoragePartition 网络路径。只有 Profile 目录并不会有持久 cookie：NetworkContext 需要显式的 cookie 数据库路径。
+- Cookie 密钥由 Control 从 Tenant DEK 派生，经只继承给 Browser 的匿名管道传入（`--profile-key-handle`），Browser 在创建 BrowserContext 之前读出恰好 32 字节，只保存在内存里（`ProfileKey`，销毁时清零）。提供者标签 `rk1`、AES-256-GCM、唯一一个提供者。磁盘上没有任何密钥文件，也不依赖 DPAPI，所以 Profile 目录可以搬到另一台机器的另一个路径；单独拿到目录无法解密 Cookie。密钥不对或缺失时启动失败，不退回明文或内存存储。
+- 会话 cookie 跨 Browser 重启保留（persist/restore_old 打开）：Browser 的关闭多半是休眠而不是用户关闭浏览器。
+- 优雅关闭（`browser.shutdown`）：停止接受新命令（之后一律 `unavailable`），持久化 sessionStorage namespace，直接销毁 WebContents（不运行 beforeunload），在 10 秒内等 cookie 与各 StoragePartition 的 flush 回调，退出码 0；任一步失败以退出码 70 退出并记录失败的步骤。Endpoint 只把退出码 0 且作业为空视为干净关闭；强制终止会跳过这些 flush。
 - 剪贴板使用官方的 `ClipboardNonBacked`：不同 Tenant 的 Browser 进程如果用系统剪贴板，会共享同一个 Windows 剪贴板。同一 Session 内的页面共享它，Browser 重启清空。跨设备剪贴板是另一项工作。
 - 关闭顺序：`PostMainMessageLoopRun` 先关闭生产者，解绑 delegate 并取消请求，销毁 pending 弹窗和正式 contents，排空延迟的宿主删除，最后销毁 Context 与 Screen。成员声明顺序不是关闭协议（曾经 BrowserContext 先于 pending 弹窗的 WebContents 被销毁）。
 

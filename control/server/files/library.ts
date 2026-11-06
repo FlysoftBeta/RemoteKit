@@ -1,3 +1,4 @@
+import type { ObjectIndex } from '../cluster/objects';
 import { createHash, randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type {
@@ -103,13 +104,14 @@ export class FileLibrary {
     private readonly repository: LibraryRepository,
     private endpoint: EndpointGateway,
     private limits: FileLimits,
+    private readonly objects: Pick<ObjectIndex, 'require'>,
   ) {}
   private async describe(tenant: string, assetId: string): Promise<Asset> {
+    this.objects.require(tenant, assetId);
     const value: Asset = await this.endpoint.describeAsset(tenant, { assetId });
     if (
       !value ||
       value.assetId !== assetId ||
-      !/^[0-9a-f]{64}$/.test(value.hash) ||
       !Number.isSafeInteger(value.size) ||
       value.size < 0 ||
       value.size > this.limits.maxFileBytes ||
@@ -120,7 +122,7 @@ export class FileLibrary {
       throw new RemoteKitError('rejected', 'Endpoint未返回有效文件信息');
     return value;
   }
-  private async retainAssets(
+  private async describeAssets(
     tenant: string,
     fields: Pick<LibraryEntry, 'assetId' | 'originalAssetId' | 'photo'>,
     authorize: () => void,
@@ -129,9 +131,6 @@ export class FileLibrary {
     const asset = await this.describe(tenant, fields.assetId);
     for (const reference of references.slice(1)) await this.describe(tenant, reference);
     authorize();
-    const retained = await this.endpoint.retainAssets(tenant, { assetIds: references });
-    authorize();
-    if (retained?.accepted !== true) throw new RemoteKitError('rejected', 'Endpoint未确认保留文件');
     return asset;
   }
   private async import(tenant: string, params: Params<'library.import'>, authorize: () => void) {
@@ -145,7 +144,6 @@ export class FileLibrary {
     const afterId = params.afterId === undefined ? undefined : id(params.afterId);
     if (afterId !== undefined && destination !== 'basket') throw invalid('仅篮内文件支持指定插入位置');
     const requestedGroup = params.groupId === null ? null : id(params.groupId);
-    // Keep the original receipt hash for imports from before photo metadata.
     const fields = ['import', assetId, name, destination, requestedGroup, originalAssetId, afterId];
     const payload = operationHash(...fields, ...(photo ? [photo] : []));
     if (this.repository.operation(tenant, operationId, payload)) return this.repository.snapshot(tenant);
@@ -160,8 +158,10 @@ export class FileLibrary {
       return groupId;
     };
     validate(this.repository.snapshot(tenant));
-    const asset = await this.retainAssets(tenant, { assetId, originalAssetId, photo }, authorize);
+    const asset = await this.describeAssets(tenant, { assetId, originalAssetId, photo }, authorize);
     return this.repository.change(tenant, operationId, payload, (snapshot) => {
+      for (const reference of assetIds({ assetId, originalAssetId, photo }))
+        this.objects.require(tenant, reference);
       const groupId = validate(snapshot),
         entryId = randomUUID();
       snapshot.entries.unshift({
@@ -201,8 +201,10 @@ export class FileLibrary {
       return entry;
     };
     validate(this.repository.snapshot(tenant));
-    const asset = await this.retainAssets(tenant, { assetId, originalAssetId, photo }, authorize);
+    const asset = await this.describeAssets(tenant, { assetId, originalAssetId, photo }, authorize);
     const snapshot = this.repository.change(tenant, operationId, payload, (snapshot) => {
+      for (const reference of assetIds({ assetId, originalAssetId, photo }))
+        this.objects.require(tenant, reference);
       const entry = validate(snapshot);
       entry.assetId = assetId;
       entry.type = asset.type;
@@ -212,21 +214,8 @@ export class FileLibrary {
       if (photo) entry.photo = photo;
       else delete entry.photo;
     });
-    await this.reconcileReferences(tenant, snapshot);
     authorize();
     return snapshot;
-  }
-  private async reconcileReferences(tenant: string, snapshot: LibrarySnapshot) {
-    const assets = new Set<string>();
-    for (const entry of snapshot.entries) for (const assetId of assetIds(entry)) assets.add(assetId);
-    // SQLite stays authoritative if Endpoint is offline. The next library.get
-    // replays the complete retained set, including references from pending selections.
-    await this.endpoint
-      .referenceAssets(tenant, {
-        revision: snapshot.revision,
-        assetIds: [...assets].sort(),
-      })
-      .catch(() => {});
   }
   private async prepare(
     tenant: string,
@@ -299,7 +288,6 @@ export class FileLibrary {
     authorize();
     if (!terminal) this.repository.settle(tenant, manifest, state);
     const snapshot = this.repository.snapshot(tenant);
-    if (state === 'cancelled' || state === 'selected') await this.reconcileReferences(tenant, snapshot);
     authorize();
     return { state, snapshot };
   }
@@ -314,7 +302,6 @@ export class FileLibrary {
     authorize();
     for (const { manifest, state } of results) this.repository.settle(tenant, manifest, state);
     const snapshot = this.repository.snapshot(tenant);
-    await this.reconcileReferences(tenant, snapshot);
     authorize();
     return snapshot;
   }
@@ -363,7 +350,6 @@ export class FileLibrary {
             this.repository.prune(tenant, snapshot);
           },
         );
-        await this.reconcileReferences(tenant, snapshot);
         authorize();
         return snapshot;
       }
@@ -416,7 +402,6 @@ export class FileLibrary {
             snapshot.basket = snapshot.basket.filter((entryId) => !removed.has(entryId));
           },
         );
-        await this.reconcileReferences(tenant, snapshot);
         authorize();
         return snapshot;
       }

@@ -1,6 +1,7 @@
 #include "browser/control_dispatcher.h"
 #include "browser/control_requests.h"
 #include "browser/control_response.h"
+#include "browser/browser_runtime.h"
 
 namespace remotekit::browser {
 namespace {
@@ -19,6 +20,8 @@ base::DictValue Invoke(ControlDispatcher& dispatcher,
 base::DictValue ControlDispatcher::Dispatch(const base::DictValue& request) {
   const auto id = request.FindInt("id").value_or(0);
   const auto* name = request.FindString("method");
+  if (runtime_.shutting_down && (!name || *name != protocol::kBrowserShutdown))
+    return ControlResult::Failure(id, ErrorCode::unavailable, "Browser shutdown started");
   if (id <= 0 || request.FindInt("version") != protocol::kControlVersion || !name)
     return ControlResult::Failure(id, ErrorCode::invalid_request, "Invalid control envelope");
   struct Method {
@@ -26,7 +29,10 @@ base::DictValue ControlDispatcher::Dispatch(const base::DictValue& request) {
     base::DictValue (*handler)(ControlDispatcher&, const base::DictValue&, RequestEnvelope);
   };
   static constexpr Method methods[] = {
-      {"shutdown", &Invoke<ShutdownRequest, DecodeShutdown, &ControlDispatcher::HandleShutdown>},
+      {protocol::kBrowserShutdown,
+       &Invoke<ShutdownRequest, DecodeShutdown, &ControlDispatcher::HandleShutdown>},
+      {protocol::kStorageScavenge, &Invoke<StorageScavengeRequest, DecodeStorageScavenge,
+                                           &ControlDispatcher::HandleStorageScavenge>},
       {"output.configure", &Invoke<OutputConfigureRequest, DecodeOutputConfigure,
                                    &ControlDispatcher::HandleOutputConfigure>},
       {"output.open",

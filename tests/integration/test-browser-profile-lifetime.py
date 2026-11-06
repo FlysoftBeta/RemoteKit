@@ -10,6 +10,7 @@ from contextlib import closing
 import http.server
 import json
 import os
+from browser_key import spawn_browser
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -86,7 +87,7 @@ def main():
             self.handle = c.c_uint64()
             self.log = (run / (tag + '.log')).open('wb')
             channel = 'RemoteKit.profileLifetime.' + str(time.time_ns())
-            self.process = subprocess.Popen([
+            self.process = spawn_browser([
                 str(args.browser), '--control-channel=' + channel,
                 '--session-id=1', '--tenant-id=' + tag,
                 '--remotekit-render-host=offscreen', '--data-path=' + str(data),
@@ -156,7 +157,7 @@ def main():
             try:
                 if self.process.poll() is None and self.handle.value:
                     try:
-                        self.rpc('shutdown')
+                        self.rpc('browser.shutdown')
                     except BaseException:
                         if not force:
                             raise
@@ -198,7 +199,7 @@ def main():
         active.append(a)
         a.create(1, '/observe-restart')
         assert 'rk_persistent=keep' in observed['/observe-restart']
-        assert 'rk_session=' not in observed['/observe-restart']
+        assert 'rk_session=ephemeral' in observed['/observe-restart']
         b = Browser(run / 'tenant-b', 'b')
         active.append(b)
         b.create(1, '/observe-other')
@@ -211,7 +212,7 @@ def main():
         configs = [dict(session='1', view=str(view), width=360, height=260,
                         device='desktop', device_scale_factor=1, visible=True) for view in (1, 2)]
         rejected = a.rpc('output.configure', ok=False, viewConfigs=configs)
-        assert rejected['error'] == 'restore_required_before_show', rejected
+        assert rejected['error'] == 'unavailable' and rejected['detail'] == 'Restore required before showing view', rejected
         after = a.views()
         fields = ('view', 'width', 'height', 'visible', 'device_scale_factor', 'instance', 'document', 'focus', 'actual', 'pending')
         assert [{k: v.get(k) for k in fields} for v in before] == [{k: v.get(k) for k in fields} for v in after]

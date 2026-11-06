@@ -231,10 +231,11 @@ export class RtcSignaling {
       runtime.closeRtc();
     }
   }
-  endpointOffline() {
-    for (const runtime of this.context.tenants.values()) runtime.disconnectRtc();
+  endpointOffline(nodeId?: string) {
+    for (const runtime of this.context.tenants.values())
+      if (!nodeId || this.context.endpoint.isPlacedOn(runtime.tenantId, nodeId)) runtime.disconnectRtc();
     for (const [tenant, viewer] of this.context.tenants.withViewers())
-      if (viewer.security) {
+      if (viewer.security && (!nodeId || this.context.endpoint.isPlacedOn(tenant, nodeId))) {
         viewer.security.face = { available: false };
         void this.services.security.lock(tenant, viewer.security, false, false);
       }

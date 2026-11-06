@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,26 +11,34 @@ export function startProductStack({
   endpoint,
   browser,
   server = join(root, 'control/dist/server.mjs'),
-  endpointArgs = [],
-  environment = {},
+  nodeDefaults = {},
+  configOverrides = {},
 }) {
+  mkdirSync(run, { recursive: true });
+  const configPath = join(run, 'control.json');
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      http: { host: '127.0.0.1', port, origins: [`http://127.0.0.1:${port}`] },
+      database: join(run, 'control.db'),
+      diagnostics: join(run, 'diagnostics'),
+      nodeDefaults: {
+        browser: resolve(browser),
+        dataPath: join(run, 'endpoint'),
+        peer: { listen: `127.0.0.1:${port + 2}`, advertise: `127.0.0.1:${port + 2}` },
+        ...nodeDefaults,
+      },
+      nodes: { local: { launch: { executable: resolve(endpoint), root: join(run, 'node') } } },
+      ...configOverrides,
+    }),
+  );
   return spawn(process.execPath, [server], {
     cwd: root,
     windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     env: {
       ...process.env,
-      PORT: String(port),
-      REMOTEKIT_CONTROL_HOST: '127.0.0.1',
-      REMOTEKIT_CONTROL_ORIGINS: `http://127.0.0.1:${port}`,
-      REMOTEKIT_CONTROL_DB: join(run, 'control.db'),
-      REMOTEKIT_ENDPOINT: resolve(endpoint),
-      REMOTEKIT_ENDPOINT_ARGS: JSON.stringify([
-        '--browser=' + resolve(browser),
-        '--data-path=' + join(run, 'endpoint'),
-        ...endpointArgs,
-      ]),
-      ...environment,
+      REMOTEKIT_CONTROL_CONFIG: configPath,
     },
   });
 }

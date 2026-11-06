@@ -1,18 +1,26 @@
 #include "session/session.hpp"
+#include "cluster/node_files.hpp"
+#include "persistence/checkpoint.hpp"
+#include "util/result_macros.hpp"
 namespace remotekit {
 Session::Session(media::Sdk& api,
                  const RuntimeOptions& options,
                  std::string tenant,
                  std::string id,
-                 ManagementLink& link)
-    : config{options, std::move(tenant), id, options.data / "sessions" / id},
+                 uint64_t placement_epoch,
+                 const cluster::Key& profile_key,
+                 ManagementLink& link,
+                 objects::ObjectService& objects,
+                 const objects::Keys& object_keys)
+    : config{options,         std::move(tenant), id,         options.data / "sessions" / id,
+             placement_epoch, profile_key,       object_keys},
       sdk(api),
       management(link),
-      browser(api),
+      browser(api, config.profile_key),
       store(config.directory),
       trace(media::ServerTrace::Create(config.tenant, config.id)),
-      context{sdk,     config.options, config.tenant, config.id, config.directory,
-              browser, store,          management,    trace},
+      context{sdk,   config.options, config.tenant, config.id, config.directory,  browser,
+              store, management,     trace,         objects,   config.object_keys},
       timing(context),
       authorization(
           api,
@@ -30,7 +38,7 @@ Session::Session(media::Sdk& api,
               .files_opened =
                   [this](uint64_t handle) { files.Bind(handle, peer_controller.Connection()); }}),
       input(
-          config.id,
+          BrowserRuntime::kSessionId,
           InputController::Hooks{
               .control = [this] { return browser.Rpc().Control(); },
               .input_stamp = [this] { return authorization.Input(); },
@@ -125,7 +133,10 @@ Session::Session(media::Sdk& api,
                pipeline,
                channel,
                timing),
-      audio(context, peer_controller, authorization),
+      audio({sdk, config.options, config.tenant, BrowserRuntime::kSessionId, config.directory,
+             browser, store, management, trace, objects, config.object_keys},
+            peer_controller,
+            authorization),
       face(context, authorization),
       files(context, authorization, views, peer_controller),
       navigation(context, views),
@@ -158,6 +169,31 @@ Session::Session(media::Sdk& api,
   views.SetStopRuntime([this] { return Stop(); });
   output.Slots().SetTrace(trace);
 }
+Result<Json> Session::Open(const Json& request) const {
+  auto key = cluster::DecodeKey(request.at("profileKey").get<std::string>());
+  if (!key)
+    return key.error();
+  auto object_key = cluster::DecodeKey(request.at("objectKey").get<std::string>());
+  auto id_key = cluster::DecodeKey(request.at("objectIdKey").get<std::string>());
+  if (!object_key || !id_key) {
+    SecureZeroMemory(key.value().data(), key.value().size());
+    if (object_key)
+      SecureZeroMemory(object_key.value().data(), object_key.value().size());
+    if (id_key)
+      SecureZeroMemory(id_key.value().data(), id_key.value().size());
+    return Error{ErrorCode::kInvalidRequest, "invalid object keys"};
+  }
+  const bool identical =
+      request.at("sessionId") == config.id &&
+      request.at("placementEpoch") == config.placement_epoch && key.value() == config.profile_key &&
+      object_key.value() == config.object_keys.object && id_key.value() == config.object_keys.id;
+  SecureZeroMemory(key.value().data(), key.value().size());
+  SecureZeroMemory(object_key.value().data(), object_key.value().size());
+  SecureZeroMemory(id_key.value().data(), id_key.value().size());
+  if (!identical)
+    return Error{ErrorCode::kConflict, "session placement conflicts with the open session"};
+  return Json{{"sessionId", config.id}, {"placementEpoch", config.placement_epoch}};
+}
 Result<void> Session::Initialize() {
   auto loaded = views.Initialize();
   if (!loaded)
@@ -171,7 +207,7 @@ Result<void> Session::Initialize() {
 }
 Session::~Session() {
   files.Stop();
-  auto stopped = Stop();
+  auto stopped = Shutdown();
   if (!stopped)
     fprintf(stderr, "session shutdown: %s\n", stopped.error().message.c_str());
 }
@@ -215,13 +251,20 @@ void Session::DrainPeerResources() {
   }
 }
 Result<void> Session::Stop() {
-  navigation.Reset();
-  views.Reset();
+  return CloseRuntime(false);
+}
+Result<void> Session::Shutdown() {
+  return CloseRuntime(true);
+}
+Result<void> Session::CloseRuntime(bool graceful) {
   peer_controller.Close();
   const bool had_process = browser.Present();
-  auto stopped = browser.Stop();
-  if (!stopped)
-    return stopped.error();
+  auto stopped =
+      graceful ? browser.Shutdown([this] { return navigation.FinalExport(); }) : browser.Stop();
+  if (browser.Alive())
+    return stopped;
+  navigation.Reset();
+  views.Reset();
   if (had_process) {
     auto files_stopped = files.BrowserStopped(browser.ProcessIncarnation());
     if (!files_stopped)
@@ -233,6 +276,42 @@ Result<void> Session::Stop() {
   browser.ReleaseExited();
   registry.ReleaseAdapter();
   presentation.Bind(0);
-  return {};
+  return stopped;
+}
+Result<Json> Session::Snapshot(bool output_diagnostics) {
+  RK_ASSIGN_OR_RETURN(snapshot, views.Snapshot(output_diagnostics));
+  auto blockers = files.Hibernation();
+  blockers["unacknowledgedClosedEvents"] = snapshot["events"].size();
+  blockers["pendingPageRequests"] = 0;
+  blockers["downloadsInProgress"] = snapshot["downloadsInProgress"];
+  blockers["rtcConnected"] = peer_controller.Handle() != 0;
+  blockers["lifecycleUncertain"] =
+      navigation.RecoverySnapshot().value("pending", false) ||
+      (!snapshot.value("running", false) && !browser.CheckpointReady());
+  for (const auto& view : snapshot["views"]) {
+    blockers["pendingPageRequests"] =
+        blockers["pendingPageRequests"].get<size_t>() +
+        view.value("pageRequests", Json::object()).value("pending", Json::array()).size();
+    if (view.value("lifecycle_uncertain", false) || view.value("pending", false) ||
+        view.value("close_state", std::string()) == "closing")
+      blockers["lifecycleUncertain"] = true;
+  }
+  snapshot["hibernation"] = std::move(blockers);
+  return snapshot;
+}
+Result<Json> Session::Hibernate(objects::ObjectService& objects) {
+  RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
+  for (const auto& [name, value] : snapshot["hibernation"].items())
+    if ((value.is_boolean() && value.get<bool>()) ||
+        (value.is_number() && value.get<uint64_t>() != 0))
+      return Error{ErrorCode::kConflict, "hibernation blocked: " + name};
+  RK_RETURN_IF_ERROR(Shutdown());
+  files.Stop();
+  // No session worker can mutate files after the shutdown boundary.
+  for (const auto* relative :
+       {"uploads", "file-library/drafts", "file-library/incoming", "file-library/staging"})
+    fs::remove_all(config.directory / relative);
+  return Checkpoints(objects).Create(config.directory, config.tenant, config.object_keys, config.id,
+                                     config.placement_epoch, config.options.build_id);
 }
 }  // namespace remotekit

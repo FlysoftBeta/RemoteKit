@@ -8,7 +8,7 @@ import { RemoteKitError, httpStatus, toRemoteKitError } from '../../shared/error
 
 import type { DomainServices } from '../application';
 import { DiagnosticSessions } from '../diagnostics/sessions';
-import type { RemoteNodeLink } from '../endpoint/remote-node';
+import type { NodeRegistry } from '../cluster/node-link';
 import { attachViewerSocket } from './viewer-socket';
 
 export function createHttp(
@@ -18,7 +18,7 @@ export function createHttp(
     clientDir: string;
     diagnosticDir?: string;
     tls?: { key: Buffer; cert: Buffer };
-    endpointNode?: RemoteNodeLink;
+    nodes?: NodeRegistry;
   },
 ) {
   let closing = false;
@@ -163,7 +163,7 @@ export function createHttp(
     closing = true;
     const archivesClosed = diagnosticSessions?.shutdown();
     // Fail remote management requests before draining handlers waiting on them.
-    options.endpointNode?.stop();
+    options.nodes?.stop();
     viewerSocket.close();
     const httpClosed = new Promise<void>((resolve, reject) =>
       originalClose((error) => {

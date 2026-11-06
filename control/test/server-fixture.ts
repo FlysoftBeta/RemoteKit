@@ -1,16 +1,55 @@
+import { NodeRegistry } from '../server/cluster/node-link';
+import type { SessionPlacement } from '../server/cluster/placement';
+import { nodeDefaults } from '../server/config';
+import { RemoteKitError } from '../shared/errors';
 import { EndpointGateway } from '../server/endpoint/gateway';
 import type { EndpointLink, EndpointLinkState } from '../server/endpoint/link';
 import type { Clock } from '../server/util/clock';
 export function testGateway(
   link: Pick<EndpointLink, 'request' | 'onSignal' | 'onClientAction'> & { state?: EndpointLinkState },
 ): EndpointGateway {
-  return new EndpointGateway({
-    get state() {
-      return link.state ?? { state: 'ready', incarnation: 'fixture', connectionEpoch: 'fixture' };
+  const nodes = new NodeRegistry({
+    nodes: { fixture: { config: { ...nodeDefaults, nodeId: 'fixture' }, configHash: 'fixture' } },
+    key: Buffer.alloc(32).toString('base64'),
+    buildId: 'dev',
+  });
+  const node = nodes.get('fixture')!;
+  Object.defineProperty(node, 'state', {
+    get: () => link.state ?? { state: 'ready', incarnation: 'fixture', connectionEpoch: 'fixture' },
+  });
+  node.request = async (method, tenant, args) =>
+    method === 'session.open' ? {} : link.request(method, tenant, args);
+  if (link.onSignal) node.onSignal = link.onSignal.bind(link);
+  if (link.onClientAction) node.onClientAction = link.onClientAction.bind(link);
+  const placements = new Map<string, SessionPlacement>();
+  return new EndpointGateway(nodes, {
+    peek: (tenant) => placements.get(tenant),
+    resolve: (tenant) => {
+      if (node.state.state !== 'ready') throw new RemoteKitError('unavailable', 'Fixture offline');
+      let placement = placements.get(tenant);
+      if (!placement) {
+        placement = {
+          tenant,
+          sessionId: tenant,
+          nodeId: 'fixture',
+          placementEpoch: 1,
+          keyCiphertext: '',
+          state: 'active',
+          checkpointId: null,
+          checkpoint: null,
+        };
+        placements.set(tenant, placement);
+      }
+      return placement;
     },
-    request: (method, tenant, args) => link.request(method, tenant, args),
-    onSignal: link.onSignal?.bind(link),
-    onClientAction: link.onClientAction?.bind(link),
+    keys: () => ({
+      profileKey: Buffer.alloc(32).toString('base64'),
+      objectKey: Buffer.alloc(32).toString('base64'),
+      objectIdKey: Buffer.alloc(32).toString('base64'),
+    }),
+    underPressure: () => false,
+    commitCheckpoint: () => 1,
+    markWarm: () => {},
   });
 }
 export class TestClock implements Clock {

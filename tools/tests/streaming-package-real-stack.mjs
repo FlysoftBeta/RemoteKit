@@ -39,9 +39,15 @@ await new Promise(done => reserve.listen(0, '127.0.0.1', done));
 const port = reserve.address().port;
 await new Promise(done => reserve.close(done));
 const origin = 'http://127.0.0.1:' + port;
-const env = { ...process.env, PORT: String(port), REMOTEKIT_CONTROL_HOST: '127.0.0.1', REMOTEKIT_CONTROL_ORIGINS: origin };
-for (const name of ['NODE_PATH', 'NODE_OPTIONS', 'REMOTEKIT_HTTPS_KEY', 'REMOTEKIT_HTTPS_CERT',
-  'REMOTEKIT_ENDPOINT_NODE_ID', 'REMOTEKIT_ENDPOINT_TOKEN', 'REMOTEKIT_ENDPOINT_TLS_PROXY']) delete env[name];
+await mkdir(join(runtime, 'config'), { recursive: true });
+await writeFile(join(runtime, 'config/control.json'), JSON.stringify({
+  http: { host: '127.0.0.1', port, origins: [origin] },
+  database: '../data/control.db',
+  diagnostics: '../data/diagnostics',
+  nodes: { local: { launch: { executable: '../bin/endpoint_service.exe', root: '../data/node' } } },
+}));
+const env = { ...process.env };
+for (const name of ['NODE_PATH', 'NODE_OPTIONS', 'REMOTEKIT_CONTROL_CONFIG']) delete env[name];
 const child = spawn(join(runtime, 'bin/node.exe'), [join(runtime, 'run-control.cjs')], {
   cwd: runtime, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
 });

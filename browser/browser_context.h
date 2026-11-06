@@ -14,10 +14,12 @@ namespace remotekit::browser {
 class ProfilePermissions;
 class ProfileDownloads;
 class ProfileNetworkState;
+class ProfileKey;
 class BrowserContext final : public content::BrowserContext {
  public:
-  explicit BrowserContext(base::FilePath path);
+  BrowserContext(base::FilePath path, std::unique_ptr<ProfileKey> key);
   ~BrowserContext() override;
+  void PrepareForShutdown();
   base::FilePath GetPath() const override;
   bool IsOffTheRecord() override { return false; }
   std::unique_ptr<content::ZoomLevelDelegate> CreateZoomLevelDelegate(
@@ -50,8 +52,11 @@ class BrowserContext final : public content::BrowserContext {
     return nullptr;
   }
 
+  const ProfileDownloads& downloads() const { return *downloads_; }
+
  private:
   base::FilePath path_;
+  bool shutdown_prepared_ = false;
   std::unique_ptr<content::ClientHintsControllerDelegate> client_hints_;
   std::unique_ptr<ProfilePermissions> permissions_;
   std::unique_ptr<ProfileDownloads> downloads_;

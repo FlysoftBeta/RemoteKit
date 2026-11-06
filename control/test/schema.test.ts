@@ -7,10 +7,10 @@ import { join } from 'node:path';
 import { ControlDatabase } from '../server/persistence/database';
 import { createSchema } from '../server/persistence/schema';
 
-test('fresh schema contains accounts and basket tables at version 2', () => {
+test('fresh schema contains accounts and basket tables at version 4', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 2n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 4n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -55,7 +55,7 @@ test('current tables without a schema version reopen with accounts, workspace an
     assert.equal(store.accounts.userForTenant(account.tenantId)?.isAdmin, true);
     assert.equal(store.workspaces.workspace(account.tenantId).tabs[0].webviewId, firstView);
     assert.ok(BigInt(store.workspaces.viewId()) > BigInt(firstView));
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 2n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 4n }]);
     store.db.close();
     store = new ControlDatabase(path);
     assert.equal(
@@ -72,7 +72,7 @@ test('current tables without a schema version reopen with accounts, workspace an
   }
 });
 
-test('version 1 settings migrate to version 2 with avSync off', async () => {
+test('version 1 settings migrate to version 4 with avSync off', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-schema-v1-'));
   const path = join(directory, 'control.db');
   let store = new ControlDatabase(path);
@@ -91,7 +91,7 @@ test('version 1 settings migrate to version 2 with avSync off', async () => {
     const loaded = store.workspaces.workspace(account.tenantId).settings;
     assert.equal(loaded.avSync, false);
     assert.deepEqual(loaded.audioChannels, { left: false, right: true });
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 2n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 4n }]);
   } finally {
     store.db.close();
     await rm(directory, { recursive: true, force: true });
@@ -103,9 +103,41 @@ test('newer schema versions are rejected', () => {
   try {
     store.db.exec(`DROP TABLE schema_version;
       CREATE TABLE schema_version (version INTEGER NOT NULL);
-      INSERT INTO schema_version(version) VALUES (3);`);
+      INSERT INTO schema_version(version) VALUES (5);`);
     assert.throws(() => createSchema(store.db), /Unsupported database schema/);
   } finally {
     store.db.close();
+  }
+});
+
+test('v3 placements migrate in place with their identity, epoch and sealed key intact', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-schema-v3-'));
+  const path = join(directory, 'control.db');
+  let store = new ControlDatabase(path);
+  try {
+    const sealed = store.atRestKey.seal('tenant', Buffer.alloc(32, 9));
+    store.db.exec(`DROP TABLE session_placements;
+      CREATE TABLE session_placements (tenant TEXT PRIMARY KEY,session_id TEXT NOT NULL UNIQUE,node_id TEXT NOT NULL,
+        placement_epoch INTEGER NOT NULL,key_ciphertext TEXT NOT NULL);
+      DROP TABLE schema_version; CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(3)`);
+    store.db
+      .prepare('INSERT INTO session_placements VALUES(?,?,?,?,?)')
+      .run('tenant', 'session', 'node', 7, sealed);
+    store.db.close();
+    store = new ControlDatabase(path);
+    assert.deepEqual(store.db.prepare('SELECT * FROM session_placements').get(), {
+      tenant: 'tenant',
+      session_id: 'session',
+      node_id: 'node',
+      placement_epoch: 7n,
+      key_ciphertext: sealed,
+      state: 'active',
+      checkpoint_id: null,
+    });
+    assert.deepEqual(store.atRestKey.open('tenant', sealed), Buffer.alloc(32, 9));
+    assert.ok(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='objects'").get());
+  } finally {
+    store.db.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });

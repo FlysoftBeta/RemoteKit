@@ -5,7 +5,7 @@ import { RemoteKitError, httpStatus, toRemoteKitError } from '../../shared/error
 import type { ProductState } from '../../shared/product';
 import type { DomainServices } from '../application';
 import { DiagnosticSessions, diagnosticMessageLimit } from '../diagnostics/sessions';
-import type { RemoteNodeLink } from '../endpoint/remote-node';
+import type { NodeRegistry } from '../cluster/node-link';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
 
 type DiagnosticAuthority = { sessions?: DiagnosticSessions; identity: string; allowed: () => boolean };
@@ -70,6 +70,17 @@ const handlers: Record<string, Handler> = {
     ),
   ),
 };
+for (const method of ['admin.nodes', 'admin.removeNode', 'admin.readdNode']) {
+  handlers[method] = product(({ services, authority }, params) => {
+    if (!services.store.accounts.userForTenant(authority.tenantId)?.isAdmin)
+      throw new RemoteKitError('forbidden', '需要管理员权限');
+    if (method === 'admin.nodes') return services.objects.listNodes();
+    if (typeof params.nodeId !== 'string') throw new RemoteKitError('invalid_request', 'Invalid node id');
+    return method === 'admin.removeNode'
+      ? services.objects.removeNode(params.nodeId)
+      : services.objects.readdNode(params.nodeId);
+  });
+}
 for (const method of [
   'auth.get',
   'auth.lock',
@@ -134,7 +145,7 @@ export async function dispatchViewerRequest(
 export function attachViewerSocket(
   control: DomainServices,
   server: Server,
-  options: { endpointNode?: RemoteNodeLink },
+  options: { nodes?: NodeRegistry },
   helpers: {
     diagnosticSessions?: DiagnosticSessions;
     firstViewer: Map<string, number>;
@@ -180,7 +191,7 @@ export function attachViewerSocket(
   server.on('upgrade', (req, socket, head) => {
     try {
       if (isClosing()) throw new RemoteKitError('unavailable', '服务正在关闭');
-      if (options.endpointNode?.handleUpgrade(req, socket, head)) return;
+      if (options.nodes?.handleUpgrade(req, socket, head)) return;
       if (new URL(req.url ?? '/', 'http://localhost').pathname !== '/api/socket')
         throw new RemoteKitError('not_found', '接口不存在');
       checkOrigin(req);

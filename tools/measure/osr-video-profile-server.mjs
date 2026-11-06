@@ -1,6 +1,6 @@
 // Usage: node tools/measure/osr-video-profile-server.mjs --package <unpacked streaming runtime>
 //   --evidence develop/tmp/<new-directory> [--live-build] [--port 33623]
-//   [--viewer <chrome.exe>] [--rtc-playout-max-ms 50] [--state <previous evidence directory>]
+//   [--viewer <chrome.exe>] [--state <previous evidence directory>]
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
@@ -17,15 +17,12 @@ const { values: options } = parseArgs({
     port: { type: 'string', default: '33623' },
     viewer: { type: 'string', default: 'C:/src/chromium/src/out/rel/chrome.exe' },
     'live-build': { type: 'boolean' },
-    'rtc-playout-max-ms': { type: 'string' },
     state: { type: 'string' },
   },
 });
 if (!options.package || !options.evidence) throw Error('--package and --evidence are required');
 const port = Number(options.port);
 if (!Number.isInteger(port) || port < 1024 || port > 65534) throw Error('Invalid Control port');
-const maxPlayout = options['rtc-playout-max-ms'];
-if (maxPlayout !== undefined && maxPlayout !== '50') throw Error('Only the 50 ms contrast is supported');
 const fixturePort = port + 1;
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const evidence = resolve(options.evidence);
@@ -39,7 +36,7 @@ const pkg = resolve(options.package);
 const node = join(pkg, 'bin', 'node.exe');
 const viewer = resolve(options.viewer);
 const endpoint = options['live-build']
-  ? join(root, 'build', 'endpoint-package', 'endpoint', 'endpoint_service.exe')
+  ? join(root, 'build', 'endpoint', 'endpoint', 'endpoint_service.exe')
   : join(pkg, 'bin', 'endpoint_service.exe');
 const browser = options['live-build']
   ? resolve('C:/src/chromium/src/out/dev/remotekit_browser.exe')
@@ -156,21 +153,27 @@ await new Promise((ready, reject) => {
   server.once('error', reject);
   server.listen(fixturePort, '127.0.0.1', ready);
 });
-const endpointArgs = [`--browser=${browser}`, `--data-path=${join(state, 'endpoint')}`];
-if (maxPlayout) endpointArgs.push(`--rtc-playout-max-ms=${maxPlayout}`);
+const configPath = join(state, 'control.json');
+await writeFile(
+  configPath,
+  JSON.stringify({
+    http: { host: '127.0.0.1', port, origins: [`http://127.0.0.1:${port}`] },
+    database: join(state, 'control.db'),
+    diagnostics: join(evidence, 'diagnostics'),
+    nodeDefaults: {
+      browser,
+      dataPath: join(state, 'endpoint'),
+      browserTraceDir: join(evidence, 'browser-trace'),
+    },
+    nodes: { local: { launch: { executable: endpoint, root: join(state, 'node') } } },
+  }),
+);
 const child = spawn(node, [control], {
   windowsHide: true,
   stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   env: {
     ...process.env,
-    PORT: String(port),
-    REMOTEKIT_CONTROL_HOST: '127.0.0.1',
-    REMOTEKIT_CONTROL_DB: join(state, 'control.db'),
-    REMOTEKIT_SERVER_TRACE: join(evidence, 'server-trace'),
-    REMOTEKIT_MEDIA_TRACE: join(evidence, 'browser-trace'),
-    REMOTEKIT_ENDPOINT: endpoint,
-    REMOTEKIT_ENDPOINT_ARGS: JSON.stringify(endpointArgs),
-    REMOTEKIT_CONTROL_ORIGINS: `http://127.0.0.1:${port}`,
+    REMOTEKIT_CONTROL_CONFIG: configPath,
   },
 });
 child.stdout.pipe(createWriteStream(join(evidence, 'server.stdout.log')));
@@ -210,9 +213,8 @@ await writeFile(
       endpoint,
       browser,
       control,
-      endpointArgs,
+      configPath,
       state,
-      maxPlayout: maxPlayout ?? null,
       startedUtc: new Date().toISOString(),
     },
     null,

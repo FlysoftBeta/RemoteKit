@@ -140,6 +140,12 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
       connection.current!.request('admin.setRegistrationCredential', { serverCredential }),
     [],
   );
+  const loadNodes = useCallback(() => connection.current!.request('admin.nodes', {}), []);
+  const changeNode = useCallback(
+    (nodeId: string, action: 'remove' | 'readd') =>
+      connection.current!.request(action === 'remove' ? 'admin.removeNode' : 'admin.readdNode', { nodeId }),
+    [],
+  );
   const productReady = status === 'online' && snapshot.authorization.ready;
   const fullscreen = state?.pageFullscreen;
   const fullscreenTarget = fullscreen?.target;
@@ -380,6 +386,8 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
         )}
         {state.user.isAdmin && (
           <AdminDialog
+            loadNodes={loadNodes}
+            changeNode={changeNode}
             open={admin}
             online={status === 'online'}
             onClose={() => setAdmin(false)}

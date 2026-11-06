@@ -275,8 +275,6 @@ export class FileChannel {
     if (
       !asset ||
       asset.assetId !== assetId ||
-      typeof asset.hash !== 'string' ||
-      !asset.hash ||
       typeof asset.type !== 'string' ||
       !Number.isSafeInteger(asset.size) ||
       asset.size < 0

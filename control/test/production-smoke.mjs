@@ -1,14 +1,13 @@
-// Proves the bundled server runs outside the source tree with only native runtime dependencies.
+// Proves the bundled server runs in an isolated deployment with only native runtime dependencies.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { cp, mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { tmpdir } from 'node:os';
 import { WebSocket } from 'ws';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const scratchRoot = tmpdir();
+const scratchRoot = resolve(root, '../develop/tmp');
 await mkdir(scratchRoot, { recursive: true });
 const scratch = await mkdtemp(resolve(scratchRoot, 'control-production-')),
   deployment = resolve(scratch, 'control');
@@ -18,19 +17,20 @@ await cp(resolve(root, 'dist/client'), resolve(deployment, 'dist/client'), { rec
 await cp(resolve(root, 'dist/runtime/node_modules'), resolve(deployment, 'node_modules'), {
   recursive: true,
 });
-await cp(resolve(root, 'test/stdio-fixture.mjs'), resolve(scratch, 'endpoint-fixture.mjs'));
+const configPath = resolve(scratch, 'control.json');
+await writeFile(
+  configPath,
+  JSON.stringify({
+    http: { host: '127.0.0.1', port: 0, origins: ['http://production.test'] },
+    database: resolve(deployment, 'data/control.db'),
+    nodes: { production: {} },
+  }),
+);
 const child = spawn(process.execPath, [resolve(deployment, 'dist/server.mjs')], {
   cwd: scratch,
   env: {
     ...process.env,
-    PORT: '0',
-    REMOTEKIT_CONTROL_HOST: '127.0.0.1',
-    REMOTEKIT_HTTPS_KEY: '',
-    REMOTEKIT_HTTPS_CERT: '',
-    REMOTEKIT_CONTROL_DB: resolve(deployment, 'data/control.db'),
-    REMOTEKIT_ENDPOINT: process.execPath,
-    REMOTEKIT_ENDPOINT_ARGS: JSON.stringify([resolve(scratch, 'endpoint-fixture.mjs')]),
-    REMOTEKIT_CONTROL_ORIGINS: 'http://production.test',
+    REMOTEKIT_CONTROL_CONFIG: configPath,
   },
   stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   windowsHide: true,

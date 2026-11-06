@@ -69,6 +69,12 @@ Result<Json> BrowserRpc::Exchange(Json command,
   if (!Control())
     return Error{ErrorCode::kUnavailable, "browser control unavailable"};
   command["version"] = 1;
+  // Browser session numbers are scoped to a single Browser process.
+  if (command.contains("session"))
+    command["session"] = "1";
+  if (command.contains("viewConfigs") && command["viewConfigs"].is_array())
+    for (auto& view : command["viewConfigs"])
+      view["session"] = "1";
   command["id"] = ++serial_;
   const auto encoded = command.dump();
   std::vector<char> response(1024 * 1024);
@@ -85,11 +91,14 @@ Result<Json> BrowserRpc::Exchange(Json command,
       if (const auto handle = control_.exchange(0))
         sdk_.remotekit_sdk_control_close(handle);
     }
-    fprintf(stderr, "browser RPC method=%s request_id=%llu elapsed_ms=%lld sdk_status=%d control=%llu error=%s\n",
+    fprintf(stderr,
+            "browser RPC method=%s request_id=%llu elapsed_ms=%lld sdk_status=%d control=%llu "
+            "error=%s\n",
             command.value("method", std::string()).c_str(), serial_,
             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started).count()), status, Control(),
-            error.message.c_str());
+                                       std::chrono::steady_clock::now() - started)
+                                       .count()),
+            status, Control(), error.message.c_str());
     return error;
   };
   if (status) {
@@ -177,16 +186,20 @@ Result<void> BrowserRpc::OpenRender(remotekit_sdk_render_setup& setup) {
         sdk_.remotekit_sdk_control_close(handle);
     }
     needs_health_check_ = true;
-    fprintf(stderr, "browser RPC method=output.open/describe elapsed_ms=%lld sdk_status=%d control=%llu\n",
+    fprintf(stderr,
+            "browser RPC method=output.open/describe elapsed_ms=%lld sdk_status=%d control=%llu\n",
             static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started).count()), status, Control());
+                                       std::chrono::steady_clock::now() - started)
+                                       .count()),
+            status, Control());
     lock.unlock();
     if (Control() && status != REMOTEKIT_SDK_TIMEOUT) {
       auto description = Request({{"method", "output.status"}}, 0, 1000);
       if (description && description.value().contains("output")) {
         const auto& output = description.value()["output"];
         if (!output.value("error", std::string()).empty())
-          return Error{ErrorCode::kUnavailable, output.value("message", output["error"].get<std::string>())};
+          return Error{ErrorCode::kUnavailable,
+                       output.value("message", output["error"].get<std::string>())};
       }
     }
     return Error{media::SdkErrorCode(status), "browser render setup SDK " + std::to_string(status)};

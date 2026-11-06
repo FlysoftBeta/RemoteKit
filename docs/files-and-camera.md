@@ -6,11 +6,11 @@
 
 | 对象 | 所有者 | 内容 |
 |---|---|---|
-| 资产（asset） | Endpoint Session（`FileLibrary`） | 按 SHA-256 内容寻址的字节；只在本 Session 内去重 |
+| 资产（asset） | 对象存储（Endpoint 节点上的加密对象，Control 的对象索引） | 不可变字节，id = Tenant 密钥对内容的 HMAC；只在本 Tenant 内去重，可以有多个节点上的副本 |
 | 目录条目（library entry） | Control SQLite | 名称、分组、时间、是否归档、照片元数据；引用资产 hash |
 | 篮子与选择事务 | Control SQLite | 篮子顺序；一次原生选择的不可变清单与终态 |
 
-同一个资产可以被多个条目引用，各条目有独立的名称、分组和归档状态。content hash 永远不授予跨 Session 访问。
+同一个资产可以被多个条目引用，各条目有独立的名称、分组和归档状态。资产 id 不授予跨 Tenant 访问，也无法被没有 Tenant 密钥的一方用内容 hash 推出。对象格式、副本与回收见[多节点 · 对象存储](cluster.md#对象存储)。
 
 **数据路径**：文件字节和照片分析全部走已有的 WebRTC DataChannel（`files.request/result`，version 1），由 Session 拥有的有界磁盘线程处理；元数据走鉴权的 WebSocket。Control 只授权不透明的绑定，从不打开 Endpoint 的磁盘路径——Control 与 Endpoint 可以在不同机器上。哈希、拷贝、OpenCV 不持有媒体锁或 Browser 锁。
 
@@ -32,8 +32,8 @@
 - 篮子最多 64 个唯一条目，目录最多 4096 条。归档状态与篮子成员身份独立：从"我的文件"直接导入立即归档；临时导入到篮子的文件只在原生选择确认后归档；从篮子移除不删除已归档文件。
 - `library.import/replace/basket/group/move/delete/prepare` 都带操作 ID 并保存冻结的 payload 回执。`library.basket` 与 `library.replace` 先检查幂等重放，再做 `expectedRevision` CAS：过期的拖放不能重新插入已被消费的文件，也不能丢掉并发的导入。
 - `library.finish` 在 Endpoint 持久化匹配 `selection_id` 的终态之后，原子地归档并从篮子移除精确的已选条目，仅一次。取消和未知不消费篮子。
-- 引用对账：Control 携带单调递增的目录 revision 发送完整的引用集合（原件、未决候选、未决选择），Endpoint 据此决定过期。显式删除需确认，被未决原生选择持有的条目拒绝删除；删除只改变过期时间，不立即删除共享内容。
-- Endpoint 预算：资产+草稿 1GiB，单文件 256MiB，草稿字节 512MiB，8192 个资产、1024 个草稿、32 个活动草稿；草稿 30 分钟过期，无引用的资产有 2 小时宽限。原生暂存另有自己的逻辑预算（单文件 256MiB，单批 512MiB/64 个文件，每 Session 1GiB/4096 个文件；零字节文件也占文件数预算），已选或可能已提交的数据计费到所属 Browser incarnation 确认退出为止。两个 1GiB 逻辑预算不等于总磁盘上限。
+- 引用与回收由 Control 的对象索引负责：目录条目、未决候选与未决选择引用资产，缩略图随源对象一起被引用；无引用超过 2 小时的对象从所有副本删除。显式删除需确认，被未决原生选择持有的条目拒绝删除。
+- 预算：每 Tenant 对象字节配额由 Control 配置（`quotas.tenantObjectBytes`，默认 4GiB）按索引计算；Endpoint 只限制单文件 256MiB、草稿字节 512MiB、1024 个草稿、32 个活动草稿，草稿 30 分钟过期。上传 seal 时写入对象并向 Control `object.committed`，登记成功才算 seal 成功。给 Browser 暂存、生成缩略图或 Viewer 下载时本地没有该对象，就从持有副本的节点拉取。原生暂存另有自己的逻辑预算（单文件 256MiB，单批 512MiB/64 个文件，每 Session 1GiB/4096 个文件；零字节文件也占文件数预算），已选或可能已提交的数据计费到所属 Browser incarnation 确认退出为止。两个 1GiB 逻辑预算不等于总磁盘上限。
 - 重启扫描只检查已识别的自有目录，不跟随 reparse/符号链接，按 max(声明的预留, 实际大小) 计费；预留无效或缺失、访问失败、扫描溢出时保守地把配额置满。未知目录和归属未确认的旧文件不是可删除的缓存。
 - 上传：`asset.begin/chunk/seal/cancel`，每块最多 16384 字节（base64 编码后），最多 4 块在途，DataChannel `bufferedAmount` 有界；Endpoint 只在实际写入后确认 offset；同 offset 相同字节可幂等重放，错误 offset/数据不行。篮子的库授权使用 `requestId='library'`，与原生选择器的授权分开；锁定、peer 变化、授权代次变化同时撤销两者。
 - 缩略图：内容寻址的 JPEG，最长边 320、最大 64KiB，最多 256 个源映射；客户端按可见性懒加载，带有界缓存（96 项、2MiB、128 个待处理订阅，失败冷却 30 秒）。WIC 在完整 RGB 分配前先缩小 JPEG/PNG，输入上限 64MiB 压缩、32Mi 像素、单轴 16384；不支持的格式显示文件图标。

@@ -1,6 +1,5 @@
 export interface Asset {
   assetId: string;
-  hash: string;
   size: number;
   type: string;
   width?: number;

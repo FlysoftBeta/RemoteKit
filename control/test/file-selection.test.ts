@@ -11,7 +11,7 @@ const request: FileRequest = {
   multiple: false,
   accept: ['.JPG', 'image/png'],
   state: 'pending',
-  limits: { maxFiles: 3, maxFileBytes: 100, maxBatchBytes: 150, sessionBytes: 1000 },
+  limits: { maxFiles: 3, maxFileBytes: 100, maxBatchBytes: 150 },
 };
 
 test('chooser cancellation preserves claimed outcomes until terminal reconciliation', () => {

@@ -4,10 +4,7 @@
 namespace remotekit {
 ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
   static const std::map<std::string, Handler> methods{
-      {"session.library.references",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Files().Library().LibraryCommand("session.library.references", request);
-       }},
+      {"session.open", [](Session& session, const Json& request) { return session.Open(request); }},
       {"auth.face.begin",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Face().FaceCommand(Required(request, "method"), request,
@@ -72,10 +69,6 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Files().Library().LibraryCommand(Required(request, "method"), request);
        }},
-      {"session.library.retain",
-       [](Session& session, const Json& request) -> Result<Json> {
-         return session.Files().Library().LibraryCommand(Required(request, "method"), request);
-       }},
       {"session.library.selectionStatus",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Files().Library().LibraryCommand(Required(request, "method"), request);
@@ -90,7 +83,7 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        }},
       {"session.snapshot",
        [](Session& session, const Json& request) -> Result<Json> {
-         return session.Views().ManageSessionSnapshot(request);
+         return session.Snapshot(request.value("outputDiagnostics", false));
        }},
       {"view.adopt",
        [](Session& session, const Json& request) -> Result<Json> {

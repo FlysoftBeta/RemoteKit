@@ -10,11 +10,12 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
             └───────┬──────────────────────────────┬──────────┘
           WebSocket │ 认证、产品状态、信令            │ WebRTC：视频/音频/输入/
                     │                              │ 产品动作/文件/人脸图像
-            ┌───────▼───────┐   JSONL 或 WSS   ┌──────▼──────────────────────┐
+            ┌───────▼───────┐  集群通道（Noise）┌──────▼──────────────────────┐
             │   Control     │◄────────────────►│  Endpoint（每台算力节点一个）  │
-            │ Node + SQLite │   管理协议        │  Session × N                 │
+            │ Node + SQLite │  stdio 或 WS      │  Session × N                 │
             └───────────────┘                  │   ├ Comp：节拍、Slot、编码    │
                                                │   ├ RTC peer（SDK）          │
+                                               │   ├ 对象存储 ◄──TCP──► 其他节点
                                                │   └ Browser 进程 ──Mojo──┐   │
                                                └──────────────────────────┼───┘
                                                 ┌─────────────────────────▼───┐
@@ -26,17 +27,18 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 | 组件 | 语言/构建 | 职责 |
 |---|---|---|
-| **Control** | TypeScript，Node，better-sqlite3，Vite/React/MUI | 产品状态的唯一真相：账户、Window/Tab、地址意图、设置、站点偏好、文件目录、操作收据。认证、Viewer 租约、信令转发、对账、Memory Saver 策略。提供 Viewer 前端。 |
-| **Endpoint** | C++20，独立 CMake/Ninja | 算力节点。Tenant→Session；每个 Session 一个 Browser 进程。GPU atlas 消费、硬件编码（QSV/NVENC）、WebRTC、输入校验与路由、文件资产与照片处理、人脸推理。可与 Control 分机部署。 |
+| **Control** | TypeScript，Node，better-sqlite3，Vite/React/MUI | 产品状态的唯一真相：账户、Window/Tab、地址意图、设置、站点偏好、文件目录、操作收据。节点配置、会话放置、Tenant 密钥、对象索引与 checkpoint。认证、Viewer 租约、信令转发、对账、Memory Saver 与休眠策略、更新包分发。提供 Viewer 前端。 |
+| **Endpoint** | C++20，独立 CMake/Ninja | 算力节点，可与 Control 分机部署，配置由 Control 下发。Tenant→Session；每个 Session 一个 Browser 进程。GPU atlas 消费、硬件编码（QSV/NVENC）、WebRTC、输入校验与路由、照片处理、人脸推理、加密对象存储与节点间传输、checkpoint。 |
+| **Updater** | C++20，同一 CMake 工程的独立可执行文件 | 节点上的 `remotekit_node.exe`：监管 Endpoint 进程，从 Control 下载并安装与之相同版本的节点运行时。 |
 | **Browser** | C++，Chromium GN | 承载 WebContents 与 Profile；页面生命周期、输入派发、页面请求（对话框/文件选择/权限/下载）、导航状态；Rend 驱动离屏绘制并合成 atlas。 |
 | **SDK** | C ABI DLL（在 Chromium 树内构建） | 把 Mojo（与 Browser 的控制和渲染管道）和 libwebrtc（peer、视频源、外部编码器桥、音频源）包成 C 接口给 Endpoint 用。跨 DLL 不传任何 C++ STL/libc++/Abseil/Chromium 对象。 |
 | **Viewer** | Control 提供的 Web 前端 | 沉浸式浏览器外壳；多个独立 Window 并排或窄屏切换；video 呈现；输入、IME、触控手势；文件篮与相机。 |
 
 ## 隔离与身份
 
-- 一个 User = 一个 workspace = 一个 Tenant = 一个 Session。Session 是多租户数据隔离边界：独立的 Browser 进程、Profile 目录、本地 Mojo 通道、GPU atlas、文件存储。Window 与 Tab 是 Session 内的产品关系，不是隔离边界。当前每 Session 一个 Profile，层级上为多 Profile 留了位置。
+- 一个 User = 一个 workspace = 一个 Tenant = 一个 Session。Session 是多租户数据隔离边界：独立的 Browser 进程、Profile 目录、本地 Mojo 通道、GPU atlas、Tenant 密钥与对象命名空间。Session 由 Control 分配的 sessionId 标识，任一时刻只在一个节点上运行，Browser 关闭后可以在任何节点上从 checkpoint 重新打开（见[多节点](cluster.md)）。Window 与 Tab 是 Session 内的产品关系，不是隔离边界。当前每 Session 一个 Profile，层级上为多 Profile 留了位置。
 - 网络用户只能通过已认证的 Control 会话和 RTC 会话进入；Session ID 不是凭据。Tenant 身份由认证用户映射得到，客户端不能指定。
-- 稳定的逻辑身份与可替换的执行实例分开：WebView 是稳定的，WebContents（instance）、文档（document）、焦点（focus）、输出布局（outputGeneration/layoutEpoch）、Browser 进程（browserIncarnation）、Endpoint 进程（endpointIncarnation）、管理连接（connectionEpoch）、RTC 尝试（attemptId）、产品授权（authEpoch）各有自己的代次。异步结果总是带着它产生时的身份回来，与当前身份不符就作废——旧请求永远不会被改投到新对象上。
+- 稳定的逻辑身份与可替换的执行实例分开：WebView 是稳定的，WebContents（instance）、文档（document）、焦点（focus）、输出布局（outputGeneration/layoutEpoch）、Browser 进程（browserIncarnation）、Endpoint 进程（endpointIncarnation）、管理连接（connectionEpoch）、会话放置（placementEpoch）、RTC 尝试（attemptId）、产品授权（authEpoch）各有自己的代次。异步结果总是带着它产生时的身份回来，与当前身份不符就作废——旧请求永远不会被改投到新对象上。
 
 ## 主要数据流
 
@@ -84,7 +86,8 @@ control/
     http/          HTTP 路由与 WebSocket 分发表
     auth/          账户、Viewer 锁定与 peer 授权、人脸挑战、密码学
     persistence/   schema 与各仓库（账户、安全、workspace、操作收据、文件库）
-    endpoint/      Endpoint 链路（本地 JSONL / 远端 WSS）与类型化网关
+    cluster/       集群通道（Noise、帧、节点链路）、放置、密钥派生、对象索引、指标、更新包
+    endpoint/      类型化网关（按 Tenant 路由到所在节点）与管理消息类型
     tenants/       每租户运行时状态
     viewers/       Viewer 租约与 RTC 信令
     workspace/     纯命令、操作管线、对账、导航、生命周期与 Memory Saver、页面请求、弹窗、站点策略
@@ -104,7 +107,9 @@ control/
 endpoint/
   src/
     main.cpp, options.*, service.*       入口、配置、租户注册与管理分发循环
-    management/    管理链路（stdio / 远端 WSS）与方法表
+    cluster/       集群通道库（Noise/CNG、帧、stdio/WebSocket/TCP 载体、node.json 与 build.json）
+    management/    ClusterLink（管理链路）与方法表
+    objects/       加密对象存储、节点间传输（PeerServer/PeerClient）
     platform/      Windows 作业与进程
     persistence/   Session 的持久文件
     session/       Session（组装）、BrowserRuntime/BrowserRpc、ViewController、导航恢复
@@ -114,6 +119,7 @@ endpoint/
     auth/          人脸推理、原始相机帧
     files/         文件库、暂存、照片处理、DC 文件服务
     diagnostics/ util/
+  updater/         remotekit_node.exe：服务、监管、下载、zstd + tar 解包、自我替换
   tests/           CTest 单元测试
 browser/
   browser_runtime.*, view_registry.*, layout_transaction.*, popup_registry.*, closed_views.*
@@ -122,7 +128,7 @@ browser/
   osr_renderer.*, osr/（device, plane_pool, scheduler, atlas, retirement）, offscreen_host.*, render_channel.*
   page_requests.*, profile_*, browser_context.*, navigation_*, audio_target.*, compat*, view_model.*
   sdk/             sdk_{runtime,control,render,resources}.cc、rtc_{peer,encoder,video_source,audio,stats}.cc
-protocol/          跨组件契约：控制版本与错误码、渲染线格式、Slot 与音频共享内存、触控时钟、atlas 规划与 fixture
+protocol/          跨组件契约：控制版本与错误码、渲染线格式、Slot 与音频共享内存、触控时钟、atlas 规划与 fixture、集群 Noise 测试向量
 sdk/               公共 C 头与独立的 SDK 消费者 smoke
 patches/           有序的 Chromium 补丁与 manifest
 tools/             构建、补丁、SDK 导出、打包；tools/measure/ 性能测量；tools/tests/ 工具自身的测试
@@ -133,6 +139,7 @@ tests/             e2e/（真实栈产品场景）、integration/（原生 Endpo
 
 | 文档 | 内容 |
 |---|---|
+| [多节点](cluster.md) | 配置文件、集群通道与握手、版本锁定与更新、放置与密钥、对象存储、checkpoint 与休眠、指标、节点移除 |
 | [Control](control-plane.md) | 数据归属、连接、操作与收据、导航、对账、对话框/关闭/弹窗、站点身份、全屏、设置 |
 | [页面生命周期](page-lifecycle.md) | 可见性、freeze/discard/unload/restore、Memory Saver、不确定恢复、导航导出、Profile |
 | [渲染](rendering.md) | OSR 输出设备、plane、atlas、Slot/Fence、渲染管道协议、换代、几何 |

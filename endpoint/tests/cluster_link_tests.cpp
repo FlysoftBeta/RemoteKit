@@ -1,0 +1,330 @@
+#include "management/cluster_link.hpp"
+#include "cluster/node_files.hpp"
+#include <windows.h>
+#include <atomic>
+#include <condition_variable>
+#include <future>
+#include <iostream>
+#include <mutex>
+#include <stdexcept>
+#include <thread>
+using namespace remotekit;
+using namespace remotekit::cluster;
+using namespace std::chrono_literals;
+namespace {
+void Check(bool value, const char* message) {
+  if (!value)
+    throw std::runtime_error(message);
+}
+template <class T>
+T Take(Result<T> result) {
+  if (!result)
+    throw std::runtime_error(result.error().message);
+  return std::move(result).value();
+}
+void Take(Result<void> result) {
+  if (!result)
+    throw std::runtime_error(result.error().message);
+}
+template <class Predicate>
+void Await(Predicate predicate) {
+  auto deadline = std::chrono::steady_clock::now() + 5s;
+  while (!predicate()) {
+    Check(std::chrono::steady_clock::now() < deadline, "condition timed out");
+    std::this_thread::sleep_for(10ms);
+  }
+}
+Json Ready(Json config = {{"maxSessions", 3}}) {
+  auto text = config.dump();
+  return {
+      {"type", "node.ready"},
+      {"sessions", Json::array()},
+      {"buildId", "dev"},
+      {"connectionEpoch", "12345678-1234-1234-1234-123456789abc"},
+      {"config", config},
+      {"configHash", Hex(Sha256({reinterpret_cast<const uint8_t*>(text.data()), text.size()}))}};
+}
+Json Reject(const char* code) {
+  return {{"type", "node.reject"}, {"code", code}, {"buildId", "dev"}};
+}
+struct Responder {
+  std::mutex mutex;
+  std::vector<std::shared_ptr<Channel>> channels;
+  std::vector<Json> replies;
+  std::atomic<unsigned> attempts{0};
+  unsigned failures = 0;
+  explicit Responder(std::vector<Json> values) : replies(std::move(values)) {}
+  Result<Established> Connect() {
+    const auto attempt = attempts++;
+    if (attempt < failures)
+      return Error{ErrorCode::kUnavailable, "injected connection failure"};
+    const size_t index = attempt - failures;
+    if (index >= replies.size())
+      return Error{ErrorCode::kUnavailable, "responder stopped"};
+    HANDLE ar, aw, br, bw;
+    Check(CreatePipe(&ar, &bw, nullptr, 65536) != FALSE, "pipe");
+    Check(CreatePipe(&br, &aw, nullptr, 65536) != FALSE, "pipe");
+    auto responder = std::async(std::launch::async, [&] {
+      return AcceptCarrier(HandleCarrier(br, bw), Key{}, [&](const Json& hello) -> Result<Json> {
+        Check(hello["role"] == "endpoint" && hello["buildId"] == "dev" &&
+                  hello["nodeId"] == "test" && hello["incarnation"] == std::string(32, 'a'),
+              "endpoint hello");
+        return replies[index];
+      });
+    });
+    auto connection = ConnectCarrier(HandleCarrier(ar, aw), Key{},
+                                     {"endpoint", "test", "dev", std::string(32, 'a')});
+    auto accepted = Take(responder.get());
+    {
+      std::lock_guard lock(mutex);
+      channels.push_back(std::move(accepted.channel));
+    }
+    return connection;
+  }
+  std::shared_ptr<Channel> At(size_t index) {
+    std::shared_ptr<Channel> result;
+    Await([&] {
+      std::lock_guard lock(mutex);
+      if (channels.size() <= index)
+        return false;
+      result = channels[index];
+      return true;
+    });
+    return result;
+  }
+};
+Result<void> Validate(const Json& config) {
+  if (config.contains("maxSessions"))
+    return {};
+  return Error{ErrorCode::kInvalidRequest, "invalid config"};
+}
+uint64_t Request(ClusterLink& link, Channel& server, int id) {
+  Take(server.Send({{"id", id}, {"method", "session.snapshot"}, {"tenantId", "tenant"}}));
+  std::string text;
+  uint64_t generation = 0;
+  bool eof = false;
+  Await([&] { return link.Next(text, generation, eof); });
+  Check(!eof && Json::parse(text)["id"] == id && link.Current(generation),
+        "request delivered with current generation");
+  return generation;
+}
+void Local() {
+  Responder responder({Ready()});
+  ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
+  Check(Take(link.WaitReady())["maxSessions"] == 3, "initial config");
+  auto server = responder.At(0);
+  auto generation = Request(link, *server, 1);
+  Check(link.SendReply(generation, {{"id", 1}, {"ok", true}}), "reply enqueued");
+  Check(Take(server->Receive(2s)).json["id"] == 1, "encrypted reply");
+  Check(link.SendEvent({{"event", "rtc.signal"}}, generation), "event enqueued");
+  Check(Take(server->Receive(2s)).json["event"] == "rtc.signal", "encrypted event");
+  server->Close();
+  bool eof = false;
+  std::string bytes;
+  Await([&] {
+    link.Next(bytes, generation, eof);
+    return eof;
+  });
+  Check(link.ExitCode() == 0 && responder.attempts == 1, "local EOF without reconnect");
+}
+void Reconnect() {
+  Responder responder({Ready(), Ready()});
+  ClusterLink link([&] { return responder.Connect(); }, false, "dev", Validate);
+  Take(link.WaitReady());
+  auto first = responder.At(0);
+  auto old = Request(link, *first, 1);
+  std::atomic<uint64_t> lost{0};
+  link.OnDisconnect([&](uint64_t generation) { lost = generation; });
+  first->Close();
+  auto second = responder.At(1);
+  auto current = Request(link, *second, 2);
+  Check(lost == old && old != current && !link.Current(old), "disconnect retires generation");
+  Check(!link.SendReply(old, {{"id", 1}}) && !link.SendEvent({{"event", "stale"}}, old),
+        "stale replies and events rejected");
+  Check(link.SendReply(current, {{"id", 2}}), "replacement reply");
+  Check(Take(second->Receive(2s)).json["id"] == 2, "only replacement response delivered");
+  link.OnDisconnect({});
+}
+void ExitRules() {
+  for (const auto& [reply, expected] :
+       std::vector<std::pair<Json, int>>{{Ready({{"maxSessions", 4}}), 4},
+                                         {Ready({{"unknown", 4}}), 4},
+                                         {Reject("build_mismatch"), 3},
+                                         {Reject("unknown_node"), 1}}) {
+    Responder responder({Ready(), reply});
+    ClusterLink link([&] { return responder.Connect(); }, false, "dev", Validate);
+    Take(link.WaitReady());
+    auto first = responder.At(0);
+    auto generation = Request(link, *first, 1);
+    first->Close();
+    bool eof = false;
+    std::string bytes;
+    Await([&] {
+      link.Next(bytes, generation, eof);
+      return eof;
+    });
+    Check(link.ExitCode() == expected, "reconnect exit code");
+  }
+  for (const auto& [code, expected] :
+       std::vector<std::pair<const char*, int>>{{"build_mismatch", 3}, {"unknown_node", 1}}) {
+    Responder responder({Reject(code)});
+    ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
+    Check(!link.WaitReady() && link.ExitCode() == expected, "initial rejection exit code");
+  }
+  auto invalid = Ready();
+  invalid["configHash"] = std::string(64, '0');
+  Responder responder({invalid});
+  ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
+  Check(!link.WaitReady() && link.ExitCode() == 1, "config hash integrity");
+}
+void LimitsAndRetry() {
+  {
+    Responder responder({Ready()});
+    responder.failures = 2;
+    ClusterLink link([&] { return responder.Connect(); }, false, "dev", Validate);
+    Take(link.WaitReady());
+    Check(responder.attempts == 3, "retry failed connections");
+    auto server = responder.At(0);
+    auto generation = Request(link, *server, 1);
+    Check(!link.SendReply(generation, {{"large", std::string(kMaxJson, 'x')}}),
+          "oversized reply rejected without sending");
+    Check(!link.Current(generation), "overload retires dispatch admission");
+  }
+  {
+    Responder responder({Ready()});
+    ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
+    Take(link.WaitReady());
+    auto server = responder.At(0);
+    std::atomic<bool> lost{false};
+    link.OnDisconnect([&](uint64_t) { lost = true; });
+    for (int i = 0; i < 300 && !lost; ++i) {
+      if (!server->Send({{"id", i}}))
+        break;
+      // Fill the management queue without overflowing the carrier's own queue.
+      std::this_thread::sleep_for(1ms);
+    }
+    Await([&] { return lost.load(); });
+    Await([&] { return link.ExitCode() == 1; });
+    Check(link.ExitCode() == 1, "bounded incoming queue fails local carrier");
+    link.OnDisconnect({});
+  }
+}
+void SupervisorEof() {
+  const auto saved = GetStdHandle(STD_INPUT_HANDLE);
+  HANDLE read, write;
+  Check(CreatePipe(&read, &write, nullptr, 0) != FALSE, "supervisor pipe");
+  Check(SetStdHandle(STD_INPUT_HANDLE, read) != FALSE, "supervisor stdin");
+  struct Restore {
+    HANDLE saved, read, write;
+    ~Restore() {
+      SetStdHandle(STD_INPUT_HANDLE, saved);
+      CloseHandle(read);
+      if (write)
+        CloseHandle(write);
+    }
+  } restore{saved, read, write};
+  Responder responder({Ready()});
+  ClusterLink link([&] { return responder.Connect(); }, false, "dev", Validate, true);
+  Take(link.WaitReady());
+  auto server = responder.At(0);
+  auto generation = Request(link, *server, 1);
+  CloseHandle(restore.write);
+  restore.write = nullptr;
+  bool eof = false;
+  std::string bytes;
+  Await([&] {
+    link.Next(bytes, generation, eof);
+    return eof;
+  });
+  Check(link.ExitCode() == 0 && !link.Current(generation), "supervisor EOF requests graceful stop");
+}
+void OutboundRequests() {
+  Responder responder({Ready()});
+  ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
+  Take(link.WaitReady());
+  auto server = responder.At(0);
+  auto first = std::async(std::launch::async, [&] {
+    return link.Request("object.committed",
+                        {{"tenantId", "tenant"}, {"objectId", std::string(64, 'a')}});
+  });
+  auto second = std::async(std::launch::async, [&] {
+    return link.Request("object.locate", {{"tenantId", "tenant"}, {"ids", Json::array()}});
+  });
+  auto a = Take(server->Receive(5s)).json;
+  auto b = Take(server->Receive(5s)).json;
+  Check(a["id"].is_string() && a["id"].get<std::string>().size() == 36 && a["id"] != b["id"],
+        "request UUIDs");
+  for (const auto& request : {b, a}) {
+    if (request["request"] == "object.committed")
+      Take(server->Send({{"id", request["id"]},
+                         {"ok", false},
+                         {"error", {{"code", "conflict"}, {"message", "conflicting object"}}}}));
+    else
+      Take(server->Send(
+          {{"id", request["id"]}, {"ok", true}, {"result", {{"sources", Json::object()}}}}));
+  }
+  const auto committed = first.get();
+  Check(!committed && committed.error().code == ErrorCode::kConflict,
+        "Control error routed to caller");
+  Check(Take(second.get()).contains("sources"), "out of order replies without dispatcher pumping");
+  std::string bytes;
+  uint64_t generation = 0;
+  bool eof = false;
+  Check(!link.Next(bytes, generation, eof), "replies stay out of dispatcher queue");
+  auto pending = std::async(
+      std::launch::async, [&] { return link.Request("object.locate", {{"tenantId", "tenant"}}); });
+  Take(server->Receive(5s));
+  server->Close();
+  auto lost = pending.get();
+  Check(!lost && lost.error().code == ErrorCode::kOutcomeUnknown, "disconnect outcome unknown");
+}
+void RequestTimeout() {
+  Responder responder({Ready()});
+  ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
+  Take(link.WaitReady());
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = link.Request("object.locate", {{"tenantId", "tenant"}});
+  Check(!result && result.error().code == ErrorCode::kOutcomeUnknown &&
+            std::chrono::steady_clock::now() - started >= 20s,
+        "20 second request timeout");
+}
+void ReadySessions() {
+  for (const auto& sessions :
+       {Json(nullptr), Json::object(),
+        Json::array({{{"tenantId", "../tenant"},
+                      {"sessionId", std::string(32, 'a')},
+                      {"placementEpoch", 1}}}),
+        Json::array({{{"tenantId", "tenant"}, {"sessionId", "bad"}, {"placementEpoch", 1}}}),
+        Json::array({{{"tenantId", "tenant"},
+                      {"sessionId", std::string(32, 'a')},
+                      {"placementEpoch", 0}}})}) {
+    auto ready = Ready();
+    ready["sessions"] = sessions;
+    Responder responder({ready});
+    ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
+    Check(!link.WaitReady(), "invalid ready session list rejected");
+  }
+  auto ready = Ready();
+  ready["sessions"] = Json::array(
+      {{{"tenantId", "tenant"}, {"sessionId", std::string(32, 'a')}, {"placementEpoch", 1}}});
+  Responder responder({ready});
+  ClusterLink link([&] { return responder.Connect(); }, true, "dev", Validate);
+  Take(link.WaitReady());
+}
+}  // namespace
+int main() {
+  try {
+    Local();
+    Reconnect();
+    ExitRules();
+    LimitsAndRetry();
+    SupervisorEof();
+    OutboundRequests();
+    RequestTimeout();
+    ReadySessions();
+    return 0;
+  } catch (const std::exception& error) {
+    std::cerr << error.what() << '\n';
+    return 1;
+  }
+}

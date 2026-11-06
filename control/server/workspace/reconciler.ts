@@ -22,6 +22,10 @@ export class Reconciler {
     >,
   ) {}
   async tick() {
+    const active = this.context.store.db
+      .prepare("SELECT tenant FROM session_placements WHERE state='active'")
+      .all() as { tenant: string }[];
+    for (const { tenant } of active) this.context.tenants.get(tenant).started = true;
     const work = this.context.tenants.activeTenants().map((tenant) => {
       const tracking = this.context.tenants.get(tenant).reconciliation;
       const running = tracking.inflight;
@@ -39,29 +43,22 @@ export class Reconciler {
     });
     await Promise.all(work);
   }
-  async endpointReady(identity?: { processChanged: boolean }) {
-    // Stdio ready means a new child; only authenticated remote hello can prove
-    // that a replacement management socket still belongs to the same process.
-    if (identity?.processChanged !== false) return this.reconcileAll();
-    for (const runtime of this.context.tenants.values()) {
+  private runtimesForNode(nodeId?: string) {
+    return this.context.tenants.values().filter((runtime) => {
+      const placement = this.context.endpoint.placement.peek(runtime.tenantId);
+      return !nodeId || !placement || placement.nodeId === nodeId;
+    });
+  }
+  async endpointReady(identity?: { processChanged: boolean; nodeId?: string }) {
+    if (identity?.processChanged !== false) return this.reconcileAll(identity?.nodeId);
+    const runtimes = this.runtimesForNode(identity.nodeId);
+    for (const runtime of runtimes) {
       this.services.pageRequests.clearAuthorization(runtime.tenantId);
       this.services.policy.reset(runtime.tenantId);
+      if (runtime.connectionId || runtime.rtc.disconnectedPeer) runtime.pendingRtcCheck = true;
     }
-    for (const tenant of this.context.tenants
-      .values()
-      .filter((runtime) => runtime.connectionId || runtime.rtc.disconnectedPeer)
-      .map((runtime) => runtime.tenantId))
-      this.context.tenants.get(tenant).pendingRtcCheck = true;
-    for (const tenant of new Set([
-      ...this.context.tenants
-        .values()
-        .filter((runtime) => runtime.viewer !== undefined)
-        .map((runtime) => runtime.tenantId),
-      ...this.context.tenants
-        .values()
-        .filter((runtime) => runtime.started)
-        .map((runtime) => runtime.tenantId),
-    ])) {
+    for (const runtime of runtimes.filter((runtime) => runtime.viewer || runtime.started)) {
+      const tenant = runtime.tenantId;
       await this.context.tenants.serial(tenant, async () => {
         try {
           await this.services.rtc.checkReconnectedRtc(tenant);
@@ -73,24 +70,16 @@ export class Reconciler {
       });
     }
   }
-  async reconcileAll() {
-    this.context.tenants.endpointGeneration =
-      Math.max(
-        this.context.tenants.endpointGeneration,
-        ...this.context.tenants
-          .values()
-          .flatMap((runtime) => (runtime.mediaGeneration === undefined ? [] : [runtime.mediaGeneration])),
-      ) + 1;
-    for (const runtime of this.context.tenants.values()) {
+  async reconcileAll(nodeId?: string) {
+    const runtimes = this.runtimesForNode(nodeId);
+    for (const runtime of runtimes) {
       if (runtime.viewer) this.services.security.forgetPeer(runtime.tenantId, runtime.viewer.security);
+      const generation = this.context.tenants.mediaGeneration(runtime.tenantId) + 1;
       runtime.resetEndpoint();
+      runtime.mediaGeneration = generation;
     }
-    for (const tenant of new Set([
-      ...this.context.tenants
-        .values()
-        .filter((runtime) => runtime.viewer !== undefined)
-        .map((runtime) => runtime.tenantId),
-    ]))
+    for (const runtime of runtimes.filter((runtime) => runtime.viewer)) {
+      const tenant = runtime.tenantId;
       await this.context.tenants
         .serial(tenant, async () => {
           const viewer = this.context.tenants.get(tenant).viewer;
@@ -107,6 +96,7 @@ export class Reconciler {
           this.services.viewers.push(tenant);
         })
         .catch(() => {});
+    }
   }
   async reconcileProduct(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
@@ -403,6 +393,10 @@ export class Reconciler {
   }
   async observeOffline(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
+    if (this.context.endpoint.placement.peek(tenant)?.state === 'hibernated') {
+      runtime.started = false;
+      return;
+    }
     // Snapshot is read-only. Maintenance must never revive a missing Browser/view.
     const snapshot = await this.context.endpoint.snapshot(tenant),
       state = this.context.store.workspaces.workspace(tenant);
@@ -427,6 +421,7 @@ export class Reconciler {
       );
       this.services.operations.saveWorkspace(state);
     }
+    if (await this.services.lifecycle.hibernate(tenant, snapshot)) return;
     if (snapshot.running === false) {
       runtime.started = false;
       this.services.policy.reset(tenant);

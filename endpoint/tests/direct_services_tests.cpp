@@ -1,8 +1,5 @@
 #include "rtc/dc_services.hpp"
 #include "management/link.hpp"
-namespace remotekit {
-bool ReadServiceLine(std::istream&, std::string&);
-}
 #include <cstdlib>
 #include <cstdio>
 #include <iostream>
@@ -202,11 +199,5 @@ int main() {
   });
   Check(sent.size() == 1 && sent[0]["editable"]["active"] == false,
         "suspended output clears stale authority");
-  std::istringstream input(std::string(1024 * 1024 + 32, 'a') + "\n{}\n");
-  std::string line;
-  Check(remotekit::ReadServiceLine(input, line) && line.size() == 1024 * 1024 + 1,
-        "oversized line does not accumulate");
-  Check(remotekit::ReadServiceLine(input, line) && line == "{}", "oversized tail fully discarded");
-  Check(!remotekit::ReadServiceLine(input, line), "EOF");
   std::cout << "direct services tests passed\n";
 }

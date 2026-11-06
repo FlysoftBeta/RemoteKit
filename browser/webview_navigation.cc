@@ -30,7 +30,7 @@ Result<std::string> NavigationCoordinator::ExportNavigation() const {
     return payload;
   base::Pickle envelope;
   envelope.WriteString(kNavigationOwnerMagic);
-  envelope.WriteInt(1);
+  envelope.WriteInt(2);
   envelope.WriteUInt64(owner_.session_);
   envelope.WriteUInt64(model->profile);
   envelope.WriteString(kNavigationRevision);
@@ -53,7 +53,7 @@ Status NavigationCoordinator::ImportNavigation(std::string_view bytes) {
   int schema = 0;
   std::uint64_t owner_session = 0, owner_profile = 0;
   if (!input.ReadString(&magic) || magic != kNavigationOwnerMagic || !input.ReadInt(&schema) ||
-      schema != 1 || !input.ReadUInt64(&owner_session) || !input.ReadUInt64(&owner_profile) ||
+      schema != 2 || !input.ReadUInt64(&owner_session) || !input.ReadUInt64(&owner_profile) ||
       !input.ReadString(&revision) || revision != kNavigationRevision)
     return Fail(ErrorCode::invalid_request,
                 "Unsupported owned navigation schema or Chromium revision");
@@ -62,7 +62,7 @@ Status NavigationCoordinator::ImportNavigation(std::string_view bytes) {
                 "Navigation snapshot belongs to another Session/Profile");
   if (!input.ReadString(&payload) || !input.ReachedEnd())
     return Fail(ErrorCode::invalid_request, "Invalid owned navigation payload length");
-  auto imported = ImportNavigationState(payload);
+  auto imported = ImportNavigationState(payload, owner_.context_);
   if (!imported)
     return imported.status;
   owner_.lifecycle_->navigation_state_ =

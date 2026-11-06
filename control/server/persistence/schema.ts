@@ -1,9 +1,28 @@
 import type Database from 'better-sqlite3';
+import { existsSync, renameSync } from 'node:fs';
 import { RemoteKitError } from '../../shared/errors';
 
-const version = 2;
+const version = 4;
+const placements = `CREATE TABLE IF NOT EXISTS session_placements (
+  tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
+  placement_epoch INTEGER NOT NULL, key_ciphertext TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'active', checkpoint_id INTEGER)`;
 
 const migrations: Record<number, (db: Database.Database) => void> = {
+  3: (db) => {
+    const columns = db.prepare('PRAGMA table_info(session_placements)').all() as { name: string }[];
+    if (!columns.some((column) => column.name === 'state'))
+      db.exec("ALTER TABLE session_placements ADD COLUMN state TEXT NOT NULL DEFAULT 'active'");
+    if (!columns.some((column) => column.name === 'checkpoint_id'))
+      db.exec('ALTER TABLE session_placements ADD COLUMN checkpoint_id INTEGER');
+  },
+  2: (db) => {
+    db.exec(placements);
+    if (db.name && db.name !== ':memory:' && existsSync(db.name + '.face-key')) {
+      if (existsSync(db.name + '.key')) throw new RemoteKitError('internal', 'Both at-rest key files exist');
+      renameSync(db.name + '.face-key', db.name + '.key');
+    }
+  },
   // v2: settings.avSync is required; existing users keep sync off.
   1: (db) =>
     db.exec(
@@ -49,6 +68,26 @@ export function createSchema(db: Database.Database) {
         tenant TEXT NOT NULL, id TEXT NOT NULL, manifest TEXT NOT NULL, terminal TEXT, checked INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(tenant,id));
       CREATE INDEX IF NOT EXISTS file_library_open ON file_library_selections(tenant,terminal,checked);`);
+    db.exec(placements);
+    db.exec(`CREATE TABLE IF NOT EXISTS objects (
+      tenant TEXT NOT NULL, id TEXT NOT NULL, size INTEGER NOT NULL, stored_size INTEGER NOT NULL,
+      stored_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL, derived_from TEXT, PRIMARY KEY(tenant,id));
+      CREATE TABLE IF NOT EXISTS object_derivations (
+        tenant TEXT NOT NULL, id TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(tenant,id,source_id));
+      CREATE TABLE IF NOT EXISTS object_replicas (
+        tenant TEXT NOT NULL, id TEXT NOT NULL, node_id TEXT NOT NULL, PRIMARY KEY(tenant,id,node_id));
+      CREATE TABLE IF NOT EXISTS checkpoints (
+        tenant TEXT NOT NULL, id INTEGER NOT NULL, placement_epoch INTEGER NOT NULL, manifest_id TEXT NOT NULL,
+        build_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,id));
+      CREATE TABLE IF NOT EXISTS checkpoint_objects (
+        tenant TEXT NOT NULL, checkpoint_id INTEGER NOT NULL, object_id TEXT NOT NULL,
+        PRIMARY KEY(tenant,checkpoint_id,object_id));
+      CREATE TABLE IF NOT EXISTS warm_session_copies (
+        tenant TEXT NOT NULL, node_id TEXT NOT NULL, manifest_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,node_id));
+      CREATE TABLE IF NOT EXISTS removed_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS object_inventory_orphans (
+        node_id TEXT NOT NULL, tenant TEXT NOT NULL, id TEXT NOT NULL, first_seen INTEGER NOT NULL,
+        PRIMARY KEY(node_id,tenant,id));`);
     for (; current < version; ++current) migrations[current](db);
     if (stored === version) return;
     db.exec(`DROP TABLE IF EXISTS schema_version;

@@ -448,6 +448,14 @@ void ProfileDownloads::Shutdown() {
     std::move(callback).Run(std::move(info));
   }
 }
+size_t ProfileDownloads::InProgressCount() const {
+  size_t count = 0;
+  for (const auto& [guid, record] : records_) {
+    if (record.item && record.item->GetState() == download::DownloadItem::IN_PROGRESS)
+      ++count;
+  }
+  return count;
+}
 void ProfileDownloads::ManagerGoingDown(content::DownloadManager*) {
   Shutdown();
 }

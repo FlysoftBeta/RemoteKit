@@ -29,6 +29,8 @@ class BrowserRuntime : public content::GpuDataManagerObserver {
   mojo::ScopedMessagePipeHandle TakeControlAttachment(const base::DictValue&,
                                                       const base::DictValue&);
   void OnControlClosed();
+  void BeginShutdown();
+  void VerifyShutdownComplete();
   bool shutting_down = false;
   std::unique_ptr<display::Screen> screen;
   ViewModel view_model;
@@ -48,6 +50,17 @@ class BrowserRuntime : public content::GpuDataManagerObserver {
   uint64_t output_generation = 0;
   NavigationTransfer navigation_transfers;
   base::RepeatingClosure quit;
+
+ private:
+  void RunShutdown();
+  void OnShutdownFlushed(const std::string& step, bool succeeded);
+  void OnShutdownTimeout();
+  void FinishShutdown();
+  std::set<std::string> shutdown_flushes_;
+  base::OneShotTimer shutdown_timer_;
+  bool shutdown_failed_ = false;
+  bool shutdown_finished_ = false;
+  base::WeakPtrFactory<BrowserRuntime> weak_factory_{this};
 };
 class RemoteKitMainParts final : public content::BrowserMainParts {
  public:

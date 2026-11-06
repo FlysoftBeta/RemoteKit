@@ -16,9 +16,9 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def create_archive(package, node):
+def create_archive(package, node, *, node_runtime=False):
     """Stream tar into bounded, concatenated zstd frames; no intermediate tar."""
-    archive = package.with_name(package.name + '.tar.zst')
+    archive = package / 'release/node.tar.zst' if node_runtime else package.with_name(package.name + '.tar.zst')
     script = r'''
 const { pipeline } = require('node:stream/promises');
 const { zstdCompressSync, constants: c } = require('node:zlib');
@@ -60,7 +60,16 @@ pipeline(process.stdin, compressFrames, process.stdout)
                     writing_error = None
                     try:
                         with tarfile.open(fileobj=compressor.stdin, mode='w|', format=tarfile.PAX_FORMAT) as tar:
-                            tar.add(package, arcname=package.name)
+                            if node_runtime:
+                                root_entry = tarfile.TarInfo('node')
+                                root_entry.type = tarfile.DIRTYPE
+                                root_entry.mode = 0o755
+                                tar.addfile(root_entry)
+                                tar.add(package / 'build.json', arcname='node/build.json')
+                                tar.add(package / 'bin', arcname='node/bin',
+                                        filter=lambda entry: None if entry.name == 'node/bin/node.exe' else entry)
+                            else:
+                                tar.add(package, arcname=package.name)
                     except OSError as error:
                         writing_error = error
                     finally:
@@ -79,8 +88,9 @@ pipeline(process.stdin, compressFrames, process.stdout)
             archive.unlink(missing_ok=True)
             raise
     checksum = digest(archive)
-    archive.with_name(archive.name + '.sha256').write_text(
-        checksum + '  ' + archive.name + '\n', encoding='ascii')
+    if not node_runtime:
+        archive.with_name(archive.name + '.sha256').write_text(
+            checksum + '  ' + archive.name + '\n', encoding='ascii')
     return archive, checksum
 
 
@@ -114,7 +124,7 @@ def copy_face_runtime(files, package):
 
 
 def run_startup_smoke(package, *, work_dir=None):
-    """Run the startup validator with UTF-8 output and preserve real failures."""
+    """Run startup validation with an isolated config file and UTF-8 output."""
     command = [sys.executable, '-X', 'utf8', str(ROOT / 'tests/e2e/test-streaming-package.py'),
                '--package', str(package)]
     if work_dir is not None:
@@ -212,6 +222,7 @@ def main():
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
     copy_endpoint(endpoint, binary)
+    shutil.copy2(endpoint.parent / 'remotekit_node.exe', binary / 'remotekit_node.exe')
     vpl = endpoint.parent / 'libvpl.dll'
     if not vpl.is_file(): raise FileNotFoundError('Build endpoint Release dispatcher: ' + str(vpl))
     shutil.copy2(vpl, binary / vpl.name)
@@ -238,6 +249,7 @@ def main():
     shutil.copy2(dist / 'runtime/manifest.json', control / 'runtime-manifest.json')
     licenses = package / 'licenses'
     licenses.mkdir()
+    shutil.copy2(ROOT / 'build/dependencies/zstd-1.5.7/LICENSE', licenses / 'zstd-LICENSE')
     for name in ['LICENSE', 'third-party-programs.txt']:
         shutil.copy2(ROOT / 'build/dependencies/libvpl-2.17.0' / name, licenses / ('libvpl-' + name))
     if not (node.parent / 'LICENSE').is_file(): raise FileNotFoundError('Node runtime LICENSE missing')
@@ -246,6 +258,18 @@ def main():
     header = (ROOT / 'build/dependencies/nvEncodeAPI.h').read_text(encoding='utf-8')
     (licenses / 'NVENC-header-notice.txt').write_text(header[:header.index('*/') + 2], encoding='utf-8')
     copy_face_runtime(face_files, package)
+    (package / 'config').mkdir()
+    build_lines = []
+    for tree in ['bin', 'control']:
+        for file in (package / tree).rglob('*'):
+            if file.is_file():
+                build_lines.append(f'{file.relative_to(package).as_posix()}\t{digest(file)}\n')
+    build_id = hashlib.sha256(''.join(sorted(build_lines)).encode('utf-8')).hexdigest()
+    (package / 'build.json').write_text(json.dumps({'buildId': build_id}) + '\n', encoding='utf-8')
+    (package / 'release').mkdir()
+    node_archive, node_checksum = create_archive(package, node, node_runtime=True)
+    (package / 'release/node.json').write_text(json.dumps({
+        'buildId': build_id, 'sha256': node_checksum, 'size': node_archive.stat().st_size}) + '\n', encoding='utf-8')
     shutil.copy2(ROOT / 'tools/streaming-launcher.cjs', package / 'run-control.cjs')
     (package / 'run.cmd').write_text(
         '@echo off\nsetlocal DisableDelayedExpansion\nset "RK_ROOT=%~dp0"\n'
@@ -265,13 +289,14 @@ def main():
         '5 FPS. The required public face models are included in bin/face-models.\n'
         'Each user has an isolated Tenant/Session and browser process.\n'
         'Viewer state and settings use an authenticated WebSocket; browser operations use the WebRTC DataChannel.\n'
-        'The service defaults to Intel QSV; NVIDIA NVENC can be explicitly selected on compatible hardware.\n'
+        'The encoder defaults to auto. Configure encoder and node paths in config/control.json.\n'
         'This package includes Node and the Control production dependencies; no build tools are required.\n'
         'Data is created in data/. In Viewer Settings, start diagnostics and use the floating stop button to save a tar.zst archive and receive its ID.\n'
-        'Diagnostic archives are stored beside control.db in diagnostics/ (override with REMOTEKIT_DIAGNOSTICS_DIR).\n'
+        'Diagnostic archives are stored in data/diagnostics; set diagnostics in config/control.json to change it.\n'
         'Control stores the Viewer degradation preference; WebRTC controls media adaptation and encoder rates.\n'
-        'Endpoint overrides can be appended to run.cmd, for example: run.cmd --encoder=nvenc\n'
-        'Arguments use --name=value; quote arguments containing spaces.\n'
+        'run.cmd accepts no arguments. Edit config/control.json to configure HTTP, storage, and nodes.\n'
+        'For remote nodes, set cluster.advertiseUrl and copy config/node.json to the node root.\n'
+        'Install bin/remotekit_node.exe on that node and run it with run --root=<node root>.\n'
         'Hardware smoke and stream measurements are reported separately from this package creation.\n', encoding='utf-8')
     validation = None
     if args.smoke:
@@ -284,7 +309,7 @@ def main():
         if any(part.lower() in {'data', 'profiles', 'profile', 'metrics', '.git'} for part in relative.parts):
             raise RuntimeError('Non-runtime directory in package: ' + str(relative))
         if file.is_file() and (file.name.lower() in {'cred.json', '.env'} or
-                              file.name.lower().endswith('.face-key') or
+                              file.name.lower().endswith('.key') or
                               file.suffix.lower() in {'.pdb', '.obj', '.lib', '.exp', '.ilk', '.sqlite', '.db', '.ts', '.tsx', '.cpp', '.cc', '.h'}):
             raise RuntimeError('Non-runtime file in package: ' + str(relative))
     files = []
@@ -293,7 +318,7 @@ def main():
             files.append({'path': file.relative_to(package).as_posix(),
                           'bytes': file.stat().st_size, 'sha256': digest(file)})
     manifest = {
-        'name': package_name,
+        'name': package_name, 'buildId': build_id,
         'remotekit_revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
         'remotekit_source_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True).strip()),
         'chromium_revision': subprocess.check_output(

@@ -1,134 +1,206 @@
 #include "options.hpp"
+#include "cluster/node_files.hpp"
 #include <windows.h>
-#include <charconv>
 #include <map>
+#include <set>
 namespace remotekit {
-using media::EncoderSettings;
 namespace {
+Error Invalid(const std::string& field) {
+  return {ErrorCode::kInvalidRequest, "invalid node configuration: " + field};
+}
 const std::map<std::string, std::pair<uint32_t, uint32_t>> ranges{
-    {"--fps", {1u, 120u}},
-    {"--bitrate", {100000u, 50000000u}},
-    {"--max-bitrate", {100000u, 60000000u}},
-    {"--async-depth", {1u, 8u}},
-    {"--gop", {1u, 65535u}},
-    {"--target-usage", {1u, 7u}},
-    {"--buffer-ms", {50u, 5000u}},
-    {"--idle-idr-ms", {0u, 4294967295u}},
-    {"--max-encode-width", {16u, 4096u}},
-    {"--max-encode-height", {16u, 4096u}}};
+    {"fps", {1, 120}},
+    {"bitrate", {100000, 50000000}},
+    {"maxBitrate", {100000, 60000000}},
+    {"asyncDepth", {1, 8}},
+    {"gop", {1, 65535}},
+    {"targetUsage", {1, 7}},
+    {"bufferMs", {50, 5000}},
+    {"idleIdrMs", {0, UINT32_MAX}},
+    {"maxEncodeWidth", {16, 4096}},
+    {"maxEncodeHeight", {16, 4096}},
+    {"maxSessions", {1, 64}}};
+}  // namespace
+Result<ProcessOptions> ProcessOptions::Parse(int argc, char** argv) {
+  ProcessOptions value;
+  std::set<std::string> seen;
+  for (int i = 1; i < argc; ++i) {
+    std::string argument = argv[i];
+    auto equal = argument.find('=');
+    auto name = argument.substr(0, equal);
+    auto text = equal == std::string::npos ? "" : argument.substr(equal + 1);
+    if (!seen.insert(name).second)
+      return Invalid("duplicate argument " + name);
+    if (argument == "--stdio")
+      value.stdio = true;
+    else if (name == "--node-root" && !text.empty())
+      value.node_root = Utf8Path(text);
+    else if (name == "--node-id" && !text.empty())
+      value.node_id = text;
+    else
+      return Invalid("argument " + argument);
+  }
+  if (!value.node_root.is_absolute() ||
+      (value.stdio ? !cluster::ValidNodeId(value.node_id) : !value.node_id.empty()))
+    return Invalid("expected --node-root=<absolute path>, with --stdio --node-id=<id> locally");
+  value.node_root = value.node_root.lexically_normal();
+  return value;
 }
 struct OptionValues {
-  std::string control_url, node_id;
-  fs::path browser, data, browser_trace_directory;
-  std::string encoder = "auto";
-  EncoderSettings encoding;
-  uint32_t idle_idr_ms = 150, max_encode_width = 4096, max_encode_height = 4096;
-  bool qsv_low_power_explicit = false;
-  OptionValues() {
-    wchar_t executable[32768]{};
-    GetModuleFileNameW(nullptr, executable, 32768);
-    browser = Utf8Path(Env("REMOTEKIT_BROWSER",
-                           Utf8(fs::path(executable).parent_path() / "remotekit_browser.exe")));
-    data = Utf8Path(Env("REMOTEKIT_DATA_PATH", Env("LOCALAPPDATA", ".") + "/RemoteKit/streaming"));
-    encoder = Env("REMOTEKIT_ENCODER", "auto");
-    encoding.bitrate = 36000000;
-    encoding.max_bitrate = 48000000;
-  }
-  Result<void> Parse(int argc, char** argv) {
-    for (int i = 1; i < argc; ++i) {
-      std::string arg = argv[i];
-      auto equal = arg.find('=');
-      if (equal == std::string::npos)
-        return Error{ErrorCode::kInvalidRequest, "arguments require --name=value"};
-      auto key = arg.substr(0, equal), value = arg.substr(equal + 1);
-      Result<uint32_t> number = uint32_t(0);
-      if (auto range = ranges.find(key); range != ranges.end()) {
-        uint32_t parsed = 0;
-        auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
-        if (error != std::errc{} || end != value.data() + value.size() || value.empty() ||
-            parsed < range->second.first || parsed > range->second.second)
-          return Error{ErrorCode::kInvalidRequest, "invalid " + key};
-        number = parsed;
-      }
-      if (key == "--control-url")
-        control_url = value;
-      else if (key == "--node-id")
-        node_id = value;
-      else if (key == "--browser")
-        browser = Utf8Path(value);
-      else if (key == "--data-path")
-        data = Utf8Path(value);
-      else if (key == "--browser-trace-dir")
-        browser_trace_directory = Utf8Path(value);
-      else if (key == "--encoder")
-        encoder = value;
-      else if (key == "--fps")
-        encoding.fps = number.value();
-      else if (key == "--bitrate")
-        encoding.bitrate = number.value();
-      else if (key == "--max-bitrate")
-        encoding.max_bitrate = number.value();
-      else if (key == "--async-depth")
-        encoding.async_depth = number.value();
-      else if (key == "--gop")
-        encoding.gop = number.value();
-      else if (key == "--target-usage") {
-        encoding.target_usage = number.value();
-        encoding.target_usage_explicit = true;
-      } else if (key == "--qsv-low-power") {
-        if (value != "auto" && value != "on" && value != "off")
-          return Error{ErrorCode::kInvalidRequest, "qsv-low-power must be auto, on or off"};
-        encoding.qsv_low_power = value == "on" ? 0x10u : (value == "off" ? 0x20u : 0u);
-        qsv_low_power_explicit = true;
-        encoding.qsv_low_power_explicit = true;
-      } else if (key == "--buffer-ms")
-        encoding.buffer_ms = number.value();
-      else if (key == "--rate-control") {
-        if (value != "cbr" && value != "vbr")
-          return Error{ErrorCode::kInvalidRequest, "rate-control must be cbr or vbr"};
-        encoding.vbr = value == "vbr";
-        encoding.rate_control_explicit = true;
-      } else if (key == "--idle-idr-ms")
-        idle_idr_ms = number.value();
-      else if (key == "--max-encode-width")
-        max_encode_width = number.value();
-      else if (key == "--max-encode-height")
-        max_encode_height = number.value();
-      else
-        return Error{ErrorCode::kInvalidRequest, "unknown endpoint argument: " + key};
-    }
-    if (encoder != "auto" && encoder != "qsv" && encoder != "nvenc")
-      return Error{ErrorCode::kInvalidRequest, "invalid --encoder"};
-    if (encoding.bitrate > encoding.max_bitrate)
-      return Error{ErrorCode::kInvalidRequest, "--bitrate exceeds --max-bitrate"};
-    if (!node_id.empty() && control_url.empty())
-      return Error{ErrorCode::kInvalidRequest, "--node-id requires --control-url"};
-    browser = fs::absolute(browser);
-    data = fs::absolute(data);
-    if (!qsv_low_power_explicit && encoder != "nvenc")
-      encoding.qsv_low_power = 0x10u;
-    if (encoder == "nvenc" && encoding.qsv_low_power)
-      return Error{ErrorCode::kInvalidRequest, "qsv-low-power requires qsv or auto encoder"};
-    return {};
-  }
+  std::string node_id, build_id;
+  fs::path node_root, browser, data, browser_trace_directory;
+  std::string encoder;
+  std::string peer_listen, peer_advertise;
+  uint64_t disk_reserve_bytes, session_memory_bytes;
+  media::EncoderSettings encoding;
+  uint32_t idle_idr_ms, max_encode_width, max_encode_height, max_sessions;
 };
-
 RuntimeOptions::RuntimeOptions(OptionValues v)
-    : control_url(std::move(v.control_url)),
-      node_id(std::move(v.node_id)),
+    : node_id(std::move(v.node_id)),
+      build_id(std::move(v.build_id)),
+      node_root(std::move(v.node_root)),
       browser(std::move(v.browser)),
       data(std::move(v.data)),
       browser_trace_directory(std::move(v.browser_trace_directory)),
       encoder(std::move(v.encoder)),
-      encoding(std::move(v.encoding)),
-      idle_idr_ms(std::move(v.idle_idr_ms)),
-      max_encode_width(std::move(v.max_encode_width)),
-      max_encode_height(std::move(v.max_encode_height)) {}
-Result<RuntimeOptions> RuntimeOptions::Parse(int argc, char** argv) {
-  OptionValues value;
-  auto parsed = value.Parse(argc, argv);
-  if (!parsed)
-    return parsed.error();
-  return RuntimeOptions(std::move(value));
+      encoding(v.encoding),
+      idle_idr_ms(v.idle_idr_ms),
+      max_encode_width(v.max_encode_width),
+      max_encode_height(v.max_encode_height),
+      max_sessions(v.max_sessions),
+      peer_listen(std::move(v.peer_listen)),
+      peer_advertise(std::move(v.peer_advertise)),
+      disk_reserve_bytes(v.disk_reserve_bytes),
+      session_memory_bytes(v.session_memory_bytes) {}
+Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
+                                                  const fs::path& root,
+                                                  std::string build_id,
+                                                  const std::string& node_id) {
+  const std::set<std::string> fields{"nodeId",
+                                     "encoder",
+                                     "fps",
+                                     "bitrate",
+                                     "maxBitrate",
+                                     "asyncDepth",
+                                     "gop",
+                                     "targetUsage",
+                                     "qsvLowPower",
+                                     "bufferMs",
+                                     "rateControl",
+                                     "idleIdrMs",
+                                     "maxEncodeWidth",
+                                     "maxEncodeHeight",
+                                     "dataPath",
+                                     "browser",
+                                     "browserTraceDir",
+                                     "maxSessions",
+                                     "peer",
+                                     "diskReserveBytes",
+                                     "sessionMemoryBytes"};
+  const std::set<std::string> nullable{"asyncDepth",  "gop",     "targetUsage",    "bufferMs",
+                                       "rateControl", "browser", "browserTraceDir"};
+  if (!config.is_object() || config.size() != fields.size())
+    return Invalid("required fields");
+  for (const auto& [name, value] : config.items()) {
+    if (!fields.contains(name))
+      return Invalid("unknown field " + name);
+    if (name == "peer") {
+      if (!value.is_object() || value.size() != 2 || !value.contains("listen") ||
+          !value["listen"].is_string() || !value.contains("advertise") ||
+          !value["advertise"].is_string())
+        return Invalid(name);
+      for (const auto* field : {"listen", "advertise"}) {
+        const auto address = value[field].get<std::string>();
+        const auto colon = address.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 == address.size() ||
+            address.size() > 1024)
+          return Invalid(name);
+        const auto port = address.substr(colon + 1);
+        if (port.size() > 5 ||
+            !std::all_of(port.begin(), port.end(), [](char c) { return c >= '0' && c <= '9'; }) ||
+            std::stoul(port) > 65535)
+          return Invalid(name);
+      }
+      continue;
+    }
+    if (name == "diskReserveBytes" || name == "sessionMemoryBytes") {
+      if (!value.is_number_integer() || (!value.is_number_unsigned() && value.get<int64_t>() < 0) ||
+          value.get<uint64_t>() > 9007199254740991ULL ||
+          (name == "sessionMemoryBytes" && value == 0))
+        return Invalid(name);
+      continue;
+    }
+    if (value.is_null() && nullable.contains(name))
+      continue;
+    if (auto range = ranges.find(name); range != ranges.end()) {
+      if (!value.is_number_integer() ||
+          (value.is_number_integer() && !value.is_number_unsigned() && value.get<int64_t>() < 0) ||
+          value.get<uint64_t>() < range->second.first ||
+          value.get<uint64_t>() > range->second.second)
+        return Invalid(name);
+    } else if (!value.is_string() || value.get_ref<const std::string&>().empty())
+      return Invalid(name);
+  }
+  for (const auto& field : fields)
+    if (!config.contains(field))
+      return Invalid(field);
+  if (!cluster::ValidNodeId(node_id) || config["nodeId"] != node_id || !root.is_absolute() ||
+      (build_id != "dev" && !cluster::ValidBuildId(build_id)))
+    return Invalid("node identity");
+  OptionValues v;
+  v.peer_listen = config["peer"]["listen"];
+  v.peer_advertise = config["peer"]["advertise"];
+  v.disk_reserve_bytes = config["diskReserveBytes"];
+  v.session_memory_bytes = config["sessionMemoryBytes"];
+  v.node_id = node_id;
+  v.build_id = std::move(build_id);
+  v.node_root = root;
+  v.encoder = config["encoder"].get<std::string>();
+  if (v.encoder != "auto" && v.encoder != "qsv" && v.encoder != "nvenc")
+    return Invalid("encoder");
+  auto number = [&](const char* field, uint32_t& destination) {
+    if (!config[field].is_null())
+      destination = config[field].get<uint32_t>();
+  };
+  number("fps", v.encoding.fps);
+  number("bitrate", v.encoding.bitrate);
+  number("maxBitrate", v.encoding.max_bitrate);
+  number("asyncDepth", v.encoding.async_depth);
+  number("gop", v.encoding.gop);
+  number("targetUsage", v.encoding.target_usage);
+  number("bufferMs", v.encoding.buffer_ms);
+  number("idleIdrMs", v.idle_idr_ms);
+  number("maxEncodeWidth", v.max_encode_width);
+  number("maxEncodeHeight", v.max_encode_height);
+  number("maxSessions", v.max_sessions);
+  if (v.encoding.max_bitrate < v.encoding.bitrate)
+    return Invalid("maxBitrate");
+  v.encoding.target_usage_explicit = !config["targetUsage"].is_null();
+  const auto low_power = config["qsvLowPower"].get<std::string>();
+  if (low_power != "auto" && low_power != "on" && low_power != "off")
+    return Invalid("qsvLowPower");
+  if (v.encoder == "nvenc" && low_power != "auto")
+    return Invalid("qsvLowPower");
+  v.encoding.qsv_low_power =
+      low_power == "off" ? 0x20u : (low_power == "on" || v.encoder != "nvenc" ? 0x10u : 0u);
+  v.encoding.qsv_low_power_explicit = low_power != "auto";
+  if (!config["rateControl"].is_null()) {
+    if (config["rateControl"] != "cbr" && config["rateControl"] != "vbr")
+      return Invalid("rateControl");
+    v.encoding.vbr = config["rateControl"] == "vbr";
+    v.encoding.rate_control_explicit = true;
+  }
+  auto path = [&](const char* name) {
+    return (root / Utf8Path(config[name].get<std::string>())).lexically_normal();
+  };
+  v.data = path("dataPath");
+  wchar_t executable[32768]{};
+  GetModuleFileNameW(nullptr, executable, 32768);
+  v.browser = config["browser"].is_null()
+                  ? fs::path(executable).parent_path() / "remotekit_browser.exe"
+                  : path("browser");
+  if (!config["browserTraceDir"].is_null())
+    v.browser_trace_directory = path("browserTraceDir");
+  return RuntimeOptions(std::move(v));
 }
 }  // namespace remotekit

@@ -23,7 +23,7 @@
 
 ## 适配器与后端选择
 
-1. Endpoint 启动 Browser 之前，按 `--encoder=qsv|nvenc|auto`（默认 auto：先 Intel QSV、再 NVIDIA NVENC）在对应厂商的适配器上实际初始化一次硬件编码器，成功的那块 GPU 的 LUID 被固定下来，并传给 Browser（见[渲染](rendering.md#gpu-适配器)）。
+1. Endpoint 启动 Browser 之前，按节点配置的 `encoder`（`qsv|nvenc|auto`，默认 auto：先 Intel QSV、再 NVIDIA NVENC）在对应厂商的适配器上实际初始化一次硬件编码器，成功的那块 GPU 的 LUID 被固定下来，并传给 Browser（见[渲染](rendering.md#gpu-适配器)）。
 2. auto 模式下允许 QSV→NVENC 回退，但如果显式给了只对 QSV 有意义的设置，回退就是语义错误，直接失败。
 3. 没有可用硬件编码器时在启动 Browser 之前就报错，不退回软件编码。
 

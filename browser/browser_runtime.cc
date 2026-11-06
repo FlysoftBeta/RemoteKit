@@ -29,6 +29,7 @@
 #include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_delegate.h"
 #include "remotekit/browser/browser_context.h"
+#include "remotekit/browser/profile_key.h"
 #include "remotekit/browser/control_server.h"
 #include "remotekit/browser/osr_renderer.h"
 #include "remotekit/browser/page_requests.h"
@@ -73,11 +74,12 @@ void BrowserRuntime::OnGpuInfoUpdate() {
   const auto info = manager->GetGPUInfo();
   const auto& active = info.active_gpu();
   LOG(INFO) << "RemoteKit GPU init ANGLE=" << info.gl_renderer
-            << " adapter=" << active.device_string
-            << " luid=" << active.luid.HighPart << "," << active.luid.LowPart
+            << " adapter=" << active.device_string << " luid=" << active.luid.HighPart << ","
+            << active.luid.LowPart
             << " hardware=" << (!active.IsSoftwareRenderer() && !info.UsesSwiftShader())
             << " compositing=" << manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_ACCELERATED_GL)
-            << " rasterization=" << manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION);
+            << " rasterization="
+            << manager->GetFeatureStatus(gpu::GPU_FEATURE_TYPE_GPU_TILE_RASTERIZATION);
 }
 BrowserRuntime::~BrowserRuntime() {
   content::GpuDataManager::GetInstance()->RemoveObserver(this);
@@ -88,6 +90,7 @@ BrowserRuntime::~BrowserRuntime() {
   CHECK(contexts.empty());
 }
 void BrowserRuntime::RemoveView(WebViewId index) {
+  views.records.at(index).webview->SetSessionStorageShouldPersist(false);
   const auto session = views.records.at(index).webview->session_id();
   const auto view = views.records.at(index).webview->view_id();
   closed.Record(session, view, views.records.at(index).requests->close_reason());
@@ -213,6 +216,9 @@ int RemoteKitMainParts::PreMainMessageLoopRun() {
   state_->screen = CreateOffscreenScreen();
   display::Screen::SetScreenInstance(state_->screen.get());
   const base::FilePath data = command.GetSwitchValuePath("data-path");
+  auto profile_key = ProfileKey::ReadFromCommandLine(command);
+  if (!profile_key)
+    return 2;
   uint64_t service_session = 0;
   if (!command.HasSwitch("control-channel") ||
       !base::StringToUint64(command.GetSwitchValueASCII("session-id"), &service_session) ||
@@ -228,7 +234,8 @@ int RemoteKitMainParts::PreMainMessageLoopRun() {
   state_->profiles.push_back(profile.value);
   state_->contexts.push_back(std::make_unique<BrowserContext>(
       data.AppendASCII("session-" + base::NumberToString(session.value))
-          .AppendASCII("profile-" + base::NumberToString(profile.value))));
+          .AppendASCII("profile-" + base::NumberToString(profile.value)),
+      std::move(profile_key)));
   LOG(INFO) << "RemoteKit startup Profile ready";
   int width = 1920, height = 1080;
   if ((command.HasSwitch("atlas-width") &&
@@ -268,6 +275,7 @@ void RemoteKitMainParts::WillRunMainMessageLoop(std::unique_ptr<base::RunLoop>& 
 void RemoteKitMainParts::PostMainMessageLoopRun() {
   if (!state_)
     return;
+  state_->VerifyShutdownComplete();
   state_->shutting_down = true;
   state_->quit.Reset();
   // Stop producers and invalidate page callbacks before destroying consumers.

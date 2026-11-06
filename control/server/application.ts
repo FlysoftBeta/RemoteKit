@@ -1,12 +1,12 @@
+import { ObjectIndex } from './cluster/objects';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { FILE_LIMITS } from '../shared/product';
 import { AccountService } from './auth/accounts';
 import { ViewerSecurity } from './auth/viewer-security';
-import type { RuntimeConfig } from './config';
+import { defaultQuotas, type RuntimeConfig } from './config';
 import type { EndpointGateway } from './endpoint/gateway';
-import type { LocalProcessLink } from './endpoint/local-process';
-import type { RemoteNodeLink } from './endpoint/remote-node';
+import type { NodeRegistry } from './cluster/node-link';
 import { FileLibrary } from './files/library';
 import type { createHttp } from './http/server';
 import type { ControlDatabase } from './persistence/database';
@@ -33,6 +33,7 @@ export interface DomainContext {
   closed: boolean;
 }
 export interface DomainServices extends DomainContext {
+  objects: ObjectIndex;
   navigation: Navigation;
   viewers: ViewerHub;
   rtc: RtcSignaling;
@@ -52,6 +53,7 @@ export function createApplication(
   endpoint: EndpointGateway,
   fileLimits: FileLimits = FILE_LIMITS,
   clock: Clock = systemClock,
+  tenantObjectBytes = defaultQuotas.tenantObjectBytes,
 ): DomainServices {
   const context: DomainContext = {
     store,
@@ -64,6 +66,13 @@ export function createApplication(
     closed: false,
   };
   const services = context as DomainServices;
+  services.objects = new ObjectIndex(
+    store,
+    endpoint.nodes,
+    tenantObjectBytes,
+    (tenant, node) => endpoint.isPlacedOn(tenant, node),
+    (tenant) => endpoint.hibernating.has(tenant),
+  );
   services.navigation = new Navigation(context, services);
   services.viewers = new ViewerHub(context, services);
   services.rtc = new RtcSignaling(context, services);
@@ -74,7 +83,7 @@ export function createApplication(
   services.popups = new Popups(context, services);
   services.policy = new SitePolicy(context);
   services.accounts = new AccountService(store);
-  services.library = new FileLibrary(store.library, endpoint, fileLimits);
+  services.library = new FileLibrary(store.library, endpoint, fileLimits, services.objects);
   services.security = new ViewerSecurity(
     store,
     endpoint,
@@ -116,6 +125,7 @@ export function createApplication(
     unsubscribeActions?.();
     unsubscribeSignals?.();
     await context.tenants.close();
+    await services.objects.close();
     context.events.removeAllListeners();
   };
   return services;
@@ -124,7 +134,7 @@ export function createApplication(
 export function startApplication(
   config: RuntimeConfig,
   store: ControlDatabase,
-  link: LocalProcessLink | RemoteNodeLink,
+  nodes: NodeRegistry,
   control: DomainServices,
   server: ReturnType<typeof createHttp>,
 ) {
@@ -140,19 +150,22 @@ export function startApplication(
       },
     );
   }
-  const endpointReady = (identity?: { processChanged: boolean }) => {
+  const endpointReady = (identity: { processChanged: boolean; nodeId: string }) => {
     if (!closing) run(control.reconciler.endpointReady(identity));
   };
-  link.on('ready', endpointReady);
-  const endpointOffline = () => {
-    if (!closing) control.rtc.endpointOffline();
+  nodes.on('ready', endpointReady);
+  const endpointOffline = (nodeId: string) => {
+    if (!closing) control.rtc.endpointOffline(nodeId);
   };
-  link.on('offline', endpointOffline);
+  nodes.on('offline', endpointOffline);
   const reconciliationTimer = setInterval(() => {
-    if (!closing) run(control.reconciler.tick());
+    if (!closing) {
+      run(control.reconciler.tick());
+      run(control.objects.tick());
+    }
   }, 1500);
   server.listen(config.port, config.host, () => {
-    link.start();
+    nodes.start();
     const address = server.address();
     console.log(
       `RemoteKit Control ${config.tls ? 'https' : 'http'}://${config.host}:${typeof address === 'object' ? address?.port : config.port}`,
@@ -163,13 +176,13 @@ export function startApplication(
     if (closePromise) return closePromise;
     closing = true;
     clearInterval(reconciliationTimer);
-    link.off('ready', endpointReady);
-    link.off('offline', endpointOffline);
+    nodes.off('ready', endpointReady);
+    nodes.off('offline', endpointOffline);
     closePromise = (async () => {
       await server.shutdown();
       while (background.size) await Promise.allSettled([...background]);
       await control.close();
-      await link.stop();
+      await nodes.stop();
       store.db.close();
     })();
     return closePromise;

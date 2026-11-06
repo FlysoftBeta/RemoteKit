@@ -343,20 +343,6 @@ Result<Json> LibraryController::LibraryCommand(const std::string& method, const 
     RK_ASSIGN_OR_RETURN(asset, file_library.Describe(Required(request, "assetId")));
     return asset.Json();
   }
-  if (method == "session.library.retain" || method == "session.library.references") {
-    const auto& values = request.at("assetIds");
-    if (!values.is_array() || values.size() > (method == "session.library.retain" ? 64 : 8192))
-      return Error{ErrorCode::kInvalidRequest, "invalid_library_assets"};
-    std::vector<std::string> assets;
-    assets.reserve(values.size());
-    for (const auto& value : values)
-      assets.push_back(value.get<std::string>());
-    if (method == "session.library.retain")
-      RK_RETURN_IF_ERROR(file_library.Retain(assets));
-    else
-      RK_RETURN_IF_ERROR(file_library.References(FileUnsigned(request.at("revision")), assets));
-    return Json{{"accepted", true}};
-  }
   const auto selection_id = Required(request, "selectionId");
   if (method == "session.library.prepare") {
     auto binding = ParseFileBinding(request.at("binding"));
@@ -457,7 +443,6 @@ Result<Json> PhotoService::Execute(const FileJob& job,
           else if (described.error().code != ErrorCode::kNotFound)
             return described.error();
         }
-        // An expired derivative can be regenerated.
       }
       if (thumbnail) {
         RK_RETURN_IF_ERROR(check());
@@ -473,7 +458,8 @@ Result<Json> PhotoService::Execute(const FileJob& job,
                                   remotekit::CreatePhotoThumbnail(source, output, cancelled));
               return remotekit::FileLibrary::Derivative{dimensions.width, dimensions.height};
             },
-            [&] { return files.RequireFileJob(job); }));
+            [&] { return files.RequireFileJob(job); }, FileLibrary::DerivativeFormat::jpeg,
+            asset_id));
     RK_RETURN_IF_ERROR(check());
     constexpr size_t kThumbnailCacheEntries = 256;
     if (photo_thumbnails.size() >= kThumbnailCacheEntries) {
@@ -484,8 +470,6 @@ Result<Json> PhotoService::Execute(const FileJob& job,
                            });
       photo_thumbnails.erase(oldest);
     }
-    // Renew before the derivative's two-hour raw asset expiration so a caller
-    // can fetch its chunks after receiving this descriptor.
     photo_thumbnails.emplace(asset_id,
                              PhotoThumbnail{thumbnail.id, QpcNow() + QpcFrequency() * 3600});
     return thumbnail.Json();
@@ -534,7 +518,7 @@ Result<Json> PhotoService::Execute(const FileJob& job,
                           geometry = dimensions.geometry;
                           return FileLibrary::Derivative{dimensions.width, dimensions.height};
                         },
-                        check, FileLibrary::DerivativeFormat::png));
+                        check, FileLibrary::DerivativeFormat::png, Required(params, "assetId")));
     auto asset = derivative.Json();
     asset["geometry"] = std::move(geometry);
     return asset;

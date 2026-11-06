@@ -94,8 +94,8 @@ function startControl() {
     port,
     endpoint,
     browser,
-    endpointArgs: scenarioModule?.endpointArgs ?? [],
-    environment: { REMOTEKIT_DIAGNOSTICS_DIR: archiveDirectory, ...scenarioModule?.controlEnvironment },
+    nodeDefaults: scenarioModule?.nodeDefaults ?? {},
+    configOverrides: { diagnostics: archiveDirectory, ...scenarioModule?.controlConfig },
   });
   control.stdout.on('data', (data) => void appendFile(join(run, 'control.stdout.log'), data));
   control.stderr.on('data', (data) => void appendFile(join(run, 'control.stderr.log'), data));

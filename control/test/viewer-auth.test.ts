@@ -223,7 +223,7 @@ test('face template is encrypted and late matches or enrollment results cannot c
   await f.control.viewers.pollFaceAuth();
   const stored = f.store.security.security(f.user.id).face!;
   assert.ok(stored && !stored.sealed.includes(JSON.stringify(template)));
-  assert.equal(readFileSync(path + '.face-key').length, 32);
+  assert.equal(readFileSync(path + '.key').length, 32);
   const reopened = new ControlDatabase(path);
   try {
     assert.deepEqual(

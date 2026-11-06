@@ -3,6 +3,7 @@
 #include "util/error.hpp"
 #include <functional>
 #include <memory>
+#include <optional>
 namespace remotekit {
 class ManagementLink {
  public:
@@ -13,6 +14,11 @@ class ManagementLink {
   virtual bool SendReply(uint64_t generation, const Json& reply) = 0;
   virtual bool SendEvent(const Json& event, uint64_t generation) = 0;
   virtual void OnDisconnect(Disconnect callback) = 0;
+  virtual Result<Json> Request(const std::string& name, Json fields) = 0;
+  struct ReadyState {
+    uint64_t generation;
+    Json sessions;
+  };
+  virtual std::optional<ReadyState> ReadySessions() { return {}; }
 };
-std::unique_ptr<ManagementLink> MakeStdioLink();
 }  // namespace remotekit

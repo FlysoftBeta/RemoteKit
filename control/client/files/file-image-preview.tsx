@@ -42,8 +42,7 @@ export function FileImagePreview({
     const abort = new AbortController();
     let objectUrl: string | undefined;
     const load = async () => {
-      const asset =
-        type && size ? { assetId, type, size, hash: '' } : await rpc.describeAsset(assetId, abort.signal);
+      const asset = type && size ? { assetId, type, size } : await rpc.describeAsset(assetId, abort.signal);
       if (!canPreviewFile(asset)) throw new Error('此图片无法预览');
       return rpc.readPhoto(asset, abort.signal);
     };

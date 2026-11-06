@@ -14,13 +14,25 @@
 #include "util/file_io.hpp"
 
 namespace remotekit {
+ServiceJson FileLibrary::Hibernation(const std::function<bool(uint64_t)>& current) const {
+  std::lock_guard lock(mutex_);
+  const auto selections =
+      std::count_if(selections_.begin(), selections_.end(), [](const auto& item) {
+        return item.second.state == Selection::State::pending ||
+               item.second.state == Selection::State::submitted;
+      });
+  const auto uploads = std::count_if(drafts_.begin(), drafts_.end(), [&](const auto& item) {
+    return item.second.sealed.empty() && current(item.second.grant);
+  });
+  return {{"pendingNativeSelections", selections}, {"inFlightUploads", uploads}};
+}
 namespace {
 namespace fs = std::filesystem;
 using Json = ServiceJson;
 using State = FileLibrary::Selection::State;
 constexpr std::uint64_t kMiB = 1024 * 1024;
 constexpr std::uint64_t kFileBytes = 256 * kMiB;
-constexpr std::uint64_t kLibraryBytes = 1024 * kMiB;
+constexpr std::uint64_t kStagingBytes = 512 * kMiB;
 constexpr std::uint64_t kDraftBytes = 512 * kMiB;
 constexpr std::uint64_t kJpegDerivativeBytes = 24 * kMiB;
 constexpr std::uint64_t kPngDerivativeBytes = 64 * kMiB;
@@ -29,7 +41,6 @@ constexpr std::size_t kDrafts = 1024;
 constexpr std::size_t kActiveDrafts = 32;
 constexpr std::size_t kSelections = 65536;
 constexpr std::int64_t kDraftLifetime = 30 * 60;
-constexpr std::int64_t kAssetLifetime = 2 * 60 * 60;
 constexpr std::size_t kChunk = 16384;
 
 std::int64_t Now() {
@@ -59,45 +70,6 @@ Result<std::string> RandomId() {
     return Error{ErrorCode::kUnavailable, "file_random_failed"};
   return Hex(bytes);
 }
-struct Sha256 {
-  BCRYPT_ALG_HANDLE algorithm{};
-  BCRYPT_HASH_HANDLE hash{};
-  Result<void> Open() {
-    if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
-      return Error{ErrorCode::kUnavailable, "file_hash_failed"};
-    if (BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0) < 0) {
-      return Error{ErrorCode::kUnavailable, "file_hash_failed"};
-    }
-    return {};
-  }
-  ~Sha256() {
-    if (hash)
-      BCryptDestroyHash(hash);
-    if (algorithm)
-      BCryptCloseAlgorithmProvider(algorithm, 0);
-  }
-};
-Result<std::string> Digest(const fs::path& file, const FileLibrary::Check& check) {
-  Sha256 digest;
-  RK_RETURN_IF_ERROR(digest.Open());
-  std::ifstream input(file, std::ios::binary);
-  std::array<unsigned char, 64 * 1024> buffer{};
-  for (;;) {
-    RK_RETURN_IF_ERROR(check());
-    input.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
-    const auto count = input.gcount();
-    if (count && BCryptHashData(digest.hash, buffer.data(), static_cast<ULONG>(count), 0) < 0)
-      return Error{ErrorCode::kUnavailable, "file_hash_failed"};
-    if (input.eof())
-      break;
-    if (!input)
-      return Error{ErrorCode::kUnavailable, "file_read_failed"};
-  }
-  std::array<unsigned char, 32> bytes{};
-  if (BCryptFinishHash(digest.hash, bytes.data(), static_cast<ULONG>(bytes.size()), 0) < 0)
-    return Error{ErrorCode::kUnavailable, "file_hash_failed"};
-  return Hex(bytes);
-}
 bool Plain(const fs::path& path, bool directory = false) {
   const auto attributes = GetFileAttributesW(path.c_str());
   return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
@@ -114,13 +86,6 @@ bool Remove(const fs::path& path) {
   std::error_code error;
   fs::remove(path, error);
   return !error;
-}
-Result<void> FlushPayload(const fs::path& path) {
-  auto flushed = FlushFile(path);
-  if (!flushed)
-    return flushed.error();
-
-  return {};
 }
 Result<void> Save(const fs::path& path, const Json& value, const FileLibrary::Check& check = {}) {
   auto saved = WriteDurableJson(path, value, check);
@@ -186,7 +151,7 @@ bool ValidSpec(const FileUploadStore::Spec& spec) {
 }  // namespace
 
 ServiceJson FileLibrary::Asset::Json() const {
-  ServiceJson result = {{"assetId", id}, {"hash", id}, {"size", size}, {"type", type}};
+  ServiceJson result = {{"assetId", id}, {"size", size}, {"type", type}};
   if (width && height) {
     result["width"] = width;
     result["height"] = height;
@@ -194,7 +159,11 @@ ServiceJson FileLibrary::Asset::Json() const {
   return result;
 }
 
-FileLibrary::FileLibrary(fs::path root) : root_(std::move(root)) {}
+FileLibrary::FileLibrary(fs::path root,
+                         objects::ObjectService& objects,
+                         std::string tenant,
+                         const objects::Keys& keys)
+    : root_(std::move(root)), objects_(objects), tenant_(std::move(tenant)), keys_(keys) {}
 Result<void> FileLibrary::Initialize() {
   std::error_code absolute_error;
   root_ = fs::absolute(root_, absolute_error).make_preferred();
@@ -204,43 +173,20 @@ Result<void> FileLibrary::Initialize() {
   if (!native.starts_with(LR"(\\?\)"))
     root_ = native.starts_with(LR"(\\)") ? fs::path(LR"(\\?\UNC\)" + native.substr(2))
                                          : fs::path(LR"(\\?\)" + native);
-  for (const auto& directory : {root_, root_ / "assets", root_ / "payload", root_ / "drafts",
+  for (const auto& directory : {root_, root_ / "metadata", root_ / "staging", root_ / "drafts",
                                 root_ / "incoming", root_ / "selections"}) {
     RK_RETURN_IF_ERROR(CreateDirectories(directory));
     if (!Plain(directory, true))
       return Error{ErrorCode::kUnavailable, "unsafe_library_root"};
   }
-  const auto reference_file = root_ / "references.json";
-  std::error_code reference_error;
-  const bool has_references = fs::exists(reference_file, reference_error);
-  if (reference_error)
-    return Error{ErrorCode::kUnavailable, "cannot inspect library references"};
-  if (has_references) {
-    RK_ASSIGN_OR_RETURN(size, FileSize(reference_file));
-    if (!Plain(reference_file) || size > 1024 * 1024)
-      return Error{ErrorCode::kInvalidRequest, "invalid_library_references"};
-    std::ifstream input(reference_file, std::ios::binary);
-    const auto record = Json::parse(input);
-    reference_revision_ = record.at("revision").get<std::uint64_t>();
-    const auto& ids = record.at("assetIds");
-    if (!ids.is_array() || ids.size() > kAssets)
-      return Error{ErrorCode::kInvalidRequest, "invalid_library_references"};
-    for (const auto& id : ids) {
-      auto asset_id = id.get<std::string>();
-      if (!HexId(asset_id, 64) || !references_.insert(std::move(asset_id)).second)
-        return Error{ErrorCode::kInvalidRequest, "invalid_library_references"};
-    }
-  }
   RK_RETURN_IF_ERROR(
-      Records(root_ / "assets", kAssets, [&](const auto& id, const Json& value) -> Result<void> {
+      Records(root_ / "metadata", kAssets, [&](const auto& id, const Json& value) -> Result<void> {
         Asset asset{id, value.at("type").get<std::string>(), value.at("size").get<std::uint64_t>(),
                     value.value("width", 0u), value.value("height", 0u)};
         if (!HexId(id, 64) || !ValidSpec({"asset", asset.type, asset.size}) ||
-            asset.size > kLibraryBytes - asset_bytes_ || entries_.size() >= kAssets)
+            entries_.size() >= kAssets)
           return Error{ErrorCode::kInvalidRequest, "invalid_asset_record"};
-        RK_RETURN_IF_ERROR(Verify(Payload(id), asset.size));
-        asset_bytes_ += asset.size;
-        entries_.emplace(id, Entry{std::move(asset), value.at("expires").get<std::int64_t>()});
+        entries_.emplace(id, Entry{std::move(asset)});
         return {};
       }));
   RK_RETURN_IF_ERROR(
@@ -291,8 +237,6 @@ Result<void> FileLibrary::Initialize() {
         selections_.emplace(id, std::move(selection));
         return {};
       }));
-  // Payloads without a committed record belong to interrupted publishes.
-  // Likewise, a committed sealed draft has no need for its original link.
   const auto clean = [&](const fs::path& directory, std::size_t maximum,
                          auto keep) -> Result<void> {
     std::size_t count = 0;
@@ -305,27 +249,33 @@ Result<void> FileLibrary::Initialize() {
     }
     return {};
   };
-  RK_RETURN_IF_ERROR(
-      clean(root_ / "payload", kAssets + 1, [&](const auto& id) { return entries_.contains(id); }));
-  clean(root_ / "incoming", kDrafts + 1, [&](const auto& id) {
+  RK_RETURN_IF_ERROR(clean(root_ / "staging", kAssets + 1, [](const auto&) { return false; }));
+  RK_RETURN_IF_ERROR(clean(root_ / "incoming", kDrafts + 1, [&](const auto& id) {
     const auto found = drafts_.find(id);
     return found != drafts_.end() && found->second.sealed.empty();
-  });
+  }));
   RK_RETURN_IF_ERROR(Sweep());
 
   return {};
-}
-fs::path FileLibrary::Payload(const std::string& id) const {
-  return root_ / "payload" / id;
 }
 fs::path FileLibrary::DraftData(const std::string& id) const {
   return root_ / "incoming" / id;
 }
 Result<const FileLibrary::Entry*> FileLibrary::RequireAsset(const std::string& id) const {
-  const auto found = entries_.find(id);
-  if (found == entries_.end())
-    return Error{ErrorCode::kNotFound, "unknown_asset"};
-  RK_RETURN_IF_ERROR(Verify(Payload(id), found->second.asset.size));
+  auto found = entries_.find(id);
+  RK_ASSIGN_OR_RETURN(stored, objects_.Store().StoredPath(tenant_, id));
+  if (found != entries_.end() && fs::exists(stored))
+    return &found->second;
+  RK_ASSIGN_OR_RETURN(info, objects_.Ensure(tenant_, id));
+  if (found == entries_.end()) {
+    if (info.size > kFileBytes)
+      return Error{ErrorCode::kLimitExceeded, "asset_too_large"};
+    Entry entry{Asset{id, "application/octet-stream", info.size}};
+    RK_RETURN_IF_ERROR(SaveEntry(entry));
+    found = entries_.emplace(id, std::move(entry)).first;
+  }
+  if (found->second.asset.size != info.size)
+    return Error{ErrorCode::kRejected, "invalid_asset_size"};
   return &found->second;
 }
 Result<FileLibrary::Draft*> FileLibrary::RequireDraft(std::uint64_t grant, const std::string& id) {
@@ -348,8 +298,7 @@ Result<void> FileLibrary::SaveDraft(const Draft& draft, const Check& check) cons
 }
 Result<void> FileLibrary::SaveEntry(const Entry& entry, const Check& check) const {
   auto value = entry.asset.Json();
-  value["expires"] = entry.expires;
-  RK_RETURN_IF_ERROR(Save(root_ / "assets" / (entry.asset.id + ".json"), value, check));
+  RK_RETURN_IF_ERROR(Save(root_ / "metadata" / (entry.asset.id + ".json"), value, check));
 
   return {};
 }
@@ -397,8 +346,7 @@ Result<ServiceJson> FileLibrary::Begin(std::uint64_t grant,
   const auto active = std::count_if(drafts_.begin(), drafts_.end(),
                                     [](const auto& item) { return item.second.sealed.empty(); });
   if (drafts_.size() >= kDrafts || static_cast<std::size_t>(active) >= kActiveDrafts ||
-      spec.size > kDraftBytes - draft_bytes_ ||
-      asset_bytes_ + draft_bytes_ + spec.size > kLibraryBytes)
+      spec.size > kDraftBytes - draft_bytes_)
     return Error{ErrorCode::kLimitExceeded, "asset_draft_quota"};
   RK_ASSIGN_OR_RETURN(random, RandomId());
   Draft draft{random, operation, {}, spec, Now() + kDraftLifetime, grant};
@@ -462,51 +410,16 @@ Result<std::uint64_t> FileLibrary::Chunk(std::uint64_t grant,
 }
 Result<FileLibrary::Asset> FileLibrary::Publish(const fs::path& source,
                                                 Asset asset,
-                                                const Check& check) {
+                                                const Check& check,
+                                                const std::string& derived_from) {
   RK_RETURN_IF_ERROR(Verify(source, asset.size));
-  RK_ASSIGN_OR_RETURN(digest, Digest(source, check));
-  asset.id = digest;
-  RK_RETURN_IF_ERROR(FlushPayload(source));
+  RK_ASSIGN_OR_RETURN(info, objects_.Write(tenant_, keys_, source, check, derived_from));
+  asset.id = info.id;
   std::lock_guard lock(mutex_);
   RK_RETURN_IF_ERROR(check());
-  const auto existing = entries_.find(asset.id);
-  if (existing != entries_.end()) {
-    RK_ASSIGN_OR_RETURN(entry, RequireAsset(asset.id));
-    auto refreshed = *entry;
-    if (refreshed.expires)
-      refreshed.expires = Now() + kAssetLifetime;
-    if (asset.width && !refreshed.asset.width) {
-      refreshed.asset.width = asset.width;
-      refreshed.asset.height = asset.height;
-      refreshed.asset.type = asset.type;
-    }
-    RK_RETURN_IF_ERROR(SaveEntry(refreshed, check));
-    existing->second = std::move(refreshed);
-    return existing->second.asset;
-  }
-  if (entries_.size() >= kAssets || asset.size > kLibraryBytes - asset_bytes_)
-    return Error{ErrorCode::kLimitExceeded, "asset_library_quota"};
-  const auto destination = Payload(asset.id);
-  // Keep the input until its upload receipt commits. A crash between the two
-  // records can then finish the same draft against the existing hash.
-  std::error_code link_error;
-  fs::create_hard_link(source, destination, link_error);
-  if (link_error)
-    return Error{ErrorCode::kUnavailable, "cannot link library payload: " + link_error.message()};
-  struct Rollback {
-    fs::path path;
-    bool committed = false;
-    ~Rollback() {
-      if (!committed)
-        Remove(path);
-    }
-  } rollback{destination};
-  Entry entry{asset, Now() + kAssetLifetime};
-  RK_RETURN_IF_ERROR(check());
+  Entry entry{asset};
   RK_RETURN_IF_ERROR(SaveEntry(entry, check));
-  rollback.committed = true;
-  asset_bytes_ += asset.size;
-  entries_.emplace(asset.id, std::move(entry));
+  entries_.insert_or_assign(asset.id, std::move(entry));
   return asset;
 }
 Result<FileLibrary::Asset> FileLibrary::Seal(std::uint64_t grant,
@@ -560,80 +473,46 @@ Result<FileLibrary::Asset> FileLibrary::Describe(const std::string& id) const {
 }
 Result<fs::path> FileLibrary::Path(const std::string& id) const {
   std::lock_guard lock(mutex_);
-  RK_RETURN_IF_ERROR(RequireAsset(id));
-  return Payload(id);
+  RK_ASSIGN_OR_RETURN(entry, RequireAsset(id));
+  const auto path = root_ / "staging" / id;
+  std::error_code error;
+  if (fs::exists(path, error))
+    return path;
+  uint64_t used = 0;
+  for (const auto& staged : fs::directory_iterator(root_ / "staging"))
+    used += staged.file_size();
+  if (entry->asset.size > kStagingBytes - std::min(used, kStagingBytes))
+    return Error{ErrorCode::kLimitExceeded, "asset_staging_quota"};
+  auto partial = path;
+  partial += ".new";
+  std::ofstream output(partial, std::ios::binary | std::ios::trunc);
+  auto read = objects_.Store().Read(tenant_, keys_, id, output);
+  output.close();
+  if (!read || !output) {
+    Remove(partial);
+    return read ? Error{ErrorCode::kUnavailable, "asset_staging_failed"} : read.error();
+  }
+  if (!MoveFileExW(partial.c_str(), path.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return Error{ErrorCode::kUnavailable, "asset_staging_failed"};
+  return path;
 }
 Result<std::pair<FileLibrary::Asset, std::vector<std::uint8_t>>> FileLibrary::Read(
     const std::string& id,
     std::uint64_t offset) const {
   RK_ASSIGN_OR_RETURN(asset, Describe(id));
-  if (offset > asset.size)
-    return Error{ErrorCode::kInvalidRequest, "invalid_asset_offset"};
-  std::vector<std::uint8_t> bytes(
-      static_cast<std::size_t>(std::min<std::uint64_t>(kChunk, asset.size - offset)));
-  if (!bytes.empty()) {
-    std::ifstream input(Payload(id), std::ios::binary);
-    input.seekg(static_cast<std::streamoff>(offset));
-    input.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-    if (!input)
-      return Error{ErrorCode::kUnavailable, "file_read_failed"};
-  }
+  RK_ASSIGN_OR_RETURN(bytes, objects_.Store().ReadRange(tenant_, keys_, id, offset, kChunk));
   return std::pair{asset, std::move(bytes)};
-}
-Result<void> FileLibrary::Retain(const std::vector<std::string>& assets) {
-  std::lock_guard lock(mutex_);
-  for (const auto& id : assets)
-    RK_RETURN_IF_ERROR(RequireAsset(id));
-  for (const auto& id : assets) {
-    auto& entry = entries_.at(id);
-    if (!entry.expires)
-      continue;
-    const Entry retained{entry.asset, 0};
-    RK_RETURN_IF_ERROR(SaveEntry(retained));
-    entry.expires = 0;
-  }
-
-  return {};
-}
-Result<void> FileLibrary::References(std::uint64_t revision,
-                                     const std::vector<std::string>& assets) {
-  if (assets.size() > kAssets)
-    return Error{ErrorCode::kInvalidRequest, "invalid_library_references"};
-  std::lock_guard lock(mutex_);
-  if (reference_revision_ && revision < *reference_revision_)
-    return {};
-  const std::set<std::string> next(assets.begin(), assets.end());
-  if (next.size() != assets.size() || (reference_revision_ == revision && next != references_))
-    return Error{ErrorCode::kConflict, "library_reference_conflict"};
-  for (const auto& id : next)
-    RK_RETURN_IF_ERROR(RequireAsset(id));
-  const auto expires = Now() + kAssetLifetime;
-  for (auto& [id, entry] : entries_) {
-    if (next.contains(id) || (entry.expires && !references_.contains(id)))
-      continue;
-    const Entry released{entry.asset, expires};
-    RK_RETURN_IF_ERROR(SaveEntry(released));
-    entry.expires = expires;
-  }
-  if (reference_revision_ != revision) {
-    RK_RETURN_IF_ERROR(
-        Save(root_ / "references.json", {{"revision", revision}, {"assetIds", next}}));
-    references_ = next;
-    reference_revision_ = revision;
-  }
-
-  return {};
 }
 Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
                                                          const Check& check,
-                                                         DerivativeFormat format) {
+                                                         DerivativeFormat format,
+                                                         const std::string& derived_from) {
   const bool png = format == DerivativeFormat::png;
   const auto budget = png ? kPngDerivativeBytes : kJpegDerivativeBytes;
   {
     std::lock_guard lock(mutex_);
     RK_RETURN_IF_ERROR(check());
-    if (entries_.size() >= kAssets || asset_bytes_ + draft_bytes_ + budget > kLibraryBytes)
-      return Error{ErrorCode::kLimitExceeded, "asset_library_quota"};
   }
   RK_ASSIGN_OR_RETURN(random, RandomId());
   const auto path = DraftData(random + (png ? ".png" : ".jpg"));
@@ -650,7 +529,7 @@ Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,
       return Error{ErrorCode::kLimitExceeded, "photo_output_too_large"};
     auto result = Publish(
         path, {{}, png ? "image/png" : "image/jpeg", size, dimensions.width, dimensions.height},
-        check);
+        check, derived_from);
     Remove(path);
     return result;
   }
@@ -666,15 +545,9 @@ Result<void> FileLibrary::Sweep() {
     if (current->second.expires <= now)
       EraseDraft(current);
   }
-  for (auto it = entries_.begin(); it != entries_.end();) {
-    const auto current = it++;
-    const auto& [id, entry] = *current;
-    if (!entry.expires || entry.expires > now || references_.contains(id))
-      continue;
-    if (!Remove(root_ / "assets" / (id + ".json")) || !Remove(Payload(id)))
-      continue;
-    asset_bytes_ -= entry.asset.size;
-    entries_.erase(current);
+  for (const auto& entry : fs::directory_iterator(root_ / "staging")) {
+    if (fs::file_time_type::clock::now() - entry.last_write_time() > std::chrono::minutes(10))
+      Remove(entry.path());
   }
 
   return {};
@@ -697,8 +570,7 @@ Result<void> FileLibrary::Prepare(const Selection& selection) {
   for (const auto& file : selection.files) {
     RK_ASSIGN_OR_RETURN(asset_entry, RequireAsset(file.asset_id));
     const auto& entry = *asset_entry;
-    if ((entry.expires && !references_.contains(file.asset_id)) ||
-        !ValidSpec({file.name, file.type, entry.asset.size}) ||
+    if (!ValidSpec({file.name, file.type, entry.asset.size}) ||
         entry.asset.size > 2 * kFileBytes - bytes)
       return Error{ErrorCode::kInvalidRequest, "invalid_selection_file"};
     bytes += entry.asset.size;

@@ -31,6 +31,7 @@ export type PolicyApplication = { encoded: string; applied: boolean; browserPid?
 export class TenantRuntime {
   reconciliation: { inflight?: Promise<void> } = {};
   viewer?: ViewerLease;
+  viewerAbsentSince: number;
   lastViewport?: ViewerViewport;
   snapshotSequence = 0;
   lastError?: string;
@@ -61,6 +62,7 @@ export class TenantRuntime {
     readonly tenantId: string,
     clock: Clock,
   ) {
+    this.viewerAbsentSince = clock.monotonicMs();
     this.lifecycle = { transitions: new Map(), background: new MemorySaverViews(clock) };
   }
   get connectionId() {

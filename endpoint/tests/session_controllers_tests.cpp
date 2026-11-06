@@ -1,3 +1,4 @@
+#include "runtime_config_fixture.hpp"
 #include "rtc/data_router.hpp"
 #include "rtc/outbox.hpp"
 #include "rtc/authorization.hpp"
@@ -243,6 +244,9 @@ void MediaPolicyRequests() {
     bool SendReply(uint64_t, const Json&) override { return true; }
     bool SendEvent(const Json&, uint64_t) override { return true; }
     void OnDisconnect(Disconnect) override {}
+    Result<Json> Request(const std::string&, Json) override {
+      return Error{ErrorCode::kUnavailable, "test Control has no object responder"};
+    }
   } link;
   const auto directory = fs::temp_directory_path() /
                          ("remotekit-media-policy-" + std::to_string(GetCurrentProcessId()) + "-" +
@@ -254,12 +258,12 @@ void MediaPolicyRequests() {
       fs::remove_all(directory, ignored);
     }
   } cleanup{directory};
-  std::string executable = "endpoint", data = "--data-path=" + directory.string();
-  char* arguments[] = {executable.data(), data.data()};
-  auto parsed = RuntimeOptions::Parse(2, arguments);
+  auto parsed = RuntimeOptions::FromConfig(TestConfig(), directory, "dev", "test");
   CHECK(parsed);
   media::Sdk sdk;
-  Session session(sdk, parsed.value(), "tenant", "1", link);
+  objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
+  Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
+                  cluster::Key{}, link, objects, objects::Keys{});
   const Json request = {{"maxFps", 30}, {"degradationPreference", "balanced"}, {"audio", false}};
   CHECK(session.Media().ManageSessionMediaPolicy(request));
   CHECK(!session.Media().Audio());
@@ -331,7 +335,7 @@ void PeerFailureCleanup() {
     *level = 31;
     return active->fail == 6 ? 1 : 0;
   };
-  auto parsed = RuntimeOptions::Parse(0, nullptr);
+  auto parsed = RuntimeOptions::FromConfig(TestConfig(), fs::current_path(), "dev", "test");
   CHECK(parsed);
   const auto options = std::move(parsed).value();
   PeerController* owner = nullptr;

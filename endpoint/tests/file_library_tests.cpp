@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 
 using remotekit::FileLibrary;
 using remotekit::FileUploadStore;
@@ -35,8 +36,41 @@ inline void Take(remotekit::Result<void> result) {
   }
 }
 
-int main() {
-  const auto root = fs::temp_directory_path() /
+class Control final : public remotekit::ManagementLink {
+ public:
+  bool reject_commit = false;
+  remotekit::ErrorCode reject_code = remotekit::ErrorCode::kUnavailable;
+  remotekit::Json last_commit;
+  std::string address;
+  std::vector<remotekit::Json> committed;
+  unsigned located = 0;
+  bool Next(std::string&, uint64_t&, bool&) override { return false; }
+  bool Current(uint64_t) override { return true; }
+  bool SendReply(uint64_t, const remotekit::Json&) override { return true; }
+  bool SendEvent(const remotekit::Json&, uint64_t) override { return true; }
+  void OnDisconnect(Disconnect) override {}
+  remotekit::Result<remotekit::Json> Request(const std::string& name,
+                                             remotekit::Json fields) override {
+    if (name == "object.committed") {
+      last_commit = fields;
+      if (reject_commit)
+        return remotekit::Error{reject_code, "Control rejected commit"};
+      committed.push_back(fields);
+      return remotekit::Json{{"accepted", true}};
+    }
+    CHECK(name == "object.locate");
+    ++located;
+    remotekit::Json sources = remotekit::Json::object();
+    for (const auto& id : fields["ids"])
+      sources[id.get<std::string>()] =
+          address.empty() ? remotekit::Json::array()
+                          : remotekit::Json::array({{{"nodeId", "source"}, {"address", address}}});
+    return remotekit::Json{{"sources", sources}};
+  }
+};
+int main(int argc, char** argv) {
+  CHECK(argc == 2);
+  const auto root = fs::path(argv[1]) /
                     ("remotekit-file-library-" +
                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   const auto live = []() -> remotekit::Result<void> { return {}; };
@@ -44,7 +78,13 @@ int main() {
     return remotekit::Error{remotekit::ErrorCode::kForbidden, "file_transfer_interrupted"};
   };
   const auto session = root / "session";
-  const std::string hash = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+  Control control;
+  remotekit::objects::Keys keys;
+  remotekit::objects::ObjectService objects(root / "node", control, remotekit::cluster::Key{},
+                                            "source", "dev");
+  remotekit::objects::PeerServer peer(objects.Store(), remotekit::cluster::Key{}, "source", "dev");
+  Take(peer.Start("127.0.0.1:0"));
+  const std::string hash = "fd7adb152c05ef80dccf50a1fa4c05d5a3ec6da95575fc312ae7c5d091836351";
   const FileUploadStore::Spec spec{"photo.jpeg", "image/jpeg", 3};
   const std::vector<std::uint8_t> png_signature{137, 80, 78, 71, 13, 10, 26, 10};
   std::string upload;
@@ -57,7 +97,7 @@ int main() {
   unsubmitted.id = "aabbccddaabbccddaabbccddaabbccee";
   unsubmitted.binding.request = "5";
   {
-    FileLibrary library(session);
+    FileLibrary library(session, objects, "tenant", keys);
     CHECK(library.Initialize());
     const auto draft = Take(library.Begin(1, "operation", spec, live));
     upload = draft["uploadId"];
@@ -70,7 +110,7 @@ int main() {
     CHECK(Fails([&] { return library.Chunk(2, upload, 1, {'b'}, live); }));
   }
   {
-    FileLibrary library(session);
+    FileLibrary library(session, objects, "tenant", keys);
     CHECK(library.Initialize());
     CHECK(Fails([&] { return library.Chunk(1, upload, 1, {'b'}, live); }));
     CHECK(Take(library.Begin(1, "operation", spec, live))["offset"] == 1);
@@ -78,7 +118,15 @@ int main() {
     CHECK(Take(library.Chunk(1, upload, 0, {'a', 'b', 'c'}, live)) == 3);
     CHECK(Fails([&] { return library.Chunk(1, upload, 0, {'x'}, live); }));
     CHECK(Fails([&] { return library.Seal(1, upload, retired); }));
+    control.reject_commit = true;
+    CHECK(Fails([&] { return library.Seal(1, upload, live); }));
+    control.reject_commit = false;
     CHECK(Take(library.Seal(1, upload, live)).id == hash);
+    CHECK(control.committed.back()["objectId"] == hash &&
+          control.committed.back()["tenantId"] == "tenant" &&
+          control.committed.back()["size"] == 3 &&
+          control.committed.back()["storedSha256"] ==
+              "5282c0a80ba6b75435b918f0fe3cd79840428777d155d5d35b0c66560471a7fa");
     CHECK(Take(library.Seal(1, upload, live)).id == hash);
     CHECK(Take(library.Read(hash, 1)).second == std::vector<std::uint8_t>({'b', 'c'}));
     CHECK(Take(library.Read(hash, 3)).second.empty());
@@ -89,24 +137,30 @@ int main() {
           output.write(reinterpret_cast<const char*>(png_signature.data()), png_signature.size());
           return FileLibrary::Derivative{800, 600};
         },
-        live, FileLibrary::DerivativeFormat::png));
+        live, FileLibrary::DerivativeFormat::png, hash));
     CHECK(derivative.type == "image/png" && derivative.width == 800 && derivative.height == 600);
     derivative_id = derivative.id;
+    CHECK(control.committed.back()["derivedFrom"] == hash);
+    CHECK(!derivative.Json().contains("hash"));
     CHECK(Take(library.Read(derivative_id, 0)).second == png_signature);
     CHECK(Fails([&] { return library.Read(hash, 4); }));
-    FileLibrary other(root / "other-session");
+    FileLibrary other(root / "other-session", objects, "other-tenant", keys);
     CHECK(other.Initialize());
     CHECK(Fails([&] { return other.Describe(hash); }));
     const auto duplicate =
         Take(library.Begin(1, "different-operation", spec, live))["uploadId"].get<std::string>();
     Take(library.Chunk(1, duplicate, 0, {'a', 'b', 'c'}, live));
     CHECK(Take(library.Seal(1, duplicate, live)).id == hash);
-    CHECK(Fails([&] { return library.Prepare(selection); }));
-    Take(library.Retain({hash}));
-    Take(library.References(7, {hash}));
-    Take(library.References(7, {hash}));
-    CHECK(Fails([&] { return library.References(7, {}); }));
-    Take(library.References(6, {}));
+    const auto conflicted =
+        Take(library.Begin(1, "conflicting-object", spec, live))["uploadId"].get<std::string>();
+    Take(library.Chunk(1, conflicted, 0, {'x', 'y', 'z'}, live));
+    control.reject_commit = true;
+    control.reject_code = remotekit::ErrorCode::kConflict;
+    CHECK(!library.Seal(1, conflicted, live));
+    CHECK(!objects.Store().Inspect("tenant", control.last_commit["objectId"].get<std::string>()));
+    control.reject_commit = false;
+    control.reject_code = remotekit::ErrorCode::kUnavailable;
+    CHECK(library.Seal(1, conflicted, live));
     Take(library.Prepare(selection));
     Take(library.Prepare(selection));
     auto conflict = selection;
@@ -134,7 +188,7 @@ int main() {
     CHECK(!Take(library.Claim(unsubmitted.id, live)));
   }
   {
-    FileLibrary library(session);
+    FileLibrary library(session, objects, "tenant", keys);
     CHECK(library.Initialize());
     using State = FileLibrary::Selection::State;
     CHECK(Take(library.Describe(hash)).size == 3);
@@ -147,7 +201,6 @@ int main() {
     Take(library.Finish(selection.id, State::selected));
     Take(library.Finish(selection.id, State::cancelled));
     CHECK(library.FindSelection(selection.id)->state == State::selected);
-    Take(library.References(8, {}));
     FileUploadStore staging(root / "staging");
     CHECK(staging.Initialize());
     const auto source = Take(library.Path(hash));
@@ -165,12 +218,50 @@ int main() {
   }
   {
     // Receipt recovery must not depend on the original source or live Browser.
-    const auto& metadata = session / "assets" / (hash + ".json");
+    const auto& metadata = session / "metadata" / (hash + ".json");
     fs::remove(metadata);
-    FileLibrary library(session);
+    FileLibrary library(session, objects, "tenant", keys);
     CHECK(library.Initialize());
     CHECK(library.FindSelection(selection.id)->state == FileLibrary::Selection::State::selected);
   }
+  {
+    Control target_control;
+    target_control.address = peer.Address();
+    remotekit::objects::ObjectService target(root / "target", target_control,
+                                             remotekit::cluster::Key{}, "target", "dev");
+    FileLibrary library(root / "remote-session", target, "tenant", keys);
+    Take(library.Initialize());
+    CHECK(!target.Store().Inspect("tenant", hash));
+    target_control.reject_commit = true;
+    CHECK(!library.Path(hash));
+    CHECK(target.Store().Inspect("tenant", hash));
+    target_control.reject_commit = false;
+    const auto path = Take(library.Path(hash));
+    std::ifstream input(path, std::ios::binary);
+    CHECK(std::string(std::istreambuf_iterator<char>(input), {}) == "abc");
+    CHECK(target_control.located == 1 && target_control.committed.back()["objectId"] == hash);
+    CHECK(target.Store().Inspect("tenant", hash));
+    CHECK(Take(library.Read(hash, 1)).second == std::vector<uint8_t>({'b', 'c'}));
+    input.close();
+    Take(target.Dispatch(
+        {{"method", "object.fetch"},
+         {"tenantId", "tenant"},
+         {"ids", {derivative_id}},
+         {"sources",
+          {{derivative_id,
+            remotekit::Json::array({{{"nodeId", "source"}, {"address", peer.Address()}}})}}}}));
+    CHECK(target_control.committed.back()["objectId"] == derivative_id);
+    const auto inventory = Take(
+        target.Dispatch({{"method", "object.inventory"}, {"tenantId", ""}, {"cursor", nullptr}}));
+    CHECK(inventory["objects"].size() == 2);
+    Take(target.Dispatch(
+        {{"method", "object.delete"}, {"tenantId", "tenant"}, {"ids", {derivative_id}}}));
+    CHECK(!target.Store().Inspect("tenant", derivative_id));
+    CHECK(!target.Dispatch(
+        {{"method", "object.delete"}, {"tenantId", "../tenant"}, {"ids", {hash}}}));
+  }
+  CHECK(!fs::exists(session / "references.json") && !fs::exists(session / "payload") &&
+        !fs::exists(session / "assets"));
   fs::remove_all(root);
   return 0;
 }

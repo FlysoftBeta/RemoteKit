@@ -7,6 +7,9 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tests/integration"))
+from browser_key import spawn_browser
+
 runtime = Path(sys.argv[1]).resolve()
 evidence = Path(sys.argv[2]).resolve()
 evidence.mkdir(parents=True, exist_ok=True)
@@ -18,7 +21,7 @@ with os.add_dll_directory(str(runtime)):
         ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t), ctypes.c_uint32]
     sdk.remotekit_sdk_control_close.argtypes = [ctypes.c_uint64]
     assert sdk.remotekit_sdk_initialize() == 0
-    process = subprocess.Popen([str(runtime / "remotekit_browser.exe"),
+    process = spawn_browser([str(runtime / "remotekit_browser.exe"),
         f"--control-channel={channel}", "--session-id=1", "--tenant-id=startup-probe",
         f"--data-path={evidence}", "--use-adapter-luid=2147483647,4294967295"],
         creationflags=subprocess.CREATE_NO_WINDOW)

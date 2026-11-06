@@ -16,7 +16,7 @@ set "RK_TARGET="
 if "%~1"=="package" (
   set "RK_BUILD=%RK_ROOT%\build\endpoint-package"
   set "RK_PACKAGE_ARGS=-DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF"
-  set "RK_TARGET=--target endpoint_service"
+  set "RK_TARGET=--target endpoint_service remotekit_node"
 )
 if "%~1"=="encoder-smoke" (
   set "RK_BUILD=%RK_ROOT%\build\endpoint-package"

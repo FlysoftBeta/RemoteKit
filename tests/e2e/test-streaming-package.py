@@ -37,11 +37,15 @@ def main():
   with socket.socket() as probe:probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
   origin='http://127.0.0.1:'+str(port);env=os.environ.copy()
   opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-  for name in ['NODE_PATH','NODE_OPTIONS','REMOTEKIT_HTTPS_KEY','REMOTEKIT_HTTPS_CERT','REMOTEKIT_ENDPOINT_NODE_ID','REMOTEKIT_ENDPOINT_TOKEN','REMOTEKIT_ENDPOINT_TLS_PROXY']:env.pop(name,None)
-  env.update(PORT=str(port),REMOTEKIT_CONTROL_HOST='127.0.0.1',REMOTEKIT_CONTROL_ORIGINS=origin,
-    REMOTEKIT_CONTROL_DB=str(run/'control.db'),
-    REMOTEKIT_ENDPOINT=str(package/'bin/endpoint_service.exe'),
-    REMOTEKIT_ENDPOINT_ARGS=json.dumps(['--browser='+str(package/'bin/remotekit_browser.exe'),'--data-path='+str(run/'endpoint')]))
+  for name in ['NODE_PATH','NODE_OPTIONS']:env.pop(name,None)
+  config=run/'control.json'
+  config.write_text(json.dumps({
+    'http':{'host':'127.0.0.1','port':port,'origins':[origin]},
+    'database':str(run/'control.db'),'diagnostics':str(run/'diagnostics'),
+    'nodeDefaults':{'browser':str(package/'bin/remotekit_browser.exe'),'dataPath':str(run/'endpoint')},
+    'nodes':{'local':{'launch':{'executable':str(package/'bin/endpoint_service.exe'),'root':str(run/'node')}}}
+  }),encoding='utf-8')
+  env['REMOTEKIT_CONTROL_CONFIG']=str(config)
   with (run/'stderr.log').open('wb') as errors,(run/'stdout.log').open('wb') as output:
    child=subprocess.Popen([str(package/'bin/node.exe'),str(package/'control/dist/server.mjs')],cwd=package,
      env=env,stdout=output,stderr=errors,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))

@@ -13,7 +13,7 @@
 | `POST /api/auth/register` | 账号、密码、注册口令（首个账号免口令）；签发 token 与一次性首租约许可 |
 | `POST /api/auth/login` / `logout` | 登录签发 token；注销只撤销当前 token |
 | `GET /api/socket` | WebSocket upgrade |
-| `GET /api/endpoint` | 远端 Endpoint 管理连接（Bearer） |
+| `GET /api/node` | 远端节点的集群通道（WebSocket 二进制帧，Noise 握手；Endpoint 与 updater） |
 | 其他 GET | Viewer 静态资源 |
 
 POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字段。
@@ -96,24 +96,30 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 
 ## Control ↔ Endpoint
 
-本地 JSONL（stdin/stdout）或远端 WSS，消息相同：
+集群通道（本地 stdio 或远端 WebSocket，握手与加密见[多节点 · 集群通道](cluster.md#集群通道)）上的 JSON 消息：
 
 ```
-请求  {id, method, tenantId, ...参数}
-回复  {id, ok:true, result} | {id, ok:false, error:{code, message}}
-事件  {event:"rtc.signal" | "client.action", ...}
-远端握手  node.hello{version, nodeId, endpointIncarnation} → node.ready{version, connectionEpoch}
+握手      node.hello{role, nodeId, buildId, incarnation}
+          → node.ready{connectionEpoch, buildId, config, configHash, sessions} | node.release{release} | node.reject{code, buildId}
+请求      {id, method, tenantId, ...参数}
+回复      {id, ok:true, result} | {id, ok:false, error:{code, message}}
+事件      {event:"rtc.signal" | "client.action" | "node.metrics", ...}
+反向请求  {id, request:"object.committed" | "object.locate", tenantId, ...}（Endpoint → Control，回复形状相同）
+保活      {type:"node.ping"} / {type:"node.pong"}
+更新包    package.get{buildId, offset} → BINARY package.chunk{offset} … package.end{size}（role updater）
 ```
 
 | 方法 | 说明 |
 |---|---|
+| `session.open` | 创建或确认 Session：sessionId、placementEpoch、checkpoint、profileKey/objectKey/objectIdKey；其他方法只对已打开的 Tenant 有效 |
+| `session.hibernate` | 优雅关闭 Browser 并生成 checkpoint，回复 manifest id；有阻塞项时 `conflict` |
 | `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
 | `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |
 | `session.sitePreferences` | 完整 origin→UA 规则表 |
 | `session.mediaPolicy` | `{degradationPreference, maxFps, audio}`；`audio` 为 false 时音频发送器停用、PCM 不进编码器 |
 | `session.events.ack` | 确认已持久化的自然关闭事件 |
 | `session.files.authorize` | 授权原生选择器与文件库的 DC 文件操作 |
-| `session.library.describe/retain/references/prepare/selectionStatus` | 文件资产与选择事务 |
+| `session.library.describe/prepare/selectionStatus` | 文件资产描述与选择事务 |
 | `view.ensure` / `view.configure` | 稳定 viewId、URL、viewport、device、visible；`requireRunning` 防止维护请求拉起 Browser |
 | `view.navigate` / `view.command` / `view.navigation.ack` | 导航与 history 命令（带 operationId/Generation/Sequence）；终态确认 |
 | `view.lifecycle` | freeze/discard/unload/restore；不确定恢复带 requireRunning、browserIncarnation、lifecycleGeneration |
@@ -124,9 +130,13 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `rtc.authorize` | connectionId、epoch、unlocked |
 | `rtc.actionResult` | 产品动作的收据回传 |
 | `auth.face.capabilities/begin/status/cancel` | 人脸挑战 |
-| `shutdown` | 仅本地模式 |
+| `object.fetch` / `object.delete` / `object.inventory` | 节点级（不需要打开的 Session）：拉取副本、删除、分页列出存储的对象 |
+| `session.cold.delete` | 节点级：删除冷副本 |
+| `shutdown` | 优雅关闭整个 Endpoint |
 
-快照中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded。
+快照中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded。快照的 `hibernation` 字段报告休眠阻塞项（未确认关闭事件、未决原生选择、上传中、页面请求、下载中的计数，以及 RTC 是否连接、生命周期是否不确定）。
+
+**Endpoint ↔ Endpoint**：TCP，u32le 长度帧，同一个 Noise 握手（role `peer`，buildId 必须相同）。`object.get{tenantId, id, offset}` → BINARY `object.chunk{offset}`（≤1MiB 存储文件字节）… `object.end{size, sha256}`，或 `object.error{code}`。
 
 ## Endpoint ↔ Browser
 

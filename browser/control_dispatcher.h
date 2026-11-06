@@ -4,6 +4,7 @@ namespace remotekit::browser {
 class BrowserRuntime;
 class ControlResult;
 struct ShutdownRequest;
+struct StorageScavengeRequest;
 struct OutputConfigureRequest;
 struct OutputOpenRequest;
 struct OutputStatusRequest;
@@ -31,6 +32,7 @@ class ControlDispatcher {
   explicit ControlDispatcher(BrowserRuntime& runtime) : runtime_(runtime) {}
   base::DictValue Dispatch(const base::DictValue&);
   ControlResult HandleShutdown(const ShutdownRequest&);
+  ControlResult HandleStorageScavenge(const StorageScavengeRequest&);
   ControlResult HandleOutputConfigure(const OutputConfigureRequest&);
   ControlResult HandleOutputOpen(const OutputOpenRequest&);
   ControlResult HandleOutputStatus(const OutputStatusRequest&);

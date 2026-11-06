@@ -6,6 +6,7 @@ import ctypes
 import http.server
 import json
 import os
+from browser_key import spawn_browser
 from pathlib import Path
 import subprocess
 import threading
@@ -166,7 +167,7 @@ def main():
         command = [str(browser_path), '--control-channel=' + channel,
             '--session-id=1', '--tenant-id=lifecycle-probe', '--remotekit-render-host=offscreen',
             '--data-path=' + str(run / 'data')]
-        browser = subprocess.Popen(command, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
+        browser = spawn_browser(command, stdout=log, stderr=log, creationflags=subprocess.CREATE_NO_WINDOW)
         try:
             wait_for(lambda: sdk.remotekit_sdk_control_connect(channel.encode(), ctypes.byref(handle)),
                      lambda status: status == 0, 'control connection')
@@ -242,7 +243,7 @@ def main():
                 try:
                     if browser.poll() is None:
                         try:
-                            rpc('shutdown')
+                            rpc('browser.shutdown')
                         except Exception as cleanup_error:
                             (run / 'shutdown-error.txt').write_text(repr(cleanup_error), encoding='utf-8')
                 finally:

@@ -5,17 +5,16 @@
 #include "services/network/public/mojom/network_context.mojom-forward.h"
 
 class CookieEncryptionProviderImpl;
-class PrefService;
 namespace os_crypt_async {
 class OSCryptAsync;
 }
 
 namespace remotekit::browser {
+class ProfileKey;
 // Owned by one BrowserContext; outlives all of that Profile's partitions.
-// Only the DPAPI-wrapped key is persisted; no host/Chrome local state is used.
 class ProfileNetworkState final {
  public:
-  explicit ProfileNetworkState(const base::FilePath& profile_path);
+  ProfileNetworkState(const base::FilePath& profile_path, std::unique_ptr<ProfileKey> key);
   ~ProfileNetworkState();
   void Configure(bool in_memory,
                  const base::FilePath& relative_partition_path,
@@ -23,7 +22,7 @@ class ProfileNetworkState final {
 
  private:
   const base::FilePath profile_path_;
-  std::unique_ptr<PrefService> key_prefs_;
+  const std::unique_ptr<ProfileKey> key_;
   std::unique_ptr<os_crypt_async::OSCryptAsync> crypt_;
   std::unique_ptr<CookieEncryptionProviderImpl> encryption_provider_;
 };

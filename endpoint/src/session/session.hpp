@@ -13,10 +13,24 @@
 namespace remotekit {
 class Session {
  public:
-  Session(media::Sdk&, const RuntimeOptions&, std::string tenant, std::string id, ManagementLink&);
+  Session(media::Sdk&,
+          const RuntimeOptions&,
+          std::string tenant,
+          std::string id,
+          uint64_t placement_epoch,
+          const cluster::Key& profile_key,
+          ManagementLink&,
+          objects::ObjectService&,
+          const objects::Keys&);
   ~Session();
   Result<void> Initialize();
   Result<void> Stop();
+  Result<void> Shutdown();
+  Result<Json> Snapshot(bool output_diagnostics = false);
+  Result<Json> Hibernate(objects::ObjectService& objects);
+  uint64_t PlacementEpoch() const { return config.placement_epoch; }
+  Result<Json> Open(const Json& request) const;
+  const std::string& Id() const { return config.id; }
   void BeginManagementRequest(uint64_t generation) {
     generation_ = generation;
     channel.BeginManagementRequest(generation);
@@ -36,6 +50,7 @@ class Session {
   ChannelController& Channel() { return channel; }
 
  private:
+  Result<void> CloseRuntime(bool graceful);
   void BindPeerResources(uint64_t handle);
   Result<void> StartPeerResources(uint64_t handle, const std::string& sdp);
   void StopPeerResources();

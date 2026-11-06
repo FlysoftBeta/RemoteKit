@@ -1,6 +1,6 @@
 # Control：产品状态、操作与对账
 
-Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、设置、站点偏好、文件目录和操作收据都只在 Control 的 SQLite 里。Endpoint 和 Browser 拥有"执行"：进程、WebContents、恢复数据、GPU 资源。Control 通过对账让执行趋向期望。
+Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、设置、站点偏好、文件目录和操作收据都只在 Control 的 SQLite 里。Endpoint 和 Browser 拥有"执行"：进程、WebContents、恢复数据、GPU 资源。Control 通过对账让执行趋向期望。Control 同时管理多个 Endpoint 节点，每个 Tenant 的请求路由到它被放置的节点（见[多节点](cluster.md)）。
 
 SQLite 带 `schema_version`（当前 2）。打开时在同一事务里从存储的版本逐级执行迁移，再写入当前版本；比当前更新的版本拒绝启动。没有 `schema_version` 但已有表的库按版本 1 处理。读取路径只认当前格式，不在运行时补默认值。v1→v2：给已有设置补 `avSync=false`。
 
@@ -8,9 +8,11 @@ SQLite 带 `schema_version`（当前 2）。打开时在同一事务里从存储
 
 | 所有者 | 数据 |
 |---|---|
-| Control SQLite | 账户、口令/PIN hash、token hash、注册口令 hash、人脸模板（加密）；workspace（Window、Tab、active 关系、地址意图、恢复阶段）；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务 |
-| Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、Endpoint 连接状态、Memory Saver 计时 |
-| Endpoint Session | Browser 进程、期望的 view 配置（views.json）、自然关闭事件（events.json）、导航恢复文件、站点 UA 与媒体策略的运行缓存、文件资产与暂存、媒体/输入/GPU 资源 |
+| Control 配置文件 | HTTP 监听、集群密钥文件、每个节点的配置、配额 |
+| Control SQLite | 账户、口令/PIN hash、token hash、注册口令 hash、人脸模板（加密）；workspace（Window、Tab、active 关系、地址意图、恢复阶段）；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务；会话放置与加密的 Tenant 密钥；对象索引与副本；checkpoint；被移除的节点 |
+| Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、节点连接状态与指标、Memory Saver 计时 |
+| Endpoint Session | Browser 进程、期望的 view 配置（views.json）、自然关闭事件（events.json）、导航恢复文件、站点 UA 与媒体策略的运行缓存、文件草稿与暂存、媒体/输入/GPU 资源、内存中的 Tenant 密钥 |
+| Endpoint 节点 | 加密对象（文件库资产、缩略图、checkpoint 块）、Session 热/冷副本 |
 | Browser | Profile 存储（cookie、缓存）、WebContents、history/PageState、sessionStorage 关联、页面回调与各种代次 |
 | Client | 服务端状态副本、地址草稿、待确认操作的内存投影、媒体缓冲；持久项只有 HttpOnly token |
 
@@ -22,10 +24,8 @@ SQLite 带 `schema_version`（当前 2）。打开时在同一事务里从存储
 
 **Viewer ↔ Endpoint**：WebRTC。视频、音频、输入、产品动作、文件字节、照片分析都走它。产品动作经 DataChannel 到 Endpoint，再由 Endpoint 经管理连接转交 Control 的唯一提交器（见下文"操作"）。
 
-**Control ↔ Endpoint**：两种部署共用同一套 JSON 请求/回复/事件：
+**Control ↔ Endpoint**：集群通道（Noise 握手 + AES-GCM，见[多节点 · 集群通道](cluster.md#集群通道)）上的 JSON 请求/回复/事件。本地节点由 Control 启动，走 stdio；远端节点主动连接 `/api/node`（WebSocket）。请求超时 20 秒，JSON 消息上限 1MiB，5 秒握手期限，每节点最多 256 个在途请求。
 
-- 本地：Control 启动 `endpoint_service`，stdin/stdout UTF-8 JSONL（stdout 只输出协议，日志走 stderr），请求超时 20 秒，消息上限 1MiB。
-- 远端：Endpoint 主动连接 Control 的 `/api/endpoint`（WSS + Bearer token），握手 `node.hello{version, nodeId, endpointIncarnation}` → `node.ready{connectionEpoch}`；5 秒握手期限、15 秒心跳、最多 256 个在途请求。
 - `endpointIncarnation` 是 Endpoint 进程身份，跨 socket 重连保持；`connectionEpoch` 只代表一次管理连接。同一进程重连时，Control 保留 Viewer、RTC 租约和媒体代次，只做快照对账；只有进程真正被替换才整体失效。旧连接的回复不能完成新连接的请求，未知结果的变更不盲目重放。
 - 管理断线不销毁已有 Session 与 RTC，但立即撤销 Endpoint 侧的产品授权；恢复后以更高的授权代次重新授权（见[认证](auth.md)）。
 - Control 与 Endpoint 不共享文件系统、时钟或进程。

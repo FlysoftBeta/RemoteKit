@@ -4,6 +4,9 @@
 
 namespace remotekit::protocol {
 inline constexpr int kControlVersion = 1;
+inline constexpr std::string_view kBrowserShutdown = "browser.shutdown";
+inline constexpr std::string_view kStorageScavenge = "storage.scavenge";
+inline constexpr int kBrowserShutdownFailureExitCode = 70;
 enum class ErrorCode {
   none = 0,
   not_found = 1,

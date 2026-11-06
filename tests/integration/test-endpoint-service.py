@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the real JSONL Endpoint service and isolated browser processes."""
 import argparse,json,os,queue,subprocess,threading,time
+from cluster_bridge import endpoint_command
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 ROOT=Path(__file__).resolve().parents[2]
@@ -34,7 +35,7 @@ def main():
  fixture_origin='http://127.0.0.1:'+str(fixture_server.server_port)
  fixture_url=fixture_origin+'/fixture'
  with (run/'stderr.log').open('wb') as log:
-  child=subprocess.Popen([str(a.endpoint),'--browser='+str(a.browser),'--data-path='+str(run/'state')],
+  child=subprocess.Popen(endpoint_command(a.endpoint, a.browser, run/'state', maxSessions=max(3, a.tenants)),
     stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=log,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
   replies=queue.Queue()
   def read():

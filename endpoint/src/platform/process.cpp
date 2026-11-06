@@ -1,6 +1,9 @@
 #include "platform/process.hpp"
 #include <iomanip>
 #include <sstream>
+#include <vector>
+#include <chrono>
+#include <thread>
 
 namespace remotekit {
 namespace {
@@ -58,9 +61,43 @@ std::wstring BrowserProcess::Quote(const std::wstring& value) {
   result.append(slashes * 2, L'\\');
   return result + L"\"";
 }
-Result<void> BrowserProcess::Launch(const fs::path& executable, std::wstring command) {
+Result<void> BrowserProcess::Launch(const fs::path& executable,
+                                    std::wstring command,
+                                    std::span<const uint8_t, 32> profile_key) {
   if (Present())
     return Error{ErrorCode::kConflict, "browser process is retained"};
+  struct Pipe {
+    HANDLE read = nullptr, write = nullptr;
+    ~Pipe() {
+      if (read)
+        CloseHandle(read);
+      if (write)
+        CloseHandle(write);
+    }
+  } pipe;
+  SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
+  if (!CreatePipe(&pipe.read, &pipe.write, &security, 32) ||
+      !SetHandleInformation(pipe.write, HANDLE_FLAG_INHERIT, 0))
+    return ProcessError("profile key pipe failed");
+  DWORD written = 0;
+  if (!WriteFile(pipe.write, profile_key.data(), 32, &written, nullptr) || written != 32)
+    return ProcessError("profile key write failed");
+  CloseHandle(pipe.write);
+  pipe.write = nullptr;
+  command += L" --profile-key-handle=" + std::to_wstring(reinterpret_cast<uintptr_t>(pipe.read));
+  SIZE_T size = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+  std::vector<uint8_t> storage(size);
+  auto attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(storage.data());
+  if (!InitializeProcThreadAttributeList(attributes, 1, 0, &size))
+    return ProcessError("process attribute initialization failed");
+  struct Attributes {
+    LPPROC_THREAD_ATTRIBUTE_LIST value;
+    ~Attributes() { DeleteProcThreadAttributeList(value); }
+  } cleanup{attributes};
+  if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &pipe.read,
+                                 sizeof(pipe.read), nullptr, nullptr))
+    return ProcessError("profile key inheritance failed");
   state_ = State::kLaunching;
   job_ = CreateJobObjectW(nullptr, nullptr);
   if (!job_) {
@@ -76,14 +113,21 @@ Result<void> BrowserProcess::Launch(const fs::path& executable, std::wstring com
     state_ = State::kStopped;
     return error;
   }
-  STARTUPINFOW startup{};
-  startup.cb = sizeof(startup);
-  startup.dwFlags = STARTF_USESHOWWINDOW;
-  startup.wShowWindow = SW_HIDE;
+  STARTUPINFOEXW startup{};
+  startup.StartupInfo.cb = sizeof(startup);
+  startup.StartupInfo.dwFlags = STARTF_USESHOWWINDOW;
+  startup.StartupInfo.wShowWindow = SW_HIDE;
+  startup.lpAttributeList = attributes;
   PROCESS_INFORMATION info{};
-  if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE,
-                      CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr,
-                      executable.parent_path().c_str(), &startup, &info)) {
+  const bool created =
+      CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
+                     CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr,
+                     executable.parent_path().c_str(), &startup.StartupInfo, &info) != FALSE;
+  const auto launch_error = GetLastError();
+  CloseHandle(pipe.read);
+  pipe.read = nullptr;
+  if (!created) {
+    SetLastError(launch_error);
     auto error = ProcessError("browser launch failed");
     CloseHandle(job_);
     job_ = nullptr;
@@ -142,6 +186,25 @@ Result<void> BrowserProcess::Terminate() {
   }
   state_ = State::kExited;
   return {};
+}
+bool BrowserProcess::JobEmpty() const {
+  if (!job_)
+    return !process_;
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+  return QueryInformationJobObject(job_, JobObjectBasicAccountingInformation, &accounting,
+                                   sizeof(accounting), nullptr) &&
+         accounting.ActiveProcesses == 0;
+}
+bool BrowserProcess::WaitCleanExit(uint32_t timeout_ms) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  do {
+    if (Exited() && JobEmpty()) {
+      state_ = State::kExited;
+      return ExitCode() == 0;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
 }
 void BrowserProcess::ReleaseExited() {
   if (state_ != State::kExited)

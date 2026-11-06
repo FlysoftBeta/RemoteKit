@@ -7,7 +7,8 @@ import {
 } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
 import type { MediaPolicy } from '../../shared/product';
-import type { EndpointLink } from './link';
+import type { NodeRegistry } from '../cluster/node-link';
+import type { Placement, SessionPlacement } from '../cluster/placement';
 import type {
   Accepted,
   ActionResult,
@@ -24,35 +25,126 @@ import type {
   ViewConfiguration,
 } from './types';
 export class EndpointGateway {
-  constructor(private readonly link: EndpointLink) {}
+  readonly hibernating = new Map<string, Promise<number>>();
+  private readonly opened = new Map<
+    string,
+    { epoch: string; placementEpoch: number; promise: Promise<void> }
+  >();
+  constructor(
+    readonly nodes: NodeRegistry,
+    readonly placement: Pick<
+      Placement,
+      'peek' | 'resolve' | 'keys' | 'commitCheckpoint' | 'underPressure' | 'markWarm'
+    >,
+  ) {}
+  isReady(tenant: string) {
+    const placed = this.placement.peek(tenant);
+    return placed?.state === 'active'
+      ? this.nodes.get(placed.nodeId)?.state.state === 'ready'
+      : this.nodes.all().some((node) => node.state.state === 'ready');
+  }
+  isPlacedOn(tenant: string, nodeId: string) {
+    const placement = this.placement.peek(tenant);
+    return placement?.state === 'active' && placement.nodeId === nodeId;
+  }
   onSignal(listener: (event: RtcSignal) => void) {
-    return this.link.onSignal?.(listener);
+    const unsubscribe = this.nodes.all().map((node) =>
+      node.onSignal?.((event) => {
+        if (this.isPlacedOn(event.tenantId, node.nodeId)) listener(event);
+      }),
+    );
+    return () => unsubscribe.forEach((fn) => fn?.());
   }
   onClientAction(listener: (event: ClientActionEvent) => void) {
-    return this.link.onClientAction?.(listener);
+    const unsubscribe = this.nodes.all().map((node) =>
+      node.onClientAction?.((event) => {
+        if (this.isPlacedOn(event.tenantId, node.nodeId)) listener(event);
+      }),
+    );
+    return () => unsubscribe.forEach((fn) => fn?.());
+  }
+  private async openSession(placement: SessionPlacement) {
+    const node = this.nodes.get(placement.nodeId)!;
+    const state = node.state;
+    if (state.state !== 'ready') throw new RemoteKitError('unavailable', 'Placed node is offline');
+    const previous = this.opened.get(placement.tenant);
+    if (previous?.epoch === state.connectionEpoch && previous.placementEpoch === placement.placementEpoch)
+      return previous.promise;
+    const entry = {
+      epoch: state.connectionEpoch,
+      placementEpoch: placement.placementEpoch,
+      promise: Promise.resolve(),
+    };
+    entry.promise = node
+      .request('session.open', placement.tenant, {
+        sessionId: placement.sessionId,
+        placementEpoch: placement.placementEpoch,
+        ...this.placement.keys(placement),
+        checkpoint: placement.checkpoint,
+      })
+      .then(() => {
+        if (node.state.state !== 'ready' || node.state.connectionEpoch !== entry.epoch)
+          throw new RemoteKitError('outcome_unknown', 'Node changed during session.open');
+        this.placement.markWarm(placement);
+      })
+      .catch((error) => {
+        if (this.opened.get(placement.tenant) === entry) this.opened.delete(placement.tenant);
+        throw error;
+      });
+    this.opened.set(placement.tenant, entry);
+    return entry.promise;
   }
   private async invoke<T>(method: string, tenant: string, args?: object): Promise<T> {
-    if (this.link.state.state !== 'ready') throw new RemoteKitError('unavailable', 'Endpoint 尚未就绪');
     try {
-      const reply = await this.link.request(method, tenant, args as Record<string, unknown>);
+      await this.hibernating.get(tenant);
+      const placement = this.placement.resolve(tenant);
+      const node = this.nodes.get(placement.nodeId)!;
+      await this.openSession(placement);
+      let reply: unknown;
+      try {
+        reply = await node.request(method, tenant, args as Record<string, unknown>);
+      } catch (error) {
+        if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'not_found')
+          throw error;
+        this.opened.delete(tenant);
+        await this.openSession(placement);
+        reply = await node.request(method, tenant, args as Record<string, unknown>);
+      }
       if (reply && typeof reply === 'object' && 'accepted' in reply && reply.accepted === false)
         throw new RemoteKitError('rejected', 'Endpoint 拒绝请求');
       return reply as T;
     } catch (error) {
-      if (isRemoteKitError(error)) throw error;
-      if (typeof error === 'string') throw new RemoteKitError('rejected', 'Endpoint 拒绝请求', error);
-      if (error && typeof error === 'object' && !(error instanceof Error)) {
-        const wire = error as { code?: string; message?: string };
-        const code: ErrorCode =
-          wire.code === 'busy'
-            ? 'unavailable'
-            : wire.code && Object.prototype.hasOwnProperty.call(httpStatus, wire.code)
-              ? (wire.code as ErrorCode)
-              : 'rejected';
-        throw new RemoteKitError(code, wire.message ?? 'Endpoint 拒绝请求');
-      }
-      throw toRemoteKitError(error);
+      throw endpointError(error);
     }
+  }
+  hibernate(tenant: string): Promise<number> {
+    const previous = this.hibernating.get(tenant);
+    if (previous) return previous;
+    const pending = this.hibernateSession(tenant)
+      .catch((error) => {
+        throw endpointError(error);
+      })
+      .finally(() => {
+        this.hibernating.delete(tenant);
+        this.opened.delete(tenant);
+      });
+    this.hibernating.set(tenant, pending);
+    return pending;
+  }
+  private async hibernateSession(tenant: string) {
+    const placement = this.placement.peek(tenant);
+    if (!placement || placement.state !== 'active')
+      throw new RemoteKitError('conflict', 'Session is not active');
+    const node = this.nodes.get(placement.nodeId)!;
+    const state = node.state;
+    if (state.state !== 'ready') throw new RemoteKitError('unavailable', 'Placed node is offline');
+    const result = await node.request('session.hibernate', tenant, {
+      placementEpoch: placement.placementEpoch,
+    });
+    this.opened.delete(tenant);
+    if (node.state.state !== 'ready' || node.state.connectionEpoch !== state.connectionEpoch)
+      throw new RemoteKitError('outcome_unknown', 'Node changed during hibernation');
+    return this.placement.commitCheckpoint(placement, result.manifestId, result.objects, node.buildId!);
   }
   async snapshot(tenant: string, args: { outputDiagnostics?: boolean } = {}): Promise<EndpointSnapshot> {
     const snapshot = await this.invoke<EndpointSnapshot>('session.snapshot', tenant, args);
@@ -175,16 +267,26 @@ export class EndpointGateway {
   async describeAsset(tenant: string, args: { assetId: string }): Promise<Asset> {
     return this.invoke<Asset>('session.library.describe', tenant, args);
   }
-  async retainAssets(tenant: string, args: { assetIds: string[] }): Promise<Accepted> {
-    return this.invoke<Accepted>('session.library.retain', tenant, args);
-  }
-  async referenceAssets(tenant: string, args: { revision: number; assetIds: string[] }): Promise<Accepted> {
-    return this.invoke<Accepted>('session.library.references', tenant, args);
-  }
   async prepareSelection(tenant: string, args: PrepareSelection): Promise<Accepted> {
     return this.invoke<Accepted>('session.library.prepare', tenant, args);
   }
   async selectionStatus(tenant: string, args: { selectionId: string }): Promise<{ state: SelectionState }> {
     return this.invoke<{ state: SelectionState }>('session.library.selectionStatus', tenant, args);
   }
+}
+
+function endpointError(error: unknown): RemoteKitError {
+  if (isRemoteKitError(error)) return error;
+  if (typeof error === 'string') return new RemoteKitError('rejected', 'Endpoint 拒绝请求', error);
+  if (error && typeof error === 'object' && !(error instanceof Error)) {
+    const wire = error as { code?: string; message?: string };
+    const code: ErrorCode =
+      wire.code === 'busy'
+        ? 'unavailable'
+        : wire.code && Object.prototype.hasOwnProperty.call(httpStatus, wire.code)
+          ? (wire.code as ErrorCode)
+          : 'rejected';
+    return new RemoteKitError(code, wire.message ?? 'Endpoint 拒绝请求');
+  }
+  return toRemoteKitError(error);
 }

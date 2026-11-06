@@ -51,7 +51,7 @@ enum class ClientTouchAckState;
 // UI-sequence-only execution adapter. BrowserContext and ViewModel outlive this.
 // Unload restore retains complete committed history/PageState and same-process
 // sessionStorage namespaces. Discard restore retains the same controller.
-// Live DOM/JS heaps and cross-browser sessionStorage recovery are not preserved.
+// SessionStorage recovery across processes uses persisted namespace handles.
 // Input positions/deltas are root-widget DIPs; modifier bits use WebInputEvent.
 // Mouse button: 0 none, 1 left, 2 middle, 3 right, 4 back, 5 forward.
 // Touch points describe changed contacts; unchanged active contacts are retained.
@@ -66,6 +66,7 @@ class WebView final : public content::WebContentsObserver,
           WebViewId,
           std::unique_ptr<content::WebContents> adopted = {});
   ~WebView() override;
+  void SetSessionStorageShouldPersist(bool persist);
   WebView(const WebView&) = delete;
   WebView& operator=(const WebView&) = delete;
 

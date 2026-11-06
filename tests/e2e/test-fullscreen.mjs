@@ -208,7 +208,7 @@ try {
     probe.sample = () => {
       const visible = (el) => el.getClientRects().length && getComputedStyle(el).visibility === 'visible';
       const rect = (el) => el.getBoundingClientRect().toJSON();
-      const peer = probe.peers[0];
+      const peer = probe.peers.at(-1);
       return {
         attempts: probe.attempts,
         events: probe.events,
@@ -328,7 +328,7 @@ try {
   };
   const identity = (baseline, latest) => {
     assert.equal(latest.connected, 'connected');
-    assert.equal(latest.peerCount, 1);
+    assert.equal(latest.peerCount, baseline.peerCount);
     for (const key of ['peer', 'tracks', 'channels'])
       assert.deepEqual(latest[key], baseline[key], key + ' changed');
   };
@@ -380,7 +380,7 @@ try {
     assert.equal(baseline.channels.filter((channel) => channel[2] === 'open').length, 2);
     const codecs = await until(async () => {
       const values = await read(`(async () => {
-        const stats = await fullscreenQA.peers[0].getStats();
+        const stats = await fullscreenQA.peers.at(-1).getStats();
         return [...stats.values()].filter(stat => stat.type === 'inbound-rtp' &&
           (stat.kind || stat.mediaType) === 'video' && stat.framesDecoded > 0)
           .map(stat => stats.get(stat.codecId)?.mimeType);

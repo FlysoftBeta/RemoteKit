@@ -3,6 +3,7 @@ import { RemoteKitError } from '../../shared/errors';
 import type { AuthSettings } from '../../shared/security';
 import {
   AuthAttempts,
+  AtRestKey,
   FaceVault,
   defaultAuthSettings,
   hashSecret,
@@ -16,11 +17,11 @@ export class SecurityRepository {
   readonly faceVault: FaceVault;
   constructor(
     private readonly db: Database.Database,
-    path: string,
+    key: AtRestKey,
     clock: Clock,
   ) {
     this.authAttempts = new AuthAttempts(clock);
-    this.faceVault = new FaceVault(path);
+    this.faceVault = new FaceVault(key);
   }
   private passwordHash(user: string): SecretHash | undefined {
     return this.db.prepare('SELECT salt, password_hash AS hash FROM users WHERE id=?').get(user) as

@@ -52,6 +52,15 @@ export interface ViewSnapshot {
   [key: string]: unknown;
 }
 export interface EndpointSnapshot {
+  hibernation?: {
+    unacknowledgedClosedEvents: number;
+    pendingNativeSelections: number;
+    inFlightUploads: number;
+    pendingPageRequests: number;
+    downloadsInProgress: number;
+    rtcConnected: boolean;
+    lifecycleUncertain: boolean;
+  };
   running?: boolean;
   browserIncarnation?: string;
   browserPid?: number;

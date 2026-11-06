@@ -3,6 +3,7 @@
 #include "options.hpp"
 #include "media/adapter.hpp"
 #include "session/browser_rpc.hpp"
+#include "cluster/noise.hpp"
 
 namespace remotekit {
 // Three launches per failure burst; a minute of healthy uptime starts a new
@@ -21,13 +22,16 @@ class BrowserStartPolicy {
       attempts_ = 0;
   }
   unsigned attempts() const { return attempts_; }
+
  private:
   unsigned attempts_ = 0;
   double retry_after_ = 0, last_launch_ = 0;
 };
 class BrowserRuntime {
  public:
-  explicit BrowserRuntime(media::Sdk& sdk) : rpc_(sdk) {}
+  static inline const std::string kSessionId = "1";
+  BrowserRuntime(media::Sdk& sdk, const cluster::Key& profile_key)
+      : rpc_(sdk), profile_key_(profile_key) {}
   Result<void> Start(const fs::path& executable, std::wstring command, const std::string& channel);
   Result<void> Launch(const RuntimeOptions&,
                       const std::string&,
@@ -36,6 +40,7 @@ class BrowserRuntime {
                       const std::shared_ptr<media::ServerTrace>&);
   Result<void> NewIncarnation();
   Result<void> Stop();
+  Result<void> Shutdown(const std::function<Result<void>()>& export_navigation);
   Result<void> HealthCheck();
   Result<void> AdmitLaunch();
   bool Initialized() const { return initialized_; }
@@ -44,6 +49,7 @@ class BrowserRuntime {
   bool Alive() const { return process_.Alive(); }
   bool Exited() const { return process_.Exited(); }
   bool Present() const { return process_.Present(); }
+  bool CheckpointReady() const { return clean_shutdown_; }
   bool Stopping() const { return process_.state() == BrowserProcess::State::kStopping; }
   DWORD Pid() const { return process_.Pid(); }
   std::string Diagnostic() const { return process_.Diagnostic(); }
@@ -56,6 +62,7 @@ class BrowserRuntime {
  private:
   BrowserProcess process_;
   BrowserRpc rpc_;
+  const cluster::Key& profile_key_;
   fs::path log_;
   std::string incarnation_, process_incarnation_;
   BrowserStartPolicy start_policy_;
@@ -63,5 +70,6 @@ class BrowserRuntime {
   std::optional<Error> last_failure_;
   int64_t next_health_check_ = 0;
   bool initialized_ = false;
+  bool clean_shutdown_ = true;
 };
 }  // namespace remotekit

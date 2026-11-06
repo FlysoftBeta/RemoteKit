@@ -92,6 +92,7 @@ const fixture = createServer(async (request, response) => {
         name:file.name,size:file.size,hash:Array.from(new Uint8Array(
           await crypto.subtle.digest('SHA-256',await file.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('')
       })));
+      for(const el of inputs) el.addEventListener('click', event => report('input-click', {id:el.id,trusted:event.isTrusted,x:event.clientX,y:event.clientY}));
       for(const el of inputs) el.onchange = async () => {
         held = [...el.files];
         report('selected', {id:el.id,files:await describe(held)});
@@ -174,6 +175,15 @@ try {
     ],
   });
   page = context.pages()[0] ?? (await context.newPage());
+  page.on('console', (message) => {
+    void appendFile(
+      join(run, 'viewer-console.jsonl'),
+      JSON.stringify({ type: message.type(), text: message.text() }) + '\n',
+    );
+  });
+  page.on('pageerror', (error) => {
+    void appendFile(join(run, 'viewer-console.jsonl'), JSON.stringify({ error: error.stack }) + '\n');
+  });
   page.setDefaultTimeout(6000);
   await page.addInitScript(() => {
     const qa = (window.fileQA = {
@@ -186,6 +196,7 @@ try {
       thumbnails: new Map(),
       imageReads: new Set(),
       photoWire: [],
+      signaling: new Map(),
       heldUploads: [],
       cameraTracks: [],
       stillCalls: 0,
@@ -204,6 +215,11 @@ try {
         return;
       }
       if (message.type === 'state') qa.state = message.state;
+      if (qa.signaling.has(message.id))
+        console.info(
+          'RTC signaling',
+          JSON.stringify({ method: qa.signaling.get(message.id), reply: message }),
+        );
       if (message.type === 'auth') {
         qa.auth = message.auth;
         if (message.auth.peerEpoch > 0) qa.peerEpoch = message.auth.peerEpoch;
@@ -234,7 +250,7 @@ try {
         }
         const source = qa.thumbnails.get(message.requestId);
         if (source && message.ok && message.result?.assetId) qa.thumbnails.set(source, message.result);
-        if (message.ok && message.result?.assetId && message.result?.hash)
+        if (message.ok && message.result?.assetId && Number.isSafeInteger(message.result?.size))
           qa.sealed.set(message.result.assetId, message.result);
         qa.receive(message.requestId, message);
       }
@@ -248,6 +264,10 @@ try {
       }
       send(raw) {
         const message = JSON.parse(raw);
+        if (message.method?.startsWith('rtc.')) {
+          qa.signaling.set(message.id, message.method);
+          console.info('RTC signaling', JSON.stringify({ request: message }));
+        }
         if (message.method === 'library.basket' && !qa.pending.has(message.id)) {
           qa.basketWrites = (qa.basketWrites ?? 0) + 1;
           if (qa.holdBasket) {
@@ -263,6 +283,28 @@ try {
       constructor(...args) {
         super(...args);
         qa.peers.push(this);
+        const peer = qa.peers.length;
+        console.info('RTC probe', JSON.stringify({ peer, event: 'created', stack: new Error().stack }));
+        for (const event of ['connectionstatechange', 'iceconnectionstatechange', 'icecandidate'])
+          this.addEventListener(event, (change) =>
+            console.info(
+              'RTC probe',
+              JSON.stringify({
+                peer,
+                event,
+                connection: this.connectionState,
+                ice: this.iceConnectionState,
+                candidate: change.candidate?.toJSON(),
+              }),
+            ),
+          );
+      }
+      close() {
+        console.info(
+          'RTC probe',
+          JSON.stringify({ peer: qa.peers.indexOf(this) + 1, event: 'close', stack: new Error().stack }),
+        );
+        return super.close();
       }
       createDataChannel(...args) {
         const channel = super.createDataChannel(...args);
@@ -343,7 +385,7 @@ try {
         }
       });
     qa.sample = () => {
-      const peer = qa.peers[0];
+      const peer = qa.peers.at(-1);
       const video = document.querySelector('.remote-video-plane video');
       return {
         peer: identity(peer),
@@ -563,9 +605,10 @@ try {
       );
     });
     const { x, y, width, height } = geometry.boxes[id];
+    const fileButton = id === 'single' || id === 'multiple';
     await page.mouse.click(
-      local.x + ((x + width / 2) * local.width) / geometry.width,
-      local.y + ((y + height / 2) * local.height) / geometry.height,
+      local.x + ((x + (fileButton ? 30 : width / 2)) * local.width) / geometry.width,
+      local.y + ((y + (fileButton ? 10 : height / 2)) * local.height) / geometry.height,
     );
   };
   const chooser = async (id) => {
@@ -643,10 +686,21 @@ try {
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
   const baseline = await identity();
+  const startupPeers = await page.evaluate(async () =>
+    Promise.all(
+      fileQA.peers.map(async (peer) => ({
+        connection: peer.connectionState,
+        local: peer.localDescription,
+        remote: peer.remoteDescription,
+        stats: [...(await peer.getStats()).values()],
+      })),
+    ),
+  );
+  await writeFile(join(run, 'startup-peers.json'), JSON.stringify(startupPeers, null, 2));
   assert.equal(baseline.connected, 'connected');
   const codec = await until('received H264 frames', () =>
     page.evaluate(async () => {
-      const stats = await fileQA.peers[0].getStats();
+      const stats = await fileQA.peers.at(-1).getStats();
       const video = Array.from(stats.values()).find(
         (entry) =>
           entry.type === 'inbound-rtp' &&
@@ -660,6 +714,7 @@ try {
   const userAgent = await page.evaluate(() => navigator.userAgent);
   await log(stage, { browser: userAgent, codec, baseline });
 
+  const assetHashes = new Map();
   async function upload(name, type, bytes, operationId = randomUUID()) {
     const begin = { operationId, name, type, size: bytes.length };
     const { uploadId, offset } = await rtc('asset.begin', begin);
@@ -674,8 +729,9 @@ try {
       position += chunk.length;
     }
     const asset = await rtc('asset.seal', { uploadId });
-    assert.equal(asset.hash, hash(bytes));
+    assert.match(asset.assetId, /^[a-f0-9]{64}$/);
     assert.equal(asset.size, bytes.length);
+    assetHashes.set(asset.assetId, hash(bytes));
     return asset;
   }
   async function read(asset) {
@@ -691,7 +747,8 @@ try {
     }
     const bytes = Buffer.concat(parts);
     assert.equal(bytes.length, asset.size);
-    assert.equal(hash(bytes), asset.hash);
+    if (assetHashes.has(asset.assetId)) assert.equal(hash(bytes), assetHashes.get(asset.assetId));
+    assetHashes.set(asset.assetId, hash(bytes));
     return bytes;
   }
   const operation = (method, params) => library(method, { operationId: randomUUID(), ...params });
@@ -753,7 +810,7 @@ try {
   });
   assert.deepEqual((await library('get')).basket, [b, c, a]);
   assert(snapshot.entries.filter((entry) => [a, b, c].includes(entry.id)).every((entry) => !entry.archived));
-  await log(stage, { hashes: [assetA.hash, assetB.hash, assetC.hash], order: snapshot.basket });
+  await log(stage, { objects: [assetA.assetId, assetB.assetId, assetC.assetId], order: snapshot.basket });
 
   stage = 'basket-list-cards-and-order';
   const single = await chooser('single');
@@ -974,7 +1031,7 @@ try {
   await log(stage, { anchor, listAndCardOrder: await order(), staleWriteRejected: true });
 
   stage = 'native-selection';
-  const expected = (name, asset) => ({ name, size: asset.size, hash: asset.hash });
+  const expected = (name, asset) => ({ name, size: asset.size, hash: assetHashes.get(asset.assetId) });
   async function select(request, ids, expectedFiles) {
     const prepare = { operationId: randomUUID(), requestId: request.id, entryIds: ids, groupId };
     const { selectionId } = await library('prepare', prepare);
@@ -1079,10 +1136,10 @@ try {
   for (const asset of [rectify, scan]) {
     assert(asset.width > 0 && asset.height > 0);
     assert.equal(asset.type, 'image/png');
-    assert.notEqual(asset.hash, original.hash);
+    assert.notEqual(asset.assetId, original.assetId);
     assert.equal((await read(asset)).subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
   }
-  assert.notEqual(scan.hash, rectify.hash);
+  assert.notEqual(scan.assetId, rectify.assetId);
   assert.deepEqual(await read(original), originalBytes);
   snapshot = await importAsset(scan, 'scan.png', {
     destination: 'library',
@@ -1254,7 +1311,11 @@ try {
       const current = await library('get');
       return current.basket.length === length && current;
     });
-  const assetOf = (id) => page.evaluate((id) => fileQA.sealed.get(id), id);
+  const assetOf = async (id) => {
+    const asset = await page.evaluate((id) => fileQA.sealed.get(id), id);
+    await read(asset);
+    return asset;
+  };
   const assertCrop = async (asset, width, height, fixture) => {
     assert.equal(asset.type, 'image/png');
     const bytes = await read(asset);
@@ -1887,7 +1948,10 @@ try {
       const paper = document.querySelector(css);
       const camera = document.querySelector('[role="dialog"][aria-label="摄像头拍照"]');
       const qa = window.fileQA;
-      const stats = await qa?.peers[0]?.getStats().catch(() => undefined);
+      const stats = await qa?.peers
+        .at(-1)
+        ?.getStats()
+        .catch(() => undefined);
       const inbound = Array.from(stats?.values() ?? [])
         .filter((entry) => entry.type === 'inbound-rtp' && (entry.kind ?? entry.mediaType) === 'video')
         .map((entry) => ({

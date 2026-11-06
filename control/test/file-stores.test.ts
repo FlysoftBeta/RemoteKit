@@ -9,7 +9,7 @@ import { PhotoJobStore } from '../client/files/photo-job-store';
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 const snapshot = (revision: number): LibrarySnapshot => ({ revision, entries: [], basket: [], groups: [] });
-const asset: Asset = { assetId: 'asset', hash: 'hash', size: 1, type: 'image/png' };
+const asset: Asset = { assetId: 'a'.repeat(64), size: 1, type: 'image/png' };
 function libraryPort() {
   return {
     photoThumbnail: async () => new Blob(),

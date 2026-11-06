@@ -165,26 +165,29 @@ void OpenRenderLifetimeAndStartupBackoff() {
   starts.Healthy(63);
   CHECK(starts.Admit(63));
   remotekit::media::Sdk sdk;
-  sdk.remotekit_sdk_control_connect = [](const char*, uint64_t* handle) { *handle = 1; return 0; };
+  sdk.remotekit_sdk_control_connect = [](const char*, uint64_t* handle) {
+    *handle = 1;
+    return 0;
+  };
   sdk.remotekit_sdk_control_close = [](uint64_t) { return 0; };
   remotekit::BrowserRpc browser(sdk);
   CHECK(browser.Connect("test"));
-  sdk.remotekit_sdk_control_open_render = [](uint64_t, uint32_t, remotekit_sdk_render_setup*, uint32_t) -> int {
-    return REMOTEKIT_SDK_TIMEOUT;
-  };
+  sdk.remotekit_sdk_control_open_render = [](uint64_t, uint32_t, remotekit_sdk_render_setup*,
+                                             uint32_t) -> int { return REMOTEKIT_SDK_TIMEOUT; };
   remotekit_sdk_render_setup setup{};
   auto timeout = browser.OpenRender(setup);
   CHECK(!timeout && timeout.error().code == remotekit::ErrorCode::kOutcomeUnknown);
   CHECK(browser.Control() == 1 && browser.NeedsHealthCheck() && !browser.Disconnected());
   sdk.remotekit_sdk_control_request = [](uint64_t, const void*, size_t, void* output, size_t,
-                                        size_t* count, uint32_t) {
+                                         size_t* count, uint32_t) {
     const std::string bytes = "{\"ok\":true}";
     *count = bytes.size();
     std::memcpy(output, bytes.data(), bytes.size());
     return 0;
   };
   CHECK(browser.Request({{"method", "snapshot"}}) && !browser.NeedsHealthCheck());
-  sdk.remotekit_sdk_control_open_render = [](uint64_t, uint32_t, remotekit_sdk_render_setup*, uint32_t) -> int {
+  sdk.remotekit_sdk_control_open_render = [](uint64_t, uint32_t, remotekit_sdk_render_setup*,
+                                             uint32_t) -> int {
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
   };
   CHECK(!browser.OpenRender(setup) && !browser.Control() && browser.Disconnected());
@@ -423,7 +426,36 @@ void OversizedBrowserReplyIsApplicationError() {
   CHECK(next && next.value().at("id") == 2);
 }
 
+void BrowserLocalSessionNumbers() {
+  remotekit::media::Sdk sdk;
+  sdk.remotekit_sdk_control_connect = [](const char*, uint64_t* handle) {
+    *handle = 1;
+    return 0;
+  };
+  sdk.remotekit_sdk_control_close = [](uint64_t) { return 0; };
+  sdk.remotekit_sdk_control_request = [](uint64_t, const void* input, size_t size, void* output,
+                                         size_t, size_t* count, uint32_t) {
+    const auto command =
+        Json::parse(static_cast<const char*>(input), static_cast<const char*>(input) + size);
+    CHECK(command.at("session") == "1");
+    CHECK(command.at("viewConfigs").at(0).at("session") == "1");
+    CHECK(command.at("viewConfigs").at(0).at("view") == "42");
+    const std::string reply = "{\"ok\":true}";
+    std::memcpy(output, reply.data(), reply.size());
+    *count = reply.size();
+    return 0;
+  };
+  remotekit::BrowserRpc browser(sdk);
+  CHECK(browser.Connect("test"));
+  CHECK(browser.Request(
+      {{"method", "output.configure"},
+       {"session", "0123456789abcdef0123456789abcdef"},
+       {"viewConfigs",
+        Json::array({{{"session", "0123456789abcdef0123456789abcdef"}, {"view", "42"}}})}}));
+}
+
 int main() {
+  BrowserLocalSessionNumbers();
   RpcLockAndStatusMapping();
   OpenRenderLifetimeAndStartupBackoff();
   OversizedBrowserReplyIsApplicationError();

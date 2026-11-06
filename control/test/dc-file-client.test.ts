@@ -7,7 +7,7 @@ test('library asset transfer resumes from the Endpoint offset and uses the libra
   const data = new Uint8Array(40000).map((_, index) => index % 251);
   const file = new File([data], '照片.jpg', { type: 'image/jpeg' });
   const signal = new AbortController().signal;
-  const asset = { assetId: 'sealed', hash: 'hash', size: data.byteLength, type: file.type };
+  const asset = { assetId: 'a'.repeat(64), size: data.byteLength, type: file.type };
   const messages: { method: string; params: any; authEpoch: number }[] = [];
   const channel = {
     readyState: 'open',
@@ -102,8 +102,8 @@ test('library asset uploads fill four ordered chunk slots and seal only after ev
   ack(sent[3], { offset: 49152 });
   await waitFor(8);
   assert.equal(sent[7].method, 'asset.seal');
-  ack(sent[7], { assetId: 'sealed' });
-  assert.equal((await run).assetId, 'sealed');
+  ack(sent[7], { assetId: 'a'.repeat(64) });
+  assert.equal((await run).assetId, 'a'.repeat(64));
 });
 
 test('photo burst admits a 44 KiB sample, rejects oversized analysis data and discards revoked sessions', async () => {
@@ -164,7 +164,7 @@ test('photo burst admits a 44 KiB sample, rejects oversized analysis data and di
 
 test('original preview permits PNGs through 64 MiB while thumbnails remain limited to 64 KiB', async () => {
   const sent: string[] = [];
-  const original = { assetId: 'original', hash: 'hash', type: 'image/png', size: 64 * 1024 * 1024 };
+  const original = { assetId: 'b'.repeat(64), type: 'image/png', size: 64 * 1024 * 1024 };
   const channel = {
     readyState: 'open',
     bufferedAmount: 0,
@@ -184,11 +184,11 @@ test('original preview permits PNGs through 64 MiB while thumbnails remain limit
   } as unknown as RTCDataChannel;
   const client = new FileChannel(() => channel);
   const signal = new AbortController().signal;
-  assert.deepEqual(await client.describeAsset('original', signal), original);
+  assert.deepEqual(await client.describeAsset('b'.repeat(64), signal), original);
   await assert.rejects(client.describeAsset('different', signal), /文件信息无效/);
   await assert.rejects(client.readPhoto(original, signal), /照片预览数据无效/);
   await assert.rejects(client.readPhoto({ ...original, size: original.size + 1 }, signal), /大小超出限制/);
-  await assert.rejects(client.photoThumbnail('original', signal), /缩略图数据无效/);
+  await assert.rejects(client.photoThumbnail('b'.repeat(64), signal), /缩略图数据无效/);
   assert.deepEqual(sent, ['asset.describe', 'asset.describe', 'asset.read', 'photo.thumbnail']);
 });
 

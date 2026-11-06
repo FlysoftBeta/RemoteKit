@@ -1,3 +1,4 @@
+import type { EndpointSnapshot } from '../endpoint/types';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import { settle } from './operations';
 
@@ -7,6 +8,39 @@ import type { DomainContext, DomainServices } from '../application';
 import { systemClock, type Clock } from '../util/clock';
 
 export class UncertainRecovery {
+  async hibernate(tenant: string, snapshot: EndpointSnapshot): Promise<boolean> {
+    const runtime = this.context.tenants.get(tenant);
+    const state = this.context.store.workspaces.workspace(tenant);
+    const blockers = snapshot.hibernation;
+    if (
+      !state.settings.memorySaverEnabled ||
+      runtime.viewer ||
+      !blockers ||
+      this.context.endpoint.placement.peek(tenant)?.state !== 'active' ||
+      this.context.clock.monotonicMs() - runtime.viewerAbsentSince <
+        (this.context.endpoint.placement.underPressure(tenant) ? 120000 : 600000) ||
+      this.context.store.operations
+        .pendingOperations(tenant)
+        .some((operation) => operation.receipt.status === 'applying') ||
+      blockers.unacknowledgedClosedEvents !== 0 ||
+      blockers.pendingNativeSelections !== 0 ||
+      blockers.inFlightUploads !== 0 ||
+      blockers.pendingPageRequests !== 0 ||
+      blockers.downloadsInProgress !== 0 ||
+      blockers.rtcConnected !== false ||
+      blockers.lifecycleUncertain !== false
+    )
+      return false;
+    await this.context.endpoint.hibernate(tenant);
+    runtime.resetEndpoint();
+    for (const tab of state.tabs)
+      if (!isLocalTab(tab)) {
+        tab.residency = 'discarded';
+        tab.restoring = false;
+      }
+    this.services.operations.saveWorkspace(state);
+    return true;
+  }
   retain(tenant: string, views: Set<string>) {
     this.context.tenants.get(tenant).lifecycle.background.retain(tenant, views);
   }

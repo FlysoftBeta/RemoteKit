@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Bounded real Browser checks for recovery scheduling, dirty state and close ACK."""
 import argparse, http.server, json, queue, subprocess, threading, time
+from cluster_bridge import endpoint_command
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class Service:
     def __init__(self, args, run, state):
         self.log = (run / (str(time.time_ns()) + '-service.log')).open('wb')
-        self.process = subprocess.Popen([str(args.endpoint), '--browser=' + str(args.browser), '--data-path=' + str(state)],
+        self.process = subprocess.Popen(endpoint_command(args.endpoint, args.browser, state),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, creationflags=subprocess.CREATE_NO_WINDOW)
         self.responses = queue.Queue(); self.serial = 0; self.evidence = []
         def read():

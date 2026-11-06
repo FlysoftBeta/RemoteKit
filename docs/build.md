@@ -15,7 +15,7 @@
 | Endpoint（CMake/Ninja） | `tools\build-endpoint.cmd`（构建 + CTest）；`build-only`；`package`（Release `endpoint_service`）；`fresh` | `build/endpoint`、`build/endpoint-package` |
 | Control（npm） | `npm ci`；`npm test`；`npm run build` | `control/dist` |
 
-三者可以并行构建；同一个 Chromium out 目录不要并发构建。Endpoint 不包含 Chromium 私有头，只依赖导出的 SDK；Endpoint 的媒体依赖（nlohmann/json、oneVPL、NVENC 头）由 `tools/fetch-media-deps.py` 按固定版本与 hash 获取，人脸依赖（静态 OpenCV、YuNet/SFace/MiniFASNet 模型与许可证）由 `tools/setup-face-auth.py` 按 `tools/face-auth-deps.json` 准备，必要时从官方权重转换 ONNX。
+三者可以并行构建；同一个 Chromium out 目录不要并发构建。Endpoint 不包含 Chromium 私有头，只依赖导出的 SDK；Endpoint 的依赖（nlohmann/json、oneVPL、NVENC 头、zstd 1.5.7 源码）由 `tools/fetch-media-deps.py` 按固定版本与 hash 获取；Endpoint 链接完整 zstd，updater 只链接解压部分，人脸依赖（静态 OpenCV、YuNet/SFace/MiniFASNet 模型与许可证）由 `tools/setup-face-auth.py` 按 `tools/face-auth-deps.json` 准备，必要时从官方权重转换 ONNX。
 
 **Chromium 叠加层**：`browser/` 不是 Chromium tracked 源码，由 `tools/chromium.py stage` 复制到 Chromium 树中（只更新变化文件的 mtime，带 hash 保护地清理已删除的文件）。**补丁**：对 Chromium tracked 源码的修改只能放在 `patches/` 的有序补丁里，由 `tools/patchset.py --chromium-root C:/src/chromium/src status|apply|revert` 管理；`patches/manifest.json` 记录顺序与每个补丁的 SHA-256。修改补丁后更新 hash，并验证可以完整撤回与重放。不要 reset 或 clean Chromium checkout（其中还有无关的分支与暂存）。
 
@@ -55,31 +55,28 @@ root_extra_deps = [
 开发配置 `out/dev` 继续使用 `is_component_build = true`、`dcheck_always_on = true`、`symbol_level = 1`，其余功能参数与发布配置相同；两者都不配置额外 DRM 模块。`is_official_build = false` 保留本地非官方构建，发布包关闭 DCHECK 与调试符号。
 
 ## 运行
+## 运行
 
 ```powershell
 cd control
 npm ci
 npm run build
-$env:REMOTEKIT_ENDPOINT = (Resolve-Path ..\build\endpoint-package\endpoint\endpoint_service.exe).Path
 npm start
 ```
 
 默认监听 `http://127.0.0.1:3001`。开发时 `npm run dev`（服务端）+ `npm run client`（Vite 5173，代理 HTTP/WS）。
 
-| 环境变量 | 用途 |
-|---|---|
-| `PORT`、`REMOTEKIT_CONTROL_HOST` | 端口与监听地址 |
-| `REMOTEKIT_CONTROL_ORIGINS` | 允许的完整 Origin，逗号分隔 |
-| `REMOTEKIT_CONTROL_DB` | SQLite 文件 |
-| `REMOTEKIT_ENDPOINT`、`REMOTEKIT_ENDPOINT_ARGS` | 本地 Endpoint 可执行文件与 JSON 参数数组 |
-| `REMOTEKIT_ENDPOINT_NODE_ID`、`REMOTEKIT_ENDPOINT_TOKEN` | 远端节点 ID 与管理 Bearer 密钥；设置后不启动本地 Endpoint |
-| `REMOTEKIT_ENDPOINT_TLS_PROXY=1` | 位于本机 TLS 反向代理之后（只接受 loopback 代理且 `X-Forwarded-Proto=https`） |
-| `REMOTEKIT_HTTPS_KEY`、`REMOTEKIT_HTTPS_CERT` | 直接 TLS |
-| `REMOTEKIT_DIAGNOSTICS_DIR` | 诊断归档目录 |
+Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/data/control.json`，不存在时按默认值创建，同时生成集群密钥文件）。所有监听、存储与节点配置都在这个文件里，格式与校验规则见[多节点 · 配置](cluster.md#配置)。默认配置有一个本地节点 `local`，Control 启动 `build/endpoint/endpoint/endpoint_service.exe`；开发时在 `nodes.local.browser` 指向 `C:/src/chromium/src/out/dev/remotekit_browser.exe`（默认是 Endpoint 同目录）。编码器与码控参数（见[编码](encoding.md#适配器与后端选择)）、`browserTraceDir` 等都写在 `nodeDefaults` 或节点项里；Endpoint 不接受这些命令行参数。开发追踪开关 `REMOTEKIT_SERVER_TRACE`、`REMOTEKIT_MEDIA_TRACE` 仍是环境变量（见[诊断](diagnostics.md#开发侧追踪)）。
 
-Endpoint 侧：`REMOTEKIT_BROWSER`（Browser 可执行文件）、`REMOTEKIT_DATA_PATH`、`REMOTEKIT_ENCODER` / `--encoder=qsv|nvenc|auto`、码率/GOP/TU 等编码参数（见[编码](encoding.md#encoderworker帧的所有权)）、`--browser-trace-dir`、`REMOTEKIT_SERVER_TRACE`、`REMOTEKIT_MEDIA_TRACE`。
+**远端节点**：在 Control 配置里设置 `cluster.advertiseUrl`（`ws(s)://<Control 地址>:<端口>/api/node`）并在 `nodes` 中登记节点 ID（默认是节点机器的主机名，小写）。Control 在配置目录写出 `node.json`；把它复制到节点根目录，再在节点上运行：
 
-局域网或远程部署需要正确的监听地址、Origin 与可信 HTTPS：摄像头、文件选择中的拍照等能力要求安全上下文。远端 Endpoint 主动连接 `/api/endpoint`（WSS），loopback 明文只用于开发；Control 当前只绑定一个配置的节点。
+```powershell
+remotekit_node.exe run --root=C:\RemoteKitNode
+# 或注册为 Windows 服务（管理员）
+remotekit_node.exe service-install --root=C:\RemoteKitNode
+```
+
+节点从 Control 下载与之相同版本的运行时后启动 Endpoint。节点的 `peer.listen` 端口（默认 3101）要对其他节点开放。局域网或远程部署需要正确的监听地址、Origin 与可信 HTTPS：摄像头、文件选择中的拍照等能力要求安全上下文；集群通道自身已加密，不依赖 TLS。
 
 ## 发布包
 
@@ -92,7 +89,7 @@ npm --prefix control run build
 C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke --node C:/path/to/node-runtime/node.exe
 ```
 
-`tools/package-runtime.py` 默认使用 `--out rel`，把 Browser/SDK 运行依赖、Release Endpoint 与 CRT、Node、Control 生产 bundle 与最小 node_modules（better-sqlite3 的原生 ABI 与 Node 一起校验）、oneVPL 依赖、人脸模型与许可证组装成目录、`.tar.zst` 和 `.tar.zst.sha256`，输出在 `develop/tmp`。完整解压后运行 `run.cmd`，打开 `http://127.0.0.1:3001` 创建首个管理员账号。首次运行创建包内 `data/`；归档不含开发账号、Profile、凭据、数据库、日志、PDB 或构建输入。`--smoke` 在临时数据目录启动包内服务，检查静态资源、注册、鉴权 WS、SQLite 与时钟接口，并确认 WS 无法绕过 WebRTC 提交产品动作；它不验证媒体链路。manifest 记录源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。manifest 的源码 HEAD 是打包时的源码，不证明每个增量产物都由它重新构建。
+`tools/package-runtime.py` 默认使用 `--out rel`，把 Browser/SDK 运行依赖、Release Endpoint、`remotekit_node.exe` 与 CRT、Node、Control 生产 bundle 与最小 node_modules（better-sqlite3 的原生 ABI 与 Node 一起校验）、oneVPL 依赖、人脸模型与许可证（含 zstd）组装成目录、`.tar.zst` 和 `.tar.zst.sha256`，输出在 `develop/tmp`。包根有 `build.json`（buildId 是 `bin/` 与 `control/` 全部文件路径与 hash 的 SHA-256）；`release/node.tar.zst` 是给远端节点的运行时（`node/build.json` + 不含 Node 的 `bin/`），`release/node.json` 记录它的 buildId、SHA-256 与大小，Control 对 updater 提供。完整解压后运行 `run.cmd`（不接受参数），打开 `http://127.0.0.1:3001` 创建首个管理员账号。首次运行创建 `config/control.json`（本地节点指向包内 `bin/endpoint_service.exe`）与 `data/`；归档不含开发账号、Profile、凭据、数据库、日志、PDB 或构建输入。`--smoke` 在临时数据目录启动包内服务，检查静态资源、注册、鉴权 WS、SQLite 与时钟接口，并确认 WS 无法绕过 WebRTC 提交产品动作；它不验证媒体链路。manifest 记录源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。manifest 的源码 HEAD 是打包时的源码，不证明每个增量产物都由它重新构建。
 
 打包使用 Node 24 内置 zstd（level 12、全部逻辑 CPU），tar 以固定 32 MiB 缓冲流入压缩器，输出标准串联 zstd frames，不生成中间 tar，也不把整个包读入内存。逐 frame 使用同步结束指令，避开 Node 24 异步多线程 zstd 的提前 EOF 问题；每个 frame 内仍由原生 zstd 多线程压缩。`--node` 必须指向带官方 `LICENSE` 的真实 Node runtime，且 ABI 匹配 Control 的 SQLite 原生模块。`--out dev` 显式生成开发包。manifest 的 `browser_configuration` 标记 `rel`/`dev`，`archive` 记录完整归档名。
 
@@ -117,12 +114,12 @@ node tools/tests/streaming-package-real-stack.mjs "C:/RemoteKit/RemoteKit-win-x6
 | 位置 | 内容 | 运行 |
 |---|---|---|
 | `control/test/` | Control 服务端与 Viewer 客户端的单元与集成测试 | `npm test`，或 `npx tsx --test test/<file>.test.ts` |
-| `endpoint/tests/` | Endpoint 策略、文件、编码器状态机（注入式 NVENC）、传输 | `tools\build-endpoint.cmd` 自带 CTest |
+| `endpoint/tests/` | Endpoint 策略、文件、编码器状态机（注入式 NVENC）、集群通道（Noise 向量、通道、ClusterLink）、对象存储与节点间传输、checkpoint、updater（下载、解包、监管、自我替换） | `tools\build-endpoint.cmd` 自带 CTest |
 | `browser/*_probe.cc`、`*_tests.cc` | 直接运行生产代码与官方 Chromium 过滤器的确定性检查（BeginFrame 调度、手势包与仲裁、控制回复、Profile 隔离、渲染通道寿命、滚动策略、导航账本与错误页） | GN 目标，构建后运行 |
 | `sdk/` | SDK 消费者 smoke（控制、渲染、RTC、音频） | `tools\verify-sdk.cmd` |
 | `tools/tests/` | 构建工具（补丁管理、stage、打包布局） | `python -m unittest` |
-| `tests/integration/` | 原生 Endpoint/Browser 集成（服务、恢复、几何、信令、关闭 ACK、生命周期、Profile、硬件编码 SPS 检查） | 需要构建好的原生二进制 |
-| `tests/e2e/` | 真实栈产品场景（Viewer + Control + Endpoint + Browser + H.264）：通用产品流、手势、键盘与移动 IME、文件库与相机、全屏、诊断、首帧 | 需要完整构建与浏览器 |
+| `tests/integration/` | 原生 Endpoint/Browser 集成（服务、恢复、几何、信令、关闭 ACK、生命周期、Profile、sessionStorage 与优雅关闭、checkpoint 跨节点恢复、硬件编码 SPS 检查；Noise 互通与 updater 端到端）。Python 测试经 `cluster-bridge.mjs` 扮演 Control（握手、下发配置、自动 `session.open`），对外仍是 JSONL | 需要构建好的原生二进制 |
+| `tests/e2e/` | 真实栈产品场景（Viewer + Control + Endpoint + Browser + H.264）：通用产品流、手势、键盘与移动 IME、文件库与相机、全屏、诊断、首帧；两个本地节点的同时串流、休眠与跨节点唤醒（`test-cluster-nodes.mjs`）；updater 下载、安装与版本切换（`test-node-updater.mjs`，用 `make-node-release.mjs` 从开发产物构造最小发布） | 需要完整构建与浏览器 |
 
 CPU 单元测试、编译、真实 GPU 运行、实体设备验证是不同层级的证据，分开记录。
 

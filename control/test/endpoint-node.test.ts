@@ -1,531 +1,313 @@
-import { accountsFor } from './server-fixture';
-import { requestViewer } from './server-fixture';
-import { RemoteKitError } from '../shared/errors';
-import { testGateway } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter, once } from 'node:events';
-import { WebSocket } from 'ws';
-import { createHttp } from '../server/http/server';
-import { RemoteNodeLink, type RemoteNodeOptions } from '../server/endpoint/remote-node';
-import { createApplication, type DomainServices } from '../server/application';
-import { ControlDatabase } from '../server/persistence/database';
-import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { createServer } from 'node:http';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { WebSocket } from 'ws';
+import { nodeDefaults } from '../server/config';
+import { NodeRegistry, type RegistryOptions } from '../server/cluster/node-link';
+import { Placement } from '../server/cluster/placement';
+import { EndpointGateway } from '../server/endpoint/gateway';
+import { ControlDatabase } from '../server/persistence/database';
+import { FakeNode } from './fake-node';
+import { createApplication } from '../server/application';
 
-async function harness(options: Partial<RemoteNodeOptions> = {}, enabled = true) {
-  const endpoint = new RemoteNodeLink({ nodeId: 'compute-1', token: 'test-node-secret', ...options });
-  const control = {
-    events: new EventEmitter(),
-    accounts: { identity: () => undefined },
-    viewers: { pollFaceAuth: async () => {} },
-    rtc: { clearSignals() {} },
-  } as unknown as DomainServices;
-  const server = createHttp(control, {
-    origins: ['http://test.local'],
-    clientDir: '.',
-    endpointNode: enabled ? endpoint : undefined,
+async function harness(overrides: Partial<RegistryOptions> = {}) {
+  const key = randomBytes(32);
+  const registry = new NodeRegistry({
+    nodes: Object.fromEntries(
+      ['alpha', 'beta'].map((nodeId) => [
+        nodeId,
+        { config: { ...nodeDefaults, nodeId, maxSessions: 2 }, configHash: nodeId },
+      ]),
+    ),
+    key: key.toString('base64'),
+    buildId: 'dev',
+    ...overrides,
+  });
+  const store = new ControlDatabase(':memory:');
+  const placement = new Placement(store, registry);
+  const gateway = new EndpointGateway(registry, placement);
+  const server = createServer();
+  server.on('upgrade', (req, socket, head) => {
+    if (!registry.handleUpgrade(req, socket, head)) socket.destroy();
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  const url = `ws://127.0.0.1:${(server.address() as { port: number }).port}/api/endpoint`;
-  const clients: WebSocket[] = [];
-  async function connect(hello = true, headers: Record<string, string> = {}, autoPong = true) {
-    const socket = new WebSocket(url, {
-      headers: { authorization: 'Bearer test-node-secret', ...headers },
-      autoPong,
-    });
-    clients.push(socket);
-    await once(socket, 'open');
-    if (hello) {
-      const ready = once(socket, 'message');
-      socket.send(
-        JSON.stringify({
-          type: 'node.hello',
-          version: 1,
-          nodeId: 'compute-1',
-          endpointIncarnation: 'test-incarnation-0001',
-        }),
-      );
-      const message = JSON.parse(String((await ready)[0]));
-      assert.equal(message.type, 'node.ready');
-      assert.equal(message.version, 1);
-      assert.ok(message.connectionEpoch);
-    }
-    return socket;
-  }
-  async function close() {
-    endpoint.stop();
-    for (const client of clients) client.terminate();
-    await server.shutdown();
-  }
-  return { endpoint, control, server, connect, close, url };
+  const url = `ws://127.0.0.1:${(server.address() as { port: number }).port}/api/node`;
+  const clients: FakeNode[] = [];
+  return {
+    registry,
+    store,
+    placement,
+    gateway,
+    url,
+    key,
+    async connect(hello: Record<string, unknown> = {}, useKey = key) {
+      const node = new FakeNode();
+      clients.push(node);
+      await node.connect(url, useKey, hello);
+      return node;
+    },
+    async close() {
+      registry.stop();
+      clients.forEach((node) => node.close());
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      store.db.close();
+    },
+  };
 }
 
-test('configured node authenticates without viewer origin and carries existing RPC, signal and heartbeat messages', async () => {
+test('encrypted handshake supplies config, rejects unknown/build mismatch, replaces connections', async () => {
   const h = await harness();
   try {
-    let readyCount = 0;
-    h.endpoint.on('ready', () => readyCount++);
-    const socket = await h.connect();
-    assert.equal(readyCount, 1);
-    const request = once(socket, 'message'),
-      result = h.endpoint.request('session.snapshot', 'tenant-A', { detail: true });
-    const message = JSON.parse(String((await request)[0]));
-    assert.equal(message.method, 'session.snapshot');
-    assert.equal(message.tenantId, 'tenant-A');
-    assert.equal(message.detail, true);
-    socket.send(JSON.stringify({ id: message.id, ok: true, result: { running: true } }));
-    assert.deepEqual(await result, { running: true });
-    const signal = once(h.endpoint, 'rtc.signal');
-    socket.send(
-      JSON.stringify({
-        event: 'rtc.signal',
-        tenantId: 'tenant-A',
-        connectionId: 'rtc-A',
-        signal: { type: 'complete' },
-      }),
-    );
-    assert.equal((await signal)[0].connectionId, 'rtc-A');
-    const pong = once(socket, 'message');
-    socket.send(JSON.stringify({ type: 'node.ping' }));
-    assert.deepEqual(JSON.parse(String((await pong)[0])), { type: 'node.pong' });
-  } finally {
-    await h.close();
-  }
-});
-
-test('socket replacement rejects old pending and ignores queued old replies/signals without replay', async () => {
-  const h = await harness();
-  try {
-    const a = await h.connect();
-    const oldServerSocket = (h.endpoint as any).current.socket as WebSocket;
-    const oldRequest = once(a, 'message');
-    const oldResult = assert.rejects(h.endpoint.request('view.ensure', 'tenant'), {
-      code: 'outcome_unknown',
-    });
-    await oldRequest;
-    const b = await h.connect();
-    await oldResult;
-    let signals = 0;
-    h.endpoint.onSignal(() => signals++);
-    const request = once(b, 'message'),
-      result = h.endpoint.request('session.snapshot', 'tenant');
-    const message = JSON.parse(String((await request)[0]));
-    // An already queued old-socket callback must not resolve a new generation.
-    oldServerSocket.emit(
-      'message',
-      Buffer.from(JSON.stringify({ id: message.id, ok: true, result: 'old' })),
-      false,
-    );
-    oldServerSocket.emit(
-      'message',
-      Buffer.from(
-        JSON.stringify({
-          event: 'rtc.signal',
-          tenantId: 'tenant',
-          connectionId: 'old',
-          signal: { type: 'complete' },
-        }),
-      ),
-      false,
-    );
-    assert.equal(signals, 0);
-    b.send(JSON.stringify({ id: message.id, ok: true, result: 'new' }));
-    assert.equal(await result, 'new');
-    const received = once(h.endpoint, 'rtc.signal');
-    b.send(
-      JSON.stringify({
-        event: 'rtc.signal',
-        tenantId: 'tenant',
-        connectionId: 'new',
-        signal: { type: 'complete' },
-      }),
-    );
+    const first = await h.connect();
+    assert.equal(first.helloReply.type, 'node.ready');
+    assert.equal(first.helloReply.config.nodeId, 'alpha');
+    assert.equal(first.helloReply.configHash, 'alpha');
+    const link = h.registry.get('alpha')!;
+    const epoch = link.state.state === 'ready' && link.state.connectionEpoch;
+    first.handler = () => undefined;
+    const received = once(first, 'request');
+    const lost = assert.rejects(link.request('test', 'tenant'), { code: 'outcome_unknown' });
     await received;
-    assert.equal(signals, 1);
+    const ready = once(link, 'ready');
+    await h.connect({ incarnation: first.incarnation });
+    assert.equal((await ready)[0].processChanged, false);
+    await lost;
+    assert.notEqual(link.state.state === 'ready' && link.state.connectionEpoch, epoch);
+    const changed = once(link, 'ready');
+    await h.connect();
+    assert.equal((await changed)[0].processChanged, true);
+    for (const [hello, code] of [
+      [{ nodeId: 'missing' }, 'unknown_node'],
+      [{ buildId: 'old' }, 'build_mismatch'],
+    ] as const) {
+      const rejected = await h.connect(hello);
+      assert.equal(rejected.helloReply.code, code);
+      await once(rejected.socket, 'close');
+      assert.equal(link.state.state, 'ready');
+    }
   } finally {
     await h.close();
   }
 });
 
-test('disconnect fails pending immediately; reconnect emits ready and does not replay mutations', async () => {
-  const h = await harness();
+test('wrong key, text, malformed ciphertext, handshake deadline and idle deadline close carriers', async () => {
+  const h = await harness({ handshakeTimeoutMs: 500, heartbeatTimeoutMs: 1000 });
   try {
-    await assert.rejects(h.endpoint.request('view.ensure', 'tenant'), { code: 'unavailable' });
-    const a = await h.connect();
-    const request = once(a, 'message');
-    const pending = assert.rejects(h.endpoint.request('view.ensure', 'tenant'), { code: 'outcome_unknown' });
-    await request;
-    const offline = once(h.endpoint, 'offline');
-    a.terminate();
-    await offline;
-    await pending;
-    await assert.rejects(h.endpoint.request('view.ensure', 'tenant'), { code: 'unavailable' });
-    const ready = once(h.endpoint, 'ready');
-    const b = await h.connect();
-    await ready;
-    const requestB = once(b, 'message'),
-      result = h.endpoint.request('session.snapshot', 'tenant');
-    const message = JSON.parse(String((await requestB)[0]));
-    assert.equal(message.method, 'session.snapshot');
-    b.send(
-      JSON.stringify({ id: message.id, ok: false, error: { code: 'unavailable', message: 'not running' } }),
+    await assert.rejects(h.connect({}, randomBytes(32)));
+    const raw = new WebSocket(h.url);
+    await once(raw, 'open');
+    await once(raw, 'close');
+    const node = await h.connect();
+    const closed = once(node.socket, 'close');
+    node.socket.send('plaintext');
+    await closed;
+    const corrupted = await h.connect();
+    const corruptClosed = once(corrupted.socket, 'close');
+    corrupted.socket.send(Buffer.alloc(32));
+    await corruptClosed;
+    const idle = await h.connect();
+    await once(idle.socket, 'close');
+  } finally {
+    await h.close();
+  }
+});
+
+test('node request cap, timeout, offline certainty and ping/pong', async () => {
+  const h = await harness({ requestTimeoutMs: 80 });
+  try {
+    const link = h.registry.get('alpha')!;
+    await assert.rejects(link.request('test', 'one'), { code: 'unavailable' });
+    const node = await h.connect();
+    const pong = once(node, 'frame');
+    node.send({ type: 'node.ping' });
+    assert.equal((await pong)[0].message.type, 'node.pong');
+    node.handler = () => undefined;
+    const requests = Array.from({ length: 256 }, () =>
+      assert.rejects(link.request('test', 'one'), { code: 'outcome_unknown' }),
     );
-    await assert.rejects(result, { code: 'unavailable' });
-  } finally {
-    await h.close();
-  }
-});
-
-test('request timeout and size/pending bounds reject without replaying', async () => {
-  const h = await harness({ requestTimeoutMs: 20 });
-  try {
-    const socket = await h.connect();
-    await assert.rejects(h.endpoint.request('view.navigate', 'tenant'), { code: 'outcome_unknown' });
-    await assert.rejects(h.endpoint.request('view.ensure', 'tenant', { value: 'x'.repeat(1024 * 1024) }), {
+    await assert.rejects(link.request('excess', 'one'), { code: 'unavailable' });
+    await Promise.all(requests);
+    await assert.rejects(link.request('big', 'one', { data: 'x'.repeat(1024 * 1024) }), {
       code: 'limit_exceeded',
     });
-    // The production bound is independent of transport writability.
-    const pending = Array.from({ length: 256 }, () =>
-      h.endpoint.request('session.snapshot', 'tenant').catch((error) => error),
-    );
-    await assert.rejects(h.endpoint.request('session.snapshot', 'tenant'), { code: 'unavailable' });
-    socket.terminate();
-    await Promise.all(pending);
   } finally {
     await h.close();
   }
 });
 
-test('bad identity and missing hello never become ready; handshake timeout closes socket', async () => {
-  const h = await harness({ handshakeTimeoutMs: 20 });
-  try {
-    let ready = 0;
-    h.endpoint.on('ready', () => ready++);
-    const invalid = await h.connect(false);
-    const invalidClosed = once(invalid, 'close');
-    invalid.send(JSON.stringify({ type: 'node.hello', version: 1, nodeId: 'other-node' }));
-    await invalidClosed;
-    const silent = await h.connect(false);
-    await once(silent, 'close');
-    assert.equal(ready, 0);
-  } finally {
-    await h.close();
-  }
-});
-
-test('invalid replacement hello leaves the current node online; oversized inbound message fails pending', async () => {
+test('sticky balanced placement seals keys, opens per epoch, retries not_found once and filters node events', async () => {
   const h = await harness();
   try {
-    const current = await h.connect();
-    const invalid = await h.connect(false),
-      closed = once(invalid, 'close');
-    invalid.send(
-      JSON.stringify({
-        type: 'node.hello',
-        version: 2,
-        nodeId: 'compute-1',
-        endpointIncarnation: 'test-incarnation-0001',
+    await assert.rejects(h.gateway.snapshot('one'), { code: 'unavailable' });
+    const alpha = await h.connect();
+    const beta = await h.connect({ nodeId: 'beta' });
+    await Promise.all([h.gateway.snapshot('one'), h.gateway.snapshot('one')]);
+    assert.deepEqual(
+      alpha.requests.map((request) => request.method),
+      ['session.open', 'session.snapshot', 'session.snapshot'],
+    );
+    const first = h.placement.peek('one')!;
+    assert.match(first.sessionId, /^[a-f0-9]{32}$/);
+    const key = alpha.requests[0].profileKey;
+    assert.equal(Buffer.from(key, 'base64').length, 32);
+    assert.equal(first.keyCiphertext.includes(key), false);
+    assert.throws(() => h.store.atRestKey.open('other-tenant', first.keyCiphertext));
+    for (const tenant of ['two', 'three', 'four']) await h.gateway.snapshot(tenant);
+    assert.deepEqual(
+      ['one', 'two', 'three', 'four'].map((tenant) => h.placement.peek(tenant)!.nodeId),
+      ['alpha', 'beta', 'alpha', 'beta'],
+    );
+    await assert.rejects(h.gateway.snapshot('five'), { code: 'unavailable' });
+    let missing = true;
+    alpha.handler = (request) => {
+      if (request.method === 'session.snapshot' && missing) {
+        missing = false;
+        throw { code: 'not_found' };
+      }
+      return {};
+    };
+    const before = alpha.requests.length;
+    await h.gateway.snapshot('one');
+    assert.deepEqual(
+      alpha.requests.slice(before).map((request) => request.method),
+      ['session.snapshot', 'session.open', 'session.snapshot'],
+    );
+    alpha.handler = (request) => {
+      if (request.method !== 'session.open') throw { code: 'not_found' };
+      return {};
+    };
+    await assert.rejects(h.gateway.snapshot('one'), { code: 'not_found' });
+    const offline = once(h.registry.get('alpha')!, 'offline');
+    alpha.close();
+    await offline;
+    assert.equal(h.gateway.isReady('one'), false);
+    assert.equal(h.gateway.isReady('two'), true);
+    await assert.rejects(h.gateway.snapshot('one'), { code: 'unavailable' });
+    assert.equal(h.placement.peek('one')!.nodeId, 'alpha');
+    const reconnected = await h.connect({ incarnation: alpha.incarnation });
+    await h.gateway.snapshot('one');
+    assert.deepEqual(
+      reconnected.requests.map((request) => request.method),
+      ['session.open', 'session.snapshot'],
+    );
+    assert.equal(reconnected.requests[0].profileKey, key);
+    assert.equal(reconnected.requests[0].sessionId, first.sessionId);
+    let signals = 0,
+      actions = 0;
+    const unsubSignal = h.gateway.onSignal(() => signals++);
+    const unsubAction = h.gateway.onClientAction(() => actions++);
+    const barrier = once(beta, 'frame');
+    for (const tenantId of ['one', 'two']) {
+      beta.send({ event: 'rtc.signal', tenantId, connectionId: 'x', signal: {} });
+      beta.send({ event: 'client.action', tenantId, connectionId: 'x' });
+    }
+    beta.send({ type: 'node.ping' });
+    await barrier;
+    assert.equal(signals, 1);
+    assert.equal(actions, 1);
+    unsubSignal();
+    unsubAction();
+  } finally {
+    await h.close();
+  }
+});
+
+test('updater resumes binary release downloads and receives no_release in dev', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-release-'));
+  const archive = join(directory, 'node.tar.zst');
+  const bytes = randomBytes(2 * 1024 * 1024 + 17);
+  await writeFile(archive, bytes);
+  const descriptor = {
+    buildId: 'a'.repeat(64),
+    size: bytes.length,
+    sha256: createHash('sha256').update(bytes).digest('hex'),
+  };
+  const h = await harness({ release: { archive, descriptor }, buildId: descriptor.buildId });
+  try {
+    const updater = await h.connect({ role: 'updater', buildId: 'dev' });
+    assert.deepEqual(updater.helloReply, { type: 'node.release', release: descriptor });
+    const frames: any[] = [];
+    const complete = new Promise<void>((resolve) =>
+      updater.on('frame', (frame) => {
+        frames.push(frame);
+        if (frame.message?.type === 'package.end') resolve();
       }),
     );
-    await closed;
-    const request = once(current, 'message');
-    const result = assert.rejects(h.endpoint.request('session.snapshot', 'tenant'), {
-      code: 'outcome_unknown',
-    });
-    await request;
-    current.send('x'.repeat(1024 * 1024 + 1));
-    await result;
+    updater.send({ type: 'package.get', buildId: descriptor.buildId, offset: 13 });
+    await complete;
+    let offset = 13;
+    for (const frame of frames.slice(0, -1)) {
+      assert.equal(frame.kind, 'binary');
+      assert.equal(frame.header.offset, offset);
+      assert.ok(frame.bytes.length <= 1024 * 1024);
+      offset += frame.bytes.length;
+    }
+    assert.deepEqual(Buffer.concat(frames.slice(0, -1).map((frame) => frame.bytes)), bytes.subarray(13));
+    assert.equal(frames[frames.length - 1].message.size, bytes.length);
+    assert.equal(h.registry.get('alpha')!.state.state, 'offline');
   } finally {
     await h.close();
+    await rm(directory, { recursive: true, force: true });
   }
-});
-
-test('unconfigured gateway and invalid credentials reject WebSocket upgrade', async () => {
-  for (const enabled of [false, true]) {
-    const h = await harness({}, enabled);
-    try {
-      const socket = new WebSocket(h.url, { headers: { authorization: 'Bearer incorrect' } });
-      const error = await new Promise<Error>((resolve) => socket.once('error', resolve));
-      assert.match(error.message, enabled ? /401/ : /404/);
-      socket.terminate();
-    } finally {
-      await h.close();
-    }
-  }
-});
-
-test('explicit TLS proxy mode rejects plaintext without forwarded HTTPS', async () => {
-  const h = await harness({ tlsProxy: true });
+  const dev = await harness();
   try {
-    await assert.rejects(h.connect(), /403/);
-    const socket = await h.connect(true, { 'x-forwarded-proto': 'https' });
-    assert.equal(socket.readyState, WebSocket.OPEN);
+    assert.equal((await dev.connect({ role: 'updater' })).helloReply.code, 'no_release');
   } finally {
-    await h.close();
+    await dev.close();
   }
 });
 
-test(
-  'server shutdown fails remote RPC before draining tracked handlers and never sends native shutdown',
-  { timeout: 2000 },
-  async () => {
-    const h = await harness();
-    try {
-      const socket = await h.connect();
-      const request = once(socket, 'message');
-      let rejected: Error | undefined;
-      Object.assign(h.control.accounts, { identity: () => ({ tenantId: 'tenant' }) });
-      Object.assign(h.control.viewers, {
-        attachViewer: async () => ({ workspace: { revision: 1 } }),
-        productEpoch: () => undefined,
-        productAllowed: () => true,
-        detachViewer: async () => {},
-        assertViewer() {},
-      });
-      Object.assign(h.control.rtc, {
-        offer: () =>
-          h.endpoint.request('session.snapshot', 'tenant').catch((error) => {
-            rejected = error;
-            throw error;
-          }),
-      });
-      // Viewer work is tracked by createHttp and awaits the remote management RPC.
-      const viewer = new WebSocket(h.url.replace('/api/endpoint', '/api/socket'), {
-        origin: 'http://test.local',
-        headers: { cookie: 'rk_session=test' },
-      });
-      await once(viewer, 'open');
-      viewer.send(JSON.stringify({ id: 'rpc', method: 'rtc.offer', params: {} }));
-      await request;
-      const messages: string[] = [];
-      socket.on('message', (data) => messages.push(String(data)));
-      await h.server.shutdown();
-      assert.equal((rejected as RemoteKitError).code, 'outcome_unknown');
-      assert.deepEqual(messages, []);
-      await assert.rejects(h.endpoint.request('shutdown', ''), { code: 'unavailable' });
-    } finally {
-      await h.close();
-    }
-  },
-);
-
-test('missing pong retires a dead management socket', async () => {
-  const h = await harness({ heartbeatMs: 20 });
+test('node offline and process changes affect only placed tenants while a same-process reconnect retains media generation', async () => {
+  const h = await harness();
+  const control = createApplication(h.store, h.gateway);
   try {
-    await h.connect(true, {}, false);
-    await once(h.endpoint, 'offline');
-    await assert.rejects(h.endpoint.request('session.snapshot', 'tenant'), { code: 'unavailable' });
+    await h.connect();
+    await h.connect({ nodeId: 'beta' });
+    await h.gateway.snapshot('one');
+    await h.gateway.snapshot('two');
+    const one = control.tenants.get('one');
+    const two = control.tenants.get('two');
+    for (const runtime of [one, two]) {
+      runtime.beginRtc(runtime.tenantId, 'attempt', 'lease');
+      runtime.activateRtc(runtime.tenantId, 'lease');
+    }
+    control.rtc.endpointOffline('alpha');
+    assert.equal(one.connectionId, undefined);
+    assert.equal(two.connectionId, 'two');
+    await control.reconciler.endpointReady({ nodeId: 'alpha', processChanged: false });
+    assert.equal(control.tenants.mediaGeneration('one'), 0);
+    assert.equal(one.pendingRtcCheck, true);
+    assert.ok(one.rtc.disconnectedPeer);
+    await control.reconciler.endpointReady({ nodeId: 'alpha', processChanged: true });
+    assert.equal(control.tenants.mediaGeneration('one'), 1);
+    assert.equal(control.tenants.mediaGeneration('two'), 0);
+    assert.equal(two.connectionId, 'two');
+    assert.equal(one.rtc.disconnectedPeer, undefined);
   } finally {
+    await control.close();
     await h.close();
   }
 });
 
-test(
-  'real gateway ready preserves same-process media authority, isolates missing RTC, and retires a new process',
-  { timeout: 10000 },
-  async () => {
-    const endpoint = new RemoteNodeLink({ nodeId: 'compute-1', token: 'test-secret' });
-    const store = new ControlDatabase(':memory:'),
-      control = createApplication(store, testGateway(endpoint));
-    const server = createServer();
-    server.on('upgrade', (req, socket, head) => endpoint.handleUpgrade(req, socket, head));
-    server.listen(0, '127.0.0.1');
-    await once(server, 'listening');
-    const url = `ws://127.0.0.1:${(server.address() as { port: number }).port}/api/endpoint`;
-    const peers = new Map<string, string>(),
-      views = new Map<string, any[]>(),
-      calls: any[] = [],
-      sockets: WebSocket[] = [];
-    const identities: any[] = [];
-    let reconciliation = Promise.resolve(),
-      loseNavigationReply = false,
-      failSnapshotTenant: string | undefined;
-    endpoint.on('ready', (identity) => {
-      identities.push(identity);
-      reconciliation = control.reconciler.endpointReady(identity);
-    });
-    async function connect(incarnation = 'endpoint-process-0001') {
-      const socket = new WebSocket(url, { headers: { authorization: 'Bearer test-secret' } });
-      sockets.push(socket);
-      socket.on('message', (data) => {
-        const message = JSON.parse(String(data));
-        if (!message.method) return;
-        calls.push(message);
-        const tenant = message.tenantId;
-        let result: any = { accepted: true, applied: true };
-        if (message.method === 'session.snapshot' && failSnapshotTenant === tenant) {
-          failSnapshotTenant = undefined;
-          socket.send(
-            JSON.stringify({ id: message.id, ok: false, error: 'snapshot temporarily unavailable' }),
-          );
-          return;
-        }
-        if (message.method === 'session.snapshot')
-          result = {
-            running: true,
-            browserIncarnation: 'browser-' + tenant,
-            views: views.get(tenant) ?? [],
-            rtc: { active: peers.has(tenant), connectionId: peers.get(tenant) ?? null },
-          };
-        if (message.method === 'rtc.offer') {
-          peers.set(tenant, message.connectionId);
-          result = { accepted: true, avSync: message.avSync, connectionId: message.connectionId };
-          socket.send(
-            JSON.stringify({
-              event: 'rtc.signal',
-              tenantId: tenant,
-              connectionId: message.connectionId,
-              signal: { type: 'answer', sdp: 'v=0\r\n' },
-            }),
-          );
-        }
-        if (message.method === 'rtc.authorize') result = { applied: true, epoch: message.epoch };
-        if (message.method === 'rtc.close' && peers.get(tenant) === message.connectionId)
-          peers.delete(tenant);
-        if (message.method === 'view.ensure') {
-          const list = views.get(tenant) ?? [];
-          list.push({ viewId: message.viewId, url: message.url, instance: '1', document: '1', actual: 0 });
-          views.set(tenant, list);
-        }
-        if (message.method === 'view.navigate' && loseNavigationReply) {
-          socket.terminate();
-          return;
-        }
-        socket.send(JSON.stringify({ id: message.id, ok: true, result }));
-      });
-      await once(socket, 'open');
-      const ready = once(endpoint, 'ready');
-      socket.send(
-        JSON.stringify({
-          type: 'node.hello',
-          version: 1,
-          nodeId: 'compute-1',
-          endpointIncarnation: incarnation,
-        }),
-      );
-      await ready;
-      await reconciliation;
-      return socket;
-    }
-    const operation = (tenant: string, action: any = { type: 'window.create' }) => ({
-      operationId: randomUUID(),
-      operationGeneration: store.operations.operationGeneration(tenant),
-      action,
-    });
-    try {
-      let socket = await connect();
-      assert.equal(identities[0].processChanged, true);
-      const a = (await accountsFor(store).register('reconnect-a', 'password123')).tenantId;
-      await accountsFor(store).setRegistrationCredential(a, 'registration-test');
-      const b = (await accountsFor(store).register('reconnect-b', 'password123', 'registration-test'))
-        .tenantId;
-      await control.viewers.attachViewer(
-        a,
-        'lease-a',
-        () => {},
-        { identity: 'test-account', valid: () => true },
-        true,
-      );
-      await control.viewers.attachViewer(
-        b,
-        'lease-b',
-        () => {},
-        { identity: 'test-account', valid: () => true },
-        true,
-      );
-      const offer = async (tenant: string, lease: string) =>
-        control.rtc.offer(tenant, { type: 'offer', sdp: 'v=0\r\n', attemptId: randomUUID() }, lease);
-      const aa = await offer(a, 'lease-a'),
-        bb = await offer(b, 'lease-b');
-      const generation = control.viewers.productState(a).endpointGeneration;
-      const firstEpoch = endpoint.state.state === 'ready' ? endpoint.state.connectionEpoch : undefined;
-      const auth = (tenant: string, lease: string) => requestViewer(control, tenant, lease, 'auth.get', {});
-      const offline = once(endpoint, 'offline');
-      socket.terminate();
-      await offline;
-      control.rtc.endpointOffline();
-      assert.equal(control.viewers.productAllowed(a, 'lease-a'), false);
-      socket = await connect();
-      await requestViewer(control, a, 'lease-a', 'auth.verify', {
-        method: 'password',
-        secret: 'password123',
-      });
-      await requestViewer(control, b, 'lease-b', 'auth.verify', {
-        method: 'password',
-        secret: 'password123',
-      });
-      assert.equal(identities[identities.length - 1].processChanged, false);
-      assert.notEqual(
-        endpoint.state.state === 'ready' ? endpoint.state.connectionEpoch : undefined,
-        firstEpoch,
-      );
-      assert.equal(control.viewers.productState(a).endpointGeneration, generation);
-      assert.ok((await auth(a, 'lease-a')).peerEpoch > 0);
-      control.viewers.assertViewer(a, 'lease-a');
-      const op = operation(a),
-        receipt = once(socket, 'message');
-      // Use the authenticated remote socket event, not a direct DomainServices method.
-      socket.send(
-        JSON.stringify({
-          ...op,
-          event: 'client.action',
-          tenantId: a,
-          connectionId: aa.connectionId,
-          authEpoch: (await auth(a, 'lease-a')).peerEpoch,
-        }),
-      );
-      // Reconciliation is serialized with the action; await its receipt publication.
-      for (let i = 0; i < 50 && !store.operations.operation(a, op.operationId); i++)
-        await new Promise((resolve) => setImmediate(resolve));
-      await control.tenants.serial(a, async () => {});
-      await receipt;
-      assert.equal(control.operations.operationStatus(a, op).status, 'committed');
-      peers.delete(a);
-      failSnapshotTenant = a;
-      socket = await connect();
-      assert.equal(control.viewers.productState(a).endpointGeneration, generation);
-      assert.ok((await auth(a, 'lease-a')).peerEpoch > 0);
-      await control.reconciler.tick();
-      assert.equal(control.viewers.productState(b).endpointGeneration, generation);
-      assert.ok(control.viewers.productState(a).endpointGeneration > generation);
-      assert.equal(control.viewers.productState(b).endpointGeneration, generation);
-      assert.equal((await auth(a, 'lease-a')).peerEpoch, 0);
-      assert.ok((await auth(b, 'lease-b')).peerEpoch > 0);
-      const restored = await offer(a, 'lease-a');
-      await control.operations.productAction(
-        a,
-        { type: 'window.create', url: 'https://before.test/' },
-        'lease-a',
-      );
-      const tab = store.workspaces.workspace(a).tabs.find((tab) => tab.kind === 'remote')!;
-      const lost = operation(a, { type: 'tab.navigate', tabId: tab.id, url: 'https://after.test/' });
-      loseNavigationReply = true;
-      const unknown = await control.operations.submitOperation(a, lost, 'lease-a');
-      assert.equal(unknown.status, 'unknown');
-      loseNavigationReply = false;
-      socket = await connect();
-      assert.equal(control.operations.operationStatus(a, lost).status, 'unknown');
-      assert.equal(calls.filter((call) => call.method === 'view.navigate').length, 1);
-      assert.ok((await auth(a, 'lease-a')).peerEpoch > 0);
-      socket = await connect('endpoint-process-0002');
-      assert.equal(identities[identities.length - 1].processChanged, true);
-      assert.equal((await auth(a, 'lease-a')).peerEpoch, 0);
-      assert.equal((await auth(b, 'lease-b')).peerEpoch, 0);
-      assert.ok(control.viewers.productState(a).endpointGeneration > restored.endpointGeneration);
-      assert.equal(
-        control.viewers.productState(a).endpointGeneration,
-        control.viewers.productState(b).endpointGeneration,
-      );
-      const fresh = await offer(a, 'lease-a');
-      assert.notEqual(fresh.connectionId, restored.connectionId);
-    } finally {
-      endpoint.stop();
-      for (const socket of sockets) socket.terminate();
-      await control.close();
-      store.db.close();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  },
-);
+test('bidirectional requests share the concurrency cap, timeout errors and JSON reply limit', async () => {
+  const h = await harness({ requestTimeoutMs: 80 });
+  try {
+    const node = await h.connect();
+    h.registry.handlers.set('fixture.hang', () => new Promise(() => {}));
+    const pending = Array.from({ length: 256 }, () =>
+      assert.rejects(node.request('fixture.hang', 'tenant'), { code: 'outcome_unknown' }),
+    );
+    await assert.rejects(node.request('fixture.hang', 'tenant'), { code: 'unavailable' });
+    await Promise.all(pending);
+    h.registry.handlers.set('fixture.large', () => ({ data: 'x'.repeat(1024 * 1024) }));
+    await assert.rejects(node.request('fixture.large', 'tenant'), { code: 'limit_exceeded' });
+  } finally {
+    await h.close();
+  }
+});

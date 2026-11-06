@@ -7,9 +7,13 @@
 #include "base/pickle.h"
 #include "components/sessions/content/content_serialized_navigation_builder.h"
 #include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/browser_context.h"
+#include "content/public/browser/dom_storage_context.h"
 #include "content/public/browser/navigation_entry.h"
 #include "content/public/browser/restore_type.h"
 #include "content/public/browser/web_contents.h"
+#include "content/public/browser/storage_partition.h"
+#include "third_party/blink/public/common/dom_storage/session_storage_namespace_id.h"
 #include "third_party/blink/public/common/page_state/page_state.h"
 #include "third_party/blink/public/common/page_state/page_state_serialization.h"
 
@@ -20,9 +24,16 @@ constexpr std::size_t kMaxEntryBytes = 16 * 1024 * 1024;
 constexpr std::size_t kMaxStateBytes = 64 * 1024 * 1024;
 constexpr int kMaxRedirects = 1024;
 constexpr int kMaxExtendedFields = 1024;
-constexpr int kFormatVersion = 1;
+constexpr int kFormatVersion = 2;
+constexpr int kMaxStoragePartitions = 128;
+constexpr std::size_t kMaxPartitionFieldBytes = 4096;
 Status Fail(ErrorCode error, const char* message) {
   return {error, message};
+}
+
+bool ValidSessionStorageId(std::string_view id) {
+  return id.size() == blink::kSessionStorageNamespaceIdLength &&
+         id.find_first_not_of("0123456789abcdef_") == std::string_view::npos;
 }
 
 bool InspectFrame(const blink::ExplodedFrameState& frame,
@@ -88,6 +99,10 @@ NavigationState::NavigationState(NavigationState&&) noexcept = default;
 NavigationState& NavigationState::operator=(NavigationState&&) noexcept = default;
 int NavigationState::entry_count() const {
   return static_cast<int>(entries_.size());
+}
+void NavigationState::SetSessionStorageShouldPersist(bool persist) {
+  for (const auto& [config, handle] : namespaces_)
+    handle->SetShouldPersist(persist);
 }
 
 Status ValidateNavigationState(const NavigationState& state) {
@@ -184,6 +199,20 @@ Result<std::string> ExportNavigationState(const NavigationState& state) {
   base::Pickle out;
   out.WriteString("RemoteKit.NavigationState");
   out.WriteInt(kFormatVersion);
+  if (state.namespaces_.size() > kMaxStoragePartitions)
+    return {{}, Fail(ErrorCode::invalid_request, "Too many sessionStorage partitions")};
+  out.WriteInt(static_cast<int>(state.namespaces_.size()));
+  for (const auto& [config, handle] : state.namespaces_) {
+    if (config.partition_domain().size() > kMaxPartitionFieldBytes ||
+        config.partition_name().size() > kMaxPartitionFieldBytes ||
+        !ValidSessionStorageId(handle->id()))
+      return {{}, Fail(ErrorCode::invalid_request, "Invalid sessionStorage namespace metadata")};
+    out.WriteString(config.partition_domain());
+    out.WriteString(config.partition_name());
+    out.WriteBool(config.in_memory());
+    out.WriteInt(static_cast<int>(config.fallback_to_partition_domain_for_blob_urls()));
+    out.WriteString(handle->id());
+  }
   out.WriteInt(state.selected_index_);
   out.WriteInt(state.entry_count());
   for (std::size_t i = 0; i < state.entries_.size(); ++i) {
@@ -207,7 +236,10 @@ Result<std::string> ExportNavigationState(const NavigationState& state) {
   return {std::string(out.AsStringView()), {}};
 }
 
-Result<NavigationState> ImportNavigationState(std::string_view bytes) {
+Result<NavigationState> ImportNavigationState(std::string_view bytes,
+                                              content::BrowserContext* context) {
+  if (!context)
+    return {{}, Fail(ErrorCode::invalid_request, "BrowserContext required")};
   if (bytes.size() > kMaxStateBytes)
     return {{}, Fail(ErrorCode::invalid_request, "Navigation state exceeds 64 MiB")};
   auto in = base::PickleIterator::WithData(base::as_byte_span(bytes));
@@ -216,11 +248,36 @@ Result<NavigationState> ImportNavigationState(std::string_view bytes) {
     return {{}, Fail(ErrorCode::invalid_request, "Invalid navigation-state pickle header")};
   NavigationState state;
   std::string magic;
-  int version, count;
+  int version, count, partitions;
   if (!in.ReadString(&magic) || magic != "RemoteKit.NavigationState" || !in.ReadInt(&version) ||
-      version != kFormatVersion || !in.ReadInt(&state.selected_index_) || !in.ReadInt(&count) ||
-      count < 1 || count > kMaxEntries || state.selected_index_ < 0 ||
-      state.selected_index_ >= count)
+      version != kFormatVersion || !in.ReadInt(&partitions) || partitions < 0 ||
+      partitions > kMaxStoragePartitions)
+    return {{}, Fail(ErrorCode::invalid_request, "Invalid navigation-state header/version")};
+  std::map<content::StoragePartitionConfig, std::string> namespaces;
+  for (int i = 0; i < partitions; ++i) {
+    std::string domain, name, id;
+    bool in_memory;
+    int fallback;
+    using Fallback = content::StoragePartitionConfig::FallbackMode;
+    if (!in.ReadString(&domain) || domain.size() > kMaxPartitionFieldBytes ||
+        domain.find_first_not_of("abcdefghijklmnopqrstuvwxyz") != std::string::npos ||
+        !in.ReadString(&name) || name.size() > kMaxPartitionFieldBytes ||
+        !in.ReadBool(&in_memory) || !in.ReadInt(&fallback) ||
+        fallback < static_cast<int>(Fallback::kNone) ||
+        fallback > static_cast<int>(Fallback::kFallbackPartitionInMemory) || !in.ReadString(&id) ||
+        !ValidSessionStorageId(id) ||
+        (domain.empty() && (!name.empty() || in_memory != context->IsOffTheRecord() ||
+                            fallback != static_cast<int>(Fallback::kNone))))
+      return {{}, Fail(ErrorCode::invalid_request, "Invalid sessionStorage partition metadata")};
+    auto config = domain.empty()
+                      ? content::StoragePartitionConfig::CreateDefault(context)
+                      : content::StoragePartitionConfig::Create(context, domain, name, in_memory);
+    config.set_fallback_to_partition_domain_for_blob_urls(static_cast<Fallback>(fallback));
+    if (!namespaces.emplace(std::move(config), std::move(id)).second)
+      return {{}, Fail(ErrorCode::invalid_request, "Duplicate sessionStorage partition")};
+  }
+  if (!in.ReadInt(&state.selected_index_) || !in.ReadInt(&count) || count < 1 ||
+      count > kMaxEntries || state.selected_index_ < 0 || state.selected_index_ >= count)
     return {{}, Fail(ErrorCode::invalid_request, "Invalid navigation-state header/version/index")};
   for (int i = 0; i < count; ++i) {
     std::string record, page_state, favicon;
@@ -250,8 +307,14 @@ Result<NavigationState> ImportNavigationState(std::string_view bytes) {
   auto valid = ValidateNavigationState(state);
   if (!valid)
     return {{}, valid};
-  // Deliberately no namespace map/context: binary import restores navigation
-  // only; sessionStorage reconstruction across browser processes is absent.
+  // Recreate now, before the caller signals that all imports are ready for
+  // scavenging. An imported view can remain unloaded until it is needed.
+  for (const auto& [config, id] : namespaces) {
+    auto* partition = context->GetStoragePartition(config);
+    state.namespaces_.emplace(config,
+                              partition->GetDOMStorageContext()->RecreateSessionStorage(id));
+  }
+  state.namespace_context_ = context;
   return {std::move(state), {}};
 }
 

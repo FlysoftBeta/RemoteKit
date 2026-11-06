@@ -19,12 +19,15 @@ class NavigationRecovery : private ControllerContext {
   void MaintainRecovery();
   void CaptureNavigation(const Json& browser_view);
   void MaintainNavigationExport();
+  Result<void> FinalExport();
 
  private:
   ViewController& views;
   std::map<std::string, std::string> recovery_revisions;
   remotekit::NavigationExport navigation_export;
   bool export_turn = false;
+  std::string scavenged_incarnation;
+  Result<void> ExportTick(uint32_t timeout_ms = 10000);
   struct Recovery {
     enum class Phase {
       kLoad,

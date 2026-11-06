@@ -409,6 +409,7 @@ Result<Json> ViewController::InactiveSnapshot() {
               {"browserPid", 0},
               {"views", Json::array()},
               {"pendingPopups", Json::array()},
+              {"downloadsInProgress", 0},
               {"events", durable_events},
               {"running", false},
               {"browserIncarnation", nullptr},
@@ -508,6 +509,7 @@ Result<Json> ViewController::Snapshot(bool output_diagnostics) {
         {"browserPid", browser.Pid()},
         {"views", views},
         {"pendingPopups", snapshot.at("sessions").at(0).value("pendingPopups", Json::array())},
+        {"downloadsInProgress", snapshot.at("sessions").at(0).value("downloadsInProgress", 0)},
         {"events", durable_events},
         {"running", true},
         {"browserIncarnation", browser.Incarnation()},
@@ -579,10 +581,6 @@ Result<Json> ViewController::ManageSessionEnsure(const Json& request) {
               {"accepted", true},
               {"browserIncarnation", browser.Incarnation()},
               {"recovery", navigation.RecoverySnapshot()}};
-}
-
-Result<Json> ViewController::ManageSessionSnapshot(const Json& request) {
-  return Snapshot(request.value("outputDiagnostics", false));
 }
 
 Result<Json> ViewController::ManageSessionEventsAck(const Json& request) {

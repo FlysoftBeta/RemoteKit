@@ -1,13 +1,16 @@
 #include "browser/control_dispatcher.h"
 #include "browser/control_requests.h"
 #include "browser/control_response.h"
+#include "browser/browser_context.h"
 #include "browser/browser_runtime.h"
+#include "browser/profile_services.h"
 #include <set>
 #include "base/strings/utf_string_conversions.h"
-#include "base/task/single_thread_task_runner.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
+#include "content/public/browser/dom_storage_context.h"
+#include "content/public/browser/storage_partition.h"
 
 namespace remotekit::browser {
 Result<SnapshotRequest> DecodeSnapshot(const base::DictValue& wire, RequestEnvelope envelope) {
@@ -22,6 +25,23 @@ Result<ShutdownRequest> DecodeShutdown(const base::DictValue& wire, RequestEnvel
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
   return decoder.Finish(std::move(request));
+}
+
+Result<StorageScavengeRequest> DecodeStorageScavenge(const base::DictValue& wire,
+                                                     RequestEnvelope envelope) {
+  StorageScavengeRequest request;
+  static_cast<RequestEnvelope&>(request) = envelope;
+  RequestDecoder decoder(wire);
+  return decoder.Finish(std::move(request));
+}
+
+ControlResult ControlDispatcher::HandleStorageScavenge(const StorageScavengeRequest& request) {
+  for (const auto& context : runtime_.contexts) {
+    context->ForEachLoadedStoragePartition([](content::StoragePartition* partition) {
+      partition->GetDOMStorageContext()->StartScavengingUnusedSessionStorage();
+    });
+  }
+  return ControlResult::Success(request.id);
 }
 
 ControlResult ControlDispatcher::HandleSnapshot(const SnapshotRequest& request) {
@@ -122,6 +142,10 @@ ControlResult ControlDispatcher::HandleSnapshot(const SnapshotRequest& request) 
     popup_values.Append(std::move(item));
   }
   session_value.Set("pendingPopups", std::move(popup_values));
+  size_t downloads_in_progress = 0;
+  for (const auto& context : runtime_.contexts)
+    downloads_in_progress += context->downloads().InProgressCount();
+  session_value.Set("downloadsInProgress", static_cast<int>(downloads_in_progress));
   list.Append(std::move(session_value));
   reply.Set("ok", true);
   reply.Set("sessions", std::move(list));
@@ -135,8 +159,7 @@ ControlResult ControlDispatcher::HandleShutdown(const ShutdownRequest& request) 
 
   reply.Set("ok", true);
   reply.Set("accepted", true);
-  if (runtime_.quit)
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE, runtime_.quit);
+  runtime_.BeginShutdown();
   return reply;
 }
 }  // namespace remotekit::browser

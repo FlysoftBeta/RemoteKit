@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify close-payload ACK is idempotent, process-bound and keeps ID retirement."""
 import argparse, ctypes as c, json, os, subprocess, time
+from browser_key import spawn_browser
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[2]
 
@@ -16,7 +17,7 @@ def main():
     assert sdk.remotekit_sdk_initialize()==0
     channel='RemoteKit.closeAck.'+str(time.time_ns());incarnation=channel;handle=c.c_uint64();evidence=[]
     with (run/'browser.log').open('wb') as log:
-        browser=subprocess.Popen([str(args.browser),'--control-channel='+channel,'--browser-incarnation='+incarnation,
+        browser=spawn_browser([str(args.browser),'--control-channel='+channel,'--browser-incarnation='+incarnation,
             '--session-id=1','--tenant-id=1','--remotekit-render-host=offscreen','--data-path='+str(run/'state')],
             stdout=log,stderr=log,creationflags=subprocess.CREATE_NO_WINDOW)
         try:

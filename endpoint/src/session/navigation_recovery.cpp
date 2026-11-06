@@ -96,6 +96,14 @@ bool NavigationRecovery::CancelRecovery(const std::string& view) {
 }
 
 void NavigationRecovery::MaintainRecovery() {
+  if (browser.Initialized() && browser.Alive() && !browser.Stopping() &&
+      scavenged_incarnation != browser.Incarnation() &&
+      std::all_of(recoveries.begin(), recoveries.end(),
+                  [](const auto& item) { return !item.second.Pending(); })) {
+    auto scavenged = browser.Rpc().Request({{"method", "storage.scavenge"}});
+    if (scavenged)
+      scavenged_incarnation = browser.Incarnation();
+  }
   // Alternate with restore/reconciliation so neither bulk direction starves
   // another Session or the normal JSONL dispatcher.
   export_turn = !export_turn;
@@ -346,10 +354,15 @@ void NavigationRecovery::CaptureNavigation(const Json& browser_view) {
 }
 
 void NavigationRecovery::MaintainNavigationExport() {
-  auto saved = navigation_export.Tick(
+  auto saved = ExportTick();
+  if (!saved)
+    fprintf(stderr, "navigation save: %s\n", saved.error().message.c_str());
+}
+Result<void> NavigationRecovery::ExportTick(uint32_t timeout_ms) {
+  return navigation_export.Tick(
       browser.Incarnation(),
       [&](const std::string& view) -> Result<Json> {
-        auto snapshot = browser.Snapshot();
+        auto snapshot = browser.Rpc().Request({{"method", "snapshot"}}, 0, timeout_ms);
         if (!snapshot)
           return snapshot.error();
         for (const auto& session : snapshot.value().at("sessions"))
@@ -361,7 +374,7 @@ void NavigationRecovery::MaintainNavigationExport() {
       },
       [&](Json command) {
         command["session"] = id;
-        return browser.Rpc().Request(std::move(command));
+        return browser.Rpc().Request(std::move(command), 0, timeout_ms);
       },
       [](const std::string& data) { return DecodedSize(data); },
       [&](const std::string& view, const Json& saved) -> Result<void> {
@@ -371,8 +384,33 @@ void NavigationRecovery::MaintainNavigationExport() {
         recovery_revisions[view] = saved.at("navigationRevision").get<std::string>();
         return {};
       });
-  if (!saved)
-    fprintf(stderr, "navigation save: %s\n", saved.error().message.c_str());
+}
+Result<void> NavigationRecovery::FinalExport() {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  auto snapshot = browser.Rpc().Request({{"method", "snapshot"}}, 0, 1000);
+  if (!snapshot)
+    return snapshot.error();
+  for (const auto& session : snapshot.value().at("sessions"))
+    for (const auto& view : session.at("views")) {
+      const auto name = view.at("view").get<std::string>();
+      if (!views.Contains(name))
+        continue;
+      if (Recovering(name) || view.value("loading", false) || view.value("pending", false) ||
+          view.value("lifecycle_uncertain", false))
+        return Error{ErrorCode::kUnavailable, "navigation state is unsettled at shutdown"};
+      CaptureNavigation(view);
+    }
+  while (navigation_export.Pending()) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               deadline - std::chrono::steady_clock::now())
+                               .count();
+    if (remaining <= 0)
+      return Error{ErrorCode::kUnavailable, "final navigation export exceeded 20 seconds"};
+    auto saved = ExportTick(static_cast<uint32_t>(std::min<int64_t>(remaining / 3 + 1, 1000)));
+    if (!saved)
+      return saved.error();
+  }
+  return {};
 }
 }  // namespace remotekit
 
@@ -383,6 +421,7 @@ void NavigationRecovery::Reset() {
   recoveries.clear();
   recovery_cursor.clear();
   recovery_revisions.clear();
+  scavenged_incarnation.clear();
 }
 void NavigationRecovery::Begin(const std::string& view) {
   recoveries[view] = Recovery{};

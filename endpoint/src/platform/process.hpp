@@ -2,6 +2,7 @@
 #include "util/common.hpp"
 #include "util/error.hpp"
 #include <optional>
+#include <span>
 #include <windows.h>
 
 namespace remotekit {
@@ -10,8 +11,12 @@ class BrowserProcess {
  public:
   enum class State { kStopped, kLaunching, kRunning, kStopping, kExited };
   ~BrowserProcess();
-  Result<void> Launch(const fs::path& executable, std::wstring command);
+  Result<void> Launch(const fs::path& executable,
+                      std::wstring command,
+                      std::span<const uint8_t, 32> profile_key);
   Result<void> Terminate();
+  bool JobEmpty() const;
+  bool WaitCleanExit(uint32_t timeout_ms);
   void ReleaseExited();
   bool Alive() const;
   bool Exited() const;

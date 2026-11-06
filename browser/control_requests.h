@@ -12,6 +12,7 @@ struct RequestEnvelope {
   std::string_view method;
 };
 struct ShutdownRequest : RequestEnvelope {};
+struct StorageScavengeRequest : RequestEnvelope {};
 struct ViewConfiguration {
   SessionId session = 0;
   WebViewId view = 0;
@@ -220,6 +221,8 @@ Result<std::optional<NavigationOperations::Identity>> DecodeNavigationOperation(
     bool acknowledge);
 
 Result<ShutdownRequest> DecodeShutdown(const base::DictValue& wire, RequestEnvelope envelope);
+Result<StorageScavengeRequest> DecodeStorageScavenge(const base::DictValue& wire,
+                                                     RequestEnvelope envelope);
 Result<OutputConfigureRequest> DecodeOutputConfigure(const base::DictValue& wire,
                                                      RequestEnvelope envelope);
 Result<OutputOpenRequest> DecodeOutputOpen(const base::DictValue& wire, RequestEnvelope envelope);

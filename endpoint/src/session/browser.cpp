@@ -7,7 +7,6 @@
 
 namespace remotekit {
 Result<void> BrowserRuntime::AdmitLaunch() {
-  // Stop() terminates the job with exit code 0; only unrequested exits are failures.
   if (const auto code = process_.ExitCode(); code && *code != 0)
     last_failure_ =
         Error{ErrorCode::kUnavailable,
@@ -43,7 +42,7 @@ Result<void> BrowserRuntime::HealthCheck() {
       const auto& output = status.value()["output"];
       if (!output.value("error", std::string()).empty()) {
         startup_error_ = Error{ErrorCode::kUnavailable,
-            output.value("message", output["error"].get<std::string>())};
+                               output.value("message", output["error"].get<std::string>())};
         last_failure_ = startup_error_;
         return *startup_error_;
       }
@@ -71,9 +70,10 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
                                    std::wstring command,
                                    const std::string& channel) {
   process_incarnation_ = incarnation_;
-  auto launched = process_.Launch(executable, std::move(command));
+  auto launched = process_.Launch(executable, std::move(command), profile_key_);
   if (!launched)
     return launched.error();
+  clean_shutdown_ = false;
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
   while (process_.Alive() && std::chrono::steady_clock::now() < deadline) {
     auto connected = rpc_.Connect(channel);
@@ -95,9 +95,34 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
   return *startup_error_;
 }
 Result<void> BrowserRuntime::Stop() {
+  if (process_.Present())
+    clean_shutdown_ = false;
   incarnation_.clear();
   rpc_.Invalidate();
   return process_.Terminate();
+}
+Result<void> BrowserRuntime::Shutdown(const std::function<Result<void>()>& export_navigation) {
+  if (!process_.Present()) {
+    if (!clean_shutdown_)
+      return Error{ErrorCode::kUnavailable, "unclean Browser shutdown"};
+    return {};
+  }
+  bool clean = false;
+  if (process_.Alive() && rpc_.Control()) {
+    const auto exported = export_navigation();
+    const auto shutdown = rpc_.Request({{"method", "browser.shutdown"}}, 0, 1000);
+    clean = process_.WaitCleanExit(30000) && bool(exported) && bool(shutdown);
+  }
+  if (!clean) {
+    auto stopped = Stop();
+    if (!stopped)
+      return stopped.error();
+    return Error{ErrorCode::kUnavailable, "unclean Browser shutdown"};
+  }
+  incarnation_.clear();
+  rpc_.Invalidate();
+  clean_shutdown_ = true;
+  return {};
 }
 }  // namespace remotekit
 
@@ -119,7 +144,7 @@ Result<void> BrowserRuntime::Launch(const RuntimeOptions& options,
   append(L"--use-adapter-luid=" + std::wstring(luid.begin(), luid.end()));
   append(L"--control-channel=" + std::wstring(channel.begin(), channel.end()));
   append(L"--browser-incarnation=" + std::wstring(Incarnation().begin(), Incarnation().end()));
-  append(L"--session-id=" + std::wstring(id.begin(), id.end()));
+  append(L"--session-id=1");
   append(L"--tenant-id=" + std::wstring(id.begin(), id.end()));
   append(L"--data-path=" + directory.wstring());
   append(L"--atlas-width=1920");

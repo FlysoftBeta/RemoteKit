@@ -1,6 +1,7 @@
 #pragma once
 #include "util/error.hpp"
 #include "files/file_upload.hpp"
+#include "objects/service.hpp"
 #include "rtc/dc_services.hpp"
 #include <filesystem>
 #include <functional>
@@ -10,8 +11,7 @@
 #include <set>
 
 namespace remotekit {
-// Session-private content store. The RTC worker is the only draft and
-// derivative writer. Control may read/retain assets and prepare selections.
+// Drafts, selections and plaintext staging belong to this session.
 class FileLibrary {
  public:
   using Check = std::function<Result<void>()>;
@@ -37,7 +37,10 @@ class FileLibrary {
   enum class DerivativeFormat { jpeg, png };
   using Render = std::function<Result<Derivative>(const std::filesystem::path&)>;
 
-  explicit FileLibrary(std::filesystem::path root);
+  FileLibrary(std::filesystem::path root,
+              objects::ObjectService& objects,
+              std::string tenant,
+              const objects::Keys& keys);
   Result<void> Initialize();
   Result<ServiceJson> Begin(std::uint64_t grant,
                             const std::string& operation,
@@ -54,12 +57,12 @@ class FileLibrary {
   Result<std::filesystem::path> Path(const std::string& asset) const;
   Result<std::pair<Asset, std::vector<std::uint8_t>>> Read(const std::string& asset,
                                                            std::uint64_t offset) const;
-  Result<void> Retain(const std::vector<std::string>& assets);
-  Result<void> References(std::uint64_t revision, const std::vector<std::string>& assets);
   Result<Asset> CreateDerivative(const Render&,
                                  const Check&,
-                                 DerivativeFormat = DerivativeFormat::jpeg);
+                                 DerivativeFormat = DerivativeFormat::jpeg,
+                                 const std::string& derived_from = {});
   Result<void> Sweep();
+  ServiceJson Hibernation(const std::function<bool(uint64_t)>& current) const;
 
   Result<void> Prepare(const Selection&);
   std::optional<Selection> FindSelection(const std::string& id) const;
@@ -73,7 +76,6 @@ class FileLibrary {
  private:
   struct Entry {
     Asset asset;
-    std::int64_t expires;
   };
   struct Draft {
     std::string id, operation, sealed;
@@ -82,16 +84,16 @@ class FileLibrary {
     std::uint64_t grant{};  // Runtime only. A new grant must explicitly Begin.
   };
   std::filesystem::path root_;
+  objects::ObjectService& objects_;
+  const std::string tenant_;
+  const objects::Keys& keys_;
   mutable std::mutex mutex_;
-  std::map<std::string, Entry> entries_;
+  mutable std::map<std::string, Entry> entries_;
   std::map<std::string, Draft> drafts_;
   std::map<std::string, Selection> selections_;
-  std::set<std::string> references_;
-  std::optional<std::uint64_t> reference_revision_;
-  std::uint64_t asset_bytes_{}, draft_bytes_{};
+  std::uint64_t draft_bytes_{};
   std::int64_t sweep_after_{};
 
-  std::filesystem::path Payload(const std::string& id) const;
   std::filesystem::path DraftData(const std::string& id) const;
   Result<const Entry*> RequireAsset(const std::string& id) const;
   Result<Draft*> RequireDraft(std::uint64_t grant, const std::string& id);
@@ -99,6 +101,9 @@ class FileLibrary {
   Result<void> SaveEntry(const Entry&, const Check& = {}) const;
   Result<void> SaveSelection(const Selection&, const Check& = {}) const;
   bool EraseDraft(std::map<std::string, Draft>::iterator);
-  Result<Asset> Publish(const std::filesystem::path&, Asset, const Check&);
+  Result<Asset> Publish(const std::filesystem::path&,
+                        Asset,
+                        const Check&,
+                        const std::string& derived_from = {});
 };
 }  // namespace remotekit

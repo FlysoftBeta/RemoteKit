@@ -106,7 +106,6 @@ export const FILE_LIMITS = {
   maxFileBytes: 256 * 1024 * 1024,
   maxBatchBytes: 512 * 1024 * 1024,
   maxFiles: 64,
-  sessionBytes: 1024 * 1024 * 1024,
 } as const;
 export interface FileRequestAnchor {
   x: number;
@@ -130,7 +129,7 @@ export interface FileRequest {
   accept: string[];
   acceptTypesOmitted?: boolean;
   state: 'pending' | 'validating';
-  limits: { maxFileBytes: number; maxBatchBytes: number; maxFiles: number; sessionBytes: number };
+  limits: { maxFileBytes: number; maxBatchBytes: number; maxFiles: number };
 }
 export type DegradationPreference = 'maintain-resolution' | 'balanced' | 'maintain-framerate';
 export interface MediaPolicy {
@@ -248,10 +247,20 @@ export interface RegistrationStatus {
   credentialRequired: boolean;
   registrationOpen: boolean;
 }
+export interface AdminNode {
+  nodeId: string;
+  state: string;
+  buildId: string | null;
+  pressure: number | null;
+  sessions: number;
+}
 export interface AdminStatus {
   registrationCredentialConfigured: boolean;
 }
 export interface SocketMethods extends AuthSocketMethods, LibraryMethods, DiagnosticMethods {
+  'admin.nodes': { params: Record<string, never>; result: AdminNode[] };
+  'admin.removeNode': { params: { nodeId: string }; result: AdminNode[] };
+  'admin.readdNode': { params: { nodeId: string }; result: AdminNode[] };
   'admin.get': { params: Record<string, never>; result: AdminStatus };
   'admin.setRegistrationCredential': { params: { serverCredential: string }; result: AdminStatus };
   'operation.status': {

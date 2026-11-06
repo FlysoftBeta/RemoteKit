@@ -1,3 +1,4 @@
+import { AdminNodes } from './admin-nodes';
 import Close from '@mui/icons-material/Close';
 import {
   Alert,
@@ -14,7 +15,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { formatError } from '../util/format-error';
 
-import type { AdminStatus } from '../../shared/product';
+import type { AdminNode, AdminStatus } from '../../shared/product';
 
 export function AdminDialog({
   open,
@@ -22,12 +23,16 @@ export function AdminDialog({
   onClose,
   load,
   save,
+  loadNodes,
+  changeNode,
 }: {
   open: boolean;
   online: boolean;
   onClose: () => void;
   load: () => Promise<AdminStatus>;
   save: (serverCredential: string) => Promise<AdminStatus>;
+  loadNodes: () => Promise<AdminNode[]>;
+  changeNode: (nodeId: string, action: 'remove' | 'readd') => Promise<AdminNode[]>;
 }) {
   const [configuration, setConfiguration] = useState<AdminStatus | null>(null),
     [credential, setCredential] = useState(''),
@@ -147,6 +152,7 @@ export function AdminDialog({
                 setSaved(false);
               }}
             />
+            {open && <AdminNodes online={online} load={loadNodes} change={changeNode} />}
           </Box>
         </DialogContent>
         <DialogActions>

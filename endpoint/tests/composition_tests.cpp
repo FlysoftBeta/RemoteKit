@@ -1,3 +1,4 @@
+#include "runtime_config_fixture.hpp"
 #include "session/session.hpp"
 
 #include <cstdlib>
@@ -20,6 +21,9 @@ class Link final : public ManagementLink {
   bool SendReply(uint64_t, const Json&) override { return true; }
   bool SendEvent(const Json&, uint64_t) override { return true; }
   void OnDisconnect(Disconnect) override {}
+  Result<Json> Request(const std::string&, Json) override {
+    return Error{ErrorCode::kUnavailable, "test Control has no object responder"};
+  }
 };
 }  // namespace
 
@@ -35,11 +39,9 @@ int main() {
       fs::remove_all(directory, ignored);
     }
   } cleanup{directory};
-  std::string executable = "endpoint", data = "--data-path=" + directory.string();
-  char* arguments[] = {executable.data(), data.data()};
-  auto parsed = RuntimeOptions::Parse(2, arguments);
+  auto parsed = RuntimeOptions::FromConfig(TestConfig(), directory, "dev", "test");
   Check(bool(parsed), "composition options");
-  SessionStore store(directory / "sessions" / "1");
+  SessionStore store(directory / "data/sessions/0123456789abcdef0123456789abcdef");
   Check(bool(store.Save("views.json", Json::array({{{"viewId", "1"}}, {{"viewId", "2"}}}))),
         "persist desired views");
   Check(bool(store.Save(
@@ -50,8 +52,10 @@ int main() {
         "persist close event before desired-state reconciliation");
   media::Sdk sdk;
   Link link;
+  objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   {
-    Session session(sdk, parsed.value(), "tenant", "1", link);
+    Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
+                    cluster::Key{}, link, objects, objects::Keys{});
     Check(bool(session.Initialize()), "initialize controller composition");
     Check(!session.Views().Contains("1") && session.Views().Contains("2"),
           "replay durable close events into desired views");

@@ -1,29 +1,22 @@
+import { createClusterControl } from './cluster-control.mts';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { readFile, mkdir, writeFile, appendFile } from 'node:fs/promises';
-import { ControlDatabase } from '../../control/server/persistence/database.ts';
-import { EndpointGateway } from '../../control/server/endpoint/gateway.ts';
-import { createApplication } from '../../control/server/application.ts';
-import { LocalProcessLink } from '../../control/server/endpoint/local-process.ts';
 import { createHttp } from '../../control/server/http/server.ts';
 const root = fileURLToPath(new URL('../../', import.meta.url)),
   run = process.env.REMOTEKIT_TOUCH_QA_RUN ?? `${root}/develop/tmp/touch-source-qa-${Date.now()}`;
 await mkdir(run, { recursive: true });
-const store = new ControlDatabase(`${run}/control.db`),
-  endpoint = new LocalProcessLink(`${root}/build/endpoint-package/endpoint/endpoint_service.exe`, [
-    '--browser=C:/src/chromium/src/out/dev/remotekit_browser.exe',
-    `--data-path=${run}/endpoint-data`,
-    ...(process.env.REMOTEKIT_TOUCH_BROWSER_DISABLE_FEATURES
-      ? [`--browser-disable-features=${process.env.REMOTEKIT_TOUCH_BROWSER_DISABLE_FEATURES}`]
-      : []),
-  ]);
-const control = createApplication(store, new EndpointGateway(endpoint)),
-  latest = new Map<string, any>();
-endpoint.on('ready', (identity) => void control.reconciler.endpointReady(identity).catch(console.error));
-endpoint.on('offline', () => control.rtc.endpointOffline());
+const { store, endpoint, control } = await createClusterControl({
+  run,
+  executable: `${root}/build/endpoint/endpoint/endpoint_service.exe`,
+  browser: 'C:/src/chromium/src/out/dev/remotekit_browser.exe',
+  port: 33281,
+});
+const latest = new Map<string, any>();
 const server = createHttp(control, {
   origins: ['http://127.0.0.1:33281'],
   clientDir: `${root}/control/dist/client`,
+  nodes: endpoint,
 });
 const fixture = createServer(async (req, res) => {
   try {
@@ -49,12 +42,11 @@ const fixture = createServer(async (req, res) => {
     }
     if (url.pathname === '/inspect') {
       const user = store.db.prepare('SELECT tenant FROM users LIMIT 1').get() as any;
-      const snapshot = user ? await endpoint.request('session.snapshot', user.tenant) : null;
+      const snapshot = user ? await control.endpoint.snapshot(user.tenant) : null;
       res.setHeader('Content-Type', 'application/json');
       res.end(
         JSON.stringify({
           run,
-          browserDisableFeatures: process.env.REMOTEKIT_TOUCH_BROWSER_DISABLE_FEATURES ?? '',
           telemetry: Object.fromEntries(latest),
           state: user ? control.viewers.productState(user.tenant) : null,
           snapshot,

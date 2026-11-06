@@ -1,4 +1,5 @@
 import Sqlite from 'better-sqlite3';
+import { AtRestKey } from '../auth/crypto';
 import { systemClock, type Clock } from '../util/clock';
 import { AccountsRepository } from './accounts';
 import { LibraryRepository } from './library';
@@ -8,6 +9,7 @@ import { SecurityRepository } from './security';
 import { WorkspacesRepository } from './workspaces';
 export class ControlDatabase {
   readonly db: Sqlite.Database;
+  readonly atRestKey: AtRestKey;
   readonly accounts: AccountsRepository;
   readonly security: SecurityRepository;
   readonly workspaces: WorkspacesRepository;
@@ -19,7 +21,8 @@ export class ControlDatabase {
     this.db.pragma('journal_mode = WAL');
     createSchema(this.db);
     this.workspaces = new WorkspacesRepository(this.db);
-    this.security = new SecurityRepository(this.db, path, clock);
+    this.atRestKey = new AtRestKey(path);
+    this.security = new SecurityRepository(this.db, this.atRestKey, clock);
     this.accounts = new AccountsRepository(this.db);
     this.operations = new OperationsRepository(this.db, this.workspaces);
     this.library = new LibraryRepository(this.db);

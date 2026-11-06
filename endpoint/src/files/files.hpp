@@ -49,7 +49,7 @@ class LibraryController : private ControllerContext {
         views(views),
         files(files),
         file_uploads(directory / "uploads"),
-        file_library(directory / "file-library"),
+        file_library(directory / "file-library", objects, tenant, object_keys),
         photos(context, file_library, files, authorization) {}
   Result<void> Initialize();
   Result<void> SweepDirectFiles();
@@ -67,6 +67,10 @@ class LibraryController : private ControllerContext {
   Result<Json> FileBrowserCommand(const FileBinding& binding, const char* method);
   Result<Json> LibraryCommand(const std::string& method, const Json& request);
   Result<void> BrowserStopped(const std::string& incarnation);
+
+  Json Hibernation(const std::function<bool(uint64_t)>& current) const {
+    return file_library.Hibernation(current);
+  }
 
  private:
   AuthorizationController& authorization;
@@ -111,6 +115,10 @@ class FileController : private ControllerContext {
   bool Current(const FileJob& job) const { return file_services.Current(job); }
   bool CurrentLibraryGrant(uint64_t grant) { return file_services.CurrentLibraryGrant(grant); }
   LibraryController& Library() { return library; }
+  Json Hibernation() {
+    return library.Hibernation(
+        [this](uint64_t grant) { return file_services.CurrentLibraryGrant(grant); });
+  }
   Result<void> BrowserStopped(const std::string& incarnation);
 
  private:

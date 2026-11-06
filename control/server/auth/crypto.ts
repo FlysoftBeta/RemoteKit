@@ -70,13 +70,13 @@ export function validFaceTemplate(value: unknown): value is number[] {
   );
 }
 
-export class FaceVault {
+export class AtRestKey {
   private key?: Buffer;
   constructor(private readonly dbPath: string) {}
   private loadKey(create: boolean) {
     if (this.key) return this.key;
     if (this.dbPath === ':memory:' || !this.dbPath) return (this.key = randomBytes(32));
-    const path = this.dbPath + '.face-key';
+    const path = this.dbPath + '.key';
     try {
       this.key = readFileSync(path);
     } catch (error) {
@@ -92,27 +92,37 @@ export class FaceVault {
     }
     if (this.key.length !== 32) {
       this.key = undefined;
-      throw new RemoteKitError('internal', '人脸模板密钥无效');
+      throw new RemoteKitError('internal', 'Invalid at-rest key');
     }
     return this.key;
   }
-  seal(user: string, template: number[], modelVersion: string) {
-    if (!validFaceTemplate(template)) throw new RemoteKitError('invalid_request', '人脸模板无效');
+  seal(aad: string, plaintext: Buffer): string {
     const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', this.loadKey(true), iv);
-    cipher.setAAD(Buffer.from(JSON.stringify([user, modelVersion])));
-    const data = Buffer.concat([cipher.update(JSON.stringify(template)), cipher.final()]);
-    return Buffer.concat([iv, cipher.getAuthTag(), data]).toString('base64');
+    cipher.setAAD(Buffer.from(aad));
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+    return Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64');
   }
-  open(user: string, sealed: string, modelVersion: string): number[] {
+  open(aad: string, sealed: string): Buffer {
     const record = Buffer.from(sealed, 'base64');
     const decipher = createDecipheriv('aes-256-gcm', this.loadKey(false), record.subarray(0, 12));
-    decipher.setAAD(Buffer.from(JSON.stringify([user, modelVersion])));
+    decipher.setAAD(Buffer.from(aad));
     decipher.setAuthTag(record.subarray(12, 28));
+    return Buffer.concat([decipher.update(record.subarray(28)), decipher.final()]);
+  }
+}
+
+export class FaceVault {
+  constructor(private readonly key: AtRestKey) {}
+  seal(user: string, template: number[], modelVersion: string) {
+    if (!validFaceTemplate(template)) throw new RemoteKitError('invalid_request', 'Invalid face template');
+    return this.key.seal(JSON.stringify([user, modelVersion]), Buffer.from(JSON.stringify(template)));
+  }
+  open(user: string, sealed: string, modelVersion: string): number[] {
     const template: unknown = JSON.parse(
-      Buffer.concat([decipher.update(record.subarray(28)), decipher.final()]).toString(),
+      this.key.open(JSON.stringify([user, modelVersion]), sealed).toString(),
     );
-    if (!validFaceTemplate(template)) throw new RemoteKitError('invalid_request', '人脸模板无效');
+    if (!validFaceTemplate(template)) throw new RemoteKitError('invalid_request', 'Invalid face template');
     return template;
   }
 }

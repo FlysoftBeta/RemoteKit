@@ -52,6 +52,14 @@ WebView::~WebView() {
   if (callback)
     callback(Fail(ErrorCode::unavailable, "WebView adapter destroyed"));
 }
+void WebView::SetSessionStorageShouldPersist(bool persist) {
+  if (contents()) {
+    for (const auto& [config, handle] : contents()->GetController().GetSessionStorageNamespaceMap())
+      handle->SetShouldPersist(persist);
+  }
+  if (lifecycle_->navigation_state_)
+    lifecycle_->navigation_state_->SetSessionStorageShouldPersist(persist);
+}
 Status WebView::Navigate(const GURL& url, std::optional<NavigationOperations::Identity> operation) {
   return navigation_->Navigate(url, operation);
 }

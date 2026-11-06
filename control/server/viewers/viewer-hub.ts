@@ -118,6 +118,7 @@ export class ViewerHub {
     const viewer = runtime.viewer;
     if (viewer?.id !== id) return;
     delete runtime.viewer;
+    runtime.viewerAbsentSince = this.context.clock.monotonicMs();
     delete runtime.pageRequests.fullscreen;
     if (viewer.security) {
       void this.services.security.lock(tenant, viewer.security).catch(() => {});

@@ -1,3 +1,4 @@
+import { createClusterControl } from './cluster-control.mts';
 // Isolated ordinary Viewer fixture. Start only after root grants artifact/GPU readiness.
 // Explicit artifact paths prevent accidentally testing a previously published package.
 import { createServer } from 'node:http';
@@ -5,11 +6,6 @@ import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { ControlDatabase } from '../../control/server/persistence/database.ts';
-import { EndpointGateway } from '../../control/server/endpoint/gateway.ts';
-import { createApplication } from '../../control/server/application.ts';
-import { LocalProcessLink } from '../../control/server/endpoint/local-process.ts';
-import { RemoteNodeLink } from '../../control/server/endpoint/remote-node.ts';
 import { createHttp } from '../../control/server/http/server.ts';
 const root = resolve('.'),
   run = resolve(process.argv[2] ?? `develop/tmp/robust-viewer-qa-${Date.now()}`);
@@ -35,23 +31,16 @@ const port = Number(process.env.ROBUST_QA_PORT ?? 33471),
 await mkdir(run, { recursive: true });
 const events: any[] = [];
 const fixtures = await readFile(join(root, 'tests/e2e/robust-viewer-qa-page.html'));
-const nodeMode = process.env.ROBUST_QA_ENDPOINT_MODE === 'node',
-  nodeToken = randomUUID() + randomUUID(),
-  nodeId = 'robust-qa';
+const nodeMode = process.env.ROBUST_QA_ENDPOINT_MODE === 'node';
 let native: ChildProcess | undefined;
-const store = new ControlDatabase(join(run, 'control.db')),
-  endpointNode = nodeMode ? new RemoteNodeLink({ nodeId, token: nodeToken }) : undefined;
-const endpoint =
-    endpointNode ??
-    new LocalProcessLink(executable, [`--browser=${browser}`, `--data-path=${join(run, 'endpoint')}`]),
-  control = createApplication(store, new EndpointGateway(endpoint));
-const server = createHttp(control, {
-  origins: [`http://127.0.0.1:${port}`],
-  clientDir,
-  endpointNode,
+const { store, endpoint, control, nodeId } = await createClusterControl({
+  run,
+  executable,
+  browser,
+  port,
+  remote: nodeMode,
 });
-endpoint.on('ready', (identity) => void control.reconciler.endpointReady(identity).catch(console.error));
-endpoint.on('offline', () => control.rtc.endpointOffline());
+const server = createHttp(control, { origins: [`http://127.0.0.1:${port}`], clientDir, nodes: endpoint });
 const fixture = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? '/', `http://127.0.0.1:${fixturePort}`);
@@ -72,11 +61,11 @@ const fixture = createServer(async (req, res) => {
     }
     // Test hook touches only this fixture's own configured node management socket.
     if (url.pathname === '/management-disconnect' && req.method === 'POST') {
-      if (!endpointNode) {
+      if (!nodeMode) {
         res.writeHead(409).end('node mode required');
         return;
       }
-      (endpointNode as any).current?.socket.terminate();
+      (endpoint.get(nodeId) as any).current?.carrier.close();
       res.end('management socket terminated');
       return;
     }
@@ -93,8 +82,8 @@ const fixture = createServer(async (req, res) => {
             users.map(async (user) => ({
               username: user.username,
               state: control.viewers.productState(user.tenant),
-              snapshot: await endpoint
-                .request('session.snapshot', user.tenant, { outputDiagnostics: true })
+              snapshot: await control.endpoint
+                .snapshot(user.tenant, { outputDiagnostics: true })
                 .catch((error) => ({ error: String(error) })),
             })),
           ),
@@ -146,7 +135,7 @@ async function close() {
   await server.shutdown();
   await control.close();
   if (native) {
-    await endpoint.request('shutdown', '').catch((error) => console.error('Fixture shutdown:', error));
+    native.stdin?.end();
     if (native.exitCode === null) {
       await Promise.race([
         new Promise<void>((r) => native!.once('exit', () => r())),
@@ -165,24 +154,11 @@ process.on('SIGTERM', () => void close());
 await new Promise<void>((r) => fixture.listen(fixturePort, '127.0.0.1', r));
 await new Promise<void>((r) => server.listen(port, '127.0.0.1', r));
 endpoint.start();
-if (endpointNode) {
-  native = spawn(
-    executable,
-    [
-      `--browser=${browser}`,
-      `--data-path=${join(run, 'endpoint')}`,
-      `--control-url=http://127.0.0.1:${port}/api/endpoint`,
-      `--node-id=${nodeId}`,
-    ],
-    {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, REMOTEKIT_ENDPOINT_TOKEN: nodeToken },
-    },
-  );
+if (nodeMode) {
+  native = spawn(executable, [`--node-root=${run}`], { windowsHide: true, stdio: 'pipe' });
   native.stderr?.pipe(process.stderr);
   native.on('error', (error) => {
-    console.error('Own Endpoint failed:', error);
+    console.error(error);
     void close();
   });
 }
@@ -192,7 +168,7 @@ await writeFile(
     {
       pid: process.pid,
       nativePid: native?.pid,
-      mode: nodeMode ? 'WinHTTP-RemoteNodeLink' : 'stdio',
+      mode: nodeMode ? 'Noise-WebSocket' : 'stdio',
       run,
       port,
       fixturePort,
