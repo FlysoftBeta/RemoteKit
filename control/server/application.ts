@@ -1,4 +1,6 @@
+import { UserAdmin } from './admin/users';
 import { NodeAdmin } from './cluster/node-admin';
+import { SessionPurge } from './cluster/session-purge';
 import { ObjectIndex } from './cluster/objects';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -36,6 +38,8 @@ export interface DomainContext {
 export interface DomainServices extends DomainContext {
   objects: ObjectIndex;
   nodeAdmin: NodeAdmin;
+  sessionPurge: SessionPurge;
+  userAdmin: UserAdmin;
   navigation: Navigation;
   viewers: ViewerHub;
   rtc: RtcSignaling;
@@ -76,6 +80,7 @@ export function createApplication(
     (tenant) => endpoint.hibernating.has(tenant),
   );
   services.nodeAdmin = new NodeAdmin(store, endpoint.nodes, endpoint.placement, services.objects);
+  services.sessionPurge = new SessionPurge(store, endpoint.nodes);
   services.navigation = new Navigation(context, services);
   services.viewers = new ViewerHub(context, services);
   services.rtc = new RtcSignaling(context, services);
@@ -86,6 +91,7 @@ export function createApplication(
   services.popups = new Popups(context, services);
   services.policy = new SitePolicy(context);
   services.accounts = new AccountService(store);
+  services.userAdmin = new UserAdmin(context, services);
   services.library = new FileLibrary(store.library, endpoint, fileLimits, services.objects);
   services.security = new ViewerSecurity(
     store,
@@ -129,6 +135,7 @@ export function createApplication(
     unsubscribeSignals?.();
     await context.tenants.close();
     await services.objects.close();
+    await services.sessionPurge.close();
     context.events.removeAllListeners();
   };
   return services;

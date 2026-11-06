@@ -113,9 +113,9 @@ def main():
 
             threading.Thread(target=read, daemon=True).start()
 
-        def call(self, method, ok=True, **fields):
+        def call(self, method, ok=True, tenant_id=tenant, **fields):
             self.serial += 1
-            request = dict(id=str(self.serial), method=method, tenantId=tenant, **fields)
+            request = dict(id=str(self.serial), method=method, tenantId=tenant_id, **fields)
             self.child.stdin.write((json.dumps(request) + "\n").encode())
             self.child.stdin.flush()
             reply = self.replies.get(timeout=100)
@@ -197,7 +197,19 @@ def main():
             assert target.call("session.hibernate", ok=False, placementEpoch=2)["code"] == "conflict"
         target.call("session.ensure")
         wait_for(target.state, "Browser recovery after unclean exit", timeout=60)
-        target.call("session.hibernate", placementEpoch=2)
+        final = target.call("session.hibernate", placementEpoch=2)
+        # Deleting a Tenant stops its running Browser without a checkpoint and removes every local copy.
+        target.open(3, final["manifestId"])
+        target.call("session.ensure")
+        running = wait_for(target.state, "warm reopen before deletion", timeout=60)[1]
+        assert target.call("session.delete", tenant_id="", sessionId=session_id) == {"stopped": True}
+        assert target.call("session.snapshot", ok=False)["code"] == "not_found"
+        leftovers = [path.name for path in (target.root / "sessions").iterdir()
+                     if path.name.startswith(session_id)]
+        assert not leftovers, leftovers
+        assert subprocess.run(["tasklist", "/FI", f"PID eq {running['browserPid']}", "/NH"],
+                              capture_output=True, text=True).stdout.find(str(running["browserPid"])) < 0
+        assert target.call("session.delete", tenant_id="", sessionId=session_id) == {"stopped": False}
         wait_for(lambda: (run / "source-node-metrics.json").exists(), "metrics event")
         target.stop()
         source.stop()

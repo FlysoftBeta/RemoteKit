@@ -1,40 +1,39 @@
-import { accountsFor } from './server-fixture';
+import { accountsFor, registerUser } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { ControlDatabase } from '../server/persistence/database';
-import { createSchema } from '../server/persistence/schema';
 
-test('fresh schema contains accounts and basket tables at version 4', () => {
+test('fresh schema is version 1 with account state and no registration credential', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 4n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 1n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
       ),
     );
-    for (const name of ['users', 'auth_tokens', 'workspaces', 'file_library', 'file_library_selections'])
-      assert.ok(tables.has(name));
-    for (const name of ['tenants', 'sessions', 'diagnostic_devices']) assert.equal(tables.has(name), false);
-    const columns = store.db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
-    assert.equal(
-      columns.some((column) => column.name === 'legacy'),
-      false,
+    for (const name of ['users', 'auth_tokens', 'workspaces', 'file_library', 'session_deletions'])
+      assert.ok(tables.has(name), name);
+    assert.equal(tables.has('registration_policy'), false);
+    const columns = (store.db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map(
+      (column) => column.name,
     );
+    for (const name of ['last_login_at', 'disabled_at']) assert.ok(columns.includes(name), name);
   } finally {
     store.db.close();
   }
 });
 
-test('current tables without a schema version reopen with accounts, workspace and allocator intact', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rk-current-schema-'));
+test('reopening keeps accounts, workspace and the view allocator', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-schema-'));
   const path = join(directory, 'control.db');
   let store = new ControlDatabase(path);
   try {
-    const account = await accountsFor(store).register('schema-user', 'schema-password123');
+    const account = await registerUser(store, 'schema-user', 'schema-password123');
     const firstView = store.workspaces.viewId();
     const workspace = store.workspaces.workspace(account.tenantId);
     workspace.windows.push({ id: 'window', activeTabId: 'tab', weight: 1 });
@@ -48,96 +47,40 @@ test('current tables without a schema version reopen with accounts, workspace an
       url: 'about:blank',
     });
     store.workspaces.saveWorkspace(workspace);
-    store.db.exec('DROP TABLE schema_version');
     store.db.close();
     store = new ControlDatabase(path);
     assert.equal(store.accounts.identity(account.token)?.user.id, account.user.id);
-    assert.equal(store.accounts.userForTenant(account.tenantId)?.isAdmin, true);
     assert.equal(store.workspaces.workspace(account.tenantId).tabs[0].webviewId, firstView);
     assert.ok(BigInt(store.workspaces.viewId()) > BigInt(firstView));
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 4n }]);
-    store.db.close();
-    store = new ControlDatabase(path);
     assert.equal(
       (await accountsFor(store).login('schema-user', 'schema-password123')).user.id,
       account.user.id,
     );
-    assert.equal(
-      (store.db.prepare('SELECT count(*) AS count FROM schema_version').get() as { count: bigint }).count,
-      1n,
-    );
   } finally {
     store.db.close();
     await rm(directory, { recursive: true, force: true });
   }
 });
 
-test('version 1 settings migrate to version 4 with avSync off', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rk-schema-v1-'));
-  const path = join(directory, 'control.db');
-  let store = new ControlDatabase(path);
+test('databases of any other schema are rejected rather than migrated', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-schema-other-'));
   try {
-    const account = await accountsFor(store).register('v1-user', 'v1-password123');
-    const { avSync: _, ...settings } = store.workspaces.workspace(account.tenantId).settings;
-    settings.audioChannels = { left: false, right: true };
-    store.db
-      .prepare('UPDATE user_settings SET data=? WHERE tenant=?')
-      .run(JSON.stringify(settings), account.tenantId);
-    store.db.exec(`DROP TABLE schema_version;
-      CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=1));
-      INSERT INTO schema_version(version) VALUES (1);`);
-    store.db.close();
-    store = new ControlDatabase(path);
-    const loaded = store.workspaces.workspace(account.tenantId).settings;
-    assert.equal(loaded.avSync, false);
-    assert.deepEqual(loaded.audioChannels, { left: false, right: true });
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 4n }]);
+    for (const [name, setup] of [
+      ['unversioned', 'CREATE TABLE users (id TEXT)'],
+      ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (0)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (2)'],
+      [
+        'ambiguous',
+        'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',
+      ],
+    ]) {
+      const path = join(directory, name + '.db');
+      const db = new Database(path);
+      db.exec(setup);
+      db.close();
+      assert.throws(() => new ControlDatabase(path), /Unsupported database schema/, name);
+    }
   } finally {
-    store.db.close();
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
-test('newer schema versions are rejected', () => {
-  const store = new ControlDatabase(':memory:');
-  try {
-    store.db.exec(`DROP TABLE schema_version;
-      CREATE TABLE schema_version (version INTEGER NOT NULL);
-      INSERT INTO schema_version(version) VALUES (5);`);
-    assert.throws(() => createSchema(store.db), /Unsupported database schema/);
-  } finally {
-    store.db.close();
-  }
-});
-
-test('v3 placements migrate in place with their identity, epoch and sealed key intact', async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'rk-schema-v3-'));
-  const path = join(directory, 'control.db');
-  let store = new ControlDatabase(path);
-  try {
-    const sealed = store.atRestKey.seal('tenant', Buffer.alloc(32, 9));
-    store.db.exec(`DROP TABLE session_placements;
-      CREATE TABLE session_placements (tenant TEXT PRIMARY KEY,session_id TEXT NOT NULL UNIQUE,node_id TEXT NOT NULL,
-        placement_epoch INTEGER NOT NULL,key_ciphertext TEXT NOT NULL);
-      DROP TABLE schema_version; CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES(3)`);
-    store.db
-      .prepare('INSERT INTO session_placements VALUES(?,?,?,?,?)')
-      .run('tenant', 'session', 'node', 7, sealed);
-    store.db.close();
-    store = new ControlDatabase(path);
-    assert.deepEqual(store.db.prepare('SELECT * FROM session_placements').get(), {
-      tenant: 'tenant',
-      session_id: 'session',
-      node_id: 'node',
-      placement_epoch: 7n,
-      key_ciphertext: sealed,
-      state: 'active',
-      checkpoint_id: null,
-    });
-    assert.deepEqual(store.atRestKey.open('tenant', sealed), Buffer.alloc(32, 9));
-    assert.ok(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='objects'").get());
-  } finally {
-    store.db.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

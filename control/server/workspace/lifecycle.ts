@@ -8,29 +8,45 @@ import type { DomainContext, DomainServices } from '../application';
 import { systemClock, type Clock } from '../util/clock';
 
 export class UncertainRecovery {
-  async hibernate(tenant: string, snapshot: EndpointSnapshot): Promise<boolean> {
+  // An administrator may hibernate at once; automatic hibernation also needs Memory Saver and idle time.
+  hibernationBlocker(tenant: string, snapshot: EndpointSnapshot, immediate: boolean): string | undefined {
     const runtime = this.context.tenants.get(tenant);
-    const state = this.context.store.workspaces.workspace(tenant);
     const blockers = snapshot.hibernation;
+    if (this.context.endpoint.placement.peek(tenant)?.state !== 'active') return '会话未运行';
+    if (runtime.viewer) return '用户在线';
+    if (!blockers) return '节点未报告休眠条件';
     if (
-      !state.settings.memorySaverEnabled ||
-      runtime.viewer ||
-      !blockers ||
-      this.context.endpoint.placement.peek(tenant)?.state !== 'active' ||
-      this.context.clock.monotonicMs() - runtime.viewerAbsentSince <
-        (this.context.endpoint.placement.underPressure(tenant) ? 120000 : 600000) ||
+      !immediate &&
+      (!this.context.store.workspaces.workspace(tenant).settings.memorySaverEnabled ||
+        this.context.clock.monotonicMs() - runtime.viewerAbsentSince <
+          (this.context.endpoint.placement.underPressure(tenant) ? 120000 : 600000))
+    )
+      return '未到休眠时间';
+    if (
       this.context.store.operations
         .pendingOperations(tenant)
-        .some((operation) => operation.receipt.status === 'applying') ||
+        .some((operation) => operation.receipt.status === 'applying')
+    )
+      return '有正在执行的操作';
+    if (blockers.inFlightUploads !== 0 || blockers.pendingNativeSelections !== 0)
+      return '有正在进行的文件传输';
+    if (blockers.downloadsInProgress !== 0) return '有正在进行的下载';
+    if (blockers.pendingPageRequests !== 0) return '页面有等待处理的请求';
+    if (
       blockers.unacknowledgedClosedEvents !== 0 ||
-      blockers.pendingNativeSelections !== 0 ||
-      blockers.inFlightUploads !== 0 ||
-      blockers.pendingPageRequests !== 0 ||
-      blockers.downloadsInProgress !== 0 ||
       blockers.rtcConnected !== false ||
       blockers.lifecycleUncertain !== false
     )
+      return '会话状态尚未稳定';
+  }
+  async hibernate(tenant: string, snapshot: EndpointSnapshot, immediate = false): Promise<boolean> {
+    const runtime = this.context.tenants.get(tenant);
+    const state = this.context.store.workspaces.workspace(tenant);
+    const blocker = this.hibernationBlocker(tenant, snapshot, immediate);
+    if (blocker) {
+      if (immediate) throw new RemoteKitError('conflict', blocker);
       return false;
+    }
     await this.context.endpoint.hibernate(tenant);
     runtime.resetEndpoint();
     for (const tab of state.tabs)

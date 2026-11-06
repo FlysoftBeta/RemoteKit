@@ -8,10 +8,11 @@
 
 | 路由 | 说明 |
 |---|---|
-| `GET /api/auth/registration` | 公开：hasAdmin、credentialRequired、registrationOpen |
+| `GET /api/auth/setup` | 公开：setupRequired（还没有任何账户） |
 | `GET /api/auth/me` | 当前账户 |
-| `POST /api/auth/register` | 账号、密码、注册口令（首个账号免口令）；签发 token 与一次性首租约许可 |
-| `POST /api/auth/login` / `logout` | 登录签发 token；注销只撤销当前 token |
+| `POST /api/auth/setup` | 仅在没有账户时：创建管理员账户，签发 token 与一次性首租约许可 |
+| `POST /api/auth/login` / `logout` | 登录签发 token 并记录最近登录（停用账户返回 forbidden）；注销只撤销当前 token |
+| `GET /api/admin/diagnostics/<票据>` | 管理员 cookie + `admin.downloadDiagnostic` 签发的一次性票据；下载诊断包 |
 | `GET /api/socket` | WebSocket upgrade |
 | `GET /api/node` | 远端节点的集群通道（WebSocket 二进制帧，Noise 握手；Endpoint 与 updater） |
 | 其他 GET | Viewer 静态资源 |
@@ -39,7 +40,10 @@ POST 与 upgrade 检查 Origin；JSON body 不允许携带 tenant/user 身份字
 | `settings.update` | 保存设置 |
 | `feedback` | 诊断用媒体反馈 |
 | `auth.get/lock/verify/settings/password`、`auth.face.begin/cancel/remove` | 锁屏与凭据 |
-| `admin.get` / `admin.setRegistrationCredential` | 管理员 |
+| `admin.overview/users/storage/nodes/diagnostics` | 管理员：各分区数据 |
+| `admin.createUser/resetPassword/clearSecondFactors/signOut/setDisabled/transferAdmin/hibernate/resetSession/deleteUser` | 管理员：按 `username` 操作用户，返回新的用户列表 |
+| `admin.removeNode/readdNode` | 管理员：按 `nodeId` |
+| `admin.deleteDiagnostic/downloadDiagnostic` | 管理员：按诊断 `id`；下载返回一次性 URL |
 | `library.get/import/replace/basket/group/move/delete/prepare/finish` | 文件目录与选择事务 |
 | `diagnostics.start/sample/stop/status` | 诊断收集 |
 
@@ -132,6 +136,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `auth.face.capabilities/begin/status/cancel` | 人脸挑战 |
 | `object.fetch` / `object.delete` / `object.inventory` | 节点级（不需要打开的 Session）：拉取副本、删除、分页列出存储的对象 |
 | `session.cold.delete` | 节点级：删除冷副本 |
+| `session.delete` | 节点级：`{sessionId}`；停止该 Session（不写 checkpoint）、从放置清单移除，并删除其目录、checkpoint 标记与索引；返回 `{stopped}` |
 | `shutdown` | 优雅关闭整个 Endpoint |
 
 快照中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded。快照的 `hibernation` 字段报告休眠阻塞项（未确认关闭事件、未决原生选择、上传中、页面请求、下载中的计数，以及 RTC 是否连接、生命周期是否不确定）。

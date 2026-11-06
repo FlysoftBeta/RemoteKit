@@ -92,4 +92,15 @@ export class SecurityRepository {
     if (!valid || this.security(user).pin?.hash !== pin?.hash)
       throw new RemoteKitError('forbidden', 'PIN 错误');
   }
+  clearSecondFactors(user: string) {
+    const record = this.security(user);
+    this.saveSecurity(user, {
+      settings: { ...record.settings, faceEnabled: false },
+      pin: undefined,
+      face: undefined,
+    });
+  }
+  deleteUser(user: string) {
+    this.db.prepare('DELETE FROM user_security WHERE user_id=?').run(user);
+  }
 }

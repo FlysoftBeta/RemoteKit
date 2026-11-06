@@ -53,6 +53,16 @@ export function testGateway(
     activeSessions: (nodeId) =>
       [...placements.values()].filter((p) => p.nodeId === nodeId && p.state === 'active').length,
     evacuate: () => {},
+    activeTenants: (nodeId) =>
+      [...placements.values()]
+        .filter((p) => p.nodeId === nodeId && p.state === 'active')
+        .map((p) => p.tenant),
+    forgetTenant: (tenant) => {
+      const sessionId = placements.get(tenant)?.sessionId;
+      placements.delete(tenant);
+      return sessionId;
+    },
+    checkpoints: () => ({ count: 0, latestAt: null, latestBytes: 0 }),
   });
 }
 export class TestClock implements Clock {
@@ -91,4 +101,11 @@ import { AccountService } from '../server/auth/accounts';
 import type { ControlDatabase } from '../server/persistence/database';
 export function accountsFor(store: ControlDatabase) {
   return new AccountService(store);
+}
+// The first account is created by setup; later accounts are created by the administrator.
+export async function registerUser(store: ControlDatabase, username: string, password: string) {
+  const accounts = new AccountService(store);
+  if (accounts.setupStatus().setupRequired) return accounts.setup(username, password);
+  await accounts.createUser(username, password);
+  return accounts.login(username, password);
 }

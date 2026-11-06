@@ -42,6 +42,9 @@ export class EndpointGateway {
       | 'markWarm'
       | 'activeSessions'
       | 'evacuate'
+      | 'activeTenants'
+      | 'forgetTenant'
+      | 'checkpoints'
     >,
   ) {}
   isReady(tenant: string) {
@@ -49,6 +52,9 @@ export class EndpointGateway {
     return placed?.state === 'active'
       ? this.nodes.get(placed.nodeId)?.state.state === 'ready'
       : this.nodes.all().some((node) => node.state.state === 'ready');
+  }
+  forget(tenant: string) {
+    this.opened.delete(tenant);
   }
   isPlacedOn(tenant: string, nodeId: string) {
     const placement = this.placement.peek(tenant);

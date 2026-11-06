@@ -19,7 +19,12 @@ export class ControlDatabase {
     this.db = new Sqlite(path);
     this.db.defaultSafeIntegers(true);
     this.db.pragma('journal_mode = WAL');
-    createSchema(this.db);
+    try {
+      createSchema(this.db);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
     this.workspaces = new WorkspacesRepository(this.db);
     this.atRestKey = new AtRestKey(path);
     this.security = new SecurityRepository(this.db, this.atRestKey, clock);

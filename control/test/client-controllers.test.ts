@@ -255,10 +255,10 @@ test('control requests map send failures and structured errors without leaving d
   );
   t.after(() => control.close());
   control.connect();
-  await assert.rejects(control.request('admin.get', {}), { code: 'unavailable' });
+  await assert.rejects(control.request('admin.overview', {}), { code: 'unavailable' });
   socket.fail = false;
   const response = assert.rejects(
-    control.request('admin.get', {}),
+    control.request('admin.overview', {}),
     (error: unknown) => error instanceof RemoteKitError && error.code === 'forbidden',
   );
   socket.onmessage?.({

@@ -65,7 +65,7 @@ async function until(probe, message, timeout = 30000) {
 const result = { passed: false, package: runtime, origin, launcher: 'bundled Node + run-control.cjs' };
 let context;
 try {
-  await until(() => fetch(origin + '/api/auth/registration').then(r => r.ok).catch(() => false), 'Control did not start');
+  await until(() => fetch(origin + '/api/auth/setup').then(r => r.ok).catch(() => false), 'Control did not start');
   context = await chromium.launchPersistentContext(join(run, 'viewer'), {
     executablePath: resolve(viewer), headless: true, viewport: { width: 1280, height: 900 },
     args: ['--no-first-run', '--autoplay-policy=no-user-gesture-required'],

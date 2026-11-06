@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { readdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
+import type { AdminDiagnostic } from '../../shared/admin';
 import { RemoteKitError } from '../../shared/errors';
 import { writeDiagnosticArchive, type ArchiveEntry } from './archive';
 import { diagnosticClientSample, diagnosticEndpointSnapshot, diagnosticEnvironment } from './projection';
@@ -12,6 +13,7 @@ const maxBytes = 32 * 1024 * 1024;
 export const diagnosticMessageLimit = 128 * 1024;
 const maxActive = 4;
 const maxRecent = 1024;
+const archiveId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const stopReasons = [
   'user',
   'duration-limit',
@@ -55,6 +57,7 @@ export class DiagnosticSessions {
   private readonly sessions = new Map<string, Session>();
   private readonly recent = new Map<string, { tenant: string; status: Status }>();
   private readonly snapshotPending = new Set<string>();
+  private readonly downloads = new Map<string, { path: string; id: string; expires: number }>();
   private closing = false;
 
   constructor(
@@ -120,10 +123,7 @@ export class DiagnosticSessions {
     if (!['diagnostics.sample', 'diagnostics.stop', 'diagnostics.status'].includes(method))
       throw new RemoteKitError('not_found', '接口不存在');
     const id = body.id;
-    if (
-      typeof id !== 'string' ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id)
-    )
+    if (typeof id !== 'string' || !archiveId.test(id))
       throw new RemoteKitError('not_found', '诊断记录不存在');
     const session = this.sessions.get(id);
     if (session && session.viewer.tenant !== viewer.tenant)
@@ -348,5 +348,84 @@ export class DiagnosticSessions {
       }
     }
     throw new RemoteKitError('not_found', '诊断记录不存在');
+  }
+
+  private async stored() {
+    const owners = await readdir(this.directory, { withFileTypes: true }).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    });
+    const archives: { owner: string; id: string; path: string }[] = [];
+    for (const owner of owners) {
+      if (!owner.isDirectory() || !/^[0-9a-f]{64}$/.test(owner.name)) continue;
+      for (const name of await readdir(join(this.directory, owner.name))) {
+        const id = name.endsWith('.tar.zst') ? name.slice(0, -'.tar.zst'.length) : '';
+        if (archiveId.test(id))
+          archives.push({ owner: owner.name, id, path: join(this.directory, owner.name, name) });
+      }
+    }
+    return archives;
+  }
+
+  async archives(tenants: ReadonlyMap<string, string>): Promise<AdminDiagnostic[]> {
+    const names = new Map(
+      [...tenants].map(([tenant, username]) => [createHash('sha256').update(tenant).digest('hex'), username]),
+    );
+    const list: AdminDiagnostic[] = [];
+    for (const archive of await this.stored()) {
+      const info = await stat(archive.path).catch(() => undefined);
+      if (!info?.isFile()) continue;
+      const reason = await readFile(archive.path.slice(0, -'.tar.zst'.length) + '.reason', 'utf8').catch(
+        () => '',
+      );
+      list.push({
+        id: archive.id,
+        username: names.get(archive.owner) ?? null,
+        createdAt: Math.round(info.mtimeMs),
+        bytes: info.size,
+        reason,
+      });
+    }
+    return list.sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  private async archive(id: unknown) {
+    const archive =
+      typeof id === 'string' && archiveId.test(id)
+        ? (await this.stored()).find((item) => item.id === id)
+        : undefined;
+    if (!archive) throw new RemoteKitError('not_found', '诊断记录不存在');
+    return archive;
+  }
+
+  async deleteArchive(id: unknown) {
+    const archive = await this.archive(id);
+    await rm(archive.path, { force: true });
+    await rm(archive.path.slice(0, -'.tar.zst'.length) + '.reason', { force: true });
+    this.recent.delete(archive.id);
+  }
+
+  async deleteOwner(tenant: string) {
+    const session = this.active.get(tenant);
+    if (session) await this.finish(session, 'authorization-changed');
+    for (const [id, item] of this.recent) if (item.tenant === tenant) this.recent.delete(id);
+    await rm(this.ownerDirectory(tenant), { recursive: true, force: true });
+  }
+
+  // Downloads are plain HTTP GETs, so the unlocked Viewer request mints a short-lived single-use ticket.
+  async downloadTicket(id: unknown) {
+    const archive = await this.archive(id);
+    const now = Date.now();
+    for (const [ticket, item] of this.downloads) if (item.expires <= now) this.downloads.delete(ticket);
+    const ticket = randomBytes(32).toString('hex');
+    this.downloads.set(ticket, { path: archive.path, id: archive.id, expires: now + 60000 });
+    return ticket;
+  }
+
+  takeDownload(ticket: string) {
+    const item = this.downloads.get(ticket);
+    this.downloads.delete(ticket);
+    if (!item || item.expires <= Date.now()) throw new RemoteKitError('not_found', '下载链接已失效');
+    return item;
   }
 }

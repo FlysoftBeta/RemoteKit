@@ -142,4 +142,11 @@ export class WorkspacesRepository {
   viewId(): string {
     return String(this.db.prepare('INSERT INTO view_ids DEFAULT VALUES').run().lastInsertRowid);
   }
+  deleteTenant(tenant: string) {
+    this.db.prepare('DELETE FROM workspaces WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM workspace_windows WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM workspace_tabs WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM user_settings WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM site_preferences WHERE tenant=?').run(tenant);
+  }
 }

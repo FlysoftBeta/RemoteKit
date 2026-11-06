@@ -69,17 +69,15 @@ const control = startControl(server, configPath, run);
 const { chromium } = createRequire(import.meta.url)(resolve(modulePath));
 let viewers;
 const contexts = [];
-const password = randomUUID(),
-  credential = randomUUID();
-async function connect(name, register = true, context) {
+const password = randomUUID();
+let setupDone = false;
+// The first account comes from setup; the administrator creates the others, which then log in.
+async function connect(name, context) {
   context ??= await viewers.newContext({ viewport: { width: 1000, height: 760 } });
   if (!contexts.includes(context)) contexts.push(context);
   const response = await context.request.post(
-    origin + (register ? '/api/auth/register' : '/api/auth/login'),
-    {
-      headers: { Origin: origin },
-      data: { username: name, password, serverCredential: credential },
-    },
+    origin + (setupDone ? '/api/auth/login' : '/api/auth/setup'),
+    { headers: { Origin: origin }, data: { username: name, password } },
   );
   assert.equal(response.status(), 200, await response.text());
   const viewer = await instrumentViewer(context, run, name);
@@ -164,7 +162,9 @@ try {
     args: ['--autoplay-policy=no-user-gesture-required'],
   });
   const first = await connect('cluster-first');
-  await first.call('admin.setRegistrationCredential', { serverCredential: credential });
+  setupDone = true;
+  for (const username of ['cluster-second', 'cluster-third'])
+    await first.call('admin.createUser', { username, password });
   await workspace(first, '/first');
   await tap(first, '/first', 'store');
   await until('persistent state set', () => events.some((event) => event.type === 'stored'));
@@ -227,7 +227,7 @@ try {
     return snapshot.nodes.find((n) => n.nodeId === other.node_id)?.metrics?.sessions === 0;
   });
   const restoreEvents = events.length;
-  const restored = await connect('cluster-first', false, first.context);
+  const restored = await connect('cluster-first', first.context);
   const media = await restored.media();
   const moved = await control.call('inspect');
   const target = placementFor(moved, 'cluster-first');

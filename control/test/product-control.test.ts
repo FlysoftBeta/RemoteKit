@@ -1,3 +1,4 @@
+import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
 import { RemoteKitError } from '../shared/errors';
@@ -154,8 +155,7 @@ async function fixture() {
     store = new ControlDatabase(':memory:', clock),
     endpoint = new ProductEndpoint(),
     control = createApplication(store, testGateway(endpoint), undefined, clock);
-  const user = await accountsFor(store).register('testuser', 'password123');
-  await accountsFor(store).setRegistrationCredential(user.tenantId, 'test-registration');
+  const user = await registerUser(store, 'testuser', 'password123');
   return { store, endpoint, control, user, clock };
 }
 
@@ -771,7 +771,7 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
   let store = new ControlDatabase(path),
     control = createApplication(store, testGateway(endpoint));
   try {
-    const { tenantId } = await accountsFor(store).register('site-settings', 'password123');
+    const { tenantId } = await registerUser(store, 'site-settings', 'password123');
     const origin = 'https://example.test',
       unrelated = 'https://other.test';
     store.db
@@ -1164,7 +1164,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
         (row) => row.data.includes('private dialog text'),
       ),
     );
-    const other = await accountsFor(store).register('another-user', 'password123', 'test-registration');
+    const other = await registerUser(store, 'another-user', 'password123');
     await assert.rejects(
       control.operations.productAction(other.tenantId, {
         type: 'page.reply',
@@ -1279,7 +1279,7 @@ test('product media policy precedes ensure and feedback only updates diagnostic 
     assert.equal(endpoint.views.get(user.tenantId)!.get(ws.tabs[0].webviewId).device.deviceScaleFactor, 1);
     assert.equal(endpoint.calls.length, 0);
     assert.equal(control.viewers.productState(user.tenantId).quality.estimatedLatencyMs, 400);
-    const other = await accountsFor(store).register('quality-other', 'password123', 'test-registration');
+    const other = await registerUser(store, 'quality-other', 'password123');
     assert.equal(control.viewers.productState(other.tenantId).quality.estimatedLatencyMs, null);
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');
@@ -1516,12 +1516,8 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
       404,
     );
     assert.equal((await fetch(base + '/api/auth/me')).status, 401);
-    assert.deepEqual(await (await fetch(base + '/api/auth/registration')).json(), {
-      hasAdmin: false,
-      credentialRequired: false,
-      registrationOpen: true,
-    });
-    const register = await post('/api/auth/register', { username: 'alice', password: 'password123' });
+    assert.deepEqual(await (await fetch(base + '/api/auth/setup')).json(), { setupRequired: true });
+    const register = await post('/api/auth/setup', { username: 'alice', password: 'password123' });
     assert.equal(register.status, 200);
     const cookieA = register.headers.get('set-cookie')!.split(';')[0];
     assert.match(register.headers.get('set-cookie')!, /HttpOnly.*SameSite=Strict/);
@@ -1530,36 +1526,25 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
       (await (await fetch(base + '/api/auth/me', { headers: { Cookie: cookieA } })).json()).user.isAdmin,
       true,
     );
-    assert.deepEqual(await (await fetch(base + '/api/auth/registration')).json(), {
-      hasAdmin: true,
-      credentialRequired: true,
-      registrationOpen: false,
-    });
+    assert.deepEqual(await (await fetch(base + '/api/auth/setup')).json(), { setupRequired: false });
+    assert.equal(
+      (await post('/api/auth/setup', { username: 'closed-user', password: 'password123' })).status,
+      403,
+    );
     assert.equal(
       (await post('/api/auth/register', { username: 'closed-user', password: 'password123' })).status,
-      503,
+      404,
     );
     const a = connect(socketUrl, cookieA);
     peers.push(a);
     await a.wait((m) => m.type === 'state');
     assert.deepEqual(
       (
-        await a.request('configure', 'admin.setRegistrationCredential', {
-          serverCredential: 'test-registration',
-        })
-      ).result,
-      { registrationCredentialConfigured: true },
+        await a.request('create', 'admin.createUser', { username: 'bob', password: 'password123' })
+      ).result.map((user: any) => user.username),
+      ['alice', 'bob'],
     );
-    assert.deepEqual(await (await fetch(base + '/api/auth/registration')).json(), {
-      hasAdmin: true,
-      credentialRequired: true,
-      registrationOpen: true,
-    });
-    const registerB = await post('/api/auth/register', {
-      username: 'bob',
-      password: 'password123',
-      serverCredential: 'test-registration',
-    });
+    const registerB = await post('/api/auth/login', { username: 'bob', password: 'password123' });
     const cookieB = registerB.headers.get('set-cookie')!.split(';')[0];
     assert.equal((await post('/api/auth/login', { username: 'alice', password: 'wrong-pass' })).status, 401);
     assert.equal(
@@ -1583,11 +1568,12 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
     const initialB = await b.wait((m) => m.type === 'state');
     assert.equal(initialB.state.workspace.tabs.length, 0);
     assert.equal(initialB.state.user.isAdmin, false);
-    for (const method of ['admin.get', 'admin.setRegistrationCredential'])
+    for (const method of ['admin.users', 'admin.createUser', 'admin.deleteUser'])
       assert.equal(
         (
           await b.request('admin-' + method, method, {
-            serverCredential: 'unauthorized-secret',
+            username: 'alice',
+            password: 'password123',
             isAdmin: true,
           })
         ).error.code,
@@ -1661,7 +1647,7 @@ test('HTTP auth and WS isolate users, reject origin/scope, revoke a replaced Vie
   }
 });
 
-test('cookie logout/login/register replacement cannot revoke another token Viewer of the same user', async () => {
+test('cookie logout/login replacement cannot revoke another token Viewer of the same user', async () => {
   const store = new ControlDatabase(':memory:'),
     control = createApplication(store, testGateway(new ProductEndpoint()));
   const server = createHttp(control, { origins: ['http://product.test'], clientDir: '.' });
@@ -1677,11 +1663,10 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
       body: JSON.stringify(body),
     });
   try {
-    for (const operation of ['logout', 'login', 'register']) {
+    for (const operation of ['logout', 'login']) {
       const name = 'scope-' + operation,
-        a = await accountsFor(store).register(name, 'password123', 'test-registration'),
+        a = await registerUser(store, name, 'password123'),
         b = await accountsFor(store).login(name, 'password123');
-      if (a.user.isAdmin) await accountsFor(store).setRegistrationCredential(a.tenantId, 'test-registration');
       const old = connect(url, `rk_session=${a.token}`);
       peers.push(old);
       await old.wait((m) => m.type === 'auth');
@@ -1691,13 +1676,7 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
       await old.wait((m) => m.type === 'lease');
       const response = await post(
         '/api/auth/' + operation,
-        operation === 'logout'
-          ? {}
-          : {
-              username: operation === 'register' ? 'new-' + name : name,
-              password: 'password123',
-              serverCredential: 'test-registration',
-            },
+        operation === 'logout' ? {} : { username: name, password: 'password123' },
         `rk_session=${a.token}`,
       );
       assert.equal(response.status, 200);
@@ -1715,13 +1694,7 @@ test('cookie logout/login/register replacement cannot revoke another token Viewe
         (
           await post(
             '/api/auth/' + operation,
-            operation === 'logout'
-              ? {}
-              : {
-                  username: operation === 'register' ? 'active-' + name : name,
-                  password: 'password123',
-                  serverCredential: 'test-registration',
-                },
+            operation === 'logout' ? {} : { username: name, password: 'password123' },
             `rk_session=${b.token}`,
           )
         ).status,

@@ -59,7 +59,7 @@ try {
   const page = await fetch(base);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /RemoteKit/);
-  const response = await fetch(base + '/api/auth/register', {
+  const response = await fetch(base + '/api/auth/setup', {
     method: 'POST',
     headers: { Origin: 'http://production.test', 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: 'production-user', password: 'production-password123' }),

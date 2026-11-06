@@ -70,7 +70,7 @@ test('optional HTTPS serves trusted local test TLS, secure cookies and configure
   try {
     const result = await new Promise<{ status: number; cookie: string; body: string }>((resolve, reject) => {
       request(
-        origin + '/api/auth/register',
+        origin + '/api/auth/setup',
         { ca: cert, method: 'POST', headers: { Origin: origin, 'Content-Type': 'application/json' } },
         (response) => {
           let body = '';

@@ -22,7 +22,8 @@ import {
   useMediaQuery,
 } from '@mui/material';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import type { ProductSettings, ProductState, ProductUser, RegistrationStatus } from '../../shared/product';
+import type { ProductSettings, ProductState, ProductUser, SetupStatus } from '../../shared/product';
+import { RemoteKitError } from '../../shared/errors';
 import { SEARCH_ENGINES } from '../../shared/product';
 import type { ProductActionHandler as Action } from '../control/product-operations';
 import { formatError } from '../util/format-error';
@@ -38,16 +39,13 @@ export function AuthView({
   close: () => void;
   notice: string;
 }) {
-  const [register, setRegister] = useState(false),
-    [username, setUsername] = useState(''),
+  const [username, setUsername] = useState(''),
     [password, setPassword] = useState(''),
-    [serverCredential, setServerCredential] = useState(''),
-    [registration, setRegistration] = useState<RegistrationStatus | null>(null),
-    [registrationError, setRegistrationError] = useState(''),
+    [setup, setSetup] = useState<SetupStatus | null>(null),
+    [setupError, setSetupError] = useState(''),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('');
-  const submitting = useRef(false),
-    registrationRequest = useRef(0);
+  const submitting = useRef(false);
   useEffect(() => {
     const escape = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && !submitting.current) close();
@@ -55,28 +53,18 @@ export function AuthView({
     window.addEventListener('keydown', escape);
     return () => window.removeEventListener('keydown', escape);
   }, [close]);
-  const refreshRegistration = useCallback(async () => {
-    const sequence = ++registrationRequest.current;
-    setRegistration(null);
-    setRegistrationError('');
+  const refreshSetup = useCallback(async () => {
+    setSetupError('');
     try {
-      const result = await request<RegistrationStatus>('/api/auth/registration');
-      if (sequence === registrationRequest.current) setRegistration(result);
+      setSetup(await request<SetupStatus>('/api/auth/setup'));
     } catch (e) {
-      if (sequence === registrationRequest.current) setRegistrationError(formatError(e));
+      setSetupError(formatError(e));
     }
   }, []);
   useEffect(() => {
-    void refreshRegistration();
-    const refresh = () => {
-      void refreshRegistration();
-    };
-    window.addEventListener('focus', refresh);
-    return () => {
-      registrationRequest.current++;
-      window.removeEventListener('focus', refresh);
-    };
-  }, [register, refreshRegistration]);
+    void refreshSetup();
+  }, [refreshSetup]);
+  const creating = !!setup?.setupRequired;
   return (
     <main className="auth-page">
       <Box
@@ -84,27 +72,25 @@ export function AuthView({
         className="auth-form"
         onSubmit={async (event) => {
           event.preventDefault();
-          if (submitting.current || (register && !registration?.registrationOpen)) return;
-          if (
-            register &&
-            registration?.credentialRequired &&
-            (serverCredential.length < 8 || serverCredential.length > 256)
-          ) {
-            setError('注册口令须为 8–256 个字符');
-            return;
-          }
+          if (submitting.current || !setup) return;
           submitting.current = true;
           setBusy(true);
           setError('');
           try {
-            const result = await request<{ user: ProductUser }>(
-              `/api/auth/${register ? 'register' : 'login'}`,
-              { username, password, ...(register ? { serverCredential } : {}) },
-            );
+            const result = await request<{ user: ProductUser }>(`/api/auth/${creating ? 'setup' : 'login'}`, {
+              username,
+              password,
+            });
             onLogin(result.user);
           } catch (e) {
-            setError(formatError(e));
-            if (register) void refreshRegistration();
+            // Account refusals carry messages written for this page, such as a disabled account.
+            setError(
+              e instanceof RemoteKitError &&
+                ['invalid_request', 'unauthenticated', 'forbidden', 'conflict'].includes(e.code)
+                ? e.message
+                : formatError(e),
+            );
+            if (creating) void refreshSetup();
           } finally {
             submitting.current = false;
             setBusy(false);
@@ -118,40 +104,26 @@ export function AuthView({
         </Box>
         {notice && <Alert severity="warning">{notice}</Alert>}
         <Typography variant="h5" component="h1">
-          {register ? '创建账户' : '登录 RemoteKit'}
+          {creating ? '创建管理员账户' : '登录 RemoteKit'}
         </Typography>
-        <Typography color="text.secondary">继续你的浏览器工作空间</Typography>
+        <Typography color="text.secondary">
+          {creating
+            ? '这是服务器上的第一个账户，之后的账户由管理员在管理员面板中创建。'
+            : '继续你的浏览器工作空间'}
+        </Typography>
         {error && <Alert severity="error">{error}</Alert>}
-        {register &&
-          (registrationError ? (
-            <Alert
-              severity="error"
-              action={
-                <Button color="inherit" onClick={() => void refreshRegistration()}>
-                  重试
-                </Button>
-              }
-            >
-              无法读取注册状态：{registrationError}
-            </Alert>
-          ) : !registration ? (
-            <Typography color="text.secondary" role="status">
-              正在读取注册状态…
-            </Typography>
-          ) : !registration.hasAdmin ? (
-            <Alert severity="info">首个账户将成为管理员。创建后，请在更多 → 管理员面板设置注册口令。</Alert>
-          ) : !registration.registrationOpen ? (
-            <Alert
-              severity="info"
-              action={
-                <Button color="inherit" onClick={() => void refreshRegistration()}>
-                  刷新
-                </Button>
-              }
-            >
-              注册暂未开放，请联系管理员先设置注册口令。
-            </Alert>
-          ) : null)}
+        {setupError && (
+          <Alert
+            severity="error"
+            action={
+              <Button color="inherit" onClick={() => void refreshSetup()}>
+                重试
+              </Button>
+            }
+          >
+            无法连接服务器：{setupError}
+          </Alert>
+        )}
         <TextField
           required
           autoFocus
@@ -166,40 +138,19 @@ export function AuthView({
           label="账户密码"
           disabled={busy}
           type="password"
-          autoComplete={register ? 'new-password' : 'current-password'}
+          autoComplete={creating ? 'new-password' : 'current-password'}
           value={password}
           onChange={(e) => setPassword(e.target.value)}
+          helperText={creating ? '8–256 个字符' : undefined}
         />
-        {register && registration?.credentialRequired && (
-          <TextField
-            required
-            label="注册口令（Server credential）"
-            disabled={busy}
-            type="password"
-            autoComplete="off"
-            value={serverCredential}
-            onChange={(e) => setServerCredential(e.target.value)}
-            helperText="由管理员提供，与账户密码不同。"
-            inputProps={{ minLength: 8, maxLength: 256 }}
-          />
+        <Button variant="contained" type="submit" disabled={busy || !setup}>
+          {busy ? '请稍候…' : creating ? '创建并登录' : '登录'}
+        </Button>
+        {!creating && setup && (
+          <Typography variant="body2" color="text.secondary" textAlign="center">
+            没有账户？请联系管理员创建。
+          </Typography>
         )}
-        <Button
-          variant="contained"
-          type="submit"
-          disabled={busy || (register && !registration?.registrationOpen)}
-        >
-          {busy ? '请稍候…' : register ? '创建账户' : '登录'}
-        </Button>
-        <Button
-          disabled={busy}
-          onClick={() => {
-            setRegister(!register);
-            setServerCredential('');
-            setError('');
-          }}
-        >
-          {register ? '已有账户？登录' : '创建账户'}
-        </Button>
       </Box>
     </main>
   );

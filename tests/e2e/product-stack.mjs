@@ -44,8 +44,7 @@ export function startProductStack({
 }
 
 export async function registerViewer({ click, fill, username, password }) {
-  await click('button', '创建账户');
   await fill('input[autocomplete="username"]', username);
   await fill('input[autocomplete="new-password"]', password);
-  await click('button[type="submit"]', '创建账户');
+  await click('button[type="submit"]', '创建并登录');
 }

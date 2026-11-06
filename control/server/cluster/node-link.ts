@@ -107,8 +107,15 @@ export interface RegistryOptions {
   heartbeatTimeoutMs?: number;
 }
 
+export interface NodeHistory {
+  connectedAt?: number;
+  disconnectedAt?: number;
+  rejected?: { code: string; buildId: string; at: number };
+  exited?: { code: number | null; at: number };
+}
 export class NodeLink extends EventEmitter implements EndpointLink {
   state: EndpointLinkState = { state: 'offline' };
+  private events: NodeHistory = {};
   readonly config: Readonly<NodeConfig>;
   readonly metrics: MetricsHistory;
   buildId?: string;
@@ -161,6 +168,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       if (finished) return;
       finished = true;
       if (this.child === child) this.child = undefined;
+      this.events = { ...this.events, exited: { code, at: Date.now() } };
       if (!this.current) this.state = { state: 'offline' };
       if (!this.stopped) this.retry = setTimeout(() => this.start(), code === 4 ? 0 : 1500);
     };
@@ -183,6 +191,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     this.metrics.clear();
     this.buildId = this.registry.options.buildId;
     this.state = transition.state;
+    this.events = { connectedAt: Date.now() };
     this.emit('ready', { incarnation, processChanged: transition.processChanged });
   }
   receive(connection: Connection, message: Record<string, any>) {
@@ -307,6 +316,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     if (this.current !== connection) return;
     this.current = undefined;
     this.state = { state: 'offline' };
+    this.events = { ...this.events, disconnectedAt: Date.now() };
     for (const [id, pending] of this.pending) {
       if (pending.epoch !== connection.epoch) continue;
       clearTimeout(pending.timer);
@@ -314,6 +324,12 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       this.pending.delete(id);
     }
     this.emit('offline');
+  }
+  history(): Readonly<NodeHistory> {
+    return this.events;
+  }
+  rejected(code: string, buildId: string) {
+    this.events = { ...this.events, rejected: { code, buildId, at: Date.now() } };
   }
   evict() {
     if (this.current) {
@@ -450,6 +466,7 @@ export class NodeRegistry extends EventEmitter {
                 };
           const response = handshake.writeMessage(Buffer.from(JSON.stringify(reply)));
           if (reject) {
+            link?.rejected(reject, hello.buildId);
             void carrier
               .send(response)
               .finally(() => carrier.close())

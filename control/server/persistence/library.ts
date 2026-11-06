@@ -124,4 +124,12 @@ export class LibraryRepository {
       .prepare('UPDATE file_library_selections SET manifest=? WHERE tenant=? AND id=?')
       .run(JSON.stringify(manifest), tenant, manifest.selectionId);
   }
+  entryCount(tenant: string) {
+    return this.snapshot(tenant).entries.length;
+  }
+  deleteTenant(tenant: string) {
+    this.db.prepare('DELETE FROM file_library WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM file_library_operations WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM file_library_selections WHERE tenant=?').run(tenant);
+  }
 }

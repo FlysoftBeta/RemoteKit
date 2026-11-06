@@ -8,7 +8,8 @@ import React, {
   useState,
   useSyncExternalStore,
 } from 'react';
-import { AdminDialog } from './admin-dialog';
+import { AdminConsole } from './admin/console';
+import type { AdminCall } from './admin/shared';
 import { useAuthCamera, type AuthRequest } from '../auth/auth-camera';
 import { useAutoLock } from '../auth/auth-idle';
 import {
@@ -39,7 +40,8 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
   const { state, pending: pendingOperations } = operationState;
   const viewportNotice = useSyncExternalStore(media.viewport.subscribe, media.viewport.getSnapshot);
   const [settings, setSettings] = useState(false);
-  const [admin, setAdmin] = useState(false);
+  const [adminRequested, setAdmin] = useState(false);
+  const admin = adminRequested && !!state?.user.isAdmin;
   const [audioSaving, setAudioSaving] = useState(false);
   const [audioError, setAudioError] = useState('');
   const [focusAddress, setFocusAddress] = useState<string | null>(null);
@@ -134,16 +136,8 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
         setAudioSaving(false);
       });
   };
-  const loadRegistration = useCallback(() => connection.current!.request('admin.get', {}), []);
-  const saveRegistration = useCallback(
-    (serverCredential: string) =>
-      connection.current!.request('admin.setRegistrationCredential', { serverCredential }),
-    [],
-  );
-  const loadNodes = useCallback(() => connection.current!.request('admin.nodes', {}), []);
-  const changeNode = useCallback(
-    (nodeId: string, action: 'remove' | 'readd') =>
-      connection.current!.request(action === 'remove' ? 'admin.removeNode' : 'admin.readdNode', { nodeId }),
+  const adminCall = useCallback<AdminCall>(
+    (method, params) => connection.current!.request(method, params),
     [],
   );
   const productReady = status === 'online' && snapshot.authorization.ready;
@@ -385,14 +379,12 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
           />
         )}
         {state.user.isAdmin && (
-          <AdminDialog
-            loadNodes={loadNodes}
-            changeNode={changeNode}
+          <AdminConsole
             open={admin}
             online={status === 'online'}
+            self={state.user.username}
+            call={adminCall}
             onClose={() => setAdmin(false)}
-            load={loadRegistration}
-            save={saveRegistration}
           />
         )}
         <SettingsDialog

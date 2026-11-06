@@ -63,6 +63,12 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       return Error{ErrorCode::kInvalidRequest, "session.cold.delete requires empty tenantId"};
     return DeleteCold(false);
   }
+  if (method == "session.delete") {
+    if (request.value("tenantId", Json()) != "" || !request.contains("sessionId") ||
+        !request["sessionId"].is_string())
+      return Error{ErrorCode::kInvalidRequest, "invalid session.delete"};
+    return DeleteSession(request["sessionId"].get<std::string>());
+  }
   const auto handler = ManagementMethods::Find(method);
   if (!handler && method != "session.hibernate")
     return Error{ErrorCode::kInvalidRequest, "unknown endpoint method: " + method};
@@ -187,6 +193,31 @@ Result<void> Service::Fence(const ManagementLink::ReadyState& ready) {
   fenced_generation_ = ready.generation;
   metrics_generation_ = ready.generation;
   return {};
+}
+// A deleted Tenant's Session is stopped without a checkpoint and every local copy is removed.
+Result<Json> Service::DeleteSession(const std::string& id) {
+  if (id.size() != 32 || !std::all_of(id.begin(), id.end(), [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+      }))
+    return Error{ErrorCode::kInvalidRequest, "invalid sessionId"};
+  bool stopped = false;
+  for (auto it = sessions_.begin(); it != sessions_.end(); ++it) {
+    if (it->second->Id() != id)
+      continue;
+    RK_RETURN_IF_ERROR(it->second->Stop());
+    std::lock_guard lock(mutex_);
+    sessions_.erase(it);
+    session_count_ = sessions_.size();
+    stopped = true;
+    break;
+  }
+  placements_.erase(std::remove_if(placements_.begin(), placements_.end(),
+                                   [&](const Json& p) { return p["sessionId"] == id; }),
+                    placements_.end());
+  const auto root = options_.data / "sessions";
+  for (const auto* suffix : {"", ".checkpoint", ".checkpoint-index.json", ".restore", ".discard"})
+    fs::remove_all(root / (id + suffix));
+  return Json{{"stopped", stopped}};
 }
 Result<Json> Service::DeleteCold(bool expired_only) {
   const auto root = options_.data / "sessions";

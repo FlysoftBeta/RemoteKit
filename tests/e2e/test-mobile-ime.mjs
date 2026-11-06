@@ -94,10 +94,10 @@ let context, page;
 const deadline = setTimeout(() => void context?.close().catch(() => {}), 120000);
 try {
   for (let attempt = 0; ; attempt++) {
-    const response = await fetch(origin + '/api/auth/registration', {
+    const response = await fetch(origin + '/api/auth/setup', {
       signal: AbortSignal.timeout(1000),
     }).catch(() => undefined);
-    if (response?.ok && (await response.json()).hasAdmin === false) break;
+    if (response?.ok && (await response.json()).setupRequired === true) break;
     assert(attempt < 50 && control.exitCode === null, 'Fresh isolated Control did not start');
     await pause(100);
   }

@@ -125,10 +125,10 @@ let context, page;
 const deadline = setTimeout(() => void context?.close().catch(() => {}), 150000);
 try {
   await until(async () => {
-    const response = await fetch(origin + '/api/auth/registration', {
+    const response = await fetch(origin + '/api/auth/setup', {
       signal: AbortSignal.timeout(1000),
     }).catch(() => undefined);
-    return response?.ok && (await response.json()).hasAdmin === false;
+    return response?.ok && (await response.json()).setupRequired === true;
   }, 'Fresh isolated Control did not start');
   context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
@@ -541,10 +541,10 @@ try {
     await stopControl();
     stopControl = startControl();
     await until(async () => {
-      const response = await fetch(origin + '/api/auth/registration', {
+      const response = await fetch(origin + '/api/auth/setup', {
         signal: AbortSignal.timeout(1000),
       }).catch(() => undefined);
-      return response?.ok && (await response.json()).hasAdmin === true;
+      return response?.ok && (await response.json()).setupRequired === false;
     }, 'Control did not restart with the original account');
     await page.goto(origin, { timeout: 12000 });
     await until(

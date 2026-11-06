@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import type { Socket } from 'node:net';
@@ -72,13 +74,26 @@ export function createHttp(
       const address = new URL(req.url ?? '/', 'http://localhost'),
         path = address.pathname,
         token = readToken(req);
-      if (path === '/api/auth/registration' && req.method === 'GET')
-        return json(res, 200, control.accounts.registrationStatus());
+      if (path === '/api/auth/setup' && req.method === 'GET')
+        return json(res, 200, control.accounts.setupStatus());
+      const download = /^\/api\/admin\/diagnostics\/([0-9a-f]{64})$/.exec(path);
+      if (download && req.method === 'GET') {
+        if (!diagnosticSessions) throw new RemoteKitError('not_found', '诊断采集未配置');
+        if (!control.accounts.identity(token)?.user.isAdmin)
+          throw new RemoteKitError('forbidden', '需要管理员权限');
+        const archive = diagnosticSessions.takeDownload(download[1]);
+        res.writeHead(200, {
+          'Content-Type': 'application/zstd',
+          'Content-Disposition': `attachment; filename="remotekit-diagnostics-${archive.id}.tar.zst"`,
+        });
+        await pipeline(createReadStream(archive.path), res);
+        return;
+      }
       if (path === '/api/auth/me' && req.method === 'GET') {
         return json(res, 200, control.accounts.me(token));
       }
       if (path.startsWith('/api/')) {
-        if (!['/api/auth/register', '/api/auth/login', '/api/auth/logout'].includes(path))
+        if (!['/api/auth/setup', '/api/auth/login', '/api/auth/logout'].includes(path))
           throw new RemoteKitError('not_found', 'Interface does not exist');
         if (req.method !== 'POST') throw new RemoteKitError('invalid_request', '不支持的方法');
         checkOrigin(req);
@@ -89,9 +104,9 @@ export function createHttp(
           throw new RemoteKitError('invalid_request', '需要 JSON 对象');
         if (['tenantId', 'tenant', 'userId', 'user'].some((key) => key in body))
           throw new RemoteKitError('invalid_request', '客户端不能指定用户或租户');
-        if (path === '/api/auth/register' || path === '/api/auth/login') {
-          const session = path.endsWith('register')
-            ? await control.accounts.register(body.username, body.password, body.serverCredential)
+        if (path === '/api/auth/setup' || path === '/api/auth/login') {
+          const session = path.endsWith('setup')
+            ? await control.accounts.setup(body.username, body.password)
             : await control.accounts.login(body.username, body.password);
           const previous = control.accounts.identity(token);
           if (previous) {

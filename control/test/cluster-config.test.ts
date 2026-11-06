@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { canonicalJson, nodeDefaults, runtimeConfig } from '../server/config';
@@ -195,20 +194,15 @@ test('build identity and release validate descriptor, archive size and hash at s
   }
 });
 
-test('v2 migration renames the shared at-rest key and preserves face templates, placements and profile keys across restart', async () => {
+test('face templates, placements and profile keys survive a Control restart', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-placement-'));
   const path = join(directory, 'control.db');
   let store = new ControlDatabase(path);
   const template = Array(128).fill(1 / Math.sqrt(128));
   const face = store.security.faceVault.seal('user', template, 'model');
-  store.db.exec(
-    'DROP TABLE session_placements; DROP TABLE schema_version; CREATE TABLE schema_version(version INTEGER); INSERT INTO schema_version VALUES (2)',
-  );
   store.db.close();
-  await rename(path + '.key', path + '.face-key');
   try {
     store = new ControlDatabase(path);
-    assert.equal(existsSync(path + '.face-key'), false);
     assert.deepEqual(store.security.faceVault.open('user', face, 'model'), template);
     const nodes = new NodeRegistry({
       nodes: { alpha: { config: { ...nodeDefaults, nodeId: 'alpha' }, configHash: 'hash' } },

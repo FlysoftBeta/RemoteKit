@@ -205,7 +205,7 @@ async (host) => {
       }
       await page.goto(origin);
       await page.evaluate(async () => {
-        const response = await fetch('/api/auth/register', {
+        const response = await fetch('/api/auth/setup', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({

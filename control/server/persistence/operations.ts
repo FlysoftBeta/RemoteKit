@@ -133,4 +133,10 @@ export class OperationsRepository {
         .run(JSON.stringify(receipt), state.tenantId, receipt.operationId);
     });
   }
+  deleteTenant(tenant: string) {
+    this.db.prepare('DELETE FROM operation_sequences WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM operation_generations WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM operation_receipts WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM popup_receipts WHERE tenant=?').run(tenant);
+  }
 }

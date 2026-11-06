@@ -53,7 +53,7 @@ let control, updater;
 try {
   control = startControl(servers[0], configPath, run);
   await until('first Control listening', () =>
-    fetch(`http://127.0.0.1:${port}/api/auth/registration`).then(
+    fetch(`http://127.0.0.1:${port}/api/auth/setup`).then(
       (r) => r.ok,
       () => false,
     ),

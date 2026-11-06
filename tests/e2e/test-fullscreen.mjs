@@ -119,10 +119,10 @@ let context, page, readProbe;
 const deadline = setTimeout(() => void context?.close().catch(() => {}), 150000);
 try {
   await until(async () => {
-    const response = await fetch(origin + '/api/auth/registration', {
+    const response = await fetch(origin + '/api/auth/setup', {
       signal: AbortSignal.timeout(1000),
     }).catch(() => undefined);
-    return response?.ok && (await response.json()).hasAdmin === false;
+    return response?.ok && (await response.json()).setupRequired === true;
   }, 'Fresh isolated Control did not start');
   context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),

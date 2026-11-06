@@ -15,25 +15,17 @@ const timeout = setTimeout(() => {
 let socket;
 try {
   assert.equal((await fetch(origin + '/api/auth/me')).status, 401);
-  assert.deepEqual(await (await fetch(origin + '/api/auth/registration')).json(), {
-    hasAdmin: false,
-    credentialRequired: false,
-    registrationOpen: true,
-  });
+  assert.deepEqual(await (await fetch(origin + '/api/auth/setup')).json(), { setupRequired: true });
   const password = randomBytes(24).toString('hex');
-  const response = await fetch(origin + '/api/auth/register', {
+  const response = await fetch(origin + '/api/auth/setup', {
     method: 'POST',
     headers: { Origin: origin, 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: 'package-smoke', password }),
   });
   assert.equal(response.status, 200, await response.clone().text());
-  assert.equal((await response.json()).user.isAdmin, true, 'The first registered user must be administrator');
+  assert.equal((await response.json()).user.isAdmin, true, 'The first account must be administrator');
   const cookie = response.headers.get('set-cookie').split(';')[0];
-  assert.deepEqual(await (await fetch(origin + '/api/auth/registration')).json(), {
-    hasAdmin: true,
-    credentialRequired: true,
-    registrationOpen: false,
-  });
+  assert.deepEqual(await (await fetch(origin + '/api/auth/setup')).json(), { setupRequired: false });
   assert.equal((await fetch(origin + '/api/auth/me', { headers: { Cookie: cookie } })).status, 200);
   let latest,
     auth,
@@ -105,7 +97,7 @@ try {
   assert.equal(initial.endpointError, null, 'Endpoint management reconciliation must be reachable');
   const face = await waitAuth((state) => state.face.available || state.face.reason);
   assert.equal(face.face.available, true, face.face.reason);
-  assert.deepEqual(await rpc('admin.get', {}), { registrationCredentialConfigured: false });
+  assert.deepEqual((await rpc('admin.users', {})).map((user) => user.username), ['package-smoke']);
   await assert.rejects(
     rpc('action', { type: 'window.create', url: 'about:blank' }),
     (error) => error.code === 'invalid_request' && /WebRTC/.test(error.message),
@@ -136,7 +128,7 @@ try {
   console.log(
     JSON.stringify({
       tenantId: state.workspace.tenantId,
-      auth: 'registered-first-administrator',
+      auth: 'setup-first-administrator',
       transport: 'authenticated-websocket',
       qualityMode: state.quality.mode,
       endpointManagementReachable: true,

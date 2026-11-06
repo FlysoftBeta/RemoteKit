@@ -171,7 +171,6 @@ async (hostPage) => {
     ]) {
       await page.keyboard.press(key);
     }
-    await page.getByRole('button', { name: '创建账户', exact: true }).click();
     await page.locator('input[autocomplete="username"]').fill('touch-qa-' + Date.now());
     await page.locator('input[autocomplete="new-password"]').fill(crypto.randomUUID());
     await page.locator('button[type="submit"]').click();

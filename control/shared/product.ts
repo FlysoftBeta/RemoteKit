@@ -2,6 +2,7 @@ import type { WireError } from './errors';
 import type { LibraryMethods } from './file-library';
 import type { AuthMessage, AuthSocketMethods } from './security';
 import type { DiagnosticMethods } from './diagnostics';
+import type { AdminSocketMethods } from './admin';
 /** Persistent product state belongs to Control; clients keep only an HttpOnly token. */
 export interface ProductUser {
   id: string;
@@ -242,27 +243,11 @@ export interface OperationReceipt {
   application?: ProductActionResult['application'];
   error?: string;
 }
-export interface RegistrationStatus {
-  hasAdmin: boolean;
-  credentialRequired: boolean;
-  registrationOpen: boolean;
+export interface SetupStatus {
+  setupRequired: boolean;
 }
-export interface AdminNode {
-  nodeId: string;
-  state: 'ready' | 'connecting' | 'offline' | 'removed';
-  buildId: string | null;
-  pressure: number | null;
-  sessions: number;
-}
-export interface AdminStatus {
-  registrationCredentialConfigured: boolean;
-}
-export interface SocketMethods extends AuthSocketMethods, LibraryMethods, DiagnosticMethods {
-  'admin.nodes': { params: Record<string, never>; result: AdminNode[] };
-  'admin.removeNode': { params: { nodeId: string }; result: AdminNode[] };
-  'admin.readdNode': { params: { nodeId: string }; result: AdminNode[] };
-  'admin.get': { params: Record<string, never>; result: AdminStatus };
-  'admin.setRegistrationCredential': { params: { serverCredential: string }; result: AdminStatus };
+export interface SocketMethods
+  extends AuthSocketMethods, LibraryMethods, DiagnosticMethods, AdminSocketMethods {
   'operation.status': {
     params: { operationId: string; operationGeneration: string };
     result: OperationReceipt;

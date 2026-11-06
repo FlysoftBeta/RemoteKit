@@ -27,6 +27,7 @@ class Service {
   bool HandleRequest(Json request, uint64_t generation);
   Result<void> Fence(const ManagementLink::ReadyState& ready);
   Result<Json> DeleteCold(bool expired_only);
+  Result<Json> DeleteSession(const std::string& id);
   media::Sdk& sdk_;
   const RuntimeOptions& options_;
   ManagementLink& link_;

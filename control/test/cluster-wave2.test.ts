@@ -1,3 +1,4 @@
+import { registerUser } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -103,6 +104,9 @@ async function harness(quota = 4096) {
     gateway,
     clock,
     control,
+    url,
+    key,
+    client: (nodeId: string) => clients.get(nodeId),
     connect,
     commit,
     async close() {
@@ -503,9 +507,8 @@ test('checkpoint commit fences stale epochs and rejects incomplete object sets',
 test('admin node methods enforce role, show metrics and persist removal until re-add', async () => {
   const h = await harness();
   try {
-    const admin = await h.control.accounts.register('administrator', 'password123');
-    await h.control.accounts.setRegistrationCredential(admin.tenantId, 'registration-secret');
-    const user = await h.control.accounts.register('ordinary', 'password123', 'registration-secret');
+    const admin = await registerUser(h.control.store, 'administrator', 'password123');
+    const user = await registerUser(h.control.store, 'ordinary', 'password123');
     for (const account of [admin, user])
       await h.control.viewers.attachViewer(
         account.tenantId,
@@ -532,6 +535,57 @@ test('admin node methods enforce role, show metrics and persist removal until re
       nodeId: 'alpha',
     });
     assert.equal(restored[0].state, 'offline');
+  } finally {
+    await h.close();
+  }
+});
+
+test('node details record rejections; a deleted session is purged from nodes as they reconnect', async () => {
+  const h = await harness();
+  try {
+    const admin = await registerUser(h.control.store, 'administrator', 'password123');
+    await h.control.viewers.attachViewer(
+      admin.tenantId,
+      admin.tenantId,
+      () => {},
+      { identity: admin.token, valid: () => true },
+      true,
+    );
+    const call = (method: string, params: Record<string, unknown> = {}) =>
+      requestViewer(h.control, admin.tenantId, admin.tenantId, method, params);
+    assert.equal((await h.connect('beta')).helloReply.type, 'node.ready');
+    const mismatched = new FakeNode();
+    await mismatched.connect(h.url, h.key, { nodeId: 'alpha', buildId: 'stale-build' });
+    assert.equal(mismatched.helloReply.code, 'build_mismatch');
+    const alpha = (await call('admin.nodes')).find((node: any) => node.nodeId === 'alpha');
+    assert.deepEqual(
+      { code: alpha.rejected.code, buildId: alpha.rejected.buildId, state: alpha.state },
+      { code: 'build_mismatch', buildId: 'stale-build', state: 'offline' },
+    );
+    const beta = (await call('admin.nodes')).find((node: any) => node.nodeId === 'beta');
+    assert.equal(beta.state, 'ready');
+    assert.ok(beta.metrics.cpu >= 0 && beta.connectedAt);
+
+    await call('admin.createUser', { username: 'leaving', password: 'password123' });
+    const tenant = h.store.accounts.byUsername('leaving')!.tenant;
+    const placement = h.placement.resolve(tenant);
+    assert.equal(placement.nodeId, 'beta');
+    await call('admin.deleteUser', { username: 'leaving' });
+    await h.control.sessionPurge.flush();
+    const betaClient = h.client('beta')!;
+    assert.ok(
+      betaClient.requests.some((r) => r.method === 'session.delete' && r.sessionId === placement.sessionId),
+    );
+    assert.deepEqual(h.store.db.prepare('SELECT node_id FROM session_deletions').all(), [
+      { node_id: 'alpha' },
+    ]);
+    assert.equal((await call('admin.storage')).pendingSessionDeletions, 1);
+    const alphaClient = await h.connect('alpha');
+    await h.control.sessionPurge.flush();
+    assert.ok(
+      alphaClient.requests.some((r) => r.method === 'session.delete' && r.sessionId === placement.sessionId),
+    );
+    assert.equal(h.control.sessionPurge.pending(), 0);
   } finally {
     await h.close();
   }

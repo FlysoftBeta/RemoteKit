@@ -59,28 +59,97 @@ const handlers: Record<string, Handler> = {
     services.viewers.viewport(authority.tenantId, params, authority.leaseId, authority.epoch),
   ),
   feedback: product(({ services, authority }, params) => services.viewers.feedback(authority, params)),
-  'admin.get': product(({ services, authority }) => {
-    if (!services.store.accounts.userForTenant(authority.tenantId)?.isAdmin)
-      throw new RemoteKitError('forbidden', '需要管理员权限');
-    return services.accounts.adminStatus();
-  }),
-  'admin.setRegistrationCredential': product(({ services, authority }, params) =>
-    services.accounts.setRegistrationCredential(authority.tenantId, params.serverCredential, () =>
-      services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch),
-    ),
-  ),
 };
-for (const method of ['admin.nodes', 'admin.removeNode', 'admin.readdNode']) {
-  handlers[method] = product(({ services, authority }, params) => {
-    if (!services.store.accounts.userForTenant(authority.tenantId)?.isAdmin)
+const admin = (handler: Handler): Handler =>
+  product((ctx, params) => {
+    if (!ctx.services.store.accounts.userForTenant(ctx.authority.tenantId)?.isAdmin)
       throw new RemoteKitError('forbidden', '需要管理员权限');
-    if (method === 'admin.nodes') return services.nodeAdmin.list();
-    if (typeof params.nodeId !== 'string') throw new RemoteKitError('invalid_request', 'Invalid node id');
-    return method === 'admin.removeNode'
-      ? services.nodeAdmin.remove(params.nodeId)
-      : services.nodeAdmin.readd(params.nodeId);
+    return handler(ctx, params);
   });
-}
+const archives = (ctx: RequestContext) => {
+  if (!ctx.diagnostics?.sessions) throw new RemoteKitError('not_found', '诊断采集未配置');
+  return ctx.diagnostics.sessions;
+};
+const tenants = ({ services }: RequestContext) =>
+  new Map(services.store.accounts.users().map((user) => [user.tenant, user.username]));
+const nodeId = (params: any) => {
+  if (typeof params.nodeId !== 'string') throw new RemoteKitError('invalid_request', '无效的节点');
+  return params.nodeId;
+};
+Object.assign(handlers, {
+  'admin.overview': admin(async (ctx) => {
+    const { services } = ctx;
+    const nodes = services.nodeAdmin.list(),
+      users = services.userAdmin.list(),
+      storage = services.objects.usage(),
+      release = services.endpoint.nodes.options.release?.descriptor;
+    return {
+      buildId: services.endpoint.nodes.options.buildId,
+      release: release ? { buildId: release.buildId, size: release.size } : null,
+      nodes: {
+        total: nodes.length,
+        ready: nodes.filter((node) => node.state === 'ready').length,
+        mismatched: nodes.filter((node) => node.rejected?.code === 'build_mismatch' && node.state !== 'ready')
+          .length,
+      },
+      users: {
+        total: users.length,
+        online: users.filter((user) => user.online).length,
+        disabled: users.filter((user) => user.disabled).length,
+      },
+      sessions: {
+        active: users.filter((user) => user.session.state === 'active').length,
+        hibernated: users.filter((user) => user.session.state === 'hibernated').length,
+      },
+      storage: {
+        bytes: storage.bytes,
+        underReplicated: storage.underReplicated,
+        pendingSessionDeletions: services.sessionPurge.pending(),
+      },
+      diagnostics: ctx.diagnostics?.sessions
+        ? (await ctx.diagnostics.sessions.archives(tenants(ctx))).length
+        : 0,
+    };
+  }),
+  'admin.users': admin(({ services }) => services.userAdmin.list()),
+  'admin.createUser': admin(({ services }, params) =>
+    services.userAdmin.create(params.username, params.password),
+  ),
+  'admin.resetPassword': admin(({ services, authority }, params) =>
+    services.userAdmin.resetPassword(authority.tenantId, params.username, params.password),
+  ),
+  'admin.clearSecondFactors': admin(({ services, authority }, params) =>
+    services.userAdmin.clearSecondFactors(authority.tenantId, params.username),
+  ),
+  'admin.signOut': admin(({ services, authority }, params) =>
+    services.userAdmin.signOut(authority.tenantId, params.username),
+  ),
+  'admin.setDisabled': admin(({ services, authority }, params) =>
+    services.userAdmin.setDisabled(authority.tenantId, params.username, params.disabled),
+  ),
+  'admin.transferAdmin': admin(({ services, authority }, params) =>
+    services.userAdmin.transferAdmin(authority.tenantId, params.username),
+  ),
+  'admin.hibernate': admin(({ services }, params) => services.userAdmin.hibernate(params.username)),
+  'admin.resetSession': admin(({ services }, params) => services.userAdmin.resetSession(params.username)),
+  'admin.deleteUser': admin(async (ctx, params) => {
+    const deleted = await ctx.services.userAdmin.delete(ctx.authority.tenantId, params.username);
+    await ctx.diagnostics?.sessions?.deleteOwner(deleted.tenant);
+    return deleted.users;
+  }),
+  'admin.storage': admin(({ services }) => services.userAdmin.storage()),
+  'admin.nodes': admin(({ services }) => services.nodeAdmin.list()),
+  'admin.removeNode': admin(({ services }, params) => services.nodeAdmin.remove(nodeId(params))),
+  'admin.readdNode': admin(({ services }, params) => services.nodeAdmin.readd(nodeId(params))),
+  'admin.diagnostics': admin((ctx) => archives(ctx).archives(tenants(ctx))),
+  'admin.deleteDiagnostic': admin(async (ctx, params) => {
+    await archives(ctx).deleteArchive(params.id);
+    return archives(ctx).archives(tenants(ctx));
+  }),
+  'admin.downloadDiagnostic': admin(async (ctx, params) => ({
+    url: '/api/admin/diagnostics/' + (await archives(ctx).downloadTicket(params.id)),
+  })),
+} satisfies Record<string, Handler>);
 for (const method of [
   'auth.get',
   'auth.lock',

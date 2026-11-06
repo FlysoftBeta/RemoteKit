@@ -583,16 +583,13 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
     if (selection && !ValidSelectionId(selection_id))
       return Result("invalid_selection_id");
     const auto* values = reply.FindList("files");
-    const bool legacy = !values && !reply.FindBool("file_only").value_or(false);
-    if (legacy)
-      values = reply.FindList("paths");
     const bool multiple = request->mode == blink::mojom::FileChooserParams::Mode::kOpenMultiple;
     if (!values || values->empty() || values->size() > kLimit || (!multiple && values->size() != 1))
       return Result("invalid_file_count");
     std::vector<SelectedFile> paths;
     for (const auto& value : *values) {
       const auto* file = value.GetIfDict();
-      const auto* path = legacy ? value.GetIfString() : file ? file->FindString("path") : nullptr;
+      const auto* path = file ? file->FindString("path") : nullptr;
       const auto* display = file ? file->FindString("displayName") : nullptr;
       if (!path || path->empty() || path->size() > kStringLimit ||
           path->find('\0') != std::string::npos || !base::IsStringUTF8(*path))
@@ -600,13 +597,11 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
       auto native = base::FilePath::FromUTF8Unsafe(*path);
       if (!native.IsAbsolute())
         return Result("file_path_must_be_absolute");
-      if (!legacy && (!display || display->empty() || display->size() > 1024 ||
-                      !base::IsStringUTF8(*display) ||
-                      display->find_first_of("/\\:\0", 0, 4) != std::string::npos ||
-                      *display == "." || *display == ".."))
+      if (!display || display->empty() || display->size() > 1024 || !base::IsStringUTF8(*display) ||
+          display->find_first_of("/\\:\0", 0, 4) != std::string::npos || *display == "." ||
+          *display == "..")
         return Result("invalid_file_display_name");
-      paths.push_back(
-          {std::move(native), display ? base::UTF8ToUTF16(*display) : std::u16string()});
+      paths.push_back({std::move(native), base::UTF8ToUTF16(*display)});
     }
     if (selection_id) {
       request->selection_id = *selection_id;

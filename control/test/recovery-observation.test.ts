@@ -1,3 +1,4 @@
+import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
 import { testGateway } from './server-fixture';
@@ -39,7 +40,7 @@ async function fixture() {
   const store = new ControlDatabase(':memory:'),
     endpoint = new RecoveryEndpoint(),
     control = createApplication(store, testGateway(endpoint));
-  const { tenantId: tenant } = await accountsFor(store).register('recovery-observer', 'password123');
+  const { tenantId: tenant } = await registerUser(store, 'recovery-observer', 'password123');
   await control.viewers.attachViewer(
     tenant,
     'lease',

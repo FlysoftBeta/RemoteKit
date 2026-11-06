@@ -116,7 +116,7 @@ test('HTTP and socket boundaries expose code and message without diagnostic deta
   const control = {
     events: new EventEmitter(),
     accounts: {
-      registrationStatus() {
+      setupStatus() {
         throw failure;
       },
       identity: () => ({ tenantId: 'tenant' }),
@@ -147,7 +147,7 @@ test('HTTP and socket boundaries expose code and message without diagnostic deta
       ['forbidden', '需要权限', 403],
       ['internal', '服务内部错误', 500],
     ] as const) {
-      const response = await fetch(base + '/api/auth/registration');
+      const response = await fetch(base + '/api/auth/setup');
       assert.equal(response.status, status);
       assert.deepEqual(await response.json(), { error: { code, message } });
       const reply = once(socket, 'message');

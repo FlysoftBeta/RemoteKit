@@ -1,3 +1,4 @@
+import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
 import { testGateway } from './server-fixture';
@@ -16,7 +17,7 @@ test('audio output channels default on and persist the complete shared pair atom
   const store = new ControlDatabase(':memory:'),
     control = createApplication(store, testGateway(endpoint));
   try {
-    const account = await accountsFor(store).register('audio-settings', 'password123'),
+    const account = await registerUser(store, 'audio-settings', 'password123'),
       tenant = account.tenantId;
     await control.viewers.attachViewer(
       tenant,
@@ -85,7 +86,7 @@ test('audio defaults enable both outputs and failed persistence preserves confir
   const store = new ControlDatabase(':memory:'),
     control = createApplication(store, testGateway(endpoint));
   try {
-    const { tenantId: tenant } = await accountsFor(store).register('audio-persistence', 'password123');
+    const { tenantId: tenant } = await registerUser(store, 'audio-persistence', 'password123');
     assert.deepEqual(store.workspaces.workspace(tenant).settings.audioChannels, { left: true, right: true });
     await control.viewers.attachViewer(
       tenant,

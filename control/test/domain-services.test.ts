@@ -1,3 +1,4 @@
+import { registerUser } from './server-fixture';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createApplication } from '../server/application';
@@ -92,9 +93,8 @@ test('a blocked tenant does not stop later reconciliation ticks for another tena
   });
   const services = createApplication(store, endpoint);
   try {
-    const first = await accountsFor(store).register('blocked', 'password123');
-    await accountsFor(store).setRegistrationCredential(first.tenantId, 'registration-secret');
-    const second = await accountsFor(store).register('progress', 'password123', 'registration-secret');
+    const first = await registerUser(store, 'blocked', 'password123');
+    const second = await registerUser(store, 'progress', 'password123');
     for (const tenant of [first.tenantId, second.tenantId]) {
       await services.viewers.attachViewer(
         tenant,

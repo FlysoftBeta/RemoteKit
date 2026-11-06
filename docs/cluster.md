@@ -95,6 +95,10 @@ Endpoint 每 5 秒发 `node.metrics`：系统 CPU 忙碌比例、内存总量/�
 - 放置（新 Tenant 或休眠后唤醒）：候选为就绪、未移除、未在磁盘排空、Session 数未满、磁盘剩余 ≥ `diskReserveBytes`、可用内存 ≥ `sessionMemoryBytes` 且已有指标的节点；优先无压力的节点，都有压力时才放到有压力的节点。得分 = 压力，持有该 Tenant 最新 checkpoint 热副本的节点减 0.15；最低者胜，同分按 nodeId。
 - 磁盘剩余低于保留值：停止向该节点放置，删除冷副本，仍不足 2 倍保留值时把对象副本迁到别处。
 
+## 管理员面板
+
+"管理员面板 → 节点"为每个节点显示：状态（在线/连接中/离线/已移除）、Control 托管或外部、对外地址、最近一次指标（CPU、内存、每块 GPU 的 3D/视频编码/显存、磁盘）、综合压力与是否持续高压、是否在腾磁盘、Session 数/上限与其上的用户、对象副本占用、版本、连接或断开时间。`NodeLink` 记录连接历史：连接与断开时间、最近一次握手拒绝（原因与节点自报的 buildId，例如版本不一致时显示节点版本）、托管进程最近一次退出码（3 需要更新、4 配置变更）；成功连接时清空旧的拒绝与退出记录。
+
 ## 节点移除
 
-管理员面板列出节点（状态、buildId、压力、Session 数）。只能移除未就绪的节点，需确认：记录到 `removed_nodes`，该节点上的 Tenant epoch 加一并以最新 checkpoint（没有则为空 Profile，按 Control 的有限产品信息重建工作区）变为 `hibernated`，它的副本从索引移除；被移除的节点握手时得到 `unknown_node`，直到管理员重新加入。`removed_nodes` 由 `NodeAdmin`（`control/server/cluster/node-admin.ts`）独占，它在一个事务里调用 Placement 的 `evacuate` 与对象索引的 `forgetNode`，各自只清理自己的表。节点列表只来自配置文件。节点失联本身不会自动触发重新放置：最近 checkpoint 之后的数据只在那台机器上。
+只能移除未就绪的节点，需确认：记录到 `removed_nodes`，该节点上的 Tenant epoch 加一并以最新 checkpoint（没有则为空 Profile，按 Control 的有限产品信息重建工作区）变为 `hibernated`，它的副本从索引移除；被移除的节点握手时得到 `unknown_node`，直到管理员重新加入。`removed_nodes` 由 `NodeAdmin`（`control/server/cluster/node-admin.ts`）独占，它在一个事务里调用 Placement 的 `evacuate` 与对象索引的 `forgetNode`，各自只清理自己的表。节点列表只来自配置文件。节点失联本身不会自动触发重新放置：最近 checkpoint 之后的数据只在那台机器上。

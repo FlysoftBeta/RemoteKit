@@ -1,3 +1,4 @@
+import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
 import { TestClock, testGateway } from './server-fixture';
@@ -92,7 +93,7 @@ async function fixture(t: TestContext, path = ':memory:') {
     await control.close();
     store.db.close();
   });
-  const { tenantId: tenant, user } = await accountsFor(store).register('account-auth', password);
+  const { tenantId: tenant, user } = await registerUser(store, 'account-auth', password);
   const attach = (lease: string, unlocked = false) =>
     control.viewers.attachViewer(tenant, lease, () => {}, { identity: lease, valid: () => true }, unlocked);
   await attach('lease', true);
@@ -111,7 +112,7 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
   const locked = await f.request('auth.lock');
   assert.equal(locked.locked, true);
   assert.equal(locked.peerEpoch, 2);
-  for (const method of ['admin.get', 'operation.status', 'viewport', 'action'])
+  for (const method of ['admin.overview', 'operation.status', 'viewport', 'action'])
     await assert.rejects(f.request(method), { code: 'locked' });
   const op = {
     tenantId: f.tenant,

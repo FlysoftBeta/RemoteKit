@@ -48,6 +48,13 @@ export class Placement {
       }
     );
   }
+  activeTenants(nodeId: string) {
+    return (
+      this.store.db
+        .prepare("SELECT tenant FROM session_placements WHERE node_id=? AND state='active' ORDER BY tenant")
+        .all(nodeId) as { tenant: string }[]
+    ).map((row) => row.tenant);
+  }
   activeSessions(nodeId: string) {
     const row = this.store.db
       .prepare("SELECT count(*) AS count FROM session_placements WHERE node_id=? AND state='active'")
@@ -63,6 +70,29 @@ export class Placement {
       )
       .run(nodeId);
     this.store.db.prepare('DELETE FROM warm_session_copies WHERE node_id=?').run(nodeId);
+  }
+  // Removes the placement and every checkpoint; returns the session whose node data must be purged.
+  forgetTenant(tenant: string) {
+    const sessionId = this.peek(tenant)?.sessionId;
+    for (const table of ['session_placements', 'checkpoints', 'checkpoint_objects', 'warm_session_copies'])
+      this.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
+    return sessionId;
+  }
+  checkpoints(tenant: string) {
+    const row = this.store.db
+      .prepare(
+        `SELECT count(*) AS count, max(created_at) AS latest,
+        (SELECT coalesce(sum(o.stored_size),0) FROM checkpoint_objects c JOIN objects o
+          ON o.tenant=c.tenant AND o.id=c.object_id
+          WHERE c.tenant=? AND c.checkpoint_id=(SELECT max(id) FROM checkpoints WHERE tenant=?)) AS bytes
+        FROM checkpoints WHERE tenant=?`,
+      )
+      .get(tenant, tenant, tenant) as { count: bigint; latest: bigint | null; bytes: bigint };
+    return {
+      count: Number(row.count),
+      latestAt: row.latest === null ? null : Number(row.latest),
+      latestBytes: Number(row.bytes),
+    };
   }
   underPressure(tenant: string) {
     const placement = this.peek(tenant);

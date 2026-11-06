@@ -156,10 +156,10 @@ let stage = 'startup';
 const deadline = setTimeout(() => void context?.close().catch(() => {}), 210000);
 try {
   await until('fresh production Control', async () => {
-    const response = await fetch(origin + '/api/auth/registration', {
+    const response = await fetch(origin + '/api/auth/setup', {
       signal: AbortSignal.timeout(1000),
     }).catch(() => null);
-    return response?.ok && !(await response.json()).hasAdmin;
+    return response?.ok && (await response.json()).setupRequired;
   });
   context = await chromium.launchPersistentContext(join(run, 'viewer-profile'), {
     executablePath: resolve(viewer),
@@ -670,7 +670,7 @@ try {
     await sleep(300);
     return page.evaluate(() =>
       Array.from(document.querySelectorAll('button')).some(
-        (button) => button.textContent.trim() === '创建账户',
+        (button) => button.textContent.trim() === '创建并登录',
       ),
     );
   });

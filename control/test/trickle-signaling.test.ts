@@ -1,3 +1,4 @@
+import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { requestViewer } from './server-fixture';
 import { testGateway } from './server-fixture';
@@ -44,9 +45,8 @@ test('pending trickle offers allow other tenants and bind early candidates to co
     endpoint = new SignalEndpoint(),
     control = createApplication(store, testGateway(endpoint));
   try {
-    const a = await accountsFor(store).register('signal-a', 'password-a');
-    await accountsFor(store).setRegistrationCredential(a.tenantId, 'signal-registration');
-    const b = await accountsFor(store).register('signal-b', 'password-b', 'signal-registration');
+    const a = await registerUser(store, 'signal-a', 'password-a');
+    const b = await registerUser(store, 'signal-b', 'password-b');
     await control.viewers.attachViewer(
       a.tenantId,
       'lease-a',
@@ -116,7 +116,7 @@ test('close cancels a pending answer immediately and late answers are ignored', 
     endpoint = new SignalEndpoint(),
     control = createApplication(store, testGateway(endpoint));
   try {
-    const a = await accountsFor(store).register('signal-c', 'password-c');
+    const a = await registerUser(store, 'signal-c', 'password-c');
     await control.viewers.attachViewer(
       a.tenantId,
       'lease',

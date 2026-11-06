@@ -476,6 +476,57 @@ export class ObjectIndex {
     });
     return this.maintenance;
   }
+  // Replicas become orphans that the next collection deletes from each node as it is reachable.
+  forgetTenant(tenant: string) {
+    this.store.db
+      .prepare(
+        `INSERT OR REPLACE INTO object_inventory_orphans SELECT node_id,tenant,id,0 FROM object_replicas WHERE tenant=?`,
+      )
+      .run(tenant);
+    for (const table of ['objects', 'object_derivations', 'object_replicas'])
+      this.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
+  }
+  tenantUsage(tenant: string) {
+    const row = this.store.db
+      .prepare('SELECT count(*) AS count, coalesce(sum(size),0) AS bytes FROM objects WHERE tenant=?')
+      .get(tenant) as { count: bigint; bytes: bigint };
+    return { objects: Number(row.count), bytes: Number(row.bytes), quotaBytes: this.tenantObjectBytes };
+  }
+  replicaBytes(nodeId: string) {
+    const row = this.store.db
+      .prepare(
+        `SELECT coalesce(sum(o.stored_size),0) AS bytes FROM object_replicas r JOIN objects o
+        ON o.tenant=r.tenant AND o.id=r.id WHERE r.node_id=?`,
+      )
+      .get(nodeId) as { bytes: bigint };
+    return Number(row.bytes);
+  }
+  usage() {
+    const ready = this.nodes
+      .all()
+      .filter((node) => node.state.state === 'ready' && !this.nodes.isRemoved(node.nodeId)).length;
+    const totals = this.store.db
+      .prepare(
+        'SELECT count(*) AS count, coalesce(sum(size),0) AS bytes, coalesce(sum(stored_size),0) AS stored FROM objects',
+      )
+      .get() as { count: bigint; bytes: bigint; stored: bigint };
+    const under = this.store.db
+      .prepare(
+        `SELECT count(*) AS count FROM objects o WHERE
+        (SELECT count(*) FROM object_replicas r WHERE r.tenant=o.tenant AND r.id=o.id) < ?`,
+      )
+      .get(Math.min(2, ready)) as { count: bigint };
+    const orphans = this.store.db.prepare('SELECT count(*) AS count FROM object_inventory_orphans').get() as {
+      count: bigint;
+    };
+    return {
+      objects: Number(totals.count),
+      bytes: Number(totals.bytes),
+      storedBytes: Number(totals.stored),
+      underReplicated: Number(under.count),
+      orphans: Number(orphans.count),
+    };
+  }
   forgetNode(nodeId: string) {
     this.store.db.prepare('DELETE FROM object_replicas WHERE node_id=?').run(nodeId);
     this.store.db.prepare('DELETE FROM object_inventory_orphans WHERE node_id=?').run(nodeId);

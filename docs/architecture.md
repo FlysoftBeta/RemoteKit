@@ -85,8 +85,9 @@ control/
     main.ts, application.ts, config.ts   组合根与配置
     http/          HTTP 路由与 WebSocket 分发表
     auth/          账户、Viewer 锁定与 peer 授权、人脸挑战、密码学
+    admin/         管理员的用户管理（创建、凭据重置、停用、转让、休眠、删除）
     persistence/   schema 与各仓库（账户、安全、workspace、操作收据、文件库）
-    cluster/       集群通道（Noise、帧、节点链路）、放置、密钥派生、对象索引、指标、更新包
+    cluster/       集群通道（Noise、帧、节点链路）、放置、密钥派生、对象索引、指标、更新包、节点管理、Session 清理队列
     endpoint/      类型化网关（按 Tenant 路由到所在节点）与管理消息类型
     tenants/       每租户运行时状态
     viewers/       Viewer 租约与 RTC 信令
@@ -94,7 +95,7 @@ control/
     files/ diagnostics/ quality.ts atlas-plan.ts navigation-url.ts
   client/
     main.tsx, viewer-session.ts          入口与控制器组装
-    app/           React 外壳：工作区、Window 框、视口、对话框、设置、统计叠层
+    app/           React 外壳：工作区、Window 框、视口、对话框、设置、统计叠层、管理员面板（admin/）
     control/       ControlSession（WS）、OperationsStore（待确认操作与收据）
     rtc/           RtcSession、DataChannel 协议（类型化编解码）
     auth/          授权作用域、锁屏、空闲策略、人脸相机

@@ -129,7 +129,6 @@ async (host) => {
     dpr = 1,
     username = 'robust-' + version,
     password,
-    serverCredential,
     camera = false,
   } = {}) => {
     if (!run || !password) throw Error('Explicit isolated run path and disposable password required');
@@ -347,17 +346,17 @@ async (host) => {
     qa.page = page;
     await page.goto('http://127.0.0.1:' + port);
     await page.evaluate(
-      async ({ username, password, serverCredential }) => {
+      async ({ username, password }) => {
         const options = {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ username, password, serverCredential }),
+          body: JSON.stringify({ username, password }),
         };
-        let response = await fetch('/api/auth/register', options);
+        let response = await fetch('/api/auth/setup', options);
         if (!response.ok) response = await fetch('/api/auth/login', options);
         if (!response.ok) throw Error('Disposable QA account failed');
       },
-      { username, password, serverCredential },
+      { username, password },
     );
     await page.reload();
     await page.waitForSelector('.viewer-lock-blank');

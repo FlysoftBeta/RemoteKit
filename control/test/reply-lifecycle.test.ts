@@ -1,3 +1,4 @@
+import { registerUser } from './server-fixture';
 import { accountsFor } from './server-fixture';
 import { RemoteKitError } from '../shared/errors';
 import { testGateway } from './server-fixture';
@@ -94,7 +95,7 @@ async function fixture() {
   const store = new ControlDatabase(':memory:'),
     endpoint = new LifecycleEndpoint(),
     control = createApplication(store, testGateway(endpoint));
-  const { tenantId: tenant } = await accountsFor(store).register('lifecycle-user', 'password123');
+  const { tenantId: tenant } = await registerUser(store, 'lifecycle-user', 'password123');
   await control.viewers.attachViewer(
     tenant,
     'lease',

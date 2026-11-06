@@ -54,7 +54,7 @@ const deadline = setTimeout(() => void context?.close(), 90000);
 try {
   for (let n = 0; ; n++) {
     if (
-      await fetch(origin + '/api/auth/registration')
+      await fetch(origin + '/api/auth/setup')
         .then((r) => r.ok)
         .catch(() => false)
     )
@@ -229,7 +229,6 @@ try {
     await page.keyboard.press(key);
     await pause(55);
   }
-  await click('创建账户');
   await page.locator('input[autocomplete=username]').fill('keyboard-recovery');
   await page.locator('input[autocomplete=new-password]').fill(randomBytes(18).toString('hex'));
   await page.locator('button[type=submit]').click();
