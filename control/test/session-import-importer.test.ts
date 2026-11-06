@@ -660,6 +660,39 @@ test('mailbox batches attachments, sorts before applying, re-reads gaps and skip
     await h.close();
   }
 });
+test('mailbox starts at the current time and then resumes from its UID watermark', async () => {
+  const h = await harness();
+  try {
+    const subject = h.client.subject;
+    const now = h.clock.wallMs();
+    h.client.add(1, Buffer.alloc(100), subject, new Date(now - 2 * 24 * 60 * 60 * 1000));
+    await h.importer.mailbox.poll();
+    assert.ok(h.client.calls.includes('search:since:true'));
+    assert.ok(!h.client.calls.some((c) => c.startsWith('download:1:')));
+    h.client.add(2, Buffer.alloc(100), 'unrelated', new Date(now));
+    h.client.calls.length = 0;
+    await h.importer.mailbox.poll();
+    assert.ok(h.client.calls.includes('range:2:*'));
+    assert.ok(!h.client.calls.includes('search:since:true'));
+    h.client.calls.length = 0;
+    await h.importer.mailbox.poll();
+    assert.ok(h.client.calls.includes('range:3:*'));
+    assert.ok(!h.client.calls.some((c) => c.startsWith('download:')));
+    h.client.add(3, Buffer.alloc(100), subject, new Date(now));
+    h.client.calls.length = 0;
+    await h.importer.mailbox.poll();
+    assert.ok(h.client.calls.includes('download:3:2.1:true'));
+    assert.deepEqual(h.client.deleted, [3]);
+    h.client.uidValidity = 2n;
+    h.client.calls.length = 0;
+    await h.importer.mailbox.poll();
+    assert.ok(h.client.calls.includes('search:since:true'));
+    assert.ok(!h.client.calls.some((c) => c.startsWith('download:1:')));
+    assert.deepEqual(h.store.sessionImports.mailCursor(0).uidValidity, '2');
+  } finally {
+    await h.close();
+  }
+});
 test('retention deletes old events and terminal imports, keeps pending imports and caps timeline at newest 200', async () => {
   const h = await harness();
   try {

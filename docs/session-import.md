@@ -138,7 +138,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 
 - 主题 `RemoteKit session import to <接收方 key id>`，头 `X-RemoteKit-Import: 2`，一段说明性纯文本正文，附件 `message.rksi`（`application/octet-stream`，base64）。一封信只有一个信封。
 - 设备 → Control：从 App 内置账户发往部署配置的 `mailbox`。Control → 设备：从 `sessionImport.mailbox` 经 `sessionImport.smtp` 发往 `sessionImport.appMailbox`。
-- 双方都只经 TLS 发信（465 隐式 TLS 或 587 STARTTLS 必须成功）、只用隐式 TLS 收信（993），收信时 IMAP 只按日期搜索最近 30 天的信（SEARCH SINCE），取信封后在本地按主题精确匹配发给自己 key id 的信：网易 163 等对 SUBJECT、HEADER、FROM 搜索一律返回空。服务器 CAPABILITY 含 `ID` 时先发 IMAP ID（网易 163 等在没有 ID 时拒绝 SELECT）。
+- 双方都只经 TLS 发信（465 隐式 TLS 或 587 STARTTLS 必须成功）、只用隐式 TLS 收信（993），收信不用 SUBJECT、HEADER、FROM 搜索（网易 163 等对这些条件一律返回空），而是取信封后在本地按主题精确匹配发给自己 key id 的信。双方各自维护收信游标：同一 UIDVALIDITY 下记 UID 水位，每次只 `UID FETCH 水位+1:*`（服务器在没有更新的信时仍会返回最新一封，按 UID 过滤掉）；首次收信或 UIDVALIDITY 变化时，从游标时间起按日期（SEARCH SINCE，再按 INTERNALDATE 留 10 分钟时钟余量）扫描。游标初始时间是功能启用的时刻：Control 为首次收信时，App 为设备密钥生成时，之前已在邮箱里的信不处理。服务器 CAPABILITY 含 `ID` 时先发 IMAP ID（网易 163 等在没有 ID 时拒绝 SELECT）。
 - App 收件箱由所有安装共享：App 只处理发给自己 key id 的信，处理完删除；主题以 `RemoteKit session import to ` 开头且超过 30 天的信，不论发给谁都删除，清理已卸载设备留下的回信。
 - 先提交本地状态再删信；两者之间崩溃会在下次以重复 seq 被识别并删除。暂不能处理的信（缺口未补上、被限流）不删，下一轮再试。
 
@@ -166,7 +166,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 }
 ```
 
-- `ImportMailbox` 每 `pollSeconds` 用 imapflow 连接一次（不保持 IDLE），按日期搜索最近 30 天的信，取 envelope 与 bodyStructure，只处理主题等于发给 Control key id 的信，只下载文件名以 `.rksi` 结尾的附件。头部不对、解密失败、消息无效 → 写日志并删除。
+- `ImportMailbox` 每 `pollSeconds` 用 imapflow 连接一次（不保持 IDLE），按收信游标取新信的 envelope、INTERNALDATE 与 bodyStructure，只处理主题等于发给 Control key id 的信，只下载文件名以 `.rksi` 结尾的附件。因缺口留在邮箱里的信（以及附件暂时读不出的信）把水位压在它下面，下一轮仍会取到；游标存在 `session_import_mailbox`。头部不对、解密失败、消息无效 → 写日志并删除。
 - 一轮内把所有能解开的消息按设备分组、按区间起点排序后依次处理，能连续应用的应用掉；仍有缺口的信留在邮箱里。
 - 已配对设备的 `import`：
   - 字段非法 → `importFailed`（`retryable: false`）；超过限制 → `importFailed`，原因写明哪项超限（`retryable: false`）；`at` 早于 30 天 → `importFailed`（"导入已超过 30 天"，`retryable: false`）。
@@ -180,6 +180,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 | 表 | 内容 |
 |---|---|
 | `session_import_keys` | 单行：导入公钥、加密私钥、key id |
+| `session_import_mailbox` | 单行收信游标：`since`（扫描起点）、`uid_validity`、`uid`（水位） |
 | `session_import_pairing` | 每用户一行：`tenant`、加密的配对码（关闭时为空）、`opened_at`、`expires_at`、`failures`、`closed_reason`（`paired`/`expired`/`failures`/`user`） |
 | `session_import_devices` | `key_id` 主键、`tenant`、`public_key`、`name`、`paired_at`、`in_seq`（已应用的设备最大连续 seq）、`out_seq`（已产生的最大 Control seq）、`acked_seq`、`resent_at` |
 | `session_import_events` | 两个方向的事件：`tenant`、`key_id`、`direction`（`in`/`out`）、`seq`、`at`、`type`、`ref`、`body`（完整事件 JSON；`in` 事件去掉密码、配对码与 cookie/storage 内容，只留数量）、`mailed_at`（`out` 事件交给 SMTP 的时间） |
@@ -241,7 +242,7 @@ WS 方法（均要求产品租约）：`sessionImport.state` → `{receiving, pa
   - 结果交给载荷校验，超出契约上限时提示失败，不截断。
 - **请求与本地数据**：请求的载荷（cookies、localStorage）用 Keystore 密钥加密存盘，直到收到 `importApplied`/`importDiscarded` 或用户删除该请求，以便失败后重试；站点名、URL 与 64px 图标作为请求元数据保留供 timeline 显示。删除尚未写入的请求同时发出 `withdraw`。
 - **timeline**：首页即 timeline，按 seq 倒序列出本设备的请求卡片（配对、导入、撤回），Control 的回复挂在卡片下方。卡片状态：待发送、已发送、已收到·等待写入、已导入、失败、已放弃；点开查看详情（站点、数量、各事件时间、原因）。失败（`importFailed` 且 `retryable`、配对被拒后未处理的导入、发信失败）的卡片有"重试"；顶部有"同步"。发信失败的事件留在队列里，由 WorkManager 按退避自动重发。
-- **收信**：App 在前台、timeline 可见且有未完成的请求时每 60 秒用 IMAP 收一次，打开 App 与下拉刷新时立即收；有未完成请求时另有 15 分钟周期的后台任务。收到的事件按 seq 应用；乱序到达的消息解密后加密暂存，等缺口补上再应用。
+- **收信**：App 在前台、timeline 可见且有未完成的请求时每 60 秒用 IMAP 收一次，打开 App 与下拉刷新时立即收；有未完成请求时另有 15 分钟周期的后台任务。收到的事件按 seq 应用；乱序到达的消息解密后加密暂存，等缺口补上再应用，所以处理过的信都直接删除，收信游标只需记最大 UID。超过 30 天的导入信每天最多清理一次。等待回信时界面不显示加载动画：Control 可能长时间不在线，回复可能要一天以上。
 - **发件**：发送方式在设置里选择（时间窗口或连续操作，见"合并与重传"）；时间窗口模式用 WorkManager 的唯一任务实现，需要网络时才运行。
 
 构建：`android/` 是独立 Gradle 工程（wrapper 自带），需要 `JAVA_HOME`（Android Studio 自带 JBR）与 `ANDROID_HOME`。内置邮箱账户写在不入库的 `android/mailbox.properties`（SMTP 与 IMAP 各自的主机、端口、用户名和密码，格式见 `mailbox.properties.example`），部署配置为不入库的 `android/deployment.json`（见 `deployment.json.example`）；缺失时仍可构建，但 App 提示未内置相应配置。
@@ -255,3 +256,4 @@ android\gradlew.bat -p android :app:testDebugUnitTest :app:assembleDebug :app:as
 - `protocol/session-import/hpke-auth-vector.json`：RFC 9180 A.1.3（X25519、HKDF-SHA256、Auth 模式）的 KEM 共享密钥已知答案（该向量的 AEAD 是 AES-128-GCM，AES-256-GCM 路径由下面的互通文件覆盖），两端都验证。
 - `protocol/session-import/device-message-fixture.json` 由 Android JVM 测试用固定密钥生成（设备 → Control 的信封与明文），Control 测试解开并比对；`control-message-fixture.json` 由 Control 测试生成（Control → 设备），Android 测试解开并比对。
 - 真实栈的 Browser 写入与读回由 `tests/integration/test-session-import.py` 验证。
+- 端到端手动验证用 `tests/e2e/session-import/demo-site.mjs`：在 `http://127.0.0.1:8090` 提供测试站，登录后设置 HttpOnly 会话 cookie、脚本可见 cookie 和两项 localStorage（含非 ASCII），页面同时列出服务端与脚本看到的状态。模拟器经 `adb reverse tcp:8090 tcp:8090` 访问同一 origin，导入后在 RemoteKit Browser 打开同一地址核对。

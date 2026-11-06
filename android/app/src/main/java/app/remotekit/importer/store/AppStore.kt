@@ -273,6 +273,8 @@ class AppStore(
         return true
     }
 
+    fun advanceInbox(cursor: InboxCursor) = update { it.copy(inbox = cursor) }
+
     fun sent(sequences: Set<Long>, now: Long = System.currentTimeMillis()) = update { state ->
         state.copy(
             outgoing =

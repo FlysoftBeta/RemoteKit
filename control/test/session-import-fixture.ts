@@ -94,12 +94,17 @@ export class FakeMailClient implements MailClient {
   readonly deleted: number[] = [];
   uidValidity = 1n;
   failure?: Error;
-  messages = new Map<number, { subject: string; bytes: Buffer; bodyStructure?: MailPart }>();
+  messages = new Map<number, { subject: string; date: Date; bytes: Buffer; bodyStructure?: MailPart }>();
   subject = '';
+  /** INTERNALDATE given to added messages. */
+  date = new Date('2999-01-01T00:00:00Z');
+  uidNext = 1;
   errorListener?: (error: Error) => void;
-  add(uid: number, bytes: Buffer, subject = this.subject) {
+  add(uid: number, bytes: Buffer, subject = this.subject, date = this.date) {
+    this.uidNext = Math.max(this.uidNext, uid + 1);
     this.messages.set(uid, {
       subject,
+      date,
       bytes,
       bodyStructure: {
         childNodes: [
@@ -115,20 +120,40 @@ export class FakeMailClient implements MailClient {
   }
   async mailboxOpen(folder: string) {
     this.calls.push('select:' + folder);
-    return { uidValidity: this.uidValidity };
+    return { uidValidity: this.uidValidity, uidNext: this.uidNext };
   }
+  /** Like IMAP SEARCH SINCE: compares dates only. */
   async search(query: { since: Date }, options: { uid: true }) {
     this.calls.push('search:since:' + options.uid);
-    this.since = query.since;
-    return [...this.messages.keys()];
+    const day = (date: Date) => date.toISOString().slice(0, 10);
+    return [...this.messages]
+      .filter(([, message]) => day(message.date) >= day(query.since))
+      .map(([uid]) => uid);
   }
-  since?: Date;
-  async *fetch(uids: number[], _query: { envelope: true; bodyStructure: true }, options: { uid: true }) {
+  /** Accepts `a,b,c` or `n:*`; like IMAP, `n:*` includes the newest message even below n. */
+  async *fetch(
+    range: string,
+    _query: { envelope: true; internalDate: true; bodyStructure: true },
+    options: { uid: true },
+  ) {
     this.calls.push('fetch:' + options.uid);
+    const all = [...this.messages.keys()].sort((a, b) => a - b);
+    let uids: number[];
+    if (range.endsWith(':*')) {
+      const start = Number(range.slice(0, -2));
+      uids = all.filter((uid) => uid >= start);
+      if (!uids.length && all.length) uids = [all[all.length - 1]];
+    } else uids = range.split(',').map(Number);
+    this.calls.push('range:' + range);
     for (const uid of uids) {
       this.calls.push('fetch:' + uid);
       const message = this.messages.get(uid)!;
-      yield { uid, envelope: { subject: message.subject }, bodyStructure: message.bodyStructure };
+      yield {
+        uid,
+        envelope: { subject: message.subject },
+        internalDate: message.date,
+        bodyStructure: message.bodyStructure,
+      };
     }
     this.calls.push('fetch:done');
   }

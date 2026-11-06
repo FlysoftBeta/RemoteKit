@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 
-const version = 3;
+const version = 4;
 
 function tableExists(db: Database.Database, name: string) {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
@@ -64,6 +64,8 @@ export function createSchema(db: Database.Database) {
         PRIMARY KEY(node_id,tenant,id));`);
     db.exec(`CREATE TABLE session_import_keys (
       id INTEGER PRIMARY KEY CHECK(id=1), public_key BLOB NOT NULL, private_key TEXT NOT NULL, key_id TEXT NOT NULL);
+      CREATE TABLE session_import_mailbox (
+        id INTEGER PRIMARY KEY CHECK(id=1), since INTEGER NOT NULL, uid_validity TEXT, uid INTEGER);
       CREATE TABLE session_import_pairing (
         tenant TEXT PRIMARY KEY, code TEXT, opened_at INTEGER, expires_at INTEGER,
         failures INTEGER NOT NULL, closed_reason TEXT);

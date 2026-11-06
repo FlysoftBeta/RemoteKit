@@ -12,13 +12,18 @@ export interface MailPart {
 }
 export interface MailClient {
   connect(): Promise<void>;
-  mailboxOpen(folder: string): Promise<{ uidValidity: bigint }>;
+  mailboxOpen(folder: string): Promise<{ uidValidity: bigint; uidNext?: number }>;
   search(query: { since: Date }, options: { uid: true }): Promise<number[] | false | undefined>;
   fetch(
-    uids: number[],
-    query: { envelope: true; bodyStructure: true },
+    range: string,
+    query: { envelope: true; internalDate: true; bodyStructure: true },
     options: { uid: true },
-  ): AsyncIterable<{ uid: number; envelope?: { subject?: string }; bodyStructure?: MailPart }>;
+  ): AsyncIterable<{
+    uid: number;
+    envelope?: { subject?: string };
+    internalDate?: Date | string;
+    bodyStructure?: MailPart;
+  }>;
   download(
     uid: number,
     part: string,
@@ -48,7 +53,19 @@ function attachments(node?: MailPart): string[] {
   return own.concat((node.childNodes ?? []).flatMap(attachments));
 }
 export type MailDecision = 'delete' | 'keep';
-const SEARCH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/** Where the next poll resumes: the UID watermark within one UIDVALIDITY, else a date scan. */
+export interface MailCursor {
+  since: number;
+  uidValidity: string | null;
+  uid: number | null;
+}
+export interface MailCursorStore {
+  /** Returns the saved cursor, creating one that starts at `now` on first use. */
+  load(now: number): MailCursor;
+  save(cursor: MailCursor): void;
+}
+// Tolerates clock skew between this host and the mail server's INTERNALDATE.
+const CLOCK_MARGIN_MS = 10 * 60 * 1000;
 export class ImportMailbox {
   private readonly skipped = new Set<string>();
   private timer?: ReturnType<typeof setTimeout>;
@@ -60,6 +77,7 @@ export class ImportMailbox {
     private readonly config: SessionImportConfig | undefined,
     private readonly keyId: () => string,
     private readonly receive: (batch: Buffer[]) => Promise<MailDecision[]>,
+    private readonly cursor: MailCursorStore,
     private readonly factory: MailClientFactory = createMailClient,
     private readonly log: (message: string) => void = console.error,
     private readonly outboxStatus: () => MailboxStatus['outbox'] = () => ({
@@ -108,22 +126,43 @@ export class ImportMailbox {
       });
       await client.connect();
       if (this.stopped) return;
+      const startedAt = this.now();
+      const cursor = this.cursor.load(startedAt);
       const mailbox = await client.mailboxOpen(config.folder);
-      // Some providers (NetEase) answer SUBJECT/HEADER searches with nothing, so search only by
-      // date and match the subject locally. Imports older than the window are rejected anyway.
-      const uids = await client.search({ since: new Date(this.now() - SEARCH_WINDOW_MS) }, { uid: true });
-      const remaining = (uids || []).filter((uid) => !this.skipped.has(`${mailbox.uidValidity}:${uid}`));
-      const subject = 'RemoteKit session import to ' + this.keyId();
-      // Finish FETCH before issuing download or delete commands on the same connection.
-      const messages: { uid: number; bodyStructure?: MailPart }[] = [];
-      if (remaining.length) {
-        for await (const message of client.fetch(
-          remaining,
-          { envelope: true, bodyStructure: true },
-          { uid: true },
-        ))
-          if (message.envelope?.subject === subject) messages.push(message);
+      const validity = String(mailbox.uidValidity);
+      const resume = cursor.uidValidity === validity && cursor.uid !== null;
+      // Within one UIDVALIDITY only UIDs above the watermark are new. Otherwise (first poll, or the
+      // server renumbered) scan by date from the cursor time; SUBJECT/HEADER searches are not
+      // used because some providers (NetEase) answer them with nothing.
+      let range: string | undefined;
+      if (resume) range = `${cursor.uid! + 1}:*`;
+      else {
+        const uids = await client.search({ since: new Date(cursor.since - CLOCK_MARGIN_MS) }, { uid: true });
+        if (uids && uids.length) range = uids.join(',');
       }
+      const subject = 'RemoteKit session import to ' + this.keyId();
+      let highest = resume ? cursor.uid! : (mailbox.uidNext ?? 1) - 1;
+      // Finish FETCH before issuing download or delete commands on the same connection.
+      const messages: { uid: number; internalDate: number; bodyStructure?: MailPart }[] = [];
+      if (range) {
+        for await (const message of client.fetch(
+          range,
+          { envelope: true, internalDate: true, bodyStructure: true },
+          { uid: true },
+        )) {
+          // `n:*` also returns the newest message when nothing is above n.
+          if (resume && message.uid <= cursor.uid!) continue;
+          highest = Math.max(highest, message.uid);
+          const internalDate = new Date(message.internalDate ?? 0).getTime();
+          if (!resume && internalDate < cursor.since - CLOCK_MARGIN_MS) continue;
+          if (this.skipped.has(`${validity}:${message.uid}`)) continue;
+          if (message.envelope?.subject === subject)
+            messages.push({ uid: message.uid, internalDate, bodyStructure: message.bodyStructure });
+        }
+      }
+      // Messages left in the mailbox (a gap in a device stream, an unreadable part) hold the
+      // watermark below them so that later polls see them again.
+      const kept = new Map<number, number>();
       const batch: { uid: number; bytes: Buffer }[] = [];
       for (const message of messages) {
         if (this.stopped) return;
@@ -160,15 +199,22 @@ export class ImportMailbox {
           addressed = true;
           batch.push({ uid: message.uid, bytes });
         }
-        if (!addressed && !missingContent) this.skipped.add(`${mailbox.uidValidity}:${message.uid}`);
+        if (missingContent) kept.set(message.uid, message.internalDate);
+        else if (!addressed) this.skipped.add(`${validity}:${message.uid}`);
       }
       const decisions = await this.receive(batch.map((m) => m.bytes));
       for (const uid of new Set(batch.map((m) => m.uid))) {
         if (batch.every((m, i) => m.uid !== uid || decisions[i] === 'delete'))
           await client.messageDelete(uid, { uid: true });
+        else kept.set(uid, messages.find((m) => m.uid === uid)!.internalDate);
       }
       if (connectionError) throw connectionError;
       await client.logout();
+      this.cursor.save({
+        since: Math.min(startedAt, ...kept.values()),
+        uidValidity: validity,
+        uid: kept.size ? Math.min(...kept.keys()) - 1 : highest,
+      });
       this.snapshot.lastSuccessAt = this.now();
       this.snapshot.lastError = null;
     } catch (error) {

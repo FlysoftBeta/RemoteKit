@@ -104,6 +104,10 @@ export class SessionImporter {
       config,
       () => this.keyPair().keyId,
       (batch) => this.receiveBatch(batch),
+      {
+        load: (now) => store.sessionImports.mailCursor(now),
+        save: (cursor) => store.sessionImports.saveMailCursor(cursor),
+      },
       factory,
       log,
       () => this.outbox.status(),

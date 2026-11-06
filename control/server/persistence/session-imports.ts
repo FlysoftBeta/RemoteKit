@@ -11,6 +11,7 @@ import type {
 } from '../../shared/session-import';
 import type { AtRestKey } from '../auth/crypto';
 import type { ImportEvent } from '../session-import/envelope';
+import type { MailCursor } from '../session-import/mailbox';
 
 export interface DeviceRow {
   keyId: string;
@@ -70,6 +71,20 @@ export class SessionImportsRepository {
     this.db
       .prepare('INSERT INTO session_import_keys VALUES (1,?,?,?)')
       .run(publicKey, this.key.seal('session-import-key:' + keyId, privateKey), keyId);
+  }
+  mailCursor(now: number): MailCursor {
+    this.db.prepare('INSERT OR IGNORE INTO session_import_mailbox VALUES (1,?,NULL,NULL)').run(now);
+    const row = this.db.prepare('SELECT * FROM session_import_mailbox WHERE id=1').get() as any;
+    return {
+      since: Number(row.since),
+      uidValidity: row.uid_validity,
+      uid: row.uid === null ? null : Number(row.uid),
+    };
+  }
+  saveMailCursor(cursor: MailCursor) {
+    this.db
+      .prepare('UPDATE session_import_mailbox SET since=?, uid_validity=?, uid=? WHERE id=1')
+      .run(cursor.since, cursor.uidValidity, cursor.uid);
   }
   pairing(tenant: string, now: number): PairingState {
     let row = this.db.prepare('SELECT * FROM session_import_pairing WHERE tenant=?').get(tenant) as any;

@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Email
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
@@ -146,10 +147,9 @@ private fun ConnectionHeader(state: AppSnapshot, server: String) {
                     IconBadge(Icons.Filled.Check, 40.dp, colors.primaryContainer, colors.onPrimaryContainer)
                 is Pairing.Pairing if pairFailed ->
                     IconBadge(Icons.Filled.Warning, 40.dp, colors.errorContainer, colors.onErrorContainer)
+                // Static on purpose: the reply can take a day when RemoteKit is offline.
                 is Pairing.Pairing ->
-                    Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
-                    }
+                    IconBadge(Icons.Filled.Email, 40.dp, colors.secondaryContainer, colors.onSecondaryContainer)
                 else ->
                     IconBadge(Icons.Filled.Lock, 40.dp, colors.errorContainer, colors.onErrorContainer)
             }
@@ -158,12 +158,14 @@ private fun ConnectionHeader(state: AppSnapshot, server: String) {
                     when (val pairing = state.pairing) {
                         is Pairing.Paired -> "已连接 · ${pairing.username}" to server
                         is Pairing.Pairing ->
-                            "等待 RemoteKit 确认配对" to
-                                when {
-                                    pairFailed -> "配对请求没能发出，展开下方记录可以重试"
-                                    pairMeta?.firstSentAt == null -> "配对请求已排队，即将发送"
-                                    else -> "配对请求已发送，通常一两分钟内会收到回信"
-                                }
+                            when {
+                                pairFailed -> "配对请求没能发出" to "展开下方记录可以重试"
+                                pairMeta?.firstSentAt == null ->
+                                    "配对请求等待发送" to "稍后会自动发出"
+                                else ->
+                                    "配对请求已发出" to
+                                        "RemoteKit 处理后会回信，可能要等一段时间。可以先离开，回信到达后这里会更新。"
+                            }
                         is Pairing.Unpaired -> "未配对" to (pairing.reason ?: server)
                         Pairing.Revoked -> "设备已被移除" to "清除本机数据后可以重新配对"
                     }

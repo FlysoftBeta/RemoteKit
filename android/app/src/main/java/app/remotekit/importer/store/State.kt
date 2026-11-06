@@ -36,6 +36,15 @@ sealed interface SendMode {
     @Serializable @SerialName("series") data object Series : SendMode
 }
 
+/** Where the next inbox poll resumes: the UID watermark within one UIDVALIDITY, else `since`. */
+@Serializable
+data class InboxCursor(
+    val since: Long,
+    val uidValidity: Long? = null,
+    val uid: Long? = null,
+    val cleanedAt: Long = since,
+)
+
 @Serializable
 data class StoredDevice(val id: String, val publicKey: String, val encryptedPrivateKey: String)
 
@@ -90,6 +99,7 @@ data class AppSnapshot(
     val pairBlob: String? = null,
     val sendMode: SendMode = SendMode.Window(),
     val pendingProfileDeletions: Set<String> = emptySet(),
+    val inbox: InboxCursor = InboxCursor(System.currentTimeMillis()),
 ) {
     fun latestImport(id: String) = outgoing.lastOrNull { it.requestId == id && it.type == "import" }
 
