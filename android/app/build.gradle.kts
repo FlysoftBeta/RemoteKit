@@ -73,7 +73,7 @@ android {
                 quoted(mailbox.getProperty("smtp.$key", "")),
             )
         }
-        for (key in listOf("host", "port")) {
+        for (key in listOf("host", "port", "username", "password")) {
             buildConfigField(
                 "String",
                 "IMAP_${key.uppercase()}",

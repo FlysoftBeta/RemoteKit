@@ -17,7 +17,14 @@ import javax.mail.search.SubjectTerm
 
 class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
     fun poll(now: Long = System.currentTimeMillis()) {
-        check(BuildConfig.IMAP_HOST.isNotBlank() && BuildConfig.IMAP_PORT == "993") { "未内置收件邮箱" }
+        check(
+            BuildConfig.IMAP_HOST.isNotBlank() &&
+                BuildConfig.IMAP_PORT == "993" &&
+                BuildConfig.IMAP_USERNAME.isNotBlank() &&
+                BuildConfig.IMAP_PASSWORD.isNotBlank()
+        ) {
+            "未内置收件邮箱"
+        }
         val properties =
             Properties().apply {
                 setProperty("mail.imaps.ssl.enable", "true")
@@ -32,8 +39,8 @@ class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
             it.connect(
                 BuildConfig.IMAP_HOST,
                 993,
-                BuildConfig.SMTP_USERNAME,
-                BuildConfig.SMTP_PASSWORD,
+                BuildConfig.IMAP_USERNAME,
+                BuildConfig.IMAP_PASSWORD,
             )
             if (it.hasCapability("ID")) it.id(mapOf("name" to "RemoteKit", "version" to "2"))
             val folder = it.getFolder("INBOX")

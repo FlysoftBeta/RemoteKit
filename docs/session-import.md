@@ -240,7 +240,7 @@ WS 方法（均要求产品租约）：`sessionImport.state` → `{receiving, pa
 - **收信**：App 在前台、timeline 可见且有未完成的请求时每 60 秒用 IMAP 收一次，打开 App 与下拉刷新时立即收；有未完成请求时另有 15 分钟周期的后台任务。收到的事件按 seq 应用；乱序到达的消息解密后加密暂存，等缺口补上再应用。
 - **发件**：发送方式在设置里选择（时间窗口或连续操作，见"合并与重传"）；时间窗口模式用 WorkManager 的唯一任务实现，需要网络时才运行。
 
-构建：`android/` 是独立 Gradle 工程（wrapper 自带），需要 `JAVA_HOME`（Android Studio 自带 JBR）与 `ANDROID_HOME`。内置邮箱账户写在不入库的 `android/mailbox.properties`（SMTP 与 IMAP，格式见 `mailbox.properties.example`），部署配置为不入库的 `android/deployment.json`（见 `deployment.json.example`）；缺失时仍可构建，但 App 提示未内置相应配置。
+构建：`android/` 是独立 Gradle 工程（wrapper 自带），需要 `JAVA_HOME`（Android Studio 自带 JBR）与 `ANDROID_HOME`。内置邮箱账户写在不入库的 `android/mailbox.properties`（SMTP 与 IMAP 各自的主机、端口、用户名和密码，格式见 `mailbox.properties.example`），部署配置为不入库的 `android/deployment.json`（见 `deployment.json.example`）；缺失时仍可构建，但 App 提示未内置相应配置。
 
 ```text
 android\gradlew.bat -p android :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
