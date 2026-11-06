@@ -41,6 +41,7 @@ async function harness(window = 30) {
   const user = await registerUser(store, 'import-user', 'import-password');
   store.sessionImports.saveKeys(controlPublic, controlPrivate, controlKeyId);
   const client = new FakeMailClient();
+  client.subject = 'RemoteKit session import to ' + controlKeyId;
   const sent: SendMailOptions[] = [];
   let active = false,
     failure: ErrorCode | undefined,
@@ -635,9 +636,13 @@ test('mailbox batches attachments, sorts before applying, re-reads gaps and skip
     v1[4] = 1;
     h.client.add(4, v1);
     h.client.add(5, Buffer.alloc(100));
+    h.client.add(7, deviceEnvelope([a]), 'RemoteKit session import to 0000000000000000');
+    h.client.add(8, deviceEnvelope([a]), '欢迎来到网易邮箱');
     await h.importer.mailbox.poll();
     assert.deepEqual(h.client.deleted, [2, 5]);
-    assert.ok(h.client.calls.includes('search:RemoteKit session import to ' + controlKeyId + ':true'));
+    assert.ok(h.client.calls.includes('search:since:true'));
+    assert.ok(!h.client.calls.some((c) => c.startsWith('download:7:') || c.startsWith('download:8:')));
+    assert.ok(h.client.messages.has(7) && h.client.messages.has(8));
     assert.ok(h.client.calls.indexOf('fetch:done') < h.client.calls.indexOf('download:1:2.1:true'));
     h.client.add(6, deviceEnvelope([b]));
     await h.importer.mailbox.poll();

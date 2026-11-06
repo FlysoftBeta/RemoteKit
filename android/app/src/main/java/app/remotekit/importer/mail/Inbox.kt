@@ -8,12 +8,18 @@ import app.remotekit.importer.store.AppStore
 import com.sun.mail.imap.IMAPStore
 import java.io.ByteArrayOutputStream
 import java.util.Properties
+import java.util.Date
+import javax.mail.FetchProfile
 import javax.mail.Flags
 import javax.mail.Folder
+import javax.mail.Message
 import javax.mail.Multipart
 import javax.mail.Part
 import javax.mail.Session
-import javax.mail.search.SubjectTerm
+import javax.mail.search.ComparisonTerm
+import javax.mail.search.ReceivedDateTerm
+
+private const val RETENTION_MS = 30L * 24 * 60 * 60 * 1000
 
 class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
     fun poll(now: Long = System.currentTimeMillis()) {
@@ -47,7 +53,10 @@ class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
             folder.open(Folder.READ_WRITE)
             try {
                 val subject = "RemoteKit session import to ${store.snapshot.value.device.id}"
-                val messages = folder.search(SubjectTerm(subject))
+                val cutoff = Date(now - RETENTION_MS)
+                // Some providers (NetEase) answer SUBJECT searches with nothing, so search only by
+                // date and match the subject locally.
+                val messages = envelopes(folder, ReceivedDateTerm(ComparisonTerm.GE, cutoff))
                 val decoded =
                     messages
                         .mapNotNull { mail ->
@@ -82,12 +91,8 @@ class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
                     )
                         mail.setFlag(Flags.Flag.DELETED, true)
                 }
-                for (mail in folder.search(SubjectTerm("RemoteKit session import to "))) {
-                    val date = mail.receivedDate ?: mail.sentDate ?: continue
-                    if (
-                        mail.subject?.startsWith("RemoteKit session import to ") == true &&
-                            now - date.time > 30L * 24 * 60 * 60 * 1000
-                    )
+                for (mail in envelopes(folder, ReceivedDateTerm(ComparisonTerm.LT, cutoff))) {
+                    if (mail.subject?.startsWith("RemoteKit session import to ") == true)
                         mail.setFlag(Flags.Flag.DELETED, true)
                 }
             } finally {
@@ -95,6 +100,9 @@ class Inbox(private val store: AppStore, private val controlPublic: ByteArray) {
             }
         }
     }
+
+    private fun envelopes(folder: Folder, term: ReceivedDateTerm): Array<Message> =
+        folder.search(term).also { folder.fetch(it, FetchProfile().apply { add(FetchProfile.Item.ENVELOPE) }) }
 
     private fun attachment(part: Part): ByteArray? {
         if (part.fileName?.endsWith(".rksi") == true) {

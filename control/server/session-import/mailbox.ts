@@ -13,12 +13,12 @@ export interface MailPart {
 export interface MailClient {
   connect(): Promise<void>;
   mailboxOpen(folder: string): Promise<{ uidValidity: bigint }>;
-  search(query: { subject: string }, options: { uid: true }): Promise<number[] | false | undefined>;
+  search(query: { since: Date }, options: { uid: true }): Promise<number[] | false | undefined>;
   fetch(
     uids: number[],
-    query: { bodyStructure: true },
+    query: { envelope: true; bodyStructure: true },
     options: { uid: true },
-  ): AsyncIterable<{ uid: number; bodyStructure?: MailPart }>;
+  ): AsyncIterable<{ uid: number; envelope?: { subject?: string }; bodyStructure?: MailPart }>;
   download(
     uid: number,
     part: string,
@@ -48,6 +48,7 @@ function attachments(node?: MailPart): string[] {
   return own.concat((node.childNodes ?? []).flatMap(attachments));
 }
 export type MailDecision = 'delete' | 'keep';
+const SEARCH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 export class ImportMailbox {
   private readonly skipped = new Set<string>();
   private timer?: ReturnType<typeof setTimeout>;
@@ -108,16 +109,20 @@ export class ImportMailbox {
       await client.connect();
       if (this.stopped) return;
       const mailbox = await client.mailboxOpen(config.folder);
-      const uids = await client.search(
-        { subject: 'RemoteKit session import to ' + this.keyId() },
-        { uid: true },
-      );
+      // Some providers (NetEase) answer SUBJECT/HEADER searches with nothing, so search only by
+      // date and match the subject locally. Imports older than the window are rejected anyway.
+      const uids = await client.search({ since: new Date(this.now() - SEARCH_WINDOW_MS) }, { uid: true });
       const remaining = (uids || []).filter((uid) => !this.skipped.has(`${mailbox.uidValidity}:${uid}`));
+      const subject = 'RemoteKit session import to ' + this.keyId();
       // Finish FETCH before issuing download or delete commands on the same connection.
       const messages: { uid: number; bodyStructure?: MailPart }[] = [];
       if (remaining.length) {
-        for await (const message of client.fetch(remaining, { bodyStructure: true }, { uid: true }))
-          messages.push(message);
+        for await (const message of client.fetch(
+          remaining,
+          { envelope: true, bodyStructure: true },
+          { uid: true },
+        ))
+          if (message.envelope?.subject === subject) messages.push(message);
       }
       const batch: { uid: number; bytes: Buffer }[] = [];
       for (const message of messages) {

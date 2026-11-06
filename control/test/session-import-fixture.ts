@@ -94,10 +94,12 @@ export class FakeMailClient implements MailClient {
   readonly deleted: number[] = [];
   uidValidity = 1n;
   failure?: Error;
-  messages = new Map<number, { bytes: Buffer; bodyStructure?: MailPart }>();
+  messages = new Map<number, { subject: string; bytes: Buffer; bodyStructure?: MailPart }>();
+  subject = '';
   errorListener?: (error: Error) => void;
-  add(uid: number, bytes: Buffer) {
+  add(uid: number, bytes: Buffer, subject = this.subject) {
     this.messages.set(uid, {
+      subject,
       bytes,
       bodyStructure: {
         childNodes: [
@@ -115,15 +117,18 @@ export class FakeMailClient implements MailClient {
     this.calls.push('select:' + folder);
     return { uidValidity: this.uidValidity };
   }
-  async search(query: { subject: string }, options: { uid: true }) {
-    this.calls.push('search:' + query.subject + ':' + options.uid);
+  async search(query: { since: Date }, options: { uid: true }) {
+    this.calls.push('search:since:' + options.uid);
+    this.since = query.since;
     return [...this.messages.keys()];
   }
-  async *fetch(uids: number[], _query: { bodyStructure: true }, options: { uid: true }) {
+  since?: Date;
+  async *fetch(uids: number[], _query: { envelope: true; bodyStructure: true }, options: { uid: true }) {
     this.calls.push('fetch:' + options.uid);
     for (const uid of uids) {
       this.calls.push('fetch:' + uid);
-      yield { uid, bodyStructure: this.messages.get(uid)!.bodyStructure };
+      const message = this.messages.get(uid)!;
+      yield { uid, envelope: { subject: message.subject }, bodyStructure: message.bodyStructure };
     }
     this.calls.push('fetch:done');
   }

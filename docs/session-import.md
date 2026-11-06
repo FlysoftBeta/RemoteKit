@@ -138,7 +138,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 
 - 主题 `RemoteKit session import to <接收方 key id>`，头 `X-RemoteKit-Import: 2`，一段说明性纯文本正文，附件 `message.rksi`（`application/octet-stream`，base64）。一封信只有一个信封。
 - 设备 → Control：从 App 内置账户发往部署配置的 `mailbox`。Control → 设备：从 `sessionImport.mailbox` 经 `sessionImport.smtp` 发往 `sessionImport.appMailbox`。
-- 双方都只经 TLS 发信（465 隐式 TLS 或 587 STARTTLS 必须成功）、只用隐式 TLS 收信（993），收信时 IMAP 搜索主题含自己 key id 的信。服务器 CAPABILITY 含 `ID` 时先发 IMAP ID（网易 163 等在没有 ID 时拒绝 SELECT）。
+- 双方都只经 TLS 发信（465 隐式 TLS 或 587 STARTTLS 必须成功）、只用隐式 TLS 收信（993），收信时 IMAP 只按日期搜索最近 30 天的信（SEARCH SINCE），取信封后在本地按主题精确匹配发给自己 key id 的信：网易 163 等对 SUBJECT、HEADER、FROM 搜索一律返回空。服务器 CAPABILITY 含 `ID` 时先发 IMAP ID（网易 163 等在没有 ID 时拒绝 SELECT）。
 - App 收件箱由所有安装共享：App 只处理发给自己 key id 的信，处理完删除；主题以 `RemoteKit session import to ` 开头且超过 30 天的信，不论发给谁都删除，清理已卸载设备留下的回信。
 - 先提交本地状态再删信；两者之间崩溃会在下次以重复 seq 被识别并删除。暂不能处理的信（缺口未补上、被限流）不删，下一轮再试。
 
@@ -166,7 +166,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 }
 ```
 
-- `ImportMailbox` 每 `pollSeconds` 用 imapflow 连接一次（不保持 IDLE），搜索主题含 Control key id 的信，读 bodyStructure，只下载文件名以 `.rksi` 结尾的附件。头部不对、解密失败、消息无效 → 写日志并删除。
+- `ImportMailbox` 每 `pollSeconds` 用 imapflow 连接一次（不保持 IDLE），按日期搜索最近 30 天的信，取 envelope 与 bodyStructure，只处理主题等于发给 Control key id 的信，只下载文件名以 `.rksi` 结尾的附件。头部不对、解密失败、消息无效 → 写日志并删除。
 - 一轮内把所有能解开的消息按设备分组、按区间起点排序后依次处理，能连续应用的应用掉；仍有缺口的信留在邮箱里。
 - 已配对设备的 `import`：
   - 字段非法 → `importFailed`（`retryable: false`）；超过限制 → `importFailed`，原因写明哪项超限（`retryable: false`）；`at` 早于 30 天 → `importFailed`（"导入已超过 30 天"，`retryable: false`）。
