@@ -5,7 +5,10 @@ import { validPassword } from '../auth/accounts';
 import { hashSecret } from '../auth/crypto';
 import type { StoredUser } from '../persistence/accounts';
 
-type Services = Pick<DomainServices, 'accounts' | 'viewers' | 'lifecycle' | 'objects' | 'sessionPurge'>;
+type Services = Pick<
+  DomainServices,
+  'accounts' | 'viewers' | 'lifecycle' | 'objects' | 'sessionPurge' | 'sessionImporter'
+>;
 
 export class UserAdmin {
   constructor(
@@ -156,7 +159,7 @@ export class UserAdmin {
     await this.context.tenants.serial(user.tenant, async () => {
       await this.context.endpoint.hibernating.get(user.tenant)?.catch(() => {});
       const store = this.context.store;
-      store.transaction(() => {
+      const importMail = store.transaction(() => {
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
         if (sessionId) this.services.sessionPurge.enqueue(sessionId);
         this.services.objects.forgetTenant(user.tenant);
@@ -164,9 +167,11 @@ export class UserAdmin {
         store.operations.deleteTenant(user.tenant);
         store.workspaces.deleteTenant(user.tenant);
         store.security.deleteUser(user.id);
-        store.sessionImports.deleteUser(user.tenant);
+        const importMail = this.services.sessionImporter.deleteUser(user.tenant);
         store.accounts.deleteUser(user.id);
+        return importMail;
       });
+      this.services.sessionImporter.queueDeletedDevices(importMail);
       this.context.endpoint.forget(user.tenant);
     });
     this.context.tenants.dispose(user.tenant);

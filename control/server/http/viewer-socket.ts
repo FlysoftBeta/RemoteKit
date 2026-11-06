@@ -42,8 +42,14 @@ const handlers: Record<string, Handler> = {
   'sessionImport.state': product(({ services, authority }) =>
     services.sessionImporter.state(authority.tenantId),
   ),
-  'sessionImport.delete': product(({ services, authority }, params) =>
-    services.sessionImporter.delete(authority.tenantId, params.id),
+  'sessionImport.pairing': product(({ services, authority }, params) =>
+    services.sessionImporter.pairing(authority.tenantId, params.open),
+  ),
+  'sessionImport.removeDevice': product(({ services, authority }, params) =>
+    services.sessionImporter.removeDevice(authority.tenantId, params.keyId),
+  ),
+  'sessionImport.discard': product(({ services, authority }, params) =>
+    services.sessionImporter.discard(authority.tenantId, params.id),
   ),
   'clock.ping': ({ services }, params) => ({
     serverTime: services.clock.wallMs(),

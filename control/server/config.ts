@@ -52,8 +52,11 @@ export interface RuntimeConfig {
 export interface SessionImportConfig {
   readonly mailbox: string;
   readonly imap: Readonly<{ host: string; port: number; user: string; password: string }>;
+  readonly smtp: Readonly<{ host: string; port: number; user: string; password: string }>;
+  readonly appMailbox: string;
   readonly folder: string;
   readonly pollSeconds: number;
+  readonly replyWindowSeconds: number;
 }
 export const defaultQuotas = Object.freeze({ tenantObjectBytes: 4 * 1024 ** 3 });
 export const nodeDefaults: Omit<NodeConfig, 'nodeId'> = Object.freeze({
@@ -214,12 +217,34 @@ export function runtimeConfig(
   const http = object(fallback(source.http, {}), ['host', 'port', 'origins', 'tls'], 'http');
   let sessionImport: SessionImportConfig | undefined;
   if (source.sessionImport !== undefined) {
-    const value = object(source.sessionImport, ['mailbox', 'imap', 'folder', 'pollSeconds'], 'sessionImport');
+    const value = object(
+      source.sessionImport,
+      ['mailbox', 'imap', 'smtp', 'appMailbox', 'folder', 'pollSeconds', 'replyWindowSeconds'],
+      'sessionImport',
+    );
     const imap = object(value.imap, ['host', 'port', 'user', 'password'], 'sessionImport.imap');
+    const smtp = object(value.smtp, ['host', 'port', 'user', 'password'], 'sessionImport.smtp');
+    const smtpPort = integer(smtp.port, 1, 65535, 'sessionImport.smtp.port');
+    if (smtpPort !== 465 && smtpPort !== 587) invalid('Invalid sessionImport.smtp.port');
+    const appMailbox = string(value.appMailbox, 'sessionImport.appMailbox');
+    if (!/^[^\s@<>]+@[^\s@<>]+$/.test(appMailbox)) invalid('Invalid sessionImport.appMailbox');
     const mailbox = string(value.mailbox, 'sessionImport.mailbox');
     if (!/^[^\s@<>]+@[^\s@<>]+$/.test(mailbox)) invalid('Invalid sessionImport.mailbox');
     sessionImport = Object.freeze({
       mailbox,
+      appMailbox,
+      smtp: Object.freeze({
+        host: string(smtp.host, 'sessionImport.smtp.host'),
+        port: smtpPort,
+        user: string(smtp.user, 'sessionImport.smtp.user'),
+        password: string(smtp.password, 'sessionImport.smtp.password'),
+      }),
+      replyWindowSeconds: integer(
+        fallback(value.replyWindowSeconds, 30),
+        0,
+        600,
+        'sessionImport.replyWindowSeconds',
+      ),
       imap: Object.freeze({
         host: string(imap.host, 'sessionImport.imap.host'),
         port: integer(fallback(imap.port, 993), 1, 65535, 'sessionImport.imap.port'),

@@ -4,3 +4,5 @@ smtp.security=tls
 smtp.username=import@example.com
 smtp.password=replace-me
 smtp.from=import@example.com
+imap.host=imap.example.com
+imap.port=993

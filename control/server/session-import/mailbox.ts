@@ -2,7 +2,7 @@ import { ImapFlow } from 'imapflow';
 import type { Readable } from 'node:stream';
 import type { SessionImportConfig } from '../config';
 import type { MailboxStatus } from '../../shared/session-import';
-import { MAX_ENVELOPE_BYTES } from './envelope';
+import { MAX_ENVELOPE_BYTES, envelopeKeyId } from './envelope';
 
 export interface MailPart {
   part?: string;
@@ -47,23 +47,31 @@ function attachments(node?: MailPart): string[] {
   const own = name?.toLowerCase().endsWith('.rksi') && node.part ? [node.part] : [];
   return own.concat((node.childNodes ?? []).flatMap(attachments));
 }
+export type MailDecision = 'delete' | 'keep';
 export class ImportMailbox {
   private readonly skipped = new Set<string>();
   private timer?: ReturnType<typeof setTimeout>;
   private running?: Promise<void>;
   private client?: MailClient;
   private stopped = false;
-  private snapshot: MailboxStatus;
+  private snapshot: Omit<MailboxStatus, 'outbox'>;
   constructor(
     private readonly config: SessionImportConfig | undefined,
-    private readonly receive: (bytes: Buffer) => Promise<'delete' | 'keep' | 'retry'>,
+    private readonly keyId: () => string,
+    private readonly receive: (batch: Buffer[]) => Promise<MailDecision[]>,
     private readonly factory: MailClientFactory = createMailClient,
     private readonly log: (message: string) => void = console.error,
+    private readonly outboxStatus: () => MailboxStatus['outbox'] = () => ({
+      pending: 0,
+      lastErrorAt: null,
+      lastError: null,
+    }),
+    private readonly now: () => number = Date.now,
   ) {
     this.snapshot = { configured: !!config, lastSuccessAt: null, lastErrorAt: null, lastError: null };
   }
   status(): MailboxStatus {
-    return { ...this.snapshot };
+    return { ...this.snapshot, outbox: this.outboxStatus() };
   }
   start() {
     if (!this.config || this.running || this.timer || this.stopped) return;
@@ -100,7 +108,10 @@ export class ImportMailbox {
       await client.connect();
       if (this.stopped) return;
       const mailbox = await client.mailboxOpen(config.folder);
-      const uids = await client.search({ subject: 'RemoteKit session import' }, { uid: true });
+      const uids = await client.search(
+        { subject: 'RemoteKit session import to ' + this.keyId() },
+        { uid: true },
+      );
       const remaining = (uids || []).filter((uid) => !this.skipped.has(`${mailbox.uidValidity}:${uid}`));
       // Finish FETCH before issuing download or delete commands on the same connection.
       const messages: { uid: number; bodyStructure?: MailPart }[] = [];
@@ -108,33 +119,57 @@ export class ImportMailbox {
         for await (const message of client.fetch(remaining, { bodyStructure: true }, { uid: true }))
           messages.push(message);
       }
+      const batch: { uid: number; bytes: Buffer }[] = [];
       for (const message of messages) {
         if (this.stopped) return;
         const parts = attachments(message.bodyStructure);
-        if (parts.length !== 1) continue;
-        const { content } = await client.download(message.uid, parts[0], {
-          uid: true,
-          maxBytes: MAX_ENVELOPE_BYTES + 1,
-        });
-        if (!content) continue;
-        const buffers: Buffer[] = [];
-        let size = 0;
-        for await (const data of content) {
-          const bytes = Buffer.from(data);
-          size += bytes.length;
-          buffers.push(bytes);
+        if (!parts.length) {
+          await client.messageDelete(message.uid, { uid: true });
+          continue;
         }
-        const decision = await this.receive(Buffer.concat(buffers, size));
-        if (decision === 'delete') await client.messageDelete(message.uid, { uid: true });
-        else if (decision === 'keep') this.skipped.add(`${mailbox.uidValidity}:${message.uid}`);
+        let addressed = false;
+        let missingContent = false;
+        for (const part of parts) {
+          const { content } = await client.download(message.uid, part, {
+            uid: true,
+            maxBytes: MAX_ENVELOPE_BYTES + 1,
+          });
+          if (!content) {
+            missingContent = true;
+            continue;
+          }
+          const buffers: Buffer[] = [];
+          let size = 0;
+          for await (const data of content) {
+            const bytes = Buffer.from(data);
+            size += bytes.length;
+            buffers.push(bytes);
+          }
+          const bytes = Buffer.concat(buffers, size);
+          const recipient = envelopeKeyId(bytes);
+          if (
+            (recipient !== undefined && recipient !== this.keyId()) ||
+            (bytes.length >= 5 && bytes.subarray(0, 4).toString() === 'RKSI' && bytes[4] !== 2)
+          )
+            continue;
+          addressed = true;
+          batch.push({ uid: message.uid, bytes });
+        }
+        if (!addressed && !missingContent) this.skipped.add(`${mailbox.uidValidity}:${message.uid}`);
+      }
+      const decisions = await this.receive(batch.map((m) => m.bytes));
+      for (const uid of new Set(batch.map((m) => m.uid))) {
+        if (batch.every((m, i) => m.uid !== uid || decisions[i] === 'delete'))
+          await client.messageDelete(uid, { uid: true });
       }
       if (connectionError) throw connectionError;
       await client.logout();
-      this.snapshot.lastSuccessAt = Date.now();
+      this.snapshot.lastSuccessAt = this.now();
+      this.snapshot.lastError = null;
     } catch (error) {
       if (!this.stopped) {
         const message = error instanceof Error ? error.message : String(error);
-        this.snapshot.lastErrorAt = Date.now();
+        this.snapshot.lastErrorAt = this.now();
         this.snapshot.lastError = message;
         this.log(`Session import mailbox: ${message}`);
       }

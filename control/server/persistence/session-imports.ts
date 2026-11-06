@@ -1,37 +1,56 @@
 import type Database from 'better-sqlite3';
-import type { ImportPayload, ImportRecord, StoredImportPayload } from '../../shared/session-import';
+import type {
+  ControlEvent,
+  DeviceEvent,
+  ImportChunk,
+  ImportRecord,
+  PairingClosedReason,
+  PairingState,
+  TimelineEntry,
+  TimelineRequest,
+} from '../../shared/session-import';
 import type { AtRestKey } from '../auth/crypto';
+import type { ImportEvent } from '../session-import/envelope';
 
-interface ImportRow {
-  id: string;
+export interface DeviceRow {
+  keyId: string;
   tenant: string;
-  sites: string;
-  device: string;
-  created_at: bigint;
-  received_at: bigint;
-  state: ImportRecord['state'];
-  cookies: bigint;
-  origins: bigint;
-  rejected_items: bigint;
-  error: string | null;
-  finished_at: bigint | null;
+  publicKey: Buffer;
+  name: string;
+  pairedAt: number;
+  inSeq: number;
+  outSeq: number;
+  ackedSeq: number;
+  resentAt: number | null;
 }
-const columns =
-  'id,tenant,sites,device,created_at,received_at,state,cookies,origins,rejected_items,error,finished_at';
-function record(row: ImportRow): ImportRecord {
+export interface StoredImport extends ImportRecord {
+  tenant: string;
+  keyId: string;
+}
+export interface OutgoingEvent {
+  rowId: number;
+  tenant: string;
+  keyId: string;
+  event: ControlEvent;
+}
+type Reply = ControlEvent extends infer E ? (E extends ControlEvent ? Omit<E, 'seq' | 'at'> : never) : never;
+function record(row: any): StoredImport {
   return {
     id: row.id,
+    tenant: row.tenant,
+    keyId: row.key_id,
     sites: JSON.parse(row.sites),
-    device: row.device,
-    createdAt: Number(row.created_at),
-    receivedAt: Number(row.received_at),
     state: row.state,
     cookies: Number(row.cookies),
     origins: Number(row.origins),
     rejectedItems: Number(row.rejected_items),
     error: row.error,
+    receivedAt: Number(row.received_at),
     finishedAt: row.finished_at === null ? null : Number(row.finished_at),
   };
+}
+function visibleRecord({ tenant, keyId, ...value }: StoredImport): ImportRecord {
+  return value;
 }
 export class SessionImportsRepository {
   constructor(
@@ -39,9 +58,7 @@ export class SessionImportsRepository {
     private readonly key: AtRestKey,
   ) {}
   keys(): { publicKey: Buffer; privateKey: Buffer; keyId: string } | undefined {
-    const row = this.db
-      .prepare('SELECT public_key, private_key, key_id FROM session_import_keys WHERE id=1')
-      .get() as { public_key: Buffer; private_key: string; key_id: string } | undefined;
+    const row = this.db.prepare('SELECT * FROM session_import_keys WHERE id=1').get() as any;
     if (row)
       return {
         publicKey: row.public_key,
@@ -54,48 +71,234 @@ export class SessionImportsRepository {
       .prepare('INSERT INTO session_import_keys VALUES (1,?,?,?)')
       .run(publicKey, this.key.seal('session-import-key:' + keyId, privateKey), keyId);
   }
-  exists(id: string) {
-    return !!this.db.prepare('SELECT 1 FROM session_imports WHERE id=?').get(id);
-  }
-  insert(tenant: string, payload: ImportPayload, receivedAt: number, rejection?: string) {
-    const session: StoredImportPayload = {
-      v: payload.v,
-      id: payload.id,
-      createdAt: payload.createdAt,
-      device: payload.device,
-      sites: payload.sites,
-      cookies: payload.cookies,
-      localStorage: payload.localStorage,
+  pairing(tenant: string, now: number): PairingState {
+    let row = this.db.prepare('SELECT * FROM session_import_pairing WHERE tenant=?').get(tenant) as any;
+    if (row?.code && Number(row.expires_at) <= now) {
+      this.closePairing(tenant, 'expired');
+      row = this.db.prepare('SELECT * FROM session_import_pairing WHERE tenant=?').get(tenant);
+    }
+    return {
+      open: !!row?.code,
+      code: row?.code
+        ? JSON.parse(this.key.open('session-import-pairing:' + tenant, row.code).toString('utf8'))
+        : null,
+      expiresAt: row?.code ? Number(row.expires_at) : null,
+      failures: Number(row?.failures ?? 0),
+      closedReason: row?.closed_reason ?? null,
     };
+  }
+  openPairing(tenant: string, code: string[], now: number) {
     this.db
-      .prepare(`INSERT INTO session_imports (${columns},payload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .prepare(
+        `INSERT INTO session_import_pairing VALUES (?,?,?,?,0,NULL) ON CONFLICT(tenant) DO UPDATE SET code=excluded.code,opened_at=excluded.opened_at,expires_at=excluded.expires_at,failures=0,closed_reason=NULL`,
+      )
       .run(
-        payload.id.toLowerCase(),
         tenant,
-        JSON.stringify(payload.sites.map(({ name, url }) => ({ name, url }))),
-        payload.device,
-        payload.createdAt,
-        receivedAt,
-        rejection ? 'rejected' : 'pending',
-        payload.cookies.length,
-        payload.localStorage.length,
-        0,
-        rejection ?? null,
-        rejection ? receivedAt : null,
-        rejection
-          ? null
-          : this.key.seal(
-              JSON.stringify(['session-import', tenant, payload.id.toLowerCase()]),
-              Buffer.from(JSON.stringify(session)),
-            ),
+        this.key.seal('session-import-pairing:' + tenant, Buffer.from(JSON.stringify(code))),
+        now,
+        now + 3 * 86400000,
       );
   }
-  list(tenant: string): ImportRecord[] {
-    return (
+  closePairing(tenant: string, reason: PairingClosedReason) {
+    this.db
+      .prepare(
+        `INSERT INTO session_import_pairing VALUES (?,NULL,NULL,NULL,0,?) ON CONFLICT(tenant) DO UPDATE SET code=NULL,closed_reason=excluded.closed_reason`,
+      )
+      .run(tenant, reason);
+  }
+  pairingFailure(tenant: string) {
+    this.db
+      .prepare(
+        'INSERT INTO session_import_pairing VALUES (?,NULL,NULL,NULL,1,NULL) ON CONFLICT(tenant) DO UPDATE SET failures=failures+1',
+      )
+      .run(tenant);
+    const row = this.db
+      .prepare('SELECT code,failures FROM session_import_pairing WHERE tenant=?')
+      .get(tenant) as any;
+    if (row?.code && Number(row.failures) >= 10) this.closePairing(tenant, 'failures');
+  }
+  device(keyId: string): DeviceRow | undefined {
+    const row = this.db.prepare('SELECT * FROM session_import_devices WHERE key_id=?').get(keyId) as any;
+    if (row)
+      return {
+        keyId,
+        tenant: row.tenant,
+        publicKey: row.public_key,
+        name: row.name,
+        pairedAt: Number(row.paired_at),
+        inSeq: Number(row.in_seq),
+        outSeq: Number(row.out_seq),
+        ackedSeq: Number(row.acked_seq),
+        resentAt: row.resent_at === null ? null : Number(row.resent_at),
+      };
+  }
+  addDevice(keyId: string, tenant: string, publicKey: Buffer, name: string, now: number) {
+    this.db
+      .prepare('INSERT INTO session_import_devices VALUES (?,?,?,?,?,0,0,0,NULL)')
+      .run(keyId, tenant, publicKey, name, now);
+  }
+  setInSeq(keyId: string, seq: number) {
+    this.db.prepare('UPDATE session_import_devices SET in_seq=? WHERE key_id=?').run(seq, keyId);
+  }
+  acknowledge(device: DeviceRow, ack: number, now: number) {
+    const acknowledged = Math.max(device.ackedSeq, Math.min(ack, device.outSeq));
+    this.db
+      .prepare('UPDATE session_import_devices SET acked_seq=? WHERE key_id=?')
+      .run(acknowledged, device.keyId);
+    if (acknowledged < device.outSeq && (device.resentAt === null || now - device.resentAt >= 900000)) {
+      const requeued = this.db
+        .prepare(
+          "UPDATE session_import_events SET mailed_at=NULL WHERE key_id=? AND direction='out' AND seq>? AND mailed_at IS NOT NULL",
+        )
+        .run(device.keyId, acknowledged);
+      if (requeued.changes)
+        this.db
+          .prepare('UPDATE session_import_devices SET resent_at=? WHERE key_id=?')
+          .run(now, device.keyId);
+    }
+  }
+  revoked(keyId: string) {
+    return !!this.db
+      .prepare(
+        "SELECT 1 FROM session_import_events WHERE key_id=? AND direction='out' AND type='revoked' LIMIT 1",
+      )
+      .get(keyId);
+  }
+  removeDevice(keyId: string) {
+    this.db.prepare('DELETE FROM session_import_devices WHERE key_id=?').run(keyId);
+  }
+  incoming(
+    tenant: string,
+    keyId: string,
+    publicKey: Buffer,
+    name: string,
+    event: DeviceEvent,
+    receivedAt: number,
+  ) {
+    let request: TimelineRequest;
+    if (event.type === 'pair') request = { type: 'pair', device: event.device };
+    else if (event.type === 'withdraw') request = { type: 'withdraw', id: event.id.toLowerCase() };
+    else
+      request = {
+        type: 'import',
+        id: event.id.toLowerCase(),
+        sites: Array.isArray(event.sites)
+          ? event.sites
+              .filter((s) => s && typeof s.name === 'string' && typeof s.url === 'string')
+              .map(({ name, url }) => ({ name, url }))
+          : [],
+        cookies: Array.isArray(event.cookies) ? event.cookies.length : 0,
+        origins: Array.isArray(event.localStorage) ? event.localStorage.length : 0,
+      };
+    const body = {
+      ...request,
+      seq: event.seq,
+      at: event.at,
+      receivedAt,
+      device: name,
+      publicKey: publicKey.toString('base64url'),
+      ...(event.type === 'pair' ? { username: event.username } : {}),
+    };
+    this.db
+      .prepare("INSERT INTO session_import_events VALUES (?,?,'in',?,?,?,NULL,?,NULL)")
+      .run(tenant, keyId, event.seq, event.at, event.type, JSON.stringify(body));
+  }
+  reply(tenant: string, keyId: string, reply: Reply, now: number): ControlEvent {
+    const device = this.device(keyId);
+    const seq = reply.type === 'pairRejected' ? 0 : (device?.outSeq ?? 0) + 1;
+    if (reply.type !== 'pairRejected' && !device) throw new Error('Missing paired device');
+    const event = { ...reply, seq, at: now } as ControlEvent;
+    this.db
+      .prepare("INSERT INTO session_import_events VALUES (?,?,'out',?,?,?,?,?,NULL)")
+      .run(tenant, keyId, seq, now, event.type, 'ref' in event ? event.ref : null, JSON.stringify(event));
+    if (seq) this.db.prepare('UPDATE session_import_devices SET out_seq=? WHERE key_id=?').run(seq, keyId);
+    return event;
+  }
+  latestRef(keyId: string, id: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT seq FROM session_import_events WHERE key_id=? AND direction='in' AND type='import' AND json_extract(body,'$.id')=? ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(keyId, id) as any;
+    if (row) return Number(row.seq);
+    const imported = this.db
+      .prepare("SELECT tenant,payload FROM session_imports WHERE key_id=? AND id=? AND state='pending'")
+      .get(keyId, id) as any;
+    return imported
+      ? JSON.parse(
+          this.key
+            .open(JSON.stringify(['session-import', imported.tenant, id]), imported.payload)
+            .toString('utf8'),
+        ).ref
+      : 0;
+  }
+  rememberRef(tenant: string, id: string, ref: number) {
+    const payload = this.payload(tenant, id);
+    if (payload)
       this.db
-        .prepare(`SELECT ${columns} FROM session_imports WHERE tenant=? ORDER BY received_at DESC,id`)
-        .all(tenant) as ImportRow[]
-    ).map(record);
+        .prepare("UPDATE session_imports SET payload=? WHERE tenant=? AND id=? AND state='pending'")
+        .run(
+          this.key.seal(
+            JSON.stringify(['session-import', tenant, id]),
+            Buffer.from(JSON.stringify({ ...payload, ref })),
+          ),
+          tenant,
+          id,
+        );
+  }
+  appliedEvent(keyId: string, id: string): Extract<ControlEvent, { type: 'importApplied' }> | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT body FROM session_import_events WHERE key_id=? AND direction='out' AND type='importApplied' AND json_extract(body,'$.id')=? ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(keyId, id) as any;
+    return row ? JSON.parse(row.body) : undefined;
+  }
+  failedRetryable(keyId: string, id: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT body FROM session_import_events WHERE key_id=? AND direction='out' AND type='importFailed' AND json_extract(body,'$.id')=? ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(keyId, id) as any;
+    return row ? JSON.parse(row.body).retryable : false;
+  }
+  get(id: string): StoredImport | undefined {
+    const row = this.db.prepare('SELECT * FROM session_imports WHERE id=?').get(id) as any;
+    return row ? record(row) : undefined;
+  }
+  saveImport(tenant: string, keyId: string, event: ImportEvent, now: number, error: string | null) {
+    const id = event.id.toLowerCase();
+    const payload = error
+      ? null
+      : this.key.seal(
+          JSON.stringify(['session-import', tenant, id]),
+          Buffer.from(
+            JSON.stringify({ cookies: event.cookies, localStorage: event.localStorage, ref: event.seq }),
+          ),
+        );
+    const sites = Array.isArray(event.sites)
+      ? event.sites
+          .filter((s) => s && typeof s.name === 'string' && typeof s.url === 'string')
+          .map(({ name, url }) => ({ name, url }))
+      : [];
+    this.db
+      .prepare(
+        `INSERT INTO session_imports VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET sites=excluded.sites,state=excluded.state,payload=excluded.payload,cookies=excluded.cookies,origins=excluded.origins,rejected_items=0,error=excluded.error,received_at=excluded.received_at,finished_at=excluded.finished_at`,
+      )
+      .run(
+        id,
+        tenant,
+        keyId,
+        JSON.stringify(sites),
+        error ? 'failed' : 'pending',
+        payload,
+        Array.isArray(event.cookies) ? event.cookies.length : 0,
+        Array.isArray(event.localStorage) ? event.localStorage.length : 0,
+        0,
+        error,
+        now,
+        error ? now : null,
+      );
   }
   pendingTenants(): string[] {
     return (
@@ -104,47 +307,165 @@ export class SessionImportsRepository {
       }[]
     ).map((row) => row.tenant);
   }
-  pending(tenant: string): ImportRecord[] {
+  pending(tenant: string): StoredImport[] {
     return (
       this.db
         .prepare(
-          `SELECT ${columns} FROM session_imports WHERE tenant=? AND state='pending' ORDER BY received_at,id`,
+          "SELECT * FROM session_imports WHERE tenant=? AND state='pending' ORDER BY received_at,rowid",
         )
-        .all(tenant) as ImportRow[]
+        .all(tenant) as any[]
     ).map(record);
   }
-  payload(tenant: string, id: string): StoredImportPayload | undefined {
+  payload(tenant: string, id: string): ImportChunk | undefined {
     const row = this.db
       .prepare("SELECT payload FROM session_imports WHERE tenant=? AND id=? AND state='pending'")
-      .get(tenant, id) as { payload: string } | undefined;
+      .get(tenant, id) as any;
     if (row)
       return JSON.parse(
         this.key.open(JSON.stringify(['session-import', tenant, id]), row.payload).toString('utf8'),
       );
   }
   isPending(tenant: string, id: string) {
-    return !!this.db
-      .prepare("SELECT 1 FROM session_imports WHERE tenant=? AND id=? AND state='pending'")
-      .get(tenant, id);
+    return this.get(id)?.tenant === tenant && this.get(id)?.state === 'pending';
   }
   finish(
     tenant: string,
     id: string,
-    state: 'applied' | 'failed',
+    state: 'applied' | 'failed' | 'discarded',
     rejectedItems: number,
     error: string | null,
-    at: number,
+    now: number,
   ) {
     this.db
       .prepare(
         "UPDATE session_imports SET state=?,payload=NULL,rejected_items=?,error=?,finished_at=? WHERE tenant=? AND id=? AND state='pending'",
       )
-      .run(state, rejectedItems, error, at, tenant, id);
+      .run(state, rejectedItems, error, now, tenant, id);
   }
-  delete(tenant: string, id: string) {
-    this.db.prepare('DELETE FROM session_imports WHERE tenant=? AND id=?').run(tenant, id);
+  devices(tenant: string) {
+    return (
+      this.db
+        .prepare(
+          `SELECT d.*, (SELECT MAX(at) FROM session_import_events e WHERE e.key_id=d.key_id AND e.tenant=d.tenant AND direction='in') AS last_request_at FROM session_import_devices d WHERE tenant=? ORDER BY paired_at DESC,rowid DESC`,
+        )
+        .all(tenant) as any[]
+    ).map((row) => ({
+      keyId: row.key_id,
+      name: row.name,
+      pairedAt: Number(row.paired_at),
+      lastRequestAt: row.last_request_at === null ? null : Number(row.last_request_at),
+    }));
+  }
+  timeline(tenant: string): TimelineEntry[] {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM session_import_events WHERE tenant=? AND direction='in' ORDER BY json_extract(body,'$.receivedAt') DESC,rowid DESC LIMIT 200",
+      )
+      .all(tenant) as any[];
+    return rows.map((row) => {
+      const body = JSON.parse(row.body);
+      const device = this.device(row.key_id);
+      const replies = (
+        this.db
+          .prepare(
+            "SELECT body FROM session_import_events WHERE tenant=? AND key_id=? AND direction='out' AND ref=? ORDER BY at,rowid",
+          )
+          .all(tenant, row.key_id, row.seq) as any[]
+      ).map((r) => JSON.parse(r.body));
+      const imported = body.type === 'import' ? this.get(body.id) : undefined;
+      const request: TimelineRequest =
+        body.type === 'pair'
+          ? { type: 'pair', device: body.device }
+          : body.type === 'withdraw'
+            ? { type: 'withdraw', id: body.id }
+            : {
+                type: 'import',
+                id: body.id,
+                sites: body.sites,
+                cookies: body.cookies,
+                origins: body.origins,
+              };
+      return {
+        keyId: row.key_id,
+        device: device?.tenant === tenant ? device.name : body.device,
+        paired: device?.tenant === tenant,
+        seq: Number(row.seq),
+        at: Number(row.at),
+        receivedAt: body.receivedAt,
+        request,
+        record: imported?.tenant === tenant ? visibleRecord(imported) : null,
+        replies,
+      };
+    });
+  }
+  unacknowledged(keyId: string): ControlEvent[] {
+    const device = this.device(keyId)!;
+    return (
+      this.db
+        .prepare(
+          "SELECT body FROM session_import_events WHERE key_id=? AND direction='out' AND seq>? ORDER BY seq",
+        )
+        .all(keyId, device.ackedSeq) as { body: string }[]
+    ).map((row) => JSON.parse(row.body));
+  }
+  outgoing(): OutgoingEvent[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT rowid,* FROM session_import_events WHERE direction='out' AND mailed_at IS NULL ORDER BY key_id,seq,at,rowid",
+        )
+        .all() as any[]
+    ).map((row) => ({
+      rowId: Number(row.rowid),
+      tenant: row.tenant,
+      keyId: row.key_id,
+      event: JSON.parse(row.body),
+    }));
+  }
+  lastInSeq(keyId: string): number {
+    const row = this.db
+      .prepare("SELECT MAX(seq) AS seq FROM session_import_events WHERE key_id=? AND direction='in'")
+      .get(keyId) as any;
+    return Number(row?.seq ?? 0);
+  }
+  recipient(keyId: string): Buffer | undefined {
+    const device = this.device(keyId);
+    if (device) return device.publicKey;
+    const row = this.db
+      .prepare(
+        "SELECT body FROM session_import_events WHERE key_id=? AND direction='in' ORDER BY rowid DESC LIMIT 1",
+      )
+      .get(keyId) as any;
+    return row ? Buffer.from(JSON.parse(row.body).publicKey, 'base64url') : undefined;
+  }
+  mailed(row: OutgoingEvent, now: number) {
+    this.db
+      .prepare(
+        "UPDATE session_import_events SET mailed_at=? WHERE rowid=? AND tenant=? AND key_id=? AND direction='out' AND body=?",
+      )
+      .run(now, row.rowId, row.tenant, row.keyId, JSON.stringify(row.event));
+  }
+  retain(now: number) {
+    const cutoff = now - 180 * 86400000;
+    this.db
+      .prepare(
+        "DELETE FROM session_import_events WHERE CASE WHEN direction='in' THEN json_extract(body,'$.receivedAt') ELSE at END < ?",
+      )
+      .run(cutoff);
+    this.db.prepare("DELETE FROM session_imports WHERE state!='pending' AND finished_at<?").run(cutoff);
+    this.db
+      .prepare(
+        "UPDATE session_import_pairing SET code=NULL,closed_reason='expired' WHERE code IS NOT NULL AND expires_at<=?",
+      )
+      .run(now);
   }
   deleteUser(tenant: string) {
-    this.db.prepare('DELETE FROM session_imports WHERE tenant=?').run(tenant);
+    for (const table of [
+      'session_import_pairing',
+      'session_import_devices',
+      'session_import_events',
+      'session_imports',
+    ])
+      this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
   }
 }

@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:net';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { WebSocket } from 'ws';
+import Sqlite from 'better-sqlite3';
+import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const scratchRoot = resolve(root, '../develop/tmp');
 await mkdir(scratchRoot, { recursive: true });
@@ -25,6 +27,13 @@ const imap = createServer((socket) => {
   imapConnections++;
   socket.destroy();
 });
+let smtpConnections = 0;
+const smtp = createServer((socket) => {
+  smtpConnections++;
+  socket.destroy();
+});
+smtp.listen(465, '127.0.0.1');
+await once(smtp, 'listening');
 imap.listen(0, '127.0.0.1');
 await once(imap, 'listening');
 await writeFile(
@@ -35,6 +44,8 @@ await writeFile(
     nodes: { production: {} },
     sessionImport: {
       mailbox: 'production@example.test',
+      appMailbox: 'app@example.test',
+      smtp: { host: '127.0.0.1', port: 465, user: 'test', password: 'test' },
       imap: { host: '127.0.0.1', port: imap.address().port, user: 'test', password: 'test' },
     },
   }),
@@ -80,6 +91,28 @@ try {
   assert.equal(response.status, 200);
   const { user } = await response.json();
   assert.equal(user.isAdmin, true);
+  const seed = new Sqlite(resolve(deployment, 'data/control.db'));
+  const tenant = seed.prepare('SELECT tenant FROM users WHERE id=?').get(user.id).tenant;
+  const privateKey = createPrivateKey({
+    key: Buffer.concat([
+      Buffer.from('302e020100300506032b656e04220420', 'hex'),
+      Buffer.from(Array.from({ length: 32 }, (_, i) => i + 33)),
+    ]),
+    format: 'der',
+    type: 'pkcs8',
+  });
+  const publicKey = Buffer.from(createPublicKey(privateKey).export({ format: 'jwk' }).x, 'base64url');
+  const keyId = createHash('sha256').update(publicKey).digest('hex').slice(0, 16);
+  const event = { seq: 1, at: Date.now() - 600000, type: 'paired', ref: 1, username: 'production-user' };
+  seed.transaction(() => {
+    seed
+      .prepare('INSERT INTO session_import_devices VALUES (?,?,?,?,?,1,1,0,NULL)')
+      .run(keyId, tenant, publicKey, 'Production smoke', event.at);
+    seed
+      .prepare("INSERT INTO session_import_events VALUES (?,?,'out',?,?,?,?,?,NULL)")
+      .run(tenant, keyId, 1, event.at, 'paired', 1, JSON.stringify(event));
+  })();
+  seed.close();
   const cookie = response.headers.get('set-cookie').split(';')[0];
   const me = await fetch(base + '/api/auth/me', { headers: { Cookie: cookie } });
   assert.equal(me.status, 200);
@@ -103,7 +136,7 @@ try {
     assert.equal(auth.user.id, user.id);
     assert.equal(auth.locked, false);
     let sequence = 0;
-    const mailboxStatus = () =>
+    const request = (method = 'admin.overview', params = {}) =>
       new Promise((resolve, reject) => {
         const id = 'overview-' + ++sequence;
         const timer = setTimeout(() => {
@@ -116,22 +149,30 @@ try {
           clearTimeout(timer);
           socket.off('message', receive);
           if (message.type === 'error') reject(new Error(JSON.stringify(message.error)));
-          else resolve(message.result.sessionImport);
+          else resolve(message.result);
         };
         socket.on('message', receive);
-        socket.send(JSON.stringify({ id, method: 'admin.overview', params: {} }));
+        socket.send(JSON.stringify({ id, method, params }));
       });
+    const pairing = await request('sessionImport.pairing', { open: true });
+    assert.equal(pairing.code.length, 5);
+    assert.ok(pairing.code.every((word) => /^[a-z]+$/.test(word)));
     let state;
-    for (let attempt = 0; attempt < 40; attempt++) {
-      state = await mailboxStatus();
-      if (state.lastErrorAt) break;
-      await sleep(50);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      state = (await request()).sessionImport;
+      if (state.lastErrorAt && state.outbox.lastErrorAt) break;
+      await sleep(250);
     }
     assert.ok(imapConnections > 0, 'Bundled ImapFlow client reached the local TCP server');
     assert.equal(state.configured, true);
     assert.ok(state.lastErrorAt);
     assert.match(state.lastError, /TLS|socket|closed|ECONNRESET/i);
     assert.doesNotMatch(state.lastError, /Dynamic require|Cannot find module|not defined/);
+    assert.ok(smtpConnections > 0, 'Bundled nodemailer reached the local TCP server');
+    assert.equal(state.outbox.pending, 1);
+    assert.ok(state.outbox.lastErrorAt);
+    assert.match(state.outbox.lastError, /TLS|socket|closed|ECONNRESET/i);
+    assert.doesNotMatch(state.outbox.lastError, /Dynamic require|Cannot find module|not defined/);
   } finally {
     socket.terminate();
   }
@@ -147,5 +188,8 @@ try {
   const kill = setTimeout(() => child.kill(), 4000);
   await exited;
   clearTimeout(kill);
-  await new Promise((resolve) => imap.close(resolve));
+  await Promise.all([
+    new Promise((resolve) => imap.close(resolve)),
+    new Promise((resolve) => smtp.close(resolve)),
+  ]);
 }

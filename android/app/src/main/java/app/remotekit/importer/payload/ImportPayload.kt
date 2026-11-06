@@ -1,7 +1,6 @@
 package app.remotekit.importer.payload
 
 import app.remotekit.importer.R
-import app.remotekit.importer.account.validateAccount
 import app.remotekit.importer.deployment.ContractJson
 import app.remotekit.importer.requireMessage
 import java.net.URI
@@ -37,26 +36,15 @@ data class ImportCookie(
 
 @Serializable
 data class ImportPayload(
-    val v: Int = 1,
     val id: String,
-    val createdAt: Long,
-    val username: String,
-    val password: String,
-    val device: String,
     val sites: List<ImportSite>,
     val cookies: List<ImportCookie>,
     val localStorage: List<OriginStorage>,
 ) {
     fun validate() {
-        requireMessage(v == 1) { R.string.payload_version_error }
         val uuid = UUID.fromString(id)
         requireMessage(uuid.version() == 4 && uuid.variant() == 2 && uuid.toString() == id) {
             R.string.payload_invalid_uuid
-        }
-        requireMessage(createdAt >= 0) { R.string.payload_invalid_time }
-        validateAccount(username, password)
-        requireMessage(device.isNotBlank() && device.codePointCount(0, device.length) <= 64) {
-            R.string.device_name_limit
         }
         requireMessage(sites.size in 1..16 && sites.map { it.url }.distinct().size == sites.size) {
             R.string.site_count_limit

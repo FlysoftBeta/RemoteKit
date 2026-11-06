@@ -19,6 +19,7 @@
     "@mui/material": "^7.3.11",
     "better-sqlite3": "^12.4.1",
     "imapflow": "^2.10.2",
+    "nodemailer": "^10.3.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "ws": "^8.22.1"
@@ -26,6 +27,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.10.0",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@types/ws": "^8.18.2",

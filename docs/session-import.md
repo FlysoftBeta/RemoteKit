@@ -1,29 +1,36 @@
 # 会话导入
 
-RemoteKit 部署在内网，用户使用时通常拿不到手机，短信/动态码一类的二次验证没法现场完成。会话导入让用户提前在手机上登录网站，把登录状态（cookies 与 localStorage）加密后经邮件送进 Control，Control 再写入该用户的 Browser Profile。
+RemoteKit 部署在内网，用户使用时通常拿不到手机，短信/动态码一类的二次验证没法现场完成。会话导入让用户提前在手机上登录网站，把登录状态（cookies 与 localStorage）经邮件送进 Control，Control 再写入该用户的 Browser Profile。
 
-内网的 Control 外部不可达，也不能常驻在线，所以不建立任何手机→Control 的直连：邮箱充当无服务器的消息队列。手机 App 用内置的公共邮箱发件，Control 定时用 IMAP 拉取。邮箱内容只有密文，邮箱本身不受信任。
+内网的 Control 外部不可达，也不常驻在线，所以不建立手机与 Control 之间的任何直连：邮件是双向信道。手机 App 与 Control 之间交换的是有序事件流，App 发请求（配对、导入、撤回），Control 回事件（已配对、已收到、已导入、失败……）。邮箱只承载密文，本身不受信任。
 
 ```
- Android App                         邮箱（不受信任）              Control                       Endpoint → Browser
- ┌───────────────────────┐  SMTP   ┌──────────────┐  IMAP 拉取  ┌───────────────────────┐ 管理 RPC ┌──────────────────┐
- │ 隔离 WebView Profile  │────────►│ RemoteKit    │◄────────────│ 解密 · 校验账密 · 去重  │────────►│ storage.import    │
- │ 登录 → 导出 → HPKE 封装 │  .rksi  │ session      │  删除已处理  │ 存储 · 等 Session 活跃  │         │ CookieManager     │
- │ 发送成功 → 销毁本地状态 │         │ import <id>  │             │ 分块写入 · 记录结果     │         │ LocalStorageControl│
- └───────────────────────┘         └──────────────┘             └───────────────────────┘         └──────────────────┘
+ Android App（设备密钥）                 邮箱（不受信任）                 Control（导入密钥）
+ ┌──────────────────────────┐   SMTP   ┌───────────────┐   IMAP   ┌─────────────────────────────┐   管理 RPC
+ │ 配对 · 一次性浏览器 · 请求  │─────────►│ Control 收件箱 │─────────►│ 解密 · 排序 · 配对/信任 · 去重 │──────────► Endpoint → Browser
+ │ 发件队列（合并、重传）      │          └───────────────┘          │ 导入记录 · 等 Session 活跃写入 │
+ │ timeline · 重试            │   IMAP   ┌───────────────┐   SMTP   │ 事件 · 发件队列（合并、重传）   │
+ │ 按 seq 应用回复事件         │◄─────────│ App 收件箱     │◄─────────│ timeline（Viewer）            │
+ └──────────────────────────┘          └───────────────┘          └─────────────────────────────┘
 ```
 
-## 部署配置与账户
+## 信任模型
 
-没有配对步骤。App 需要的部署信息在构建时内置，用户在 App 里填自己的 RemoteKit 用户名和密码，Control 收信时按普通密码验证。
+- **信任根内置**：每个 Control 有一对 X25519 导入密钥。公钥随部署配置在构建时写进 App，App 只接受由这把密钥发出的事件，也只向它发送请求。
+- **设备密钥**：每个 App 安装首次启动时生成自己的 X25519 密钥对，私钥不出设备。设备 ID 即 key id（公钥 SHA-256 的前 8 字节，16 位小写 hex）。
+- **双向认证加密**：两个方向都用 HPKE Auth 模式，用发送方静态私钥与接收方公钥封装。接收方解开即证明发送方持有对应私钥，不依赖任何公钥保密。
+- **配对**：设备第一次与 Control 建立信任必须同时给出正确的用户名、密码与配对码，而配对码只在用户主动打开配对开关后存在。配对成功后 Control 按公钥信任该设备，此后该设备的请求不再带任何凭据。
+- **爆破防护**：App 与 Control 公钥都可以被任何人拿到，所以任何人都能构造配对请求并收到回复。配对码让这条路径默认关闭：开关关闭时任何组合都失败；打开时有 3 天期限、一次成功即关闭、累计 10 次失败即关闭，失败原因统一为一句话，不区分是哪一项错误。密码校验与登录共用按用户的尝试限流。
 
-- 部署配置：Control 的导入公钥、收件邮箱，以及 RemoteKit Browser 当前的 UA/Client Hints。管理员在管理员面板→概览→会话导入里下载 `deployment.json`，放到 `android/deployment.json` 后构建 App（与内置发件邮箱一样，不入库）。一个 App 构建对应一个部署；Control 换导入密钥或 Browser 升级后需要重新下载并重新构建。
+## 部署配置
+
+App 需要的部署信息在构建时内置，没有运行时的发现步骤。管理员在管理员面板→概览→会话导入里下载 `deployment.json`，放到 `android/deployment.json` 后构建 App（不入库）。一个 App 构建对应一个部署；Control 换导入密钥或 Browser 升级后需要重新下载并重新构建。
 
 ```json
 {
   "v": 1,
   "server": "Control 显示名（HTTP Host）",
-  "mailbox": "收件地址",
+  "mailbox": "Control 收件地址",
   "key": { "id": "16 位小写 hex", "x25519": "base64url 32 字节公钥" },
   "browser": {
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ...",
@@ -40,35 +47,54 @@ RemoteKit 部署在内网，用户使用时通常拿不到手机，短信/动态
 }
 ```
 
-- `browser` 由 Browser 的 `identity` 控制方法给出（与页面看到的 `ChromeUserAgent()`/`ChromeUserAgentMetadata()` 同源，含 GREASE 品牌），Control 不维护版本字符串。App 用它让登录时的 WebView 对网站表现为与 RemoteKit 相同的桌面 Chrome，避免网站把会话绑定到不同的设备指纹。
-- 导入密钥：每个 Control 一对 X25519 密钥，首次使用时生成；私钥用 Control 的 at-rest 密钥加密后存库。`key.id` 是公钥 SHA-256 的前 8 字节，用来在共享邮箱里识别发给本 Control 的信件。
-- 账户：用户名与密码随每个信封加密发送。修改密码后，此前封装的信封会被拒绝，需要重新导出。
+- `browser` 由 Browser 的 `identity` 控制方法给出（与页面看到的 `ChromeUserAgent()`/`ChromeUserAgentMetadata()` 同源，含 GREASE 品牌），Control 不维护版本字符串。App 用它让登录时的 WebView 对网站表现为与 RemoteKit 相同的桌面 Chrome。
+- 导入密钥首次使用时生成，私钥用 Control 的 at-rest 密钥加密后存库。
+- App 自己的收发邮箱（内置账户）写在不入库的 `android/mailbox.properties`；它的地址必须与 Control 配置里的 `appMailbox` 一致，Control 只往这个地址回信。
 
 ## 信封
 
-二进制文件 `.rksi`：
+两个方向使用同一种二进制文件 `.rksi`：
 
 | 偏移 | 长度 | 内容 |
 |---|---|---|
 | 0 | 4 | ASCII `RKSI` |
-| 4 | 1 | 版本 `0x01` |
-| 5 | 8 | key id |
-| 13 | 32 | HPKE `enc`（发送方临时 X25519 公钥） |
-| 45 | 余下 | HPKE 密文 |
+| 4 | 1 | 版本 `0x02` |
+| 5 | 8 | 接收方 key id |
+| 13 | 32 | 发送方静态 X25519 公钥 |
+| 45 | 32 | HPKE `enc`（临时公钥） |
+| 77 | 余下 | HPKE 密文 |
 
-- HPKE（RFC 9180）base 模式，DHKEM(X25519, HKDF-SHA256) `0x0020`、HKDF-SHA256 `0x0001`、AES-256-GCM `0x0002`，单次 seal（序号 0）。`info` 为 UTF-8 `RemoteKit session import v1`，`aad` 为前 13 字节头。发送方不签名：信封只能由知道账户密码的人构造，账密在密文里。
-- 明文是 gzip 压缩的 UTF-8 JSON 载荷。信封上限 16 MiB，解压后上限 32 MiB。
+- HPKE（RFC 9180）Auth 模式 `0x02`，DHKEM(X25519, HKDF-SHA256) `0x0020`、HKDF-SHA256 `0x0001`、AES-256-GCM `0x0002`，单次 seal（序号 0）。`info` 为 UTF-8 `RemoteKit session import v2`，`aad` 为前 45 字节头。
+- 明文是 gzip 压缩的 UTF-8 JSON 消息。信封上限 16 MiB，解压后上限 32 MiB。超过上限的一批事件拆成多个信封，每个信封仍是连续的 seq 区间。
+- App 只接受发送方公钥等于内置 Control 公钥的信封；Control 用发送方公钥算出设备 key id。
 
-载荷：
+## 消息与事件
+
+消息：
+
+```json
+{ "v": 2, "ack": 12, "events": [{ "seq": 13, "at": 1793900000000, "type": "import", "...": "..." }] }
+```
+
+- 每个方向、每台设备一条独立的事件流。`seq` 从 1 开始逐一递增；一条消息里的 `events` 是连续升序区间，可以为空（只为传递 `ack`）。
+- `ack` 是发送方已按序应用的对方最大连续 seq（没有则为 0）。
+- `at` 是事件产生时的 Unix 毫秒。
+- 接收方严格按 seq 应用事件：`seq ≤` 已应用值的是重复，忽略；区间起点大于已应用值 + 1 时，整条消息暂不处理，等缺口补上。唯一例外是 Control 发给未配对设备的 `pairRejected`，它不占序号（`seq: 0`），收到即应用。
+
+设备 → Control：
+
+| type | 字段 | 含义 |
+|---|---|---|
+| `pair` | `username`、`password`、`code`（5 个单词的数组）、`device`（设备名 ≤64 字符） | 配对请求 |
+| `import` | `id`（UUID v4）、`sites`、`cookies`、`localStorage` | 导入请求；重试时用同一 `id` 重新发送 |
+| `withdraw` | `id` | 撤回尚未写入的导入 |
+
+`import` 的字段与限制：
 
 ```json
 {
-  "v": 1,
-  "id": "UUID v4，导入 ID，用于去重",
-  "createdAt": 1793900000000,
-  "username": "RemoteKit 用户名",
-  "password": "RemoteKit 密码",
-  "device": "设备名（≤64 字符）",
+  "seq": 2, "at": 1793900000000, "type": "import",
+  "id": "UUID v4",
   "sites": [{ "name": "站点名（≤128 字符）", "url": "https://该站点最后访问的页面" }],
   "cookies": [
     {
@@ -78,56 +104,102 @@ RemoteKit 部署在内网，用户使用时通常拿不到手机，短信/动态
       "expires": 1825436000000
     }
   ],
-  "localStorage": [
-    { "origin": "https://www.example.com", "items": [["key", "value"]] }
-  ]
+  "localStorage": [{ "origin": "https://www.example.com", "items": [["key", "value"]] }]
 }
 ```
 
-- `expires` 为 Unix 毫秒，`null` 表示会话 cookie。`hostOnly=true` 时 `domain` 是不带前导点的主机名。`sites[].url`、`origin` 只接受 http/https，`origin` 必须是序列化后的 origin（无路径）。
-- 一个载荷对应 App 里的一次登录浏览，可包含多个站点：`sites` 1–16 项、`url` 互不相同；cookies 与 localStorage 是这些站点导出结果的合集，不按站点分组。
-- 限制：username 1–64 字符、password 1–256 字符；cookies ≤ 4096 条，单条 name+value ≤ 4096 字节；origin ≤ 256 个，每个 origin 的 key+value 合计 ≤ 10 MiB（Chromium localStorage 配额），单个条目按其 JSON 序列化（`["key","value"]` 的 UTF-8 字节数，含转义）≤ 256 KiB，保证分块后每条控制消息仍小于 1 MiB；条目不跨块拆分。
-- 载荷只描述登录状态。怎样从网站取得这些状态由 App 里按站点适配的导出器决定，不属于本契约。
+- `sites` 1–16 项、`url` 互不相同；cookies 与 localStorage 是这些站点导出结果的合集。`expires` 为 Unix 毫秒，`null` 表示会话 cookie；`hostOnly=true` 时 `domain` 是不带前导点的主机名。`url`、`origin` 只接受 http/https，`origin` 是序列化后的 origin（无路径）。
+- cookies ≤ 4096 条，单条 name+value ≤ 4096 字节；origin ≤ 256 个，每个 origin 的 key+value 合计 ≤ 10 MiB，单个条目按其 JSON 序列化（`["key","value"]` 的 UTF-8 字节数）≤ 256 KiB；条目不跨块拆分。username 1–64 字符、password 1–256 字符。
+- 怎样从网站取得这些状态由 App 里按站点适配的导出器决定，不属于本契约。
+
+Control → 设备（`ref` 是所回复的设备事件 seq）：
+
+| type | 字段 | 含义 |
+|---|---|---|
+| `paired` | `ref`、`username` | 配对成功；已配对设备流的第 1 个事件 |
+| `pairRejected` | `ref`、`reason` | 配对失败，`seq: 0` |
+| `importReceived` | `ref`、`id` | 已收到并保存，等待该用户 Session 活跃 |
+| `importApplied` | `ref`、`id`、`cookies:{applied,rejected}`、`localStorage:{applied,rejected}` | 已写入 Browser |
+| `importFailed` | `ref`、`id`、`reason`、`retryable` | 未能写入；`retryable` 表示同样的请求重发有意义 |
+| `importDiscarded` | `ref`、`id` | 已放弃（设备撤回，或用户在 Viewer 放弃） |
+| `revoked` | — | 设备已被移除，之后的请求不会被处理 |
+
+`ref` 让两侧把回复挂在对应请求下面显示。同一导入的后续事件（如 `importReceived` 之后的 `importApplied`）`ref` 指向该导入最近一次 `import` 事件；Viewer 放弃导入产生的 `importDiscarded` 同样指向它。`revoked` 没有 `ref`。
+
+## 合并与重传
+
+- **合并**：同一目标的多条事件合进一封信。App 的发送方式二选一：时间窗口（最后一条事件入队后等待窗口时长再发，默认 60 秒，可选立即/1 分钟/5 分钟）或连续操作（事件留在队列里，用户结束一串操作后点"发送"）。Control 按设备合并回复：最后一条事件产生后等待 `replyWindowSeconds`（默认 30 秒），持续有新事件时最长等 5 分钟。
+- **一次往返完成配对与上传**：配对请求和随后的导入请求可以在同一封信里，Control 先处理 `pair`，成功后同一消息中的后续事件按已信任设备处理；失败则后续事件不处理。
+- **设备重传**：已发出但未被 `ack` 的事件留在发件队列。发送时若最早的未确认事件已发出满 1 小时，整段未确认区间随新事件一起重发；用户在 timeline 点"同步"时立即重发未确认区间，没有未确认事件则发一条空消息，让 Control 补发 App 缺的事件。
+- **Control 重传**：收到已配对设备的消息时，若其 `ack` 小于 Control 已产生的最大 seq，且距上次补发满 15 分钟，就把未确认区间重新排入发件队列。
+- 未配对设备的消息里只有 `pair` 会被处理，它之前的事件忽略。配对成功时，该设备的已应用 seq 取这条消息的最后一个 seq。
 
 ## 邮件
 
-- 主题 `RemoteKit session import <id>`，头 `X-RemoteKit-Import: 1`，一段说明性纯文本正文，附件 `<id>.rksi`（`application/octet-stream`，base64）。一封信只有一个信封；批量发送就是多封信。
-- App 发件只经 TLS（465 隐式 TLS 或 587 STARTTLS 必须成功），发件账户与收件地址都在构建时内置。
+- 主题 `RemoteKit session import to <接收方 key id>`，头 `X-RemoteKit-Import: 2`，一段说明性纯文本正文，附件 `message.rksi`（`application/octet-stream`，base64）。一封信只有一个信封。
+- 设备 → Control：从 App 内置账户发往部署配置的 `mailbox`。Control → 设备：从 `sessionImport.mailbox` 经 `sessionImport.smtp` 发往 `sessionImport.appMailbox`。
+- 双方都只经 TLS 发信（465 隐式 TLS 或 587 STARTTLS 必须成功）、只用隐式 TLS 收信（993），收信时 IMAP 搜索主题含自己 key id 的信。服务器 CAPABILITY 含 `ID` 时先发 IMAP ID（网易 163 等在没有 ID 时拒绝 SELECT）。
+- App 收件箱由所有安装共享：App 只处理发给自己 key id 的信，处理完删除；主题以 `RemoteKit session import to ` 开头且超过 30 天的信，不论发给谁都删除，清理已卸载设备留下的回信。
+- 先提交本地状态再删信；两者之间崩溃会在下次以重复 seq 被识别并删除。暂不能处理的信（缺口未补上、被限流）不删，下一轮再试。
 
-## Control 接收
+## 配对
 
-配置在 `control.json` 的 `sessionImport`，缺省则功能关闭（用户的会话导入页提示未开启，下载部署配置返回 `unavailable`）：
+- Viewer 的会话导入→设备里有"允许配对新设备"开关。打开时 Control 生成配对码：从 BIP39 英文词表（2048 词，`protocol/session-import/wordlist.txt`）用安全随机数均匀选 5 个词（55 bit），在开关下方显示，可复制。配对码用 at-rest 密钥加密存库，以便再次显示。
+- 开关在以下情况自动关闭：一次配对成功、打开满 3 天、累计 10 次配对失败、用户手动关闭。关闭原因显示一行；再次打开生成新的配对码。
+- Control 处理 `pair`：用户名存在且未停用、该用户配对开关打开、密码正确（与登录同一套 scrypt 校验，在 `'password:' + user.id` 限流下执行）、配对码一致（每个单词去首尾空白、转小写后比较，恒定时间）。全部满足才成功；被限流则信件不动，下一轮再试。任一不满足 → `pairRejected`，`reason` 固定为"配对失败：账户、密码或配对码不正确，或该账户未开启配对"；用户存在时计入本次开关的失败次数。
+- 成功：保存设备（公钥、设备名、所属用户、配对时间），关闭开关，发出 `paired`。一个设备公钥只属于一个用户；已配对给其他用户的公钥再配对 → `pairRejected`。已配对给同一用户的设备重复配对 → 再次回复 `paired`。
+- 移除设备：用户在 Viewer 移除设备，或管理员彻底删除用户。Control 放弃该设备尚未写入的导入、发出最后一个事件 `revoked`；之后该设备的信直接删除，不回复。
+
+## Control 处理
+
+配置在 `control.json` 的 `sessionImport`，缺省则功能关闭（Viewer 提示未开启，下载部署配置返回 `unavailable`）：
 
 ```json
 "sessionImport": {
   "mailbox": "rk-import@example.com",
   "imap": { "host": "imap.example.com", "port": 993, "user": "rk-import@example.com", "password": "…" },
+  "smtp": { "host": "smtp.example.com", "port": 465, "user": "rk-import@example.com", "password": "…" },
+  "appMailbox": "rk-app@example.com",
   "folder": "INBOX",
-  "pollSeconds": 60
+  "pollSeconds": 60,
+  "replyWindowSeconds": 30
 }
 ```
 
-- `ImportMailbox` 每 `pollSeconds` 用 imapflow 隐式 TLS 连接一次（不保持 IDLE）；服务器 CAPABILITY 含 `ID` 时先发 IMAP ID（网易 163 等在没有 ID 时拒绝 SELECT），搜索主题含 `RemoteKit session import` 的信，读 bodyStructure，只下载文件名以 `.rksi` 结尾的附件。
-- 处理一封信：头部格式或 key id 不属于本 Control → 不动，本进程内按 UIDVALIDITY+UID 记住跳过（共享邮箱里可能有其他部署的信）。属于本 Control 的信：解密失败、载荷无效、用户名不存在 → 只写日志并删除。用户存在时用登录同一套 scrypt 校验密码，并与登录共用按用户名的尝试限流：被限流 → 不动信件，下一轮再试；账户停用或密码错误 → 记录为 `rejected`（原因"账户已停用"/"账户密码不正确"，不保存载荷）；通过 → 写入导入记录（见下）。处理完的信都删除。先提交数据库再删信；两者之间崩溃会在下次以重复 ID 被识别并删除。
-- 校验：`createdAt` 早于 30 天或晚于当前 10 分钟 → 记录为 `rejected`（用户可见原因）。导入 ID 已存在 → 删除信件，不改原记录。
-- 邮件拉取的失败只影响本轮，下一轮重试；状态（最近一次成功/失败时间与错误）只显示在管理员面板概览，拉取失败同时列为概览问题。
+- `ImportMailbox` 每 `pollSeconds` 用 imapflow 连接一次（不保持 IDLE），搜索主题含 Control key id 的信，读 bodyStructure，只下载文件名以 `.rksi` 结尾的附件。头部不对、解密失败、消息无效 → 写日志并删除。
+- 一轮内把所有能解开的消息按设备分组、按区间起点排序后依次处理，能连续应用的应用掉；仍有缺口的信留在邮箱里。
+- 已配对设备的 `import`：
+  - 字段非法 → `importFailed`（`retryable: false`）；超过限制 → `importFailed`，原因写明哪项超限（`retryable: false`）；`at` 早于 30 天 → `importFailed`（"导入已超过 30 天"，`retryable: false`）。
+  - 同 `id` 已存在且属于其他设备 → `importFailed`（"导入 ID 冲突"，`retryable: false`）。属于本设备：`pending` 或 `applied` → 按当前状态重发 `importReceived`/`importApplied`；`failed` 或 `discarded` → 用新载荷重置为 `pending`（即重试）。
+  - 新 `id` → 保存为 `pending`，回复 `importReceived`。
+- `withdraw`：`pending` → `discarded` 并回复 `importDiscarded`；其他状态按当前状态回复。
+- 邮件收取失败只影响本轮；状态（最近一次成功/失败）只显示在管理员面板概览，失败同时列为概览问题。
 
-## Control 存储与写入
+## Control 存储
 
-`session_imports` 表：`id`、`tenant`、`sites`（`[{name,url}]` JSON）、`device`、`created_at`、`received_at`、`state`、`payload`（at-rest 加密的载荷 JSON，终态后清空）、`cookies`、`origins`、`rejected_items`、`error`、`finished_at`。`session_import_keys`（单行）。账密只在收信时校验，不随载荷存库。
-
-状态：
-
-| state | 含义 |
+| 表 | 内容 |
 |---|---|
-| `pending` | 已接收，等待该用户 Session 活跃 |
-| `applied` | 已写入 Browser；`rejected_items` 记录被 Chromium 拒绝的条目数 |
-| `rejected` | 被 Control 拒绝（账密不正确、账户停用、过期、超限），不会写入 |
-| `failed` | Browser 明确拒绝整个导入 |
+| `session_import_keys` | 单行：导入公钥、加密私钥、key id |
+| `session_import_pairing` | 每用户一行：`tenant`、加密的配对码（关闭时为空）、`opened_at`、`expires_at`、`failures`、`closed_reason`（`paired`/`expired`/`failures`/`user`） |
+| `session_import_devices` | `key_id` 主键、`tenant`、`public_key`、`name`、`paired_at`、`in_seq`（已应用的设备最大连续 seq）、`out_seq`（已产生的最大 Control seq）、`acked_seq`、`resent_at` |
+| `session_import_events` | 两个方向的事件：`tenant`、`key_id`、`direction`（`in`/`out`）、`seq`、`at`、`type`、`ref`、`body`（完整事件 JSON；`in` 事件去掉密码、配对码与 cookie/storage 内容，只留数量）、`mailed_at`（`out` 事件交给 SMTP 的时间） |
+| `session_imports` | `id` 主键、`tenant`、`key_id`、`sites`、`state`（`pending`/`applied`/`failed`/`discarded`）、`payload`（at-rest 加密的 cookies/localStorage，终态后清空）、`cookies`、`origins`、`rejected_items`、`error`、`received_at`、`finished_at` |
 
-- `SessionImporter` 只在 Session 放置为 active 时写入，不为导入唤醒休眠的 Session、不新建放置；新记录到达时、以及每 15 秒检查一次。同一 Tenant 的导入串行执行。
-- 写入把载荷切成若干块，每块 JSON ≤ 512 KiB；每块调用 Endpoint `session.storage.import` 得到 job，再以 200 ms 间隔调用 `session.storage.importStatus` 直到完成。写入是幂等的（同名 cookie / 同 key 覆盖），所以 `outcome_unknown`、`unavailable`、`busy`、`conflict`（Browser 换代、job 丢失）都保持 `pending`，下次从头重写；`invalid_request`/`rejected` → `failed`。
+- 未知用户的配对请求只回复，不入库；已知用户的失败配对记为该用户 timeline 上的事件，设备显示为"未配对设备"。
+- 移除设备删除其行，事件保留在 timeline；彻底删除用户删除该用户的全部行。事件与终态导入保留 180 天。
+
+## Control 写入
+
+- `SessionImporter` 只在 Session 放置为 active 时写入，不为导入唤醒休眠的 Session、不新建放置；新导入到达时、以及每 15 秒检查一次。同一 Tenant 的导入按接收顺序串行执行。
+- 写入把载荷切成若干块，每块 JSON ≤ 512 KiB；每块调用 Endpoint `session.storage.import` 得到 job，再以 200 ms 间隔调用 `session.storage.importStatus` 直到完成。写入是幂等的（同名 cookie / 同 key 覆盖），所以 `outcome_unknown`、`unavailable`、`busy`、`conflict`（Browser 换代、job 丢失）都保持 `pending`，下次从头重写；`invalid_request`/`rejected` → `failed` 并发出 `importFailed`（`retryable: true`）；完成 → `applied` 并发出 `importApplied`。
 - 已经打开的页面不会自动刷新；导入记录为每个站点提供一个入口，在新标签页打开对应的 `url`。
+
+## Control 发件
+
+- `out` 事件写库与状态变化在同一事务中。发件循环按设备取 `mailed_at` 为空的事件，满足合并条件后封装成一封信（`ack` 取该设备 `in_seq`），经 nodemailer 以 TLS 发出，成功后记 `mailed_at`。
+- `pairRejected` 也走同一循环；未知用户的配对失败不入库，只在内存中排队发送，进程退出即丢弃。
+- 发送失败按 1 分钟起翻倍、最长 1 小时退避重试；待发数量与最近一次失败显示在管理员面板概览，持续失败列为概览问题。
+- 补发：清除未确认区间的 `mailed_at`，由发件循环重新发送。
 
 ## Endpoint 与 Browser
 
@@ -145,27 +217,37 @@ Browser 控制方法：
 
 ## Viewer
 
-用户界面只面向自己的导入：更多→设置→会话导入列出导入记录（站点名、设备、接收时间、状态与结果数量）；`applied` 记录的每个站点可在新标签页打开，任意记录可删除（`pending` 的删除即放弃导入）。功能未开启时提示一行，不展示邮箱、密钥等部署细节。对话框可见时每 5 秒刷新。
+更多→设置→会话导入是用户自己的页面，分两部分：
 
-管理员面板→概览有"会话导入"面板：邮箱状态（未配置、正常及最近检查时间、拉取失败）与"App 部署配置"下载。
+- **设备**：配对开关；打开时显示 5 个单词的配对码（可复制）与剩余有效期，关闭原因显示一行。下面是已配对设备列表（设备名、key id、配对时间、最近一次请求），每台可移除。
+- **Timeline**：该用户所有设备的事件，按接收时间倒序；每张卡片是一个设备请求（配对、导入、撤回），Control 的回复按时间顺序挂在卡片下方，回复式显示在同一页面。点开卡片查看详情：设备、seq、各事件时间、站点列表、cookie/storage 数量与写入结果、失败原因。`pending` 导入可放弃（发出 `importDiscarded`），`applied` 导入的每个站点可在新标签页打开。
 
-WS 方法：`sessionImport.state`（`{receiving, imports}`）、`sessionImport.delete {id}`，均要求产品租约；`admin.sessionImportDeployment` 仅管理员，返回部署配置；邮箱状态随 `admin.overview` 的 `sessionImport` 字段返回。
+功能未开启时提示一行，不展示邮箱、密钥等部署细节。对话框可见时每 5 秒刷新。管理员面板→概览有"会话导入"面板：收信状态、发件队列状态与"App 部署配置"下载。
+
+WS 方法（均要求产品租约）：`sessionImport.state` → `{receiving, pairing, devices, timeline}`；`sessionImport.pairing {open}`；`sessionImport.removeDevice {keyId}`；`sessionImport.discard {id}`；`admin.sessionImportDeployment` 仅管理员；收信与发件状态随 `admin.overview` 的 `sessionImport` 字段返回。
 
 ## Android App
 
-`android/`：Kotlin、Jetpack Compose（Material 3）、单 Activity。面向学校等场景：在家里或允许使用手机时登录，到了内网直接用 RemoteKit。
+`android/`：Kotlin、Jetpack Compose（Material 3）、单 Activity。
 
-- **账户**：首次使用时填写 RemoteKit 用户名和密码，可在设置里修改；密码用 Android Keystore 中不可导出的 AES-GCM 密钥加密后存 App 私有目录。账户未填时不能完成导出。
-- **登录**：每个待导入会话一个独立的 WebView Profile（androidx.webkit `ProfileStore`，Profile 名即会话 ID），cookie、localStorage、缓存与其他会话、App 自身互不相通。WebView 的 UA 设为部署配置里的 `userAgent`，Client Hints 用 `WebSettingsCompat.setUserAgentMetadata` 设为部署配置里的桌面 Windows 元数据，宽视口加载桌面版页面。设备不支持 `MULTI_PROFILE` 或 `USER_AGENT_METADATA` 时 App 提示更新 Android System WebView，不提供降级。
-- **浏览**：新建登录直接进入 App 内浏览器。起始页提供 Bing、百度、Google 入口和地址栏；地址栏输入像网址的内容时可直接打开，否则列出用各搜索引擎搜索。浏览中点地址栏可随时去别处。一次浏览可以登录多个网站，它们共用这次登录的 Profile。
-- **站点推断**：App 记录这次浏览的顶层导航（含 SPA 的 history 变化），按近似的可注册域名归并（无公共后缀表：两字母国家顶级域名前是 `com`/`edu`/`gov`/`ac`/`co` 等时取三段，否则取两段），每个站点保留最后访问的 URL、网页图标（`onReceivedIcon`）与名称。名称依次取页面声明的 `og:site_name`/`application-name`/`apple-mobile-web-app-title`、标题里含域名主标签的最短片段、多段标题的最后一段、较短的完整标题，最后退回域名主标签；只用于识别，不保证准确。记录只在内存中，App 进程结束即丢失。
-- **导出**：点"完成登录"后列出推断出的站点，可导出的排前，搜索引擎排后，当前页所在站点默认勾选；没有 `SessionExporter` 适配的站点变灰并注明"尚未适配导出"。勾选的每个站点由各自的 `SessionExporter`（经网站自己支持的接口）产出 cookies 与 localStorage，合并为一个载荷。站点名、URL 与 64px 图标存入本地记录供列表显示，图标不进入载荷。导出结果连同账密立即用内置公钥封装成信封存盘，本地不留明文载荷。修改账户后，此前的信封标为需重新导出。
-- **发送**：多选后批量发送，一个 SMTP 连接逐封发出，逐项显示结果。某封发送成功后立即销毁该会话的本地状态：删除信封、清空 Profile 的 cookie 与 Web Storage、删除 Profile；Profile 在本进程已加载而不能删除时记下，下次启动在创建任何 WebView 之前删除。这样同一份登录状态不会同时留在手机和 RemoteKit 两处。
+- **设备密钥**：首次启动用 BouncyCastle 生成 X25519 密钥对，私钥用 Android Keystore 中不可导出的 AES-GCM 密钥加密后存 App 私有目录。"解除配对并清除数据"删除全部本地数据并轮换设备密钥，Control 视之为新设备。
+- **配对**：未配对时首页是配对表单：服务器名（来自部署配置）、用户名、密码、5 个配对码单词（按词表自动补全，输入时校验）、设备名。提交生成 `pair` 事件入队。密码只存在于这个尚未确认的事件里，收到 `paired` 或 `pairRejected` 后随事件内容一起删除。
+- **授权门禁**：任何需要授权的操作（新建登录、重试、撤回）都要求已配对，或存在一个尚未被拒绝的在途 `pair` 事件。配对被拒绝后回到配对表单，原因显示在表单上方；失败的导入保留在 timeline 上，重新配对后可以重试。
+- **一次性浏览器**：新建登录打开一个全新的隔离 WebView Profile（androidx.webkit `ProfileStore`），UA/Client Hints 设为部署配置里的桌面 Chrome 元数据；设备不支持 `MULTI_PROFILE` 或 `USER_AGENT_METADATA` 时提示更新 Android System WebView。起始页提供 Bing、百度、Google 入口和地址栏；没有历史记录、书签与会话恢复。点"完成登录"后从这次浏览推断出的站点里勾选、导出，生成 `import` 事件入队。无论导出还是放弃，这个 Profile 都立即销毁（清空 cookie 与 Web Storage 后删除；本进程已加载而不能删除时记下，下次启动在创建任何 WebView 之前删除）；App 被杀时同样在下次启动删除。
+- **站点推断**：记录这次浏览的顶层导航（含 SPA 的 history 变化），按近似的可注册域名归并（两字母国家顶级域名前是 `com`/`edu`/`gov`/`ac`/`co` 等时取三段，否则取两段），每个站点保留最后访问的 URL、网页图标与名称。名称依次取页面声明的 `og:site_name`/`application-name`/`apple-mobile-web-app-title`、标题里含域名主标签的最短片段、多段标题的最后一段、较短的完整标题，最后退回域名主标签。可导出的站点排前，搜索引擎排后，当前页所在站点默认勾选；没有 `SessionExporter` 适配的站点变灰并注明"尚未适配导出"。
+- **请求与本地数据**：请求的载荷（cookies、localStorage）用 Keystore 密钥加密存盘，直到收到 `importApplied`/`importDiscarded` 或用户删除该请求，以便失败后重试；站点名、URL 与 64px 图标作为请求元数据保留供 timeline 显示。删除尚未写入的请求同时发出 `withdraw`。
+- **timeline**：首页即 timeline，按 seq 倒序列出本设备的请求卡片（配对、导入、撤回），Control 的回复挂在卡片下方。卡片状态：待发送、已发送、已收到·等待写入、已导入、失败、已放弃；点开查看详情（站点、数量、各事件时间、原因）。失败（`importFailed` 且 `retryable`、配对被拒后未处理的导入、发信失败）的卡片有"重试"；顶部有"同步"。发信失败的事件留在队列里，由 WorkManager 按退避自动重发。
+- **收信**：App 在前台、timeline 可见且有未完成的请求时每 60 秒用 IMAP 收一次，打开 App 与下拉刷新时立即收；有未完成请求时另有 15 分钟周期的后台任务。收到的事件按 seq 应用；乱序到达的消息解密后加密暂存，等缺口补上再应用。
+- **发件**：发送方式在设置里选择（时间窗口或连续操作，见"合并与重传"）；时间窗口模式用 WorkManager 的唯一任务实现，需要网络时才运行。
 
-构建：`android/` 是独立 Gradle 工程（wrapper 自带），需要 `JAVA_HOME`（Android Studio 自带 JBR）与 `ANDROID_HOME`；内置发件账户写在不入库的 `android/mailbox.properties`（格式见 `mailbox.properties.example`），部署配置为不入库的 `android/deployment.json`（见 `deployment.json.example`）；缺失时仍可构建，但 App 提示未内置相应配置，不能导出或发送。
+构建：`android/` 是独立 Gradle 工程（wrapper 自带），需要 `JAVA_HOME`（Android Studio 自带 JBR）与 `ANDROID_HOME`。内置邮箱账户写在不入库的 `android/mailbox.properties`（SMTP 与 IMAP，格式见 `mailbox.properties.example`），部署配置为不入库的 `android/deployment.json`（见 `deployment.json.example`）；缺失时仍可构建，但 App 提示未内置相应配置。
 
 ```text
 android\gradlew.bat -p android :app:testDebugUnitTest :app:assembleDebug :app:assembleRelease
 ```
 
-JVM 测试生成 `protocol/session-import/envelope-fixture.json`，Control 的测试用它验证两端 HPKE/信封实现互通；`protocol/session-import/hpke-vector.json` 是 RFC 9180 的已知答案向量。真实栈的 Browser 写入与读回由 `tests/integration/test-session-import.py` 验证。
+## 测试与互通
+
+- `protocol/session-import/hpke-auth-vector.json`：RFC 9180 A.1.3（X25519、HKDF-SHA256、Auth 模式）的 KEM 共享密钥已知答案（该向量的 AEAD 是 AES-128-GCM，AES-256-GCM 路径由下面的互通文件覆盖），两端都验证。
+- `protocol/session-import/device-message-fixture.json` 由 Android JVM 测试用固定密钥生成（设备 → Control 的信封与明文），Control 测试解开并比对；`control-message-fixture.json` 由 Control 测试生成（Control → 设备），Android 测试解开并比对。
+- 真实栈的 Browser 写入与读回由 `tests/integration/test-session-import.py` 验证。

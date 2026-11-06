@@ -7,10 +7,10 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { ControlDatabase } from '../server/persistence/database';
 
-test('fresh schema is version 2 with account and session import state', () => {
+test('fresh schema is version 3 with account and session import state', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 2n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 3n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -24,6 +24,9 @@ test('fresh schema is version 2 with account and session import state', () => {
       'session_deletions',
       'session_imports',
       'session_import_keys',
+      'session_import_pairing',
+      'session_import_devices',
+      'session_import_events',
     ])
       assert.ok(tables.has(name), name);
     assert.equal(tables.has('registration_policy'), false);
@@ -75,8 +78,9 @@ test('databases of any other schema are rejected rather than migrated', async ()
   try {
     for (const [name, setup] of [
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
+      ['v2', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (2)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (3)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (4)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',

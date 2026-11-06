@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 
-const version = 2;
+const version = 3;
 
 function tableExists(db: Database.Database, name: string) {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
@@ -64,13 +64,27 @@ export function createSchema(db: Database.Database) {
         PRIMARY KEY(node_id,tenant,id));`);
     db.exec(`CREATE TABLE session_import_keys (
       id INTEGER PRIMARY KEY CHECK(id=1), public_key BLOB NOT NULL, private_key TEXT NOT NULL, key_id TEXT NOT NULL);
+      CREATE TABLE session_import_pairing (
+        tenant TEXT PRIMARY KEY, code TEXT, opened_at INTEGER, expires_at INTEGER,
+        failures INTEGER NOT NULL, closed_reason TEXT);
+      CREATE TABLE session_import_devices (
+        key_id TEXT PRIMARY KEY, tenant TEXT NOT NULL, public_key BLOB NOT NULL, name TEXT NOT NULL,
+        paired_at INTEGER NOT NULL, in_seq INTEGER NOT NULL, out_seq INTEGER NOT NULL,
+        acked_seq INTEGER NOT NULL, resent_at INTEGER);
+      CREATE TABLE session_import_events (
+        tenant TEXT NOT NULL, key_id TEXT NOT NULL, direction TEXT NOT NULL CHECK(direction IN ('in','out')),
+        seq INTEGER NOT NULL, at INTEGER NOT NULL, type TEXT NOT NULL, ref INTEGER, body TEXT NOT NULL, mailed_at INTEGER);
+      CREATE INDEX session_import_events_stream ON session_import_events(key_id,direction,seq);
+      CREATE INDEX session_import_events_tenant ON session_import_events(tenant,direction);
+      CREATE INDEX session_import_events_retention ON session_import_events(CASE WHEN direction='in' THEN json_extract(body,'$.receivedAt') ELSE at END);
+      CREATE INDEX session_import_events_outbox ON session_import_events(mailed_at) WHERE direction='out';
       CREATE TABLE session_imports (
-        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, sites TEXT NOT NULL,
-        device TEXT NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
-        state TEXT NOT NULL CHECK(state IN ('pending','applied','rejected','failed')), payload TEXT,
+        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, key_id TEXT NOT NULL, sites TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending','applied','failed','discarded')), payload TEXT,
         cookies INTEGER NOT NULL, origins INTEGER NOT NULL, rejected_items INTEGER NOT NULL,
-        error TEXT, finished_at INTEGER);
-      CREATE INDEX session_imports_tenant ON session_imports(tenant,state,received_at);`);
+        error TEXT, received_at INTEGER NOT NULL, finished_at INTEGER);
+      CREATE INDEX session_imports_tenant ON session_imports(tenant,state,received_at);
+      CREATE INDEX session_imports_retention ON session_imports(finished_at) WHERE state!='pending';`);
     db.exec(`CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=${version}));
       INSERT INTO schema_version(version) VALUES (${version});`);
   })();

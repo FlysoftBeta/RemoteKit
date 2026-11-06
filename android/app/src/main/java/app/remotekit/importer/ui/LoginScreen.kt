@@ -54,17 +54,15 @@ import app.remotekit.importer.web.siteKey
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun LoginScreen(vm: AppViewModel, id: String) {
-    val snapshot by vm.snapshot.collectAsStateWithLifecycle()
-    val draft = snapshot.drafts.find { it.id == id } ?: return
     val deployment = vm.deployment ?: return
     val context = LocalContext.current
     val exporting by vm.exporting.collectAsStateWithLifecycle()
     val history = remember(id) { vm.visits(id) }
     val visits by history.visits.collectAsStateWithLifecycle()
-    var url by remember(id) { mutableStateOf(draft.lastUrl) }
+    var url by remember(id) { mutableStateOf<String?>(null) }
     var title by remember(id) { mutableStateOf<String?>(null) }
     var progress by remember(id) { mutableIntStateOf(100) }
-    var omnibox by remember(id) { mutableStateOf(draft.lastUrl == null) }
+    var omnibox by remember(id) { mutableStateOf(true) }
     var picking by remember(id) { mutableStateOf(false) }
     var query by remember(id) { mutableStateOf(TextFieldValue()) }
     val session = remember(id) { vm.profiles.create(context, id, deployment.browser) }
@@ -109,13 +107,12 @@ fun LoginScreen(vm: AppViewModel, id: String) {
                     history.icon(view.url, icon)
                 }
             }
-        draft.lastUrl?.let(webView::loadUrl)
         onDispose {
-            runCatching { vm.store.leftAt(id, webView.url) }
             webView.stopLoading()
             webView.webChromeClient = null
             webView.webViewClient = WebViewClient()
             webView.destroy()
+            vm.leaveLogin(id)
         }
     }
     val open = { target: String ->
@@ -145,11 +142,13 @@ fun LoginScreen(vm: AppViewModel, id: String) {
                 )
             else
                 TopAppBar(
-                    title = { AddressPill(url, title) {
+                    title = {
+                        AddressPill(url, title) {
                             val current = url.orEmpty()
                             query = TextFieldValue(current, TextRange(0, current.length))
                             omnibox = true
-                        } },
+                        }
+                    },
                     navigationIcon = {
                         IconButton(onClick = leave, enabled = !exporting) {
                             Icon(Icons.Filled.Close, stringResource(R.string.close))
@@ -212,7 +211,7 @@ fun LoginScreen(vm: AppViewModel, id: String) {
             exporting = exporting,
             onDismiss = { if (!exporting) picking = false },
             onExport = { chosen ->
-                vm.exportSites(draft, webView, session.second, chosen) { picking = false }
+                vm.exportSites(webView, session.second, chosen) { picking = false }
             },
         )
 }
@@ -356,7 +355,9 @@ private fun StartPanel(text: String, onOpen: (String) -> Unit) {
             addressOf(text)?.let { address ->
                 item {
                     ListItem(
-                        leadingContent = { SiteIcon(null, Uri.parse(address).host.orEmpty(), 36.dp) },
+                        leadingContent = {
+                            SiteIcon(null, Uri.parse(address).host.orEmpty(), 36.dp)
+                        },
                         headlineContent = {
                             Text(stringResource(R.string.open_address), maxLines = 1)
                         },
@@ -415,10 +416,14 @@ private fun SitePickerSheet(
     ) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
             Column(Modifier.padding(horizontal = 24.dp)) {
-                Text(stringResource(R.string.pick_title), style = MaterialTheme.typography.titleLarge)
+                Text(
+                    stringResource(R.string.pick_title),
+                    style = MaterialTheme.typography.titleLarge,
+                )
                 Text(
                     stringResource(
-                        if (rows.any { it.second }) R.string.pick_hint else R.string.pick_none_supported
+                        if (rows.any { it.second }) R.string.pick_hint
+                        else R.string.pick_none_supported
                     ),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -456,10 +461,7 @@ private fun SitePickerSheet(
                             Modifier.padding(horizontal = 8.dp)
                                 .alpha(if (supported) 1f else 0.6f)
                                 .clickable(enabled = supported && !exporting) { toggle() },
-                        colors =
-                            ListItemDefaults.colors(
-                                containerColor = Color.Transparent
-                            ),
+                        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                     )
                 }
             }

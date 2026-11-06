@@ -1,20 +1,61 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { openEnvelope } from '../server/session-import/envelope';
-test('Control opens the envelope produced by the Android JVM implementation', () => {
+import { readFileSync, writeFileSync } from 'node:fs';
+import { openMessage, sealMessage, parseDeviceMessage } from '../server/session-import/envelope';
+import type { ControlEvent, ImportMessage } from '../shared/session-import';
+import {
+  controlPrivate,
+  controlPublic,
+  controlKeyId,
+  devicePrivate,
+  devicePublic,
+  deviceKeyId,
+  fixedKeys,
+} from './session-import-fixture';
+test('Control writes and opens the Control-to-device cross fixture', () => {
+  const message: ImportMessage<ControlEvent> = {
+    v: 2,
+    ack: 2,
+    events: [
+      { seq: 1, at: 1793900002000, type: 'paired', ref: 1, username: 'student' },
+      {
+        seq: 2,
+        at: 1793900003000,
+        type: 'importReceived',
+        ref: 2,
+        id: 'bf81f466-e992-48e5-a3d3-6b168556c471',
+      },
+      {
+        seq: 3,
+        at: 1793900004000,
+        type: 'importApplied',
+        ref: 2,
+        id: 'bf81f466-e992-48e5-a3d3-6b168556c471',
+        cookies: { applied: 1, rejected: 0 },
+        localStorage: { applied: 1, rejected: 0 },
+      },
+    ],
+  };
+  const envelope = sealMessage(controlPrivate, controlPublic, devicePublic, message);
+  writeFileSync(
+    new URL('../../protocol/session-import/control-message-fixture.json', import.meta.url),
+    JSON.stringify({ ...fixedKeys, envelope: envelope.toString('base64'), message }, null, 4) + '\n',
+  );
+  const opened = openMessage(devicePrivate, deviceKeyId, envelope);
+  assert.equal(opened.senderKeyId, controlKeyId);
+  assert.deepEqual(opened.senderPublic, controlPublic);
+  assert.deepEqual(opened.message, message);
+});
+test('Control opens the device-to-Control fixture produced by the Android JVM test', () => {
   const fixture = JSON.parse(
-    readFileSync(new URL('../../protocol/session-import/envelope-fixture.json', import.meta.url), 'utf8'),
-  );
-  assert.equal(typeof fixture.payload.username, 'string');
-  assert.equal(typeof fixture.payload.password, 'string');
-  assert.equal('token' in fixture.payload, false);
-  assert.deepEqual(
-    openEnvelope(
-      Buffer.from(fixture.recipientPrivate, 'base64url'),
-      fixture.keyId,
-      Buffer.from(fixture.envelope, 'base64'),
+    readFileSync(
+      new URL('../../protocol/session-import/device-message-fixture.json', import.meta.url),
+      'utf8',
     ),
-    fixture.payload,
   );
+  for (const [key, value] of Object.entries(fixedKeys)) assert.equal(fixture[key], value, key);
+  const opened = openMessage(controlPrivate, controlKeyId, Buffer.from(fixture.envelope, 'base64'));
+  assert.equal(opened.senderKeyId, deviceKeyId);
+  assert.deepEqual(opened.message, fixture.message);
+  assert.deepEqual(parseDeviceMessage(opened.message).message, fixture.message);
 });

@@ -1,26 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { hpkeOpen, hpkeSealWithEphemeral, x25519Public } from '../server/session-import/hpke';
-
-// Official RFC 9180 vectors: cfrg/draft-irtf-cfrg-hpke/test-vectors.json.
+import { authEncap, authDecap, x25519Public, hpkeSeal, hpkeOpen } from '../server/session-import/hpke';
 const vector = JSON.parse(
-  readFileSync(new URL('../../protocol/session-import/hpke-vector.json', import.meta.url), 'utf8'),
+  readFileSync(new URL('../../protocol/session-import/hpke-auth-vector.json', import.meta.url), 'utf8'),
 );
 const b = (name: string) => Buffer.from(vector[name], 'hex');
-test('RFC 9180 base X25519/HKDF-SHA256/AES-256-GCM opens and reproduces the first encryption', () => {
+test('RFC 9180 AuthEncap and AuthDecap match the Auth KEM vector', () => {
+  assert.deepEqual(x25519Public(b('skSm')), b('pkSm'));
   assert.deepEqual(x25519Public(b('skRm')), b('pkRm'));
-  assert.deepEqual(x25519Public(b('skEm')), b('pkEm'));
-  assert.deepEqual(hpkeOpen(b('skRm'), b('enc'), b('info'), b('aad'), b('ct')), b('pt'));
-  const sealed = hpkeSealWithEphemeral(b('pkRm'), b('info'), b('aad'), b('pt'), b('skEm'));
+  const sealed = authEncap(b('skSm'), b('pkRm'), b('skEm'));
   assert.deepEqual(sealed.enc, b('enc'));
-  assert.deepEqual(sealed.ciphertext, b('ct'));
-  assert.throws(() => hpkeOpen(Buffer.alloc(32, 1), b('enc'), b('info'), b('aad'), b('ct')), {
-    code: 'invalid_request',
-  });
-  const changed = b('ct');
-  changed[0] ^= 1;
-  assert.throws(() => hpkeOpen(b('skRm'), b('enc'), b('info'), b('aad'), changed), {
-    code: 'invalid_request',
-  });
+  assert.deepEqual(sealed.sharedSecret, b('sharedSecret'));
+  assert.deepEqual(authDecap(b('skRm'), b('pkSm'), b('enc')), b('sharedSecret'));
+});
+test('Auth AES-256 encryption authenticates the sender, recipient and aad', () => {
+  const sealed = hpkeSeal(b('skSm'), b('pkRm'), b('info'), b('aad'), b('pt'));
+  assert.deepEqual(
+    hpkeOpen(b('skRm'), b('pkSm'), sealed.enc, b('info'), b('aad'), sealed.ciphertext),
+    b('pt'),
+  );
+  for (const [recipient, sender, aad, ct] of [
+    [b('skEm'), b('pkSm'), b('aad'), sealed.ciphertext],
+    [b('skRm'), b('pkEm'), b('aad'), sealed.ciphertext],
+    [b('skRm'), b('pkSm'), Buffer.from('changed'), sealed.ciphertext],
+    [b('skRm'), b('pkSm'), b('aad'), Buffer.alloc(16)],
+  ])
+    assert.throws(() => hpkeOpen(recipient, sender, sealed.enc, b('info'), aad, ct), {
+      code: 'invalid_request',
+    });
 });

@@ -2,238 +2,328 @@ package app.remotekit.importer.store
 
 import android.content.Context
 import android.os.Build
-import android.util.AtomicFile
-import app.remotekit.importer.R
-import app.remotekit.importer.account.Account
-import app.remotekit.importer.account.AccountCipher
-import app.remotekit.importer.account.validateAccount
+import app.remotekit.importer.crypto.*
 import app.remotekit.importer.deployment.ContractJson
-import app.remotekit.importer.deployment.Deployment
-import app.remotekit.importer.requireMessage
+import app.remotekit.importer.payload.ImportPayload
+import app.remotekit.importer.protocol.*
 import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.Base64
 import java.util.UUID
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
-@Serializable
-sealed interface DraftState {
-    @Serializable @SerialName("LoggingIn") data object LoggingIn : DraftState
-
-    @Serializable
-    @SerialName("Ready")
-    data class Ready(val deploymentKeyId: String, val accountRevision: Long) : DraftState
-}
-
-/** A site chosen for import. [icon] is a base64 PNG of at most 64 px, kept only for display. */
-@Serializable data class SiteRef(val name: String, val url: String, val icon: String? = null)
-
-@Serializable
-data class Draft(
-    val id: String,
-    val updatedAt: Long,
-    val lastUrl: String? = null,
-    val sites: List<SiteRef> = emptyList(),
-    val state: DraftState = DraftState.LoggingIn,
-    val sendError: String? = null,
+class AppStore(
+    private val directory: File,
+    private val cipher: BlobCipher,
+    private val defaultDeviceName: String,
+    private val controlPublic: ByteArray? = null,
 ) {
-    fun isCurrent(deployment: Deployment?, snapshot: AppSnapshot): Boolean =
-        deployment != null &&
-            snapshot.account != null &&
-            state is DraftState.Ready &&
-            state.deploymentKeyId == deployment.key.id &&
-            state.accountRevision == snapshot.accountRevision
-}
+    constructor(
+        context: Context,
+        controlPublic: ByteArray?,
+    ) : this(context.filesDir, LocalCipher(), Build.MODEL.take(64), controlPublic)
 
-@Serializable data class SentRecord(val sites: List<SiteRef>, val sentAt: Long)
-
-@Serializable data class StoredAccount(val username: String, val encryptedPassword: String)
-
-@Serializable
-data class AppSnapshot(
-    val account: StoredAccount? = null,
-    val accountRevision: Long = 0,
-    val deviceName: String = Build.MODEL.take(64),
-    val drafts: List<Draft> = emptyList(),
-    val pendingProfileDeletions: Set<String> = emptySet(),
-    val sent: List<SentRecord> = emptyList(),
-)
-
-class AppStore(context: Context) {
-    private val accountCipher = AccountCipher()
-    private val stateFile = AtomicFile(File(context.filesDir, "state.json"))
-    private val envelopes = File(context.filesDir, "envelopes").apply { mkdirs() }
+    private val stateFile = File(directory, "state.json")
+    private val blobs = File(directory, "blobs")
     private val mutable = MutableStateFlow(read())
-    val snapshot: StateFlow<AppSnapshot> = mutable.asStateFlow()
+    val snapshot = mutable.asStateFlow()
 
     init {
-        val ids = mutable.value.drafts.filter { it.state is DraftState.Ready }.map { it.id }.toSet()
-        envelopes.listFiles()?.filter { it.nameWithoutExtension !in ids }?.forEach { it.delete() }
-        val missing =
-            mutable.value.drafts.filter {
-                it.state is DraftState.Ready && !envelopeFile(it.id).exists()
-            }
-        if (missing.isNotEmpty())
-            update {
-                it.copy(
-                    drafts =
-                        it.drafts.map { draft ->
-                            if (draft in missing) draft.copy(state = DraftState.LoggingIn)
-                            else draft
-                        }
-                )
-            }
+        cleanupBlobs()
     }
 
-    private fun read(): AppSnapshot =
-        if (stateFile.baseFile.exists() || File(stateFile.baseFile.path + ".bak").exists()) {
-            stateFile.openRead().use {
-                ContractJson.decodeFromString<AppSnapshot>(it.readBytes().toString(Charsets.UTF_8))
-            }
-        } else AppSnapshot()
-
-    @Synchronized
-    private fun update(transform: (AppSnapshot) -> AppSnapshot) {
-        val next = transform(mutable.value)
-        val stream = stateFile.startWrite()
-        try {
-            stream.write(ContractJson.encodeToString(next).toByteArray(Charsets.UTF_8))
-            stateFile.finishWrite(stream)
-        } catch (error: Exception) {
-            stateFile.failWrite(stream)
-            throw error
-        }
-        mutable.value = next
-    }
-
-    fun account(): Account? =
-        snapshot.value.account?.let {
-            Account(it.username, accountCipher.decrypt(it.encryptedPassword))
-        }
-
-    fun setAccount(username: String, password: String) {
-        validateAccount(username, password)
-        val current = account()
-        if (current?.username == username && current.password == password) return
-        val encrypted = accountCipher.encrypt(password)
-        update {
-            it.copy(
-                account = StoredAccount(username, encrypted),
-                accountRevision = it.accountRevision + 1,
-            )
-        }
-    }
-
-    fun setDeviceName(name: String) {
-        requireMessage(name.isNotBlank() && name.codePointCount(0, name.length) <= 64) {
-            R.string.device_name_limit
-        }
-        update { it.copy(deviceName = name) }
-    }
-
-    fun createDraft(): Draft {
-        val draft = Draft(UUID.randomUUID().toString(), System.currentTimeMillis())
-        update { it.copy(drafts = listOf(draft) + it.drafts) }
-        return draft
-    }
-
-    fun leftAt(id: String, url: String?) {
-        if (url == null || snapshot.value.drafts.none { it.id == id && it.lastUrl != url }) return
-        update { state ->
-            state.copy(drafts = state.drafts.map { if (it.id == id) it.copy(lastUrl = url) else it })
-        }
-    }
-
-    private fun envelopeFile(id: String): File {
-        requireMessage(UUID.fromString(id).toString() == id)
-        return File(envelopes, "$id.rksi")
-    }
-
-    fun readEnvelope(draft: Draft, deployment: Deployment): ByteArray {
-        requireMessage(draft.isCurrent(deployment, snapshot.value)) { R.string.account_reexport }
-        return envelopeFile(draft.id).readBytes()
-    }
-
-    fun ready(
-        id: String,
-        deployment: Deployment,
-        accountRevision: Long,
-        sites: List<SiteRef>,
-        envelope: ByteArray,
-    ) {
-        val file = AtomicFile(envelopeFile(id))
-        val output = file.startWrite()
-        try {
-            output.write(envelope)
-            file.finishWrite(output)
-        } catch (error: Exception) {
-            file.failWrite(output)
-            throw error
-        }
-        update { state ->
-            requireMessage(state.account != null && state.accountRevision == accountRevision) {
-                R.string.account_reexport
-            }
-            state.copy(
-                drafts =
-                    state.drafts.map {
-                        if (it.id == id)
-                            it.copy(
-                                sites = sites,
-                                updatedAt = System.currentTimeMillis(),
-                                state = DraftState.Ready(deployment.key.id, accountRevision),
-                                sendError = null,
-                            )
-                        else it
-                    }
-            )
-        }
-    }
-
-    fun sendFailed(id: String, reason: String) = update { state ->
-        state.copy(
-            drafts = state.drafts.map { if (it.id == id) it.copy(sendError = reason) else it }
+    private fun fresh(): AppSnapshot {
+        val key = DeviceKey.generate()
+        return AppSnapshot(
+            device =
+                StoredDevice(key.id, base64(key.publicKey), base64(cipher.encrypt(key.privateKey))),
+            deviceName = defaultDeviceName,
         )
     }
 
-    fun recordSent(draft: Draft) = update {
-        it.copy(sent = (listOf(SentRecord(draft.sites, System.currentTimeMillis())) + it.sent).take(20))
+    private fun read(): AppSnapshot {
+        directory.mkdirs()
+        if (stateFile.exists()) {
+            val text = stateFile.readText(Charsets.UTF_8)
+            val version =
+                ContractJson.parseToJsonElement(text).jsonObject["v"]?.jsonPrimitive?.content
+            if (version == "2") return ContractJson.decodeFromString(text)
+            check(stateFile.delete())
+        }
+        check(File(directory, "envelopes").deleteRecursively())
+        File(directory, "state.json.bak").delete()
+        File(directory, "state.json.new").delete()
+        return fresh().also(::write)
     }
 
-    fun beginDestroy(id: String) {
+    private fun atomicWrite(file: File, bytes: ByteArray) {
+        file.parentFile?.mkdirs()
+        val temporary = File(file.parentFile, file.name + ".new")
+        temporary.outputStream().use { stream ->
+            stream.write(bytes)
+            stream.fd.sync()
+        }
+        Files.move(
+            temporary.toPath(),
+            file.toPath(),
+            StandardCopyOption.ATOMIC_MOVE,
+            StandardCopyOption.REPLACE_EXISTING,
+        )
+    }
+
+    private fun write(state: AppSnapshot) =
+        atomicWrite(stateFile, ContractJson.encodeToString(state).toByteArray(Charsets.UTF_8))
+
+    @Synchronized
+    private fun update(transform: (AppSnapshot) -> AppSnapshot) {
+        val transformed = transform(mutable.value)
+        val next =
+            transformed.copy(
+                outgoing =
+                    transformed.outgoing.map {
+                        if (it.seq <= transformed.ackedByControl || it.retired)
+                            it.copy(sealedBlob = null)
+                        else it
+                    }
+            )
+        write(next)
+        mutable.value = next
+        cleanupBlobs()
+    }
+
+    private fun cleanupBlobs() {
+        val state = mutable.value
+        val live =
+            state.buffered +
+                listOfNotNull(state.pairBlob) +
+                state.requests.mapNotNull { it.payloadBlob } +
+                state.outgoing.mapNotNull { it.sealedBlob }
+        blobs.listFiles()?.filter { it.name !in live }?.forEach { it.delete() }
+    }
+
+    private fun blob(bytes: ByteArray): String {
+        val id = UUID.randomUUID().toString()
+        atomicWrite(File(blobs, id), cipher.encrypt(bytes))
+        return id
+    }
+
+    private inline fun <reified T> save(value: T) =
+        blob(ContractJson.encodeToString(value).toByteArray(Charsets.UTF_8))
+
+    private inline fun <reified T> load(id: String): T =
+        ContractJson.decodeFromString(
+            cipher.decrypt(File(blobs, id).readBytes()).toString(Charsets.UTF_8)
+        )
+
+    @Synchronized
+    fun deviceKey() =
+        DeviceKey(
+            cipher.decrypt(Base64.getDecoder().decode(snapshot.value.device.encryptedPrivateKey))
+        )
+
+    fun authorized() = snapshot.value.pairing.authorized()
+
+    private fun requireAuthorization() {
+        check(authorized()) { "请先配对设备" }
+    }
+
+    private fun metadata(event: DeviceEvent, type: String, id: String? = null): EventMeta {
+        val message = DeviceMessage(ack = snapshot.value.appliedControlSeq, events = listOf(event))
+        message.validate()
+        val sealed =
+            controlPublic?.let {
+                blob(Envelope.seal(ContractJson.encodeToString(message), deviceKey(), it))
+            }
+        return EventMeta(event.seq, event.at, type, id, sealedBlob = sealed)
+    }
+
+    @Synchronized
+    fun pair(
+        username: String,
+        password: String,
+        code: List<String>,
+        device: String,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        check(snapshot.value.pairing is Pairing.Unpaired)
+        val event =
+            DeviceEvent.Pair(
+                snapshot.value.nextDeviceSeq,
+                now,
+                username,
+                password,
+                code.map { it.trim().lowercase() },
+                device,
+            )
+        event.validate()
+        val content = save<DeviceEvent>(event)
+        val meta = metadata(event, "pair")
         update {
             it.copy(
-                drafts = it.drafts.filterNot { draft -> draft.id == id },
-                pendingProfileDeletions = it.pendingProfileDeletions + id,
+                pairing = Pairing.Pairing(event.seq),
+                pairBlob = content,
+                deviceName = device,
+                nextDeviceSeq = event.seq + 1,
+                outgoing = it.outgoing + meta,
             )
         }
-        val file = envelopeFile(id)
-        AtomicFile(file).delete()
-        requireMessage(
-            !file.exists() &&
-                !File(file.path + ".new").exists() &&
-                !File(file.path + ".bak").exists()
-        ) {
-            R.string.envelope_delete_error
+    }
+
+    @Synchronized
+    fun addImport(
+        payload: ImportPayload,
+        sites: List<SiteRef>,
+        now: Long = System.currentTimeMillis(),
+    ) {
+        requireAuthorization()
+        payload.validate()
+        val event = payload.event(snapshot.value.nextDeviceSeq, now)
+        val content = save(payload)
+        val meta = metadata(event, "import", payload.id)
+        val request =
+            ImportRequest(
+                payload.id,
+                sites,
+                now,
+                content,
+                payload.cookies.size,
+                payload.localStorage.sumOf { it.items.size },
+            )
+        update {
+            it.copy(
+                nextDeviceSeq = event.seq + 1,
+                outgoing = it.outgoing + meta,
+                requests = it.requests + request,
+            )
         }
+    }
+
+    @Synchronized
+    fun retry(id: String, now: Long = System.currentTimeMillis()) {
+        requireAuthorization()
+        check(snapshot.value.retryable(id))
+        val request = snapshot.value.requests.single { it.id == id }
+        val event =
+            load<ImportPayload>(requireNotNull(request.payloadBlob))
+                .event(snapshot.value.nextDeviceSeq, now)
+        val meta = metadata(event, "import", id)
+        update { it.copy(nextDeviceSeq = event.seq + 1, outgoing = it.outgoing + meta) }
+    }
+
+    @Synchronized
+    fun deleteRequest(id: String, now: Long = System.currentTimeMillis()) {
+        val state = snapshot.value
+        val pending = state.mayBePending(id)
+        if (pending) requireAuthorization()
+        val event = if (pending) DeviceEvent.Withdraw(state.nextDeviceSeq, now, id) else null
+        val meta = event?.let { metadata(it, "withdraw", id) }
+        update {
+            it.copy(
+                requests = it.requests.filterNot { request -> request.id == id },
+                outgoing = it.outgoing + listOfNotNull(meta),
+                nextDeviceSeq = it.nextDeviceSeq + if (pending) 1 else 0,
+            )
+        }
+    }
+
+    @Synchronized
+    fun event(meta: EventMeta): DeviceEvent? =
+        when (meta.type) {
+            "pair" ->
+                snapshot.value.pairBlob
+                    ?.let { load<DeviceEvent>(it) }
+                    ?.takeIf { it.seq == meta.seq }
+            "import" ->
+                snapshot.value.requests
+                    .find { it.id == meta.requestId }
+                    ?.payloadBlob
+                    ?.let { load<ImportPayload>(it).event(meta.seq, meta.at) }
+            "withdraw" -> DeviceEvent.Withdraw(meta.seq, meta.at, requireNotNull(meta.requestId))
+            else -> error("未知事件")
+        }
+
+    @Synchronized
+    fun sealed(meta: EventMeta): ByteArray =
+        cipher.decrypt(File(blobs, requireNotNull(meta.sealedBlob)).readBytes())
+
+    @Synchronized
+    fun receive(message: ControlMessage): Boolean {
+        message.validate()
+        val next = snapshot.value.applyMessage(message)
+        if (next == null) {
+            val existing = snapshot.value.buffered.any { load<ControlMessage>(it) == message }
+            if (!existing) {
+                val content = save(message)
+                update { it.copy(buffered = it.buffered + content) }
+            }
+            return false
+        }
+        update { next }
+        while (true) {
+            val state = snapshot.value
+            val ready = state.buffered.firstOrNull { state.applyMessage(load(it)) != null } ?: break
+            val applied = requireNotNull(state.applyMessage(load(ready)))
+            update { applied.copy(buffered = applied.buffered - ready) }
+        }
+        return true
+    }
+
+    fun sent(sequences: Set<Long>, now: Long = System.currentTimeMillis()) = update { state ->
+        state.copy(
+            outgoing =
+                state.outgoing.map {
+                    if (it.seq in sequences)
+                        it.copy(
+                            firstSentAt = it.firstSentAt ?: now,
+                            lastSentAt = now,
+                            sendError = null,
+                        )
+                    else it
+                }
+        )
+    }
+
+    fun sendFailed(sequences: Set<Long>, reason: String) = update { state ->
+        state.copy(
+            outgoing =
+                state.outgoing.map { if (it.seq in sequences) it.copy(sendError = reason) else it }
+        )
+    }
+
+    fun setDeviceName(name: String) {
+        validateDeviceName(name)
+        update { it.copy(deviceName = name) }
+    }
+
+    fun hideEvent(seq: Long) = update { state ->
+        state.copy(
+            outgoing = state.outgoing.map { if (it.seq == seq) it.copy(hidden = true) else it }
+        )
+    }
+
+    fun setSendMode(mode: SendMode) = update { it.copy(sendMode = mode) }
+
+    fun beginDestroy(id: String) = update {
+        it.copy(pendingProfileDeletions = it.pendingProfileDeletions + id)
     }
 
     fun profileDeleted(id: String) = update {
         it.copy(pendingProfileDeletions = it.pendingProfileDeletions - id)
     }
 
-    fun clearAccountAndDevice() {
-        update {
-            it.copy(
-                account = null,
-                accountRevision = it.accountRevision + 1,
-                deviceName = Build.MODEL.take(64),
-                sent = emptyList(),
-            )
-        }
-        accountCipher.deleteKey()
+    @Synchronized
+    fun clearAll() {
+        directory.listFiles()?.forEach { check(it.deleteRecursively()) }
+        cipher.deleteKey()
+        val next = fresh()
+        write(next)
+        mutable.value = next
     }
+
+    private fun base64(bytes: ByteArray) = Base64.getEncoder().encodeToString(bytes)
 }

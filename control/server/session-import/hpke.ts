@@ -55,11 +55,29 @@ function publicKey(raw: Buffer) {
 export function x25519Public(rawPrivate: Buffer): Buffer {
   return Buffer.from(createPublicKey(x25519Private(rawPrivate)).export({ format: 'jwk' }).x!, 'base64url');
 }
-function schedule(dh: Buffer, enc: Buffer, recipient: Buffer, info: Buffer) {
+function sharedSecret(dh: Buffer, enc: Buffer, recipient: Buffer, sender: Buffer) {
   const prk = labeledExtract(kemSuite, empty, 'eae_prk', dh);
-  const shared = labeledExpand(kemSuite, prk, 'shared_secret', Buffer.concat([enc, recipient]), 32);
+  return labeledExpand(kemSuite, prk, 'shared_secret', Buffer.concat([enc, recipient, sender]), 32);
+}
+export function authEncap(senderPrivate: Buffer, recipientPublic: Buffer, ephemeralPrivate: Buffer) {
+  const enc = x25519Public(ephemeralPrivate);
+  const dh = Buffer.concat([
+    diffieHellman({ privateKey: x25519Private(ephemeralPrivate), publicKey: publicKey(recipientPublic) }),
+    diffieHellman({ privateKey: x25519Private(senderPrivate), publicKey: publicKey(recipientPublic) }),
+  ]);
+  return { enc, sharedSecret: sharedSecret(dh, enc, recipientPublic, x25519Public(senderPrivate)) };
+}
+export function authDecap(recipientPrivate: Buffer, senderPublic: Buffer, enc: Buffer) {
+  const recipient = x25519Private(recipientPrivate);
+  const dh = Buffer.concat([
+    diffieHellman({ privateKey: recipient, publicKey: publicKey(enc) }),
+    diffieHellman({ privateKey: recipient, publicKey: publicKey(senderPublic) }),
+  ]);
+  return sharedSecret(dh, enc, x25519Public(recipientPrivate), senderPublic);
+}
+function schedule(shared: Buffer, info: Buffer) {
   const context = Buffer.concat([
-    Buffer.from([0]),
+    Buffer.from([2]),
     labeledExtract(hpkeSuite, empty, 'psk_id_hash', empty),
     labeledExtract(hpkeSuite, empty, 'info_hash', info),
   ]);
@@ -69,33 +87,31 @@ function schedule(dh: Buffer, enc: Buffer, recipient: Buffer, info: Buffer) {
     nonce: labeledExpand(hpkeSuite, secret, 'base_nonce', context, 12),
   };
 }
-// Fixed ephemeral keys are for the RFC known-answer test only.
-export function hpkeSealWithEphemeral(
+export function hpkeSeal(
+  senderPrivate: Buffer,
   recipientPublic: Buffer,
   info: Buffer,
   aad: Buffer,
   plaintext: Buffer,
-  ephemeralPrivate: Buffer,
 ) {
-  const ephemeral = x25519Private(ephemeralPrivate);
-  const enc = x25519Public(ephemeralPrivate);
-  const dh = diffieHellman({ privateKey: ephemeral, publicKey: publicKey(recipientPublic) });
-  const { key, nonce } = schedule(dh, enc, recipientPublic, info);
-  const cipher = createCipheriv('aes-256-gcm', key, nonce);
-  cipher.setAAD(aad);
-  return { enc, ciphertext: Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]) };
-}
-export function hpkeSeal(recipientPublic: Buffer, info: Buffer, aad: Buffer, plaintext: Buffer) {
   try {
     const pair = generateKeyPairSync('x25519');
-    const raw = Buffer.from(pair.privateKey.export({ format: 'jwk' }).d!, 'base64url');
-    return hpkeSealWithEphemeral(recipientPublic, info, aad, plaintext, raw);
+    const ephemeral = Buffer.from(pair.privateKey.export({ format: 'jwk' }).d!, 'base64url');
+    const { enc, sharedSecret } = authEncap(senderPrivate, recipientPublic, ephemeral);
+    const { key, nonce } = schedule(sharedSecret, info);
+    const cipher = createCipheriv('aes-256-gcm', key, nonce);
+    cipher.setAAD(aad);
+    return {
+      enc,
+      ciphertext: Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]),
+    };
   } catch {
     throw invalid();
   }
 }
 export function hpkeOpen(
   recipientPrivate: Buffer,
+  senderPublic: Buffer,
   enc: Buffer,
   info: Buffer,
   aad: Buffer,
@@ -103,8 +119,7 @@ export function hpkeOpen(
 ): Buffer {
   try {
     if (ciphertext.length < 16) throw invalid();
-    const dh = diffieHellman({ privateKey: x25519Private(recipientPrivate), publicKey: publicKey(enc) });
-    const { key, nonce } = schedule(dh, enc, x25519Public(recipientPrivate), info);
+    const { key, nonce } = schedule(authDecap(recipientPrivate, senderPublic, enc), info);
     const decipher = createDecipheriv('aes-256-gcm', key, nonce);
     decipher.setAAD(aad);
     decipher.setAuthTag(ciphertext.subarray(-16));

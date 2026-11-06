@@ -1,42 +1,44 @@
 import { randomUUID } from 'node:crypto';
-import { gzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
-import type { BrowserIdentity, ImportPayload } from '../shared/session-import';
+import type { BrowserIdentity, DeviceEvent, ImportMessage } from '../shared/session-import';
 import type { SessionImportConfig } from '../server/config';
 import type { MailClient, MailPart } from '../server/session-import/mailbox';
-import { hpkeSeal } from '../server/session-import/hpke';
+import { x25519Public } from '../server/session-import/hpke';
+import { publicKeyId, sealMessage } from '../server/session-import/envelope';
 
 export const importConfig: SessionImportConfig = {
   mailbox: 'import@example.com',
+  appMailbox: 'app@example.com',
   imap: { host: 'imap.example.com', port: 993, user: 'user', password: 'secret' },
+  smtp: { host: 'smtp.example.com', port: 465, user: 'user', password: 'secret' },
   folder: 'INBOX',
   pollSeconds: 60,
+  replyWindowSeconds: 30,
 };
-export const browserIdentity: BrowserIdentity = {
-  userAgent: 'RemoteKit Test UA',
-  metadata: {
-    platform: 'Windows',
-    platformVersion: '19.0.0',
-    architecture: 'x86',
-    bitness: '64',
-    wow64: false,
-    model: '',
-    mobile: false,
-    brands: [{ brand: 'Chromium', version: '157' }],
-    fullVersionList: [{ brand: 'Chromium', version: '157.0.0.0' }],
-  },
+export const controlPrivate = Buffer.from(Array.from({ length: 32 }, (_, i) => i + 1));
+export const devicePrivate = Buffer.from(Array.from({ length: 32 }, (_, i) => i + 33));
+export const controlPublic = x25519Public(controlPrivate),
+  devicePublic = x25519Public(devicePrivate);
+export const controlKeyId = publicKeyId(controlPublic),
+  deviceKeyId = publicKeyId(devicePublic);
+export const fixedKeys = {
+  controlPrivate: controlPrivate.toString('base64url'),
+  controlPublic: controlPublic.toString('base64url'),
+  controlKeyId,
+  devicePrivate: devicePrivate.toString('base64url'),
+  devicePublic: devicePublic.toString('base64url'),
+  deviceKeyId,
 };
-export function importPayload(overrides: Partial<ImportPayload> = {}): ImportPayload {
+export type ImportEvent = Extract<DeviceEvent, { type: 'import' }>;
+export function importEvent(overrides: Partial<ImportEvent> = {}): ImportEvent {
   return {
-    v: 1,
+    seq: 2,
+    at: 1793900000000,
+    type: 'import',
     id: randomUUID(),
-    createdAt: Date.now(),
-    username: 'import-user',
-    password: 'import-password',
-    device: '测试手机',
     sites: [
-      { name: '测试站点', url: 'https://example.com/account' },
-      { name: '测试论坛', url: 'https://forum.example.org/' },
+      { name: '测试手机', url: 'https://example.com/account' },
+      { name: '测试手机', url: 'https://forum.example.org/' },
     ],
     cookies: [
       {
@@ -55,16 +57,38 @@ export function importPayload(overrides: Partial<ImportPayload> = {}): ImportPay
     ...overrides,
   };
 }
-export function uncheckedEnvelope(publicKey: Buffer, keyId: string, payload: unknown) {
-  const header = Buffer.concat([Buffer.from('RKSI'), Buffer.from([1]), Buffer.from(keyId, 'hex')]);
-  const result = hpkeSeal(
-    publicKey,
-    Buffer.from('RemoteKit session import v1'),
-    header,
-    gzipSync(Buffer.from(JSON.stringify(payload))),
-  );
-  return Buffer.concat([header, result.enc, result.ciphertext]);
+export function pairEvent(
+  overrides: Partial<Extract<DeviceEvent, { type: 'pair' }>> = {},
+): Extract<DeviceEvent, { type: 'pair' }> {
+  return {
+    seq: 1,
+    at: 1793900000000,
+    type: 'pair',
+    username: 'import-user',
+    password: 'import-password',
+    code: ['abandon', 'ability', 'able', 'about', 'above'],
+    device: '测试手机',
+    ...overrides,
+  };
 }
+export function deviceEnvelope(events: DeviceEvent[], ack = 0, privateKey = devicePrivate) {
+  const message: ImportMessage<DeviceEvent> = { v: 2, ack, events };
+  return sealMessage(privateKey, x25519Public(privateKey), controlPublic, message);
+}
+export const browserIdentity: BrowserIdentity = {
+  userAgent: 'RemoteKit Test UA',
+  metadata: {
+    platform: 'Windows',
+    platformVersion: '19.0.0',
+    architecture: 'x86',
+    bitness: '64',
+    wow64: false,
+    model: '',
+    mobile: false,
+    brands: [{ brand: 'Chromium', version: '157' }],
+    fullVersionList: [{ brand: 'Chromium', version: '157.0.0.0' }],
+  },
+};
 export class FakeMailClient implements MailClient {
   readonly calls: string[] = [];
   readonly deleted: number[] = [];

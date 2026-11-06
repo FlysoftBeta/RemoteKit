@@ -39,6 +39,11 @@ function issues(overview: AdminOverview) {
       severity: 'warning',
       text: `会话导入邮箱拉取失败：${overview.sessionImport.lastError}`,
     });
+  if (overview.sessionImport.outbox.lastError && overview.sessionImport.outbox.pending > 0)
+    list.push({
+      severity: 'warning',
+      text: `会话导入回信发送失败，${overview.sessionImport.outbox.pending} 封待发：${overview.sessionImport.outbox.lastError}`,
+    });
   return list;
 }
 
@@ -91,7 +96,7 @@ function SessionImportPanel({
       </Box>
       {error && <Alert severity="error">{error}</Alert>}
       <dl className="admin-facts">
-        <dt>导入邮箱</dt>
+        <dt>收信</dt>
         <dd>
           {!status.configured
             ? '未配置（control.json 的 sessionImport）'
@@ -103,6 +108,14 @@ function SessionImportPanel({
         </dd>
         {status.configured && (
           <>
+            <dt>回信</dt>
+            <dd>
+              {status.outbox.pending === 0
+                ? '没有待发回信'
+                : status.outbox.lastError
+                  ? `${status.outbox.pending} 封待发 · 发送失败 ${formatTime(status.outbox.lastErrorAt)}`
+                  : `${status.outbox.pending} 封待发`}
+            </dd>
             <dt>App 构建</dt>
             <dd>部署配置放到 android/deployment.json；更换导入密钥或 Browser 升级后需重新下载并重新构建</dd>
           </>

@@ -29,7 +29,7 @@ abstract class GenerateDeploymentAssets : DefaultTask() {
     @TaskAction
     fun generate() {
         val source = deploymentFiles.singleFile
-        val target = outputDirectory.get().file("deployment.json").asFile
+        val target = outputDirectory.get().file(source.name).asFile
         target.parentFile.mkdirs()
         if (source.exists()) source.copyTo(target, overwrite = true) else target.delete()
     }
@@ -39,6 +39,12 @@ val generateDeploymentAssets =
     tasks.register<GenerateDeploymentAssets>("generateDeploymentAssets") {
         deploymentFiles.from(rootProject.file("deployment.json"))
         outputDirectory.set(layout.buildDirectory.dir("generated/deploymentAssets"))
+    }
+
+val copyPairingWordlist =
+    tasks.register<GenerateDeploymentAssets>("copyPairingWordlist") {
+        deploymentFiles.from(rootProject.file("../protocol/session-import/wordlist.txt"))
+        outputDirectory.set(layout.buildDirectory.dir("generated/wordlistAssets"))
     }
 
 fun quoted(value: String): String =
@@ -67,6 +73,13 @@ android {
                 quoted(mailbox.getProperty("smtp.$key", "")),
             )
         }
+        for (key in listOf("host", "port")) {
+            buildConfigField(
+                "String",
+                "IMAP_${key.uppercase()}",
+                quoted(mailbox.getProperty("imap.$key", "")),
+            )
+        }
     }
     buildFeatures {
         compose = true
@@ -91,12 +104,16 @@ android {
     testOptions.unitTests.all {
         it.systemProperty(
             "fixture.path",
-            rootProject.file("../protocol/session-import/envelope-fixture.json").absolutePath,
+            rootProject.file("../protocol/session-import/device-message-fixture.json").absolutePath,
         )
     }
 }
 
 androidComponents.onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(
+        copyPairingWordlist,
+        GenerateDeploymentAssets::outputDirectory,
+    )
     variant.sources.assets?.addGeneratedSourceDirectory(
         generateDeploymentAssets,
         GenerateDeploymentAssets::outputDirectory,
@@ -121,5 +138,6 @@ dependencies {
     implementation(libs.bc)
     implementation(libs.mail)
     implementation(libs.activation)
+    implementation("androidx.work:work-runtime-ktx:2.11.0")
     testImplementation(libs.junit)
 }

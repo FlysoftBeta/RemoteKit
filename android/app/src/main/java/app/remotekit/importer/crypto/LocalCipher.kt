@@ -1,15 +1,14 @@
-package app.remotekit.importer.account
+package app.remotekit.importer.crypto
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import java.security.KeyStore
-import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-class AccountCipher {
+class LocalCipher : BlobCipher {
     private val keyStore = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
     private fun key(): SecretKey =
@@ -29,29 +28,35 @@ class AccountCipher {
                 }
                 .generateKey()
 
-    fun encrypt(password: String): String {
+    override fun encrypt(bytes: ByteArray): ByteArray {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
-        return Base64.getEncoder()
-            .encodeToString(cipher.iv + cipher.doFinal(password.toByteArray(Charsets.UTF_8)))
+        return cipher.iv + cipher.doFinal(bytes)
     }
 
-    fun decrypt(encrypted: String): String {
-        val bytes = Base64.getDecoder().decode(encrypted)
+    override fun decrypt(bytes: ByteArray): ByteArray {
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(
             Cipher.DECRYPT_MODE,
             keyStore.getKey(ALIAS, null) as SecretKey,
             GCMParameterSpec(128, bytes.copyOfRange(0, 12)),
         )
-        return cipher.doFinal(bytes.copyOfRange(12, bytes.size)).toString(Charsets.UTF_8)
+        return cipher.doFinal(bytes.copyOfRange(12, bytes.size))
     }
 
-    fun deleteKey() {
+    override fun deleteKey() {
         keyStore.deleteEntry(ALIAS)
     }
 
     private companion object {
-        const val ALIAS = "rk_account"
+        const val ALIAS = "rk_device_data"
     }
+}
+
+interface BlobCipher {
+    fun encrypt(bytes: ByteArray): ByteArray
+
+    fun decrypt(bytes: ByteArray): ByteArray
+
+    fun deleteKey()
 }

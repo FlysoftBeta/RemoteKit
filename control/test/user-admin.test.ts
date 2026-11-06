@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { createApplication } from '../server/application';
 import { ControlDatabase } from '../server/persistence/database';
 import type { EndpointLink } from '../server/endpoint/link';
-import { importPayload } from './session-import-fixture';
+import { importEvent, devicePublic, deviceKeyId, pairEvent } from './session-import-fixture';
 
 const password = 'password123';
 
@@ -205,7 +205,16 @@ test('deleting a user removes every row of its tenant and queues node data delet
     const leaving = await accountsFor(h.store).login('leaving', password);
     await h.attach(leaving);
     const user = h.store.accounts.byUsername('leaving')!;
-    h.store.sessionImports.insert(user.tenant, importPayload(), Date.now());
+    h.store.sessionImports.openPairing(user.tenant, pairEvent().code, Date.now());
+    h.store.sessionImports.addDevice(deviceKeyId, user.tenant, devicePublic, 'phone', Date.now());
+    h.store.sessionImports.incoming(user.tenant, deviceKeyId, devicePublic, 'phone', pairEvent(), Date.now());
+    h.store.sessionImports.reply(
+      user.tenant,
+      deviceKeyId,
+      { type: 'paired', ref: 1, username: user.username },
+      Date.now(),
+    );
+    h.store.sessionImports.saveImport(user.tenant, deviceKeyId, importEvent(), Date.now(), null);
     const placement = h.control.endpoint.placement.resolve(leaving.tenantId);
     h.store.db
       .prepare('INSERT INTO user_security VALUES (?,?,?,?,?,?)')
@@ -223,6 +232,7 @@ test('deleting a user removes every row of its tenant and queues node data delet
       ['administrator'],
     );
     assert.ok(h.revoked.includes(leaving.tenantId + ':logout'));
+    assert.equal(h.control.sessionImporter.outbox.status().pending, 2);
     assert.equal(h.store.accounts.identity(leaving.token), undefined);
     const tables = h.store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as {
       name: string;

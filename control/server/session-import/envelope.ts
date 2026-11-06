@@ -1,27 +1,32 @@
+import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { TextDecoder } from 'node:util';
 import { RemoteKitError } from '../../shared/errors';
-import type { ImportPayload } from '../../shared/session-import';
+import type { DeviceEvent, ControlEvent, ImportMessage } from '../../shared/session-import';
 import { hpkeOpen, hpkeSeal } from './hpke';
 
 export const MAX_ENVELOPE_BYTES = 16 * 1024 ** 2;
 export const MAX_PAYLOAD_BYTES = 32 * 1024 ** 2;
-const info = Buffer.from('RemoteKit session import v1');
+const info = Buffer.from('RemoteKit session import v2');
 const invalid = (field: string): never => {
   throw new RemoteKitError('invalid_request', `Invalid session import: ${field}`);
 };
-export class ImportLimitError extends RemoteKitError {
-  constructor(
-    readonly payload: ImportPayload,
-    reason: string,
-  ) {
+export type ImportEvent = Extract<DeviceEvent, { type: 'import' }>;
+export interface EventResult {
+  event: DeviceEvent;
+  error: string | null;
+}
+class ImportLimitError extends RemoteKitError {
+  constructor(reason: string) {
     super('invalid_request', reason);
   }
 }
+class UnknownKeysError extends RemoteKitError {}
 function object(value: unknown, keys: string[], field: string): Record<string, any> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(field);
   const record = value as Record<string, any>;
-  if (Object.keys(record).some((key) => !keys.includes(key))) invalid(field);
+  if (Object.keys(record).some((key) => !keys.includes(key)))
+    throw new UnknownKeysError('invalid_request', `Invalid session import: ${field}`);
   return record;
 }
 function string(value: unknown, field: string): asserts value is string {
@@ -40,28 +45,8 @@ function webUrl(value: unknown, field: string): URL {
     return invalid(field);
   }
 }
-export function parseImportPayload(json: unknown): ImportPayload {
-  const p = object(
-    json,
-    ['v', 'id', 'createdAt', 'username', 'password', 'device', 'sites', 'cookies', 'localStorage'],
-    'payload',
-  );
-  if (p.v !== 1) invalid('v');
-  if (
-    typeof p.id !== 'string' ||
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(p.id)
-  )
-    invalid('id');
-  for (const [field, max] of [
-    ['username', 64],
-    ['password', 256],
-  ] as const) {
-    string(p[field], field);
-    const length = Array.from(p[field]).length;
-    if (length < 1 || length > max) invalid(field);
-  }
-  timestamp(p.createdAt, 'createdAt');
-  string(p.device, 'device');
+function parseImport(event: unknown): ImportEvent {
+  const p = object(event, ['seq', 'at', 'type', 'id', 'sites', 'cookies', 'localStorage'], 'import');
   if (!Array.isArray(p.sites) || p.sites.length === 0) invalid('sites');
   const urls = new Set<string>();
   for (const value of p.sites) {
@@ -76,7 +61,6 @@ export function parseImportPayload(json: unknown): ImportPayload {
   const exceeds = (condition: boolean, reason: string) => {
     if (condition) limit ??= reason;
   };
-  exceeds(Array.from(p.device).length > 64, '设备名超过 64 字符');
   exceeds(p.sites.length > 16, '站点超过 16 个');
   exceeds(
     p.sites.some((site: { name: string }) => Array.from(site.name).length > 128),
@@ -120,43 +104,127 @@ export function parseImportPayload(json: unknown): ImportPayload {
     originBytes.set(storage.origin, size);
   }
   exceeds(Buffer.byteLength(JSON.stringify(p)) > MAX_PAYLOAD_BYTES, '载荷超过 32 MiB');
-  const payload = p as ImportPayload;
-  if (limit) throw new ImportLimitError(payload, limit);
-  return payload;
+  if (limit) throw new ImportLimitError(limit);
+  return p as ImportEvent;
+}
+export function parseDeviceMessage(json: unknown): {
+  message: ImportMessage<DeviceEvent>;
+  results: EventResult[];
+} {
+  const m = object(json, ['v', 'ack', 'events'], 'message');
+  if (m.v !== 2 || !Number.isSafeInteger(m.ack) || m.ack < 0 || !Array.isArray(m.events)) invalid('message');
+  const results: EventResult[] = [];
+  let previous: number | undefined;
+  for (const value of m.events) {
+    const e = object(
+      value,
+      [
+        'seq',
+        'at',
+        'type',
+        'username',
+        'password',
+        'code',
+        'device',
+        'id',
+        'sites',
+        'cookies',
+        'localStorage',
+      ],
+      'event',
+    );
+    if (!Number.isSafeInteger(e.seq) || e.seq < 1 || (previous !== undefined && e.seq !== previous + 1))
+      invalid('seq');
+    timestamp(e.at, 'at');
+    if (e.at < 0) invalid('at');
+    previous = e.seq;
+    let error: string | null = null;
+    if (e.type === 'pair') {
+      object(e, ['seq', 'at', 'type', 'username', 'password', 'code', 'device'], 'pair');
+      for (const [field, max] of [
+        ['username', 64],
+        ['password', 256],
+        ['device', 64],
+      ] as const) {
+        string(e[field], field);
+        if ((field !== 'device' && !e[field].length) || Array.from(e[field]).length > max) invalid(field);
+      }
+      if (
+        !Array.isArray(e.code) ||
+        e.code.length !== 5 ||
+        e.code.some((word: unknown) => typeof word !== 'string')
+      )
+        invalid('code');
+    } else if (e.type === 'import' || e.type === 'withdraw') {
+      if (
+        typeof e.id !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(e.id)
+      )
+        invalid('id');
+      if (e.type === 'withdraw') object(e, ['seq', 'at', 'type', 'id'], 'withdraw');
+      else {
+        // Unknown keys invalidate the message; item validation failures belong to this import event.
+        object(e, ['seq', 'at', 'type', 'id', 'sites', 'cookies', 'localStorage'], 'import');
+        try {
+          parseImport(e);
+        } catch (failure) {
+          if (failure instanceof UnknownKeysError) throw failure;
+          if (failure instanceof RemoteKitError) error = failure.message;
+          else throw failure;
+        }
+      }
+    } else invalid('type');
+    results.push({ event: e as DeviceEvent, error });
+  }
+  return { message: m as ImportMessage<DeviceEvent>, results };
+}
+export function publicKeyId(publicKey: Buffer): string {
+  return createHash('sha256').update(publicKey).digest('hex').slice(0, 16);
 }
 export function envelopeKeyId(bytes: Buffer): string | undefined {
-  if (bytes.length < 61 || !bytes.subarray(0, 4).equals(Buffer.from('RKSI')) || bytes[4] !== 1) return;
+  if (bytes.length < 93 || !bytes.subarray(0, 4).equals(Buffer.from('RKSI')) || bytes[4] !== 2) return;
   return bytes.subarray(5, 13).toString('hex');
 }
-function header(keyId: string) {
-  if (!/^[0-9a-f]{16}$/.test(keyId)) invalid('key id');
-  return Buffer.concat([Buffer.from('RKSI'), Buffer.from([1]), Buffer.from(keyId, 'hex')]);
-}
-export function sealEnvelope(publicKey: Buffer, keyId: string, payload: ImportPayload): Buffer {
-  parseImportPayload(payload);
-  const plaintext = Buffer.from(JSON.stringify(payload));
+export function sealMessage<E extends DeviceEvent | ControlEvent>(
+  senderPrivate: Buffer,
+  senderPublic: Buffer,
+  recipientPublic: Buffer,
+  message: ImportMessage<E>,
+): Buffer {
+  const plaintext = Buffer.from(JSON.stringify(message));
   if (plaintext.length > MAX_PAYLOAD_BYTES) invalid('payload size');
-  const aad = header(keyId);
-  const { enc, ciphertext } = hpkeSeal(publicKey, info, aad, gzipSync(plaintext));
+  const aad = Buffer.concat([
+    Buffer.from('RKSI'),
+    Buffer.from([2]),
+    Buffer.from(publicKeyId(recipientPublic), 'hex'),
+    senderPublic,
+  ]);
+  const { enc, ciphertext } = hpkeSeal(senderPrivate, recipientPublic, info, aad, gzipSync(plaintext));
   const bytes = Buffer.concat([aad, enc, ciphertext]);
   if (bytes.length > MAX_ENVELOPE_BYTES) invalid('envelope size');
   return bytes;
 }
-export function openEnvelope(privateKey: Buffer, keyId: string, bytes: Buffer): ImportPayload {
-  if (bytes.length > MAX_ENVELOPE_BYTES || envelopeKeyId(bytes) !== keyId) invalid('envelope header');
+export function openMessage(
+  recipientPrivate: Buffer,
+  recipientKeyId: string,
+  bytes: Buffer,
+): { senderPublic: Buffer; senderKeyId: string; message: unknown } {
+  if (bytes.length > MAX_ENVELOPE_BYTES || envelopeKeyId(bytes) !== recipientKeyId)
+    invalid('envelope header');
+  const senderPublic = bytes.subarray(13, 45);
   const compressed = hpkeOpen(
-    privateKey,
-    bytes.subarray(13, 45),
+    recipientPrivate,
+    senderPublic,
+    bytes.subarray(45, 77),
     info,
-    bytes.subarray(0, 13),
-    bytes.subarray(45),
+    bytes.subarray(0, 45),
+    bytes.subarray(77),
   );
-  let json: unknown;
   try {
     const plaintext = gunzipSync(compressed, { maxOutputLength: MAX_PAYLOAD_BYTES });
-    json = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext));
+    const message: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext));
+    return { senderPublic, senderKeyId: publicKeyId(senderPublic), message };
   } catch {
     return invalid('compressed payload');
   }
-  return parseImportPayload(json);
 }

@@ -27,13 +27,15 @@ class ProfileSessions(private val store: AppStore) {
 
     fun deletePendingBeforeWebViews() {
         val profiles = ProfileStore.getInstance()
-        store.snapshot.value.pendingProfileDeletions.forEach { id ->
+        val names = profiles.allProfileNames.filter { it != "Default" }
+        (names + store.snapshot.value.pendingProfileDeletions).distinct().forEach { id ->
             profiles.deleteProfile(id)
             store.profileDeleted(id)
         }
     }
 
     fun create(context: Context, id: String, identity: BrowserIdentity): Pair<WebView, Profile> {
+        store.beginDestroy(id)
         val profile = ProfileStore.getInstance().getOrCreateProfile(id)
         loaded[id] = profile
         val view = WebView(context)

@@ -1,0 +1,44 @@
+{
+    "controlPrivate": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+    "controlPublic": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw",
+    "controlKeyId": "aaa8fff703b50b22",
+    "devicePrivate": "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A",
+    "devicePublic": "WGmv9FBUlzLLqu1eXfmzCm2jHLDldCutWtShp2jxpns",
+    "deviceKeyId": "4457134794559182",
+    "envelope": "UktTSQJEVxNHlFWRggejfLwUIJPIt1XcGxDobLQmN0rRaqhT7QvfwLK4bRx80v0Bqe1pbMDim5zcrm65dyVQbAtjxRy8gsc9UmVPGQjDRjDwIJJO4V87P2V+YoC3a7d4PW2Y0pOs5o+7gpyJGqBfp/AVIj+CxuWtv2eMWlJ+zPq7CeY+Pav+cwFfphnmDjR9pbarmigNSdjCcsspt2jyVrPQoRIzTmgHtFBsYKESmlMWRvawyU56/jdcyQmjXAsR2nmACPg0NQBnHIk5fPDYnEvwMR+qyoQmbxr9hvaK2S46OkoqaXUSCud/i1pggGwU07HMLyHK92TBC60vJq7ZO3xBLzB4LTyWZVqZNnwqR2kV+IFw7vqTqgSzf++7KydBp9kLHr2Gwvy/b0bc6sX5pzKppm8=",
+    "message": {
+        "v": 2,
+        "ack": 2,
+        "events": [
+            {
+                "seq": 1,
+                "at": 1793900002000,
+                "type": "paired",
+                "ref": 1,
+                "username": "student"
+            },
+            {
+                "seq": 2,
+                "at": 1793900003000,
+                "type": "importReceived",
+                "ref": 2,
+                "id": "bf81f466-e992-48e5-a3d3-6b168556c471"
+            },
+            {
+                "seq": 3,
+                "at": 1793900004000,
+                "type": "importApplied",
+                "ref": 2,
+                "id": "bf81f466-e992-48e5-a3d3-6b168556c471",
+                "cookies": {
+                    "applied": 1,
+                    "rejected": 0
+                },
+                "localStorage": {
+                    "applied": 1,
+                    "rejected": 0
+                }
+            }
+        ]
+    }
+}
