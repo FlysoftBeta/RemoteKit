@@ -70,23 +70,45 @@ class ProtocolTest {
         Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
 
     @Test
-    fun writeDeviceFixture() {
+    fun sealDeviceMessage() {
         val json = ContractJson.encodeToString(message)
         val bytes = Envelope.seal(json, device, control.publicKey)
-        val fixture = buildJsonObject {
-            put("controlPrivate", url64(control.privateKey))
-            put("controlPublic", url64(control.publicKey))
-            put("controlKeyId", control.id)
-            put("devicePrivate", url64(device.privateKey))
-            put("devicePublic", url64(device.publicKey))
-            put("deviceKeyId", device.id)
-            put("envelope", Base64.getEncoder().encodeToString(bytes))
-            put("message", ContractJson.encodeToJsonElement(message))
-        }
-        fixture().writeText(prettyJson.encodeToString(fixture) + "\n", Charsets.UTF_8)
         assertEquals(json, Envelope.open(bytes, control, device.publicKey))
         assertEquals(2, bytes[4].toInt())
         assertArrayEquals(device.publicKey, bytes.copyOfRange(13, 45))
+    }
+
+    /**
+     * Sealing is randomized, so the committed fixture is written once (delete it to regenerate)
+     * and afterwards only checked against the current keys and message.
+     */
+    @Test
+    fun deviceFixtureMatches() {
+        val file = fixture()
+        if (!file.exists()) {
+            val bytes = Envelope.seal(ContractJson.encodeToString(message), device, control.publicKey)
+            val fixture = buildJsonObject {
+                put("controlPrivate", url64(control.privateKey))
+                put("controlPublic", url64(control.publicKey))
+                put("controlKeyId", control.id)
+                put("devicePrivate", url64(device.privateKey))
+                put("devicePublic", url64(device.publicKey))
+                put("deviceKeyId", device.id)
+                put("envelope", Base64.getEncoder().encodeToString(bytes))
+                put("message", ContractJson.encodeToJsonElement(message))
+            }
+            file.writeText(prettyJson.encodeToString(fixture) + "\n", Charsets.UTF_8)
+        }
+        val fixture = ContractJson.parseToJsonElement(file.readText(Charsets.UTF_8)).jsonObject
+        assertEquals(url64(control.publicKey), fixture.getValue("controlPublic").jsonPrimitive.content)
+        assertEquals(url64(device.publicKey), fixture.getValue("devicePublic").jsonPrimitive.content)
+        assertEquals(ContractJson.encodeToJsonElement(message), fixture.getValue("message"))
+        val envelope =
+            Base64.getDecoder().decode(fixture.getValue("envelope").jsonPrimitive.content)
+        assertEquals(
+            ContractJson.parseToJsonElement(Envelope.open(envelope, control, device.publicKey)),
+            fixture.getValue("message"),
+        )
     }
 
     @Test
