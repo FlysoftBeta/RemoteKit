@@ -84,6 +84,33 @@ Result<void> Download(cluster::Channel& channel,
   }
   return Retry("update stopped");
 }
+bool RuntimeInstalled(const fs::path& runtime, const std::string& id) {
+  auto build = cluster::ReadBuildId(runtime);
+  return build && build.value() == id &&
+         fs::is_regular_file(runtime / L"bin/endpoint_service.exe") &&
+         fs::is_regular_file(runtime / L"bin/remotekit_node.exe");
+}
+Result<void> InstallRuntime(const fs::path& root, const fs::path& archive, const std::string& id) {
+  auto runtime = root / L"runtime" / id;
+  if (RuntimeInstalled(runtime, id))
+    return {};
+  fs::create_directories(runtime.parent_path());
+  auto temporary = runtime.parent_path() / (".extract-" + std::to_string(GetCurrentProcessId()) +
+                                            "-" + std::to_string(GetTickCount64()));
+  if (!fs::create_directory(temporary))
+    return Retry("cannot create extraction directory");
+  auto extracted = ExtractArchive(archive, temporary);
+  std::error_code error;
+  if (extracted && RuntimeInstalled(temporary / L"node", id))
+    fs::rename(temporary / L"node", runtime, error);
+  std::error_code cleanup_error;
+  fs::remove_all(ExtendedPath(temporary), cleanup_error);
+  if (!extracted)
+    return extracted.error();
+  if (!RuntimeInstalled(runtime, id))
+    return Retry("cannot install node runtime: invalid archive or destination");
+  return {};
+}
 Result<bool> ReplaceSelf(const fs::path& root, const fs::path& runtime, bool service, Log& log) {
   auto installed = root / L"remotekit_node.exe";
   auto running = ExecutablePath();
@@ -137,6 +164,30 @@ std::string ReadCurrent(const fs::path& root) {
     return {};
   return id;
 }
+Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
+  auto build = cluster::ReadBuildId(package);
+  if (!build)
+    return build.error();
+  const auto& id = build.value();
+  if (!cluster::ValidBuildId(id))
+    return Retry("invalid bundled build identity");
+  if (RuntimeInstalled(root / L"runtime" / id, id))
+    return {};
+  auto archive = package / L"release/node.tar.zst";
+  std::ifstream descriptor(package / L"release/node.json", std::ios::binary);
+  auto release = Json::parse(descriptor, nullptr, false);
+  if (!release.is_object() || !release.contains("buildId") || release["buildId"] != id ||
+      !release.contains("sha256") || !release["sha256"].is_string() || !release.contains("size") ||
+      !release["size"].is_number_unsigned() ||
+      fs::file_size(archive) != release["size"].get<uint64_t>())
+    return Retry("invalid bundled node release");
+  auto hash = cluster::Sha256File(archive);
+  if (!hash)
+    return hash.error();
+  if (cluster::Hex(hash.value()) != release["sha256"].get<std::string>())
+    return Retry("bundled node package SHA-256 mismatch");
+  return InstallRuntime(root, archive, id);
+}
 Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
   try {
     auto files = cluster::LoadNodeFiles(root);
@@ -173,28 +224,10 @@ Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
     if (!MoveFileExW(partial.c_str(), archive.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
       return Retry("cannot finish archive download");
-    auto temporary = root / L"runtime" /
-                     (".extract-" + std::to_string(GetCurrentProcessId()) + "-" +
-                      std::to_string(GetTickCount64()));
-    if (!fs::create_directory(temporary))
-      return Retry("cannot create extraction directory");
-    auto extracted = ExtractArchive(archive, temporary);
-    if (!extracted) {
-      fs::remove_all(ExtendedPath(temporary));
-      return extracted.error();
-    }
-    auto build = cluster::ReadBuildId(temporary / L"node");
-    if (!build || build.value() != id ||
-        !fs::is_regular_file(temporary / L"node/bin/endpoint_service.exe") ||
-        !fs::is_regular_file(temporary / L"node/bin/remotekit_node.exe")) {
-      fs::remove_all(ExtendedPath(temporary));
-      return Retry("node archive build identity or binaries invalid");
-    }
+    auto installed = InstallRuntime(root, archive, id);
+    if (!installed)
+      return installed.error();
     auto runtime = root / L"runtime" / id;
-    if (fs::exists(runtime))
-      fs::remove_all(ExtendedPath(runtime));
-    fs::rename(temporary / L"node", runtime);
-    fs::remove(temporary);
     auto activated = SetCurrent(root, id);
     if (!activated)
       return activated.error();

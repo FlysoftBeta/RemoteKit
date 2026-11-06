@@ -68,12 +68,12 @@ npm start
 
 Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/data/control.json`，不存在时按默认值创建，同时生成集群密钥文件）。所有监听、存储与节点配置都在这个文件里，格式与校验规则见[多节点 · 配置](cluster.md#配置)。默认配置有一个本地节点 `local`，Control 启动 `build/endpoint/endpoint/endpoint_service.exe`；开发时在 `nodes.local.browser` 指向 `C:/src/chromium/src/out/dev/remotekit_browser.exe`（默认是 Endpoint 同目录）。编码器与码控参数（见[编码](encoding.md#适配器与后端选择)）、`browserTraceDir` 等都写在 `nodeDefaults` 或节点项里；Endpoint 不接受这些命令行参数。开发追踪开关 `REMOTEKIT_SERVER_TRACE`、`REMOTEKIT_MEDIA_TRACE` 仍是环境变量（见[诊断](diagnostics.md#开发侧追踪)）。
 
-**远端节点**：在 Control 配置里设置 `cluster.advertiseUrl`（`ws(s)://<Control 地址>:<端口>/api/node`）并在 `nodes` 中登记节点 ID（默认是节点机器的主机名，小写）。Control 在配置目录写出 `node.json`；把它复制到节点根目录，再在节点上运行：
+**远端节点**：在 Control 配置里设置 `cluster.advertiseUrl`（`ws(s)://<Control 地址>:<端口>/api/node`）并在 `nodes` 中登记节点 ID（默认是节点机器的主机名，小写），节点项省略 `launch`。Control 在配置目录写出含集群密钥的 `node.json`。在节点上解压 Endpoint 引导包，把该文件复制到 `run-endpoint.cmd` 同目录，再运行：
 
 ```powershell
-remotekit_node.exe run --root=C:\RemoteKitNode
+.\run-endpoint.cmd
 # 或注册为 Windows 服务（管理员）
-remotekit_node.exe service-install --root=C:\RemoteKitNode
+.\remotekit_node.exe service-install "--root=$PWD"
 ```
 
 节点从 Control 下载与之相同版本的运行时后启动 Endpoint。节点的 `peer.listen` 端口（默认 3101）要对其他节点开放。局域网或远程部署需要正确的监听地址、Origin 与可信 HTTPS：摄像头、文件选择中的拍照等能力要求安全上下文；集群通道自身已加密，不依赖 TLS。
@@ -89,7 +89,21 @@ npm --prefix control run build
 C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke --node C:/path/to/node-runtime/node.exe
 ```
 
-`tools/package-runtime.py` 默认使用 `--out rel`，把 Browser/SDK 运行依赖、Release Endpoint、`remotekit_node.exe` 与 CRT、Node、Control 生产 bundle 与最小 node_modules（better-sqlite3 的原生 ABI 与 Node 一起校验）、oneVPL 依赖、人脸模型与许可证（含 zstd）组装成目录、`.tar.zst` 和 `.tar.zst.sha256`，输出在 `develop/tmp`。包根有 `build.json`（buildId 是 `bin/` 与 `control/` 全部文件路径与 hash 的 SHA-256）；`release/node.tar.zst` 是给远端节点的运行时（`node/build.json` + 不含 Node 的 `bin/`），`release/node.json` 记录它的 buildId、SHA-256 与大小，Control 对 updater 提供。完整解压后运行 `run.cmd`（不接受参数），打开 `http://127.0.0.1:3001` 创建首个管理员账号。首次运行创建 `config/control.json`（本地节点指向包内 `bin/endpoint_service.exe`）与 `data/`；归档不含开发账号、Profile、凭据、数据库、日志、PDB 或构建输入。`--smoke` 在临时数据目录启动包内服务，检查静态资源、注册、鉴权 WS、SQLite 与时钟接口，并确认 WS 无法绕过 WebRTC 提交产品动作；启动检查等待本地节点上报容量并完成对账，在重新连接并解锁后检查人脸模型。它不验证媒体链路。manifest 记录源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。manifest 的源码 HEAD 是打包时的源码，不证明每个增量产物都由它重新构建。
+`tools/package-runtime.py` 默认使用 `--out rel`，在 `develop/tmp/<时间戳>/` 输出两套解包目录、`.tar.zst` 和 `.tar.zst.sha256`。
+
+| 部署方式 | 发布包 | 启动入口 |
+|---|---|---|
+| Control + 本地 Endpoint | `RemoteKit-control-win-x64.tar.zst` | `run.cmd` 首次离线安装节点运行时，再由 Control 经 stdio 启动本地 Endpoint。 |
+| 仅 Control | `RemoteKit-control-win-x64.tar.zst` | `run-control.cmd`，初始配置为 `nodes: {}`。远端节点可在配置中登记。 |
+| 仅 Endpoint | `RemoteKit-endpoint-win-x64.tar.zst` | 放入 Control 生成的 `node.json`，运行 `run-endpoint.cmd`。updater 下载、安装并监管 Endpoint。 |
+
+Control 包包含 Node、Control 生产 bundle、匹配 Node ABI 的 better-sqlite3、updater 与 CRT。Endpoint、Browser、SDK、oneVPL 和人脸模型集中在 `release/node.tar.zst`。本地安装和远端更新共用该归档及记录 buildId、SHA-256 和大小的 `release/node.json`。Endpoint 引导包带 updater、CRT、启动脚本和许可证。
+
+Control 启动脚本首次生成 `config/control.json`。合部署把运行时安装到 `data/local/runtime/<buildId>/`，节点根目录仍为 `data/node/`。升级时停止服务，把新版 Control 包部署到同一根目录并保留 `config/`、`data/`。默认本地节点的可执行文件路径会在新版安装成功后更新，其他节点设置由配置文件管理。从旧单包布局升级且仍指向 `../bin/endpoint_service.exe` 时，可先把旧的 `nodes.local.launch.executable` 改成 `../data/local/runtime/<新版 build.json 中的 buildId>/bin/endpoint_service.exe`。如果切换到仅 Control 模式，先移除本地节点的 `launch` 项或整个本地节点项。
+
+默认打开 `http://127.0.0.1:3001` 创建首个管理员账号。归档只收录运行文件与许可证。Control 包 manifest 记录打包时的源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。构建 ID 由 Control 包的 `bin/`、`control/` 和归档内 `node/bin/` 的文件路径及 hash 计算。
+
+`--smoke` 在隔离目录安装节点运行时并验证启动、鉴权和 Endpoint 管理。真实 Viewer 的产品操作和媒体验证使用独立端到端测试。
 
 打包使用 Node 24 内置 zstd（level 12、全部逻辑 CPU），tar 以固定 32 MiB 缓冲流入压缩器，输出标准串联 zstd frames，不生成中间 tar，也不把整个包读入内存。逐 frame 使用同步结束指令，避开 Node 24 异步多线程 zstd 的提前 EOF 问题；每个 frame 内仍由原生 zstd 多线程压缩。`--node` 必须指向带官方 `LICENSE` 的真实 Node runtime，且 ABI 匹配 Control 的 SQLite 原生模块。`--out dev` 显式生成开发包。manifest 的 `browser_configuration` 标记 `rel`/`dev`，`archive` 记录完整归档名。
 

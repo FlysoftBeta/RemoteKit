@@ -15,6 +15,24 @@ packager = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packager)
 
 class EndpointLayout(unittest.TestCase):
+    def test_control_only_launcher_consumes_mode_before_loading_server(self):
+        node = os.environ.get('REMOTEKIT_TEST_NODE') or shutil.which('node')
+        self.assertIsNotNone(node, 'Node is required')
+        with tempfile.TemporaryDirectory(prefix='rk launcher ') as temporary:
+            root = Path(temporary)
+            shutil.copy2(packager.ROOT / 'tools/streaming-launcher.cjs', root / 'run-control.cjs')
+            server = root / 'control/dist/server.mjs'
+            server.parent.mkdir(parents=True)
+            server.write_text(
+                "import assert from 'node:assert/strict';\n"
+                "import { readFileSync } from 'node:fs';\n"
+                "assert.equal(process.argv.length, 2);\n"
+                "const config = JSON.parse(readFileSync(process.env.REMOTEKIT_CONTROL_CONFIG));\n"
+                "assert.deepEqual(config.nodes, {});\n",
+                encoding='utf-8')
+            subprocess.run([node, root / 'run-control.cjs', 'control'], check=True)
+            self.assertFalse((root / 'data/local').exists())
+
     def test_zstd_archive_roundtrip_and_checksum(self):
         node = os.environ.get('REMOTEKIT_TEST_NODE') or shutil.which('node')
         self.assertIsNotNone(node, 'Node with built-in zstd is required')

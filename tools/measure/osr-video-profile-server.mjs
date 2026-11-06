@@ -1,9 +1,9 @@
 // Usage: node tools/measure/osr-video-profile-server.mjs --package <unpacked streaming runtime>
 //   --evidence develop/tmp/<new-directory> [--live-build] [--port 33623]
 //   [--viewer <chrome.exe>] [--state <previous evidence directory>]
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { appendFile, copyFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -35,12 +35,23 @@ if (options.state) await stat(join(state, 'control.db'));
 const pkg = resolve(options.package);
 const node = join(pkg, 'bin', 'node.exe');
 const viewer = resolve(options.viewer);
+let nodeBin;
+if (!options['live-build']) {
+  const { buildId } = JSON.parse(await readFile(join(pkg, 'build.json'), 'utf8'));
+  const nodeRoot = join(pkg, 'data', 'local');
+  execFileSync(
+    join(pkg, 'bin', 'remotekit_node.exe'),
+    ['install', '--root=' + nodeRoot, '--package=' + pkg],
+    { stdio: 'inherit', windowsHide: true },
+  );
+  nodeBin = join(nodeRoot, 'runtime', buildId, 'bin');
+}
 const endpoint = options['live-build']
   ? join(root, 'build', 'endpoint', 'endpoint', 'endpoint_service.exe')
-  : join(pkg, 'bin', 'endpoint_service.exe');
+  : join(nodeBin, 'endpoint_service.exe');
 const browser = options['live-build']
   ? resolve('C:/src/chromium/src/out/dev/remotekit_browser.exe')
-  : join(pkg, 'bin', 'remotekit_browser.exe');
+  : join(nodeBin, 'remotekit_browser.exe');
 const control = join(options['live-build'] ? root : pkg, 'control', 'dist', 'server.mjs');
 const clientRoot = join(dirname(control), 'client');
 const clientIndex = join(clientRoot, 'index.html');
@@ -54,6 +65,7 @@ async function fingerprint(path) {
   return { path, sha256: hash.digest('hex'), bytes: info.size, modifiedUtc: info.mtime.toISOString() };
 }
 
+const vizComponent = join(dirname(browser), 'components_viz_service.dll');
 const fingerprints = await Promise.all(
   [
     node,
@@ -64,7 +76,7 @@ const fingerprints = await Promise.all(
     clientIndex,
     join(clientRoot, clientEntry),
     join(dirname(browser), 'remotekit_sdk.dll'),
-    join(dirname(browser), 'components_viz_service.dll'),
+    ...(existsSync(vizComponent) ? [vizComponent] : []),
   ].map(fingerprint),
 );
 await mkdir(dirname(evidence), { recursive: true });

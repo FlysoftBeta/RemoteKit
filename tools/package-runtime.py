@@ -16,9 +16,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def create_archive(package, node, *, node_runtime=False):
+def create_archive(package, node, *, archive=None):
     """Stream tar into bounded, concatenated zstd frames; no intermediate tar."""
-    archive = package / 'release/node.tar.zst' if node_runtime else package.with_name(package.name + '.tar.zst')
+    publish = archive is None
+    archive = archive or package.with_name(package.name + '.tar.zst')
     script = r'''
 const { pipeline } = require('node:stream/promises');
 const { zstdCompressSync, constants: c } = require('node:zlib');
@@ -60,16 +61,7 @@ pipeline(process.stdin, compressFrames, process.stdout)
                     writing_error = None
                     try:
                         with tarfile.open(fileobj=compressor.stdin, mode='w|', format=tarfile.PAX_FORMAT) as tar:
-                            if node_runtime:
-                                root_entry = tarfile.TarInfo('node')
-                                root_entry.type = tarfile.DIRTYPE
-                                root_entry.mode = 0o755
-                                tar.addfile(root_entry)
-                                tar.add(package / 'build.json', arcname='node/build.json')
-                                tar.add(package / 'bin', arcname='node/bin',
-                                        filter=lambda entry: None if entry.name == 'node/bin/node.exe' else entry)
-                            else:
-                                tar.add(package, arcname=package.name)
+                            tar.add(package, arcname=package.name)
                     except OSError as error:
                         writing_error = error
                     finally:
@@ -88,7 +80,7 @@ pipeline(process.stdin, compressFrames, process.stdout)
             archive.unlink(missing_ok=True)
             raise
     checksum = digest(archive)
-    if not node_runtime:
+    if publish:
         archive.with_name(archive.name + '.sha256').write_text(
             checksum + '  ' + archive.name + '\n', encoding='ascii')
     return archive, checksum
@@ -143,6 +135,26 @@ def run_startup_smoke(package, *, work_dir=None):
     return validation
 
 
+def validate_runtime_tree(root):
+    # Use only explicit runtime inputs above; refuse accidental state, secrets or
+    # compiler artifacts before either hashing or archiving the package.
+    for file in root.rglob('*'):
+        relative = file.relative_to(root)
+        if any(part.lower() in {'data', 'profiles', 'profile', 'metrics', '.git'} for part in relative.parts):
+            raise RuntimeError('Non-runtime directory in package: ' + str(relative))
+        if file.is_file() and (file.name.lower() in {'cred.json', '.env'} or
+                              file.name.lower().endswith('.key') or
+                              file.suffix.lower() in {'.pdb', '.obj', '.lib', '.exp', '.ilk', '.sqlite', '.db', '.ts', '.tsx', '.cpp', '.cc', '.h'}):
+            raise RuntimeError('Non-runtime file in package: ' + str(relative))
+
+
+def write_launcher(file, command, setup=''):
+    file.write_text(
+        '@echo off\nsetlocal DisableDelayedExpansion\n'
+        'if not "%~1"=="" exit /b 1\n' + setup + command + '\nexit /b %errorlevel%\n',
+        encoding='ascii')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--chromium-root', type=Path, default=Path(r'C:\src\chromium\src'))
@@ -152,6 +164,11 @@ def main():
     parser.add_argument('--node', type=Path)
     parser.add_argument('--smoke', action='store_true', help='Validate streaming startup/auth/Endpoint management before archiving; real Viewer RTC product/media checks remain required')
     args = parser.parse_args()
+    with tempfile.TemporaryDirectory(prefix="remotekit-runtime-") as staging:
+        package_runtime(args, Path(staging) / "node")
+
+
+def package_runtime(args, node_runtime):
     chromium = args.chromium_root.resolve()
     output = chromium / 'out' / args.out
     browser_name = 'remotekit_browser.exe'
@@ -201,21 +218,26 @@ def main():
     # not rely on Visual Studio or a separately installed redistributable.
     vs = Path(os.environ.get('REMOTEKIT_VS', r'C:\Program Files\Microsoft Visual Studio\18\Community'))
     redist = vs / 'VC/Redist/MSVC'
+    crt_files = {}
     if redist.is_dir():
         versions = sorted((p for p in redist.iterdir() if p.is_dir() and p.name[0].isdigit()),
                           key=lambda p: tuple(int(n) for n in p.name.split('.')), reverse=True)
         if versions:
             for crt in (versions[0] / 'x64').glob('Microsoft.VC*.CRT'):
                 for dependency in crt.glob('*.dll'):
+                    crt_files[dependency.name] = dependency
                     selected.setdefault(Path(dependency.name), dependency)
     backend = 'streaming-qsv-nvenc'
-    package_name = 'RemoteKit-win-x64-' + backend + '-' + datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d-%H%M%S')
-    destination = args.destination.resolve()
-    destination.mkdir(parents=True, exist_ok=True)
-    package = destination / package_name
+    timestamp = datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d-%H%M%S')
+    destination = args.destination.resolve() / timestamp
+    destination.mkdir(parents=True)
+    package = destination / 'RemoteKit-control-win-x64'
+    package_name = package.name
+    bootstrap = destination / 'RemoteKit-endpoint-win-x64'
     package.mkdir()
-    binary = package / 'bin'
-    binary.mkdir()
+    bootstrap.mkdir()
+    binary = node_runtime / 'bin'
+    binary.mkdir(parents=True)
     print(f'Copying {len(selected)} runtime files ({sum(p.stat().st_size for p in selected.values()) / 1048576:.1f} MiB)', flush=True)
     for relative, source in selected.items():
         target = binary / relative
@@ -236,7 +258,13 @@ def main():
     node = Path(node_info['executable']).resolve()
     if str(node_info['abi']) != str(runtime_manifest['nodeModuleAbi']):
         raise RuntimeError('Node ABI does not match packaged SQLite native addon')
-    shutil.copy2(node, binary / 'node.exe')
+    control_bin = package / 'bin'
+    control_bin.mkdir()
+    shutil.copy2(node, control_bin / 'node.exe')
+    for folder in (control_bin, bootstrap):
+        shutil.copy2(binary / 'remotekit_node.exe', folder / 'remotekit_node.exe')
+        for name, source in crt_files.items():
+            shutil.copy2(source, folder / name)
     control = package / 'control'
     control.mkdir()
     dist = ROOT / 'control/dist'
@@ -257,59 +285,53 @@ def main():
     shutil.copy2(ROOT / 'build/dependencies/json-LICENSE.MIT', licenses / 'nlohmann-json-LICENSE.MIT')
     header = (ROOT / 'build/dependencies/nvEncodeAPI.h').read_text(encoding='utf-8')
     (licenses / 'NVENC-header-notice.txt').write_text(header[:header.index('*/') + 2], encoding='utf-8')
-    copy_face_runtime(face_files, package)
-    (package / 'config').mkdir()
+    copy_face_runtime(face_files, node_runtime)
+    (node_runtime / 'licenses').mkdir(exist_ok=True)
+    for name in ('zstd-LICENSE', 'nlohmann-json-LICENSE.MIT'):
+        shutil.copy2(licenses / name, bootstrap / name)
+    for file in licenses.iterdir():
+        if file.name != 'Node-LICENSE':
+            shutil.copy2(file, node_runtime / 'licenses' / file.name)
+    validate_runtime_tree(node_runtime)
     build_lines = []
-    for tree in ['bin', 'control']:
-        for file in (package / tree).rglob('*'):
+    for root, tree in [(node_runtime, 'bin'), (package, 'bin'), (package, 'control')]:
+        for file in (root / tree).rglob('*'):
             if file.is_file():
-                build_lines.append(f'{file.relative_to(package).as_posix()}\t{digest(file)}\n')
+                prefix = 'node/' if root == node_runtime else ''
+                build_lines.append(f'{prefix}{file.relative_to(root).as_posix()}\t{digest(file)}\n')
     build_id = hashlib.sha256(''.join(sorted(build_lines)).encode('utf-8')).hexdigest()
-    (package / 'build.json').write_text(json.dumps({'buildId': build_id}) + '\n', encoding='utf-8')
+    for root in (package, node_runtime):
+        (root / 'build.json').write_text(json.dumps({'buildId': build_id}) + '\n', encoding='utf-8')
     (package / 'release').mkdir()
-    node_archive, node_checksum = create_archive(package, node, node_runtime=True)
+    node_archive, node_checksum = create_archive(node_runtime, node, archive=package / 'release/node.tar.zst')
     (package / 'release/node.json').write_text(json.dumps({
         'buildId': build_id, 'sha256': node_checksum, 'size': node_archive.stat().st_size}) + '\n', encoding='utf-8')
     shutil.copy2(ROOT / 'tools/streaming-launcher.cjs', package / 'run-control.cjs')
-    (package / 'run.cmd').write_text(
-        '@echo off\nsetlocal DisableDelayedExpansion\nset "RK_ROOT=%~dp0"\n'
-        'echo Open http://127.0.0.1:3001 in Chrome. Close this console to stop.\n'
-        '"%RK_ROOT%bin\\node.exe" "%RK_ROOT%run-control.cjs" %*\n', encoding='utf-8')
-    shutil.copy2(package / 'run.cmd', package / 'run-control.cmd')
+    for name, mode in [('run.cmd', 'combined'), ('run-control.cmd', 'control')]:
+        write_launcher(package / name, f'"%~dp0bin\\node.exe" "%~dp0run-control.cjs" {mode}')
+    write_launcher(bootstrap / 'run-endpoint.cmd',
+                   '"%~dp0remotekit_node.exe" run "--root=%~dp0."',
+                   'if exist "%~dp0node.json" goto start\n'
+                   'echo Copy the Control-generated node.json into this directory. 1>&2\n'
+                   'exit /b 1\n:start\n')
     (package / 'README.txt').write_text(
-        'RemoteKit Windows hardware streaming package\n\n'
-        'Extract everything to a writable folder and run run.cmd. Open http://127.0.0.1:3001 in Chrome.\n'
-        'The initial screen is blank white. Press Up Up Down Down Left Right Left Right, or click the corresponding\n'
-        'top, bottom, left, and right areas in that order, to reveal the account sign-in form.\n'
-        'The first account becomes administrator. To create more accounts, open More > Administrator panel > Users.\n'
-        'After signing in, open More > Settings > Security to configure a PIN or face authentication.\n'
-        'Face authentication sends uncompressed RGB24 over the dedicated WebRTC data channel at the server-negotiated\n'
-        '5 FPS. The required public face models are included in bin/face-models.\n'
-        'Each user has an isolated Tenant/Session and browser process.\n'
-        'Viewer state and settings use an authenticated WebSocket; browser operations use the WebRTC DataChannel.\n'
-        'The encoder defaults to auto. Configure encoder and node paths in config/control.json.\n'
-        'This package includes Node and the Control production dependencies; no build tools are required.\n'
-        'Data is created in data/. In Viewer Settings, start diagnostics and use the floating stop button to save a tar.zst archive and receive its ID.\n'
-        'Diagnostic archives are stored in data/diagnostics; set diagnostics in config/control.json to change it.\n'
-        'Control stores the Viewer degradation preference; WebRTC controls media adaptation and encoder rates.\n'
-        'run.cmd accepts no arguments. Edit config/control.json to configure HTTP, storage, and nodes.\n'
-        'For remote nodes, set cluster.advertiseUrl and copy config/node.json to the node root.\n'
-        'Install bin/remotekit_node.exe on that node and run it with run --root=<node root>.\n'
-        'Hardware smoke and stream measurements are reported separately from this package creation.\n', encoding='utf-8')
+        'Run run.cmd for Control plus a local Endpoint, or run-control.cmd for Control only.\n'
+        'The launchers create config/control.json on first start. Edit it to configure HTTP, storage and nodes.\n'
+        'Open http://127.0.0.1:3001 and press Up Up Down Down Left Right Left Right to reveal sign-in.\n'
+        'The first account becomes administrator.\n'
+        'For remote Endpoint setup, set cluster.advertiseUrl and register the node ID without a launch entry.\n'
+        'Copy config/node.json to the unpacked RemoteKit Endpoint package on that node.\n'
+        'Keep release/node.json and release/node.tar.zst together for node installation and updates.\n', encoding='utf-8')
+    (bootstrap / 'README.txt').write_text(
+        'Copy the Control-generated node.json here and run run-endpoint.cmd.\n'
+        'The node ID defaults to the lowercase host name. Set nodeId in node.json to override it.\n'
+        'The supervisor downloads and starts the matching Endpoint runtime from Control.\n', encoding='utf-8')
     validation = None
     if args.smoke:
         validation = run_startup_smoke(package)
         print('Bundled startup/auth/Endpoint management smoke passed (RTC product/media checks separate): ' + validation['evidence'], flush=True)
-    # Use only explicit runtime inputs above; refuse accidental state, secrets or
-    # compiler artifacts before either hashing or archiving the package.
-    for file in package.rglob('*'):
-        relative = file.relative_to(package)
-        if any(part.lower() in {'data', 'profiles', 'profile', 'metrics', '.git'} for part in relative.parts):
-            raise RuntimeError('Non-runtime directory in package: ' + str(relative))
-        if file.is_file() and (file.name.lower() in {'cred.json', '.env'} or
-                              file.name.lower().endswith('.key') or
-                              file.suffix.lower() in {'.pdb', '.obj', '.lib', '.exp', '.ilk', '.sqlite', '.db', '.ts', '.tsx', '.cpp', '.cc', '.h'}):
-            raise RuntimeError('Non-runtime file in package: ' + str(relative))
+    validate_runtime_tree(package)
+    validate_runtime_tree(bootstrap)
     files = []
     for file in sorted(package.rglob('*')):
         if file.is_file():
@@ -342,11 +364,11 @@ def main():
     }
     (package / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
     print('Creating tar.zst (level 12, all logical CPUs)...', flush=True)
-    archive, checksum = create_archive(package, node)
-    print(json.dumps({'directory': str(package), 'archive': str(archive),
-                      'directory_mib': round(sum(p.stat().st_size for p in package.rglob('*') if p.is_file()) / 1048576, 1),
-                      'archive_mib': round(archive.stat().st_size / 1048576, 1),
-                      'sha256': checksum}, indent=2), flush=True)
+    for folder in (package, bootstrap):
+        archive, checksum = create_archive(folder, node)
+        print(json.dumps({'directory': str(folder), 'archive': str(archive),
+                          'archive_mib': round(archive.stat().st_size / 1048576, 1),
+                          'sha256': checksum}, indent=2), flush=True)
 
 
 if __name__ == '__main__':

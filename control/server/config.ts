@@ -227,7 +227,6 @@ export function runtimeConfig(
   const defaults = object(fallback(source.nodeDefaults, {}), Object.keys(nodeDefaults), 'nodeDefaults');
   validateNode(defaults, true);
   const entries = object(source.nodes, Object.keys(source.nodes ?? {}), 'nodes');
-  if (!Object.keys(entries).length) invalid('At least one node is required');
   const quotas = object(fallback(source.quotas, {}), ['tenantObjectBytes'], 'quotas');
   const tenantObjectBytes = integer(
     fallback(quotas.tenantObjectBytes, defaultQuotas.tenantObjectBytes),

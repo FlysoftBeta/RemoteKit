@@ -81,6 +81,8 @@ test('config creates defaults and key, resolves paths, hashes effective override
     const bootstrap = JSON.parse(await readFile(join(directory, 'node.json'), 'utf8'));
     assert.deepEqual(bootstrap, { control: 'ws://192.168.1.10:3001/api/node', key: initial.cluster.key });
     assert.equal(load().cluster.key, initial.cluster.key);
+    await writeFile(configPath, JSON.stringify({ nodes: {} }));
+    assert.deepEqual(Object.keys(load().nodes), []);
     await writeFile(join(directory, 'cluster.key'), 'invalid');
     assert.throws(load, { code: 'invalid_request' });
   } finally {
@@ -95,7 +97,6 @@ test('config rejects unknown fields, wrong types, invalid ranges and invalid com
     const invalid: unknown[] = [
       null,
       [],
-      { nodes: {} },
       { nodes: { alpha: {}, beta: {} } },
       { quotas: { tenantObjectBytes: -1 } },
       { quotas: { tenantObjectBytes: '1000' } },

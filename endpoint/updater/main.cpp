@@ -1,3 +1,4 @@
+#include "download.hpp"
 #include "service.hpp"
 #include "supervisor.hpp"
 #include <iostream>
@@ -17,7 +18,8 @@ int wmain(int argc, wchar_t** argv) {
   using namespace remotekit::updater;
   try {
     if (argc < 2)
-      throw std::runtime_error("expected run, service, service-install or service-uninstall");
+      throw std::runtime_error(
+          "expected run, install, service, service-install or service-uninstall");
     std::wstring command = argv[1];
     if (command == L"service-uninstall" && argc == 2) {
       auto result = UninstallService();
@@ -25,9 +27,19 @@ int wmain(int argc, wchar_t** argv) {
         throw std::runtime_error(result.error().message);
       return 0;
     }
-    if (argc != 3 || !std::wstring_view(argv[2]).starts_with(L"--root=") || !argv[2][7])
+    if (argc < 3 || !std::wstring_view(argv[2]).starts_with(L"--root=") || !argv[2][7])
       throw std::runtime_error("expected --root=<directory>");
     auto root = fs::absolute(fs::path(argv[2] + 7)).lexically_normal();
+    if (command == L"install") {
+      if (argc != 4 || !std::wstring_view(argv[3]).starts_with(L"--package=") || !argv[3][10])
+        throw std::runtime_error("expected --package=<Control package directory>");
+      auto result = InstallBundled(root, fs::absolute(fs::path(argv[3] + 10)));
+      if (!result)
+        throw std::runtime_error(result.error().message);
+      return 0;
+    }
+    if (argc != 3)
+      throw std::runtime_error("unexpected node command arguments");
     if (command == L"service-install") {
       auto result = InstallService(root);
       if (!result)

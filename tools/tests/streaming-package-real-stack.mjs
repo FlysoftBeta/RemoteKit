@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdir, appendFile, writeFile } from 'node:fs/promises';
+import { mkdir, appendFile, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { join, resolve } from 'node:path';
@@ -40,15 +40,23 @@ const port = reserve.address().port;
 await new Promise(done => reserve.close(done));
 const origin = 'http://127.0.0.1:' + port;
 await mkdir(join(runtime, 'config'), { recursive: true });
+const { buildId } = JSON.parse(await readFile(join(runtime, 'build.json'), 'utf8'));
 await writeFile(join(runtime, 'config/control.json'), JSON.stringify({
   http: { host: '127.0.0.1', port, origins: [origin] },
   database: '../data/control.db',
   diagnostics: '../data/diagnostics',
-  nodes: { local: { launch: { executable: '../bin/endpoint_service.exe', root: '../data/node' } } },
+  nodes: {
+    local: {
+      launch: {
+        executable: '../data/local/runtime/' + buildId + '/bin/endpoint_service.exe',
+        root: '../data/node',
+      },
+    },
+  },
 }));
 const env = { ...process.env };
 for (const name of ['NODE_PATH', 'NODE_OPTIONS', 'REMOTEKIT_CONTROL_CONFIG']) delete env[name];
-const child = spawn(join(runtime, 'bin/node.exe'), [join(runtime, 'run-control.cjs')], {
+const child = spawn(join(runtime, 'bin/node.exe'), [join(runtime, 'run-control.cjs'), 'combined'], {
   cwd: runtime, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
 });
 child.stdout.on('data', data => void appendFile(join(run, 'stdout.log'), data));

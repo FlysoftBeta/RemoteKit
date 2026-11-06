@@ -31,9 +31,13 @@ def main():
    if manifest['archive']!=package.name+'.tar.zst':raise ValueError('Manifest archive name mismatch')
    if manifest['browser_configuration'] not in ['dev','rel']:raise ValueError('Unknown browser configuration')
    result['browserConfiguration']=manifest['browser_configuration']
-  for relative in ['bin/node.exe','bin/endpoint_service.exe','bin/remotekit_browser.exe','control/dist/server.mjs','control/dist/client/index.html']:
+  for relative in ['bin/node.exe','bin/remotekit_node.exe','control/dist/server.mjs','control/dist/client/index.html']:
    if not (package/relative).is_file():raise FileNotFoundError(relative)
-  result['endpointSha256']=hashlib.sha256((package/'bin/endpoint_service.exe').read_bytes()).hexdigest()
+  build_id=json.loads((package/'build.json').read_text(encoding='utf-8'))['buildId']
+  subprocess.run([str(package/'bin/remotekit_node.exe'),'install','--root='+str(run/'local'),
+    '--package='+str(package)],check=True)
+  binary=run/'local/runtime'/build_id/'bin'
+  result['endpointSha256']=hashlib.sha256((binary/'endpoint_service.exe').read_bytes()).hexdigest()
   with socket.socket() as probe:probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
   origin='http://127.0.0.1:'+str(port);env=os.environ.copy()
   opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -42,8 +46,8 @@ def main():
   config.write_text(json.dumps({
     'http':{'host':'127.0.0.1','port':port,'origins':[origin]},
     'database':str(run/'control.db'),'diagnostics':str(run/'diagnostics'),
-    'nodeDefaults':{'browser':str(package/'bin/remotekit_browser.exe'),'dataPath':str(run/'endpoint')},
-    'nodes':{'local':{'launch':{'executable':str(package/'bin/endpoint_service.exe'),'root':str(run/'node')}}}
+    'nodeDefaults':{'browser':str(binary/'remotekit_browser.exe'),'dataPath':str(run/'endpoint')},
+    'nodes':{'local':{'launch':{'executable':str(binary/'endpoint_service.exe'),'root':str(run/'node')}}}
   }),encoding='utf-8')
   env['REMOTEKIT_CONTROL_CONFIG']=str(config)
   with (run/'stderr.log').open('wb') as errors,(run/'stdout.log').open('wb') as output:

@@ -31,7 +31,7 @@ Control 与所有节点之间、节点与节点之间用同一个握手：`Noise
 
 ## 版本锁定与更新
 
-每个运行时根目录有 `build.json{buildId}`；buildId 由打包工具对 `bin/` 与 `control/` 下全部文件的路径和 hash 计算。开发构建没有 build.json，buildId 为 `dev`。role `endpoint` 的连接 buildId 与 Control 不同即 `build_mismatch`，在放置、对账和节点间传输中都等同断开。由此 Control、Endpoint、Browser 与节点之间不需要任何协议版本协商。
+Control 包和节点运行时的根目录有相同的 `build.json{buildId}`。buildId 由打包工具对 Control 包的 `bin/`、`control/` 及节点运行时的 `node/bin/` 下文件的路径和 hash 计算。开发构建没有 build.json，buildId 为 `dev`。role `endpoint` 的连接 buildId 与 Control 不同即 `build_mismatch`，在放置、对账和节点间传输中都等同断开。由此 Control、Endpoint、Browser 与节点之间不需要任何协议版本协商。
 
 `remotekit_node.exe` 是独立的 updater 与监管者：不依赖 SDK、Chromium 或媒体代码，只链接集群通道库、内嵌的 zstd 解压与自带的 PAX tar 读取器，只使用 Windows 10（1809+）的接口。
 
@@ -40,7 +40,7 @@ Control 与所有节点之间、节点与节点之间用同一个握手：`Noise
 - 更新：以 role `updater` 连接（updater 自己的 buildId 可以较旧），拿到 `node.release{buildId, sha256, size}`，用 `package.get{offset}` 断点续传下载到 `downloads/`，校验大小与 SHA-256，在进程内流式解 zstd 多帧、解 tar（只接受 `node/` 下的普通文件与目录，拒绝链接、设备名、备用数据流、绝对路径与 `..`），核对 `node/build.json`，移到 `runtime/<buildId>`，原子替换 `current`，只保留当前与上一个运行时。
 - 新运行时里的 `remotekit_node.exe` 与正在运行的不同时：把运行中的文件改名为 `.old`，复制新文件，用相同参数启动新监管者后退出；替换失败则回滚 `current`。
 
-发布包里 `release/node.tar.zst` 与 `release/node.json` 是节点运行时（不含 Node 与 Control），Control 启动时校验其 buildId 与自身一致后对 updater 提供。先升级 Control，节点随即全部被视为断开，各自更新后重新上线；代价是每次发布所有用户的 Browser 冷启动一次。
+Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线安装和远端节点更新。合部署的 `run.cmd` 用 updater 的 `install` 入口校验归档并按 buildId 安装，Control 经 stdio 监管本地 Endpoint。独立节点从 Endpoint 引导包启动，由 updater 下载同一份归档并监管 Endpoint。先升级 Control，节点随即全部被视为断开，各自更新后重新上线；代价是每次发布所有用户的 Browser 冷启动一次。部署入口见[构建与发布](build.md#发布包)。
 
 ## 会话、放置与密钥
 
