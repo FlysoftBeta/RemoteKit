@@ -54,7 +54,7 @@ Client:   每个 video 观察到自己的真实 RTP 并匹配当前 epoch → �
 - 客户端对实际 receiver 设置 `jitterBufferTarget = 0`。Chrome89 没有标准属性，在可用时设置 `playoutDelayHint = 0`。能力、尝试设置的值和读回值分别报告。
 - Endpoint 在创建 peer 时请求 RTP playout-delay min 0 / max 50ms。Chromium157 中 min=0 且 0 < max ≤ 500ms 会进入低延迟分支，保留有界的合成队列；50ms 约等于 60Hz 下三帧的合成预算。
 - 这些都是请求，不是保证：min=0 时解码调度仍有约 8ms 的最小值；`jitterBufferTarget=0` 也不取消解码和抖动所需的等待。
-- 音视频同步默认关闭：视频与音频使用不同的 stream id（`remotekit-video`、`remotekit-audio`），接收端不把它们放进同一同步组。设置开启时音频也用 `remotekit-video`，换取唇音同步。同组时 RtpStreamsSynchronizer 会把视频最小播放延迟抬到 NetEq 的音频延迟（实测音频静音补偿时约 84–99ms，视频最小延迟 60–111ms，而包抖动只有 2–17ms），min 一旦大于 0 就离开上面的低延迟分支。关闭同步的代价是页面内音视频不对齐，音频通常比画面晚几十毫秒。stream id 写在 SDP 里，切换需要重建 peer（见[控制面](control-plane.md)）。
+- 音视频同步默认关闭：视频与音频使用不同的 stream id（`remotekit-video`、`remotekit-audio`），接收端不把它们放进同一同步组。设置开启时音频也用 `remotekit-video`，换取唇音同步。同组时 RtpStreamsSynchronizer 会把视频最小播放延迟抬到 NetEq 的音频延迟（实测音频静音补偿时约 84–99ms，视频最小延迟 60–111ms，而包抖动只有 2–17ms），min 一旦大于 0 就离开上面的低延迟分支。页面静音停发音频 RTP 后，同步器因没有新音频包直接返回，视频保持最后一次设置的同步延迟，不会回落到 0，直到重建 peer。关闭同步的代价是页面内音视频不对齐，音频通常比画面晚几十毫秒。stream id 写在 SDP 里，切换需要重建 peer（见[控制面](control-plane.md)）。
 - 0/50 对比未设置（同二进制，1936×1008，QSV，48Mbps/10ms）：合成 55.5→57.9FPS，丢帧 58/1172→9/1170，末包→合成 p95 78.5→50.4ms，实际缓冲均值 59.6→28.9ms，marker p95 115→92ms。
 - 0/10 被否决：末包→合成 p95 约 39→18ms，但合成帧率 45→38FPS，marker p95 没有改善，首段 rVFC 间隔 p95 38→74ms。更紧的预算导致有用的呈现丢失。
 - 0/0 是另一种原生行为，不能和 0/10、0/50 的结果混在一起。
@@ -76,6 +76,7 @@ rVFC 回调次数不是显示 FPS：Chromium157 一个 10 秒区间里有 600 �
 
 - 共享音频环 `SharedAudio` v1：8 个槽，每块带 session/generation、sequence、样本索引、首样本 QPC；64 字节对齐的原子/seqlock 发布，读者拒绝撕裂或身份不符的块。稳态不走 IPC。
 - 绝对 10ms 调度：错过期限时推进样本索引并标记不连续，不突发补发旧块。时间线属于整个 Session 的混音，与视频节拍无关：静态视频不停音频时钟。
+- 静音门：混音后的 s16 块全为 0 时，连续 100 块（1 秒）后不再发布，sequence 不前进，样本索引照常推进；环挂上时即处于静音态，不先发 1 秒静音。于是页面没有声音（无输出流、暂停、静音或 AudioContext 只输出 0）时不进 Opus、不发音频 RTP。判断在音源处做，不经 Control 往返，也不用 `IsCurrentlyAudible`：往返会截掉声音开头。1 秒尾巴让编码器和接收端 NetEq 先收到静音再断流，短停顿不反复重启发送器。恢复出声时样本缺口超过 8 块，SDK 走 `restart_gap`（发送器停用再启用，RTP 时钟按真实时间推进），SDP 不变，不需要重新协商，Viewer 的 track 不结束。
 - 坑：内嵌音频服务时如果 `AudioServiceOutOfProcess` feature 仍为开启，`enumerateDevices` 会走到只在远端服务里存在的设备通知器并触发 CHECK。修正是在 `BasicStartupComplete` 里于 FeatureList 初始化前关闭该 feature。
 
 **Endpoint 侧**：独立音频线程，不受视频编码停顿影响。

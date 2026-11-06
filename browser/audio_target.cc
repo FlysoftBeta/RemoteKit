@@ -115,6 +115,7 @@ class TargetManager final : public media::AudioManagerBase {
     sequence_ = 0;
     sample_index_ = 0;
     qpc_origin_ = 0;
+    silent_blocks_ = kSilentTailBlocks;
     discontinuity_ = true;
     Wake();
   }
@@ -183,7 +184,6 @@ class TargetManager final : public media::AudioManagerBase {
     if (!mapping_)
       return;
     AudioPacket packet{};
-    packet.sequence = ++sequence_;
     packet.sample_index = current_sample;
     LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency);
@@ -207,14 +207,27 @@ class TargetManager final : public media::AudioManagerBase {
                 ? static_cast<int16_t>(std::clamp(sample, -1.0f, 32767.0f / 32768) * 32768)
                 : 0;
       }
+    // A silent page publishes nothing after a short tail, so no Opus RTP is sent.
+    // The sample clock keeps advancing; the SDK timeline restarts the sender on the gap.
+    if (std::ranges::all_of(pcm, [](int16_t sample) { return sample == 0; })) {
+      if (silent_blocks_ >= kSilentTailBlocks)
+        return;
+      ++silent_blocks_;
+    } else {
+      silent_blocks_ = 0;
+    }
+    packet.sequence = ++sequence_;
     PublishAudio(mapping_->ring, packet);
   }
+  // Pauses shorter than this keep the sender running instead of restarting it.
+  static constexpr uint32_t kSilentTailBlocks = 100;
   std::vector<TargetStream*> active_;
   std::unique_ptr<media::AudioBus> bus_, mix_;
   base::DeadlineTimer timer_;
   base::TimeTicks next_;
   std::shared_ptr<Mapping> mapping_;
   uint64_t sequence_ = 0, sample_index_ = 0;
+  uint32_t silent_blocks_ = kSilentTailBlocks;
   int64_t qpc_origin_ = 0;
   bool discontinuity_ = true;
 };
