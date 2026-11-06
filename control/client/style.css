@@ -326,6 +326,71 @@ button:focus-visible,
 .quality-option .MuiFormControlLabel-label {
   padding: 3px 0;
 }
+.import-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+.import-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: #2e7d32;
+}
+.import-dot.failing {
+  background: #d32f2f;
+}
+.import-deployment {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid rgba(127, 127, 127, 0.3);
+  border-radius: 8px;
+}
+.import-deployment > div {
+  flex: 1;
+  min-width: 0;
+}
+.import-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 16px;
+  text-align: center;
+}
+.import-record {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid rgba(127, 127, 127, 0.2);
+}
+.import-record-text {
+  flex: 1;
+  min-width: 0;
+}
+.import-record-sites {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.import-record-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.import-record-actions {
+  display: flex;
+  flex: none;
+  margin-top: -2px;
+}
 .setting-section {
   padding-top: 20px;
 }
@@ -605,6 +670,12 @@ button:focus-visible,
 }
 .admin-panel {
   padding: 16px;
+}
+.admin-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 .admin-facts {
   display: grid;

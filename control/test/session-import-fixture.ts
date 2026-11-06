@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { Readable } from 'node:stream';
 import type { BrowserIdentity, ImportPayload } from '../shared/session-import';
@@ -31,9 +31,13 @@ export function importPayload(overrides: Partial<ImportPayload> = {}): ImportPay
     v: 1,
     id: randomUUID(),
     createdAt: Date.now(),
-    token: randomBytes(32).toString('base64url'),
+    username: 'import-user',
+    password: 'import-password',
     device: '测试手机',
-    site: { name: '测试站点', url: 'https://example.com/account' },
+    sites: [
+      { name: '测试站点', url: 'https://example.com/account' },
+      { name: '测试论坛', url: 'https://forum.example.org/' },
+    ],
     cookies: [
       {
         name: 'SID',

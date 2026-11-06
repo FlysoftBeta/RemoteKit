@@ -205,7 +205,6 @@ test('deleting a user removes every row of its tenant and queues node data delet
     const leaving = await accountsFor(h.store).login('leaving', password);
     await h.attach(leaving);
     const user = h.store.accounts.byUsername('leaving')!;
-    h.store.sessionImports.pair(user.id, 'pairing-hash', Date.now());
     h.store.sessionImports.insert(user.tenant, importPayload(), Date.now());
     const placement = h.control.endpoint.placement.resolve(leaving.tenantId);
     h.store.db

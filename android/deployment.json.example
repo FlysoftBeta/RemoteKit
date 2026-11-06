@@ -1,0 +1,31 @@
+{
+  "v": 1,
+  "server": "rk.example.com:8443",
+  "mailbox": "import@example.com",
+  "key": {
+    "id": "aaa8fff703b50b22",
+    "x25519": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw"
+  },
+  "browser": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36",
+    "platform": "Windows",
+    "platformVersion": "19.0.0",
+    "architecture": "x86",
+    "bitness": "64",
+    "wow64": false,
+    "model": "",
+    "mobile": false,
+    "brands": [
+      {
+        "brand": "Google Chrome",
+        "version": "157"
+      }
+    ],
+    "fullVersionList": [
+      {
+        "brand": "Google Chrome",
+        "version": "157.0.8103.15"
+      }
+    ]
+  }
+}

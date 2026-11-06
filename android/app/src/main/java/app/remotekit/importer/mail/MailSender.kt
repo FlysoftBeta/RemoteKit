@@ -6,6 +6,7 @@ import app.remotekit.importer.R
 import app.remotekit.importer.UserMessage
 import java.util.Properties
 import javax.activation.DataHandler
+import javax.mail.AuthenticationFailedException
 import javax.mail.Message
 import javax.mail.Session
 import javax.mail.Transport
@@ -77,7 +78,10 @@ class MailSender(private val context: Context) {
                             )
                         }
                 } catch (error: Exception) {
-                    connectionError = error
+                    connectionError = UserMessage(
+                        if (error is AuthenticationFailedException) R.string.mail_auth_failed
+                        else R.string.mail_unreachable
+                    )
                 }
                 for (item in items) {
                     val failedConnection = connectionError
@@ -127,9 +131,18 @@ class MailSender(private val context: Context) {
                                     }
                                 transport!!.sendMessage(message, message.allRecipients)
                             }
-                    if (result.isFailure && transport?.isConnected != true)
-                        connectionError = result.exceptionOrNull()
-                    onEach(item, result)
+                    val mapped =
+                        result.exceptionOrNull()?.let {
+                            Result.failure<Unit>(
+                                if (it is UserMessage) it
+                                else if (transport?.isConnected != true)
+                                    UserMessage(R.string.mail_unreachable)
+                                else UserMessage(R.string.mail_rejected)
+                            )
+                        } ?: result
+                    if (mapped.isFailure && transport?.isConnected != true)
+                        connectionError = mapped.exceptionOrNull()
+                    onEach(item, mapped)
                 }
             } finally {
                 runCatching { transport?.close() }

@@ -92,7 +92,7 @@ control/
     tenants/       每租户运行时状态
     viewers/       Viewer 租约与 RTC 信令
     workspace/     纯命令、操作管线、对账、导航、生命周期与 Memory Saver、页面请求、弹窗、站点策略
-    session-import/  会话导入：HPKE 信封、IMAP 拉取、配对与写入
+    session-import/  会话导入：HPKE 信封、IMAP 拉取、账密校验与写入
     files/ diagnostics/ quality.ts atlas-plan.ts navigation-url.ts
   client/
     main.tsx, viewer-session.ts          入口与控制器组装
@@ -153,7 +153,7 @@ tests/             e2e/（真实栈产品场景）、integration/（原生 Endpo
 | [移动编辑](mobile-editing.md) | 编辑目标、键盘会话、resize 事务 |
 | [文件与相机](files-and-camera.md) | 原生文件选择、文件库、拍照选帧、文档扫描 |
 | [认证](auth.md) | 账户、锁屏、授权代次、人脸验证 |
-| [会话导入](session-import.md) | 配对、HPKE 信封、邮箱队列、Control 导入与写入、Android App |
+| [会话导入](session-import.md) | 部署配置与账户、HPKE 信封、邮箱队列、Control 导入与写入、Android App |
 | [兼容性](compatibility.md) | UA/Client Hints、window.chrome、Chrome89 |
 | [诊断与测量](diagnostics.md) | 诊断收集、追踪、测量方法 |
 | [调优经验](tuning.md) | 被否决的方案与原因 |

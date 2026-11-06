@@ -1,8 +1,9 @@
-import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type {
   ImportChunk,
+  ImportDeployment,
   ImportPayload,
   ImportStorage,
   SessionImportState,
@@ -10,15 +11,13 @@ import type {
 import type { SessionImportConfig } from '../config';
 import type { EndpointGateway } from '../endpoint/gateway';
 import type { ControlDatabase } from '../persistence/database';
+import { verifySecret, type AuthAttempts } from '../auth/crypto';
 import { systemClock, type Clock } from '../util/clock';
 import { envelopeKeyId, ImportLimitError, openEnvelope } from './envelope';
 import { ImportMailbox, type MailClientFactory } from './mailbox';
-import { buildPairingCode } from './pairing';
 
 const MAX_CHUNK_BYTES = 512 * 1024;
-const hashToken = (token: string) =>
-  createHash('sha256').update(Buffer.from(token, 'base64url')).digest('hex');
-export function* importChunks(payload: ImportPayload): Generator<ImportChunk> {
+export function* importChunks(payload: ImportChunk): Generator<ImportChunk> {
   let chunk: ImportChunk = { cookies: [], localStorage: [] };
   let size = Buffer.byteLength(JSON.stringify(chunk));
   for (const cookie of payload.cookies) {
@@ -74,6 +73,7 @@ export class SessionImporter {
   constructor(
     private readonly store: ControlDatabase,
     private readonly gateway: Gateway,
+    private readonly authAttempts: AuthAttempts,
     private readonly config?: SessionImportConfig,
     factory?: MailClientFactory,
     private readonly clock: Clock = systemClock,
@@ -93,44 +93,23 @@ export class SessionImporter {
     return (this.keys = { publicKey, privateKey, keyId });
   }
   state(tenant: string): SessionImportState {
-    const user = this.user(tenant);
     return {
-      mailbox: this.mailbox.status(),
-      pairing: this.store.sessionImports.pairing(user.id),
+      receiving: !!this.config,
       imports: this.store.sessionImports.list(tenant),
     };
   }
-  private user(tenant: string) {
-    const user = this.store.accounts.userForTenant(tenant);
-    if (!user) throw new RemoteKitError('not_found', '用户不存在');
-    return user;
-  }
-  async pair(tenant: string, server: string, authorize: () => void = () => {}) {
+  async deployment(tenant: string, server: string): Promise<ImportDeployment> {
     if (!this.config) throw new RemoteKitError('unavailable', '会话导入邮箱未配置');
     if (!server) throw new RemoteKitError('invalid_request', '缺少 HTTP Host');
     const identity = await this.gateway.identity(tenant);
-    authorize();
-    const user = this.user(tenant);
     const key = this.keyPair();
-    const token = randomBytes(32).toString('base64url');
-    const createdAt = this.clock.wallMs();
-    this.store.sessionImports.pair(user.id, hashToken(token), createdAt);
     return {
-      code: buildPairingCode({
-        v: 1,
-        server,
-        user: user.username,
-        mailbox: this.config.mailbox,
-        key: { id: key.keyId, x25519: key.publicKey.toString('base64url') },
-        token,
-        browser: { userAgent: identity.userAgent, ...identity.metadata },
-      }),
-      createdAt,
+      v: 1,
+      server,
+      mailbox: this.config.mailbox,
+      key: { id: key.keyId, x25519: key.publicKey.toString('base64url') },
+      browser: { userAgent: identity.userAgent, ...identity.metadata },
     };
-  }
-  unpair(tenant: string) {
-    this.store.sessionImports.unpair(this.user(tenant).id);
-    return { ok: true };
   }
   delete(tenant: string, id: unknown) {
     if (typeof id !== 'string' || !/^[0-9a-f-]{36}$/i.test(id))
@@ -138,7 +117,7 @@ export class SessionImporter {
     this.store.sessionImports.delete(tenant, id.toLowerCase());
     return { ok: true };
   }
-  async receive(bytes: Buffer): Promise<'delete' | 'keep'> {
+  async receive(bytes: Buffer): Promise<'delete' | 'keep' | 'retry'> {
     const key = this.keyPair();
     if (envelopeKeyId(bytes) !== key.keyId) return 'keep';
     let payload: ImportPayload;
@@ -154,16 +133,28 @@ export class SessionImporter {
         return 'delete';
       }
     }
-    const tenant = this.store.sessionImports.recipient(hashToken(payload.token));
-    if (!tenant) {
-      this.log('Session import discarded: unknown pairing token');
+    const user = this.store.accounts.loginUser(payload.username);
+    if (!user) {
+      this.log('Session import discarded: unknown user');
       return 'delete';
     }
+    const tenant = user.tenant;
     const id = payload.id.toLowerCase();
     if (this.store.sessionImports.exists(id)) return 'delete';
     const now = this.clock.wallMs();
     if (payload.createdAt < now - 30 * 86400000) rejection = '导入已超过 30 天';
     else if (payload.createdAt > now + 10 * 60000) rejection = '生成时间晚于当前时间 10 分钟';
+    try {
+      await this.authAttempts.run('password:' + user.id, async () => {
+        const valid = await verifySecret(payload.password, { salt: user.salt, hash: user.password_hash });
+        if (user.disabled_at !== null) rejection = '账户已停用';
+        else if (!valid || this.store.accounts.passwordHash(user.id) !== user.password_hash)
+          rejection = '账户密码不正确';
+      });
+    } catch (error) {
+      if (toRemoteKitError(error).code === 'rate_limited') return 'retry';
+      throw error;
+    }
     this.store.transaction(() => this.store.sessionImports.insert(tenant, payload, now, rejection));
     if (!rejection) void this.applyTenant(tenant);
     return 'delete';

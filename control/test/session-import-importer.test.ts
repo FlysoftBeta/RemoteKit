@@ -1,13 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { ControlDatabase } from '../server/persistence/database';
 import { SessionImporter, importChunks } from '../server/session-import/importer';
 import { ImportMailbox, createMailClient } from '../server/session-import/mailbox';
 import { sealEnvelope } from '../server/session-import/envelope';
-import { parsePairingCode } from '../server/session-import/pairing';
 import { RemoteKitError, type ErrorCode } from '../shared/errors';
 import { createApplication } from '../server/application';
 import { dispatchViewerRequest } from '../server/http/viewer-socket';
@@ -19,11 +17,11 @@ import {
   importPayload,
   uncheckedEnvelope,
 } from './session-import-fixture';
-import { registerUser, TestClock, testGateway } from './server-fixture';
+import { accountsFor, registerUser, TestClock, testGateway } from './server-fixture';
 
 async function harness() {
-  const store = new ControlDatabase(':memory:');
   const clock = new TestClock();
+  const store = new ControlDatabase(':memory:', clock);
   const user = await registerUser(store, 'import-user', 'import-password');
   const rounds: FakeMailClient[] = [];
   const messages = new FakeMailClient().messages;
@@ -64,6 +62,7 @@ async function harness() {
   const importer = new SessionImporter(
     store,
     gateway,
+    store.security.authAttempts,
     importConfig,
     () => {
       const client = new FakeMailClient();
@@ -74,21 +73,17 @@ async function harness() {
     clock,
     (message) => logs.push(message),
   );
-  const paired = await importer.pair(user.tenantId, 'viewer.example:3001');
-  const pairing = parsePairingCode(paired.code);
+  const deployment = await importer.deployment(user.tenantId, 'viewer.example:3001');
   const envelope = (payload = importPayload()) =>
-    sealEnvelope(Buffer.from(pairing.key.x25519, 'base64url'), pairing.key.id, {
-      ...payload,
-      token: pairing.token,
-    });
-  const payload = () => importPayload({ token: pairing.token, createdAt: clock.wallMs() });
+    sealEnvelope(Buffer.from(deployment.key.x25519, 'base64url'), deployment.key.id, payload);
+  const payload = () => importPayload({ createdAt: clock.wallMs() });
   return {
     store,
     clock,
     user,
     gateway,
     importer,
-    pairing,
+    deployment,
     messages,
     rounds,
     requests,
@@ -123,7 +118,7 @@ async function harness() {
   };
 }
 
-test('mail keeps foreign headers and keys, deletes bad tokens and replay only after database commit', async () => {
+test('mail keeps foreign headers and keys, deletes unknown users and replay only after database commit', async () => {
   const h = await harness();
   try {
     const valid = h.payload();
@@ -131,21 +126,22 @@ test('mail keeps foreign headers and keys, deletes bad tokens and replay only af
     foreign[5] ^= 1;
     const malformed = h.envelope();
     malformed[0] ^= 1;
-    const badToken = sealEnvelope(
-      Buffer.from(h.pairing.key.x25519, 'base64url'),
-      h.pairing.key.id,
-      importPayload(),
+    const unknownUser = sealEnvelope(
+      Buffer.from(h.deployment.key.x25519, 'base64url'),
+      h.deployment.key.id,
+      importPayload({ username: 'missing-user' }),
     );
     const client = new FakeMailClient();
     client.messages = h.messages;
     client.add(1, foreign);
-    client.add(2, badToken);
+    client.add(2, unknownUser);
     client.add(3, h.envelope(valid));
     client.add(4, h.envelope(valid));
     client.add(5, malformed);
     const originalFactoryRound = h.importer.mailbox;
     await originalFactoryRound.poll();
     assert.deepEqual(h.rounds[0].deleted, [2, 3, 4]);
+    assert.ok(h.logs.includes('Session import discarded: unknown user'));
     assert.equal(h.store.sessionImports.list(h.user.tenantId).length, 1);
     assert.equal(h.record(valid.id).state, 'pending');
     const first = h.record(valid.id);
@@ -158,22 +154,30 @@ test('mail keeps foreign headers and keys, deletes bad tokens and replay only af
     );
     assert.ok(h.messages.has(1));
     assert.ok(h.messages.has(5));
-    assert.equal(h.importer.state(h.user.tenantId).mailbox.lastSuccessAt === null, false);
+    assert.equal(h.importer.mailbox.status().lastSuccessAt === null, false);
 
     const owned = h.envelope();
     owned[owned.length - 1] ^= 1;
     assert.equal(await h.importer.receive(owned), 'delete');
-    const invalid = uncheckedEnvelope(Buffer.from(h.pairing.key.x25519, 'base64url'), h.pairing.key.id, {
-      ...h.payload(),
-      site: { name: 'bad', url: 'file:///bad' },
-    });
+    const invalid = uncheckedEnvelope(
+      Buffer.from(h.deployment.key.x25519, 'base64url'),
+      h.deployment.key.id,
+      {
+        ...h.payload(),
+        sites: [{ name: 'bad', url: 'file:///bad' }],
+      },
+    );
     assert.equal(await h.importer.receive(invalid), 'delete');
     assert.equal(h.store.sessionImports.list(h.user.tenantId).length, 1);
     const stored = h.store.db.prepare('SELECT payload FROM session_imports WHERE id=?').get(valid.id) as {
       payload: string;
     };
-    assert.equal(stored.payload.includes(valid.token), false);
-    assert.deepEqual(h.store.sessionImports.payload(h.user.tenantId, valid.id), valid);
+    assert.equal(stored.payload.includes(valid.password), false);
+    const { username, password, ...session } = valid;
+    const saved = h.store.sessionImports.payload(h.user.tenantId, valid.id)!;
+    assert.deepEqual(saved, session);
+    assert.equal('username' in saved, false);
+    assert.equal('password' in saved, false);
   } finally {
     await h.close();
   }
@@ -236,7 +240,7 @@ test('mail callback commit precedes uid deletion, UIDVALIDITY changes invalidate
     await mailbox.stop();
   }
 });
-test('valid tokens with expired, future or oversized payloads produce rejected records without payloads', async () => {
+test('authenticated imports with expired, future or oversized payloads produce rejected records without payloads', async () => {
   const h = await harness();
   try {
     for (const createdAt of [h.clock.wallMs() - 30 * 86400000 - 1, h.clock.wallMs() + 600001]) {
@@ -248,7 +252,7 @@ test('valid tokens with expired, future or oversized payloads produce rejected r
     const p = h.payload();
     p.localStorage[0].items = [['', '\u0000'.repeat(50000)]];
     await h.importer.receive(
-      uncheckedEnvelope(Buffer.from(h.pairing.key.x25519, 'base64url'), h.pairing.key.id, p),
+      uncheckedEnvelope(Buffer.from(h.deployment.key.x25519, 'base64url'), h.deployment.key.id, p),
     );
     assert.equal(h.record(p.id).state, 'rejected');
     assert.equal(
@@ -374,14 +378,13 @@ test('explicit browser rejections fail and clear payload; deleting pending recor
     h.importer.delete(h.user.tenantId, p.id);
     await applying;
     assert.equal(h.record(p.id), undefined);
-    h.store.sessionImports.deleteUser(h.user.user.id, h.user.tenantId);
-    assert.equal(h.importer.state(h.user.tenantId).pairing, null);
+    h.store.sessionImports.deleteUser(h.user.tenantId);
     assert.deepEqual(h.importer.state(h.user.tenantId).imports, []);
   } finally {
     await h.close();
   }
 });
-test('pairing rotates credentials, state hides secrets and keys persist sealed at rest', async () => {
+test('deployment preserves Browser identity and keys persist sealed at rest', async () => {
   const h = await harness();
   try {
     const keys = h.store.sessionImports.keys()!;
@@ -389,30 +392,42 @@ test('pairing rotates credentials, state hides secrets and keys persist sealed a
       private_key: string;
     };
     assert.equal(sealed.private_key.includes(keys.privateKey.toString('base64url')), false);
-    const second = new SessionImporter(h.store, h.gateway, importConfig, undefined, h.clock, () => {});
-    const newer = parsePairingCode((await second.pair(h.user.tenantId, 'other.test:4321')).code);
-    assert.equal(newer.key.id, h.pairing.key.id);
-    assert.equal(newer.server, 'other.test:4321');
-    assert.deepEqual(newer.browser, { userAgent: browserIdentity.userAgent, ...browserIdentity.metadata });
-    await h.importer.receive(h.envelope(h.payload()));
-    assert.equal(h.store.sessionImports.list(h.user.tenantId).length, 0);
-    assert.equal(JSON.stringify(second.state(h.user.tenantId)).includes(newer.token), false);
-    second.unpair(h.user.tenantId);
-    assert.equal(second.state(h.user.tenantId).pairing, null);
+    const second = new SessionImporter(
+      h.store,
+      h.gateway,
+      h.store.security.authAttempts,
+      importConfig,
+      undefined,
+      h.clock,
+      () => {},
+    );
+    const deployment = await second.deployment(h.user.tenantId, 'other.test:4321');
+    assert.deepEqual(deployment, { ...h.deployment, server: 'other.test:4321' });
+    assert.deepEqual(deployment.browser, {
+      userAgent: browserIdentity.userAgent,
+      ...browserIdentity.metadata,
+    });
+    assert.deepEqual(Object.keys(second.state(h.user.tenantId)).sort(), ['imports', 'receiving']);
     await second.stop();
-    const disabled = new SessionImporter(h.store, h.gateway);
-    assert.equal(disabled.state(h.user.tenantId).mailbox.configured, false);
-    await assert.rejects(disabled.pair(h.user.tenantId, 'host'), { code: 'unavailable' });
+    const disabled = new SessionImporter(h.store, h.gateway, h.store.security.authAttempts);
+    assert.equal(disabled.state(h.user.tenantId).receiving, false);
+    await assert.rejects(disabled.deployment(h.user.tenantId, 'host'), { code: 'unavailable' });
     await disabled.stop();
   } finally {
     await h.close();
   }
 });
-test('WS import methods use the current product lease, scope records and pair with the upgrade Host', async () => {
+
+test('WS deployment is admin-only, uses the upgrade Host and current product lease', async () => {
   const store = new ControlDatabase(':memory:');
+  const identityTenants: string[] = [];
   const gateway = testGateway({
-    async request(method) {
-      return method === 'session.identity' ? browserIdentity : {};
+    async request(method, tenant) {
+      if (method === 'session.identity') {
+        identityTenants.push(tenant);
+        return browserIdentity;
+      }
+      return {};
     },
   });
   const control = createApplication(store, gateway, undefined, undefined, undefined, importConfig);
@@ -427,39 +442,165 @@ test('WS import methods use the current product lease, scope records and pair wi
         { identity: user.token, valid: () => true },
         true,
       );
-    const authority = {
-      tenantId: a.tenantId,
-      leaseId: a.tenantId,
-      epoch: control.viewers.productEpoch(a.tenantId, a.tenantId)!,
-    };
-    const call = (method: string, params = {}) =>
-      dispatchViewerRequest(control, authority, method, params, undefined, 'connected.example:7443');
-    const paired = await call('sessionImport.pair');
-    assert.deepEqual(Object.keys(paired).sort(), ['code', 'createdAt']);
-    assert.equal(parsePairingCode(paired.code).server, 'connected.example:7443');
+    const authority = (user: typeof a) => ({
+      tenantId: user.tenantId,
+      leaseId: user.tenantId,
+      epoch: control.viewers.productEpoch(user.tenantId, user.tenantId)!,
+    });
+    const call = (method: string, params = {}, user = a) =>
+      dispatchViewerRequest(control, authority(user), method, params, undefined, 'connected.example:7443');
+    await assert.rejects(call('admin.sessionImportDeployment', {}, b), { code: 'forbidden' });
+    assert.deepEqual(identityTenants, []);
+    const deployment = await call('admin.sessionImportDeployment');
+    const key = store.sessionImports.keys()!;
+    assert.deepEqual(deployment, {
+      v: 1,
+      server: 'connected.example:7443',
+      mailbox: importConfig.mailbox,
+      key: { id: key.keyId, x25519: key.publicKey.toString('base64url') },
+      browser: { userAgent: browserIdentity.userAgent, ...browserIdentity.metadata },
+    });
+    assert.deepEqual(identityTenants, [a.tenantId]);
     const other = importPayload();
     store.sessionImports.insert(b.tenantId, other, Date.now());
     assert.deepEqual(await call('sessionImport.delete', { id: other.id }), { ok: true });
     assert.equal(store.sessionImports.exists(other.id), true);
-    const state = await call('sessionImport.state');
-    assert.deepEqual(Object.keys(state).sort(), ['imports', 'mailbox', 'pairing']);
-    assert.deepEqual(state.pairing, { createdAt: paired.createdAt });
-    assert.deepEqual(state.imports, []);
-    assert.deepEqual(await call('sessionImport.unpair'), { ok: true });
+    assert.deepEqual(await call('sessionImport.state'), {
+      receiving: true,
+      imports: [],
+    });
     await assert.rejects(call('sessionImport.state', { tenant: b.tenantId }), { code: 'invalid_request' });
     await control.security.lock(a.tenantId, control.tenants.get(a.tenantId).viewer!.security);
-    for (const method of [
-      'sessionImport.state',
-      'sessionImport.pair',
-      'sessionImport.unpair',
-      'sessionImport.delete',
-    ])
+    for (const method of ['sessionImport.state', 'admin.sessionImportDeployment', 'sessionImport.delete'])
       await assert.rejects(call(method), { code: 'locked' });
   } finally {
     await control.close();
     store.db.close();
   }
 });
+
+test('WS deployment is unavailable without a mailbox configuration', async () => {
+  const store = new ControlDatabase(':memory:');
+  const control = createApplication(
+    store,
+    testGateway({
+      async request() {
+        return {};
+      },
+    }),
+  );
+  try {
+    const user = await registerUser(store, 'unconfigured-admin', 'password123');
+    await control.viewers.attachViewer(
+      user.tenantId,
+      'lease',
+      () => {},
+      { identity: user.token, valid: () => true },
+      true,
+    );
+    await assert.rejects(
+      dispatchViewerRequest(
+        control,
+        {
+          tenantId: user.tenantId,
+          leaseId: 'lease',
+          epoch: control.viewers.productEpoch(user.tenantId, 'lease')!,
+        },
+        'admin.sessionImportDeployment',
+        {},
+        undefined,
+        'viewer.test',
+      ),
+      { code: 'unavailable' },
+    );
+  } finally {
+    await control.close();
+    store.db.close();
+  }
+});
+
+test('wrong passwords and disabled accounts are rejected without retaining payloads or logging passwords', async () => {
+  const h = await harness();
+  try {
+    const wrong = h.payload();
+    wrong.password = 'never-log-this-password';
+    assert.equal(await h.importer.receive(h.envelope(wrong)), 'delete');
+    assert.equal(h.record(wrong.id).state, 'rejected');
+    assert.equal(h.record(wrong.id).error, '账户密码不正确');
+    h.store.accounts.setDisabled(h.user.user.id, h.clock.wallMs());
+    const disabled = h.payload();
+    assert.equal(await h.importer.receive(h.envelope(disabled)), 'delete');
+    assert.equal(h.record(disabled.id).state, 'rejected');
+    assert.equal(h.record(disabled.id).error, '账户已停用');
+    assert.equal(
+      h.store.db.prepare('SELECT 1 FROM session_imports WHERE payload IS NOT NULL').get(),
+      undefined,
+    );
+    for (const password of [wrong.password, disabled.password])
+      assert.equal(JSON.stringify(h.logs).includes(password), false);
+    assert.equal(
+      h.requests.some((r) => r.method === 'session.storage.import'),
+      false,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test('mail and login share the password budget; rate-limited mail is kept and retried each round', async () => {
+  const h = await harness();
+  try {
+    const accounts = accountsFor(h.store);
+    for (let i = 0; i < 5; i++)
+      await assert.rejects(accounts.login('IMPORT-USER', 'wrong-password'), { code: 'unauthenticated' });
+    const wrong = h.payload();
+    wrong.password = 'wrong-mail-password';
+    assert.equal(await h.importer.receive(h.envelope(wrong)), 'delete');
+    assert.equal(h.record(wrong.id).error, '账户密码不正确');
+    await assert.rejects(accounts.login('import-user', 'import-password'), { code: 'rate_limited' });
+    const pending = h.payload();
+    const bytes = h.envelope(pending);
+    assert.equal(await h.importer.receive(bytes), 'retry');
+    const client = new FakeMailClient();
+    client.messages = h.messages;
+    client.add(1, bytes);
+    for (let round = 0; round < 2; round++) {
+      await h.importer.mailbox.poll();
+      assert.deepEqual(h.rounds[round].deleted, []);
+      assert.ok(h.rounds[round].calls.includes('download:1:2.1:true'));
+      assert.ok(h.messages.has(1));
+      assert.equal(h.record(pending.id), undefined);
+    }
+    h.clock.advance(60001);
+    await h.importer.mailbox.poll();
+    assert.deepEqual(h.rounds[2].deleted, [1]);
+    assert.equal(h.messages.has(1), false);
+    assert.equal(h.record(pending.id).state, 'pending');
+  } finally {
+    await h.close();
+  }
+});
+
+test('replay is deleted before password verification and consumes no password attempts', async () => {
+  const h = await harness();
+  try {
+    const p = h.payload();
+    p.username = 'IMPORT-USER';
+    assert.equal(await h.importer.receive(h.envelope(p)), 'delete');
+    const first = h.record(p.id);
+    for (let i = 0; i < 6; i++)
+      assert.equal(await h.importer.receive(h.envelope({ ...p, password: 'wrong-password' })), 'delete');
+    assert.deepEqual(h.record(p.id), first);
+    const accounts = accountsFor(h.store);
+    for (let i = 0; i < 5; i++)
+      await assert.rejects(accounts.login('import-user', 'wrong-password'), { code: 'unauthenticated' });
+    assert.equal(await h.importer.receive(h.envelope({ ...p, password: 'wrong-password' })), 'delete');
+    assert.equal(await h.importer.receive(h.envelope(h.payload())), 'retry');
+  } finally {
+    await h.close();
+  }
+});
+
 test('session import config is optional, strict and applies only the specified defaults', async () => {
   const directory = await mkdtemp(resolve('develop/tmp/session-import-config-'));
   const configPath = resolve(directory, 'control.json');

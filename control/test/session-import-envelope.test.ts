@@ -11,8 +11,7 @@ import {
   sealEnvelope,
 } from '../server/session-import/envelope';
 import { hpkeSeal, x25519Public } from '../server/session-import/hpke';
-import { buildPairingCode, parsePairingCode } from '../server/session-import/pairing';
-import { browserIdentity, importPayload } from './session-import-fixture';
+import { importPayload } from './session-import-fixture';
 const privateKey = randomBytes(32),
   publicKey = x25519Public(privateKey);
 const keyId = createHash('sha256').update(publicKey).digest('hex').slice(0, 16);
@@ -46,10 +45,25 @@ test('payload validates field types, timestamps, URLs, origins and cookie fields
     { v: 2 },
     { id: 'not-uuid' },
     { createdAt: 1.5 },
+    { username: '' },
+    { username: 'x'.repeat(65) },
+    { username: null },
+    { password: '' },
+    { password: 'x'.repeat(257) },
+    { password: null },
     { token: 'invalid' },
     { device: null },
     { extra: 1 },
-    { site: { name: 'Site', url: 'file:///file' } },
+    { site: { name: 'Site', url: 'https://example.com' } },
+    { sites: [] },
+    { sites: [{ name: 'Site', url: 'file:///file' }] },
+    { sites: [{ name: 'Site', url: 'https://example.com', icon: '' }] },
+    {
+      sites: [
+        { name: 'A', url: 'https://example.com' },
+        { name: 'B', url: 'https://example.com' },
+      ],
+    },
     { cookies: {} },
     { cookies: [{ ...importPayload().cookies[0], hostOnly: true }] },
     { cookies: [{ ...importPayload().cookies[0], sameSite: 'bad' }] },
@@ -59,6 +73,13 @@ test('payload validates field types, timestamps, URLs, origins and cookie fields
     { localStorage: [{ origin: 'https://example.com', items: [['key', 1]] }] },
   ])
     assert.throws(() => parseImportPayload({ ...importPayload(), ...patch }), { code: 'invalid_request' });
+  for (const credentials of [
+    { username: 'a', password: 'b' },
+    { username: '界'.repeat(64), password: '😀'.repeat(256) },
+  ]) {
+    const payload = importPayload(credentials);
+    assert.deepEqual(parseImportPayload(payload), payload);
+  }
   const valid = importPayload();
   valid.cookies[0].hostOnly = true;
   valid.cookies[0].domain = 'example.com';
@@ -78,7 +99,8 @@ test('payload limits include escaped UTF-8 JSON size of a whole localStorage ent
     { cookies: Array(4097).fill(importPayload().cookies[0]) },
     { cookies: [{ ...importPayload().cookies[0], value: '界'.repeat(1366) }] },
     { device: 'a'.repeat(65) },
-    { site: { name: 'a'.repeat(129), url: 'https://example.com' } },
+    { sites: [{ name: 'a'.repeat(129), url: 'https://example.com' }] },
+    { sites: Array.from({ length: 17 }, (_, i) => ({ name: 'S', url: `https://s${i}.example.com` })) },
     { localStorage: Array.from({ length: 257 }, (_, i) => ({ origin: `https://site${i}.com`, items: [] })) },
     {
       localStorage: [
@@ -90,19 +112,4 @@ test('payload limits include escaped UTF-8 JSON size of a whole localStorage ent
     },
   ])
     assert.throws(() => parseImportPayload({ ...importPayload(), ...patch }), ImportLimitError);
-});
-test('pairing code is unpadded base64url JSON and preserves Browser identity', () => {
-  const p = {
-    v: 1 as const,
-    server: 'viewer.test:3001',
-    user: '测试用户',
-    mailbox: 'import@example.com',
-    key: { id: keyId, x25519: publicKey.toString('base64url') },
-    token: randomBytes(32).toString('base64url'),
-    browser: { userAgent: browserIdentity.userAgent, ...browserIdentity.metadata },
-  };
-  const code = buildPairingCode(p);
-  assert.match(code, /^RKP1:[A-Za-z0-9_-]+$/);
-  assert.deepEqual(parsePairingCode(code), p);
-  assert.throws(() => parsePairingCode(code + '='), { code: 'invalid_request' });
 });

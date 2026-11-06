@@ -1,3 +1,4 @@
+import type { ImportDeployment, MailboxStatus } from './session-import';
 export type AdminNodeState = 'ready' | 'connecting' | 'offline' | 'removed';
 export interface AdminNodeMetrics {
   at: number;
@@ -73,6 +74,7 @@ export interface AdminOverview {
   sessions: { active: number; hibernated: number };
   storage: { bytes: number; underReplicated: number; pendingSessionDeletions: number };
   diagnostics: number;
+  sessionImport: MailboxStatus;
 }
 export interface AdminDiagnostic {
   id: string;
@@ -100,5 +102,6 @@ export interface AdminSocketMethods {
   'admin.readdNode': { params: { nodeId: string }; result: AdminNode[] };
   'admin.diagnostics': { params: Record<string, never>; result: AdminDiagnostic[] };
   'admin.deleteDiagnostic': { params: { id: string }; result: AdminDiagnostic[] };
+  'admin.sessionImportDeployment': { params: Record<string, never>; result: ImportDeployment };
   'admin.downloadDiagnostic': { params: { id: string }; result: { url: string } };
 }

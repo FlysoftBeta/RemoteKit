@@ -23,7 +23,6 @@ test('fresh schema is version 2 with account and session import state', () => {
       'file_library',
       'session_deletions',
       'session_imports',
-      'session_import_pairings',
       'session_import_keys',
     ])
       assert.ok(tables.has(name), name);

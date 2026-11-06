@@ -1,6 +1,8 @@
 package app.remotekit.importer
 
 import android.app.Application
+import app.remotekit.importer.deployment.Deployment
+import app.remotekit.importer.deployment.DeploymentConfig
 import app.remotekit.importer.store.AppStore
 import app.remotekit.importer.web.ProfileSessions
 
@@ -11,6 +13,9 @@ class ImporterApplication : Application() {
     lateinit var profiles: ProfileSessions
         private set
 
+    var deployment: Deployment? = null
+        private set
+
     var supported = false
         private set
 
@@ -19,6 +24,17 @@ class ImporterApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        runCatching {
+            if ("deployment.json" in assets.list("").orEmpty()) {
+                deployment =
+                    assets.open("deployment.json").use {
+                        DeploymentConfig.parse(it.readBytes())
+                    }
+            }
+        }
+            .onFailure {
+                startupError = getString(R.string.invalid_deployment)
+            }
         store = AppStore(this)
         profiles = ProfileSessions(store)
         supported = profiles.supported()

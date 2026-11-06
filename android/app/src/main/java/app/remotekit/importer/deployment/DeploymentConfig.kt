@@ -1,4 +1,4 @@
-package app.remotekit.importer.pairing
+package app.remotekit.importer.deployment
 
 import app.remotekit.importer.R
 import app.remotekit.importer.requireMessage
@@ -31,20 +31,15 @@ fun sha256Hex(bytes: ByteArray): String =
     }
 
 @Serializable
-data class Pairing(
+data class Deployment(
     val v: Int,
     val server: String,
-    val user: String,
     val mailbox: String,
-    val key: PairingKey,
-    val token: String,
+    val key: DeploymentKey,
     val browser: BrowserIdentity,
-) {
-    val tokenHash: String
-        get() = sha256Hex(decodeBase64Url(token, 32))
-}
+)
 
-@Serializable data class PairingKey(val id: String, val x25519: String)
+@Serializable data class DeploymentKey(val id: String, val x25519: String)
 
 @Serializable data class Brand(val brand: String, val version: String)
 
@@ -62,47 +57,43 @@ data class BrowserIdentity(
     val fullVersionList: List<Brand>,
 )
 
-object PairingCode {
-    fun parse(text: String): Pairing {
-        requireMessage(text.startsWith("RKP1:")) { R.string.pairing_prefix_error }
-        requireMessage(text.length <= 65536) { R.string.pairing_too_long }
-        val bytes = decodeBase64Url(text.substring(5))
+object DeploymentConfig {
+    fun parse(bytes: ByteArray): Deployment {
+        requireMessage(bytes.size <= 65536) { R.string.deployment_too_long }
         val json =
             Charsets.UTF_8.newDecoder()
                 .onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT)
                 .decode(ByteBuffer.wrap(bytes))
                 .toString()
-        val pairing = ContractJson.decodeFromString<Pairing>(json)
-        requireMessage(pairing.v == 1) { R.string.pairing_version_error }
-        requireMessage(pairing.server.isNotBlank() && pairing.user.isNotBlank()) {
-            R.string.pairing_empty_identity
+        val deployment = ContractJson.decodeFromString<Deployment>(json)
+        requireMessage(deployment.v == 1) { R.string.deployment_version_error }
+        requireMessage(deployment.server.isNotBlank()) {
+            R.string.deployment_empty_identity
         }
         requireMessage(
-            pairing.server.none { it.isWhitespace() || it.isISOControl() || it in "/?#@" }
+            deployment.server.none { it.isWhitespace() || it.isISOControl() || it in "/?#@" }
         ) {
-            R.string.pairing_invalid_server
+            R.string.deployment_invalid_server
         }
-        requireMessage(pairing.user.none { it.isISOControl() }) { R.string.pairing_invalid_user }
-        val address = InternetAddress(pairing.mailbox, true)
+        val address = InternetAddress(deployment.mailbox, true)
         address.validate()
         requireMessage(
-            address.address == pairing.mailbox &&
+            address.address == deployment.mailbox &&
                 address.personal == null &&
-                pairing.mailbox.none { it.isWhitespace() }
+                deployment.mailbox.none { it.isWhitespace() }
         ) {
-            R.string.pairing_invalid_mailbox
+            R.string.deployment_invalid_mailbox
         }
-        val publicKey = decodeBase64Url(pairing.key.x25519, 32)
-        requireMessage(publicKey.any { it != 0.toByte() }) { R.string.pairing_invalid_key }
+        val publicKey = decodeBase64Url(deployment.key.x25519, 32)
+        requireMessage(publicKey.any { it != 0.toByte() }) { R.string.deployment_invalid_key }
         requireMessage(
-            pairing.key.id.matches(Regex("[0-9a-f]{16}")) &&
-                pairing.key.id == sha256Hex(publicKey).take(16)
+            deployment.key.id.matches(Regex("[0-9a-f]{16}")) &&
+                deployment.key.id == sha256Hex(publicKey).take(16)
         ) {
-            R.string.pairing_key_id_error
+            R.string.deployment_key_id_error
         }
-        decodeBase64Url(pairing.token, 32)
-        val browser = pairing.browser
+        val browser = deployment.browser
         requireMessage(browser.platform == "Windows" && !browser.mobile) {
             R.string.browser_not_windows
         }
@@ -131,6 +122,6 @@ object PairingCode {
         ) {
             R.string.browser_brands_mismatch
         }
-        return pairing
+        return deployment
     }
 }

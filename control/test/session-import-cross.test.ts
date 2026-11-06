@@ -6,6 +6,9 @@ test('Control opens the envelope produced by the Android JVM implementation', ()
   const fixture = JSON.parse(
     readFileSync(new URL('../../protocol/session-import/envelope-fixture.json', import.meta.url), 'utf8'),
   );
+  assert.equal(typeof fixture.payload.username, 'string');
+  assert.equal(typeof fixture.payload.password, 'string');
+  assert.equal('token' in fixture.payload, false);
   assert.deepEqual(
     openEnvelope(
       Buffer.from(fixture.recipientPrivate, 'base64url'),

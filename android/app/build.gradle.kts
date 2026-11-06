@@ -1,4 +1,11 @@
 import java.util.Properties
+import org.gradle.api.file.ConfigurableFileCollection
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.tasks.InputFiles
+import org.gradle.api.tasks.OutputDirectory
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
 
 plugins {
     alias(libs.plugins.android.application)
@@ -10,6 +17,28 @@ val mailbox =
     Properties().apply {
         val source = rootProject.file("mailbox.properties")
         if (source.exists()) source.inputStream().use { load(it) }
+    }
+
+abstract class GenerateDeploymentAssets : DefaultTask() {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val deploymentFiles: ConfigurableFileCollection
+
+    @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction
+    fun generate() {
+        val source = deploymentFiles.singleFile
+        val target = outputDirectory.get().file("deployment.json").asFile
+        target.parentFile.mkdirs()
+        if (source.exists()) source.copyTo(target, overwrite = true) else target.delete()
+    }
+}
+
+val generateDeploymentAssets =
+    tasks.register<GenerateDeploymentAssets>("generateDeploymentAssets") {
+        deploymentFiles.from(rootProject.file("deployment.json"))
+        outputDirectory.set(layout.buildDirectory.dir("generated/deploymentAssets"))
     }
 
 fun quoted(value: String): String =
@@ -67,22 +96,26 @@ android {
     }
 }
 
+androidComponents.onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(
+        generateDeploymentAssets,
+        GenerateDeploymentAssets::outputDirectory,
+    )
+}
+
 kotlin.compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
 
 dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.material3)
     implementation(libs.compose.ui)
+    implementation(libs.compose.icons)
     implementation(libs.compose.tooling.preview)
     implementation(libs.webkit)
     implementation(libs.activity.compose)
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.lifecycle.runtime.compose)
     implementation(libs.core)
-    implementation(libs.camera.camera2)
-    implementation(libs.camera.lifecycle)
-    implementation(libs.camera.view)
-    implementation(libs.zxing)
     implementation(libs.serialization)
     implementation(libs.coroutines)
     implementation(libs.bc)

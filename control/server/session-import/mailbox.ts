@@ -56,7 +56,7 @@ export class ImportMailbox {
   private snapshot: MailboxStatus;
   constructor(
     private readonly config: SessionImportConfig | undefined,
-    private readonly receive: (bytes: Buffer) => Promise<'delete' | 'keep'>,
+    private readonly receive: (bytes: Buffer) => Promise<'delete' | 'keep' | 'retry'>,
     private readonly factory: MailClientFactory = createMailClient,
     private readonly log: (message: string) => void = console.error,
   ) {
@@ -126,7 +126,7 @@ export class ImportMailbox {
         }
         const decision = await this.receive(Buffer.concat(buffers, size));
         if (decision === 'delete') await client.messageDelete(message.uid, { uid: true });
-        else this.skipped.add(`${mailbox.uidValidity}:${message.uid}`);
+        else if (decision === 'keep') this.skipped.add(`${mailbox.uidValidity}:${message.uid}`);
       }
       if (connectionError) throw connectionError;
       await client.logout();

@@ -1,57 +1,52 @@
 import Close from '@mui/icons-material/Close';
+import DeleteOutline from '@mui/icons-material/DeleteOutline';
+import MoveToInbox from '@mui/icons-material/MoveToInbox';
+import OpenInNew from '@mui/icons-material/OpenInNew';
 import {
   Alert,
-  Box,
+  Avatar,
   Button,
+  Chip,
   Dialog,
-  DialogActions,
   DialogContent,
   DialogTitle,
   Divider,
   IconButton,
-  Stack,
-  TextField,
+  LinearProgress,
+  Tooltip,
   Typography,
   useMediaQuery,
 } from '@mui/material';
-import qrcode from 'qrcode-generator';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { SessionImportState, SessionImportSocketMethods } from '../../shared/session-import';
+import { useEffect, useRef, useState } from 'react';
+import type {
+  ImportRecord,
+  SessionImportState,
+  SessionImportSocketMethods,
+} from '../../shared/session-import';
 import type { Action } from './product-dialogs';
 import { formatError } from '../util/format-error';
+import { formatTime } from './admin/shared';
 
 export type SessionImportCall = <K extends keyof SessionImportSocketMethods>(
   method: K,
   params: SessionImportSocketMethods[K]['params'],
 ) => Promise<SessionImportSocketMethods[K]['result']>;
 type Call = SessionImportCall;
-const time = (value: number | null) => (value === null ? '暂无' : new Date(value).toLocaleString('zh-CN'));
-const states = { pending: '等待会话活跃', applied: '已导入', rejected: '已拒绝', failed: '导入失败' };
-function PairingQr({ code }: { code: string }) {
-  const qr = useMemo(() => {
-    const value = qrcode(0, 'M');
-    value.addData(code);
-    value.make();
-    return value;
-  }, [code]);
-  const modules = qr.getModuleCount();
-  const cells: string[] = [];
-  for (let row = 0; row < modules; row++)
-    for (let col = 0; col < modules; col++)
-      if (qr.isDark(row, col)) cells.push(`M${col + 4} ${row + 4}h1v1h-1z`);
-  return (
-    <svg
-      role="img"
-      aria-label="会话导入配对二维码"
-      viewBox={`0 0 ${modules + 8} ${modules + 8}`}
-      style={{ display: 'block', width: '100%', maxWidth: 420, margin: '0 auto' }}
-      shapeRendering="crispEdges"
-    >
-      <rect width="100%" height="100%" fill="white" />
-      <path d={cells.join('')} fill="black" />
-    </svg>
-  );
+const states = { pending: '等待会话', applied: '已导入', rejected: '已拒绝', failed: '导入失败' };
+const stateColor = { pending: 'default', applied: 'success', rejected: 'error', failed: 'error' } as const;
+
+function host(url: string) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
+
+function siteTitle(record: ImportRecord) {
+  return record.sites.map((site) => site.name || host(site.url)).join('、');
+}
+
 export function SessionImportSettings({
   online,
   call,
@@ -71,7 +66,7 @@ export function SessionImportSettings({
       <div className="setting-section">
         <Typography fontWeight={600}>会话导入</Typography>
         <Typography variant="body2" color="text.secondary">
-          在手机上登录后，将登录状态导入此浏览器。
+          提前在手机上登录需要二次验证的网站，再把登录状态发到这里。
         </Typography>
         <Button disabled={!online} onClick={() => setOpen(true)}>
           管理会话导入
@@ -94,6 +89,7 @@ export function SessionImportSettings({
     </>
   );
 }
+
 function ImportDialog({
   online,
   call,
@@ -113,9 +109,6 @@ function ImportDialog({
   const [state, setState] = useState<SessionImportState>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [confirm, setConfirm] = useState(false);
-  const [pairing, setPairing] = useState<{ code: string; createdAt: number }>();
-  const [copied, setCopied] = useState(false);
   const mounted = useRef(true);
   const refreshing = useRef(false);
   const refresh = async () => {
@@ -156,6 +149,15 @@ function ImportDialog({
       if (mounted.current) setBusy(false);
     }
   };
+  const openSite = (url: string) =>
+    run(async () => {
+      await action({ type: 'tab.create', windowId: windowId!, url });
+      opened();
+    });
+  const deleteRecord = (record: ImportRecord) =>
+    run(async () => {
+      await call('sessionImport.delete', { id: record.id });
+    });
   return (
     <Dialog
       open
@@ -172,140 +174,95 @@ function ImportDialog({
         </IconButton>
       </DialogTitle>
       <DialogContent dividers>
-        <Stack spacing={2}>
-          {error && <Alert severity="error">{error}</Alert>}
-          <Box>
-            <Typography fontWeight={600}>
-              {state ? (state.mailbox.configured ? '邮箱已配置' : '邮箱未配置') : '正在读取…'}
+        {error && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {error}
+          </Alert>
+        )}
+        {!state ? (
+          <LinearProgress sx={{ my: 1 }} />
+        ) : (
+          !state.receiving && (
+            <Alert severity="info" sx={{ mb: 1 }}>
+              管理员尚未开启会话导入，暂时无法接收手机发来的登录状态。
+            </Alert>
+          )
+        )}
+        {state?.imports.length === 0 && (
+          <div className="import-empty">
+            <MoveToInbox color="disabled" sx={{ fontSize: 40 }} />
+            <Typography variant="body2" color="text.secondary">
+              在手机 App 里登录网站并发送后，记录会出现在这里。
             </Typography>
-            {state?.mailbox.configured && (
-              <>
-                <Typography variant="body2">最近拉取：{time(state.mailbox.lastSuccessAt)}</Typography>
-                <Typography variant="body2" color={state.mailbox.lastError ? 'error' : 'text.secondary'}>
-                  最近错误：
-                  {state.mailbox.lastError
-                    ? `${time(state.mailbox.lastErrorAt)} · ${state.mailbox.lastError}`
-                    : '暂无'}
-                </Typography>
-              </>
-            )}
-            <Typography sx={{ mt: 1 }}>
-              {state?.pairing ? `已配对 · ${time(state.pairing.createdAt)}` : '未配对'}
-            </Typography>
-            <Button disabled={!online || busy || !state?.mailbox.configured} onClick={() => setConfirm(true)}>
-              生成配对码
-            </Button>
-            <Button
-              disabled={!online || busy || !state?.pairing}
-              onClick={() =>
-                void run(async () => {
-                  await call('sessionImport.unpair', {});
-                  setPairing(undefined);
-                })
-              }
+          </div>
+        )}
+        {state?.imports.map((record) => (
+          <div className="import-record" key={record.id}>
+            <Avatar
+              sx={{ width: 36, height: 36, fontSize: 16, bgcolor: 'action.selected', color: 'text.primary' }}
             >
-              解除配对
-            </Button>
-          </Box>
-          {pairing && (
-            <Stack spacing={1}>
-              <Alert severity="info">配对码仅显示这一次，关闭后无法再次查看。</Alert>
-              <PairingQr code={pairing.code} />
-              <TextField
-                label="配对码"
-                multiline
-                maxRows={5}
-                fullWidth
-                value={pairing.code}
-                slotProps={{ input: { readOnly: true } }}
-              />
-              <Button
-                onClick={() =>
-                  void run(async () => {
-                    await navigator.clipboard.writeText(pairing.code);
-                    setCopied(true);
-                  })
-                }
-              >
-                {copied ? '已复制' : '复制配对码'}
-              </Button>
-            </Stack>
-          )}
-          <Divider />
-          <Typography fontWeight={600}>导入记录</Typography>
-          {state?.imports.length === 0 && <Typography color="text.secondary">暂无导入记录</Typography>}
-          {state?.imports.map((record) => (
-            <Box key={record.id} sx={{ borderBottom: 1, borderColor: 'divider', pb: 1 }}>
-              <Typography fontWeight={600} sx={{ overflowWrap: 'anywhere' }}>
-                {record.siteName || record.siteUrl}
+              {siteTitle(record).slice(0, 1).toUpperCase()}
+            </Avatar>
+            <div className="import-record-text">
+              <div className="import-record-title">
+                <Typography fontWeight={600} noWrap>
+                  {siteTitle(record)}
+                </Typography>
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  color={stateColor[record.state]}
+                  label={states[record.state]}
+                />
+              </div>
+              <Typography variant="body2" color="text.secondary">
+                {record.device || '未命名设备'} · {formatTime(record.receivedAt)}收到
               </Typography>
-              <Typography variant="body2">设备：{record.device || '未命名'}</Typography>
-              <Typography variant="body2">
-                生成：{time(record.createdAt)}
-                <br />
-                接收：{time(record.receivedAt)}
-              </Typography>
-              <Typography variant="body2">
-                {states[record.state]} · Cookie {record.cookies} 条 · 来源 {record.origins} 个 · 拒绝{' '}
-                {record.rejectedItems} 项
-              </Typography>
+              {record.state === 'applied' && (
+                <Typography variant="body2" color="text.secondary">
+                  {record.cookies} 个 Cookie · {record.origins} 个站点存储
+                  {record.rejectedItems > 0 && ` · ${record.rejectedItems} 项未写入`}
+                </Typography>
+              )}
+              {record.state === 'applied' && (
+                <div className="import-record-sites">
+                  {record.sites.map((site) => (
+                    <Tooltip key={site.url} title={`在新标签页打开 ${host(site.url)}`}>
+                      <span>
+                        <Chip
+                          size="small"
+                          icon={<OpenInNew />}
+                          label={site.name || host(site.url)}
+                          disabled={!online || busy || !windowId}
+                          onClick={() => void openSite(site.url)}
+                        />
+                      </span>
+                    </Tooltip>
+                  ))}
+                </div>
+              )}
               {record.error && (
                 <Typography variant="body2" color="error">
                   {record.error}
                 </Typography>
               )}
-              {record.state === 'applied' && (
-                <Button
-                  disabled={!online || busy || !windowId}
-                  onClick={() =>
-                    void run(async () => {
-                      await action({ type: 'tab.create', windowId: windowId!, url: record.siteUrl });
-                      opened();
-                    })
-                  }
-                >
-                  打开
-                </Button>
-              )}
-              <Button
-                disabled={!online || busy}
-                color="error"
-                onClick={() =>
-                  void run(async () => {
-                    await call('sessionImport.delete', { id: record.id });
-                  })
-                }
-              >
-                删除
-              </Button>
-            </Box>
-          ))}
-        </Stack>
+            </div>
+            <div className="import-record-actions">
+              <Tooltip title={record.state === 'pending' ? '放弃导入' : '删除记录'}>
+                <span>
+                  <IconButton
+                    aria-label={record.state === 'pending' ? '放弃导入' : '删除记录'}
+                    disabled={!online || busy}
+                    onClick={() => void deleteRecord(record)}
+                  >
+                    <DeleteOutline fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </div>
+          </div>
+        ))}
       </DialogContent>
-      <Dialog open={confirm} onClose={busy ? undefined : () => setConfirm(false)} fullWidth maxWidth="xs">
-        <DialogTitle>生成配对码？</DialogTitle>
-        <DialogContent>旧配对码立即失效。请用手机重新扫码或粘贴新配对码。</DialogContent>
-        <DialogActions>
-          <Button disabled={busy} onClick={() => setConfirm(false)}>
-            取消
-          </Button>
-          <Button
-            disabled={!online || busy}
-            onClick={() =>
-              void run(async () => {
-                const value = await call('sessionImport.pair', {});
-                if (mounted.current) {
-                  setPairing(value);
-                  setCopied(false);
-                  setConfirm(false);
-                }
-              })
-            }
-          >
-            生成
-          </Button>
-        </DialogActions>
-      </Dialog>
     </Dialog>
   );
 }

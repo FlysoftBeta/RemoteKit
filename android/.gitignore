@@ -5,3 +5,4 @@ mailbox.properties
 .idea/
 *.iml
 .kotlin/
+deployment.json

@@ -164,7 +164,7 @@ export class UserAdmin {
         store.operations.deleteTenant(user.tenant);
         store.workspaces.deleteTenant(user.tenant);
         store.security.deleteUser(user.id);
-        store.sessionImports.deleteUser(user.id, user.tenant);
+        store.sessionImports.deleteUser(user.tenant);
         store.accounts.deleteUser(user.id);
       });
       this.context.endpoint.forget(user.tenant);

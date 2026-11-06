@@ -4,8 +4,11 @@ import android.content.Context
 import android.os.Build
 import android.util.AtomicFile
 import app.remotekit.importer.R
-import app.remotekit.importer.pairing.ContractJson
-import app.remotekit.importer.pairing.Pairing
+import app.remotekit.importer.account.Account
+import app.remotekit.importer.account.AccountCipher
+import app.remotekit.importer.account.validateAccount
+import app.remotekit.importer.deployment.ContractJson
+import app.remotekit.importer.deployment.Deployment
 import app.remotekit.importer.requireMessage
 import java.io.File
 import java.util.UUID
@@ -22,34 +25,45 @@ sealed interface DraftState {
 
     @Serializable
     @SerialName("Ready")
-    data class Ready(val pairingKeyId: String, val tokenHash: String) : DraftState
+    data class Ready(val deploymentKeyId: String, val accountRevision: Long) : DraftState
 }
+
+/** A site chosen for import. [icon] is a base64 PNG of at most 64 px, kept only for display. */
+@Serializable data class SiteRef(val name: String, val url: String, val icon: String? = null)
 
 @Serializable
 data class Draft(
     val id: String,
-    val name: String,
-    val url: String,
     val updatedAt: Long,
+    val lastUrl: String? = null,
+    val sites: List<SiteRef> = emptyList(),
     val state: DraftState = DraftState.LoggingIn,
     val sendError: String? = null,
 ) {
-    fun isCurrent(pairing: Pairing?): Boolean =
-        pairing != null &&
+    fun isCurrent(deployment: Deployment?, snapshot: AppSnapshot): Boolean =
+        deployment != null &&
+            snapshot.account != null &&
             state is DraftState.Ready &&
-            state.pairingKeyId == pairing.key.id &&
-            state.tokenHash == pairing.tokenHash
+            state.deploymentKeyId == deployment.key.id &&
+            state.accountRevision == snapshot.accountRevision
 }
+
+@Serializable data class SentRecord(val sites: List<SiteRef>, val sentAt: Long)
+
+@Serializable data class StoredAccount(val username: String, val encryptedPassword: String)
 
 @Serializable
 data class AppSnapshot(
-    val pairing: Pairing? = null,
+    val account: StoredAccount? = null,
+    val accountRevision: Long = 0,
     val deviceName: String = Build.MODEL.take(64),
     val drafts: List<Draft> = emptyList(),
     val pendingProfileDeletions: Set<String> = emptySet(),
+    val sent: List<SentRecord> = emptyList(),
 )
 
 class AppStore(context: Context) {
+    private val accountCipher = AccountCipher()
     private val stateFile = AtomicFile(File(context.filesDir, "state.json"))
     private val envelopes = File(context.filesDir, "envelopes").apply { mkdirs() }
     private val mutable = MutableStateFlow(read())
@@ -95,7 +109,23 @@ class AppStore(context: Context) {
         mutable.value = next
     }
 
-    fun pair(pairing: Pairing) = update { it.copy(pairing = pairing) }
+    fun account(): Account? =
+        snapshot.value.account?.let {
+            Account(it.username, accountCipher.decrypt(it.encryptedPassword))
+        }
+
+    fun setAccount(username: String, password: String) {
+        validateAccount(username, password)
+        val current = account()
+        if (current?.username == username && current.password == password) return
+        val encrypted = accountCipher.encrypt(password)
+        update {
+            it.copy(
+                account = StoredAccount(username, encrypted),
+                accountRevision = it.accountRevision + 1,
+            )
+        }
+    }
 
     fun setDeviceName(name: String) {
         requireMessage(name.isNotBlank() && name.codePointCount(0, name.length) <= 64) {
@@ -104,10 +134,17 @@ class AppStore(context: Context) {
         update { it.copy(deviceName = name) }
     }
 
-    fun createDraft(name: String, url: String): Draft {
-        val draft = Draft(UUID.randomUUID().toString(), name, url, System.currentTimeMillis())
+    fun createDraft(): Draft {
+        val draft = Draft(UUID.randomUUID().toString(), System.currentTimeMillis())
         update { it.copy(drafts = listOf(draft) + it.drafts) }
         return draft
+    }
+
+    fun leftAt(id: String, url: String?) {
+        if (url == null || snapshot.value.drafts.none { it.id == id && it.lastUrl != url }) return
+        update { state ->
+            state.copy(drafts = state.drafts.map { if (it.id == id) it.copy(lastUrl = url) else it })
+        }
     }
 
     private fun envelopeFile(id: String): File {
@@ -115,9 +152,18 @@ class AppStore(context: Context) {
         return File(envelopes, "$id.rksi")
     }
 
-    fun readEnvelope(draft: Draft): ByteArray = envelopeFile(draft.id).readBytes()
+    fun readEnvelope(draft: Draft, deployment: Deployment): ByteArray {
+        requireMessage(draft.isCurrent(deployment, snapshot.value)) { R.string.account_reexport }
+        return envelopeFile(draft.id).readBytes()
+    }
 
-    fun ready(id: String, pairing: Pairing, url: String, envelope: ByteArray) {
+    fun ready(
+        id: String,
+        deployment: Deployment,
+        accountRevision: Long,
+        sites: List<SiteRef>,
+        envelope: ByteArray,
+    ) {
         val file = AtomicFile(envelopeFile(id))
         val output = file.startWrite()
         try {
@@ -128,15 +174,17 @@ class AppStore(context: Context) {
             throw error
         }
         update { state ->
-            requireMessage(state.pairing == pairing) { R.string.pairing_reexport }
+            requireMessage(state.account != null && state.accountRevision == accountRevision) {
+                R.string.account_reexport
+            }
             state.copy(
                 drafts =
                     state.drafts.map {
                         if (it.id == id)
                             it.copy(
-                                url = url,
+                                sites = sites,
                                 updatedAt = System.currentTimeMillis(),
-                                state = DraftState.Ready(pairing.key.id, pairing.tokenHash),
+                                state = DraftState.Ready(deployment.key.id, accountRevision),
                                 sendError = null,
                             )
                         else it
@@ -149,6 +197,10 @@ class AppStore(context: Context) {
         state.copy(
             drafts = state.drafts.map { if (it.id == id) it.copy(sendError = reason) else it }
         )
+    }
+
+    fun recordSent(draft: Draft) = update {
+        it.copy(sent = (listOf(SentRecord(draft.sites, System.currentTimeMillis())) + it.sent).take(20))
     }
 
     fun beginDestroy(id: String) {
@@ -173,7 +225,15 @@ class AppStore(context: Context) {
         it.copy(pendingProfileDeletions = it.pendingProfileDeletions - id)
     }
 
-    fun clearPairingAndDevice() = update {
-        it.copy(pairing = null, deviceName = Build.MODEL.take(64))
+    fun clearAccountAndDevice() {
+        update {
+            it.copy(
+                account = null,
+                accountRevision = it.accountRevision + 1,
+                deviceName = Build.MODEL.take(64),
+                sent = emptyList(),
+            )
+        }
+        accountCipher.deleteKey()
     }
 }

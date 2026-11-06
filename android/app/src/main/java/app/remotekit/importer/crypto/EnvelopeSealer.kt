@@ -1,9 +1,9 @@
 package app.remotekit.importer.crypto
 
 import app.remotekit.importer.R
-import app.remotekit.importer.pairing.ContractJson
-import app.remotekit.importer.pairing.Pairing
-import app.remotekit.importer.pairing.decodeBase64Url
+import app.remotekit.importer.deployment.ContractJson
+import app.remotekit.importer.deployment.Deployment
+import app.remotekit.importer.deployment.decodeBase64Url
 import app.remotekit.importer.payload.ImportPayload
 import app.remotekit.importer.requireMessage
 import java.io.ByteArrayOutputStream
@@ -12,9 +12,8 @@ import kotlinx.serialization.encodeToString
 import org.bouncycastle.crypto.hpke.HPKE
 
 class EnvelopeSealer {
-    fun seal(payload: ImportPayload, pairing: Pairing): ByteArray {
+    fun seal(payload: ImportPayload, deployment: Deployment): ByteArray {
         payload.validate()
-        requireMessage(payload.token == pairing.token) { R.string.payload_token_mismatch }
         val plaintext = ContractJson.encodeToString(payload).toByteArray(Charsets.UTF_8)
         requireMessage(plaintext.size <= MAX_PLAINTEXT) { R.string.payload_too_large }
         val compressed =
@@ -24,11 +23,11 @@ class EnvelopeSealer {
                 }
                 .toByteArray()
         requireMessage(compressed.size + 61 <= MAX_ENVELOPE) { R.string.envelope_too_large }
-        val keyId = pairing.key.id.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        val keyId = deployment.key.id.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         requireMessage(keyId.size == 8) { R.string.key_id_length_error }
         val header = "RKSI".toByteArray(Charsets.US_ASCII) + byteArrayOf(1) + keyId
         val hpke = suite()
-        val recipient = hpke.deserializePublicKey(decodeBase64Url(pairing.key.x25519, 32))
+        val recipient = hpke.deserializePublicKey(decodeBase64Url(deployment.key.x25519, 32))
         val context = hpke.setupBaseS(recipient, INFO)
         return header + context.encapsulation + context.seal(header, compressed)
     }

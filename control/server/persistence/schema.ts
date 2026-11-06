@@ -64,10 +64,8 @@ export function createSchema(db: Database.Database) {
         PRIMARY KEY(node_id,tenant,id));`);
     db.exec(`CREATE TABLE session_import_keys (
       id INTEGER PRIMARY KEY CHECK(id=1), public_key BLOB NOT NULL, private_key TEXT NOT NULL, key_id TEXT NOT NULL);
-      CREATE TABLE session_import_pairings (
-        user_id TEXT PRIMARY KEY REFERENCES users(id), token_hash TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
       CREATE TABLE session_imports (
-        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, site_name TEXT NOT NULL, site_url TEXT NOT NULL,
+        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, sites TEXT NOT NULL,
         device TEXT NOT NULL, created_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('pending','applied','rejected','failed')), payload TEXT,
         cookies INTEGER NOT NULL, origins INTEGER NOT NULL, rejected_items INTEGER NOT NULL,

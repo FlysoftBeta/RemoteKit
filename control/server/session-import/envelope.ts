@@ -40,17 +40,10 @@ function webUrl(value: unknown, field: string): URL {
     return invalid(field);
   }
 }
-export function isImportToken(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    /^[A-Za-z0-9_-]{43}$/.test(value) &&
-    Buffer.from(value, 'base64url').toString('base64url') === value
-  );
-}
 export function parseImportPayload(json: unknown): ImportPayload {
   const p = object(
     json,
-    ['v', 'id', 'createdAt', 'token', 'device', 'site', 'cookies', 'localStorage'],
+    ['v', 'id', 'createdAt', 'username', 'password', 'device', 'sites', 'cookies', 'localStorage'],
     'payload',
   );
   if (p.v !== 1) invalid('v');
@@ -59,19 +52,36 @@ export function parseImportPayload(json: unknown): ImportPayload {
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(p.id)
   )
     invalid('id');
-  if (!isImportToken(p.token)) invalid('token');
+  for (const [field, max] of [
+    ['username', 64],
+    ['password', 256],
+  ] as const) {
+    string(p[field], field);
+    const length = Array.from(p[field]).length;
+    if (length < 1 || length > max) invalid(field);
+  }
   timestamp(p.createdAt, 'createdAt');
   string(p.device, 'device');
-  const site = object(p.site, ['name', 'url'], 'site');
-  string(site.name, 'site.name');
-  webUrl(site.url, 'site.url');
+  if (!Array.isArray(p.sites) || p.sites.length === 0) invalid('sites');
+  const urls = new Set<string>();
+  for (const value of p.sites) {
+    const site = object(value, ['name', 'url'], 'site');
+    string(site.name, 'site.name');
+    webUrl(site.url, 'site.url');
+    if (urls.has(site.url)) invalid('site.url');
+    urls.add(site.url);
+  }
   if (!Array.isArray(p.cookies) || !Array.isArray(p.localStorage)) invalid('storage arrays');
   let limit: string | undefined;
   const exceeds = (condition: boolean, reason: string) => {
     if (condition) limit ??= reason;
   };
   exceeds(Array.from(p.device).length > 64, '设备名超过 64 字符');
-  exceeds(Array.from(site.name).length > 128, '站点名超过 128 字符');
+  exceeds(p.sites.length > 16, '站点超过 16 个');
+  exceeds(
+    p.sites.some((site: { name: string }) => Array.from(site.name).length > 128),
+    '站点名超过 128 字符',
+  );
   exceeds(p.cookies.length > 4096, 'Cookie 超过 4096 条');
   exceeds(p.localStorage.length > 256, '来源超过 256 个');
   for (const value of p.cookies) {

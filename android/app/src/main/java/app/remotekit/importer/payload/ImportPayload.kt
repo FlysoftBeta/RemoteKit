@@ -1,12 +1,14 @@
 package app.remotekit.importer.payload
 
 import app.remotekit.importer.R
-import app.remotekit.importer.pairing.decodeBase64Url
+import app.remotekit.importer.account.validateAccount
+import app.remotekit.importer.deployment.ContractJson
 import app.remotekit.importer.requireMessage
 import java.net.URI
 import java.util.UUID
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
 
 @Serializable
 enum class SameSite {
@@ -38,9 +40,10 @@ data class ImportPayload(
     val v: Int = 1,
     val id: String,
     val createdAt: Long,
-    val token: String,
+    val username: String,
+    val password: String,
     val device: String,
-    val site: ImportSite,
+    val sites: List<ImportSite>,
     val cookies: List<ImportCookie>,
     val localStorage: List<OriginStorage>,
 ) {
@@ -51,16 +54,21 @@ data class ImportPayload(
             R.string.payload_invalid_uuid
         }
         requireMessage(createdAt >= 0) { R.string.payload_invalid_time }
-        decodeBase64Url(token, 32)
+        validateAccount(username, password)
         requireMessage(device.isNotBlank() && device.codePointCount(0, device.length) <= 64) {
             R.string.device_name_limit
         }
-        requireMessage(
-            site.name.isNotBlank() && site.name.codePointCount(0, site.name.length) <= 128
-        ) {
-            R.string.site_name_limit
+        requireMessage(sites.size in 1..16 && sites.map { it.url }.distinct().size == sites.size) {
+            R.string.site_count_limit
         }
-        httpUrl(site.url)
+        sites.forEach { site ->
+            requireMessage(
+                site.name.isNotBlank() && site.name.codePointCount(0, site.name.length) <= 128
+            ) {
+                R.string.site_name_limit
+            }
+            httpUrl(site.url)
+        }
         requireMessage(cookies.size <= 4096) { R.string.cookie_count_limit }
         cookies.forEach {
             requireMessage(utf8Size(it.name) + utf8Size(it.value) <= 4096) {
@@ -93,7 +101,11 @@ data class ImportPayload(
             storage.items.forEach {
                 requireMessage(it.size == 2) { R.string.storage_pair_error }
                 val size = utf8Size(it[0]) + utf8Size(it[1])
-                requireMessage(size <= 256 * 1024) { R.string.storage_item_limit }
+                requireMessage(
+                    ContractJson.encodeToString(it).toByteArray(Charsets.UTF_8).size <= 256 * 1024
+                ) {
+                    R.string.storage_item_limit
+                }
                 total += size
             }
             requireMessage(total <= 10 * 1024 * 1024) { R.string.storage_origin_limit }

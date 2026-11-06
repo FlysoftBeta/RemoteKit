@@ -14,14 +14,16 @@ import app.remotekit.importer.export.ExportScope
 import app.remotekit.importer.export.SessionExporters
 import app.remotekit.importer.mail.MailItem
 import app.remotekit.importer.mail.MailSender
-import app.remotekit.importer.pairing.Pairing
-import app.remotekit.importer.pairing.PairingCode
 import app.remotekit.importer.payload.ImportPayload
 import app.remotekit.importer.payload.ImportSite
-import app.remotekit.importer.payload.httpUrl
+import app.remotekit.importer.payload.OriginStorage
 import app.remotekit.importer.requireMessage
 import app.remotekit.importer.requireMessageNotNull
 import app.remotekit.importer.store.Draft
+import app.remotekit.importer.store.SiteRef
+import app.remotekit.importer.web.SiteVisit
+import app.remotekit.importer.web.SiteVisits
+import app.remotekit.importer.web.encodeIcon
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -36,8 +38,6 @@ sealed interface Screen {
 
     data object Settings : Screen
 
-    data object Scan : Screen
-
     data class Login(val id: String) : Screen
 }
 
@@ -50,6 +50,7 @@ data class SendProgress(
 
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val runtime = application as ImporterApplication
+    val deployment = runtime.deployment
     val store = runtime.store
     val profiles = runtime.profiles
     val mail = MailSender(application)
@@ -57,7 +58,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val screen = MutableStateFlow<Screen>(Screen.Home)
     val selected = MutableStateFlow<Set<String>>(emptySet())
     val selecting = MutableStateFlow(false)
-    val pendingPairing = MutableStateFlow<Pairing?>(null)
     val progress = MutableStateFlow<List<SendProgress>?>(null)
     val sending = MutableStateFlow(false)
     val exporting = MutableStateFlow(false)
@@ -78,38 +78,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun notifyError(error: Throwable) = notify(errorText(error))
 
-    fun pair(text: String): Boolean =
+    fun saveAccount(username: String, password: String) {
         try {
-            val pairing = PairingCode.parse(text.trim())
-            if (snapshot.value.pairing != null) pendingPairing.value = pairing
-            else store.pair(pairing)
-            screen.value = Screen.Home
-            true
+            requireMessage(!sending.value && !exporting.value && !cleaning.value)
+            store.setAccount(username, password)
+            clearSelection()
+            notify(text(R.string.account_saved))
         } catch (error: Exception) {
-            notify(errorText(error, R.string.invalid_pairing))
-            false
+            notifyError(error)
         }
-
-    fun confirmPairing() {
-        pendingPairing.value?.let { store.pair(it) }
-        pendingPairing.value = null
-        clearSelection()
     }
 
-    fun create(name: String, url: String): Boolean =
+    private val history = mutableMapOf<String, SiteVisits>()
+
+    /** Navigation history of a login browser; survives leaving and reopening the login screen. */
+    fun visits(id: String): SiteVisits = history.getOrPut(id) { SiteVisits() }
+
+    private suspend fun destroy(id: String) {
+        history.remove(id)
+        profiles.destroy(id)
+    }
+
+    fun create() {
         try {
-            requireMessage(snapshot.value.pairing != null) { R.string.pair_first }
-            requireMessage(name.isNotBlank() && name.codePointCount(0, name.length) <= 128) {
-                R.string.site_name_limit
-            }
-            httpUrl(url)
-            val draft = store.createDraft(name.trim(), url)
-            screen.value = Screen.Login(draft.id)
-            true
+            screen.value = Screen.Login(store.createDraft().id)
         } catch (error: Exception) {
             notify(errorText(error, R.string.create_failed))
-            false
         }
+    }
 
     fun toggle(id: String) {
         selected.value = if (id in selected.value) selected.value - id else selected.value + id
@@ -122,43 +118,70 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectedReady(): List<Draft> =
         snapshot.value.drafts.filter {
-            it.id in selected.value && it.isCurrent(snapshot.value.pairing)
+            it.id in selected.value && it.isCurrent(deployment, snapshot.value)
         }
 
-    fun completeLogin(
+    fun exportSites(
         draft: Draft,
         view: WebView,
         profile: Profile,
-        unsupported: String,
-        ready: String,
+        chosen: List<SiteVisit>,
+        done: () -> Unit,
     ) {
-        if (exporting.value) return
+        if (exporting.value || chosen.isEmpty()) return
         viewModelScope.launch {
             exporting.value = true
             try {
-                val pairing = requireMessageNotNull(snapshot.value.pairing) { R.string.pair_first }
-                val url = Uri.parse(view.url ?: draft.url)
-                val exporter = SessionExporters.forUrl(url)
-                if (exporter == null) {
-                    notify(unsupported)
-                    return@launch
-                }
-                val capture = exporter.export(ExportScope(view, profile, url))
+                val deployment = requireMessageNotNull(deployment) { R.string.no_deployment }
+                val accountRevision = snapshot.value.accountRevision
+                val account = requireMessageNotNull(store.account()) { R.string.account_required }
+                requireMessage(mail.configured) { R.string.no_sender }
+                val captures =
+                    chosen.map { visit ->
+                        val url = Uri.parse(visit.url)
+                        val exporter =
+                            requireMessageNotNull(SessionExporters.forUrl(url)) {
+                                R.string.unsupported_export
+                            }
+                        exporter.export(ExportScope(view, profile, url))
+                    }
+                val sites = chosen.map { SiteRef(it.name, it.url, it.icon?.let(::encodeIcon)) }
                 val payload =
                     ImportPayload(
                         id = draft.id,
                         createdAt = System.currentTimeMillis(),
-                        token = pairing.token,
+                        username = account.username,
+                        password = account.password,
                         device = snapshot.value.deviceName,
-                        site = ImportSite(draft.name, url.toString()),
-                        cookies = capture.cookies,
-                        localStorage = capture.localStorage,
+                        sites = sites.map { ImportSite(it.name, it.url) },
+                        cookies =
+                            captures
+                                .flatMap { it.cookies }
+                                .associateBy { Triple(it.name, it.domain, it.path) }
+                                .values
+                                .toList(),
+                        localStorage =
+                            captures
+                                .flatMap { it.localStorage }
+                                .groupBy { it.origin }
+                                .map { (origin, parts) ->
+                                    OriginStorage(
+                                        origin,
+                                        parts
+                                            .flatMap { it.items }
+                                            .associateBy { it[0] }
+                                            .values
+                                            .toList(),
+                                    )
+                                },
                     )
                 val envelope =
-                    withContext(Dispatchers.Default) { EnvelopeSealer().seal(payload, pairing) }
-                store.ready(draft.id, pairing, url.toString(), envelope)
+                    withContext(Dispatchers.Default) { EnvelopeSealer().seal(payload, deployment) }
+                store.leftAt(draft.id, view.url)
+                store.ready(draft.id, deployment, accountRevision, sites, envelope)
                 screen.value = Screen.Home
-                notify(ready)
+                notify(text(R.string.ready_snackbar))
+                done()
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
                 notify(errorText(error, R.string.export_failed))
@@ -170,23 +193,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun sendSelected() {
         if (sending.value || cleaning.value) return
-        val pairing = snapshot.value.pairing ?: return
+        val deployment = deployment ?: return
         val drafts = selectedReady()
         if (drafts.isEmpty()) return
-        progress.value = drafts.map { SendProgress(it.id, it.name) }
+        progress.value = drafts.map { SendProgress(it.id, it.sites.joinToString("、") { site -> site.name }) }
         sending.value = true
         clearSelection()
         viewModelScope.launch {
             try {
                 val items = drafts.map { draft ->
-                    MailItem(draft.id, pairing.mailbox) { store.readEnvelope(draft) }
+                    MailItem(draft.id, deployment.mailbox) { store.readEnvelope(draft, deployment) }
                 }
                 mail.sendBatch(items) { item, result ->
                     withContext(NonCancellable + Dispatchers.Main.immediate) {
                         var error =
                             result.exceptionOrNull()?.let { errorText(it, R.string.send_error) }
                         if (result.isSuccess) {
-                            runCatching { profiles.destroy(item.id) }
+                            drafts.find { it.id == item.id }?.let(store::recordSent)
+                            runCatching { destroy(item.id) }
                                 .onFailure {
                                     error =
                                         getApplication<Application>()
@@ -234,7 +258,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 ids.forEach { id ->
-                    runCatching { profiles.destroy(id) }
+                    runCatching { destroy(id) }
                         .onFailure { notify(errorText(it, R.string.cleanup_error)) }
                 }
             } finally {
@@ -248,8 +272,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         cleaning.value = true
         viewModelScope.launch {
             try {
-                snapshot.value.drafts.map { it.id }.forEach { profiles.destroy(it) }
-                store.clearPairingAndDevice()
+                store.clearAccountAndDevice()
+                snapshot.value.drafts.map { it.id }.forEach { destroy(it) }
                 clearSelection()
             } catch (error: Exception) {
                 if (error is CancellationException) throw error

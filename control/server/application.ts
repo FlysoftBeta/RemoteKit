@@ -75,7 +75,14 @@ export function createApplication(
     closed: false,
   };
   const services = context as DomainServices;
-  services.sessionImporter = new SessionImporter(store, endpoint, sessionImport, undefined, clock);
+  services.sessionImporter = new SessionImporter(
+    store,
+    endpoint,
+    store.security.authAttempts,
+    sessionImport,
+    undefined,
+    clock,
+  );
   services.objects = new ObjectIndex(
     store,
     endpoint.nodes,

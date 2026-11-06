@@ -1,12 +1,11 @@
 import type Database from 'better-sqlite3';
-import type { ImportPayload, ImportRecord } from '../../shared/session-import';
+import type { ImportPayload, ImportRecord, StoredImportPayload } from '../../shared/session-import';
 import type { AtRestKey } from '../auth/crypto';
 
 interface ImportRow {
   id: string;
   tenant: string;
-  site_name: string;
-  site_url: string;
+  sites: string;
   device: string;
   created_at: bigint;
   received_at: bigint;
@@ -18,12 +17,11 @@ interface ImportRow {
   finished_at: bigint | null;
 }
 const columns =
-  'id,tenant,site_name,site_url,device,created_at,received_at,state,cookies,origins,rejected_items,error,finished_at';
+  'id,tenant,sites,device,created_at,received_at,state,cookies,origins,rejected_items,error,finished_at';
 function record(row: ImportRow): ImportRecord {
   return {
     id: row.id,
-    siteName: row.site_name,
-    siteUrl: row.site_url,
+    sites: JSON.parse(row.sites),
     device: row.device,
     createdAt: Number(row.created_at),
     receivedAt: Number(row.received_at),
@@ -56,40 +54,25 @@ export class SessionImportsRepository {
       .prepare('INSERT INTO session_import_keys VALUES (1,?,?,?)')
       .run(publicKey, this.key.seal('session-import-key:' + keyId, privateKey), keyId);
   }
-  pair(user: string, tokenHash: string, createdAt: number) {
-    this.db
-      .prepare('INSERT OR REPLACE INTO session_import_pairings VALUES (?,?,?)')
-      .run(user, tokenHash, createdAt);
-  }
-  pairing(user: string): { createdAt: number } | null {
-    const row = this.db
-      .prepare('SELECT created_at FROM session_import_pairings WHERE user_id=?')
-      .get(user) as { created_at: bigint } | undefined;
-    return row ? { createdAt: Number(row.created_at) } : null;
-  }
-  unpair(user: string) {
-    this.db.prepare('DELETE FROM session_import_pairings WHERE user_id=?').run(user);
-  }
-  recipient(tokenHash: string): string | undefined {
-    return (
-      this.db
-        .prepare(
-          'SELECT u.tenant FROM session_import_pairings p JOIN users u ON u.id=p.user_id WHERE p.token_hash=?',
-        )
-        .get(tokenHash) as { tenant: string } | undefined
-    )?.tenant;
-  }
   exists(id: string) {
     return !!this.db.prepare('SELECT 1 FROM session_imports WHERE id=?').get(id);
   }
   insert(tenant: string, payload: ImportPayload, receivedAt: number, rejection?: string) {
+    const session: StoredImportPayload = {
+      v: payload.v,
+      id: payload.id,
+      createdAt: payload.createdAt,
+      device: payload.device,
+      sites: payload.sites,
+      cookies: payload.cookies,
+      localStorage: payload.localStorage,
+    };
     this.db
-      .prepare(`INSERT INTO session_imports (${columns},payload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .prepare(`INSERT INTO session_imports (${columns},payload) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(
         payload.id.toLowerCase(),
         tenant,
-        payload.site.name,
-        payload.site.url,
+        JSON.stringify(payload.sites.map(({ name, url }) => ({ name, url }))),
         payload.device,
         payload.createdAt,
         receivedAt,
@@ -103,7 +86,7 @@ export class SessionImportsRepository {
           ? null
           : this.key.seal(
               JSON.stringify(['session-import', tenant, payload.id.toLowerCase()]),
-              Buffer.from(JSON.stringify(payload)),
+              Buffer.from(JSON.stringify(session)),
             ),
       );
   }
@@ -130,7 +113,7 @@ export class SessionImportsRepository {
         .all(tenant) as ImportRow[]
     ).map(record);
   }
-  payload(tenant: string, id: string): ImportPayload | undefined {
+  payload(tenant: string, id: string): StoredImportPayload | undefined {
     const row = this.db
       .prepare("SELECT payload FROM session_imports WHERE tenant=? AND id=? AND state='pending'")
       .get(tenant, id) as { payload: string } | undefined;
@@ -161,8 +144,7 @@ export class SessionImportsRepository {
   delete(tenant: string, id: string) {
     this.db.prepare('DELETE FROM session_imports WHERE tenant=? AND id=?').run(tenant, id);
   }
-  deleteUser(user: string, tenant: string) {
-    this.unpair(user);
+  deleteUser(tenant: string) {
     this.db.prepare('DELETE FROM session_imports WHERE tenant=?').run(tenant);
   }
 }

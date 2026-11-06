@@ -103,12 +103,12 @@ try {
     assert.equal(auth.user.id, user.id);
     assert.equal(auth.locked, false);
     let sequence = 0;
-    const importState = () =>
+    const mailboxStatus = () =>
       new Promise((resolve, reject) => {
-        const id = 'import-' + ++sequence;
+        const id = 'overview-' + ++sequence;
         const timer = setTimeout(() => {
           socket.off('message', receive);
-          reject(new Error('Import state timeout'));
+          reject(new Error('Mailbox status timeout'));
         }, 5000);
         const receive = (data) => {
           const message = JSON.parse(String(data));
@@ -116,22 +116,22 @@ try {
           clearTimeout(timer);
           socket.off('message', receive);
           if (message.type === 'error') reject(new Error(JSON.stringify(message.error)));
-          else resolve(message.result);
+          else resolve(message.result.sessionImport);
         };
         socket.on('message', receive);
-        socket.send(JSON.stringify({ id, method: 'sessionImport.state', params: {} }));
+        socket.send(JSON.stringify({ id, method: 'admin.overview', params: {} }));
       });
     let state;
     for (let attempt = 0; attempt < 40; attempt++) {
-      state = await importState();
-      if (state.mailbox.lastErrorAt) break;
+      state = await mailboxStatus();
+      if (state.lastErrorAt) break;
       await sleep(50);
     }
     assert.ok(imapConnections > 0, 'Bundled ImapFlow client reached the local TCP server');
-    assert.equal(state.mailbox.configured, true);
-    assert.ok(state.mailbox.lastErrorAt);
-    assert.match(state.mailbox.lastError, /TLS|socket|closed|ECONNRESET/i);
-    assert.doesNotMatch(state.mailbox.lastError, /Dynamic require|Cannot find module|not defined/);
+    assert.equal(state.configured, true);
+    assert.ok(state.lastErrorAt);
+    assert.match(state.lastError, /TLS|socket|closed|ECONNRESET/i);
+    assert.doesNotMatch(state.lastError, /Dynamic require|Cannot find module|not defined/);
   } finally {
     socket.terminate();
   }

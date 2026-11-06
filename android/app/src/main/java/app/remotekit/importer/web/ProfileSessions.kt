@@ -11,7 +11,7 @@ import androidx.webkit.UserAgentMetadata
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
-import app.remotekit.importer.pairing.BrowserIdentity
+import app.remotekit.importer.deployment.BrowserIdentity
 import app.remotekit.importer.store.AppStore
 import kotlin.coroutines.resume
 import kotlinx.coroutines.Dispatchers
@@ -62,13 +62,13 @@ class ProfileSessions(private val store: AppStore) {
         val metadata =
             UserAgentMetadata.Builder()
                 .setBrandVersionList(brands)
-                .setPlatform("Windows")
+                .setPlatform(identity.platform)
                 .setPlatformVersion(identity.platformVersion)
                 .setArchitecture(identity.architecture)
                 .setBitness(identity.bitness.toInt())
                 .setWow64(identity.wow64)
                 .setModel(identity.model)
-                .setMobile(false)
+                .setMobile(identity.mobile)
                 .build()
         WebSettingsCompat.setUserAgentMetadata(view.settings, metadata)
         profile.cookieManager.setAcceptThirdPartyCookies(view, true)

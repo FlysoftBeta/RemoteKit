@@ -1,6 +1,17 @@
-import { Alert, Box, Paper, Typography } from '@mui/material';
+import Download from '@mui/icons-material/Download';
+import { Alert, Box, Button, Paper, Typography } from '@mui/material';
+import { useState } from 'react';
 import type { AdminOverview } from '../../../shared/admin';
-import { formatBytes, LoadState, SectionHeader, StatTile, useAdminResource, type AdminCall } from './shared';
+import {
+  adminError,
+  formatBytes,
+  formatTime,
+  LoadState,
+  SectionHeader,
+  StatTile,
+  useAdminResource,
+  type AdminCall,
+} from './shared';
 
 function issues(overview: AdminOverview) {
   const list: { severity: 'warning' | 'error' | 'info'; text: string }[] = [];
@@ -23,7 +34,82 @@ function issues(overview: AdminOverview) {
       severity: 'info',
       text: `${overview.storage.pendingSessionDeletions} 个已删除会话的数据等待节点上线后清理。`,
     });
+  if (overview.sessionImport.lastError)
+    list.push({
+      severity: 'warning',
+      text: `会话导入邮箱拉取失败：${overview.sessionImport.lastError}`,
+    });
   return list;
+}
+
+function SessionImportPanel({
+  online,
+  call,
+  status,
+}: {
+  online: boolean;
+  call: AdminCall;
+  status: AdminOverview['sessionImport'];
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const download = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const deployment = await call('admin.sessionImportDeployment', {});
+      const url = URL.createObjectURL(
+        new Blob([JSON.stringify(deployment, null, 2)], { type: 'application/json' }),
+      );
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'deployment.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (e) {
+      setError(adminError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Paper variant="outlined" className="admin-panel">
+      <Box className="admin-panel-heading">
+        <Typography fontWeight={600}>会话导入</Typography>
+        {status.configured && (
+          <Button
+            size="small"
+            startIcon={<Download />}
+            disabled={!online || busy}
+            onClick={() => void download()}
+          >
+            App 部署配置
+          </Button>
+        )}
+      </Box>
+      {error && <Alert severity="error">{error}</Alert>}
+      <dl className="admin-facts">
+        <dt>导入邮箱</dt>
+        <dd>
+          {!status.configured
+            ? '未配置（control.json 的 sessionImport）'
+            : status.lastError
+              ? `拉取失败 · ${formatTime(status.lastErrorAt)}`
+              : status.lastSuccessAt === null
+                ? '正在连接'
+                : `正常 · ${formatTime(status.lastSuccessAt)}检查`}
+        </dd>
+        {status.configured && (
+          <>
+            <dt>App 构建</dt>
+            <dd>部署配置放到 android/deployment.json；更换导入密钥或 Browser 升级后需重新下载并重新构建</dd>
+          </>
+        )}
+      </dl>
+    </Paper>
+  );
 }
 
 export function AdminOverviewSection({ online, call }: { online: boolean; call: AdminCall }) {
@@ -67,6 +153,7 @@ export function AdminOverviewSection({ online, call }: { online: boolean; call: 
               </Alert>
             ))}
           </Box>
+          <SessionImportPanel online={online} call={call} status={data.sessionImport} />
           <Paper variant="outlined" className="admin-panel">
             <Typography fontWeight={600}>版本</Typography>
             <dl className="admin-facts">

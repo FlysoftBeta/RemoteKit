@@ -2,17 +2,24 @@
     "recipientPrivate": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
     "recipientPublic": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9_AsrhtHHw",
     "keyId": "aaa8fff703b50b22",
-    "envelope": "UktTSQGqqP/3A7ULIiset0vovCaILUS+adR7E0iy97b9F0w3esTrxDKPjNNnqK/7TKup7tuDIwAgqI/diCDus32Wj3+hdtIlyiyP61ujreb6jFj2TSm4q7xpngjHZ558S+ExRQeDe/OKcFo6jhzCnx0c6pACzVMcn29DpX5XvKFi+tG4CCi1Rc4GS7znEmxLl/7kLOekVYomHepyvXqqrulTgGWJMjAXgEcunaHPZFpBvpo1byYI+N3DGAH4SISADmyI30FG84LsB8skZPBsrhZ5WmO2q3QV7QcFD2oMMUrsZrMO+K1bP4BjL1H5qb+2Op3XR7XipdtjpfdlfPjTKobu0UYie2vLGVAuquoHjkqfld6Lhe5RKpFPBQW+Bx4tzxewcSWE63K4Oo8BXOC7qmn3rQlJqNPhGm/55E2T6ib1Pz4M8F1aRYlg/PlsPDY/0srZhppxlbXL21SYX6QYq22ec+OuKjUBLdz2/iQt4Qo2/PblwC0meaLgPezNWfDxS62rHHwmSPo=",
+    "envelope": "UktTSQGqqP/3A7ULInxOTNaJCxR3QxZaV+trNMr09aKuEklhWa8Z2CcjJLQLpdbaYL4JE2E/j9aHC5Ati1afFayzqdkkjR7XsrgWD/CBBsaQ0rnBx9iQESkDadnCWOtp9SyPnbU3lCGFi3eptUpHJmuZjPT1QQDL7Il2HLyzlzAofAWi8Icy84Jdoi6YJkIgzYTgwIq9h5u88kQmVSV1Ft3u5Hj9Uplp6zDZDoF2hVMdusvpp8glWMFiyeJsgFoZo41mcm3MLzk5r/qKhjchyVam1921eVil+AZ2F3CUC4FdUpWt11+8z5617IbnIls9WOWk0DbB2mrGAqsTTcBoYnHf0IAGICBOGzCUp6EPbjXrUYDb5kyFwjYpfbP40L6DucFBQoaKN6zaqu5fSmVuj92C49Bs0FXjnpugkTjrQlRfrxgdDfrnnDk1BXm3p5hpHR4fil+zw/GRtnD5+dvJcOgJvMu29qajFOd0xELQ4gi30DNo8gBfy2D5Qn8S/Dgn0RmZLDS+vdhSrOKcbzWgHpXAYfVmydTCjvLhVYSacgPNw7FSUGw=",
     "payload": {
         "v": 1,
         "id": "bf81f466-e992-48e5-a3d3-6b168556c471",
         "createdAt": 1793900000000,
-        "token": "KioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKio",
+        "username": "student",
+        "password": "test-password",
         "device": "测试手机",
-        "site": {
-            "name": "示例站点",
-            "url": "https://www.example.com/account"
-        },
+        "sites": [
+            {
+                "name": "示例站点",
+                "url": "https://www.example.com/account"
+            },
+            {
+                "name": "示例论坛",
+                "url": "https://forum.example.org/"
+            }
+        ],
         "cookies": [
             {
                 "name": "SID",

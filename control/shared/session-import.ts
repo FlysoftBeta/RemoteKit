@@ -21,10 +21,16 @@ export interface ImportPayload extends ImportChunk {
   v: 1;
   id: string;
   createdAt: number;
-  token: string;
+  username: string;
+  password: string;
   device: string;
-  site: { name: string; url: string };
+  sites: ImportSite[];
 }
+export interface ImportSite {
+  name: string;
+  url: string;
+}
+export type StoredImportPayload = Omit<ImportPayload, 'username' | 'password'>;
 export interface BrowserMetadata {
   platform: string;
   platformVersion: string;
@@ -40,19 +46,16 @@ export interface BrowserIdentity {
   userAgent: string;
   metadata: BrowserMetadata;
 }
-export interface ImportPairing {
+export interface ImportDeployment {
   v: 1;
   server: string;
-  user: string;
   mailbox: string;
   key: { id: string; x25519: string };
-  token: string;
   browser: BrowserMetadata & { userAgent: string };
 }
 export interface ImportRecord {
   id: string;
-  siteName: string;
-  siteUrl: string;
+  sites: ImportSite[];
   device: string;
   createdAt: number;
   receivedAt: number;
@@ -70,14 +73,11 @@ export interface MailboxStatus {
   lastError: string | null;
 }
 export interface SessionImportState {
-  mailbox: MailboxStatus;
-  pairing: { createdAt: number } | null;
+  receiving: boolean;
   imports: ImportRecord[];
 }
 export interface SessionImportSocketMethods {
   'sessionImport.state': { params: Record<string, never>; result: SessionImportState };
-  'sessionImport.pair': { params: Record<string, never>; result: { code: string; createdAt: number } };
-  'sessionImport.unpair': { params: Record<string, never>; result: { ok: true } };
   'sessionImport.delete': { params: { id: string }; result: { ok: true } };
 }
 export interface StorageImportJob {

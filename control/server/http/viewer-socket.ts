@@ -42,14 +42,6 @@ const handlers: Record<string, Handler> = {
   'sessionImport.state': product(({ services, authority }) =>
     services.sessionImporter.state(authority.tenantId),
   ),
-  'sessionImport.pair': product(({ services, authority, host }) =>
-    services.sessionImporter.pair(authority.tenantId, host ?? '', () =>
-      services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch),
-    ),
-  ),
-  'sessionImport.unpair': product(({ services, authority }) =>
-    services.sessionImporter.unpair(authority.tenantId),
-  ),
   'sessionImport.delete': product(({ services, authority }, params) =>
     services.sessionImporter.delete(authority.tenantId, params.id),
   ),
@@ -92,6 +84,13 @@ const nodeId = (params: any) => {
   return params.nodeId;
 };
 Object.assign(handlers, {
+  'admin.sessionImportDeployment': admin(async ({ services, authority, host }) => {
+    const deployment = await services.sessionImporter.deployment(authority.tenantId, host ?? '');
+    services.viewers.assertProductViewer(authority.tenantId, authority.leaseId, authority.epoch);
+    if (!services.store.accounts.userForTenant(authority.tenantId)?.isAdmin)
+      throw new RemoteKitError('forbidden', '需要管理员权限');
+    return deployment;
+  }),
   'admin.overview': admin(async (ctx) => {
     const { services } = ctx;
     const nodes = services.nodeAdmin.list(),
@@ -124,6 +123,7 @@ Object.assign(handlers, {
       diagnostics: ctx.diagnostics?.sessions
         ? (await ctx.diagnostics.sessions.archives(tenants(ctx))).length
         : 0,
+      sessionImport: services.sessionImporter.mailbox.status(),
     };
   }),
   'admin.users': admin(({ services }) => services.userAdmin.list()),
