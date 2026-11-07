@@ -2,8 +2,6 @@ import type { RtcServerSignal } from '../../shared/product';
 import { stereoOpusOffer } from '../media/audio-output';
 import {
   configureReceiveOffer,
-  loadReceiveProfile,
-  probeReceiveCapabilities,
   selectProductReceiveProfile,
   type ProductReceiveSelection,
   type ReceiveProfile,
@@ -128,11 +126,9 @@ export class RtcSession {
     return Promise.reject(new RemoteKitError('unavailable', 'Control WebSocket 未连接'));
   }
 
-  receiveProfile: ReceiveProfile = loadReceiveProfile();
+  receiveProfile: ReceiveProfile = 'native';
 
   signaling: Record<string, unknown> | undefined;
-
-  private probeReceiveCapabilities = probeReceiveCapabilities;
 
   private currentPeer: RTCPeerConnection | null = null;
   get peer() {
@@ -297,7 +293,7 @@ export class RtcSession {
       if (this.controlRpc) {
         this.markConnection('receiveProbeStart');
         if (!this.productReceiveSelection)
-          this.productReceiveSelection = await selectProductReceiveProfile(navigator.userAgent, codecs);
+          this.productReceiveSelection = await selectProductReceiveProfile(codecs);
         if (attempt !== this.attempt) return;
         this.receiveProfile = this.productReceiveSelection.profile;
         this.markConnection('receiveProbeEnd');
@@ -306,12 +302,7 @@ export class RtcSession {
       this.markConnection('createOfferStart');
       const originalOffer = await peer.createOffer();
       this.markConnection('createOfferEnd');
-      const effectiveOffer = configureReceiveOffer(
-        originalOffer.sdp ?? '',
-        this.receiveProfile,
-        navigator.userAgent,
-        codecs,
-      );
+      const effectiveOffer = configureReceiveOffer(originalOffer.sdp ?? '', this.receiveProfile, codecs);
       effectiveOffer.sdp = stereoOpusOffer(effectiveOffer.sdp);
       this.signaling = {
         receiveSelection: this.productReceiveSelection,

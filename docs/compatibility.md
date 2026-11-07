@@ -27,7 +27,7 @@
 Viewer 仍支持 Chrome 89（89.0.4389.90），因此：
 
 - 布局用 flex/grid/ResizeObserver 和特性检测，不依赖 container query、`:has`、`dvh`、OffscreenCanvas 或新的 viewport API。
-- 接收能力：桌面/headless 89 固定使用 H.264 level 4.2；它对 MediaCapabilities 的 `type:'webrtc'` 抛 TypeError，文件解码能力不代表 WebRTC 接收能力；没有 WebCodecs 时用合适的 MediaCapabilities WebRTC 查询，不支持则保留原生回退。Android 的能力不会被桌面 89 的结论覆盖。
+- 接收能力：89 没有 WebCodecs，它的 MediaCapabilities 对 `type:'webrtc'` 抛 TypeError，所以探测总是没有结论，按物理屏幕声明所需 level（见[编码 · H.264 level](encoding.md#h264-level)）。它的 SDP factory 默认（640×480@30）不是解码上限，实测能接受 level 4.2 的 SPS。
 - 没有 `jitterBufferTarget`，使用 `playoutDelayHint = 0`。
 - 没有 `getCoalescedEvents` 时触控只发单采样。
 - 没有 `beforeinput` 时 IME 依赖 `input` 事件；89 的软键盘同时缩小 layout 与 visual viewport。

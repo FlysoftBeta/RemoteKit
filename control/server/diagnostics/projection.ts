@@ -1,5 +1,7 @@
 const words = (value: string) => new Set(value.trim().split(/\s+/));
 
+const probeOutcomes = words('supported rejected timeout error unavailable');
+
 const labels: Record<string, ReadonlySet<string>> = {
   browserFamily: words('chrome chromium edge safari firefox brave other'),
   platform: words('android ios windows macos linux chromeos other'),
@@ -37,13 +39,12 @@ const labels: Record<string, ReadonlySet<string>> = {
   close_state: words('open closing closed'),
   configuration: words('generic-desktop current-platform'),
   counterScope: words('transport'),
-  profile: words(
-    'native chrome89-h264-42 chrome89-h264-51 h264-level42-experimental h264-level52 h264-level51',
-  ),
+  profile: words('native h264-level42 h264-level50 h264-level51 h264-level52'),
   probeSource: words('video-decoder media-capabilities-webrtc'),
-  level52: words('supported rejected timeout error unavailable'),
-  level51: words('supported rejected timeout error unavailable'),
-  level42: words('supported rejected timeout error unavailable'),
+  level52: probeOutcomes,
+  level51: probeOutcomes,
+  level50: probeOutcomes,
+  level42: probeOutcomes,
 };
 
 const decoderLabels = new Set([
@@ -98,7 +99,7 @@ const clientFields = words(`
   retiredGenerations retiredGenerationsCompleted unknownGpuRetainedGenerations unknownGpuRetentions targetFps resumeMaxFps officialMaxFps
   codecMaxFps adaptRequests adaptDrops adaptErrors adaptSizeChanges presentationRefreshPending presentationRefreshAttempts
   presentationRefreshForcedBegins presentationRefreshSuccesses
-  receive profile probeSource probes level52 level51 level42 probeDurationMs
+  receive profile probeSource probes level52 level51 level50 level42 required probeDurationMs
 `);
 
 // Only the tenant's diagnostic subtrees enter this projection. Identity, raw

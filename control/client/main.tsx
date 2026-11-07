@@ -36,7 +36,7 @@ function App() {
   const [user, setUser] = useState<ProductUser | null | undefined>(undefined),
     [notice, setNotice] = useState('');
   useEffect(() => {
-    void selectProductReceiveProfile(navigator.userAgent, RTCRtpReceiver.getCapabilities?.('video')?.codecs);
+    void selectProductReceiveProfile(RTCRtpReceiver.getCapabilities?.('video')?.codecs);
 
     void request<{ user: ProductUser }>('/api/auth/me')
       .then((r) => setUser(r.user))

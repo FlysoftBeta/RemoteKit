@@ -148,6 +148,7 @@ export class MediaObservations {
         profile: this.diagnostics.receiveSelection.profile,
         probeSource: this.diagnostics.receiveSelection.probeSource,
         probes: this.diagnostics.receiveSelection.probes,
+        required: this.diagnostics.receiveSelection.required,
         probeDurationMs: this.diagnostics.receiveSelection.probeDurationMs,
       },
       endpointReceivedAtMs: this.endpointStatsAtMs,
