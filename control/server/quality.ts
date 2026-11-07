@@ -8,7 +8,10 @@ import type {
 } from '../shared/product';
 import { isLocalTab } from '../shared/product';
 import { feasibleDpr } from './atlas-plan';
-const preferences: Record<ProductWorkspace['settings']['qualityPreference'], DegradationPreference> = {
+const preferences: Record<
+  ProductWorkspace['settings']['workspace']['qualityPreference'],
+  DegradationPreference
+> = {
   quality: 'maintain-resolution',
   auto: 'balanced',
   smooth: 'maintain-framerate',
@@ -76,7 +79,9 @@ export class QualityState {
               !!window.activeTabId &&
               !workspace.tabs.some((tab) => tab.id === window.activeTabId && isLocalTab(tab)),
           ) &&
-          (workspace.layoutMode !== 'focused' || w.windowId === workspace.activeWindowId),
+          workspace.spaces.some(
+            (space) => space.id === workspace.activeSpaceId && space.windowIds.includes(w.windowId),
+          ),
       ) ?? [];
     let effectiveDpr = scale,
       resourceLimitation: string | null = null;
@@ -95,14 +100,15 @@ export class QualityState {
         ? Math.min(240, Math.floor(hz))
         : 60;
     const requested = {
-      degradationPreference: preferences[workspace.settings.qualityPreference],
+      degradationPreference: preferences[workspace.settings.workspace.qualityPreference],
       maxFps,
-      audio: workspace.settings.audioChannels.left || workspace.settings.audioChannels.right,
+      audio:
+        workspace.settings.workspace.audioChannels.left || workspace.settings.workspace.audioChannels.right,
     };
     return {
       resourceLimitation,
       mode: 'product',
-      preference: workspace.settings.qualityPreference,
+      preference: workspace.settings.workspace.qualityPreference,
       clientScale: scale,
       effectiveDpr,
       requested,

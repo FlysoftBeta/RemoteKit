@@ -1,13 +1,15 @@
 import { RemoteKitError } from '../shared/errors';
-import { LibraryRepository } from '../server/persistence/library';
-import { testGateway } from './server-fixture';
+import { LibraryRepository, migrateLibrarySnapshots } from '../server/persistence/library';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import { createSchema } from '../server/persistence/schema';
+import { ObjectIndex } from '../server/cluster/objects';
+import type { NodeRegistry } from '../server/cluster/node-link';
+import type { ControlDatabase } from '../server/persistence/database';
 import { FileLibrary } from '../server/files/library';
 import type { InternalFileRequest } from '../server/workspace/page-requests';
-import type { LibrarySnapshot, SelectionState } from '../shared/file-library';
+import type { LibrarySnapshot, LibrarySource, SelectionState } from '../shared/file-library';
 
 const ASSETS = {
   photo: 'a'.repeat(64),
@@ -51,7 +53,7 @@ function fixture() {
     locked = false,
     lockOnDescribe = false;
   const endpoint = {
-    async request(method: string, tenant: string, args: any = {}) {
+    async request(method: string, tenant: string, args: any = {}): Promise<any> {
       calls.push({ method, tenant, args });
       if (method === 'session.library.describe') {
         if (lockOnDescribe) locked = true;
@@ -75,11 +77,28 @@ function fixture() {
       return { accepted: true };
     },
   };
-  let manager = new FileLibrary(new LibraryRepository(db), testGateway(endpoint), limits, {
-    require: (tenant, id) => {
-      if (tenant !== 'tenant' || !assets.has(id)) throw new RemoteKitError('not_found', 'Object missing');
+  const gateway = {
+    describeAsset: (tenant: string, args: { assetId: string }) =>
+      endpoint.request('session.library.describe', tenant, args),
+    prepareSelection: (tenant: string, args: unknown) =>
+      endpoint.request('session.library.prepare', tenant, args),
+    selectionStatus: (tenant: string, args: { selectionId: string }) =>
+      endpoint.request('session.library.selectionStatus', tenant, args),
+  };
+  let requestSource: LibrarySource | null = { app: 'browser', channel: 'example.test' };
+  const resolveSource = (tenant: string, requestId: string) =>
+    tenant === 'tenant' && requestId === 'chooser' ? requestSource : null;
+  let manager = new FileLibrary(
+    new LibraryRepository(db),
+    gateway,
+    limits,
+    {
+      require: (tenant, id) => {
+        if (tenant !== 'tenant' || !assets.has(id)) throw new RemoteKitError('not_found', 'Object missing');
+      },
     },
-  });
+    resolveSource,
+  );
   const run = <T = LibrarySnapshot>(
     method: string,
     params: unknown = {},
@@ -101,7 +120,7 @@ function fixture() {
       assetId,
       name: assetId + '.jpg',
       destination,
-      groupId: null,
+      origin: { kind: 'files', channel: 'upload', partitionId: null },
       ...more,
     });
   return {
@@ -111,12 +130,25 @@ function fixture() {
     run,
     add,
     reopen: () => {
-      manager = new FileLibrary(new LibraryRepository(db), testGateway(endpoint), limits, {
-        require: (tenant, id) => {
-          if (tenant !== 'tenant' || !assets.has(id)) throw new RemoteKitError('not_found', 'Object missing');
+      manager = new FileLibrary(
+        new LibraryRepository(db),
+        gateway,
+        limits,
+        {
+          require: (tenant, id) => {
+            if (tenant !== 'tenant' || !assets.has(id))
+              throw new RemoteKitError('not_found', 'Object missing');
+          },
         },
-      });
+        resolveSource,
+      );
     },
+    setSource: (source: LibrarySource | null) => {
+      requestSource = source;
+    },
+    exists: (entryId: string) => manager.entryExists('tenant', entryId),
+    hidden: () => manager.hiddenEntryIds('tenant'),
+    organized: (entryId: string) => manager.organized('tenant', entryId),
     losePrepare: () => {
       losePrepare = true;
     },
@@ -129,17 +161,23 @@ function fixture() {
   };
 }
 
-test('file catalog validates scoped assets and ordered basket, prunes removed entries and preserves archived originals', async (t) => {
+test('file catalog validates scoped assets and ordered basket, prunes removed entries and preserves collected originals', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const start = await f.run('group', { operationId: 'group', name: '  Receipts  ' });
-  const groupId = start.groups[0].id;
-  const direct = await f.add(ASSETS.photo, 'library', { originalAssetId: ASSETS.original, groupId });
+  const start = await f.run('partition', { operationId: 'group', name: '  Receipts  ' });
+  const partitionId = start.partitions[0].id;
+  const direct = await f.add(ASSETS.photo, 'library', {
+    originalAssetId: ASSETS.original,
+    origin: { kind: 'files', channel: 'upload', partitionId },
+  });
   const first = await f.add(ASSETS.draft);
   const second = await f.add(ASSETS.extra, 'basket', { afterId: first.basket[0] });
   assert.deepEqual(second.basket, [first.basket[0], second.entries[0].id]);
   f.reopen();
-  const retry = await f.add(ASSETS.photo, 'library', { originalAssetId: ASSETS.original, groupId });
+  const retry = await f.add(ASSETS.photo, 'library', {
+    originalAssetId: ASSETS.original,
+    origin: { kind: 'files', channel: 'upload', partitionId },
+  });
   assert.deepEqual(retry, second);
   assert.equal(
     f.calls.filter((c) => c.method === 'session.library.describe' && c.args.assetId === ASSETS.photo).length,
@@ -165,38 +203,39 @@ test('file catalog validates scoped assets and ordered basket, prunes removed en
         operationId: 'foreign',
         assetId: ASSETS.photo,
         name: 'photo.jpg',
-        groupId: null,
+        origin: { kind: 'files', channel: 'upload', partitionId: null },
         destination: 'library',
       },
       'other',
     ),
     { code: 'not_found' },
   );
-  const archived = direct.entries[0].id;
+  const collected = direct.entries[0].id;
   const removed = await f.run('basket', {
     operationId: 'clear',
     expectedRevision: second.revision,
-    ids: [archived],
+    ids: [collected],
   });
   assert.deepEqual(
     removed.entries.map((e) => e.id),
-    [archived],
+    [collected],
   );
   assert.deepEqual(await f.add(ASSETS.draft), removed);
-  const moved = await f.run('move', { operationId: 'move', ids: [archived], groupId: null });
-  assert.equal(moved.entries[0].groupId, null);
-  const renamed = await f.run('group', { operationId: 'rename', id: groupId, name: 'Invoices' });
-  assert.deepEqual(renamed.groups, [{ id: groupId, name: 'Invoices' }]);
+  const moved = await f.run('move', { operationId: 'move', ids: [collected], partitionId: null });
+  assert.equal(moved.entries[0].partitionId, null);
+  const renamed = await f.run('partition', { operationId: 'rename', id: partitionId, name: 'Invoices' });
+  assert.deepEqual(renamed.partitions, [{ id: partitionId, name: 'Invoices' }]);
 });
 
 test('prepared selection retries its immutable manifest and consumes only confirmed entry IDs after restart', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const groupId = (await f.run('group', { operationId: 'group', name: 'Receipts' })).groups[0].id;
+  const partitionId = (await f.run('partition', { operationId: 'group', name: 'Receipts' })).partitions[0].id;
   const first = await f.add(ASSETS.draft);
   const latest = await f.add(ASSETS.extra);
   const [draft, extra] = latest.basket;
-  const params = { operationId: 'prepare', requestId: 'chooser', entryIds: [draft], groupId };
+  await f.run('basketPartition', { operationId: 'basket-partition', partitionId });
+  const params = { operationId: 'prepare', requestId: 'chooser', entryIds: [draft] };
   await assert.rejects(
     f.run('prepare', { ...params, entryIds: latest.basket }, 'tenant', { ...request, multiple: false }),
     { code: 'invalid_request' },
@@ -228,14 +267,18 @@ test('prepared selection retries its immutable manifest and consumes only confir
   const unknown = await f.run<Finish>('finish', prepared, 'tenant', null);
   assert.equal(unknown.state, 'unknown');
   assert.deepEqual(unknown.snapshot.basket, latest.basket);
-  const reorder = { operationId: 'reorder', expectedRevision: latest.revision, ids: [extra, draft] };
+  const reorder = {
+    operationId: 'reorder',
+    expectedRevision: (await f.run('get')).revision,
+    ids: [extra, draft],
+  };
   const reordered = await f.run('basket', reorder);
   f.states.set(prepared.selectionId, 'selected');
   const reconciled = await f.run('get', {}, 'tenant', null);
   assert.deepEqual(reconciled.basket, [extra]);
   assert.deepEqual(
     reconciled.entries.find((e) => e.id === draft),
-    { ...first.entries[0], archived: true, groupId },
+    { ...first.entries[0], collected: true, partitionId },
   );
   await assert.rejects(
     f.run('basket', {
@@ -265,7 +308,6 @@ test('pending selections pin removed entries, cancelled selections release them,
     operationId: 'prepare',
     requestId: 'chooser',
     entryIds: [entry.id],
-    groupId: null,
   });
   const removed = await f.run('basket', {
     operationId: 'remove',
@@ -294,7 +336,6 @@ test('explicit deletion is atomic and keeps assets referenced by another entry o
     operationId: 'prepare',
     requestId: 'chooser',
     entryIds: [first.id],
-    groupId: null,
   });
   const deletion = { operationId: 'delete', ids: [first.id, duplicate.id] };
   await assert.rejects(f.run('delete', deletion), { code: 'conflict' });
@@ -314,23 +355,27 @@ test('explicit deletion is atomic and keeps assets referenced by another entry o
 test('photo choice and scan failure remain blocked until confirmed in place', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
-  const groupId = (await f.run('group', { operationId: 'group', name: 'Scans' })).groups[0].id;
+  const partitionId = (await f.run('partition', { operationId: 'group', name: 'Scans' })).partitions[0].id;
   await f.add(ASSETS.draft);
   const photo = { mode: 'scan', pending: 'choice', candidateAssetIds: [ASSETS.photo, ASSETS.extra] };
-  const initial = await f.add(ASSETS.photo, 'basket', { groupId, originalAssetId: ASSETS.original, photo });
+  const initial = await f.add(ASSETS.photo, 'basket', {
+    origin: { kind: 'files', channel: 'camera', partitionId },
+    originalAssetId: ASSETS.original,
+    photo,
+  });
   const [entry] = initial.entries;
   assert.deepEqual(entry.photo, photo);
   f.reopen();
   assert.deepEqual(await f.run('get'), initial);
   await assert.rejects(
     f.add(ASSETS.photo, 'basket', {
-      groupId,
+      origin: { kind: 'files', channel: 'camera', partitionId },
       originalAssetId: ASSETS.original,
       photo: { ...photo, mode: 'photo' },
     }),
     { code: 'conflict' },
   );
-  const prepare = { operationId: 'prepare', requestId: 'chooser', entryIds: [entry.id], groupId };
+  const prepare = { operationId: 'prepare', requestId: 'chooser', entryIds: [entry.id] };
   await assert.rejects(f.run('prepare', prepare), { code: 'conflict' });
   const scanError = { mode: 'scan', pending: 'scan-error', warning: '扫描失败' };
   const choice = {
@@ -394,8 +439,9 @@ test('photo choice and scan failure remain blocked until confirmed in place', as
     type: entry.type,
     name: entry.name,
     createdAt: entry.createdAt,
-    groupId,
-    archived: false,
+    source: { app: 'files', channel: 'camera' },
+    partitionId,
+    collected: false,
   });
 });
 
@@ -430,4 +476,359 @@ test('photo metadata validates candidate references and prunes them when an entr
     pruned.entries.map((e) => e.assetId),
     [ASSETS.draft],
   );
+});
+
+const uploadSource = { app: 'files', channel: 'upload' };
+const requestOrigin = { kind: 'request', requestId: 'chooser' };
+type Finish = { state: SelectionState; snapshot: LibrarySnapshot };
+
+async function prepare(f: ReturnType<typeof fixture>, entryId: string, operationId = 'prepare') {
+  return f.run<{ selectionId: string }>('prepare', {
+    operationId,
+    requestId: 'chooser',
+    entryIds: [entryId],
+  });
+}
+
+test('request imports infer browser and web app sources and replay without the retired request', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const first = await f.add(ASSETS.photo, 'basket', { origin: requestOrigin });
+  assert.deepEqual(first.entries[0].source, { app: 'browser', channel: 'example.test' });
+  assert.equal(first.entries[0].collected, false);
+  f.setSource({ app: 'web:mail', channel: '' });
+  const second = await f.add(ASSETS.extra, 'basket', { origin: requestOrigin });
+  assert.deepEqual(second.sources, [
+    { app: 'web:mail', channel: '', count: 1, excluded: false },
+    { app: 'browser', channel: 'example.test', count: 1, excluded: false },
+  ]);
+  f.setSource(null);
+  f.reopen();
+  assert.deepEqual(await f.add(ASSETS.photo, 'basket', { origin: requestOrigin }), second);
+  await assert.rejects(f.add(ASSETS.draft, 'basket', { origin: requestOrigin }), { code: 'conflict' });
+  await assert.rejects(f.add(ASSETS.photo, 'basket', { origin: { ...requestOrigin, requestId: 'other' } }), {
+    code: 'conflict',
+  });
+});
+
+test('source exclusion hides unorganized entries, supports undo, and permits explicit library uploads', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Saved' })).partitions[0]
+    .id;
+  const first = (await f.add(ASSETS.photo, 'library')).entries[0];
+  const second = (
+    await f.add(ASSETS.extra, 'library', {
+      origin: { kind: 'files', channel: 'upload', partitionId },
+    })
+  ).entries[0];
+  const excluded = await f.run('source', { operationId: 'exclude', source: uploadSource, excluded: true });
+  assert.deepEqual(excluded.sources, [{ ...uploadSource, count: 2, excluded: true }]);
+  assert.deepEqual(f.hidden(), new Set([first.id]));
+  assert.equal(f.exists(first.id), true);
+  assert.equal(f.exists('missing'), false);
+  assert.equal(f.organized(second.id), true);
+  assert.equal(f.organized(first.id), false);
+  const direct = await f.add(ASSETS.draft, 'library');
+  assert.equal(direct.entries[0].collected, true);
+  assert.ok(f.hidden().has(direct.entries[0].id));
+  const restored = await f.run('source', { operationId: 'include', source: uploadSource, excluded: false });
+  assert.deepEqual(restored.excludedSources, []);
+  assert.deepEqual(f.hidden(), new Set());
+  f.reopen();
+  assert.deepEqual(
+    await f.run('source', { operationId: 'exclude', source: uploadSource, excluded: true }),
+    restored,
+  );
+});
+
+test('finish uses current exclusions and basket partition and settles exactly once after restart', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const source = { app: 'browser', channel: 'example.test' };
+  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Sent' })).partitions[0].id;
+  const initial = await f.add(ASSETS.photo, 'basket', { origin: requestOrigin });
+  const entryId = initial.entries[0].id;
+  const selection = await prepare(f, entryId);
+  await f.run('source', { operationId: 'exclude', source, excluded: true });
+  await f.run('basketPartition', { operationId: 'destination', partitionId });
+  f.states.set(selection.selectionId, 'selected');
+  f.reopen();
+  const result = await f.run<Finish>('finish', selection);
+  assert.deepEqual(result.snapshot.basket, []);
+  assert.deepEqual(result.snapshot.entries, [{ ...initial.entries[0], partitionId }]);
+  assert.deepEqual(f.hidden(), new Set());
+  await f.run('source', { operationId: 'include', source, excluded: false });
+  await f.run('basketPartition', { operationId: 'clear-destination', partitionId: null });
+  const latest = await f.run('get');
+  assert.deepEqual(await f.run('finish', selection), { state: 'selected', snapshot: latest });
+  assert.equal(latest.entries[0].collected, false);
+  const moved = await f.run('move', { operationId: 'unorganize', ids: [entryId], partitionId: null });
+  assert.deepEqual(moved.entries, []);
+});
+
+test('excluded consumed entries lose collection and vanish when their last reference ends', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const initial = await f.add(ASSETS.photo, 'library');
+  const entryId = initial.entries[0].id;
+  await f.run('basket', { operationId: 'basket', expectedRevision: initial.revision, ids: [entryId] });
+  const selection = await prepare(f, entryId);
+  await f.run('source', { operationId: 'exclude', source: uploadSource, excluded: true });
+  f.states.set(selection.selectionId, 'selected');
+  const result = await f.run<Finish>('finish', selection);
+  assert.deepEqual(result.snapshot.entries, []);
+  assert.deepEqual(result.snapshot.sources, []);
+  assert.equal(f.exists(entryId), false);
+});
+
+test('purge clears source references, retains partition and basket references, and prunes the rest', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Kept' })).partitions[0].id;
+  const discarded = (await f.add(ASSETS.photo, 'library')).entries[0];
+  const organized = (
+    await f.add(ASSETS.extra, 'library', {
+      origin: { kind: 'files', channel: 'upload', partitionId },
+    })
+  ).entries[0];
+  const basket = (await f.add(ASSETS.draft)).entries[0];
+  const purged = await f.run('sourcePurge', { operationId: 'purge', source: uploadSource });
+  assert.deepEqual(purged.sources, []);
+  assert.deepEqual(
+    purged.entries,
+    [basket, organized].map((entry) => ({ ...entry, source: null, collected: false })),
+  );
+  assert.equal(f.exists(discarded.id), false);
+  assert.equal(f.organized(organized.id), true);
+  const removed = await f.run('basket', { operationId: 'clear', expectedRevision: purged.revision, ids: [] });
+  assert.deepEqual(
+    removed.entries.map((entry) => entry.id),
+    [organized.id],
+  );
+  const deleted = await f.run('partitionDelete', { operationId: 'delete-partition', id: partitionId });
+  assert.deepEqual(deleted.entries, []);
+  f.reopen();
+  assert.deepEqual(await f.run('sourcePurge', { operationId: 'purge', source: uploadSource }), deleted);
+});
+
+test('pending selections reject purge, partition deletion, and deletion atomically', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Kept' })).partitions[0].id;
+  const initial = await f.add(ASSETS.photo, 'library', {
+    origin: { kind: 'files', channel: 'upload', partitionId },
+  });
+  const entryId = initial.entries[0].id;
+  const selection = await prepare(f, entryId);
+  const mutations = [
+    ['sourcePurge', { operationId: 'purge', source: uploadSource }],
+    ['partitionDelete', { operationId: 'delete-partition', id: partitionId }],
+    ['delete', { operationId: 'delete', ids: [entryId] }],
+  ] as const;
+  for (const [method, params] of mutations) {
+    await assert.rejects(f.run(method, params), { code: 'conflict' });
+    assert.deepEqual(await f.run('get'), initial);
+  }
+  f.states.set(selection.selectionId, 'cancelled');
+  await f.run('finish', selection);
+  await f.run('sourcePurge', mutations[0][1]);
+  const deleted = await f.run('partitionDelete', mutations[1][1]);
+  assert.deepEqual(deleted.entries, []);
+});
+
+test('partition deletion keeps source and basket references and clears basket destination', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Kept' })).partitions[0].id;
+  const origin = { kind: 'files', channel: 'upload', partitionId };
+  const collected = (await f.add(ASSETS.photo, 'library', { origin })).entries[0];
+  const basket = (await f.add(ASSETS.extra, 'basket', { origin })).entries[0];
+  await f.run('basketPartition', { operationId: 'destination', partitionId });
+  const deleted = await f.run('partitionDelete', { operationId: 'delete-partition', id: partitionId });
+  assert.equal(deleted.basketPartitionId, null);
+  assert.deepEqual(deleted.partitions, []);
+  assert.deepEqual(
+    deleted.entries,
+    [basket, collected].map((entry) => ({ ...entry, partitionId: null })),
+  );
+});
+
+test('new mutations freeze payloads and reject mismatched operation IDs before state validation', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Saved' })).partitions[0]
+    .id;
+  const mutations = [
+    ['partition', { operationId: 'rename', id: partitionId, name: 'Sent' }, { name: 'Other' }],
+    [
+      'move',
+      { operationId: 'move', ids: [(await f.add(ASSETS.photo, 'library')).entries[0].id], partitionId },
+      { partitionId: null },
+    ],
+    ['source', { operationId: 'exclude', source: uploadSource, excluded: true }, { excluded: false }],
+    ['basketPartition', { operationId: 'destination', partitionId }, { partitionId: null }],
+    [
+      'sourcePurge',
+      { operationId: 'purge', source: uploadSource },
+      { source: { app: 'files', channel: 'camera' } },
+    ],
+    ['partitionDelete', { operationId: 'delete-partition', id: partitionId }, { id: 'missing' }],
+  ] as const;
+  for (const [method, params, changed] of mutations) {
+    const result = await f.run(method, params);
+    f.reopen();
+    assert.deepEqual(await f.run(method, params), result);
+    await assert.rejects(f.run(method, { ...params, ...changed }), { code: 'conflict' });
+  }
+  await assert.rejects(f.run('basketPartition', { operationId: 'missing', partitionId: 'missing' }), {
+    code: 'not_found',
+  });
+  await assert.rejects(
+    f.run('source', {
+      operationId: 'bad-source',
+      source: { app: 'files', channel: 'other' },
+      excluded: true,
+    }),
+    { code: 'invalid_request' },
+  );
+  await assert.rejects(
+    f.run('import', {
+      operationId: 'bad-origin',
+      assetId: ASSETS.photo,
+      name: 'file.jpg',
+      destination: 'library',
+      origin: { kind: 'files', channel: 'other', partitionId: null },
+    }),
+    { code: 'invalid_request' },
+  );
+});
+
+test('library migration preserves IDs and assets and replaces stored group and archive fields', (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const entries = [true, false].map((archived, index) => ({
+    id: 'entry-' + index,
+    name: 'image.jpg',
+    assetId: ASSETS.photo,
+    originalAssetId: ASSETS.original,
+    type: 'image/jpeg',
+    size: 3,
+    createdAt: 100,
+    groupId: index === 0 ? 'partition' : null,
+    archived,
+  }));
+  const snapshot = {
+    revision: 7,
+    entries,
+    groups: [{ id: 'partition', name: 'Saved' }],
+    basket: ['entry-1'],
+  };
+  for (const tenant of ['tenant', 'other'])
+    f.db.prepare('INSERT INTO file_library VALUES (?,?)').run(tenant, JSON.stringify(snapshot));
+  migrateLibrarySnapshots(f.db);
+  for (const tenant of ['tenant', 'other']) {
+    const migrated = new LibraryRepository(f.db).snapshot(tenant);
+    assert.equal(migrated.revision, 7);
+    assert.deepEqual(migrated.partitions, snapshot.groups);
+    assert.deepEqual(migrated.basket, snapshot.basket);
+    assert.deepEqual(
+      migrated.entries,
+      entries.map(({ groupId, archived, ...entry }) => ({
+        ...entry,
+        partitionId: groupId,
+        collected: archived,
+        source: archived ? uploadSource : null,
+      })),
+    );
+    assert.deepEqual(migrated.sources, [{ ...uploadSource, count: 1, excluded: false }]);
+    assert.deepEqual(migrated.excludedSources, []);
+    assert.equal(migrated.basketPartitionId, null);
+    const stored = f.db.prepare('SELECT snapshot FROM file_library WHERE tenant=?').get(tenant) as {
+      snapshot: string;
+    };
+    assert.ok(!/"(groups|groupId|archived)"/.test(stored.snapshot));
+  }
+});
+
+test('object GC follows live entry assets, originals, candidates, and pending selections through purge', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const nodes = { handlers: new Map(), on() {} } as unknown as NodeRegistry;
+  const store = {
+    db: f.db,
+    transaction: <T>(work: () => T) => f.db.transaction(work)(),
+  } as ControlDatabase;
+  const objects = new ObjectIndex(
+    store,
+    nodes,
+    1024,
+    () => false,
+    () => false,
+  );
+  for (const assetId of [ASSETS.photo, ASSETS.original, ASSETS.extra, ASSETS.draft])
+    f.db.prepare('INSERT INTO objects VALUES (?,?,?,?,?,?,?)').run('tenant', assetId, 3, 3, assetId, 0, null);
+  const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Saved' })).partitions[0]
+    .id;
+  const saved = await f.add(ASSETS.photo, 'library', {
+    originalAssetId: ASSETS.original,
+    origin: { kind: 'files', channel: 'upload', partitionId },
+    photo: { mode: 'photo', candidateAssetIds: [ASSETS.extra] },
+  });
+  const basket = await f.add(ASSETS.draft);
+  const selection = await prepare(f, basket.entries[0].id);
+  await f.run('basket', { operationId: 'remove', expectedRevision: basket.revision, ids: [] });
+  const indexed = () =>
+    (f.db.prepare('SELECT id FROM objects ORDER BY id').all() as { id: string }[]).map((row) => row.id);
+  const allAssets = indexed();
+  await objects.gc();
+  assert.deepEqual(indexed(), allAssets);
+  f.states.set(selection.selectionId, 'cancelled');
+  await f.run('finish', selection);
+  await objects.gc();
+  assert.deepEqual(indexed(), [ASSETS.photo, ASSETS.original, ASSETS.extra].sort());
+  await f.run('sourcePurge', { operationId: 'purge', source: uploadSource });
+  await objects.gc();
+  assert.equal(f.exists(saved.entries[0].id), true);
+  assert.deepEqual(indexed(), [ASSETS.photo, ASSETS.original, ASSETS.extra].sort());
+  await f.run('partitionDelete', { operationId: 'delete-partition', id: partitionId });
+  await objects.gc();
+  assert.deepEqual(indexed(), []);
+});
+
+test('purged basket entries finish with only their partition reference', async (t) => {
+  for (const organize of [false, true]) {
+    const f = fixture();
+    t.after(() => f.db.close());
+    const initial = await f.add(ASSETS.photo);
+    const entryId = initial.entries[0].id;
+    await f.run('sourcePurge', { operationId: 'purge', source: uploadSource });
+    let partitionId: string | null = null;
+    if (organize) {
+      partitionId = (await f.run('partition', { operationId: 'partition', name: 'Sent' })).partitions[0].id;
+      await f.run('basketPartition', { operationId: 'destination', partitionId });
+    }
+    const selection = await prepare(f, entryId);
+    f.states.set(selection.selectionId, 'selected');
+    const { snapshot } = await f.run<Finish>('finish', selection);
+    assert.deepEqual(snapshot.basket, []);
+    assert.deepEqual(
+      snapshot.entries,
+      organize ? [{ ...initial.entries[0], source: null, collected: false, partitionId }] : [],
+    );
+  }
+});
+
+test('excluded request sources permit temporary basket imports and reject direct collection', async (t) => {
+  const f = fixture();
+  t.after(() => f.db.close());
+  const source = { app: 'browser', channel: 'example.test' };
+  await f.run('source', { operationId: 'exclude', source, excluded: true });
+  await assert.rejects(f.add(ASSETS.photo, 'library', { origin: requestOrigin }), { code: 'conflict' });
+  const basket = await f.add(ASSETS.photo, 'basket', { origin: requestOrigin });
+  assert.equal(basket.entries[0].collected, false);
+  const selection = await prepare(f, basket.entries[0].id);
+  f.states.set(selection.selectionId, 'selected');
+  const { snapshot } = await f.run<Finish>('finish', selection);
+  assert.deepEqual(snapshot.entries, []);
 });

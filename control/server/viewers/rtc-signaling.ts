@@ -135,7 +135,7 @@ export class RtcSignaling {
         const accepted = await this.context.endpoint.offer(tenant, {
           connectionId,
           sdp: body.sdp,
-          avSync: this.context.store.workspaces.workspace(tenant).settings.avSync,
+          avSync: this.context.store.workspaces.workspace(tenant).settings.workspace.avSync,
         });
         timings.endpointAcceptedMs = this.context.clock.monotonicMs() - receivedAt;
         if (

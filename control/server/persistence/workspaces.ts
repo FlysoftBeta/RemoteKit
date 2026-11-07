@@ -3,16 +3,18 @@ import { isDeepStrictEqual } from 'node:util';
 import { RemoteKitError } from '../../shared/errors';
 import type { ProductWorkspace } from '../../shared/product';
 import { transaction } from './database';
+import { WorkspaceItemsRepository } from './workspace-items';
 export const defaultSettings = () => ({
-  searchEngine: 'google' as const,
-  qualityPreference: 'auto' as const,
-  uiScale: 1,
-  topDeadZone: 'off' as const,
-  memorySaverEnabled: true,
-  showStats: false,
-  autoFullscreen: false,
-  avSync: false,
-  audioChannels: { left: true, right: true },
+  workspace: {
+    qualityPreference: 'auto' as const,
+    uiScale: 1,
+    topDeadZone: 'off' as const,
+    showStats: false,
+    autoFullscreen: false,
+    avSync: false,
+    audioChannels: { left: true, right: true },
+  },
+  browser: { searchEngine: 'google' as const, memorySaverEnabled: true },
 });
 export function emptyWorkspace(tenantId: string): ProductWorkspace {
   return {
@@ -20,8 +22,10 @@ export function emptyWorkspace(tenantId: string): ProductWorkspace {
     revision: 0,
     tabs: [],
     windows: [],
-    activeWindowId: null,
-    layoutMode: 'side-by-side',
+    spaces: [],
+    activeSpaceId: null,
+    apps: [],
+    favorites: [],
     settings: defaultSettings(),
     sites: {},
     pendingClose: null,
@@ -30,13 +34,15 @@ export function emptyWorkspace(tenantId: string): ProductWorkspace {
 }
 
 export class WorkspacesRepository {
-  constructor(private readonly db: Database.Database) {}
+  readonly items: WorkspaceItemsRepository;
+  constructor(private readonly db: Database.Database) {
+    this.items = new WorkspaceItemsRepository(db);
+  }
   workspace(tenant: string): ProductWorkspace {
     const row = this.db.prepare('SELECT * FROM workspaces WHERE tenant=?').get(tenant) as
       | {
           revision: bigint;
-          active_window: string | null;
-          layout_mode: ProductWorkspace['layoutMode'];
+          active_space: string | null;
           pending: string;
         }
       | undefined;
@@ -47,15 +53,35 @@ export class WorkspacesRepository {
     return {
       tenantId: tenant,
       revision: Number(row.revision),
-      activeWindowId: row.active_window,
-      layoutMode: row.layout_mode,
+      activeSpaceId: row.active_space,
       ...JSON.parse(row.pending ?? '{}'),
       settings: JSON.parse(settings.data),
       windows: (
         this.db
-          .prepare('SELECT id,active_tab,weight FROM workspace_windows WHERE tenant=? ORDER BY position')
-          .all(tenant) as { id: string; active_tab: string | null; weight: number }[]
-      ).map((w) => ({ id: w.id, activeTabId: w.active_tab, weight: w.weight })),
+          .prepare(
+            'SELECT id,app_id,active_tab,state,last_active_at FROM workspace_windows WHERE tenant=? ORDER BY position',
+          )
+          .all(tenant) as {
+          id: string;
+          app_id: string;
+          active_tab: string | null;
+          state: string | null;
+          last_active_at: bigint;
+        }[]
+      ).map((w) => ({
+        id: w.id,
+        appId: w.app_id,
+        activeTabId: w.active_tab,
+        lastActiveAt: Number(w.last_active_at),
+        ...(w.state === null ? {} : { state: JSON.parse(w.state) }),
+      })),
+      spaces: (
+        this.db.prepare('SELECT data FROM workspace_spaces WHERE tenant=? ORDER BY position').all(tenant) as {
+          data: string;
+        }[]
+      ).map((space) => JSON.parse(space.data)),
+      apps: this.items.apps(tenant),
+      favorites: this.items.favorites(tenant),
       tabs: (
         this.db.prepare('SELECT data FROM workspace_tabs WHERE tenant=? ORDER BY position').all(tenant) as {
           data: string;
@@ -73,7 +99,9 @@ export class WorkspacesRepository {
   }
   saveWorkspace(state: ProductWorkspace) {
     const windows = new Set(state.windows.map((w) => w.id)),
-      tabs = new Set(state.tabs.map((t) => t.id));
+      tabs = new Set(state.tabs.map((t) => t.id)),
+      spaces = new Set(state.spaces.map((space) => space.id)),
+      placedWindows = state.spaces.flatMap((space) => space.windowIds);
     if (
       windows.size !== state.windows.length ||
       tabs.size !== state.tabs.length ||
@@ -82,7 +110,20 @@ export class WorkspacesRepository {
         (w) =>
           w.activeTabId !== null && !state.tabs.some((t) => t.id === w.activeTabId && t.windowId === w.id),
       ) ||
-      (state.activeWindowId !== null && !windows.has(state.activeWindowId))
+      spaces.size !== state.spaces.length ||
+      placedWindows.length !== windows.size ||
+      new Set(placedWindows).size !== placedWindows.length ||
+      placedWindows.some((id) => !windows.has(id)) ||
+      state.spaces.some(
+        (space) =>
+          space.windowIds.length < 1 ||
+          space.windowIds.length > 3 ||
+          space.weights.length !== space.windowIds.length ||
+          space.weights.some((weight) => !Number.isFinite(weight) || weight <= 0) ||
+          space.focusedWindowId === null ||
+          !space.windowIds.includes(space.focusedWindowId),
+      ) ||
+      (state.activeSpaceId !== null && !spaces.has(state.activeSpaceId))
     )
       throw new RemoteKitError('internal', '工作区窗口/标签归属不一致');
     const previous = this.workspace(state.tenantId);
@@ -105,23 +146,42 @@ export class WorkspacesRepository {
     return true;
   }
   writeWorkspace(state: ProductWorkspace) {
-    this.db.prepare('INSERT OR REPLACE INTO workspaces VALUES (?,?,?,?,?)').run(
+    this.db.prepare('INSERT OR REPLACE INTO workspaces VALUES (?,?,?,?)').run(
       state.tenantId,
       state.revision,
-      state.activeWindowId,
-      state.layoutMode,
+      state.activeSpaceId,
       JSON.stringify({
         pendingClose: state.pendingClose ?? null,
         pendingWindowCloseId: state.pendingWindowCloseId ?? null,
+        ...(state.pendingWindowCloseIds === undefined
+          ? {}
+          : { pendingWindowCloseIds: state.pendingWindowCloseIds }),
+        ...(state.pendingAppUninstallId === undefined
+          ? {}
+          : { pendingAppUninstallId: state.pendingAppUninstallId }),
       }),
     );
-    for (const table of ['workspace_windows', 'workspace_tabs', 'site_preferences'])
+    for (const table of ['workspace_windows', 'workspace_tabs', 'workspace_spaces', 'site_preferences'])
       this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(state.tenantId);
     state.windows.forEach((w, i) =>
       this.db
-        .prepare('INSERT INTO workspace_windows VALUES (?,?,?,?,?)')
-        .run(w.id, state.tenantId, i, w.activeTabId, w.weight),
+        .prepare('INSERT INTO workspace_windows VALUES (?,?,?,?,?,?,?)')
+        .run(
+          w.id,
+          state.tenantId,
+          i,
+          w.appId,
+          w.activeTabId,
+          w.state === undefined ? null : JSON.stringify(w.state),
+          w.lastActiveAt,
+        ),
     );
+    state.spaces.forEach((space, i) =>
+      this.db
+        .prepare('INSERT INTO workspace_spaces VALUES (?,?,?,?)')
+        .run(space.id, state.tenantId, i, JSON.stringify(space)),
+    );
+    this.items.save(state.tenantId, state.apps, state.favorites);
     state.tabs.forEach((t, i) =>
       this.db
         .prepare('INSERT INTO workspace_tabs VALUES (?,?,?,?,?)')
@@ -147,7 +207,9 @@ export class WorkspacesRepository {
     this.db.prepare('DELETE FROM workspaces WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM workspace_windows WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM workspace_tabs WHERE tenant=?').run(tenant);
+    this.db.prepare('DELETE FROM workspace_spaces WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM user_settings WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM site_preferences WHERE tenant=?').run(tenant);
+    this.items.deleteTenant(tenant);
   }
 }

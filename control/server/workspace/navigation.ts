@@ -2,10 +2,11 @@ import { isLocalTab, type ProductTab, type ProductWorkspace } from '../../shared
 import type { DomainContext, DomainServices } from '../application';
 import type { CommandEffect } from './commands';
 import { settle } from './operations';
+import { pageUsageIdentity } from './workspace';
 export class Navigation {
   constructor(
     private readonly context: DomainContext,
-    private readonly services: Pick<DomainServices, 'policy'>,
+    private readonly services: Pick<DomainServices, 'policy' | 'workspace'>,
   ) {}
   async navigate(state: ProductWorkspace, effect: Extract<CommandEffect, { kind: 'navigate' }>) {
     const tenant = state.tenantId,
@@ -119,12 +120,16 @@ export class Navigation {
         if (committed || terminal.documentCommitted === true) {
           t.kind = 'remote';
           t.url = typeof terminal.url === 'string' ? terminal.url : (t.pendingUrl ?? t.url);
+          if (committed && terminal.documentCommitted === true && terminal.isErrorPage !== true)
+            this.services.workspace.recordPage(state, t, current, snapshot.browserIncarnation);
+          if (!committed) t.usageDocument = pageUsageIdentity(t, current, snapshot.browserIncarnation);
         } else {
           t.kind = nav.previousKind;
           t.url = nav.previousUrl;
           if (isLocalTab(t)) t.loading = false;
         }
         delete t.pendingUrl;
+        if (!committed) delete t.usageSource;
         if (operation) {
           settle(operation.receipt, { status: committed ? 'committed' : 'rejected' });
           delete operation.receipt.application;

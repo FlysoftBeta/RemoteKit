@@ -119,7 +119,7 @@ test('locks existing peer, rejects product actions and uploads, and resumes with
     connectionId,
     operationId: randomUUID(),
     operationGeneration: f.store.operations.operationGeneration(f.tenant),
-    action: { type: 'window.create' as const },
+    action: { type: 'window.open' as const, appId: 'browser', placement: { mode: 'space' as const } },
   };
   await f.control.operations.handleEndpointAction({ ...op, authEpoch: 1 });
   assert.equal(f.store.workspaces.workspace(f.tenant).windows.length, 0);

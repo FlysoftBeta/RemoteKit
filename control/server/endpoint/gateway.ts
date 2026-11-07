@@ -31,6 +31,7 @@ import type {
   PrepareSelection,
   RtcSignal,
   ViewConfiguration,
+  ViewAppInfo,
 } from './types';
 export class EndpointGateway {
   storageImport(tenant: string, args: ImportChunk): Promise<StorageImportJob> {
@@ -230,6 +231,9 @@ export class EndpointGateway {
   }
   async configureView(tenant: string, args: ViewConfiguration): Promise<Accepted> {
     return this.invoke<Accepted>('view.configure', tenant, args);
+  }
+  appInfo(tenant: string, args: { viewId: string }): Promise<ViewAppInfo> {
+    return this.invoke<ViewAppInfo>('view.appInfo', tenant, args);
   }
   async command(
     tenant: string,

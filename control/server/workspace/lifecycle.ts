@@ -17,7 +17,7 @@ export class UncertainRecovery {
     if (!blockers) return '节点未报告休眠条件';
     if (
       !immediate &&
-      (!this.context.store.workspaces.workspace(tenant).settings.memorySaverEnabled ||
+      (!this.context.store.workspaces.workspace(tenant).settings.browser.memorySaverEnabled ||
         this.context.clock.monotonicMs() - runtime.viewerAbsentSince <
           (this.context.endpoint.placement.underPressure(tenant) ? 120000 : 600000))
     )
@@ -291,7 +291,7 @@ export class UncertainRecovery {
       .get(tenant)
       .lifecycle.background.action(
         key,
-        state.settings.memorySaverEnabled,
+        state.settings.browser.memorySaverEnabled,
         visible,
         isLocalTab(tab) ||
           (!!tab.popup && tab.popup.status !== 'adopted') ||

@@ -58,10 +58,14 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
       workspaces: {
         workspace: () => ({
           revision: 4,
-          layoutMode: 'focused',
+          spaces: [],
+          activeSpaceId: null,
           tabs: [{ title: 'sensitive-title' }],
           windows: [],
-          settings: { qualityPreference: 'auto', unrelatedSetting: 'sensitive-setting' },
+          settings: {
+            workspace: { qualityPreference: 'auto', unrelatedSetting: 'sensitive-setting' },
+            browser: { searchEngine: 'google', memorySaverEnabled: true },
+          },
         }),
       },
     },

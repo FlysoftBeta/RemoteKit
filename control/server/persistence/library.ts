@@ -1,15 +1,69 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
-import type { LibraryEntry, LibrarySnapshot, SelectionState } from '../../shared/file-library';
+import type { LibraryEntry, LibrarySnapshot, LibrarySource, SelectionState } from '../../shared/file-library';
 import type { FileBinding } from '../endpoint/types';
 import { transaction } from './database';
+
+export function sameSource(left: LibrarySource | null, right: LibrarySource): boolean {
+  return left !== null && left.app === right.app && left.channel === right.channel;
+}
+
+export function sourceExcluded(snapshot: LibrarySnapshot, source: LibrarySource): boolean {
+  return snapshot.excludedSources.some((item) => sameSource(item, source));
+}
+
+function librarySources(snapshot: LibrarySnapshot): LibrarySnapshot['sources'] {
+  const sources = new Map<string, LibrarySnapshot['sources'][number]>();
+  for (const entry of snapshot.entries) {
+    if (!entry.source) continue;
+    const key = JSON.stringify([entry.source.app, entry.source.channel]);
+    const source = sources.get(key);
+    if (source) source.count++;
+    else sources.set(key, { ...entry.source, count: 1, excluded: sourceExcluded(snapshot, entry.source) });
+  }
+  return [...sources.values()];
+}
+
+export function migrateLibrarySnapshots(db: Database.Database): void {
+  const rows = db.prepare('SELECT tenant,snapshot FROM file_library').all() as {
+    tenant: string;
+    snapshot: string;
+  }[];
+  const update = db.prepare('UPDATE file_library SET snapshot=? WHERE tenant=?');
+  for (const row of rows) {
+    const { groups, entries, ...snapshot } = JSON.parse(row.snapshot) as {
+      revision: number;
+      basket: string[];
+      groups: { id: string; name: string }[];
+      entries: (Omit<LibraryEntry, 'source' | 'partitionId' | 'collected'> & {
+        groupId: string | null;
+        archived: boolean;
+      })[];
+    };
+    const migrated: LibrarySnapshot = {
+      ...snapshot,
+      partitions: groups,
+      entries: entries.map(({ groupId, archived, ...entry }) => ({
+        ...entry,
+        partitionId: groupId,
+        collected: archived,
+        source: archived ? { app: 'files', channel: 'upload' } : null,
+      })),
+      excludedSources: [],
+      basketPartitionId: null,
+      sources: [],
+    };
+    migrated.sources = librarySources(migrated);
+    update.run(JSON.stringify(migrated), row.tenant);
+  }
+}
+
 type TerminalState = Extract<SelectionState, 'selected' | 'cancelled'>;
 export interface Selection {
   selectionId: string;
   requestId: string;
   binding: FileBinding;
   entryIds: string[];
-  groupId: string | null;
   files: Pick<LibraryEntry, 'assetId' | 'name' | 'type'>[];
   prepared: boolean;
 }
@@ -19,9 +73,22 @@ export class LibraryRepository {
   snapshot(tenant: string): LibrarySnapshot {
     const row = this.db.prepare('SELECT snapshot FROM file_library WHERE tenant=?').get(tenant) as
       { snapshot: string } | undefined;
-    return row ? JSON.parse(row.snapshot) : { revision: 0, entries: [], basket: [], groups: [] };
+    const snapshot: LibrarySnapshot = row
+      ? JSON.parse(row.snapshot)
+      : {
+          revision: 0,
+          entries: [],
+          basket: [],
+          partitions: [],
+          sources: [],
+          excludedSources: [],
+          basketPartitionId: null,
+        };
+    snapshot.sources = librarySources(snapshot);
+    return snapshot;
   }
   save(tenant: string, snapshot: LibrarySnapshot) {
+    snapshot.sources = librarySources(snapshot);
     snapshot.revision++;
     this.db.prepare('INSERT OR REPLACE INTO file_library VALUES (?,?)').run(tenant, JSON.stringify(snapshot));
   }
@@ -62,7 +129,10 @@ export class LibraryRepository {
     const inUse = this.pendingEntries(tenant);
     for (const entryId of snapshot.basket) inUse.add(entryId);
     const before = snapshot.entries.length;
-    snapshot.entries = snapshot.entries.filter((entry) => entry.archived || inUse.has(entry.id));
+    snapshot.entries = snapshot.entries.filter(
+      (entry) =>
+        entry.partitionId !== null || (entry.collected && entry.source !== null) || inUse.has(entry.id),
+    );
     return snapshot.entries.length !== before;
   }
   selection(tenant: string, selectionId: string) {
@@ -87,8 +157,8 @@ export class LibraryRepository {
           if (state === 'selected')
             for (const entry of snapshot.entries)
               if (selected.has(entry.id)) {
-                entry.archived = true;
-                entry.groupId = manifest.groupId;
+                entry.collected = entry.source !== null && !sourceExcluded(snapshot, entry.source);
+                if (snapshot.basketPartitionId !== null) entry.partitionId = snapshot.basketPartitionId;
               }
           if (state === 'selected')
             snapshot.basket = snapshot.basket.filter((entryId) => !selected.has(entryId));

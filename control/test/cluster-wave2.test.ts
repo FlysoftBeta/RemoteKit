@@ -358,12 +358,16 @@ test('GC follows library and selection references, derivatives and only the newe
           type: 'text/plain',
           size: 1,
           createdAt: 0,
-          groupId: null,
-          archived: true,
+          partitionId: null,
+          collected: true,
+          source: { app: 'files', channel: 'upload' },
         },
       ],
       basket: [],
-      groups: [],
+      partitions: [],
+      sources: [],
+      excludedSources: [],
+      basketPartitionId: null,
     });
     h.store.db
       .prepare('INSERT INTO file_library_selections (tenant,id,manifest) VALUES (?,?,?)')
@@ -378,7 +382,15 @@ test('GC follows library and selection references, derivatives and only the newe
     await h.control.objects.gc();
     for (const n of [1, 2, 3, 5, 6]) assert.ok(alpha.objects.has('tenant:' + id(n)));
     for (const n of [4, 7]) assert.equal(alpha.objects.has('tenant:' + id(n)), false);
-    h.store.library.save('tenant', { revision: 1, entries: [], basket: [], groups: [] });
+    h.store.library.save('tenant', {
+      revision: 1,
+      entries: [],
+      basket: [],
+      partitions: [],
+      sources: [],
+      excludedSources: [],
+      basketPartitionId: null,
+    });
     h.store.db.exec("UPDATE file_library_selections SET terminal='cancelled'");
     await h.control.objects.gc();
     for (const n of [1, 2, 3]) assert.equal(alpha.objects.has('tenant:' + id(n)), false);
@@ -404,10 +416,10 @@ test('hibernation policy respects Memory Saver, viewer absence, every blocker, r
     for (let offset = 30000; offset >= 0; offset -= 5000)
       h.nodes.get('alpha')!.metrics.record(fakeMetrics({ cpu: 0.95 }), now - offset);
     const workspace = h.store.workspaces.workspace('tenant');
-    workspace.settings.memorySaverEnabled = false;
+    workspace.settings.browser.memorySaverEnabled = false;
     h.store.workspaces.writeWorkspace(workspace);
     assert.equal(await h.control.lifecycle.hibernate('tenant', snapshot), false);
-    workspace.settings.memorySaverEnabled = true;
+    workspace.settings.browser.memorySaverEnabled = true;
     h.store.workspaces.writeWorkspace(workspace);
     for (const field of Object.keys(snapshot.hibernation!)) {
       const blocked = structuredClone(snapshot);
@@ -702,7 +714,7 @@ test('library imports require indexed object ids and deduplicated derivatives st
           assetId,
           name: 'image.png',
           destination: 'library',
-          groupId: null,
+          origin: { kind: 'files', channel: 'upload', partitionId: null },
         },
         () => {},
         () => undefined,
@@ -755,7 +767,10 @@ test('GC rechecks references after asynchronous deletes and checkpoints cannot a
     h.store.library.save('tenant', {
       revision: 0,
       basket: [],
-      groups: [],
+      partitions: [],
+      sources: [],
+      excludedSources: [],
+      basketPartitionId: null,
       entries: [
         {
           id: 'entry',
@@ -764,8 +779,9 @@ test('GC rechecks references after asynchronous deletes and checkpoints cannot a
           type: 'text/plain',
           size: 10,
           createdAt: 0,
-          groupId: null,
-          archived: true,
+          partitionId: null,
+          collected: true,
+          source: { app: 'files', channel: 'upload' },
         },
       ],
     });

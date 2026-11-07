@@ -152,3 +152,16 @@ export interface LifecycleRequest {
   browserIncarnation?: string;
   lifecycleGeneration?: string;
 }
+export interface ViewAppInfo {
+  title: string;
+  url: string;
+  manifest?: {
+    name?: string;
+    shortName?: string;
+    startUrl?: string;
+    scope?: string;
+    themeColor?: string;
+    display?: string;
+  };
+  icon?: { png: string; width: number; height: number };
+}

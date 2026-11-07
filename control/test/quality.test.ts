@@ -4,8 +4,9 @@ import { QualityState } from '../server/quality';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 const workspace = () => ({
   ...emptyWorkspace('tenant'),
-  windows: [{ id: 'w', activeTabId: 'tab', weight: 1 }],
-  activeWindowId: 'w',
+  windows: [{ id: 'w', appId: 'browser', activeTabId: 'tab', lastActiveAt: 1 }],
+  spaces: [{ id: 'space', windowIds: ['w'], weights: [1], focusedWindowId: 'w', lastActiveAt: 1 }],
+  activeSpaceId: 'space',
 });
 const viewport = {
   devicePixelRatio: 1,
@@ -36,7 +37,7 @@ test('quality choices only select WebRTC degradation preference', () => {
     ['auto', 'balanced'],
     ['smooth', 'maintain-framerate'],
   ] as const) {
-    state.settings.qualityPreference = preference;
+    state.settings.workspace.qualityPreference = preference;
     const result = quality.snapshot(state, measured, 100);
     assert.equal(result.effectiveDpr, 2);
     assert.deepEqual(result.requested, { degradationPreference, maxFps: 60, audio: true });
@@ -50,7 +51,7 @@ test('pages render at the reported Viewer DPR regardless of UI scale, preference
   const state = workspace(),
     quality = new QualityState();
   // The Viewer already reports devicePixelRatio × UI scale; the setting is not applied twice.
-  state.settings.uiScale = 2;
+  state.settings.workspace.uiScale = 2;
   const measured = { ...viewport, devicePixelRatio: 1.5, refreshHz: 120.9 };
   assert.deepEqual(quality.snapshot(state, measured).requested, {
     degradationPreference: 'balanced',
@@ -95,7 +96,7 @@ test('all preferences retain client DPR until the physical atlas allocation boun
       windows: [{ windowId: 'w', width: 2560, height: 1440, visible: true }],
     };
   for (const preference of ['quality', 'auto', 'smooth'] as const) {
-    state.settings.qualityPreference = preference;
+    state.settings.workspace.qualityPreference = preference;
     assert.equal(new QualityState().snapshot(state, measured).effectiveDpr, 2);
     assert.ok(
       new QualityState().snapshot(state, {
@@ -127,7 +128,7 @@ test('audio policy follows either selected output channel', () => {
     quality = new QualityState();
   for (const left of [false, true])
     for (const right of [false, true]) {
-      state.settings.audioChannels = { left, right };
+      state.settings.workspace.audioChannels = { left, right };
       assert.equal(quality.snapshot(state, viewport).requested.audio, left || right);
     }
 });

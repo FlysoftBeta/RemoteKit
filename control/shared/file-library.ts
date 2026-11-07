@@ -25,11 +25,17 @@ export interface LibraryEntry extends LibraryAssetFields {
   type: string;
   size: number;
   createdAt: number;
-  groupId: string | null;
-  archived: boolean;
+  source: LibrarySource | null;
+  partitionId: string | null;
+  collected: boolean;
 }
 
-export interface LibraryGroup {
+export interface LibrarySource {
+  app: string;
+  channel: string;
+}
+
+export interface LibraryPartition {
   id: string;
   name: string;
 }
@@ -37,7 +43,10 @@ export interface LibrarySnapshot {
   revision: number;
   entries: LibraryEntry[];
   basket: string[];
-  groups: LibraryGroup[];
+  partitions: LibraryPartition[];
+  sources: (LibrarySource & { count: number; excluded: boolean })[];
+  excludedSources: LibrarySource[];
+  basketPartitionId: string | null;
 }
 export type SelectionState = 'pending' | 'validating' | 'selected' | 'cancelled' | 'unknown';
 
@@ -48,7 +57,9 @@ export interface LibraryMethods {
       operationId: string;
       name: string;
       destination: 'basket' | 'library';
-      groupId: string | null;
+      origin:
+        | { kind: 'request'; requestId: string }
+        | { kind: 'files'; channel: 'upload' | 'camera'; partitionId: string | null };
       afterId?: string;
     };
     result: LibrarySnapshot;
@@ -61,14 +72,30 @@ export interface LibraryMethods {
     params: { operationId: string; expectedRevision: number; ids: string[] };
     result: LibrarySnapshot;
   };
-  'library.group': { params: { operationId: string; id?: string; name: string }; result: LibrarySnapshot };
+  'library.partition': {
+    params: { operationId: string; id?: string; name: string };
+    result: LibrarySnapshot;
+  };
+  'library.partitionDelete': { params: { operationId: string; id: string }; result: LibrarySnapshot };
+  'library.source': {
+    params: { operationId: string; source: LibrarySource; excluded: boolean };
+    result: LibrarySnapshot;
+  };
+  'library.sourcePurge': {
+    params: { operationId: string; source: LibrarySource };
+    result: LibrarySnapshot;
+  };
+  'library.basketPartition': {
+    params: { operationId: string; partitionId: string | null };
+    result: LibrarySnapshot;
+  };
   'library.move': {
-    params: { operationId: string; ids: string[]; groupId: string | null };
+    params: { operationId: string; ids: string[]; partitionId: string | null };
     result: LibrarySnapshot;
   };
   'library.delete': { params: { operationId: string; ids: string[] }; result: LibrarySnapshot };
   'library.prepare': {
-    params: { operationId: string; requestId: string; entryIds: string[]; groupId: string | null };
+    params: { operationId: string; requestId: string; entryIds: string[] };
     result: { selectionId: string };
   };
   'library.finish': {

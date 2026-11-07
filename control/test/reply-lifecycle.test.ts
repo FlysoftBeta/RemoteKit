@@ -105,7 +105,7 @@ async function fixture() {
   );
   const created = await control.operations.productAction(
     tenant,
-    { type: 'window.create', url: 'about:blank' },
+    { type: 'window.open', appId: 'browser', placement: { mode: 'space' }, url: 'about:blank' },
     'lease',
   );
   const tab = created.state.workspace.tabs[0];

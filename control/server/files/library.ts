@@ -6,11 +6,12 @@ import type {
   LibraryEntry,
   LibraryMethods,
   LibrarySnapshot,
+  LibrarySource,
   PhotoMetadata,
   SelectionState,
 } from '../../shared/file-library';
 import type { EndpointGateway } from '../endpoint/gateway';
-import { LibraryRepository, type Selection } from '../persistence/library';
+import { LibraryRepository, sameSource, sourceExcluded, type Selection } from '../persistence/library';
 import { KeyedSerialQueue } from '../util/serial-queue';
 import { type FileLimits, type InternalFileRequest } from '../workspace/page-requests';
 
@@ -18,7 +19,7 @@ type LibraryMethod = keyof LibraryMethods;
 type Params<K extends LibraryMethod> = LibraryMethods[K]['params'];
 const MAX_BASKET = 64;
 const MAX_CATALOG = 4096;
-const MAX_GROUPS = 256;
+const MAX_PARTITIONS = 256;
 const RECONCILE_BATCH = 8;
 const operationHash = (...fields: unknown[]) =>
   createHash('sha256').update(JSON.stringify(fields)).digest('hex');
@@ -38,6 +39,33 @@ function ids(value: unknown, max: number, min = 0): string[] {
     throw invalid('无效的文件数量或重复文件');
   return value.map(id);
 }
+
+function librarySource(value: unknown): LibrarySource {
+  if (!value || typeof value !== 'object') throw invalid('Invalid source');
+  const { app, channel } = value as LibrarySource;
+  if (typeof app !== 'string' || typeof channel !== 'string') throw invalid('Invalid source');
+  if (app === 'files' && (channel === 'upload' || channel === 'camera')) return { app, channel };
+  if (/^web:[a-zA-Z0-9_-]{1,128}$/.test(app) && channel === '') return { app, channel };
+  if (app === 'browser' && channel.length > 0 && channel.length <= 253) {
+    try {
+      if (new URL('https://' + channel).hostname === channel) return { app, channel };
+    } catch {}
+  }
+  throw invalid('Invalid source');
+}
+function importOrigin(value: unknown): Params<'library.import'>['origin'] {
+  if (!value || typeof value !== 'object') throw invalid('Invalid import origin');
+  const origin = value as Params<'library.import'>['origin'];
+  if (origin.kind === 'request') return { kind: 'request', requestId: id(origin.requestId) };
+  if (origin.kind === 'files' && (origin.channel === 'upload' || origin.channel === 'camera'))
+    return {
+      kind: 'files',
+      channel: origin.channel,
+      partitionId: origin.partitionId === null ? null : id(origin.partitionId),
+    };
+  throw invalid('Invalid import origin');
+}
+
 function photoMetadata(value: unknown): PhotoMetadata | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object') throw invalid('无效的照片信息');
@@ -75,17 +103,17 @@ function fileName(value: unknown): string {
     throw invalid('无效的文件名');
   return value;
 }
-function groupName(value: unknown): string {
+function partitionName(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 120 || /[\x00-\x1f\x7f]/.test(value))
-    throw invalid('无效的分组名');
+    throw invalid('无效的分区名');
   return value.trim();
 }
-function group(snapshot: LibrarySnapshot, value: unknown): string | null {
+function partition(snapshot: LibrarySnapshot, value: unknown): string | null {
   if (value === null) return null;
-  const groupId = id(value);
-  if (!snapshot.groups.some((item) => item.id === groupId))
-    throw new RemoteKitError('not_found', '分组不存在');
-  return groupId;
+  const partitionId = id(value);
+  if (!snapshot.partitions.some((item) => item.id === partitionId))
+    throw new RemoteKitError('not_found', '分区不存在');
+  return partitionId;
 }
 function entries(snapshot: LibrarySnapshot, entryIds: string[]) {
   const catalog = new Map(snapshot.entries.map((entry) => [entry.id, entry]));
@@ -102,10 +130,38 @@ export class FileLibrary {
 
   constructor(
     private readonly repository: LibraryRepository,
-    private endpoint: EndpointGateway,
+    private readonly endpoint: Pick<
+      EndpointGateway,
+      'describeAsset' | 'prepareSelection' | 'selectionStatus'
+    >,
     private limits: FileLimits,
     private readonly objects: Pick<ObjectIndex, 'require'>,
+    private readonly fileSourceForRequest: (tenant: string, requestId: string) => LibrarySource | null,
   ) {}
+  entryExists(tenant: string, entryId: string): boolean {
+    return this.repository.snapshot(tenant).entries.some((entry) => entry.id === entryId);
+  }
+  hiddenEntryIds(tenant: string): Set<string> {
+    const snapshot = this.repository.snapshot(tenant);
+    return new Set(
+      snapshot.entries
+        .filter(
+          (entry) =>
+            entry.partitionId === null && entry.source !== null && sourceExcluded(snapshot, entry.source),
+        )
+        .map((entry) => entry.id),
+    );
+  }
+  organized(tenant: string, entryId: string): boolean {
+    return this.repository
+      .snapshot(tenant)
+      .entries.some((entry) => entry.id === entryId && entry.partitionId !== null);
+  }
+  private rejectPending(tenant: string, selected: LibraryEntry[]) {
+    const pending = this.repository.pendingEntries(tenant);
+    if (selected.some((entry) => pending.has(entry.id)))
+      throw new RemoteKitError('conflict', 'Files are held by a pending selection');
+  }
   private async describe(tenant: string, assetId: string): Promise<Asset> {
     this.objects.require(tenant, assetId);
     const value: Asset = await this.endpoint.describeAsset(tenant, { assetId });
@@ -143,26 +199,34 @@ export class FileLibrary {
     const photo = photoMetadata(params.photo);
     const afterId = params.afterId === undefined ? undefined : id(params.afterId);
     if (afterId !== undefined && destination !== 'basket') throw invalid('仅篮内文件支持指定插入位置');
-    const requestedGroup = params.groupId === null ? null : id(params.groupId);
-    const fields = ['import', assetId, name, destination, requestedGroup, originalAssetId, afterId];
+    const origin = importOrigin(params.origin);
+    const requestedPartition = origin.kind === 'files' ? origin.partitionId : null;
+    const fields = ['import', assetId, name, destination, origin, originalAssetId, afterId];
     const payload = operationHash(...fields, ...(photo ? [photo] : []));
     if (this.repository.operation(tenant, operationId, payload)) return this.repository.snapshot(tenant);
+    const source =
+      origin.kind === 'files'
+        ? { app: 'files', channel: origin.channel }
+        : this.fileSourceForRequest(tenant, origin.requestId);
+    if (!source) throw new RemoteKitError('conflict', 'File request is no longer available');
     const validate = (snapshot: LibrarySnapshot) => {
-      const groupId = group(snapshot, requestedGroup);
+      if (destination === 'library' && origin.kind === 'request' && sourceExcluded(snapshot, source))
+        throw new RemoteKitError('conflict', 'Source is excluded from collection');
+      const partitionId = partition(snapshot, requestedPartition);
       if (snapshot.entries.length >= MAX_CATALOG)
         throw new RemoteKitError('limit_exceeded', '文件库已达上限');
       if (destination === 'basket' && snapshot.basket.length >= MAX_BASKET)
         throw new RemoteKitError('limit_exceeded', '文件篮已满');
       if (afterId !== undefined && !snapshot.basket.includes(afterId))
         throw new RemoteKitError('conflict', '插入位置已改变');
-      return groupId;
+      return partitionId;
     };
     validate(this.repository.snapshot(tenant));
     const asset = await this.describeAssets(tenant, { assetId, originalAssetId, photo }, authorize);
     return this.repository.change(tenant, operationId, payload, (snapshot) => {
       for (const reference of assetIds({ assetId, originalAssetId, photo }))
         this.objects.require(tenant, reference);
-      const groupId = validate(snapshot),
+      const partitionId = validate(snapshot),
         entryId = randomUUID();
       snapshot.entries.unshift({
         id: entryId,
@@ -171,8 +235,9 @@ export class FileLibrary {
         type: asset.type,
         size: asset.size,
         createdAt: Date.now(),
-        groupId,
-        archived: destination === 'library',
+        source: { ...source },
+        partitionId,
+        collected: destination === 'library',
         ...(originalAssetId ? { originalAssetId } : {}),
         ...(photo ? { photo } : {}),
       });
@@ -226,8 +291,7 @@ export class FileLibrary {
     const operationId = id(params.operationId),
       requestId = id(params.requestId);
     const entryIds = ids(params.entryIds, MAX_BASKET, 1);
-    const requestedGroup = params.groupId === null ? null : id(params.groupId);
-    const payload = operationHash('prepare', requestId, entryIds, requestedGroup);
+    const payload = operationHash('prepare', requestId, entryIds);
     const previous = this.repository.operation(tenant, operationId, payload);
     let manifest: Selection;
     if (previous?.selection_id) {
@@ -248,13 +312,11 @@ export class FileLibrary {
         selected.reduce((sum, entry) => sum + entry.size, 0) > request.limits.maxBatchBytes
       )
         throw new RemoteKitError('limit_exceeded', '文件大小超过限制');
-      const groupId = group(snapshot, requestedGroup);
       manifest = {
         selectionId: randomUUID().replace(/-/g, ''),
         requestId,
         binding: request.binding,
         entryIds,
-        groupId,
         files: selected.map(({ assetId, name, type }) => ({ assetId, name, type })),
         prepared: false,
       };
@@ -353,50 +415,107 @@ export class FileLibrary {
         authorize();
         return snapshot;
       }
-      case 'library.group': {
-        const groupId = params.id === undefined ? undefined : id(params.id),
-          name = groupName(params.name);
+      case 'library.partition': {
+        const partitionId = params.id === undefined ? undefined : id(params.id),
+          name = partitionName(params.name);
         return this.repository.change(
           tenant,
           id(params.operationId),
-          operationHash('group', groupId, name),
+          operationHash('partition', partitionId, name),
           (snapshot) => {
-            if (groupId === undefined) {
-              if (snapshot.groups.length >= MAX_GROUPS)
-                throw new RemoteKitError('limit_exceeded', '分组已达上限');
-              snapshot.groups.push({ id: randomUUID(), name });
+            if (partitionId === undefined) {
+              if (snapshot.partitions.length >= MAX_PARTITIONS)
+                throw new RemoteKitError('limit_exceeded', '分区已达上限');
+              snapshot.partitions.push({ id: randomUUID(), name });
             } else {
-              const item = snapshot.groups.find((entry) => entry.id === groupId);
-              if (!item) throw new RemoteKitError('not_found', '分组不存在');
+              const item = snapshot.partitions.find((entry) => entry.id === partitionId);
+              if (!item) throw new RemoteKitError('not_found', '分区不存在');
               item.name = name;
             }
           },
         );
       }
-      case 'library.move': {
-        const entryIds = ids(params.ids, MAX_CATALOG, 1);
-        const requestedGroup = params.groupId === null ? null : id(params.groupId);
+      case 'library.partitionDelete': {
+        const partitionId = id(params.id);
         return this.repository.change(
           tenant,
           id(params.operationId),
-          operationHash('move', entryIds, requestedGroup),
+          operationHash('partitionDelete', partitionId),
           (snapshot) => {
-            const groupId = group(snapshot, requestedGroup);
-            for (const entry of entries(snapshot, entryIds)) entry.groupId = groupId;
+            partition(snapshot, partitionId);
+            const selected = snapshot.entries.filter((entry) => entry.partitionId === partitionId);
+            this.rejectPending(tenant, selected);
+            for (const entry of selected) entry.partitionId = null;
+            snapshot.partitions = snapshot.partitions.filter((item) => item.id !== partitionId);
+            if (snapshot.basketPartitionId === partitionId) snapshot.basketPartitionId = null;
+            this.repository.prune(tenant, snapshot);
+          },
+        );
+      }
+      case 'library.source': {
+        const source = librarySource(params.source);
+        if (typeof params.excluded !== 'boolean') throw invalid('Invalid source exclusion');
+        const excluded = params.excluded;
+        return this.repository.change(
+          tenant,
+          id(params.operationId),
+          operationHash('source', source, excluded),
+          (snapshot) => {
+            snapshot.excludedSources = snapshot.excludedSources.filter((item) => !sameSource(item, source));
+            if (excluded) snapshot.excludedSources.push(source);
+          },
+        );
+      }
+      case 'library.sourcePurge': {
+        const source = librarySource(params.source);
+        return this.repository.change(
+          tenant,
+          id(params.operationId),
+          operationHash('sourcePurge', source),
+          (snapshot) => {
+            const selected = snapshot.entries.filter((entry) => sameSource(entry.source, source));
+            this.rejectPending(tenant, selected);
+            for (const entry of selected) {
+              entry.source = null;
+              entry.collected = false;
+            }
+            this.repository.prune(tenant, snapshot);
+          },
+        );
+      }
+      case 'library.basketPartition': {
+        const requestedPartition = params.partitionId === null ? null : id(params.partitionId);
+        return this.repository.change(
+          tenant,
+          id(params.operationId),
+          operationHash('basketPartition', requestedPartition),
+          (snapshot) => {
+            snapshot.basketPartitionId = partition(snapshot, requestedPartition);
+          },
+        );
+      }
+      case 'library.move': {
+        const entryIds = ids(params.ids, MAX_CATALOG, 1);
+        const requestedPartition = params.partitionId === null ? null : id(params.partitionId);
+        return this.repository.change(
+          tenant,
+          id(params.operationId),
+          operationHash('move', entryIds, requestedPartition),
+          (snapshot) => {
+            const partitionId = partition(snapshot, requestedPartition);
+            for (const entry of entries(snapshot, entryIds)) entry.partitionId = partitionId;
+            this.repository.prune(tenant, snapshot);
           },
         );
       }
       case 'library.delete': {
-        const entryIds = ids(params.ids, MAX_BASKET, 1);
+        const entryIds = ids(params.ids, MAX_CATALOG, 1);
         const snapshot = this.repository.change(
           tenant,
           id(params.operationId),
           operationHash('delete', entryIds),
           (snapshot) => {
-            entries(snapshot, entryIds);
-            const pending = this.repository.pendingEntries(tenant);
-            if (entryIds.some((entryId) => pending.has(entryId)))
-              throw new RemoteKitError('conflict', '文件选择尚未确认，暂不能删除');
+            this.rejectPending(tenant, entries(snapshot, entryIds));
             const removed = new Set(entryIds);
             snapshot.entries = snapshot.entries.filter((entry) => !removed.has(entry.id));
             snapshot.basket = snapshot.basket.filter((entryId) => !removed.has(entryId));

@@ -1,14 +1,22 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { RemoteKitError } from '../shared/errors';
-import type { Asset, LibrarySnapshot, SelectionState } from '../shared/file-library';
+import type { Asset, LibraryMethods, LibrarySnapshot, SelectionState } from '../shared/file-library';
 import type { CapturedBurst } from '../client/files/camera-capture';
 import { ImportQueue } from '../client/files/import-queue';
 import { LibraryStore, type LibraryRequest } from '../client/files/library-store';
 import { PhotoJobStore } from '../client/files/photo-job-store';
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
-const snapshot = (revision: number): LibrarySnapshot => ({ revision, entries: [], basket: [], groups: [] });
+const snapshot = (revision: number): LibrarySnapshot => ({
+  revision,
+  entries: [],
+  basket: [],
+  partitions: [],
+  sources: [],
+  excludedSources: [],
+  basketPartitionId: null,
+});
 const asset: Asset = { assetId: 'a'.repeat(64), size: 1, type: 'image/png' };
 function libraryPort() {
   return {
@@ -72,7 +80,7 @@ test('claimed cancellation outcomes keep reconciling without resubmitting the na
   const store = new LibraryStore(request, port);
   t.after(store.dispose);
   store.configure(true, true, 'viewer', ['chooser']);
-  await store.select('chooser', ['entry'], null);
+  await store.select('chooser', ['entry']);
   assert.equal(await store.cancelSelection('chooser'), 'unknown');
   assert.equal(store.getSnapshot().cancellations.chooser, 'unknown');
   assert.equal(store.getSnapshot().checkouts.chooser.state, 'unknown');
@@ -101,16 +109,84 @@ test('selected cancellation still finishes the library checkout', async (t) => {
   const store = new LibraryStore(request, port);
   t.after(store.dispose);
   store.configure(true, true, 'viewer', ['chooser']);
-  await store.select('chooser', ['entry'], null);
+  await store.select('chooser', ['entry']);
   assert.equal(await store.cancelSelection('chooser'), 'selected');
   assert.equal(store.getSnapshot().cancellations.chooser, 'selected');
   assert.equal(store.getSnapshot().checkouts.chooser.state, 'selected');
   assert.equal(store.getSnapshot().snapshot?.revision, 2);
 });
 
+test('basket mutations record file usage only after a successful addition in the owning window', async (t) => {
+  let current = snapshot(0);
+  const usage: unknown[] = [];
+  const request = (async (method: string, params: unknown) => {
+    if (method === 'usage.record') {
+      usage.push(params);
+      return {};
+    }
+    if (method === 'library.basket') {
+      const ids = (params as { ids: string[] }).ids;
+      if (ids.includes('fail')) throw new RemoteKitError('conflict', 'changed');
+      current = { ...current, revision: current.revision + 1, basket: ids };
+    }
+    return current;
+  }) as LibraryRequest;
+  const store = new LibraryStore(request, libraryPort());
+  t.after(store.dispose);
+  store.configure(true, true, 'viewer', []);
+  await flush();
+  await store.mutate(
+    'library.basket',
+    { operationId: 'one', expectedRevision: 0, ids: ['a'] },
+    'files-window',
+  );
+  await store.mutate(
+    'library.basket',
+    { operationId: 'two', expectedRevision: 1, ids: ['a', 'b'] },
+    'browser-window',
+  );
+  await store.mutate(
+    'library.basket',
+    { operationId: 'three', expectedRevision: 2, ids: ['b', 'a'] },
+    'files-window',
+  );
+  await assert.rejects(
+    store.mutate(
+      'library.basket',
+      { operationId: 'four', expectedRevision: 3, ids: ['fail'] },
+      'files-window',
+    ),
+  );
+  assert.deepEqual(usage, [
+    { item: 'file:a', windowId: 'files-window' },
+    { item: 'file:b', windowId: 'browser-window' },
+  ]);
+});
+
+test('Files uploads retain the selected partition and upload channel', async () => {
+  const origins: unknown[] = [];
+  const queue = new ImportQueue(
+    {
+      rpc: { uploadAsset: async () => asset },
+      mutate: async (_method, params) => {
+        origins.push(params.origin);
+        return snapshot(1);
+      },
+    },
+    'library',
+  );
+  queue.configure(true, 'viewer');
+  const origin = { kind: 'files' as const, channel: 'upload' as const, partitionId: 'chosen' };
+  queue.enqueue([new File(['a'], 'a.txt')], 0, origin);
+  origin.partitionId = 'elsewhere';
+  await flush();
+  assert.deepEqual(origins, [{ kind: 'files', channel: 'upload', partitionId: 'chosen' }]);
+  queue.dispose();
+});
+
 test('import retry retains the sealed asset and operation identity after a lost mutation response', async () => {
   const uploads: string[] = [];
-  const mutations: { operationId: string; afterId?: string }[] = [];
+  const mutations: LibraryMethods['library.import']['params'][] = [];
   let loseReply = true;
   const queue = new ImportQueue(
     {
@@ -132,8 +208,12 @@ test('import retry retains the sealed asset and operation identity after a lost 
     'basket',
   );
   queue.configure(true, 'scope');
-  queue.enqueue([new File(['a'], 'a.png'), new File(['b'], 'b.png')], 1, true, 'anchor');
-  queue.choose('group');
+  queue.enqueue(
+    [new File(['a'], 'a.png'), new File(['b'], 'b.png')],
+    1,
+    { kind: 'request', requestId: 'chooser' },
+    'anchor',
+  );
   await flush();
   assert.equal(queue.getSnapshot().remaining, 2);
   assert.ok(queue.getSnapshot().error);
@@ -142,6 +222,14 @@ test('import retry retains the sealed asset and operation identity after a lost 
   assert.equal(uploads.length, 2);
   assert.equal(mutations[0].operationId, mutations[1].operationId);
   assert.equal(mutations[2].afterId, 'first');
+  assert.deepEqual(
+    mutations.map((params) => params.origin),
+    [
+      { kind: 'request', requestId: 'chooser' },
+      { kind: 'request', requestId: 'chooser' },
+      { kind: 'request', requestId: 'chooser' },
+    ],
+  );
   queue.dispose();
 });
 
@@ -167,7 +255,7 @@ test('import scope revocation aborts an upload and prevents its late mutation', 
     'library',
   );
   queue.configure(true, 'first');
-  queue.enqueue([new File(['a'], 'a.png')], 0, false);
+  queue.enqueue([new File(['a'], 'a.png')], 0, { kind: 'files', channel: 'upload', partitionId: null });
   queue.configure(true, 'second');
   resolve(asset);
   await flush();
@@ -211,7 +299,10 @@ test('photo retry commits the same mutation without reuploading captured frames'
     },
   });
   store.configure(true, 'viewer');
-  const job = store.reserve({ destination: 'basket', groupId: null }, 'photo')!;
+  const job = store.reserve(
+    { destination: 'basket', origin: { kind: 'request', requestId: 'chooser' } },
+    'photo',
+  )!;
   store.capture(job.id, Promise.resolve(burst));
   await flush();
   assert.equal(store.getSnapshot()[0].state, 'error');
@@ -238,7 +329,10 @@ test('photo scope reset ignores a late capture and publishes immutable job snaps
   });
   store.configure(true, 'first');
   const insertion = { afterId: 'anchor' };
-  const job = store.reserve({ destination: 'basket', groupId: null, insertion }, 'photo')!;
+  const job = store.reserve(
+    { destination: 'basket', origin: { kind: 'request', requestId: 'chooser' }, insertion },
+    'photo',
+  )!;
   assert.ok(Object.isFrozen(store.getSnapshot()[0].insertion));
   assert.equal(Object.isFrozen(insertion), false);
   let resolve!: (burst: CapturedBurst) => void;

@@ -11,9 +11,17 @@ import { TestClock, accountsFor, testGateway } from './server-fixture';
 test('workspace planning is deterministic and leaves its input unchanged', () => {
   const workspace = emptyWorkspace('tenant');
   const before = structuredClone(workspace);
-  const context = { ids: ['window', 'tab'], viewId: '1' };
-  const first = applyCommand(workspace, { type: 'window.create' }, context);
-  const second = applyCommand(workspace, { type: 'window.create' }, context);
+  const context = { ids: ['window', 'space', 'tab'], viewId: '1', now: 1000 };
+  const first = applyCommand(
+    workspace,
+    { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
+    context,
+  );
+  const second = applyCommand(
+    workspace,
+    { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
+    context,
+  );
   assert.deepEqual(workspace, before);
   assert.deepEqual(first, second);
   assert.equal(first.workspace.tabs[0].id, 'tab');

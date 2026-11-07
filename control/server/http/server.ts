@@ -29,24 +29,25 @@ export function createHttp(
   const diagnosticSessions = options.diagnosticDir
     ? new DiagnosticSessions(options.diagnosticDir, {
         control: (tenant) => {
-          const { revision, layoutMode, settings, tabs, windows } =
+          const { revision, spaces, activeSpaceId, settings, tabs, windows } =
             control.store.workspaces.workspace(tenant);
           return {
             revision,
-            layoutMode,
+            spaceCount: spaces.length,
+            activeSpaceId,
             windowCount: windows.length,
             tabCount: tabs.length,
             windows: windows
               .slice(0, 64)
-              .map((window) => ({ weight: window.weight, active: window.activeTabId !== null })),
+              .map((window) => ({ appId: window.appId, active: window.activeTabId !== null })),
             settings: {
-              qualityPreference: settings.qualityPreference,
-              uiScale: settings.uiScale,
-              topDeadZone: settings.topDeadZone,
-              memorySaverEnabled: settings.memorySaverEnabled,
-              autoFullscreen: settings.autoFullscreen,
-              avSync: settings.avSync,
-              audioChannels: settings.audioChannels,
+              qualityPreference: settings.workspace.qualityPreference,
+              uiScale: settings.workspace.uiScale,
+              topDeadZone: settings.workspace.topDeadZone,
+              autoFullscreen: settings.workspace.autoFullscreen,
+              avSync: settings.workspace.avSync,
+              audioChannels: settings.workspace.audioChannels,
+              memorySaverEnabled: settings.browser.memorySaverEnabled,
             },
           };
         },
@@ -81,6 +82,22 @@ export function createHttp(
         token = readToken(req);
       if (path === '/api/auth/setup' && req.method === 'GET')
         return json(res, 200, control.accounts.setupStatus());
+      const appIcon = /^\/api\/apps\/([^/]+)\/icon$/.exec(path);
+      if (appIcon && (req.method === 'GET' || req.method === 'HEAD')) {
+        const identity = control.accounts.identity(token);
+        if (!identity) throw new RemoteKitError('unauthenticated', '请先登录');
+        const icon = control.store.workspaces.items.appIcon(identity.tenantId, appIcon[1]);
+        if (!icon || address.searchParams.get('h') !== icon.hash)
+          throw new RemoteKitError('not_found', '图标不存在');
+        res.writeHead(200, {
+          'Content-Type': 'image/png',
+          'Content-Length': icon.png.length,
+          'Cache-Control': 'private, max-age=31536000, immutable',
+          Vary: 'Cookie',
+        });
+        res.end(req.method === 'HEAD' ? undefined : icon.png);
+        return;
+      }
       const download = /^\/api\/admin\/diagnostics\/([0-9a-f]{64})$/.exec(path);
       if (download && req.method === 'GET') {
         if (!diagnosticSessions) throw new RemoteKitError('not_found', '诊断采集未配置');

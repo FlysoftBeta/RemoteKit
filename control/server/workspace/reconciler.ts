@@ -1,5 +1,7 @@
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import { settle } from './operations';
+import { normalizedUsagePage } from '../navigation-url';
+import { pageUsageIdentity } from './workspace';
 
 import type { ProductTab } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
@@ -19,6 +21,7 @@ export class Reconciler {
       | 'rtc'
       | 'security'
       | 'viewers'
+      | 'workspace'
     >,
   ) {}
   async tick() {
@@ -204,6 +207,28 @@ export class Reconciler {
             t.url = current.url;
             delete t.pendingUrl;
           }
+          const document = pageUsageIdentity(t, current, snapshot.browserIncarnation);
+          if (
+            document &&
+            document !== t.usageDocument &&
+            typeof current.url === 'string' &&
+            normalizedUsagePage(current.url) === normalizedUsagePage(t.url) &&
+            !t.pendingUrl &&
+            (!t.navigation || t.navigation.resolved || !['applying', 'unknown'].includes(t.navigation.status))
+          ) {
+            if (!t.restoring)
+              this.services.workspace.recordPage(state, t, current, snapshot.browserIncarnation);
+            t.usageDocument = document;
+          }
+          if (typeof current.title === 'string') {
+            const url = normalizedUsagePage(t.url);
+            if (url)
+              this.context.store.workspaces.items.updateUsageTitle(
+                tenant,
+                'page:' + url,
+                current.title.slice(0, 120),
+              );
+          }
         }
         if (Number.isInteger(current.actual) && current.actual >= 0 && current.actual <= 3)
           t.residency = (['live', 'frozen', 'discarded', 'unloaded'] as const)[current.actual];
@@ -241,7 +266,9 @@ export class Reconciler {
         }
         const removed =
           (a.type === 'tab.close' && !state.tabs.some((tab) => tab.id === a.tabId)) ||
-          (a.type === 'window.close' && !state.windows.some((window) => window.id === a.windowId));
+          (a.type === 'window.close' && !state.windows.some((window) => window.id === a.windowId)) ||
+          (a.type === 'space.close' && !state.spaces.some((space) => space.id === a.spaceId)) ||
+          (a.type === 'app.uninstall' && !state.apps.some((app) => 'web:' + app.id === a.appId));
         if (removed) {
           settle(pending.receipt, { status: 'committed' });
           delete pending.receipt.application;
@@ -262,7 +289,9 @@ export class Reconciler {
         !viewer?.security?.locked &&
         !!viewer?.viewport?.windows.some((w) => w.windowId === t.windowId && w.visible) &&
         state.windows.some((w) => w.id === t.windowId && w.activeTabId === t.id) &&
-        (state.layoutMode !== 'focused' || t.windowId === state.activeWindowId);
+        state.spaces.some(
+          (space) => space.id === state.activeSpaceId && space.windowIds.includes(t.windowId),
+        );
       const ordered = [...state.tabs]
         .filter((t) => !isLocalTab(t))
         .sort((a, b) => Number(wanted(a)) - Number(wanted(b)));

@@ -213,7 +213,9 @@ export class ViewerHub {
               !!window.activeTabId &&
               !state.tabs.some((tab) => tab.id === window.activeTabId && isLocalTab(tab)),
           ) &&
-          (state.layoutMode !== 'focused' || region.windowId === state.activeWindowId),
+          state.spaces.some(
+            (space) => space.id === state.activeSpaceId && space.windowIds.includes(region.windowId),
+          ),
       );
       const accepted = this.services.policy
         .qualityState(tenant)

@@ -28,8 +28,10 @@ test('TS and C++ share exact packing/allocation fixtures', () => {
 });
 test('axis constraints lower real DPR without shrinking DIP; minimum failure is explicit', () => {
   const state = emptyWorkspace('t');
-  state.settings.qualityPreference = 'quality';
-  state.windows = [{ id: 'w', activeTabId: 't', weight: 1 }];
+  state.settings.workspace.qualityPreference = 'quality';
+  state.windows = [{ id: 'w', appId: 'browser', activeTabId: 't', lastActiveAt: 1 }];
+  state.spaces = [{ id: 'space', windowIds: ['w'], weights: [1], focusedWindowId: 'w', lastActiveAt: 1 }];
+  state.activeSpaceId = 'space';
   const viewport = {
     devicePixelRatio: 4,
     windows: [{ windowId: 'w', width: 8192, height: 400, visible: true }],

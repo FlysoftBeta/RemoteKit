@@ -31,7 +31,7 @@ export class OperationPipeline {
     private readonly context: DomainContext,
     private readonly services: Pick<
       DomainServices,
-      'navigation' | 'pageRequests' | 'policy' | 'reconciler' | 'viewers'
+      'navigation' | 'pageRequests' | 'policy' | 'reconciler' | 'viewers' | 'workspace'
     >,
   ) {}
 
@@ -145,6 +145,8 @@ export class OperationPipeline {
           'tab.command',
           'tab.close',
           'window.close',
+          'space.close',
+          'app.uninstall',
           'page.reply',
           'page.exitFullscreen',
         ].includes(operation.action.type)
@@ -181,7 +183,9 @@ export class OperationPipeline {
             a = operation.action;
           if (
             (a.type === 'tab.close' && !a.cancel && current.tabs.some((tab) => tab.id === a.tabId)) ||
-            (a.type === 'window.close' && current.windows.some((window) => window.id === a.windowId))
+            (a.type === 'window.close' && current.windows.some((window) => window.id === a.windowId)) ||
+            (a.type === 'space.close' && current.spaces.some((space) => space.id === a.spaceId)) ||
+            (a.type === 'app.uninstall' && current.apps.some((app) => 'web:' + app.id === a.appId))
           ) {
             settle(receipt, { status: 'applying' });
             receipt.application = { status: 'pending', reason: '关闭已受理，等待页面确认' };
@@ -233,18 +237,35 @@ export class OperationPipeline {
     receipt?: OperationReceipt,
   ): Promise<ProductActionResult> {
     const runtime = this.context.tenants.get(tenant);
-    const plan = applyCommand(this.context.store.workspaces.workspace(tenant), body, {
+    const before = this.context.store.workspaces.workspace(tenant);
+    const icon =
+      body.type === 'app.install' || body.type === 'app.update'
+        ? this.services.workspace.appIcon(tenant, body.iconToken)
+        : undefined;
+    const plan = applyCommand(before, body, {
       execution,
       browserIncarnation: runtime.browserIncarnation,
-      ids: [randomUUID(), randomUUID()],
-      viewId: ['window.create', 'tab.create', 'tab.files'].includes(body.type)
-        ? this.context.store.workspaces.viewId()
-        : '',
+      ids: [randomUUID(), randomUUID(), randomUUID(), randomUUID()],
+      now: this.context.clock.wallMs(),
+      appIcon: icon,
+      viewId: ['window.open', 'tab.create'].includes(body.type) ? this.context.store.workspaces.viewId() : '',
     });
     const state = plan.workspace;
     let application = plan.application;
     if (receipt && plan.effects.length === 0) settle(receipt, { status: 'committed', application });
-    this.saveWorkspace(state, receipt);
+    this.context.store.transaction(() => {
+      this.services.workspace.recordAction(before, state, body);
+      if (receipt) this.context.store.operations.saveOperation(state, receipt);
+      else this.context.store.workspaces.saveWorkspace(state);
+      if (icon) {
+        const app =
+          body.type === 'app.update'
+            ? state.apps.find((app) => 'web:' + app.id === body.appId)
+            : state.apps.find((app) => !before.apps.some((old) => old.id === app.id));
+        if (app) this.context.store.workspaces.items.setAppIcon(tenant, app.id, icon.png);
+      }
+    });
+    this.services.viewers.push(tenant);
     for (const effect of plan.effects) {
       switch (effect.kind) {
         case 'navigate':
@@ -281,11 +302,13 @@ export class OperationPipeline {
     const action = body as any;
     const closePending =
       (action.type === 'tab.close' && !action.cancel && state.tabs.some((t) => t.id === action.tabId)) ||
-      (action.type === 'window.close' && state.windows.some((w) => w.id === action.windowId));
+      (action.type === 'window.close' && state.windows.some((w) => w.id === action.windowId)) ||
+      (action.type === 'space.close' && state.spaces.some((space) => space.id === action.spaceId)) ||
+      (action.type === 'app.uninstall' && state.apps.some((app) => 'web:' + app.id === action.appId));
     if (receipt && !['tab.navigate', 'tab.command'].includes(action.type) && !closePending)
       settle(receipt, { status: 'committed', application });
     this.saveWorkspace(state, receipt);
-    if (action.type !== 'site.set' || plan.siteUaChanged)
+    if (action.type !== 'window.state' && (action.type !== 'site.set' || plan.siteUaChanged))
       await this.services.reconciler.reconcileProduct(tenant).catch(() => {});
     if (plan.siteUaChanged) {
       const latest = this.context.store.workspaces.workspace(tenant);

@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { FileRequest } from '../../shared/product';
 import type { FileBinding, PageIdentity } from '../endpoint/types';
 import { settle } from './operations';
+import { removeWindow } from './model';
 export type FileLimits = FileRequest['limits'];
 export interface InternalFileRequest extends FileRequest {
   binding: FileBinding;
@@ -79,7 +80,9 @@ export class PageRequests {
       (tab) =>
         !isLocalTab(tab) &&
         workspace.windows.some((window) => window.id === tab.windowId && window.activeTabId === tab.id) &&
-        (workspace.layoutMode !== 'focused' || tab.windowId === workspace.activeWindowId),
+        workspace.spaces.some(
+          (space) => space.id === workspace.activeSpaceId && space.windowIds.includes(tab.windowId),
+        ),
     );
   }
   fullscreenBinding(workspace: ProductWorkspace) {
@@ -113,7 +116,12 @@ export class PageRequests {
     ) {
       const tabs = this.fullscreenTabs(workspace).sort((a, b) => {
         const priority = (tab: ProductTab) =>
-          tab.id === previous?.page.tabId ? 2 : Number(tab.windowId === workspace.activeWindowId);
+          tab.id === previous?.page.tabId
+            ? 2
+            : Number(
+                tab.windowId ===
+                  workspace.spaces.find((space) => space.id === workspace.activeSpaceId)?.focusedWindowId,
+              );
         return priority(b) - priority(a);
       });
       for (const tab of tabs) {
@@ -122,7 +130,8 @@ export class PageRequests {
           view?.fullscreen !== true ||
           view.close_state === 'closed' ||
           (view.visible !== true &&
-            tab.windowId !== workspace.activeWindowId &&
+            tab.windowId !==
+              workspace.spaces.find((space) => space.id === workspace.activeSpaceId)?.focusedWindowId &&
             tab.id !== previous?.page.tabId) ||
           ![view.instance, view.document].every(
             (id) => typeof id === 'string' && /^[1-9][0-9]{0,19}$/.test(id),
@@ -151,6 +160,7 @@ export class PageRequests {
     state.tabs = state.tabs.filter((t) => t.id !== tab.id);
     const w = state.windows.find((w) => w.id === tab.windowId);
     if (w?.activeTabId === tab.id) w.activeTabId = state.tabs.find((t) => t.windowId === w.id)?.id ?? null;
+    if (w?.appId.startsWith('web:')) removeWindow(state, w.id);
     if (state.pendingClose?.id === tab.id) state.pendingClose = null;
     this.services.lifecycle.remove(state.tenantId, tab.webviewId);
   }
@@ -205,6 +215,8 @@ export class PageRequests {
     ) {
       state.pendingClose = null;
       state.pendingWindowCloseId = null;
+      delete state.pendingWindowCloseIds;
+      delete state.pendingAppUninstallId;
       return;
     }
     const request = view?.pending_close?.requestId;
@@ -257,16 +269,54 @@ export class PageRequests {
     else throw new RemoteKitError('conflict', 'Endpoint 尚未确认页面关闭');
   }
   async continueWindowClose(state: ProductWorkspace) {
-    if (!state.pendingWindowCloseId || state.pendingClose) return;
-    const id = state.pendingWindowCloseId;
-    for (const tab of state.tabs.filter((t) => t.windowId === id)) {
-      await this.closeProductTab(state, tab);
-      this.services.operations.saveWorkspace(state);
-      if (state.pendingClose) return;
+    const windowIds = new Set([state.pendingWindowCloseId, ...(state.pendingWindowCloseIds ?? [])]);
+    const spaceIds = new Set(
+      state.spaces
+        .filter((space) => space.windowIds.some((id) => windowIds.has(id)))
+        .map((space) => space.id),
+    );
+    const appId = state.pendingAppUninstallId;
+    try {
+      await this.advanceWindowClose(state);
+    } catch (error) {
+      const failure = toRemoteKitError(error);
+      if (failure.code !== 'outcome_unknown') {
+        state.pendingWindowCloseId = null;
+        delete state.pendingWindowCloseIds;
+        delete state.pendingAppUninstallId;
+        for (const pending of this.context.store.operations.pendingOperations(state.tenantId)) {
+          const action = pending.action;
+          if (
+            (action.type === 'window.close' && windowIds.has(action.windowId)) ||
+            (action.type === 'space.close' && spaceIds.has(action.spaceId)) ||
+            (action.type === 'app.uninstall' && action.appId === 'web:' + appId)
+          ) {
+            settle(pending.receipt, { status: 'rejected', error: failure.message });
+            this.context.store.operations.saveOperation(state, pending.receipt);
+          }
+        }
+        this.services.operations.saveWorkspace(state);
+      }
+      throw error;
     }
-    state.windows = state.windows.filter((w) => w.id !== id);
-    if (state.activeWindowId === id) state.activeWindowId = state.windows[0]?.id ?? null;
-    state.pendingWindowCloseId = null;
+  }
+  private async advanceWindowClose(state: ProductWorkspace) {
+    if (state.pendingClose) return;
+    while (state.pendingWindowCloseId) {
+      const id = state.pendingWindowCloseId;
+      for (const tab of state.tabs.filter((t) => t.windowId === id)) {
+        await this.closeProductTab(state, tab);
+        this.services.operations.saveWorkspace(state);
+        if (state.pendingClose) return;
+      }
+      removeWindow(state, id);
+      state.pendingWindowCloseId = state.pendingWindowCloseIds?.shift() ?? null;
+    }
+    delete state.pendingWindowCloseIds;
+    if (state.pendingAppUninstallId) {
+      state.apps = state.apps.filter((app) => app.id !== state.pendingAppUninstallId);
+      delete state.pendingAppUninstallId;
+    }
   }
   authorizeFiles(tenant: string) {
     const runtime = this.context.tenants.get(tenant);
@@ -466,11 +516,14 @@ export class PageRequests {
       const windowId = state.pendingWindowCloseId;
       state.pendingClose = null;
       state.pendingWindowCloseId = null;
+      delete state.pendingWindowCloseIds;
+      delete state.pendingAppUninstallId;
       for (const saved of this.context.store.operations.pendingOperations(state.tenantId)) {
         if (saved.receipt.operationId === operationId) continue;
         if (
           (saved.action.type === 'tab.close' && saved.action.tabId === tabId) ||
-          (saved.action.type === 'window.close' && saved.action.windowId === windowId)
+          (saved.action.type === 'window.close' && saved.action.windowId === windowId) ||
+          ['space.close', 'app.uninstall'].includes(saved.action.type)
         ) {
           settle(saved.receipt, { status: 'rejected', error: '用户取消关闭' });
           this.context.store.operations.saveOperation(state, saved.receipt);

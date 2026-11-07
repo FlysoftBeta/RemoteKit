@@ -10,9 +10,19 @@ import {
   type ProductActionResult,
   type ProductTab,
   type ProductWorkspace,
+  type InstalledApp,
+  type AppDefinition,
 } from '../../shared/product';
 import { resolveNavigation } from '../navigation-url';
-import { findTab, findWindow, reservesFilesTab, WORKSPACE_LIMITS } from './model';
+import {
+  assertWindowMutable,
+  findTab,
+  findWindow,
+  findSpace,
+  focusWindow,
+  placeWindow,
+  WORKSPACE_LIMITS,
+} from './model';
 import type { ExecutionContext } from './operations';
 import { readClose } from './page-requests';
 export type CommandEffect =
@@ -28,17 +38,23 @@ export interface CommandContext {
   browserIncarnation?: string;
   ids: readonly string[];
   viewId: string;
+  now?: number;
+  appIcon?: { hash: string };
 }
 export function applyCommand(workspace: ProductWorkspace, body: ProductAction, ctx: CommandContext) {
   const state = structuredClone(workspace),
     action = body as any;
   const effects: CommandEffect[] = [];
+  if (action.source !== undefined && action.source !== 'launcher')
+    throw new RemoteKitError('invalid_request', 'Invalid action source');
   let idIndex = 0;
+  const now = ctx.now ?? Date.now();
+  const nextId = () => ctx.ids[idIndex++];
   const tab = () => findTab(state, action.tabId);
   const window = () => findWindow(state, action.windowId);
   const navigationUrl = (value: unknown) => {
     try {
-      return resolveNavigation(value, state.settings.searchEngine);
+      return resolveNavigation(value, state.settings.browser.searchEngine);
     } catch (error) {
       throw new RemoteKitError(
         'invalid_request',
@@ -46,106 +62,216 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       );
     }
   };
-  const createTab = (windowId: string, files = false) => {
+  const createTab = (windowId: string, address: string | undefined = action.url) => {
+    assertWindowMutable(state, windowId);
+    const target = findWindow(state, windowId);
+    if (target.appId !== 'browser' && !target.appId.startsWith('web:'))
+      throw new RemoteKitError('invalid_request', 'This App does not support tabs');
+    if (target.appId.startsWith('web:') && state.tabs.some((tab) => tab.windowId === target.id))
+      throw new RemoteKitError('conflict', 'Web Apps have exactly one tab');
     if (state.tabs.length >= WORKSPACE_LIMITS.tabs)
-      throw new RemoteKitError('limit_exceeded', '最多支持32个标签页');
-    const kind = files ? 'files' : action.url === undefined ? 'start' : 'remote';
+      throw new RemoteKitError('limit_exceeded', 'The workspace supports up to 32 tabs');
+    const kind = address === undefined ? 'start' : 'remote';
     const next: ProductTab = {
-      id: ctx.ids[idIndex++],
+      id: nextId(),
       windowId,
       webviewId: ctx.viewId,
       kind,
-      title: files ? '我的文件' : String(action.title ?? '新标签页').slice(0, 120),
-      url: kind === 'remote' ? navigationUrl(action.url) : '',
+      title: String(action.title ?? 'New tab').slice(0, 120),
+      url: kind === 'remote' ? navigationUrl(address) : '',
+      ...(action.source === 'launcher' ? { usageSource: 'launcher' as const } : {}),
     };
     state.tabs.push(next);
-    state.windows.find((w) => w.id === windowId)!.activeTabId = next.id;
-    state.activeWindowId = windowId;
+    target.activeTabId = next.id;
+    focusWindow(state, windowId, now);
+  };
+  const closeWindows = (ids: string[]) => {
+    if (state.pendingWindowCloseId || state.pendingClose || state.pendingWindowCloseIds?.length)
+      throw new RemoteKitError('conflict', 'Resolve the pending close request first');
+    state.pendingWindowCloseIds = [...ids];
+    state.pendingWindowCloseId = state.pendingWindowCloseIds.shift() ?? null;
+    if (state.pendingWindowCloseId) effects.push({ kind: 'closeWindow' });
+  };
+  const httpUrl = (value: unknown) => {
+    if (typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > 8192)
+      throw new RemoteKitError('invalid_request', 'Invalid URL');
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new RemoteKitError('invalid_request', 'Enter an HTTP or HTTPS URL');
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password)
+      throw new RemoteKitError('invalid_request', 'Enter an HTTP or HTTPS URL');
+    return parsed.href;
+  };
+  const appDefinition = (value: AppDefinition): Omit<InstalledApp, 'id' | 'createdAt' | 'updatedAt'> => {
+    if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 120)
+      throw new RemoteKitError('invalid_request', 'App names must contain 1 to 120 characters');
+    const startUrl = httpUrl(value.startUrl);
+    const scope = httpUrl(value.scope ?? new URL('.', startUrl).href);
+    if (new URL(scope).origin !== new URL(startUrl).origin || !startUrl.startsWith(scope))
+      throw new RemoteKitError('invalid_request', 'The start URL must be within the same-origin scope');
+    if (value.display !== undefined && !['standalone', 'browser'].includes(value.display))
+      throw new RemoteKitError('invalid_request', 'Invalid App display mode');
+    if (value.themeColor !== undefined && !/^#[0-9a-f]{6}$/i.test(value.themeColor))
+      throw new RemoteKitError('invalid_request', 'Theme color must be #rrggbb');
+    return {
+      name: value.name.trim(),
+      startUrl,
+      scope,
+      display: value.display ?? 'standalone',
+      ...(value.themeColor ? { themeColor: value.themeColor.toLowerCase() } : {}),
+    };
+  };
+  const app = () => {
+    const installed = state.apps.find((item) => `web:${item.id}` === action.appId);
+    if (!installed) throw new RemoteKitError('not_found', 'App does not exist');
+    return installed;
   };
   let application: ProductActionResult['application'];
   let siteUaChanged = false;
   switch (action.type) {
-    case 'window.create': {
+    case 'window.open': {
+      if (action.appId === 'settings') {
+        const existing = state.windows.find((window) => window.appId === 'settings');
+        if (existing) {
+          focusWindow(state, existing.id, now);
+          break;
+        }
+      }
+      if (
+        typeof action.appId !== 'string' ||
+        (!['browser', 'files', 'settings'].includes(action.appId) && !action.appId.startsWith('web:'))
+      )
+        throw new RemoteKitError('invalid_request', 'Invalid App');
+      const installed = action.appId.startsWith('web:') ? app() : undefined;
+      if (installed && installed.id === state.pendingAppUninstallId)
+        throw new RemoteKitError('conflict', 'The App is being uninstalled');
       if (state.windows.length >= WORKSPACE_LIMITS.windows)
-        throw new RemoteKitError('limit_exceeded', '最多支持8个窗口');
-      const id = ctx.ids[idIndex++];
-      state.windows.push({ id, activeTabId: null, weight: 1 });
-      createTab(id);
+        throw new RemoteKitError('limit_exceeded', 'The workspace supports up to 12 windows');
+      if (action.url !== undefined && !installed && action.appId !== 'browser')
+        throw new RemoteKitError('invalid_request', 'This App does not support URLs');
+      const id = nextId();
+      state.windows.push({ id, appId: action.appId, activeTabId: null, lastActiveAt: now });
+      placeWindow(state, id, action.placement, nextId(), now);
+      if (installed || action.appId === 'browser') createTab(id, action.url ?? installed?.startUrl);
       break;
     }
-    case 'window.activate':
-      state.activeWindowId = window().id;
+    case 'window.focus':
+      focusWindow(state, window().id, now);
       break;
-    case 'window.layout': {
-      if (!['side-by-side', 'focused'].includes(action.mode))
-        throw new RemoteKitError('invalid_request', '无效的窗口布局');
-      state.layoutMode = action.mode;
-      if (action.weights !== undefined) {
-        if (
-          !Array.isArray(action.weights) ||
-          action.weights.length > 8 ||
-          new Set(action.weights.map((w: any) => w.windowId)).size !== action.weights.length
+    case 'window.place':
+      placeWindow(state, window().id, action.placement, nextId(), now);
+      break;
+    case 'window.state': {
+      const value = action.state;
+      if (
+        !value ||
+        typeof value !== 'object' ||
+        Array.isArray(value) ||
+        Buffer.byteLength(JSON.stringify(value), 'utf8') > 4096
+      )
+        throw new RemoteKitError('invalid_request', 'Window state must be a JSON object of at most 4 KiB');
+      window().state = structuredClone(value);
+      break;
+    }
+    case 'space.activate': {
+      const space = findSpace(state, action.spaceId);
+      if (space.focusedWindowId) focusWindow(state, space.focusedWindowId, now);
+      break;
+    }
+    case 'space.layout': {
+      const space = findSpace(state, action.spaceId);
+      if (
+        !Array.isArray(action.weights) ||
+        action.weights.length !== space.windowIds.length ||
+        action.weights.some(
+          (weight: unknown) => typeof weight !== 'number' || !Number.isFinite(weight) || weight <= 0,
         )
-          throw new RemoteKitError('invalid_request', '无效的窗口比例');
-        for (const entry of action.weights) {
-          const w = state.windows.find((w) => w.id === entry.windowId);
-          if (
-            !w ||
-            typeof entry.weight !== 'number' ||
-            !Number.isFinite(entry.weight) ||
-            entry.weight < 0.1 ||
-            entry.weight > 10
-          )
-            throw new RemoteKitError('invalid_request', '无效的窗口比例');
-          w.weight = entry.weight;
-        }
+      )
+        throw new RemoteKitError('invalid_request', 'Invalid value');
+      const sum = action.weights.reduce((total: number, weight: number) => total + weight, 0);
+      if (!Number.isFinite(sum)) throw new RemoteKitError('invalid_request', 'Invalid value');
+      space.weights = action.weights.map((weight: number) => weight / sum);
+      break;
+    }
+    case 'window.close':
+      closeWindows([window().id]);
+      break;
+    case 'space.close':
+      closeWindows(findSpace(state, action.spaceId).windowIds);
+      break;
+    case 'app.install': {
+      const id = nextId();
+      state.apps.push({
+        id,
+        ...appDefinition(action),
+        createdAt: now,
+        updatedAt: now,
+        ...(ctx.appIcon
+          ? { iconHash: ctx.appIcon.hash, iconUrl: `/api/apps/${id}/icon?h=${ctx.appIcon.hash}` }
+          : {}),
+      });
+      break;
+    }
+    case 'app.update': {
+      const installed = app();
+      Object.assign(installed, appDefinition({ ...installed, ...action }), { updatedAt: now });
+      if (ctx.appIcon) {
+        installed.iconHash = ctx.appIcon.hash;
+        installed.iconUrl = `/api/apps/${installed.id}/icon?h=${ctx.appIcon.hash}`;
       }
       break;
     }
-    case 'window.close': {
-      const w = window();
-      if (state.pendingWindowCloseId && state.pendingWindowCloseId !== w.id)
-        throw new RemoteKitError('conflict', '请先处理当前关闭请求');
-      state.pendingWindowCloseId = w.id;
-      effects.push({ kind: 'closeWindow' });
+    case 'app.uninstall': {
+      const installed = app();
+      const ids = state.windows.filter((window) => window.appId === action.appId).map((window) => window.id);
+      if (ids.length) {
+        closeWindows(ids);
+        state.pendingAppUninstallId = installed.id;
+      } else state.apps = state.apps.filter((item) => item !== installed);
+      break;
+    }
+    case 'favorite.add': {
+      const url = httpUrl(action.url);
+      if (typeof action.title !== 'string' || action.title.length > 512)
+        throw new RemoteKitError('invalid_request', 'Invalid value');
+      const existing = state.favorites.find((favorite) => favorite.url === url);
+      if (existing) existing.title = action.title;
+      else state.favorites.push({ id: nextId(), url, title: action.title, createdAt: now });
+      break;
+    }
+    case 'favorite.remove': {
+      if (!state.favorites.some((favorite) => favorite.id === action.id))
+        throw new RemoteKitError('not_found', 'Item does not exist');
+      state.favorites = state.favorites.filter((favorite) => favorite.id !== action.id);
       break;
     }
     case 'tab.create':
       createTab(window().id);
       break;
-    case 'tab.files': {
-      const target = window(),
-        existing = state.tabs.find((tab) => tab.windowId === target.id && reservesFilesTab(tab));
-      if (existing) {
-        target.activeTabId = existing.id;
-        state.activeWindowId = target.id;
-      } else createTab(target.id, true);
-      break;
-    }
     case 'tab.activate': {
       const t = tab();
-      state.windows.find((w) => w.id === t.windowId)!.activeTabId = t.id;
-      state.activeWindowId = t.windowId;
+      findWindow(state, t.windowId).activeTabId = t.id;
+      focusWindow(state, t.windowId, now);
       break;
     }
     case 'tab.move': {
-      const t = tab(),
-        target = window(),
-        old = state.windows.find((w) => w.id === t.windowId)!;
+      const t = tab();
+      const target = window();
+      const old = findWindow(state, t.windowId);
+      assertWindowMutable(state, old.id);
+      assertWindowMutable(state, target.id);
+      if (old.appId !== 'browser' || target.appId !== 'browser')
+        throw new RemoteKitError('invalid_request', 'Tabs can only move between browser windows');
       if (action.index !== undefined && !(Number.isInteger(action.index) && action.index >= 0))
         throw new RemoteKitError('invalid_request', '无效的标签页位置');
-      if (
-        reservesFilesTab(t) &&
-        state.tabs.some(
-          (other) => other.id !== t.id && other.windowId === target.id && reservesFilesTab(other),
-        )
-      )
-        throw new RemoteKitError('conflict', '目标窗口已打开我的文件');
       placeTab(state.tabs, t.id, target.id, action.index);
       if (old !== target && old.activeTabId === t.id)
         old.activeTabId = state.tabs.find((item) => item.windowId === old.id)?.id ?? null;
       target.activeTabId = t.id;
-      state.activeWindowId = target.id;
+      focusWindow(state, target.id, now);
       break;
     }
     case 'tab.navigate': {
@@ -167,6 +293,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         application = { status: 'pending', reason: '导航已受理，等待页面确认' };
       }
       t.pendingUrl = address;
+      if (action.source === 'launcher') t.usageSource = 'launcher';
       effects.push({ kind: 'navigate', tabId: t.id, url: address, previousKind, ctx: ctx.execution });
       break;
     }
@@ -231,63 +358,87 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         !value ||
         typeof value !== 'object' ||
         Array.isArray(value) ||
-        Object.keys(value).some(
-          (k) =>
+        Object.keys(value).some((key) => !['workspace', 'browser'].includes(key))
+      )
+        throw new RemoteKitError('invalid_request', 'Item does not exist');
+      const browser = value.browser;
+      if (browser !== undefined) {
+        if (
+          !browser ||
+          typeof browser !== 'object' ||
+          Array.isArray(browser) ||
+          Object.keys(browser).some((key) => !['searchEngine', 'memorySaverEnabled'].includes(key))
+        )
+          throw new RemoteKitError('invalid_request', 'Invalid settings');
+        if (
+          'searchEngine' in browser &&
+          !SEARCH_ENGINES.some((engine) => engine.value === browser.searchEngine)
+        )
+          throw new RemoteKitError('invalid_request', 'Invalid value');
+        if ('memorySaverEnabled' in browser && typeof browser.memorySaverEnabled !== 'boolean')
+          throw new RemoteKitError('invalid_request', 'Invalid value');
+        Object.assign(state.settings.browser, browser);
+      }
+      if (value.workspace === undefined) break;
+      const workspaceSettings = value.workspace;
+      if (
+        !workspaceSettings ||
+        typeof workspaceSettings !== 'object' ||
+        Array.isArray(workspaceSettings) ||
+        Object.keys(workspaceSettings).some(
+          (key) =>
             ![
               'qualityPreference',
               'uiScale',
               'topDeadZone',
-              'memorySaverEnabled',
               'showStats',
               'audioChannels',
-              'searchEngine',
               'autoFullscreen',
               'avSync',
-            ].includes(k),
+            ].includes(key),
         )
       )
-        throw new RemoteKitError('invalid_request', '无效的设置');
-      if ('searchEngine' in value && !SEARCH_ENGINES.some((engine) => engine.value === value.searchEngine))
-        throw new RemoteKitError('invalid_request', '无效的搜索引擎');
-      if ('qualityPreference' in value && !['quality', 'auto', 'smooth'].includes(value.qualityPreference))
+        throw new RemoteKitError('invalid_request', 'Invalid settings');
+      if (
+        'qualityPreference' in workspaceSettings &&
+        !['quality', 'auto', 'smooth'].includes(workspaceSettings.qualityPreference)
+      )
         throw new RemoteKitError('invalid_request', '无效的画面质量');
       if (
-        'uiScale' in value &&
-        (typeof value.uiScale !== 'number' ||
-          !Number.isFinite(value.uiScale) ||
-          value.uiScale < UI_SCALE_MIN ||
-          value.uiScale > UI_SCALE_MAX)
+        'uiScale' in workspaceSettings &&
+        (typeof workspaceSettings.uiScale !== 'number' ||
+          !Number.isFinite(workspaceSettings.uiScale) ||
+          workspaceSettings.uiScale < UI_SCALE_MIN ||
+          workspaceSettings.uiScale > UI_SCALE_MAX)
       )
         throw new RemoteKitError('invalid_request', `界面缩放需在 ${UI_SCALE_MIN}–${UI_SCALE_MAX} 之间`);
       if (
-        'topDeadZone' in value &&
-        value.topDeadZone !== 'off' &&
-        value.topDeadZone !== 'auto' &&
-        (typeof value.topDeadZone !== 'number' ||
-          !Number.isInteger(value.topDeadZone) ||
-          value.topDeadZone < 1 ||
-          value.topDeadZone > DEAD_ZONE_MAX)
+        'topDeadZone' in workspaceSettings &&
+        workspaceSettings.topDeadZone !== 'off' &&
+        workspaceSettings.topDeadZone !== 'auto' &&
+        (typeof workspaceSettings.topDeadZone !== 'number' ||
+          !Number.isInteger(workspaceSettings.topDeadZone) ||
+          workspaceSettings.topDeadZone < 1 ||
+          workspaceSettings.topDeadZone > DEAD_ZONE_MAX)
       )
         throw new RemoteKitError('invalid_request', `顶部留空需为 1–${DEAD_ZONE_MAX} px`);
-      if ('memorySaverEnabled' in value && typeof value.memorySaverEnabled !== 'boolean')
-        throw new RemoteKitError('invalid_request', '无效的内存设置');
-      if ('avSync' in value && typeof value.avSync !== 'boolean')
+      if ('avSync' in workspaceSettings && typeof workspaceSettings.avSync !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的音视频同步设置');
-      if ('autoFullscreen' in value && typeof value.autoFullscreen !== 'boolean')
+      if ('autoFullscreen' in workspaceSettings && typeof workspaceSettings.autoFullscreen !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的全屏设置');
       if (
-        'audioChannels' in value &&
-        (!value.audioChannels ||
-          typeof value.audioChannels !== 'object' ||
-          Array.isArray(value.audioChannels) ||
-          Object.keys(value.audioChannels).length !== 2 ||
-          typeof value.audioChannels.left !== 'boolean' ||
-          typeof value.audioChannels.right !== 'boolean')
+        'audioChannels' in workspaceSettings &&
+        (!workspaceSettings.audioChannels ||
+          typeof workspaceSettings.audioChannels !== 'object' ||
+          Array.isArray(workspaceSettings.audioChannels) ||
+          Object.keys(workspaceSettings.audioChannels).length !== 2 ||
+          typeof workspaceSettings.audioChannels.left !== 'boolean' ||
+          typeof workspaceSettings.audioChannels.right !== 'boolean')
       )
         throw new RemoteKitError('invalid_request', '声道设置需同时提供左右开关');
-      if ('showStats' in value && typeof value.showStats !== 'boolean')
+      if ('showStats' in workspaceSettings && typeof workspaceSettings.showStats !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的统计设置');
-      Object.assign(state.settings, value);
+      Object.assign(state.settings.workspace, workspaceSettings);
       break;
     }
     case 'site.set': {

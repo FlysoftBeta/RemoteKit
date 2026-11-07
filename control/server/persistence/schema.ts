@@ -1,7 +1,22 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
+import { migrateLibrarySnapshots } from './library';
 
-const version = 5;
+const version = 6;
+
+function createWorkspaceItems(db: Database.Database) {
+  db.exec(`CREATE TABLE installed_apps (
+      tenant TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL,
+      icon BLOB, icon_hash TEXT, PRIMARY KEY(tenant,id));
+    CREATE TABLE favorites (
+      tenant TEXT NOT NULL, id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL,
+      PRIMARY KEY(tenant,id));
+    CREATE TABLE usage_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, tenant TEXT NOT NULL, at INTEGER NOT NULL,
+      item TEXT NOT NULL, window_id TEXT NOT NULL, context TEXT NOT NULL, chain TEXT NOT NULL, title TEXT);
+    CREATE INDEX usage_events_tenant ON usage_events(tenant,at,id);
+    CREATE INDEX usage_events_context ON usage_events(tenant,window_id,context,at,id);`);
+}
 
 function tableExists(db: Database.Database, name: string) {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
@@ -20,6 +35,90 @@ const migrations: Record<number, (db: Database.Database) => void> = {
       const { clientScaleOverride: _, ...settings } = JSON.parse(row.data) as Record<string, unknown>;
       update.run(JSON.stringify({ ...settings, uiScale: 1, topDeadZone: 'off' }), row.tenant);
     }
+  },
+  5: (db) => {
+    db.exec(`CREATE TABLE workspace_spaces (
+        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE new_workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_space TEXT, pending TEXT);
+      CREATE TABLE new_workspace_windows (
+        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL,
+        app_id TEXT NOT NULL, active_tab TEXT, state TEXT, last_active_at INTEGER NOT NULL);`);
+    const workspaces = db.prepare('SELECT tenant,revision,active_window,pending FROM workspaces').all() as {
+      tenant: string;
+      revision: bigint;
+      active_window: string | null;
+      pending: string | null;
+    }[];
+    const insertWindow = db.prepare('INSERT INTO new_workspace_windows VALUES (?,?,?,?,?,?,?)');
+    const insertSpace = db.prepare('INSERT INTO workspace_spaces VALUES (?,?,?,?)');
+    const removeTab = db.prepare('DELETE FROM workspace_tabs WHERE tenant=? AND id=?');
+    for (const workspace of workspaces) {
+      const windows = db
+        .prepare('SELECT id,position,active_tab FROM workspace_windows WHERE tenant=? ORDER BY position')
+        .all(workspace.tenant) as { id: string; position: bigint; active_tab: string | null }[];
+      const tabs = db
+        .prepare('SELECT id,data FROM workspace_tabs WHERE tenant=? ORDER BY position')
+        .all(workspace.tenant) as {
+        id: string;
+        data: string;
+      }[];
+      const retained = tabs.filter((tab) => {
+        if (JSON.parse(tab.data).kind !== 'files') return true;
+        removeTab.run(workspace.tenant, tab.id);
+        return false;
+      });
+      for (const window of windows) {
+        const activeTab =
+          retained.find((tab) => tab.id === window.active_tab)?.id ??
+          retained.find((tab) => JSON.parse(tab.data).windowId === window.id)?.id ??
+          null;
+        const lastActiveAt = window.id === workspace.active_window ? 1 : 0;
+        insertWindow.run(
+          window.id,
+          workspace.tenant,
+          window.position,
+          'browser',
+          activeTab,
+          null,
+          lastActiveAt,
+        );
+        insertSpace.run(
+          `space:${window.id}`,
+          workspace.tenant,
+          window.position,
+          JSON.stringify({
+            id: `space:${window.id}`,
+            windowIds: [window.id],
+            weights: [1],
+            focusedWindowId: window.id,
+            lastActiveAt,
+          }),
+        );
+      }
+      db.prepare('INSERT INTO new_workspaces VALUES (?,?,?,?)').run(
+        workspace.tenant,
+        workspace.revision,
+        workspace.active_window ? `space:${workspace.active_window}` : null,
+        workspace.pending,
+      );
+    }
+    db.exec(`DROP TABLE workspaces;
+      ALTER TABLE new_workspaces RENAME TO workspaces;
+      DROP TABLE workspace_windows;
+      ALTER TABLE new_workspace_windows RENAME TO workspace_windows;`);
+    const settingsRows = db.prepare('SELECT tenant,data FROM user_settings').all() as {
+      tenant: string;
+      data: string;
+    }[];
+    for (const row of settingsRows) {
+      const { searchEngine, memorySaverEnabled, ...workspace } = JSON.parse(row.data);
+      db.prepare('UPDATE user_settings SET data=? WHERE tenant=?').run(
+        JSON.stringify({ workspace, browser: { searchEngine, memorySaverEnabled } }),
+        row.tenant,
+      );
+    }
+    createWorkspaceItems(db);
+    migrateLibrarySnapshots(db);
   },
 };
 
@@ -49,8 +148,9 @@ export function createSchema(db: Database.Database) {
     db.exec(`CREATE TABLE view_ids (id INTEGER PRIMARY KEY AUTOINCREMENT);
       CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, tenant TEXT NOT NULL UNIQUE, salt TEXT NOT NULL, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, last_login_at INTEGER, disabled_at INTEGER);
       CREATE TABLE auth_tokens (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
-      CREATE TABLE workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_window TEXT, layout_mode TEXT NOT NULL, pending TEXT);
-      CREATE TABLE workspace_windows (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, active_tab TEXT, weight REAL NOT NULL);
+      CREATE TABLE workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_space TEXT, pending TEXT);
+      CREATE TABLE workspace_windows (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, app_id TEXT NOT NULL, active_tab TEXT, state TEXT, last_active_at INTEGER NOT NULL);
+      CREATE TABLE workspace_spaces (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE workspace_tabs (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, window_id TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE user_settings (tenant TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE site_preferences (tenant TEXT NOT NULL, origin TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY(tenant,origin));
@@ -117,6 +217,7 @@ export function createSchema(db: Database.Database) {
         error TEXT, received_at INTEGER NOT NULL, finished_at INTEGER);
       CREATE INDEX session_imports_tenant ON session_imports(tenant,state,received_at);
       CREATE INDEX session_imports_retention ON session_imports(finished_at) WHERE state!='pending';`);
+    createWorkspaceItems(db);
     writeVersion(db);
   })();
 }

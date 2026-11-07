@@ -63,7 +63,7 @@ test('pending trickle offers allow other tenants and bind early candidates to co
     );
     await requestViewer(control, a.tenantId, 'lease-a', 'action', {
       type: 'settings.update',
-      settings: { avSync: true },
+      settings: { workspace: { avSync: true } },
     });
     const events: any[] = [];
     control.events.on('rtc.signal', (...event) => events.push(event));

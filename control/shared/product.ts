@@ -24,16 +24,26 @@ export const UI_SCALE_MAX = 2;
 // clears the title bar, a number is a fixed height in CSS px.
 export type TopDeadZone = 'off' | 'auto' | number;
 export const DEAD_ZONE_MAX = 200;
-export interface ProductSettings {
-  searchEngine: SearchEngine;
+export interface WorkspaceSettings {
   qualityPreference: 'quality' | 'auto' | 'smooth';
   uiScale: number;
   topDeadZone: TopDeadZone;
-  memorySaverEnabled: boolean;
   showStats: boolean;
   autoFullscreen: boolean;
   avSync: boolean;
   audioChannels: { left: boolean; right: boolean };
+}
+export interface BrowserSettings {
+  searchEngine: SearchEngine;
+  memorySaverEnabled: boolean;
+}
+export interface ProductSettings {
+  workspace: WorkspaceSettings;
+  browser: BrowserSettings;
+}
+export interface ProductSettingsUpdate {
+  workspace?: Partial<WorkspaceSettings>;
+  browser?: Partial<BrowserSettings>;
 }
 export interface LifecycleRecovery {
   browserIncarnation: string;
@@ -41,8 +51,8 @@ export interface LifecycleRecovery {
   phase: 'unload' | 'unloaded' | 'restore';
   submittedAt: number;
 }
-export type ProductTabKind = 'start' | 'files' | 'remote';
-export const isLocalTab = (tab: Pick<ProductTab, 'kind'>) => tab.kind === 'start' || tab.kind === 'files';
+export type ProductTabKind = 'start' | 'remote';
+export const isLocalTab = (tab: Pick<ProductTab, 'kind'>) => tab.kind === 'start';
 
 // Tabs keep one workspace-wide order; a window's strip is that order filtered by windowId.
 export function placeTab<T extends { id: string; windowId: string }>(
@@ -67,6 +77,8 @@ export function placeTab<T extends { id: string; windowId: string }>(
   tabs.splice(at, 0, moved);
 }
 export interface ProductTab {
+  usageDocument?: string;
+  usageSource?: 'launcher';
   navigation?: {
     resolved?: boolean;
     browserIncarnation?: string;
@@ -96,7 +108,67 @@ export interface ProductTab {
 export interface ProductWindow {
   id: string;
   activeTabId: string | null;
-  weight: number;
+  appId: string;
+  state?: Record<string, unknown>;
+  lastActiveAt: number;
+}
+export interface ProductSpace {
+  id: string;
+  windowIds: string[];
+  weights: number[];
+  focusedWindowId: string;
+  lastActiveAt: number;
+}
+export interface InstalledApp {
+  id: string;
+  name: string;
+  startUrl: string;
+  scope: string;
+  display: 'standalone' | 'browser';
+  themeColor?: string;
+  iconHash?: string;
+  iconUrl?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface Favorite {
+  id: string;
+  url: string;
+  title: string;
+  createdAt: number;
+}
+export type WindowPlacement =
+  { mode: 'space' } | { mode: 'split'; besideWindowId: string; side: 'left' | 'right' };
+export interface AppDefinition {
+  name: string;
+  startUrl: string;
+  scope?: string;
+  display?: 'standalone' | 'browser';
+  themeColor?: string;
+  iconToken?: string;
+}
+export interface LauncherItem {
+  key: string;
+  kind: 'app' | 'page' | 'file';
+  group: 'frequent' | 'apps' | 'pages' | 'files';
+  score: number;
+  title: string;
+  subtitle?: string;
+  appId?: string;
+  url?: string;
+  entryId?: string;
+  favorite?: boolean;
+  organized?: boolean;
+  themeColor?: string;
+  iconUrl?: string;
+}
+export interface AppInspectResult {
+  name: string;
+  startUrl: string;
+  scope: string;
+  display: 'standalone' | 'browser';
+  themeColor?: string;
+  iconToken?: string;
 }
 /** Browser-local request IDs are never exposed as the user confirmation token. */
 export interface PendingClose {
@@ -118,12 +190,16 @@ export interface ProductWorkspace {
   revision: number;
   tabs: ProductTab[];
   windows: ProductWindow[];
-  activeWindowId: string | null;
-  layoutMode: 'side-by-side' | 'focused';
+  spaces: ProductSpace[];
+  activeSpaceId: string | null;
+  apps: InstalledApp[];
+  favorites: Favorite[];
   settings: ProductSettings;
   sites: Record<string, SitePreferences>;
   pendingClose?: PendingClose | null;
   pendingWindowCloseId?: string | null;
+  pendingWindowCloseIds?: string[];
+  pendingAppUninstallId?: string;
 }
 export interface PageDialog {
   id: string;
@@ -190,7 +266,7 @@ export interface ProductFeedback {
 export interface ProductQuality {
   resourceLimitation: string | null;
   mode: 'product';
-  preference: ProductSettings['qualityPreference'];
+  preference: WorkspaceSettings['qualityPreference'];
   clientScale: number;
   effectiveDpr: number;
   requested: MediaPolicy;
@@ -222,27 +298,32 @@ export interface ProductState {
   integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean };
 }
 export type ProductAction =
-  | { type: 'window.create'; url?: string; title?: string }
-  | { type: 'window.activate' | 'window.close'; windowId: string }
-  | {
-      type: 'window.layout';
-      mode: 'side-by-side' | 'focused';
-      weights?: { windowId: string; weight: number }[];
-    }
-  | { type: 'tab.files'; windowId: string }
-  | { type: 'tab.create'; windowId: string; url?: string; title?: string }
+  | { type: 'window.open'; appId: string; url?: string; placement: WindowPlacement; source?: 'launcher' }
+  | { type: 'window.focus'; windowId: string; source?: 'launcher' }
+  | { type: 'window.place'; windowId: string; placement: WindowPlacement }
+  | { type: 'window.close'; windowId: string }
+  | { type: 'window.state'; windowId: string; state: Record<string, unknown> }
+  | { type: 'space.activate'; spaceId: string; source?: 'launcher' }
+  | { type: 'space.close'; spaceId: string }
+  | { type: 'space.layout'; spaceId: string; weights: number[] }
+  | ({ type: 'app.install' } & AppDefinition)
+  | ({ type: 'app.update'; appId: string } & Partial<AppDefinition>)
+  | { type: 'app.uninstall'; appId: string }
+  | { type: 'favorite.add'; url: string; title: string }
+  | { type: 'favorite.remove'; id: string }
+  | { type: 'tab.create'; windowId: string; url?: string; title?: string; source?: 'launcher' }
   | {
       type: 'tab.activate' | 'tab.close';
       tabId: string;
       requestId?: string;
       confirm?: boolean;
       cancel?: boolean;
+      source?: 'launcher';
     }
-  /** index: position among the target window's tabs; omitted appends. */
   | { type: 'tab.move'; tabId: string; windowId: string; index?: number }
-  | { type: 'tab.navigate'; tabId: string; url: string }
+  | { type: 'tab.navigate'; tabId: string; url: string; source?: 'launcher' }
   | { type: 'tab.command'; tabId: string; command: 'back' | 'forward' | 'reload' | 'stop' }
-  | { type: 'settings.update'; settings: Partial<ProductSettings> }
+  | { type: 'settings.update'; settings: ProductSettingsUpdate }
   | { type: 'page.reply'; dialogId: string; accept: boolean; text?: string }
   | { type: 'page.exitFullscreen'; target: string }
   | ({ type: 'site.set'; origin: string; tabId?: string } & (
@@ -289,7 +370,21 @@ export interface SocketMethods
     params: { operationId: string; operationGeneration: string };
     result: OperationReceipt;
   };
-  action: { params: Extract<ProductAction, { type: 'settings.update' }>; result: ProductActionResult };
+  action: {
+    params: Extract<ProductAction, { type: 'settings.update' | 'window.state' }>;
+    result: ProductActionResult;
+  };
+  'window.state': {
+    params: { windowId: string; state: Record<string, unknown> };
+    result: ProductActionResult;
+  };
+  'usage.record': {
+    params: { item: string; windowId: string; source?: 'launcher' };
+    result: { recorded: boolean };
+  };
+  'usage.clear': { params: { scope: 'all' | 'pages' }; result: { cleared: boolean } };
+  'launcher.get': { params: { query?: string }; result: { items: LauncherItem[] } };
+  'app.inspect': { params: { tabId: string }; result: AppInspectResult };
   viewport: { params: ViewerViewport; result: ProductState };
   feedback: { params: ProductFeedback; result: { accepted: boolean } };
   'rtc.offer': {

@@ -8,6 +8,27 @@ const searchUrls: Record<SearchEngine, string> = {
   baidu: 'https://www.baidu.com/s?wd=',
 };
 
+export function normalizedUsagePage(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
+  for (const template of Object.values(searchUrls)) {
+    const search = new URL(template);
+    if (
+      url.origin === search.origin &&
+      url.pathname === search.pathname &&
+      [...search.searchParams.keys()].some((key) => url.searchParams.has(key))
+    )
+      return null;
+  }
+  url.hash = '';
+  return url.href;
+}
+
 /** User text is resolved only here, shared by address-bar and start-page actions. */
 export function resolveNavigation(value: unknown, engine: SearchEngine): string {
   const url = resolveInput(value, engine);

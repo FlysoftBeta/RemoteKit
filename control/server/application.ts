@@ -25,6 +25,7 @@ import { PageRequests, type FileLimits } from './workspace/page-requests';
 import { Popups } from './workspace/popups';
 import { Reconciler } from './workspace/reconciler';
 import { SitePolicy } from './workspace/site-policy';
+import { Workspace } from './workspace/workspace';
 
 export interface DomainContext {
   store: ControlDatabase;
@@ -53,6 +54,7 @@ export interface DomainServices extends DomainContext {
   policy: SitePolicy;
   security: ViewerSecurity;
   library: FileLibrary;
+  workspace: Workspace;
   accounts: AccountService;
   close(): Promise<void>;
 }
@@ -103,7 +105,14 @@ export function createApplication(
   services.policy = new SitePolicy(context);
   services.accounts = new AccountService(store);
   services.userAdmin = new UserAdmin(context, services);
-  services.library = new FileLibrary(store.library, endpoint, fileLimits, services.objects);
+  services.workspace = new Workspace(context, services);
+  services.library = new FileLibrary(
+    store.library,
+    endpoint,
+    fileLimits,
+    services.objects,
+    (tenant, requestId) => services.workspace.fileSourceForRequest(tenant, requestId),
+  );
   services.security = new ViewerSecurity(
     store,
     endpoint,

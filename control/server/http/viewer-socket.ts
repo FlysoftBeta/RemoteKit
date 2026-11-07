@@ -64,10 +64,29 @@ const handlers: Record<string, Handler> = {
     services.operations.operationStatus(authority.tenantId, params),
   ),
   action: product(({ services, authority }, params) => {
-    if (params.type !== 'settings.update')
+    if (!['settings.update', 'window.state'].includes(params.type))
       throw new RemoteKitError('invalid_request', '产品操作必须通过WebRTC数据通道');
     return services.operations.productAction(authority.tenantId, params, authority.leaseId);
   }),
+  'window.state': product(({ services, authority }, params) =>
+    services.operations.productAction(
+      authority.tenantId,
+      { ...params, type: 'window.state' },
+      authority.leaseId,
+    ),
+  ),
+  'usage.record': product(({ services, authority }, params) =>
+    services.workspace.recordFile(authority.tenantId, params),
+  ),
+  'usage.clear': product(({ services, authority }, params) =>
+    services.workspace.clearUsage(authority.tenantId, params.scope),
+  ),
+  'launcher.get': product(({ services, authority }, params) =>
+    services.workspace.launcher(authority.tenantId, params.query),
+  ),
+  'app.inspect': product(({ services, authority }, params) =>
+    services.workspace.inspect(authority.tenantId, params.tabId),
+  ),
   viewport: product(({ services, authority }, params) =>
     services.viewers.viewport(authority.tenantId, params, authority.leaseId, authority.epoch),
   ),
@@ -189,7 +208,11 @@ for (const method of [
   'library.prepare',
   'library.finish',
   'library.basket',
-  'library.group',
+  'library.partition',
+  'library.partitionDelete',
+  'library.source',
+  'library.sourcePurge',
+  'library.basketPartition',
   'library.move',
   'library.delete',
 ])
