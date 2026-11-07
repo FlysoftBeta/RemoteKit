@@ -6,6 +6,8 @@
 #include "media/presentation.hpp"
 #include "input/input.hpp"
 #include "session/session.hpp"
+#include "management/methods.hpp"
+#include "persistence/session_store.hpp"
 #include <cstdlib>
 #include <iostream>
 #include <vector>
@@ -264,6 +266,17 @@ void SessionManagementRequests() {
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
                   cluster::Key{}, link, objects, objects::Keys{});
+  const auto session_directory = parsed.value().data / "sessions" / session.Id();
+  fs::create_directories(session_directory);
+  CHECK(SessionStore(session_directory).Save("views.json", Json::array({Json{{"viewId", "1"}}})));
+  CHECK(session.Views().Initialize());
+  auto app_info = ManagementMethods::Find("view.appInfo");
+  CHECK(app_info);
+  const auto unknown_view = app_info(session, {{"viewId", "2"}});
+  CHECK(!unknown_view && unknown_view.error().code == ErrorCode::kNotFound);
+  const auto offline_view = app_info(session, {{"viewId", "1"}});
+  CHECK(!offline_view && offline_view.error().code == ErrorCode::kUnavailable);
+  CHECK(!session.Snapshot().value().at("running").get<bool>());
   for (const auto* field : {"cookies", "localStorage"}) {
     for (const auto& invalid : {Json(), Json(0), Json("array"), Json::object()}) {
       Json request = {{"cookies", Json::array()}, {"localStorage", Json::array()}};

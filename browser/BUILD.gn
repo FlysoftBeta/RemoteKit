@@ -25,6 +25,7 @@ executable("remotekit_browser") {
     "compat.h",
     "compat_renderer.cc",
     "compat_renderer.h",
+    "control_app_info.cc",
     "control_dispatcher.cc",
     "control_dispatcher.h",
     "control_input.cc",
@@ -136,6 +137,7 @@ executable("remotekit_browser") {
     "//mojo/public/cpp/system",
     "//net",
     "//sandbox",
+    "//skia",
     "//services/network/public/cpp",
     "//services/network/public/mojom",
     "//services/viz/privileged/mojom/compositing",
@@ -150,6 +152,7 @@ executable("remotekit_browser") {
     "//ui/events/blink",
     "//ui/events/platform",
     "//ui/gfx",
+    "//ui/gfx/codec",
     "//url",
     "//v8",
   ]

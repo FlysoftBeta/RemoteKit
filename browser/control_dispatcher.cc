@@ -17,13 +17,29 @@ base::DictValue Invoke(ControlDispatcher& dispatcher,
   return (dispatcher.*Handle)(decoded.value).TakeFields();
 }
 }  // namespace
-base::DictValue ControlDispatcher::Dispatch(const base::DictValue& request) {
+void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
   const auto id = request.FindInt("id").value_or(0);
   const auto* name = request.FindString("method");
-  if (runtime_.shutting_down && (!name || *name != protocol::kBrowserShutdown))
-    return ControlResult::Failure(id, ErrorCode::unavailable, "Browser shutdown started");
-  if (id <= 0 || request.FindInt("version") != protocol::kControlVersion || !name)
-    return ControlResult::Failure(id, ErrorCode::invalid_request, "Invalid control envelope");
+  if (runtime_.shutting_down && (!name || *name != protocol::kBrowserShutdown)) {
+    std::move(reply).Run(
+        ControlResult::Failure(id, ErrorCode::unavailable, "Browser shutdown started"));
+    return;
+  }
+  if (id <= 0 || request.FindInt("version") != protocol::kControlVersion || !name) {
+    std::move(reply).Run(
+        ControlResult::Failure(id, ErrorCode::invalid_request, "Invalid control envelope"));
+    return;
+  }
+  if (*name == protocol::kViewAppInfo) {
+    auto decoded = DecodeAppInfo(request, {id, protocol::kViewAppInfo});
+    if (!decoded) {
+      std::move(reply).Run(
+          ControlResult::Failure(id, decoded.status.error, decoded.status.message));
+      return;
+    }
+    HandleAppInfo(decoded.value, std::move(reply));
+    return;
+  }
   struct Method {
     std::string_view name;
     base::DictValue (*handler)(ControlDispatcher&, const base::DictValue&, RequestEnvelope);
@@ -104,9 +120,13 @@ base::DictValue ControlDispatcher::Dispatch(const base::DictValue& request) {
        &Invoke<LifecycleControlRequest, DecodeLifecycle, &ControlDispatcher::HandleLifecycle>},
       {"input", &Invoke<InputRequest, DecodeInput, &ControlDispatcher::HandleInput>},
   };
-  for (const auto& method : methods)
-    if (method.name == *name)
-      return method.handler(*this, request, {id, method.name});
-  return ControlResult::Failure(id, ErrorCode::unsupported, "Unknown control method");
+  for (const auto& method : methods) {
+    if (method.name == *name) {
+      std::move(reply).Run(method.handler(*this, request, {id, method.name}));
+      return;
+    }
+  }
+  std::move(reply).Run(
+      ControlResult::Failure(id, ErrorCode::unsupported, "Unknown control method"));
 }
 }  // namespace remotekit::browser

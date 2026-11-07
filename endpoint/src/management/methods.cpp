@@ -105,6 +105,10 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Views().ManageViewEnsure(request);
        }},
+      {"view.appInfo",
+       [](Session& session, const Json& request) -> Result<Json> {
+         return session.Views().ManageViewAppInfo(request);
+       }},
       {"view.close",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Views().ManageViewClose(request);

@@ -63,6 +63,7 @@ class ViewController : private ControllerContext {
   Result<Json> ManageSessionSitePreferences(const Json& request);
   Result<Json> ManageViewNavigationAck(const Json& request);
   Result<Json> ManageViewEnsure(const Json& request);
+  Result<Json> ManageViewAppInfo(const Json& request);
   Result<Json> ManageViewClose(const Json& request);
   Result<Json> ManageViewCloseReply(const Json& request);
   Result<Json> ManageViewPageReply(const Json& request);

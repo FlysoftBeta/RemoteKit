@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include "base/functional/callback.h"
+#include "base/memory/weak_ptr.h"
 #include "base/values.h"
 #include "mojo/public/cpp/platform/named_platform_channel.h"
 #include "mojo/public/cpp/system/isolated_connection.h"
@@ -11,7 +12,8 @@ namespace remotekit::browser {
 // One local testing client. Both processes retain their own Mojo process graph.
 class ControlServer final {
  public:
-  using Handler = base::RepeatingCallback<base::DictValue(const base::DictValue&)>;
+  using Handler = base::RepeatingCallback<void(const base::DictValue&,
+                                               base::OnceCallback<void(base::DictValue)>)>;
   using AttachmentProvider =
       base::RepeatingCallback<mojo::ScopedMessagePipeHandle(const base::DictValue&,
                                                             const base::DictValue&)>;
@@ -23,6 +25,7 @@ class ControlServer final {
 
  private:
   void OnReadable(MojoResult result);
+  void SendReply(base::DictValue request, base::DictValue reply);
   void Close();
   Handler handler_;
   AttachmentProvider attachment_provider_;
@@ -31,5 +34,6 @@ class ControlServer final {
   mojo::IsolatedConnection connection_;
   mojo::ScopedMessagePipeHandle pipe_;
   mojo::SimpleWatcher watcher_;
+  base::WeakPtrFactory<ControlServer> weak_factory_{this};
 };
 }  // namespace remotekit::browser

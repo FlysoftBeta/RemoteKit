@@ -30,6 +30,7 @@ ControlServer::~ControlServer() {
   Close();
 }
 void ControlServer::Close() {
+  weak_factory_.InvalidateWeakPtrs();
   watcher_.Cancel();
   pipe_.reset();
   if (disconnected_)
@@ -52,44 +53,46 @@ void ControlServer::OnReadable(MojoResult result) {
     }
     const std::string request(data.begin(), data.end());
     auto parsed = base::JSONReader::ReadDict(request, base::JSON_PARSE_RFC, 32);
-    base::DictValue reply;
     if (!parsed) {
-      reply =
-          ControlResult::Failure(0, protocol::ErrorCode::invalid_request, "Invalid control JSON");
+      SendReply({}, ControlResult::Failure(0, protocol::ErrorCode::invalid_request,
+                                           "Invalid control JSON"));
     } else {
-      reply = handler_.Run(*parsed);
+      auto application_request = parsed->Clone();
+      handler_.Run(*parsed, base::BindOnce(&ControlServer::SendReply, weak_factory_.GetWeakPtr(),
+                                           std::move(application_request)));
     }
-    const base::DictValue invalid_request;
-    const auto& application_request = parsed ? *parsed : invalid_request;
-    if (!WriteControlResponse(
-            application_request, reply,
-            base::BindRepeating(
-                [](ControlServer* server, const base::DictValue* request,
-                   const base::DictValue* response, std::string_view encoded, bool original_reply) {
-                  mojo::ScopedMessagePipeHandle endpoint;
-                  if (ShouldAttachRenderEndpoint(*request, *response, original_reply)) {
-                    if (!server->attachment_provider_)
-                      return false;
-                    endpoint = server->attachment_provider_.Run(*request, *response);
-                    if (!endpoint.is_valid())
-                      return false;
-                  }
-                  const MojoHandle attached = endpoint.get().value();
-                  const auto result = mojo::WriteMessageRaw(
-                      server->pipe_.get(), encoded.data(), encoded.size(),
-                      endpoint.is_valid() ? &attached : nullptr, endpoint.is_valid() ? 1 : 0,
-                      MOJO_WRITE_MESSAGE_FLAG_NONE);
-                  // Mojo consumes attached handles only on a successful write.
-                  // Failure destroys the local endpoint, then Close stops output.
-                  if (result == MOJO_RESULT_OK && endpoint.is_valid())
-                    (void)endpoint.release();
-                  return result == MOJO_RESULT_OK;
-                },
-                base::Unretained(this), base::Unretained(&application_request),
-                base::Unretained(&reply)))) {
-      Close();
+    if (!pipe_.is_valid())
       return;
-    }
+  }
+}
+void ControlServer::SendReply(base::DictValue application_request, base::DictValue reply) {
+  if (!WriteControlResponse(
+          application_request, reply,
+          base::BindRepeating(
+              [](ControlServer* server, const base::DictValue* request,
+                 const base::DictValue* response, std::string_view encoded, bool original_reply) {
+                mojo::ScopedMessagePipeHandle endpoint;
+                if (ShouldAttachRenderEndpoint(*request, *response, original_reply)) {
+                  if (!server->attachment_provider_)
+                    return false;
+                  endpoint = server->attachment_provider_.Run(*request, *response);
+                  if (!endpoint.is_valid())
+                    return false;
+                }
+                const MojoHandle attached = endpoint.get().value();
+                const auto result = mojo::WriteMessageRaw(
+                    server->pipe_.get(), encoded.data(), encoded.size(),
+                    endpoint.is_valid() ? &attached : nullptr, endpoint.is_valid() ? 1 : 0,
+                    MOJO_WRITE_MESSAGE_FLAG_NONE);
+                // Mojo consumes attached handles only on a successful write.
+                // Failure destroys the local endpoint, then Close stops output.
+                if (result == MOJO_RESULT_OK && endpoint.is_valid())
+                  (void)endpoint.release();
+                return result == MOJO_RESULT_OK;
+              },
+              base::Unretained(this), base::Unretained(&application_request),
+              base::Unretained(&reply)))) {
+    Close();
   }
 }
 }  // namespace remotekit::browser

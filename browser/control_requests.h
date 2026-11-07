@@ -15,6 +15,10 @@ struct RequestEnvelope {
 struct ShutdownRequest : RequestEnvelope {};
 struct StorageScavengeRequest : RequestEnvelope {};
 struct IdentityRequest : RequestEnvelope {};
+struct AppInfoRequest : RequestEnvelope {
+  SessionId session = 0;
+  WebViewId view = 0;
+};
 struct StorageImportRequest : RequestEnvelope {
   StorageImportData data;
 };
@@ -230,6 +234,7 @@ Result<std::optional<NavigationOperations::Identity>> DecodeNavigationOperation(
 
 Result<ShutdownRequest> DecodeShutdown(const base::DictValue& wire, RequestEnvelope envelope);
 Result<IdentityRequest> DecodeIdentity(const base::DictValue& wire, RequestEnvelope envelope);
+Result<AppInfoRequest> DecodeAppInfo(const base::DictValue& wire, RequestEnvelope envelope);
 Result<StorageImportRequest> DecodeStorageImport(const base::DictValue& wire,
                                                  RequestEnvelope envelope);
 Result<StorageImportStatusRequest> DecodeStorageImportStatus(const base::DictValue& wire,

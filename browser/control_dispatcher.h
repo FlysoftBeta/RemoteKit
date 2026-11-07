@@ -1,4 +1,6 @@
 #pragma once
+#include "base/functional/callback.h"
+#include "base/memory/weak_ptr.h"
 #include "base/values.h"
 namespace remotekit::browser {
 class BrowserRuntime;
@@ -23,6 +25,7 @@ struct RecreateViewRequest;
 struct ConfigureViewRequest;
 struct ProfileCommandRequest;
 struct PageControlRequest;
+struct AppInfoRequest;
 struct ExitFullscreenRequest;
 struct NavigationTransferRequest;
 struct FocusRequest;
@@ -33,7 +36,9 @@ struct InputRequest;
 class ControlDispatcher {
  public:
   explicit ControlDispatcher(BrowserRuntime& runtime) : runtime_(runtime) {}
-  base::DictValue Dispatch(const base::DictValue&);
+  using Reply = base::OnceCallback<void(base::DictValue)>;
+  void Dispatch(const base::DictValue&, Reply);
+  void HandleAppInfo(const AppInfoRequest&, Reply);
   ControlResult HandleShutdown(const ShutdownRequest&);
   ControlResult HandleIdentity(const IdentityRequest&);
   ControlResult HandleStorageImport(const StorageImportRequest&);
@@ -64,5 +69,6 @@ class ControlDispatcher {
 
  private:
   BrowserRuntime& runtime_;
+  base::WeakPtrFactory<ControlDispatcher> weak_factory_{this};
 };
 }  // namespace remotekit::browser

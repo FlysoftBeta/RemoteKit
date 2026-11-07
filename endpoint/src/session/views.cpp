@@ -790,6 +790,22 @@ Result<Json> ViewController::ManageViewCloseReply(const Json& request) {
   return Json{{"accepted", true}, {"browser", result}};
 }
 
+Result<Json> ViewController::ManageViewAppInfo(const Json& request) {
+  const auto view = ViewId(request);
+  if (!desired.contains(view))
+    return Error{ErrorCode::kNotFound, "view not found"};
+  if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping() ||
+      navigation.Recovering(view))
+    return Error{ErrorCode::kUnavailable, "view is not live"};
+  auto reply =
+      browser.Rpc().Request({{"method", protocol::kViewAppInfo}, {"session", id}, {"view", view}});
+  if (!reply)
+    return reply.error();
+  if (!reply.value().contains("appInfo") || !reply.value()["appInfo"].is_object())
+    return Error{ErrorCode::kInternal, "browser appInfo response missing"};
+  return std::move(reply).value()["appInfo"];
+}
+
 Result<Json> ViewController::ManageViewPageReply(const Json& request) {
   auto prepare_view_command_result_4 = PrepareViewCommand(request, Required(request, "method"));
   if (!prepare_view_command_result_4)
