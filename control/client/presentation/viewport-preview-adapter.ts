@@ -208,7 +208,7 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
         offsetLeft: visual.offsetLeft,
         offsetTop: visual.offsetTop,
       };
-      const bounds =
+      const seen =
         inViewer || !vv
           ? { left: content.left, top: content.top, width: content.width, height: content.height }
           : {
@@ -216,9 +216,18 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
               left: Math.max(content.left, vv.offsetLeft),
               top: Math.max(content.top, vv.offsetTop),
             };
+      // Client rects are visual px; surfaces and element styles use layout px, which differ by the
+      // Viewer's UI scale transform.
+      const scale = parent.offsetWidth ? content.width / parent.offsetWidth : 1;
+      const bounds = {
+        left: seen.left / scale,
+        top: seen.top / scale,
+        width: seen.width / scale,
+        height: seen.height / scale,
+      };
       const next = {
-        left: bounds.left - content.left,
-        top: bounds.top - content.top,
+        left: (seen.left - content.left) / scale,
+        top: (seen.top - content.top) / scale,
         width: bounds.width,
         height: bounds.height,
       };

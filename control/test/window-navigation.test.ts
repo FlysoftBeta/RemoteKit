@@ -49,7 +49,6 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
     endpointError: null,
     viewer: { connected: true },
     integrations: { siteUa: false, lifecycle: false, popupAdoption: false },
-    constraints: { clientScaleMin: 1, clientScaleMax: 2 },
   };
 }
 

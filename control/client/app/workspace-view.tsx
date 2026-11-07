@@ -22,6 +22,8 @@ import { DiagnosticCollectionView, DiagnosticSettings } from './diagnostic-colle
 import { FileChooserDialog } from '../files/file-chooser-dialog';
 import { FloatingActions, FloatingActionsContext, useFloatingAction } from './floating-actions';
 import { FloatingDock } from './floating-dock';
+import { deadZoneHeight, useTopInsetProbe } from './top-inset';
+import { setUiScale } from './ui-scale';
 import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../files/file-library-state';
 import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import type { AudioChannels } from '../media/audio-output';
@@ -90,23 +92,34 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     if (status === 'expired') expired();
   }, [status, expired]);
   useAutoFullscreen(showShell && state.workspace.settings.autoFullscreen === true);
+  const scale = state?.workspace.settings.uiScale ?? 1;
+  const insets = useTopInsetProbe();
+  const deadZone = deadZoneHeight(state?.workspace.settings.topDeadZone ?? 'off', insets);
+  useLayoutEffect(() => {
+    setUiScale(scale);
+  }, [scale]);
+  useLayoutEffect(() => () => setUiScale(1), []);
   useLayoutEffect(() => {
     const node = shell.current;
     if (!showShell || !node) return;
     const visual = window.visualViewport;
+    // The shell follows the visual viewport below the dead zone. Under the scaled root its box is
+    // in layout px (visual / scale); remote pages get layout px at devicePixelRatio × scale.
     const position = () => {
-      node.style.left = `${visual?.offsetLeft ?? 0}px`;
-      node.style.top = `${visual?.offsetTop ?? 0}px`;
+      node.style.left = `${(visual?.offsetLeft ?? 0) / scale}px`;
+      node.style.top = `${((visual?.offsetTop ?? 0) + deadZone) / scale}px`;
     };
     const measure = () => {
-      node.style.width = `${visual?.width ?? document.documentElement.clientWidth}px`;
-      node.style.height = `${visual?.height ?? document.documentElement.clientHeight}px`;
-      const bounds = node.getBoundingClientRect();
-      setWidth(bounds.width);
+      const width = (visual?.width ?? document.documentElement.clientWidth) / scale;
+      const height =
+        Math.max(1, (visual?.height ?? document.documentElement.clientHeight) - deadZone) / scale;
+      node.style.width = `${width}px`;
+      node.style.height = `${height}px`;
+      setWidth(width);
       media.viewport.measure(
-        bounds.width,
-        bounds.height,
-        window.devicePixelRatio || 1,
+        width,
+        height,
+        (window.devicePixelRatio || 1) * scale,
         document.visibilityState !== 'hidden',
       );
       position();
@@ -125,7 +138,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
       window.removeEventListener('resize', measure);
       document.removeEventListener('visibilitychange', measure);
     };
-  }, [showShell, media]);
+  }, [showShell, media, scale, deadZone]);
   const onGeometry = media.viewport.setGeometry;
   const action: Action = media.operations.action;
   const report = media.workspace.report;
@@ -283,6 +296,13 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
   return (
     <FileLibraryContext.Provider value={library}>
       <FloatingActionsContext.Provider value={floatingActions}>
+        {deadZone > 0 && (
+          <div
+            className={`viewer-dead-zone${fullscreen ? ' fullscreen' : ''}`}
+            style={{ height: deadZone / scale }}
+            aria-hidden
+          />
+        )}
         <main
           className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}`}
           ref={shell}

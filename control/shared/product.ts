@@ -17,10 +17,18 @@ export const SEARCH_ENGINES: { value: SearchEngine; label: string }[] = [
   { value: 'duckduckgo', label: 'DuckDuckGo' },
   { value: 'baidu', label: '百度' },
 ];
+// App-wide zoom of the Viewer shell and remote pages together; streaming stays at native pixels.
+export const UI_SCALE_MIN = 0.5;
+export const UI_SCALE_MAX = 2;
+// A reserved strip above the Viewer, never smaller than the safe area: off adds nothing, auto also
+// clears the title bar, a number is a fixed height in CSS px.
+export type TopDeadZone = 'off' | 'auto' | number;
+export const DEAD_ZONE_MAX = 200;
 export interface ProductSettings {
   searchEngine: SearchEngine;
   qualityPreference: 'quality' | 'auto' | 'smooth';
-  clientScaleOverride: number | null;
+  uiScale: number;
+  topDeadZone: TopDeadZone;
   memorySaverEnabled: boolean;
   showStats: boolean;
   autoFullscreen: boolean;
@@ -189,7 +197,6 @@ export interface ProductState {
   endpointError: string | null;
   viewer: { connected: boolean };
   integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean };
-  constraints: { clientScaleMin: number; clientScaleMax: number };
 }
 export type ProductAction =
   | { type: 'window.create'; url?: string; title?: string }

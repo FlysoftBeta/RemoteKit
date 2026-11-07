@@ -195,7 +195,7 @@ async (hostPage) => {
           const qa = window.touchQA;
           await qa.rpc('action', {
             type: 'settings.update',
-            settings: { clientScaleOverride: dpr, qualityPreference: dpr === 2 ? 'quality' : 'smooth' },
+            settings: { qualityPreference: dpr === 2 ? 'quality' : 'smooth' },
           });
           await qa.action({ type: 'tab.navigate', tabId, url: fixture + '/fixture?case=' + id });
         },

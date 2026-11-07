@@ -17,7 +17,6 @@ import {
   MenuItem,
   TextField,
   Typography,
-  useMediaQuery,
 } from '@mui/material';
 import { useEffect, useRef, useState } from 'react';
 import type { LibraryEntry, LibraryGroup } from '../../shared/file-library';
@@ -40,6 +39,7 @@ import { FileThumbnail } from './file-thumbnail';
 import { FileViewButton, useFileView } from './file-view';
 import { PhotoCapture } from './photo-library-capture';
 import { PhotoOptions } from './photo-options';
+import { scaledAnchor, useLayoutNarrow } from '../app/ui-scale';
 
 const PAGE_SIZE = 50;
 const dates = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' });
@@ -89,7 +89,7 @@ export function MyFiles({ visible }: { visible: boolean }) {
     else days.set(key, [entry]);
   }
   const disabled = !online || busy || uploading || !snapshot;
-  const systemNarrow = useMediaQuery('(max-width:599px)');
+  const systemNarrow = useLayoutNarrow();
   useEffect(() => {
     if (online && visible) void refresh().catch((error) => diagnostics.record('my-files', error));
   }, [online, visible]);
@@ -545,7 +545,7 @@ export function MyFiles({ visible }: { visible: boolean }) {
       {visible && showBasket && <FileBasketDialog onClose={() => setShowBasket(false)} />}
       {visible && (
         <Menu
-          anchorEl={cardMenu?.anchor}
+          anchorEl={scaledAnchor(cardMenu?.anchor)}
           open={!!menuEntry && !disabled}
           onClose={() => setCardMenu(undefined)}
         >

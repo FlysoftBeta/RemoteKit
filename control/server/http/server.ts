@@ -41,7 +41,8 @@ export function createHttp(
               .map((window) => ({ weight: window.weight, active: window.activeTabId !== null })),
             settings: {
               qualityPreference: settings.qualityPreference,
-              clientScaleOverride: settings.clientScaleOverride,
+              uiScale: settings.uiScale,
+              topDeadZone: settings.topDeadZone,
               memorySaverEnabled: settings.memorySaverEnabled,
               autoFullscreen: settings.autoFullscreen,
               avSync: settings.avSync,

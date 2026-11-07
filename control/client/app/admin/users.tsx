@@ -1,5 +1,6 @@
 import Add from '@mui/icons-material/Add';
 import MoreVert from '@mui/icons-material/MoreVert';
+import { scaledAnchor } from '../ui-scale';
 import {
   Alert,
   Box,
@@ -418,7 +419,7 @@ export function AdminUsersSection({
           </Table>
         </Box>
       )}
-      <Menu anchorEl={menu?.anchor} open={!!menu} onClose={() => setMenu(null)}>
+      <Menu anchorEl={scaledAnchor(menu?.anchor)} open={!!menu} onClose={() => setMenu(null)}>
         <MenuItem disabled={!other} onClick={() => open('password')}>
           重置密码
         </MenuItem>

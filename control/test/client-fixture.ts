@@ -70,7 +70,8 @@ export function productSnapshot(): import('../shared/product').ProductState {
       settings: {
         searchEngine: 'google',
         qualityPreference: 'auto',
-        clientScaleOverride: null,
+        uiScale: 1,
+        topDeadZone: 'off',
         memorySaverEnabled: true,
         showStats: false,
         autoFullscreen: false,
@@ -101,6 +102,5 @@ export function productSnapshot(): import('../shared/product').ProductState {
     endpointError: null,
     viewer: { connected: true },
     integrations: { siteUa: false, lifecycle: false, popupAdoption: false },
-    constraints: { clientScaleMin: 1, clientScaleMax: 2 },
   };
 }

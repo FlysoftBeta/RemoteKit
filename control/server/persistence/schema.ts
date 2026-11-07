@@ -1,18 +1,48 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 
-const version = 4;
+const version = 5;
 
 function tableExists(db: Database.Database, name: string) {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
+}
+
+// Each entry upgrades a database written at that version to the next one.
+const migrations: Record<number, (db: Database.Database) => void> = {
+  // The display-scale override became an app-wide UI scale; the top dead zone is new.
+  4: (db) => {
+    const rows = db.prepare('SELECT tenant, data FROM user_settings').all() as {
+      tenant: string;
+      data: string;
+    }[];
+    const update = db.prepare('UPDATE user_settings SET data=? WHERE tenant=?');
+    for (const row of rows) {
+      const { clientScaleOverride: _, ...settings } = JSON.parse(row.data) as Record<string, unknown>;
+      update.run(JSON.stringify({ ...settings, uiScale: 1, topDeadZone: 'off' }), row.tenant);
+    }
+  },
+};
+
+function writeVersion(db: Database.Database) {
+  db.exec(`DROP TABLE IF EXISTS schema_version;
+    CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=${version}));
+    INSERT INTO schema_version(version) VALUES (${version});`);
 }
 
 export function createSchema(db: Database.Database) {
   db.transaction(() => {
     if (tableExists(db, 'schema_version')) {
       const rows = db.prepare('SELECT version FROM schema_version').all() as { version: bigint }[];
-      if (rows.length !== 1 || Number(rows[0].version) !== version)
-        throw new RemoteKitError('internal', 'Unsupported database schema');
+      if (rows.length !== 1) throw new RemoteKitError('internal', 'Unsupported database schema');
+      let current = Number(rows[0].version);
+      if (current === version) return;
+      for (; current < version; current++) {
+        const migrate = migrations[current];
+        if (!migrate) throw new RemoteKitError('internal', 'Unsupported database schema');
+        migrate(db);
+      }
+      if (current !== version) throw new RemoteKitError('internal', 'Unsupported database schema');
+      writeVersion(db);
       return;
     }
     if (tableExists(db, 'users')) throw new RemoteKitError('internal', 'Unsupported database schema');
@@ -87,7 +117,6 @@ export function createSchema(db: Database.Database) {
         error TEXT, received_at INTEGER NOT NULL, finished_at INTEGER);
       CREATE INDEX session_imports_tenant ON session_imports(tenant,state,received_at);
       CREATE INDEX session_imports_retention ON session_imports(finished_at) WHERE state!='pending';`);
-    db.exec(`CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=${version}));
-      INSERT INTO schema_version(version) VALUES (${version});`);
+    writeVersion(db);
   })();
 }

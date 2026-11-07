@@ -1,4 +1,4 @@
-import { AccountCircleOutlined, Close, Logout } from '@mui/icons-material';
+import { AccountCircleOutlined, Add, Close, Logout, Remove } from '@mui/icons-material';
 import {
   Alert,
   Box,
@@ -6,27 +6,26 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
-  FormControl,
   FormControlLabel,
-  FormHelperText,
   IconButton,
-  InputLabel,
-  MenuItem,
+  InputAdornment,
   Radio,
   RadioGroup,
-  Select,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
-  useMediaQuery,
 } from '@mui/material';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { ProductSettings, ProductState, ProductUser, SetupStatus } from '../../shared/product';
 import { RemoteKitError } from '../../shared/errors';
-import { SEARCH_ENGINES } from '../../shared/product';
+import { DEAD_ZONE_MAX, SEARCH_ENGINES } from '../../shared/product';
 import type { ProductActionHandler as Action } from '../control/product-operations';
 import { formatError } from '../util/format-error';
 import { request } from '../control/http-request';
-import { SettingNote, SettingSection, SettingSwitch } from './setting-layout';
+import { SettingNote, SettingRow, SettingSection, SettingSwitch } from './setting-layout';
+import { deadZoneHeight, useTopInsetProbe } from './top-inset';
+import { UI_SCALE_STEPS, useLayoutNarrow } from './ui-scale';
 export type { ProductActionHandler as Action } from '../control/product-operations';
 
 export function AuthView({
@@ -154,6 +153,14 @@ export function AuthView({
     </main>
   );
 }
+function deadZoneDescription(height: number, safeArea: number) {
+  const base = '在界面上方留出不响应操作的区域';
+  if (height === 0) return base;
+  return safeArea > 0
+    ? base + `，当前 ${height}px（不少于系统安全区 ${safeArea}px）`
+    : base + `，当前 ${height}px`;
+}
+
 export function SettingsDialog({
   online,
   state,
@@ -175,14 +182,17 @@ export function SettingsDialog({
   diagnostics?: React.ReactNode;
   sessionImport?: React.ReactNode;
 }) {
-  const compact = useMediaQuery('(max-width:600px)'),
+  const compact = useLayoutNarrow(),
     settings = state.workspace.settings;
-  const [scale, setScale] = useState(String(settings.clientScaleOverride ?? window.devicePixelRatio ?? 1)),
+  const insets = useTopInsetProbe();
+  const [deadZone, setDeadZone] = useState(
+      typeof settings.topDeadZone === 'number' ? String(settings.topDeadZone) : '24',
+    ),
     [result, setResult] = useState<Record<string, string>>({}),
     [busy, setBusy] = useState<Record<string, boolean>>({});
   useEffect(() => {
     if (open) {
-      setScale(String(settings.clientScaleOverride ?? window.devicePixelRatio ?? 1));
+      setDeadZone(typeof settings.topDeadZone === 'number' ? String(settings.topDeadZone) : '24');
       setResult({});
     }
   }, [open]);
@@ -211,7 +221,16 @@ export function SettingsDialog({
     const text = busy[key] ? '正在保存…' : (result[key] ?? '');
     return <SettingNote text={text} error={!busy[key] && !!text && text !== '已保存'} />;
   };
-  const deviceScale = Number((window.devicePixelRatio || 1).toFixed(2));
+  const scaleIndex = UI_SCALE_STEPS.findIndex((step) => step >= settings.uiScale - 0.001);
+  const stepScale = (direction: 1 | -1) => {
+    const index = scaleIndex < 0 ? UI_SCALE_STEPS.length - 1 : scaleIndex;
+    const next = UI_SCALE_STEPS[Math.max(0, Math.min(UI_SCALE_STEPS.length - 1, index + direction))];
+    if (next !== settings.uiScale) void save('scale', { uiScale: next });
+  };
+  const deadZoneMode = typeof settings.topDeadZone === 'number' ? 'custom' : settings.topDeadZone;
+  const customDeadZone = Number(deadZone);
+  const deadZoneValid =
+    Number.isInteger(customDeadZone) && customDeadZone >= 1 && customDeadZone <= DEAD_ZONE_MAX;
   return (
     <Dialog
       open={open}
@@ -229,25 +248,109 @@ export function SettingsDialog({
       </DialogTitle>
       <DialogContent dividers className="settings-content">
         <SettingSection title="搜索">
-          <FormControl fullWidth size="small" disabled={!online || busy.search} sx={{ mt: 0.5 }}>
-            <InputLabel id="search-engine-label">默认搜索引擎</InputLabel>
-            <Select
-              labelId="search-engine-label"
-              label="默认搜索引擎"
-              value={settings.searchEngine}
-              onChange={(event) =>
-                void save('search', { searchEngine: event.target.value as ProductSettings['searchEngine'] })
-              }
-            >
-              {SEARCH_ENGINES.map((engine) => (
-                <MenuItem key={engine.value} value={engine.value}>
-                  {engine.label}
-                </MenuItem>
-              ))}
-            </Select>
-            <FormHelperText>用于地址栏和起始页中的搜索</FormHelperText>
-          </FormControl>
+          <SettingRow title="默认搜索引擎" description="用于地址栏和起始页中的搜索" />
+          <ToggleButtonGroup
+            exclusive
+            fullWidth
+            size="small"
+            color="primary"
+            aria-label="默认搜索引擎"
+            value={settings.searchEngine}
+            disabled={!online || busy.search}
+            onChange={(_, value: ProductSettings['searchEngine'] | null) =>
+              value && value !== settings.searchEngine && void save('search', { searchEngine: value })
+            }
+          >
+            {SEARCH_ENGINES.map((engine) => (
+              <ToggleButton key={engine.value} value={engine.value}>
+                {engine.label}
+              </ToggleButton>
+            ))}
+          </ToggleButtonGroup>
           {note('search')}
+        </SettingSection>
+        <SettingSection title="显示">
+          <SettingRow title="界面缩放" description="界面与网页内容一起缩放；画面始终按此设备的原生分辨率传输">
+            <IconButton
+              aria-label="缩小"
+              disabled={!online || busy.scale || settings.uiScale <= UI_SCALE_STEPS[0]}
+              onClick={() => stepScale(-1)}
+            >
+              <Remove fontSize="small" />
+            </IconButton>
+            <Typography className="scale-value" aria-live="polite">
+              {Math.round(settings.uiScale * 100)}%
+            </Typography>
+            <IconButton
+              aria-label="放大"
+              disabled={
+                !online || busy.scale || settings.uiScale >= UI_SCALE_STEPS[UI_SCALE_STEPS.length - 1]
+              }
+              onClick={() => stepScale(1)}
+            >
+              <Add fontSize="small" />
+            </IconButton>
+            <Button
+              size="small"
+              disabled={!online || busy.scale || settings.uiScale === 1}
+              onClick={() => void save('scale', { uiScale: 1 })}
+            >
+              重置
+            </Button>
+          </SettingRow>
+          {note('scale')}
+          <SettingRow
+            title="顶部留空"
+            description={deadZoneDescription(deadZoneHeight(settings.topDeadZone, insets), insets.safeArea)}
+          />
+          <ToggleButtonGroup
+            exclusive
+            fullWidth
+            size="small"
+            color="primary"
+            aria-label="顶部留空"
+            value={deadZoneMode}
+            disabled={!online || busy.deadZone}
+            onChange={(_, mode: 'off' | 'auto' | 'custom' | null) => {
+              if (!mode || mode === deadZoneMode) return;
+              void save('deadZone', {
+                topDeadZone: mode === 'custom' ? (deadZoneValid ? customDeadZone : 24) : mode,
+              });
+            }}
+          >
+            <ToggleButton value="off">关闭</ToggleButton>
+            <ToggleButton value="auto">跟随系统</ToggleButton>
+            <ToggleButton value="custom">自定义</ToggleButton>
+          </ToggleButtonGroup>
+          {deadZoneMode === 'custom' && (
+            <div className="scale-row">
+              <TextField
+                size="small"
+                label="高度"
+                type="number"
+                className="dead-zone-field"
+                disabled={!online}
+                value={deadZone}
+                error={!deadZoneValid}
+                onChange={(e) => setDeadZone(e.target.value)}
+                helperText={`1–${DEAD_ZONE_MAX}`}
+                slotProps={{
+                  htmlInput: { min: 1, max: DEAD_ZONE_MAX, step: 1 },
+                  input: { endAdornment: <InputAdornment position="end">px</InputAdornment> },
+                }}
+              />
+              <Button
+                variant="outlined"
+                disabled={
+                  !online || busy.deadZone || !deadZoneValid || customDeadZone === settings.topDeadZone
+                }
+                onClick={() => void save('deadZone', { topDeadZone: customDeadZone })}
+              >
+                应用
+              </Button>
+            </div>
+          )}
+          {note('deadZone')}
         </SettingSection>
         <SettingSection title="画面">
           <RadioGroup
@@ -284,49 +387,6 @@ export function SettingsDialog({
             ))}
           </RadioGroup>
           {note('quality')}
-          <SettingSwitch
-            title="像素比例跟随此设备"
-            description={`Client Scale · 此设备为 ${deviceScale}×`}
-            checked={settings.clientScaleOverride === null}
-            disabled={!online || busy.scale}
-            onChange={(checked) =>
-              void save('scale', {
-                clientScaleOverride: checked ? null : Number(scale) || window.devicePixelRatio || 1,
-              })
-            }
-          />
-          {settings.clientScaleOverride !== null && (
-            <div className="scale-row">
-              <TextField
-                size="small"
-                label="像素比例"
-                type="number"
-                disabled={!online}
-                value={scale}
-                onChange={(e) => setScale(e.target.value)}
-                inputProps={{
-                  min: state.constraints.clientScaleMin,
-                  max: state.constraints.clientScaleMax,
-                  step: 0.1,
-                }}
-                helperText={`${state.constraints.clientScaleMin}–${state.constraints.clientScaleMax}，点击应用后生效`}
-              />
-              <Button
-                variant="outlined"
-                disabled={
-                  !online ||
-                  busy.scale ||
-                  !Number.isFinite(Number(scale)) ||
-                  Number(scale) < state.constraints.clientScaleMin ||
-                  Number(scale) > state.constraints.clientScaleMax
-                }
-                onClick={() => void save('scale', { clientScaleOverride: Number(scale) })}
-              >
-                应用
-              </Button>
-            </div>
-          )}
-          {note('scale')}
           <SettingSwitch
             title="显示连接统计"
             description="在页面右上角叠加帧率、码率与延迟"

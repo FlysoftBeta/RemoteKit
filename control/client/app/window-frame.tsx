@@ -38,7 +38,6 @@ import {
   Switch,
   Tooltip,
   Typography,
-  useMediaQuery,
 } from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
 import type { ProductState, ProductTab, ProductWindow } from '../../shared/product';
@@ -51,6 +50,7 @@ import type { Action } from './product-dialogs';
 import { RemoteViewport } from './remote-viewport';
 import { StartPage } from './start-page';
 import { ViewerSession } from '../viewer-session';
+import { scaledAnchor, useLayoutNarrow } from './ui-scale';
 export function Tool({
   title,
   children,
@@ -137,7 +137,7 @@ export function WindowFrame({
   const addressDirty = useRef(false),
     previousTab = useRef(active?.id),
     composing = useRef(false);
-  const narrow = useMediaQuery('(max-width:600px)');
+  const narrow = useLayoutNarrow();
   const multipleWindows = state.workspace.windows.length > 1;
   const sideBySideMode = state.workspace.layoutMode !== 'focused';
   const layoutIcon = sideBySideMode ? <WebAssetOutlined fontSize="small" /> : <ViewColumn fontSize="small" />;
@@ -201,9 +201,11 @@ export function WindowFrame({
     const node = content.current;
     if (!node) return;
     const measure = () => {
-      const rect = node.getBoundingClientRect();
-      if (!rect.width || !rect.height) return;
-      onGeometry(win.id, Math.max(1, Math.round(rect.width)), Math.max(1, Math.round(rect.height)));
+      // Layout px: the remote page's DIP size, independent of the UI scale transform.
+      const width = node.offsetWidth,
+        height = node.offsetHeight;
+      if (!width || !height) return;
+      onGeometry(win.id, width, height);
     };
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : undefined;
     observer?.observe(node);
@@ -488,12 +490,14 @@ export function WindowFrame({
         )}
       </div>
       <Popover
-        anchorEl={menu}
+        anchorEl={scaledAnchor(menu)}
         open={!!menu}
         onClose={closeMore}
         anchorOrigin={dropDown.anchorOrigin}
         transformOrigin={dropDown.transformOrigin}
-        slotProps={{ paper: { className: 'more-menu', sx: { width: 320, maxWidth: 'calc(100vw - 24px)' } } }}
+        slotProps={{
+          paper: { className: 'more-menu', sx: { width: 320, maxWidth: 'calc(var(--layout-vw) - 24px)' } },
+        }}
       >
         {origin && siteMenuOrigin === origin ? (
           <MenuList aria-label="网页兼容性处理" dense>
@@ -691,7 +695,7 @@ export function WindowFrame({
         )}
       </Popover>
       <Menu
-        anchorEl={switcher}
+        anchorEl={scaledAnchor(switcher)}
         open={!!switcher}
         onClose={() => setSwitcher(null)}
         anchorOrigin={dropDown.anchorOrigin}
@@ -744,7 +748,7 @@ export function WindowFrame({
         )}
       </Menu>
       <Menu
-        anchorEl={tabMenu?.anchor}
+        anchorEl={scaledAnchor(tabMenu?.anchor)}
         open={!!tabMenu}
         onClose={() => setTabMenu(null)}
         anchorOrigin={{ vertical: 'bottom', horizontal: tabMenu?.fromToolbar ? 'right' : 'left' }}

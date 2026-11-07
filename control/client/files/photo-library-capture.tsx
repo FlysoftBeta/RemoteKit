@@ -23,6 +23,7 @@ import { capturePhotoBurst } from './camera-capture';
 import { fileError } from './file-library-controls';
 import { useLibrary } from './file-library-state';
 import { FileThumbnail } from './file-thumbnail';
+import { uiScale } from '../app/ui-scale';
 
 const inset = (side: string, px: number) =>
   `calc(var(--remotekit-safe-area-${side}, env(safe-area-inset-${side}, 0px)) + ${px}px)`;
@@ -34,13 +35,15 @@ const overlay = {
   '&.Mui-disabled': { color: '#adb5c0', bgcolor: '#343e4d' },
 } as const;
 const icon = { ...overlay, width: 44, height: 44 };
+// Layout px of the visual viewport under the app-wide UI scale.
 const viewport = () => {
   const visual = window.visualViewport;
+  const scale = uiScale();
   return {
-    width: visual?.width ?? window.innerWidth,
-    height: visual?.height ?? window.innerHeight,
-    left: visual?.offsetLeft ?? 0,
-    top: visual?.offsetTop ?? 0,
+    width: (visual?.width ?? window.innerWidth) / scale,
+    height: (visual?.height ?? window.innerHeight) / scale,
+    left: (visual?.offsetLeft ?? 0) / scale,
+    top: (visual?.offsetTop ?? 0) / scale,
   };
 };
 

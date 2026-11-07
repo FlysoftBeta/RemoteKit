@@ -7,10 +7,10 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { ControlDatabase } from '../server/persistence/database';
 
-test('fresh schema is version 4 with account and session import state', () => {
+test('fresh schema is version 5 with account and session import state', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 4n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 5n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -73,14 +73,49 @@ test('reopening keeps accounts, workspace and the view allocator', async () => {
   }
 });
 
-test('databases of any other schema are rejected rather than migrated', async () => {
+test('a version 4 database migrates the display-scale override to the UI scale', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-schema-v4-'));
+  const path = join(directory, 'control.db');
+  try {
+    let store = new ControlDatabase(path);
+    const account = await registerUser(store, 'v4-user', 'v4-password1234');
+    const {
+      uiScale: _,
+      topDeadZone: __,
+      ...settings
+    } = store.workspaces.workspace(account.tenantId).settings;
+    store.db.exec(`DROP TABLE schema_version;
+      CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=4));
+      INSERT INTO schema_version(version) VALUES (4);`);
+    store.db
+      .prepare('INSERT OR REPLACE INTO user_settings VALUES (?,?)')
+      .run(account.tenantId, JSON.stringify({ ...settings, clientScaleOverride: 1.5, showStats: true }));
+    store.db.close();
+    store = new ControlDatabase(path);
+    try {
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 5n }]);
+      const migrated = store.workspaces.workspace(account.tenantId).settings;
+      assert.equal('clientScaleOverride' in migrated, false);
+      assert.equal(migrated.uiScale, 1);
+      assert.equal(migrated.topDeadZone, 'off');
+      assert.equal(migrated.showStats, true);
+      assert.throws(() => store.db.exec('UPDATE schema_version SET version=4'));
+    } finally {
+      store.db.close();
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('databases without a migration path are rejected', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-schema-other-'));
   try {
     for (const [name, setup] of [
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
       ['v3', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (3)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (5)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (6)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',

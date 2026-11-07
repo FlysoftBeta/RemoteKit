@@ -6,8 +6,31 @@ body,
   margin: 0;
   overflow: hidden;
 }
+:root {
+  /* Viewport units do not follow the transform on #root; size against the scaled layout instead. */
+  --layout-vw: calc(100vw / var(--ui-scale, 1));
+}
 * {
   box-sizing: border-box;
+}
+html.ui-scaled #root {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: calc(100% / var(--ui-scale));
+  height: calc(100% / var(--ui-scale));
+  transform: scale(var(--ui-scale));
+  transform-origin: 0 0;
+}
+.viewer-dead-zone {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  background: #e8ecf1;
+}
+.viewer-dead-zone.fullscreen {
+  background: #000;
 }
 button,
 input,
@@ -31,6 +54,9 @@ button:focus-visible,
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  padding: 0 calc(env(safe-area-inset-right, 0px) / var(--ui-scale, 1))
+    calc(env(safe-area-inset-bottom, 0px) / var(--ui-scale, 1))
+    calc(env(safe-area-inset-left, 0px) / var(--ui-scale, 1));
   background: #fff;
 }
 .window-workspace {
@@ -594,13 +620,11 @@ button:focus-visible,
   justify-content: flex-end;
   padding: 0 8px 8px;
 }
-@media (max-width: 600px) {
-  .timeline-replies {
-    margin-left: 24px;
-  }
-  .timeline-details {
-    padding-left: 12px;
-  }
+html.layout-narrow .timeline-replies {
+  margin-left: 24px;
+}
+html.layout-narrow .timeline-details {
+  padding-left: 12px;
 }
 .setting-section {
   padding: 20px 0 12px;
@@ -663,6 +687,9 @@ button:focus-visible,
   font-size: 12px;
   line-height: 1.5;
 }
+.setting-result:not(:empty) {
+  margin-bottom: 6px;
+}
 .setting-result:empty {
   height: 0;
   overflow: hidden;
@@ -671,7 +698,13 @@ button:focus-visible,
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  padding: 4px 0 8px;
+  padding: 12px 0 4px;
+}
+.dead-zone-field {
+  width: 132px;
+}
+.scale-row .MuiButton-root {
+  height: 40px;
 }
 .account-row {
   display: flex;
@@ -757,7 +790,7 @@ button:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 .MuiMenu-paper {
-  max-width: calc(100vw - 24px);
+  max-width: calc(var(--layout-vw) - 24px);
 }
 .MuiMenuItem-root {
   overflow-wrap: anywhere;
@@ -766,29 +799,27 @@ button:focus-visible,
 .MuiDialog-root .MuiDialog-paper {
   max-height: calc(100% - 48px);
 }
-@media (max-width: 600px) {
-  .navigation-bar {
-    padding: 5px 4px;
-    gap: 0;
-  }
-  .forward-button {
-    display: none !important;
-  }
-  .browser-tab {
-    flex-basis: 140px;
-  }
-  .tab-bar {
-    padding-left: 4px;
-  }
-  .settings-paper {
-    max-width: none !important;
-  }
-  .MuiDialog-root .MuiDialog-paperFullScreen {
-    max-height: 100%;
-  }
-  .MuiDialogContent-root {
-    padding: 16px !important;
-  }
+html.layout-narrow .navigation-bar {
+  padding: 5px 4px;
+  gap: 0;
+}
+html.layout-narrow .forward-button {
+  display: none !important;
+}
+html.layout-narrow .browser-tab {
+  flex-basis: 140px;
+}
+html.layout-narrow .tab-bar {
+  padding-left: 4px;
+}
+html.layout-narrow .settings-paper {
+  max-width: none !important;
+}
+html.layout-narrow .MuiDialog-root .MuiDialog-paperFullScreen {
+  max-height: 100%;
+}
+html.layout-narrow .MuiDialogContent-root {
+  padding: 16px !important;
 }
 @media (prefers-reduced-motion: reduce) {
   * {
@@ -1082,33 +1113,31 @@ button:focus-visible,
   border-radius: 8px;
   background: #f7f8fa;
 }
-@media (max-width: 760px) {
-  .admin-paper {
-    height: 100%;
-  }
-  .admin-header {
-    padding-left: 16px;
-  }
-  .admin-content {
-    padding: 16px;
-  }
-  .admin-wide {
-    display: none !important;
-  }
-  .admin-narrow {
-    display: block !important;
-  }
-  .admin-tabs .MuiTab-root {
-    min-width: 0;
-    padding-left: 4px;
-    padding-right: 4px;
-  }
-  .admin-node-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .admin-section-header {
-    flex-wrap: wrap;
-  }
+html.layout-compact .admin-paper {
+  height: 100%;
+}
+html.layout-compact .admin-header {
+  padding-left: 16px;
+}
+html.layout-compact .admin-content {
+  padding: 16px;
+}
+html.layout-compact .admin-wide {
+  display: none !important;
+}
+html.layout-compact .admin-narrow {
+  display: block !important;
+}
+html.layout-compact .admin-tabs .MuiTab-root {
+  min-width: 0;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+html.layout-compact .admin-node-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+html.layout-compact .admin-section-header {
+  flex-wrap: wrap;
 }
 .floating-dock {
   --dock-top: 97px;

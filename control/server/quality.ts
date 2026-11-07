@@ -64,7 +64,8 @@ export class QualityState {
     now = Date.now(),
     applied: AppliedMediaPolicy | null = null,
   ): ProductQuality {
-    const scale = workspace.settings.clientScaleOverride ?? viewport?.devicePixelRatio ?? 1;
+    // The Viewer reports devicePixelRatio × UI scale, so pages render at its physical pixels.
+    const scale = viewport?.devicePixelRatio ?? 1;
     const visible =
       viewport?.windows.filter(
         (w) =>

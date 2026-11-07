@@ -83,12 +83,15 @@ export class VideoPlane {
     const { canvas, view } = this.renderer,
       parent = canvas.parentElement;
     if (!parent) return false;
-    const bounds = canvas.getBoundingClientRect(),
+    const visual = canvas.getBoundingClientRect(),
       container = parent.getBoundingClientRect();
+    // Styles are layout px; client rects are visual px under the Viewer's UI scale transform.
+    const scale = canvas.offsetWidth ? visual.width / canvas.offsetWidth : 1;
+    const bounds = { width: visual.width / scale, height: visual.height / scale };
     const geometry = videoPlaneGeometry(view, layout, bounds);
     if (!geometry) return false;
-    const left = bounds.left - container.left,
-      top = bounds.top - container.top;
+    const left = (visual.left - container.left) / scale,
+      top = (visual.top - container.top) / scale;
     const position = [
       left,
       top,

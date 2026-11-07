@@ -37,7 +37,6 @@ export class ViewerHub {
         connected: runtime.viewer !== undefined,
       },
       integrations: { siteUa: true, lifecycle: true, popupAdoption: true },
-      constraints: { clientScaleMin: 0.5, clientScaleMax: 4 },
     };
   }
   push(tenant: string) {
@@ -152,7 +151,7 @@ export class ViewerHub {
         typeof body.devicePixelRatio !== 'number' ||
         !Number.isFinite(body.devicePixelRatio) ||
         body.devicePixelRatio < 0.5 ||
-        body.devicePixelRatio > 4 ||
+        body.devicePixelRatio > 8 ||
         !Array.isArray(body.windows) ||
         body.windows.length > 8 ||
         (body.refreshHz !== undefined &&

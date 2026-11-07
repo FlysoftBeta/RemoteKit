@@ -46,11 +46,12 @@ test('quality choices only select WebRTC degradation preference', () => {
   }
 });
 
-test('client display ceiling and explicit DPR override are independent of preference and feedback', () => {
+test('pages render at the reported Viewer DPR regardless of UI scale, preference and feedback', () => {
   const state = workspace(),
     quality = new QualityState();
-  state.settings.clientScaleOverride = 1.5;
-  const measured = { ...viewport, devicePixelRatio: 2, refreshHz: 120.9 };
+  // The Viewer already reports devicePixelRatio × UI scale; the setting is not applied twice.
+  state.settings.uiScale = 2;
+  const measured = { ...viewport, devicePixelRatio: 1.5, refreshHz: 120.9 };
   assert.deepEqual(quality.snapshot(state, measured).requested, {
     degradationPreference: 'balanced',
     audio: true,

@@ -6,7 +6,8 @@ import { transaction } from './database';
 export const defaultSettings = () => ({
   searchEngine: 'google' as const,
   qualityPreference: 'auto' as const,
-  clientScaleOverride: null,
+  uiScale: 1,
+  topDeadZone: 'off' as const,
   memorySaverEnabled: true,
   showStats: false,
   autoFullscreen: false,

@@ -16,7 +16,6 @@ import {
   Tab,
   Tabs,
   Typography,
-  useMediaQuery,
 } from '@mui/material';
 import { useState, type ReactElement } from 'react';
 import { AdminDiagnosticsSection } from './diagnostics';
@@ -25,6 +24,7 @@ import { AdminOverviewSection } from './overview';
 import type { AdminCall } from './shared';
 import { AdminStorageSection } from './storage';
 import { AdminUsersSection } from './users';
+import { useLayoutNarrow } from '../ui-scale';
 
 const sections = [
   { key: 'overview', label: '概览', icon: <DashboardOutlined /> },
@@ -48,7 +48,7 @@ export function AdminConsole({
   call: AdminCall;
   onClose: () => void;
 }) {
-  const compact = useMediaQuery('(max-width:760px)');
+  const compact = useLayoutNarrow('compact');
   const [section, setSection] = useState<Section>('overview');
   const content: Record<Section, ReactElement> = {
     overview: <AdminOverviewSection online={online} call={call} />,

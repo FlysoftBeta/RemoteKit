@@ -137,7 +137,7 @@ Browser 渲染、纹理导入、VPP 和硬件编码必须在同一块物理 GPU 
 | 量 | 含义 | 决定者 |
 |---|---|---|
 | viewport（DIP） | 页面布局尺寸 | 客户端 Window 内容区的实际 CSS 尺寸 |
-| 页面 DPR | 页面 backing 的像素密度 | Client Scale（默认取 Viewer DPR），资源不足时由规划降低 |
+| 页面 DPR | 页面 backing 的像素密度 | Viewer 上报的设备 DPR × 界面缩放（编码像素 = 物理像素），资源不足时由规划降低 |
 | atlas 像素每 DIP | atlas 内的统一密度 | Endpoint 规划；混合 DPR 时低密度 plane 会被上采样 |
 | atlas 矩形 | plane 在 atlas 里的位置 | 打包算法；只用于源裁剪 |
 | 编码采样尺寸 | 实际 H.264 帧尺寸 | WebRTC `AdaptFrame` 缩放整张 atlas |

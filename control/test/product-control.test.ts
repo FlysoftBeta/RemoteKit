@@ -271,23 +271,36 @@ test('window beforeunload cancellation retains remaining tabs; settings and site
     state = (
       await control.operations.productAction(
         user.tenantId,
-        { type: 'settings.update', settings: { clientScaleOverride: 1.5, qualityPreference: 'smooth' } },
+        {
+          type: 'settings.update',
+          settings: { uiScale: 1.5, topDeadZone: 32, qualityPreference: 'smooth' },
+        },
         'lease',
       )
     ).state;
-    assert.equal(state.workspace.settings.clientScaleOverride, 1.5);
+    assert.equal(state.workspace.settings.uiScale, 1.5);
+    assert.equal(state.workspace.settings.topDeadZone, 32);
     assert.ok(
       endpoint.calls
         .filter((c) => c.method === 'view.configure')
         .every((c) => c.args.device.mode === 'desktop'),
     );
-    await assert.rejects(
-      control.operations.productAction(
-        user.tenantId,
-        { type: 'settings.update', settings: { clientScaleOverride: 5 } },
-        'lease',
-      ),
-    );
+    for (const settings of [
+      { uiScale: 5 },
+      { uiScale: 0.25 },
+      { topDeadZone: 0 },
+      { topDeadZone: 12.5 },
+      { topDeadZone: 'top' },
+      { clientScaleOverride: 1.5 },
+    ])
+      await assert.rejects(
+        control.operations.productAction(
+          user.tenantId,
+          { type: 'settings.update', settings: settings as never },
+          'lease',
+        ),
+        JSON.stringify(settings),
+      );
   } finally {
     await control.viewers.detachViewer(user.tenantId, 'lease');
     await control.close();

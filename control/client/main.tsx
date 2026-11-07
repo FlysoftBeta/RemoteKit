@@ -10,6 +10,7 @@ import { selectProductReceiveProfile } from './media/receive-profile';
 import { AuthView } from './app/product-dialogs';
 import './style.css';
 import { request } from './control/http-request';
+const portalRoot = () => document.getElementById('root');
 const theme = createTheme({
   palette: {
     primary: { main: '#245DB5' },
@@ -26,6 +27,9 @@ const theme = createTheme({
     MuiIconButton: { defaultProps: { size: 'small' } },
     MuiButton: { defaultProps: { disableElevation: true } },
     MuiDialog: { defaultProps: { transitionDuration: 150 } },
+    // Overlays live inside #root so they follow the app-wide UI scale transform.
+    MuiModal: { defaultProps: { container: portalRoot } },
+    MuiPopper: { defaultProps: { container: portalRoot } },
   },
 });
 function App() {

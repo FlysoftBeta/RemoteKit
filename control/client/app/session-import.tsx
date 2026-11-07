@@ -24,7 +24,6 @@ import {
   Switch,
   Tooltip,
   Typography,
-  useMediaQuery,
 } from '@mui/material';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type {
@@ -39,6 +38,7 @@ import type { Action } from './product-dialogs';
 import { formatError } from '../util/format-error';
 import { SettingRow, SettingSection } from './setting-layout';
 import { formatTime } from './admin/shared';
+import { useLayoutNarrow } from './ui-scale';
 
 export type SessionImportCall = <K extends keyof SessionImportSocketMethods>(
   method: K,
@@ -192,7 +192,7 @@ function ImportDialog({
   close: () => void;
   opened: () => void;
 }) {
-  const compact = useMediaQuery('(max-width:600px)');
+  const compact = useLayoutNarrow();
   const [state, setState] = useState<SessionImportState>();
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);

@@ -25,6 +25,7 @@ import { fileChooserAccept, selectionViewModel, validateSelection } from './file
 import { FileViewButton, useFileView } from './file-view';
 import { PhotoCapture } from './photo-library-capture';
 import type { ViewerSession } from '../viewer-session';
+import { uiScale } from '../app/ui-scale';
 
 type Panel = 'add' | 'more' | 'group' | 'archive' | BasketItemPanel;
 type Camera = { afterId?: string; replace?: LibraryEntry };
@@ -95,8 +96,10 @@ export function FileBasketDialog({
       viewId && request?.anchor && transport?.presentation.fileInputBounds(viewId, request.anchor);
     const visual = window.visualViewport;
     const height = visual?.height ?? window.innerHeight;
-    setViewportHeight(height);
-    const next = anchor
+    // Placement is computed in visual px and applied in layout px under the UI scale.
+    const scale = uiScale();
+    setViewportHeight(height / scale);
+    const placed = anchor
       ? placeFileChooser(anchor, {
           left: visual?.offsetLeft ?? 0,
           top: visual?.offsetTop ?? 0,
@@ -104,6 +107,13 @@ export function FileBasketDialog({
           height,
         })
       : undefined;
+    const next = placed && {
+      ...placed,
+      top: placed.top / scale,
+      left: placed.left / scale,
+      width: placed.width / scale,
+      maxHeight: placed.maxHeight / scale,
+    };
     setPosition((previous) =>
       previous?.top === next?.top &&
       previous?.left === next?.left &&
@@ -217,7 +227,7 @@ export function FileBasketDialog({
                   transform: position.above ? 'translateY(-100%)' : undefined,
                   m: 0,
                 }
-              : { width: 400, maxWidth: 'calc(100vw - 16px)', m: 1 },
+              : { width: 400, maxWidth: 'calc(var(--layout-vw) - 16px)', m: 1 },
           },
         }}
       >

@@ -1,7 +1,10 @@
 import { RemoteKitError } from '../../shared/errors';
 import {
   isLocalTab,
+  DEAD_ZONE_MAX,
   SEARCH_ENGINES,
+  UI_SCALE_MAX,
+  UI_SCALE_MIN,
   type ProductAction,
   type ProductActionResult,
   type ProductTab,
@@ -229,7 +232,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
           (k) =>
             ![
               'qualityPreference',
-              'clientScaleOverride',
+              'uiScale',
+              'topDeadZone',
               'memorySaverEnabled',
               'showStats',
               'audioChannels',
@@ -245,14 +249,23 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       if ('qualityPreference' in value && !['quality', 'auto', 'smooth'].includes(value.qualityPreference))
         throw new RemoteKitError('invalid_request', '无效的画面质量');
       if (
-        'clientScaleOverride' in value &&
-        value.clientScaleOverride !== null &&
-        (typeof value.clientScaleOverride !== 'number' ||
-          !Number.isFinite(value.clientScaleOverride) ||
-          value.clientScaleOverride < 0.5 ||
-          value.clientScaleOverride > 4)
+        'uiScale' in value &&
+        (typeof value.uiScale !== 'number' ||
+          !Number.isFinite(value.uiScale) ||
+          value.uiScale < UI_SCALE_MIN ||
+          value.uiScale > UI_SCALE_MAX)
       )
-        throw new RemoteKitError('invalid_request', '显示比例需0.5–4');
+        throw new RemoteKitError('invalid_request', `界面缩放需在 ${UI_SCALE_MIN}–${UI_SCALE_MAX} 之间`);
+      if (
+        'topDeadZone' in value &&
+        value.topDeadZone !== 'off' &&
+        value.topDeadZone !== 'auto' &&
+        (typeof value.topDeadZone !== 'number' ||
+          !Number.isInteger(value.topDeadZone) ||
+          value.topDeadZone < 1 ||
+          value.topDeadZone > DEAD_ZONE_MAX)
+      )
+        throw new RemoteKitError('invalid_request', `顶部留空需为 1–${DEAD_ZONE_MAX} px`);
       if ('memorySaverEnabled' in value && typeof value.memorySaverEnabled !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的内存设置');
       if ('avSync' in value && typeof value.avSync !== 'boolean')
