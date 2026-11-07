@@ -821,6 +821,7 @@ try {
   await hiddenKeyboard();
   const manualBefore = await sample();
   await screenshot('manual-keyboard-hidden');
+  await click('.floating-ball');
   await click('.remote-open-keyboard', '显示键盘');
   await shownKeyboard();
   await screenshot('manual-keyboard-shown');
@@ -830,6 +831,7 @@ try {
     (event) => event.type === 'compositionupdate' && event.field === 'third' && event.data === 'manual',
     'Native composition did not update before manual hide',
   );
+  await click('.floating-ball');
   await click('.remote-open-keyboard', '隐藏键盘');
   await hiddenKeyboard();
   await text('third', 'manual');

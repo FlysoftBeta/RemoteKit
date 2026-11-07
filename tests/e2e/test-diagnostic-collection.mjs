@@ -408,9 +408,7 @@ try {
   assert.match(start.id, /^[0-9a-f-]{36}$/);
   await until(
     () =>
-      read(`[...document.querySelectorAll('button')].some(button =>
-    button.getClientRects().length &&
-    (button.getAttribute('aria-label') || button.textContent.trim()) === '停止数据收集')`),
+      read(`!!document.querySelector('.floating-ball-dock.attention-recording [aria-label="停止数据收集"]')`),
     'Floating stop action did not appear',
   );
   assert.equal(await read(`document.body.innerText.includes(${JSON.stringify(start.id)})`), false);
@@ -436,6 +434,7 @@ try {
     return [];
   });
   assert.deepEqual(preStop, [], 'Unexpected archive before stop');
+  await click('.floating-ball');
   await click('button', '停止数据收集');
   const complete = await until(
     () => read("diagnosticQA.replies.find(reply => reply.result?.status === 'complete')?.result"),
