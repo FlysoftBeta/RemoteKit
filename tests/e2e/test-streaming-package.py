@@ -2,6 +2,7 @@
 """Test bundled streaming startup/auth/management; RTC product/media checks require a real Viewer."""
 import argparse,hashlib,json,os,re,socket,subprocess,sys,time,urllib.request
 from pathlib import Path
+from shutil import copytree
 ROOT=Path(__file__).resolve().parents[2]
 def main():
  p=argparse.ArgumentParser(description=__doc__)
@@ -33,6 +34,9 @@ def main():
    result['browserConfiguration']=manifest['browser_configuration']
   for relative in ['bin/node.exe','bin/remotekit_node.exe','control/dist/server.mjs','control/dist/client/index.html']:
    if not (package/relative).is_file():raise FileNotFoundError(relative)
+  if a.package:
+   package=copytree(package,run/'package'/package.name)
+   result['package']=str(package)
   build_id=json.loads((package/'build.json').read_text(encoding='utf-8'))['buildId']
   # Packaged Control runs the runtime installed for its own build under data/local, as run.cmd does.
   subprocess.run([str(package/'bin/remotekit_node.exe'),'install','--root='+str(package/'data/local'),

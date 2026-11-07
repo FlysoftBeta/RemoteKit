@@ -102,7 +102,7 @@ Control 启动脚本首次生成 `config/control.json`。合部署把运行时�
 
 默认打开 `http://127.0.0.1:3001` 创建首个管理员账号。归档只收录运行文件与许可证。Control 包 manifest 记录打包时的源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。构建 ID 由 Control 包的 `bin/`、`control/` 和归档内 `node/bin/` 的文件路径及 hash 计算。
 
-`--smoke` 在隔离目录安装节点运行时并验证启动、鉴权和 Endpoint 管理。真实 Viewer 的产品操作和媒体验证使用独立端到端测试。
+`--smoke` 把 Control 包复制到隔离目录，在副本内安装节点运行时并验证启动、鉴权和 Endpoint 管理。安装生成的 `data/local` 留在副本内，归档继续使用原始打包目录。真实 Viewer 的产品操作和媒体验证使用独立端到端测试。
 
 打包使用 Node 24 内置 zstd（level 12、全部逻辑 CPU），tar 以固定 32 MiB 缓冲流入压缩器，输出标准串联 zstd frames，不生成中间 tar，也不把整个包读入内存。逐 frame 使用同步结束指令，避开 Node 24 异步多线程 zstd 的提前 EOF 问题；每个 frame 内仍由原生 zstd 多线程压缩。`--node` 必须指向带官方 `LICENSE` 的真实 Node runtime，且 ABI 匹配 Control 的 SQLite 原生模块。`--out dev` 显式生成开发包。manifest 的 `browser_configuration` 标记 `rel`/`dev`，`archive` 记录完整归档名。
 
