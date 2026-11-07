@@ -11,6 +11,26 @@ const row = (label: string, value: unknown, suffix: string, title?: string, digi
       <dd>{measured(value, suffix, digits)}</dd>
     </>
   ) : null;
+const levelLabel = (value: unknown) =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0
+    ? value === 9
+      ? '1b'
+      : `${Math.floor(value / 10)}.${value % 10}`
+    : '—';
+// The overlay ignores pointer events, so explanations must be visible text.
+const note = (text: string) => (
+  <dd
+    style={{
+      gridColumn: '1 / -1',
+      textAlign: 'left',
+      fontSize: '0.85em',
+      overflowWrap: 'anywhere',
+      whiteSpace: 'normal',
+    }}
+  >
+    {text}
+  </dd>
+);
 const resolutionReason: Record<string, string> = {
   none: '无',
   'receiver-level-macroblock-rate': '接收端像素速率',
@@ -63,6 +83,7 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
         applied?: { maxFps?: number; degradationPreference?: string };
       }
     | undefined;
+  const comp = endpoint?.comp as { codecMaxFps?: unknown; officialMaxFps?: unknown } | undefined;
   const sender = endpoint?.senderRtcStats as
     { selectedPair?: { availableOutgoingBitrate?: number } } | undefined;
   return (
@@ -76,8 +97,9 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
         LIVE STATS <span>{diagnostics.codec ?? '—'}</span>
       </div>
       <dl>
-        <dt title={diagnostics.receiveSelection?.reason}>接收档</dt>
+        <dt>接收档</dt>
         <dd>{diagnostics.receiveSelection?.profile ?? '—'}</dd>
+        {diagnostics.receiveSelection?.reason && note(diagnostics.receiveSelection.reason)}
         <dt title="同轮采样的每平面 video compositor presentedFrames 增量，表示视频帧提交">Video 提交 FPS</dt>
         <dd>{measured(model.presentationFps, 'fps')}</dd>
         <dt title="相邻 WebRTC 入站统计采样的解码帧增量">解码 FPS</dt>
@@ -245,12 +267,17 @@ export function StatsOverlay({ diagnostics, surface }: { diagnostics: Diagnostic
           )}
         </dd>
         <dt>分辨率限制</dt>
-        <dd
-          title={`${endpoint?.resolutionLimitation ?? '—'}；协商level ${endpoint?.negotiatedReceiveLevel ?? '—'}；采样FPS预算 ${endpoint?.samplingFpsBudget ?? '—'}`}
-        >
+        <dd>
           {typeof endpoint?.resolutionLimitation === 'string'
             ? (resolutionReason[endpoint.resolutionLimitation] ?? endpoint.resolutionLimitation)
             : '—'}
+        </dd>
+        <dt>协商 H264 level</dt>
+        <dd>{levelLabel(endpoint?.negotiatedReceiveLevel)}</dd>
+        <dt>FPS 上限 level / WebRTC</dt>
+        <dd>
+          {typeof comp?.codecMaxFps === 'number' ? comp.codecMaxFps : '—'} /{' '}
+          {typeof comp?.officialMaxFps === 'number' ? comp.officialMaxFps : '—'}
         </dd>
         <dt title="WebRTC估计的输入帧率，经SetRates传给编码器；不是实际输出FPS">输入 FPS 估计</dt>
         <dd>{measured(model.inputFps, 'fps')}</dd>

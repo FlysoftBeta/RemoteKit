@@ -120,7 +120,7 @@ level 同时约束单帧大小（MaxFS）和宏块吞吐（MaxMBPS）。一个 l
 
 `FitH264Sampling` 保持整张 atlas 的宽高比，偶数尺寸，单轴不超过 4096，取 min(MaxFS, MaxMBPS/FPS)，用有界迭代修正取整。服务端先在 FPS=1 下拟合适配后的几何，再按得到的尺寸给所有降级偏好算出 FPS 上限，Comp 与 EncoderWorker 使用同一个上限；码率与 VBV 也受协商 level 约束。
 
-**接收能力**：客户端并行探测 5.2（`avc1.42e034`，3856×2176@60）、5.1（`avc1.42e033`，同尺寸 @29）、4.2（`avc1.42e02a`，1936×1088@60），每项 1500ms 超时，页面内 8 项缓存（含进行中的请求）。网络失败不会被缓存成永久的编解码降级；只有编解码协商失败才逐级降档。SDK 声明 constrained baseline、`packetization-mode=1`、`level-asymmetry-allowed=1`，最高 5.2，再应用选定的接收上限。Chrome89 桌面版固定走 4.2：它的 SDP factory 默认（640×480@30）不是物理解码上限，实测能接受 1288×728 和 level 4.2 的 SPS；但它的 MediaCapabilities 对 `type:'webrtc'` 抛 TypeError，而文件解码能力不能代表 WebRTC 接收能力。
+**接收能力**：客户端并行探测 5.2（`avc1.42e034`，3856×2176@60）、5.1（`avc1.42e033`，同尺寸 @29）、4.2（`avc1.42e02a`，1936×1088@60），每项 1500ms 超时，页面内 8 项缓存（含进行中的请求）。安全上下文用 `VideoDecoder.isConfigSupported`，否则用 MediaCapabilities `type:'webrtc'`；每档结果记为 `supported/rejected/timeout/error/unavailable`，连同探测来源进入诊断采样，原因文本直接显示在统计叠层（叠层不接收指针事件，不能依赖悬停提示）。三档都没有肯定结果时为 `native`，即浏览器默认 offer，Android/Safari 通常是 `42e01f`（level 3.1：单帧 3600 宏块、约 720p，宏块吞吐只够 30FPS）。网络失败不会被缓存成永久的编解码降级；只有编解码协商失败才逐级降档。SDK 声明 constrained baseline、`packetization-mode=1`、`level-asymmetry-allowed=1`，最高 5.2，再应用选定的接收上限。Chrome89 桌面版固定走 4.2：它的 SDP factory 默认（640×480@30）不是物理解码上限，实测能接受 1288×728 和 level 4.2 的 SPS；但它的 MediaCapabilities 对 `type:'webrtc'` 抛 TypeError，而文件解码能力不能代表 WebRTC 接收能力。
 
 ## WebRTC 适配
 

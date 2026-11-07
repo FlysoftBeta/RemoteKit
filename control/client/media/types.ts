@@ -1,5 +1,6 @@
 import type { ReceiverBufferTiming, ReceiverVideoTiming } from './media-diagnostics';
 import type { ReceiverPlayout } from './receiver-playout';
+import type { ProductReceiveSelection } from './receive-profile';
 export type { ReceiverVideoTiming } from './media-diagnostics';
 interface TimingPercentile {
   samples: number;
@@ -25,7 +26,7 @@ export interface RenderingDiagnostics {
 export interface Diagnostics {
   receiverPlayout?: Partial<Record<'video' | 'audio', ReceiverPlayout>>;
   rendering?: RenderingDiagnostics;
-  receiveSelection?: { profile: string; reason: string };
+  receiveSelection?: ProductReceiveSelection;
   presentationEstimate?: { presentationLatencyMs: number; clockUncertaintyMs: number; sampleCount: number };
   connection: string;
   channel: string;

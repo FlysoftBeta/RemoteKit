@@ -144,6 +144,12 @@ export class MediaObservations {
         getStatsWaitMs: rtc.getStatsWaitMs,
       },
       endpoint: collectionEndpointSample(this.diagnostics.endpoint),
+      receive: this.diagnostics.receiveSelection && {
+        profile: this.diagnostics.receiveSelection.profile,
+        probeSource: this.diagnostics.receiveSelection.probeSource,
+        probes: this.diagnostics.receiveSelection.probes,
+        probeDurationMs: this.diagnostics.receiveSelection.probeDurationMs,
+      },
       endpointReceivedAtMs: this.endpointStatsAtMs,
       endpointAgeMs: this.endpointStatsAtMs === undefined ? undefined : now - this.endpointStatsAtMs,
       viewport: {

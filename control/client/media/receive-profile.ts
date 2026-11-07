@@ -145,9 +145,14 @@ export async function probeReceiveCapabilities() {
   return { userAgent: navigator.userAgent, results };
 }
 
+export type ReceiveProbeOutcome = 'supported' | 'rejected' | 'timeout' | 'error' | 'unavailable';
+export type ReceiveProbeSource = 'video-decoder' | 'media-capabilities-webrtc';
 export interface ProductReceiveSelection {
   profile: ReceiveProfile;
   reason: string;
+  probeSource?: ReceiveProbeSource;
+  /** Outcome per probed H264 level, keyed by level_idc. */
+  probes?: { level52: ReceiveProbeOutcome; level51: ReceiveProbeOutcome; level42: ReceiveProbeOutcome };
   probeDurationMs?: number;
 }
 const productReceiveCache = new Map<string, Promise<ProductReceiveSelection>>();
@@ -184,47 +189,48 @@ export async function selectProductReceiveProfile(
   if (!supportsExperimentalH264Level42(codecs))
     return { profile: 'native', reason: 'H264 constrained-baseline mode1 RTP codec unavailable' };
   const probeErrors: string[] = [];
+  const probeSource: ReceiveProbeSource = probe ? 'video-decoder' : 'media-capabilities-webrtc';
   const capabilitySource = probe ? 'VideoDecoder' : 'MediaCapabilities WebRTC';
-  const bounded = async (work: Promise<{ supported?: boolean }>, label: string) => {
+  const bounded = async (
+    work: () => Promise<{ supported?: boolean }>,
+    label: string,
+  ): Promise<ReceiveProbeOutcome> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      return (
-        (
-          await Promise.race([
-            work,
-            new Promise<{ supported: false }>((resolve) => {
-              timer = setTimeout(() => {
-                probeErrors.push(label + ' probe timed out after 1500ms');
-                resolve({ supported: false });
-              }, 1500);
-            }),
-          ])
-        ).supported === true
-      );
+      const result = await Promise.race([
+        Promise.resolve().then(work),
+        new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), 1500);
+        }),
+      ]);
+      if (result === 'timeout') {
+        probeErrors.push(label + ' probe timed out after 1500ms');
+        return 'timeout';
+      }
+      return result.supported === true ? 'supported' : 'rejected';
     } catch (error) {
-      probeErrors.push(String(error));
-      return false;
+      probeErrors.push(label + ': ' + String(error));
+      return 'error';
     } finally {
       clearTimeout(timer);
     }
   };
-  const supported = async (codec: string, codedWidth: number, codedHeight: number, framerate = 60) => {
-    if (probe) {
-      return bounded(
-        Promise.resolve().then(() => probe({ codec, codedWidth, codedHeight })),
-        capabilitySource + ' ' + codec,
-      );
-    }
+  const supported = async (
+    codec: string,
+    codedWidth: number,
+    codedHeight: number,
+    framerate = 60,
+  ): Promise<ReceiveProbeOutcome> => {
+    const label = capabilitySource + ' ' + codec;
+    if (probe) return bounded(() => probe({ codec, codedWidth, codedHeight }), label);
     // On an insecure origin WebCodecs can be absent while RTC is available.
     // Ask the actual WebRTC decoding capability API; unsupported API/config is a conservative rejection.
     if (typeof navigator === 'undefined' || !navigator.mediaCapabilities?.decodingInfo) {
-      probeErrors.push(
-        'VideoDecoder and MediaCapabilities WebRTC decodingInfo unavailable; retaining native receiver level',
-      );
-      return false;
+      probeErrors.push(label + ': VideoDecoder and MediaCapabilities decodingInfo unavailable');
+      return 'unavailable';
     }
-    try {
-      return bounded(
+    return bounded(
+      () =>
         navigator.mediaCapabilities.decodingInfo({
           type: 'webrtc',
           video: {
@@ -236,48 +242,44 @@ export async function selectProductReceiveProfile(
             framerate,
           },
         } as MediaDecodingConfiguration),
-        capabilitySource + ' ' + codec,
-      );
-    } catch (error) {
-      probeErrors.push(String(error));
-      return false;
-    }
+      label,
+    );
   };
-  try {
-    // All three levels begin now; rejected/slow higher-level probing adds at most
-    // one 1500ms budget, rather than two serial timeout windows.
-    const high = supported('avc1.42e034', 3856, 2176),
-      middle = supported('avc1.42e033', 3856, 2176, 29),
-      compatibility = supported('avc1.42e02a', 1936, 1088);
-    if (await high)
-      return {
-        profile: 'h264-level52',
-        reason:
-          capabilitySource +
-          ' supports H264 level5.2 at 3856x2176; negotiated sampling still enforces FS/MBPS',
-      };
-    if (await middle)
-      return {
-        profile: 'h264-level51',
-        reason:
-          capabilitySource +
-          ' supports H264 level5.1 at 3856x2176 / 29fps; resolution-first policy may lower actual target FPS',
-      };
-    if (await compatibility)
-      return {
-        profile: 'h264-level42-experimental',
-        reason:
-          capabilitySource +
-          ' rejected level5.2/5.1; supports H264 level4.2 at 1936x1088' +
-          (probeErrors.length ? '; ' + probeErrors.join('; ') : ''),
-      };
+  // All three levels begin now; rejected/slow higher-level probing adds at most
+  // one 1500ms budget, rather than two serial timeout windows.
+  const [level52, level51, level42] = await Promise.all([
+    supported('avc1.42e034', 3856, 2176),
+    supported('avc1.42e033', 3856, 2176, 29),
+    supported('avc1.42e02a', 1936, 1088),
+  ]);
+  const evidence = { probeSource, probes: { level52, level51, level42 } };
+  const detail = probeErrors.length ? '; ' + probeErrors.join('; ') : '';
+  if (level52 === 'supported')
     return {
-      profile: 'native',
-      reason: probeErrors.length
-        ? 'Decoder capability probe failed: ' + probeErrors.join('; ')
-        : 'Decoder capability rejected H264 level5.2, level5.1 and level4.2',
+      profile: 'h264-level52',
+      reason:
+        capabilitySource + ' supports H264 level5.2 at 3856x2176; negotiated sampling still enforces FS/MBPS',
+      ...evidence,
     };
-  } catch (error) {
-    return { profile: 'native', reason: 'Decoder capability probe failed: ' + String(error) };
-  }
+  if (level51 === 'supported')
+    return {
+      profile: 'h264-level51',
+      reason:
+        capabilitySource +
+        ' supports H264 level5.1 at 3856x2176 / 29fps; resolution-first policy may lower actual target FPS',
+      ...evidence,
+    };
+  if (level42 === 'supported')
+    return {
+      profile: 'h264-level42-experimental',
+      reason: capabilitySource + ' rejected level5.2/5.1; supports H264 level4.2 at 1936x1088' + detail,
+      ...evidence,
+    };
+  return {
+    profile: 'native',
+    reason: probeErrors.length
+      ? 'Decoder capability probe failed: ' + probeErrors.join('; ')
+      : capabilitySource + ' rejected H264 level5.2, level5.1 and level4.2',
+    ...evidence,
+  };
 }

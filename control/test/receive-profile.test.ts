@@ -135,6 +135,7 @@ test('only the verified desktop Chrome build defaults to 4.2 and saved choices t
   );
 });
 import { selectProductReceiveProfile } from '../client/media/receive-profile';
+import { diagnosticClientSample } from '../server/diagnostics/projection';
 test('product prefers decoder-probed level5.2 and falls back to verified level4.2', async () => {
   const codecs = [
     { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' },
@@ -282,4 +283,29 @@ test('production capability probes run in parallel and share page-local in-fligh
   );
   assert.equal(pending.length, 3);
   assert.ok((await first).probeDurationMs! >= 0);
+});
+
+test('native selection records a coded outcome per probed level for diagnostics', async () => {
+  const codecs = [
+    { mimeType: 'video/H264', clockRate: 90000, sdpFmtpLine: 'packetization-mode=1;profile-level-id=42e01f' },
+  ];
+  const selection = await selectProductReceiveProfile('Chrome/157.0', codecs, async (configuration) => {
+    if (configuration.codec === 'avc1.42e034') throw new TypeError('unsupported');
+    return { supported: false };
+  });
+  assert.equal(selection.profile, 'native');
+  assert.equal(selection.probeSource, 'video-decoder');
+  assert.deepEqual(selection.probes, { level52: 'error', level51: 'rejected', level42: 'rejected' });
+  assert.match(selection.reason, /avc1\.42e034: TypeError: unsupported/);
+  const projected = diagnosticClientSample(
+    { receive: { ...selection, reason: selection.reason } },
+    new Set(),
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(projected)), {
+    receive: {
+      profile: 'native',
+      probeSource: 'video-decoder',
+      probes: { level52: 'error', level51: 'rejected', level42: 'rejected' },
+    },
+  });
 });
