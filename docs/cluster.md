@@ -88,7 +88,7 @@ Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线
 - 节点之间：每个节点在 `peer.listen` 上监听 TCP，握手 role `peer`，buildId 必须相同；任何持有集群密钥的节点都可读取任何对象的存储文件（只有密文），`object.get{tenantId, id, offset}` 按 1MiB 分块返回并以 `object.end{size, sha256}` 结束，可从 offset 续传；每个服务端最多 8 个并发连接。
 - Endpoint 本地需要对象（给 Browser 暂存文件、缩略图、Viewer 下载、恢复 checkpoint）而本地没有时，先 `object.locate` 拿到副本地址，从对端拉取并校验后写入本地存储，再 `object.committed` 登记为新副本。Browser 自己从不访问对象存储。
 
-文件库的条目、分组、篮子和选择事务仍在 Control；资产 id 就是对象 id，Endpoint 的 `Seal` 写入对象并 `object.committed` 后才算成功。草稿、选择与原生暂存仍是 Session 本地的。见[文件与相机](files-and-camera.md)。
+文件库的条目、分区、来源、篮子和选择事务仍在 Control；资产 id 就是对象 id，Endpoint 的 `Seal` 写入对象并 `object.committed` 后才算成功。草稿、选择与原生暂存仍是 Session 本地的。见[文件与相机](files-and-camera.md)。
 
 ## Checkpoint 与休眠
 

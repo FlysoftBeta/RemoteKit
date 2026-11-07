@@ -9,14 +9,14 @@ SQLite 带 `schema_version`（当前 1）。空库在一个事务里建表并写
 | 所有者 | 数据 |
 |---|---|
 | Control 配置文件 | HTTP 监听、集群密钥文件、每个节点的配置、配额 |
-| Control SQLite | 账户（含最近登录、停用时间）、口令/PIN hash、token hash、人脸模板（加密）；workspace（Window、Tab、active 关系、地址意图、恢复阶段）；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务；会话放置与加密的 Tenant 密钥；对象索引与副本；checkpoint；被移除的节点；待各节点清理的已删除 Session |
+| Control SQLite | 账户（含最近登录、停用时间）、口令/PIN hash、token hash、人脸模板（加密）；workspace（Space、Window、Tab、active 关系、地址意图、恢复阶段、窗口视图状态）；已安装 App 与图标；收藏；使用记录；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务；会话放置与加密的 Tenant 密钥；对象索引与副本；checkpoint；被移除的节点；待各节点清理的已删除 Session |
 | Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、节点连接状态与指标、Memory Saver 计时 |
 | Endpoint Session | Browser 进程、期望的 view 配置（views.json）、自然关闭事件（events.json）、导航恢复文件、站点 UA 与媒体策略的运行缓存、文件草稿与暂存、媒体/输入/GPU 资源、内存中的 Tenant 密钥 |
 | Endpoint 节点 | 加密对象（文件库资产、缩略图、checkpoint 块）、Session 热/冷副本 |
 | Browser | Profile 存储（cookie、缓存）、WebContents、history/PageState、sessionStorage 关联、页面回调与各种代次 |
 | Client | 服务端状态副本、地址草稿、待确认操作的内存投影、媒体缓冲；持久项只有 HttpOnly token |
 
-一个 User 对应一个 workspace，即一个 Tenant/Session。一个 workspace 有多个 Window（最多 8），每个 Window 有独立的 activeTab；Tab（最多 32）通过 `windowId` 归属。关闭最后一个 Tab 保留空 Window。窄屏只改变显示哪个 Window，不合并 Window，也不搬动 Tab。Tab 的 `kind` 为 `remote | start | files`：start（简易起始页）和 files（我的文件，每 Window 单例）在 Viewer 本地渲染，不产生远端渲染需求，但 Session 的数据通道仍在，首次导航直接创建远端页面，不插入伪造的 about:blank 历史。
+一个 User 对应一个 workspace，即一个 Tenant/Session。workspace 由 App、Window 与 Space 组成（见[工作区](workspace.md)）：Window 承载一个 App，browser 与网页 App 窗口通过 `windowId` 拥有 Tab（最多 32），Window 最多 12 个，每个 Space 并排 1–3 个 Window。Tab 的 `kind` 为 `remote | start`：start（简易起始页）在 Viewer 本地渲染，不产生远端渲染需求，但 Session 的数据通道仍在，首次导航直接创建远端页面，不插入伪造的 about:blank 历史。files 与 settings 窗口完全在 Viewer 本地渲染。
 
 ## 连接
 

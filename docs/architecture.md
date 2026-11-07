@@ -32,7 +32,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 | **Updater** | C++20，同一 CMake 工程的独立可执行文件 | 节点上的 `remotekit_node.exe`：监管 Endpoint 进程，从 Control 下载并安装与之相同版本的节点运行时。 |
 | **Browser** | C++，Chromium GN | 承载 WebContents 与 Profile；页面生命周期、输入派发、页面请求（对话框/文件选择/权限/下载）、导航状态；Rend 驱动离屏绘制并合成 atlas。 |
 | **SDK** | C ABI DLL（在 Chromium 树内构建） | 把 Mojo（与 Browser 的控制和渲染管道）和 libwebrtc（peer、视频源、外部编码器桥、音频源）包成 C 接口给 Endpoint 用。跨 DLL 不传任何 C++ STL/libc++/Abseil/Chromium 对象。 |
-| **Viewer** | Control 提供的 Web 前端 | 沉浸式浏览器外壳；多个独立 Window 并排或窄屏切换；video 呈现；输入、IME、触控手势；文件篮与相机。 |
+| **Viewer** | Control 提供的 Web 前端 | App 外壳：浏览器、我的文件、设置与网页 App；Space 分屏多任务与开始屏幕；video 呈现；输入、IME、触控手势；文件篮与相机。 |
 
 ## 隔离与身份
 
@@ -143,6 +143,7 @@ tests/             e2e/（真实栈产品场景）、integration/（原生 Endpo
 | 文档 | 内容 |
 |---|---|
 | [多节点](cluster.md) | 配置文件、集群通道与握手、版本锁定与更新、放置与密钥、对象存储、checkpoint 与休眠、指标、节点移除 |
+| [工作区](workspace.md) | App、Window 与 Space 多任务、开始屏幕与 frecency、安装网页为 App、设置拆分、我的文件的来源与分区 |
 | [Control](control-plane.md) | 数据归属、连接、操作与收据、导航、对账、对话框/关闭/弹窗、站点身份、全屏、设置 |
 | [页面生命周期](page-lifecycle.md) | 可见性、freeze/discard/unload/restore、Memory Saver、不确定恢复、导航导出、Profile |
 | [渲染](rendering.md) | OSR 输出设备、plane、atlas、Slot/Fence、渲染管道协议、换代、几何 |
