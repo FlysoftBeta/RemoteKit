@@ -77,8 +77,8 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py
 
 ## 委派（Codex）
 
-- 只有用户在对话中明确要求时才调用 Codex；否则主对话自己完成实现、调查、构建与测试，不主动委派。
-- 用户要求委派时：主对话负责架构设计、接口契约、取舍、拆分、审阅、集成与 commit/push，不把核心架构决策委派出去；`docs/` 由主对话亲自撰写。用法、提示写法、并行与审阅要点见 [tools/codex/README.md](tools/codex/README.md)。
+- UI/UX 设计与架构设计之外的探索类、实现类任务可以直接交给 Codex；UI/UX 与架构设计由主对话完成。
+- 委派时：主对话负责架构设计、接口契约、取舍、拆分、审阅、集成与 commit/push，不把核心架构决策委派出去；`docs/` 由主对话亲自撰写。用法、提示写法、并行与审阅要点见 [tools/codex/README.md](tools/codex/README.md)。
 - 不频繁询问进度；有独立工作继续推进，等待使用合理长超时，不忙轮询。
 
 ## 发布
