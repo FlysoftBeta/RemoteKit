@@ -43,47 +43,11 @@ export function DiagnosticSettings({
 
 export function DiagnosticCollectionView({
   state,
-  online,
-  stop,
   dismiss,
 }: {
   state: DiagnosticState;
-  online: boolean;
-  stop: () => void;
   dismiss: () => void;
 }) {
-  if (state.phase === 'collecting' || state.phase === 'finalizing' || state.phase === 'retry') {
-    const retry = state.phase === 'retry';
-    return (
-      <Alert
-        severity={retry ? 'warning' : 'info'}
-        sx={{
-          position: 'absolute',
-          left: '50%',
-          bottom: 'max(12px, env(safe-area-inset-bottom))',
-          transform: 'translateX(-50%)',
-          zIndex: 1210,
-          width: 'max-content',
-          maxWidth: 'calc(100% - 24px)',
-          alignItems: 'center',
-          boxShadow: 2,
-        }}
-        action={
-          state.phase !== 'finalizing' && (
-            <Button color="inherit" size="small" disabled={!online} onClick={stop}>
-              {retry ? '重试确认' : '停止数据收集'}
-            </Button>
-          )
-        }
-      >
-        {retry
-          ? '保存尚未确认'
-          : state.phase === 'finalizing'
-            ? '正在保存诊断…'
-            : `已收集 ${state.samples} 个样本`}
-      </Alert>
-    );
-  }
   return state.phase === 'complete' || state.phase === 'failed' ? (
     <DiagnosticResult
       key={state.id}

@@ -1,7 +1,7 @@
-import { KeyboardHideOutlined, KeyboardOutlined } from '@mui/icons-material';
 import { Button } from '@mui/material';
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { formatError } from '../util/format-error';
+import { useFloatingAction } from './floating-actions';
 import { PageOverlay } from './page-overlay';
 import { ViewportInput } from '../input/viewport-input';
 import { StatsOverlay } from './stats-overlay';
@@ -66,6 +66,22 @@ export function RemoteViewport({
     controller?.editing.subscribe ?? emptySubscribe,
     controller?.editing.getSnapshot ?? emptyEditing,
   );
+  useFloatingAction(
+    `keyboard:${viewId}`,
+    controller &&
+      keyboardActive &&
+      editing.keyboardEnabled &&
+      (editing.observedOwner || editing.keyboardShown)
+      ? {
+          order: 10,
+          label: editing.keyboardShown ? '隐藏键盘' : '显示键盘',
+          icon: editing.keyboardShown ? 'keyboard-hide' : 'keyboard',
+          disabled: !editing.keyboardShown && !editing.keyboardReady,
+          className: 'remote-open-keyboard',
+          run: () => controller.editing.toggleKeyboard(),
+        }
+      : null,
+  );
   return (
     <section
       ref={viewport}
@@ -87,18 +103,6 @@ export function RemoteViewport({
         autoComplete="off"
         spellCheck={false}
       />
-      {editing.keyboardEnabled && (editing.observedOwner || editing.keyboardShown) && (
-        <Button
-          size="small"
-          className="remote-open-keyboard"
-          startIcon={editing.keyboardShown ? <KeyboardHideOutlined /> : <KeyboardOutlined />}
-          disabled={!editing.keyboardShown && !editing.keyboardReady}
-          onPointerDown={(event) => event.preventDefault()}
-          onClick={controller?.editing.toggleKeyboard}
-        >
-          {editing.keyboardShown ? '隐藏键盘' : '显示键盘'}
-        </Button>
-      )}
       {editing.error && (
         <div role="status" className="input-notice">
           {editing.error}

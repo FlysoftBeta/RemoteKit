@@ -1,11 +1,5 @@
 import { formatError } from '../util/format-error';
-import {
-  Add,
-  AdminPanelSettingsOutlined,
-  Logout,
-  VolumeUpOutlined,
-  WebAssetOutlined,
-} from '@mui/icons-material';
+import { Add, AdminPanelSettingsOutlined, Logout, WebAssetOutlined } from '@mui/icons-material';
 import { Alert, Button, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from '@mui/material';
 import React, {
   useCallback,
@@ -26,6 +20,8 @@ import {
 } from '../media/diagnostic-collection';
 import { DiagnosticCollectionView, DiagnosticSettings } from './diagnostic-collection-view';
 import { FileChooserDialog } from '../files/file-chooser-dialog';
+import { FloatingActions, FloatingActionsContext, useFloatingAction } from './floating-actions';
+import { FloatingBall } from './floating-ball';
 import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../files/file-library-state';
 import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import type { AudioChannels } from '../media/audio-output';
@@ -41,6 +37,7 @@ import { WindowDivider, WindowFrame } from './window-frame';
 
 export function WorkspaceView({ logout, expired }: { logout: () => void; expired: () => void }) {
   const [media] = useState(() => new ViewerSession());
+  const [floatingActions] = useState(() => new FloatingActions());
   const snapshot = useViewerSession(media);
   const workspaceState = useSyncExternalStore(media.workspace.subscribe, media.workspace.getSnapshot);
   const { auth, localLock, manualLock, status, error, idleRearmed } = workspaceState;
@@ -195,6 +192,62 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     auth?.user.id,
     state?.fileRequests.map((request) => request.id) ?? [],
   );
+  const audioBlocked =
+    productReady &&
+    media.observations.audio.state === 'blocked' &&
+    (state?.workspace.settings.audioChannels?.left !== false ||
+      state?.workspace.settings.audioChannels?.right !== false);
+  useFloatingAction(
+    'fullscreen',
+    fullscreenTarget
+      ? {
+          order: 0,
+          label: '退出网页全屏',
+          icon: 'fullscreen-exit',
+          disabled: !productReady || exitingFullscreen,
+          run: () => exitFullscreen.current(),
+        }
+      : null,
+    floatingActions,
+  );
+  useFloatingAction(
+    'sound',
+    audioBlocked
+      ? {
+          order: 20,
+          label: '开启声音',
+          detail: '浏览器拦截了自动播放',
+          icon: 'sound',
+          attention: 'notice',
+          run: () => media.observations.audio.resume(),
+        }
+      : null,
+    floatingActions,
+  );
+  const collecting =
+    diagnosticState.phase === 'collecting' ||
+    diagnosticState.phase === 'finalizing' ||
+    diagnosticState.phase === 'retry';
+  useFloatingAction(
+    'diagnostics',
+    collecting
+      ? {
+          order: 30,
+          label: diagnosticState.phase === 'retry' ? '重试确认' : '停止数据收集',
+          detail:
+            diagnosticState.phase === 'retry'
+              ? '诊断保存尚未确认'
+              : diagnosticState.phase === 'finalizing'
+                ? '正在保存诊断…'
+                : `已收集 ${diagnosticState.samples} 个样本`,
+          icon: 'stop',
+          attention: 'recording',
+          disabled: diagnosticState.phase === 'finalizing' || status !== 'online',
+          run: () => diagnostics.stop(),
+        }
+      : null,
+    floatingActions,
+  );
   if (localLock || auth?.locked !== false)
     return (
       <RevealScreen key={`${auth?.epoch ?? 'connecting'}:${localLock ?? ''}`}>
@@ -223,290 +276,267 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
       : undefined;
   return (
     <FileLibraryContext.Provider value={library}>
-      <main
-        className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}`}
-        ref={shell}
-      >
-        <DiagnosticCollectionView
-          state={diagnosticState}
-          online={status === 'online'}
-          stop={() => diagnostics.stop()}
-          dismiss={() => diagnostics.dismiss()}
-        />
-        <div className="shell-notices" aria-live="polite">
-          {status !== 'online' && (
-            <Alert
-              severity="warning"
-              action={
-                status === 'failed' && (
-                  <Button color="inherit" size="small" onClick={() => connection.current?.restart()}>
-                    重试
-                  </Button>
-                )
-              }
-            >
-              {status === 'failed' ? '暂时无法连接' : '正在恢复连接…'}
-            </Alert>
-          )}
-          {status === 'online' && !productReady && (
-            <Alert
-              severity={snapshot.rtc.phase === 'exhausted' ? 'warning' : 'info'}
-              action={
-                snapshot.rtc.phase === 'exhausted' && (
-                  <Button color="inherit" size="small" onClick={() => void media.rtc.connect()}>
-                    重试
-                  </Button>
-                )
-              }
-            >
-              {snapshot.rtc.phase === 'exhausted' ? '浏览器连接失败' : '正在连接浏览器…'}
-            </Alert>
-          )}
-          {(error || operationState.error || viewportNotice || state.endpointError) && (
-            <Alert
-              severity="warning"
-              onClose={() => {
-                media.workspace.dismissError();
-                media.viewport.dismissNotice();
-              }}
-            >
-              {error ||
-                (operationState.error && formatError(operationState.error)) ||
-                viewportNotice ||
-                (state.quality.resourceLimitation
-                  ? '当前画面尺寸超出可用范围，请缩小窗口或关闭部分窗口。'
-                  : state.endpointError)}
-            </Alert>
-          )}
-          {pendingOperations.length > 0 && (
-            <Alert
-              severity="info"
-              action={
-                pendingOperations.some((entry) => entry.receipt?.status === 'unknown') ? (
-                  <Button color="inherit" size="small" onClick={() => media.operations.dismissUnknown()}>
-                    以当前工作区为准
-                  </Button>
-                ) : undefined
-              }
-            >
-              {pendingOperations.length} 个操作
-              {pendingOperations.some((entry) => entry.receipt?.status === 'unknown')
-                ? '结果未知，请核对工作区'
-                : '正在同步'}
-              {snapshot.observations.channel !== '已连接' ? '，等待数据通道连接' : ''}
-            </Alert>
-          )}
-          {productReady &&
-            media.observations.audio.state === 'blocked' &&
-            (workspace.settings.audioChannels?.left !== false ||
-              workspace.settings.audioChannels?.right !== false) && (
-              <Button
-                variant="contained"
-                startIcon={<VolumeUpOutlined />}
-                onClick={() => media.observations.audio.resume()}
-              >
-                点击开启声音
-              </Button>
-            )}
-        </div>
-        <div className={`window-workspace ${sideBySide ? 'side-by-side' : ''}`}>
-          {windows.map((w, index) => (
-            <React.Fragment key={w.id}>
-              {sideBySide && index > 0 && (
-                <WindowDivider
-                  before={windows[index - 1]}
-                  after={w}
-                  windows={workspace.windows}
-                  online={productReady}
-                  action={action}
-                  report={report}
-                />
-              )}
-              <WindowFrame
-                win={w}
-                state={state}
-                transport={media}
-                action={action}
-                online={productReady}
-                onSettings={() => setSettings(true)}
-                onAdmin={() => setAdmin(true)}
-                onLogout={logout}
-                report={report}
-                onGeometry={onGeometry}
-                focusAddress={focusAddress}
-                visible={
-                  fullscreen ? w.id === fullscreen.windowId : sideBySide || w.id === workspace.activeWindowId
-                }
-                fullscreen={fullscreen?.windowId === w.id}
-                audioSaving={audioSaving}
-                audioError={audioError}
-                saveAudio={saveAudio}
-              />
-            </React.Fragment>
-          ))}
-          {fullscreen && (
-            <Button
-              className="remote-fullscreen-exit"
-              variant="contained"
-              size="small"
-              disabled={!productReady || exitingFullscreen}
-              onClick={() => exitFullscreen.current()}
-            >
-              退出网页全屏
-            </Button>
-          )}
-          {windows.length === 0 && (
-            <div className="workspace-empty">
-              <div className="workspace-empty-body">
-                <WebAssetOutlined className="workspace-empty-icon" />
-                <Typography component="h1" variant="h6">
-                  没有打开的窗口
-                </Typography>
-                <Typography variant="body2" color="text.secondary">
-                  新建一个窗口开始浏览
-                </Typography>
-                <Button
-                  variant="contained"
-                  startIcon={<Add />}
-                  disabled={!productReady}
-                  onClick={() => void action({ type: 'window.create' }).catch(report)}
-                >
-                  新建窗口
-                </Button>
-                <div className="workspace-empty-links">
-                  {state.user.isAdmin && (
-                    <Button
-                      size="small"
-                      color="inherit"
-                      startIcon={<AdminPanelSettingsOutlined />}
-                      disabled={status !== 'online'}
-                      onClick={() => setAdmin(true)}
-                    >
-                      管理员面板
+      <FloatingActionsContext.Provider value={floatingActions}>
+        <main
+          className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}`}
+          ref={shell}
+        >
+          <DiagnosticCollectionView state={diagnosticState} dismiss={() => diagnostics.dismiss()} />
+          <div className="shell-notices" aria-live="polite">
+            {status !== 'online' && (
+              <Alert
+                severity="warning"
+                action={
+                  status === 'failed' && (
+                    <Button color="inherit" size="small" onClick={() => connection.current?.restart()}>
+                      重试
                     </Button>
-                  )}
-                  <Button size="small" color="inherit" startIcon={<Logout />} onClick={logout}>
-                    退出登录
+                  )
+                }
+              >
+                {status === 'failed' ? '暂时无法连接' : '正在恢复连接…'}
+              </Alert>
+            )}
+            {status === 'online' && !productReady && (
+              <Alert
+                severity={snapshot.rtc.phase === 'exhausted' ? 'warning' : 'info'}
+                action={
+                  snapshot.rtc.phase === 'exhausted' && (
+                    <Button color="inherit" size="small" onClick={() => void media.rtc.connect()}>
+                      重试
+                    </Button>
+                  )
+                }
+              >
+                {snapshot.rtc.phase === 'exhausted' ? '浏览器连接失败' : '正在连接浏览器…'}
+              </Alert>
+            )}
+            {(error || operationState.error || viewportNotice || state.endpointError) && (
+              <Alert
+                severity="warning"
+                onClose={() => {
+                  media.workspace.dismissError();
+                  media.viewport.dismissNotice();
+                }}
+              >
+                {error ||
+                  (operationState.error && formatError(operationState.error)) ||
+                  viewportNotice ||
+                  (state.quality.resourceLimitation
+                    ? '当前画面尺寸超出可用范围，请缩小窗口或关闭部分窗口。'
+                    : state.endpointError)}
+              </Alert>
+            )}
+            {pendingOperations.length > 0 && (
+              <Alert
+                severity="info"
+                action={
+                  pendingOperations.some((entry) => entry.receipt?.status === 'unknown') ? (
+                    <Button color="inherit" size="small" onClick={() => media.operations.dismissUnknown()}>
+                      以当前工作区为准
+                    </Button>
+                  ) : undefined
+                }
+              >
+                {pendingOperations.length} 个操作
+                {pendingOperations.some((entry) => entry.receipt?.status === 'unknown')
+                  ? '结果未知，请核对工作区'
+                  : '正在同步'}
+                {snapshot.observations.channel !== '已连接' ? '，等待数据通道连接' : ''}
+              </Alert>
+            )}
+          </div>
+          <FloatingBall actions={floatingActions} />
+          <div className={`window-workspace ${sideBySide ? 'side-by-side' : ''}`}>
+            {windows.map((w, index) => (
+              <React.Fragment key={w.id}>
+                {sideBySide && index > 0 && (
+                  <WindowDivider
+                    before={windows[index - 1]}
+                    after={w}
+                    windows={workspace.windows}
+                    online={productReady}
+                    action={action}
+                    report={report}
+                  />
+                )}
+                <WindowFrame
+                  win={w}
+                  state={state}
+                  transport={media}
+                  action={action}
+                  online={productReady}
+                  onSettings={() => setSettings(true)}
+                  onAdmin={() => setAdmin(true)}
+                  onLogout={logout}
+                  report={report}
+                  onGeometry={onGeometry}
+                  focusAddress={focusAddress}
+                  visible={
+                    fullscreen
+                      ? w.id === fullscreen.windowId
+                      : sideBySide || w.id === workspace.activeWindowId
+                  }
+                  fullscreen={fullscreen?.windowId === w.id}
+                  audioSaving={audioSaving}
+                  audioError={audioError}
+                  saveAudio={saveAudio}
+                />
+              </React.Fragment>
+            ))}
+            {windows.length === 0 && (
+              <div className="workspace-empty">
+                <div className="workspace-empty-body">
+                  <WebAssetOutlined className="workspace-empty-icon" />
+                  <Typography component="h1" variant="h6">
+                    没有打开的窗口
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    新建一个窗口开始浏览
+                  </Typography>
+                  <Button
+                    variant="contained"
+                    startIcon={<Add />}
+                    disabled={!productReady}
+                    onClick={() => void action({ type: 'window.create' }).catch(report)}
+                  >
+                    新建窗口
                   </Button>
+                  <div className="workspace-empty-links">
+                    {state.user.isAdmin && (
+                      <Button
+                        size="small"
+                        color="inherit"
+                        startIcon={<AdminPanelSettingsOutlined />}
+                        disabled={status !== 'online'}
+                        onClick={() => setAdmin(true)}
+                      >
+                        管理员面板
+                      </Button>
+                    )}
+                    <Button size="small" color="inherit" startIcon={<Logout />} onClick={logout}>
+                      退出登录
+                    </Button>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
+          </div>
+          {productReady && (
+            <PageDialogs
+              state={state}
+              action={action}
+              activeId={foreground?.kind === 'page' ? foreground.id : null}
+            />
           )}
-        </div>
-        {productReady && (
-          <PageDialogs
+          {fileRequest && (
+            <FileChooserDialog
+              key={fileRequest.id}
+              request={fileRequest}
+              transport={media}
+              viewId={workspace.tabs.find((tab) => tab.id === fileRequest.tabId)?.webviewId}
+            />
+          )}
+          {state.user.isAdmin && (
+            <AdminConsole
+              open={admin}
+              online={status === 'online'}
+              self={state.user.username}
+              call={adminCall}
+              onClose={() => setAdmin(false)}
+            />
+          )}
+          <SettingsDialog
+            online={productReady}
             state={state}
+            open={settings}
+            onClose={() => setSettings(false)}
             action={action}
-            activeId={foreground?.kind === 'page' ? foreground.id : null}
+            logout={logout}
+            sessionImport={
+              settings && (
+                <SessionImportSettings
+                  online={productReady}
+                  call={sessionImportCall}
+                  action={action}
+                  windowId={state.workspace.activeWindowId}
+                  opened={() => setSettings(false)}
+                />
+              )
+            }
+            diagnostics={
+              settings && (
+                <DiagnosticSettings
+                  state={diagnosticState}
+                  online={status === 'online'}
+                  start={() => {
+                    void diagnostics.start(diagnosticEnvironment()).then((started) => {
+                      if (started) setSettings(false);
+                    });
+                  }}
+                />
+              )
+            }
+            security={
+              settings && (
+                <SecuritySettings
+                  auth={auth}
+                  online={status === 'online'}
+                  request={authRequest}
+                  camera={camera}
+                  idle={idle}
+                  lock={() => lock('manual')}
+                />
+              )
+            }
           />
-        )}
-        {fileRequest && (
-          <FileChooserDialog
-            key={fileRequest.id}
-            request={fileRequest}
-            transport={media}
-            viewId={workspace.tabs.find((tab) => tab.id === fileRequest.tabId)?.webviewId}
-          />
-        )}
-        {state.user.isAdmin && (
-          <AdminConsole
-            open={admin}
-            online={status === 'online'}
-            self={state.user.username}
-            call={adminCall}
-            onClose={() => setAdmin(false)}
-          />
-        )}
-        <SettingsDialog
-          online={productReady}
-          state={state}
-          open={settings}
-          onClose={() => setSettings(false)}
-          action={action}
-          logout={logout}
-          sessionImport={
-            settings && (
-              <SessionImportSettings
-                online={productReady}
-                call={sessionImportCall}
-                action={action}
-                windowId={state.workspace.activeWindowId}
-                opened={() => setSettings(false)}
-              />
-            )
-          }
-          diagnostics={
-            settings && (
-              <DiagnosticSettings
-                state={diagnosticState}
-                online={status === 'online'}
-                start={() => {
-                  void diagnostics.start(diagnosticEnvironment()).then((started) => {
-                    if (started) setSettings(false);
-                  });
-                }}
-              />
-            )
-          }
-          security={
-            settings && (
-              <SecuritySettings
-                auth={auth}
-                online={status === 'online'}
-                request={authRequest}
-                camera={camera}
-                idle={idle}
-                lock={() => lock('manual')}
-              />
-            )
-          }
-        />
-        <Dialog
-          open={productReady && !!pending && !pending.awaiting}
-          onClose={() =>
-            productReady &&
-            pending &&
-            void action({
-              type: 'tab.close',
-              tabId: pending.id,
-              requestId: pending.requestId,
-              cancel: true,
-            }).catch(report)
-          }
-        >
-          <DialogTitle>离开此页面？</DialogTitle>
-          <DialogContent>此页面可能有未保存的内容。</DialogContent>
-          <DialogActions>
-            <Button
-              autoFocus
-              onClick={() =>
-                pending &&
-                void action({
-                  type: 'tab.close',
-                  tabId: pending.id,
-                  requestId: pending.requestId,
-                  cancel: true,
-                }).catch(report)
-              }
-            >
-              保留页面
-            </Button>
-            <Button
-              onClick={() =>
-                pending &&
-                void action({
-                  type: 'tab.close',
-                  tabId: pending.id,
-                  requestId: pending.requestId,
-                  confirm: true,
-                }).catch(report)
-              }
-            >
-              离开
-            </Button>
-          </DialogActions>
-        </Dialog>
-      </main>
+          <Dialog
+            open={productReady && !!pending && !pending.awaiting}
+            onClose={() =>
+              productReady &&
+              pending &&
+              void action({
+                type: 'tab.close',
+                tabId: pending.id,
+                requestId: pending.requestId,
+                cancel: true,
+              }).catch(report)
+            }
+          >
+            <DialogTitle>离开此页面？</DialogTitle>
+            <DialogContent>此页面可能有未保存的内容。</DialogContent>
+            <DialogActions>
+              <Button
+                autoFocus
+                onClick={() =>
+                  pending &&
+                  void action({
+                    type: 'tab.close',
+                    tabId: pending.id,
+                    requestId: pending.requestId,
+                    cancel: true,
+                  }).catch(report)
+                }
+              >
+                保留页面
+              </Button>
+              <Button
+                onClick={() =>
+                  pending &&
+                  void action({
+                    type: 'tab.close',
+                    tabId: pending.id,
+                    requestId: pending.requestId,
+                    confirm: true,
+                  }).catch(report)
+                }
+              >
+                离开
+              </Button>
+            </DialogActions>
+          </Dialog>
+        </main>
+      </FloatingActionsContext.Provider>
     </FileLibraryContext.Provider>
   );
 }

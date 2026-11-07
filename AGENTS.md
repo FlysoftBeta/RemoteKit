@@ -22,7 +22,7 @@
 - Tenant 对应 Session，Session 是多租户数据隔离边界；其下可有多个 Profile。当前单 Profile 限制属于实现状态，不是最终层级需求。
 - Control 是产品状态真相，持有 User/Window/tab/设置与 Endpoint 对象有限引用。Chromium 恢复数据由 Endpoint Session/Browser 托管；对象丢失可按有限产品信息重建，对账清理 orphan。
 - `control/` 使用 TypeScript、better-sqlite3、Vite、React、MUI。普通 Viewer 采用沉浸式浏览器外壳、实际内容区尺寸、多个独立 Window 并排/窄屏切换；不是两个 active tab 冒充多 Window。
-- 每站点设置放更多→网页兼容性处理，包含平板版网站与不自动弹出键盘；平板选项只改变 UA/CH，不模拟 viewport。提供悬浮按钮显示、隐藏键盘。其余设置统一在更多→设置。质量选择只保留优先高画质、自动、优先流畅；Client Scale 默认 Viewer DPR，可 override。设置存 Control，客户端只持久化用户 token。
+- 每站点设置放更多→网页兼容性处理，包含平板版网站与不自动弹出键盘；平板选项只改变 UA/CH，不模拟 viewport。显示、隐藏键盘放在悬浮球里。其余设置统一在更多→设置。质量选择只保留优先高画质、自动、优先流畅；Client Scale 默认 Viewer DPR，可 override。设置存 Control，客户端只持久化用户 token。
 - 没有公开注册：首个账户为管理员，其余账户只能由管理员在管理员面板创建。管理员面板分概览、用户、节点、存储、诊断；用户管理含重置密码、清除 PIN/人脸、强制下线、休眠与重置浏览器数据、停用、转让管理员和彻底删除（含各节点上的数据）。
 - 高级认证包含完全空白、无交互反馈的锁屏；上上下下左右左右支持键盘与触屏/鼠标点击屏幕区域。未登录只用账密，登录后可配置密码、PIN 与人脸验证；锁定下保留人脸验证，检测用户离开及浏览器可提供的关屏相关信号。
 - 人脸摄像头通过既有 Client↔Endpoint WebRTC 连接传送未压缩 RGB，帧率每秒 5 帧、由服务端协商；Control 参与发起与授权，Endpoint 承担 OpenCV YuNet/SFace 与 MiniFASNet V1SE/V2 ONNX 推理，可自行转换 ONNX。不能为鉴权另建重复 peer 或把识别计算放回 Client/Control。
@@ -42,7 +42,7 @@
 - 服务串流与输入的关键参数尽量独立于宿主系统设置，避免服务器显示器、DPI、刷新率或 RDP 改变行为；客户端 DPR/刷新能力和产品媒体策略仍作为适配输入。
 - 保留 Chrome89 支持。性能环境为 UHD630、RTT10ms、24–48Mbps；重载目标 2–3 租户。目标实际动态画面 ≥50FPS、Pixel marker p95 ≤100ms；静态低 FPS 正常。
 - 单次 idle 尾 IDR、显示/网络自适应 FPS、背压、高码率换编码速度与高精度计时。拥塞控制与媒体降级交给 WebRTC，质量三档对应 DegradationPreference；不保留自行按延迟调整 DPR/分辨率/码率的控制器。Comp 依据 SetRates 与 Slot 压力安排 Begin 和活动队列深度，经 BeginFrameSource 驱动自定义 OSR 呈现后端，不使用 Capture API 截取。Viewer 接收端 jitterBufferTarget 设为 0。受控实验使用独立无交互测试页；保留细粒度 GPU/延迟 profile，淘汰无效旋钮。
-- 诊断从设置内点击开始，收集期间显示悬浮的停止数据收集按钮；停止后打包为 tar.zst 文件保存在服务端，客户端显示诊断 ID。诊断包尽可能涵盖完整的调试信息。
+- 诊断从设置内点击开始，收集期间悬浮球进入提醒状态并提供停止数据收集；停止后打包为 tar.zst 文件保存在服务端，客户端显示诊断 ID。诊断包尽可能涵盖完整的调试信息。
 
 ## 仓库与文档
 
