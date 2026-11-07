@@ -38,7 +38,7 @@ async function until(predicate, timeout = 45000) {
     if (await predicate()) return;
     await delay(40);
   }
-  throw Error('updater integration deadline');
+  throw Error(`updater integration deadline (${phase})`);
 }
 async function makeArchive(id, replacement = updater) {
   const tarPath = path.join(temporary, `${id}.tar`);
@@ -220,7 +220,7 @@ try {
     const rejectRun = run(rejectRoot);
     await until(async () =>
       (await readFile(path.join(rejectRoot, 'logs/supervisor.log'), 'utf8').catch(() => '')).includes(
-        mode === 'bad-hash' ? 'SHA-256 mismatch' : 'build identity or binaries invalid',
+        mode === 'bad-hash' ? 'SHA-256 mismatch' : 'cannot install node runtime: invalid archive or destination',
       ),
     );
     assert.equal(await readFile(path.join(rejectRoot, 'current'), 'utf8'), ids[0]);
