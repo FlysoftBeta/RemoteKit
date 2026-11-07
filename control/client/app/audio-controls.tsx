@@ -1,6 +1,9 @@
 import { VolumeOffOutlined, VolumeUpOutlined } from '@mui/icons-material';
-import { Button, FormControlLabel, Switch, Typography } from '@mui/material';
+import { Button, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
 import type { AudioChannels, AudioPlaybackState } from '../media/audio-output';
+
+type Choice = 'left' | 'right' | 'none';
+
 export function AudioControls({
   channels,
   online,
@@ -18,56 +21,43 @@ export function AudioControls({
   busy: boolean;
   error: string;
 }) {
-  const change = (next: AudioChannels) => {
-    if (busy || !online) return;
-    if (next.left || next.right) resume();
-    save(next);
-  };
   const silent = !channels.left && !channels.right;
+  const selected: Choice[] = silent
+    ? ['none']
+    : [...(channels.left ? ['left' as const] : []), ...(channels.right ? ['right' as const] : [])];
+  const change = (next: Choice[]) => {
+    if (busy || !online) return;
+    // "none" was just picked when it is the newest entry; it clears both channels.
+    const cleared = next[next.length - 1] === 'none' || next.length === 0;
+    const value = cleared
+      ? { left: false, right: false }
+      : { left: next.includes('left'), right: next.includes('right') };
+    if (value.left === channels.left && value.right === channels.right) return;
+    if (value.left || value.right) resume();
+    save(value);
+  };
   const status = error || (busy ? '正在保存…' : '');
   return (
-    <div role="group" aria-label="整个工作空间的声音" className="menu-audio">
+    <div className="menu-audio">
       <div className="menu-audio-row">
         {silent ? (
           <VolumeOffOutlined fontSize="small" color="action" />
         ) : (
           <VolumeUpOutlined fontSize="small" color="action" />
         )}
-        <FormControlLabel
-          className="menu-audio-channel"
-          control={
-            <Switch
-              size="small"
-              disabled={!online || busy}
-              checked={channels.left}
-              onChange={(_, left) => change({ ...channels, left })}
-            />
-          }
-          label={<Typography variant="body2">左声道</Typography>}
-        />
-        <FormControlLabel
-          className="menu-audio-channel"
-          control={
-            <Switch
-              size="small"
-              disabled={!online || busy}
-              checked={channels.right}
-              onChange={(_, right) => change({ ...channels, right })}
-            />
-          }
-          label={<Typography variant="body2">右声道</Typography>}
-        />
-        <Button
+        <ToggleButtonGroup
           size="small"
-          variant={silent ? 'contained' : 'outlined'}
-          color={silent ? 'primary' : 'inherit'}
-          aria-pressed={silent}
+          color="primary"
+          fullWidth
+          aria-label="整个工作空间的声音"
+          value={selected}
           disabled={!online || busy}
-          className="menu-audio-mute"
-          onClick={() => change({ left: false, right: false })}
+          onChange={(_, next: Choice[]) => change(next)}
         >
-          不播放
-        </Button>
+          <ToggleButton value="left">左声道</ToggleButton>
+          <ToggleButton value="right">右声道</ToggleButton>
+          <ToggleButton value="none">不播放</ToggleButton>
+        </ToggleButtonGroup>
       </div>
       <Typography
         variant="caption"

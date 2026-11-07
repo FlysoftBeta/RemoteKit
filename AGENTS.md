@@ -34,7 +34,7 @@
 - 开启 Control Memory Saver 策略。Viewer 断线决定产品 visible=false 及回收资格；RTC 连接独立决定渲染/编码需求，不反向把 hidden 页面显示出来。
 - Rectangle Packing 把多个可见平面合为视频 atlas；必须处理 DPR、DIP、编码采样比例、letterbox、screen 坐标与旧布局输入门禁。
 - Endpoint 用独立 CMake/Ninja，Mojo/libwebrtc 纳入 SDK 边界；跨 DLL 不传 C++ STL/libc++/Abseil/Chromium 对象。oneVPL 异步 H264 与 NVENC 均在范围内。音频目标必须是 Chromium 播放输出 target，不用系统 hook/capture。
-- 音频播放配置按整个 Viewer 统一并由 Control 保存：更多菜单紧凑放左右声道多选 Switch 与"不播放"（清空选择）。
+- 音频播放配置按整个 Viewer 统一并由 Control 保存：更多菜单用一个紧凑按钮组：左声道、右声道可多选，"不播放"清空选择。
 - Viewer 统一使用 video 呈现，没有 Canvas 串流后端或自动回退；尺寸过渡快照、摄像头处理与测试像素读回不属于串流后端。显示布局来自客户端内容 bounds，atlas 矩形用于裁剪；不启用原生 controls、画中画和多余媒体功能。布局/输入对应必须正确，不能把实验原型当成已完成的产品实现。
 - 网页文件上传使用自定义文件篮，支持设备文件和摄像头拍照。拍照用摄像头 feature 而非 capture input；全屏取景，横屏快门在侧边，模式与连续拍摄配置在相机中选定。只有文件篮和拍照两个主界面，拍后直接入篮，不经过独立"检查照片"。Endpoint 选片，质量够用即停止采样，单次采样最长 1 秒、最多 20 个不同源帧；照片不经过视频编解码链，限制并发与内存。仅足够不确定时在篮内提供候选，可移除或原位重拍。文档扫描是统一功能，合并几何矫正与保色扫描增强，默认保留颜色，不做黑白硬二值化；文档不完整入镜也应有可用结果，不能猜裁丢掉已有内容。照片和普通文件共用有序文件篮，可插入、排序；图片为主时横向卡片整卡拖拽、点击菜单，简易态为小 strip 和右侧纵向发送/添加/更多图标；明显普通文件居多时列表手柄拖拽且操作展开为按钮，可切换视图。multiple 可选全部，否则手动选一项，选择确认后消费项自动出篮。更多→我的文件是独立 tab，按时间排列、可分组、上传及加入文件篮；有分组后每次上传显式选择分组或不分组。文件字节在服务端按 hash 存储。文件选择 UI 紧凑，输入可见且有可靠位置时锚定输入，否则使用 dialog。
 - 实际 GPU Fence 保护读写与复用；CPU 发布位、提交返回或持有 HANDLE 不能假装完成。Browser↔Endpoint 采用 Comp 主动 Slot Begin、Rend Reject 或 GPU Fence Signal，均绑定 Slot Value 并允许多个请求在途；成功帧不增加 ready/present/release 消息。Rend 主动 Wake 后 Comp 应尽快申请新帧，仍遵守 Slot 租约、背压及媒体暂停门禁。Chromium 内部 IPC 和 Endpoint↔Client 媒体元数据是不同边界。

@@ -721,31 +721,23 @@ button:focus-visible,
   white-space: nowrap;
 }
 .menu-audio {
-  padding: 4px 12px 0 16px;
+  padding: 8px 12px 8px 16px;
 }
 .menu-audio-row {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  column-gap: 4px;
-  min-height: 44px;
+  gap: 12px;
 }
-.menu-audio-row > .MuiSvgIcon-root {
-  margin-right: 12px;
+.menu-audio-row .MuiToggleButton-root {
+  padding: 4px 8px;
+  white-space: nowrap;
 }
-.menu-audio-channel.MuiFormControlLabel-root {
-  margin: 0 4px 0 -6px;
-  min-height: 44px;
-}
-.menu-audio-mute.MuiButton-root {
-  margin-left: auto;
-  min-width: 0;
-  padding: 2px 10px;
-  border-radius: 999px;
+.menu-audio-status {
+  display: block;
+  padding: 4px 0 0 32px;
 }
 .menu-audio-status:empty {
-  display: block;
-  height: 4px;
+  padding: 0;
 }
 .stats-overlay {
   pointer-events: none;
