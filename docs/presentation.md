@@ -25,9 +25,9 @@ Viewer 收到一路 H.264 atlas 视频和一路 Opus 音频。本文讲视频如
 
 画面始终按设备物理像素串流。设置里的界面缩放（50%–200%）把外壳和网页内容一起放大或缩小，不改变编码像素密度：
 
-- `#root` 按 `视口 / scale` 排版，再用 `transform: scale()` 放大回视口。不用 CSS `zoom`：Chrome 128 之前 `zoom` 下 `getBoundingClientRect` 与指针坐标不在同一空间，transform 在所有支持版本上都保持二者一致（都是视觉 px）。
+- `<body>` 按 `视口 / scale` 排版，再用 `transform: scale()` 放大回视口。不用 CSS `zoom`：Chrome 128 之前 `zoom` 下 `getBoundingClientRect` 与指针坐标不在同一空间，transform 在所有支持版本上都保持二者一致（都是视觉 px）。
 - Viewer 上报的内容区尺寸是布局 px，DPR 是 `devicePixelRatio × scale`，所以远端页面的 DIP 等于布局 px，编码像素等于物理像素。`video-plane` 和尺寸过渡快照把视觉 rect 按元素的视觉/布局比例换回布局 px，再与 DIP 比较。
-- MUI 的 Modal/Popper 挂到 `#root` 内，跟随同一个 transform。Popover/Menu 用 `scaledAnchor` 把锚点 rect 和窗口尺寸换成布局 px；视口单位不跟 transform 走，宽度上限用 `--layout-vw`。断点按布局宽度计算（`html.layout-narrow` ≤600、`layout-compact` ≤760），不用 media query。
+- MUI 的 Modal/Popper 默认挂在 `<body>` 下，直接跟随同一个 transform。不能把它们挂进 React 根容器 `#root`：React 拥有该节点的子树，挂在里面的 Menu 关闭后退出过渡完成却不卸载，残留的 Popover 根会挡住后续交互。Popover/Menu 用 `scaledAnchor` 把锚点 rect 和窗口尺寸换成布局 px；视口单位不跟 transform 走，宽度上限用 `--layout-vw`。断点按布局宽度计算（`html.layout-narrow` ≤600、`layout-compact` ≤760），不用 media query。
 
 顶部留空在界面上方留出不响应操作的条带，高度以视觉 px 计：关闭时等于 `env(safe-area-inset-top)`；跟随系统时取安全区与 `env(titlebar-area-height)` 的较大值；自定义 1–200px 时不低于安全区。页面声明 `viewport-fit=cover` 才能读到安全区，所以安全区始终由留空负责避开。外壳从条带下方开始排版，上报的内容区高度扣除条带。
 

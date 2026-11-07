@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from 'react';
 
 // The Viewer always streams at the device's physical resolution. The user-facing scale zooms the
-// whole app: #root is laid out at viewport / scale and scaled back up with a transform, and remote
+// whole app: <body> is laid out at viewport / scale and scaled back up with a transform (so portaled
+// overlays follow it without a container override), and remote
 // pages get DIP = layout px with deviceScaleFactor = devicePixelRatio × scale. A transform keeps
 // getBoundingClientRect and pointer coordinates in the same (visual) space on every supported
 // Chrome version; CSS zoom does not before Chrome 128.

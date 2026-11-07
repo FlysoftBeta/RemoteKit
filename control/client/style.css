@@ -7,13 +7,13 @@ body,
   overflow: hidden;
 }
 :root {
-  /* Viewport units do not follow the transform on #root; size against the scaled layout instead. */
+  /* Viewport units do not follow the transform on <body>; size against the scaled layout instead. */
   --layout-vw: calc(100vw / var(--ui-scale, 1));
 }
 * {
   box-sizing: border-box;
 }
-html.ui-scaled #root {
+html.ui-scaled body {
   position: fixed;
   top: 0;
   left: 0;

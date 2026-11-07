@@ -396,7 +396,7 @@ export function WindowFrame({
               <Language fontSize="inherit" />
               <span className="tab-title">{drag.title}</span>
             </div>,
-            document.getElementById('root') ?? document.body,
+            document.body,
           )}
         <Tool
           title="新建标签页"
