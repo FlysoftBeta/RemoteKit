@@ -21,7 +21,7 @@ import {
 import { DiagnosticCollectionView, DiagnosticSettings } from './diagnostic-collection-view';
 import { FileChooserDialog } from '../files/file-chooser-dialog';
 import { FloatingActions, FloatingActionsContext, useFloatingAction } from './floating-actions';
-import { FloatingBall } from './floating-ball';
+import { FloatingDock } from './floating-dock';
 import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../files/file-library-state';
 import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import type { AudioChannels } from '../media/audio-output';
@@ -34,6 +34,8 @@ import { useViewerSession } from './use-viewer-session';
 import { ViewerSession } from '../viewer-session';
 import { selectVisibility } from './visibility';
 import { WindowDivider, WindowFrame } from './window-frame';
+
+const FULLSCREEN_EXIT_ANCHORS = ['top-left', 'top', 'top-right'] as const;
 
 export function WorkspaceView({ logout, expired }: { logout: () => void; expired: () => void }) {
   const [media] = useState(() => new ViewerSession());
@@ -202,6 +204,8 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     fullscreenTarget
       ? {
           order: 0,
+          anchor: 'top-right',
+          anchors: FULLSCREEN_EXIT_ANCHORS,
           label: '退出网页全屏',
           icon: 'fullscreen-exit',
           disabled: !productReady || exitingFullscreen,
@@ -215,6 +219,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     audioBlocked
       ? {
           order: 20,
+          anchor: 'top',
           label: '开启声音',
           detail: '浏览器拦截了自动播放',
           icon: 'sound',
@@ -233,6 +238,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     collecting
       ? {
           order: 30,
+          anchor: 'bottom',
           label: diagnosticState.phase === 'retry' ? '重试确认' : '停止数据收集',
           detail:
             diagnosticState.phase === 'retry'
@@ -346,7 +352,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
               </Alert>
             )}
           </div>
-          <FloatingBall actions={floatingActions} />
+          <FloatingDock actions={floatingActions} />
           <div className={`window-workspace ${sideBySide ? 'side-by-side' : ''}`}>
             {windows.map((w, index) => (
               <React.Fragment key={w.id}>

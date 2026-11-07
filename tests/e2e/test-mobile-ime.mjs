@@ -565,7 +565,6 @@ try {
     'Simulated Back moved DOM focus or automatically reopened the IME',
   );
   await log('mobile-ime-system-back', afterBack);
-  await click('.floating-ball');
   await click('.remote-open-keyboard', '显示键盘');
   await wait(
     () =>

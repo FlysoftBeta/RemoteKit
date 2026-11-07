@@ -1,6 +1,8 @@
 import { createContext, useContext, useLayoutEffect } from 'react';
 
 export type FloatingIcon = 'keyboard' | 'keyboard-hide' | 'fullscreen-exit' | 'sound' | 'stop';
+export type DockAnchor =
+  'top-left' | 'top' | 'top-right' | 'left' | 'right' | 'bottom-left' | 'bottom' | 'bottom-right';
 
 export type FloatingAction = {
   id: string;
@@ -8,9 +10,11 @@ export type FloatingAction = {
   label: string;
   detail?: string;
   icon: FloatingIcon;
+  // Edge slot used until the user drags the button elsewhere, and the slots it may be dragged to.
+  anchor: DockAnchor;
+  anchors?: readonly DockAnchor[];
   run: () => void;
   disabled?: boolean;
-  // Attention brings the ball out of its half-hidden dock until the action is gone.
   attention?: 'notice' | 'recording';
   className?: string;
 };
@@ -58,6 +62,8 @@ function sameEntry(entry: Entry, action: FloatingAction) {
     entry.label === action.label &&
     entry.detail === action.detail &&
     entry.icon === action.icon &&
+    entry.anchor === action.anchor &&
+    entry.anchors === action.anchors &&
     entry.disabled === action.disabled &&
     entry.attention === action.attention &&
     entry.className === action.className

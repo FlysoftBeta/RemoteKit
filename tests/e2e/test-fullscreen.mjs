@@ -552,7 +552,6 @@ try {
       // Use the overlay exit, which must address the currently fullscreen document
       // even after the preceding navigation retired a fullscreen document.
       await expectRemoteFullscreen(cleanupEnterAt, navigated.documentId);
-      await click('.floating-ball');
       await click('button', '退出网页全屏');
       await until(
         () =>

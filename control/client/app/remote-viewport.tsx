@@ -74,6 +74,7 @@ export function RemoteViewport({
       (editing.observedOwner || editing.keyboardShown)
       ? {
           order: 10,
+          anchor: 'bottom-right',
           label: editing.keyboardShown ? '隐藏键盘' : '显示键盘',
           icon: editing.keyboardShown ? 'keyboard-hide' : 'keyboard',
           disabled: !editing.keyboardShown && !editing.keyboardReady,
