@@ -65,16 +65,20 @@ bool ValidSelectionId(const std::string* selection_id) {
 }
 base::DictValue InputAnchor(const blink::mojom::FileChooserInputAnchor& anchor,
                             const PageRequests::AnchorLayout& layout) {
+  // Bounds and viewport are page DIPs; the renderer scale is the original virtual screen scale,
+  // not the emulated page scale.
+  if (!std::isfinite(layout.device_scale_factor) || layout.device_scale_factor <= 0) {
+    return {};
+  }
   const auto& bounds = anchor.bounds;
   const auto& viewport = anchor.viewport;
   if (!std::isfinite(bounds.x()) || !std::isfinite(bounds.y()) || !std::isfinite(bounds.width()) ||
       !std::isfinite(bounds.height()) || !std::isfinite(viewport.width()) ||
-      !std::isfinite(viewport.height()) || !std::isfinite(anchor.device_scale_factor) ||
-      bounds.IsEmpty() || viewport.IsEmpty() || bounds.x() < 0 || bounds.y() < 0 ||
-      bounds.right() > viewport.width() + 0.01f || bounds.bottom() > viewport.height() + 0.01f ||
+      !std::isfinite(viewport.height()) || bounds.IsEmpty() || viewport.IsEmpty() ||
+      bounds.x() < 0 || bounds.y() < 0 || bounds.right() > viewport.width() + 0.01f ||
+      bounds.bottom() > viewport.height() + 0.01f ||
       std::abs(viewport.width() - layout.width) > 1.f ||
-      std::abs(viewport.height() - layout.height) > 1.f ||
-      std::abs(anchor.device_scale_factor - layout.device_scale_factor) > 0.001f) {
+      std::abs(viewport.height() - layout.height) > 1.f) {
     return {};
   }
   base::DictValue result;
@@ -84,7 +88,7 @@ base::DictValue InputAnchor(const blink::mojom::FileChooserInputAnchor& anchor,
   result.Set("height", bounds.height());
   result.Set("viewportWidth", viewport.width());
   result.Set("viewportHeight", viewport.height());
-  result.Set("deviceScaleFactor", anchor.device_scale_factor);
+  result.Set("deviceScaleFactor", layout.device_scale_factor);
   result.Set("instance", base::NumberToString(layout.instance));
   result.Set("document", base::NumberToString(layout.document));
   result.Set("layoutGeneration", base::NumberToString(layout.generation));

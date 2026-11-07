@@ -9,9 +9,34 @@ body,
 :root {
   /* Viewport units do not follow the transform on <body>; size against the scaled layout instead. */
   --layout-vw: calc(100vw / var(--ui-scale, 1));
+  --layout-vh: calc(100vh / var(--ui-scale, 1));
 }
 * {
   box-sizing: border-box;
+}
+/* Thin overlay-like scrollbars for the shell's own scroll areas (both syntaxes: Chrome 89 only
+   knows the -webkit- one, newer Chrome prefers the standard one when set). */
+@supports (scrollbar-width: thin) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #c3cbd6 transparent;
+  }
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background: #c3cbd6 content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #9aa6b5;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 html.ui-scaled body {
   position: fixed;

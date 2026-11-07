@@ -72,7 +72,7 @@ export function FileImagePreview({
       sx={{
         width: '100%',
         display: 'block',
-        maxHeight: inline ? 'min(34vh, 210px)' : '70vh',
+        maxHeight: inline ? 'min(calc(var(--layout-vh) * 0.34), 210px)' : 'calc(var(--layout-vh) * 0.7)',
         objectFit: 'contain',
       }}
     />

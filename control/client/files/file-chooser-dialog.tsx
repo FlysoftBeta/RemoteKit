@@ -1,34 +1,58 @@
 import { diagnostics } from '../media/diagnostics';
-import { Add, Close, MoreHoriz, Send } from '@mui/icons-material';
+import {
+  Add,
+  Close,
+  FolderOutlined,
+  GridViewOutlined,
+  MoreHoriz,
+  PhotoCameraOutlined,
+  Send,
+  UploadFileOutlined,
+  ViewListOutlined,
+} from '@mui/icons-material';
 import {
   Alert,
   Badge,
   Box,
   Button,
-  Dialog,
-  DialogContent,
+  Divider,
   IconButton,
   LinearProgress,
+  ListItemIcon,
+  ListItemText,
+  ListSubheader,
+  Menu,
+  MenuItem,
   Tooltip,
   Typography,
 } from '@mui/material';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import type { LibraryEntry } from '../../shared/file-library';
 import type { FileRequest } from '../../shared/product';
-import { ArchiveContents } from './archive-picker';
-import { BasketRows, type BasketItemPanel } from './basket-rows';
+import { FloatingPanel } from '../app/floating-panel';
+import { scaledAnchor, uiScale } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
+import type { ViewerSession } from '../viewer-session';
+import { ArchivePicker } from './archive-picker';
+import { BasketItems, type BasketPanel } from './basket-items';
 import { placeFileChooser } from './file-chooser-anchor';
-import { basketEntries, DeviceImport, fileError, GroupConfirm, touchButton } from './file-library-controls';
+import {
+  basketEntries,
+  fileError,
+  FileDropZone,
+  GroupConfirm,
+  useDeviceImport,
+} from './file-library-controls';
 import { useLibrary } from './file-library-state';
 import { fileChooserAccept, selectionViewModel, validateSelection } from './file-selection';
-import { FileViewButton, useFileView } from './file-view';
+import { useFileView } from './file-view';
 import { PhotoCapture } from './photo-library-capture';
-import type { ViewerSession } from '../viewer-session';
-import { uiScale } from '../app/ui-scale';
 
-type Panel = 'add' | 'more' | 'group' | 'archive' | BasketItemPanel;
+const MAX_BASKET = 64;
+
+type Step = 'archive' | 'group';
 type Camera = { afterId?: string; replace?: LibraryEntry };
+type AddMenu = { anchor: HTMLElement; afterId?: string };
 
 export function FileChooserDialog(props: {
   request: FileRequest;
@@ -56,16 +80,17 @@ export function FileBasketDialog({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const cancelOutcome = request && cancellations[request.id];
-  const [uploading, setUploading] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [camera, setCamera] = useState<Camera>();
-  const [panel, setPanel] = useState<Panel>();
+  const [step, setStep] = useState<Step>();
+  const [panel, setPanel] = useState<BasketPanel>();
+  const [addMenu, setAddMenu] = useState<AddMenu>();
+  const [moreMenu, setMoreMenu] = useState<HTMLElement>();
   const [afterId, setAfterId] = useState<string>();
   const [position, setPosition] = useState<ReturnType<typeof placeFileChooser>>();
   const [viewportHeight, setViewportHeight] = useState(
     () => window.visualViewport?.height ?? window.innerHeight,
   );
-  const input = useRef<HTMLInputElement>(null);
   const basket = basketEntries(snapshot);
   const view = useFileView(basket);
   const pending = photos.jobs.filter((job) => job.destination === 'basket' && !job.replace);
@@ -83,13 +108,25 @@ export function FileBasketDialog({
   const outcome = selectionViewModel(transaction?.state, cancelOutcome);
   const final = outcome.terminal;
   const waiting = request?.state === 'validating' || !!transaction || cancelOutcome !== undefined;
-  const disabled = !online || busy || uploading || !!transaction?.active;
+  const capacity = MAX_BASKET - basket.length - pending.length;
+  const reportError = useCallback((message: string) => setError(message), []);
+  const clearInsertion = useCallback(() => setAfterId(undefined), []);
+  const upload = useDeviceImport({
+    destination: 'basket',
+    afterId,
+    accept: request ? fileChooserAccept(request) : undefined,
+    inlineChoice: true,
+    disabled: !online || busy || !snapshot || waiting || final || dragging,
+    onError: reportError,
+    onDone: clearInsertion,
+  });
+  const disabled = !online || busy || upload.busy || !!transaction?.active;
   const editingDisabled = disabled || !snapshot || waiting || final;
   const toolbarDisabled = editingDisabled || dragging;
-  const canAdd = !toolbarDisabled && basket.length + pending.length < 64;
+  const canAdd = !toolbarDisabled && capacity > 0;
 
   useEffect(() => {
-    if (online) void refresh().catch((error) => diagnostics.record('file-chooser-dialog', error));
+    if (online) void refresh().catch((failure) => diagnostics.record('file-chooser-dialog', failure));
   }, [online, request?.id]);
   const measure = () => {
     const anchor =
@@ -100,12 +137,16 @@ export function FileBasketDialog({
     const scale = uiScale();
     setViewportHeight(height / scale);
     const placed = anchor
-      ? placeFileChooser(anchor, {
-          left: visual?.offsetLeft ?? 0,
-          top: visual?.offsetTop ?? 0,
-          width: visual?.width ?? window.innerWidth,
-          height,
-        })
+      ? placeFileChooser(
+          anchor,
+          {
+            left: visual?.offsetLeft ?? 0,
+            top: visual?.offsetTop ?? 0,
+            width: visual?.width ?? window.innerWidth,
+            height,
+          },
+          scale,
+        )
       : undefined;
     const next = placed && {
       ...placed,
@@ -185,243 +226,328 @@ export function FileBasketDialog({
       setError(problem);
       return;
     }
-    if (groups.length) setPanel('group');
+    if (groups.length) setStep('group');
     else submit(null);
   }
-  function openInsert(id?: string) {
-    setAfterId(id);
-    setPanel(panel === 'add' && id === afterId ? undefined : 'add');
-  }
-  const sendTitle = transaction
+  const openAdd = (anchor: HTMLElement, insertAfter?: string) => {
+    setAfterId(insertAfter);
+    setAddMenu({ anchor, afterId: insertAfter });
+  };
+  const addFromArchive = (ids: string[]) => {
+    const order = basket.map((item) => item.id);
+    const index = afterId ? order.indexOf(afterId) : -1;
+    if (afterId && index < 0) {
+      setError('文件篮已更新，请重新选择插入位置');
+      return;
+    }
+    order.splice(index >= 0 ? index + 1 : order.length, 0, ...ids);
+    setStep(undefined);
+    setAfterId(undefined);
+    void saveBasket(order);
+  };
+  const addSources = [
+    {
+      key: 'device',
+      icon: <UploadFileOutlined fontSize="small" />,
+      label: '从设备选择',
+      disabled: !canAdd,
+      run: () => upload.pick(),
+    },
+    {
+      key: 'camera',
+      icon: <PhotoCameraOutlined fontSize="small" />,
+      label: '摄像头拍照',
+      disabled: !canAdd,
+      run: () => setCamera({ afterId }),
+    },
+    {
+      key: 'archive',
+      icon: <FolderOutlined fontSize="small" />,
+      label: '从我的文件选择',
+      disabled: !canAdd || !archived.length,
+      run: () => setStep('archive'),
+    },
+  ];
+  const sendLabel = transaction
     ? '重试确认'
     : blocked
       ? `还有 ${blocked} 项处理中或待确认`
       : request?.multiple
         ? `按顺序发送全部 ${selection.length} 项`
-        : '发送选中的文件';
-  const expandedLimit = typeof panel === 'object' ? 560 : 360;
-  const maxHeight = Math.min(expandedLimit, position?.maxHeight ?? Math.max(0, viewportHeight - 16));
+        : selection.length
+          ? '发送选中的文件'
+          : '先选择一个文件';
+  const sendDisabled =
+    disabled || final || dragging || (!transaction && (waiting || !selection.length || blocked > 0));
+  const expanded = !!panel || !!step;
+  const maxHeight = Math.min(expanded ? 600 : 380, position?.maxHeight ?? Math.max(0, viewportHeight - 16));
+  const closeLabel = request ? '取消文件选择' : '关闭文件篮';
+  const statusText =
+    final || waiting
+      ? final
+        ? outcome.selected
+          ? '文件已交给页面'
+          : '文件选择已关闭'
+        : outcome.uncertain
+          ? '页面接收结果未知，正在确认'
+          : '等待页面确认文件'
+      : '';
   return (
     <>
-      <Dialog
-        open
-        disableEscapeKeyDown={dragging}
-        onClose={
-          disabled || final || dragging
+      <FloatingPanel
+        label="文件篮"
+        placement={position}
+        width={position?.width ?? 420}
+        maxHeight={maxHeight}
+        onEscape={
+          dragging
             ? undefined
             : () => {
-                if (panel) setPanel(undefined);
-                else cancel();
+                if (step) setStep(undefined);
+                else if (panel) setPanel(undefined);
               }
         }
-        slotProps={{
-          paper: {
-            'aria-label': '文件篮',
-            style: { maxHeight },
-            sx: position
-              ? {
-                  position: 'fixed',
-                  top: position.top,
-                  left: position.left,
-                  width: position.width,
-                  transform: position.above ? 'translateY(-100%)' : undefined,
-                  m: 0,
-                }
-              : { width: 400, maxWidth: 'calc(var(--layout-vw) - 16px)', m: 1 },
-          },
-        }}
+        header={
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', height: 20, mt: '-14px', px: 0.5 }}>
+            <Tooltip title={closeLabel}>
+              <span>
+                <IconButton
+                  aria-label={closeLabel}
+                  disabled={disabled || final || dragging}
+                  onClick={cancel}
+                  sx={{ p: '3px' }}
+                >
+                  <Close sx={{ fontSize: 18 }} />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Box>
+        }
       >
-        <DialogContent
-          sx={{ '&&': { p: '6px !important' }, display: 'flex', flexDirection: 'column', gap: 0.5 }}
+        <Box
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            overflowY: 'auto',
+            p: '6px 6px 8px 8px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 0.75,
+          }}
         >
-          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.75 }}>
+          <FileDropZone
+            label="松开以加入文件篮"
+            disabled={!canAdd}
+            onFiles={(files) => {
+              setAfterId(undefined);
+              upload.add(files);
+            }}
+            sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.75 }}
+          >
             <Box sx={{ flex: 1, minWidth: 0 }}>
-              {snapshot ? (
-                <BasketRows
+              {!snapshot ? (
+                <Box sx={{ py: 4, textAlign: 'center' }}>
+                  <Button disabled={!online || waiting} onClick={() => void run(refresh)}>
+                    加载文件篮
+                  </Button>
+                </Box>
+              ) : basket.length || pending.length ? (
+                <BasketItems
                   entries={basket}
+                  pending={pending}
                   revision={snapshot.revision}
+                  mode={view.mode}
+                  ordered={!request || request.multiple}
                   chosen={chosen}
                   onChoose={request && !request.multiple ? setChosen : undefined}
-                  mode={view.mode}
-                  pending={pending}
-                  panel={typeof panel === 'object' ? panel : undefined}
-                  setPanel={setPanel}
-                  onChange={saveBasket}
-                  onInsert={openInsert}
                   disabled={editingDisabled}
                   dragging={dragging}
                   onDragging={setDragging}
-                  onRetake={(replace) => {
-                    setCamera({ replace });
-                  }}
+                  panel={panel}
+                  setPanel={setPanel}
+                  onChange={saveBasket}
+                  onInsert={(id, anchor) => openAdd(anchor, id)}
+                  onRetake={(replace) => setCamera({ replace })}
                 />
               ) : (
-                <Button disabled={!online || waiting} onClick={() => void run(refresh)}>
-                  加载文件篮
-                </Button>
+                <EmptyBasket sources={addSources} />
               )}
             </Box>
-            <Box sx={{ flex: '0 0 44px', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <Box
+              sx={{
+                flex: '0 0 44px',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 0.5,
+              }}
+            >
               {request && (
-                <Tooltip title={sendTitle}>
-                  <span>
-                    <IconButton
-                      aria-label={transaction ? '重试确认' : '发送'}
-                      color="primary"
-                      sx={{ width: 44, height: 44 }}
-                      disabled={
-                        disabled ||
-                        final ||
-                        dragging ||
-                        (!transaction && (waiting || !selection.length || blocked > 0))
-                      }
-                      onClick={beginSelection}
-                    >
-                      <Badge badgeContent={request.multiple ? selection.length : 0} color="primary">
+                <Tooltip title={sendLabel} placement="left">
+                  <Badge
+                    overlap="circular"
+                    badgeContent={request.multiple ? selection.length : 0}
+                    sx={{
+                      '& .MuiBadge-badge': {
+                        bgcolor: '#fff',
+                        color: 'primary.main',
+                        fontWeight: 600,
+                        boxShadow: '0 0 0 1px #245db5',
+                      },
+                    }}
+                  >
+                    <span>
+                      <IconButton
+                        aria-label={transaction ? '重试确认' : '发送'}
+                        disabled={sendDisabled}
+                        onClick={beginSelection}
+                        sx={{
+                          width: 44,
+                          height: 44,
+                          bgcolor: 'primary.main',
+                          color: 'primary.contrastText',
+                          '&:hover': { bgcolor: 'primary.dark' },
+                          '&.Mui-disabled': { bgcolor: 'action.disabledBackground' },
+                        }}
+                      >
                         <Send fontSize="small" />
-                      </Badge>
-                    </IconButton>
-                  </span>
+                      </IconButton>
+                    </span>
+                  </Badge>
                 </Tooltip>
               )}
-              <Tooltip title="添加文件">
+              <Tooltip title="添加文件" placement="left">
                 <span>
                   <IconButton
                     aria-label="添加文件"
-                    aria-expanded={panel === 'add'}
+                    aria-haspopup="menu"
+                    aria-expanded={!!addMenu}
                     disabled={!canAdd}
                     sx={{ width: 44, height: 44 }}
-                    onClick={() => openInsert()}
+                    onClick={(event) => openAdd(event.currentTarget)}
                   >
                     <Add />
                   </IconButton>
                 </span>
               </Tooltip>
-              <Tooltip title="更多">
+              <Tooltip title="更多" placement="left">
                 <span>
                   <IconButton
                     aria-label="更多"
-                    aria-expanded={panel === 'more'}
+                    aria-haspopup="menu"
+                    aria-expanded={!!moreMenu}
                     disabled={dragging}
                     sx={{ width: 44, height: 44 }}
-                    onClick={() => setPanel(panel === 'more' ? undefined : 'more')}
+                    onClick={(event) => setMoreMenu(event.currentTarget)}
                   >
                     <MoreHoriz />
                   </IconButton>
                 </span>
               </Tooltip>
             </Box>
-          </Box>
-          {panel === 'add' && (
-            <Box sx={{ display: 'flex', flexWrap: 'wrap' }}>
-              <Button
-                disabled={!canAdd}
-                onClick={() => {
-                  setPanel(undefined);
-                  input.current?.click();
-                }}
-              >
-                从设备选择
-              </Button>
-              <Button
-                disabled={!canAdd}
-                onClick={() => {
-                  setPanel(undefined);
-                  setCamera({ afterId });
-                }}
-              >
-                摄像头拍照
-              </Button>
-              <Button disabled={!canAdd || !archived.length} onClick={() => setPanel('archive')}>
-                从我的文件选择
-              </Button>
-            </Box>
-          )}
-          {panel === 'archive' && (
-            <ArchiveContents
+          </FileDropZone>
+          {step === 'archive' && (
+            <ArchivePicker
               entries={archived}
-              onClose={() => setPanel(undefined)}
-              onAdd={(id) => {
-                if (!canAdd) return;
-                const ids = basket.map((item) => item.id);
-                const index = afterId ? ids.indexOf(afterId) : -1;
-                if (afterId && index < 0) {
-                  setError('文件篮已更新，请重新选择插入位置');
-                  return;
-                }
-                ids.splice(index >= 0 ? index + 1 : ids.length, 0, id);
-                setPanel(undefined);
-                void saveBasket(ids);
-              }}
+              capacity={capacity}
+              onClose={() => setStep(undefined)}
+              onAdd={addFromArchive}
             />
           )}
-          {panel === 'group' && (
+          {step === 'group' && (
             <GroupConfirm
               groups={groups}
-              onClose={() => setPanel(undefined)}
-              title="选择文件保存分组"
+              onClose={() => setStep(undefined)}
+              title="发送后保存到哪个分组？"
+              detail="发送的文件会同时保存到我的文件"
               disabled={disabled || blocked > 0}
               onChoose={(group) => {
-                setPanel(undefined);
+                setStep(undefined);
                 submit(group);
               }}
             />
           )}
-          {panel === 'more' && (
-            <Box sx={{ borderTop: '1px solid', borderColor: 'divider', px: 1, pb: 0.5 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <FileViewButton mode={view.mode} toggle={view.toggle} disabled={toolbarDisabled} />
-                <Button
-                  startIcon={<Close />}
-                  disabled={disabled || final || dragging}
-                  onClick={cancel}
-                  sx={touchButton}
-                >
-                  {request ? '取消文件选择' : '关闭文件篮'}
-                </Button>
-              </Box>
-              {request && (
-                <Typography variant="caption" display="block" sx={{ overflowWrap: 'anywhere' }}>
-                  {request.origin}
-                  <br />
-                  {request.multiple
-                    ? `按篮中顺序发送全部文件，页面最多接收 ${request.limits.maxFiles} 项`
-                    : '使用单选按钮选择一个文件'}
-                </Typography>
-              )}
-            </Box>
-          )}
-          <DeviceImport
-            inline
-            destination="basket"
-            afterId={afterId}
-            accept={request ? fileChooserAccept(request) : undefined}
-            disabled={toolbarDisabled}
-            inputRef={input}
-            onBusy={setUploading}
-            onError={setError}
-            onDone={() => setAfterId(undefined)}
-          />
+          {upload.view}
           {error && (
             <Alert severity="warning" onClose={() => setError('')}>
               {error}
             </Alert>
           )}
           {!online && <Alert severity="info">等待连接恢复</Alert>}
-          {(busy || uploading || transaction?.active) && <LinearProgress />}
-          {(final || waiting) && (
-            <Typography role="status" variant="caption">
-              {final
-                ? outcome.selected
-                  ? '文件已交给页面'
-                  : '文件选择已关闭'
-                : outcome.uncertain
-                  ? '页面接收结果未知，正在确认'
-                  : '等待页面确认文件'}
+          {(busy || upload.busy || transaction?.active) && <LinearProgress sx={{ borderRadius: 1 }} />}
+          {statusText && (
+            <Typography role="status" variant="caption" color="text.secondary" sx={{ px: 0.5 }}>
+              {statusText}
             </Typography>
           )}
-        </DialogContent>
-      </Dialog>
+        </Box>
+      </FloatingPanel>
+      <Menu
+        anchorEl={scaledAnchor(addMenu?.anchor)}
+        open={!!addMenu && canAdd}
+        onClose={() => {
+          setAddMenu(undefined);
+          if (!step) setAfterId(undefined);
+        }}
+        slotProps={{ list: { dense: true } }}
+      >
+        {addMenu?.afterId && (
+          <ListSubheader disableSticky sx={{ lineHeight: '32px', maxWidth: 260 }}>
+            <Typography variant="caption" noWrap display="block">
+              插入到“{basket.find((entry) => entry.id === addMenu.afterId)?.name}”之后
+            </Typography>
+          </ListSubheader>
+        )}
+        {addSources.map((source) => (
+          <MenuItem
+            key={source.key}
+            disabled={source.disabled}
+            onClick={() => {
+              setAddMenu(undefined);
+              source.run();
+            }}
+          >
+            <ListItemIcon>{source.icon}</ListItemIcon>
+            <ListItemText>{source.label}</ListItemText>
+          </MenuItem>
+        ))}
+      </Menu>
+      <Menu
+        anchorEl={scaledAnchor(moreMenu)}
+        open={!!moreMenu}
+        onClose={() => setMoreMenu(undefined)}
+        slotProps={{ list: { dense: true } }}
+      >
+        <MenuItem
+          disabled={toolbarDisabled}
+          onClick={() => {
+            setMoreMenu(undefined);
+            view.toggle();
+          }}
+        >
+          <ListItemIcon>
+            {view.mode === 'cards' ? (
+              <ViewListOutlined fontSize="small" />
+            ) : (
+              <GridViewOutlined fontSize="small" />
+            )}
+          </ListItemIcon>
+          <ListItemText>{view.mode === 'cards' ? '切换到列表' : '切换到卡片'}</ListItemText>
+        </MenuItem>
+        <Divider />
+        <MenuItem
+          disabled={disabled || final || dragging}
+          onClick={() => {
+            setMoreMenu(undefined);
+            cancel();
+          }}
+        >
+          <ListItemIcon>
+            <Close fontSize="small" />
+          </ListItemIcon>
+          <ListItemText>{closeLabel}</ListItemText>
+        </MenuItem>
+      </Menu>
       {camera && (
         <PhotoCapture
           {...camera}
@@ -432,5 +558,48 @@ export function FileBasketDialog({
         />
       )}
     </>
+  );
+}
+
+function EmptyBasket({
+  sources,
+}: {
+  sources: { key: string; icon: React.ReactNode; label: string; disabled: boolean; run: () => void }[];
+}) {
+  return (
+    <Box
+      sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: 1,
+        px: 1,
+        py: 2.5,
+        borderRadius: '10px',
+        border: '1px dashed',
+        borderColor: '#c8d0da',
+        bgcolor: '#f7f8fa',
+        textAlign: 'center',
+      }}
+    >
+      <Typography variant="body2" color="text.secondary">
+        文件篮是空的，添加要上传的文件
+      </Typography>
+      <Box sx={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: 0.75 }}>
+        {sources.map((source) => (
+          <Button
+            key={source.key}
+            size="small"
+            variant="outlined"
+            startIcon={source.icon}
+            disabled={source.disabled}
+            onClick={source.run}
+            sx={{ bgcolor: 'background.paper' }}
+          >
+            {source.label}
+          </Button>
+        ))}
+      </Box>
+    </Box>
   );
 }

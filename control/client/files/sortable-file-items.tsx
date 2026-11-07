@@ -23,6 +23,7 @@ import { DragIndicator } from '@mui/icons-material';
 import { Box, IconButton, Typography } from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { unscaledLayer, useUiScale } from '../app/ui-scale';
 import { basketDragCurrent, basketDrop, type BasketDrag } from './basket-order';
 
 export type FileView = 'cards' | 'list';
@@ -42,7 +43,6 @@ export interface SortablePresentation {
   index: number;
   overlay?: boolean;
 }
-const cardWidth = 144;
 
 function SortableFileItem({
   id,
@@ -77,6 +77,9 @@ function SortableFileItem({
     index: currentIndex,
     activeIndex,
   } = useSortable({ id, disabled: { draggable: disabled, droppable: false } });
+  // dnd-kit measures in visual px; the shift is applied in layout px under the UI scale.
+  const scale = useUiScale();
+  const shift = transform && { ...transform, x: transform.x / scale, y: transform.y / scale };
   const cards = mode === 'cards';
   const lifted = isCurrent && isDragging;
   const marker =
@@ -114,7 +117,7 @@ function SortableFileItem({
       data-sort-item={id}
       data-sort-target={marker}
       style={{
-        transform: isCurrent ? CSS.Transform.toString(transform) : undefined,
+        transform: isCurrent ? CSS.Transform.toString(shift) : undefined,
         transition: isCurrent ? transition : undefined,
       }}
       sx={{
@@ -163,10 +166,8 @@ export function SortableFileItems<T extends SortableItem>({
   renderItem,
   onChange,
   onDragging,
-  compact = false,
 }: {
   items: T[];
-  compact?: boolean;
   revision: number;
   mode: FileView;
   disabled: boolean;
@@ -176,6 +177,7 @@ export function SortableFileItems<T extends SortableItem>({
   onDragging: (value: boolean) => void;
 }) {
   const cards = mode === 'cards';
+  const scale = useUiScale();
   const ids = items.map((item) => item.id);
   const list = useRef<HTMLUListElement>(null);
   const drag = useRef<BasketDrag | null>(null);
@@ -233,9 +235,7 @@ export function SortableFileItems<T extends SortableItem>({
         sensors={sensors}
         collisionDetection={(args) => {
           const point = args.pointerCoordinates;
-          const bounds = (
-            cards ? list.current : compact ? list.current : list.current?.closest('.MuiDialogContent-root')
-          )?.getBoundingClientRect();
+          const bounds = list.current?.getBoundingClientRect();
           if (
             point &&
             bounds &&
@@ -254,13 +254,7 @@ export function SortableFileItems<T extends SortableItem>({
                 acceleration: 4.5,
                 interval: 10,
                 threshold: cards ? { x: scrollEdge, y: 0 } : { x: 0, y: scrollEdge },
-                canScroll: (element) =>
-                  element ===
-                  (cards
-                    ? list.current
-                    : compact
-                      ? list.current
-                      : list.current?.closest('.MuiDialogContent-root')),
+                canScroll: (element) => element === list.current,
               }
             : false
         }
@@ -284,9 +278,7 @@ export function SortableFileItems<T extends SortableItem>({
           drag.current = { id: String(active.id), ids, revision };
           setActiveId(drag.current.id);
           onDragging(true);
-          const extent = cards
-            ? list.current?.clientWidth
-            : (compact ? list.current : list.current?.closest('.MuiDialogContent-root'))?.clientHeight;
+          const extent = cards ? list.current?.clientWidth : list.current?.clientHeight;
           if (extent) setScrollEdge(Math.min(0.5, 36 / extent));
         }}
         onDragCancel={endDrag}
@@ -316,7 +308,7 @@ export function SortableFileItems<T extends SortableItem>({
               ...(cards
                 ? {
                     display: 'flex',
-                    gap: compact ? '6px' : '10px',
+                    gap: '6px',
                     overflowX: 'auto',
                     overflowY: 'hidden',
                     scrollSnapType: active ? 'none' : 'x proximity',
@@ -327,9 +319,7 @@ export function SortableFileItems<T extends SortableItem>({
                     '&::-webkit-scrollbar': { height: 6 },
                     '&::-webkit-scrollbar-thumb': { bgcolor: 'divider', borderRadius: 3 },
                   }
-                : compact
-                  ? { maxHeight: 170, overflowY: 'auto' }
-                  : {}),
+                : { maxHeight: 170, overflowY: 'auto' }),
             }}
           >
             {order.map((id, index) => {
@@ -342,7 +332,7 @@ export function SortableFileItems<T extends SortableItem>({
                     name={item.name}
                     index={index}
                     mode={mode}
-                    width={compact ? 96 : cardWidth}
+                    width={96}
                     disabled={disabled || !!saving || ids.length < 2}
                     isCurrent={!!active}
                     anyDrag={!!activeId}
@@ -353,17 +343,21 @@ export function SortableFileItems<T extends SortableItem>({
             })}
           </Box>
         </SortableContext>
+        {/* The overlay is placed at visual px rects, so it lives outside the scaled <body> and
+            scales its own content instead. */}
         {createPortal(
           <DragOverlay zIndex={1500} dropAnimation={null}>
             {active && (
               <Box
                 aria-hidden="true"
                 data-basket-drag-overlay
+                style={{ width: `${100 / scale}%`, transform: `scale(${scale})` }}
                 sx={{
+                  transformOrigin: '0 0',
+                  fontFamily: (theme) => theme.typography.fontFamily,
+                  color: 'text.primary',
                   borderRadius: '10px',
-                  boxShadow: 3,
-                  outline: '2px solid',
-                  outlineColor: 'primary.main',
+                  boxShadow: '0 8px 24px rgb(15 23 42 / 22%)',
                   pointerEvents: 'none',
                 }}
               >
@@ -371,7 +365,7 @@ export function SortableFileItems<T extends SortableItem>({
               </Box>
             )}
           </DragOverlay>,
-          document.body,
+          unscaledLayer(),
         )}
       </DndContext>
       {stale && (

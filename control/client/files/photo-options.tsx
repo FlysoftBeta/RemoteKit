@@ -53,7 +53,9 @@ export function PhotoOptions({
           <FileThumbnail
             assetId={selected}
             type="image/png"
-            sx={{ height: 'min(26vh, 180px)', borderRadius: 1 }}
+            name="候选照片"
+            fit="contain"
+            sx={{ height: 'min(calc(var(--layout-vh) * 0.26), 180px)', borderRadius: 1 }}
           />
         </ButtonBase>
         <Box sx={{ display: 'flex', gap: 0.5, my: 0.5 }}>
@@ -72,7 +74,13 @@ export function PhotoOptions({
                 borderRadius: 1,
               }}
             >
-              <FileThumbnail assetId={id} type="image/png" sx={{ width: '100%', height: '100%' }} />
+              <FileThumbnail
+                assetId={id}
+                type="image/png"
+                name="候选照片"
+                size="small"
+                sx={{ width: '100%', height: '100%' }}
+              />
             </ButtonBase>
           ))}
           <Button

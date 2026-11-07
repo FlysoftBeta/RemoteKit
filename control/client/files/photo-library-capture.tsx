@@ -423,6 +423,8 @@ export function PhotoCapture({
             <FileThumbnail
               assetId={newest.id}
               type="image/png"
+              name="照片"
+              size="small"
               blob={newest.preview}
               localOnly
               sx={{ width: 32, height: 32 }}
@@ -431,6 +433,8 @@ export function PhotoCapture({
             <FileThumbnail
               assetId={latestEntry.assetId}
               type={latestEntry.type}
+              name={latestEntry.name}
+              size="small"
               sx={{ width: 32, height: 32 }}
             />
           ) : (

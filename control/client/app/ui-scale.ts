@@ -84,3 +84,16 @@ export function scaledAnchor(element: Element | null | undefined) {
     },
   } as unknown as Element;
 }
+
+// A portal container outside the scaled <body>, for overlays positioned in visual px (drag
+// overlays placed from getBoundingClientRect). React 19 moves a portal aimed at <html> itself into
+// <body>, so the layer is an element of its own.
+let unscaled: HTMLElement | undefined;
+export function unscaledLayer() {
+  if (!unscaled) {
+    unscaled = document.createElement('div');
+    unscaled.dataset.unscaledLayer = '';
+    document.documentElement.appendChild(unscaled);
+  }
+  return unscaled;
+}

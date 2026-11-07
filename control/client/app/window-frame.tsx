@@ -51,7 +51,7 @@ import { StartPage } from './start-page';
 import { ViewerSession } from '../viewer-session';
 import { BrowserTab, TabDragGhost } from './browser-tab';
 import { beginTabPointer, registerTabStrip, tabShift, useTabDrag } from './tab-drag';
-import { scaledAnchor, useLayoutNarrow, useUiScale } from './ui-scale';
+import { scaledAnchor, uiScale, useLayoutNarrow, useUiScale } from './ui-scale';
 export function Tool({
   title,
   children,
@@ -206,8 +206,8 @@ export function WindowFrame({
     if (!bar || !selected) return;
     const bounds = bar.getBoundingClientRect();
     const tabBounds = selected.getBoundingClientRect();
-    if (tabBounds.left < bounds.left) bar.scrollLeft += tabBounds.left - bounds.left;
-    else if (tabBounds.right > bounds.right) bar.scrollLeft += tabBounds.right - bounds.right;
+    if (tabBounds.left < bounds.left) bar.scrollLeft += (tabBounds.left - bounds.left) / uiScale();
+    else if (tabBounds.right > bounds.right) bar.scrollLeft += (tabBounds.right - bounds.right) / uiScale();
   }, [active?.id]);
   useEffect(() => {
     const node = content.current;
@@ -917,7 +917,8 @@ export function WindowDivider({
         const current = drag.current;
         if (!current || !online) return;
         const ratio = clampRatio(
-          current.before / (current.before + current.after) + (e.clientX - current.x) / current.width,
+          current.before / (current.before + current.after) +
+            (e.clientX - current.x) / uiScale() / current.width,
           current.width,
         );
         (e.currentTarget.previousElementSibling as HTMLElement).style.flexGrow = String(
@@ -930,7 +931,10 @@ export function WindowDivider({
       onPointerUp={(e) => {
         const current = drag.current;
         if (current)
-          change(current.before / (current.before + current.after) + (e.clientX - current.x) / current.width);
+          change(
+            current.before / (current.before + current.after) +
+              (e.clientX - current.x) / uiScale() / current.width,
+          );
         drag.current = null;
         e.currentTarget.releasePointerCapture(e.pointerId);
       }}

@@ -1,5 +1,6 @@
 import type { FileRequestAnchor } from '../../shared/product';
 import { projectFileInput } from '../files/file-chooser-anchor';
+import { uiScale } from '../app/ui-scale';
 import { PresentationDiagnostics } from '../media/presentation-diagnostics';
 import { type Layout, type Surface, type VideoPresentation } from './types';
 import { freezeSnapshot } from '../util/store';
@@ -418,6 +419,7 @@ export class PresentationSession {
       this.layout,
       current.renderer.view,
       current.renderer.canvas.getBoundingClientRect(),
+      uiScale(),
     );
   }
 

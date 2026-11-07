@@ -1,26 +1,59 @@
-import { ImageOutlined, InsertDriveFileOutlined } from '@mui/icons-material';
+import {
+  ArticleOutlined,
+  AudioFileOutlined,
+  DescriptionOutlined,
+  FolderZipOutlined,
+  ImageOutlined,
+  InsertDriveFileOutlined,
+  PictureAsPdfOutlined,
+  SlideshowOutlined,
+  TableChartOutlined,
+  VideoFileOutlined,
+} from '@mui/icons-material';
 import { Box, Skeleton, Typography, type SxProps, type Theme } from '@mui/material';
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { fileExtension, fileKind, type FileKind } from './file-format';
 import { useLibrary } from './file-library-state';
 
+const KINDS: Record<FileKind, { icon: React.ElementType; color: string; background: string }> = {
+  image: { icon: ImageOutlined, color: '#1967d2', background: '#e8f0fe' },
+  pdf: { icon: PictureAsPdfOutlined, color: '#c5221f', background: '#fce8e6' },
+  document: { icon: DescriptionOutlined, color: '#1a73e8', background: '#e8f0fe' },
+  sheet: { icon: TableChartOutlined, color: '#188038', background: '#e6f4ea' },
+  slides: { icon: SlideshowOutlined, color: '#c26401', background: '#fef3e0' },
+  archive: { icon: FolderZipOutlined, color: '#795548', background: '#f3ece8' },
+  audio: { icon: AudioFileOutlined, color: '#8430ce', background: '#f3e8fd' },
+  video: { icon: VideoFileOutlined, color: '#b3261e', background: '#fce8e6' },
+  text: { icon: ArticleOutlined, color: '#4b5563', background: '#eef1f4' },
+  other: { icon: InsertDriveFileOutlined, color: '#4b5563', background: '#eef1f4' },
+};
+
+// A file's visual: the cached thumbnail for decodable images (cropped to fill unless `fit` says
+// otherwise), or a tinted icon for its kind with the extension underneath when there is room.
 export function FileThumbnail({
   assetId,
   type,
+  name,
   blob,
-  extension,
   sx,
+  size = 'large',
+  fit = 'cover',
   localOnly = false,
 }: {
   assetId: string;
   type: string;
+  name: string;
   blob?: Blob;
-  extension?: string;
   sx?: SxProps<Theme>;
+  size?: 'small' | 'large';
+  fit?: 'cover' | 'contain';
   localOnly?: boolean;
 }) {
   const { online, thumbnails } = useLibrary();
-  const image = type.toLowerCase().startsWith('image/');
   const decodable = /^(image\/jpeg|image\/png)$/i.test(type);
+  const kind = KINDS[fileKind(type, name)];
+  const Icon = kind.icon;
+  const extension = fileExtension(name).slice(0, 6).toUpperCase();
   const host = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [imageUrl, setImageUrl] = useState<{ assetId: string; value: string }>();
@@ -56,6 +89,7 @@ export function FileThumbnail({
     };
   }, [assetId, blob, decodable, localOnly, online, thumbnails, visible]);
 
+  const shown = visible && url;
   return (
     <Box
       ref={host}
@@ -64,16 +98,19 @@ export function FileThumbnail({
         {
           position: 'relative',
           minWidth: 0,
-          display: 'grid',
-          placeItems: 'center',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 0.25,
           overflow: 'hidden',
-          bgcolor: 'action.hover',
-          color: 'text.secondary',
+          bgcolor: shown ? '#eef1f4' : kind.background,
+          color: kind.color,
         },
         ...(Array.isArray(sx) ? sx : [sx ?? {}]),
       ]}
     >
-      {visible && url ? (
+      {shown ? (
         <Box
           component="img"
           src={url}
@@ -86,24 +123,20 @@ export function FileThumbnail({
             display: 'block',
             width: '100%',
             height: '100%',
-            objectFit: 'contain',
+            objectFit: fit,
           }}
         />
       ) : visible && loading ? (
-        <Skeleton variant="rectangular" width="100%" height="100%" />
+        <Skeleton variant="rectangular" sx={{ position: 'absolute', inset: 0, height: '100%' }} />
       ) : (
-        <Box sx={{ textAlign: 'center' }}>
-          {image ? (
-            <ImageOutlined sx={{ fontSize: 36 }} />
-          ) : (
-            <InsertDriveFileOutlined sx={{ fontSize: 36 }} />
-          )}
-          {(image || extension) && (
-            <Typography variant="caption" display="block">
-              {image ? '预览不可用' : extension?.toUpperCase()}
+        <>
+          <Icon sx={{ fontSize: size === 'small' ? 20 : 34 }} />
+          {size === 'large' && extension && (
+            <Typography variant="caption" sx={{ fontWeight: 600, letterSpacing: 0.4, lineHeight: 1 }}>
+              {extension}
             </Typography>
           )}
-        </Box>
+        </>
       )}
     </Box>
   );

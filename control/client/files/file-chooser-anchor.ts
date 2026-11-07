@@ -9,6 +9,7 @@ export function projectFileInput(
   layout: Layout,
   surface: Surface,
   bounds: Bounds,
+  scale: number,
 ): Bounds | undefined {
   if (
     layout.reconfiguring ||
@@ -17,7 +18,7 @@ export function projectFileInput(
     surface.document !== anchor.document ||
     layout.generation !== anchor.layoutGeneration ||
     Math.abs(surface.deviceScaleFactor - anchor.deviceScaleFactor) > 0.001 ||
-    !surfaceMatchesViewport(surface, bounds)
+    !surfaceMatchesViewport(surface, { width: bounds.width / scale, height: bounds.height / scale })
   )
     return;
   const dip = surfaceDipSize(surface);
@@ -42,15 +43,15 @@ export function projectFileInput(
   };
 }
 
-export function placeFileChooser(anchor: Bounds, viewport: Bounds) {
-  const padding = 12,
-    gap = 8,
-    width = Math.min(360, viewport.width - padding * 2);
+export function placeFileChooser(anchor: Bounds, viewport: Bounds, scale: number) {
+  const padding = 12 * scale,
+    gap = 8 * scale,
+    width = Math.min(420 * scale, viewport.width - padding * 2);
   const right = viewport.left + viewport.width,
     bottom = viewport.top + viewport.height;
   const anchorBottom = anchor.top + anchor.height;
   if (
-    width < 276 ||
+    width < 276 * scale ||
     anchor.left < viewport.left ||
     anchor.left + anchor.width > right ||
     anchor.top < viewport.top ||
@@ -59,9 +60,9 @@ export function placeFileChooser(anchor: Bounds, viewport: Bounds) {
     return;
   const below = bottom - anchorBottom - gap - padding;
   const above = anchor.top - viewport.top - gap - padding;
-  const useBelow = below >= 420 || below >= above;
-  const height = Math.min(420, useBelow ? below : above);
-  if (height < 156) return;
+  const useBelow = below >= 420 * scale || below >= above;
+  const height = Math.min(420 * scale, useBelow ? below : above);
+  if (height < 156 * scale) return;
   const left = Math.max(viewport.left + padding, Math.min(anchor.left, right - width - padding));
   return {
     width,

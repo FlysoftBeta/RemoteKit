@@ -623,7 +623,7 @@ try {
     await sleep(300);
     await page.screenshot({ path: join(run, name + '.png') });
   };
-  const containedImages = (selector) =>
+  const filledThumbnails = (selector) =>
     wait((css) => {
       const images = Array.from(document.querySelectorAll(css));
       if (!images.length) return false;
@@ -633,7 +633,7 @@ try {
         return (
           image.complete &&
           image.naturalWidth > 0 &&
-          getComputedStyle(image).objectFit === 'contain' &&
+          getComputedStyle(image).objectFit === 'cover' &&
           inner.width > 0 &&
           inner.height > 0 &&
           inner.left >= outer.left - 1 &&
@@ -648,7 +648,19 @@ try {
       ({ id, css }) => {
         const current = fileQA.state.fileRequests.find((request) => request.id === id);
         const paper = document.querySelector(css);
-        return current?.anchor && paper && getComputedStyle(paper).position === 'fixed' && current.anchor;
+        const viewport = document.querySelector('.remote-viewport')?.getBoundingClientRect();
+        const scale =
+          parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale')) || 1;
+        return (
+          current?.anchor &&
+          viewport &&
+          Math.abs(current.anchor.viewportWidth - viewport.width / scale) <= 1 &&
+          Math.abs(current.anchor.viewportHeight - viewport.height / scale) <= 1 &&
+          paper?.getAttribute('aria-modal') === 'false' &&
+          getComputedStyle(paper).position === 'fixed' &&
+          paper.style.bottom === '' &&
+          current.anchor
+        );
       },
       { id: requestId, css: basketDialog },
     ).then((handle) => handle.jsonValue());
@@ -886,6 +898,10 @@ try {
     await sleep(100);
   };
   const keyboardSort = async (selector, direction, finish) => {
+    await wait((css) => {
+      const button = document.querySelector(css);
+      return button && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+    }, selector);
     await page.focus(selector);
     await page.keyboard.press('Space');
     await wait((css) => document.querySelector(css), overlay);
@@ -897,6 +913,8 @@ try {
     await sleep(100);
   };
   await basketOrder([b, c, a]);
+  assert.equal(await page.locator(basketDialog).getAttribute('aria-modal'), 'false');
+  assert.equal(await page.locator('.MuiBackdrop-root').count(), 0);
   await wait((css) => {
     const rows = Array.from(document.querySelectorAll(css + ' > li'));
     return (
@@ -919,12 +937,7 @@ try {
   await basketOrder([c, b, a]);
   const more = basketDialog + ' button[aria-label="更多"]';
   await click(more);
-  await wait(
-    (css) => document.querySelector(css)?.textContent.includes('使用单选按钮选择一个文件'),
-    basketDialog,
-  );
-  await click('button[aria-label="切换到卡片"]');
-  await click(more);
+  await click('[role="menuitem"]', '切换到卡片');
   await wait(
     (css) =>
       document.querySelectorAll(css + ' [data-file-card]').length === 3 &&
@@ -933,11 +946,16 @@ try {
   );
   await click(cardButton(c));
   await wait(() =>
-    [...document.querySelectorAll('button')].some((item) => item.textContent.trim() === '从文件篮移除'),
+    [...document.querySelectorAll('[role="menuitem"]')].some(
+      (item) => item.textContent.trim() === '从文件篮移除',
+    ),
   );
   assert.equal(await page.locator('input[name="chooser-file"]:checked').count(), 0);
   await page.keyboard.press('Escape');
-  await wait(() => !document.querySelector('button[aria-label="收起项目"]'));
+  await wait(() => !document.querySelector('[role="menu"]'));
+  await page.focus(cardButton(c));
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator(basketDialog).count(), 1);
   await dragMouse(cardButton(c), cardButton(b));
   await basketOrder([b, c, a]);
   const writes = () => page.evaluate(() => fileQA.basketWrites ?? 0);
@@ -952,6 +970,12 @@ try {
   await screenshot('chooser-single');
 
   await page.setViewportSize({ width: 320, height: 568 });
+  await wait(
+    () =>
+      Math.abs(document.querySelector('.remote-viewport').getBoundingClientRect().width - innerWidth) <= 1,
+  );
+  await ready();
+  await waitForAnchor(single.id);
   await wait((css) => {
     const strip = document.querySelector(css);
     return strip && strip.scrollWidth - strip.clientWidth > 25;
@@ -965,8 +989,7 @@ try {
     });
   const beforeSwipe = await writes();
   const start = await center(cardButton(c));
-  // Send the short swipe as one ordered CDP burst so debugger round trips on
-  // old Chromium cannot turn the gesture into the 200 ms drag hold.
+  // Send the swipe as one ordered CDP burst so debugger round trips cannot turn it into a drag hold.
   await Promise.all([
     dispatchTouch('touchStart', start),
     ...[20, 40, 60, 80, 100, 120].map((delta) =>
@@ -982,15 +1005,17 @@ try {
   await page.evaluate((css) => {
     document.querySelector(css).scrollLeft = 0;
   }, basketList);
-  const first = await center(cardButton(b)),
-    target = await center(cardButton(c));
+  await wait((css) => document.querySelector(css)?.scrollLeft <= 4, basketList);
+  const first = await center(cardButton(b));
   await dispatchTouch('touchStart', first);
   await wait((css) => document.querySelector(css), overlay);
+  const target = await center(cardButton(c));
   for (let step = 1; step <= 10; step++)
     await dispatchTouch('touchMove', {
       x: first.x + ((target.x - first.x) * step) / 10,
       y: first.y,
     });
+  await wait((css) => document.querySelector(css)?.hasAttribute('data-sort-target'), listRow(c));
   await dispatchTouch('touchEnd');
   await basketOrder([c, b, a]);
   assert.equal(await writes(), beforeSwipe + 1);
@@ -998,8 +1023,12 @@ try {
   await touch.send('Emulation.setTouchEmulationEnabled', { enabled: false });
   await touch.detach();
   await page.setViewportSize({ width: 1152, height: 820 });
+  await wait(
+    () =>
+      Math.abs(document.querySelector('.remote-viewport').getBoundingClientRect().width - innerWidth) <= 1,
+  );
   await ready();
-  await sleep(250);
+  await waitForAnchor(single.id);
 
   await page.evaluate(() => {
     fileQA.holdBasket = true;
@@ -1010,7 +1039,11 @@ try {
   assert.deepEqual(held.ids, [b, c, a]);
   assert.deepEqual(await order(), held.ids);
   await click(more);
-  await wait(() => document.querySelector('button[aria-label="切换到列表"]')?.disabled);
+  await wait(() =>
+    [...document.querySelectorAll('[role="menuitem"]')].some(
+      (item) => item.textContent.trim() === '切换到列表' && item.getAttribute('aria-disabled') === 'true',
+    ),
+  );
   const winner = [c, a, b];
   await operation('basket', { ids: winner, expectedRevision: held.expectedRevision });
   await page.evaluate(() => {
@@ -1024,7 +1057,8 @@ try {
     ),
   );
   await screenshot('basket-conflict-rollback');
-  await click(more);
+  await page.keyboard.press('Escape');
+  await wait(() => !document.querySelector('[role="menu"]'));
   await wait((css) => document.querySelectorAll(css + ' [data-file-card]').length === 3, basketList);
   await keyboardSort(cardButton(b), 'Home', 'Enter');
   await basketOrder([b, c, a]);
@@ -1214,7 +1248,7 @@ try {
   const basketAdd = basketDialog + ' button[aria-label="添加文件"]';
   const openCamera = async () => {
     await click(basketAdd);
-    await click(basketDialog + ' button', '摄像头拍照');
+    await click('[role="menuitem"]', '摄像头拍照');
     if ((await page.evaluate(() => fileQA.cameraFixture)) !== 'denied')
       await wait((css) => !document.querySelector(css)?.disabled && document.querySelector(css), shutter);
   };
@@ -1458,7 +1492,9 @@ try {
         await wait(
           ({ camera, width, height }) => {
             const bounds = document.querySelector(camera)?.getBoundingClientRect();
-            return devicePixelRatio === 2 && bounds?.width === width && bounds.height === height;
+            return (
+              Math.abs(devicePixelRatio - 2) < 0.001 && bounds?.width === width && bounds.height === height
+            );
           },
           { camera, width, height },
         );
@@ -1639,15 +1675,15 @@ try {
 
   const oldEntry = snapshot.entries.find((entry) => entry.id === snapshot.basket[0]);
   await click(cardButton(oldEntry.id));
-  await click(basketDialog + ' button', '重拍');
+  await click('[role="menuitem"]', '重拍');
   await click(camera + ' button[aria-label="取消重拍"]');
   assert.deepEqual(
     (await library('get')).entries.find((entry) => entry.id === oldEntry.id),
     oldEntry,
   );
   await cameraFixture('denied');
-  if (!(await page.locator('button[aria-label="收起项目"]').count())) await click(cardButton(oldEntry.id));
-  await click(basketDialog + ' button', '重拍');
+  await click(cardButton(oldEntry.id));
+  await click('[role="menuitem"]', '重拍');
   await wait((css) => document.querySelector(css)?.textContent.includes('无法使用摄像头'), camera);
   await click(camera + ' button[aria-label="取消重拍"]');
   assert.deepEqual(
@@ -1677,14 +1713,24 @@ try {
   await screenshot('chooser-photo-cards');
   const stripBox = await bounds(basketDialog);
   const toolbar = await Promise.all([basketSend, basketAdd, more].map((selector) => bounds(selector)));
-  assert(stripBox.height >= 135 && stripBox.height <= 165, JSON.stringify(stripBox));
+  const viewport = page.viewportSize();
+  assert(
+    stripBox.width <= 420 &&
+      stripBox.width >= 276 &&
+      stripBox.height >= 140 &&
+      stripBox.height <= 240 &&
+      stripBox.left >= 0 &&
+      stripBox.right <= viewport.width &&
+      stripBox.bottom <= viewport.height,
+    JSON.stringify(stripBox),
+  );
   assert(
     toolbar.every(
       (box, index) =>
         box.width === 44 &&
         box.height === 44 &&
         box.x === toolbar[0].x &&
-        box.y === toolbar[0].y + index * 46,
+        box.y === toolbar[0].y + index * 48,
     ),
     JSON.stringify(toolbar),
   );
@@ -1692,6 +1738,10 @@ try {
   await click(listRow(photos[1].id) + ' input[name="chooser-file"]');
   assert(!(await isDisabled(basketSend)));
   await click(basketSend);
+  await wait(
+    (css) => document.querySelector(css)?.textContent.includes('发送后保存到哪个分组？'),
+    basketDialog,
+  );
   await click(basketDialog + ' button', '确认');
   const photoSelected = await until(
     'radio choice delivers exactly one photo',
@@ -1759,7 +1809,7 @@ try {
   });
   assert(!(await isDisabled(basketSend)));
   await click(more);
-  await click(basketDialog + ' button', '取消文件选择');
+  await click('[role="menuitem"]', '取消文件选择');
   await wait((css) => !document.querySelector(css), basketDialog);
   assert.deepEqual(await identity(), baseline);
   await log(stage, { candidates: candidateEntry.photo.candidateAssetIds, decision: alternate.end.result });
@@ -1817,16 +1867,9 @@ try {
     );
   });
   await screenshot('files-tab');
-  await until('archived delete confirmation visible', async () => {
-    if (await page.evaluate(() => !!document.getElementById('delete-library-file'))) return true;
-    const direct = 'button[aria-label="删除 empty.bin"]';
-    if (await page.locator(direct).count()) await click(direct);
-    else {
-      await click('[data-file-card] > button[aria-label="empty.bin"]');
-      await click('[role="menuitem"]', '删除文件');
-    }
-    return false;
-  });
+  await click('button[aria-label="列表视图"]');
+  await click('[data-file-row] button[aria-label="更多操作 empty.bin"]');
+  await click('[role="menuitem"]', '删除文件');
   await click('[role="dialog"] button', '删除文件');
   await until(
     'deleted archived file is absent',
@@ -1882,7 +1925,7 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await wait(() => document.body.textContent.includes('我的文件'));
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-  await containedImages('[data-file-card] img');
+  await filledThumbnails('[data-file-card] img');
   await screenshot('files-tab-narrow');
   await page.setViewportSize({ width: 1152, height: 820 });
   await action({ type: 'tab.navigate', tabId: files.id, url: fixtureOrigin + '/files-converted' });
@@ -1902,13 +1945,19 @@ try {
     ({ id, css }) => {
       const current = fileQA.state.fileRequests.find((request) => request.id === id);
       const paper = document.querySelector(css);
-      return current && !current.anchor && paper && getComputedStyle(paper).position !== 'fixed';
+      return (
+        current &&
+        !current.anchor &&
+        paper &&
+        getComputedStyle(paper).position === 'fixed' &&
+        paper.style.left === '50%' &&
+        paper.style.bottom === '16px'
+      );
     },
     { id: moving.id, css: basketDialog },
   );
   assert.deepEqual(await bounds('.remote-viewport'), beforeHide);
-  await click(more);
-  await click(basketDialog + ' button', '取消文件选择');
+  await click(basketDialog + ' button[aria-label="取消文件选择"]');
   await until(
     'cancel native request after fallback',
     async () => !(await state()).fileRequests.some((request) => request.id === moving.id),
