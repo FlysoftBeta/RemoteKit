@@ -12,6 +12,7 @@ import {
   Alert,
   Avatar,
   Button,
+  ButtonBase,
   Chip,
   Collapse,
   Dialog,
@@ -487,7 +488,7 @@ function TimelineCard({
     );
   return (
     <article className="timeline-card">
-      <button className="timeline-head" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
+      <ButtonBase className="timeline-head" onClick={() => setExpanded(!expanded)} aria-expanded={expanded}>
         <Avatar sx={{ width: 32, height: 32, bgcolor: 'action.selected', color: 'text.primary' }}>
           {icon}
         </Avatar>
@@ -502,7 +503,7 @@ function TimelineCard({
         </span>
         <Chip size="small" variant="outlined" color={tone} label={label} />
         <ExpandMore className={expanded ? 'timeline-chevron open' : 'timeline-chevron'} fontSize="small" />
-      </button>
+      </ButtonBase>
       {entry.replies.length > 0 && (
         <ol className="timeline-replies">
           {entry.replies.map((reply, index) => {

@@ -22,6 +22,17 @@ html.ui-scaled body {
   transform: scale(var(--ui-scale));
   transform-origin: 0 0;
 }
+/* TouchRipple sizes and places ripples from getBoundingClientRect and pointer client coordinates,
+   both visual px under the <body> transform. Undo the scale on the ripple layer so its local px are
+   visual px again; the layer still covers the button exactly. */
+html.ui-scaled .MuiTouchRipple-root {
+  right: auto;
+  bottom: auto;
+  width: calc(100% * var(--ui-scale));
+  height: calc(100% * var(--ui-scale));
+  transform: scale(calc(1 / var(--ui-scale)));
+  transform-origin: 0 0;
+}
 .viewer-dead-zone {
   position: fixed;
   top: 0;
@@ -37,7 +48,6 @@ input,
 textarea {
   font: inherit;
 }
-button:focus-visible,
 [role='separator']:focus-visible {
   outline: 2px solid #245db5;
   outline-offset: -2px;
@@ -120,36 +130,25 @@ button:focus-visible,
 .browser-tab.tab-drag-source {
   visibility: hidden;
 }
-.tab-drag-ghost {
+.browser-tab.tab-drag-ghost {
   position: fixed;
   z-index: 1500;
-  display: flex;
-  align-items: center;
-  gap: 8px;
   height: 37px;
-  padding: 0 12px 0 8px;
   border-radius: 8px;
-  background: #fff;
-  color: #1f2937;
-  font-size: 13px;
   box-shadow: 0 6px 18px rgb(15 23 42 / 22%);
   pointer-events: none;
-}
-.tab-drag-ghost > .tab-title {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 .tab-strip::-webkit-scrollbar {
   display: none;
 }
+/* A fixed width rather than flex-basis: Chrome 89 sizes the scrolling strip from its items'
+   content widths and ignores their flex-basis. */
 .browser-tab {
   position: relative;
   display: flex;
   align-items: center;
-  flex: 0 0 180px;
-  max-width: 200px;
-  min-width: 95px;
+  flex: none;
+  width: 180px;
   padding-right: 4px;
   border-radius: 8px 8px 0 0;
   color: #5f6b7a;
@@ -175,46 +174,46 @@ button:focus-visible,
   background: #fff;
   color: #1f2937;
 }
-.tab-attention {
-  display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-left: 6px;
-  border-radius: 50%;
-  background: #d97706;
-  vertical-align: middle;
-}
-.tab-select {
+.tab-select.MuiButtonBase-root,
+.tab-drag-ghost .tab-select {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 8px;
-  min-width: 0;
   flex: 1;
-  background: none;
-  border: 0;
-  cursor: pointer;
-  text-align: left;
-  padding: 8px;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 10px;
+  border-radius: 8px 8px 0 0;
   font-size: 13px;
   color: inherit;
-  height: 100%;
+  text-align: left;
 }
-.tab-select > .tab-title {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.tab-select.Mui-focusVisible {
+  box-shadow: inset 0 0 0 2px #245db5;
+}
+.tab-select .tab-icon {
+  flex: none;
+  font-size: 15px;
+}
+.tab-title {
   flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
-.tab-select > .tab-loading-indicator {
-  flex-shrink: 0;
-}
-.tab-select svg {
-  flex-shrink: 0;
+.tab-attention {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d97706;
 }
 .browser-tab .tab-close {
-  font-size: 15px;
+  flex: none;
   padding: 3px;
-  flex-shrink: 0;
+  font-size: 15px;
 }
 @media (hover: hover) {
   .browser-tab:not(.selected-tab):not(:hover):not(:focus-within) .tab-close {
@@ -568,18 +567,14 @@ button:focus-visible,
   border-radius: 10px;
   overflow: hidden;
 }
-.timeline-head {
+.timeline-head.MuiButtonBase-root {
   display: flex;
   align-items: center;
+  justify-content: flex-start;
   gap: 12px;
   width: 100%;
   padding: 10px 12px;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
   text-align: left;
-  cursor: pointer;
 }
 .timeline-head:hover {
   background: rgba(127, 127, 127, 0.06);
@@ -1226,7 +1221,8 @@ html.layout-compact .admin-section-header {
 .dock-bottom-right {
   flex-direction: row-reverse;
 }
-.dock-button {
+.dock-button.MuiButtonBase-root,
+.dock-ghost {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -1234,8 +1230,6 @@ html.layout-compact .admin-section-header {
   width: 36px;
   height: 36px;
   flex: none;
-  padding: 0;
-  border: 0;
   border-radius: 50%;
   background: rgb(31 41 55 / 62%);
   color: #fff;
@@ -1243,17 +1237,15 @@ html.layout-compact .admin-section-header {
   cursor: pointer;
   pointer-events: auto;
   touch-action: none;
-  -webkit-tap-highlight-color: transparent;
   transition:
     background-color 120ms,
     opacity 120ms;
 }
-.dock-button:hover:not(:disabled) {
+.dock-button:hover:not(.Mui-disabled) {
   background: rgb(31 41 55 / 82%);
 }
-.dock-button:disabled {
+.dock-button.Mui-disabled {
   opacity: 0.45;
-  cursor: default;
 }
 .dock-button.attention-notice {
   background: #245db5;
@@ -1284,7 +1276,7 @@ html.layout-compact .admin-section-header {
     opacity: 0.35;
   }
 }
-.dock-ghost {
+.dock-button.dock-ghost {
   position: absolute;
   margin: -18px 0 0 -18px;
   pointer-events: none;

@@ -1,6 +1,9 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+// A second Control instance (UI QA, isolated data) can be targeted without editing this file.
+const control = process.env.REMOTEKIT_VITE_CONTROL ?? 'http://127.0.0.1:3001';
+
 export default defineConfig({
   plugins: [react()],
   server: {
@@ -8,7 +11,7 @@ export default defineConfig({
     port: 5173,
     // control/data holds the local node's Browser profiles, whose locked files break the watcher.
     watch: { ignored: ['**/data/**', '**/dist/**'] },
-    proxy: { '/api': { target: 'http://127.0.0.1:3001', ws: true } },
+    proxy: { '/api': { target: control, ws: true } },
   },
   build: {
     target: 'chrome89',

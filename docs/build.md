@@ -134,6 +134,8 @@ node tools/tests/streaming-package-real-stack.mjs "C:/RemoteKit/RemoteKit-win-x6
 | `tests/integration/` | 原生 Endpoint/Browser 集成（服务、恢复、几何、信令、关闭 ACK、生命周期、Profile、sessionStorage 与优雅关闭、checkpoint 跨节点恢复、硬件编码 SPS 检查；Noise 互通与 updater 端到端）。Python 测试经 `cluster-bridge.mjs` 扮演 Control（握手、下发配置、自动 `session.open`），对外仍是 JSONL | 需要构建好的原生二进制 |
 | `tests/e2e/` | 真实栈产品场景（Viewer + Control + Endpoint + Browser + H.264）：通用产品流、手势、键盘与移动 IME、文件库与相机、全屏、诊断、首帧；两个本地节点的同时串流、休眠与跨节点唤醒（`test-cluster-nodes.mjs`）；updater 下载、安装与版本切换（`test-node-updater.mjs`，用 `make-node-release.mjs` 从开发产物构造最小发布） | 需要完整构建与浏览器 |
 
+Viewer 外壳的界面检查不需要原生栈：用独立的 `REMOTEKIT_CONTROL_CONFIG`（另一个端口与数据目录，放在 `develop/tmp/`）启动第二个 Control，`REMOTEKIT_VITE_CONTROL=http://127.0.0.1:<端口>` 让 Vite 开发服务器（现代浏览器）或 `vite build --watch` + `vite preview`（Chrome 89 只能跑构建产物）代理到它。`tools/cdp.mjs` 用独立 Profile 启动任意 Chromium（含 Chrome 89），之后每次调用对同一调试端口执行 `eval`、鼠标 `click` / 触摸 `tap`（可 `--hold` 按住）、`key`、`type`、`shot`；启动参数关闭窗口遮挡判定，被其他窗口盖住或在 RDP 下页面也保持可见。
+
 CPU 单元测试、编译、真实 GPU 运行、实体设备验证是不同层级的证据，分开记录。
 
 RDP 启动回归：`remotekit_service_gpu_policy_probe` 将 primary vendor `0x1414` 输入 Chromium 正式 blocklist/功能决策，验证条目 74 在服务 GPU 策略前禁止硬件 GL OSR、策略后允许；随后用真实栈检查 Intel 串流。`remotekit_sdk_control_lifetime_probe` 用真实 Mojo 管道验证超时后续请求、迟到附件释放和断线；CTest `endpoint_control_reliability`、`endpoint_comp_pacing` 覆盖控制句柄语义、启动退避与缓存 Idle 身份。模拟不能代替真实 RDP 连接状态验证。

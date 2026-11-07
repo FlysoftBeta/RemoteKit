@@ -5,7 +5,7 @@ import {
   StopCircleOutlined,
   VolumeUpOutlined,
 } from '@mui/icons-material';
-import { Tooltip } from '@mui/material';
+import { ButtonBase, Tooltip } from '@mui/material';
 import React, { useRef, useState, useSyncExternalStore } from 'react';
 import type { DockAnchor, FloatingAction, FloatingActions, FloatingIcon } from './floating-actions';
 
@@ -72,8 +72,7 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
       title={dragging ? '' : action.detail ? `${action.label} · ${action.detail}` : action.label}
       disableInteractive
     >
-      <button
-        type="button"
+      <ButtonBase
         className={[
           'dock-button',
           action.attention ? `attention-${action.attention}` : '',
@@ -127,7 +126,7 @@ export function FloatingDock({ actions }: { actions: FloatingActions }) {
       >
         {icons[action.icon]}
         <span className="visually-hidden">{action.label}</span>
-      </button>
+      </ButtonBase>
     </Tooltip>
   );
   return (

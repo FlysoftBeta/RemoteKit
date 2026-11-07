@@ -5,7 +5,6 @@ import {
   AdminPanelSettingsOutlined,
   ArrowBack,
   ArrowForward,
-  BedtimeOutlined,
   Check,
   ChevronRight,
   Close,
@@ -25,7 +24,6 @@ import {
 import {
   Box,
   Button,
-  CircularProgress,
   Divider,
   IconButton,
   InputBase,
@@ -51,6 +49,7 @@ import type { Action } from './product-dialogs';
 import { RemoteViewport } from './remote-viewport';
 import { StartPage } from './start-page';
 import { ViewerSession } from '../viewer-session';
+import { BrowserTab, TabDragGhost } from './browser-tab';
 import { beginTabPointer, registerTabStrip, tabShift, useTabDrag } from './tab-drag';
 import { scaledAnchor, useLayoutNarrow, useUiScale } from './ui-scale';
 export function Tool({
@@ -305,11 +304,17 @@ export function WindowFrame({
           ref={stripRef}
         >
           {tabs.map((tab, index) => (
-            <div
-              className={`browser-tab ${active?.id === tab.id ? 'selected-tab' : ''}${drag?.tabId === tab.id ? ' tab-drag-source' : ''}`}
+            <BrowserTab
               key={tab.id}
-              data-tab-id={tab.id}
-              style={{ transform: `translateX(${tabShift(drag, win.id, tab.id, index)}px)` }}
+              tab={tab}
+              selected={active?.id === tab.id}
+              online={online}
+              attention={
+                !!state.pageDialogs?.some((d) => d.tabId === tab.id) ||
+                !!state.fileRequests?.some((d) => d.tabId === tab.id)
+              }
+              dragSource={drag?.tabId === tab.id}
+              shift={tabShift(drag, win.id, tab.id, index)}
               onPointerDown={(event) =>
                 online &&
                 beginTabPointer({
@@ -322,80 +327,35 @@ export function WindowFrame({
                   longPress: (anchor) => setTabMenu({ anchor, tab }),
                 })
               }
-              onContextMenu={(e) => {
-                e.preventDefault();
-                setTabMenu({ anchor: e.currentTarget, tab });
+              onContextMenu={(anchor) => setTabMenu({ anchor, tab })}
+              onSelect={() => run({ type: 'tab.activate', tabId: tab.id })}
+              onClose={() => run({ type: 'tab.close', tabId: tab.id })}
+              onKeyDown={(e) => {
+                if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.ctrlKey && e.shiftKey) {
+                  e.preventDefault();
+                  const to = index + (e.key === 'ArrowRight' ? 1 : -1);
+                  if (to >= 0 && to < tabs.length) moveTab(tab.id, win.id, to);
+                  return;
+                }
+                if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+                  e.preventDefault();
+                  const next = (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+                  (strip.current?.querySelectorAll('.tab-select')[next] as HTMLElement)?.focus({
+                    preventScroll: true,
+                  });
+                }
               }}
-            >
-              <button
-                type="button"
-                className="tab-select"
-                role="tab"
-                disabled={!online}
-                tabIndex={active?.id === tab.id ? 0 : -1}
-                aria-selected={active?.id === tab.id}
-                onClick={() => run({ type: 'tab.activate', tabId: tab.id })}
-                onKeyDown={(e) => {
-                  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.ctrlKey && e.shiftKey) {
-                    e.preventDefault();
-                    const to = index + (e.key === 'ArrowRight' ? 1 : -1);
-                    if (to >= 0 && to < tabs.length) moveTab(tab.id, win.id, to);
-                    return;
-                  }
-                  if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-                    e.preventDefault();
-                    const next = (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
-                    (strip.current?.querySelectorAll('.tab-select')[next] as HTMLElement)?.focus({
-                      preventScroll: true,
-                    });
-                  }
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    run({ type: 'tab.activate', tabId: tab.id });
-                  }
-                }}
-              >
-                {tab.loading ? (
-                  <CircularProgress className="tab-loading-indicator" size={13} />
-                ) : tab.residency && tab.residency !== 'live' ? (
-                  <BedtimeOutlined fontSize="inherit" />
-                ) : (
-                  <Language fontSize="inherit" />
-                )}
-                <span className="tab-title">
-                  {tab.title || '新标签页'}
-                  {(state.pageDialogs?.some((d) => d.tabId === tab.id) ||
-                    state.fileRequests?.some((d) => d.tabId === tab.id)) && (
-                    <span className="tab-attention" aria-label="页面等待处理请求" />
-                  )}
-                </span>
-              </button>
-              <IconButton
-                className="tab-close"
-                size="small"
-                aria-label={`关闭 ${tab.title || '标签页'}`}
-                disabled={!online}
-                onClick={() => run({ type: 'tab.close', tabId: tab.id })}
-              >
-                <Close fontSize="inherit" />
-              </IconButton>
-            </div>
+            />
           ))}
         </div>
         {drag?.sourceWindowId === win.id &&
           createPortal(
-            <div
-              className="tab-drag-ghost"
-              aria-hidden
-              style={{
-                left: (drag.x - drag.grabX) / scale,
-                top: (drag.y - drag.grabY) / scale,
-                width: drag.width,
-              }}
-            >
-              <Language fontSize="inherit" />
-              <span className="tab-title">{drag.title}</span>
-            </div>,
+            <TabDragGhost
+              title={drag.title}
+              left={(drag.x - drag.grabX) / scale}
+              top={(drag.y - drag.grabY) / scale}
+              width={drag.width}
+            />,
             document.body,
           )}
         <Tool
