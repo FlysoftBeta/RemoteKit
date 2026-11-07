@@ -19,7 +19,6 @@ import {
   DialogContent,
   DialogContentText,
   DialogTitle,
-  Divider,
   IconButton,
   LinearProgress,
   Switch,
@@ -38,6 +37,7 @@ import type {
 } from '../../shared/session-import';
 import type { Action } from './product-dialogs';
 import { formatError } from '../util/format-error';
+import { SettingRow, SettingSection } from './setting-layout';
 import { formatTime } from './admin/shared';
 
 export type SessionImportCall = <K extends keyof SessionImportSocketMethods>(
@@ -150,16 +150,16 @@ export function SessionImportSettings({
   const [open, setOpen] = useState(false);
   return (
     <>
-      <div className="setting-section">
-        <Typography fontWeight={600}>会话导入</Typography>
-        <Typography variant="body2" color="text.secondary">
-          提前在手机上登录需要二次验证的网站，再把登录状态发到这里。
-        </Typography>
-        <Button disabled={!online} onClick={() => setOpen(true)}>
-          管理会话导入
-        </Button>
-      </div>
-      <Divider />
+      <SettingSection title="会话导入">
+        <SettingRow
+          title="从手机导入登录状态"
+          description="提前在手机上登录需要二次验证的网站，再把登录状态发到这里。"
+        >
+          <Button variant="outlined" disabled={!online} onClick={() => setOpen(true)}>
+            管理
+          </Button>
+        </SettingRow>
+      </SettingSection>
       {open && (
         <ImportDialog
           online={online}

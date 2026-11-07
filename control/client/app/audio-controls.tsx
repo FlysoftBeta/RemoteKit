@@ -1,4 +1,5 @@
-import { Box, Button, FormControlLabel, Switch, Typography } from '@mui/material';
+import { VolumeOffOutlined, VolumeUpOutlined } from '@mui/icons-material';
+import { Button, FormControlLabel, Switch, Typography } from '@mui/material';
 import type { AudioChannels, AudioPlaybackState } from '../media/audio-output';
 export function AudioControls({
   channels,
@@ -22,14 +23,18 @@ export function AudioControls({
     if (next.left || next.right) resume();
     save(next);
   };
+  const silent = !channels.left && !channels.right;
+  const status = error || (busy ? '正在保存…' : '');
   return (
-    <Box role="group" aria-label="整个工作空间的声音" sx={{ px: 2, py: 0.5, maxWidth: '100%' }}>
-      <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 0.5, minHeight: 44 }}>
-        <Typography variant="body2" sx={{ mr: 0.5 }}>
-          声音
-        </Typography>
+    <div role="group" aria-label="整个工作空间的声音" className="menu-audio">
+      <div className="menu-audio-row">
+        {silent ? (
+          <VolumeOffOutlined fontSize="small" color="action" />
+        ) : (
+          <VolumeUpOutlined fontSize="small" color="action" />
+        )}
         <FormControlLabel
-          sx={{ m: 0, minHeight: 44 }}
+          className="menu-audio-channel"
           control={
             <Switch
               size="small"
@@ -41,7 +46,7 @@ export function AudioControls({
           label={<Typography variant="body2">左声道</Typography>}
         />
         <FormControlLabel
-          sx={{ m: 0, minHeight: 44 }}
+          className="menu-audio-channel"
           control={
             <Switch
               size="small"
@@ -54,25 +59,29 @@ export function AudioControls({
         />
         <Button
           size="small"
+          variant={silent ? 'contained' : 'outlined'}
+          color={silent ? 'primary' : 'inherit'}
+          aria-pressed={silent}
           disabled={!online || busy}
-          sx={{
-            minHeight: 44,
-            minWidth: 48,
-            bgcolor: !channels.left && !channels.right ? 'action.selected' : undefined,
-          }}
+          className="menu-audio-mute"
           onClick={() => change({ left: false, right: false })}
         >
           不播放
         </Button>
-      </Box>
-      <Typography variant="caption" aria-live="polite" color={error ? 'error' : 'text.secondary'}>
-        {error || (busy ? '正在保存…' : '')}
+      </div>
+      <Typography
+        variant="caption"
+        aria-live="polite"
+        color={error ? 'error' : 'text.secondary'}
+        className="menu-audio-status"
+      >
+        {status}
       </Typography>
-      {(channels.left || channels.right) && playback === 'blocked' && (
-        <Button size="small" onClick={resume}>
+      {!silent && playback === 'blocked' && (
+        <Button size="small" startIcon={<VolumeUpOutlined />} onClick={resume}>
           点击开启声音
         </Button>
       )}
-    </Box>
+    </div>
   );
 }

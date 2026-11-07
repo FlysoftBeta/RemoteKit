@@ -1,22 +1,20 @@
-import Close from '@mui/icons-material/Close';
+import { AccountCircleOutlined, Close, Logout } from '@mui/icons-material';
 import {
   Alert,
   Box,
   Button,
-  Checkbox,
   Dialog,
   DialogContent,
   DialogTitle,
-  Divider,
   FormControl,
   FormControlLabel,
+  FormHelperText,
   IconButton,
   InputLabel,
   MenuItem,
   Radio,
   RadioGroup,
   Select,
-  Switch,
   TextField,
   Typography,
   useMediaQuery,
@@ -28,6 +26,7 @@ import { SEARCH_ENGINES } from '../../shared/product';
 import type { ProductActionHandler as Action } from '../control/product-operations';
 import { formatError } from '../util/format-error';
 import { request } from '../control/http-request';
+import { SettingNote, SettingSection, SettingSwitch } from './setting-layout';
 export type { ProductActionHandler as Action } from '../control/product-operations';
 
 export function AuthView({
@@ -208,15 +207,11 @@ export function SettingsDialog({
       setBusy((p) => ({ ...p, [key]: false }));
     }
   };
-  const note = (key: string) => (
-    <Typography
-      className="setting-result"
-      role="status"
-      color={busy[key] || !result[key] || result[key] === '已保存' ? 'text.secondary' : 'error'}
-    >
-      {busy[key] ? '正在保存…' : result[key] || ' '}
-    </Typography>
-  );
+  const note = (key: string) => {
+    const text = busy[key] ? '正在保存…' : (result[key] ?? '');
+    return <SettingNote text={text} error={!busy[key] && !!text && text !== '已保存'} />;
+  };
+  const deviceScale = Number((window.devicePixelRatio || 1).toFixed(2));
   return (
     <Dialog
       open={open}
@@ -232,12 +227,9 @@ export function SettingsDialog({
           <Close />
         </IconButton>
       </DialogTitle>
-      <DialogContent dividers>
-        <div className="setting-section">
-          <Typography fontWeight={600} sx={{ mb: 2 }}>
-            搜索
-          </Typography>
-          <FormControl fullWidth size="small" disabled={!online || busy.search}>
+      <DialogContent dividers className="settings-content">
+        <SettingSection title="搜索">
+          <FormControl fullWidth size="small" disabled={!online || busy.search} sx={{ mt: 0.5 }}>
             <InputLabel id="search-engine-label">默认搜索引擎</InputLabel>
             <Select
               labelId="search-engine-label"
@@ -253,69 +245,55 @@ export function SettingsDialog({
                 </MenuItem>
               ))}
             </Select>
+            <FormHelperText>用于地址栏和起始页中的搜索</FormHelperText>
           </FormControl>
-          <Typography variant="caption" color="text.secondary">
-            用于地址栏和起始页中的搜索
-          </Typography>
           {note('search')}
-        </div>
-        <Divider sx={{ mb: 2 }} />
-        <Typography fontWeight={600}>画面质量</Typography>
-        <RadioGroup
-          aria-label="画面质量"
-          value={settings.qualityPreference}
-          onChange={(e) =>
-            void save('quality', {
-              qualityPreference: e.target.value as ProductSettings['qualityPreference'],
-            })
-          }
-        >
-          {(
-            [
-              ['quality', '优先高画质', '尽量保留画面细节'],
-              ['auto', '自动', '平衡清晰度与响应速度'],
-              ['smooth', '优先流畅', '优先保持操作顺畅'],
-            ] as const
-          ).map(([value, title, detail]) => (
-            <FormControlLabel
-              className="quality-option"
-              key={value}
-              value={value}
-              disabled={!online || busy.quality}
-              control={<Radio size="small" />}
-              label={
-                <>
-                  <Typography>{title}</Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    {detail}
-                  </Typography>
-                </>
-              }
-            />
-          ))}
-        </RadioGroup>
-        {note('quality')}
-        <Divider />
-        <div className="setting-section">
-          <Typography fontWeight={600}>
-            显示像素比例{' '}
-            <Typography component="span" variant="caption" color="text.secondary">
-              Client Scale
-            </Typography>
-          </Typography>
-          <FormControlLabel
-            control={
-              <Switch
-                checked={settings.clientScaleOverride === null}
-                disabled={!online || busy.scale}
-                onChange={(_, checked) =>
-                  void save('scale', {
-                    clientScaleOverride: checked ? null : Number(scale) || window.devicePixelRatio || 1,
-                  })
+        </SettingSection>
+        <SettingSection title="画面">
+          <RadioGroup
+            aria-label="画面质量"
+            value={settings.qualityPreference}
+            onChange={(e) =>
+              void save('quality', {
+                qualityPreference: e.target.value as ProductSettings['qualityPreference'],
+              })
+            }
+          >
+            {(
+              [
+                ['quality', '优先高画质', '尽量保留画面细节'],
+                ['auto', '自动', '平衡清晰度与响应速度'],
+                ['smooth', '优先流畅', '优先保持操作顺畅'],
+              ] as const
+            ).map(([value, title, detail]) => (
+              <FormControlLabel
+                className="quality-option"
+                key={value}
+                value={value}
+                disabled={!online || busy.quality}
+                control={<Radio size="small" />}
+                label={
+                  <>
+                    <Typography>{title}</Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {detail}
+                    </Typography>
+                  </>
                 }
               />
+            ))}
+          </RadioGroup>
+          {note('quality')}
+          <SettingSwitch
+            title="像素比例跟随此设备"
+            description={`Client Scale · 此设备为 ${deviceScale}×`}
+            checked={settings.clientScaleOverride === null}
+            disabled={!online || busy.scale}
+            onChange={(checked) =>
+              void save('scale', {
+                clientScaleOverride: checked ? null : Number(scale) || window.devicePixelRatio || 1,
+              })
             }
-            label={`跟随此设备 · 当前 ${Number((window.devicePixelRatio || 1).toFixed(2))}×`}
           />
           {settings.clientScaleOverride !== null && (
             <div className="scale-row">
@@ -331,9 +309,10 @@ export function SettingsDialog({
                   max: state.constraints.clientScaleMax,
                   step: 0.1,
                 }}
-                helperText="点击应用后生效"
+                helperText={`${state.constraints.clientScaleMin}–${state.constraints.clientScaleMax}，点击应用后生效`}
               />
               <Button
+                variant="outlined"
                 disabled={
                   !online ||
                   busy.scale ||
@@ -348,79 +327,49 @@ export function SettingsDialog({
             </div>
           )}
           {note('scale')}
-        </div>
-        <Divider />
-        <div className="setting-section">
-          <FormControlLabel
-            className="setting-switch"
-            labelPlacement="start"
-            control={
-              <Switch
-                checked={settings.autoFullscreen}
-                disabled={!online || busy.fullscreen}
-                onChange={(_, checked) => void save('fullscreen', { autoFullscreen: checked })}
-              />
-            }
-            label="打开或激活时全屏"
-          />
-          {note('fullscreen')}
-        </div>
-        <Divider />
-        <div className="setting-section">
-          <FormControlLabel
-            className="setting-switch"
-            labelPlacement="start"
-            control={
-              <Switch
-                checked={settings.avSync}
-                disabled={!online || busy.avSync}
-                onChange={(_, checked) => void save('avSync', { avSync: checked })}
-              />
-            }
-            label="音视频同步"
-          />
-          <Typography variant="body2" color="text.secondary">
-            开启后声音与画面对齐，画面延迟会增加；切换时会重新建立媒体连接
-          </Typography>
-          {note('avSync')}
-        </div>
-        <Divider />
-        <div className="setting-section">
-          <FormControlLabel
-            className="setting-switch"
-            labelPlacement="start"
-            control={
-              <Switch
-                checked={settings.memorySaverEnabled}
-                disabled={!online || busy.memory}
-                onChange={(_, checked) => void save('memory', { memorySaverEnabled: checked })}
-              />
-            }
-            label="内存节省"
-          />
-          <Typography variant="body2" color="text.secondary">
-            暂不使用的页面可以休眠，返回时自动恢复。
-          </Typography>
-          {note('memory')}
-          <FormControlLabel
-            control={
-              <Checkbox
-                checked={settings.showStats ?? false}
-                disabled={!online || busy.stats}
-                onChange={(_, checked) => void save('stats', { showStats: checked })}
-              />
-            }
-            label="显示连接统计"
+          <SettingSwitch
+            title="显示连接统计"
+            description="在页面右上角叠加帧率、码率与延迟"
+            checked={settings.showStats ?? false}
+            disabled={!online || busy.stats}
+            onChange={(checked) => void save('stats', { showStats: checked })}
           />
           {note('stats')}
-        </div>
-        <Divider />
-        {diagnostics}
-        {sessionImport}
+        </SettingSection>
+        <SettingSection title="浏览">
+          <SettingSwitch
+            title="打开或激活时全屏"
+            checked={settings.autoFullscreen}
+            disabled={!online || busy.fullscreen}
+            onChange={(checked) => void save('fullscreen', { autoFullscreen: checked })}
+          />
+          {note('fullscreen')}
+          <SettingSwitch
+            title="音视频同步"
+            description="声音与画面对齐，画面延迟会增加；切换时重新建立媒体连接"
+            checked={settings.avSync}
+            disabled={!online || busy.avSync}
+            onChange={(checked) => void save('avSync', { avSync: checked })}
+          />
+          {note('avSync')}
+          <SettingSwitch
+            title="内存节省"
+            description="暂不使用的页面可以休眠，返回时自动恢复"
+            checked={settings.memorySaverEnabled}
+            disabled={!online || busy.memory}
+            onChange={(checked) => void save('memory', { memorySaverEnabled: checked })}
+          />
+          {note('memory')}
+        </SettingSection>
         {security}
+        {sessionImport}
+        {diagnostics}
         <div className="account-row">
-          <Typography color="text.secondary">{state.user.username}</Typography>
-          <Button color="inherit" onClick={logout}>
+          <AccountCircleOutlined color="action" />
+          <Typography sx={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
+            {state.user.username}
+          </Typography>
+          <Button color="inherit" startIcon={<Logout />} onClick={logout}>
             退出登录
           </Button>
         </div>

@@ -1,3 +1,4 @@
+import { LockOutlined } from '@mui/icons-material';
 import { formatError } from '../util/format-error';
 import { diagnostics } from '../media/diagnostics';
 import {
@@ -7,10 +8,7 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
-  FormControlLabel,
   Stack,
-  Switch,
   TextField,
   Typography,
 } from '@mui/material';
@@ -18,6 +16,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import type { AuthSettings, AuthState } from '../../shared/security';
 import type { AuthCamera, AuthRequest } from './auth-camera';
 import type { useAutoLock } from './auth-idle';
+import { SettingRow, SettingSection, SettingSwitch } from '../app/setting-layout';
 
 type Change = 'password' | 'pin' | 'removePin' | 'enroll' | 'removeFace' | 'policy';
 const titles: Record<Change, string> = {
@@ -169,130 +168,116 @@ export function SecuritySettings({
   };
   const enrollmentStatus = enrollmentStarted && auth.face.purpose === 'enroll' ? auth.face.status : undefined;
   return (
-    <div className="setting-section">
-      <Stack spacing={1.5}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
-          <Typography fontWeight={600}>安全</Typography>
-          <Button disabled={!online} onClick={lock}>
+    <>
+      <SettingSection
+        title="安全"
+        action={
+          <Button size="small" startIcon={<LockOutlined />} disabled={!online} onClick={lock}>
             立即锁定
           </Button>
-        </Stack>
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
-          <Typography>账户密码</Typography>
+        }
+      >
+        <SettingRow title="账户密码">
           <Button disabled={!online} onClick={() => setChange('password')}>
             更改
           </Button>
-        </Stack>
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
-          <Typography>PIN · {auth.methods.pin ? '已设置' : '未设置'}</Typography>
-          <Stack direction="row">
-            <Button disabled={!online} onClick={() => setChange('pin')}>
-              {auth.methods.pin ? '修改' : '设置'}
-            </Button>
-            {auth.methods.pin && (
-              <Button disabled={!online} onClick={() => setChange('removePin')}>
-                删除
-              </Button>
-            )}
-          </Stack>
-        </Stack>
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
-          <Typography>人脸 · {enrolled ? '已录入' : '未录入'}</Typography>
-          <Stack direction="row">
-            <Button disabled={!online || !auth.face.available} onClick={() => setChange('enroll')}>
-              {enrolled ? '重新录入' : '录入'}
-            </Button>
-            {enrolled && (
-              <Button disabled={!online} onClick={() => setChange('removeFace')}>
-                删除
-              </Button>
-            )}
-          </Stack>
-        </Stack>
-        {!auth.face.available && (
-          <Typography variant="caption" color="text.secondary">
-            当前服务无法进行人脸验证。
-          </Typography>
-        )}
-        <FormControlLabel
-          control={
-            <Switch
-              checked={settings.faceEnabled}
-              disabled={!online || !enrolled}
-              onChange={(event) => setSwitch('faceEnabled', event.target.checked)}
-            />
-          }
-          label="启用人脸验证"
-        />
-        <Divider />
-        <Typography fontWeight={600}>自动锁定</Typography>
-        <FormControlLabel
-          control={
-            <Switch
-              checked={settings.lockOnIdle}
-              disabled={!online}
-              onChange={(event) => setSwitch('lockOnIdle', event.target.checked)}
-            />
-          }
-          label="无操作时锁定"
-        />
-        <TextField
-          type="number"
-          size="small"
-          label="无操作时长（秒）"
-          value={seconds}
-          disabled={!online || !settings.lockOnIdle}
-          slotProps={{ htmlInput: { min: 15, max: 3600 } }}
-          error={!validIdle}
-          helperText={!validIdle ? '请输入 15–3600 秒。' : undefined}
-          onChange={(event) => {
-            const value = event.target.value;
-            setSeconds(value);
-            setPolicy((previous) => ({ ...previous, idleSeconds: value === '' ? NaN : Number(value) }));
-          }}
-        />
-        <Typography variant="caption" color="text.secondary">
-          {idle.system ? '已启用系统锁定和闲置检测。' : '使用此页面的活动判断闲置。'}
-        </Typography>
-        {idle.systemSupported && !idle.system && (
-          <Button
-            disabled={!online}
-            onClick={() => {
-              void idle.requestSystem().catch(() => setNotice('无法启用系统锁定检测。'));
-            }}
-          >
-            授权系统锁定检测
+        </SettingRow>
+        <SettingRow title="PIN" description={auth.methods.pin ? '已设置' : '未设置'}>
+          <Button disabled={!online} onClick={() => setChange('pin')}>
+            {auth.methods.pin ? '修改' : '设置'}
           </Button>
-        )}
-        <FormControlLabel
-          control={
-            <Switch
-              checked={settings.lockOnHidden}
-              disabled={!online}
-              onChange={(event) => setSwitch('lockOnHidden', event.target.checked)}
-            />
-          }
-          label="切到后台时锁定"
-        />
-        <FormControlLabel
-          control={
-            <Switch
-              checked={settings.lockOnDeparture}
-              disabled={!online || !settings.faceEnabled}
-              onChange={(event) => setSwitch('lockOnDeparture', event.target.checked)}
-            />
-          }
-          label="离开摄像头时锁定"
-        />
-        <Button
-          variant="outlined"
-          disabled={!online || !Object.keys(policy).length || !validIdle}
-          onClick={() => setChange('policy')}
+          {auth.methods.pin && (
+            <Button color="inherit" disabled={!online} onClick={() => setChange('removePin')}>
+              删除
+            </Button>
+          )}
+        </SettingRow>
+        <SettingRow
+          title="人脸"
+          description={auth.face.available ? (enrolled ? '已录入' : '未录入') : '当前服务无法进行人脸验证'}
         >
-          保存安全设置
-        </Button>
-        {notice && <Typography role="status">{notice}</Typography>}
-      </Stack>
+          <Button disabled={!online || !auth.face.available} onClick={() => setChange('enroll')}>
+            {enrolled ? '重新录入' : '录入'}
+          </Button>
+          {enrolled && (
+            <Button color="inherit" disabled={!online} onClick={() => setChange('removeFace')}>
+              删除
+            </Button>
+          )}
+        </SettingRow>
+        <SettingSwitch
+          title="启用人脸验证"
+          description={enrolled ? undefined : '录入人脸后可用'}
+          checked={settings.faceEnabled}
+          disabled={!online || !enrolled}
+          onChange={(checked) => setSwitch('faceEnabled', checked)}
+        />
+      </SettingSection>
+      <SettingSection title="自动锁定">
+        <SettingSwitch
+          title="无操作时锁定"
+          description={idle.system ? '已启用系统锁定和闲置检测' : '使用此页面的活动判断闲置'}
+          checked={settings.lockOnIdle}
+          disabled={!online}
+          onChange={(checked) => setSwitch('lockOnIdle', checked)}
+        />
+        <div className="setting-indent">
+          <TextField
+            type="number"
+            size="small"
+            label="无操作时长（秒）"
+            sx={{ width: 180 }}
+            value={seconds}
+            disabled={!online || !settings.lockOnIdle}
+            slotProps={{ htmlInput: { min: 15, max: 3600 } }}
+            error={!validIdle}
+            helperText={!validIdle ? '请输入 15–3600 秒。' : undefined}
+            onChange={(event) => {
+              const value = event.target.value;
+              setSeconds(value);
+              setPolicy((previous) => ({ ...previous, idleSeconds: value === '' ? NaN : Number(value) }));
+            }}
+          />
+          {idle.systemSupported && !idle.system && (
+            <Button
+              size="small"
+              disabled={!online}
+              onClick={() => {
+                void idle.requestSystem().catch(() => setNotice('无法启用系统锁定检测。'));
+              }}
+            >
+              授权系统锁定检测
+            </Button>
+          )}
+        </div>
+        <SettingSwitch
+          title="切到后台时锁定"
+          checked={settings.lockOnHidden}
+          disabled={!online}
+          onChange={(checked) => setSwitch('lockOnHidden', checked)}
+        />
+        <SettingSwitch
+          title="离开摄像头时锁定"
+          description={settings.faceEnabled ? undefined : '启用人脸验证后可用'}
+          checked={settings.lockOnDeparture}
+          disabled={!online || !settings.faceEnabled}
+          onChange={(checked) => setSwitch('lockOnDeparture', checked)}
+        />
+        <div className="setting-actions">
+          {notice && (
+            <Typography variant="body2" color="text.secondary" role="status">
+              {notice}
+            </Typography>
+          )}
+          <Button
+            variant="contained"
+            disabled={!online || !Object.keys(policy).length || !validIdle}
+            onClick={() => setChange('policy')}
+          >
+            保存安全设置
+          </Button>
+        </div>
+      </SettingSection>
       {change && (
         <Dialog open onClose={close} fullWidth maxWidth="xs">
           <form onSubmit={submit}>
@@ -372,6 +357,6 @@ export function SecuritySettings({
           </form>
         </Dialog>
       )}
-    </div>
+    </>
   );
 }

@@ -2,6 +2,7 @@ import { KeyboardHideOutlined, KeyboardOutlined } from '@mui/icons-material';
 import { Button } from '@mui/material';
 import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { formatError } from '../util/format-error';
+import { PageOverlay } from './page-overlay';
 import { ViewportInput } from '../input/viewport-input';
 import { StatsOverlay } from './stats-overlay';
 import { useViewerSession } from './use-viewer-session';
@@ -104,23 +105,32 @@ export function RemoteViewport({
         </div>
       )}
       {snapshot.presentation.error ? (
-        <div className="page-overlay" role="alert">
+        <PageOverlay
+          kind="error"
+          action={
+            snapshot.presentation.canRetry && (
+              <Button variant="outlined" onClick={() => transport.presentation.retryPresentation()}>
+                重试视频
+              </Button>
+            )
+          }
+        >
           {formatError(snapshot.presentation.error)}
-          {snapshot.presentation.canRetry && (
-            <Button sx={{ pointerEvents: 'auto' }} onClick={() => transport.presentation.retryPresentation()}>
-              重试视频
+        </PageOverlay>
+      ) : snapshot.rtc.phase === 'exhausted' ? (
+        <PageOverlay
+          kind="error"
+          action={
+            <Button variant="outlined" onClick={() => void transport.rtc.connect()}>
+              重新连接
             </Button>
-          )}
-        </div>
+          }
+        >
+          画面连接中断
+        </PageOverlay>
       ) : (
-        (snapshot.rtc.phase === 'exhausted' || (snapshot.rtc.phase !== 'connected' && !resize.frozen)) && (
-          <div className="page-overlay" role="status">
-            {snapshot.rtc.phase === 'exhausted' ? '画面连接中断' : '正在连接浏览器…'}
-            {snapshot.rtc.phase === 'exhausted' && (
-              <Button onClick={() => void transport.rtc.connect()}>重新连接</Button>
-            )}
-          </div>
-        )
+        snapshot.rtc.phase !== 'connected' &&
+        !resize.frozen && <PageOverlay kind="progress">正在连接浏览器…</PageOverlay>
       )}
       {overlay && <StatsOverlay diagnostics={snapshot.observations} surface={surface} />}
     </section>

@@ -1,4 +1,11 @@
 import { formatError } from '../util/format-error';
+import {
+  Add,
+  AdminPanelSettingsOutlined,
+  Logout,
+  VolumeUpOutlined,
+  WebAssetOutlined,
+} from '@mui/icons-material';
 import { Alert, Button, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from '@mui/material';
 import React, {
   useCallback,
@@ -216,91 +223,92 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
       : undefined;
   return (
     <FileLibraryContext.Provider value={library}>
-      <main className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}`} ref={shell}>
+      <main
+        className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}`}
+        ref={shell}
+      >
         <DiagnosticCollectionView
           state={diagnosticState}
           online={status === 'online'}
           stop={() => diagnostics.stop()}
           dismiss={() => diagnostics.dismiss()}
         />
-        {pendingOperations.length > 0 && (
-          <Alert
-            severity="info"
-            sx={{ position: 'absolute', top: 88, left: '50%', transform: 'translateX(-50%)', zIndex: 1190 }}
-            action={
-              pendingOperations.some((entry) => entry.receipt?.status === 'unknown') ? (
-                <Button onClick={() => media.operations.dismissUnknown()}>以当前工作区为准</Button>
-              ) : undefined
-            }
-          >
-            {pendingOperations.length} 个操作
-            {pendingOperations.some((entry) => entry.receipt?.status === 'unknown')
-              ? '结果未知，请核对工作区'
-              : '正在同步'}
-            {snapshot.observations.channel !== '已连接' ? '，等待数据通道连接' : ''}
-          </Alert>
-        )}
-        {productReady &&
-          media.observations.audio.state === 'blocked' &&
-          (workspace.settings.audioChannels?.left !== false ||
-            workspace.settings.audioChannels?.right !== false) && (
-            <Button
-              variant="contained"
-              onClick={() => media.observations.audio.resume()}
-              sx={{ position: 'absolute', top: 96, left: '50%', transform: 'translateX(-50%)', zIndex: 1200 }}
+        <div className="shell-notices" aria-live="polite">
+          {status !== 'online' && (
+            <Alert
+              severity="warning"
+              action={
+                status === 'failed' && (
+                  <Button color="inherit" size="small" onClick={() => connection.current?.restart()}>
+                    重试
+                  </Button>
+                )
+              }
             >
-              点击开启声音
-            </Button>
+              {status === 'failed' ? '暂时无法连接' : '正在恢复连接…'}
+            </Alert>
           )}
-        {status !== 'online' && (
-          <Alert
-            severity="warning"
-            action={
-              status === 'failed' && (
-                <Button color="inherit" size="small" onClick={() => connection.current?.restart()}>
-                  重试
-                </Button>
-              )
-            }
-          >
-            {status === 'failed' ? '暂时无法连接' : '正在恢复连接…'}
-          </Alert>
-        )}
-        {status === 'online' && !productReady && (
-          <Alert
-            severity={snapshot.rtc.phase === 'exhausted' ? 'warning' : 'info'}
-            action={
-              snapshot.rtc.phase === 'exhausted' && (
-                <Button color="inherit" size="small" onClick={() => void media.rtc.connect()}>
-                  重试
-                </Button>
-              )
-            }
-          >
-            {snapshot.rtc.phase === 'exhausted' ? '浏览器连接失败' : '正在连接浏览器…'}
-          </Alert>
-        )}
-        {(error || operationState.error || viewportNotice || state.endpointError) && (
-          <Alert
-            severity="warning"
-            onClose={() => {
-              media.workspace.dismissError();
-              media.viewport.dismissNotice();
-            }}
-            sx={
-              !error && (viewportNotice || state.quality.resourceLimitation)
-                ? { position: 'absolute', top: 8, left: 12, right: 12, zIndex: 1400 }
-                : undefined
-            }
-          >
-            {error ||
-              (operationState.error && formatError(operationState.error)) ||
-              viewportNotice ||
-              (state.quality.resourceLimitation
-                ? '当前画面尺寸超出可用范围，请缩小窗口或关闭部分窗口。'
-                : state.endpointError)}
-          </Alert>
-        )}
+          {status === 'online' && !productReady && (
+            <Alert
+              severity={snapshot.rtc.phase === 'exhausted' ? 'warning' : 'info'}
+              action={
+                snapshot.rtc.phase === 'exhausted' && (
+                  <Button color="inherit" size="small" onClick={() => void media.rtc.connect()}>
+                    重试
+                  </Button>
+                )
+              }
+            >
+              {snapshot.rtc.phase === 'exhausted' ? '浏览器连接失败' : '正在连接浏览器…'}
+            </Alert>
+          )}
+          {(error || operationState.error || viewportNotice || state.endpointError) && (
+            <Alert
+              severity="warning"
+              onClose={() => {
+                media.workspace.dismissError();
+                media.viewport.dismissNotice();
+              }}
+            >
+              {error ||
+                (operationState.error && formatError(operationState.error)) ||
+                viewportNotice ||
+                (state.quality.resourceLimitation
+                  ? '当前画面尺寸超出可用范围，请缩小窗口或关闭部分窗口。'
+                  : state.endpointError)}
+            </Alert>
+          )}
+          {pendingOperations.length > 0 && (
+            <Alert
+              severity="info"
+              action={
+                pendingOperations.some((entry) => entry.receipt?.status === 'unknown') ? (
+                  <Button color="inherit" size="small" onClick={() => media.operations.dismissUnknown()}>
+                    以当前工作区为准
+                  </Button>
+                ) : undefined
+              }
+            >
+              {pendingOperations.length} 个操作
+              {pendingOperations.some((entry) => entry.receipt?.status === 'unknown')
+                ? '结果未知，请核对工作区'
+                : '正在同步'}
+              {snapshot.observations.channel !== '已连接' ? '，等待数据通道连接' : ''}
+            </Alert>
+          )}
+          {productReady &&
+            media.observations.audio.state === 'blocked' &&
+            (workspace.settings.audioChannels?.left !== false ||
+              workspace.settings.audioChannels?.right !== false) && (
+              <Button
+                variant="contained"
+                startIcon={<VolumeUpOutlined />}
+                onClick={() => media.observations.audio.resume()}
+              >
+                点击开启声音
+              </Button>
+            )}
+        </div>
         <div className={`window-workspace ${sideBySide ? 'side-by-side' : ''}`}>
           {windows.map((w, index) => (
             <React.Fragment key={w.id}>
@@ -349,22 +357,39 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
           )}
           {windows.length === 0 && (
             <div className="workspace-empty">
-              <Typography variant="h6">开始浏览</Typography>
-              <Button
-                variant="contained"
-                disabled={!productReady}
-                onClick={() => void action({ type: 'window.create' }).catch(report)}
-              >
-                新建窗口
-              </Button>
-              <Button color="inherit" onClick={logout}>
-                退出登录
-              </Button>
-              {state.user.isAdmin && (
-                <Button disabled={status !== 'online'} onClick={() => setAdmin(true)}>
-                  管理员面板
+              <div className="workspace-empty-body">
+                <WebAssetOutlined className="workspace-empty-icon" />
+                <Typography component="h1" variant="h6">
+                  没有打开的窗口
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  新建一个窗口开始浏览
+                </Typography>
+                <Button
+                  variant="contained"
+                  startIcon={<Add />}
+                  disabled={!productReady}
+                  onClick={() => void action({ type: 'window.create' }).catch(report)}
+                >
+                  新建窗口
                 </Button>
-              )}
+                <div className="workspace-empty-links">
+                  {state.user.isAdmin && (
+                    <Button
+                      size="small"
+                      color="inherit"
+                      startIcon={<AdminPanelSettingsOutlined />}
+                      disabled={status !== 'online'}
+                      onClick={() => setAdmin(true)}
+                    >
+                      管理员面板
+                    </Button>
+                  )}
+                  <Button size="small" color="inherit" startIcon={<Logout />} onClick={logout}>
+                    退出登录
+                  </Button>
+                </div>
+              </div>
             </div>
           )}
         </div>

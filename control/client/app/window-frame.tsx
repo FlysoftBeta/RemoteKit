@@ -1,26 +1,36 @@
 import { diagnostics } from '../media/diagnostics';
 import {
+  AccountCircleOutlined,
   Add,
+  AdminPanelSettingsOutlined,
   ArrowBack,
   ArrowForward,
   BedtimeOutlined,
   Check,
   ChevronRight,
   Close,
+  DriveFileMoveOutlined,
+  FolderOutlined,
   Language,
   MoreVert,
   OpenInNew,
   Refresh,
+  SettingsOutlined,
   Stop,
   Tab as TabIcon,
+  TuneOutlined,
   ViewColumn,
+  WebAssetOutlined,
 } from '@mui/icons-material';
 import {
   Box,
+  Button,
   CircularProgress,
   Divider,
   IconButton,
   InputBase,
+  ListItemIcon,
+  ListItemText,
   Menu,
   MenuItem,
   MenuList,
@@ -28,6 +38,7 @@ import {
   Switch,
   Tooltip,
   Typography,
+  useMediaQuery,
 } from '@mui/material';
 import React, { useEffect, useRef, useState } from 'react';
 import type { ProductState, ProductTab, ProductWindow } from '../../shared/product';
@@ -35,6 +46,7 @@ import { isLocalTab, SEARCH_ENGINES } from '../../shared/product';
 import { AudioControls } from './audio-controls';
 import type { AudioChannels } from '../media/audio-output';
 import { MyFiles } from '../files/my-files';
+import { PageOverlay } from './page-overlay';
 import type { Action } from './product-dialogs';
 import { RemoteViewport } from './remote-viewport';
 import { StartPage } from './start-page';
@@ -62,6 +74,10 @@ export function Tool({
     </Tooltip>
   );
 }
+const dropDown = {
+  anchorOrigin: { vertical: 'bottom', horizontal: 'right' },
+  transformOrigin: { vertical: 'top', horizontal: 'right' },
+} as const;
 export function WindowFrame({
   win,
   state,
@@ -109,6 +125,7 @@ export function WindowFrame({
     [tabMenu, setTabMenu] = useState<{
       anchor: HTMLElement;
       tab: ProductTab;
+      fromToolbar?: boolean;
     } | null>(null),
     [siteMenuOrigin, setSiteMenuOrigin] = useState<string>(),
     [siteSaving, setSiteSaving] = useState<
@@ -120,6 +137,11 @@ export function WindowFrame({
   const addressDirty = useRef(false),
     previousTab = useRef(active?.id),
     composing = useRef(false);
+  const narrow = useMediaQuery('(max-width:600px)');
+  const multipleWindows = state.workspace.windows.length > 1;
+  const sideBySideMode = state.workspace.layoutMode !== 'focused';
+  const layoutIcon = sideBySideMode ? <WebAssetOutlined fontSize="small" /> : <ViewColumn fontSize="small" />;
+  const layoutLabel = sideBySideMode ? '只显示此窗口' : '并排显示';
   const run = (command: Parameters<Action>[0]) => {
     if (!online) return;
     setBusy(true);
@@ -218,6 +240,8 @@ export function WindowFrame({
       .catch(report)
       .finally(() => setSiteSaving((current) => ({ ...current, [preference]: undefined })));
   };
+  const toggleLayout = () =>
+    run({ type: 'window.layout', mode: sideBySideMode ? 'focused' : 'side-by-side' });
   const activate = () => {
     if (!focused && online) void action({ type: 'window.activate', windowId: win.id }).catch(report);
   };
@@ -302,7 +326,7 @@ export function WindowFrame({
                   {tab.title || '新标签页'}
                   {(state.pageDialogs?.some((d) => d.tabId === tab.id) ||
                     state.fileRequests?.some((d) => d.tabId === tab.id)) && (
-                    <span aria-label="页面等待处理请求"> ●</span>
+                    <span className="tab-attention" aria-label="页面等待处理请求" />
                   )}
                 </span>
               </button>
@@ -318,9 +342,15 @@ export function WindowFrame({
             </div>
           ))}
         </div>
-        <Tool title="新建标签页" disabled={!online || busy} onClick={createStartTab}>
+        <Tool
+          title="新建标签页"
+          className="new-tab-button"
+          disabled={!online || busy}
+          onClick={createStartTab}
+        >
           <Add fontSize="small" />
         </Tool>
+        <span className="tab-bar-spacer" />
         <Tool
           title={`切换窗口，共 ${state.workspace.windows.length} 个`}
           onClick={(e) => setSwitcher(e.currentTarget)}
@@ -330,7 +360,7 @@ export function WindowFrame({
         <Tool
           title="标签页操作"
           disabled={!active}
-          onClick={(e) => active && setTabMenu({ anchor: e.currentTarget, tab: active })}
+          onClick={(e) => active && setTabMenu({ anchor: e.currentTarget, tab: active, fromToolbar: true })}
         >
           <TabIcon fontSize="small" />
         </Tool>
@@ -429,11 +459,7 @@ export function WindowFrame({
               online={navigationReady}
               onSubmit={submit}
             />
-            {creatingTab && (
-              <div className="page-overlay" role="status">
-                正在创建标签页…
-              </div>
-            )}
+            {creatingTab && <PageOverlay kind="progress">正在创建标签页…</PageOverlay>}
           </>
         ) : (
           <>
@@ -447,23 +473,15 @@ export function WindowFrame({
               onFocus={activate}
             />
             {active.popup?.status === 'pending' ? (
-              <div className="page-overlay" role="status">
-                正在创建页面…
-              </div>
+              <PageOverlay kind="progress">正在创建页面…</PageOverlay>
             ) : active.popup?.status === 'failed' ? (
-              <div className="page-overlay" role="alert">
-                {active.popup.error || '未能打开此页面'}
-              </div>
+              <PageOverlay kind="error">{active.popup.error || '未能打开此页面'}</PageOverlay>
             ) : active.lifecycleRecoveryError ? (
-              <div className="page-overlay" role="alert">
-                {active.lifecycleRecoveryError}
-              </div>
+              <PageOverlay kind="error">{active.lifecycleRecoveryError}</PageOverlay>
             ) : (
               !transport.presentation.presentationError &&
               (active.restoring || (active.residency && active.residency !== 'live')) && (
-                <div className="page-overlay" role="status">
-                  正在唤醒已休眠的标签页…
-                </div>
+                <PageOverlay kind="progress">正在唤醒已休眠的标签页…</PageOverlay>
               )
             )}
           </>
@@ -473,22 +491,22 @@ export function WindowFrame({
         anchorEl={menu}
         open={!!menu}
         onClose={closeMore}
-        slotProps={{ paper: { sx: { width: 360, maxWidth: 'calc(100vw - 24px)' } } }}
+        anchorOrigin={dropDown.anchorOrigin}
+        transformOrigin={dropDown.transformOrigin}
+        slotProps={{ paper: { className: 'more-menu', sx: { width: 320, maxWidth: 'calc(100vw - 24px)' } } }}
       >
         {origin && siteMenuOrigin === origin ? (
-          <MenuList aria-label="网页兼容性处理">
+          <MenuList aria-label="网页兼容性处理" dense>
             <MenuItem autoFocus onClick={() => setSiteMenuOrigin(undefined)}>
-              <ArrowBack fontSize="small" sx={{ mr: 1.5 }} />
-              网页兼容性处理
+              <ListItemIcon>
+                <ArrowBack fontSize="small" />
+              </ListItemIcon>
+              <ListItemText
+                primary="网页兼容性处理"
+                secondary={origin}
+                slotProps={{ secondary: { sx: { overflowWrap: 'anywhere' } } }}
+              />
             </MenuItem>
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              component="li"
-              sx={{ px: 2, pb: 1, overflowWrap: 'anywhere' }}
-            >
-              {origin}
-            </Typography>
             <Divider component="li" />
             {(
               [
@@ -510,7 +528,7 @@ export function WindowFrame({
                   disabled={disabled}
                   onClick={() => toggleSitePreference(preference)}
                 >
-                  <Typography sx={{ flex: 1 }}>{label}</Typography>
+                  <ListItemText primary={label} />
                   <Switch
                     size="small"
                     checked={checked}
@@ -524,7 +542,7 @@ export function WindowFrame({
           </MenuList>
         ) : (
           <>
-            <MenuList autoFocusItem={!!menu}>
+            <MenuList autoFocusItem={!!menu} dense>
               <MenuItem
                 disabled={!online}
                 onClick={() => {
@@ -532,6 +550,9 @@ export function WindowFrame({
                   createStartTab();
                 }}
               >
+                <ListItemIcon>
+                  <Add fontSize="small" />
+                </ListItemIcon>
                 新建标签页
               </MenuItem>
               <MenuItem
@@ -541,6 +562,9 @@ export function WindowFrame({
                   run({ type: 'window.create' });
                 }}
               >
+                <ListItemIcon>
+                  <OpenInNew fontSize="small" />
+                </ListItemIcon>
                 新建窗口
               </MenuItem>
               <MenuItem
@@ -550,35 +574,43 @@ export function WindowFrame({
                   run({ type: 'tab.files', windowId: win.id });
                 }}
               >
+                <ListItemIcon>
+                  <FolderOutlined fontSize="small" />
+                </ListItemIcon>
                 我的文件
               </MenuItem>
-              <MenuItem
-                disabled={!online || !active?.canGoForward}
-                onClick={() => {
-                  setMenu(null);
-                  active &&
-                    run({
-                      type: 'tab.command',
-                      tabId: active.id,
-                      command: 'forward',
-                    });
-                }}
-              >
-                前进
-              </MenuItem>
+              {narrow && (
+                <MenuItem
+                  disabled={!online || !active?.canGoForward}
+                  onClick={() => {
+                    setMenu(null);
+                    active &&
+                      run({
+                        type: 'tab.command',
+                        tabId: active.id,
+                        command: 'forward',
+                      });
+                  }}
+                >
+                  <ListItemIcon>
+                    <ArrowForward fontSize="small" />
+                  </ListItemIcon>
+                  前进
+                </MenuItem>
+              )}
               <Divider />
-              <MenuItem
-                disabled={!online}
-                onClick={() => {
-                  setMenu(null);
-                  run({
-                    type: 'window.layout',
-                    mode: state.workspace.layoutMode === 'focused' ? 'side-by-side' : 'focused',
-                  });
-                }}
-              >
-                {state.workspace.layoutMode === 'focused' ? '并排显示' : '只显示此窗口'}
-              </MenuItem>
+              {multipleWindows && (
+                <MenuItem
+                  disabled={!online}
+                  onClick={() => {
+                    setMenu(null);
+                    toggleLayout();
+                  }}
+                >
+                  <ListItemIcon>{layoutIcon}</ListItemIcon>
+                  {layoutLabel}
+                </MenuItem>
+              )}
               <MenuItem
                 disabled={!online}
                 onClick={() => {
@@ -586,15 +618,21 @@ export function WindowFrame({
                   run({ type: 'window.close', windowId: win.id });
                 }}
               >
+                <ListItemIcon>
+                  <Close fontSize="small" />
+                </ListItemIcon>
                 关闭此窗口
               </MenuItem>
               <Divider />
               <MenuItem disabled={!origin} onClick={() => setSiteMenuOrigin(origin)}>
-                <Typography sx={{ flex: 1 }}>网页兼容性处理</Typography>
-                <ChevronRight fontSize="small" />
+                <ListItemIcon>
+                  <TuneOutlined fontSize="small" />
+                </ListItemIcon>
+                <ListItemText primary="网页兼容性处理" />
+                <ChevronRight fontSize="small" color="action" />
               </MenuItem>
-              <Divider />
             </MenuList>
+            <Divider />
             <AudioControls
               channels={state.workspace.settings.audioChannels ?? { left: true, right: true }}
               online={online}
@@ -605,13 +643,16 @@ export function WindowFrame({
               error={audioError}
             />
             <Divider />
-            <MenuList>
+            <MenuList dense>
               <MenuItem
                 onClick={() => {
                   setMenu(null);
                   onSettings();
                 }}
               >
+                <ListItemIcon>
+                  <SettingsOutlined fontSize="small" />
+                </ListItemIcon>
                 设置
               </MenuItem>
               {state.user.isAdmin && (
@@ -622,38 +663,58 @@ export function WindowFrame({
                     onAdmin();
                   }}
                 >
+                  <ListItemIcon>
+                    <AdminPanelSettingsOutlined fontSize="small" />
+                  </ListItemIcon>
                   管理员面板
                 </MenuItem>
               )}
-              <Divider />
-              <MenuItem disabled>{state.user.username}</MenuItem>
-              <MenuItem
+            </MenuList>
+            <Divider />
+            <div className="more-menu-account">
+              <AccountCircleOutlined fontSize="small" color="action" />
+              <Typography variant="body2" className="more-menu-user">
+                {state.user.username}
+              </Typography>
+              <Button
+                size="small"
+                color="inherit"
                 onClick={() => {
                   setMenu(null);
                   onLogout();
                 }}
               >
                 退出登录
-              </MenuItem>
-            </MenuList>
+              </Button>
+            </div>
           </>
         )}
       </Popover>
-      <Menu anchorEl={switcher} open={!!switcher} onClose={() => setSwitcher(null)}>
+      <Menu
+        anchorEl={switcher}
+        open={!!switcher}
+        onClose={() => setSwitcher(null)}
+        anchorOrigin={dropDown.anchorOrigin}
+        transformOrigin={dropDown.transformOrigin}
+        slotProps={{ list: { dense: true } }}
+      >
         {state.workspace.windows.map((w, index) => (
           <MenuItem
             key={w.id}
             disabled={!online}
+            selected={w.id === win.id}
             aria-label={`切换到窗口 ${index + 1}`}
             onClick={() => {
               setSwitcher(null);
               run({ type: 'window.activate', windowId: w.id });
             }}
           >
-            {w.id === win.id ? <Check fontSize="small" /> : <span className="menu-icon-space" />}
-            <span>
-              {index + 1} · {state.workspace.tabs.find((t) => t.id === w.activeTabId)?.title || '新窗口'}
-            </span>
+            <ListItemIcon>{w.id === win.id && <Check fontSize="small" />}</ListItemIcon>
+            <ListItemText
+              primary={state.workspace.tabs.find((t) => t.id === w.activeTabId)?.title || '新窗口'}
+              secondary={`窗口 ${index + 1} · ${state.workspace.tabs.filter((t) => t.windowId === w.id).length} 个标签页`}
+              slotProps={{ primary: { noWrap: true } }}
+            />
           </MenuItem>
         ))}
         <Divider />
@@ -664,22 +725,32 @@ export function WindowFrame({
             run({ type: 'window.create' });
           }}
         >
+          <ListItemIcon>
+            <Add fontSize="small" />
+          </ListItemIcon>
           新建窗口
         </MenuItem>
-        <MenuItem
-          disabled={!online}
-          onClick={() => {
-            setSwitcher(null);
-            run({
-              type: 'window.layout',
-              mode: state.workspace.layoutMode === 'focused' ? 'side-by-side' : 'focused',
-            });
-          }}
-        >
-          {state.workspace.layoutMode === 'focused' ? '并排显示' : '只显示此窗口'}
-        </MenuItem>
+        {multipleWindows && (
+          <MenuItem
+            disabled={!online}
+            onClick={() => {
+              setSwitcher(null);
+              toggleLayout();
+            }}
+          >
+            <ListItemIcon>{layoutIcon}</ListItemIcon>
+            {layoutLabel}
+          </MenuItem>
+        )}
       </Menu>
-      <Menu anchorEl={tabMenu?.anchor} open={!!tabMenu} onClose={() => setTabMenu(null)}>
+      <Menu
+        anchorEl={tabMenu?.anchor}
+        open={!!tabMenu}
+        onClose={() => setTabMenu(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: tabMenu?.fromToolbar ? 'right' : 'left' }}
+        transformOrigin={{ vertical: 'top', horizontal: tabMenu?.fromToolbar ? 'right' : 'left' }}
+        slotProps={{ list: { dense: true } }}
+      >
         <MenuItem
           disabled={!online}
           onClick={() => {
@@ -688,7 +759,10 @@ export function WindowFrame({
             setTabMenu(null);
           }}
         >
-          <OpenInNew fontSize="small" /> 在新窗口打开
+          <ListItemIcon>
+            <OpenInNew fontSize="small" />
+          </ListItemIcon>
+          在新窗口打开
         </MenuItem>
         {state.workspace.windows
           .filter((w) => w.id !== win.id)
@@ -706,9 +780,25 @@ export function WindowFrame({
                 setTabMenu(null);
               }}
             >
+              <ListItemIcon>
+                <DriveFileMoveOutlined fontSize="small" />
+              </ListItemIcon>
               移到窗口 {state.workspace.windows.indexOf(w) + 1}
             </MenuItem>
           ))}
+        <Divider />
+        <MenuItem
+          disabled={!online}
+          onClick={() => {
+            if (tabMenu) run({ type: 'tab.close', tabId: tabMenu.tab.id });
+            setTabMenu(null);
+          }}
+        >
+          <ListItemIcon>
+            <Close fontSize="small" />
+          </ListItemIcon>
+          关闭标签页
+        </MenuItem>
       </Menu>
     </section>
   );

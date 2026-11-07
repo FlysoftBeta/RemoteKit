@@ -93,7 +93,10 @@ function checkNavigation(
   const inputs = html.match(/<input\b[^>]*aria-label="搜索或输入网址"[^>]*>/g) ?? [];
   assert.equal(inputs.length, options.inputs);
   for (const input of inputs) assert.equal(/\sdisabled(?:=""|\s|>)/.test(input), options.disabled);
-  assert.equal(html.includes('role="status">正在创建标签页…'), options.creating ?? false);
+  assert.equal(
+    /class="page-overlay" role="status">(?:(?!<\/div>)[\s\S])*正在创建标签页…/.test(html),
+    options.creating ?? false,
+  );
 }
 
 test('projected window and tab cannot take navigation drafts before their IDs are confirmed', () => {

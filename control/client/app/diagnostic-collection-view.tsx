@@ -5,12 +5,12 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
   TextField,
   Typography,
 } from '@mui/material';
 import { useState } from 'react';
 import type { DiagnosticState } from '../media/diagnostic-collection';
+import { SettingRow, SettingSection } from './setting-layout';
 
 export function DiagnosticSettings({
   state,
@@ -22,12 +22,8 @@ export function DiagnosticSettings({
   start: () => void;
 }) {
   return (
-    <>
-      <div className="setting-section">
-        <Typography fontWeight={600}>诊断</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ my: 1 }}>
-          收集连接、媒体与性能信息，停止后保存在服务端。
-        </Typography>
+    <SettingSection title="诊断">
+      <SettingRow description="收集连接、媒体与性能信息，停止后保存在服务端。" title="诊断数据收集">
         <Button
           variant="outlined"
           onClick={start}
@@ -35,14 +31,13 @@ export function DiagnosticSettings({
         >
           {state.phase === 'starting' ? '正在开始…' : '开始诊断'}
         </Button>
-        {state.phase === 'start-error' && (
-          <Alert severity="error" sx={{ mt: 1 }}>
-            未能确认诊断已开始，请重试。
-          </Alert>
-        )}
-      </div>
-      <Divider />
-    </>
+      </SettingRow>
+      {state.phase === 'start-error' && (
+        <Alert severity="error" sx={{ mt: 1 }}>
+          未能确认诊断已开始，请重试。
+        </Alert>
+      )}
+    </SettingSection>
   );
 }
 

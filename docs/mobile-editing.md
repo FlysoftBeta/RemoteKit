@@ -64,7 +64,7 @@ grace     → dismissed 200ms 到期
 
 **键盘遮挡判断**（`KeyboardViewport`）：在稳定的无遮挡基线上，2px 以内视为噪声；visual viewport 被遮挡 48px 以上，或粗指针设备的布局高度下降 80px 以上，判为键盘。宽度变化或缩放偏差 ≥0.02 重置为普通 resize。高度完全恢复后 140ms settle。这些判断不授予新的键盘意图。
 
-**外壳**：Viewer 外壳按 visualViewport 的宽高布局，`offsetTop/Left` 只移动外壳。远端 DIP 取 Window 内容区实际大小；可视区域平移（光标平移）不提交 resize、不启动新的输入屏障。曾经把内容矩形与移动中的 visualViewport 求交，导致光标平移期间远端尺寸来回变化。视口提交在约 100ms 内合并；浮层 UI（对话框、文件篮）覆盖在工作区上，不占用内容布局，因此打开设置不会让所有远端页面 resize。
+**外壳**：Viewer 外壳按 visualViewport 的宽高布局，`offsetTop/Left` 只移动外壳。远端 DIP 取 Window 内容区实际大小；可视区域平移（光标平移）不提交 resize、不启动新的输入屏障。曾经把内容矩形与移动中的 visualViewport 求交，导致光标平移期间远端尺寸来回变化。视口提交在约 100ms 内合并；浮层 UI（对话框、文件篮、连接与同步提示）覆盖在工作区上，不占用内容布局，因此打开设置或出现"正在恢复连接"之类的提示不会让远端页面 resize；外壳提示统一叠放在工具栏下方的通知栈里。
 
 ## 修复过的循环
 
