@@ -43,6 +43,29 @@ export interface LifecycleRecovery {
 }
 export type ProductTabKind = 'start' | 'files' | 'remote';
 export const isLocalTab = (tab: Pick<ProductTab, 'kind'>) => tab.kind === 'start' || tab.kind === 'files';
+
+// Tabs keep one workspace-wide order; a window's strip is that order filtered by windowId.
+export function placeTab<T extends { id: string; windowId: string }>(
+  tabs: T[],
+  tabId: string,
+  windowId: string,
+  index?: number,
+) {
+  const from = tabs.findIndex((tab) => tab.id === tabId);
+  if (from < 0) return;
+  const [moved] = tabs.splice(from, 1);
+  moved.windowId = windowId;
+  const siblings: number[] = [];
+  tabs.forEach((tab, at) => tab.windowId === windowId && siblings.push(at));
+  const slot = index === undefined ? siblings.length : Math.max(0, Math.min(index, siblings.length));
+  const at =
+    slot < siblings.length
+      ? siblings[slot]
+      : siblings.length
+        ? siblings[siblings.length - 1] + 1
+        : tabs.length;
+  tabs.splice(at, 0, moved);
+}
 export interface ProductTab {
   navigation?: {
     resolved?: boolean;
@@ -215,7 +238,8 @@ export type ProductAction =
       confirm?: boolean;
       cancel?: boolean;
     }
-  | { type: 'tab.move'; tabId: string; windowId: string }
+  /** index: position among the target window's tabs; omitted appends. */
+  | { type: 'tab.move'; tabId: string; windowId: string; index?: number }
   | { type: 'tab.navigate'; tabId: string; url: string }
   | { type: 'tab.command'; tabId: string; command: 'back' | 'forward' | 'reload' | 'stop' }
   | { type: 'settings.update'; settings: Partial<ProductSettings> }

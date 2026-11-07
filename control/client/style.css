@@ -104,6 +104,41 @@ button:focus-visible,
   scrollbar-width: none;
   height: 37px;
   gap: 3px;
+  /* Offset parent for the drop index computed from tab offsets. */
+  position: relative;
+}
+.tab-strip-dragging {
+  user-select: none;
+}
+.tab-strip-dragging .browser-tab {
+  transition: transform 150ms ease;
+}
+.tab-drop-target {
+  background: rgb(36 93 181 / 8%);
+  border-radius: 8px 8px 0 0;
+}
+.browser-tab.tab-drag-source {
+  visibility: hidden;
+}
+.tab-drag-ghost {
+  position: fixed;
+  z-index: 1500;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 37px;
+  padding: 0 12px 0 8px;
+  border-radius: 8px;
+  background: #fff;
+  color: #1f2937;
+  font-size: 13px;
+  box-shadow: 0 6px 18px rgb(15 23 42 / 22%);
+  pointer-events: none;
+}
+.tab-drag-ghost > .tab-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .tab-strip::-webkit-scrollbar {
   display: none;

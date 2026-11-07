@@ -39,7 +39,8 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { ProductState, ProductTab, ProductWindow } from '../../shared/product';
 import { isLocalTab, SEARCH_ENGINES } from '../../shared/product';
 import { AudioControls } from './audio-controls';
@@ -50,7 +51,8 @@ import type { Action } from './product-dialogs';
 import { RemoteViewport } from './remote-viewport';
 import { StartPage } from './start-page';
 import { ViewerSession } from '../viewer-session';
-import { scaledAnchor, useLayoutNarrow } from './ui-scale';
+import { beginTabPointer, registerTabStrip, tabShift, useTabDrag } from './tab-drag';
+import { scaledAnchor, useLayoutNarrow, useUiScale } from './ui-scale';
 export function Tool({
   title,
   children,
@@ -138,6 +140,17 @@ export function WindowFrame({
     previousTab = useRef(active?.id),
     composing = useRef(false);
   const narrow = useLayoutNarrow();
+  const drag = useTabDrag(),
+    scale = useUiScale();
+  const stripRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      strip.current = element;
+      registerTabStrip(win.id, element);
+    },
+    [win.id],
+  );
+  const moveTab = (tabId: string, windowId: string, index: number) =>
+    run({ type: 'tab.move', tabId, windowId, index });
   const multipleWindows = state.workspace.windows.length > 1;
   const sideBySideMode = state.workspace.layoutMode !== 'focused';
   const layoutIcon = sideBySideMode ? <WebAssetOutlined fontSize="small" /> : <ViewColumn fontSize="small" />;
@@ -285,11 +298,30 @@ export function WindowFrame({
       onPointerDownCapture={activate}
     >
       <div className="tab-bar">
-        <div className="tab-strip" role="tablist" aria-label="标签页" ref={strip}>
+        <div
+          className={`tab-strip${drag ? ' tab-strip-dragging' : ''}${drag?.target?.windowId === win.id && drag.sourceWindowId !== win.id ? ' tab-drop-target' : ''}`}
+          role="tablist"
+          aria-label="标签页"
+          ref={stripRef}
+        >
           {tabs.map((tab, index) => (
             <div
-              className={`browser-tab ${active?.id === tab.id ? 'selected-tab' : ''}`}
+              className={`browser-tab ${active?.id === tab.id ? 'selected-tab' : ''}${drag?.tabId === tab.id ? ' tab-drag-source' : ''}`}
               key={tab.id}
+              data-tab-id={tab.id}
+              style={{ transform: `translateX(${tabShift(drag, win.id, tab.id, index)}px)` }}
+              onPointerDown={(event) =>
+                online &&
+                beginTabPointer({
+                  event,
+                  tabId: tab.id,
+                  windowId: win.id,
+                  title: tab.title || '新标签页',
+                  index,
+                  move: moveTab,
+                  longPress: (anchor) => setTabMenu({ anchor, tab }),
+                })
+              }
               onContextMenu={(e) => {
                 e.preventDefault();
                 setTabMenu({ anchor: e.currentTarget, tab });
@@ -304,6 +336,12 @@ export function WindowFrame({
                 aria-selected={active?.id === tab.id}
                 onClick={() => run({ type: 'tab.activate', tabId: tab.id })}
                 onKeyDown={(e) => {
+                  if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.ctrlKey && e.shiftKey) {
+                    e.preventDefault();
+                    const to = index + (e.key === 'ArrowRight' ? 1 : -1);
+                    if (to >= 0 && to < tabs.length) moveTab(tab.id, win.id, to);
+                    return;
+                  }
                   if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
                     e.preventDefault();
                     const next = (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
@@ -344,6 +382,22 @@ export function WindowFrame({
             </div>
           ))}
         </div>
+        {drag?.sourceWindowId === win.id &&
+          createPortal(
+            <div
+              className="tab-drag-ghost"
+              aria-hidden
+              style={{
+                left: (drag.x - drag.grabX) / scale,
+                top: (drag.y - drag.grabY) / scale,
+                width: drag.width,
+              }}
+            >
+              <Language fontSize="inherit" />
+              <span className="tab-title">{drag.title}</span>
+            </div>,
+            document.getElementById('root') ?? document.body,
+          )}
         <Tool
           title="新建标签页"
           className="new-tab-button"

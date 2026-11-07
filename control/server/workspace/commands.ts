@@ -1,6 +1,7 @@
 import { RemoteKitError } from '../../shared/errors';
 import {
   isLocalTab,
+  placeTab,
   DEAD_ZONE_MAX,
   SEARCH_ENGINES,
   UI_SCALE_MAX,
@@ -131,6 +132,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       const t = tab(),
         target = window(),
         old = state.windows.find((w) => w.id === t.windowId)!;
+      if (action.index !== undefined && !(Number.isInteger(action.index) && action.index >= 0))
+        throw new RemoteKitError('invalid_request', '无效的标签页位置');
       if (
         reservesFilesTab(t) &&
         state.tabs.some(
@@ -138,8 +141,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         )
       )
         throw new RemoteKitError('conflict', '目标窗口已打开我的文件');
-      t.windowId = target.id;
-      if (old.activeTabId === t.id)
+      placeTab(state.tabs, t.id, target.id, action.index);
+      if (old !== target && old.activeTabId === t.id)
         old.activeTabId = state.tabs.find((item) => item.windowId === old.id)?.id ?? null;
       target.activeTabId = t.id;
       state.activeWindowId = target.id;

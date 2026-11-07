@@ -65,6 +65,12 @@ Control  每 Tenant 串行：
 
 历史问题：创建 Window 的回复丢失后用户重试，会因为传输层请求 ID 只在连接内有效而创建出第二个 Window——加长超时解决不了重复副作用，稳定的操作 ID 和可查询的 unknown 才能。导航曾在 Control 保存地址意图之前就在 Endpoint 执行，崩溃窗口内执行与产品状态不一致——现在意图在外部执行之前持久化，之后的结算绑定到 Native 导航身份。
 
+## 标签页顺序
+
+workspace 只有一份全局 Tab 顺序，每个 Window 的标签栏是它按 `windowId` 过滤的结果，所以不需要单独的位置字段。`tab.move{tabId, windowId, index?}` 同时负责同窗口排序和移到其他 Window：`index` 是移除自身后在目标 Window 内的位置，省略时排到末尾；服务端命令和客户端 pending 投影共用 `placeTab`，被移动的 Tab 成为目标 Window 的活动 Tab。
+
+Viewer 里鼠标/触控笔移动超过 5px 开始拖拽，触摸需要长按 400ms，这样横向滑动仍然滚动标签栏；长按后不移动就松开会打开标签页菜单。拖拽状态是页面内唯一的一份，所以可以拖进并排的另一个 Window 的标签栏。落点按各 Tab 的 `offsetLeft` 计算（不受拖拽动画的 transform 影响），靠近边缘时滚动标签栏；Esc 取消。键盘用 Ctrl+Shift+←/→ 移动当前 Tab。
+
 ## 导航
 
 RPC 受理、导航开始、文档提交、资源加载完成是不同结果。

@@ -1,5 +1,11 @@
 import { RemoteKitError } from '../../shared/errors';
-import type { OperationReceipt, ProductAction, ProductOperation, ProductState } from '../../shared/product';
+import {
+  placeTab,
+  type OperationReceipt,
+  type ProductAction,
+  type ProductOperation,
+  type ProductState,
+} from '../../shared/product';
 /** Product actions return execution receipts, never an authoritative workspace. */
 export type ProductActionHandler = (action: ProductAction) => Promise<OperationReceipt>;
 export function requireAcceptedReceipt(receipt: OperationReceipt): OperationReceipt {
@@ -83,6 +89,19 @@ export function projectOperations(
         if (tab) {
           w.activeWindowId = tab.windowId;
           w.windows.find((x) => x.id === tab.windowId)!.activeTabId = tab.id;
+        }
+        break;
+      }
+      case 'tab.move': {
+        const tab = w.tabs.find((t) => t.id === a.tabId),
+          target = w.windows.find((x) => x.id === a.windowId);
+        if (tab && target) {
+          const source = w.windows.find((x) => x.id === tab.windowId);
+          placeTab(w.tabs, tab.id, target.id, a.index);
+          if (source && source !== target && source.activeTabId === tab.id)
+            source.activeTabId = w.tabs.find((t) => t.windowId === source.id)?.id ?? null;
+          target.activeTabId = tab.id;
+          w.activeWindowId = target.id;
         }
         break;
       }
