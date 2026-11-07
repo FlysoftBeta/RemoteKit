@@ -266,6 +266,7 @@ if(WIN32)
     src/auth/face.cpp
     src/files/files.cpp
     src/diagnostics/stats.cpp
+    src/diagnostics/log_files.cpp
     src/diagnostics/node_metrics.cpp
     src/diagnostics/timing.cpp
     src/rtc/channel.cpp

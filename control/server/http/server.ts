@@ -9,6 +9,7 @@ import { extname, resolve, sep } from 'node:path';
 import { RemoteKitError, httpStatus, toRemoteKitError } from '../../shared/errors';
 
 import type { DomainServices } from '../application';
+import type { ProcessLog } from '../diagnostics/process-log';
 import { DiagnosticSessions } from '../diagnostics/sessions';
 import type { NodeRegistry } from '../cluster/node-link';
 import { attachViewerSocket } from './viewer-socket';
@@ -21,6 +22,7 @@ export function createHttp(
     diagnosticDir?: string;
     tls?: { key: Buffer; cert: Buffer };
     nodes?: NodeRegistry;
+    processLog?: ProcessLog;
   },
 ) {
   let closing = false;
@@ -48,6 +50,8 @@ export function createHttp(
           };
         },
         endpoint: (tenant) => control.endpoint.snapshot(tenant, { outputDiagnostics: true }),
+        endpointLog: (tenant, request) => control.endpoint.readLog(tenant, request),
+        controlLog: options.processLog && (() => options.processLog!.snapshot()),
       })
     : undefined;
   const inflight = new Set<Promise<unknown>>();

@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { open } from 'node:fs/promises';
 import type { IncomingMessage } from 'node:http';
+import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer } from 'ws';
+import { EndpointLog } from './endpoint-log';
 import { MetricsHistory } from './metrics';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { ConfiguredNode, NodeConfig } from '../config';
@@ -54,7 +56,10 @@ export class StdioCarrier extends Carrier {
   get bufferedAmount() {
     return this.child.stdin.writableLength;
   }
-  constructor(readonly child: ChildProcessWithoutNullStreams) {
+  constructor(
+    readonly child: ChildProcessWithoutNullStreams,
+    log: EndpointLog,
+  ) {
     super();
     const decoder = new StdioDecoder();
     child.stdout.on('data', (bytes: Buffer) => {
@@ -70,7 +75,7 @@ export class StdioCarrier extends Carrier {
       } catch {}
       this.close();
     });
-    child.stderr.on('data', (bytes) => process.stderr.write(bytes));
+    child.stderr.on('data', (bytes: Buffer) => log.write(bytes));
     child.stdin.on('error', () => this.close());
     child.stdout.on('error', () => this.close());
     child.on('error', () => this.emit('close'));
@@ -162,7 +167,10 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       },
     );
     this.child = child;
-    this.registry.accept(new StdioCarrier(child), this.nodeId);
+    this.registry.accept(
+      new StdioCarrier(child, new EndpointLog(join(launch.root, 'logs', 'endpoint.log'))),
+      this.nodeId,
+    );
     let finished = false;
     const exited = (code: number | null) => {
       if (finished) return;

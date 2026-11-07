@@ -5,7 +5,15 @@ import { pipeline } from 'node:stream/promises';
 import { createZstdCompress } from 'node:zlib';
 
 export type ArchiveEntry =
-  'manifest.json' | 'client.jsonl' | 'control.jsonl' | 'endpoint.jsonl' | 'events.jsonl';
+  | 'manifest.json'
+  | 'client.jsonl'
+  | 'control.jsonl'
+  | 'endpoint.jsonl'
+  | 'events.jsonl'
+  | 'logs/control.log'
+  | 'logs/browser.log'
+  | 'logs/endpoint.log'
+  | 'logs/endpoint.log.1';
 const block = 512;
 
 function* tar(entries: ReadonlyMap<ArchiveEntry, readonly Buffer[]>, mtime: number) {

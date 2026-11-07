@@ -51,6 +51,21 @@ export interface ViewSnapshot {
   provisional?: boolean;
   [key: string]: unknown;
 }
+// Raw log names an Endpoint serves for diagnostics: this Session's Browser log
+// and the node's Endpoint log with its first rotation.
+export type EndpointLogName = 'browser' | 'endpoint' | 'endpoint.1';
+export interface LogWindowRequest {
+  log: EndpointLogName;
+  end?: number;
+  maxBytes: number;
+}
+export interface LogWindow {
+  exists: boolean;
+  size: number;
+  start: number;
+  end: number;
+  data: string;
+}
 export interface EndpointSnapshot {
   hibernation?: {
     unacknowledgedClosedEvents: number;

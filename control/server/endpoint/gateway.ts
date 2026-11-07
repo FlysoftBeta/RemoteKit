@@ -24,6 +24,8 @@ import type {
   FaceStatusReply,
   FileAuthorization,
   LifecycleRequest,
+  LogWindow,
+  LogWindowRequest,
   OperationIdentity,
   PageIdentity,
   PrepareSelection,
@@ -186,6 +188,9 @@ export class EndpointGateway {
         return { ...fields, viewId: String(viewId ?? nativeView ?? id) };
       }),
     };
+  }
+  readLog(tenant: string, request: LogWindowRequest): Promise<LogWindow> {
+    return this.invoke<LogWindow>('session.logs.read', tenant, request);
   }
   async ensureSession(tenant: string): Promise<{ browserPid?: number; [key: string]: unknown }> {
     return this.invoke<{ browserPid?: number; [key: string]: unknown }>('session.ensure', tenant);

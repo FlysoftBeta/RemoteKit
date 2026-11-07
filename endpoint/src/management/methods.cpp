@@ -93,6 +93,10 @@ ManagementMethods::Handler ManagementMethods::Find(const std::string& name) {
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Views().ManageSessionSitePreferences(request);
        }},
+      {"session.logs.read",
+       [](Session& session, const Json& request) -> Result<Json> {
+         return session.ReadLog(request);
+       }},
       {"session.snapshot",
        [](Session& session, const Json& request) -> Result<Json> {
          return session.Snapshot(request.value("outputDiagnostics", false));

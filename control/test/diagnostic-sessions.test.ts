@@ -43,6 +43,11 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const leases = new Map<string, { lease: string; epoch?: number; allowed: boolean }>();
   const emitter = new EventEmitter();
   const snapshots: string[] = [];
+  // Larger than one 512 KiB window so the tail walk must stitch windows.
+  const browserLog = Buffer.from(
+    Array.from({ length: 30000 }, (_, i) => `[INFO:CONSOLE] line ${i}\n`).join(''),
+  );
+  const logReads: unknown[] = [];
   const control = {
     events: emitter,
     store: {
@@ -61,6 +66,19 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
       },
     },
     endpoint: {
+      readLog: async (tenant: string, request: { log: string; end?: number; maxBytes: number }) => {
+        logReads.push({ tenant, ...request });
+        if (request.log !== 'browser') return { exists: false, size: 0, start: 0, end: 0, data: '' };
+        const end = Math.min(request.end ?? browserLog.length, browserLog.length);
+        const start = Math.max(0, end - request.maxBytes);
+        return {
+          exists: true,
+          size: browserLog.length,
+          start,
+          end,
+          data: browserLog.subarray(start, end).toString('base64'),
+        };
+      },
       snapshot: async (tenant: string, options: unknown) => {
         assert.deepEqual(options, { outputDiagnostics: true });
         snapshots.push(tenant);
@@ -223,9 +241,20 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const files = entries(bytes);
   assert.deepEqual(
     [...files.keys()],
-    ['manifest.json', 'client.jsonl', 'control.jsonl', 'endpoint.jsonl', 'events.jsonl'],
+    ['manifest.json', 'client.jsonl', 'control.jsonl', 'endpoint.jsonl', 'events.jsonl', 'logs/browser.log'],
+  );
+  assert.equal(files.get('logs/browser.log'), browserLog.toString());
+  assert.deepEqual(
+    logReads.map((read) => (read as { log: string }).log),
+    ['browser', 'browser', 'endpoint', 'endpoint.1'],
   );
   const manifest = JSON.parse(files.get('manifest.json')!);
+  assert.deepEqual(manifest.logs, {
+    control: { available: false },
+    browser: { exists: true, size: browserLog.length, start: 0, bytes: browserLog.length },
+    endpoint: { exists: false, size: 0, start: 0, bytes: 0 },
+    'endpoint.1': { exists: false, size: 0, start: 0, bytes: 0 },
+  });
   assert.deepEqual(manifest.environment, { platform: 'android', browserVersion: '139.0.1.2' });
   assert.equal(manifest.sources.client.records, 1);
   assert.equal(manifest.interrupted, false);
@@ -255,8 +284,12 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   ]);
   assert.equal(endpoint.browserOutput.submitted, '10');
   assert.equal(endpoint.views[0].compositor.osr.enabled, true);
+  // Raw logs are archived verbatim; projected samples stay sanitized.
   assert.doesNotMatch(
-    [...files.values()].join(''),
+    [...files]
+      .filter(([name]) => !name.startsWith('logs/'))
+      .map(([, text]) => text)
+      .join(''),
     /sensitive-|secret\.invalid|password-from-page|rtcid|"sdp"|"token"/,
   );
   assert.deepEqual(snapshots, ['one']);
@@ -274,7 +307,11 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   const reconnect = await viewer('one');
   assert.equal((await reconnect.request('stop', { id: third.id })).reason, 'disconnected');
 
-  const restarted = new DiagnosticSessions(directory, { control: () => ({}), endpoint: async () => ({}) });
+  const restarted = new DiagnosticSessions(directory, {
+    control: () => ({}),
+    endpoint: async () => ({}),
+    endpointLog: () => Promise.reject(new Error('unused')),
+  });
   const query = { tenant: 'one', identity: 'changed', lease: 'after-restart', epoch: 1, allowed: () => true };
   assert.deepEqual(await restarted.request(query, 'diagnostics.stop', { id }), complete);
   await assert.rejects(restarted.request({ ...query, tenant: 'two' }, 'diagnostics.status', { id }), {
@@ -290,6 +327,7 @@ test('global capacity includes finalization, and shutdown drains even when Endpo
   const manager = new DiagnosticSessions(blockingFile, {
     control: () => ({}),
     endpoint: () => new Promise(() => {}),
+    endpointLog: () => Promise.reject(new RemoteKitError('unavailable', 'Endpoint offline')),
   });
   const viewer = (tenant: string) => ({
     tenant,

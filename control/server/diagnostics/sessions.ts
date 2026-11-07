@@ -5,6 +5,7 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { AdminDiagnostic } from '../../shared/admin';
 import { RemoteKitError } from '../../shared/errors';
 import { writeDiagnosticArchive, type ArchiveEntry } from './archive';
+import type { EndpointLogName, LogWindow, LogWindowRequest } from '../endpoint/types';
 import { diagnosticClientSample, diagnosticEndpointSnapshot, diagnosticEnvironment } from './projection';
 
 const intervalMs = 2000;
@@ -12,6 +13,12 @@ const maxDurationMs = 10 * 60 * 1000;
 const maxBytes = 32 * 1024 * 1024;
 export const diagnosticMessageLimit = 128 * 1024;
 const maxActive = 4;
+// Raw logs are read once at stop, newest bytes first, so history from before
+// the collection started is included up to each budget.
+const logBudgets = { browser: 16 * 1024 * 1024, endpoint: 8 * 1024 * 1024 } as const;
+const logWindowBytes = 512 * 1024;
+const logDeadlineMs = 15000;
+const shutdownLogDeadlineMs = 3000;
 const maxRecent = 1024;
 const archiveId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const stopReasons = [
@@ -28,6 +35,10 @@ type Status =
   | { id: string; status: 'complete'; reason: StopReason; bytes: number }
   | { id: string; status: 'failed'; reason: 'archive-write-failed' };
 type Source = 'client' | 'control' | 'endpoint' | 'events';
+interface CollectedLogs {
+  files: Map<ArchiveEntry, Buffer[]>;
+  summary: Record<string, unknown>;
+}
 export interface DiagnosticViewer {
   tenant: string;
   identity: string;
@@ -65,6 +76,8 @@ export class DiagnosticSessions {
     private readonly sources: {
       control: (tenant: string) => unknown;
       endpoint: (tenant: string) => Promise<unknown>;
+      endpointLog: (tenant: string, request: LogWindowRequest) => Promise<LogWindow>;
+      controlLog?: () => { data: Buffer; dropped: number };
     },
   ) {}
 
@@ -274,6 +287,26 @@ export class DiagnosticSessions {
     session.entries.events.push(
       Buffer.from(JSON.stringify({ receivedAt: endedAt, elapsedMs, event: 'stopped', reason }) + '\n'),
     );
+    session.finalization = this.collectLogs(session.viewer.tenant, reason)
+      .then((logs) => this.write(session, reason, endedAt, elapsedMs, logs))
+      .then((status) => {
+        session.status = status;
+        this.sessions.delete(id);
+        if (this.recent.size >= maxRecent) this.recent.delete(this.recent.keys().next().value!);
+        this.recent.set(id, { tenant: session.viewer.tenant, status });
+        return status;
+      });
+    return session.finalization;
+  }
+
+  private async write(
+    session: Session,
+    reason: StopReason,
+    endedAt: number,
+    elapsedMs: number,
+    logs: CollectedLogs,
+  ): Promise<Status> {
+    const { id } = session.status;
     const manifest = {
       schemaVersion: 1,
       id,
@@ -284,7 +317,14 @@ export class DiagnosticSessions {
       interrupted: reason !== 'user',
       runtime: { node: process.versions.node, platform: process.platform, architecture: process.arch },
       environment: session.environment,
-      limits: { maxDurationMs, maxBytes, sampleIntervalMs: intervalMs, messageBytes: diagnosticMessageLimit },
+      limits: {
+        maxDurationMs,
+        maxBytes,
+        sampleIntervalMs: intervalMs,
+        messageBytes: diagnosticMessageLimit,
+        logBytes: logBudgets,
+      },
+      logs: logs.summary,
       sources: Object.fromEntries(
         Object.entries(session.entries).map(([source, rows]) => [
           source,
@@ -307,25 +347,88 @@ export class DiagnosticSessions {
     ]);
     for (const source of ['client', 'control', 'endpoint', 'events'] as const)
       if (session.entries[source].length) entries.set(`${source}.jsonl`, session.entries[source]);
-    session.finalization = writeDiagnosticArchive(
+    for (const [name, chunks] of logs.files) entries.set(name, chunks);
+    return writeDiagnosticArchive(
       this.ownerDirectory(session.viewer.tenant),
       id,
       entries,
       endedAt,
       reason,
-    )
-      .then<Status, Status>(
-        (bytes) => ({ id, status: 'complete', bytes, reason }),
-        () => ({ id, status: 'failed', reason: 'archive-write-failed' }),
+    ).then<Status, Status>(
+      (bytes) => ({ id, status: 'complete', bytes, reason }),
+      () => ({ id, status: 'failed', reason: 'archive-write-failed' }),
+    );
+  }
+
+  private async collectLogs(tenant: string, reason: StopReason): Promise<CollectedLogs> {
+    const files = new Map<ArchiveEntry, Buffer[]>();
+    const summary: Record<string, unknown> = {};
+    const control = this.sources.controlLog?.();
+    if (control) {
+      files.set('logs/control.log', [control.data]);
+      summary.control = { bytes: control.data.length, droppedBefore: control.dropped };
+    } else summary.control = { available: false };
+    const deadline = Date.now() + (reason === 'shutdown' ? shutdownLogDeadlineMs : logDeadlineMs);
+    const read = async (log: EndpointLogName, budget: number, entry: ArchiveEntry) => {
+      try {
+        const tail = await this.readTail(tenant, log, budget, deadline);
+        if (tail.chunks.length) files.set(entry, tail.chunks);
+        summary[log] = { exists: tail.exists, size: tail.size, start: tail.start, bytes: tail.bytes };
+        return tail;
+      } catch (error) {
+        summary[log] = { error: error instanceof Error ? error.message : 'unavailable' };
+        return undefined;
+      }
+    };
+    await read('browser', logBudgets.browser, 'logs/browser.log');
+    const endpoint = await read('endpoint', logBudgets.endpoint, 'logs/endpoint.log');
+    if (endpoint && endpoint.start === 0 && endpoint.bytes < logBudgets.endpoint)
+      await read('endpoint.1', logBudgets.endpoint - endpoint.bytes, 'logs/endpoint.log.1');
+    return { files, summary };
+  }
+
+  // Walks backwards from the size seen by the first window, so concurrent
+  // appends do not shift the bytes already collected.
+  private async readTail(tenant: string, log: EndpointLogName, budget: number, deadline: number) {
+    const chunks: Buffer[] = [];
+    let end: number | undefined,
+      size = 0,
+      start = 0,
+      bytes = 0,
+      exists = false;
+    while (bytes < budget) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error('log read deadline');
+      let timer: NodeJS.Timeout | undefined;
+      const window = await Promise.race([
+        this.sources.endpointLog(tenant, {
+          log,
+          ...(end === undefined ? {} : { end }),
+          maxBytes: Math.min(logWindowBytes, budget - bytes),
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('log read deadline')), remaining);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      if (
+        !window ||
+        typeof window.exists !== 'boolean' ||
+        ![window.size, window.start, window.end].every(Number.isSafeInteger) ||
+        typeof window.data !== 'string'
       )
-      .then((status) => {
-        session.status = status;
-        this.sessions.delete(id);
-        if (this.recent.size >= maxRecent) this.recent.delete(this.recent.keys().next().value!);
-        this.recent.set(id, { tenant: session.viewer.tenant, status });
-        return status;
-      });
-    return session.finalization;
+        throw new Error('invalid log window');
+      if (!window.exists) break;
+      if (!exists) size = window.size;
+      exists = true;
+      const data = Buffer.from(window.data, 'base64');
+      if (data.length !== window.end - window.start) throw new Error('invalid log window');
+      chunks.unshift(data);
+      bytes += data.length;
+      start = window.start;
+      if (window.start === 0 || !data.length) break;
+      end = window.start;
+    }
+    return { chunks, exists, size, start, bytes };
   }
 
   private ownerDirectory(tenant: string) {

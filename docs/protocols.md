@@ -119,6 +119,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `session.hibernate` | 优雅关闭 Browser 并生成 checkpoint，回复 manifest id；有阻塞项时 `conflict` |
 | `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
 | `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |
+| `session.logs.read` | 诊断用原始日志窗口：`{log: browser \| endpoint \| endpoint.1, end?, maxBytes ≤ 512 KiB}` → `{exists, size, start, end, data(base64)}`，读取 `[max(0, end−maxBytes), end)`，`end` 缺省为当前大小；`browser` 是本 Session 的 `browser.log`，`endpoint` 是节点的 `logs/endpoint.log` |
 | `session.sitePreferences` | 完整 origin→UA 规则表 |
 | `session.mediaPolicy` | `{degradationPreference, maxFps, audio}`；`audio` 为 false 时音频发送器停用、PCM 不进编码器 |
 | `session.events.ack` | 确认已持久化的自然关闭事件 |

@@ -43,6 +43,7 @@ const fixture = createServer((request, response) => {
     <style>body { margin:24px; font:16px Arial; background:#d0e5fc; }</style>
     <h1>Diagnostic collection fixture</h1><canvas width="24" height="24"></canvas>
     <script>
+      console.warn('diagnostic-fixture-console-marker');
       const ctx = document.querySelector('canvas').getContext('2d');
       let frame = 0;
       setInterval(() => {
@@ -58,7 +59,7 @@ await new Promise((accept, reject) => {
 
 function readArchive(compressed) {
   assert.equal(compressed.subarray(0, 4).toString('hex'), '28b52ffd', 'Expected Zstandard frame');
-  const tar = zstdDecompressSync(compressed, { maxOutputLength: 32 * 1024 * 1024 });
+  const tar = zstdDecompressSync(compressed, { maxOutputLength: 64 * 1024 * 1024 });
   const entries = new Map();
   for (let offset = 0; offset + 512 <= tar.length;) {
     const header = tar.subarray(offset, offset + 512);
@@ -82,7 +83,11 @@ function readArchive(compressed) {
       .trim();
     entries.set(
       name,
-      name.endsWith('.jsonl') ? body.split('\n').map((line) => JSON.parse(line)) : JSON.parse(body),
+      name.startsWith('logs/')
+        ? body
+        : name.endsWith('.jsonl')
+          ? body.split('\n').map((line) => JSON.parse(line))
+          : JSON.parse(body),
     );
     offset += 512 + Math.ceil(size / 512) * 512;
   }
@@ -461,9 +466,19 @@ try {
     'control.jsonl',
     'endpoint.jsonl',
     'events.jsonl',
+    'logs/browser.log',
+    'logs/control.log',
+    'logs/endpoint.log',
     'manifest.json',
   ]);
   const manifest = entries.get('manifest.json');
+  // Raw logs include history from before the collection started.
+  assert.match(entries.get('logs/browser.log'), /RemoteKit startup InitLogging/);
+  assert.match(entries.get('logs/browser.log'), /CONSOLE.*diagnostic-fixture-console-marker/);
+  assert.match(entries.get('logs/endpoint.log'), / browser command /);
+  assert.match(entries.get('logs/control.log'), /RemoteKit Control http:\/\//);
+  assert.equal(manifest.logs.browser.exists, true);
+  assert.equal(manifest.logs.endpoint.exists, true);
   assert.equal(manifest.id, complete.id);
   assert.equal(manifest.reason, 'user');
   assert.equal(manifest.interrupted, false);

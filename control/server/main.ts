@@ -9,6 +9,9 @@ import { open } from './persistence/database';
 
 import { createApplication, startApplication } from './application';
 import { createHttp } from './http/server';
+import { ProcessLog } from './diagnostics/process-log';
+const processLog = new ProcessLog(4 * 1024 * 1024);
+processLog.install();
 const config = runtimeConfig();
 mkdirSync(dirname(config.dbPath), { recursive: true });
 const database = open(config.dbPath);
@@ -32,5 +35,6 @@ const server = createHttp(control, {
   origins: [...config.origins],
   clientDir: config.clientDir,
   diagnosticDir: config.diagnosticDir,
+  processLog,
 });
 startApplication(config, database, nodes, control, server);

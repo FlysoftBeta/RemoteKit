@@ -27,6 +27,9 @@ class Session {
   Result<void> Stop();
   Result<void> Shutdown();
   Result<Json> Snapshot(bool output_diagnostics = false);
+  // Raw log windows for diagnostics: this Session's Browser log and the
+  // node's Endpoint log (current and first rotated file).
+  Result<Json> ReadLog(const Json& request) const;
   Result<Json> Hibernate(objects::ObjectService& objects);
   uint64_t PlacementEpoch() const { return config.placement_epoch; }
   Result<Json> Open(const Json& request) const;

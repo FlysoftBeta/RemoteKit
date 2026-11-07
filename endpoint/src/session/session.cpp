@@ -1,4 +1,5 @@
 #include "session/session.hpp"
+#include "diagnostics/log_files.hpp"
 #include "cluster/node_files.hpp"
 #include "persistence/checkpoint.hpp"
 #include "util/result_macros.hpp"
@@ -298,6 +299,24 @@ Result<Json> Session::Snapshot(bool output_diagnostics) {
   }
   snapshot["hibernation"] = std::move(blockers);
   return snapshot;
+}
+Result<Json> Session::ReadLog(const Json& request) const {
+  const auto name = Required(request, "log");
+  fs::path path;
+  if (name == "browser")
+    path = config.directory / "browser.log";
+  else if (name == "endpoint")
+    path = config.options.node_root / "logs" / "endpoint.log";
+  else if (name == "endpoint.1")
+    path = config.options.node_root / "logs" / "endpoint.log.1";
+  else
+    return Error{ErrorCode::kInvalidRequest, "unknown log"};
+  const auto& max = request.at("maxBytes");
+  const auto* end = request.contains("end") ? &request.at("end") : nullptr;
+  if (!max.is_number_unsigned() || (end && !end->is_number_unsigned()))
+    return Error{ErrorCode::kInvalidRequest, "invalid log window"};
+  return ReadLogWindow(path, end ? std::optional(end->get<uint64_t>()) : std::nullopt,
+                       max.get<uint64_t>());
 }
 Result<Json> Session::Hibernate(objects::ObjectService& objects) {
   RK_ASSIGN_OR_RETURN(snapshot, Snapshot());

@@ -3,12 +3,16 @@ import assert from 'node:assert/strict';
 import { EventEmitter, once } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { EndpointLog } from '../server/cluster/endpoint-log';
 import { NodeRegistry, StdioCarrier } from '../server/cluster/node-link';
 import { nodeDefaults } from '../server/config';
 import { NoiseHandshake } from '../server/cluster/noise';
 import { decodeFrame, encodeJson, encodeStdio, StdioDecoder, jsonObject } from '../server/cluster/frames';
 
-test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply certainty', async () => {
+test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply certainty', async (t) => {
   const key = Buffer.alloc(32, 17);
   const registry = new NodeRegistry({
     key: key.toString('base64'),
@@ -23,7 +27,10 @@ test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply 
       child.emit('exit', 1);
     },
   });
-  const carrier = new StdioCarrier(child as unknown as ChildProcessWithoutNullStreams);
+  const log = await mkdtemp(join(tmpdir(), 'rk-endpoint-log-'));
+  t.after(() => rm(log, { recursive: true, force: true }));
+  const endpointLog = new EndpointLog(join(log, 'logs', 'endpoint.log'));
+  const carrier = new StdioCarrier(child as unknown as ChildProcessWithoutNullStreams, endpointLog);
   registry.accept(carrier, 'local');
   const handshake = new NoiseHandshake('initiator', key);
   const reply = once(child.stdin, 'data');
@@ -62,5 +69,9 @@ test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply 
   child.emit('exit', 1);
   await lost;
   assert.equal(link.state.state, 'offline');
+  child.stderr.write('endpoint stderr line\n');
+  await new Promise((resolve) => setImmediate(resolve));
+  await endpointLog.flush();
+  assert.equal(await readFile(join(log, 'logs', 'endpoint.log'), 'utf8'), 'endpoint stderr line\n');
   registry.stop();
 });
