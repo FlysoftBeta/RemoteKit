@@ -292,14 +292,9 @@ int Peer::Start() {
     }
     webrtc::PeerConnectionInterface::RTCConfiguration config;
     config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
-    if (options.ice_server_url && *options.ice_server_url) {
-      webrtc::PeerConnectionInterface::IceServer server;
-      server.urls.emplace_back(options.ice_server_url);
-      if (options.ice_username)
-        server.username = options.ice_username;
-      if (options.ice_password)
-        server.password = options.ice_password;
-      config.servers.push_back(std::move(server));
+    if (options.port_min) {
+      config.port_allocator_config.min_port = static_cast<int>(options.port_min);
+      config.port_allocator_config.max_port = static_cast<int>(options.port_max);
     }
     auto result =
         factory->CreatePeerConnectionOrError(config, webrtc::PeerConnectionDependencies(this));
@@ -375,6 +370,9 @@ int remotekit_rtc_create(const remotekit_rtc_options* options, uint64_t* id) {
   if (!id || !options || options->struct_size != sizeof(*options) ||
       options->abi_version != REMOTEKIT_RTC_ABI_VERSION || !options->event ||
       options->auth_required > 1 || options->encoder.struct_size != sizeof(options->encoder) ||
+      ((options->port_min || options->port_max) &&
+       (options->port_min < 1024 || options->port_max > 65535 ||
+        options->port_min > options->port_max)) ||
       !options->encoder.create || !options->encoder.configure || !options->encoder.encode ||
       !options->encoder.set_rates || !options->encoder.destroy)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;

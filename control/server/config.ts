@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RemoteKitError } from '../shared/errors';
@@ -24,14 +24,18 @@ export interface NodeConfig {
   browser: string | null;
   browserTraceDir: string | null;
   maxSessions: number;
-  peer: Readonly<{ listen: string; advertise: string }>;
+  /** Node-to-node object transfer: where this node listens and where other nodes reach it. */
+  peer: Readonly<{ listen: string; address: string }>;
+  /** Viewer media: UDP port range for WebRTC and the host or IP Viewers use to reach it. */
+  rtc: Readonly<{ ports: string | null; address: string | null }>;
   diskReserveBytes: number;
   sessionMemoryBytes: number;
 }
 export interface ConfiguredNode {
   readonly config: Readonly<NodeConfig>;
   readonly configHash: string;
-  readonly launch?: Readonly<{ executable: string; root: string }>;
+  /** Present for a node Control starts itself over stdio. */
+  readonly local?: Readonly<{ executable: string; root: string }>;
 }
 export interface RuntimeConfig {
   readonly sessionImport?: SessionImportConfig;
@@ -45,7 +49,7 @@ export interface RuntimeConfig {
   readonly origins: readonly string[];
   readonly clientDir: string;
   readonly diagnosticDir: string;
-  readonly cluster: Readonly<{ keyFile: string; key: string; advertiseUrl?: string }>;
+  readonly cluster: Readonly<{ keyFile: string; key: string }>;
   readonly quotas: Readonly<{ tenantObjectBytes: number }>;
   readonly nodes: Readonly<Record<string, ConfiguredNode>>;
 }
@@ -77,7 +81,8 @@ export const nodeDefaults: Omit<NodeConfig, 'nodeId'> = Object.freeze({
   browser: null,
   browserTraceDir: null,
   maxSessions: 3,
-  peer: Object.freeze({ listen: '0.0.0.0:3101', advertise: '' }),
+  peer: Object.freeze({ listen: '0.0.0.0:3101', address: '' }),
+  rtc: Object.freeze({ ports: null, address: null }),
   diskReserveBytes: 10 * 1024 ** 3,
   sessionMemoryBytes: 2 * 1024 ** 3,
 });
@@ -148,27 +153,84 @@ function validateNode(value: Record<string, any>, partial = false): NodeConfig {
   for (const key of ['browser', 'browserTraceDir'])
     if ((!partial || key in value) && value[key] !== null) string(value[key], key);
   if (!partial || 'peer' in value) {
-    const peer = object(value.peer, ['listen', 'advertise'], 'peer');
-    for (const key of ['listen', 'advertise']) {
-      if (partial && !(key in peer)) continue;
-      if (key === 'advertise' && peer[key] === '') continue;
-      const address = string(peer[key], `peer.${key}`);
-      if (
-        !/^(?:\[[^\]]+\]|[^\s:]+):[0-9]+$/.test(address) ||
-        Number(address.slice(address.lastIndexOf(':') + 1)) < 1 ||
-        Number(address.slice(address.lastIndexOf(':') + 1)) > 65535
-      )
-        invalid(`Invalid peer.${key}`);
+    const peer = object(value.peer, ['listen', 'address'], 'peer');
+    if (!partial || 'listen' in peer) hostPort(peer.listen, 'peer.listen');
+    if ((!partial || 'address' in peer) && peer.address !== '') hostPort(peer.address, 'peer.address');
+  }
+  if (!partial || 'rtc' in value) {
+    const rtc = object(value.rtc, ['ports', 'address'], 'rtc');
+    if ((!partial || 'ports' in rtc) && rtc.ports !== null) portRange(rtc.ports, 'rtc.ports');
+    if ((!partial || 'address' in rtc) && rtc.address !== null) {
+      const address = string(rtc.address, 'rtc.address');
+      if (!/^[A-Za-z0-9.-]+$/.test(address)) invalid('Invalid rtc.address');
     }
   }
+  if (!partial && value.rtc.address !== null && value.rtc.ports === null)
+    invalid('rtc.address requires rtc.ports so the forwarded ports are fixed');
   return value as NodeConfig;
 }
+function hostPort(value: unknown, name: string, minPort = 1): { host: string; port: number } {
+  const address = string(value, name);
+  const match = /^(\[[^\]]+\]|[^\s:[\]]+):([0-9]{1,5})$/.exec(address);
+  if (!match || Number(match[2]) < minPort || Number(match[2]) > 65535) invalid(`Invalid ${name}`);
+  return { host: match[1], port: Number(match[2]) };
+}
+function portRange(value: unknown, name: string) {
+  const match = /^([0-9]{1,5})-([0-9]{1,5})$/.exec(string(value, name));
+  const [min, max] = match ? [Number(match[1]), Number(match[2])] : [0, 0];
+  if (!match || min < 1024 || max > 65535 || min > max) invalid(`Invalid ${name}`);
+}
+function controlUrl(value: unknown, name: string): string {
+  const text = string(value, name);
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    invalid(`Invalid ${name}`);
+  }
+  if (
+    !['ws:', 'wss:'].includes(url.protocol) ||
+    url.pathname !== '/api/node' ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    invalid(`${name} must be ws(s)://host:port/api/node`);
+  return text;
+}
+/** A packaged Control runs the node runtime it installed for its own build; a dev build names its Endpoint. */
+function localExecutable(root: string, buildId: string, directory: string, value: unknown) {
+  if (buildId === 'dev') return resolve(directory, string(value, 'local.executable'));
+  if (value !== undefined) invalid('local.executable is only for development builds');
+  return resolve(root, '..', 'data', 'local', 'runtime', buildId, 'bin', 'endpoint_service.exe');
+}
+function writeNodeFiles(directory: string, files: ReadonlyMap<string, string>) {
+  const parent = resolve(directory, 'nodes');
+  mkdirSync(parent, { recursive: true });
+  for (const entry of readdirSync(parent, { withFileTypes: true }))
+    if (entry.isDirectory() && !files.has(entry.name))
+      rmSync(resolve(parent, entry.name, 'node.json'), { force: true });
+  for (const [nodeId, contents] of files) {
+    const file = resolve(parent, nodeId, 'node.json');
+    mkdirSync(dirname(file), { recursive: true });
+    if (!existsSync(file) || readFileSync(file, 'utf8') !== contents)
+      writeFileSync(file, contents, { mode: 0o600 });
+  }
+}
+const defaultOrigins = Object.freeze([
+  'http://127.0.0.1:3001',
+  'http://localhost:3001',
+  'http://127.0.0.1:5173',
+  'http://localhost:5173',
+]);
 export function runtimeConfig(
   env: NodeJS.ProcessEnv = process.env,
   argv: readonly string[] = process.argv.slice(2),
 ): RuntimeConfig {
   if (argv.length) invalid('Control does not accept command-line arguments');
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const buildId = readBuildId(root);
   const configPath = resolve(env.REMOTEKIT_CONTROL_CONFIG ?? resolve(root, 'data/control.json'));
   const directory = dirname(configPath);
   mkdirSync(directory, { recursive: true });
@@ -177,24 +239,14 @@ export function runtimeConfig(
       configPath,
       JSON.stringify(
         {
-          http: {
-            host: '127.0.0.1',
-            port: 3001,
-            origins: [
-              'http://127.0.0.1:3001',
-              'http://localhost:3001',
-              'http://127.0.0.1:5173',
-              'http://localhost:5173',
-            ],
-          },
-          database: 'control.db',
-          diagnostics: 'diagnostics',
+          http: { listen: '127.0.0.1:3001', origins: defaultOrigins },
+          storage: { database: 'control.db', diagnostics: 'diagnostics' },
           cluster: { keyFile: 'cluster.key' },
           nodeDefaults,
           quotas: defaultQuotas,
           nodes: {
             local: {
-              launch: { executable: '../../build/endpoint/endpoint/endpoint_service.exe', root: 'node' },
+              local: { executable: '../../build/endpoint/endpoint/endpoint_service.exe', root: 'node' },
             },
           },
         },
@@ -211,10 +263,10 @@ export function runtimeConfig(
   }
   const source = object(
     parsed,
-    ['http', 'database', 'diagnostics', 'cluster', 'nodeDefaults', 'nodes', 'quotas', 'sessionImport'],
+    ['http', 'storage', 'cluster', 'nodeDefaults', 'nodes', 'quotas', 'sessionImport'],
     'config',
   );
-  const http = object(fallback(source.http, {}), ['host', 'port', 'origins', 'tls'], 'http');
+  const http = object(fallback(source.http, {}), ['listen', 'origins', 'tls'], 'http');
   let sessionImport: SessionImportConfig | undefined;
   if (source.sessionImport !== undefined) {
     const value = object(
@@ -255,14 +307,9 @@ export function runtimeConfig(
       pollSeconds: integer(fallback(value.pollSeconds, 60), 15, 3600, 'sessionImport.pollSeconds'),
     });
   }
-  const host = string(fallback(http.host, '127.0.0.1'), 'http.host');
-  const port = integer(fallback(http.port, 3001), 0, 65535, 'http.port');
-  const origins = fallback(http.origins, [
-    'http://127.0.0.1:3001',
-    'http://localhost:3001',
-    'http://127.0.0.1:5173',
-    'http://localhost:5173',
-  ]);
+  // Port 0 lets the OS choose, which only tests use.
+  const listen = hostPort(fallback(http.listen, '127.0.0.1:3001'), 'http.listen', 0);
+  const origins = fallback<unknown>(http.origins, defaultOrigins);
   if (!Array.isArray(origins) || !origins.every((value) => typeof value === 'string'))
     invalid('Invalid http.origins');
   let tls: RuntimeConfig['tls'];
@@ -272,8 +319,11 @@ export function runtimeConfig(
     const certPath = resolve(directory, string(value.cert, 'tls.cert'));
     tls = Object.freeze({ key: readFileSync(keyPath), cert: readFileSync(certPath) });
   }
-  const cluster = object(fallback(source.cluster, {}), ['keyFile', 'advertiseUrl'], 'cluster');
+  const storage = object(fallback(source.storage, {}), ['database', 'diagnostics'], 'storage');
+  const cluster = object(fallback(source.cluster, {}), ['keyFile', 'controlUrl'], 'cluster');
   const keyFile = resolve(directory, string(fallback(cluster.keyFile, 'cluster.key'), 'cluster.keyFile'));
+  const defaultControlUrl =
+    cluster.controlUrl === undefined ? undefined : controlUrl(cluster.controlUrl, 'cluster.controlUrl');
   const defaults = object(fallback(source.nodeDefaults, {}), Object.keys(nodeDefaults), 'nodeDefaults');
   validateNode(defaults, true);
   const entries = object(source.nodes, Object.keys(source.nodes ?? {}), 'nodes');
@@ -285,52 +335,48 @@ export function runtimeConfig(
     'quotas.tenantObjectBytes',
   );
   const nodes: Record<string, ConfiguredNode> = Object.create(null);
+  const remoteControlUrls = new Map<string, string>();
   for (const [nodeId, entry] of Object.entries(entries)) {
     if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(nodeId)) invalid('Invalid node ID');
-    const override = object(entry, [...Object.keys(nodeDefaults), 'launch'], `nodes.${nodeId}`);
-    const { launch: launchValue, ...options } = override;
+    const override = object(entry, [...Object.keys(nodeDefaults), 'local', 'controlUrl'], `nodes.${nodeId}`);
+    const { local: localValue, controlUrl: urlValue, ...options } = override;
     validateNode(options, true);
     const peer = { ...nodeDefaults.peer, ...defaults.peer, ...options.peer };
-    if (!peer.advertise) {
-      if (launchValue === undefined && Object.keys(entries).length > 1)
-        invalid(`nodes.${nodeId}.peer.advertise is required for remote nodes`);
-      peer.advertise = '127.0.0.1:' + peer.listen.slice(peer.listen.lastIndexOf(':') + 1);
+    if (!peer.address) {
+      if (localValue === undefined && Object.keys(entries).length > 1)
+        invalid(`nodes.${nodeId}.peer.address is required when there are several nodes`);
+      peer.address = '127.0.0.1:' + hostPort(peer.listen, 'peer.listen').port;
     }
+    const rtc = { ...nodeDefaults.rtc, ...defaults.rtc, ...options.rtc };
     const config = Object.freeze(
-      validateNode({ ...nodeDefaults, ...defaults, ...options, nodeId, peer: Object.freeze(peer) }),
+      validateNode({
+        ...nodeDefaults,
+        ...defaults,
+        ...options,
+        nodeId,
+        peer: Object.freeze(peer),
+        rtc: Object.freeze(rtc),
+      }),
     );
-    let launch: ConfiguredNode['launch'];
-    if (launchValue !== undefined) {
-      const value = object(launchValue, ['executable', 'root'], 'launch');
-      launch = Object.freeze({
-        executable: resolve(directory, string(value.executable, 'launch.executable')),
-        root: resolve(directory, string(value.root, 'launch.root')),
+    let local: ConfiguredNode['local'];
+    if (localValue !== undefined) {
+      if (urlValue !== undefined) invalid(`nodes.${nodeId}.controlUrl is only for remote nodes`);
+      const value = object(localValue, ['executable', 'root'], `nodes.${nodeId}.local`);
+      local = Object.freeze({
+        executable: localExecutable(root, buildId, directory, value.executable),
+        root: resolve(directory, string(value.root, `nodes.${nodeId}.local.root`)),
       });
+    } else {
+      const url =
+        urlValue === undefined ? defaultControlUrl : controlUrl(urlValue, `nodes.${nodeId}.controlUrl`);
+      if (!url) invalid(`nodes.${nodeId} needs cluster.controlUrl or its own controlUrl`);
+      remoteControlUrls.set(nodeId, url);
     }
     nodes[nodeId] = Object.freeze({
       config,
       configHash: createHash('sha256').update(canonicalJson(config)).digest('hex'),
-      ...(launch ? { launch } : {}),
+      ...(local ? { local } : {}),
     });
-  }
-  let advertiseUrl: string | undefined;
-  if (cluster.advertiseUrl !== undefined) {
-    advertiseUrl = string(cluster.advertiseUrl, 'cluster.advertiseUrl');
-    let url: URL;
-    try {
-      url = new URL(advertiseUrl);
-    } catch {
-      invalid('Invalid cluster.advertiseUrl');
-    }
-    if (
-      !['ws:', 'wss:'].includes(url.protocol) ||
-      url.pathname !== '/api/node' ||
-      url.username ||
-      url.password ||
-      url.search ||
-      url.hash
-    )
-      invalid('Invalid cluster.advertiseUrl');
   }
   mkdirSync(dirname(keyFile), { recursive: true });
   try {
@@ -345,26 +391,32 @@ export function runtimeConfig(
     Buffer.from(key, 'base64').toString('base64') !== key
   )
     invalid('Invalid cluster key file');
-  if (advertiseUrl) {
-    const nodeFile = resolve(directory, 'node.json');
-    const contents = JSON.stringify({ control: advertiseUrl, key }) + '\n';
-    if (!existsSync(nodeFile) || readFileSync(nodeFile, 'utf8') !== contents)
-      writeFileSync(nodeFile, contents, { mode: 0o600 });
-  }
-  for (const node of Object.values(nodes)) if (node.launch) mkdirSync(node.launch.root, { recursive: true });
+  writeNodeFiles(
+    directory,
+    new Map(
+      [...remoteControlUrls].map(([nodeId, control]) => [
+        nodeId,
+        JSON.stringify({ nodeId, control, key }, null, 2) + '\n',
+      ]),
+    ),
+  );
+  for (const node of Object.values(nodes)) if (node.local) mkdirSync(node.local.root, { recursive: true });
   return Object.freeze({
     sessionImport,
     configPath,
     root,
-    buildId: readBuildId(root),
-    host,
-    port,
+    buildId,
+    host: listen.host.replace(/^\[(.*)\]$/, '$1'),
+    port: listen.port,
     tls,
-    origins: Object.freeze(origins),
-    dbPath: resolve(directory, string(fallback(source.database, 'control.db'), 'database')),
-    diagnosticDir: resolve(directory, string(fallback(source.diagnostics, 'diagnostics'), 'diagnostics')),
+    origins: Object.freeze([...origins]),
+    dbPath: resolve(directory, string(fallback(storage.database, 'control.db'), 'storage.database')),
+    diagnosticDir: resolve(
+      directory,
+      string(fallback(storage.diagnostics, 'diagnostics'), 'storage.diagnostics'),
+    ),
     clientDir: resolve(root, 'dist/client'),
-    cluster: Object.freeze({ keyFile, key, advertiseUrl }),
+    cluster: Object.freeze({ keyFile, key }),
     nodes: Object.freeze(nodes),
     quotas: Object.freeze({ tenantObjectBytes }),
   });

@@ -154,7 +154,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     };
   }
   start() {
-    const launch = this.configured.launch;
+    const launch = this.configured.local;
     if (!launch || this.stopped || this.child || this.registry.isRemoved(this.nodeId)) return;
     this.state = { state: 'connecting' };
     const child = spawn(
@@ -453,7 +453,7 @@ export class NodeRegistry extends EventEmitter {
             !link ||
             this.isRemoved(hello.nodeId) ||
             (expectedNodeId && expectedNodeId !== hello.nodeId) ||
-            (!expectedNodeId && link.configured.launch)
+            (!expectedNodeId && link.configured.local)
           )
             reject = 'unknown_node';
           // Updaters connect with their installed build to fetch its replacement.

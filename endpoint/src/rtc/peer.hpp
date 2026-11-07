@@ -64,6 +64,7 @@ class PeerController {
   std::atomic<uint32_t> receive_level_{0};
   mutable std::mutex mutex_;
   std::string connection_;
+  std::string advertised_ip_;
   std::deque<RtcEvent> signals_;
   bool signal_overflow_ = false;
 };

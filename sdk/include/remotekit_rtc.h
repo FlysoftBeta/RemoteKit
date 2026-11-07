@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define REMOTEKIT_RTC_ABI_VERSION 5u
+#define REMOTEKIT_RTC_ABI_VERSION 6u
 enum remotekit_rtc_event_type {
   REMOTEKIT_RTC_SDP_OFFER = 1,
   REMOTEKIT_RTC_SDP_ANSWER = 2,
@@ -93,9 +93,9 @@ struct remotekit_rtc_options {
   void* context;
   remotekit_rtc_event_fn event;
   struct remotekit_rtc_encoder_callbacks encoder;
-  const char* ice_server_url; /* optional stun: or turn: URL */
-  const char* ice_username;
-  const char* ice_password;
+  /* Local UDP ports for ICE candidates; both zero lets the OS choose. Otherwise
+   * 1024 <= port_min <= port_max. */
+  uint32_t port_min, port_max;
   uint32_t min_bitrate_bps, start_bitrate_bps, max_bitrate_bps;
   uint32_t auth_required; /* 1 starts with product media disabled */
 };

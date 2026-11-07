@@ -100,7 +100,10 @@ function startControl() {
     endpoint,
     browser,
     nodeDefaults: scenarioModule?.nodeDefaults ?? {},
-    configOverrides: { diagnostics: archiveDirectory, ...scenarioModule?.controlConfig },
+    configOverrides: {
+      storage: { database: join(run, 'control.db'), diagnostics: archiveDirectory },
+      ...scenarioModule?.controlConfig,
+    },
   });
   control.stdout.on('data', (data) => void appendFile(join(run, 'control.stdout.log'), data));
   control.stderr.on('data', (data) => void appendFile(join(run, 'control.stderr.log'), data));

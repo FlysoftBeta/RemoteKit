@@ -18,7 +18,7 @@ export interface AdminNode {
   nodeId: string;
   state: AdminNodeState;
   managed: boolean;
-  advertise: string;
+  peerAddress: string;
   buildId: string | null;
   pressure: number | null;
   underPressure: boolean;

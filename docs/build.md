@@ -55,7 +55,6 @@ root_extra_deps = [
 开发配置 `out/dev` 继续使用 `is_component_build = true`、`dcheck_always_on = true`、`symbol_level = 1`，其余功能参数与发布配置相同；两者都不配置额外 DRM 模块。`is_official_build = false` 保留本地非官方构建，发布包关闭 DCHECK 与调试符号。
 
 ## 运行
-## 运行
 
 ```powershell
 cd control
@@ -66,9 +65,9 @@ npm start
 
 默认监听 `http://127.0.0.1:3001`。开发时 `npm run dev`（服务端）+ `npm run client`（Vite 5173，代理 HTTP/WS）。
 
-Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/data/control.json`，不存在时按默认值创建，同时生成集群密钥文件）。所有监听、存储与节点配置都在这个文件里，格式与校验规则见[多节点 · 配置](cluster.md#配置)。默认配置有一个本地节点 `local`，Control 启动 `build/endpoint/endpoint/endpoint_service.exe`；开发时在 `nodes.local.browser` 指向 `C:/src/chromium/src/out/dev/remotekit_browser.exe`（默认是 Endpoint 同目录）。编码器与码控参数（见[编码](encoding.md#适配器与后端选择)）、`browserTraceDir` 等都写在 `nodeDefaults` 或节点项里；Endpoint 不接受这些命令行参数。开发追踪开关 `REMOTEKIT_SERVER_TRACE`、`REMOTEKIT_MEDIA_TRACE` 仍是环境变量（见[诊断](diagnostics.md#开发侧追踪)）。
+Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/data/control.json`，不存在时按默认值创建，同时生成集群密钥文件）。所有监听、访问地址、存储与节点配置都在这个文件里，格式与校验规则见[多节点 · 配置](cluster.md#配置)。默认配置有一个本地节点 `local`，`local.executable` 指向 `build/endpoint/endpoint/endpoint_service.exe`；开发时在 `nodes.local.browser` 指向 `C:/src/chromium/src/out/dev/remotekit_browser.exe`（默认是 Endpoint 同目录）。编码器与码控参数（见[编码](encoding.md#适配器与后端选择)）、`browserTraceDir` 等都写在 `nodeDefaults` 或节点项里；Endpoint 不接受这些命令行参数。开发追踪开关 `REMOTEKIT_SERVER_TRACE`、`REMOTEKIT_MEDIA_TRACE` 仍是环境变量（见[诊断](diagnostics.md#开发侧追踪)）。
 
-**远端节点**：在 Control 配置里设置 `cluster.advertiseUrl`（`ws(s)://<Control 地址>:<端口>/api/node`）并在 `nodes` 中登记节点 ID（默认是节点机器的主机名，小写），节点项省略 `launch`。Control 在配置目录写出含集群密钥的 `node.json`。在节点上解压 Endpoint 引导包，把该文件复制到 `run-endpoint.cmd` 同目录，再运行：
+**远端节点**：在 Control 配置里设置 `cluster.controlUrl`（节点访问 Control 的 `ws(s)://<地址>:<端口>/api/node`），在 `nodes` 中加入节点 ID（不带 `local`），写明 `peer.address`，Viewer 不在同一网络时再设 `rtc.ports` 与 `rtc.address`。Control 启动后写出 `config/nodes/<节点 ID>/node.json`。在节点上解压 Endpoint 引导包，把该文件原样复制到 `run-endpoint.cmd` 同目录，再运行：
 
 ```powershell
 .\run-endpoint.cmd
@@ -76,7 +75,7 @@ Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/da
 .\remotekit_node.exe service-install "--root=$PWD"
 ```
 
-节点从 Control 下载与之相同版本的运行时后启动 Endpoint。节点的 `peer.listen` 端口（默认 3101）要对其他节点开放。局域网或远程部署需要正确的监听地址、Origin 与可信 HTTPS：摄像头、文件选择中的拍照等能力要求安全上下文；集群通道自身已加密，不依赖 TLS。
+节点从 Control 下载与之相同版本的运行时后启动 Endpoint。`peer.listen` 端口要对其他节点开放，`rtc.ports` 的 UDP 端口段要对 Viewer 开放（经路由器时转发到节点）。局域网或远程部署需要正确的监听地址、Origin 与可信 HTTPS：摄像头、文件选择中的拍照等能力要求安全上下文；集群通道自身已加密，不依赖 TLS。
 
 ## 发布包
 
@@ -95,11 +94,11 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke --node C:/path/t
 |---|---|---|
 | Control + 本地 Endpoint | `RemoteKit-control-win-x64.tar.zst` | `run.cmd` 首次离线安装节点运行时，再由 Control 经 stdio 启动本地 Endpoint。 |
 | 仅 Control | `RemoteKit-control-win-x64.tar.zst` | `run-control.cmd`，初始配置为 `nodes: {}`。远端节点可在配置中登记。 |
-| 仅 Endpoint | `RemoteKit-endpoint-win-x64.tar.zst` | 放入 Control 生成的 `node.json`，运行 `run-endpoint.cmd`。updater 下载、安装并监管 Endpoint。 |
+| 仅 Endpoint | `RemoteKit-endpoint-win-x64.tar.zst` | 放入 Control 生成的 `config/nodes/<节点 ID>/node.json`，运行 `run-endpoint.cmd`。updater 下载、安装并监管 Endpoint。 |
 
 Control 包包含 Node、Control 生产 bundle、匹配 Node ABI 的 better-sqlite3、updater 与 CRT。Endpoint、Browser、SDK、oneVPL 和人脸模型集中在 `release/node.tar.zst`。本地安装和远端更新共用该归档及记录 buildId、SHA-256 和大小的 `release/node.json`。Endpoint 引导包带 updater、CRT、启动脚本和许可证。
 
-Control 启动脚本首次生成 `config/control.json`。合部署把运行时安装到 `data/local/runtime/<buildId>/`，节点根目录仍为 `data/node/`。升级时停止服务，把新版 Control 包部署到同一根目录并保留 `config/`、`data/`。默认本地节点的可执行文件路径会在新版安装成功后更新，其他节点设置由配置文件管理。从旧单包布局升级且仍指向 `../bin/endpoint_service.exe` 时，可先把旧的 `nodes.local.launch.executable` 改成 `../data/local/runtime/<新版 build.json 中的 buildId>/bin/endpoint_service.exe`。如果切换到仅 Control 模式，先移除本地节点的 `launch` 项或整个本地节点项。
+Control 启动脚本首次生成 `config/control.json`。合部署把运行时安装到 `data/local/runtime/<buildId>/`，节点根目录仍为 `data/node/`。升级时停止服务，把新版 Control 包部署到同一根目录并保留 `config/`、`data/`。`run.cmd` 每次启动先安装本包 buildId 的运行时，Control 按自身 buildId 找到本地 Endpoint，升级不改配置。如果切换到仅 Control 模式，先移除本地节点项。
 
 默认打开 `http://127.0.0.1:3001` 创建首个管理员账号。归档只收录运行文件与许可证。Control 包 manifest 记录打包时的源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。构建 ID 由 Control 包的 `bin/`、`control/` 和归档内 `node/bin/` 的文件路径及 hash 计算。
 

@@ -8,7 +8,6 @@ struct NodeFiles {
 };
 bool ValidNodeId(std::string_view value);
 bool ValidBuildId(std::string_view value);
-Result<std::string> DefaultNodeId();
 Result<NodeFiles> LoadNodeFiles(const std::filesystem::path& root);
 Result<std::string> ReadBuildId(const std::filesystem::path& runtime_root);
 Result<Key> DecodeKey(std::string_view base64);

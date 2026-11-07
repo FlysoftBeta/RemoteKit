@@ -50,8 +50,8 @@ const nodes = Object.fromEntries(
     id,
     {
       dataPath: join(run, id, 'data'),
-      peer: { listen: `127.0.0.1:${port + 2 + index}`, advertise: `127.0.0.1:${port + 2 + index}` },
-      launch: { executable: resolve(endpoint), root: join(run, id, 'root') },
+      peer: { listen: `127.0.0.1:${port + 2 + index}`, address: `127.0.0.1:${port + 2 + index}` },
+      local: { executable: resolve(endpoint), root: join(run, id, 'root') },
     },
   ]),
 );
@@ -59,8 +59,8 @@ const configPath = join(run, 'control.json');
 await writeFile(
   configPath,
   JSON.stringify({
-    http: { host: '127.0.0.1', port, origins: [origin] },
-    database: join(run, 'control.db'),
+    http: { listen: `127.0.0.1:${port}`, origins: [origin] },
+    storage: { database: join(run, 'control.db') },
     nodeDefaults: { browser: resolve(browser), maxSessions: 1 },
     nodes,
   }),

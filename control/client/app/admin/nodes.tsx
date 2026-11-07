@@ -84,7 +84,7 @@ function NodeCard({
             />
           </Box>
           <Typography variant="body2" color="text.secondary" noWrap>
-            {node.managed ? 'Control 托管进程' : '外部节点'} · {node.advertise}
+            {node.managed ? 'Control 托管进程' : '外部节点'} · {node.peerAddress}
           </Typography>
         </Box>
         <Button

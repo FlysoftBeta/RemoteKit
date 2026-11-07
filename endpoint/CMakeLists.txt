@@ -271,6 +271,7 @@ if(WIN32)
     src/diagnostics/timing.cpp
     src/rtc/channel.cpp
     src/rtc/peer.cpp
+    src/rtc/candidate_address.cpp
     src/rtc/authorization.cpp
     src/rtc/data_router.cpp
     src/rtc/outbox.cpp

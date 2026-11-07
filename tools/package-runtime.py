@@ -319,12 +319,11 @@ def package_runtime(args, node_runtime):
         'The launchers create config/control.json on first start. Edit it to configure HTTP, storage and nodes.\n'
         'Open http://127.0.0.1:3001 and press Up Up Down Down Left Right Left Right to reveal sign-in.\n'
         'The first account becomes administrator.\n'
-        'For remote Endpoint setup, set cluster.advertiseUrl and register the node ID without a launch entry.\n'
-        'Copy config/node.json to the unpacked RemoteKit Endpoint package on that node.\n'
+        'For a remote node, set cluster.controlUrl and add the node under nodes without a local entry.\n'
+        'Control writes config/nodes/<node ID>/node.json; copy it unchanged next to run-endpoint.cmd on that node.\n'
         'Keep release/node.json and release/node.tar.zst together for node installation and updates.\n', encoding='utf-8')
     (bootstrap / 'README.txt').write_text(
-        'Copy the Control-generated node.json here and run run-endpoint.cmd.\n'
-        'The node ID defaults to the lowercase host name. Set nodeId in node.json to override it.\n'
+        'Copy config/nodes/<node ID>/node.json from Control here unchanged and run run-endpoint.cmd.\n'
         'The supervisor downloads and starts the matching Endpoint runtime from Control.\n', encoding='utf-8')
     validation = None
     if args.smoke:

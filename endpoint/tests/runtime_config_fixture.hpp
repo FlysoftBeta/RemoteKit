@@ -19,7 +19,8 @@ inline remotekit::Json TestConfig() {
           {"browser", nullptr},
           {"browserTraceDir", nullptr},
           {"maxSessions", 3},
-          {"peer", {{"listen", "127.0.0.1:0"}, {"advertise", "127.0.0.1:3101"}}},
+          {"peer", {{"listen", "127.0.0.1:0"}, {"address", "127.0.0.1:3101"}}},
+          {"rtc", {{"ports", nullptr}, {"address", nullptr}}},
           {"diskReserveBytes", 10737418240ULL},
           {"sessionMemoryBytes", 2147483648ULL}};
 }

@@ -3,6 +3,7 @@
 #include "management/link.hpp"
 #include "options.hpp"
 #include "persistence/session_store.hpp"
+#include "rtc/candidate_address.hpp"
 #include "platform/process.hpp"
 #include "service.hpp"
 #include "media/sdk_loader.hpp"
@@ -67,6 +68,47 @@ void NumericOptions() {
   auto options = Options().value();
   Check(options.data == fs::current_path() / "data" && options.browser.is_absolute(),
         "paths resolved against node root");
+  Check(!options.rtc_port_min && !options.rtc_port_max && options.rtc_address.empty(),
+        "RTC defaults to OS-chosen ports on local interfaces");
+  config = TestConfig();
+  config["rtc"] = {{"ports", "40000-40019"}, {"address", "viewer.example"}};
+  const auto forwarded = Options(config).value();
+  Check(forwarded.rtc_port_min == 40000 && forwarded.rtc_port_max == 40019 &&
+            forwarded.rtc_address == "viewer.example",
+        "RTC port range and address");
+  for (const auto& invalid :
+       {Json{{"ports", "40000"}, {"address", nullptr}},
+        Json{{"ports", "900-1000"}, {"address", nullptr}},
+        Json{{"ports", "5000-4000"}, {"address", nullptr}},
+        Json{{"ports", "40000-40001x"}, {"address", nullptr}},
+        Json{{"ports", nullptr}, {"address", "viewer.example"}},
+        Json{{"ports", "40000-40001"}, {"address", "bad host"}}, Json{{"ports", nullptr}}}) {
+    config = TestConfig();
+    config["rtc"] = invalid;
+    Check(!Options(config), "invalid RTC configuration rejected");
+  }
+}
+void AdvertisedCandidates() {
+  const std::string host =
+      "candidate:1234 1 udp 2122260223 192.168.1.20 40005 typ host generation 0 network-id 1";
+  Check(
+      AdvertisedCandidate(host, "203.0.113.7", 40000, 40019) ==
+          "candidate:rk1234 1 udp 2122260223 203.0.113.7 40005 typ host generation 0 network-id 1",
+      "host candidate in range gets the advertised address");
+  Check(!AdvertisedCandidate(host, "203.0.113.7", 41000, 41019), "port outside forwarded range");
+  Check(!AdvertisedCandidate(host, "192.168.1.20", 40000, 40019), "already the advertised address");
+  Check(!AdvertisedCandidate("candidate:1 1 tcp 1518280447 192.168.1.20 40005 typ host tcptype "
+                             "passive",
+                             "203.0.113.7", 40000, 40019),
+        "TCP candidates are not forwarded");
+  Check(!AdvertisedCandidate("candidate:1 1 udp 1686052607 198.51.100.2 40005 typ srflx raddr "
+                             "192.168.1.20 rport 40005",
+                             "203.0.113.7", 40000, 40019),
+        "only host candidates");
+  Check(
+      !AdvertisedCandidate("candidate:1 1 udp 1 192.168.1.20 4x typ host", "203.0.113.7", 0, 65535),
+      "malformed port");
+  Check(ResolveRtcAddress("127.0.0.1").value() == "127.0.0.1", "IP literal resolves to itself");
 }
 void ProcessArguments() {
   auto parse = [](std::vector<std::string> arguments) {
@@ -311,6 +353,7 @@ int main(int argc, char** argv) {
   }
   try {
     NumericOptions();
+    AdvertisedCandidates();
     ProcessArguments();
     Durability();
     ThreadFailure();

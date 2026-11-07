@@ -19,7 +19,11 @@ class RuntimeOptions {
   const media::EncoderSettings encoding;
   const uint32_t idle_idr_ms, max_encode_width, max_encode_height;
   const uint32_t max_sessions;
-  const std::string peer_listen, peer_advertise;
+  const std::string peer_listen, peer_address;
+  // WebRTC UDP ports (0 when the OS chooses) and the host Viewers use when it differs from the
+  // node's own interfaces, e.g. a forwarded public address.
+  const uint16_t rtc_port_min, rtc_port_max;
+  const std::string rtc_address;
   const uint64_t disk_reserve_bytes, session_memory_bytes;
   static constexpr uint32_t kAtlasAllocationAlignment = 1;
   static constexpr int32_t kRtcPlayoutMinMs = 0, kRtcPlayoutMaxMs = 50;

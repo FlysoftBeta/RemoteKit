@@ -1,6 +1,8 @@
 #include "options.hpp"
 #include "cluster/node_files.hpp"
 #include <windows.h>
+#include <algorithm>
+#include <charconv>
 #include <map>
 #include <set>
 namespace remotekit {
@@ -50,7 +52,9 @@ struct OptionValues {
   std::string node_id, build_id;
   fs::path node_root, browser, data, browser_trace_directory;
   std::string encoder;
-  std::string peer_listen, peer_advertise;
+  std::string peer_listen, peer_address;
+  uint16_t rtc_port_min = 0, rtc_port_max = 0;
+  std::string rtc_address;
   uint64_t disk_reserve_bytes, session_memory_bytes;
   media::EncoderSettings encoding;
   uint32_t idle_idr_ms, max_encode_width, max_encode_height, max_sessions;
@@ -69,34 +73,23 @@ RuntimeOptions::RuntimeOptions(OptionValues v)
       max_encode_height(v.max_encode_height),
       max_sessions(v.max_sessions),
       peer_listen(std::move(v.peer_listen)),
-      peer_advertise(std::move(v.peer_advertise)),
+      peer_address(std::move(v.peer_address)),
+      rtc_port_min(v.rtc_port_min),
+      rtc_port_max(v.rtc_port_max),
+      rtc_address(std::move(v.rtc_address)),
       disk_reserve_bytes(v.disk_reserve_bytes),
       session_memory_bytes(v.session_memory_bytes) {}
 Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
                                                   const fs::path& root,
                                                   std::string build_id,
                                                   const std::string& node_id) {
-  const std::set<std::string> fields{"nodeId",
-                                     "encoder",
-                                     "fps",
-                                     "bitrate",
-                                     "maxBitrate",
-                                     "asyncDepth",
-                                     "gop",
-                                     "targetUsage",
-                                     "qsvLowPower",
-                                     "bufferMs",
-                                     "rateControl",
-                                     "idleIdrMs",
-                                     "maxEncodeWidth",
-                                     "maxEncodeHeight",
-                                     "dataPath",
-                                     "browser",
-                                     "browserTraceDir",
-                                     "maxSessions",
-                                     "peer",
-                                     "diskReserveBytes",
-                                     "sessionMemoryBytes"};
+  const std::set<std::string> fields{
+      "nodeId",           "encoder",           "fps",         "bitrate",
+      "maxBitrate",       "asyncDepth",        "gop",         "targetUsage",
+      "qsvLowPower",      "bufferMs",          "rateControl", "idleIdrMs",
+      "maxEncodeWidth",   "maxEncodeHeight",   "dataPath",    "browser",
+      "browserTraceDir",  "maxSessions",       "peer",        "rtc",
+      "diskReserveBytes", "sessionMemoryBytes"};
   const std::set<std::string> nullable{"asyncDepth",  "gop",     "targetUsage",    "bufferMs",
                                        "rateControl", "browser", "browserTraceDir"};
   if (!config.is_object() || config.size() != fields.size())
@@ -106,10 +99,10 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
       return Invalid("unknown field " + name);
     if (name == "peer") {
       if (!value.is_object() || value.size() != 2 || !value.contains("listen") ||
-          !value["listen"].is_string() || !value.contains("advertise") ||
-          !value["advertise"].is_string())
+          !value["listen"].is_string() || !value.contains("address") ||
+          !value["address"].is_string())
         return Invalid(name);
-      for (const auto* field : {"listen", "advertise"}) {
+      for (const auto* field : {"listen", "address"}) {
         const auto address = value[field].get<std::string>();
         const auto colon = address.rfind(':');
         if (colon == std::string::npos || colon == 0 || colon + 1 == address.size() ||
@@ -121,6 +114,13 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
             std::stoul(port) > 65535)
           return Invalid(name);
       }
+      continue;
+    }
+    if (name == "rtc") {
+      if (!value.is_object() || value.size() != 2 || !value.contains("ports") ||
+          !value.contains("address") || !(value["ports"].is_null() || value["ports"].is_string()) ||
+          !(value["address"].is_null() || value["address"].is_string()))
+        return Invalid(name);
       continue;
     }
     if (name == "diskReserveBytes" || name == "sessionMemoryBytes") {
@@ -149,7 +149,31 @@ Result<RuntimeOptions> RuntimeOptions::FromConfig(const Json& config,
     return Invalid("node identity");
   OptionValues v;
   v.peer_listen = config["peer"]["listen"];
-  v.peer_advertise = config["peer"]["advertise"];
+  v.peer_address = config["peer"]["address"];
+  if (const auto& ports = config["rtc"]["ports"]; !ports.is_null()) {
+    const auto text = ports.get<std::string>();
+    const auto dash = text.find('-');
+    unsigned min = 0, max = 0;
+    auto number = [&](size_t begin, size_t end, unsigned& out) {
+      const auto parsed = std::from_chars(text.data() + begin, text.data() + end, out);
+      return begin < end && end - begin <= 5 && parsed.ec == std::errc() &&
+             parsed.ptr == text.data() + end;
+    };
+    if (dash == std::string::npos || !number(0, dash, min) || !number(dash + 1, text.size(), max) ||
+        min < 1024 || max > 65535 || min > max)
+      return Invalid("rtc.ports");
+    v.rtc_port_min = static_cast<uint16_t>(min);
+    v.rtc_port_max = static_cast<uint16_t>(max);
+  }
+  if (const auto& address = config["rtc"]["address"]; !address.is_null()) {
+    v.rtc_address = address.get<std::string>();
+    if (v.rtc_address.empty() || v.rtc_address.size() > 253 || !v.rtc_port_min ||
+        !std::all_of(v.rtc_address.begin(), v.rtc_address.end(), [](char c) {
+          return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                 c == '.' || c == '-';
+        }))
+      return Invalid("rtc.address");
+  }
   v.disk_reserve_bytes = config["diskReserveBytes"];
   v.session_memory_bytes = config["sessionMemoryBytes"];
   v.node_id = node_id;

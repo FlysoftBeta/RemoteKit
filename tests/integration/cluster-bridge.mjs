@@ -33,7 +33,8 @@ const config = {
   browser: null,
   browserTraceDir: null,
   maxSessions: 3,
-  peer: { listen: '127.0.0.1:0', advertise: '127.0.0.1:3101' },
+  peer: { listen: '127.0.0.1:0', address: '127.0.0.1:3101' },
+  rtc: { ports: null, address: null },
   diskReserveBytes: 10737418240,
   sessionMemoryBytes: 2147483648,
   ...overrides,
@@ -131,8 +132,8 @@ try {
           const identity = json.tenantId + '/' + json.objectId;
           const entry = index[identity] ?? { ...json, sources: [] };
           if (entry.storedSha256 !== json.storedSha256) throw Error('conflicting stored object');
-          if (!entry.sources.some((source) => source.address === config.peer.advertise))
-            entry.sources.push({ nodeId: config.nodeId, address: config.peer.advertise });
+          if (!entry.sources.some((source) => source.address === config.peer.address))
+            entry.sources.push({ nodeId: config.nodeId, address: config.peer.address });
           index[identity] = entry;
           await writeFile(args['object-index'], JSON.stringify(index));
         }

@@ -4,16 +4,44 @@
 
 ## 配置
 
-**Control 配置文件**是唯一的配置来源：`REMOTEKIT_CONTROL_CONFIG` 指定路径（默认 `<control>/data/control.json`），不存在时按默认值创建。严格校验，未知键或类型错误拒绝启动；相对路径相对配置文件所在目录。包含：
+**Control 配置文件**是唯一的配置来源：`REMOTEKIT_CONTROL_CONFIG` 指定路径（默认 `<control>/data/control.json`；发布包为 `config/control.json`），不存在时按默认值创建。严格校验，未知键或类型错误拒绝启动；相对路径相对配置文件所在目录。
 
-- `http`：监听地址、端口、允许的 Origin、可选 TLS。
-- `database`、`diagnostics`、`quotas.tenantObjectBytes`（每 Tenant 对象字节配额）。
-- `cluster.keyFile`：32 字节集群密钥（base64），缺失时生成；`cluster.advertiseUrl` 设置后，Control 在配置目录写出 `node.json`（Control 地址 + 集群密钥），运维把它原样复制到节点。
-- `nodeDefaults` 与 `nodes.<nodeId>`：编码器与码控参数、数据目录、Browser 路径、`maxSessions`、`peer.listen/advertise`、`diskReserveBytes`、`sessionMemoryBytes`。节点项是对默认值的部分覆盖；带 `launch` 的是**本地节点**（Control 自己启动 Endpoint，经 stdio 通信），否则是**远端节点**（主动连接 Control）。
+每个网络入口都分开写"在哪监听"和"别人从哪访问"，两者常因 NAT、端口转发或多网卡而不同：
 
-节点生效配置 = 默认值 + 覆盖 + `nodeId`，其规范 JSON 的 SHA-256 是 `configHash`。Endpoint 不读任何配置参数或环境变量，只在握手后接收这份配置。重连时 configHash 变化，Endpoint 优雅退出（退出码 4），由监管者重启以采用新配置。
+| 入口 | 监听 | 访问方 | 访问地址 |
+|---|---|---|---|
+| Control HTTP/WS | `http.listen`（`host:port`） | 浏览器 | `http.origins`（Viewer 页面的 Origin） |
+| 节点 → Control | 同上 `/api/node` | 远端节点 | `cluster.controlUrl`，单个节点可用 `nodes.<id>.controlUrl` 覆盖 |
+| 节点间对象传输 | `peer.listen`（`host:port`，TCP） | 其他节点 | `peer.address`（`host:port`） |
+| Viewer 媒体（WebRTC） | `rtc.ports`（`"min-max"` UDP 端口段；`null` 由系统选择） | Viewer | 节点本机网卡地址；另设 `rtc.address` 时追加该主机名/IP |
 
-**节点端**只有 `<root>/node.json`：`control`（`ws(s)://host:port/api/node`）和 `key`，可选 `nodeId`（默认是机器的 DNS 主机名，小写）。节点必须在 Control 配置的 `nodes` 中登记才能接入。集群密钥从不进入日志、命令行或错误信息。
+```json
+{
+  "http": { "listen": "0.0.0.0:3001", "origins": ["https://example.org:3001"], "tls": { "key": "certs/privkey.pem", "cert": "certs/fullchain.pem" } },
+  "storage": { "database": "../data/control.db", "diagnostics": "../data/diagnostics" },
+  "cluster": { "keyFile": "cluster.key", "controlUrl": "ws://192.168.1.10:3001/api/node" },
+  "nodeDefaults": { "maxSessions": 3 },
+  "nodes": {
+    "local": { "local": { "root": "../data/node" } },
+    "gpu-1": {
+      "peer": { "listen": "0.0.0.0:3101", "address": "192.168.1.20:3101" },
+      "rtc": { "ports": "40000-40019", "address": "example.org" }
+    }
+  }
+}
+```
+
+- `storage`：数据库与诊断归档位置；`quotas.tenantObjectBytes`：每 Tenant 对象字节配额。
+- `cluster.keyFile`：32 字节集群密钥（base64），缺失时生成。
+- `nodeDefaults` 与 `nodes.<nodeId>`：编码器与码控参数、数据目录、Browser 路径、`maxSessions`、`peer`、`rtc`、`diskReserveBytes`、`sessionMemoryBytes`。节点项是对默认值的部分覆盖。只有一个节点时 `peer.address` 可省略（取 `127.0.0.1:<listen 端口>`），多节点时远端节点必须写。
+- 带 `local` 的是**本地节点**：Control 自己启动 Endpoint，经 stdio 通信，`local.root` 是节点根目录。发布包里的可执行文件由 Control 按自身 buildId 定位到 `data/local/runtime/<buildId>/bin/endpoint_service.exe`（`run.cmd` 先安装同一 buildId 的运行时），配置里不出现版本；只有开发构建（buildId `dev`）用 `local.executable` 指向自己编译的 Endpoint。
+- 不带 `local` 的是**远端节点**，主动连接 Control。Control 为每个远端节点写出 `<配置目录>/nodes/<nodeId>/node.json`（`nodeId`、该节点使用的 Control 地址、集群密钥），运维把这个文件原样复制到节点根目录即可；节点从配置中删除后，对应文件也被删除。
+
+`rtc.address` 用于 Viewer 不在节点所在网络的情况，例如路由器把公网 UDP 端口段转发到节点：Endpoint 在每次 offer 时解析该名称（动态 DNS 随之更新），对端口段内的每个本机 UDP host 候选再发一份地址替换后的候选，原候选保留给同网络的 Viewer。端口段必须固定才能转发，所以设置 `rtc.address` 时要求 `rtc.ports`；每个 RTC 连接占用段内一个端口，端口段大小应不少于节点同时连接的 Viewer 数。
+
+节点生效配置 = 默认值 + 覆盖 + `nodeId`，其规范 JSON 的 SHA-256 是 `configHash`。Endpoint 不读任何配置参数或环境变量，只在握手后接收这份配置。重连时 configHash 变化，Endpoint 优雅退出（退出码 4），由监管者重启以采用新配置，节点端无需操作。
+
+**节点端**只有 `<root>/node.json`：`nodeId`、`control`（`ws(s)://host:port/api/node`）和 `key`，三项都必需，由 Control 生成。节点必须在 Control 配置的 `nodes` 中登记才能接入。集群密钥从不进入日志、命令行或错误信息。
 
 ## 集群通道
 

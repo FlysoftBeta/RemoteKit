@@ -34,9 +34,10 @@ def main():
   for relative in ['bin/node.exe','bin/remotekit_node.exe','control/dist/server.mjs','control/dist/client/index.html']:
    if not (package/relative).is_file():raise FileNotFoundError(relative)
   build_id=json.loads((package/'build.json').read_text(encoding='utf-8'))['buildId']
-  subprocess.run([str(package/'bin/remotekit_node.exe'),'install','--root='+str(run/'local'),
+  # Packaged Control runs the runtime installed for its own build under data/local, as run.cmd does.
+  subprocess.run([str(package/'bin/remotekit_node.exe'),'install','--root='+str(package/'data/local'),
     '--package='+str(package)],check=True)
-  binary=run/'local/runtime'/build_id/'bin'
+  binary=package/'data/local/runtime'/build_id/'bin'
   result['endpointSha256']=hashlib.sha256((binary/'endpoint_service.exe').read_bytes()).hexdigest()
   with socket.socket() as probe:probe.bind(('127.0.0.1',0));port=probe.getsockname()[1]
   with socket.socket() as probe:probe.bind(('127.0.0.1',0));peer_port=probe.getsockname()[1]
@@ -45,11 +46,11 @@ def main():
   for name in ['NODE_PATH','NODE_OPTIONS']:env.pop(name,None)
   config=run/'control.json'
   config.write_text(json.dumps({
-    'http':{'host':'127.0.0.1','port':port,'origins':[origin]},
-    'database':str(run/'control.db'),'diagnostics':str(run/'diagnostics'),
+    'http':{'listen':'127.0.0.1:'+str(port),'origins':[origin]},
+    'storage':{'database':str(run/'control.db'),'diagnostics':str(run/'diagnostics')},
     'nodeDefaults':{'browser':str(binary/'remotekit_browser.exe'),'dataPath':str(run/'endpoint'),
                     'peer':{'listen':'127.0.0.1:'+str(peer_port)}},
-    'nodes':{'local':{'launch':{'executable':str(binary/'endpoint_service.exe'),'root':str(run/'node')}}}
+    'nodes':{'local':{'local':{'root':str(run/'node')}}}
   }),encoding='utf-8')
   env['REMOTEKIT_CONTROL_CONFIG']=str(config)
   with (run/'stderr.log').open('wb') as errors,(run/'stdout.log').open('wb') as output:

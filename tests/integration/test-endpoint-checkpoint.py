@@ -101,7 +101,7 @@ def main():
                 endpoint_command(args.endpoint, args.browser, self.root,
                                  cluster_key=cluster_key, object_index=run / "objects.json",
                                  metrics_file=run / (tag + "-metrics.json"),
-                                 peer={"listen": address, "advertise": address}),
+                                 peer={"listen": address, "address": address}),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log,
                 creationflags=subprocess.CREATE_NO_WINDOW)
             self.replies = queue.Queue()

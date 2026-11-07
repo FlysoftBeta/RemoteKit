@@ -26,6 +26,10 @@ int wmain(int argc, wchar_t** argv) {
     auto files = LoadNodeFiles(root);
     Check(static_cast<bool>(files));
     Check(files.value().node_id == "node-1" && files.value().key == Key{});
+    config.erase("nodeId");
+    Write(root / L"node.json", config);
+    Check(!LoadNodeFiles(root));
+    config["nodeId"] = "node-1";
     config["extra"] = true;
     Write(root / L"node.json", config);
     Check(!LoadNodeFiles(root));

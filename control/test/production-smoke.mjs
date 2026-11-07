@@ -39,8 +39,9 @@ await once(imap, 'listening');
 await writeFile(
   configPath,
   JSON.stringify({
-    http: { host: '127.0.0.1', port: 0, origins: ['http://production.test'] },
-    database: resolve(deployment, 'data/control.db'),
+    http: { listen: '127.0.0.1:0', origins: ['http://production.test'] },
+    storage: { database: resolve(deployment, 'data/control.db') },
+    cluster: { controlUrl: 'ws://127.0.0.1:1/api/node' },
     nodes: { production: {} },
     sessionImport: {
       mailbox: 'production@example.test',

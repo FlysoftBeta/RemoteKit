@@ -38,13 +38,13 @@ const configPath = join(run, 'control.json');
 await writeFile(
   configPath,
   JSON.stringify({
-    http: { host: '127.0.0.1', port },
-    database: join(run, 'control.db'),
-    cluster: { keyFile: join(run, 'cluster.key') },
+    http: { listen: `127.0.0.1:${port}` },
+    storage: { database: join(run, 'control.db') },
+    cluster: { keyFile: join(run, 'cluster.key'), controlUrl: `ws://127.0.0.1:${port}/api/node` },
     nodeDefaults: {
       browser,
       dataPath: join(run, 'data'),
-      peer: { listen: `127.0.0.1:${port + 1}`, advertise: `127.0.0.1:${port + 1}` },
+      peer: { listen: `127.0.0.1:${port + 1}`, address: `127.0.0.1:${port + 1}` },
     },
     nodes: { 'updater-test': {} },
   }),

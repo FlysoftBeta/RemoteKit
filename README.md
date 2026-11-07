@@ -20,7 +20,7 @@ npm run build
 New-Item -ItemType Directory -Force data | Out-Null
 $config = @{
   nodeDefaults = @{ browser = 'C:/src/chromium/src/out/dev/remotekit_browser.exe' }
-  nodes = @{ local = @{ launch = @{ executable = '../../build/endpoint/endpoint/endpoint_service.exe'; root = 'node' } } }
+  nodes = @{ local = @{ local = @{ executable = '../../build/endpoint/endpoint/endpoint_service.exe'; root = 'node' } } }
 }
 [System.IO.File]::WriteAllText("$PWD/data/control.json", ($config | ConvertTo-Json -Depth 5), [System.Text.UTF8Encoding]::new($false))
 npm start
@@ -45,8 +45,10 @@ npm start
 Control reads `REMOTEKIT_CONTROL_CONFIG`, defaulting to `control/data/control.json`.
 All HTTP, TLS, storage, encoder, and node settings belong in that JSON file. Paths are
 relative to the config directory; node browser/data paths are relative to the node root.
-For a remote node, configure its ID under `nodes` without `launch` and set
-`cluster.advertiseUrl` to `ws(s)://host:port/api/node`. Copy the generated `node.json`
-to the remote node root and run `remotekit_node.exe run --root=<absolute root>`.
-Keep `cluster.key`, `node.json`, and database `.key` files private.
+For a remote node, add it under `nodes` without a `local` entry and set
+`cluster.controlUrl` to the `ws(s)://host:port/api/node` address nodes use to reach Control.
+Control writes `nodes/<node ID>/node.json` next to the config; copy it unchanged to the
+remote node root and run `remotekit_node.exe run --root=<absolute root>`. See
+[多节点 · 配置](docs/cluster.md#配置) for the full layout.
+Keep `cluster.key`, `nodes/`, and database `.key` files private.
 Packaged `run.cmd` creates `config/control.json` on first run and accepts no arguments.

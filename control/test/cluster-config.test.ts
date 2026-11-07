@@ -21,32 +21,43 @@ test('config creates defaults and key, resolves paths, hashes effective override
     assert.equal(initial.port, 3001);
     assert.deepEqual(initial.nodes.local.config.peer, {
       listen: '0.0.0.0:3101',
-      advertise: '127.0.0.1:3101',
+      address: '127.0.0.1:3101',
     });
+    assert.deepEqual(initial.nodes.local.config.rtc, { ports: null, address: null });
     assert.equal(initial.nodes.local.config.diskReserveBytes, 10 * 1024 ** 3);
     assert.equal(initial.nodes.local.config.sessionMemoryBytes, 2 * 1024 ** 3);
     assert.equal(initial.quotas.tenantObjectBytes, 4 * 1024 ** 3);
     assert.equal(Buffer.from(initial.cluster.key, 'base64').length, 32);
     assert.equal(
-      initial.nodes.local.launch!.executable,
+      initial.nodes.local.local!.executable,
       resolve(directory, '../../build/endpoint/endpoint/endpoint_service.exe'),
     );
     await writeFile(
       configPath,
       JSON.stringify({
-        http: { port: 0, origins: ['https://viewer.test'] },
-        database: 'db/control.db',
-        diagnostics: 'archives',
-        cluster: { advertiseUrl: 'ws://192.168.1.10:3001/api/node' },
+        http: { listen: '0.0.0.0:0', origins: ['https://viewer.test'] },
+        storage: { database: 'db/control.db', diagnostics: 'archives' },
+        cluster: { controlUrl: 'ws://192.168.1.10:3001/api/node' },
         nodeDefaults: { fps: 30, dataPath: 'tenant-data', browser: 'browser.exe' },
         nodes: {
-          alpha: { fps: 60, peer: { advertise: 'alpha.test:3101' } },
-          local: { launch: { executable: '../bin/endpoint.exe', root: 'root' } },
+          alpha: {
+            fps: 60,
+            peer: { address: 'alpha.test:3101' },
+            rtc: { ports: '40000-40019', address: 'viewer-facing.example' },
+          },
+          beta: { controlUrl: 'wss://control.example/api/node', peer: { address: 'beta.test:3101' } },
+          local: { local: { executable: '../bin/endpoint.exe', root: 'root' } },
         },
       }),
     );
     const config = load();
     assert.equal(config.port, 0);
+    assert.equal(config.host, '0.0.0.0');
+    assert.deepEqual(config.nodes.alpha.config.rtc, {
+      ports: '40000-40019',
+      address: 'viewer-facing.example',
+    });
+    assert.equal(config.nodes.local.local!.executable, resolve(directory, '../bin/endpoint.exe'));
     assert.equal(config.dbPath, join(directory, 'db/control.db'));
     assert.equal(config.diagnosticDir, join(directory, 'archives'));
     assert.equal(config.nodes.alpha.config.fps, 60);
@@ -63,7 +74,8 @@ test('config creates defaults and key, resolves paths, hashes effective override
             dataPath: 'tenant-data',
             browser: 'browser.exe',
             nodeId: 'local',
-            peer: { listen: '0.0.0.0:3101', advertise: '127.0.0.1:3101' },
+            peer: { listen: '0.0.0.0:3101', address: '127.0.0.1:3101' },
+            rtc: { ports: null, address: null },
           }),
         )
         .digest('hex'),
@@ -73,16 +85,28 @@ test('config creates defaults and key, resolves paths, hashes effective override
       config.nodes,
       config.nodes.local,
       config.nodes.local.config,
-      config.nodes.local.launch,
+      config.nodes.local.local,
       config.origins,
       config.cluster,
     ])
       assert.ok(Object.isFrozen(value));
-    const bootstrap = JSON.parse(await readFile(join(directory, 'node.json'), 'utf8'));
-    assert.deepEqual(bootstrap, { control: 'ws://192.168.1.10:3001/api/node', key: initial.cluster.key });
+    const nodeFile = (nodeId: string) =>
+      readFile(join(directory, 'nodes', nodeId, 'node.json'), 'utf8').then(JSON.parse);
+    assert.deepEqual(await nodeFile('alpha'), {
+      nodeId: 'alpha',
+      control: 'ws://192.168.1.10:3001/api/node',
+      key: initial.cluster.key,
+    });
+    assert.deepEqual(await nodeFile('beta'), {
+      nodeId: 'beta',
+      control: 'wss://control.example/api/node',
+      key: initial.cluster.key,
+    });
+    await assert.rejects(nodeFile('local'));
     assert.equal(load().cluster.key, initial.cluster.key);
     await writeFile(configPath, JSON.stringify({ nodes: {} }));
     assert.deepEqual(Object.keys(load().nodes), []);
+    await assert.rejects(nodeFile('alpha'));
     await writeFile(join(directory, 'cluster.key'), 'invalid');
     assert.throws(load, { code: 'invalid_request' });
   } finally {
@@ -98,28 +122,40 @@ test('config rejects unknown fields, wrong types, invalid ranges and invalid com
       null,
       [],
       { nodes: { alpha: {}, beta: {} } },
+      { cluster: { controlUrl: 'ws://test/api/node' }, nodes: { alpha: {}, beta: {} } },
+      { nodes: { remote: {} } },
+      { nodeDefaults: { rtc: { ports: '3000' } } },
+      { nodeDefaults: { rtc: { ports: '900-1000' } } },
+      { nodeDefaults: { rtc: { ports: '5000-4000' } } },
+      { nodeDefaults: { rtc: { address: 'viewer.test' } } },
+      { nodeDefaults: { rtc: { ports: '40000-40001', address: 'bad host' } } },
+      { nodes: { local: { local: { executable: 'e.exe', root: 'r' }, controlUrl: 'ws://t/api/node' } } },
       { quotas: { tenantObjectBytes: -1 } },
       { quotas: { tenantObjectBytes: '1000' } },
       { nodeDefaults: { peer: { listen: 'invalid' } } },
-      { nodeDefaults: { peer: { advertise: 'host:65536' } } },
+      { nodeDefaults: { peer: { address: 'host:65536' } } },
+      { nodeDefaults: { peer: { advertise: 'host:3101' } } },
       { nodeDefaults: { diskReserveBytes: -1 } },
       { nodeDefaults: { sessionMemoryBytes: 0 } },
       { nodes: { Bad_ID: {} } },
       { extra: true },
       { http: null },
-      { http: { port: '3001' } },
-      { http: { port: -1 } },
-      { http: { host: null } },
+      { http: { port: 3001 } },
+      { http: { listen: '3001' } },
+      { http: { listen: 'host:65536' } },
       { http: { origins: 'http://test' } },
       { http: { tls: { key: 'key' } } },
-      { database: null },
-      { diagnostics: false },
+      { database: 'control.db' },
+      { storage: { database: null } },
+      { storage: { diagnostics: false } },
       { cluster: { keyFile: null } },
-      { cluster: { advertiseUrl: 'http://test/api/node' } },
-      { cluster: { advertiseUrl: 'ws://test/api/endpoint' } },
-      { nodeDefaults: { launch: {} } },
+      { cluster: { advertiseUrl: 'ws://test/api/node' } },
+      { cluster: { controlUrl: 'http://test/api/node' } },
+      { cluster: { controlUrl: 'ws://test/api/endpoint' } },
+      { nodeDefaults: { local: {} } },
       { nodeDefaults: null },
-      { nodes: { local: { launch: { executable: 'endpoint' } } } },
+      { nodes: { local: { launch: { executable: 'endpoint', root: 'root' } } } },
+      { nodes: { local: { local: { executable: 'endpoint' } } } },
       { nodes: { local: { ignored: true } } },
     ];
     for (const [field, value] of Object.entries({
@@ -142,10 +178,15 @@ test('config rejects unknown fields, wrong types, invalid ranges and invalid com
     }))
       invalid.push({ nodeDefaults: { [field]: value } });
     invalid.push({ nodeDefaults: { encoder: 'nvenc', qsvLowPower: 'on' } });
+    await writeFile(
+      configPath,
+      JSON.stringify({ nodes: { local: { local: { executable: 'endpoint.exe', root: 'node' } } } }),
+    );
+    runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: configPath }, []);
     for (const value of invalid) {
       const input =
         value && typeof value === 'object' && !Array.isArray(value)
-          ? { nodes: { local: {} }, ...value }
+          ? { nodes: { local: { local: { executable: 'endpoint.exe', root: 'node' } } }, ...value }
           : value;
       await writeFile(configPath, JSON.stringify(input));
       assert.throws(

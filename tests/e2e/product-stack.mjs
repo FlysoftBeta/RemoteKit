@@ -19,16 +19,15 @@ export function startProductStack({
   writeFileSync(
     configPath,
     JSON.stringify({
-      http: { host: '127.0.0.1', port, origins: [`http://127.0.0.1:${port}`] },
-      database: join(run, 'control.db'),
-      diagnostics: join(run, 'diagnostics'),
+      http: { listen: `127.0.0.1:${port}`, origins: [`http://127.0.0.1:${port}`] },
+      storage: { database: join(run, 'control.db'), diagnostics: join(run, 'diagnostics') },
       nodeDefaults: {
         browser: resolve(browser),
         dataPath: join(run, 'endpoint'),
-        peer: { listen: `127.0.0.1:${port + 2}`, advertise: `127.0.0.1:${port + 2}` },
+        peer: { listen: `127.0.0.1:${port + 2}`, address: `127.0.0.1:${port + 2}` },
         ...nodeDefaults,
       },
-      nodes: { local: { launch: { executable: resolve(endpoint), root: join(run, 'node') } } },
+      nodes: { local: { local: { executable: resolve(endpoint), root: join(run, 'node') } } },
       ...configOverrides,
     }),
   );

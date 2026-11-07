@@ -40,19 +40,10 @@ const port = reserve.address().port;
 await new Promise(done => reserve.close(done));
 const origin = 'http://127.0.0.1:' + port;
 await mkdir(join(runtime, 'config'), { recursive: true });
-const { buildId } = JSON.parse(await readFile(join(runtime, 'build.json'), 'utf8'));
 await writeFile(join(runtime, 'config/control.json'), JSON.stringify({
-  http: { host: '127.0.0.1', port, origins: [origin] },
-  database: '../data/control.db',
-  diagnostics: '../data/diagnostics',
-  nodes: {
-    local: {
-      launch: {
-        executable: '../data/local/runtime/' + buildId + '/bin/endpoint_service.exe',
-        root: '../data/node',
-      },
-    },
-  },
+  http: { listen: '127.0.0.1:' + port, origins: [origin] },
+  storage: { database: '../data/control.db', diagnostics: '../data/diagnostics' },
+  nodes: { local: { local: { root: '../data/node' } } },
 }));
 const env = { ...process.env };
 for (const name of ['NODE_PATH', 'NODE_OPTIONS', 'REMOTEKIT_CONTROL_CONFIG']) delete env[name];

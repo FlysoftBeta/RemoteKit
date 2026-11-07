@@ -17,24 +17,6 @@ bool ValidBuildId(std::string_view s) {
            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
          });
 }
-Result<std::string> DefaultNodeId() {
-  std::array<wchar_t, 256> name{};
-  DWORD length = static_cast<DWORD>(name.size());
-  if (!GetComputerNameExW(ComputerNameDnsHostname, name.data(), &length))
-    return Error{ErrorCode::kUnavailable, "cannot read DNS hostname"};
-  std::string value;
-  for (DWORD i = 0; i < length; ++i) {
-    wchar_t c = name[i];
-    if (c >= L'A' && c <= L'Z')
-      c += L'a' - L'A';
-    if (c > 127)
-      return Error{ErrorCode::kInvalidRequest, "DNS hostname is not a valid node ID"};
-    value += static_cast<char>(c);
-  }
-  if (!ValidNodeId(value))
-    return Error{ErrorCode::kInvalidRequest, "DNS hostname is not a valid node ID"};
-  return value;
-}
 Result<Key> DecodeKey(std::string_view s) {
   Key key{};
   auto fail = [&]() -> Result<Key> {
@@ -108,7 +90,7 @@ Result<NodeFiles> LoadNodeFiles(const std::filesystem::path& root) {
       if (it.key() != "control" && it.key() != "key" && it.key() != "nodeId")
         return Error{ErrorCode::kInvalidRequest, "unknown node.json field"};
     if (!json.contains("key") || !json["key"].is_string() || !json.contains("control") ||
-        !json["control"].is_string())
+        !json["control"].is_string() || !json.contains("nodeId") || !json["nodeId"].is_string())
       return Error{ErrorCode::kInvalidRequest, "invalid node.json fields"};
     auto& encoded = json["key"].get_ref<std::string&>();
     auto key = DecodeKey(encoded);
@@ -122,16 +104,7 @@ Result<NodeFiles> LoadNodeFiles(const std::filesystem::path& root) {
     auto valid = ParseControlUrl(out.control);
     if (!valid)
       return valid.error();
-    if (json.contains("nodeId")) {
-      if (!json["nodeId"].is_string())
-        return Error{ErrorCode::kInvalidRequest, "invalid nodeId"};
-      out.node_id = json["nodeId"].get<std::string>();
-    } else {
-      auto id = DefaultNodeId();
-      if (!id)
-        return id.error();
-      out.node_id = std::move(id).value();
-    }
+    out.node_id = json["nodeId"].get<std::string>();
     if (!ValidNodeId(out.node_id))
       return Error{ErrorCode::kInvalidRequest, "invalid nodeId"};
     return out;

@@ -169,15 +169,21 @@ const configPath = join(state, 'control.json');
 await writeFile(
   configPath,
   JSON.stringify({
-    http: { host: '127.0.0.1', port, origins: [`http://127.0.0.1:${port}`] },
-    database: join(state, 'control.db'),
-    diagnostics: join(evidence, 'diagnostics'),
+    http: { listen: `127.0.0.1:${port}`, origins: [`http://127.0.0.1:${port}`] },
+    storage: { database: join(state, 'control.db'), diagnostics: join(evidence, 'diagnostics') },
     nodeDefaults: {
       browser,
       dataPath: join(state, 'endpoint'),
       browserTraceDir: join(evidence, 'browser-trace'),
     },
-    nodes: { local: { launch: { executable: endpoint, root: join(state, 'node') } } },
+    nodes: {
+      // A packaged Control finds the runtime it installed for its own build.
+      local: {
+        local: options['live-build']
+          ? { executable: endpoint, root: join(state, 'node') }
+          : { root: join(state, 'node') },
+      },
+    },
   }),
 );
 const child = spawn(node, [control], {

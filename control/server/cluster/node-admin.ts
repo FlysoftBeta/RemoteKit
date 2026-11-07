@@ -22,8 +22,8 @@ export class NodeAdmin {
       return {
         nodeId: node.nodeId,
         state: this.nodes.isRemoved(node.nodeId) ? 'removed' : node.state.state,
-        managed: !!node.configured.launch,
-        advertise: node.config.peer.advertise,
+        managed: !!node.configured.local,
+        peerAddress: node.config.peer.address,
         buildId: node.state.state === 'ready' ? (node.buildId ?? null) : null,
         pressure: sample?.pressure ?? null,
         underPressure: node.metrics.underPressure(),

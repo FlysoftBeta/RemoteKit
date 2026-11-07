@@ -150,7 +150,7 @@ export class ObjectIndex {
     ).flatMap(({ node_id }) => {
       const node = this.nodes.get(node_id);
       return node?.state.state === 'ready' && !this.nodes.isRemoved(node_id)
-        ? [{ nodeId: node_id, address: node.config.peer.advertise }]
+        ? [{ nodeId: node_id, address: node.config.peer.address }]
         : [];
     });
   }

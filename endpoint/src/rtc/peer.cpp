@@ -1,6 +1,8 @@
 #include "rtc/peer.hpp"
 #include "rtc/data_router.hpp"
 #include "media/server_trace.hpp"
+#include "rtc/candidate_address.hpp"
+#include <cstdio>
 namespace remotekit {
 PeerController::~PeerController() {
   if (Handle())
@@ -52,6 +54,20 @@ Result<Json> PeerController::Offer(const Json& request,
   config.min_bitrate_bps = 500000;
   config.start_bitrate_bps = options_.encoding.bitrate;
   config.max_bitrate_bps = options_.encoding.max_bitrate;
+  config.port_min = options_.rtc_port_min;
+  config.port_max = options_.rtc_port_max;
+  std::string advertised;
+  if (!options_.rtc_address.empty()) {
+    // An unresolvable public name still leaves same-network Viewers their direct candidates.
+    if (auto ip = ResolveRtcAddress(options_.rtc_address))
+      advertised = std::move(ip).value();
+    else
+      std::fprintf(stderr, "RTC address unavailable: %s\n", ip.error().message.c_str());
+  }
+  {
+    std::lock_guard lock(mutex_);
+    advertised_ip_ = std::move(advertised);
+  }
   uint64_t handle = 0;
   const int status = sdk_.remotekit_rtc_create(&config, &handle);
   peer_ = handle;
@@ -122,6 +138,7 @@ void PeerController::Close() {
   {
     std::lock_guard lock(mutex_);
     connection_.clear();
+    advertised_ip_.clear();
     signals_.clear();
     signal_overflow_ = false;
   }
@@ -184,9 +201,11 @@ void PeerController::OnEvent(uint64_t peer,
 }
 void PeerController::FlushSignals() {
   std::deque<RtcEvent> pending;
+  std::string advertised;
   {
     std::lock_guard lock(mutex_);
     pending.swap(signals_);
+    advertised = advertised_ip_;
   }
   for (const auto& event : pending) {
     if (!Handle() || event.peer != Handle())
@@ -207,6 +226,13 @@ void PeerController::FlushSignals() {
     else
       continue;
     hooks_.signal(event.management_generation, signal);
+    if (event.type != REMOTEKIT_RTC_ICE || advertised.empty())
+      continue;
+    if (auto copy = AdvertisedCandidate(event.bytes, advertised, options_.rtc_port_min,
+                                        options_.rtc_port_max)) {
+      signal["candidate"]["candidate"] = std::move(*copy);
+      hooks_.signal(event.management_generation, signal);
+    }
   }
 }
 }  // namespace remotekit
