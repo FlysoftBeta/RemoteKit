@@ -58,6 +58,7 @@
 - 保留原 rb 分支、stash（RemoteKit baseline preservation 2026-10-31 (original rb tracked edits)）及未跟踪 re。不得清理/重置这些其他项目数据。
 - 不读或引用旧 `C:\Users\Flysoft\Desktop\remotekit`，除非用户重新明确引用。
 - 复用 out/dev 和 out/rel 增量产物，不 full/clean/新建 out；不要并发 gen/build 同一 out。默认使用全部逻辑 CPU，同 out 多目标一次 Ninja。Browser（Chromium out）、Endpoint（`build/`）、Control（npm）三个构建域可以并行。
+- 搜索代码与文件可以使用 ripgrep（`rg`）；没有时再用其他工具代替。
 - Python 用 `C:\src\depot_tools\python3.bat`；不用 WindowsApps 空别名。VS 为 `C:\Program Files\Microsoft Visual Studio\18\Community`。clang-format 需设置 `CHROMIUM_BUILDTOOLS_PATH=C:/src/chromium/src/buildtools`。
 - 用户授权必要系统修改及 Windows sudo；不为已授权步骤重复确认。
 - 选择必要测试：迭代时只跑相关的测试文件/目标，完整套件最多在一批结束时跑一次；不反复跑已通过且无新疑点的组。计时 GPU 实验独占资源，不与 CPU 构建混跑；只清理自己创建的进程，不动用户/RDP/系统服务。
