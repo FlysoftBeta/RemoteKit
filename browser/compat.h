@@ -13,6 +13,7 @@ class ClientHintsControllerDelegate;
 namespace remotekit::browser {
 
 std::string ChromeUserAgent();
+blink::UserAgentOverride ChromeUserAgentOverride(bool tablet);
 blink::UserAgentMetadata ChromeUserAgentMetadata();
 // The caller owns one delegate per BrowserContext.
 std::unique_ptr<content::ClientHintsControllerDelegate> CreateClientHintsDelegate();

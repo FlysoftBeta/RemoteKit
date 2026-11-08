@@ -46,6 +46,8 @@ class OffscreenHost final : public aura::WindowTreeHost,
   explicit OffscreenHost(content::WebContents* contents, const gfx::Size& viewport);
   ~OffscreenHost() override;
   void SetViewport(const gfx::Size& viewport);
+  void SetScreenConfiguration(const gfx::Size& viewport, float scale);
+  static void UpdateIdentity(content::WebContents* contents, bool tablet);
   void SetOutputScale(float scale);
   void SetRenderDemand(bool enabled);
   void SetNeedsBeginFrameCallback(base::RepeatingClosure callback);
@@ -90,6 +92,9 @@ class OffscreenHost final : public aura::WindowTreeHost,
   gfx::Rect bounds_;
   gfx::Size viewport_;
   float output_scale_ = 1.f;
+  float screen_scale_ = 1.f;
+  bool tablet_identity_ = false;
+  void UpdateVirtualDisplay();
   raw_ptr<aura::Window> content_window_ = nullptr;
   std::unique_ptr<aura::client::FocusClient> focus_client_;
   std::unique_ptr<aura::client::WindowParentingClient> parenting_client_;

@@ -22,6 +22,9 @@
 #include "ui/compositor/compositor.h"
 #include "ui/display/display.h"
 #include "ui/display/screen_base.h"
+#include "ui/display/display_util.h"
+#include "ui/display/screen_infos.h"
+#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
 #include "ui/events/keycodes/dom/dom_code.h"
 
 namespace remotekit::browser {
@@ -66,7 +69,7 @@ class RetiredHost final : public std::enable_shared_from_this<RetiredHost> {
 class ServiceScreen final : public display::ScreenBase {
  public:
   ServiceScreen() {
-    display::Display screen(1, gfx::Rect(0, 0, 8192, 8192));
+    display::Display screen(1, gfx::Rect(1, 1));
     screen.set_device_scale_factor(1.f);
     display_list().AddDisplay(screen, display::DisplayList::Type::PRIMARY);
   }
@@ -78,14 +81,60 @@ class ServiceScreen final : public display::ScreenBase {
     return nullptr;
   }
   display::Display GetDisplayNearestWindow(gfx::NativeWindow window) const override {
-    auto result = GetPrimaryDisplay();
-    result.set_device_scale_factor(OutputScale(window));
-    return result;
+    const auto it = views_.find(window ? window->GetRootWindow() : nullptr);
+    return it == views_.end() ? GetPrimaryDisplay() : it->second.display;
   }
   std::optional<float> GetPreferredScaleFactorForWindow(gfx::NativeWindow window) const override {
     return OutputScale(window);
   }
+  display::ScreenInfos GetScreenInfosNearestDisplay(int64_t id) const override {
+    for (const auto& [root, view] : views_) {
+      if (view.display.id() != id)
+        continue;
+      display::ScreenInfo info;
+      display::DisplayUtil::DisplayToScreenInfo(&info, view.display);
+      const bool landscape = view.display.bounds().width() > view.display.bounds().height();
+      info.orientation_type = landscape ? display::mojom::ScreenOrientation::kLandscapePrimary
+                                        : display::mojom::ScreenOrientation::kPortraitPrimary;
+      // screen_win maps DMDO_90 to ROTATE_90; DisplayUtil converts it to 270.
+      info.orientation_angle = view.tablet ? (landscape ? 90 : 0) : (landscape ? 0 : 270);
+      info.is_primary = true;
+      info.is_extended = false;
+      return display::ScreenInfos(info);
+    }
+    return display::ScreenBase::GetScreenInfosNearestDisplay(id);
+  }
+  void SetViewDisplay(aura::Window* root, const gfx::Size& viewport, float scale, bool tablet) {
+    auto [it, inserted] = views_.try_emplace(root);
+    auto& view = it->second;
+    if (inserted)
+      view.display.set_id(++next_display_id_);
+    view.tablet = tablet;
+    view.display.set_bounds(gfx::Rect(viewport));
+    view.display.set_work_area(gfx::Rect(viewport));
+    view.display.set_device_scale_factor(scale);
+    const bool landscape = viewport.width() > viewport.height();
+    view.display.set_rotation(
+        tablet ? (landscape ? display::Display::ROTATE_270 : display::Display::ROTATE_0)
+               : (landscape ? display::Display::ROTATE_0 : display::Display::ROTATE_90));
+    ProcessDisplayChanged(view.display, false);
+  }
+  void RemoveView(aura::Window* root) {
+    auto it = views_.find(root);
+    if (it == views_.end())
+      return;
+    display_list().RemoveDisplay(it->second.display.id());
+    views_.erase(it);
+  }
   bool IsHeadless() const override { return true; }
+
+ private:
+  struct ViewDisplay {
+    display::Display display;
+    bool tablet = false;
+  };
+  std::map<aura::Window*, ViewDisplay> views_;
+  int64_t next_display_id_ = 1;
 };
 
 class FocusClient final : public aura::client::FocusClient, public aura::WindowObserver {
@@ -162,6 +211,9 @@ OffscreenHost::OffscreenHost(content::WebContents* contents, const gfx::Size& vi
   CHECK(content_window_);
   window()->AddChild(content_window_);
   content_window_->Show();
+  const auto& prefs = *contents->GetMutableRendererPrefs();
+  const auto& metadata = prefs.user_agent_override.ua_metadata_override;
+  tablet_identity_ = metadata && metadata->platform == "Android";
   SetViewport(viewport);
   compositor()->SetVisible(false);
 }
@@ -169,6 +221,7 @@ OffscreenHost::OffscreenHost(content::WebContents* contents, const gfx::Size& vi
 OffscreenHost::~OffscreenHost() {
   Detach();
   parenting_client_.reset();
+  static_cast<ServiceScreen*>(display::Screen::Get())->RemoveView(window());
   OutputScales().erase(window());
   DestroyCompositor();
   DestroyDispatcher();
@@ -177,10 +230,35 @@ OffscreenHost::~OffscreenHost() {
 
 void OffscreenHost::SetViewport(const gfx::Size& viewport) {
   viewport_ = viewport;
+  UpdateVirtualDisplay();
   if (content_window_)
     content_window_->SetBounds(gfx::Rect(viewport));
   SetBoundsInPixels(gfx::Rect(gfx::Size(std::lround(viewport.width() * output_scale_),
                                         std::lround(viewport.height() * output_scale_))));
+}
+
+void OffscreenHost::UpdateVirtualDisplay() {
+  static_cast<ServiceScreen*>(display::Screen::Get())
+      ->SetViewDisplay(window(), viewport_, screen_scale_, tablet_identity_);
+}
+
+void OffscreenHost::SetScreenConfiguration(const gfx::Size& viewport, float scale) {
+  if (viewport_ == viewport && screen_scale_ == scale)
+    return;
+  screen_scale_ = scale;
+  SetViewport(viewport);
+}
+
+void OffscreenHost::UpdateIdentity(content::WebContents* contents, bool tablet) {
+  auto* native = contents->GetNativeView();
+  auto* root = native ? native->GetRootWindow() : nullptr;
+  if (!root || !root->GetHost())
+    return;
+  auto* host = static_cast<OffscreenHost*>(root->GetHost());
+  if (host->tablet_identity_ == tablet)
+    return;
+  host->tablet_identity_ = tablet;
+  host->UpdateVirtualDisplay();
 }
 
 void OffscreenHost::SetOutputScale(float scale) {

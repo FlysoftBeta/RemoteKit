@@ -21,6 +21,8 @@ executable("remotekit_browser") {
     "client_input_timing.h",
     "closed_views.cc",
     "closed_views.h",
+    "chrome_parity.cc",
+    "chrome_parity.h",
     "compat.cc",
     "compat.h",
     "compat_renderer.cc",
@@ -167,7 +169,11 @@ executable("remotekit_browser") {
     "//url",
     "//v8",
   ]
-  data_deps = [ "//tools/v8_context_snapshot" ]
+  # Chromium owns the root locales/*.pak output paths.
+  data_deps = [
+    "//tools/v8_context_snapshot",
+    "//chrome:packed_resources_locales",
+  ]
   libs = [
     "d3d11.lib",
     "d3dcompiler.lib",
@@ -294,11 +300,7 @@ repack("pak") {
     "$root_gen_dir/net/net_resources.pak",
     "$root_gen_dir/third_party/blink/public/resources/blink_resources.pak",
     "$root_gen_dir/third_party/blink/public/resources/blink_scaled_resources_100_percent.pak",
-    "$root_gen_dir/third_party/blink/public/strings/blink_strings_en-US.pak",
     "$root_gen_dir/ui/resources/ui_resources_100_percent.pak",
-    "$root_gen_dir/ui/strings/app_locale_settings_en-US.pak",
-    "$root_gen_dir/ui/strings/ax_strings_en-US.pak",
-    "$root_gen_dir/ui/strings/ui_strings_en-US.pak",
   ]
   deps = [
     "//content:content_resources",
@@ -307,9 +309,7 @@ repack("pak") {
     "//net:net_resources",
     "//third_party/blink/public:resources",
     "//third_party/blink/public:scaled_resources_100_percent",
-    "//third_party/blink/public/strings",
     "//ui/resources",
-    "//ui/strings",
   ]
   output = "$root_out_dir/remotekit.pak"
 }

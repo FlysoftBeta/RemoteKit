@@ -21,7 +21,6 @@
 #include "base/task/single_thread_task_runner.h"
 #include "base/time/time.h"
 #include "components/input/native_web_keyboard_event.h"
-#include "third_party/blink/public/common/widget/device_emulation_params.h"
 #include "third_party/blink/public/mojom/page/widget.mojom.h"
 #include "components/input/render_widget_host_input_event_router.h"
 #include "content/browser/renderer_host/frame_tree.h"          // nogncheck

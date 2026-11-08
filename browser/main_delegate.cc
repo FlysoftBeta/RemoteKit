@@ -1,4 +1,9 @@
 #include "browser/device_configuration.h"
+#include "browser/chrome_parity.h"
+#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+#include "ui/base/ui_base_paths.h"
+#include "base/files/file.h"
+#include "base/files/memory_mapped_file.h"
 #include "browser/context_menu.h"
 #include "remotekit/browser/main_delegate.h"
 #include "remotekit/browser/crash_reporter.h"
@@ -49,14 +54,14 @@ class ContentClient final : public content::ContentClient {
 };
 class BrowserClient final : public content::ContentBrowserClient {
  public:
-  std::unique_ptr<content::WebContentsViewDelegate> GetWebContentsViewDelegate(
-      content::WebContents* contents) override {
-    return CreateRemoteContextMenuDelegate(contents);
-  }
   std::unique_ptr<media::AudioManager> CreateAudioManager(media::AudioLogFactory* log) override {
     return CreateAudioTarget(log);
   }
   bool OverridesAudioManager() override { return true; }
+  std::unique_ptr<content::WebContentsViewDelegate> GetWebContentsViewDelegate(
+      content::WebContents* contents) override {
+    return CreateRemoteContextMenuDelegate(contents);
+  }
   void OnWebContentsCreated(content::WebContents* contents) override {
     DeviceConfiguration::InstallSiteIdentity(contents);
   }
@@ -82,14 +87,32 @@ class BrowserClient final : public content::ContentBrowserClient {
   std::string GetUserAgent() override { return ChromeUserAgent(); }
   std::string GetProduct() override { return embedder_support::GetProductAndVersion(); }
   blink::UserAgentMetadata GetUserAgentMetadata() override { return ChromeUserAgentMetadata(); }
-  std::string GetAcceptLangs(content::BrowserContext*) override { return "en-US,en"; }
+  std::string GetApplicationLocale() override { return kChromeLocale; }
+  std::string GetAcceptLangs(content::BrowserContext*) override { return ChromeAcceptLanguage(); }
+  void OverrideWebPreferences(content::WebContents*,
+                              content::SiteInstance&,
+                              blink::web_pref::WebPreferences* prefs) override {
+    ApplyChromeWebPreferences(*prefs);
+  }
+  void UpdateRendererPreferencesForWorker(content::BrowserContext*,
+                                          blink::RendererPreferences* prefs) override {
+    ApplyChromeRendererPreferences(*prefs);
+  }
+  void OverrideWorkerIdentity(content::BrowserContext* context,
+                              const url::Origin& origin,
+                              blink::RendererPreferences* prefs) override {
+    const bool tablet =
+        context && static_cast<BrowserContext*>(context)->TabletUaFor(origin.GetURL());
+    prefs->user_agent_override = ChromeUserAgentOverride(tablet);
+    prefs->navigator_platform_override = tablet ? kTabletNavigatorPlatform : "";
+  }
   void ConfigureNetworkContextParams(content::BrowserContext* context,
                                      bool in_memory,
                                      const base::FilePath& relative_partition_path,
                                      network::mojom::NetworkContextParams* params,
                                      cert_verifier::mojom::CertVerifierCreationParams*) override {
     params->user_agent = ChromeUserAgent();
-    params->accept_language = "en-US,en";
+    params->accept_language = ChromeAcceptLanguage();
     params->enable_zstd = true;
     static_cast<BrowserContext*>(context)->ConfigureNetworkContext(in_memory,
                                                                    relative_partition_path, params);
@@ -155,7 +178,20 @@ void MainDelegate::PreSandboxStartup() {
   InitializeCrashReporter();
   base::FilePath assets;
   CHECK(base::PathService::Get(base::DIR_ASSETS, &assets));
-  ui::ResourceBundle::InitSharedInstanceWithPakPath(assets.AppendASCII("remotekit.pak"));
+  const auto locales = assets.AppendASCII("locales");
+  const auto primary = locales.AppendASCII("zh-CN.pak");
+  const auto secondary = locales.AppendASCII("en-US.pak");
+  CHECK(base::PathExists(primary)) << primary;
+  CHECK(base::PathExists(secondary)) << secondary;
+  CHECK(base::PathService::Override(ui::DIR_LOCALES, locales));
+  CHECK_EQ(ui::ResourceBundle::InitSharedInstanceWithLocale(
+               kChromeLocale, nullptr, ui::ResourceBundle::DO_NOT_LOAD_COMMON_RESOURCES),
+           kChromeLocale);
+  auto& bundle = ui::ResourceBundle::GetSharedInstance();
+  bundle.AddDataPackFromPath(assets.AppendASCII("remotekit.pak"), ui::kScaleFactorNone);
+  bundle.LoadAdditionalLocaleDataWithPakFileRegion(
+      base::File(secondary, base::File::FLAG_OPEN | base::File::FLAG_READ),
+      base::MemoryMappedFile::Region::kWholeFile);
 }
 content::ContentClient* MainDelegate::CreateContentClient() {
   content_client_ = std::make_unique<ContentClient>();

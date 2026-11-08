@@ -83,6 +83,26 @@ blink::UserAgentMetadata ChromeUserAgentMetadata() {
   return metadata;
 }
 
+blink::UserAgentOverride ChromeUserAgentOverride(bool tablet) {
+  blink::UserAgentOverride ua;
+  ua.ua_string_override = ChromeUserAgent();
+  auto metadata = ChromeUserAgentMetadata();
+  if (tablet) {
+    ua.ua_string_override = embedder_support::BuildUserAgentFromOSAndProduct(
+        "Linux; Android 10; K", "Chrome/" + version_info::GetMajorVersionNumber() + ".0.0.0");
+    metadata.platform = "Android";
+    metadata.platform_version = "13.0.0";
+    metadata.architecture = "arm";
+    metadata.bitness = "64";
+    metadata.model.clear();
+    metadata.mobile = false;
+    metadata.wow64 = false;
+    metadata.form_factors = {"Tablet"};
+  }
+  ua.ua_metadata_override = std::move(metadata);
+  return ua;
+}
+
 std::unique_ptr<content::ClientHintsControllerDelegate> CreateClientHintsDelegate() {
   return std::make_unique<MemoryClientHintsDelegate>();
 }

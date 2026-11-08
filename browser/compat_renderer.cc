@@ -144,8 +144,8 @@ void InstallApp(v8::Local<v8::Context> context) {
       .Check();
   SetMethod(context, app, "getDetails", GetDetails);
   SetMethod(context, app, "getIsInstalled", GetIsInstalled);
-  SetMethod(context, app, "runningState", RunningState);
   SetMethod(context, app, "installState", InstallState);
+  SetMethod(context, app, "runningState", RunningState);
 
   auto install_state = content::GetOrCreateObject(isolate, context, app, "InstallState");
   install_state
@@ -189,7 +189,7 @@ v8::Local<v8::Private> OrientationHandlerKey(v8::Isolate* isolate) {
 void OrientationGetter(const v8::FunctionCallbackInfo<v8::Value>& info) {
   auto* frame = blink::WebLocalFrame::FrameForContext(info.GetIsolate()->GetCurrentContext());
   auto* widget = frame ? frame->LocalRoot()->FrameWidget() : nullptr;
-  // Same value as LocalDOMWindow::orientation: the emulated screen angle,
+  // Same value as LocalDOMWindow::orientation: the view's screen angle,
   // reported in WebKit's [-90, 180] range.
   const int angle = widget ? widget->GetScreenInfo().orientation_angle : 0;
   info.GetReturnValue().Set(angle == 270 ? -90 : angle);
@@ -345,11 +345,10 @@ class CompatViewObserver final : public blink::WebViewObserver {
     OnRendererPreferencesUpdated(view->GetRendererPreferences());
   }
   void OnRendererPreferencesUpdated(const blink::RendererPreferences& prefs) override {
-    const bool tablet = IsTabletIdentity(prefs);
     if (GetWebView())
       GetWebView()->GetSettings()->SetFromStrings(
           blink::WebString::FromAscii("navigatorPlatformOverride"),
-          tablet ? blink::WebString::FromAscii("Linux armv81") : blink::WebString());
+          blink::WebString::FromUtf8(prefs.navigator_platform_override));
   }
   void OnDestruct() override { delete this; }
 };

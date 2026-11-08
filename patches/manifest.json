@@ -26,6 +26,11 @@
       "id": "file-chooser-input-anchor",
       "path": "0016-file-chooser-input-anchor.patch",
       "sha256": "418fa5acb3c7a17b5473c1b4e1dc0fa75d1cbb9d9b447b6a5ce8b16b5388426f"
+    },
+    {
+      "id": "origin-worker-identity",
+      "path": "0017-origin-worker-identity.patch",
+      "sha256": "958475c04b0e5e77be3b6cbfdcbfeb3542d4f0113b9cab02296c7661e27429fa"
     }
   ]
 }

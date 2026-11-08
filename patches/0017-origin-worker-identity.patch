@@ -1,0 +1,956 @@
+diff --git a/content/browser/loader/browser_initiated_resource_request.cc b/content/browser/loader/browser_initiated_resource_request.cc
+index 5615000e36..d23262002c 100644
+--- a/content/browser/loader/browser_initiated_resource_request.cc
++++ b/content/browser/loader/browser_initiated_resource_request.cc
+@@ -9,6 +9,7 @@
+ #include "content/public/browser/content_browser_client.h"
+ #include "content/public/common/content_client.h"
+ #include "net/http/http_request_headers.h"
++#include "net/http/structured_headers.h"
+ #include "third_party/blink/public/common/global_privacy_control/global_privacy_control_util.h"
+ #include "third_party/blink/public/common/loader/loader_constants.h"
+ #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+@@ -20,9 +21,29 @@ void UpdateAdditionalHeadersForBrowserInitiatedRequest(
+     BrowserContext* browser_context,
+     bool should_update_existing_headers,
+     const blink::RendererPreferences& renderer_preferences,
+-    bool is_for_worker_script) {
++    bool is_for_worker_script,
++    bool send_worker_ua_hints) {
+   CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M160);
+ 
++  if (is_for_worker_script) {
++    const auto& ua = renderer_preferences.user_agent_override;
++    if (!ua.ua_string_override.empty()) {
++      headers->SetHeader(net::HttpRequestHeaders::kUserAgent,
++                         ua.ua_string_override);
++    }
++    if (send_worker_ua_hints && ua.ua_metadata_override) {
++      const auto& metadata = *ua.ua_metadata_override;
++      headers->SetHeader("Sec-CH-UA",
++                         metadata.SerializeBrandMajorVersionList());
++      headers->SetHeader("Sec-CH-UA-Mobile", metadata.mobile ? "?1" : "?0");
++      headers->SetHeader("Sec-CH-UA-Platform",
++                         *net::structured_headers::SerializeItem(
++                             net::structured_headers::ItemView(
++                                 net::structured_headers::ItemView::string,
++                                 metadata.platform)));
++    }
++  }
++
+   // Set the DoNotTrack header if appropriate.
+   // https://w3c.github.io/dnt/drafts/tracking-dnt.html#expression-format
+   if (renderer_preferences.enable_do_not_track) {
+diff --git a/content/browser/loader/browser_initiated_resource_request.h b/content/browser/loader/browser_initiated_resource_request.h
+index 7f978af35c..2bad6a3b57 100644
+--- a/content/browser/loader/browser_initiated_resource_request.h
++++ b/content/browser/loader/browser_initiated_resource_request.h
+@@ -28,7 +28,8 @@ void UpdateAdditionalHeadersForBrowserInitiatedRequest(
+     BrowserContext* browser_context,
+     bool should_update_existing_headers,
+     const blink::RendererPreferences& renderer_preferences,
+-    bool is_for_worker_script);
++    bool is_for_worker_script,
++    bool send_worker_ua_hints = false);
+ 
+ }  // namespace content
+ 
+diff --git a/content/browser/renderer_preferences_util.cc b/content/browser/renderer_preferences_util.cc
+index 7e2dca3a33..8fc146bf63 100644
+--- a/content/browser/renderer_preferences_util.cc
++++ b/content/browser/renderer_preferences_util.cc
+@@ -15,10 +15,13 @@ namespace content {
+ 
+ void UpdateRendererPreferencesForWorkerHelper(
+     BrowserContext* context,
+-    blink::RendererPreferences* preferences) {
++    blink::RendererPreferences* preferences,
++    const url::Origin& origin) {
+   CHECK(preferences);
+   GetContentClient()->browser()->UpdateRendererPreferencesForWorker(
+       context, preferences);
++  GetContentClient()->browser()->OverrideWorkerIdentity(context, origin,
++                                                        preferences);
+   // Set the DevTools GPC override, if one is set. This takes precedence
+   // over the embedder's profile setting (see
+   // `IsGlobalPrivacyControlFeatureAndSettingEnabled()`).
+diff --git a/content/browser/renderer_preferences_util.h b/content/browser/renderer_preferences_util.h
+index a8810a43a3..e4da0db356 100644
+--- a/content/browser/renderer_preferences_util.h
++++ b/content/browser/renderer_preferences_util.h
+@@ -6,6 +6,7 @@
+ #define CONTENT_BROWSER_RENDERER_PREFERENCES_UTIL_H_
+ 
+ #include "content/common/content_export.h"
++#include "url/origin.h"
+ 
+ namespace blink {
+ struct RendererPreferences;
+@@ -19,7 +20,8 @@ class BrowserContext;
+ // applies content-specific overrides as needed.
+ CONTENT_EXPORT void UpdateRendererPreferencesForWorkerHelper(
+     BrowserContext* context,
+-    blink::RendererPreferences* preferences);
++    blink::RendererPreferences* preferences,
++    const url::Origin& origin = url::Origin());
+ 
+ }  // namespace content
+ 
+diff --git a/content/browser/service_worker/embedded_worker_instance.cc b/content/browser/service_worker/embedded_worker_instance.cc
+index 4984b41356..db905eb913 100644
+--- a/content/browser/service_worker/embedded_worker_instance.cc
++++ b/content/browser/service_worker/embedded_worker_instance.cc
+@@ -100,13 +100,15 @@ void NotifyForegroundServiceWorker(bool added, ChildProcessId process_id) {
+   CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+ 
+   RenderProcessHost* rph = RenderProcessHost::FromID(process_id);
+-  if (!rph)
++  if (!rph) {
+     return;
++  }
+ 
+-  if (added)
++  if (added) {
+     rph->OnForegroundServiceWorkerAdded();
+-  else
++  } else {
+     rph->OnForegroundServiceWorkerRemoved();
++  }
+ }
+ 
+ }  // namespace
+@@ -246,8 +248,9 @@ void EmbeddedWorkerInstance::Start(
+   starting_phase_ = ALLOCATING_PROCESS;
+   network_accessed_for_script_ = false;
+ 
+-  for (auto& observer : listener_list_)
++  for (auto& observer : listener_list_) {
+     observer.OnStarting();
++  }
+ 
+   // service_worker_route_id will be set later in SetupOnUIThread
+   params->service_worker_route_id = IPC::mojom::kRoutingIdNone;
+@@ -407,7 +410,8 @@ void EmbeddedWorkerInstance::Start(
+         base::NotFatalUntil::M159);
+   params->renderer_preferences = blink::RendererPreferences();
+   UpdateRendererPreferencesForWorkerHelper(
+-      context_->wrapper()->browser_context(), &params->renderer_preferences);
++      context_->wrapper()->browser_context(), &params->renderer_preferences,
++      owner_version_->key().origin());
+ 
+   {
+     // Create a RendererPreferenceWatcher to observe updates in the preferences.
+@@ -426,8 +430,9 @@ void EmbeddedWorkerInstance::Start(
+ 
+   ServiceWorkerMetrics::StartSituation start_situation =
+       process_info->start_situation;
+-  if (!GetContentClient()->browser()->IsBrowserStartupComplete())
++  if (!GetContentClient()->browser()->IsBrowserStartupComplete()) {
+     start_situation = ServiceWorkerMetrics::StartSituation::DURING_STARTUP;
++  }
+ 
+   // Notify the instance that a process is allocated.
+   OnProcessAllocated(std::move(process_handle), start_situation);
+@@ -495,16 +500,18 @@ void EmbeddedWorkerInstance::Stop() {
+     if (!weak_this) {
+       return;
+     }
+-    for (auto& observer : listener_list_)
++    for (auto& observer : listener_list_) {
+       observer.OnStopped(
+           blink::EmbeddedWorkerStatus::kStarting /* old_status */);
++    }
+     return;
+   }
+ 
+   client_->StopWorker();
+   status_ = blink::EmbeddedWorkerStatus::kStopping;
+-  for (auto& observer : listener_list_)
++  for (auto& observer : listener_list_) {
+     observer.OnStopping();
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::StopIfNotAttachedToDevTools() {
+@@ -555,8 +562,9 @@ void EmbeddedWorkerInstance::OnProcessAllocated(
+   UpdateForegroundPriority();
+ 
+   start_situation_ = start_situation;
+-  for (auto& observer : listener_list_)
++  for (auto& observer : listener_list_) {
+     observer.OnProcessAllocated();
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::OnRegisteredToDevToolsManager(
+@@ -565,8 +573,9 @@ void EmbeddedWorkerInstance::OnRegisteredToDevToolsManager(
+     CHECK(!devtools_proxy_, base::NotFatalUntil::M159);
+     devtools_proxy_ = std::move(devtools_proxy);
+   }
+-  for (auto& observer : listener_list_)
++  for (auto& observer : listener_list_) {
+     observer.OnRegisteredToDevToolsManager();
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::SendStartWorker(
+@@ -612,8 +621,9 @@ void EmbeddedWorkerInstance::SendStartWorker(
+   client_->StartWorker(std::move(params));
+ 
+   starting_phase_ = is_script_streaming ? SCRIPT_STREAMING : SENT_START_WORKER;
+-  for (auto& observer : listener_list_)
++  for (auto& observer : listener_list_) {
+     observer.OnStartWorkerMessageSent();
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::RequestTermination(
+@@ -642,15 +652,17 @@ void EmbeddedWorkerInstance::CountFeature(blink::mojom::WebFeature feature) {
+ void EmbeddedWorkerInstance::OnReadyForInspection(
+     mojo::PendingRemote<blink::mojom::DevToolsAgent> agent_remote,
+     mojo::PendingReceiver<blink::mojom::DevToolsAgentHost> host_receiver) {
+-  if (!devtools_proxy_)
++  if (!devtools_proxy_) {
+     return;
++  }
+   devtools_proxy_->NotifyWorkerReadyForInspection(std::move(agent_remote),
+                                                   std::move(host_receiver));
+ }
+ 
+ void EmbeddedWorkerInstance::OnScriptLoaded() {
+-  if (!inflight_start_info_)
++  if (!inflight_start_info_) {
+     return;
++  }
+ 
+   // Renderer side has started to launch the worker thread.
+   starting_phase_ = SCRIPT_LOADED;
+@@ -661,8 +673,9 @@ void EmbeddedWorkerInstance::OnScriptLoaded() {
+ }
+ 
+ void EmbeddedWorkerInstance::OnWorkerVersionInstalled() {
+-  if (devtools_proxy_)
++  if (devtools_proxy_) {
+     devtools_proxy_->NotifyWorkerVersionInstalled();
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::OnWorkerVersionDoomed() {
+@@ -675,12 +688,14 @@ void EmbeddedWorkerInstance::OnWorkerVersionDoomed() {
+ }
+ 
+ void EmbeddedWorkerInstance::OnScriptEvaluationStart() {
+-  if (!inflight_start_info_)
++  if (!inflight_start_info_) {
+     return;
++  }
+ 
+   starting_phase_ = SCRIPT_EVALUATION;
+-  for (auto& observer : listener_list_)
++  for (auto& observer : listener_list_) {
+     observer.OnScriptEvaluationStart();
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::OnStarted(
+@@ -753,8 +768,9 @@ void EmbeddedWorkerInstance::OnStopped() {
+   if (!weak_this) {
+     return;
+   }
+-  for (auto& observer : listener_list_)
++  for (auto& observer : listener_list_) {
+     observer.OnStopped(old_status);
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::Detach() {
+@@ -769,8 +785,9 @@ void EmbeddedWorkerInstance::Detach() {
+   if (!weak_this) {
+     return;
+   }
+-  for (auto& observer : listener_list_)
++  for (auto& observer : listener_list_) {
+     observer.OnDetached(old_status);
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::UpdateForegroundPriority() {
+@@ -994,20 +1011,23 @@ void EmbeddedWorkerInstance::OnReportConsoleMessage(
+ }
+ 
+ ChildProcessId EmbeddedWorkerInstance::process_id() const {
+-  if (process_handle_)
++  if (process_handle_) {
+     return process_handle_->process_id();
++  }
+   return ChildProcessId();
+ }
+ 
+ int EmbeddedWorkerInstance::worker_devtools_agent_route_id() const {
+-  if (devtools_proxy_)
++  if (devtools_proxy_) {
+     return devtools_proxy_->agent_route_id();
++  }
+   return IPC::mojom::kRoutingIdNone;
+ }
+ 
+ base::UnguessableToken EmbeddedWorkerInstance::WorkerDevtoolsId() const {
+-  if (devtools_proxy_)
++  if (devtools_proxy_) {
+     return devtools_proxy_->devtools_id();
++  }
+   return base::UnguessableToken();
+ }
+ 
+@@ -1021,10 +1041,12 @@ void EmbeddedWorkerInstance::RemoveObserver(Listener* listener) {
+ 
+ void EmbeddedWorkerInstance::SetDevToolsAttached(bool attached) {
+   devtools_attached_ = attached;
+-  if (!attached)
++  if (!attached) {
+     return;
+-  if (inflight_start_info_)
++  }
++  if (inflight_start_info_) {
+     inflight_start_info_->skip_recording_startup_time = true;
++  }
+ }
+ 
+ void EmbeddedWorkerInstance::OnNetworkAccessedForScriptLoad() {
+@@ -1071,8 +1093,9 @@ void EmbeddedWorkerInstance::OnSetupFailed(
+   ReleaseProcess();
+   std::move(callback).Run(status);
+   if (weak_this && old_status != blink::EmbeddedWorkerStatus::kStopped) {
+-    for (auto& observer : weak_this->listener_list_)
++    for (auto& observer : weak_this->listener_list_) {
+       observer.OnStopped(old_status);
++    }
+   }
+ }
+ 
+@@ -1118,8 +1141,9 @@ std::string EmbeddedWorkerInstance::StartingPhaseToString(StartingPhase phase) {
+ void EmbeddedWorkerInstance::NotifyForegroundServiceWorkerAdded() {
+   CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+ 
+-  if (!process_handle_ || foreground_notified_)
++  if (!process_handle_ || foreground_notified_) {
+     return;
++  }
+ 
+   foreground_notified_ = true;
+   NotifyForegroundServiceWorker(true /* added */, process_id());
+@@ -1128,8 +1152,9 @@ void EmbeddedWorkerInstance::NotifyForegroundServiceWorkerAdded() {
+ void EmbeddedWorkerInstance::NotifyForegroundServiceWorkerRemoved() {
+   CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M159);
+ 
+-  if (!process_handle_ || !foreground_notified_)
++  if (!process_handle_ || !foreground_notified_) {
+     return;
++  }
+ 
+   foreground_notified_ = false;
+   NotifyForegroundServiceWorker(false /* added */, process_id());
+diff --git a/content/browser/service_worker/service_worker_loader_helpers.cc b/content/browser/service_worker/service_worker_loader_helpers.cc
+index c3ed0598e7..8567495edf 100644
+--- a/content/browser/service_worker/service_worker_loader_helpers.cc
++++ b/content/browser/service_worker/service_worker_loader_helpers.cc
+@@ -34,6 +34,7 @@
+ #include "content/public/common/referrer.h"
+ #include "net/base/url_util.h"
+ #include "services/network/public/cpp/constants.h"
++#include "services/network/public/cpp/is_potentially_trustworthy.h"
+ #include "services/network/public/cpp/permissions_policy/permissions_policy.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/common/mime_util/mime_util.h"
+@@ -94,8 +95,9 @@ bool IsPathRestrictionSatisfiedInternal(
+     error_message->append(scope_string);
+     error_message->append("') is not under the max scope allowed (");
+     if (service_worker_allowed_header_value &&
+-        service_worker_allowed_header_supported)
++        service_worker_allowed_header_supported) {
+       error_message->append("set by Service-Worker-Allowed: ");
++    }
+     error_message->append("'");
+     error_message->append(max_scope_string);
+     if (service_worker_allowed_header_supported) {
+@@ -294,12 +296,13 @@ network::ResourceRequest CreateRequestForServiceWorkerScript(
+   request.do_not_prompt_for_login = true;
+ 
+   blink::RendererPreferences renderer_preferences;
+-  UpdateRendererPreferencesForWorkerHelper(&browser_context,
+-                                           &renderer_preferences);
++  UpdateRendererPreferencesForWorkerHelper(
++      &browser_context, &renderer_preferences, storage_key.origin());
+   UpdateAdditionalHeadersForBrowserInitiatedRequest(
+       &request.headers, &browser_context,
+       /*should_update_existing_headers=*/false, renderer_preferences,
+-      /*is_for_worker_script=*/true);
++      /*is_for_worker_script=*/true,
++      network::IsUrlPotentiallyTrustworthy(script_url));
+ 
+   // Set the accept header to '*/*'.
+   // https://fetch.spec.whatwg.org/#concept-fetch
+diff --git a/content/browser/service_worker/service_worker_version.cc b/content/browser/service_worker/service_worker_version.cc
+index f1305b444c..5d37aac2bd 100644
+--- a/content/browser/service_worker/service_worker_version.cc
++++ b/content/browser/service_worker/service_worker_version.cc
+@@ -2792,8 +2792,15 @@ void ServiceWorkerVersion::StartWorkerInternal() {
+       outside_fetch_client_settings_object_.Clone();
+ 
+   ContentBrowserClient* browser_client = GetContentClient()->browser();
+-  params->user_agent = browser_client->GetUserAgent();
+-  params->ua_metadata = browser_client->GetUserAgentMetadata();
++  blink::RendererPreferences identity_preferences;
++  browser_client->OverrideWorkerIdentity(context_->wrapper()->browser_context(),
++                                         key_.origin(), &identity_preferences);
++  const auto& ua_override = identity_preferences.user_agent_override;
++  params->user_agent = ua_override.ua_string_override.empty()
++                           ? browser_client->GetUserAgent()
++                           : ua_override.ua_string_override;
++  params->ua_metadata = ua_override.ua_metadata_override.value_or(
++      browser_client->GetUserAgentMetadata());
+   params->is_installed = IsInstalled(status_);
+   params->script_url_to_skip_throttling = updated_script_url_;
+   params->main_script_load_params = std::move(main_script_load_params_);
+diff --git a/content/browser/worker_host/dedicated_worker_host.cc b/content/browser/worker_host/dedicated_worker_host.cc
+index b206e6eb31..728beb5e5b 100644
+--- a/content/browser/worker_host/dedicated_worker_host.cc
++++ b/content/browser/worker_host/dedicated_worker_host.cc
+@@ -29,6 +29,7 @@
+ #include "content/browser/renderer_host/frame_tree_node.h"
+ #include "content/browser/renderer_host/local_network_access_util.h"
+ #include "content/browser/renderer_host/render_frame_host_impl.h"
++#include "content/browser/renderer_preferences_util.h"
+ #include "content/browser/security/cpsp/child_process_security_policy_impl.h"
+ #include "content/browser/service_worker/service_worker_client.h"
+ #include "content/browser/service_worker/service_worker_context_core.h"
+@@ -646,6 +647,15 @@ void DedicatedWorkerHost::DidStartScriptLoad(
+                 ukm::kInvalidSourceId);
+   }
+ 
++  blink::RendererPreferences identity_preferences;
++  UpdateRendererPreferencesForWorkerHelper(
++      GetProcessHost()->GetBrowserContext(), &identity_preferences,
++      worker_storage_key_.origin());
++  if (!identity_preferences.user_agent_override.ua_string_override.empty()) {
++    result->main_script_load_params->identity_preferences =
++        std::move(identity_preferences);
++  }
++
+   client_->OnScriptLoadStarted(
+       std::move(container_info), std::move(result->main_script_load_params),
+       std::move(result->subresource_loader_factories),
+diff --git a/content/browser/worker_host/shared_worker_host.cc b/content/browser/worker_host/shared_worker_host.cc
+index dcbf9f96ec..c4e43869b3 100644
+--- a/content/browser/worker_host/shared_worker_host.cc
++++ b/content/browser/worker_host/shared_worker_host.cc
+@@ -409,7 +409,8 @@ void SharedWorkerHost::Start(
+ 
+   auto renderer_preferences = blink::RendererPreferences();
+   UpdateRendererPreferencesForWorkerHelper(
+-      GetProcessHost()->GetBrowserContext(), &renderer_preferences);
++      GetProcessHost()->GetBrowserContext(), &renderer_preferences,
++      instance_.worker_storage_key().origin());
+ 
+   // Create a RendererPreferenceWatcher to observe updates in the preferences.
+   mojo::PendingRemote<blink::mojom::RendererPreferenceWatcher> watcher_remote;
+@@ -504,6 +505,13 @@ void SharedWorkerHost::Start(
+                                    .GetWebExposedIsolationInfo()
+                                    .is_isolated();
+ 
++  const auto& ua_override = renderer_preferences.user_agent_override;
++  const auto user_agent = ua_override.ua_string_override.empty()
++                              ? GetContentClient()->browser()->GetUserAgent()
++                              : ua_override.ua_string_override;
++  const auto ua_metadata = ua_override.ua_metadata_override.value_or(
++      GetContentClient()->browser()->GetUserAgentMetadata());
++
+   // Send the CreateSharedWorker message.
+   factory_.Bind(std::move(factory));
+   factory_->CreateSharedWorker(
+@@ -511,12 +519,10 @@ void SharedWorkerHost::Start(
+       instance_.worker_storage_key().origin(),
+       creator_policy_container_host_ &&
+           creator_policy_container_host_->policies().is_web_secure_context,
+-      GetContentClient()->browser()->GetUserAgent(),
+-      GetContentClient()->browser()->GetUserAgentMetadata(),
+-      devtools_handle_->pause_on_start(), devtools_handle_->dev_tools_token(),
+-      std::move(renderer_preferences), std::move(preference_watcher_receiver),
+-      std::move(content_settings), std::move(container_info),
+-      std::move(result.main_script_load_params),
++      user_agent, ua_metadata, devtools_handle_->pause_on_start(),
++      devtools_handle_->dev_tools_token(), std::move(renderer_preferences),
++      std::move(preference_watcher_receiver), std::move(content_settings),
++      std::move(container_info), std::move(result.main_script_load_params),
+       std::move(result.subresource_loader_factories), std::move(controller),
+       policy_container_host->CreatePolicyContainerForBlink(),
+       receiver_.BindNewPipeAndPassRemote(), std::move(worker_receiver_),
+diff --git a/content/browser/worker_host/worker_script_fetcher.cc b/content/browser/worker_host/worker_script_fetcher.cc
+index 77f5160431..07a84221f7 100644
+--- a/content/browser/worker_host/worker_script_fetcher.cc
++++ b/content/browser/worker_host/worker_script_fetcher.cc
+@@ -57,6 +57,7 @@
+ #include "services/network/public/cpp/constants.h"
+ #include "services/network/public/cpp/features.h"
+ #include "services/network/public/cpp/ip_address_space_util.h"
++#include "services/network/public/cpp/is_potentially_trustworthy.h"
+ #include "services/network/public/cpp/permissions_policy/permissions_policy.h"
+ #include "services/network/public/cpp/record_ontransfersizeupdate_utils.h"
+ #include "services/network/public/cpp/shared_url_loader_factory.h"
+@@ -120,12 +121,14 @@ void AddAdditionalRequestHeaders(network::ResourceRequest* resource_request,
+       net::HttpRequestHeaders::kAccept, network::kDefaultAcceptHeaderValue);
+ 
+   blink::RendererPreferences renderer_preferences;
+-  UpdateRendererPreferencesForWorkerHelper(browser_context,
+-                                           &renderer_preferences);
++  UpdateRendererPreferencesForWorkerHelper(
++      browser_context, &renderer_preferences,
++      url::Origin::Create(resource_request->url));
+   UpdateAdditionalHeadersForBrowserInitiatedRequest(
+       &resource_request->headers, browser_context,
+       /*should_update_existing_headers=*/false, renderer_preferences,
+-      /*is_for_worker_script=*/true);
++      /*is_for_worker_script=*/true,
++      network::IsUrlPotentiallyTrustworthy(resource_request->url));
+ }
+ 
+ // Build `PolicyContainerPolicies` from the worker script response headers or
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index 92be4ef5f5..4b0c83cf5b 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -612,6 +612,11 @@ void ContentBrowserClient::UpdateRendererPreferencesForWorker(
+   // |browser_context| may be null (e.g. during shutdown of a service worker).
+ }
+ 
++void ContentBrowserClient::OverrideWorkerIdentity(
++    BrowserContext* browser_context,
++    const url::Origin& origin,
++    blink::RendererPreferences* out_prefs) {}
++
+ void ContentBrowserClient::RequestFilesAccess(
+     const std::vector<base::FilePath>& files,
+     const GURL& destination_url,
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 9a920eb24d..7715ad4f00 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -1029,6 +1029,13 @@ class CONTENT_EXPORT ContentBrowserClient {
+       BrowserContext* browser_context,
+       blink::RendererPreferences* out_prefs);
+ 
++  // Chooses an independent worker identity from its origin, including workers
++  // that start without a live document. Empty UA overrides keep content
++  // defaults.
++  virtual void OverrideWorkerIdentity(BrowserContext* browser_context,
++                                      const url::Origin& origin,
++                                      blink::RendererPreferences* out_prefs);
++
+   // Requests access to |files| in order to be sent to |destination_url|.
+   // |continuation_callback| is called with a token that should be held until
+   // `open()` operation on the files is finished.
+diff --git a/content/renderer/worker/dedicated_worker_host_factory_client.cc b/content/renderer/worker/dedicated_worker_host_factory_client.cc
+index a0814715b2..ca3019d02e 100644
+--- a/content/renderer/worker/dedicated_worker_host_factory_client.cc
++++ b/content/renderer/worker/dedicated_worker_host_factory_client.cc
+@@ -150,6 +150,8 @@ void DedicatedWorkerHostFactoryClient::OnScriptLoadStarted(
+   // the browser process.
+   auto worker_main_script_load_params =
+       std::make_unique<blink::WorkerMainScriptLoadParameters>();
++  worker_main_script_load_params->identity_preferences =
++      std::move(main_script_load_params->identity_preferences);
+   worker_main_script_load_params->request_id =
+       main_script_load_params->request_id;
+   worker_main_script_load_params->response_head =
+diff --git a/third_party/blink/common/renderer_preferences/renderer_preferences_mojom_traits.cc b/third_party/blink/common/renderer_preferences/renderer_preferences_mojom_traits.cc
+index 63d141c841..1a58ff2472 100644
+--- a/third_party/blink/common/renderer_preferences/renderer_preferences_mojom_traits.cc
++++ b/third_party/blink/common/renderer_preferences/renderer_preferences_mojom_traits.cc
+@@ -18,14 +18,16 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
+   out->can_accept_load_drops = data.can_accept_load_drops();
+   out->should_antialias_text = data.should_antialias_text();
+ 
+-  if (!data.ReadHinting(&out->hinting))
++  if (!data.ReadHinting(&out->hinting)) {
+     return false;
++  }
+   out->use_autohinter = data.use_autohinter();
+ 
+   out->use_bitmaps = data.use_bitmaps();
+ 
+-  if (!data.ReadSubpixelRendering(&out->subpixel_rendering))
++  if (!data.ReadSubpixelRendering(&out->subpixel_rendering)) {
+     return false;
++  }
+   out->use_subpixel_positioning = data.use_subpixel_positioning();
+ 
+ #if BUILDFLAG(IS_WIN)
+@@ -42,8 +44,9 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
+   out->browser_handles_all_top_level_requests =
+       data.browser_handles_all_top_level_requests();
+ 
+-  if (!data.ReadCaretBlinkInterval(&out->caret_blink_interval))
++  if (!data.ReadCaretBlinkInterval(&out->caret_blink_interval)) {
+     return false;
++  }
+ 
+   out->use_custom_colors = data.use_custom_colors();
+ 
+@@ -57,8 +60,9 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
+   out->enable_do_not_track = data.enable_do_not_track();
+   out->enable_encrypted_media = data.enable_encrypted_media();
+ 
+-  if (!data.ReadWebrtcIpHandlingPolicy(&out->webrtc_ip_handling_policy))
++  if (!data.ReadWebrtcIpHandlingPolicy(&out->webrtc_ip_handling_policy)) {
+     return false;
++  }
+ 
+   if (!data.ReadWebrtcIpHandlingUrls(&out->webrtc_ip_handling_urls)) {
+     return false;
+@@ -68,41 +72,55 @@ bool StructTraits<blink::mojom::RendererPreferencesDataView,
+   out->webrtc_udp_min_port = data.webrtc_udp_min_port();
+   out->webrtc_udp_max_port = data.webrtc_udp_max_port();
+ 
+-  if (!data.ReadWebrtcLocalIpsAllowedUrls(&out->webrtc_local_ips_allowed_urls))
++  if (!data.ReadWebrtcLocalIpsAllowedUrls(
++          &out->webrtc_local_ips_allowed_urls)) {
+     return false;
++  }
++
++  if (!data.ReadUserAgentOverride(&out->user_agent_override)) {
++    return false;
++  }
+ 
+-  if (!data.ReadUserAgentOverride(&out->user_agent_override))
++  if (!data.ReadNavigatorPlatformOverride(&out->navigator_platform_override)) {
+     return false;
++  }
+ 
+-  if (!data.ReadAcceptLanguages(&out->accept_languages))
++  if (!data.ReadAcceptLanguages(&out->accept_languages)) {
+     return false;
++  }
+ 
+   out->send_subresource_notification = data.send_subresource_notification();
+ 
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+-  if (!data.ReadSystemFontFamilyName(&out->system_font_family_name))
++  if (!data.ReadSystemFontFamilyName(&out->system_font_family_name)) {
+     return false;
++  }
+ #endif
+ #if BUILDFLAG(IS_WIN)
+-  if (!data.ReadCaptionFontFamilyName(&out->caption_font_family_name))
++  if (!data.ReadCaptionFontFamilyName(&out->caption_font_family_name)) {
+     return false;
++  }
+   out->caption_font_height = data.caption_font_height();
+ 
+   if (!data.ReadSmallCaptionFontFamilyName(
+-          &out->small_caption_font_family_name))
++          &out->small_caption_font_family_name)) {
+     return false;
++  }
+   out->small_caption_font_height = data.small_caption_font_height();
+ 
+-  if (!data.ReadMenuFontFamilyName(&out->menu_font_family_name))
++  if (!data.ReadMenuFontFamilyName(&out->menu_font_family_name)) {
+     return false;
++  }
+   out->menu_font_height = data.menu_font_height();
+ 
+-  if (!data.ReadStatusFontFamilyName(&out->status_font_family_name))
++  if (!data.ReadStatusFontFamilyName(&out->status_font_family_name)) {
+     return false;
++  }
+   out->status_font_height = data.status_font_height();
+ 
+-  if (!data.ReadMessageFontFamilyName(&out->message_font_family_name))
++  if (!data.ReadMessageFontFamilyName(&out->message_font_family_name)) {
+     return false;
++  }
+   out->message_font_height = data.message_font_height();
+ #endif
+ #if BUILDFLAG(IS_OZONE)
+diff --git a/third_party/blink/public/common/loader/worker_main_script_load_parameters.h b/third_party/blink/public/common/loader/worker_main_script_load_parameters.h
+index 1638aaa7b4..508123e9ec 100644
+--- a/third_party/blink/public/common/loader/worker_main_script_load_parameters.h
++++ b/third_party/blink/public/common/loader/worker_main_script_load_parameters.h
+@@ -11,6 +11,7 @@
+ #include "services/network/public/mojom/url_loader.mojom.h"
+ #include "services/network/public/mojom/url_response_head.mojom.h"
+ #include "third_party/blink/public/common/common_export.h"
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+ 
+ namespace blink {
+ 
+@@ -21,6 +22,7 @@ struct BLINK_COMMON_EXPORT WorkerMainScriptLoadParameters {
+   WorkerMainScriptLoadParameters() = default;
+   ~WorkerMainScriptLoadParameters() = default;
+ 
++  std::optional<RendererPreferences> identity_preferences;
+   int request_id;
+   network::mojom::URLResponseHeadPtr response_head;
+   mojo::ScopedDataPipeConsumerHandle response_body;
+diff --git a/third_party/blink/public/common/renderer_preferences/renderer_preferences.h b/third_party/blink/public/common/renderer_preferences/renderer_preferences.h
+index 0fdf8029f8..d654e557e3 100644
+--- a/third_party/blink/public/common/renderer_preferences/renderer_preferences.h
++++ b/third_party/blink/public/common/renderer_preferences/renderer_preferences.h
+@@ -66,6 +66,8 @@ struct BLINK_COMMON_EXPORT RendererPreferences {
+   uint16_t webrtc_udp_max_port{0};
+   std::vector<std::string> webrtc_local_ips_allowed_urls;
+   UserAgentOverride user_agent_override;
++  // NavigatorID platform for workers. Empty uses the native platform.
++  std::string navigator_platform_override;
+   std::string accept_languages;
+   bool send_subresource_notification{false};
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+diff --git a/third_party/blink/public/common/renderer_preferences/renderer_preferences_mojom_traits.h b/third_party/blink/public/common/renderer_preferences/renderer_preferences_mojom_traits.h
+index 3851a3a49a..6b357a3f82 100644
+--- a/third_party/blink/public/common/renderer_preferences/renderer_preferences_mojom_traits.h
++++ b/third_party/blink/public/common/renderer_preferences/renderer_preferences_mojom_traits.h
+@@ -173,6 +173,11 @@ struct BLINK_COMMON_EXPORT
+     return data.user_agent_override;
+   }
+ 
++  static const std::string& navigator_platform_override(
++      const ::blink::RendererPreferences& data) {
++    return data.navigator_platform_override;
++  }
++
+   static const std::string& accept_languages(
+       const ::blink::RendererPreferences& data) {
+     return data.accept_languages;
+@@ -274,7 +279,6 @@ struct BLINK_COMMON_EXPORT
+     return data.autofill_shortcut_modifiers;
+   }
+ 
+-
+   static bool autofill_at_memory_double_ctrl_trigger_enabled(
+       const ::blink::RendererPreferences& data) {
+     return data.autofill_at_memory_double_ctrl_trigger_enabled;
+diff --git a/third_party/blink/public/mojom/renderer_preferences.mojom b/third_party/blink/public/mojom/renderer_preferences.mojom
+index 88f561eac9..4d66f67046 100644
+--- a/third_party/blink/public/mojom/renderer_preferences.mojom
++++ b/third_party/blink/public/mojom/renderer_preferences.mojom
+@@ -121,6 +121,7 @@ struct RendererPreferences {
+   // The user agent given to WebKit when it requests one and the user agent is
+   // being overridden for the current navigation.
+   UserAgentOverride user_agent_override;
++  string navigator_platform_override;
+ 
+   // The accept-languages of the browser, comma-separated.
+   string accept_languages;
+diff --git a/third_party/blink/public/mojom/worker/worker_main_script_load_params.mojom b/third_party/blink/public/mojom/worker/worker_main_script_load_params.mojom
+index ac88a74abe..acd1d51a67 100644
+--- a/third_party/blink/public/mojom/worker/worker_main_script_load_params.mojom
++++ b/third_party/blink/public/mojom/worker/worker_main_script_load_params.mojom
+@@ -5,12 +5,16 @@
+ module blink.mojom;
+ 
+ import "services/network/public/mojom/url_loader.mojom";
++import "third_party/blink/public/mojom/renderer_preferences.mojom";
+ import "services/network/public/mojom/url_response_head.mojom";
+ 
+ // NetworkService (PlzWorker):
+ // Used for passing the web worker main script pre-requested by the browser
+ // process and its redirect information.
+ struct WorkerMainScriptLoadParams {
++  // Optional embedder-selected identity for a dedicated worker's own origin.
++  RendererPreferences? identity_preferences;
++
+   // Request ID for a browser-initiated request.
+   int32 request_id;
+ 
+diff --git a/third_party/blink/public/platform/web_worker_fetch_context.h b/third_party/blink/public/platform/web_worker_fetch_context.h
+index 237899e63e..060e393394 100644
+--- a/third_party/blink/public/platform/web_worker_fetch_context.h
++++ b/third_party/blink/public/platform/web_worker_fetch_context.h
+@@ -162,6 +162,11 @@ class WebWorkerFetchContext : public base::RefCounted<WebWorkerFetchContext> {
+     return nullptr;
+   }
+ 
++  // Applied before the worker starts, after the browser chooses its identity.
++  void SetIdentityPreferences(const RendererPreferences& preferences) {
++    renderer_preferences_ = preferences;
++  }
++
+   const RendererPreferences& GetRendererPreferences() const {
+     return renderer_preferences_;
+   }
+diff --git a/third_party/blink/renderer/core/loader/worker_fetch_context.cc b/third_party/blink/renderer/core/loader/worker_fetch_context.cc
+index 8173b16883..126f5910fe 100644
+--- a/third_party/blink/renderer/core/loader/worker_fetch_context.cc
++++ b/third_party/blink/renderer/core/loader/worker_fetch_context.cc
+@@ -5,6 +5,7 @@
+ #include "third_party/blink/renderer/core/loader/worker_fetch_context.h"
+ 
+ #include "base/task/single_thread_task_runner.h"
++#include "net/http/structured_headers.h"
+ #include "third_party/blink/public/mojom/fetch/fetch_api_request.mojom-blink.h"
+ #include "third_party/blink/public/platform/web_content_settings_client.h"
+ #include "third_party/blink/public/platform/web_url_request.h"
+@@ -19,6 +20,7 @@
+ #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
+ #include "third_party/blink/renderer/platform/exported/wrapped_resource_request.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
++#include "third_party/blink/renderer/platform/loader/fetch/client_hints_preferences.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/fetch_client_settings_object.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher.h"
+ #include "third_party/blink/renderer/platform/loader/fetch/resource_fetcher_properties.h"
+@@ -235,6 +237,26 @@ void WorkerFetchContext::AddAdditionalRequestHeaders(ResourceRequest& request) {
+     return;
+   }
+ 
++  const auto& ua_override =
++      global_scope_->GetRendererPreferences().user_agent_override;
++  if (!ua_override.ua_string_override.empty() &&
++      GetExecutionContext()->IsSecureContext() &&
++      ClientHintsPreferences::IsClientHintsAllowed(request.Url())) {
++    const auto metadata = global_scope_->GetUserAgentMetadata();
++    request.SetHttpHeaderField(
++        AtomicString("Sec-CH-UA"),
++        AtomicString(metadata.SerializeBrandMajorVersionList().c_str()));
++    request.SetHttpHeaderField(AtomicString("Sec-CH-UA-Mobile"),
++                               AtomicString(metadata.mobile ? "?1" : "?0"));
++    const auto platform = net::structured_headers::SerializeItem(
++        net::structured_headers::ItemView(
++            net::structured_headers::ItemView::string, metadata.platform));
++    if (platform) {
++      request.SetHttpHeaderField(AtomicString("Sec-CH-UA-Platform"),
++                                 AtomicString(platform->c_str()));
++    }
++  }
++
+   // TODO(crbug.com/1315612): WARNING: This bypasses the permissions policy.
+   // Unfortunately, workers lack a permissions policy and to derive proper hints
+   // https://github.com/w3c/webappsec-permissions-policy/issues/207.
+@@ -332,8 +354,9 @@ WorkerFetchContext::CreateResourceLoadInfoNotifierWrapper() {
+ }
+ 
+ void WorkerFetchContext::SetFirstPartyCookie(ResourceRequest& out_request) {
+-  if (out_request.SiteForCookies().IsNull())
++  if (out_request.SiteForCookies().IsNull()) {
+     out_request.SetSiteForCookies(GetSiteForCookies());
++  }
+ }
+ 
+ WorkerSettings* WorkerFetchContext::GetWorkerSettings() const {
+@@ -341,11 +364,11 @@ WorkerSettings* WorkerFetchContext::GetWorkerSettings() const {
+   return scope ? scope->GetWorkerSettings() : nullptr;
+ }
+ 
+-bool WorkerFetchContext::AllowRunningInsecureContent(
+-    bool enabled_per_settings,
+-    const KURL& url) const {
+-  if (!global_scope_->ContentSettingsClient())
++bool WorkerFetchContext::AllowRunningInsecureContent(bool enabled_per_settings,
++                                                     const KURL& url) const {
++  if (!global_scope_->ContentSettingsClient()) {
+     return enabled_per_settings;
++  }
+   return global_scope_->ContentSettingsClient()->AllowRunningInsecureContent(
+       enabled_per_settings, url);
+ }
+diff --git a/third_party/blink/renderer/core/workers/dedicated_worker.cc b/third_party/blink/renderer/core/workers/dedicated_worker.cc
+index 64be4c4900..0333066452 100644
+--- a/third_party/blink/renderer/core/workers/dedicated_worker.cc
++++ b/third_party/blink/renderer/core/workers/dedicated_worker.cc
+@@ -460,13 +460,24 @@ void DedicatedWorker::ContinueStartInternal(
+   if (!GetExecutionContext()) {
+     return;
+   }
++  auto creation_params = CreateGlobalScopeCreationParams(
++      script_url, std::move(coep_reporting_observer),
++      std::move(dip_reporting_observer));
++  if (worker_main_script_load_params->identity_preferences) {
++    const auto& preferences =
++        *worker_main_script_load_params->identity_preferences;
++    const auto& ua = preferences.user_agent_override;
++    creation_params->user_agent = String::FromUtf8(ua.ua_string_override);
++    if (ua.ua_metadata_override) {
++      creation_params->ua_metadata = *ua.ua_metadata_override;
++    }
++    creation_params->web_worker_fetch_context->SetIdentityPreferences(
++        preferences);
++  }
+   context_proxy_->StartWorkerGlobalScope(
+-      CreateGlobalScopeCreationParams(script_url,
+-                                      std::move(coep_reporting_observer),
+-                                      std::move(dip_reporting_observer)),
+-      std::move(worker_main_script_load_params), options_, script_url,
+-      *outside_fetch_client_settings_object_, v8_stack_trace_id_, token_,
+-      std::move(pending_dedicated_worker_host_),
++      std::move(creation_params), std::move(worker_main_script_load_params),
++      options_, script_url, *outside_fetch_client_settings_object_,
++      v8_stack_trace_id_, token_, std::move(pending_dedicated_worker_host_),
+       std::move(back_forward_cache_controller_host),
+       std::move(policy_container));
+ }
+diff --git a/third_party/blink/renderer/core/workers/worker_navigator.cc b/third_party/blink/renderer/core/workers/worker_navigator.cc
+index db1a55d008..aafbbd7037 100644
+--- a/third_party/blink/renderer/core/workers/worker_navigator.cc
++++ b/third_party/blink/renderer/core/workers/worker_navigator.cc
+@@ -25,6 +25,8 @@
+  */
+ 
+ #include "third_party/blink/renderer/core/workers/worker_navigator.h"
++
++#include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
+ #include "third_party/blink/public/platform/web_worker_fetch_context.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+ #include "third_party/blink/renderer/core/dom/events/event_target.h"
+@@ -53,6 +55,18 @@ String WorkerNavigator::GetAcceptLanguages() {
+   return global_scope->GetAcceptLanguages();
+ }
+ 
++String WorkerNavigator::platform() const {
++  auto* scope = To<WorkerOrWorkletGlobalScope>(GetExecutionContext());
++  if (scope) {
++    const auto& platform =
++        scope->GetRendererPreferences().navigator_platform_override;
++    if (!platform.empty()) {
++      return String::FromUtf8(platform);
++    }
++  }
++  return NavigatorBase::platform();
++}
++
+ void WorkerNavigator::NotifyUpdate() {
+   WorkerOrWorkletGlobalScope* global_scope =
+       To<WorkerOrWorkletGlobalScope>(GetExecutionContext());
+diff --git a/third_party/blink/renderer/core/workers/worker_navigator.h b/third_party/blink/renderer/core/workers/worker_navigator.h
+index ab622f8ebc..ea23712422 100644
+--- a/third_party/blink/renderer/core/workers/worker_navigator.h
++++ b/third_party/blink/renderer/core/workers/worker_navigator.h
+@@ -21,7 +21,7 @@
+  * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+-*/
++ */
+ 
+ #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_WORKER_NAVIGATOR_H_
+ #define THIRD_PARTY_BLINK_RENDERER_CORE_WORKERS_WORKER_NAVIGATOR_H_
+@@ -44,6 +44,7 @@ class CORE_EXPORT WorkerNavigator final : public NavigatorBase,
+ 
+   // NavigatorLanguage override
+   String GetAcceptLanguages() override;
++  String platform() const override;
+ 
+   // AcceptLanguagesWatcher override
+   void NotifyUpdate() override;
+diff --git a/ui/display/screen.h b/ui/display/screen.h
+index c8bd0657da..cd628cf9a2 100644
+--- a/ui/display/screen.h
++++ b/ui/display/screen.h
+@@ -137,7 +137,8 @@ class DISPLAY_EXPORT Screen {
+   // to be non-empty.  This function also performs fallback to ensure the result
+   // also has a valid current ScreenInfo and exactly one primary ScreenInfo
+   // (both of which may or may not be `nearest_id`).
+-  display::ScreenInfos GetScreenInfosNearestDisplay(int64_t nearest_id) const;
++  virtual display::ScreenInfos GetScreenInfosNearestDisplay(
++      int64_t nearest_id) const;
+ 
+ #if BUILDFLAG(IS_LINUX)
+   // Object which suspends the platform-specific screensaver for the duration of

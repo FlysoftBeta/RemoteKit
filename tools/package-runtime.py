@@ -418,6 +418,8 @@ def package_runtime(args, node_runtime):
             raise RuntimeError(f'Runtime dependency escapes output tree: {entry}')
         relative = source.relative_to(output)
         include = source.suffix.lower() in {'.dll', '.pak', '.dat', '.bin'}
+        if relative.parent == Path('locales') and relative.name not in {'zh-CN.pak', 'en-US.pak'}:
+            include = False
         include |= source.name == browser_name
         include |= source.name == 'vk_swiftshader_icd.json'
         if not include:
@@ -426,7 +428,14 @@ def package_runtime(args, node_runtime):
         if not source.is_file():
             raise FileNotFoundError(source)
         selected[relative] = source
-    for name in [browser_name, 'remotekit.pak', 'icudtl.dat', 'v8_context_snapshot.bin']:
+    for name in [
+        browser_name,
+        'remotekit.pak',
+        'locales/zh-CN.pak',
+        'locales/en-US.pak',
+        'icudtl.dat',
+        'v8_context_snapshot.bin',
+    ]:
         source = output / name
         if not source.is_file():
             raise FileNotFoundError(source)
