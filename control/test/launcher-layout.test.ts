@@ -86,7 +86,7 @@ test('tile spans follow group semantics and score ratios at boundaries', () => {
   ];
   assert.deepEqual(
     launcherLayout(semantic, 600).groups.flatMap((group) => group.tiles.map((tile) => tile.size)),
-    ['medium', 'medium', 'small', 'medium', 'medium', 'medium'],
+    ['small', 'small', 'small', 'medium', 'medium', 'medium'],
   );
 });
 

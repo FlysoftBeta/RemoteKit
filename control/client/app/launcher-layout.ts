@@ -85,7 +85,8 @@ export function launcherLayout(items: LauncherItem[], availableHeight: number, q
       id,
       title,
       tiles: entries.map((item, index) => {
-        const size = tileSize(item, index, entries);
+        // The App row is a catalog of everything installed, so its tiles stay uniform.
+        const size = id === 'apps' ? 'small' : tileSize(item, index, entries);
         const span = SPANS[size];
         return { ...item, size, span, width: span * height + (span - 1) * LAUNCHER_SPACING };
       }),
