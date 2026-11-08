@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <string>
+#include "base/files/file_path.h"
 
 #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
 
@@ -16,7 +17,8 @@ std::string ChromeUserAgent();
 blink::UserAgentOverride ChromeUserAgentOverride(bool tablet);
 blink::UserAgentMetadata ChromeUserAgentMetadata();
 // The caller owns one delegate per BrowserContext.
-std::unique_ptr<content::ClientHintsControllerDelegate> CreateClientHintsDelegate();
+std::unique_ptr<content::ClientHintsControllerDelegate> CreateClientHintsDelegate(
+    const base::FilePath& profile);
 
 }  // namespace remotekit::browser
 #endif  // REMOTEKIT_BROWSER_COMPAT_H_

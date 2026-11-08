@@ -2,6 +2,13 @@
 
 #include <map>
 #include <vector>
+#include "base/files/file_util.h"
+#include "base/files/important_file_writer.h"
+#include "base/logging.h"
+#include "base/task/thread_pool.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/json/json_reader.h"
+#include "base/json/json_writer.h"
 
 #include "base/functional/bind.h"
 #include "base/strings/string_number_conversions.h"
@@ -17,9 +24,27 @@ namespace remotekit::browser {
 namespace {
 using Hint = network::mojom::WebClientHintsType;
 
-class MemoryClientHintsDelegate final : public content::ClientHintsControllerDelegate {
+class ProfileClientHintsDelegate final : public content::ClientHintsControllerDelegate {
  public:
-  MemoryClientHintsDelegate() : tracker_(base::BindRepeating(&content::GetNetworkService)) {}
+  explicit ProfileClientHintsDelegate(const base::FilePath& profile)
+      : tracker_(base::BindRepeating(&content::GetNetworkService)),
+        file_(profile.AppendASCII("ClientHints.json")) {
+    std::string text;
+    if (!base::ReadFileToString(file_, &text))
+      return;
+    auto data = base::JSONReader::ReadDict(text, base::JSON_PARSE_RFC);
+    if (!data)
+      return;
+    for (const auto [key, value] : *data) {
+      const auto origin = url::Origin::Create(GURL(key));
+      if (origin.opaque() || !value.is_list())
+        continue;
+      for (const auto& item : value.GetList()) {
+        if (item.is_int() && network::mojom::IsKnownEnumValue(static_cast<Hint>(item.GetInt())))
+          hints_[origin].push_back(static_cast<Hint>(item.GetInt()));
+      }
+    }
+  }
   network::NetworkQualityTracker* GetNetworkQualityTracker() override { return &tracker_; }
   void GetAllowedClientHintsFromSource(const url::Origin& origin,
                                        blink::EnabledClientHints* hints) override {
@@ -36,11 +61,17 @@ class MemoryClientHintsDelegate final : public content::ClientHintsControllerDel
   void PersistClientHints(const url::Origin& origin,
                           content::RenderFrameHost*,
                           const std::vector<Hint>& hints) override {
-    if (!origin.opaque())
-      hints_[origin] = hints;
+    if (origin.opaque())
+      return;
+    const auto found = hints_.find(origin);
+    if (found != hints_.end() && found->second == hints)
+      return;
+    hints_[origin] = hints;
+    Save();
   }
   void ResetForTesting() override {
     hints_.clear();
+    Save();
     additional_.clear();
   }
   void SetAdditionalClientHints(const std::vector<Hint>& hints) override { additional_ = hints; }
@@ -53,7 +84,28 @@ class MemoryClientHintsDelegate final : public content::ClientHintsControllerDel
   bool ShouldForceEmptyViewportSize() override { return force_empty_; }
 
  private:
+  void Save() {
+    base::DictValue data;
+    for (const auto& [origin, hints] : hints_) {
+      base::ListValue values;
+      for (auto hint : hints)
+        values.Append(static_cast<int>(hint));
+      data.Set(origin.Serialize(), std::move(values));
+    }
+    std::string text;
+    CHECK(base::JSONWriter::Write(data, &text));
+    writer_->PostTask(FROM_HERE,
+                      base::BindOnce(
+                          [](base::FilePath file, std::string json) {
+                            if (!base::ImportantFileWriter::WriteFileAtomically(file, json))
+                              LOG(ERROR) << "Cannot persist client hints in " << file;
+                          },
+                          file_, std::move(text)));
+  }
   network::NetworkQualityTracker tracker_;
+  base::FilePath file_;
+  scoped_refptr<base::SequencedTaskRunner> writer_ = base::ThreadPool::CreateSequencedTaskRunner(
+      {base::MayBlock(), base::TaskShutdownBehavior::BLOCK_SHUTDOWN});
   std::map<url::Origin, std::vector<Hint>> hints_;
   std::vector<Hint> additional_;
   gfx::Size viewport_;
@@ -103,7 +155,8 @@ blink::UserAgentOverride ChromeUserAgentOverride(bool tablet) {
   return ua;
 }
 
-std::unique_ptr<content::ClientHintsControllerDelegate> CreateClientHintsDelegate() {
-  return std::make_unique<MemoryClientHintsDelegate>();
+std::unique_ptr<content::ClientHintsControllerDelegate> CreateClientHintsDelegate(
+    const base::FilePath& profile) {
+  return std::make_unique<ProfileClientHintsDelegate>(profile);
 }
 }  // namespace remotekit::browser

@@ -77,6 +77,24 @@ class PageRequests final : public content::WebContentsDelegate,
                                        bool user_gesture,
                                        bool* was_blocked) override;
 
+  content::WebContents* OpenURLFromTab(
+      content::WebContents*,
+      const content::OpenURLParams&,
+      base::OnceCallback<void(content::NavigationHandle&)>) override;
+  static content::WebContents* OpenURLFromBrowser(content::BrowserContext*,
+                                                  const content::OpenURLParams&);
+  void ShowRepostFormWarningDialog(content::WebContents*) override;
+  blink::mojom::DisplayMode GetDisplayMode(const content::WebContents*) override;
+  bool IsBackForwardCacheSupported(content::WebContents&) override { return true; }
+  void RequestMediaAccessPermission(content::WebContents*,
+                                    const content::MediaStreamRequest&,
+                                    content::MediaResponseCallback) override;
+  bool CheckMediaAccessPermission(content::RenderFrameHost*,
+                                  const url::Origin&,
+                                  blink::mojom::MediaStreamType) override;
+  void ProcessSelectAudioOutput(const content::SelectAudioOutputRequest&,
+                                content::SelectAudioOutputCallback) override;
+
   content::JavaScriptDialogManager* GetJavaScriptDialogManager(content::WebContents*) override;
   void RunJavaScriptDialog(content::WebContents*,
                            content::RenderFrameHost*,

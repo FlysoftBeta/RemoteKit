@@ -1,0 +1,199 @@
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -2317,6 +2317,9 @@
+   // Allows the embedder to provide an implementation of the WebUSB API.
+   virtual UsbDelegate* GetUsbDelegate();
+ 
++  // Process-wide policy, callable on UI and IO sequences before device discovery.
++  virtual bool AllowHostDeviceAccess();
++
+   // Allows the embedder to provide an implementation of the Generic Sensor API.
+   virtual SensorDelegate* GetSensorDelegate();
+ 
+--- a/content/browser/renderer_host/media/media_devices_manager.cc
++++ b/content/browser/renderer_host/media/media_devices_manager.cc
+@@ -617,6 +617,10 @@
+     EnumerationCallback callback,
+     uint64_t request_id) {
+   CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M155);
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess()) {
++    std::move(callback).Run(MediaDeviceEnumeration());
++    return;
++  }
+   SendLogMessage(
+       base::StringPrintf("EnumerateDevices({request_id=%llu})", request_id));
+   bool start_audio_monitoring =
+@@ -853,6 +857,8 @@
+ void MediaDevicesManager::StartMonitoringAndPopulateCache(
+     uint64_t request_id,
+     DeviceStartMonitoringMode start_monitoring_mode) {
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess())
++    return;
+   bool start_audio_device_monitoring =
+       (start_monitoring_mode == DeviceStartMonitoringMode::kStartAudio) ||
+       (start_monitoring_mode == DeviceStartMonitoringMode::kStartAudioAndVideo);
+--- a/content/browser/bluetooth/web_bluetooth_service_impl.cc
++++ b/content/browser/bluetooth/web_bluetooth_service_impl.cc
+@@ -811,6 +811,10 @@
+ 
+ void WebBluetoothServiceImpl::GetAvailability(
+     GetAvailabilityCallback callback) {
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess()) {
++    std::move(callback).Run(false);
++    return;
++  }
+   if (GetBluetoothAllowed() != blink::mojom::WebBluetoothResult::SUCCESS) {
+     std::move(callback).Run(/*result=*/false);
+     return;
+@@ -841,6 +845,10 @@
+ void WebBluetoothServiceImpl::RequestDevice(
+     blink::mojom::WebBluetoothRequestDeviceOptionsPtr options,
+     RequestDeviceCallback callback) {
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess()) {
++    std::move(callback).Run(blink::mojom::WebBluetoothResult::CHOOSER_CANCELLED, nullptr);
++    return;
++  }
+   blink::mojom::WebBluetoothResult allowed_result = GetBluetoothAllowed();
+   if (allowed_result != blink::mojom::WebBluetoothResult::SUCCESS) {
+     if (allowed_result == blink::mojom::WebBluetoothResult::
+@@ -899,6 +907,10 @@
+ }
+ 
+ void WebBluetoothServiceImpl::GetDevices(GetDevicesCallback callback) {
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess()) {
++    std::move(callback).Run({});
++    return;
++  }
+   if (GetBluetoothAllowed() != blink::mojom::WebBluetoothResult::SUCCESS ||
+       !BluetoothAdapterFactoryWrapper::Get().IsLowEnergySupported()) {
+     std::move(callback).Run({});
+--- a/content/browser/webauth/authenticator_common_impl.cc
++++ b/content/browser/webauth/authenticator_common_impl.cc
+@@ -937,6 +937,12 @@
+ 
+ void AuthenticatorCommonImpl::StartMakeCredentialRequest(
+     bool allow_skipping_pin_touch) {
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess()) {
++    GetUIThreadTaskRunner({})->PostTask(
++        FROM_HERE, base::BindOnce(&AuthenticatorCommonImpl::OnCancelFromUI,
++                                 weak_factory_.GetWeakPtr()));
++    return;
++  }
+   req_state_->request_result.reset();
+   InitDiscoveryFactory();
+ 
+@@ -1005,6 +1011,12 @@
+ 
+ void AuthenticatorCommonImpl::StartGetAssertionRequest(
+     bool allow_skipping_pin_touch) {
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess()) {
++    GetUIThreadTaskRunner({})->PostTask(
++        FROM_HERE, base::BindOnce(&AuthenticatorCommonImpl::OnCancelFromUI,
++                                 weak_factory_.GetWeakPtr()));
++    return;
++  }
+   req_state_->request_result.reset();
+   InitDiscoveryFactory();
+ 
+@@ -2432,10 +2444,12 @@
+         options->all_accepted_credentials->user_id,
+         options->all_accepted_credentials->all_accepted_credentials_ids);
+ #if BUILDFLAG(IS_WIN)
++    if (GetContentClient()->browser()->AllowHostDeviceAccess()) {
+     device::WinWebAuthnApiAuthenticator::SignalAllAcceptedCredentials(
+         device::WinWebAuthnApi::GetDefault(), req_state_->relying_party_id,
+         options->all_accepted_credentials->user_id,
+         options->all_accepted_credentials->all_accepted_credentials_ids);
++    }
+ #endif  // BUILDFLAG(IS_WIN)
+   } else if (options->current_user_details) {
+     UpdateVirtualAuthenticatorUserCreds(
+@@ -2451,9 +2465,11 @@
+         options->current_user_details->display_name);
+   } else if (options->unknown_credential_id) {
+ #if BUILDFLAG(IS_WIN)
++    if (GetContentClient()->browser()->AllowHostDeviceAccess()) {
+     device::WinWebAuthnApiAuthenticator::SignalUnknownCredential(
+         device::WinWebAuthnApi::GetDefault(), *options->unknown_credential_id,
+         req_state_->relying_party_id);
++    }
+ #endif  // BUILDFLAG(IS_WIN)
+     DeleteVirtualAuthenticatorCreds(render_frame_host,
+                                     *options->unknown_credential_id,
+@@ -3624,6 +3640,8 @@
+ }
+ 
+ bool AuthenticatorCommonImpl::IsGetMatchingCredentialIdsSupported() {
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess())
++    return false;
+ #if BUILDFLAG(IS_WIN)
+   return device::WinWebAuthnApi::GetDefault() &&
+          device::WinWebAuthnApi::GetDefault()->IsAvailable() &&
+--- a/content/browser/speech/speech_recognition_manager_impl.cc
++++ b/content/browser/speech/speech_recognition_manager_impl.cc
+@@ -429,6 +429,13 @@
+ void SpeechRecognitionManagerImpl::RecognitionAllowedCallback(int session_id,
+                                                               bool ask_user,
+                                                               bool is_allowed) {
++  if (!GetContentClient()->browser()->AllowHostDeviceAccess()) {
++    OnRecognitionError(session_id, media::mojom::SpeechRecognitionError(
++        media::mojom::SpeechRecognitionErrorCode::kAudioCapture,
++        media::mojom::SpeechAudioErrorDetails::kNone));
++    AbortSession(session_id);
++    return;
++  }
+   CHECK_CURRENTLY_ON(BrowserThread::IO, base::NotFatalUntil::M159);
+ 
+   auto iter = sessions_.find(session_id);
+--- a/content/public/browser/screen_orientation_delegate.h
++++ b/content/public/browser/screen_orientation_delegate.h
+@@ -41,6 +41,10 @@
+   // Unlocks the display with the provided `web_contents`, allowing hardware
+   // rotation to resume.
+   virtual void Unlock(WebContents* web_contents) = 0;
++
++  // False when an embedder cannot rotate to the requested orientation.
++  virtual bool IsOrientationLockAllowed(
++      WebContents*, device::mojom::ScreenOrientationLockType);
+ };
+ 
+ } // namespace content
+--- a/content/browser/screen_orientation/screen_orientation_provider.cc
++++ b/content/browser/screen_orientation/screen_orientation_provider.cc
+@@ -18,6 +18,11 @@
+ namespace content {
+ 
+ using device::mojom::ScreenOrientationLockResult;
++
++bool ScreenOrientationDelegate::IsOrientationLockAllowed(
++    WebContents*, device::mojom::ScreenOrientationLockType) {
++  return true;
++}
+ 
+ ScreenOrientationDelegate* ScreenOrientationProvider::delegate_ = nullptr;
+ 
+@@ -117,6 +122,11 @@
+     }
+   }
+ 
++  if (!delegate_->IsOrientationLockAllowed(web_contents(), orientation)) {
++    NotifyLockResult(ScreenOrientationLockResult::
++                         SCREEN_ORIENTATION_LOCK_RESULT_ERROR_NOT_AVAILABLE);
++    return;
++  }
+   lock_applied_ = true;
+   delegate_->Lock(web_contents(), orientation);
+   if (auto* view = web_contents()->GetRenderWidgetHostView())
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -1288,6 +1288,10 @@
+   return nullptr;
+ }
+ 
++bool ContentBrowserClient::AllowHostDeviceAccess() {
++  return true;
++}
++
+ UsbDelegate* ContentBrowserClient::GetUsbDelegate() {
+   return nullptr;
+ }

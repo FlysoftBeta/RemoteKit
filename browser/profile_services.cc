@@ -1,4 +1,8 @@
 #include "browser/profile_services.h"
+#include "content/public/browser/device_service.h"
+#include "mojo/public/cpp/bindings/remote.h"
+#include "services/device/public/mojom/geolocation_control.mojom.h"
+#include "services/network/public/cpp/is_potentially_trustworthy.h"
 
 #include <algorithm>
 #include <limits>
@@ -63,7 +67,6 @@ bool Grantable(Type type) {
     case Type::CLIPBOARD_SANITIZED_WRITE:
     case Type::PERSISTENT_STORAGE:
     case Type::BACKGROUND_SYNC:
-    case Type::PERIODIC_BACKGROUND_SYNC:
     case Type::GEOLOCATION:
       return true;
     default:
@@ -103,7 +106,11 @@ std::optional<Type> ParseType(const std::string* name) {
   return std::nullopt;
 }
 std::optional<Type> DescriptorType(const blink::mojom::PermissionDescriptorPtr& descriptor) {
-  return descriptor ? blink::MaybePermissionDescriptorToPermissionType(descriptor) : std::nullopt;
+  auto type =
+      descriptor ? blink::MaybePermissionDescriptorToPermissionType(descriptor) : std::nullopt;
+  if (type == Type::GEOLOCATION_APPROXIMATE)
+    return Type::GEOLOCATION;
+  return type;
 }
 bool LiveDocument(content::RenderFrameHost* frame, content::BrowserContext* context) {
   auto* contents = frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr;
@@ -123,7 +130,15 @@ Result ProfilePermissions::Lookup(Type type,
   if (!context_ || !Grantable(type) || !Eligible(requesting) || !Eligible(embedding))
     return Denied();
   const auto found = policy_.find({requesting.Serialize(), embedding.Serialize(), type});
-  return Result(found != policy_.end() && found->second ? Status::GRANTED : Status::DENIED);
+  if (found != policy_.end()) {
+    Result result(found->second ? Status::GRANTED : Status::DENIED);
+    if (type == Type::GEOLOCATION && found->second) {
+      result.retrieved_permission_setting = GeolocationSetting{
+          .approximate = PermissionOption::kAllowed, .precise = PermissionOption::kAllowed};
+    }
+    return result;
+  }
+  return Result(type == Type::BACKGROUND_SYNC ? Status::GRANTED : Status::DENIED);
 }
 Status ProfilePermissions::GetPermissionStatus(
     const blink::mojom::PermissionDescriptorPtr& descriptor,
@@ -174,6 +189,15 @@ void ProfilePermissions::RequestPermissionsFromCurrentDocument(
   if (document.AsRenderFrameHostIfValid() != frame || !LiveDocument(frame, context_))
     for (auto& result : results)
       result = Denied();
+  for (size_t i = 0; i < results.size(); ++i) {
+    if (DescriptorType(request.permissions[i]) == Type::GEOLOCATION &&
+        results[i].status == Status::GRANTED) {
+      mojo::Remote<device::mojom::GeolocationControl> control;
+      content::GetDeviceService().BindGeolocationControl(control.BindNewPipeAndPassReceiver());
+      control->UserDidOptIntoLocationServices();
+      break;
+    }
+  }
   // No prompt or posted grant: document validity is checked at the reply point.
   std::move(callback).Run(results);
 }
@@ -362,8 +386,13 @@ AllocatedTarget AllocateTarget(const base::FilePath& directory,
   // user file is handed to Chromium's overwrite-style target API.
   return {path, {}};
 }
-bool HttpsOnly(const GURL& url) {
-  return url.is_valid() && url.SchemeIs("https");
+bool AllowedDownload(const GURL& url, const std::optional<url::Origin>& initiator) {
+  if (!url.is_valid())
+    return false;
+  if (url.SchemeIs("https"))
+    return true;
+  return (url.SchemeIsBlob() || url.SchemeIs("data") || url.SchemeIs("filesystem")) && initiator &&
+         network::IsOriginPotentiallyTrustworthy(*initiator);
 }
 const char* DownloadState(download::DownloadItem::DownloadState state) {
   switch (state) {
@@ -467,10 +496,10 @@ void ProfileDownloads::GetNextId(content::DownloadIdCallback callback) {
   std::move(callback).Run(next_id_++);
 }
 std::string ProfileDownloads::BlockReason(download::DownloadItem* item) const {
-  if (!item || !HttpsOnly(item->GetURL()))
+  if (!item || !AllowedDownload(item->GetURL(), item->GetRequestInitiator()))
     return "https_only_policy";
   for (const auto& url : item->GetUrlChain())
-    if (!HttpsOnly(url))
+    if (!AllowedDownload(url, item->GetRequestInitiator()))
       return "non_https_redirect_blocked";
   if (item->GetDangerType() != download::DOWNLOAD_DANGER_TYPE_NOT_DANGEROUS)
     return "dangerous_download_blocked";
@@ -670,7 +699,7 @@ std::string ProfileDownloads::ApplicationClientIdForFileScanning() {
 void ProfileDownloads::CheckDownloadAllowed(const content::WebContents::Getter& getter,
                                             const GURL& url,
                                             const std::string&,
-                                            std::optional<url::Origin>,
+                                            std::optional<url::Origin> initiator,
                                             bool,
                                             bool,
                                             const std::string&,
@@ -679,7 +708,8 @@ void ProfileDownloads::CheckDownloadAllowed(const content::WebContents::Getter& 
   auto* contents = getter.Run();
   auto* frame = contents ? contents->GetPrimaryMainFrame() : nullptr;
   const auto document = frame ? frame->GetWeakDocumentPtr() : content::WeakDocumentPtr();
-  const bool allowed = !shutdown_ && HttpsOnly(url) && LiveDocument(frame, context_) &&
+  const bool allowed = !shutdown_ && AllowedDownload(url, initiator) &&
+                       LiveDocument(frame, context_) &&
                        document.AsRenderFrameHostIfValid() == frame;
   std::move(callback).Run(allowed);
 }
@@ -693,7 +723,7 @@ base::DictValue ProfileDownloads::Command(const base::DictValue& command) {
     return Response("action_required");
   if (*action == "snapshot") {
     auto result = Response();
-    result.Set("policy", "https_only_no_safebrowsing");
+    result.Set("policy", "https_network_trustworthy_local_no_safebrowsing");
     result.Set("quarantine", "chromium_backend");
     result.Set("shutdown", shutdown_);
     base::ListValue items;

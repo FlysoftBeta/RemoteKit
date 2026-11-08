@@ -440,6 +440,9 @@ def package_runtime(args, node_runtime):
         if not source.is_file():
             raise FileNotFoundError(source)
         selected[Path(name)] = source
+    selected[Path("hyphen-data/LICENSE")] = chromium / "third_party/hyphenation-patterns/LICENSE"
+    for source in (chromium / "third_party/hyphenation-patterns/hyb").glob("hyph-*.hyb"):
+        selected[Path("hyphen-data") / source.name] = source
     # ANGLE and its runtime compiler can be loaded dynamically rather than
     # appear as imports of a particular component DLL.
     for name in [

@@ -1,4 +1,6 @@
 #include "browser/compat_renderer.h"
+#include <limits>
+#include "third_party/blink/public/platform/web_runtime_features.h"
 #include "browser/navigation_error_page.h"
 
 #include <iterator>
@@ -288,6 +290,105 @@ v8::MaybeLocal<v8::Function> NewFunction(v8::Local<v8::Context> context,
   return function;
 }
 
+v8::Local<v8::Private> ConnectionHandlerKey(v8::Isolate* isolate) {
+  return v8::Private::ForApi(isolate, gin::StringToV8(isolate, "remotekit.ontypechange"));
+}
+bool ConnectionReceiver(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  if (info.This()->StrictEquals(info.Data()))
+    return true;
+  info.GetIsolate()->ThrowException(
+      v8::Exception::TypeError(gin::StringToV8(info.GetIsolate(), "Illegal invocation")));
+  return false;
+}
+void ConnectionType(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  if (ConnectionReceiver(info))
+    info.GetReturnValue().Set(gin::StringToV8(info.GetIsolate(), "wifi"));
+}
+void ConnectionMax(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  if (ConnectionReceiver(info))
+    info.GetReturnValue().Set(
+        v8::Number::New(info.GetIsolate(), std::numeric_limits<double>::infinity()));
+}
+void ConnectionHandler(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  if (!ConnectionReceiver(info))
+    return;
+  auto* isolate = info.GetIsolate();
+  v8::Local<v8::Value> handler;
+  if (info.This()
+          ->GetPrivate(isolate->GetCurrentContext(), ConnectionHandlerKey(isolate))
+          .ToLocal(&handler) &&
+      handler->IsObject())
+    info.GetReturnValue().Set(handler);
+  else
+    info.GetReturnValue().SetNull();
+}
+void SetConnectionHandler(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  if (!ConnectionReceiver(info))
+    return;
+  auto* isolate = info.GetIsolate();
+  v8::Local<v8::Value> value = v8::Null(isolate);
+  if (info.Length() && info[0]->IsObject())
+    value = info[0];
+  (void)info.This()->SetPrivate(isolate->GetCurrentContext(), ConnectionHandlerKey(isolate), value);
+}
+void InvokeConnectionHandler(const v8::FunctionCallbackInfo<v8::Value>& info) {
+  auto* isolate = info.GetIsolate();
+  auto context = isolate->GetCurrentContext();
+  auto connection = info.Data().As<v8::Object>();
+  v8::Local<v8::Value> handler;
+  if (!connection->GetPrivate(context, ConnectionHandlerKey(isolate)).ToLocal(&handler) ||
+      !handler->IsFunction())
+    return;
+  v8::Local<v8::Value> args[] = {info[0]};
+  v8::Local<v8::Value> result;
+  if (!handler.As<v8::Function>()->Call(context, connection, 1, args).ToLocal(&result))
+    return;
+  if (result->IsFalse() && args[0]->IsObject()) {
+    v8::Local<v8::Function> prevent;
+    if (GetMethod(context, args[0].As<v8::Object>(), "preventDefault").ToLocal(&prevent))
+      (void)prevent->Call(context, args[0], 0, nullptr);
+  }
+}
+void InstallConnection(v8::Local<v8::Context> context) {
+  auto* isolate = v8::Isolate::GetCurrent();
+  v8::Local<v8::Value> navigator;
+  v8::Local<v8::Value> connection;
+  if (!context->Global()->Get(context, gin::StringToV8(isolate, "navigator")).ToLocal(&navigator) ||
+      !navigator->IsObject() ||
+      !navigator.As<v8::Object>()
+           ->Get(context, gin::StringToV8(isolate, "connection"))
+           .ToLocal(&connection) ||
+      !connection->IsObject())
+    return;
+  auto prototype = connection.As<v8::Object>()->GetPrototype().As<v8::Object>();
+  struct Property {
+    const char* name;
+    v8::FunctionCallback getter;
+    v8::FunctionCallback setter;
+  };
+  for (const auto& property :
+       {Property{"type", ConnectionType, nullptr}, Property{"downlinkMax", ConnectionMax, nullptr},
+        Property{"ontypechange", ConnectionHandler, SetConnectionHandler}}) {
+    v8::Local<v8::Function> getter;
+    v8::Local<v8::Function> setter;
+    if (!NewFunction(context, property.getter, (std::string("get ") + property.name).c_str(), 0,
+                     connection)
+             .ToLocal(&getter))
+      continue;
+    if (property.setter &&
+        !NewFunction(context, property.setter, "set ontypechange", 1, connection).ToLocal(&setter))
+      continue;
+    prototype->SetAccessorProperty(gin::StringToV8(isolate, property.name), getter, setter);
+  }
+  v8::Local<v8::Function> add_listener;
+  v8::Local<v8::Function> invoke_handler;
+  if (GetMethod(context, connection.As<v8::Object>(), "addEventListener").ToLocal(&add_listener) &&
+      NewFunction(context, InvokeConnectionHandler, "", 1, connection).ToLocal(&invoke_handler)) {
+    v8::Local<v8::Value> args[] = {gin::StringToV8(isolate, "typechange"), invoke_handler};
+    (void)add_listener->Call(context, connection, 2, args);
+  }
+}
+
 void InstallOrientation(v8::Local<v8::Context> context) {
   auto* isolate = v8::Isolate::GetCurrent();
   auto global = context->Global();
@@ -368,13 +469,21 @@ class CompatFrameObserver final : public content::RenderFrameObserver {
     // The identity is chosen and synced to the WebView before the navigation
     // commits, so the new document's context already sees it.
     auto* view = render_frame()->GetWebView();
-    if (view && IsTabletIdentity(view->GetRendererPreferences()))
+    if (view && IsTabletIdentity(view->GetRendererPreferences())) {
       InstallOrientation(context);
+      InstallConnection(context);
+    }
   }
   void OnDestruct() override { delete this; }
 };
 }  // namespace
 
+void CompatRendererClient::SetRuntimeFeaturesDefaultsBeforeBlinkInitialization() {
+  blink::WebRuntimeFeatures::EnableWebShare(true);
+}
+void CompatRendererClient::RenderThreadStarted() {
+  blink::WebRuntimeFeatures::EnableFeatureFromString("DocumentPictureInPictureAPI", false);
+}
 void CompatRendererClient::WebViewCreated(blink::WebView* view, bool, const url::Origin*) {
   new CompatViewObserver(view);
 }

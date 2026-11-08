@@ -1,4 +1,7 @@
 #include "browser/device_configuration.h"
+#include "browser/services_browser.h"
+#include <atomic>
+#include "components/embedder_support/origin_trials/origin_trial_policy_impl.h"
 #include "browser/chrome_parity.h"
 #include "third_party/blink/public/common/renderer_preferences/renderer_preferences.h"
 #include "ui/base/ui_base_paths.h"
@@ -38,6 +41,15 @@ namespace remotekit::browser {
 namespace {
 class ContentClient final : public content::ContentClient {
  public:
+  blink::OriginTrialPolicy* GetOriginTrialPolicy() override {
+    if (!origin_policy_logged_.exchange(true, std::memory_order_relaxed)) {
+      LOG(INFO) << "RemoteKit OriginTrialPolicy supported="
+                << origin_trials_.IsOriginTrialsSupported();
+    }
+    return &origin_trials_;
+  }
+  std::atomic<bool> origin_policy_logged_{false};
+  embedder_support::OriginTrialPolicyImpl origin_trials_;
   std::u16string GetLocalizedString(int id) override { return l10n_util::GetStringUTF16(id); }
   std::string_view GetDataResource(int id, ui::ResourceScaleFactor scale) override {
     return ui::ResourceBundle::GetSharedInstance().GetRawDataResourceForScale(id, scale);
@@ -52,7 +64,7 @@ class ContentClient final : public content::ContentClient {
     return ui::ResourceBundle::GetSharedInstance().GetNativeImageNamed(id);
   }
 };
-class BrowserClient final : public content::ContentBrowserClient {
+class BrowserClient final : public ServicesBrowserClient {
  public:
   std::unique_ptr<media::AudioManager> CreateAudioManager(media::AudioLogFactory* log) override {
     return CreateAudioTarget(log);
@@ -64,6 +76,7 @@ class BrowserClient final : public content::ContentBrowserClient {
   }
   void OnWebContentsCreated(content::WebContents* contents) override {
     DeviceConfiguration::InstallSiteIdentity(contents);
+    InstallServiceOrientationDelegate();
   }
   bool CanCreateWindow(content::RenderFrameHost*,
                        const GURL&,

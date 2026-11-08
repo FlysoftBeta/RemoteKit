@@ -4,7 +4,7 @@
 
 ## 对网页：Chrome 身份
 
-**UA 与 Client Hints**：复用当前 Chromium 版本的 `embedder_support` 生成 UA、版本、平台，保留官方的 GREASE 排列、Windows 平台探测和命令行覆盖语义，只把品牌设为 Google Chrome。不手工维护固定的版本字符串。Client Hints 的 opt-in 按 BrowserContext 和 origin 保存在内存中（`MemoryClientHintsDelegate`），Context 重启后不保留。
+**UA 与 Client Hints**：复用当前 Chromium 版本的 `embedder_support` 生成 UA、版本、平台，保留官方的 GREASE 排列、Windows 平台探测和命令行覆盖语义，只把品牌设为 Google Chrome。不手工维护固定的版本字符串。Client Hints 的 opt-in 按 origin 写入 Profile 目录，Browser 重启后仍然有效，与 Chrome 的内容设置一致。
 
 **语言**：Browser 按简体中文版 Chrome 构建：界面 locale `zh-CN`，`locales/zh-CN.pak` 缺失的字符串回退到 `locales/en-US.pak`（ResourceBundle 次要 locale），两个 pak 缺一即启动失败、打包失败。Blink 自带文字（表单校验气泡、文件输入框、日期控件）、`Intl` 默认 locale 与错误页都是中文。语言偏好只有一份（`chrome_parity.h` 的 `zh-CN,zh,en-US,en`）：`Accept-Language` 用 Chrome 同样的展开与 q 值生成（`zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7`），页面和所有 worker 的 `navigator.languages` 是同一列表。
 
@@ -21,6 +21,23 @@ Worker 跟随自己的 origin 选择身份，而不是创建它的页面：servi
 - `orientation` 取 frame widget 的屏幕角度（来自视图的虚拟显示器），换算到 WebKit 的 [-90, 180]，与 `screen.orientation.angle` 一致：横屏 90、竖屏 0。
 - `onorientationchange` 按 EventHandler 语义保存对象、其他值变为 null；`screen.orientation` 的 change 来自同一次 widget 方向更新，据此在 window 上派发 `orientationchange`。Event 构造器和 `dispatchEvent` 在页面脚本运行前取得。与原生实现的差别：事件 `isTrusted` 为 false，handler 的监听位置固定在页面所有监听器之前。
 - 桌面身份不暴露这两个属性，与桌面 Chrome 一致。
+
+**没有后端的服务**：Chrome 由产品层提供、而本服务没有对应后端的接口，页面看到的是 Chrome 在"没有该设备/账户/应用"或"用户取消"时的结果，不能是 renderer 被杀、挂起或错误的异常。依据 Chrome `chrome_browser_interface_binders` 的清单逐项补齐 content 没有绑定的接口（缺少 binder 会以坏消息终止 renderer，例如 `navigator.setAppBadge()`），实现在 `browser/services_*.cc`：
+
+| 接口 | 页面看到的结果 |
+|---|---|
+| Badging | set/clear 正常 resolve，不显示（未安装的网站在 Chrome 里同样被忽略） |
+| Payment Request | `canMakePayment`/`hasEnrolledInstrument` 为 false，`show()` 以 `NotSupportedError` 拒绝；Secure Payment Confirmation 不可用 |
+| Credential Management（密码） | `get()` 返回 null，`store()`、`preventSilentAccess()` resolve |
+| Web Share | 以 `AbortError`（取消分享）结束 |
+| 语音识别 | 没有麦克风：`audio-capture` 错误后 `end` |
+| Push | `AbortError`，"Registration failed - push service error" |
+| Background Sync | 一次性同步在页面 renderer 存活时触发；周期同步不可用 |
+| 画中画 | 按策略关闭：`pictureInPictureEnabled === false`，请求以 `NotSupportedError` 拒绝，Document PiP 不存在 |
+
+**宿主设备隔离**：服务器自身的摄像头、麦克风、USB、HID、串口、蓝牙、Windows Hello/平台验证器和 Windows 定位属于宿主，不属于租户。补丁 `0018-host-device-isolation` 给 content 增加 `ContentBrowserClient::AllowHostDeviceAccess()`，RemoteKit 返回 false，content 在媒体设备枚举、蓝牙、WebAuthn 发现与语音识别入口处直接走"没有设备"的路径。页面结果：`enumerateDevices()` 为空、`getUserMedia` 为 `NotFoundError`、`getDisplayMedia` 为 `NotAllowedError`；USB/串口/蓝牙的选择以 `NotFoundError` 结束、HID 返回空列表；`isUserVerifyingPlatformAuthenticatorAvailable()` 为 false，`create/get` 在超时内以 `NotAllowedError` 拒绝，服务器桌面上不会出现 Windows Hello；地理位置在获准后报告 `POSITION_UNAVAILABLE`。媒体设备 ID 的 salt 按 Profile 持久化。客户端证书：空证书库，TLS 在没有客户端证书的情况下继续。
+
+**其他 Chrome 行为**：Ctrl/中键点击与带修饰键的打开经 `OpenURLFromTab` 走与 popup 相同的产品 Tab 路径；service worker 的 `clients.openWindow` 经 `ContentBrowserClient::OpenURL` 打开产品 Tab。全屏时 `display-mode: fullscreen` 成立并触发 change；启用 back/forward cache；安装 Chrome 的 origin trial 策略；随包提供断字词典，`hyphens: auto` 生效；旧的 YouTube/Dailymotion/Vimeo Flash 嵌入按 Chrome 规则改写为 HTML 播放器。平板身份额外提供 Android 的 `navigator.connection.type`（`wifi`）/`downlinkMax`/`ontypechange`；`screen.orientation.lock()` 在全屏且方向已匹配时成功，否则以不支持拒绝（无法旋转 Viewer），桌面身份按 Windows Chrome 拒绝。
 
 **`window.chrome`**：通过 renderer 原生绑定建立（`CompatRendererClient`），不注入页面脚本——注入的 JS 对象无法得到正确的绑定寿命和 world 控制。
 

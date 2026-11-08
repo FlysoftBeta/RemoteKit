@@ -38,7 +38,7 @@ class BrowserContext final : public content::BrowserContext {
   content::PlatformNotificationService* GetPlatformNotificationService() override {
     return nullptr;
   }
-  content::PushMessagingService* GetPushMessagingService() override { return nullptr; }
+  content::PushMessagingService* GetPushMessagingService() override;
   content::StorageNotificationService* GetStorageNotificationService() override { return nullptr; }
   content::SSLHostStateDelegate* GetSSLHostStateDelegate() override { return nullptr; }
   content::PermissionControllerDelegate* GetPermissionControllerDelegate() override;
@@ -47,15 +47,19 @@ class BrowserContext final : public content::BrowserContext {
     return nullptr;
   }
   content::BackgroundFetchDelegate* GetBackgroundFetchDelegate() override { return nullptr; }
-  content::BackgroundSyncController* GetBackgroundSyncController() override { return nullptr; }
+  content::BackgroundSyncController* GetBackgroundSyncController() override;
   content::BrowsingDataRemoverDelegate* GetBrowsingDataRemoverDelegate() override {
     return nullptr;
   }
 
+  const std::string& media_device_salt() const { return media_device_salt_; }
   const ProfileDownloads& downloads() const { return *downloads_; }
 
  private:
   base::FilePath path_;
+  std::string media_device_salt_;
+  std::unique_ptr<content::BackgroundSyncController> background_sync_;
+  std::unique_ptr<content::PushMessagingService> push_;
   bool shutdown_prepared_ = false;
   std::unique_ptr<content::ClientHintsControllerDelegate> client_hints_;
   std::unique_ptr<ProfilePermissions> permissions_;

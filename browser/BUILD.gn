@@ -83,6 +83,11 @@ executable("remotekit_browser") {
     "osr_renderer.cc",
     "osr_renderer.h",
     "osr_wake_state.h",
+    "services_browser.cc",
+    "services_browser.h",
+    "services_binders.cc",
+    "services_devices.cc",
+    "services_flash.cc",
     "page_requests.cc",
     "page_requests.h",
     "popup_registry.cc",
@@ -128,6 +133,12 @@ executable("remotekit_browser") {
     "//components/crash/core/common:crash_key",
     "//components/download/public/common:public",
     "//components/embedder_support:user_agent",
+    "//components/embedder_support/origin_trials",
+    "//components/payments/core",
+    "//components/password_manager/core/common",
+    "//services/device/public/cpp/geolocation",
+    "//services/device/public/mojom",
+    "//services/device/public/mojom:usb",
     "//components/headless/clipboard",
     "//components/input",
     "//components/os_crypt/async/browser",
@@ -176,6 +187,7 @@ executable("remotekit_browser") {
   data_deps = [
     "//tools/v8_context_snapshot",
     "//chrome:packed_resources_locales",
+    "//third_party/hyphenation-patterns:bundle_hyphen_data",
   ]
   libs = [
     "d3d11.lib",

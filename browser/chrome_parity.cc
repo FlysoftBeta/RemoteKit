@@ -71,6 +71,7 @@ void ApplyChromeWebPreferences(blink::web_pref::WebPreferences& prefs) {
             base::UTF8ToUTF16(gfx::FontList::FirstAvailableOrFirst(families[i]));
     }
   }
+  prefs.picture_in_picture_enabled = false;
   prefs.default_font_size = 16;
   prefs.default_fixed_font_size = 13;
   prefs.minimum_font_size = 0;

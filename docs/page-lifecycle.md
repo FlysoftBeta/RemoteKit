@@ -96,10 +96,10 @@ lifecycle_uncertain
 
 ## 权限、下载与页面命令
 
-- `ProfilePermissions`：内存中的规则，键为请求 origin、嵌入 origin、权限类型。规则覆盖剪贴板读写、durable storage、后台/周期同步和地理位置；活跃文档、Permissions-Policy 和 worker origin 检查仍然生效，规则本身不会创建缺失的 API 后端。媒体采集权限是另一条路径（`RequestMediaAccessPermission`），未接入。
-- `ProfileDownloads`：写入 Profile/downloads，唯一目标名、`.crdownload` 中间文件、要求 HTTPS 链、危险文件检查、异步目标分配，完成后返回相对 `file_reference`。没有 SafeBrowsing，也没有完整的下载 UI。
+- `ProfilePermissions`：内存中的规则，键为请求 origin、嵌入 origin、权限类型。规则覆盖剪贴板读写、durable storage、后台/周期同步和地理位置；活跃文档、Permissions-Policy 和 worker origin 检查仍然生效，规则本身不会创建缺失的 API 后端。媒体采集不经过这些规则：宿主设备对租户不可见（见[兼容性 · 宿主设备隔离](compatibility.md)）。
+- `ProfileDownloads`：写入 Profile/downloads，唯一目标名、`.crdownload` 中间文件、网络下载要求 HTTPS 链，由 https 页面生成的 `blob:`/`data:`/`filesystem:` 下载允许，危险文件检查、异步目标分配，完成后返回相对 `file_reference`。没有 SafeBrowsing，也没有完整的下载 UI。
 - `page.command`：back/forward/reload/stop（走导航操作账本）、find/stop_find、zoom/get_zoom、copy/paste/cut/select_all。find 在回调之前登记请求身份，因为回复可能同步；替换 find 会话会丢弃旧回复，最终回复不保证到达。
 
 ## 尚未实现
 
-多 Profile（当前每 Session 一个 Profile，层级上保留余量）、跨 Browser 的 sessionStorage、原生 popup widget 的像素与命中、目录上传、HTTP/代理认证与证书选择、剪贴板图片格式与跨端同步、PDF 与打印、原生长按、POST 重新提交确认、IPC 传输故障后同一 Browser incarnation 的重新附着。
+多 Profile（当前每 Session 一个 Profile，层级上保留余量）、跨 Browser 的 sessionStorage、原生 popup widget 的像素与命中、目录上传、HTTP/代理认证、剪贴板图片格式与跨端同步、PDF 与打印、原生长按、POST 重新提交确认（目前取消该次 reload 并发出 `repost_cancelled`）、IPC 传输故障后同一 Browser incarnation 的重新附着。

@@ -2,6 +2,15 @@
 #include "browser/file_chooser_accept.h"
 
 #include <cmath>
+#include <set>
+#include "third_party/blink/public/mojom/window_features/window_features.mojom.h"
+#include "base/no_destructor.h"
+#include "content/public/browser/media_stream_request.h"
+#include "content/public/browser/select_audio_output_request.h"
+#include "content/public/browser/render_view_host.h"
+#include "content/public/browser/render_widget_host.h"
+#include "third_party/blink/public/mojom/manifest/display_mode.mojom.h"
+#include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -33,6 +42,15 @@
 
 namespace remotekit::browser {
 namespace {
+std::set<PageRequests*>& BoundPages() {
+  static base::NoDestructor<std::set<PageRequests*>> pages;
+  return *pages;
+}
+void SyncDisplayMode(content::WebContents* contents) {
+  contents->ForEachRenderFrameHost([](content::RenderFrameHost* frame) {
+    frame->GetRenderViewHost()->GetWidget()->SynchronizeVisualProperties();
+  });
+}
 constexpr std::size_t kLimit = 64;
 constexpr std::size_t kStringLimit = 16 * 1024;
 std::string Clip(std::string_view text) {
@@ -144,6 +162,7 @@ void PageRequests::Bind(content::WebContents* contents) {
   if (web_contents() && web_contents()->GetDelegate() == this)
     web_contents()->SetDelegate(nullptr);
   Observe(nullptr);
+  BoundPages().erase(this);
   if (previous && find_request_id_ != -1)
     previous->StopFinding(content::STOP_FIND_ACTION_CLEAR_SELECTION);
   CancelAll("contents_rebound");
@@ -154,8 +173,10 @@ void PageRequests::Bind(content::WebContents* contents) {
   find_request_id_ = -1;
   find_pending_ = false;
   Observe(target.get());
-  if (target)
+  if (target) {
     target->SetDelegate(this);
+    BoundPages().insert(this);
+  }
 }
 void PageRequests::RequestClose() {
   if (close_state_ == "closing" || close_state_ == "closed")
@@ -451,6 +472,7 @@ bool PageRequests::CanEnterFullscreenModeForTab(content::RenderFrameHost*) {
 void PageRequests::EnterFullscreenModeForTab(content::RenderFrameHost* frame,
                                              const blink::mojom::FullscreenOptions&) {
   fullscreen_ = true;
+  SyncDisplayMode(web_contents());
   auto event = Kind("fullscreen");
   event.Set("active", true);
   event.Set("native_host_fullscreen", false);
@@ -459,6 +481,7 @@ void PageRequests::EnterFullscreenModeForTab(content::RenderFrameHost* frame,
 }
 void PageRequests::ExitFullscreenModeForTab(content::WebContents*) {
   fullscreen_ = false;
+  SyncDisplayMode(web_contents());
   auto event = Kind("fullscreen");
   event.Set("active", false);
   Event(std::move(event));
@@ -518,6 +541,75 @@ content::WebContents* PageRequests::AddNewContents(content::WebContents*,
   if (!adopted && was_blocked)
     *was_blocked = true;
   return adopted;
+}
+
+content::WebContents* PageRequests::OpenURLFromTab(
+    content::WebContents* source,
+    const content::OpenURLParams& params,
+    base::OnceCallback<void(content::NavigationHandle&)> callback) {
+  content::WebContents* target = source;
+  if (params.disposition != WindowOpenDisposition::CURRENT_TAB) {
+    switch (params.disposition) {
+      case WindowOpenDisposition::NEW_FOREGROUND_TAB:
+      case WindowOpenDisposition::NEW_BACKGROUND_TAB:
+      case WindowOpenDisposition::NEW_WINDOW:
+      case WindowOpenDisposition::NEW_POPUP:
+        break;
+      default:
+        return nullptr;
+    }
+    if (!popup_handler_)
+      return nullptr;
+    content::WebContents::CreateParams create(source->GetBrowserContext());
+    create.initially_hidden = true;
+    auto contents = content::WebContents::Create(create);
+    target = AddNewContents(source, std::move(contents), params.url, params.disposition,
+                            blink::mojom::WindowFeatures(), params.user_gesture, nullptr);
+    if (!target)
+      return nullptr;
+  }
+  content::NavigationController::LoadURLParams load(params);
+  if (target != source)
+    load.frame_tree_node_id = content::FrameTreeNodeId();
+  auto navigation = target->GetController().LoadURLWithParams(load);
+  if (navigation && callback)
+    std::move(callback).Run(*navigation);
+  return target;
+}
+content::WebContents* PageRequests::OpenURLFromBrowser(content::BrowserContext* context,
+                                                       const content::OpenURLParams& params) {
+  for (auto* page : BoundPages()) {
+    if (page->web_contents()->GetBrowserContext() == context && page->popup_handler_)
+      return page->OpenURLFromTab(page->web_contents(), params, {});
+  }
+  return nullptr;
+}
+void PageRequests::ShowRepostFormWarningDialog(content::WebContents* contents) {
+  contents->GetController().CancelPendingReload();
+  Event(Kind("repost_cancelled"));
+}
+blink::mojom::DisplayMode PageRequests::GetDisplayMode(const content::WebContents*) {
+  return fullscreen_ ? blink::mojom::DisplayMode::kFullscreen : blink::mojom::DisplayMode::kBrowser;
+}
+void PageRequests::RequestMediaAccessPermission(content::WebContents*,
+                                                const content::MediaStreamRequest& request,
+                                                content::MediaResponseCallback callback) {
+  const bool capture = request.audio_type == blink::mojom::MediaStreamType::DEVICE_AUDIO_CAPTURE ||
+                       request.video_type == blink::mojom::MediaStreamType::DEVICE_VIDEO_CAPTURE;
+  std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                          capture
+                              ? blink::mojom::MediaStreamRequestResult::NO_HARDWARE
+                              : blink::mojom::MediaStreamRequestResult::PERMISSION_DENIED_BY_USER,
+                          nullptr);
+}
+bool PageRequests::CheckMediaAccessPermission(content::RenderFrameHost*,
+                                              const url::Origin&,
+                                              blink::mojom::MediaStreamType) {
+  return false;
+}
+void PageRequests::ProcessSelectAudioOutput(const content::SelectAudioOutputRequest&,
+                                            content::SelectAudioOutputCallback callback) {
+  std::move(callback).Run(base::unexpected(content::SelectAudioOutputError::kUserCancelled));
 }
 
 base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBinding binding) {
@@ -765,6 +857,7 @@ void PageRequests::RenderFrameDeleted(content::RenderFrameHost* frame) {
   }
 }
 void PageRequests::WebContentsDestroyed() {
+  BoundPages().erase(this);
   fullscreen_ = false;
   Observe(nullptr);
   CancelAll("contents_destroyed");

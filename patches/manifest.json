@@ -31,6 +31,11 @@
       "id": "origin-worker-identity",
       "path": "0017-origin-worker-identity.patch",
       "sha256": "958475c04b0e5e77be3b6cbfdcbfeb3542d4f0113b9cab02296c7661e27429fa"
+    },
+    {
+      "id": "host-device-isolation",
+      "path": "0018-host-device-isolation.patch",
+      "sha256": "bede3ecdef5831ca7506cb30b6c798f0c8f3c108cbf718586b4258f5f5a33b6c"
     }
   ]
 }
