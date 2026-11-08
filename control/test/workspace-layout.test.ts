@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { selectVisibility } from '../client/app/visibility';
 import { dividerWeights } from '../client/app/window-divider';
-import { launcherActions, launcherNavigation } from '../client/app/launcher-actions';
+import { launcherActions, launcherNavigation, launcherPlacement } from '../client/app/launcher-actions';
 import { projectOperations } from '../client/control/product-operations';
 import { ViewportRequests } from '../client/control/viewport-requests';
 import { productSnapshot } from './client-fixture';
@@ -34,8 +34,8 @@ function workspace() {
 
 test('space visibility uses the 360px window threshold without changing the space', () => {
   const state = workspace();
-  assert.deepEqual(selectVisibility(state, 725).visibleWindowIds, ['a', 'b']);
-  assert.deepEqual(selectVisibility(state, 724).visibleWindowIds, ['b']);
+  assert.deepEqual(selectVisibility(state, 744).visibleWindowIds, ['a', 'b']);
+  assert.deepEqual(selectVisibility(state, 743).visibleWindowIds, ['b']);
   assert.deepEqual(state.workspace.spaces[0].windowIds, ['a', 'b']);
   state.workspace.activeSpaceId = 'two';
   assert.deepEqual(selectVisibility(state, 1600).visibleWindowIds, ['c']);
@@ -94,7 +94,7 @@ test('space projection handles split, focus, detach, proportions and settings si
   assert.deepEqual(dividerWeights([0.2, 0.3, 0.5], 1, 0.5), [0.2, 0.4, 0.4]);
 });
 
-test('launcher creates groups, honors longest app scope and explicitly reuses page or file windows', () => {
+test('launcher appends to the target group, honors longest app scope and explicitly reuses page or file windows', () => {
   const state = workspace().workspace;
   const page: LauncherItem = {
     key: 'page',
@@ -109,7 +109,7 @@ test('launcher creates groups, honors longest app scope and explicitly reuses pa
       type: 'window.open',
       appId: 'browser',
       url: page.url,
-      placement: { mode: 'space' },
+      placement: { mode: 'split', besideWindowId: 'b', side: 'right' },
       source: 'launcher',
     },
   ]);
@@ -134,7 +134,7 @@ test('launcher creates groups, honors longest app scope and explicitly reuses pa
       type: 'window.open',
       appId: 'browser',
       url: undefined,
-      placement: { mode: 'space' },
+      placement: { mode: 'split', besideWindowId: 'b', side: 'right' },
       source: 'launcher',
     },
   ]);
@@ -150,14 +150,14 @@ test('launcher creates groups, honors longest app scope and explicitly reuses pa
   assert.deepEqual(launcherActions(state, file, undefined, true), [
     { type: 'window.focus', windowId: 'b', source: 'launcher' },
   ]);
-  assert.deepEqual(launcherNavigation(page.url!), {
+  assert.deepEqual(launcherNavigation(page.url!, { mode: 'space' }), {
     type: 'window.open',
     appId: 'browser',
     placement: { mode: 'space' },
     url: page.url,
     source: 'launcher',
   });
-  assert.deepEqual(launcherNavigation('two words'), {
+  assert.deepEqual(launcherNavigation('two words', { mode: 'space' }), {
     type: 'window.open',
     appId: 'browser',
     url: 'two words',
@@ -182,18 +182,56 @@ test('a stale placement target cannot break authoritative snapshot projection', 
   assert.deepEqual(projected.workspace.spaces, state.workspace.spaces);
 });
 
-test('merge projection uses the same atomic order and proportions as server commands', () => {
+test('replace projection preserves the slot and proportions and detaches the replaced window', () => {
   const state = workspace();
-  const merged = projectOperations(state, [
+  const projected = projectOperations(state, [
     {
-      operationId: 'merge',
+      operationId: 'replace',
       operationGeneration: 'g',
-      action: { type: 'space.merge', spaceId: 'two', intoSpaceId: 'one' },
+      action: {
+        type: 'window.open',
+        appId: 'files',
+        placement: { mode: 'replace', windowId: 'a' },
+      },
     },
   ])!.workspace;
-  assert.deepEqual(merged.spaces[0].windowIds, ['a', 'b', 'c']);
-  assert.deepEqual(merged.spaces[0].weights, [0.35, 0.15, 0.5]);
-  assert.equal(merged.spaces.length, 1);
-  assert.equal(merged.activeSpaceId, 'one');
-  assert.equal(state.workspace.spaces.length, 2);
+  assert.deepEqual(projected.spaces[0].windowIds, ['pending-replace', 'b']);
+  assert.deepEqual(projected.spaces[0].weights, [0.7, 0.3]);
+  assert.deepEqual(projected.spaces[2].windowIds, ['a']);
+  assert.equal(projected.activeSpaceId, 'one');
+  assert.equal(projected.spaces[0].focusedWindowId, 'pending-replace');
+  assert.deepEqual(
+    projectOperations(state, [
+      {
+        operationId: 'stale',
+        operationGeneration: 'g',
+        action: {
+          type: 'window.open',
+          appId: 'files',
+          placement: { mode: 'replace', windowId: 'retired' },
+        },
+      },
+    ])!.workspace.spaces,
+    state.workspace.spaces,
+  );
+});
+
+test('launcher falls back to a new group at capacity and settings always focuses its singleton', () => {
+  const state = workspace().workspace;
+  state.spaces[0].windowIds.push('c');
+  assert.deepEqual(launcherPlacement(state), { mode: 'space' });
+  state.windows[0].appId = 'settings';
+  const item: LauncherItem = {
+    key: 'app:settings',
+    kind: 'app',
+    group: 'apps',
+    score: 0,
+    title: 'Settings',
+    appId: 'settings',
+  };
+  assert.deepEqual(launcherActions(state, item, { mode: 'replace', windowId: 'b' }), [
+    { type: 'window.focus', windowId: 'a', source: 'launcher' },
+  ]);
+  state.activeSpaceId = null;
+  assert.deepEqual(launcherPlacement(state), { mode: 'space' });
 });

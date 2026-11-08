@@ -81,6 +81,9 @@ const handlers: Record<string, Handler> = {
   'usage.clear': product(({ services, authority }, params) =>
     services.workspace.clearUsage(authority.tenantId, params.scope),
   ),
+  'page.preview': product(({ services, authority }, params) =>
+    services.workspace.savePreview(authority.tenantId, params),
+  ),
   'launcher.get': product(({ services, authority }, params) =>
     services.workspace.launcher(authority.tenantId, params.query),
   ),

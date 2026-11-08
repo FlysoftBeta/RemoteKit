@@ -28,6 +28,11 @@ const KINDS: Record<FileKind, { icon: React.ElementType; color: string; backgrou
   other: { icon: InsertDriveFileOutlined, color: '#4b5563', background: '#eef1f4' },
 };
 
+export function FileTypeIcon({ type, name }: { type: string; name: string }) {
+  const Icon = KINDS[fileKind(type, name)].icon;
+  return <Icon fontSize="inherit" />;
+}
+
 export function fileTypeColor(type: string, name: string): string {
   return KINDS[fileKind(type, name)].color;
 }

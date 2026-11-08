@@ -74,7 +74,7 @@ export function removeWindow(workspace: ProductWorkspace, windowId: string) {
 export function placeWindow(
   workspace: ProductWorkspace,
   windowId: string,
-  placement: WindowPlacement,
+  placement: Exclude<WindowPlacement, { mode: 'replace' }>,
   spaceId: string,
   now = Date.now(),
 ) {
@@ -122,23 +122,24 @@ export function placeWindow(
   focusWindow(workspace, windowId, now);
 }
 
-export function mergeSpaces(
+export function replaceWindow(
   workspace: ProductWorkspace,
+  windowId: string,
+  replacedId: string,
   spaceId: string,
-  intoSpaceId: string,
   now = Date.now(),
 ) {
-  const source = findSpace(workspace, spaceId);
-  const target = findSpace(workspace, intoSpaceId);
-  if (source === target) throw new RemoteKitError('invalid_request', 'Choose another space');
-  if (source.windowIds.length + target.windowIds.length > WORKSPACE_LIMITS.windowsPerSpace)
-    throw new RemoteKitError('limit_exceeded', 'Each space supports up to 3 windows');
-  for (const id of [...source.windowIds, ...target.windowIds]) assertWindowMutable(workspace, id);
-  target.windowIds.push(...source.windowIds);
-  target.weights = [
-    ...target.weights.map((weight) => weight / 2),
-    ...source.weights.map((weight) => weight / 2),
-  ];
-  workspace.spaces.splice(workspace.spaces.indexOf(source), 1);
-  focusWindow(workspace, target.focusedWindowId, now);
+  const replaced = findWindow(workspace, replacedId);
+  assertWindowMutable(workspace, replacedId);
+  const space = windowSpace(workspace, replacedId);
+  const index = space.windowIds.indexOf(replacedId);
+  space.windowIds[index] = windowId;
+  workspace.spaces.push({
+    id: spaceId,
+    windowIds: [replacedId],
+    weights: [1],
+    focusedWindowId: replacedId,
+    lastActiveAt: replaced.lastActiveAt,
+  });
+  focusWindow(workspace, windowId, now);
 }

@@ -39,14 +39,13 @@ import { selectVisibility } from './visibility';
 import { WindowFrame } from './window-frame';
 import { WindowDivider } from './window-divider';
 import { Launcher } from './launcher';
-import { launcherActions, launcherNavigation } from './launcher-actions';
-import { SpaceSwitcher } from './space-switcher';
+import { launcherActions, launcherNavigation, launcherPlacement } from './launcher-actions';
 import { SpaceSnapshots } from './space-snapshots';
 import { HomeBar } from './home-bar';
+import { usePagePreviews } from './page-previews';
 import { SettingsApp } from './settings-app';
 import { AudioControls } from './audio-controls';
 import { appName } from './app-icon';
-import { GroupRail } from './group-rail';
 import { WindowDragProvider } from './window-drag';
 import { waitForWorkspaceRevision, type WorkspaceCall } from './window-state';
 
@@ -61,7 +60,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
   const operationState = useSyncExternalStore(media.operations.subscribe, media.operations.getSnapshot);
   const { state, pending: pendingOperations } = operationState;
   const viewportNotice = useSyncExternalStore(media.viewport.subscribe, media.viewport.getSnapshot);
-  const [overlay, setOverlay] = useState<{ kind: 'launcher' | 'switcher' }>();
+  const [overlay, setOverlay] = useState<{ kind: 'launcher' }>();
   const [visibleLauncher, setVisibleLauncher] = useState<typeof overlay>();
   useEffect(() => {
     if (overlay?.kind === 'launcher') {
@@ -76,6 +75,12 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
   const admin = adminRequested && !!state?.user.isAdmin;
   const [audioSaving, setAudioSaving] = useState(false);
   const [audioError, setAudioError] = useState('');
+  const [stageNotice, setStageNotice] = useState('');
+  useEffect(() => {
+    if (!stageNotice) return;
+    const timer = setTimeout(() => setStageNotice(''), 3500);
+    return () => clearTimeout(timer);
+  }, [stageNotice]);
   const [width, setWidth] = useState(0);
   const shell = useRef<HTMLElement>(null);
   const previousSpace = useRef<{ id: string | null; windowIds: string[] } | undefined>(undefined);
@@ -115,10 +120,8 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     if (status === 'expired') expired();
   }, [status, expired]);
   useAutoFullscreen(showShell && state.workspace.settings.workspace.autoFullscreen === true);
-  const railEnabled = state?.workspace.settings.workspace.groupRail !== false;
   const pageFullscreen = !!state?.pageFullscreen;
-  const railVisible = width >= 900 && railEnabled && !pageFullscreen;
-  const contentWidth = Math.max(1, width - (railVisible ? 76 : 0));
+  const contentWidth = width;
   const scale = state?.workspace.settings.workspace.uiScale ?? 1;
   const insets = useTopInsetProbe();
   const deadZone = deadZoneHeight(state?.workspace.settings.workspace.topDeadZone ?? 'off', insets);
@@ -144,8 +147,8 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
       node.style.height = `${height}px`;
       setWidth(width);
       media.viewport.measure(
-        Math.max(1, width - (width >= 900 && railEnabled && !pageFullscreen ? 76 : 0)),
-        Math.max(1, height - (width >= 900 && railEnabled && !pageFullscreen ? 0 : 16)),
+        Math.max(1, width),
+        Math.max(1, height - 16),
         (window.devicePixelRatio || 1) * scale,
         document.visibilityState !== 'hidden',
       );
@@ -165,7 +168,14 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
       window.removeEventListener('resize', measure);
       document.removeEventListener('visibilitychange', measure);
     };
-  }, [showShell, media, scale, deadZone, railEnabled, pageFullscreen]);
+  }, [showShell, media, scale, deadZone, pageFullscreen]);
+  const call: WorkspaceCall = useCallback((method, params) => media.control.request(method, params), [media]);
+  const capturePreviews = usePagePreviews(
+    state,
+    shell,
+    state && showShell ? selectVisibility(state, contentWidth).visibleWindowIds : [],
+    call,
+  );
   const onGeometry = media.viewport.setGeometry;
   const action: Action = useCallback(
     async (command) => {
@@ -178,7 +188,6 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
           'window.focus',
           'window.place',
           'space.activate',
-          'space.merge',
           'space.close',
           'tab.create',
           'tab.activate',
@@ -187,11 +196,26 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
         const space = current.spaces.find((space) => space.id === current.activeSpaceId);
         if (space) snapshots.capture(shell.current, space.windowIds);
       }
+      if (
+        [
+          'window.open',
+          'window.focus',
+          'window.place',
+          'space.activate',
+          'space.close',
+          'tab.create',
+          'tab.activate',
+          'tab.navigate',
+          'tab.command',
+          'window.close',
+          'tab.close',
+        ].includes(command.type)
+      )
+        capturePreviews();
       return media.operations.action(command);
     },
-    [media, snapshots],
+    [media, snapshots, capturePreviews],
   );
-  const call: WorkspaceCall = useCallback((method, params) => media.control.request(method, params), [media]);
   useEffect(() => {
     if (!overlay) return;
     const escape = (event: KeyboardEvent) => {
@@ -378,6 +402,11 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     placement?: WindowPlacement,
     reuseExisting?: boolean,
   ) => {
+    const singleton = item.appId === 'settings' && workspace.windows.some((win) => win.appId === 'settings');
+    if (workspace.windows.length >= 16 && !singleton && !reuseExisting)
+      throw new Error('窗口已满，请先关闭一些窗口');
+    const wasFull =
+      !placement && !reuseExisting && !singleton && activeSpace && activeSpace.windowIds.length >= 3;
     const commands = launcherActions(workspace, item, placement, reuseExisting);
     for (const command of commands) {
       const receipt = await action(command);
@@ -403,6 +432,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
         }
       }
     }
+    if (wasFull) setStageNotice('当前窗口组已满，已在新窗口组打开');
   };
   const dropLauncherItem = async (item: LauncherItem, placement: WindowPlacement) => {
     await openLauncherItem(item, placement);
@@ -434,15 +464,15 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
           snapshots={snapshots}
           action={action}
           report={report}
-          railVisible={railVisible}
           openItem={dropLauncherItem}
         >
           <main
-            className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${railVisible ? ' rail-visible' : ''}${windows.length ? '' : ' no-windows'}${!sideBySide && activeSpace && activeSpace.windowIds.length > 1 && !fullscreen ? ' window-pill-visible' : ''}`}
+            className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}${!sideBySide && activeSpace && activeSpace.windowIds.length > 1 && !fullscreen ? ' window-pill-visible' : ''}`}
             ref={shell}
           >
             <DiagnosticCollectionView state={diagnosticState} dismiss={() => diagnostics.dismiss()} />
             <div className="shell-notices" aria-live="polite">
+              {stageNotice && <Alert severity="info">{stageNotice}</Alert>}
               {status !== 'online' && (
                 <Alert
                   severity="warning"
@@ -507,21 +537,6 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
               )}
             </div>
             <FloatingDock actions={floatingActions} />
-            {width >= 900 && !fullscreen && (
-              <GroupRail
-                state={state}
-                action={action}
-                report={report}
-                online={productReady}
-                expanded={railVisible}
-                launcher={() => setOverlay({ kind: 'launcher' })}
-                switcher={() => {
-                  if (shell.current && activeSpace) snapshots.capture(shell.current, activeSpace.windowIds);
-                  setOverlay({ kind: 'switcher' });
-                }}
-              />
-            )}
-
             {!sideBySide && activeSpace && activeSpace.windowIds.length > 1 && !fullscreen && (
               <div className="narrow-window-switcher" aria-label="空间内窗口">
                 {activeSpace.windowIds.map((id) => {
@@ -680,43 +695,36 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
                 onClose={() => setAdmin(false)}
               />
             )}
-            {!railVisible && (
-              <HomeBar
-                launcher={() => setOverlay((current) => (current ? undefined : { kind: 'launcher' }))}
-                switcher={() => {
-                  if (shell.current && activeSpace) snapshots.capture(shell.current, activeSpace.windowIds);
-                  setOverlay({ kind: 'switcher' });
-                }}
-                previous={() => {
-                  const previous = [...workspace.spaces]
-                    .filter((space) => space.id !== workspace.activeSpaceId)
-                    .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-                  if (previous) void action({ type: 'space.activate', spaceId: previous.id }).catch(report);
-                }}
-              />
-            )}
+            <HomeBar
+              launcher={() => {
+                if (shell.current && activeSpace) snapshots.capture(shell.current, activeSpace.windowIds);
+                setOverlay({ kind: 'launcher' });
+              }}
+              previous={() => {
+                const previous = [...workspace.spaces]
+                  .filter((space) => space.id !== workspace.activeSpaceId)
+                  .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+                if (previous) void action({ type: 'space.activate', spaceId: previous.id }).catch(report);
+              }}
+            />
             {visibleLauncher?.kind === 'launcher' && (
               <Launcher
                 state={state}
                 audio={audioControls}
+                lock={() => lock('manual')}
+                snapshots={snapshots}
+                action={action}
+                report={report}
                 call={call}
                 exiting={overlay?.kind !== 'launcher'}
                 online={productReady}
                 close={() => setOverlay(undefined)}
-                navigate={async (value) => {
-                  await action(launcherNavigation(value));
+                navigate={async (value, placement) => {
+                  await action(launcherNavigation(value, placement ?? launcherPlacement(workspace)));
+                  if (!placement && activeSpace && activeSpace.windowIds.length >= 3)
+                    setStageNotice('当前窗口组已满，已在新窗口组打开');
                 }}
                 activate={openLauncherItem}
-              />
-            )}
-            {overlay?.kind === 'switcher' && (
-              <SpaceSwitcher
-                state={state}
-                snapshots={snapshots}
-                action={action}
-                close={() => setOverlay(undefined)}
-                report={report}
-                online={productReady}
               />
             )}
             <Dialog

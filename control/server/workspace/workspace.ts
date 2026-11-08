@@ -168,6 +168,30 @@ export class Workspace {
     return { recorded: true };
   }
 
+  savePreview(tenant: string, params: { url: string; image: string }) {
+    if (
+      typeof params.url !== 'string' ||
+      typeof params.image !== 'string' ||
+      params.image.length > 'data:image/jpeg;base64,'.length + 32768 ||
+      !/^data:image\/jpeg;base64,(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
+        params.image,
+      )
+    )
+      throw new RemoteKitError('invalid_request', '需要 JPEG 页面预览');
+    const image = Buffer.from(params.image.slice('data:image/jpeg;base64,'.length), 'base64');
+    if (!image.length || image.length > 24 * 1024 || image[0] !== 0xff || image[1] !== 0xd8)
+      throw new RemoteKitError('invalid_request', '页面预览必须为不超过 24 KiB 的 JPEG');
+    const url = normalizedUsagePage(params.url);
+    if (!url) return { saved: false };
+    this.context.store.workspaces.items.savePreview(
+      tenant,
+      'page:' + url,
+      image,
+      this.context.clock.wallMs(),
+    );
+    return { saved: true };
+  }
+
   clearUsage(tenant: string, scope: 'all' | 'pages') {
     if (scope !== 'all' && scope !== 'pages') throw new RemoteKitError('invalid_request', '无效的清除范围');
     this.context.store.workspaces.items.clearUsage(tenant, scope);
@@ -238,6 +262,7 @@ export class Workspace {
         }))
         .sort((a, b) => b.score - a.score),
     ];
+    const previews = this.context.store.workspaces.items.previewHashes(tenant);
     const pageMap = new Map<string, LauncherItem>();
     const page = (url: string, title: string, favorite: boolean) => {
       const app = matchingApp(url);
@@ -245,6 +270,9 @@ export class Workspace {
         key: 'page:' + url,
         kind: 'page',
         group: 'pages',
+        ...(previews.has('page:' + normalizedUsagePage(url))
+          ? { previewUrl: '/api/previews/' + previews.get('page:' + normalizedUsagePage(url)) }
+          : {}),
         title: title || url,
         subtitle: new URL(url).hostname,
         url,

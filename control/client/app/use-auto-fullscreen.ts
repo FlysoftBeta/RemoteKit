@@ -66,3 +66,8 @@ export function useAutoFullscreen(enabled: boolean) {
     };
   }, [enabled]);
 }
+
+export async function toggleFullscreen() {
+  if (document.fullscreenElement) await document.exitFullscreen();
+  else await document.documentElement.requestFullscreen();
+}

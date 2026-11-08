@@ -1,4 +1,13 @@
-import { AddToQueue, Close, OpenInNew, Search, ViewWeekOutlined } from '@mui/icons-material';
+import {
+  AddToQueue,
+  Close,
+  OpenInNew,
+  Search,
+  ViewWeekOutlined,
+  Fullscreen,
+  FullscreenExit,
+  LockOutlined,
+} from '@mui/icons-material';
 import {
   Alert,
   ButtonBase,
@@ -13,13 +22,18 @@ import {
 } from '@mui/material';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LauncherItem, ProductState, WindowPlacement } from '../../shared/product';
-import { fileTypeColor, FileThumbnail } from '../files/file-thumbnail';
+import { fileTypeColor, FileThumbnail, FileTypeIcon } from '../files/file-thumbnail';
 import { useLibrary } from '../files/file-library-state';
 import { launcherLayout, contrastColor, originColor, type LauncherTile } from './launcher-layout';
 import { AppIcon } from './app-icon';
 import { useItemDrag, useWindowDragging, type PointerStart } from './window-drag';
 import { scaledAnchor, uiScale } from './ui-scale';
 import type { WorkspaceCall } from './window-state';
+import { LauncherSpaces } from './launcher-spaces';
+import type { SpaceSnapshots } from './space-snapshots';
+import type { Action } from './product-dialogs';
+import { dominantColor } from './dominant-color';
+import { toggleFullscreen } from './use-auto-fullscreen';
 import { formatError } from '../util/format-error';
 
 export function Launcher({
@@ -31,18 +45,36 @@ export function Launcher({
   navigate,
   exiting,
   audio,
+  lock,
+  snapshots,
+  action,
+  report,
 }: {
   state: ProductState;
+  lock(): void;
+  snapshots: SpaceSnapshots;
+  action: Action;
+  report(error: unknown): void;
   call: WorkspaceCall;
   online: boolean;
   /** Workspace-wide audio channels; quick to reach from wherever the user is. */
   audio: React.ReactNode;
   close(): void;
   activate(item: LauncherItem, placement?: WindowPlacement, reuseExisting?: boolean): Promise<void>;
-  navigate(value: string): Promise<void>;
+  navigate(value: string, placement?: WindowPlacement): Promise<void>;
   exiting?: boolean;
 }) {
   const theme = useTheme();
+  const [newTarget, setNewTarget] = useState(false);
+  useEffect(() => {
+    if (!exiting) setNewTarget(false);
+  }, [exiting]);
+  const [fullscreen, setFullscreen] = useState(!!document.fullscreenElement);
+  useEffect(() => {
+    const change = () => setFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', change);
+    return () => document.removeEventListener('fullscreenchange', change);
+  }, []);
   const [items, setItems] = useState<LauncherItem[]>([]);
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
@@ -78,7 +110,7 @@ export function Launcher({
     const groups = groupsHost.current!;
     const measure = () => {
       const bottom = parseFloat(getComputedStyle(groups).paddingBottom);
-      setBounds({ width: node.offsetWidth, height: Math.max(0, groups.clientHeight - bottom) });
+      setBounds({ width: groups.clientWidth, height: Math.max(0, groups.clientHeight - bottom) });
       measureEdges();
     };
     const observer = new ResizeObserver(measure);
@@ -134,7 +166,7 @@ export function Launcher({
       await activate(item, target, reuseExisting);
     });
   const space = state.workspace.spaces.find((space) => space.id === state.workspace.activeSpaceId);
-  const full = !space || space.windowIds.length >= 3;
+  const full = !!space && space.windowIds.length >= 3;
   const place = (target?: WindowPlacement, reuseExisting = false) => {
     if (menu) open(menu.item, target, reuseExisting);
     setMenu(undefined);
@@ -154,10 +186,22 @@ export function Launcher({
     >
       <div className="launcher-heading">
         <Typography variant="h5">开始</Typography>
-        <div className="launcher-audio">{audio}</div>
-        <IconButton aria-label="关闭开始屏幕" onClick={close}>
-          <Close />
-        </IconButton>
+        <div className="launcher-system-controls">
+          <div className="launcher-audio">{audio}</div>
+          <IconButton aria-label="锁定" title="锁定" onClick={lock}>
+            <LockOutlined />
+          </IconButton>
+          <IconButton
+            aria-label={fullscreen ? '退出全屏' : '全屏'}
+            title={fullscreen ? '退出全屏' : '全屏'}
+            onClick={() => void toggleFullscreen().catch(report)}
+          >
+            {fullscreen ? <FullscreenExit /> : <Fullscreen />}
+          </IconButton>
+          <IconButton aria-label="关闭开始屏幕" onClick={close}>
+            <Close />
+          </IconButton>
+        </div>
       </div>
       <form
         className="launcher-search"
@@ -168,8 +212,8 @@ export function Launcher({
             const result = await call('launcher.get', { query });
             const first = launcherLayout(result.items, bounds.height, query).groups[0]?.tiles[0];
             checkCapacity(first);
-            if (first) await activate(first);
-            else await navigate(query.trim());
+            if (first) await activate(first, newTarget ? { mode: 'space' } : undefined);
+            else await navigate(query.trim(), newTarget ? { mode: 'space' } : undefined);
           });
         }}
       >
@@ -197,60 +241,82 @@ export function Launcher({
         />
       </form>
       {error && <Alert severity="error">{error}</Alert>}
-      <div
-        className={`launcher-groups${edges.left ? ' fade-left' : ''}${edges.right ? ' fade-right' : ''}`}
-        ref={groupsHost}
-        onScroll={measureEdges}
-        onClick={(event) => {
-          if (!(event.target as Element).closest('.launcher-tile')) close();
-        }}
-      >
-        <div className="launcher-rows">
-          {layout.groups.map((group) => (
-            <section className="launcher-group" key={group.id}>
-              <Typography variant="subtitle1">{group.title}</Typography>
-              <div className="launcher-row" style={{ height: layout.height }}>
-                {group.tiles.map((tile) => {
-                  const entry = library.snapshot?.entries.find((entry) => entry.id === tile.entryId);
-                  const color = contrastColor(
-                    tile.kind === 'file'
-                      ? fileTypeColor(entry?.type ?? '', tile.title)
-                      : tile.appId === 'browser'
-                        ? '#2563b8'
-                        : tile.appId === 'files'
-                          ? '#b77713'
-                          : tile.appId === 'settings'
-                            ? '#475569'
-                            : (tile.themeColor ?? originColor(tile.url ?? tile.key)),
-                  );
-                  return (
-                    <LauncherTileView
-                      key={tile.key}
-                      tile={tile}
-                      color={color}
-                      disabled={!online || busy}
-                      open={() => open(tile)}
-                      menu={(anchor) => setMenu({ item: tile, anchor })}
-                      lift={(pointer) => liftItem(pointer, tile)}
-                    >
-                      {entry?.type.startsWith('image/') && tile.size !== 'small' && (
-                        <div className="launcher-file-image">
-                          <FileThumbnail
-                            assetId={entry.assetId}
-                            type={entry.type}
-                            name={entry.name}
-                            sx={{ width: '100%', height: '100%' }}
-                          />
-                        </div>
-                      )}
-                    </LauncherTileView>
-                  );
-                })}
-              </div>
-            </section>
-          ))}
+      <div className="launcher-body">
+        <div
+          className={`launcher-groups${edges.left ? ' fade-left' : ''}${edges.right ? ' fade-right' : ''}`}
+          ref={groupsHost}
+          onScroll={measureEdges}
+          onClick={(event) => {
+            if (!(event.target as Element).closest('.launcher-tile')) close();
+          }}
+        >
+          <div className="launcher-rows">
+            {layout.groups.map((group) => (
+              <section className="launcher-group" key={group.id}>
+                <Typography variant="subtitle1">{group.title}</Typography>
+                <div className="launcher-row" style={{ height: layout.height }}>
+                  {group.tiles.map((tile) => {
+                    const entry = library.snapshot?.entries.find((entry) => entry.id === tile.entryId);
+                    const color = contrastColor(
+                      tile.kind === 'file'
+                        ? fileTypeColor(entry?.type ?? '', tile.title)
+                        : tile.appId === 'browser'
+                          ? '#2563b8'
+                          : tile.appId === 'files'
+                            ? '#b77713'
+                            : tile.appId === 'settings'
+                              ? '#475569'
+                              : (tile.themeColor ?? originColor(tile.url ?? tile.key)),
+                    );
+                    return (
+                      <LauncherTileView
+                        key={tile.key}
+                        tile={tile}
+                        color={color}
+                        imageFile={!!entry?.type.startsWith('image/')}
+                        assetId={entry?.assetId}
+                        fileType={entry?.type}
+                        disabled={!online || busy}
+                        open={() => open(tile, newTarget ? { mode: 'space' } : undefined)}
+                        menu={(anchor) => setMenu({ item: tile, anchor })}
+                        lift={(pointer) => {
+                          try {
+                            checkCapacity(tile);
+                            liftItem(pointer, tile);
+                          } catch (error) {
+                            setError(formatError(error));
+                          }
+                        }}
+                      >
+                        {entry?.type.startsWith('image/') && (
+                          <div className="launcher-file-image">
+                            <FileThumbnail
+                              assetId={entry.assetId}
+                              type={entry.type}
+                              name={entry.name}
+                              sx={{ width: '100%', height: '100%' }}
+                            />
+                          </div>
+                        )}
+                      </LauncherTileView>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+          {query && !layout.groups.length && <Typography>没有匹配项，按回车搜索或打开网址</Typography>}
         </div>
-        {query && !layout.groups.length && <Typography>没有匹配项，按回车搜索或打开网址</Typography>}
+        <LauncherSpaces
+          state={state}
+          snapshots={snapshots}
+          action={action}
+          online={online}
+          newTarget={newTarget}
+          targetNew={() => setNewTarget(true)}
+          close={close}
+          report={report}
+        />
       </div>
       <Menu
         anchorEl={scaledAnchor(menu?.anchor)}
@@ -258,7 +324,7 @@ export function Launcher({
         onClose={() => setMenu(undefined)}
         slotProps={{ list: { dense: true } }}
       >
-        <MenuItem onClick={() => place()}>
+        <MenuItem onClick={() => place({ mode: 'space' })}>
           <ListItemIcon>
             <AddToQueue fontSize="small" />
           </ListItemIcon>
@@ -267,12 +333,15 @@ export function Launcher({
         <MenuItem
           disabled={full}
           onClick={() =>
-            space &&
-            place({
-              mode: 'split',
-              besideWindowId: space.windowIds[space.windowIds.length - 1],
-              side: 'right',
-            })
+            place(
+              space
+                ? {
+                    mode: 'split',
+                    besideWindowId: space.windowIds[space.windowIds.length - 1],
+                    side: 'right',
+                  }
+                : { mode: 'space' },
+            )
           }
         >
           <ListItemIcon>
@@ -304,6 +373,9 @@ export function Launcher({
 function LauncherTileView({
   tile,
   color,
+  imageFile,
+  assetId,
+  fileType,
   disabled,
   open,
   menu,
@@ -312,12 +384,18 @@ function LauncherTileView({
 }: {
   tile: LauncherTile;
   color: string;
+  imageFile: boolean;
+  assetId?: string;
+  fileType?: string;
   disabled: boolean;
   open(): void;
   menu(anchor: HTMLElement): void;
   lift(pointer: PointerStart): void;
   children: React.ReactNode;
 }) {
+  const [imageColor, setImageColor] = useState<string>();
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const preview = tile.kind === 'page' && tile.previewUrl && !previewFailed;
   const gesture = useRef<
     | {
         x: number;
@@ -328,7 +406,7 @@ function LauncherTileView({
         scrolling: boolean;
         moved: boolean;
         consumed: boolean;
-        timer: ReturnType<typeof setTimeout>;
+        timer?: ReturnType<typeof setTimeout>;
       }
     | undefined
   >(undefined);
@@ -340,9 +418,22 @@ function LauncherTileView({
   );
   return (
     <ButtonBase
-      className={`launcher-tile tile-${tile.size}`}
+      className={`launcher-tile tile-${tile.size}${imageFile ? ' tile-image-file' : ''}${preview ? ' tile-page-preview' : ''}`}
+      data-tile-key={tile.key}
+      onLoadCapture={(event) => {
+        if (!(event.target instanceof HTMLImageElement) || (!imageFile && !preview)) return;
+        if (!event.target.matches('.launcher-page-image, .launcher-file-image img')) return;
+        const value = dominantColor(event.target, assetId ?? tile.previewUrl!);
+        if (value) setImageColor(value);
+      }}
       disabled={disabled}
-      style={{ backgroundColor: color, width: tile.width }}
+      style={
+        {
+          backgroundColor: imageColor ?? color,
+          width: tile.width,
+          '--tile-color': imageColor ?? color,
+        } as React.CSSProperties
+      }
       onClick={(event) => {
         if (event.detail === 0 || (!gesture.current?.consumed && !gesture.current?.moved)) open();
       }}
@@ -351,6 +442,12 @@ function LauncherTileView({
         if (gesture.current?.touch) return;
         if (gesture.current) gesture.current.consumed = true;
         menu(event.currentTarget);
+      }}
+      onKeyDown={(event) => {
+        if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+          event.preventDefault();
+          menu(event.currentTarget);
+        }
       }}
       onPointerDown={(event) => {
         if (event.button !== 0) {
@@ -365,28 +462,49 @@ function LauncherTileView({
           y: event.clientY,
           lastX: event.clientX,
           lastY: event.clientY,
-          touch: event.pointerType === 'touch',
+          touch: event.pointerType !== 'mouse',
           scrolling: false,
           moved: false,
           consumed: false,
-          timer: setTimeout(() => {
-            const current = gesture.current;
-            if (!current || current.moved) return;
-            current.consumed = true;
-            // The drag provider tracks the pointer from here; the tile stops scrolling the rows.
-            if (anchor.hasPointerCapture(pointerId)) anchor.releasePointerCapture(pointerId);
-            lift({ pointerId, pointerType, clientX: current.lastX, clientY: current.lastY, element: anchor });
-          }, 400),
+          timer:
+            event.pointerType !== 'mouse'
+              ? setTimeout(() => {
+                  const current = gesture.current;
+                  if (!current || current.moved) return;
+                  current.consumed = true;
+                  // The drag provider tracks the pointer from here; the tile stops scrolling the rows.
+                  if (anchor.hasPointerCapture(pointerId)) anchor.releasePointerCapture(pointerId);
+                  lift({
+                    pointerId,
+                    pointerType,
+                    clientX: current.lastX,
+                    clientY: current.lastY,
+                    element: anchor,
+                  });
+                }, 400)
+              : undefined,
         };
         anchor.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event) => {
         const current = gesture.current;
         if (current?.consumed) return;
-        if (current && Math.hypot(event.clientX - current.x, event.clientY - current.y) > 10) {
+        if (current && Math.hypot(event.clientX - current.x, event.clientY - current.y) / uiScale() > 4) {
           current.moved = true;
           clearTimeout(current.timer);
-          if (current.touch && !current.consumed) current.scrolling = true;
+          if (current.touch) current.scrolling = true;
+          else {
+            current.consumed = true;
+            const anchor = event.currentTarget;
+            if (anchor.hasPointerCapture(event.pointerId)) anchor.releasePointerCapture(event.pointerId);
+            lift({
+              pointerId: event.pointerId,
+              pointerType: event.pointerType,
+              clientX: event.clientX,
+              clientY: event.clientY,
+              element: anchor,
+            });
+          }
         }
         if (current?.scrolling) {
           const scroller = event.currentTarget.closest('.launcher-groups')!;
@@ -408,12 +526,44 @@ function LauncherTileView({
         gesture.current = undefined;
       }}
     >
+      {preview && (
+        <img
+          className="launcher-page-image"
+          src={tile.previewUrl}
+          alt=""
+          draggable={false}
+          onError={() => setPreviewFailed(true)}
+        />
+      )}
+      {preview && <span className="tile-preview-scrim" />}
       {children}
       <span className="tile-icon">
-        <AppIcon appId={tile.appId} iconUrl={tile.iconUrl} file={tile.kind === 'file'} />
+        {tile.kind === 'file' ? (
+          <FileTypeIcon type={fileType ?? ''} name={tile.title} />
+        ) : tile.kind === 'page' ? (
+          !preview && <PageIcon key={tile.url} url={tile.url!} iconUrl={tile.iconUrl} />
+        ) : (
+          <AppIcon appId={tile.appId} iconUrl={tile.iconUrl} />
+        )}
       </span>
       <span className="tile-label">{tile.title}</span>
-      {tile.size === 'wide' && tile.subtitle && <span className="tile-subtitle">{tile.subtitle}</span>}
+      {(tile.size === 'wide' || preview) && tile.subtitle && (
+        <span className="tile-subtitle">{tile.subtitle}</span>
+      )}
     </ButtonBase>
+  );
+}
+
+function PageIcon({ url, iconUrl }: { url: string; iconUrl?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <AppIcon />;
+  return (
+    <img
+      className="launcher-app-icon"
+      src={iconUrl ?? new URL('/favicon.ico', url).href}
+      alt=""
+      draggable={false}
+      onError={() => setFailed(true)}
+    />
   );
 }

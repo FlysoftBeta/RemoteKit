@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 import { migrateLibrarySnapshots } from './library';
 
-const version = 6;
+const version = 7;
 
 function createWorkspaceItems(db: Database.Database) {
   db.exec(`CREATE TABLE installed_apps (
@@ -16,6 +16,14 @@ function createWorkspaceItems(db: Database.Database) {
       item TEXT NOT NULL, window_id TEXT NOT NULL, context TEXT NOT NULL, chain TEXT NOT NULL, title TEXT);
     CREATE INDEX usage_events_tenant ON usage_events(tenant,at,id);
     CREATE INDEX usage_events_context ON usage_events(tenant,window_id,context,at,id);`);
+}
+
+function createPagePreviews(db: Database.Database) {
+  db.exec(`CREATE TABLE page_previews (
+    tenant TEXT NOT NULL, key TEXT NOT NULL, image BLOB NOT NULL, hash TEXT NOT NULL,
+    updated_at INTEGER NOT NULL, PRIMARY KEY(tenant,key));
+    CREATE INDEX page_previews_hash ON page_previews(tenant,hash);
+    CREATE INDEX page_previews_updated ON page_previews(tenant,updated_at);`);
 }
 
 function tableExists(db: Database.Database, name: string) {
@@ -35,6 +43,10 @@ const migrations: Record<number, (db: Database.Database) => void> = {
       const { clientScaleOverride: _, ...settings } = JSON.parse(row.data) as Record<string, unknown>;
       update.run(JSON.stringify({ ...settings, uiScale: 1, topDeadZone: 'off' }), row.tenant);
     }
+  },
+  6: (db) => {
+    createPagePreviews(db);
+    db.exec("UPDATE user_settings SET data=json_remove(data,'$.workspace.groupRail')");
   },
   5: (db) => {
     db.exec(`CREATE TABLE workspace_spaces (
@@ -218,6 +230,7 @@ export function createSchema(db: Database.Database) {
       CREATE INDEX session_imports_tenant ON session_imports(tenant,state,received_at);
       CREATE INDEX session_imports_retention ON session_imports(finished_at) WHERE state!='pending';`);
     createWorkspaceItems(db);
+    createPagePreviews(db);
     writeVersion(db);
   })();
 }

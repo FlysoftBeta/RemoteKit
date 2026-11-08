@@ -11,7 +11,6 @@ export const defaultSettings = () => ({
     topDeadZone: 'off' as const,
     showStats: false,
     autoFullscreen: false,
-    groupRail: true,
     avSync: false,
     audioChannels: { left: true, right: true },
   },
@@ -52,7 +51,6 @@ export class WorkspacesRepository {
       data: string;
     };
     const productSettings = JSON.parse(settings.data);
-    productSettings.workspace.groupRail ??= true;
     return {
       tenantId: tenant,
       revision: Number(row.revision),

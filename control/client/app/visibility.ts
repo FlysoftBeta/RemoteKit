@@ -7,7 +7,7 @@ export function selectVisibility(state: ProductState, shellWidth: number) {
     !state.pageFullscreen &&
     !!space &&
     space.windowIds.length > 1 &&
-    shellWidth - (space.windowIds.length - 1) * 5 >= space.windowIds.length * 360;
+    shellWidth - 16 - (space.windowIds.length - 1) * 8 >= space.windowIds.length * 360;
   const visibleWindowIds = state.pageFullscreen
     ? [state.pageFullscreen.windowId]
     : space

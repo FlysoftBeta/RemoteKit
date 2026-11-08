@@ -23,7 +23,6 @@ function empty(): ProductWorkspace {
         topDeadZone: 'off',
         showStats: false,
         autoFullscreen: false,
-        groupRail: true,
         avSync: false,
         audioChannels: { left: true, right: true },
       },
@@ -268,49 +267,6 @@ test('web App popups split beside the opener and new tabs move to the recent bro
   assert.equal(workspace.tabs.length, previousCount);
 });
 
-test('merge appends atomically, retains creation order, focuses destination and rejects full or closing groups', () => {
-  let workspace = open(open(open(empty(), 'files'), 'files'), 'files');
-  const [first, second, third] = workspace.spaces;
-  const originalOrder = workspace.spaces.map((space) => space.id);
-  workspace = command(workspace, { type: 'space.activate', spaceId: first.id }).workspace;
-  assert.deepEqual(
-    workspace.spaces.map((space) => space.id),
-    originalOrder,
-  );
-  workspace = command(workspace, { type: 'space.merge', spaceId: third.id, intoSpaceId: first.id }).workspace;
-  assert.deepEqual(
-    workspace.spaces.map((space) => space.id),
-    [first.id, second.id],
-  );
-  assert.deepEqual(workspace.spaces[0].windowIds, [...first.windowIds, ...third.windowIds]);
-  assert.deepEqual(workspace.spaces[0].weights, [0.5, 0.5]);
-  assert.equal(workspace.activeSpaceId, first.id);
-  workspace = command(workspace, {
-    type: 'space.merge',
-    spaceId: second.id,
-    intoSpaceId: first.id,
-  }).workspace;
-  workspace = open(workspace, 'files');
-  const source = workspace.spaces[1];
-  const before = structuredClone(workspace);
-  assert.throws(
-    () => command(workspace, { type: 'space.merge', spaceId: source.id, intoSpaceId: first.id }),
-    (error: any) => error.code === 'limit_exceeded',
-  );
-  assert.deepEqual(workspace, before);
-  assert.throws(
-    () => command(workspace, { type: 'space.merge', spaceId: source.id, intoSpaceId: source.id }),
-    /another space/,
-  );
-  workspace = open(workspace, 'files');
-  workspace.pendingWindowCloseId = source.windowIds[0];
-  assert.throws(
-    () =>
-      command(workspace, { type: 'space.merge', spaceId: source.id, intoSpaceId: workspace.spaces[2].id }),
-    /closing/,
-  );
-});
-
 test('cross-group placement targets either side, rejects full groups and detaches into a new group', () => {
   let workspace = open(open(open(open(empty(), 'files'), 'files'), 'files'), 'files');
   const [a, b, c, d] = workspace.windows;
@@ -344,4 +300,51 @@ test('cross-group placement targets either side, rejects full groups and detache
   assert.deepEqual(workspace.spaces[0].windowIds, [b.id, c.id]);
   assert.deepEqual(workspace.spaces[2].windowIds, [a.id]);
   assert.equal(workspace.activeSpaceId, workspace.spaces[2].id);
+});
+
+test('opening a replacement retains slot and weight, preserves the old window, and validates its target', () => {
+  let workspace = open(empty());
+  const first = workspace.windows[0];
+  workspace = command(workspace, {
+    type: 'window.open',
+    appId: 'files',
+    placement: { mode: 'split', besideWindowId: first.id, side: 'right' },
+  }).workspace;
+  const spaceId = workspace.activeSpaceId!;
+  workspace = command(workspace, { type: 'space.layout', spaceId, weights: [1, 3] }).workspace;
+  const replaced = structuredClone(workspace.windows[1]);
+  workspace = command(workspace, {
+    type: 'window.open',
+    appId: 'browser',
+    placement: { mode: 'replace', windowId: replaced.id },
+  }).workspace;
+  const newWindow = workspace.windows[2];
+  assert.deepEqual(workspace.spaces[0].windowIds, [first.id, newWindow.id]);
+  assert.deepEqual(workspace.spaces[0].weights, [0.25, 0.75]);
+  assert.equal(workspace.activeSpaceId, spaceId);
+  assert.equal(workspace.spaces[0].focusedWindowId, newWindow.id);
+  assert.deepEqual(workspace.windows[1], replaced);
+  assert.deepEqual(workspace.spaces[1].windowIds, [replaced.id]);
+  assert.equal(workspace.spaces[1].lastActiveAt, replaced.lastActiveAt);
+  const before = structuredClone(workspace);
+  assert.throws(
+    () =>
+      command(workspace, {
+        type: 'window.open',
+        appId: 'files',
+        placement: { mode: 'replace', windowId: 'missing' },
+      }),
+    { code: 'not_found' },
+  );
+  assert.deepEqual(workspace, before);
+  workspace.pendingWindowCloseId = replaced.id;
+  assert.throws(
+    () =>
+      command(workspace, {
+        type: 'window.open',
+        appId: 'files',
+        placement: { mode: 'replace', windowId: replaced.id },
+      }),
+    { code: 'conflict' },
+  );
 });

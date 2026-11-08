@@ -13,6 +13,7 @@ import { RemoteKitError } from '../shared/errors';
 import { registerUser, requestViewer, TestClock, testGateway } from './server-fixture';
 
 const png = Buffer.from('89504e470d0a1a0a0000000049454e44ae426082', 'hex');
+const jpeg = Buffer.from('ffd8ffe000104a46494600010100000100010000ffd9', 'hex');
 
 class Endpoint {
   readonly calls: { method: string; tenant: string; args: any }[] = [];
@@ -729,52 +730,82 @@ test('space close and App uninstall stop at beforeunload, preserve cancelled tar
   }
 });
 
-test('merge uses product receipts, preserves creation order and rejects capacity without partial changes', async () => {
+test('page previews share normalized usage keys, reject invalid images, and serve only authenticated tenant images', async () => {
   const f = await fixture();
+  let server: ReturnType<typeof createHttp> | undefined;
   try {
-    for (let index = 0; index < 4; index++)
-      await f.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
-    let state = f.store.workspaces.workspace(f.user.tenantId);
-    const [target, second, third, fourth] = state.spaces;
-    const submit = (action: ProductAction) =>
-      f.control.operations.submitOperation(
-        f.user.tenantId,
-        {
-          operationId: randomUUID(),
-          operationGeneration: f.store.operations.operationGeneration(f.user.tenantId),
-          action,
-        },
-        'lease',
+    const image = 'data:image/jpeg;base64,' + jpeg.toString('base64');
+    await f.action({
+      type: 'favorite.add',
+      url: 'https://preview.test/page#favorite',
+      title: 'Preview page',
+    });
+    assert.deepEqual(await f.request('page.preview', { url: 'https://preview.test/page#capture', image }), {
+      saved: true,
+    });
+    assert.deepEqual(
+      [...f.store.workspaces.items.previewHashes(f.user.tenantId).keys()],
+      ['page:https://preview.test/page'],
+    );
+    const result = await f.request('launcher.get', { query: 'Preview page' });
+    const item = result.items.find((item: any) => item.kind === 'page');
+    assert.match(item.previewUrl, /^\/api\/previews\/[0-9a-f]{64}$/);
+    for (const url of [
+      'about:blank',
+      'chrome-error://chromewebdata/',
+      'https://www.google.com/search?q=hello',
+      'https://duckduckgo.com/?q=hello',
+    ])
+      assert.deepEqual(await f.request('page.preview', { url, image }), { saved: false });
+    for (const invalid of [
+      '',
+      'data:image/png;base64,' + png.toString('base64'),
+      'data:image/jpeg;base64,!!!!',
+      'data:image/jpeg;base64,' + Buffer.alloc(24 * 1024 + 1, 0xff).toString('base64'),
+      'data:image/jpeg;base64,' + Buffer.alloc(512 * 1024, 0xff).toString('base64'),
+    ])
+      await assert.rejects(f.request('page.preview', { url: 'https://preview.test/', image: invalid }), {
+        code: 'invalid_request',
+      });
+    const exact = Buffer.alloc(24 * 1024, 0xff);
+    exact[1] = 0xd8;
+    assert.deepEqual(
+      await f.request('page.preview', {
+        url: 'https://preview.test/exact',
+        image: 'data:image/jpeg;base64,' + exact.toString('base64'),
+      }),
+      { saved: true },
+    );
+    server = createHttp(f.control, { origins: [], clientDir: '.' });
+    server.listen(0, '127.0.0.1');
+    await once(server, 'listening');
+    const address = server.address();
+    assert.ok(address && typeof address !== 'string');
+    const origin = `http://127.0.0.1:${address.port}`;
+    const get = (token?: string) =>
+      fetch(origin + item.previewUrl, { headers: token ? { Cookie: `rk_session=${token}` } : {} });
+    assert.equal((await get()).status, 401);
+    const other = await registerUser(f.store, 'preview-other', 'password123');
+    assert.equal((await get(other.token)).status, 404);
+    const response = await get(f.user.token);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/jpeg');
+    assert.equal(response.headers.get('cache-control'), 'private, max-age=31536000, immutable');
+    assert.equal(response.headers.get('vary'), 'Cookie');
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), jpeg);
+    for (const scope of ['pages', 'all']) {
+      await f.request('usage.clear', { scope });
+      assert.equal((await get(f.user.token)).status, 404);
+      assert.equal(
+        (await f.request('launcher.get', { query: 'Preview page' })).items.find(
+          (item: any) => item.kind === 'page',
+        ).previewUrl,
+        undefined,
       );
-    await submit({ type: 'space.activate', spaceId: second.id });
-    assert.deepEqual(
-      f.store.workspaces.workspace(f.user.tenantId).spaces.map((space) => space.id),
-      state.spaces.map((space) => space.id),
-    );
-    const operation = {
-      operationId: randomUUID(),
-      operationGeneration: f.store.operations.operationGeneration(f.user.tenantId),
-      action: { type: 'space.merge', spaceId: second.id, intoSpaceId: target.id } as ProductAction,
-    };
-    const receipt = await f.control.operations.submitOperation(f.user.tenantId, operation, 'lease');
-    assert.equal(receipt.status, 'committed');
-    assert.equal(
-      (await f.control.operations.submitOperation(f.user.tenantId, operation, 'lease')).status,
-      'committed',
-    );
-    state = f.store.workspaces.workspace(f.user.tenantId);
-    assert.deepEqual(state.spaces[0].windowIds, [...target.windowIds, ...second.windowIds]);
-    assert.deepEqual(
-      state.spaces.map((space) => space.id),
-      [target.id, third.id, fourth.id],
-    );
-    await submit({ type: 'space.merge', spaceId: third.id, intoSpaceId: target.id });
-    const before = f.store.workspaces.workspace(f.user.tenantId);
-    const rejected = await submit({ type: 'space.merge', spaceId: fourth.id, intoSpaceId: target.id });
-    assert.equal(rejected.status, 'rejected');
-    assert.match(rejected.error!, /3 windows/);
-    assert.deepEqual(f.store.workspaces.workspace(f.user.tenantId).spaces, before.spaces);
+      await f.request('page.preview', { url: 'https://preview.test/page', image });
+    }
   } finally {
+    await server?.shutdown();
     await f.close();
   }
 });

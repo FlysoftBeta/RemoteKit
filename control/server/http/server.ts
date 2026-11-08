@@ -82,6 +82,21 @@ export function createHttp(
         token = readToken(req);
       if (path === '/api/auth/setup' && req.method === 'GET')
         return json(res, 200, control.accounts.setupStatus());
+      const preview = /^\/api\/previews\/([0-9a-f]{64})$/.exec(path);
+      if (preview && (req.method === 'GET' || req.method === 'HEAD')) {
+        const identity = control.accounts.identity(token);
+        if (!identity) throw new RemoteKitError('unauthenticated', '请先登录');
+        const image = control.store.workspaces.items.preview(identity.tenantId, preview[1]);
+        if (!image) throw new RemoteKitError('not_found', '预览不存在');
+        res.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': image.length,
+          'Cache-Control': 'private, max-age=31536000, immutable',
+          Vary: 'Cookie',
+        });
+        res.end(req.method === 'HEAD' ? undefined : image);
+        return;
+      }
       const appIcon = /^\/api\/apps\/([^/]+)\/icon$/.exec(path);
       if (appIcon && (req.method === 'GET' || req.method === 'HEAD')) {
         const identity = control.accounts.identity(token);

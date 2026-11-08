@@ -10,7 +10,7 @@ import { ControlDatabase } from '../server/persistence/database';
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 6n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 7n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -24,6 +24,7 @@ test('fresh schema includes workspace spaces, installed apps, favorites and usag
       'installed_apps',
       'favorites',
       'usage_events',
+      'page_previews',
       'file_library',
       'session_deletions',
       'session_imports',
@@ -99,6 +100,7 @@ test('legacy workspaces migrate in order, drop files tabs and split settings', a
       DROP TABLE workspaces;
       CREATE TABLE workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_window TEXT, layout_mode TEXT NOT NULL, pending TEXT);
       CREATE TABLE workspace_windows (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, active_tab TEXT, weight REAL NOT NULL);
+      DROP TABLE IF EXISTS page_previews;
       DROP TABLE schema_version;
       CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=4));
       INSERT INTO schema_version(version) VALUES (4);`);
@@ -146,7 +148,7 @@ test('legacy workspaces migrate in order, drop files tabs and split settings', a
     store.db.close();
     store = new ControlDatabase(path);
     try {
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 6n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 7n }]);
       const migrated = store.workspaces.workspace(account.tenantId);
       assert.equal('clientScaleOverride' in migrated.settings.workspace, false);
       assert.equal(migrated.settings.workspace.uiScale, 1);
@@ -192,7 +194,7 @@ test('databases without a migration path are rejected', async () => {
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
       ['v3', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (3)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (7)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (8)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',
@@ -309,29 +311,63 @@ test('installed app metadata survives icon updates and tenant deletion removes w
     assert.deepEqual(restored.favorites, workspace.favorites);
     assert.deepEqual(store.workspaces.items.appIcon(account.tenantId, 'app')?.png, Buffer.from('png'));
     store.workspaces.items.recordUsage(account.tenantId, { item: 'app:web:app', windowId: 'app-window' });
+    store.workspaces.items.savePreview(account.tenantId, 'page:https://example.com/', Buffer.from('jpeg'), 1);
     store.workspaces.deleteTenant(account.tenantId);
-    for (const table of ['workspace_spaces', 'installed_apps', 'favorites', 'usage_events'])
+    for (const table of ['workspace_spaces', 'installed_apps', 'favorites', 'usage_events', 'page_previews'])
       assert.deepEqual(store.db.prepare(`SELECT * FROM ${table} WHERE tenant=?`).all(account.tenantId), []);
   } finally {
     store.db.close();
   }
 });
 
-test('group rail defaults on JSON read and persists an explicit collapse', async () => {
+test('version six migrates previews without changing workspace state', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-schema-previews-'));
+  const path = join(directory, 'control.db');
+  let store = new ControlDatabase(path);
+  try {
+    const account = await registerUser(store, 'preview-migration', 'schema-password123');
+    const workspace = store.workspaces.workspace(account.tenantId);
+    store.db
+      .prepare("UPDATE user_settings SET data=json_set(data,'$.workspace.groupRail',1) WHERE tenant=?")
+      .run(account.tenantId);
+    store.db.exec(`DROP TABLE page_previews;
+      DROP TABLE schema_version;
+      CREATE TABLE schema_version(version INTEGER CHECK(version=6));
+      INSERT INTO schema_version VALUES(6);`);
+    store.db.close();
+    store = new ControlDatabase(path);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 7n }]);
+    assert.deepEqual(store.workspaces.workspace(account.tenantId), workspace);
+    store.workspaces.items.savePreview(account.tenantId, 'page:https://example.com/', Buffer.from('jpeg'), 1);
+    assert.equal(store.workspaces.items.previewHashes(account.tenantId).size, 1);
+  } finally {
+    store.db.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('previews update by key, evict oldest within each tenant, and clear with both usage scopes', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    const account = await registerUser(store, 'rail-user', 'schema-password123');
-    const state = store.workspaces.workspace(account.tenantId);
-    assert.equal(state.settings.workspace.groupRail, true);
-    const oldSettings = JSON.parse(JSON.stringify(state.settings));
-    delete oldSettings.workspace.groupRail;
-    store.db
-      .prepare('UPDATE user_settings SET data=? WHERE tenant=?')
-      .run(JSON.stringify(oldSettings), account.tenantId);
-    assert.equal(store.workspaces.workspace(account.tenantId).settings.workspace.groupRail, true);
-    state.settings.workspace.groupRail = false;
-    store.workspaces.saveWorkspace(state);
-    assert.equal(store.workspaces.workspace(account.tenantId).settings.workspace.groupRail, false);
+    const items = store.workspaces.items;
+    items.savePreview('other', 'page:https://other.test/', Buffer.from('other'), 0);
+    for (let index = 0; index < 200; index++)
+      items.savePreview('tenant', 'page:https://example.test/' + index, Buffer.from(String(index)), index);
+    items.savePreview('tenant', 'page:https://example.test/0', Buffer.from('updated'), 201);
+    items.savePreview('tenant', 'page:https://example.test/200', Buffer.from('new'), 202);
+    const hashes = items.previewHashes('tenant');
+    assert.equal(hashes.size, 200);
+    assert.equal(hashes.has('page:https://example.test/1'), false);
+    assert.deepEqual(
+      items.preview('tenant', hashes.get('page:https://example.test/0')!),
+      Buffer.from('updated'),
+    );
+    assert.equal(items.preview('other', hashes.get('page:https://example.test/0')!), undefined);
+    items.clearUsage('tenant', 'pages');
+    assert.equal(items.previewHashes('tenant').size, 0);
+    assert.equal(items.previewHashes('other').size, 1);
+    items.clearUsage('other', 'all');
+    assert.equal(items.previewHashes('other').size, 0);
   } finally {
     store.db.close();
   }

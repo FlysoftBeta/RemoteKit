@@ -17,19 +17,33 @@ export function launcherActions(
     .filter((win) => win.appId === (item.kind === 'page' ? 'browser' : appId))
     .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
   const url = item.kind === 'page' ? item.url : undefined;
-  if (!placement && existing && (reuseExisting || appId === 'settings')) {
+  if (existing && (reuseExisting || appId === 'settings')) {
     if (item.kind === 'page') return [{ type: 'tab.create', windowId: existing.id, url, source: 'launcher' }];
     return [{ type: 'window.focus', windowId: existing.id, source: 'launcher' }];
   }
-  return [{ type: 'window.open', appId, url, placement: placement ?? { mode: 'space' }, source: 'launcher' }];
+  return [
+    {
+      type: 'window.open',
+      appId,
+      url,
+      placement: placement ?? launcherPlacement(workspace),
+      source: 'launcher',
+    },
+  ];
 }
 
-export function launcherNavigation(url: string): ProductAction {
+export function launcherPlacement(workspace: ProductWorkspace): WindowPlacement {
+  const space = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
+  if (!space || space.windowIds.length >= 3) return { mode: 'space' };
+  return { mode: 'split', besideWindowId: space.windowIds[space.windowIds.length - 1], side: 'right' };
+}
+
+export function launcherNavigation(url: string, placement: WindowPlacement): ProductAction {
   return {
     type: 'window.open',
     appId: 'browser',
     url,
-    placement: { mode: 'space' },
+    placement,
     source: 'launcher',
   };
 }

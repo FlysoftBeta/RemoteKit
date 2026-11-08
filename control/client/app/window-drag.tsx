@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { DeleteOutline, Add } from '@mui/icons-material';
 import type {
   LauncherItem,
   ProductAction,
@@ -13,8 +14,8 @@ import { SpaceSnapshots } from './space-snapshots';
 import { uiScale } from './ui-scale';
 
 // A launcher item is not a window yet: dropping it opens a window at the chosen placement.
-type Source = { windowId: string } | { spaceId: string } | { item: LauncherItem };
-type Target = { action?: ProductAction; placement?: WindowPlacement; marker?: number };
+type Source = { windowId: string } | { item: LauncherItem };
+type Target = { action?: ProductAction; placement?: WindowPlacement; marker?: number; replaceId?: string };
 type Drag = { source: Source; x: number; y: number; target?: Target };
 export interface PointerStart {
   pointerId: number;
@@ -38,7 +39,10 @@ function insertionPositions(stage: HTMLElement, space: ProductSpace) {
     (node) => node.offsetWidth > 0,
   );
   if (frames.length === space.windowIds.length)
-    return [bounds.left, ...frames.map((frame) => frame.getBoundingClientRect().right)];
+    return [
+      frames[0].getBoundingClientRect().left - 4 * uiScale(),
+      ...frames.map((frame) => frame.getBoundingClientRect().right + 4 * uiScale()),
+    ];
   return [
     bounds.left,
     ...space.weights.map(
@@ -54,7 +58,6 @@ export function WindowDragProvider({
   snapshots,
   action,
   report,
-  railVisible,
   openItem,
   children,
 }: {
@@ -62,7 +65,6 @@ export function WindowDragProvider({
   snapshots: SpaceSnapshots;
   action: Action;
   report(error: unknown): void;
-  railVisible: boolean;
   openItem(item: LauncherItem, placement: WindowPlacement): Promise<void>;
   children: React.ReactNode;
 }) {
@@ -74,42 +76,44 @@ export function WindowDragProvider({
   const targetAt = (source: Source, x: number, y: number): Target | undefined => {
     const element = document.elementFromPoint(x, y);
     const stage = document.querySelector<HTMLElement>('.window-workspace');
-    if ('spaceId' in source) {
-      const from = workspace.spaces.find((space) => space.id === source.spaceId);
-      if (
-        element?.closest('.window-workspace') &&
-        from &&
-        active &&
-        from !== active &&
-        from.windowIds.length + active.windowIds.length <= 3
-      )
-        return { action: { type: 'space.merge', spaceId: from.id, intoSpaceId: active.id } };
-      return;
-    }
     const movingId = 'windowId' in source ? source.windowId : undefined;
-    const place = (placement: WindowPlacement): Target =>
+    const place = (placement: Exclude<WindowPlacement, { mode: 'replace' }>): Target =>
       'windowId' in source
         ? { action: { type: 'window.place', windowId: source.windowId, placement } }
         : { placement };
-    const card = element?.closest<HTMLElement>('[data-rail-space]');
+    if (movingId && element?.closest('[data-close-window]'))
+      return { action: { type: 'window.close', windowId: movingId } };
+    const card = element?.closest<HTMLElement>('[data-space-card]');
     if (card) {
-      const space = workspace.spaces.find((space) => space.id === card.dataset.railSpace);
+      const space = workspace.spaces.find((space) => space.id === card.dataset.spaceCard);
       if (space && space.windowIds.length < 3) {
         const beside = space.windowIds.filter((id) => id !== movingId).pop();
         if (beside) return place({ mode: 'split', besideWindowId: beside, side: 'right' });
       }
       return;
     }
-    if (element?.closest('[data-new-group]') || (element?.closest('.group-rail-list') && !card))
-      return place({ mode: 'space' });
+    if (element?.closest('[data-new-group]')) return place({ mode: 'space' });
     if (!stage || !active || !element?.closest('.window-workspace')) return;
     const own = !!movingId && active.windowIds.includes(movingId);
-    if (!own && active.windowIds.length >= 3) return;
+
     const boundaries = insertionPositions(stage, active);
     let slot = 0;
     boundaries.forEach((position, index) => {
       if (Math.abs(x - position) < Math.abs(x - boundaries[slot])) slot = index;
     });
+    if (
+      'item' in source &&
+      (active.windowIds.length >= 3 || Math.abs(x - boundaries[slot]) > 18 * uiScale())
+    ) {
+      const frame = element?.closest<HTMLElement>('[data-window-id]');
+      if (frame && active.windowIds.includes(frame.dataset.windowId!))
+        return {
+          placement: { mode: 'replace', windowId: frame.dataset.windowId! },
+          replaceId: frame.dataset.windowId,
+        };
+      return;
+    }
+    if (!own && active.windowIds.length >= 3) return;
     const remaining = active.windowIds.filter((id) => id !== movingId);
     const before = active.windowIds.slice(0, slot).filter((id) => id !== movingId).length;
     const beside = remaining[Math.min(before, remaining.length - 1)];
@@ -125,35 +129,38 @@ export function WindowDragProvider({
     event.stopPropagation();
     start({ ...event, element: event.currentTarget }, source, event.pointerType !== 'mouse');
   };
-  // Items are lifted by a long press that already happened, so they show at once.
   const beginItem = (pointer: PointerStart, item: LauncherItem) => start(pointer, { item }, true);
   const start = (pointer: PointerStart, source: Source, immediate: boolean) => {
     stop.current();
     const pointerId = pointer.pointerId;
     const startX = pointer.clientX,
       startY = pointer.clientY;
-    let moved = false;
+    let moved = immediate && 'item' in source;
     const shell =
       pointer.element.closest<HTMLElement>('.viewer-shell') ??
       document.querySelector<HTMLElement>('.viewer-shell');
     const space =
-      'spaceId' in source
-        ? workspace.spaces.find((space) => space.id === source.spaceId)
-        : 'windowId' in source
-          ? workspace.spaces.find((space) => space.windowIds.includes(source.windowId))
-          : undefined;
+      'windowId' in source
+        ? workspace.spaces.find((space) => space.windowIds.includes(source.windowId))
+        : undefined;
     if (shell && space) snapshots.capture(shell, space.windowIds);
     const sourceFrame =
       'windowId' in source
         ? shell?.querySelector<HTMLElement>(`[data-window-id="${source.windowId}"]`)
         : undefined;
     const update = (x: number, y: number) => {
-      setDrag({ source, x, y, target: targetAt(source, x, y) });
+      const target = targetAt(source, x, y);
+      setDrag({ source, x, y, target });
+      document.querySelector('[data-window-replace]')?.removeAttribute('data-window-replace');
+      if (target?.replaceId)
+        shell
+          ?.querySelector(`[data-window-id="${target.replaceId}"]`)
+          ?.setAttribute('data-window-replace', 'true');
       if (sourceFrame) sourceFrame.style.opacity = '0.35';
       document.querySelector('[data-window-drop-hover]')?.removeAttribute('data-window-drop-hover');
       document
         .elementFromPoint(x, y)
-        ?.closest('[data-rail-space], [data-new-group]')
+        ?.closest('[data-space-card], [data-new-group], [data-close-window]')
         ?.setAttribute('data-window-drop-hover', 'true');
       shell?.classList.add('window-dragging');
     };
@@ -172,6 +179,7 @@ export function WindowDragProvider({
       window.removeEventListener('pointercancel', cancel, true);
       window.removeEventListener('keydown', key, true);
       setDrag(undefined);
+      document.querySelector('[data-window-replace]')?.removeAttribute('data-window-replace');
       if (sourceFrame) sourceFrame.style.opacity = '';
       document.querySelector('[data-window-drop-hover]')?.removeAttribute('data-window-drop-hover');
       shell?.classList.remove('window-dragging');
@@ -219,13 +227,7 @@ export function WindowDragProvider({
     stop.current = cleanup;
   };
   const source = drag?.source;
-  const id =
-    source &&
-    ('windowId' in source
-      ? source.windowId
-      : 'spaceId' in source
-        ? workspace.spaces.find((space) => space.id === source.spaceId)?.focusedWindowId
-        : undefined);
+  const id = source && 'windowId' in source ? source.windowId : undefined;
   const item = source && 'item' in source ? source.item : undefined;
   const win = workspace.windows.find((win) => win.id === id);
   const stageElement = drag && document.querySelector<HTMLElement>('.window-workspace');
@@ -236,19 +238,28 @@ export function WindowDragProvider({
       <ItemDragContext.Provider value={beginItem}>
         <DraggingContext.Provider value={drag?.source}>
           <div
-            className={
-              drag
-                ? `window-drag-active${railVisible ? ' drag-with-rail' : ''}${item ? ' item-dragging' : ''}`
-                : undefined
-            }
+            className={drag ? `window-drag-active${item ? ' item-dragging' : ' handle-dragging'}` : undefined}
             style={{ display: 'contents' }}
           >
             {children}
-            {drag && (
-              <div className="window-drop-bar" data-new-group>
-                新窗口组
-              </div>
-            )}
+            {drag &&
+              win &&
+              createPortal(
+                <div
+                  className="window-drop-zones"
+                  style={{ left: (stage?.left ?? 0) / uiScale(), width: (stage?.width ?? 0) / uiScale() }}
+                >
+                  <div className="window-drop-zone" data-new-group>
+                    <Add />
+                    新窗口组
+                  </div>
+                  <div className="window-drop-zone window-trash" data-close-window>
+                    <DeleteOutline />
+                    关闭
+                  </div>
+                </div>,
+                document.body,
+              )}
             {drag &&
               (win || item) &&
               createPortal(
@@ -302,15 +313,11 @@ export function WindowDragProvider({
                   height: stage ? stage.height / uiScale() : 0,
                 }}
               >
-                {!('spaceId' in drag.source) &&
-                  (('windowId' in drag.source && active.windowIds.includes(drag.source.windowId)) ||
-                    active.windowIds.length < 3) &&
+                {(('windowId' in drag.source && active.windowIds.includes(drag.source.windowId)) ||
+                  active.windowIds.length < 3) &&
                   slots.map((position, index) => (
                     <i key={index} style={{ left: (position - (stage?.left ?? 0)) / uiScale() }} />
                   ))}
-                {'spaceId' in drag.source && drag.target && (
-                  <div className="group-merge-target">合并到当前窗口组</div>
-                )}
               </div>
             )}
           </div>

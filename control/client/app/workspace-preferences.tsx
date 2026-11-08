@@ -171,16 +171,6 @@ export function WorkspacePreferences({
             )}
             {note('deadZone')}
           </SettingSection>
-          <SettingSection title="窗口组">
-            <SettingSwitch
-              title="显示组栏"
-              description="宽屏左侧常驻窗口组"
-              checked={settings.groupRail}
-              disabled={!online || busy.groupRail}
-              onChange={(checked) => void save('groupRail', { groupRail: checked })}
-            />
-            {note('groupRail')}
-          </SettingSection>
           <SettingSection title="全屏">
             {' '}
             <SettingSwitch

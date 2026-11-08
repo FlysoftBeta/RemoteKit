@@ -30,7 +30,6 @@ export interface WorkspaceSettings {
   topDeadZone: TopDeadZone;
   showStats: boolean;
   autoFullscreen: boolean;
-  groupRail: boolean;
   avSync: boolean;
   audioChannels: { left: boolean; right: boolean };
 }
@@ -139,7 +138,9 @@ export interface Favorite {
   createdAt: number;
 }
 export type WindowPlacement =
-  { mode: 'space' } | { mode: 'split'; besideWindowId: string; side: 'left' | 'right' };
+  | { mode: 'space' }
+  | { mode: 'split'; besideWindowId: string; side: 'left' | 'right' }
+  | { mode: 'replace'; windowId: string };
 export interface AppDefinition {
   name: string;
   startUrl: string;
@@ -159,6 +160,7 @@ export interface LauncherItem {
   url?: string;
   entryId?: string;
   favorite?: boolean;
+  previewUrl?: string;
   organized?: boolean;
   themeColor?: string;
   iconUrl?: string;
@@ -302,12 +304,11 @@ export interface ProductState {
 export type ProductAction =
   | { type: 'window.open'; appId: string; url?: string; placement: WindowPlacement; source?: 'launcher' }
   | { type: 'window.focus'; windowId: string; source?: 'launcher' }
-  | { type: 'window.place'; windowId: string; placement: WindowPlacement }
+  | { type: 'window.place'; windowId: string; placement: Exclude<WindowPlacement, { mode: 'replace' }> }
   | { type: 'window.close'; windowId: string }
   | { type: 'window.state'; windowId: string; state: Record<string, unknown> }
   | { type: 'space.activate'; spaceId: string; source?: 'launcher' }
   | { type: 'space.close'; spaceId: string }
-  | { type: 'space.merge'; spaceId: string; intoSpaceId: string }
   | { type: 'space.layout'; spaceId: string; weights: number[] }
   | ({ type: 'app.install' } & AppDefinition)
   | ({ type: 'app.update'; appId: string } & Partial<AppDefinition>)
@@ -386,6 +387,7 @@ export interface SocketMethods
     result: { recorded: boolean };
   };
   'usage.clear': { params: { scope: 'all' | 'pages' }; result: { cleared: boolean } };
+  'page.preview': { params: { url: string; image: string }; result: { saved: boolean } };
   'launcher.get': { params: { query?: string }; result: { items: LauncherItem[] } };
   'app.inspect': { params: { tabId: string }; result: AppInspectResult };
   viewport: { params: ViewerViewport; result: ProductState };

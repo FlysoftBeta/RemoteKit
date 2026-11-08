@@ -1,4 +1,4 @@
-import { focusWindow, mergeSpaces, placeWindow, windowClosing } from '../../server/workspace/model';
+import { focusWindow, replaceWindow, placeWindow, windowClosing } from '../../server/workspace/model';
 import { RemoteKitError } from '../../shared/errors';
 import {
   placeTab,
@@ -22,6 +22,11 @@ export interface PendingOperation extends ProductOperation {
 function canPlace(workspace: ProductWorkspace, windowId: string, placement: WindowPlacement) {
   if (windowClosing(workspace, windowId)) return false;
   if (placement.mode === 'space') return true;
+  if (placement.mode === 'replace')
+    return (
+      workspace.windows.some((win) => win.id === placement.windowId) &&
+      !windowClosing(workspace, placement.windowId)
+    );
   const target = workspace.spaces.find((space) => space.windowIds.includes(placement.besideWindowId));
   return (
     !!target &&
@@ -57,7 +62,8 @@ export function projectOperations(
         }
         if (w.windows.length >= 16 || !canPlace(w, id, a.placement)) break;
         w.windows.push({ id, appId: a.appId, activeTabId: null, lastActiveAt: Date.now() });
-        placeWindow(w, id, a.placement, id + '-space');
+        if (a.placement.mode === 'replace') replaceWindow(w, id, a.placement.windowId, id + '-space');
+        else placeWindow(w, id, a.placement, id + '-space');
         if (a.appId === 'browser' || a.appId.startsWith('web:')) {
           const url = a.url ?? w.apps.find((app) => `web:${app.id}` === a.appId)?.startUrl;
           w.tabs.push({
@@ -83,19 +89,6 @@ export function projectOperations(
       case 'space.activate': {
         const space = w.spaces.find((space) => space.id === a.spaceId);
         if (space) focusWindow(w, space.focusedWindowId);
-        break;
-      }
-      case 'space.merge': {
-        const source = w.spaces.find((space) => space.id === a.spaceId);
-        const target = w.spaces.find((space) => space.id === a.intoSpaceId);
-        if (
-          source &&
-          target &&
-          source !== target &&
-          source.windowIds.length + target.windowIds.length <= 3 &&
-          [...source.windowIds, ...target.windowIds].every((id) => !windowClosing(w, id))
-        )
-          mergeSpaces(w, source.id, target.id);
         break;
       }
       case 'space.layout': {

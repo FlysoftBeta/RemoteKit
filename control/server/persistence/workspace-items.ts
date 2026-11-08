@@ -135,6 +135,7 @@ export class WorkspaceItemsRepository {
   }
 
   clearUsage(tenant: string, scope: 'all' | 'pages') {
+    this.db.prepare('DELETE FROM page_previews WHERE tenant=?').run(tenant);
     this.db
       .prepare(`DELETE FROM usage_events WHERE tenant=?${scope === 'pages' ? " AND item LIKE 'page:%'" : ''}`)
       .run(tenant);
@@ -161,8 +162,41 @@ export class WorkspaceItemsRepository {
       .run(tenant, tenant);
   }
 
+  savePreview(tenant: string, key: string, image: Buffer, at: number) {
+    const hash = createHash('sha256').update(image).digest('hex');
+    transaction(this.db, () => {
+      this.db
+        .prepare(
+          `INSERT INTO page_previews(tenant,key,image,hash,updated_at) VALUES (?,?,?,?,?)
+        ON CONFLICT(tenant,key) DO UPDATE SET image=excluded.image,hash=excluded.hash,updated_at=excluded.updated_at`,
+        )
+        .run(tenant, key, image, hash, at);
+      this.db
+        .prepare(
+          `DELETE FROM page_previews WHERE tenant=? AND key IN
+        (SELECT key FROM page_previews WHERE tenant=? ORDER BY updated_at DESC,rowid DESC LIMIT -1 OFFSET 200)`,
+        )
+        .run(tenant, tenant);
+    });
+  }
+
+  previewHashes(tenant: string): Map<string, string> {
+    const rows = this.db.prepare('SELECT key,hash FROM page_previews WHERE tenant=?').all(tenant) as {
+      key: string;
+      hash: string;
+    }[];
+    return new Map(rows.map((row) => [row.key, row.hash]));
+  }
+
+  preview(tenant: string, hash: string): Buffer | undefined {
+    const row = this.db
+      .prepare('SELECT image FROM page_previews WHERE tenant=? AND hash=?')
+      .get(tenant, hash) as { image: Buffer } | undefined;
+    return row?.image;
+  }
+
   deleteTenant(tenant: string) {
-    for (const table of ['installed_apps', 'favorites', 'usage_events'])
+    for (const table of ['installed_apps', 'favorites', 'usage_events', 'page_previews'])
       this.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
   }
 }

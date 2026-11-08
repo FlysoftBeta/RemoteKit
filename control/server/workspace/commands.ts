@@ -21,7 +21,7 @@ import {
   findSpace,
   focusWindow,
   placeWindow,
-  mergeSpaces,
+  replaceWindow,
   WORKSPACE_LIMITS,
 } from './model';
 import type { ExecutionContext } from './operations';
@@ -155,7 +155,9 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         throw new RemoteKitError('invalid_request', 'This App does not support URLs');
       const id = nextId();
       state.windows.push({ id, appId: action.appId, activeTabId: null, lastActiveAt: now });
-      placeWindow(state, id, action.placement, nextId(), now);
+      if (action.placement?.mode === 'replace')
+        replaceWindow(state, id, action.placement.windowId, nextId(), now);
+      else placeWindow(state, id, action.placement, nextId(), now);
       if (installed || action.appId === 'browser') createTab(id, action.url ?? installed?.startUrl);
       break;
     }
@@ -182,9 +184,6 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       if (space.focusedWindowId) focusWindow(state, space.focusedWindowId, now);
       break;
     }
-    case 'space.merge':
-      mergeSpaces(state, action.spaceId, action.intoSpaceId, now);
-      break;
     case 'space.layout': {
       const space = findSpace(state, action.spaceId);
       if (
@@ -398,7 +397,6 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
               'showStats',
               'audioChannels',
               'autoFullscreen',
-              'groupRail',
               'avSync',
             ].includes(key),
         )
@@ -429,8 +427,6 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         throw new RemoteKitError('invalid_request', `顶部留空需为 1–${DEAD_ZONE_MAX} px`);
       if ('avSync' in workspaceSettings && typeof workspaceSettings.avSync !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的音视频同步设置');
-      if ('groupRail' in workspaceSettings && typeof workspaceSettings.groupRail !== 'boolean')
-        throw new RemoteKitError('invalid_request', 'Invalid group rail setting');
       if ('autoFullscreen' in workspaceSettings && typeof workspaceSettings.autoFullscreen !== 'boolean')
         throw new RemoteKitError('invalid_request', '无效的全屏设置');
       if (
