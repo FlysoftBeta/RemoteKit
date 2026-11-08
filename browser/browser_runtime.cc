@@ -9,7 +9,9 @@
 #include <string_view>
 #include "base/base64.h"
 #include "base/command_line.h"
+#include "base/files/file_util.h"
 #include "base/functional/bind.h"
+#include "base/path_service.h"
 #include "base/run_loop.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/utf_string_conversions.h"
@@ -17,6 +19,7 @@
 #include "base/task/current_thread.h"
 #include "base/timer/timer.h"
 #include "base/unguessable_token.h"
+#include "build/build_config.h"
 #include "content/public/browser/navigation_controller.h"
 #include "content/public/browser/gpu_data_manager.h"
 #include "gpu/config/gpu_info.h"
@@ -208,6 +211,11 @@ int RemoteKitMainParts::PostCreateThreads() {
       FROM_HERE, base::BindOnce([] { new ServiceIoClipboard; })));
   return 0;
 }
+namespace {
+// PathService key for --data-path; above the ranges used by base, content and chrome.
+constexpr int kDataPathKey = 16000;
+}  // namespace
+
 int RemoteKitMainParts::PreMainMessageLoopRun() {
   LOG(INFO) << "RemoteKit startup PreMain entered";
   state_ = std::make_unique<BrowserRuntime>();
@@ -225,6 +233,13 @@ int RemoteKitMainParts::PreMainMessageLoopRun() {
       service_session == 0 || command.GetSwitchValueASCII("tenant-id").empty() ||
       !data.IsAbsolute())
     return 2;
+#if BUILDFLAG(IS_WIN)
+  // Writable files handed to renderers (the File System API among them) get a deny-execute
+  // ACE, which base only permits under TEMP and one embedder data root; without this a page
+  // using those APIs fails a CHECK when the data path lies elsewhere.
+  CHECK(base::PathService::Override(kDataPathKey, data));
+  base::SetExtraNoExecuteAllowedPath(kDataPathKey);
+#endif
   auto session =
       state_->view_model.CreateSession(command.GetSwitchValueASCII("tenant-id"), service_session);
   CHECK(session);

@@ -87,6 +87,7 @@ lifecycle_uncertain
 ## Profile 持久化
 
 - `ProfileNetworkState` 拥有 OSCryptAsync、RemoteKit 的 `ProfileKeyProvider`、cookie 加密绑定和 StoragePartition 网络路径。只有 Profile 目录并不会有持久 cookie：NetworkContext 需要显式的 cookie 数据库路径。
+- 交给 renderer 的可写文件句柄（File System API 等）在 Windows 上要加禁止执行的 ACE，base 只允许在 TEMP 和嵌入方登记的一个数据根下这样做。Browser 启动时把 `--data-path` 登记为该数据根（PathService 键 16000 + `SetExtraNoExecuteAllowedPath`）；否则数据目录不在 TEMP 下时，任何用到这些 API 的页面（例如 Cloudflare 人机验证）都会让 Browser 因 CHECK 失败退出。
 - Cookie 密钥由 Control 从 Tenant DEK 派生，经只继承给 Browser 的匿名管道传入（`--profile-key-handle`），Browser 在创建 BrowserContext 之前读出恰好 32 字节，只保存在内存里（`ProfileKey`，销毁时清零）。提供者标签 `rk1`、AES-256-GCM、唯一一个提供者。磁盘上没有任何密钥文件，也不依赖 DPAPI，所以 Profile 目录可以搬到另一台机器的另一个路径；单独拿到目录无法解密 Cookie。密钥不对或缺失时启动失败，不退回明文或内存存储。
 - 会话 cookie 跨 Browser 重启保留（persist/restore_old 打开）：Browser 的关闭多半是休眠而不是用户关闭浏览器。
 - 优雅关闭（`browser.shutdown`）：停止接受新命令（之后一律 `unavailable`），持久化 sessionStorage namespace，直接销毁 WebContents（不运行 beforeunload），在 10 秒内等 cookie 与各 StoragePartition 的 flush 回调，退出码 0；任一步失败以退出码 70 退出并记录失败的步骤。Endpoint 只把退出码 0 且作业为空视为干净关闭；强制终止会跳过这些 flush。

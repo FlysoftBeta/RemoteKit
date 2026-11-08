@@ -20,6 +20,13 @@ export interface FrecencyScore {
   transitWeight: number;
   /** Distinct chains in which the item was a destination rather than a pass-through. */
   returns: number;
+  /** Distinct chains in which the item appeared at all. */
+  chains: number;
+  /**
+   * Distinct pages its pass-through visits ended at, following further pass-throughs: a
+   * sign-in page ends at the same app every time, a chat home at a new conversation.
+   */
+  ends: number;
 }
 
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -38,21 +45,46 @@ export function computeFrecency(
     if (previous) successors.set(previous, event);
     tails.set(event.chain, event);
   }
+  const isTransit = (event: UsageEvent) => {
+    const successor = successors.get(event);
+    return !!successor && Math.min(10 * 60 * 1000, successor.at - event.at) < 15 * 1000;
+  };
+  const endOf = (event: UsageEvent) => {
+    let end = successors.get(event)!;
+    while (isTransit(end)) end = successors.get(end)!;
+    return end.item;
+  };
 
   const scores = new Map<string, FrecencyScore>();
   const returnChains = new Map<string, Set<string>>();
+  const allChains = new Map<string, Set<string>>();
+  const ends = new Map<string, Set<string>>();
   const destinations = new Map<string, Map<string, number>>();
   for (const { event } of ordered) {
     const weight = 2 ** (-Math.max(0, now - event.at) / week);
     const successor = successors.get(event);
-    const transit = !!successor && Math.min(10 * 60 * 1000, successor.at - event.at) < 15 * 1000;
+    const transit = isTransit(event);
     let score = scores.get(event.item);
     if (!score) {
-      score = { score: 0, direct: 0, hub: 0, visits: 0, weight: 0, transitWeight: 0, returns: 0 };
+      score = {
+        score: 0,
+        direct: 0,
+        hub: 0,
+        visits: 0,
+        weight: 0,
+        transitWeight: 0,
+        returns: 0,
+        chains: 0,
+        ends: 0,
+      };
       scores.set(event.item, score);
     }
     score.visits += weight * (transit ? 0.3 : 1);
     score.weight += weight;
+    let seen = allChains.get(event.item);
+    if (!seen) allChains.set(event.item, (seen = new Set()));
+    seen.add(event.chain);
+    score.chains = seen.size;
     if (!transit) {
       let chains = returnChains.get(event.item);
       if (!chains) returnChains.set(event.item, (chains = new Set()));
@@ -60,13 +92,17 @@ export function computeFrecency(
       score.returns = chains.size;
     }
     if (transit) {
+      let reached = ends.get(event.item);
+      if (!reached) ends.set(event.item, (reached = new Set()));
+      reached.add(endOf(event));
+      score.ends = reached.size;
       score.transitWeight += weight;
       let distribution = destinations.get(event.item);
       if (!distribution) {
         distribution = new Map();
         destinations.set(event.item, distribution);
       }
-      distribution.set(successor.item, (distribution.get(successor.item) ?? 0) + weight);
+      distribution.set(successor!.item, (distribution.get(successor!.item) ?? 0) + weight);
     }
   }
 

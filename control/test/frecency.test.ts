@@ -113,3 +113,34 @@ test('returns count distinct chains where an item was a destination, not a pass-
   assert.equal(scores.get('page:app')!.returns, 2);
   assert.equal(scores.get('page:once')!.returns, 1);
 });
+
+test('ends follow pass-throughs to where the user stayed', () => {
+  const now = 1_000_000_000;
+  const at = (minutes: number) => now - minutes * 60_000;
+  const visit = (minutes: number, item: string, chain: string): UsageEvent => ({
+    at: at(minutes),
+    item,
+    windowId: 'w',
+    chain,
+  });
+  const events: UsageEvent[] = [
+    visit(300, 'page:home', 'a'),
+    visit(299.95, 'page:chat/1', 'a'),
+    visit(200, 'page:home', 'b'),
+    visit(199.95, 'page:chat/2', 'b'),
+    visit(100, 'page:login', 'c'),
+    visit(99.98, 'page:callback?code=1', 'c'),
+    visit(99.96, 'page:app', 'c'),
+    visit(50, 'page:login', 'd'),
+    visit(49.98, 'page:callback?code=2', 'd'),
+    visit(49.96, 'page:app', 'd'),
+  ];
+  const scores = computeFrecency(events, now);
+  assert.deepEqual(
+    ['page:home', 'page:login'].map((item) => [scores.get(item)!.chains, scores.get(item)!.ends]),
+    [
+      [2, 2],
+      [2, 1],
+    ],
+  );
+});
