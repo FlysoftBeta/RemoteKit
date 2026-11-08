@@ -16,7 +16,7 @@ SQLite 带 `schema_version`（当前 1）。空库在一个事务里建表并写
 | Browser | Profile 存储（cookie、缓存）、WebContents、history/PageState、sessionStorage 关联、页面回调与各种代次 |
 | Client | 服务端状态副本、地址草稿、待确认操作的内存投影、媒体缓冲；持久项只有 HttpOnly token |
 
-一个 User 对应一个 workspace，即一个 Tenant/Session。workspace 由 App、Window 与 Space 组成（见[工作区](workspace.md)）：Window 承载一个 App，browser 与网页 App 窗口通过 `windowId` 拥有 Tab（最多 32），Window 最多 12 个，每个 Space 并排 1–3 个 Window。Tab 的 `kind` 为 `remote | start`：start（简易起始页）在 Viewer 本地渲染，不产生远端渲染需求，但 Session 的数据通道仍在，首次导航直接创建远端页面，不插入伪造的 about:blank 历史。files 与 settings 窗口完全在 Viewer 本地渲染。
+一个 User 对应一个 workspace，即一个 Tenant/Session。workspace 由 App、Window 与 Space 组成（见[工作区](workspace.md)）：Window 承载一个 App，browser 与网页 App 窗口通过 `windowId` 拥有 Tab（最多 32），Window 最多 16 个，每个窗口组（Space）并排 1–3 个 Window。Tab 的 `kind` 为 `remote | start`：start（简易起始页）在 Viewer 本地渲染，不产生远端渲染需求，但 Session 的数据通道仍在，首次导航直接创建远端页面，不插入伪造的 about:blank 历史。files 与 settings 窗口完全在 Viewer 本地渲染。
 
 ## 连接
 
