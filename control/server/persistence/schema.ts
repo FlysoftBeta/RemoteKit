@@ -1,8 +1,11 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 import { migrateLibrarySnapshots } from './library';
+import { normalizedUsagePage } from '../navigation-url';
+import { cleanUrl } from '../url-clean';
+import type { Favorite } from '../../shared/product';
 
-const version = 7;
+const version = 8;
 
 function createWorkspaceItems(db: Database.Database) {
   db.exec(`CREATE TABLE installed_apps (
@@ -32,6 +35,60 @@ function tableExists(db: Database.Database, name: string) {
 
 // Each entry upgrades a database written at that version to the next one.
 const migrations: Record<number, (db: Database.Database) => void> = {
+  7: (db) => {
+    const events = db.prepare("SELECT id,item FROM usage_events WHERE item LIKE 'page:%'").all() as {
+      id: bigint;
+      item: string;
+    }[];
+    const updateEvent = db.prepare('UPDATE usage_events SET item=? WHERE id=?');
+    const deleteEvent = db.prepare('DELETE FROM usage_events WHERE id=?');
+    for (const event of events) {
+      const url = normalizedUsagePage(event.item.slice(5));
+      if (url) updateEvent.run('page:' + url, event.id);
+      else deleteEvent.run(event.id);
+    }
+
+    const previews = db
+      .prepare(
+        "SELECT tenant,key,image,hash,updated_at FROM page_previews WHERE key LIKE 'page:%' ORDER BY updated_at DESC,rowid DESC",
+      )
+      .all() as {
+      tenant: string;
+      key: string;
+      image: Buffer;
+      hash: string;
+      updated_at: bigint;
+    }[];
+    db.exec("DELETE FROM page_previews WHERE key LIKE 'page:%'");
+    const insertPreview = db.prepare('INSERT OR IGNORE INTO page_previews VALUES (?,?,?,?,?)');
+    for (const preview of previews) {
+      const url = normalizedUsagePage(preview.key.slice(5));
+      if (url)
+        insertPreview.run(preview.tenant, 'page:' + url, preview.image, preview.hash, preview.updated_at);
+    }
+
+    const favorites = db
+      .prepare('SELECT tenant,id,data FROM favorites ORDER BY tenant,position,id')
+      .all() as {
+      tenant: string;
+      id: string;
+      data: string;
+    }[];
+    const seen = new Map<string, Set<string>>();
+    const updateFavorite = db.prepare('UPDATE favorites SET data=? WHERE tenant=? AND id=?');
+    const deleteFavorite = db.prepare('DELETE FROM favorites WHERE tenant=? AND id=?');
+    for (const row of favorites) {
+      const favorite = JSON.parse(row.data) as Favorite;
+      const url = cleanUrl(favorite.url);
+      const urls = seen.get(row.tenant) ?? new Set<string>();
+      seen.set(row.tenant, urls);
+      if (!url || urls.has(url)) deleteFavorite.run(row.tenant, row.id);
+      else {
+        urls.add(url);
+        updateFavorite.run(JSON.stringify({ ...favorite, url }), row.tenant, row.id);
+      }
+    }
+  },
   // The display-scale override became an app-wide UI scale; the top dead zone is new.
   4: (db) => {
     const rows = db.prepare('SELECT tenant, data FROM user_settings').all() as {

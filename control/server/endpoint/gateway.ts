@@ -20,6 +20,7 @@ import type {
   ActionResult,
   ClientActionEvent,
   EndpointSnapshot,
+  EndpointErrorReason,
   FaceBinding,
   FaceStatusReply,
   FileAuthorization,
@@ -182,6 +183,7 @@ export class EndpointGateway {
   }
   async snapshot(tenant: string, args: { outputDiagnostics?: boolean } = {}): Promise<EndpointSnapshot> {
     const snapshot = await this.invoke<EndpointSnapshot>('session.snapshot', tenant, args);
+    if (snapshot.status) throw endpointError(snapshot.status);
     return {
       ...snapshot,
       views: (snapshot.views ?? []).map((view) => {
@@ -319,13 +321,27 @@ function endpointError(error: unknown): RemoteKitError {
   if (isRemoteKitError(error)) return error;
   if (typeof error === 'string') return new RemoteKitError('rejected', 'Endpoint 拒绝请求', error);
   if (error && typeof error === 'object' && !(error instanceof Error)) {
-    const wire = error as { code?: string; message?: string };
+    const wire = error as { code?: string; message?: string; reason?: EndpointErrorReason };
     const code: ErrorCode =
       wire.code === 'busy'
         ? 'unavailable'
         : wire.code && Object.prototype.hasOwnProperty.call(httpStatus, wire.code)
           ? (wire.code as ErrorCode)
           : 'rejected';
+    const messages: Record<EndpointErrorReason, string> = {
+      browser_crashed: '浏览器异常退出，正在恢复…',
+      browser_restarting: '浏览器正在恢复，请稍候…',
+      output_failed: '浏览器画面输出失败，请稍后重试',
+    };
+    const message = wire.reason && messages[wire.reason];
+    if (message) {
+      console.error('Endpoint status', { code, reason: wire.reason, detail: wire.message });
+      return new RemoteKitError(
+        code,
+        code === 'outcome_unknown' ? '浏览器连接中断，操作可能已执行，请查看恢复后的页面' : message,
+        wire.message,
+      );
+    }
     return new RemoteKitError(code, wire.message ?? 'Endpoint 拒绝请求');
   }
   return toRemoteKitError(error);

@@ -43,7 +43,10 @@ class Session {
   Result<void> ManagementLost(uint64_t generation) {
     return authorization.ManagementLost(generation);
   }
-  void MaintainRecovery() { navigation.MaintainRecovery(); }
+  void MaintainRecovery() {
+    browser.RecordCrash();
+    navigation.MaintainRecovery();
+  }
   void FlushSignals() { channel.FlushSignals(); }
   ViewController& Views() { return views; }
   FileController& Files() { return files; }

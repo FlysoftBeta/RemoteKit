@@ -1,3 +1,4 @@
+import { cleanUrl } from './url-clean';
 import { RemoteKitError } from '../shared/errors';
 import type { SearchEngine } from '../shared/product';
 
@@ -25,8 +26,7 @@ export function normalizedUsagePage(value: string): string | null {
     )
       return null;
   }
-  url.hash = '';
-  return url.href;
+  return cleanUrl(value);
 }
 
 /** User text is resolved only here, shared by address-bar and start-page actions. */

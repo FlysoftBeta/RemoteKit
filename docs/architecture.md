@@ -72,6 +72,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 - 错误码同时表达"是什么错"和"有没有可能已经执行"。操作收据由此决定 rejected 还是 unknown；`outcome_unknown` 的操作只查询，从不用新 ID 重做。
 - 每个边界只转换一次：HTTP 返回 `{error:{code,message}}` 和对应状态码；WS 返回 `{type:"error", id, error:{code,message}}`；Endpoint 管理回复 `{ok:false, error:{code,message}}`；Browser 控制回复 `{ok:false, code, error, detail}`。`message` 可以展示给用户；内部细节只进日志。
+- Endpoint 的 Session 状态错误额外带一个 `reason`：`browser_crashed`（Browser 非正常退出）、`browser_restarting`（替换中）、`output_failed`（GPU 输出无法继续），错误码为 `unavailable`；在途操作仍按 `outcome_unknown` 处理。Control 在网关处把 reason 转成一次面向用户的文字（如"浏览器异常退出，正在恢复…"），内部原因（例如 render generation 未决的 GPU 工作）只进日志和诊断，不出现在 Viewer。
 - 意外异常在请求边界和线程入口被捕获：请求返回 `internal`，线程入口把所属组件标记为失败，而不是终止进程。
 - 不确定的 GPU 工作、编码任务和原生回调不靠超时"放弃"：资源保留到有证据为止，必要时保留到进程结束。
 - 控制 RPC 超时只使本次结果成为 `outcome_unknown`，不关闭 SDK 通道、不清除 Endpoint 的控制句柄。SDK 使用每通道请求 ID 匹配回复，丢弃迟到回复并释放其 Mojo 附件与本地资源句柄；后续健康检查有界等待。只有管道确实断开或进程退出才允许替换 Browser，连续失败最多启动三次，按 1/2/4 秒退避，健康运行一分钟后恢复额度。拒绝重启的错误附带最近一次真实失败（进程退出码及其含义、控制管道超时或 `output.status` 错误）和 Session 目录下 `browser.log` 的路径；Endpoint 自己终止的进程（退出码 0）不算失败。GPU 输出启动失败通过现有 Session 错误投影显示在标签页/工作区。

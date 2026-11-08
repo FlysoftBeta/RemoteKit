@@ -197,7 +197,7 @@ test('settings updates merge each section and reject fields in the wrong section
 test('favorites normalize URLs and update existing titles', () => {
   let workspace = command(empty(), {
     type: 'favorite.add',
-    url: 'https://example.com',
+    url: 'https://example.com/?token=private&utm_source=tracker#fragment',
     title: 'First',
   }).workspace;
   workspace = command(workspace, {
@@ -207,6 +207,11 @@ test('favorites normalize URLs and update existing titles', () => {
   }).workspace;
   assert.equal(workspace.favorites.length, 1);
   assert.equal(workspace.favorites[0].title, 'Latest');
+  assert.equal(workspace.favorites[0].url, 'https://example.com/');
+  for (const url of ['about:blank', 'invalid', 'https://user:password@example.com/'])
+    assert.throws(() => command(workspace, { type: 'favorite.add', url, title: 'Invalid' }), {
+      code: 'invalid_request',
+    });
   workspace = command(workspace, { type: 'favorite.remove', id: workspace.favorites[0].id }).workspace;
   assert.deepEqual(workspace.favorites, []);
 });

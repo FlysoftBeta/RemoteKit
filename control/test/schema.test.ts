@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { ControlDatabase } from '../server/persistence/database';
+import { createSchema } from '../server/persistence/schema';
 
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 7n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 8n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -39,6 +40,126 @@ test('fresh schema includes workspace spaces, installed apps, favorites and usag
       (column) => column.name,
     );
     for (const name of ['last_login_at', 'disabled_at']) assert.ok(columns.includes(name), name);
+  } finally {
+    store.db.close();
+  }
+});
+
+test('version seven cleans remembered URLs and resolves collisions per tenant', () => {
+  const store = new ControlDatabase(':memory:');
+  try {
+    const urls = [
+      'https://accounts.google.com/v3/signin/identifier?opparams=private&client_id=client&nonce=secret&state=secret&redirect_uri=private',
+      'https://claude.ai/?__cf_chl_rt_tk=private',
+      'https://www.google.com/search?q=chatgpt&sei=private',
+      'https://example.com/callback?code=secret&extra=private',
+      'https://user:password@example.com/',
+      'about:blank',
+      'https://example.com/page?b=2&utm_source=old&a=1',
+      'https://example.com/page?a=1&b=2#fragment',
+    ];
+    const insertEvent = store.db.prepare(
+      'INSERT INTO usage_events(tenant,at,item,window_id,context,chain,title) VALUES (?,?,?,?,?,?,?)',
+    );
+    const insertPreview = store.db.prepare('INSERT INTO page_previews VALUES (?,?,?,?,?)');
+    const insertFavorite = store.db.prepare('INSERT INTO favorites VALUES (?,?,?,?)');
+    for (const tenant of ['tenant', 'other']) {
+      for (const [index, url] of urls.entries()) {
+        insertEvent.run(tenant, 100 + index, 'page:' + url, 'window', 'tab:tab', 'chain', `Title ${index}`);
+        insertPreview.run(
+          tenant,
+          'page:' + url,
+          Buffer.from(`${tenant}:${index}`),
+          `${tenant}-hash-${index}`,
+          100 + index,
+        );
+        insertFavorite.run(
+          tenant,
+          `favorite-${index}`,
+          index,
+          JSON.stringify({ id: `favorite-${index}`, url, title: `Favorite ${index}`, createdAt: index }),
+        );
+      }
+      insertEvent.run(tenant, 1, 'app:browser', 'window', 'window', 'app-chain', null);
+      insertPreview.run(
+        tenant,
+        'page:https://claude.ai/',
+        Buffer.from(tenant + ':new'),
+        tenant + '-new-hash',
+        200,
+      );
+    }
+    store.db.exec(`DROP TABLE schema_version;
+      CREATE TABLE schema_version(version INTEGER CHECK(version=7));
+      INSERT INTO schema_version VALUES(7);`);
+    createSchema(store.db);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 8n }]);
+    for (const tenant of ['tenant', 'other']) {
+      const rows = store.db
+        .prepare('SELECT item,at,title,window_id,context,chain FROM usage_events WHERE tenant=? ORDER BY id')
+        .all(tenant) as {
+        item: string;
+        at: bigint;
+        title: string;
+        window_id: string;
+        context: string;
+        chain: string;
+      }[];
+      assert.deepEqual(
+        rows.map((row) => row.item),
+        [
+          'page:https://accounts.google.com/v3/signin/identifier',
+          'page:https://claude.ai/',
+          'page:https://example.com/callback',
+          'page:https://example.com/page?a=1&b=2',
+          'page:https://example.com/page?a=1&b=2',
+          'app:browser',
+        ],
+      );
+      assert.deepEqual(rows[0], {
+        item: 'page:https://accounts.google.com/v3/signin/identifier',
+        at: 100n,
+        title: 'Title 0',
+        window_id: 'window',
+        context: 'tab:tab',
+        chain: 'chain',
+      });
+      const previews = store.db
+        .prepare('SELECT key,hash,image FROM page_previews WHERE tenant=? ORDER BY key')
+        .all(tenant) as { key: string; hash: string; image: Buffer }[];
+      assert.deepEqual(
+        previews.map((row) => row.key),
+        [
+          'page:https://accounts.google.com/v3/signin/identifier',
+          'page:https://claude.ai/',
+          'page:https://example.com/callback',
+          'page:https://example.com/page?a=1&b=2',
+        ],
+      );
+      assert.deepEqual(previews[1], {
+        key: 'page:https://claude.ai/',
+        hash: tenant + '-new-hash',
+        image: Buffer.from(tenant + ':new'),
+      });
+      assert.deepEqual(previews[3], {
+        key: 'page:https://example.com/page?a=1&b=2',
+        hash: tenant + '-hash-7',
+        image: Buffer.from(tenant + ':7'),
+      });
+      const favorites = store.workspaces.items.favorites(tenant);
+      assert.deepEqual(
+        favorites.map((favorite) => [favorite.id, favorite.url]),
+        [
+          ['favorite-0', 'https://accounts.google.com/v3/signin/identifier'],
+          ['favorite-1', 'https://claude.ai/'],
+          ['favorite-2', 'https://www.google.com/search?q=chatgpt&sei=private'],
+          ['favorite-3', 'https://example.com/callback'],
+          ['favorite-6', 'https://example.com/page?a=1&b=2'],
+        ],
+      );
+      assert.equal(favorites[4].title, 'Favorite 6');
+      assert.equal(favorites[4].createdAt, 6);
+    }
   } finally {
     store.db.close();
   }
@@ -148,7 +269,7 @@ test('legacy workspaces migrate in order, drop files tabs and split settings', a
     store.db.close();
     store = new ControlDatabase(path);
     try {
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 7n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 8n }]);
       const migrated = store.workspaces.workspace(account.tenantId);
       assert.equal('clientScaleOverride' in migrated.settings.workspace, false);
       assert.equal(migrated.settings.workspace.uiScale, 1);
@@ -194,7 +315,7 @@ test('databases without a migration path are rejected', async () => {
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
       ['v3', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (3)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (8)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (9)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',
@@ -336,7 +457,7 @@ test('version six migrates previews without changing workspace state', async () 
       INSERT INTO schema_version VALUES(6);`);
     store.db.close();
     store = new ControlDatabase(path);
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 7n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 8n }]);
     assert.deepEqual(store.workspaces.workspace(account.tenantId), workspace);
     store.workspaces.items.savePreview(account.tenantId, 'page:https://example.com/', Buffer.from('jpeg'), 1);
     assert.equal(store.workspaces.items.previewHashes(account.tenantId).size, 1);

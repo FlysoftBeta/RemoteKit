@@ -269,147 +269,49 @@ test('committed main-frame navigation records normalized pages, latest titles an
   }
 });
 
-test('launcher groups obey caps, favorite and organized priority, source exclusion and App presentation', async () => {
+test('launcher adapter maps organized and hidden library entries and usage routes enforce file ownership', async () => {
   const f = await fixture();
   try {
     await f.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
-    const state = f.store.workspaces.workspace(f.user.tenantId);
-    const windowId = state.windows[0].id;
-    state.apps = Array.from({ length: 15 }, (_, index) => ({
-      id: `app-${index}`,
-      name: `Installed ${index}`,
-      startUrl: `https://app${index}.test/`,
-      scope: `https://app${index}.test/`,
-      display: 'standalone',
-      createdAt: 1,
-      updatedAt: 1,
-      themeColor: '#123456',
-      iconUrl: `/api/apps/app-${index}/icon?h=hash`,
-      iconHash: 'hash',
-    }));
-    state.favorites = [
-      { id: 'favorite', title: 'Favorite page', url: 'https://app0.test/favorite', createdAt: 1 },
-    ];
-    f.store.workspaces.saveWorkspace(state);
+    const windowId = f.store.workspaces.workspace(f.user.tenantId).windows[0].id;
     const library = f.store.library.snapshot(f.user.tenantId);
     library.partitions = [{ id: 'partition', name: 'Organized' }];
     library.excludedSources = [{ app: 'files', channel: 'camera' }];
-    library.entries = Array.from({ length: 30 }, (_, index): LibraryEntry => ({
-      id: `file-${index}`,
-      name: `File ${index}`,
-      assetId: `asset-${index}`,
+    library.entries = ['visible', 'hidden', 'hidden-organized'].map((id): LibraryEntry => ({
+      id,
+      name: id,
+      assetId: id,
       type: 'text/plain',
       size: 1,
       createdAt: 1,
-      source: { app: 'files', channel: index === 0 ? 'camera' : 'upload' },
-      partitionId: index >= 20 ? 'partition' : null,
+      source: { app: 'files', channel: id.startsWith('hidden') ? 'camera' : 'upload' },
+      partitionId: id === 'hidden' ? null : 'partition',
       collected: true,
     }));
-    library.entries.push({
-      ...library.entries[20],
-      id: 'excluded-organized',
-      source: { app: 'files', channel: 'camera' },
-    });
-    library.entries.push({
-      id: 'unused',
-      name: 'Unused searchable file',
-      assetId: 'unused-asset',
-      type: 'text/plain',
-      size: 1,
-      createdAt: 1,
-      source: { app: 'files', channel: 'upload' },
-      partitionId: null,
-      collected: true,
-    });
     f.store.library.save(f.user.tenantId, library);
-    const record = (item: string, visits: number, title?: string) => {
-      for (let index = 0; index < visits; index++)
-        f.store.workspaces.items.recordUsage(
-          f.user.tenantId,
-          { item, windowId, title, source: 'launcher' },
-          f.clock.wallMs(),
-        );
-    };
-    for (const app of state.apps) record('app:web:' + app.id, 40);
-    for (let index = 0; index < 30; index++) record(`page:https://pages.test/${index}`, 2, `Page ${index}`);
-    record('page:https://once.test/sign-in', 1, 'Sign in once');
-    record('page:https://pages.test/1', 1, 'Just a moment...');
-    for (const entry of library.entries.filter((entry) => entry.id !== 'unused'))
-      record('file:' + entry.id, entry.id === 'file-0' ? 100 : 1);
-    const { items } = await f.request('launcher.get', {});
-    const group = (name: string) => items.filter((item: any) => item.group === name);
-    assert.equal(group('frequent').length, 12);
-    assert.equal(group('apps').length, 18);
     assert.deepEqual(
-      group('apps')
-        .slice(0, 3)
-        .map((item: any) => item.appId),
-      ['browser', 'files', 'settings'],
+      (await f.request('launcher.get', {})).items
+        .filter((item: any) => item.kind === 'file')
+        .map((item: any) => [item.entryId, item.organized]),
+      [['visible', true]],
     );
-    assert.equal(group('pages').length, 16);
-    assert.equal(group('pages')[0].favorite, true);
-    assert.equal(group('pages')[0].themeColor, '#123456');
-    assert.equal(group('pages')[0].iconUrl, '/api/apps/app-0/icon?h=hash');
-    assert.equal(group('files').length, 12);
-    assert.ok(
-      group('files')
-        .slice(0, 10)
-        .every((item: any) => item.organized),
-    );
-    assert.equal(
-      items.some((item: any) => item.entryId === 'file-0'),
-      false,
-    );
-    assert.equal(
-      items.some((item: any) => item.entryId === 'excluded-organized'),
-      false,
-    );
-    const frequent = new Set(group('frequent').map((item: any) => item.key));
-    assert.ok([...group('pages'), ...group('files')].every((item: any) => !frequent.has(item.key)));
-    const search = await f.request('launcher.get', { query: 'favorite' });
-    assert.deepEqual(
-      search.items.map((item: any) => item.url),
-      ['https://app0.test/favorite'],
-    );
-    assert.equal(
-      items.some((item: any) => item.url === 'https://once.test/sign-in'),
-      false,
-    );
-    assert.equal(items.find((item: any) => item.url === 'https://pages.test/1')?.title, 'Page 1');
-    const once = await f.request('launcher.get', { query: 'sign in once' });
-    assert.deepEqual(
-      once.items.map((item: any) => item.url),
-      ['https://once.test/sign-in'],
-    );
-    const unused = await f.request('launcher.get', { query: 'unused searchable' });
-    assert.deepEqual(
-      unused.items.map((item: any) => item.entryId),
-      ['unused'],
-    );
-    assert.equal(
-      items.some((item: any) => item.entryId === 'unused'),
-      false,
-    );
+    assert.deepEqual((await f.request('launcher.get', { query: 'hidden' })).items, []);
+    await assert.rejects(f.request('launcher.get', { query: 123 }), { code: 'invalid_request' });
     await assert.rejects(f.request('usage.record', { item: 'file:missing', windowId }), {
       code: 'not_found',
     });
     await assert.rejects(f.request('usage.record', { item: 'page:https://pages.test/', windowId }), {
       code: 'invalid_request',
     });
-    assert.deepEqual(await f.request('usage.record', { item: 'file:file-1', windowId }), { recorded: true });
+    assert.deepEqual(await f.request('usage.record', { item: 'file:visible', windowId }), { recorded: true });
+    f.store.workspaces.items.recordUsage(f.user.tenantId, { item: 'page:https://pages.test/', windowId });
     await f.request('usage.clear', { scope: 'pages' });
-    let events = f.store.workspaces.items.usage(f.user.tenantId, f.clock.wallMs());
-    assert.equal(
-      events.some((event) => event.item.startsWith('page:')),
-      false,
-    );
-    assert.equal(
-      events.some((event) => event.item.startsWith('file:')),
-      true,
+    assert.deepEqual(
+      f.store.workspaces.items.usage(f.user.tenantId, f.clock.wallMs()).map((event) => event.item),
+      ['app:files', 'file:visible'],
     );
     await f.request('usage.clear', { scope: 'all' });
-    events = f.store.workspaces.items.usage(f.user.tenantId, f.clock.wallMs());
-    assert.deepEqual(events, []);
+    assert.deepEqual(f.store.workspaces.items.usage(f.user.tenantId, f.clock.wallMs()), []);
   } finally {
     await f.close();
   }
@@ -818,6 +720,44 @@ test('page previews share normalized usage keys, reject invalid images, and serv
     }
   } finally {
     await server?.shutdown();
+    await f.close();
+  }
+});
+
+test('reconciliation writes titles only when a tab changes page or remembered title', async (t) => {
+  const f = await fixture();
+  try {
+    await f.action({
+      type: 'window.open',
+      appId: 'browser',
+      url: 'https://title.test/first',
+      placement: { mode: 'space' },
+    });
+    await f.control.reconciler.tick();
+    const tab = f.store.workspaces.workspace(f.user.tenantId).tabs[0];
+    const view = f.endpoint.views.get(tab.webviewId)!;
+    const write = t.mock.method(f.store.workspaces.items, 'updateUsageTitle');
+    view.title = 'Settled title';
+    await f.control.reconciler.tick();
+    await f.control.reconciler.tick();
+    await f.control.reconciler.tick();
+    assert.equal(write.mock.callCount(), 1);
+    Object.assign(view, { url: 'https://title.test/second?token=private', document: 'second' });
+    await f.control.reconciler.tick();
+    await f.control.reconciler.tick();
+    assert.equal(write.mock.callCount(), 2);
+    assert.deepEqual(write.mock.calls[1].arguments, [
+      f.user.tenantId,
+      'page:https://title.test/second',
+      'Settled title',
+    ]);
+    view.title = 'Changed title';
+    await f.control.reconciler.tick();
+    await f.control.reconciler.tick();
+    assert.equal(write.mock.callCount(), 3);
+    const events = f.store.workspaces.items.usage(f.user.tenantId, f.clock.wallMs());
+    assert.equal(events[events.length - 1]?.title, 'Changed title');
+  } finally {
     await f.close();
   }
 });

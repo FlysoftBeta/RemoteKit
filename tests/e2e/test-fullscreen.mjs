@@ -2,7 +2,8 @@
  * Real H.264 fullscreen regression on an isolated loopback instance.
  * node tests/e2e/test-fullscreen.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port]
  */
-import { startProductStack, registerViewer } from './product-stack.mjs';
+import { startProductStack } from './kit/stack.mjs';
+import { registerViewer } from './product-stack.mjs';
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir } from 'node:fs/promises';
 import { createServer } from 'node:http';

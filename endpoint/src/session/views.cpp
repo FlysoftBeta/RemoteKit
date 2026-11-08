@@ -1,4 +1,5 @@
 #include "session/views.hpp"
+#include "util/wire_error.hpp"
 #include "util/file_io.hpp"
 #include "util/result_macros.hpp"
 #include "diagnostics/stats.hpp"
@@ -111,7 +112,7 @@ Result<void> ViewController::Start() {
               browser.Diagnostic().c_str());
     auto stopped = stop_runtime();
     if (!stopped)
-      return stopped.error();
+      return browser.Unavailable(stopped.error().message);
     auto prepared = registry.PrepareAdapter();
     if (!prepared)
       return prepared.error();
@@ -399,23 +400,27 @@ Result<Json> ViewController::InactiveSnapshot() {
   // Only a signaled process handle proves producer exit. Retire its GPU state
   // through the existing stop boundary; observing a Session never launches it.
   if (browser.Exited()) {
+    browser.RecordCrash();
     fprintf(stderr, "session %s inactive snapshot observed producer exit peer=%llu %s\n",
             id.c_str(), peer_controller.Handle(), browser.Diagnostic().c_str());
     auto stopped = stop_runtime();
     if (!stopped)
-      return stopped.error();
+      return browser.Unavailable(stopped.error().message);
   }
-  return Json{{"sessionId", id},
-              {"browserPid", 0},
-              {"views", Json::array()},
-              {"pendingPopups", Json::array()},
-              {"downloadsInProgress", 0},
-              {"events", durable_events},
-              {"running", false},
-              {"browserIncarnation", nullptr},
-              {"rtc", RtcSnapshot()},
-              {"stats", diagnostics.Stats()},
-              {"recovery", navigation.RecoverySnapshot()}};
+  return Json{
+      {"status", browser.Crashed() ? WireError(browser.Unavailable("Browser process exited"))
+                                   : Json(nullptr)},
+      {"sessionId", id},
+      {"browserPid", 0},
+      {"views", Json::array()},
+      {"pendingPopups", Json::array()},
+      {"downloadsInProgress", 0},
+      {"events", durable_events},
+      {"running", false},
+      {"browserIncarnation", nullptr},
+      {"rtc", RtcSnapshot()},
+      {"stats", diagnostics.Stats()},
+      {"recovery", navigation.RecoverySnapshot()}};
 }
 
 Result<Json> ViewController::Snapshot(bool output_diagnostics) {

@@ -80,15 +80,16 @@ Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/da
 ## 发布包
 
 ```powershell
-C:\src\depot_tools\python3.bat tools/chromium.py stage
-C:\src\depot_tools\python3.bat tools/chromium.py build --out rel --target remotekit_browser --target remotekit_sdk
-C:\src\depot_tools\python3.bat tools/export-sdk.py --out C:/src/chromium/src/out/rel --destination sdk/dist/rel
-tools\build-endpoint.cmd package
-npm --prefix control run build
-C:\src\depot_tools\python3.bat tools/package-runtime.py --smoke --node C:/path/to/node-runtime/node.exe
+C:\src\depot_tools\python3.bat tools/release.py
 ```
 
-`tools/package-runtime.py` 默认使用 `--out rel`，在 `develop/tmp/<时间戳>/` 输出两套解包目录、`.tar.zst` 和 `.tar.zst.sha256`。
+`tools/release.py` 是唯一的发布入口：工作树有未提交改动时拒绝；依次执行 stage、Chromium `out/rel` 构建（Browser + SDK）、SDK 导出、Endpoint 打包构建、Control 构建，再运行 `package-runtime.py --smoke`，最后打印归档路径、大小、SHA-256 与 manifest 的来源摘要。任一步失败即停止。
+
+`tools/package-runtime.py` 也可单独运行（默认 `--out rel`），在 `develop/tmp/<时间戳>/` 输出两套解包目录、`.tar.zst` 和 `.tar.zst.sha256`。它先检查产物是否新鲜，任一项不满足就拒绝打包并指出是哪个组件：`tools/chromium.py stage --check` 有待同步的源码；Chromium out 目录对 `remotekit_browser remotekit_sdk` 还有待执行的构建（ninja 干跑）；Endpoint 打包构建目录还有待执行的构建；`control/dist` 比 `control/server`、`client`、`shared` 下最新的源文件旧。
+
+**来源**：manifest 记录 `source{commit, dirty}`（dirty 指 browser/、endpoint/、control/、protocol/、sdk/、tools/、patches/ 下有未提交改动；只有 `release.py` 保证为 false）和 `artifacts`（实际打包的 Browser、Endpoint、Node、Control 服务端文件的 SHA-256），据此可以确认某个修复是否在包里。
+
+**Node 运行时**：`tools/node_runtime.py` 固定一个版本（v24.20.0，ABI 137，与 Control 的 better-sqlite3 匹配），从 nodejs.org 下载官方 Windows x64 zip，用脚本内写死的 SHA-256 校验，解压到仓库外的构建缓存 `%LOCALAPPDATA%/RemoteKit/build-cache/`，带官方 `LICENSE`。打包只用这个运行时，不接受手动指定。
 
 | 部署方式 | 发布包 | 启动入口 |
 |---|---|---|
@@ -104,7 +105,7 @@ Control 启动脚本首次生成 `config/control.json`。合部署把运行时�
 
 `--smoke` 把 Control 包复制到隔离目录，在副本内安装节点运行时并验证启动、鉴权和 Endpoint 管理。安装生成的 `data/local` 留在副本内，归档继续使用原始打包目录。真实 Viewer 的产品操作和媒体验证使用独立端到端测试。
 
-打包使用 Node 24 内置 zstd（level 12、全部逻辑 CPU），tar 以固定 32 MiB 缓冲流入压缩器，输出标准串联 zstd frames，不生成中间 tar，也不把整个包读入内存。逐 frame 使用同步结束指令，避开 Node 24 异步多线程 zstd 的提前 EOF 问题；每个 frame 内仍由原生 zstd 多线程压缩。`--node` 必须指向带官方 `LICENSE` 的真实 Node runtime，且 ABI 匹配 Control 的 SQLite 原生模块。`--out dev` 显式生成开发包。manifest 的 `browser_configuration` 标记 `rel`/`dev`，`archive` 记录完整归档名。
+打包使用 Node 24 内置 zstd（level 12、全部逻辑 CPU），tar 以固定 32 MiB 缓冲流入压缩器，输出标准串联 zstd frames，不生成中间 tar，也不把整个包读入内存。逐 frame 使用同步结束指令，避开 Node 24 异步多线程 zstd 的提前 EOF 问题；每个 frame 内仍由原生 zstd 多线程压缩。`--out dev` 显式生成开发包。manifest 的 `browser_configuration` 标记 `rel`/`dev`，`archive` 记录完整归档名。
 
 Endpoint 编译直接包含仓库 `sdk/include` 公共头，不链接 SDK import lib；运行时通过 `LoadLibraryExW` 加载 Browser 同目录的 `remotekit_sdk.dll` 并解析 C ABI。发布 SDK 导出到独立 `sdk/dist/rel`；非 component 构建的 runtime deps 缩减后，打包仍从 GN 图收集 Browser 和 SDK 的完整运行依赖，不沿用开发 DLL 目录。
 
@@ -132,7 +133,8 @@ node tools/tests/streaming-package-real-stack.mjs "C:/RemoteKit/RemoteKit-win-x6
 | `sdk/` | SDK 消费者 smoke（控制、渲染、RTC、音频） | `tools\verify-sdk.cmd` |
 | `tools/tests/` | 构建工具（补丁管理、stage、打包布局） | `python -m unittest` |
 | `tests/integration/` | 原生 Endpoint/Browser 集成（服务、恢复、几何、信令、关闭 ACK、生命周期、Profile、sessionStorage 与优雅关闭、checkpoint 跨节点恢复、硬件编码 SPS 检查；Noise 互通与 updater 端到端）。Python 测试经 `cluster-bridge.mjs` 扮演 Control（握手、下发配置、自动 `session.open`），对外仍是 JSONL | 需要构建好的原生二进制 |
-| `tests/e2e/` | 真实栈产品场景（Viewer + Control + Endpoint + Browser + H.264）：通用产品流、手势、键盘与移动 IME、文件库与相机、全屏、诊断、首帧；两个本地节点的同时串流、休眠与跨节点唤醒（`test-cluster-nodes.mjs`）；updater 下载、安装与版本切换（`test-node-updater.mjs`，用 `make-node-release.mjs` 从开发产物构造最小发布） | 需要完整构建与浏览器 |
+| `tests/e2e/kit/` 与 `workspace-ui.mjs`、`web-app-install.mjs`、`drive.mjs` | Viewer UI 的真实栈场景。`kit/stack.mjs` 是唯一的一次性栈启动器（Control 源码 + Vite + 夹具服务器，运行目录在 `develop/tmp/e2e/`，数据目录刻意不在 TEMP 下）；夹具有带 manifest 的笔记页和使用 File System API 的 `/fs/`。`kit/viewer.mjs` 提供 Playwright 会话（Edge 或 Chrome 89、DPR、鼠标或触摸，Chrome 89 与触摸用原始 CDP 事件）、逐步 ok/FAIL 日志、开始屏幕与地址栏操作、锁定与按键/点按区域解锁、Browser 是否重启的检查。开发构建里的 `window.__remotekitTest`（`state()`、`unlock()`）直接读产品状态并走与完成图案相同的解锁路径，生产构建中不存在。`drive.mjs` 保持栈与 Viewer 打开，经本地 HTTP 接受点击、输入、截图等命令，用于探索；`kit/usage-report.mts` 输出 usage 记录与 frecency 得分 | `node tests/e2e/workspace-ui.mjs [--browser chrome89] [--dpr 2] [--pointer touch]`，任一步失败退出码非零；需要已构建的 `out/rel` Browser 与 Endpoint |
+| `tests/e2e/`（其余） | 真实栈产品场景（Viewer + Control + Endpoint + Browser + H.264）：通用产品流、手势、键盘与移动 IME、文件库与相机、全屏、诊断、首帧；两个本地节点的同时串流、休眠与跨节点唤醒（`test-cluster-nodes.mjs`）；updater 下载、安装与版本切换（`test-node-updater.mjs`，用 `make-node-release.mjs` 从开发产物构造最小发布） | 需要完整构建与浏览器 |
 
 Viewer 外壳的界面检查不需要原生栈：用独立的 `REMOTEKIT_CONTROL_CONFIG`（另一个端口与数据目录，放在 `develop/tmp/`）启动第二个 Control，`REMOTEKIT_VITE_CONTROL=http://127.0.0.1:<端口>` 让 Vite 开发服务器（现代浏览器）或 `vite build --watch` + `vite preview`（Chrome 89 只能跑构建产物）代理到它。`tools/cdp.mjs` 用独立 Profile 启动任意 Chromium（含 Chrome 89），之后每次调用对同一调试端口执行 `eval`、鼠标 `click` / 触摸 `tap`（可 `--hold` 按住）、`key`、`type`、`shot`；启动参数关闭窗口遮挡判定，被其他窗口盖住或在 RDP 下页面也保持可见。
 

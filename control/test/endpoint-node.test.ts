@@ -14,6 +14,7 @@ import { EndpointGateway } from '../server/endpoint/gateway';
 import { ControlDatabase } from '../server/persistence/database';
 import { FakeNode } from './fake-node';
 import { createApplication } from '../server/application';
+import { emptyWorkspace } from '../server/persistence/workspaces';
 
 async function harness(overrides: Partial<RegistryOptions> = {}) {
   const key = randomBytes(32);
@@ -308,6 +309,57 @@ test('bidirectional requests share the concurrency cap, timeout errors and JSON 
     h.registry.handlers.set('fixture.large', () => ({ data: 'x'.repeat(1024 * 1024) }));
     await assert.rejects(node.request('fixture.large', 'tenant'), { code: 'limit_exceeded' });
   } finally {
+    await h.close();
+  }
+});
+
+test('browser status reasons map once at the Endpoint boundary and keep uncertain outcomes', async () => {
+  const h = await harness();
+  const control = createApplication(h.store, h.gateway);
+  try {
+    h.store.workspaces.writeWorkspace(emptyWorkspace('one'));
+    const node = await h.connect();
+    const detail = 'render generations have unresolved GPU work or leases; retained';
+    for (const [reason, message] of [
+      ['browser_crashed', '浏览器异常退出，正在恢复…'],
+      ['browser_restarting', '浏览器正在恢复，请稍候…'],
+      ['output_failed', '浏览器画面输出失败，请稍后重试'],
+    ]) {
+      node.handler = (request) => {
+        if (request.method === 'session.open') return {};
+        throw { code: 'unavailable', reason, message: detail };
+      };
+      await assert.rejects(h.gateway.ensureSession('one'), {
+        code: 'unavailable',
+        message,
+        detail,
+      });
+      const runtime = control.tenants.get('one');
+      runtime.started = true;
+      await assert.rejects(control.reconciler.reconcileProduct('one'), { message });
+      assert.equal(runtime.lastError, message);
+      assert.equal(control.viewers.productState('one').endpointError, message);
+    }
+    node.handler = () => ({
+      running: false,
+      views: [],
+      status: { code: 'unavailable', reason: 'browser_crashed', message: detail },
+    });
+    await assert.rejects(h.gateway.snapshot('one'), {
+      code: 'unavailable',
+      message: '浏览器异常退出，正在恢复…',
+      detail,
+    });
+    node.handler = () => {
+      throw { code: 'outcome_unknown', reason: 'browser_restarting', message: detail };
+    };
+    await assert.rejects(h.gateway.command('one', { viewId: '1', command: 'reload' }), {
+      code: 'outcome_unknown',
+      message: '浏览器连接中断，操作可能已执行，请查看恢复后的页面',
+      detail,
+    });
+  } finally {
+    await control.close();
     await h.close();
   }
 });

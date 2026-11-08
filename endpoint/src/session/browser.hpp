@@ -43,7 +43,10 @@ class BrowserRuntime {
   Result<void> Shutdown(const std::function<Result<void>()>& export_navigation);
   Result<void> HealthCheck();
   Result<void> AdmitLaunch();
+  void RecordCrash();
+  Error Unavailable(std::string detail) const;
   bool Initialized() const { return initialized_; }
+  bool Crashed() const { return crash_recorded_; }
   void MarkInitialized() { initialized_ = true; }
   void ReleaseExited() { process_.ReleaseExited(); }
   bool Alive() const { return process_.Alive(); }
@@ -71,5 +74,6 @@ class BrowserRuntime {
   int64_t next_health_check_ = 0;
   bool initialized_ = false;
   bool clean_shutdown_ = true;
+  bool crash_recorded_ = false;
 };
 }  // namespace remotekit

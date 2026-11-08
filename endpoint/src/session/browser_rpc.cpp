@@ -104,7 +104,9 @@ Result<Json> BrowserRpc::Exchange(Json command,
   if (status) {
     needs_health_check_ = true;
     return failed(Error{media::SdkErrorCode(status, true),
-                        "browser request transport SDK " + std::to_string(status)});
+                        "browser request transport SDK " + std::to_string(status),
+                        status == REMOTEKIT_SDK_CHANNEL_CLOSED ? ErrorReason::kBrowserRestarting
+                                                               : ErrorReason::kNone});
   }
   if (count > response.size())
     return failed(Error{ErrorCode::kOutcomeUnknown, "browser response exceeds bound"});

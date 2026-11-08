@@ -9,7 +9,7 @@ import type {
 } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import { normalizedUsagePage } from '../navigation-url';
-import { computeFrecency } from './frecency';
+import { launcherItems } from './launcher-items';
 import { findTab, findWindow } from './model';
 
 export function pageUsageIdentity(tab: ProductTab, current: any, browser: unknown): string | undefined {
@@ -205,153 +205,21 @@ export class Workspace {
     const events = this.context.store.workspaces.items.usage(tenant, this.context.clock.wallMs());
     const library = this.context.store.library.snapshot(tenant);
     const hidden = this.services.library.hiddenEntryIds(tenant);
-    const favorites = new Set(state.favorites.map((favorite) => favorite.url));
-    const organized = new Set(
-      library.entries.filter((entry) => entry.partitionId !== null).map((entry) => entry.id),
-    );
-    const usedFiles = new Set(
-      events.filter((event) => event.item.startsWith('file:')).map((event) => event.item.slice(5)),
-    );
-    const organizedBoost = new Set(
-      [...usedFiles].filter((id) => organized.has(id) && this.services.library.organized(tenant, id)),
-    );
-    const frecency = computeFrecency(events, this.context.clock.wallMs(), {
-      favorites,
-      organized: organizedBoost,
-    });
-    const scores = new Map([...frecency].map(([item, score]) => [item, score.score]));
-    // A page is frequent once it came up in two separate chains and was either a destination
-    // or a pass-through to varied places (a chat home before each new conversation). A page
-    // seen once, or one always passed through to the same place (sign-in, bot checks,
-    // redirects), is history; it stays searchable.
-    const established = (item: LauncherItem) => {
-      if (item.kind !== 'page' || item.favorite) return true;
-      const usage = frecency.get(item.key);
-      return !!usage && usage.chains >= 2 && (usage.returns >= 1 || usage.ends >= 2);
-    };
-    const matchingApp = (url: string) =>
-      state.apps
-        .filter((app) => url.startsWith(app.scope))
-        .sort((a, b) => b.scope.length - a.scope.length)[0];
-    const apps: LauncherItem[] = [
-      {
-        key: 'app:browser',
-        kind: 'app',
-        group: 'apps',
-        title: '浏览器',
-        appId: 'browser',
-        score: scores.get('app:browser') ?? 0,
-      },
-      {
-        key: 'app:files',
-        kind: 'app',
-        group: 'apps',
-        title: '我的文件',
-        appId: 'files',
-        score: scores.get('app:files') ?? 0,
-      },
-      {
-        key: 'app:settings',
-        kind: 'app',
-        group: 'apps',
-        title: '设置',
-        appId: 'settings',
-        score: scores.get('app:settings') ?? 0,
-      },
-      ...state.apps
-        .map((app): LauncherItem => ({
-          key: 'app:web:' + app.id,
-          kind: 'app',
-          group: 'apps',
-          title: app.name,
-          appId: 'web:' + app.id,
-          url: app.startUrl,
-          score: scores.get('app:web:' + app.id) ?? 0,
-          themeColor: app.themeColor,
-          iconUrl: app.iconUrl,
-        }))
-        .sort((a, b) => b.score - a.score),
-    ];
-    const previews = this.context.store.workspaces.items.previewHashes(tenant);
-    const pageMap = new Map<string, LauncherItem>();
-    const page = (url: string, title: string, favorite: boolean) => {
-      const app = matchingApp(url);
-      return {
-        key: 'page:' + url,
-        kind: 'page',
-        group: 'pages',
-        ...(previews.has('page:' + normalizedUsagePage(url))
-          ? { previewUrl: '/api/previews/' + previews.get('page:' + normalizedUsagePage(url)) }
-          : {}),
-        title: title || url,
-        subtitle: new URL(url).hostname,
-        url,
-        favorite,
-        score: scores.get('page:' + url) ?? 0,
-        ...(app ? { appId: 'web:' + app.id, themeColor: app.themeColor, iconUrl: app.iconUrl } : {}),
-      } satisfies LauncherItem;
-    };
-    // A page's usual title, not its latest: one visit stuck on a bot check or an error must
-    // not rename the tile. Ties go to the more recent title.
-    const titles = new Map<string, Map<string, number>>();
-    for (const event of events)
-      if (event.item.startsWith('page:') && event.title) {
-        const url = normalizedUsagePage(event.item.slice(5));
-        if (!url) continue;
-        const counts = titles.get(url) ?? new Map<string, number>();
-        titles.set(url, counts);
-        counts.set(event.title, (counts.get(event.title) ?? 0) + 1);
-      }
-    const usualTitle = (url: string) => {
-      let best = '';
-      let count = 0;
-      for (const [title, seen] of titles.get(url) ?? []) if (seen >= count) [best, count] = [title, seen];
-      return best;
-    };
-    for (const event of events)
-      if (event.item.startsWith('page:')) {
-        const url = normalizedUsagePage(event.item.slice(5));
-        if (url && !pageMap.has(url)) pageMap.set(url, page(url, usualTitle(url) || url, favorites.has(url)));
-      }
-    for (const favorite of state.favorites)
-      pageMap.set(favorite.url, page(favorite.url, pageMap.get(favorite.url)?.title ?? favorite.title, true));
-    const pages = [...pageMap.values()].sort(
-      (a, b) => Number(b.favorite) - Number(a.favorite) || b.score - a.score,
-    );
-    const files = library.entries
-      .filter((entry) => !hidden.has(entry.id))
-      .map((entry): LauncherItem => ({
-        key: 'file:' + entry.id,
-        kind: 'file',
-        group: 'files',
-        title: entry.name,
-        entryId: entry.id,
-        organized: organized.has(entry.id),
-        score: scores.get('file:' + entry.id) ?? 0,
-      }))
-      .sort((a, b) => Number(b.organized) - Number(a.organized) || b.score - a.score);
-    if (query?.trim()) {
-      const needle = query.trim().toLocaleLowerCase();
-      return {
-        items: [...apps, ...pages, ...files].filter((item) =>
-          [item.title, item.subtitle, item.url].some((text) => text?.toLocaleLowerCase().includes(needle)),
-        ),
-      };
-    }
-    const frequent = [...apps, ...pages, ...files]
-      .filter((item) => item.score > 0 && established(item))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 12);
-    const frequentKeys = new Set(frequent.map((item) => item.key));
     return {
-      items: [
-        ...frequent.map((item): LauncherItem => ({ ...item, group: 'frequent' })),
-        ...apps,
-        ...pages.filter((item) => established(item) && !frequentKeys.has(item.key)).slice(0, 16),
-        ...files
-          .filter((item) => !frequentKeys.has(item.key) && (item.organized || scores.has(item.key)))
-          .slice(0, 12),
-      ],
+      items: launcherItems({
+        events,
+        now: this.context.clock.wallMs(),
+        query,
+        favorites: state.favorites,
+        apps: state.apps,
+        files: library.entries.map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          organized: entry.partitionId !== null,
+          hidden: hidden.has(entry.id),
+        })),
+        previews: this.context.store.workspaces.items.previewHashes(tenant),
+      }),
     };
   }
 }

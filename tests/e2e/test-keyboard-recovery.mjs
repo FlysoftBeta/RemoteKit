@@ -3,7 +3,7 @@
  *       [port=34501] [expect=stable|loop] [geometry=visual|content]
  */
 import { createServer } from 'node:http';
-import { startProductStack } from './product-stack.mjs';
+import { startProductStack } from './kit/stack.mjs';
 import { mkdir, writeFile, appendFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve, join } from 'node:path';

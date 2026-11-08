@@ -1,5 +1,6 @@
 #include "browser/device_configuration.h"
 #include "remotekit/browser/main_delegate.h"
+#include "remotekit/browser/crash_reporter.h"
 #include "remotekit/browser/audio_target.h"
 #include "media/audio/audio_manager.h"
 
@@ -146,6 +147,7 @@ std::optional<int> MainDelegate::BasicStartupComplete() {
   return std::nullopt;
 }
 void MainDelegate::PreSandboxStartup() {
+  InitializeCrashReporter();
   base::FilePath assets;
   CHECK(base::PathService::Get(base::DIR_ASSETS, &assets));
   ui::ResourceBundle::InitSharedInstanceWithPakPath(assets.AppendASCII("remotekit.pak"));

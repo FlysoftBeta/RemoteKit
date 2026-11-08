@@ -4,7 +4,8 @@
  * REMOTEKIT_QA_ACTIVE_FIXTURE=1 keeps the isolated remote fixture repainting during media-idle investigations.
  */
 import assert from 'node:assert/strict';
-import { startProductStack, registerViewer } from './product-stack.mjs';
+import { startProductStack } from './kit/stack.mjs';
+import { registerViewer } from './product-stack.mjs';
 import { createHash, randomUUID } from 'node:crypto';
 import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';

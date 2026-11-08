@@ -250,7 +250,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
   assert.equal(files.get('logs/browser.log'), browserLog.toString());
   assert.deepEqual(
     logReads.map((read) => (read as { log: string }).log),
-    ['browser', 'browser', 'endpoint', 'endpoint.1'],
+    ['browser', 'browser', 'endpoint', 'endpoint.1', 'crashes'],
   );
   const manifest = JSON.parse(files.get('manifest.json')!);
   assert.deepEqual(manifest.logs, {
@@ -258,6 +258,7 @@ test('Viewer diagnostics enforce product auth and ownership and publish a saniti
     browser: { exists: true, size: browserLog.length, start: 0, bytes: browserLog.length },
     endpoint: { exists: false, size: 0, start: 0, bytes: 0 },
     'endpoint.1': { exists: false, size: 0, start: 0, bytes: 0 },
+    crashes: { exists: false, size: 0, start: 0, bytes: 0 },
   });
   assert.deepEqual(manifest.environment, { platform: 'android', browserVersion: '139.0.1.2' });
   assert.equal(manifest.sources.client.records, 1);
@@ -353,4 +354,59 @@ test('global capacity includes finalization, and shutdown drains even when Endpo
     'failed',
   );
   assert.equal(await readFile(blockingFile, 'utf8'), 'sentinel');
+});
+
+test('crash diagnostics retain binary dumps, bound count and skip oversized or partial files', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-crash-diagnostics-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const names = [1, 2, 3, 4].map(
+    (value) => `${String(value).padStart(8, '0')}-0000-0000-0000-000000000000.dmp`,
+  );
+  const dump = Buffer.from([0x4d, 0x44, 0x4d, 0x50, 0, 255, 128, 1]);
+  const event = Buffer.from(JSON.stringify({ event: 'browser_crashed', exitCode: 0x80000003 }) + '\n');
+  const reads: string[] = [];
+  const manager = new DiagnosticSessions(directory, {
+    control: () => ({}),
+    endpoint: async () => ({}),
+    endpointLog: async (_tenant, request) => {
+      reads.push(request.log);
+      const data =
+        request.log === 'crashes' ? event : request.log.startsWith('dump/') ? dump : Buffer.alloc(0);
+      const end = Math.min(request.end ?? data.length, data.length);
+      const start = Math.max(0, end - request.maxBytes);
+      return {
+        exists: data.length > 0,
+        size: data.length,
+        start,
+        end,
+        data: data.subarray(start, end).toString('base64'),
+        ...(request.log === 'crashes'
+          ? {
+              dumps: names.map((name, i) => ({
+                name,
+                size: i === 1 ? 17 * 1024 * 1024 : i === 2 ? dump.length + 1 : dump.length,
+              })),
+            }
+          : {}),
+      };
+    },
+  });
+  t.after(() => manager.shutdown());
+  const viewer = { tenant: 'one', identity: 'one', lease: 'one', epoch: 1, allowed: () => true };
+  const started = manager.start(viewer, {});
+  const result = await manager.request(viewer, 'diagnostics.stop', { id: started.id });
+  assert.equal(result.status, 'complete');
+  const owner = join(directory, createHash('sha256').update('one').digest('hex'));
+  const compressed = await readFile(join(owner, started.id + '.tar.zst'));
+  const tar = zstdDecompressSync(compressed);
+  const files = entries(compressed);
+  assert.equal(files.get('crashes/events.jsonl'), event.toString());
+  assert(tar.includes(dump));
+  assert(files.has('crashes/' + names[0]));
+  assert(!files.has('crashes/' + names[1]));
+  assert(!files.has('crashes/' + names[2]));
+  assert(!reads.includes('dump/' + names[3]));
+  const manifest = JSON.parse(files.get('manifest.json')!);
+  assert.equal(manifest.logs['dump/' + names[1]].error, 'dump size limit');
+  assert.equal(manifest.logs['dump/' + names[2]].error, 'incomplete dump');
 });

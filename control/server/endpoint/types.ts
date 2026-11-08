@@ -1,4 +1,6 @@
 import type { AppliedMediaPolicy, OperationReceipt, ProductOperation } from '../../shared/product';
+import type { ErrorCode } from '../../shared/errors';
+export type EndpointErrorReason = 'browser_crashed' | 'browser_restarting' | 'output_failed';
 export interface RtcSignal {
   tenantId: string;
   connectionId: string;
@@ -53,7 +55,7 @@ export interface ViewSnapshot {
 }
 // Raw log names an Endpoint serves for diagnostics: this Session's Browser log
 // and the node's Endpoint log with its first rotation.
-export type EndpointLogName = 'browser' | 'endpoint' | 'endpoint.1';
+export type EndpointLogName = 'browser' | 'endpoint' | 'endpoint.1' | 'crashes' | `dump/${string}`;
 export interface LogWindowRequest {
   log: EndpointLogName;
   end?: number;
@@ -65,8 +67,10 @@ export interface LogWindow {
   start: number;
   end: number;
   data: string;
+  dumps?: { name: string; size: number }[];
 }
 export interface EndpointSnapshot {
+  status?: { code: ErrorCode; reason: EndpointErrorReason; message: string } | null;
   hibernation?: {
     unacknowledgedClosedEvents: number;
     pendingNativeSelections: number;

@@ -1,3 +1,4 @@
+import { cleanUrl } from '../url-clean';
 import { RemoteKitError } from '../../shared/errors';
 import {
   isLocalTab,
@@ -237,7 +238,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       break;
     }
     case 'favorite.add': {
-      const url = httpUrl(action.url);
+      const url = cleanUrl(httpUrl(action.url));
+      if (!url) throw new RemoteKitError('invalid_request', 'Invalid URL');
       if (typeof action.title !== 'string' || action.title.length > 512)
         throw new RemoteKitError('invalid_request', 'Invalid value');
       const existing = state.favorites.find((favorite) => favorite.url === url);

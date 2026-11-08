@@ -13,7 +13,9 @@ export type ArchiveEntry =
   | 'logs/control.log'
   | 'logs/browser.log'
   | 'logs/endpoint.log'
-  | 'logs/endpoint.log.1';
+  | 'logs/endpoint.log.1'
+  | 'crashes/events.jsonl'
+  | `crashes/${string}.dmp`;
 const block = 512;
 
 function* tar(entries: ReadonlyMap<ArchiveEntry, readonly Buffer[]>, mtime: number) {

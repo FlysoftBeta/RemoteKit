@@ -12,6 +12,8 @@
 - 采样数据（JSONL）不包含：凭据、SDP/候选 IP、Profile、用户文件、页面像素、输入文本。投影使用字段白名单和遍历预算。
 - **原始日志**（`logs/`）在停止时原样收录，不做脱敏：本 Session 的 `browser.log`（Chromium 日志，含页面全部 console 输出与 WebRTC/GPU/解码错误）尾部最多 16 MiB；节点 `logs/endpoint.log` 尾部，不足 8 MiB 时用 `endpoint.log.1` 补足；Control 进程自身 stdout/stderr 的最近 4 MiB（内存环形缓冲，Control 没有日志文件）。都从尾部向前读，因此包含开始诊断之前的历史——"先出问题、再开诊断"也能看到现场。Endpoint 以 `session.logs.read` 每次最多 512 KiB 分段返回，Control 从第一次看到的文件大小向前拼接，并发追加不影响已读部分；整个读取有 15 秒期限（Control 关闭时 3 秒），超时或失败记入 manifest 的 `logs`，归档照常写出。节点日志与 Control 日志是全局的，可能含其他 Tenant 的信息；归档只有管理员能下载。
 
+**Browser 崩溃**：Browser 内嵌 Crashpad，以 Browser 可执行文件自身作为 handler 进程，Browser、renderer、GPU 与 utility 进程崩溃时把 minidump 写到 `<data-path>/crashes/reports/`；不配置上传地址、上传同意恒为否，handler 随 Browser 退出。Browser 非正常退出（CHECK 的 `0x80000003`、访问违例等）时，Endpoint 在 `endpoint.log` 写一行 JSON 崩溃事件：退出码、`browser.log` 中最后一行 `FATAL`/`Check failed`、最新 dump 路径。诊断归档收录崩溃事件与最新 3 个 dump（每个最多 16 MiB）。
+
 **限制与生命周期**：每次最长 10 分钟，采样数据 32MiB 未压缩（日志另计上述预算），单个请求 128KiB；全局并发 4 个；最近 1024 个状态记录。锁定、授权变化、断线、时长/大小上限、正常关闭都会以对应原因结束；重复 stop/status 幂等。归档是 USTAR + Zstandard（Node 内置），包含 manifest、非空的 client/control/endpoint/events JSONL 成员与 `logs/` 下的原始日志，先写部分文件再发布，路径 `<db目录>/diagnostics/<SHA256(tenant)>/<id>.tar.zst`（附 `.reason`），重启后仍可按 ID 查询。强制终止 Control 会丢失进行中的内存数据；已完成的归档目前没有自动清理。
 
 ## 开发侧追踪

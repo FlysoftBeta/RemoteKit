@@ -55,9 +55,26 @@ inline std::string_view ErrorCodeName(ErrorCode code) {
   return "internal";
 }
 
+enum class ErrorReason { kNone, kBrowserCrashed, kBrowserRestarting, kOutputFailed };
+
+inline std::string_view ErrorReasonName(ErrorReason reason) {
+  switch (reason) {
+    case ErrorReason::kBrowserCrashed:
+      return "browser_crashed";
+    case ErrorReason::kBrowserRestarting:
+      return "browser_restarting";
+    case ErrorReason::kOutputFailed:
+      return "output_failed";
+    case ErrorReason::kNone:
+      return "";
+  }
+  return "";
+}
+
 struct Error {
   ErrorCode code;
   std::string message;
+  ErrorReason reason = ErrorReason::kNone;
 };
 
 template <class T>

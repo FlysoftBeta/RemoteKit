@@ -4,7 +4,8 @@
  * node tests/e2e/test-mobile-ime.mjs <playwright module> <viewer exe> <endpoint exe> <remote browser exe> <unused output dir> [port] [Control server.mjs]
  */
 import { createServer } from 'node:http';
-import { startProductStack, registerViewer } from './product-stack.mjs';
+import { startProductStack } from './kit/stack.mjs';
+import { registerViewer } from './product-stack.mjs';
 import { mkdir, readFile, writeFile, appendFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { resolve, join } from 'node:path';

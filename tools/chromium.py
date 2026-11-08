@@ -71,7 +71,12 @@ def main():
                    help='GN target; repeat to build both browser and SDK in one Ninja invocation')
     p.add_argument('--jobs', type=int, default=os.cpu_count() or 1,
                    help='parallel jobs; defaults to all logical CPUs')
+    p.add_argument(
+        '--check', action='store_true', help='Check stage without changing the Chromium tree'
+    )
     args = p.parse_args()
+    if args.check and args.command != 'stage':
+        p.error('--check is only valid for stage')
     targets = args.target or ['remotekit_browser']
     source = args.chromium_root.resolve()
     head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=source, text=True).strip()
@@ -83,8 +88,13 @@ def main():
         p.error(f'refusing to overwrite unowned directory {destination}')
     if marker.exists() and Path(marker.read_text(encoding='utf-8').strip()).resolve() != ROOT:
         p.error(f'overlay marker does not name this checkout: {marker}')
-    destination.mkdir(exist_ok=True)
-    marker.write_text(str(ROOT), encoding='utf-8')
+    changes = []
+    if args.check:
+        if not marker.exists():
+            changes.append(str(marker))
+    else:
+        destination.mkdir(exist_ok=True)
+        marker.write_text(str(ROOT), encoding='utf-8')
     manifest = destination / '.remotekit-stage-manifest.json'
     previous = json.loads(manifest.read_text(encoding='utf-8')) if manifest.exists() else {}
     if not isinstance(previous, dict):
@@ -97,12 +107,24 @@ def main():
         src = ROOT / folder
         if src.exists():
             for path in src.rglob('*'):
-                if path.is_file() and path.suffix in ['.h', '.hpp', '.cc', '.cpp', '.gn', '.mojom', '.txt']:
+                if path.is_file() and path.suffix in [
+                    '.h',
+                    '.hpp',
+                    '.cc',
+                    '.cpp',
+                    '.gn',
+                    '.mojom',
+                    '.txt',
+                ]:
                     relative = path.relative_to(ROOT).as_posix()
                     target = owned_path(destination, relative)
                     current[relative] = digest(path)
-                    if copy_if_changed(path, target):
-                        if path.suffix == '.gn': gn_changed = True
+                    if args.check:
+                        if not target.is_file() or target.read_bytes() != path.read_bytes():
+                            changes.append(relative)
+                    elif copy_if_changed(path, target):
+                        if path.suffix == '.gn':
+                            gn_changed = True
     for relative, expected in previous.items():
         if relative in current:
             continue
@@ -110,16 +132,34 @@ def main():
         if target.exists():
             if not target.is_file() or digest(target) != expected:
                 p.error(f'refusing to delete modified overlay file {target}')
-            target.unlink()
-            if target.suffix == '.gn': gn_changed = True
-    manifest.write_text(json.dumps(current, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+            if args.check:
+                changes.append(relative + ' (removed)')
+            else:
+                target.unlink()
+            if target.suffix == '.gn':
+                gn_changed = True
+    manifest_text = json.dumps(current, indent=2, sort_keys=True) + '\n'
+    if args.check:
+        if not manifest.is_file() or manifest.read_text(encoding='utf-8') != manifest_text:
+            changes.append(manifest.name)
+        if changes:
+            p.error(
+                'Stale Chromium staged sources: '
+                + ', '.join(changes)
+                + '; run tools/chromium.py stage'
+            )
+        print('Chromium staged sources are current.')
+        return
+    manifest.write_text(manifest_text, encoding='utf-8')
     if args.command == 'stage':
         return
     output = source / 'out' / args.out
     gn_args = output / 'args.gn'
     old = gn_args.read_text(encoding='utf-8')
-    root_targets = ['//remotekit/browser:remotekit_browser',
-                    '//remotekit/browser/sdk:remotekit_sdk']
+    root_targets = [
+        '//remotekit/browser:remotekit_browser',
+        '//remotekit/browser/sdk:remotekit_sdk',
+    ]
     match = re.search(r'root_extra_deps\s*=\s*\[([^\]]*)\]', old, re.DOTALL)
     existing = match.group(1) if match else ''
     existing = re.sub(r'\s*"//remotekit/browser:remotekit_browser_demo"\s*,?', '', existing)

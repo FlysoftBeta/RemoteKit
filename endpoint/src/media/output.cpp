@@ -96,8 +96,12 @@ Result<void> OutputController::Close() {
   std::string error;
   if (!pool.Close(error) && !failure)
     failure = Error{ErrorCode::kUnavailable, error};
+  if (failure && failure->code == ErrorCode::kOutcomeUnknown)
+    return Error{failure->code, failure->message, ErrorReason::kBrowserRestarting};
   if (failure)
-    return *failure;
+    return browser.Exited() || browser.Rpc().Disconnected()
+               ? browser.Unavailable(failure->message)
+               : Error{failure->code, failure->message, ErrorReason::kOutputFailed};
   return {};
 }
 

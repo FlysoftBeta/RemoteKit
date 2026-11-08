@@ -29,6 +29,26 @@ Result<std::string> Base64(const std::vector<uint8_t>& bytes) {
 }
 }  // namespace
 
+std::vector<fs::path> RecentCrashDumps(const fs::path& directory) {
+  std::vector<std::pair<fs::file_time_type, fs::path>> dumps;
+  std::error_code error;
+  for (fs::recursive_directory_iterator it(directory, error), end; it != end; it.increment(error)) {
+    if (error)
+      break;
+    if (!it->is_regular_file(error) || it->path().extension() != ".dmp")
+      continue;
+    const auto time = it->last_write_time(error);
+    if (!error)
+      dumps.emplace_back(time, it->path());
+  }
+  std::sort(dumps.begin(), dumps.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+  std::vector<fs::path> paths;
+  for (size_t i = 0; i < std::min<size_t>(3, dumps.size()); ++i)
+    paths.push_back(dumps[i].second);
+  return paths;
+}
+
 Result<Json> ReadLogWindow(const fs::path& path, std::optional<uint64_t> end, uint64_t max_bytes) {
   if (max_bytes == 0 || max_bytes > kLogWindowBytes)
     return Error{ErrorCode::kInvalidRequest, "invalid log window"};

@@ -1,12 +1,58 @@
 #include "session/browser.hpp"
 #include "util/file_io.hpp"
 #include "util/result_macros.hpp"
+#include "diagnostics/log_files.hpp"
+#include <fstream>
+#include <sstream>
 #include <chrono>
 #include <objbase.h>
 #include <thread>
 
 namespace remotekit {
+void BrowserRuntime::RecordCrash() {
+  const auto code = process_.ExitCode();
+  if (!code || *code == 0 || crash_recorded_)
+    return;
+  crash_recorded_ = true;
+  std::ifstream log(log_, std::ios::binary);
+  log.seekg(0, std::ios::end);
+  const auto size = log.tellg();
+  if (size > 0)
+    log.seekg(std::max<std::streamoff>(0, std::streamoff(size) - 16 * 1024 * 1024));
+  std::string fatal, line;
+  while (std::getline(log, line)) {
+    if (line.find("FATAL") != std::string::npos || line.find("Check failed") != std::string::npos)
+      fatal = line.substr(0, 16384);
+  }
+  const auto dumps = RecentCrashDumps(log_.parent_path() / "crashes");
+  const Json event = {{"event", "browser_crashed"},
+                      {"timestamp", std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count()},
+                      {"pid", Pid()},
+                      {"browserIncarnation", process_incarnation_},
+                      {"exitCode", *code},
+                      {"exitCodeDescription", DescribeExitCode(*code)},
+                      {"fatal", fatal.empty() ? Json(nullptr) : Json(fatal)},
+                      {"dumpPath", dumps.empty() ? Json(nullptr) : Json(Utf8(dumps.front()))}};
+  const auto encoded = event.dump();
+  fprintf(stderr, "%s\n", encoded.c_str());
+  const auto directory = log_.parent_path() / "crashes";
+  std::error_code error;
+  fs::create_directories(directory, error);
+  std::ofstream events(directory / "events.jsonl", std::ios::binary | std::ios::app);
+  events << encoded << '\n';
+}
+
+Error BrowserRuntime::Unavailable(std::string detail) const {
+  const auto code = process_.ExitCode();
+  return {ErrorCode::kUnavailable, std::move(detail),
+          crash_recorded_ || (code && *code != 0) ? ErrorReason::kBrowserCrashed
+                                                  : ErrorReason::kBrowserRestarting};
+}
+
 Result<void> BrowserRuntime::AdmitLaunch() {
+  RecordCrash();
   if (const auto code = process_.ExitCode(); code && *code != 0)
     last_failure_ =
         Error{ErrorCode::kUnavailable,
@@ -16,16 +62,17 @@ Result<void> BrowserRuntime::AdmitLaunch() {
                                                         : "Browser 启动失败，正在等待重试退避";
     if (last_failure_)
       message += "；最近一次失败：" + last_failure_->message;
-    return Error{ErrorCode::kUnavailable, std::move(message)};
+    return Unavailable(std::move(message));
   }
   startup_error_.reset();
   return {};
 }
 Result<void> BrowserRuntime::HealthCheck() {
   if (startup_error_)
-    return *startup_error_;
+    return startup_error_->reason == ErrorReason::kNone ? Unavailable(startup_error_->message)
+                                                        : *startup_error_;
   if (!rpc_.Control())
-    return Error{ErrorCode::kUnavailable, "Browser 进程仍在运行，控制管道尚未就绪"};
+    return Unavailable("Browser 进程仍在运行，控制管道尚未就绪");
   if (rpc_.NeedsHealthCheck()) {
     // A bounded health check never authorizes killing a live connected Browser.
     auto reply = rpc_.Request({{"method", "snapshot"}}, 0, 1000);
@@ -42,7 +89,8 @@ Result<void> BrowserRuntime::HealthCheck() {
       const auto& output = status.value()["output"];
       if (!output.value("error", std::string()).empty()) {
         startup_error_ = Error{ErrorCode::kUnavailable,
-                               output.value("message", output["error"].get<std::string>())};
+                               output.value("message", output["error"].get<std::string>()),
+                               ErrorReason::kOutputFailed};
         last_failure_ = startup_error_;
         return *startup_error_;
       }
@@ -70,6 +118,7 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
                                    std::wstring command,
                                    const std::string& channel) {
   process_incarnation_ = incarnation_;
+  crash_recorded_ = false;
   auto launched = process_.Launch(executable, std::move(command), profile_key_);
   if (!launched)
     return launched.error();
@@ -92,9 +141,11 @@ Result<void> BrowserRuntime::Start(const fs::path& executable,
                                            process_.Diagnostic() + "；日志 " + Utf8(log_)};
   }
   last_failure_ = startup_error_;
-  return *startup_error_;
+  RecordCrash();
+  return Unavailable(startup_error_->message);
 }
 Result<void> BrowserRuntime::Stop() {
+  RecordCrash();
   if (process_.Present())
     clean_shutdown_ = false;
   incarnation_.clear();

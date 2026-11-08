@@ -10,6 +10,8 @@ import { selectProductReceiveProfile } from './media/receive-profile';
 import { AuthView } from './app/product-dialogs';
 import './style.css';
 import { request } from './control/http-request';
+// Automation hooks exist only in dev builds; Vite drops this branch from production.
+if (import.meta.env.DEV) void import('./test-hooks');
 const theme = createTheme({
   palette: {
     primary: { main: '#245DB5' },

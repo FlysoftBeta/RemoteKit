@@ -1,4 +1,5 @@
 #include "service.hpp"
+#include "util/wire_error.hpp"
 #include "management/methods.hpp"
 #include "session/session.hpp"
 #include "cluster/node_files.hpp"
@@ -287,8 +288,7 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
   if (result)
     response["result"] = std::move(result).value();
   else
-    response["error"] = {{"code", ErrorCodeName(result.error().code)},
-                         {"message", result.error().message}};
+    response["error"] = WireError(result.error());
   link_.SendReply(generation, response);
   return result && request.value("method", std::string()) == "shutdown";
 }

@@ -15,7 +15,13 @@ export const diagnosticMessageLimit = 128 * 1024;
 const maxActive = 4;
 // Raw logs are read once at stop, newest bytes first, so history from before
 // the collection started is included up to each budget.
-const logBudgets = { browser: 16 * 1024 * 1024, endpoint: 8 * 1024 * 1024 } as const;
+const logBudgets = {
+  browser: 16 * 1024 * 1024,
+  endpoint: 8 * 1024 * 1024,
+  crashes: 256 * 1024,
+  dump: 16 * 1024 * 1024,
+  dumpCount: 3,
+} as const;
 const logWindowBytes = 512 * 1024;
 const logDeadlineMs = 15000;
 const shutdownLogDeadlineMs = 3000;
@@ -384,6 +390,20 @@ export class DiagnosticSessions {
     const endpoint = await read('endpoint', logBudgets.endpoint, 'logs/endpoint.log');
     if (endpoint && endpoint.start === 0 && endpoint.bytes < logBudgets.endpoint)
       await read('endpoint.1', logBudgets.endpoint - endpoint.bytes, 'logs/endpoint.log.1');
+    const crashes = await read('crashes', logBudgets.crashes, 'crashes/events.jsonl');
+    for (const dump of crashes?.dumps.slice(0, logBudgets.dumpCount) ?? []) {
+      if (!/^[0-9a-f-]{36}\.dmp$/i.test(dump.name) || !Number.isSafeInteger(dump.size)) continue;
+      if (dump.size > logBudgets.dump) {
+        summary[`dump/${dump.name}`] = { size: dump.size, error: 'dump size limit' };
+        continue;
+      }
+      const entry = `crashes/${dump.name}` as ArchiveEntry;
+      const data = await read(`dump/${dump.name}`, logBudgets.dump, entry);
+      if (data && (data.start !== 0 || data.bytes !== dump.size)) {
+        files.delete(entry);
+        summary[`dump/${dump.name}`] = { error: 'incomplete dump' };
+      }
+    }
     return { files, summary };
   }
 
@@ -391,6 +411,7 @@ export class DiagnosticSessions {
   // appends do not shift the bytes already collected.
   private async readTail(tenant: string, log: EndpointLogName, budget: number, deadline: number) {
     const chunks: Buffer[] = [];
+    let dumps: { name: string; size: number }[] = [];
     let end: number | undefined,
       size = 0,
       start = 0,
@@ -417,6 +438,7 @@ export class DiagnosticSessions {
         typeof window.data !== 'string'
       )
         throw new Error('invalid log window');
+      if (end === undefined) dumps = window.dumps ?? [];
       if (!window.exists) break;
       if (!exists) size = window.size;
       exists = true;
@@ -428,7 +450,7 @@ export class DiagnosticSessions {
       if (window.start === 0 || !data.length) break;
       end = window.start;
     }
-    return { chunks, exists, size, start, bytes };
+    return { chunks, exists, size, start, bytes, dumps };
   }
 
   private ownerDirectory(tenant: string) {

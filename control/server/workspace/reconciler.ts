@@ -8,6 +8,8 @@ import { isLocalTab } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 
 export class Reconciler {
+  private readonly writtenTitles = new WeakMap<object, Map<string, { page: string; title: string }>>();
+
   constructor(
     private readonly context: DomainContext,
     private readonly services: Pick<
@@ -167,6 +169,10 @@ export class Reconciler {
           snapshot,
           actual.find((v) => v.viewId === state.tabs.find((t) => t.id === state.pendingClose?.id)?.webviewId),
         );
+      let writtenTitles = this.writtenTitles.get(runtime);
+      if (!writtenTitles) this.writtenTitles.set(runtime, (writtenTitles = new Map()));
+      const tabIds = new Set(state.tabs.map((tab) => tab.id));
+      for (const id of writtenTitles.keys()) if (!tabIds.has(id)) writtenTitles.delete(id);
       for (const t of [...state.tabs]) {
         const current = actual.find((v) => v.viewId === t.webviewId);
         if (!current) {
@@ -220,14 +226,15 @@ export class Reconciler {
               this.services.workspace.recordPage(state, t, current, snapshot.browserIncarnation);
             t.usageDocument = document;
           }
-          if (typeof current.title === 'string') {
-            const url = normalizedUsagePage(t.url);
-            if (url)
-              this.context.store.workspaces.items.updateUsageTitle(
-                tenant,
-                'page:' + url,
-                current.title.slice(0, 120),
-              );
+          const page = normalizedUsagePage(t.url);
+          if (!page) writtenTitles.delete(t.id);
+          else if (typeof current.title === 'string') {
+            const title = current.title.slice(0, 120);
+            const written = writtenTitles.get(t.id);
+            if (written?.page !== page || written.title !== title) {
+              this.context.store.workspaces.items.updateUsageTitle(tenant, 'page:' + page, title);
+              writtenTitles.set(t.id, { page, title });
+            }
           }
         }
         if (Number.isInteger(current.actual) && current.actual >= 0 && current.actual <= 3)

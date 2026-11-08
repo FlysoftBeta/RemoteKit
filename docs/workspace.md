@@ -131,7 +131,8 @@
 `usage_events(tenant, at, item, window_id, chain)`：`item` 为 `app:<appId>`、`page:<规范化 URL>`、`file:<entryId>`。
 
 - App：窗口打开、聚焦（同一窗口 30 秒内的重复聚焦合并）。
-- 网页：Tab 主 frame 提交导航（Control 结算导航收据时）。规范化去掉 fragment；跳过 about:、错误页和搜索引擎结果页（与 `resolveNavigation` 的搜索模板匹配）；同时记下最新标题。
+- 网页：Tab 主 frame 提交导航（Control 结算导航收据时）。跳过 about:、错误页和搜索引擎结果页（与 `resolveNavigation` 的搜索模板匹配）；标题变化时更新该页最近一条记录的标题（不变不写）。
+- **规范化**（`server/url-clean.ts` 的 `cleanUrl`，也用于预览键和收藏）：只记 http(s)，去掉 fragment 与带用户名/密码的 URL；去掉跟踪参数（Brave 的 query filter 与 clean-urls 列表：`utm_*`、`fbclid`、`gclid` 等，以及按站点的 `si`、`igsh` 等）；去掉凭据参数（`code`、`state`、`nonce`、各类 token、`client_secret`、`session`、`sig`、`x-amz-*`、`oauth_*`、Cloudflare 的 `__cf_chl_*`，名字含 token/secret/password/apikey 的参数，以及 JWT 形态的值）；路径含登录/OAuth 段（`/oauth`、`/authorize`、`/callback`、`/signin`、`/login`、`/sso`、`/saml`、`/auth`、`/consent` 等）时整段 query 去掉；剩余参数按名排序，参数顺序不同的同一页面是同一个键。凭据和跟踪参数因此不会写进 usage、预览或收藏。
 - 文件：在 files 窗口打开预览、加入文件篮、被网页选择消费；客户端动作经 WS `usage.record{item, windowId}`，服务端校验条目存在。
 
 `chain`：同一窗口（网页再细到同一 Tab）内相邻事件间隔小于 30 分钟属于同一条链；从开始屏幕打开的事件总是开始新链——开始屏幕本身就是用户想绕开的"中转"，不应该被算成路径。停留时间 `dwell` 是到链内下一事件的时间，最长计 10 分钟；链尾的停留按"未知"处理（视为目的地）。
