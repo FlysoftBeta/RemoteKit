@@ -103,7 +103,8 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 
 ## 站点身份与全屏
 
-- **平板版网站**：按 origin 保存，只改变 UA 与 Client Hints（Android 平板，mobile=false），不改变 viewport、DPR、触控或指针特征。首次导航、redirect、history、reload 和 restore 在请求之前选择身份；子 frame 继承页面身份。只有 UA 实际变化才需要确认 Browser 已应用并刷新当前页（beforeunload 可以取消这次刷新），其他同站点页面下次导航生效。下发给 Browser 的站点映射只含 UA 规则，不含 Viewer 的键盘策略。
+- **平板版网站**：按 origin 保存，切换 Android 平板身份（`mobile=false`），不改变 viewport、DPR、触控或指针特征。首次导航、redirect、history、reload 和 restore 在请求之前选择身份，子 frame 继承页面身份。只有 UA 实际变化才需要确认 Browser 已应用并刷新当前页，`beforeunload` 可以取消这次刷新。其他同站点页面下次导航生效。
+- **网站设置**：Control 按 origin 持有兼容性选项、持久权限决定和协议处理器。`session.sitePreferences` 将 UA、权限和协议处理规则同步给 Endpoint 与 Browser。Viewer 的手动键盘设置只同步给 Viewer。权限或协议处理器的持久决定先入库并应用，再按原请求身份回复页面。仅本次允许与关闭提示不写入设置，HTTP 登录凭据只经当次回复传递。
 - **Viewer 全屏**：设置"打开或激活时全屏"（默认关闭，Control 保存）。打开或回到前台时尝试 Fullscreen API；浏览器要求用户手势而拒绝时，等下一次可信的非 Esc 交互重试；用户主动退出后本次激活不再抢回。
 - **网页全屏**：网页自己的 Fullscreen API 只让该页面内容铺满整个 Viewer，隐藏外壳与其他 Window，不调用本地 Fullscreen API。状态绑定 browserIncarnation、instance、document，作为临时 `pageFullscreen` 投影，不写数据库。网页自己退出、悬浮退出按钮（×）、Esc 都可结束；显式退出携带当前目标身份，旧文档的退出不影响新页面。导航、关页、锁定、断线清除投影；Native 状态随约 1.5 秒的周期对账同步。
 
@@ -140,4 +141,4 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 
 ## 设置
 
-设置统一在"更多 → 设置"，全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、界面缩放、顶部留空、Memory Saver、搜索引擎、左右声道（多选；"不播放"即清空）、音视频同步（默认关闭）、打开时全屏、锁定策略、统计叠层。每站点设置在"更多 → 网页兼容性处理"：平板版网站、不自动弹出键盘。Control 下发给 Endpoint 的媒体策略是 `{degradationPreference, maxFps, audio}`：maxFps 来自 Viewer 显式上报的刷新能力，未知时 60；audio 为左右声道至少选中一个。音视频同步不属于运行期策略，而是 peer 的创建参数：Control 在转发 offer 时读取当时的设置传给 Endpoint，Endpoint 在应答中回显该 peer 实际采用的值；Viewer 发现权威设置与当前 peer 不一致时立即重建 RTC 连接（不计入失败重试、不经过退避）。
+设置统一在"更多 → 设置"，全部由 Control 保存：质量（优先高画质 / 自动 / 优先流畅）、界面缩放、顶部留空、Memory Saver、搜索引擎、左右声道（多选；"不播放"即清空）、音视频同步（默认关闭）、打开时全屏、锁定策略、统计叠层。当前站点的偏好与权限在"更多 → 网站设置"。Control 下发给 Endpoint 的媒体策略是 `{degradationPreference, maxFps, audio}`：maxFps 来自 Viewer 显式上报的刷新能力，未知时 60；audio 为左右声道至少选中一个。音视频同步不属于运行期策略，而是 peer 的创建参数：Control 在转发 offer 时读取当时的设置传给 Endpoint，Endpoint 在应答中回显该 peer 实际采用的值；Viewer 发现权威设置与当前 peer 不一致时立即重建 RTC 连接（不计入失败重试、不经过退避）。

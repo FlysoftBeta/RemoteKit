@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
-import type { FileRequest } from '../../shared/product';
-import type { FileBinding, PageIdentity } from '../endpoint/types';
+import { SITE_PERMISSIONS, type FileRequest, type PageDialogReply } from '../../shared/product';
+import type { DownloadEvent, FileBinding, PageIdentity, PageReplyFields } from '../endpoint/types';
 import { settle } from './operations';
 import { removeWindow } from './model';
+import { ensureSite, pruneSite, validProtocolHandler, validSiteOrigin } from './site-policy';
 export type FileLimits = FileRequest['limits'];
 export interface InternalFileRequest extends FileRequest {
   binding: FileBinding;
@@ -20,6 +21,135 @@ import { isLocalTab } from '../../shared/product';
 import type { FullscreenBinding } from '../tenants/tenant-runtime';
 
 import type { DomainContext, DomainServices } from '../application';
+
+export function validatePageReply(value: any): asserts value is PageDialogReply {
+  const invalid = () => {
+    throw new RemoteKitError('invalid_request', '无效的页面对话回复');
+  };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return invalid();
+  let keys: string[];
+  switch (value.kind) {
+    case 'permission':
+      keys = ['kind', 'decision'];
+      if (!['allow', 'allow_once', 'block', 'dismiss'].includes(value.decision)) return invalid();
+      break;
+    case 'dialog':
+      keys = ['kind', 'accept', 'text'];
+      if (
+        value.text !== undefined &&
+        (typeof value.text !== 'string' || Buffer.byteLength(value.text, 'utf8') > 16384)
+      )
+        return invalid();
+      break;
+    case 'http_auth':
+      keys = value.accept === true ? ['kind', 'accept', 'username', 'password'] : ['kind', 'accept'];
+      if (
+        value.accept === true &&
+        ![value.username, value.password].every(
+          (text) => typeof text === 'string' && Buffer.byteLength(text, 'utf8') <= 1024,
+        )
+      )
+        return invalid();
+      break;
+    case 'repost':
+      keys = ['kind', 'accept'];
+      break;
+    case 'protocol_handler':
+      keys = ['kind', 'accept', 'remember'];
+      if (typeof value.remember !== 'boolean' || (value.accept && !value.remember)) return invalid();
+      break;
+    default:
+      return invalid();
+  }
+  if (
+    (value.kind !== 'permission' && typeof value.accept !== 'boolean') ||
+    Object.keys(value).some((key) => !keys.includes(key))
+  )
+    invalid();
+}
+type PageRequestFields<T = PageDialog> = T extends PageDialog ? Omit<T, 'id' | 'tabId' | 'windowId'> : never;
+export function projectPageRequest(request: any): PageRequestFields | undefined {
+  if (
+    !request ||
+    typeof request !== 'object' ||
+    typeof request.request !== 'string' ||
+    !request.request ||
+    request.request.length > 2048 ||
+    (request.origin !== undefined && typeof request.origin !== 'string')
+  )
+    return;
+  const origin = (request.origin ?? '').slice(0, 2048);
+  switch (request.kind) {
+    case 'alert':
+    case 'confirm':
+    case 'prompt':
+    case 'beforeunload':
+      if (
+        (request.message !== undefined && typeof request.message !== 'string') ||
+        (request.default_prompt !== undefined && typeof request.default_prompt !== 'string') ||
+        (request.is_reload !== undefined && typeof request.is_reload !== 'boolean')
+      )
+        return;
+      return {
+        kind: request.kind,
+        origin,
+        message: (request.message ?? '').slice(0, 16384),
+        defaultPrompt: (request.default_prompt ?? '').slice(0, 16384),
+        ...(request.is_reload === undefined ? {} : { isReload: request.is_reload }),
+      };
+    case 'permission':
+      if (
+        !validSiteOrigin(request.origin) ||
+        !validSiteOrigin(request.embedding_origin) ||
+        !Array.isArray(request.permissions) ||
+        !request.permissions.length ||
+        request.permissions.length > SITE_PERMISSIONS.length ||
+        !request.permissions.every((p: any) => SITE_PERMISSIONS.includes(p)) ||
+        new Set(request.permissions).size !== request.permissions.length
+      )
+        return;
+      return {
+        kind: 'permission',
+        origin,
+        embeddingOrigin: request.embedding_origin,
+        permissions: [...request.permissions],
+      };
+    case 'http_auth':
+      if (
+        typeof request.proxy !== 'boolean' ||
+        typeof request.realm !== 'string' ||
+        !['basic', 'digest', 'ntlm', 'negotiate'].includes(request.scheme) ||
+        typeof request.url !== 'string'
+      )
+        return;
+      if (
+        request.proxy
+          ? !/^(?:\[[0-9a-fA-F:]+\]|[^\s/:]+):[0-9]{1,5}$/.test(request.origin)
+          : !validSiteOrigin(request.origin)
+      )
+        return;
+      try {
+        const url = new URL(request.url);
+        if (!['http:', 'https:'].includes(url.protocol)) return;
+      } catch {
+        return;
+      }
+      return {
+        kind: 'http_auth',
+        origin,
+        realm: request.realm.slice(0, 2048),
+        scheme: request.scheme,
+        proxy: request.proxy,
+        url: request.url.slice(0, 2048),
+      };
+    case 'repost':
+      if (!validSiteOrigin(request.origin)) return;
+      return { kind: 'repost', origin };
+    case 'protocol_handler':
+      if (!validProtocolHandler(request.origin, request.protocol, request.url)) return;
+      return { kind: 'protocol_handler', origin, protocol: request.protocol, url: request.url };
+  }
+}
 function fileRequestAnchor(value: any, instance: string, document: string): FileRequestAnchor | undefined {
   if (
     !value ||
@@ -73,7 +203,10 @@ export class PageRequests {
 
   constructor(
     private readonly context: DomainContext,
-    private readonly services: Pick<DomainServices, 'lifecycle' | 'operations' | 'viewers'>,
+    private readonly services: Pick<
+      DomainServices,
+      'lifecycle' | 'operations' | 'viewers' | 'policy' | 'library'
+    >,
   ) {}
   fullscreenTabs(workspace: ProductWorkspace) {
     return workspace.tabs.filter(
@@ -344,6 +477,7 @@ export class PageRequests {
     const found: (PageDialog & PageIdentity & { requestId: string })[] = [];
     const files: InternalFileRequest[] = [];
     for (const view of Array.isArray(snapshot.views) ? snapshot.views : []) {
+      if (!view || typeof view !== 'object') continue;
       const viewId = view.viewId,
         tab = state.tabs.find((t) => t.webviewId === viewId);
       if (
@@ -352,13 +486,13 @@ export class PageRequests {
         snapshot.running === false ||
         typeof snapshot.browserIncarnation !== 'string' ||
         !snapshot.browserIncarnation ||
-        view.instance === undefined ||
-        view.document === undefined
+        ![view.instance, view.document].every((id) => typeof id === 'string' && /^[1-9][0-9]{0,19}$/.test(id))
       )
         continue;
       const instance = String(view.instance),
         document = String(view.document);
       for (const request of Array.isArray(view.pageRequests?.pending) ? view.pageRequests.pending : []) {
+        if (!request || typeof request !== 'object') continue;
         if (request.kind === 'file_chooser' && typeof request.request === 'string') {
           const id = createHash('sha256')
             .update(
@@ -397,12 +531,8 @@ export class PageRequests {
             },
           });
         }
-        if (
-          !['alert', 'confirm', 'prompt', 'beforeunload'].includes(request.kind) ||
-          typeof request.request !== 'string' ||
-          (state.pendingClose?.id === tab.id && request.kind === 'beforeunload')
-        )
-          continue;
+        const projected = projectPageRequest(request);
+        if (!projected || (state.pendingClose?.id === tab.id && request.kind === 'beforeunload')) continue;
         // Browser replacement may restart its local token/request counters.
         const id = createHash('sha256')
           .update(
@@ -417,6 +547,7 @@ export class PageRequests {
           )
           .digest('hex');
         found.push({
+          ...projected,
           id,
           tabId: tab.id,
           windowId: tab.windowId,
@@ -425,12 +556,7 @@ export class PageRequests {
           instance,
           document,
           requestId: request.request,
-          kind: request.kind,
-          message: String(request.message ?? ''),
-          defaultPrompt: String(request.default_prompt ?? ''),
-          origin: String(request.origin ?? ''),
-          ...(typeof request.is_reload === 'boolean' ? { isReload: request.is_reload } : {}),
-        });
+        } as PageDialog & PageIdentity & { requestId: string });
       }
     }
     const changed =
@@ -445,6 +571,17 @@ export class PageRequests {
     const closed = new Set<string>(),
       eventIds: string[] = [];
     for (const event of Array.isArray(snapshot.events) ? snapshot.events : []) {
+      if (event?.type === 'download.imported' || event?.type === 'download.failed') {
+        if (
+          typeof event.eventId !== 'string' ||
+          typeof event.name !== 'string' ||
+          typeof event.origin !== 'string'
+        )
+          throw new RemoteKitError('rejected', 'Invalid Endpoint download event');
+        await this.services.library.consumeDownload(state.tenantId, event as DownloadEvent);
+        eventIds.push(event.eventId);
+        continue;
+      }
       if (
         event?.type !== 'view.closed' ||
         typeof event.eventId !== 'string' ||
@@ -465,7 +602,8 @@ export class PageRequests {
     return closed;
   }
 
-  async replyDialog(state: ProductWorkspace, action: { dialogId: string; accept: boolean; text?: string }) {
+  async replyDialog(state: ProductWorkspace, action: { dialogId: string; reply: PageDialogReply }) {
+    validatePageReply(action.reply);
     const tenant = state.tenantId,
       runtime = this.context.tenants.get(tenant);
     const latest = await this.context.endpoint.snapshot(tenant);
@@ -473,16 +611,77 @@ export class PageRequests {
     const dialog = runtime.pageRequests.dialogs?.find((d) => d.id === action.dialogId);
     if (!dialog || !state.tabs.some((t) => t.id === dialog.tabId && t.webviewId === dialog.viewId))
       throw new RemoteKitError('conflict', '页面对话已过期');
-    if (dialog.kind === 'alert' && !action.accept)
+    const reply = action.reply;
+    const kind = ['alert', 'confirm', 'prompt', 'beforeunload'].includes(dialog.kind)
+      ? 'dialog'
+      : dialog.kind;
+    if (kind !== reply.kind) throw new RemoteKitError('rejected', '回复类型与页面请求不匹配');
+    if (dialog.kind === 'alert' && reply.kind === 'dialog' && !reply.accept)
       throw new RemoteKitError('invalid_request', '提示对话仅支持确认');
-    const result = await this.context.endpoint.replyPage(tenant, {
+    let changed = false;
+    if (
+      dialog.kind === 'permission' &&
+      reply.kind === 'permission' &&
+      ['allow', 'block'].includes(reply.decision)
+    ) {
+      const site = ensureSite(state, dialog.origin);
+      site.permissions ??= {};
+      for (const permission of dialog.permissions)
+        site.permissions[permission] = reply.decision as 'allow' | 'block';
+      changed = true;
+    }
+    if (dialog.kind === 'protocol_handler' && reply.kind === 'protocol_handler' && reply.remember) {
+      const site = ensureSite(state, dialog.origin);
+      const handlers = (site.protocolHandlers ?? []).filter(
+        (handler) => handler.protocol !== dialog.protocol,
+      );
+      if (handlers.length >= 32) throw new RemoteKitError('limit_exceeded', '协议处理程序已达上限');
+      if (reply.accept)
+        for (const [origin, other] of Object.entries(state.sites)) {
+          if (origin === dialog.origin) continue;
+          other.protocolHandlers = other.protocolHandlers?.filter(
+            (handler) => handler.protocol !== dialog.protocol,
+          );
+          pruneSite(state, origin);
+        }
+      site.protocolHandlers = [
+        ...handlers,
+        { protocol: dialog.protocol, url: dialog.url, allowed: reply.accept },
+      ];
+      changed = true;
+    }
+    if (changed) {
+      this.services.operations.saveWorkspace(state);
+      await this.services.policy.applySites(tenant, state);
+    }
+    let fields: PageReplyFields;
+    switch (reply.kind) {
+      case 'permission':
+        fields = { decision: reply.decision };
+        break;
+      case 'http_auth':
+        fields = reply.accept
+          ? { accept: true, username: reply.username, password: reply.password }
+          : { accept: false };
+        break;
+      case 'dialog':
+        fields = { accept: reply.accept, ...(reply.text === undefined ? {} : { text: reply.text }) };
+        break;
+      default:
+        fields = { accept: reply.accept };
+    }
+    const args = {
       viewId: dialog.viewId,
       requestId: dialog.requestId,
       browserIncarnation: dialog.browserIncarnation,
       instance: dialog.instance,
       document: dialog.document,
-      accept: action.accept,
-      ...(action.text === undefined ? {} : { text: action.text }),
+      ...fields,
+    };
+    const result = await this.context.endpoint.replyPage(tenant, args).catch((error) => {
+      if (reply.kind === 'http_auth')
+        throw new RemoteKitError(toRemoteKitError(error).code, '页面登录请求未能完成');
+      throw error;
     });
     if (result?.accepted !== true || result?.browser?.ok !== true)
       throw new RemoteKitError('conflict', 'Endpoint未确认页面对话回复');

@@ -55,6 +55,18 @@ export function pointerPointToDip(
         : 'reject';
   return clientPointToDip(surface, rect, clientX, clientY, outside);
 }
+export function pointerContactToDip(
+  surface: Surface,
+  rect: { width: number; height: number },
+  event: Pick<PointerEvent, 'width' | 'height'>,
+) {
+  if (event.width === 1 && event.height === 1) return {};
+  const size = surfaceDipSize(surface);
+  return {
+    width: (event.width * size.width) / rect.width,
+    height: (event.height * size.height) / rect.height,
+  };
+}
 export function markerSourceRect(surface: Surface, widthDip = 256, heightDip = 112) {
   return {
     x: surface.x,

@@ -1,16 +1,11 @@
 import type { InputPipeline } from '../input/input-pipeline';
-import { keyIdentity } from '../input/keys';
+import { keyIdentity, modifiers } from '../input/keys';
 import type { PresentationSession } from '../presentation/presentation-session';
 import { Store } from '../util/store';
 import { EditingInput, EDITOR_SENTINEL } from './editing-input';
 import type { EditingSession } from './editing-session';
 import { KeyboardSession } from './keyboard-session';
 import { DeferredEditingInput, editableInputMode } from './mobile-editing-state';
-const modifiers = (event: { shiftKey: boolean; ctrlKey: boolean; altKey: boolean; metaKey: boolean }) =>
-  Number(event.shiftKey) |
-  (Number(event.ctrlKey) << 1) |
-  (Number(event.altKey) << 2) |
-  (Number(event.metaKey) << 3);
 export interface EditingViewPorts {
   input: Pick<InputPipeline, 'sendInput' | 'ensureInputFocus' | 'focus'>;
   editing: Pick<EditingSession, 'mobileEditing' | 'editingSurface' | 'editingIdentity'>;

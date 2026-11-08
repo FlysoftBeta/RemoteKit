@@ -3,6 +3,7 @@
 #include "browser/view_model.h"
 #include "browser/navigation_operations.h"
 #include "browser/storage_import.h"
+#include "base/containers/flat_map.h"
 #include "base/values.h"
 #include "base/strings/string_number_conversions.h"
 #include <type_traits>
@@ -54,6 +55,7 @@ struct AudioCloseRequest : RequestEnvelope {};
 struct ClosedAckRequest : RequestEnvelope {
   std::optional<std::string> browserIncarnation;
   std::optional<std::vector<WebViewId>> views;
+  std::optional<base::ListValue> eventIds;
   std::optional<uint64_t> session;
 };
 struct SnapshotRequest : RequestEnvelope {};
@@ -98,9 +100,19 @@ struct ConfigureViewRequest : RequestEnvelope {
 struct ProfileCommandRequest : RequestEnvelope {
   std::optional<base::DictValue> command;
   std::optional<uint64_t> session;
-  std::optional<uint64_t> view;
 };
 struct PageControlRequest : RequestEnvelope {
+  PageControlRequest() = default;
+  PageControlRequest(PageControlRequest&&) = default;
+  PageControlRequest& operator=(PageControlRequest&&) = default;
+  ~PageControlRequest() {
+    for (const char* field : {"username", "password"}) {
+      auto* value = payload.FindString(field);
+      if (value)
+        for (auto& character : *value)
+          static_cast<volatile char&>(character) = 0;
+    }
+  }
   std::optional<std::string> request;
   std::optional<std::string> action;
   std::optional<std::string> selection_id;
@@ -155,10 +167,11 @@ struct LifecycleControlRequest : RequestEnvelope {
   std::optional<uint64_t> view;
 };
 struct InputRequest : RequestEnvelope {
+  using KeyboardLayout = base::flat_map<std::string, std::string>;
   std::optional<uint64_t> output_generation;
   std::optional<uint64_t> session;
   std::optional<uint64_t> view;
-  InputEvent input;
+  std::variant<InputEvent, KeyboardLayout> input;
 };
 inline base::DictValue TokenValue(const InputToken& token) {
   base::DictValue value;

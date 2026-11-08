@@ -1,4 +1,7 @@
 #include "browser/page_requests.h"
+#include "browser/browser_context.h"
+#include "browser/site_preferences.h"
+#include "browser/profile_services.h"
 #include "browser/file_chooser_accept.h"
 
 #include <cmath>
@@ -135,11 +138,13 @@ ValidatedFiles ValidateFiles(std::vector<PageRequests::SelectedFile> paths) {
 }  // namespace
 
 struct PageRequests::Pending {
-  enum class Type { dialog, file };
+  enum class Type { dialog, file, permission, http_auth, repost, protocol_handler };
   Type type = Type::dialog;
   content::WeakDocumentPtr document;
   base::DictValue data;
   DialogClosedCallback dialog;
+  AuthCallback auth;
+  std::vector<base::OnceCallback<void(const std::string&)>> permissions;
   scoped_refptr<content::FileSelectListener> file;
   blink::mojom::FileChooserParams::Mode mode = blink::mojom::FileChooserParams::Mode::kOpen;
   bool validating = false;
@@ -147,6 +152,128 @@ struct PageRequests::Pending {
   SelectionBinding selection_binding;
 };
 
+PageRequests* PageRequests::ForContents(content::WebContents* contents) {
+  for (auto* page : BoundPages())
+    if (page->web_contents() == contents)
+      return page;
+  return nullptr;
+}
+void PageRequests::SitePreferencesChanged(content::BrowserContext* context) {
+  std::vector<base::WeakPtr<PageRequests>> pages;
+  for (auto* page : BoundPages())
+    if (page->web_contents()->GetBrowserContext() == context)
+      pages.push_back(page->GetWeakPtr());
+  for (auto& page : pages)
+    if (page)
+      page->ResolveStoredDecisions();
+}
+void PageRequests::ResolveStoredDecisions() {
+  auto* context = static_cast<BrowserContext*>(web_contents()->GetBrowserContext());
+  std::vector<std::pair<std::uint64_t, base::DictValue>> replies;
+  for (const auto& [id, pending] : pending_) {
+    const auto* origin = pending->data.FindString("origin");
+    const auto* site = origin ? context->site_preferences().FindDict(*origin) : nullptr;
+    if (!site)
+      continue;
+    base::DictValue reply;
+    reply.Set("request", base::NumberToString(id));
+    if (pending->type == Pending::Type::permission) {
+      const auto* permissions = site->FindDict("permissions");
+      const auto& names = *pending->data.FindList("permissions");
+      const auto* setting =
+          permissions ? permissions->FindString(names.front().GetString()) : nullptr;
+      if (!setting)
+        continue;
+      reply.Set("decision", *setting);
+    } else if (pending->type == Pending::Type::protocol_handler) {
+      const auto* handlers = site->FindList("protocolHandlers");
+      bool stored = false;
+      if (handlers)
+        for (const auto& value : *handlers) {
+          const auto& handler = value.GetDict();
+          if (*handler.FindString("protocol") == *pending->data.FindString("protocol") &&
+              *handler.FindString("url") == *pending->data.FindString("url")) {
+            reply.Set("accept", *handler.FindBool("allowed"));
+            stored = true;
+            break;
+          }
+        }
+      if (!stored)
+        continue;
+    } else {
+      continue;
+    }
+    replies.emplace_back(id, std::move(reply));
+  }
+  auto weak = GetWeakPtr();
+  for (auto& [id, reply] : replies) {
+    Reply(reply, {});
+    if (!weak)
+      return;
+  }
+}
+void PageRequests::RequestPermission(content::RenderFrameHost* frame,
+                                     const std::vector<std::string>& permissions,
+                                     base::OnceCallback<void(const std::string&)> callback) {
+  for (auto& [id, request] : pending_) {
+    if (request->type == Pending::Type::permission &&
+        request->document.AsRenderFrameHostIfValid() == frame &&
+        request->data.FindList("permissions")->front().GetString() == permissions.front()) {
+      request->permissions.push_back(std::move(callback));
+      return;
+    }
+  }
+  auto pending = std::make_unique<Pending>();
+  pending->type = Pending::Type::permission;
+  pending->document = frame->GetWeakDocumentPtr();
+  pending->data = Kind("permission");
+  pending->data.Set("origin", frame->GetLastCommittedOrigin().Serialize());
+  pending->data.Set("embedding_origin",
+                    frame->GetOutermostMainFrame()->GetLastCommittedOrigin().Serialize());
+  base::ListValue names;
+  for (const auto& name : permissions)
+    names.Append(name);
+  pending->data.Set("permissions", std::move(names));
+  pending->permissions.push_back(std::move(callback));
+  Add(std::move(pending));
+}
+std::uint64_t PageRequests::RequestAuth(base::DictValue data, AuthCallback callback) {
+  auto pending = std::make_unique<Pending>();
+  pending->type = Pending::Type::http_auth;
+  pending->document = web_contents()->GetPrimaryMainFrame()->GetWeakDocumentPtr();
+  pending->data = std::move(data);
+  pending->auth = std::move(callback);
+  return Add(std::move(pending));
+}
+void PageRequests::CancelRequest(std::uint64_t id) {
+  Cancel(id, "request_cancelled");
+}
+void PageRequests::RegisterProtocolHandler(content::RenderFrameHost* frame,
+                                           const std::string& protocol,
+                                           const GURL& url,
+                                           bool user_gesture) {
+  if (!Live(frame) || !user_gesture ||
+      !ValidProtocolHandler(frame->GetLastCommittedOrigin().Serialize(), protocol, url.spec()))
+    return;
+  const auto* site = static_cast<BrowserContext*>(web_contents()->GetBrowserContext())
+                         ->site_preferences()
+                         .FindDict(frame->GetLastCommittedOrigin().Serialize());
+  const auto* handlers = site ? site->FindList("protocolHandlers") : nullptr;
+  if (handlers)
+    for (const auto& value : *handlers) {
+      const auto& handler = value.GetDict();
+      if (*handler.FindString("protocol") == protocol && *handler.FindString("url") == url.spec())
+        return;
+    }
+  auto pending = std::make_unique<Pending>();
+  pending->type = Pending::Type::protocol_handler;
+  pending->document = frame->GetWeakDocumentPtr();
+  pending->data = Kind("protocol_handler");
+  pending->data.Set("origin", frame->GetLastCommittedOrigin().Serialize());
+  pending->data.Set("protocol", protocol);
+  pending->data.Set("url", url.spec());
+  Add(std::move(pending));
+}
 PageRequests::PageRequests() = default;
 PageRequests::~PageRequests() {
   weak_factory_.InvalidateWeakPtrs();
@@ -220,6 +347,10 @@ std::uint64_t PageRequests::Add(std::unique_ptr<Pending> request) {
     Event(std::move(event));
     if (request->file)
       request->file->FileSelectionCanceled();
+    for (auto& permission : request->permissions)
+      std::move(permission).Run("dismiss");
+    if (request->auth)
+      std::move(request->auth).Run(false, {}, {});
     if (request->dialog)
       std::move(request->dialog).Run(false, {});
     return 0;
@@ -244,6 +375,10 @@ void PageRequests::Cancel(std::uint64_t id, const std::string& reason) {
     FileResult(id, "cancelled", *request, reason);
   if (request->file)
     request->file->FileSelectionCanceled();
+  for (auto& permission : request->permissions)
+    std::move(permission).Run("dismiss");
+  if (request->auth)
+    std::move(request->auth).Run(false, {}, {});
   if (request->dialog)
     std::move(request->dialog).Run(false, {});
 }
@@ -585,8 +720,37 @@ content::WebContents* PageRequests::OpenURLFromBrowser(content::BrowserContext* 
   return nullptr;
 }
 void PageRequests::ShowRepostFormWarningDialog(content::WebContents* contents) {
-  contents->GetController().CancelPendingReload();
-  Event(Kind("repost_cancelled"));
+  auto pending = std::make_unique<Pending>();
+  pending->type = Pending::Type::repost;
+  pending->document = contents->GetPrimaryMainFrame()->GetWeakDocumentPtr();
+  pending->data = Kind("repost");
+  pending->data.Set("origin",
+                    contents->GetPrimaryMainFrame()->GetLastCommittedOrigin().Serialize());
+  pending->dialog = base::BindOnce(
+      [](base::WeakPtr<content::WebContents> contents, base::OnceCallback<void(bool)> handler,
+         bool accept, const std::u16string&) {
+        if (handler) {
+          std::move(handler).Run(accept);
+          return;
+        }
+        if (!contents)
+          return;
+        if (accept)
+          contents->GetController().ContinuePendingReload();
+        else
+          contents->GetController().CancelPendingReload();
+      },
+      contents->GetWeakPtr(), std::move(repost_handler_));
+  Add(std::move(pending));
+}
+void PageRequests::SetRepostHandler(base::OnceCallback<void(bool)> handler) {
+  repost_handler_ = std::move(handler);
+}
+bool PageRequests::HasPendingRepost() const {
+  for (const auto& [id, request] : pending_)
+    if (request->type == Pending::Type::repost)
+      return true;
+  return false;
 }
 blink::mojom::DisplayMode PageRequests::GetDisplayMode(const content::WebContents*) {
   return fullscreen_ ? blink::mojom::DisplayMode::kFullscreen : blink::mojom::DisplayMode::kBrowser;
@@ -617,11 +781,19 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
   const auto accept = reply.FindBool("accept");
   std::uint64_t id = 0;
   if (!key || key->size() > 20 || !base::StringToUint64(*key, &id) ||
-      base::NumberToString(id) != *key || !accept.has_value())
-    return Result("request_and_accept_required");
+      base::NumberToString(id) != *key)
+    return Result("request_required");
   auto found = pending_.find(id);
-  if (found == pending_.end())
+  if (found == pending_.end()) {
+    const auto receipt = reply_results_.find(id);
+    if (receipt != reply_results_.end() &&
+        Live(receipt->second.document.AsRenderFrameHostIfValid()) &&
+        ((!receipt->second.decision.empty() && reply.FindString("decision") &&
+          *reply.FindString("decision") == receipt->second.decision) ||
+         (receipt->second.accept.has_value() && accept == receipt->second.accept)))
+      return Result();
     return Result("unknown_or_finished_request");
+  }
   auto* request = found->second.get();
   if (reply.FindBool("close_only").value_or(false) &&
       (close_state_ != "closing" || request->type != Pending::Type::dialog ||
@@ -635,6 +807,39 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
   if (!Live(frame)) {
     Cancel(id, "document_invalidated");
     return Result("document_invalidated");
+  }
+  if (request->type == Pending::Type::permission) {
+    const auto* decision = reply.FindString("decision");
+    if (!decision || reply.contains("accept") ||
+        (*decision != "allow" && *decision != "allow_once" && *decision != "block" &&
+         *decision != "dismiss"))
+      return Result("invalid_permission_decision");
+    auto completed = std::move(found->second);
+    pending_.erase(found);
+    reply_results_.insert_or_assign(id, ReplyReceipt{completed->document, *decision, {}});
+    while (reply_results_.size() > kLimit)
+      reply_results_.erase(reply_results_.begin());
+    for (auto& permission : completed->permissions)
+      std::move(permission).Run(*decision);
+    return Result();
+  }
+  if (!accept.has_value())
+    return Result("accept_required");
+  if (request->type == Pending::Type::protocol_handler) {
+    reply_results_.insert_or_assign(id, ReplyReceipt{request->document, {}, accept});
+    while (reply_results_.size() > kLimit)
+      reply_results_.erase(reply_results_.begin());
+  }
+  if (request->type == Pending::Type::http_auth && *accept) {
+    const auto* username = reply.FindString("username");
+    const auto* password = reply.FindString("password");
+    if (!username || !password || username->size() > 1024 || password->size() > 1024 ||
+        !base::IsStringUTF8(*username) || !base::IsStringUTF8(*password))
+      return Result("invalid_credentials");
+    auto completed = std::move(found->second);
+    pending_.erase(found);
+    std::move(completed->auth).Run(true, *username, *password);
+    return Result();
   }
   if (!*accept) {
     Cancel(id, "remote_rejected");
@@ -704,7 +909,7 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
   event.Set("request", base::NumberToString(id));
   event.Set("state", completed->type == Pending::Type::dialog ? "resolved" : "submitted");
   Event(std::move(event));
-  if (completed->type == Pending::Type::dialog)
+  if (completed->dialog)
     std::move(completed->dialog).Run(true, text);
   auto result = Result();
   result.Set("state", completed->type == Pending::Type::dialog ? "resolved" : "submitted");
@@ -830,6 +1035,9 @@ void PageRequests::DidStartNavigation(content::NavigationHandle* navigation) {
 void PageRequests::DidFinishNavigation(content::NavigationHandle* navigation) {
   if (!navigation->HasCommitted() || navigation->IsSameDocument())
     return;
+  static_cast<ProfilePermissions*>(
+      web_contents()->GetBrowserContext()->GetPermissionControllerDelegate())
+      ->NavigationCommitted(navigation);
   if (navigation->IsInPrimaryMainFrame())
     fullscreen_ = false;
   if (find_pending_ && !Live(find_document_.AsRenderFrameHostIfValid())) {
@@ -844,6 +1052,9 @@ void PageRequests::DidFinishNavigation(content::NavigationHandle* navigation) {
   Prune();
 }
 void PageRequests::RenderFrameDeleted(content::RenderFrameHost* frame) {
+  static_cast<ProfilePermissions*>(
+      web_contents()->GetBrowserContext()->GetPermissionControllerDelegate())
+      ->DocumentDestroyed(frame);
   std::vector<std::uint64_t> ids;
   for (const auto& [id, request] : pending_)
     if (request->document.AsRenderFrameHostIfValid() == frame ||

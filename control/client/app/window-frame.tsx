@@ -16,6 +16,7 @@ import type { ViewerSession } from '../viewer-session';
 import { BrowserChrome, useBrowserNavigation } from './browser-chrome';
 import { AppChrome } from './app-chrome';
 import { WindowMenus, useWindowMenus } from './window-menus';
+import { PermissionPrompt } from './permission-prompt';
 export function WindowFrame({
   win,
   state,
@@ -105,6 +106,9 @@ export function WindowFrame({
     report,
   });
   const menus = useWindowMenus(state.pageFullscreen?.windowId);
+  const prompt = state.pageDialogs?.find(
+    (dialog) => dialog.windowId === win.id && dialog.tabId === active?.id,
+  );
   const { submit } = navigation;
   const handle = <WindowHandle win={win} state={state} online={online} action={action} report={report} />;
   return (
@@ -172,6 +176,9 @@ export function WindowFrame({
             />
           )}
           <div className="window-content" ref={content}>
+            {online && prompt && (prompt.kind === 'permission' || prompt.kind === 'protocol_handler') && (
+              <PermissionPrompt key={prompt.id} dialog={prompt} action={action} />
+            )}
             {!active || active.kind === 'start' ? (
               <>
                 <StartPage

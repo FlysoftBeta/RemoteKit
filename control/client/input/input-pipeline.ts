@@ -5,6 +5,7 @@ import type { InputAuthority } from '../presentation/presentation-session';
 import { type Diagnostics } from '../media/types';
 import { type Layout, type Surface } from '../presentation/types';
 import { mergeGestureMomentum, mergeTouchMoves } from './touch-input';
+import { KeyboardLayout } from './keyboard-layout';
 export interface InputPorts {
   canInput(viewId: string): InputAuthority | null;
   send(message: Outgoing): void;
@@ -37,6 +38,30 @@ export class InputPipeline {
   }
   private focusLease: FocusLease = { phase: 'none' };
   constructor(private readonly ports: InputPorts) {}
+  private readonly keyboardLayout = new KeyboardLayout();
+  private keyboardChannel?: ReturnType<InputPorts['channel']>;
+
+  private connectKeyboardLayout() {
+    const channel = this.ports.channel();
+    if (channel?.readyState !== 'open' || this.ports.scope().locked || channel === this.keyboardChannel)
+      return;
+    this.keyboardChannel = channel;
+    const epoch = this.ports.scope().epoch;
+    this.keyboardLayout.connect((message) => {
+      if (
+        this.ports.channel() === channel &&
+        channel.readyState === 'open' &&
+        !this.ports.scope().locked &&
+        this.ports.scope().epoch === epoch
+      )
+        this.ports.send(message);
+    });
+  }
+
+  private disconnectKeyboardLayout() {
+    this.keyboardLayout.disconnect();
+    this.keyboardChannel = undefined;
+  }
   readonly touchInputStats = {
     queued: 0,
     merged: 0,
@@ -504,6 +529,7 @@ export class InputPipeline {
   }
 
   layoutChanged() {
+    this.connectKeyboardLayout();
     const pending = this.pendingFocus;
     const surface = this.ports.layout()?.views.find((view) => view.id === pending?.view);
     if (
@@ -522,6 +548,7 @@ export class InputPipeline {
   }
 
   reset() {
+    this.disconnectKeyboardLayout();
     clearTimeout(this.inputDrainTimer);
     this.inputDrainTimer = undefined;
     this.cancelPendingFocus(undefined, 'scope-changed');
@@ -557,6 +584,8 @@ export class InputPipeline {
     if (event.type === 'closed') this.reset();
   };
   onChannel = (event: import('../rtc/endpoint-channel').ChannelEvent) => {
+    if (event.type === 'bound' || event.type === 'closed') this.disconnectKeyboardLayout();
+    if (event.type === 'open') this.connectKeyboardLayout();
     if (event.type === 'writable') this.drainInput();
   };
 }

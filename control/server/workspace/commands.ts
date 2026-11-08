@@ -15,6 +15,8 @@ import {
   type ProductWorkspace,
   type InstalledApp,
   type AppDefinition,
+  SITE_PERMISSIONS,
+  type PageDialogReply,
 } from '../../shared/product';
 import { resolveNavigation, resolveSearch } from '../navigation-url';
 import {
@@ -28,14 +30,15 @@ import {
   WORKSPACE_LIMITS,
 } from './model';
 import type { ExecutionContext } from './operations';
-import { readClose } from './page-requests';
+import { readClose, validatePageReply } from './page-requests';
+import { ensureSite, pruneSite, validProtocol, validSiteOrigin } from './site-policy';
 export type CommandEffect =
   | { kind: 'navigate'; tabId: string; url: string; previousKind: ProductTab['kind']; ctx?: ExecutionContext }
   | { kind: 'command'; tabId: string; command: string; ctx?: ExecutionContext }
   | { kind: 'closeWindow' }
   | { kind: 'closeTab'; tabId: string }
   | { kind: 'replyClose'; tabId: string; accept: boolean }
-  | { kind: 'replyPage'; dialogId: string; accept: boolean; text?: string }
+  | { kind: 'replyPage'; dialogId: string; reply: PageDialogReply }
   | { kind: 'exitFullscreen'; target: string };
 export interface CommandContext {
   execution?: ExecutionContext;
@@ -349,16 +352,15 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
     case 'page.reply': {
       if (
         typeof action.dialogId !== 'string' ||
-        typeof action.accept !== 'boolean' ||
-        (action.text !== undefined &&
-          (typeof action.text !== 'string' || Buffer.byteLength(action.text, 'utf8') > 16384))
+        !action.dialogId ||
+        Object.keys(action).some((key) => !['type', 'dialogId', 'reply'].includes(key))
       )
         throw new RemoteKitError('invalid_request', '无效的页面对话回复');
+      validatePageReply(action.reply);
       effects.push({
         kind: 'replyPage',
         dialogId: action.dialogId,
-        accept: action.accept,
-        text: action.text,
+        reply: action.reply,
       });
       break;
     }
@@ -455,6 +457,47 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       Object.assign(state.settings.workspace, workspaceSettings);
       break;
     }
+    case 'site.permission':
+    case 'site.protocolHandler.remove':
+    case 'site.permissions.reset': {
+      const keys =
+        action.type === 'site.permission'
+          ? ['type', 'origin', 'permission', 'setting']
+          : action.type === 'site.protocolHandler.remove'
+            ? ['type', 'origin', 'protocol']
+            : ['type', 'origin'];
+      if (
+        !validSiteOrigin(action.origin) ||
+        Object.keys(action).some((key) => !keys.includes(key)) ||
+        (action.type === 'site.permission' &&
+          (!SITE_PERMISSIONS.includes(action.permission) ||
+            !['ask', 'allow', 'block'].includes(action.setting))) ||
+        (action.type === 'site.protocolHandler.remove' && !validProtocol(action.protocol))
+      )
+        throw new RemoteKitError('invalid_request', '无效的网站权限设置');
+      const site =
+        action.type === 'site.permission' && action.setting !== 'ask'
+          ? ensureSite(state, action.origin)
+          : state.sites[action.origin];
+      if (site) {
+        if (action.type === 'site.permission') {
+          if (action.setting === 'ask')
+            delete site.permissions?.[action.permission as keyof NonNullable<typeof site.permissions>];
+          else
+            (site.permissions ??= {})[action.permission as keyof NonNullable<typeof site.permissions>] =
+              action.setting;
+        } else if (action.type === 'site.protocolHandler.remove') {
+          site.protocolHandlers = site.protocolHandlers?.filter(
+            (handler) => handler.protocol !== action.protocol,
+          );
+        } else {
+          delete site.permissions;
+          delete site.protocolHandlers;
+        }
+        pruneSite(state, action.origin);
+      }
+      break;
+    }
     case 'site.set': {
       let origin: string;
       try {
@@ -491,12 +534,13 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       if (!(origin in state.sites) && Object.keys(state.sites).length >= WORKSPACE_LIMITS.sites)
         throw new RemoteKitError('limit_exceeded', '站点设置已达上限');
       const previous = state.sites[origin] ?? { tabletUa: false };
-      siteUaChanged = hasTabletUa && previous.tabletUa !== action.tabletUa;
+      siteUaChanged = hasTabletUa && !!previous.tabletUa !== action.tabletUa;
       state.sites[origin] = {
         ...previous,
         ...(hasTabletUa ? { tabletUa: action.tabletUa } : {}),
         ...(hasManualKeyboard ? { manualKeyboard: action.manualKeyboard } : {}),
       };
+      pruneSite(state, origin);
       if (siteUaChanged) {
         if (target) target.pendingUaReloadOrigin = origin;
         application = { status: 'pending', reason: '设置已保存，正在应用站点身份' };

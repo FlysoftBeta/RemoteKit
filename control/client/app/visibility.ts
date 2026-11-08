@@ -21,7 +21,12 @@ export function selectVisibility(state: ProductState, shellWidth: number) {
   let foreground: { kind: 'page' | 'file'; id: string } | null = null;
   for (const window of windows) {
     if (!visibleWindowIds.includes(window.id)) continue;
-    const page = state.pageDialogs?.find((request) => request.tabId === window.activeTabId);
+    const page = state.pageDialogs?.find(
+      (request) =>
+        request.tabId === window.activeTabId &&
+        request.kind !== 'permission' &&
+        request.kind !== 'protocol_handler',
+    );
     if (page) {
       foreground = { kind: 'page', id: page.id };
       break;

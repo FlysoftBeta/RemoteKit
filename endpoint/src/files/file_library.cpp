@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <charconv>
 #include <fstream>
 #include <limits>
 #include <span>
@@ -446,6 +447,75 @@ Result<FileLibrary::Asset> FileLibrary::Seal(std::uint64_t grant,
   draft_bytes_ -= asset.size;
   Remove(DraftData(id));
   return asset;
+}
+Result<FileLibrary::Asset> FileLibrary::ImportDownload(const fs::path& profile,
+                                                       const ServiceJson& download) {
+  const auto reference = download.at("fileReference").get<std::string>();
+  const auto size_text = download.at("size").get<std::string>();
+  uint64_t size = 0;
+  const auto parsed = std::from_chars(size_text.data(), size_text.data() + size_text.size(), size);
+  if (parsed.ec != std::errc() || parsed.ptr != size_text.data() + size_text.size())
+    return Error{ErrorCode::kInvalidRequest, "invalid_download_size"};
+  if (size > kFileBytes)
+    return Error{ErrorCode::kLimitExceeded, "file_too_large"};
+  const FileUploadStore::Spec spec{download.at("name").get<std::string>(),
+                                   download.at("mimeType").get<std::string>(), size};
+  if (!ValidSpec(spec) || reference.empty() || reference.find('\\') != std::string::npos ||
+      reference.find(':') != std::string::npos || reference.find('\0') != std::string::npos)
+    return Error{ErrorCode::kInvalidRequest, "invalid_download_path"};
+  const auto relative = fs::u8path(reference);
+  if (relative.is_absolute() || relative.has_root_path() || *relative.begin() != L"downloads")
+    return Error{ErrorCode::kInvalidRequest, "invalid_download_path"};
+  for (const auto& component : relative)
+    if (component.empty() || component == L"." || component == L".." ||
+        component.native().back() == L'.' || component.native().back() == L' ')
+      return Error{ErrorCode::kInvalidRequest, "invalid_download_path"};
+  if (std::distance(relative.begin(), relative.end()) < 2)
+    return Error{ErrorCode::kInvalidRequest, "invalid_download_path"};
+
+  // Denying writes and renames keeps every checked component fixed while the
+  // object store reads the file. OPEN_REPARSE_POINT checks the link itself.
+  struct Handles {
+    std::vector<HANDLE> values;
+    ~Handles() {
+      for (const auto handle : values)
+        CloseHandle(handle);
+    }
+  } handles;
+  auto path = profile;
+  std::vector<fs::path> paths{profile.parent_path().parent_path(), profile.parent_path(), profile};
+  for (const auto& component : relative) {
+    path /= component;
+    paths.push_back(path);
+  }
+  for (size_t index = 0; index < paths.size(); ++index) {
+    const bool directory = index + 1 < paths.size();
+    const auto handle = CreateFileW(
+        paths[index].c_str(), directory ? FILE_READ_ATTRIBUTES : GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+      const auto error = GetLastError();
+      return Error{error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
+                       ? ErrorCode::kNotFound
+                       : ErrorCode::kUnavailable,
+                   "download_open_failed"};
+    }
+    handles.values.push_back(handle);
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (GetFileType(handle) != FILE_TYPE_DISK || !GetFileInformationByHandle(handle, &info))
+      return Error{ErrorCode::kUnavailable, "download_stat_failed"};
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+        bool(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != directory)
+      return Error{ErrorCode::kInvalidRequest, "invalid_download_path"};
+    if (!directory) {
+      const auto actual = (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+      if (actual > kFileBytes)
+        return Error{ErrorCode::kLimitExceeded, "file_too_large"};
+      if (actual != size)
+        return Error{ErrorCode::kUnavailable, "download_size_mismatch"};
+    }
+  }
+  return Publish(path, {{}, spec.type, size}, []() -> Result<void> { return {}; });
 }
 bool FileLibrary::EraseDraft(std::map<std::string, Draft>::iterator draft) {
   if (!Remove(root_ / "drafts" / (draft->first + ".json")) || !Remove(DraftData(draft->first)))

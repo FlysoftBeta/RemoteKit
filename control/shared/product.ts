@@ -207,9 +207,20 @@ export interface PendingClose {
   document?: string;
   awaiting?: boolean;
 }
+export const SITE_PERMISSIONS = [
+  'geolocation',
+  'clipboard_read',
+  'local_fonts',
+  'window_management',
+  'midi_sysex',
+  'idle_detection',
+] as const;
+export type SitePermission = (typeof SITE_PERMISSIONS)[number];
 export interface SitePreferences {
-  tabletUa: boolean;
+  tabletUa?: boolean;
   manualKeyboard?: boolean;
+  permissions?: Partial<Record<SitePermission, 'allow' | 'block'>>;
+  protocolHandlers?: { protocol: string; url: string; allowed: boolean }[];
 }
 export interface ProductWorkspace {
   tenantId: string;
@@ -227,16 +238,32 @@ export interface ProductWorkspace {
   pendingWindowCloseIds?: string[];
   pendingAppUninstallId?: string;
 }
-export interface PageDialog {
+interface PageDialogIdentity {
   id: string;
   tabId: string;
   windowId: string;
-  kind: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
-  message: string;
-  defaultPrompt: string;
   origin: string;
-  isReload?: boolean;
 }
+export type PageDialog = PageDialogIdentity &
+  (
+    | {
+        kind: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+        message: string;
+        defaultPrompt: string;
+        isReload?: boolean;
+      }
+    | { kind: 'permission'; embeddingOrigin: string; permissions: SitePermission[] }
+    | { kind: 'http_auth'; realm: string; scheme: string; proxy: boolean; url: string }
+    | { kind: 'repost' }
+    | { kind: 'protocol_handler'; protocol: string; url: string }
+  );
+export type PageDialogReply =
+  | { kind: 'dialog'; accept: boolean; text?: string }
+  | { kind: 'permission'; decision: 'allow' | 'allow_once' | 'block' | 'dismiss' }
+  | { kind: 'http_auth'; accept: false }
+  | { kind: 'http_auth'; accept: true; username: string; password: string }
+  | { kind: 'repost'; accept: boolean }
+  | { kind: 'protocol_handler'; accept: boolean; remember: boolean };
 export const FILE_LIMITS = {
   maxFileBytes: 256 * 1024 * 1024,
   maxBatchBytes: 512 * 1024 * 1024,
@@ -359,7 +386,15 @@ export type ProductAction =
   | { type: 'tab.navigate'; tabId: string; url: string; source?: 'launcher' }
   | { type: 'tab.command'; tabId: string; command: 'back' | 'forward' | 'reload' | 'stop' }
   | { type: 'settings.update'; settings: ProductSettingsUpdate }
-  | { type: 'page.reply'; dialogId: string; accept: boolean; text?: string }
+  | { type: 'page.reply'; dialogId: string; reply: PageDialogReply }
+  | {
+      type: 'site.permission';
+      origin: string;
+      permission: SitePermission;
+      setting: 'ask' | 'allow' | 'block';
+    }
+  | { type: 'site.protocolHandler.remove'; origin: string; protocol: string }
+  | { type: 'site.permissions.reset'; origin: string }
   | { type: 'page.exitFullscreen'; target: string }
   | ({ type: 'site.set'; origin: string; tabId?: string } & (
       { tabletUa: boolean; manualKeyboard?: boolean } | { tabletUa?: boolean; manualKeyboard: boolean }

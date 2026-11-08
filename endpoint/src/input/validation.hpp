@@ -8,6 +8,13 @@
 
 namespace remotekit {
 using WebViewId = std::uint64_t;
+inline constexpr std::uint32_t kInputModifiers =
+    0xf | (1u << 6) | (1u << 7) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 20) | (1u << 21);
+struct PenInput {
+  std::uint32_t id{};
+  double pressure{}, tilt_x{}, tilt_y{}, twist{};
+  bool eraser{};
+};
 struct KeyInput {
   enum class Action { down, up, character };
   Action action{};
@@ -25,6 +32,7 @@ struct MouseInput {
   std::uint8_t button{};
   std::uint32_t modifiers{};
   std::uint8_t click_count{1};
+  std::optional<PenInput> pen;
 };
 struct WheelInput {
   double x{}, y{}, delta_x{}, delta_y{};
@@ -33,6 +41,7 @@ struct WheelInput {
 struct TouchPoint {
   std::uint32_t id{};
   double x{}, y{}, pressure{};
+  std::optional<double> width, height;
 };
 struct TouchInput {
   enum class Action { start, move, end, cancel };
@@ -108,6 +117,9 @@ struct ContextCommand {
 };
 struct ImeCancel {};
 struct ImeFinish {};
+struct KeyboardLayoutInput {
+  std::vector<std::pair<std::string, std::u16string>> entries;
+};
 using InputPayload = std::variant<KeyInput,
                                   MouseInput,
                                   WheelInput,
@@ -118,6 +130,9 @@ using InputPayload = std::variant<KeyInput,
                                   ImeCancel,
                                   ImeFinish,
                                   SelectionCommand,
-                                  ContextCommand>;
+                                  ContextCommand,
+                                  KeyboardLayoutInput>;
+bool ValidPen(const PenInput&);
+bool ValidContactSize(const std::optional<double>&);
 Result<void> ValidateInput(const InputPayload&);
 }  // namespace remotekit

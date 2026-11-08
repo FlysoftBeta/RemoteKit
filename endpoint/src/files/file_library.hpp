@@ -52,6 +52,7 @@ class FileLibrary {
                               const std::vector<std::uint8_t>&,
                               const Check&);
   Result<Asset> Seal(std::uint64_t grant, const std::string& upload, const Check&);
+  Result<Asset> ImportDownload(const std::filesystem::path& profile, const ServiceJson& download);
   Result<void> Cancel(std::uint64_t grant, const std::string& upload, const Check&);
   Result<Asset> Describe(const std::string& asset) const;
   Result<std::filesystem::path> Path(const std::string& asset) const;

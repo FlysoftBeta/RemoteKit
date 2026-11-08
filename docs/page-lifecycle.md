@@ -96,10 +96,11 @@ lifecycle_uncertain
 
 ## 权限、下载与页面命令
 
-- `ProfilePermissions`：内存中的规则，键为请求 origin、嵌入 origin、权限类型。规则覆盖剪贴板读写、durable storage、后台/周期同步和地理位置；活跃文档、Permissions-Policy 和 worker origin 检查仍然生效，规则本身不会创建缺失的 API 后端。媒体采集不经过这些规则：宿主设备对租户不可见（见[兼容性 · 宿主设备隔离](compatibility.md)）。
-- `ProfileDownloads`：写入 Profile/downloads，唯一目标名、`.crdownload` 中间文件、网络下载要求 HTTPS 链，由 https 页面生成的 `blob:`/`data:`/`filesystem:` 下载允许，危险文件检查、异步目标分配，完成后返回相对 `file_reference`。没有 SafeBrowsing，也没有完整的下载 UI。
+- `ProfilePermissions` 使用 Control 同步的站点规则和当前文档的临时许可。地理位置、剪贴板读取、本机字体、窗口管理、MIDI 和空闲检测可触发权限提示。活跃文档、Permissions-Policy 和 worker origin 检查仍然生效。宿主设备隔离独立于权限决定，见[兼容性 · 宿主设备隔离](compatibility.md)。
+- 权限、HTTP 与代理登录、POST 重提交、协议处理器注册都走文档绑定的页面请求。权限或协议规则同步时可结清已决定的请求。重提交操作在用户决定前保持待定，取消会结清原操作。
+- `ProfileDownloads` 在 `Profile/downloads` 分配唯一目标名和 `.crdownload` 中间文件。网络下载要求 HTTPS，由 HTTPS 页面生成的 `blob:`、`data:`、`filesystem:` 下载也允许。超过 256 MiB 会取消。完成事件保留至 Endpoint 确认，Endpoint 导入租户对象存储并清理 Browser 副本，Control 把条目放入「我的文件」。导入未结清期间阻止休眠。
 - `page.command`：back/forward/reload/stop（走导航操作账本）、find/stop_find、zoom/get_zoom、copy/paste/cut/select_all。find 在回调之前登记请求身份，因为回复可能同步；替换 find 会话会丢弃旧回复，最终回复不保证到达。
 
 ## 尚未实现
 
-多 Profile（当前每 Session 一个 Profile，层级上保留余量）、跨 Browser 的 sessionStorage、原生 popup widget 的像素与命中、目录上传、HTTP/代理认证、剪贴板图片格式与跨端同步、PDF 与打印、原生长按、POST 重新提交确认（目前取消该次 reload 并发出 `repost_cancelled`）、IPC 传输故障后同一 Browser incarnation 的重新附着。
+多 Profile（当前每 Session 一个 Profile，层级上保留余量）、跨 Browser 的 sessionStorage、原生 popup widget 的像素与命中、目录上传、剪贴板图片格式与跨端同步、PDF 与打印、原生长按、IPC 传输故障后同一 Browser incarnation 的重新附着。

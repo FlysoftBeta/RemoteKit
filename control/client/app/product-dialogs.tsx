@@ -12,7 +12,13 @@ import {
   Typography,
 } from '@mui/material';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import type { ProductState, ProductUser, SetupStatus } from '../../shared/product';
+import type {
+  PageDialog,
+  PageDialogReply,
+  ProductState,
+  ProductUser,
+  SetupStatus,
+} from '../../shared/product';
 import { RemoteKitError } from '../../shared/errors';
 import type { ProductActionHandler as Action } from '../control/product-operations';
 import { formatError } from '../util/format-error';
@@ -154,16 +160,21 @@ export function PageDialogs({
   activeId: string | null;
 }) {
   const dialog = state.pageDialogs?.find((dialog) => dialog.id === activeId);
-  return dialog ? <PageDialogForm key={dialog.id} dialog={dialog} action={action} /> : null;
+  return dialog && dialog.kind !== 'permission' && dialog.kind !== 'protocol_handler' ? (
+    <PageDialogForm key={dialog.id} dialog={dialog} action={action} />
+  ) : null;
 }
 function PageDialogForm({
   dialog,
   action,
 }: {
-  dialog: NonNullable<ProductState['pageDialogs']>[number];
+  dialog: Exclude<PageDialog, { kind: 'permission' | 'protocol_handler' }>;
   action: Action;
 }) {
-  const [text, setText] = useState(dialog.defaultPrompt ?? '');
+  const [text, setText] = useState('defaultPrompt' in dialog ? dialog.defaultPrompt : '');
+  const [username, setUsername] = useState(''),
+    [password, setPassword] = useState('');
+  useEffect(() => () => setPassword(''), []);
   const [busy, setBusy] = useState(false),
     [error, setError] = useState('');
   const reply = async (accept: boolean) => {
@@ -171,18 +182,89 @@ function PageDialogForm({
     setBusy(true);
     setError('');
     try {
+      const reply: PageDialogReply =
+        dialog.kind === 'http_auth'
+          ? accept
+            ? { kind: 'http_auth', accept: true, username, password }
+            : { kind: 'http_auth', accept: false }
+          : dialog.kind === 'repost'
+            ? { kind: 'repost', accept }
+            : { kind: 'dialog', accept, ...(dialog.kind === 'prompt' ? { text } : {}) };
       await action({
         type: 'page.reply',
         dialogId: dialog.id,
-        accept,
-        ...(dialog.kind === 'prompt' ? { text } : {}),
+        reply,
       });
+      setPassword('');
     } catch (e) {
       setError(formatError(e));
       setBusy(false);
     }
   };
   const leaving = dialog.kind === 'beforeunload';
+  if (dialog.kind === 'http_auth' || dialog.kind === 'repost')
+    return (
+      <Dialog open maxWidth="xs" fullWidth onClose={busy ? undefined : () => void reply(false)}>
+        <DialogTitle>{dialog.kind === 'http_auth' ? '登录' : '确认重新提交表单'}</DialogTitle>
+        <DialogContent>
+          {dialog.kind === 'http_auth' ? (
+            <>
+              <Typography sx={{ overflowWrap: 'anywhere' }}>
+                {dialog.proxy ? `代理服务器 ${dialog.origin}` : dialog.origin}
+              </Typography>
+              <Typography>要求提供用户名和密码。</Typography>
+              {!dialog.proxy && dialog.origin.startsWith('http:') && (
+                <Alert severity="warning" sx={{ mt: 2 }}>
+                  您与此网站的连接不是私密连接
+                </Alert>
+              )}
+              <Box
+                component="form"
+                id="page-http-auth"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void reply(true);
+                }}
+                sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}
+              >
+                <TextField
+                  autoFocus
+                  label="用户名"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={username}
+                  disabled={busy}
+                  onChange={(event) => setUsername(event.target.value)}
+                />
+                <TextField
+                  label="密码"
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={password}
+                  disabled={busy}
+                  onChange={(event) => setPassword(event.target.value)}
+                />
+                <button type="submit" hidden />
+              </Box>
+            </>
+          ) : (
+            <Typography>
+              您所查找的网页使用了您输入的信息。返回此页可能需要重复您已进行的所有操作。是否要继续？
+            </Typography>
+          )}
+          {error && <Alert severity="error">{error}</Alert>}
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 2 }}>
+            <Button disabled={busy} onClick={() => void reply(false)}>
+              取消
+            </Button>
+            <Button disabled={busy} variant="contained" onClick={() => void reply(true)}>
+              {dialog.kind === 'http_auth' ? '登录' : '继续'}
+            </Button>
+          </Box>
+        </DialogContent>
+      </Dialog>
+    );
   return (
     <Dialog
       open

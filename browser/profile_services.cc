@@ -1,4 +1,8 @@
 #include "browser/profile_services.h"
+#include "browser/browser_context.h"
+#include "browser/page_requests.h"
+#include "base/strings/utf_string_conversions.h"
+#include "net/base/filename_util.h"
 #include "content/public/browser/device_service.h"
 #include "mojo/public/cpp/bindings/remote.h"
 #include "services/device/public/mojom/geolocation_control.mojom.h"
@@ -12,7 +16,9 @@
 #include <vector>
 
 #include "base/files/file.h"
+#include "base/feature_list.h"
 #include "base/files/file_util.h"
+#include "base/logging.h"
 #include "base/functional/bind.h"
 #include "base/strings/string_number_conversions.h"
 #include "base/strings/string_util.h"
@@ -23,11 +29,13 @@
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/permission_request_description.h"
+#include "content/public/browser/navigation_handle.h"
 #include "content/public/browser/permission_status_subscription.h"
 #include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
 #include "content/public/browser/web_contents.h"
 #include "mojo/public/cpp/bindings/self_owned_receiver.h"
+#include "third_party/blink/public/common/features.h"
 #include "third_party/blink/public/mojom/permissions/permission.mojom.h"
 #include "url/origin.h"
 
@@ -37,7 +45,7 @@ using Type = blink::PermissionType;
 using Status = content::PermissionStatus;
 using Result = content::PermissionResult;
 constexpr std::size_t kStringLimit = 16 * 1024;
-constexpr std::size_t kPolicyLimit = 1024;
+
 base::DictValue Response(const std::string& error = {}) {
   base::DictValue result;
   result.Set("ok", error.empty());
@@ -51,65 +59,38 @@ std::string Clip(std::string_view value) {
 bool Eligible(const url::Origin& origin) {
   return !origin.opaque() && origin.GetURL().SchemeIsHTTPOrHTTPS();
 }
-std::optional<url::Origin> ParseOrigin(const std::string* text) {
-  if (!text || text->size() > kStringLimit)
-    return std::nullopt;
-  GURL url(*text);
-  auto origin = url::Origin::Create(url);
-  if (!url.is_valid() || !Eligible(origin) || url.has_username() || url.has_password() ||
-      url.has_query() || url.has_ref() || (url.path() != "/" && !url.path().empty()))
-    return std::nullopt;
-  return origin;
-}
-bool Grantable(Type type) {
-  switch (type) {
-    case Type::CLIPBOARD_READ_WRITE:
-    case Type::CLIPBOARD_SANITIZED_WRITE:
-    case Type::PERSISTENT_STORAGE:
-    case Type::BACKGROUND_SYNC:
-    case Type::GEOLOCATION:
-      return true;
-    default:
-      return false;
-  }
-}
 std::string TypeName(Type type) {
   switch (type) {
-    case Type::CLIPBOARD_READ_WRITE:
-      return "clipboard_read_write";
-    case Type::CLIPBOARD_SANITIZED_WRITE:
-      return "clipboard_sanitized_write";
-    case Type::PERSISTENT_STORAGE:
-      return "durable_storage";
-    case Type::BACKGROUND_SYNC:
-      return "background_sync";
-    case Type::PERIODIC_BACKGROUND_SYNC:
-      return "periodic_background_sync";
     case Type::GEOLOCATION:
       return "geolocation";
+    case Type::CLIPBOARD_READ_WRITE:
+      return "clipboard_read";
+    case Type::LOCAL_FONTS:
+      return "local_fonts";
+    case Type::WINDOW_MANAGEMENT:
+      return "window_management";
+    case Type::MIDI_SYSEX:
+      return "midi_sysex";
+    case Type::IDLE_DETECTION:
+      return "idle_detection";
     default:
-      return blink::GetPermissionString(type);
+      return {};
   }
 }
-std::optional<Type> ParseType(const std::string* name) {
-  if (!name || name->size() > 128)
-    return std::nullopt;
-  for (Type type : blink::GetAllPermissionTypes())
-    if (*name == TypeName(type) || *name == blink::GetPermissionString(type))
-      return type;
-  if (*name == "clipboard_read")
-    return Type::CLIPBOARD_READ_WRITE;
-  if (*name == "clipboard_write")
-    return Type::CLIPBOARD_SANITIZED_WRITE;
-  if (*name == "persistent_storage")
-    return Type::PERSISTENT_STORAGE;
-  return std::nullopt;
+Result PermissionResult(Type type, Status status) {
+  Result result(status);
+  if (type == Type::GEOLOCATION && status == Status::GRANTED)
+    result.retrieved_permission_setting = GeolocationSetting{
+        .approximate = PermissionOption::kAllowed, .precise = PermissionOption::kAllowed};
+  return result;
 }
 std::optional<Type> DescriptorType(const blink::mojom::PermissionDescriptorPtr& descriptor) {
   auto type =
       descriptor ? blink::MaybePermissionDescriptorToPermissionType(descriptor) : std::nullopt;
   if (type == Type::GEOLOCATION_APPROXIMATE)
     return Type::GEOLOCATION;
+  if (type == Type::MIDI && base::FeatureList::IsEnabled(blink::features::kBlockMidiByDefault))
+    return Type::MIDI_SYSEX;
   return type;
 }
 bool LiveDocument(content::RenderFrameHost* frame, content::BrowserContext* context) {
@@ -127,19 +108,29 @@ ProfilePermissions::~ProfilePermissions() = default;
 Result ProfilePermissions::Lookup(Type type,
                                   const url::Origin& requesting,
                                   const url::Origin& embedding) const {
-  if (!context_ || !Grantable(type) || !Eligible(requesting) || !Eligible(embedding))
+  if (!context_ || !Eligible(requesting) || !Eligible(embedding))
     return Denied();
-  const auto found = policy_.find({requesting.Serialize(), embedding.Serialize(), type});
-  if (found != policy_.end()) {
-    Result result(found->second ? Status::GRANTED : Status::DENIED);
-    if (type == Type::GEOLOCATION && found->second) {
-      result.retrieved_permission_setting = GeolocationSetting{
-          .approximate = PermissionOption::kAllowed, .precise = PermissionOption::kAllowed};
-    }
-    return result;
+  const auto name = TypeName(type);
+  if (!name.empty()) {
+    if (!network::IsOriginPotentiallyTrustworthy(requesting))
+      return Denied();
+    const auto* site = static_cast<BrowserContext*>(context_.get())
+                           ->site_preferences()
+                           .FindDict(requesting.Serialize());
+    const auto* permissions = site ? site->FindDict("permissions") : nullptr;
+    const auto* setting = permissions ? permissions->FindString(name) : nullptr;
+    return PermissionResult(
+        type, setting ? (*setting == "allow" ? Status::GRANTED : Status::DENIED) : Status::ASK);
   }
-  return Result(type == Type::BACKGROUND_SYNC ? Status::GRANTED : Status::DENIED);
+  if (type == Type::PERSISTENT_STORAGE)
+    return Result(Status::ASK);
+  return Result(type == Type::BACKGROUND_SYNC || type == Type::SENSORS || type == Type::MIDI ||
+                        type == Type::CLIPBOARD_SANITIZED_WRITE || type == Type::WAKE_LOCK_SCREEN ||
+                        type == Type::PAYMENT_HANDLER || type == Type::PROTECTED_MEDIA_IDENTIFIER
+                    ? Status::GRANTED
+                    : Status::DENIED);
 }
+
 Status ProfilePermissions::GetPermissionStatus(
     const blink::mojom::PermissionDescriptorPtr& descriptor,
     const GURL& requesting,
@@ -170,6 +161,12 @@ Result ProfilePermissions::GetPermissionResultForCurrentDocument(
   if (feature && !frame->IsFeatureEnabled(*feature))
     return Result(Status::DENIED, content::PermissionStatusSource::FEATURE_POLICY);
   auto result = Lookup(*type, frame->GetLastCommittedOrigin(), main->GetLastCommittedOrigin());
+  if (result.status == Status::ASK)
+    for (const auto& grant : one_time_)
+      if (grant.permission == *type && grant.document.AsRenderFrameHostIfValid() == frame)
+        result = PermissionResult(*type, Status::GRANTED);
+  if (*type == Type::CLIPBOARD_SANITIZED_WRITE && !frame->IsFocused())
+    return Denied();
   return document.AsRenderFrameHostIfValid() == frame && frame->IsActive() ? result : Denied();
 }
 void ProfilePermissions::RequestPermissionsFromCurrentDocument(
@@ -189,18 +186,66 @@ void ProfilePermissions::RequestPermissionsFromCurrentDocument(
   if (document.AsRenderFrameHostIfValid() != frame || !LiveDocument(frame, context_))
     for (auto& result : results)
       result = Denied();
-  for (size_t i = 0; i < results.size(); ++i) {
-    if (DescriptorType(request.permissions[i]) == Type::GEOLOCATION &&
-        results[i].status == Status::GRANTED) {
+  struct RequestState {
+    std::vector<Result> results;
+    size_t remaining = 0;
+    base::OnceCallback<void(const std::vector<Result>&)> callback;
+  };
+  auto state = std::make_shared<RequestState>();
+  state->results = std::move(results);
+  state->callback = std::move(callback);
+  std::vector<std::pair<size_t, Type>> pending;
+  for (size_t i = 0; i < state->results.size(); ++i) {
+    const auto type = DescriptorType(request.permissions[i]);
+    if (type == Type::GEOLOCATION && state->results[i].status == Status::GRANTED) {
       mojo::Remote<device::mojom::GeolocationControl> control;
       content::GetDeviceService().BindGeolocationControl(control.BindNewPipeAndPassReceiver());
       control->UserDidOptIntoLocationServices();
-      break;
     }
+    if (state->results[i].status == Status::ASK && type && !TypeName(*type).empty())
+      pending.emplace_back(i, *type);
+    else if (state->results[i].status == Status::ASK)
+      state->results[i] = Denied();
   }
-  // No prompt or posted grant: document validity is checked at the reply point.
-  std::move(callback).Run(results);
+  auto* page =
+      PageRequests::ForContents(frame ? content::WebContents::FromRenderFrameHost(frame) : nullptr);
+  if (pending.empty() || !page) {
+    for (auto& result : state->results)
+      if (result.status == Status::ASK)
+        result = Denied();
+    std::move(state->callback).Run(state->results);
+    return;
+  }
+  state->remaining = pending.size();
+  for (const auto [index, type] : pending) {
+    page->RequestPermission(
+        frame, {TypeName(type)},
+        base::BindOnce(
+            [](base::WeakPtr<ProfilePermissions> self, content::WeakDocumentPtr document,
+               std::shared_ptr<RequestState> state, size_t index, Type type,
+               const std::string& decision) {
+              auto* frame = document.AsRenderFrameHostIfValid();
+              const bool allow = self && LiveDocument(frame, self->context_) &&
+                                 (decision == "allow" || decision == "allow_once");
+              state->results[index] =
+                  PermissionResult(type, allow ? Status::GRANTED : Status::DENIED);
+              if (allow && decision == "allow_once")
+                self->one_time_.push_back({document, type});
+              if (allow && type == Type::GEOLOCATION) {
+                mojo::Remote<device::mojom::GeolocationControl> control;
+                content::GetDeviceService().BindGeolocationControl(
+                    control.BindNewPipeAndPassReceiver());
+                control->UserDidOptIntoLocationServices();
+              }
+              if (self)
+                self->NotifyChanged();
+              if (--state->remaining == 0)
+                std::move(state->callback).Run(state->results);
+            },
+            weak_factory_.GetWeakPtr(), document, state, index, type));
+  }
 }
+
 Result ProfilePermissions::GetPermissionResultForWorker(
     const blink::mojom::PermissionDescriptorPtr& descriptor,
     content::RenderProcessHost* process,
@@ -221,68 +266,39 @@ Result ProfilePermissions::GetPermissionResultForEmbeddedRequester(
   // This entry point is only for TOP_LEVEL_STORAGE_ACCESS, which is unsupported.
   return Denied();
 }
-void ProfilePermissions::ResetPermission(Type type, const GURL& requesting, const GURL& embedding) {
-  policy_.erase({url::Origin::Create(requesting).Serialize(),
-                 url::Origin::Create(embedding).Serialize(), type});
+void ProfilePermissions::ResetPermission(Type, const GURL&, const GURL&) {}
+void ProfilePermissions::SitePreferencesChanged() {
+  std::erase_if(one_time_, [](const OneTimeGrant& grant) {
+    return !grant.document.AsRenderFrameHostIfValid();
+  });
   NotifyChanged();
+}
+void ProfilePermissions::NavigationCommitted(content::NavigationHandle* navigation) {
+  std::erase_if(one_time_, [navigation](const OneTimeGrant& grant) {
+    auto* frame = grant.document.AsRenderFrameHostIfValid();
+    if (!frame)
+      return true;
+    if (content::WebContents::FromRenderFrameHost(frame) != navigation->GetWebContents())
+      return false;
+    if (navigation->IsInPrimaryMainFrame())
+      return true;
+    for (; frame; frame = frame->GetParent())
+      if (frame->GetFrameTreeNodeId() == navigation->GetFrameTreeNodeId())
+        return true;
+    return false;
+  });
+  NotifyChanged();
+}
+void ProfilePermissions::DocumentDestroyed(content::RenderFrameHost* frame) {
+  std::erase_if(one_time_, [frame](const OneTimeGrant& grant) {
+    auto* document = grant.document.AsRenderFrameHostIfValid();
+    return !document || document == frame;
+  });
 }
 bool ProfilePermissions::IsPermissionOverridable(Type,
                                                  base::optional_ref<const url::Origin>,
                                                  base::optional_ref<const url::Origin>) {
   return false;
-}
-base::DictValue ProfilePermissions::Command(const base::DictValue& command) {
-  const auto* action = command.FindString("action");
-  if (!action)
-    return Response("action_required");
-  if (*action == "snapshot") {
-    auto result = Response();
-    result.Set("default", "deny");
-    base::ListValue rules;
-    for (const auto& [key, allow] : policy_) {
-      base::DictValue rule;
-      rule.Set("origin", std::get<0>(key));
-      rule.Set("embedding_origin", std::get<1>(key));
-      rule.Set("permission", TypeName(std::get<2>(key)));
-      rule.Set("allow", allow);
-      rules.Append(std::move(rule));
-    }
-    result.Set("rules", std::move(rules));
-    return result;
-  }
-  if (*action == "reset_all") {
-    policy_.clear();
-    NotifyChanged();
-    return Response();
-  }
-  if (*action != "set" && *action != "reset")
-    return Response("unsupported_action");
-  const auto* origin_text = command.FindString("origin");
-  if (!origin_text)
-    origin_text = command.FindString("requesting_origin");
-  auto origin = ParseOrigin(origin_text);
-  const auto* embedding_text = command.FindString("embedding_origin");
-  auto embedding = ParseOrigin(embedding_text ? embedding_text : origin_text);
-  auto type = ParseType(command.FindString("permission"));
-  if (!origin || !embedding)
-    return Response("http_or_https_origin_required");
-  if (!type)
-    return Response("unknown_permission");
-  const Key key{origin->Serialize(), embedding->Serialize(), *type};
-  if (*action == "reset")
-    policy_.erase(key);
-  else {
-    const auto allow = command.FindBool("allow");
-    if (!allow)
-      return Response("allow_boolean_required");
-    if (*allow && !Grantable(*type))
-      return Response("permission_implementation_unsupported");
-    if (policy_.size() >= kPolicyLimit && !policy_.contains(key))
-      return Response("policy_limit");
-    policy_[key] = *allow;
-  }
-  NotifyChanged();
-  return Response();
 }
 
 void ProfilePermissions::OnPermissionStatusChangeSubscriptionAdded(
@@ -353,32 +369,17 @@ void ProfilePermissions::NotifyChanged() {
 }
 
 namespace {
-std::string SafeName(std::string suggested) {
-  // Deliberately ASCII-only and bounded: Windows device names, ADS, separators,
-  // trailing spaces/dots and server-controlled paths cannot escape the directory.
-  if (suggested.size() > 120)
-    suggested.resize(120);
-  for (char& c : suggested)
-    if (!base::IsAsciiAlphaNumeric(c) && c != '.' && c != '-' && c != '_')
-      c = '_';
-  while (!suggested.empty() && (suggested.back() == '.' || suggested.back() == ' '))
-    suggested.pop_back();
-  if (suggested.empty() || suggested == "." || suggested == "..")
-    suggested = "download.bin";
-  // The prefix also prevents reserved basenames such as CON and NUL.
-  return "file-" + suggested;
-}
 using AllocatedTarget = std::pair<base::FilePath, std::string>;
 AllocatedTarget AllocateTarget(const base::FilePath& directory,
                                std::uint32_t id,
-                               const std::string& suggested) {
+                               const base::FilePath& suggested) {
   if (!directory.IsAbsolute() || !base::CreateDirectory(directory))
     return {{}, "download_directory_unavailable"};
   base::FilePath unique;
   const auto prefix = base::FilePath::FromUTF8Unsafe(base::NumberToString(id) + "-").value();
   if (!base::CreateTemporaryDirInDir(directory, prefix, &unique))
     return {{}, "unique_download_directory_failed"};
-  const auto path = unique.Append(base::FilePath::FromUTF8Unsafe(SafeName(suggested)));
+  const auto path = unique.Append(suggested.BaseName());
   if (base::PathExists(path) ||
       base::PathExists(path.AddExtension(FILE_PATH_LITERAL("crdownload"))))
     return {{}, "download_target_already_exists"};
@@ -432,7 +433,9 @@ ProfileDownloads::ProfileDownloads(content::BrowserContext* context,
                                    const base::FilePath& profile_path)
     : context_(context),
       profile_path_(profile_path),
-      downloads_path_(profile_path.Append(FILE_PATH_LITERAL("downloads"))) {}
+      downloads_path_(profile_path.Append(FILE_PATH_LITERAL("downloads"))) {
+  CHECK(base::CreateDirectory(downloads_path_));
+}
 ProfileDownloads::~ProfileDownloads() {
   Shutdown();
 }
@@ -496,6 +499,9 @@ void ProfileDownloads::GetNextId(content::DownloadIdCallback callback) {
   std::move(callback).Run(next_id_++);
 }
 std::string ProfileDownloads::BlockReason(download::DownloadItem* item) const {
+  if (item && (item->GetReceivedBytes() > 256LL * 1024 * 1024 ||
+               item->GetTotalBytes() > 256LL * 1024 * 1024))
+    return "file_too_large";
   if (!item || !AllowedDownload(item->GetURL(), item->GetRequestInitiator()))
     return "https_only_policy";
   for (const auto& url : item->GetUrlChain())
@@ -537,12 +543,17 @@ bool ProfileDownloads::DetermineDownloadTarget(download::DownloadItem* item,
     return true;
   }
   targets_.emplace(guid, std::move(*callback));
-  std::string suggested = item->GetSuggestedFilename();
-  if (suggested.empty())
-    suggested = item->GetURL().ExtractFileName();
   base::ThreadPool::PostTaskAndReplyWithResult(
       FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
-      base::BindOnce(&AllocateTarget, downloads_path_, item->GetId(), std::move(suggested)),
+      base::BindOnce(
+          [](base::FilePath directory, std::uint32_t id, GURL url, std::string disposition,
+             std::string suggested, std::string mime) {
+            return AllocateTarget(
+                directory, id,
+                net::GenerateFileName(url, disposition, "", suggested, mime, "download"));
+          },
+          downloads_path_, item->GetId(), item->GetURL(), item->GetContentDisposition(),
+          item->GetSuggestedFilename(), item->GetMimeType()),
       base::BindOnce(
           [](base::WeakPtr<ProfileDownloads> owner, std::string guid, AllocatedTarget target) {
             if (owner)
@@ -597,7 +608,7 @@ void ProfileDownloads::OnDownloadCreated(content::DownloadManager* manager,
   }
   if (item->GetId() >= next_id_ && item->GetId() < std::numeric_limits<std::uint32_t>::max())
     next_id_ = item->GetId() + 1;
-  Update(item);
+  OnDownloadUpdated(item);
 }
 void ProfileDownloads::Update(download::DownloadItem* item) {
   auto found = records_.find(item->GetGuid());
@@ -626,6 +637,23 @@ void ProfileDownloads::Update(download::DownloadItem* item) {
       profile_path_.AppendRelativePath(record.target, &relative))
     data.Set("file_reference",
              relative.NormalizePathSeparatorsTo(FILE_PATH_LITERAL('/')).AsUTF8Unsafe());
+  if (data.contains("file_reference") && !record.completion_recorded) {
+    base::DictValue event;
+    const auto event_id = "download-" + item->GetGuid();
+    event.Set("type", "download.completed");
+    event.Set("eventId", event_id);
+    event.Set("guid", item->GetGuid());
+    event.Set("fileReference", *data.FindString("file_reference"));
+    event.Set("name", item->GetFileNameToReportUser().AsUTF8Unsafe());
+    event.Set("mimeType", item->GetMimeType());
+    event.Set("size", base::NumberToString(item->GetReceivedBytes()));
+    auto origin = url::Origin::Create(item->GetTabUrl());
+    if (origin.opaque() && item->GetRequestInitiator())
+      origin = *item->GetRequestInitiator();
+    event.Set("origin", std::string(base::TruncateUTF8ToByteSize(origin.Serialize(), 2048)));
+    events_.emplace(event_id, std::move(event));
+    record.completion_recorded = true;
+  }
   record.snapshot = std::move(data);
 }
 void ProfileDownloads::OnDownloadUpdated(download::DownloadItem* item) {
@@ -633,6 +661,7 @@ void ProfileDownloads::OnDownloadUpdated(download::DownloadItem* item) {
   const auto reason = BlockReason(item);
   if (!reason.empty() && item->GetState() == download::DownloadItem::IN_PROGRESS) {
     records_[item->GetGuid()].error = reason;
+    LOG(WARNING) << "download cancelled: " << reason;
     item->Cancel(false);
   }
 }
@@ -716,6 +745,51 @@ void ProfileDownloads::CheckDownloadAllowed(const content::WebContents::Getter& 
 download::DownloadItem* ProfileDownloads::GetDownloadByGuid(const std::string& guid) {
   const auto found = records_.find(guid);
   return found == records_.end() ? nullptr : found->second.item.get();
+}
+base::ListValue ProfileDownloads::Events() const {
+  base::ListValue events;
+  for (const auto& [id, event] : events_)
+    events.Append(event.Clone());
+  return events;
+}
+void ProfileDownloads::Acknowledge(const base::ListValue& ids) {
+  for (const auto& id : ids)
+    events_.erase(id.GetString());
+}
+void ProfileDownloads::Remove(const std::string& guid,
+                              base::OnceCallback<void(base::DictValue)> callback) {
+  if (shutdown_) {
+    std::move(callback).Run(Response("profile_shutdown"));
+    return;
+  }
+  const auto found = records_.find(guid);
+  if (found == records_.end()) {
+    std::move(callback).Run(Response());
+    return;
+  }
+  base::ThreadPool::PostTaskAndReplyWithResult(
+      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
+      base::BindOnce(
+          [](const base::FilePath& target) { return target.empty() || base::DeleteFile(target); },
+          found->second.target),
+      base::BindOnce(
+          [](base::WeakPtr<ProfileDownloads> owner, std::string guid,
+             base::OnceCallback<void(base::DictValue)> callback, bool removed) {
+            if (!owner)
+              return;
+            if (!removed) {
+              std::move(callback).Run(Response("download_remove_failed"));
+              return;
+            }
+            const auto found = owner->records_.find(guid);
+            if (found != owner->records_.end()) {
+              if (found->second.item)
+                found->second.item->Remove();
+              owner->records_.erase(guid);
+            }
+            std::move(callback).Run(Response());
+          },
+          weak_factory_.GetWeakPtr(), guid, std::move(callback)));
 }
 base::DictValue ProfileDownloads::Command(const base::DictValue& command) {
   const auto* action = command.FindString("action");

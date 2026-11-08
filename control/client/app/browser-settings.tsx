@@ -8,17 +8,20 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
+  ListItemButton,
   Tooltip,
   Typography,
 } from '@mui/material';
 import { useState } from 'react';
-import { SEARCH_ENGINES, type ProductState, type SearchEngine } from '../../shared/product';
+import { SEARCH_ENGINES, SITE_PERMISSIONS, type ProductState, type SearchEngine } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import type { WorkspaceCall } from './window-state';
 import { SettingNote, SettingRow, SettingSection, SettingSwitch } from './setting-layout';
 import { ScaledSelect } from './scaled-select';
 import { formatError } from '../util/format-error';
 import { OverflowText } from './overflow-text';
+import { SiteSettings } from './site-settings';
+import { siteHost } from './permission-prompt';
 
 const SITE_OPTIONS = [
   ['tabletUa', '平板版网站'],
@@ -30,22 +33,35 @@ export function BrowserSettingsSheet({
   action,
   call,
   online,
+  currentSite,
   onClose,
 }: {
   state: ProductState;
   action: Action;
   call: WorkspaceCall;
   online: boolean;
+  currentSite?: { origin: string; tabId: string };
   onClose(): void;
 }) {
   const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
   const [clearing, setClearing] = useState(false);
+  const [siteOrigin, setSiteOrigin] = useState<string>();
   const run = (command: Parameters<Action>[0]) =>
     void action(command).catch((error) => setNote({ text: formatError(error), error: true }));
   const { browser } = state.workspace.settings;
-  const sites = Object.entries(state.workspace.sites).filter(
-    ([, preference]) => preference.tabletUa || preference.manualKeyboard,
-  );
+  const sites = Object.entries(state.workspace.sites)
+    .map(([origin, preference]) => ({
+      origin,
+      preference,
+      permissionCount: SITE_PERMISSIONS.filter((permission) => preference.permissions?.[permission]).length,
+    }))
+    .filter(
+      ({ preference, permissionCount }) =>
+        preference.tabletUa ||
+        preference.manualKeyboard ||
+        permissionCount ||
+        preference.protocolHandlers?.length,
+    );
   return (
     <Dialog open onClose={onClose} fullWidth maxWidth="sm" scroll="paper">
       <DialogTitle className="dialog-heading">
@@ -80,46 +96,30 @@ export function BrowserSettingsSheet({
             }
           />
         </SettingSection>
-        <SettingSection title="网页兼容性">
-          {sites.map(([origin, preference]) => (
-            <div key={origin} className="site-row">
+        <SettingSection title="网站设置">
+          {sites.map(({ origin, preference, permissionCount }) => (
+            <ListItemButton
+              key={origin}
+              className="site-row site-settings-entry"
+              onClick={() => setSiteOrigin(origin)}
+            >
               <OverflowText className="site-row-origin" tip={origin}>
-                {origin.replace(/^https?:\/\//, '')}
+                {siteHost(origin)}
               </OverflowText>
               <div className="site-row-options">
-                {SITE_OPTIONS.map(([key, label]) => (
-                  <Chip
-                    key={key}
-                    size="small"
-                    label={label}
-                    color={preference[key] ? 'primary' : 'default'}
-                    variant={preference[key] ? 'filled' : 'outlined'}
-                    disabled={!online || (key === 'tabletUa' && !state.integrations.siteUa)}
-                    onClick={() =>
-                      run({ type: 'site.set', origin, [key]: !preference[key] } as Parameters<Action>[0])
-                    }
-                  />
+                {SITE_OPTIONS.filter(([key]) => preference[key]).map(([key, label]) => (
+                  <Chip key={key} size="small" label={label} />
                 ))}
+                {!!permissionCount && <Chip size="small" label={`${permissionCount} 项权限`} />}
+                {!!preference.protocolHandlers?.length && (
+                  <Chip size="small" label={`${preference.protocolHandlers.length} 个协议处理程序`} />
+                )}
               </div>
-              <Tooltip title="移除">
-                <span>
-                  <IconButton
-                    size="small"
-                    aria-label={`移除 ${origin} 的设置`}
-                    disabled={!online}
-                    onClick={() => run({ type: 'site.set', origin, tabletUa: false, manualKeyboard: false })}
-                  >
-                    <DeleteOutline fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </div>
+            </ListItemButton>
           ))}
-          {!sites.length && (
-            <Typography variant="body2" color="text.secondary">
-              在网页的更多菜单 › 网页兼容性中为单个网站调整
-            </Typography>
-          )}
+          <Typography variant="body2" color="text.secondary">
+            在网页的更多菜单 › 网站设置中为单个网站调整
+          </Typography>
         </SettingSection>
         <SettingSection title="收藏">
           {state.workspace.favorites.map((favorite) => (
@@ -160,6 +160,16 @@ export function BrowserSettingsSheet({
         </SettingSection>
         {note && <SettingNote text={note.text} error={note.error} />}
       </DialogContent>
+      {siteOrigin && (
+        <SiteSettings
+          origin={siteOrigin}
+          tabId={currentSite?.origin === siteOrigin ? currentSite.tabId : undefined}
+          state={state}
+          action={action}
+          online={online}
+          onClose={() => setSiteOrigin(undefined)}
+        />
+      )}
       <Dialog open={clearing} onClose={() => setClearing(false)}>
         <DialogTitle>清除浏览记录？</DialogTitle>
         <DialogActions>

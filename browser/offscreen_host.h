@@ -48,6 +48,7 @@ class OffscreenHost final : public aura::WindowTreeHost,
   void SetViewport(const gfx::Size& viewport);
   void SetScreenConfiguration(const gfx::Size& viewport, float scale);
   static void UpdateIdentity(content::WebContents* contents, bool tablet);
+  static void SetKeyboardLayoutMap(base::flat_map<std::string, std::string> layout);
   void SetOutputScale(float scale);
   void SetRenderDemand(bool enabled);
   void SetNeedsBeginFrameCallback(base::RepeatingClosure callback);

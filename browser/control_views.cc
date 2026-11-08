@@ -12,6 +12,14 @@ Result<ClosedAckRequest> DecodeClosedAck(const base::DictValue& wire, RequestEnv
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
   request.browserIncarnation = decoder.Optional<std::string>("browserIncarnation");
+  request.eventIds = decoder.Optional<base::ListValue>("eventIds");
+  if (request.eventIds) {
+    if (request.eventIds->size() > 256)
+      return {{}, {ErrorCode::invalid_request, "Too many event IDs"}};
+    for (const auto& value : *request.eventIds)
+      if (!value.is_string() || value.GetString().empty() || value.GetString().size() > 256)
+        return {{}, {ErrorCode::invalid_request, "Invalid event ID"}};
+  }
   const auto ids = decoder.Optional<base::ListValue>("views");
   if (!ids || ids->size() > 256)
     return {{}, {ErrorCode::invalid_request, "Closed view IDs required"}};
@@ -164,6 +172,9 @@ ControlResult ControlDispatcher::HandleClosedAck(const ClosedAckRequest& request
   const auto acknowledged = runtime_.closed.Acknowledge(session, *ids);
   if (!acknowledged)
     return ControlResult::Failure(id, acknowledged.error, acknowledged.message);
+  if (request.eventIds)
+    for (auto& context : runtime_.contexts)
+      context->AcknowledgeDownloadEvents(*request.eventIds);
   reply.Set("ok", true);
   reply.Set("accepted", true);
   return reply;

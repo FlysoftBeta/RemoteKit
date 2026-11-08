@@ -143,9 +143,14 @@ ControlResult ControlDispatcher::HandleSnapshot(const SnapshotRequest& request) 
   }
   session_value.Set("pendingPopups", std::move(popup_values));
   size_t downloads_in_progress = 0;
-  for (const auto& context : runtime_.contexts)
+  base::ListValue events;
+  for (const auto& context : runtime_.contexts) {
     downloads_in_progress += context->downloads().InProgressCount();
+    for (auto& event : context->downloads().Events())
+      events.Append(std::move(event));
+  }
   session_value.Set("downloadsInProgress", static_cast<int>(downloads_in_progress));
+  session_value.Set("events", std::move(events));
   list.Append(std::move(session_value));
   reply.Set("ok", true);
   reply.Set("sessions", std::move(list));

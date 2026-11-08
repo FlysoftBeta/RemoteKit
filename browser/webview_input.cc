@@ -7,8 +7,29 @@
 #include "browser/webview_navigation.h"
 #include "browser/webview_touch.h"
 #include "browser/webview_lifecycle.h"
+#include "ui/events/blink/blink_event_util.h"
+
+#include <bit>
 
 namespace remotekit::browser {
+namespace {
+int KeyLocationModifiers(const KeyInput& key) {
+  return ui::DomCodeToWebInputEventModifiers(static_cast<ui::DomCode>(key.dom_code));
+}
+
+void SetPenProperties(blink::WebMouseEvent& event, const std::optional<MouseInput::Pen>& pen) {
+  if (!pen)
+    return;
+  using PointerType = blink::WebPointerProperties::PointerType;
+  event.pointer_type = pen->eraser ? PointerType::kEraser : PointerType::kPen;
+  event.id = std::bit_cast<blink::PointerId>(pen->id);
+  event.force = event.GetType() == Type::kMouseUp ? 0.f : static_cast<float>(pen->pressure);
+  event.tilt_x = pen->tilt_x;
+  event.tilt_y = pen->tilt_y;
+  event.twist = static_cast<int>(pen->twist);
+}
+}  // namespace
+
 InputController::InputController(WebView& owner) : owner_(owner) {}
 InputController::~InputController() = default;
 void InputController::InvalidateLayoutInput(bool remains_visible) {
@@ -74,7 +95,11 @@ void InputController::ReleaseHeldKeys(bool deliver) {
     for (const auto& [physical, key] : pressed_keys_) {
       if (!KeyboardTargetAlive())
         break;
-      input::NativeWebKeyboardEvent event(Type::kKeyUp, 0, base::TimeTicks::Now());
+      constexpr int kLockModifiers =
+          blink::WebInputEvent::kCapsLockOn | blink::WebInputEvent::kNumLockOn;
+      input::NativeWebKeyboardEvent event(
+          Type::kKeyUp, KeyLocationModifiers(key) | (key.modifiers & kLockModifiers),
+          base::TimeTicks::Now());
       event.native_key_code = static_cast<int>(physical);
       event.windows_key_code = key.windows_key_code;
       event.dom_code = static_cast<int>(key.dom_code);
@@ -124,25 +149,28 @@ void InputController::ReleasePointer(bool deliver) {
   owner_.touch_->CancelTouches(deliver);
   if (deliver && PointerTargetAlive()) {
     auto* router = pointer_root_widget_->GetInputEventRouter();
-    int modifiers = static_cast<int>(last_mouse_.modifiers);
-    if (router)
-      for (auto button : pressed_mouse_buttons_) {
-        if (!PointerTargetAlive())
-          break;
-        modifiers &= ~MouseButtonModifier(button);
-        blink::WebMouseEvent event(Type::kMouseUp, modifiers, base::TimeTicks::Now());
-        event.button = Button(button);
-        event.click_count = 1;
-        event.SetPositionInWidget(static_cast<float>(last_mouse_.x),
-                                  static_cast<float>(last_mouse_.y));
-        event.SetPositionInScreen(
-            ViewportToScreen(pointer_root_view_.get(), event.PositionInWidget()));
-        router->RouteMouseEvent(pointer_root_view_.get(), &event, ui::LatencyInfo());
+    if (router) {
+      for (const auto& [id, held] : held_pointers_) {
+        const auto& last = held.last_event;
+        int modifiers = static_cast<int>(last.modifiers);
+        for (auto button : held.buttons) {
+          if (!PointerTargetAlive())
+            break;
+          modifiers &= ~MouseButtonModifier(button);
+          blink::WebMouseEvent event(Type::kMouseUp, modifiers, base::TimeTicks::Now());
+          SetPenProperties(event, last.pen);
+          event.button = Button(button);
+          event.click_count = 1;
+          event.SetPositionInWidget(static_cast<float>(last.x), static_cast<float>(last.y));
+          event.SetPositionInScreen(
+              ViewportToScreen(pointer_root_view_.get(), event.PositionInWidget()));
+          router->RouteMouseEvent(pointer_root_view_.get(), &event, ui::LatencyInfo());
+        }
       }
+    }
   }
   owner_.touch_->touches_.clear();
-  pressed_mouse_buttons_.clear();
-  last_mouse_ = {};
+  held_pointers_.clear();
   pointer_root_widget_.reset();
   pointer_root_view_.reset();
   pointer_frame_.reset();
@@ -307,11 +335,15 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
   if (hover &&
       (!owner_.execution_->visible_ || !InputFrameReady(owner_.contents()->GetPrimaryMainFrame())))
     return Fail(ErrorCode::unavailable, "Hover requires a visible live WebView");
-  if (hover && !pressed_mouse_buttons_.empty()) {
+  if (hover && !held_pointers_.empty()) {
     const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
     if (!model || !model->focused)
       return Fail(ErrorCode::unavailable, "Mouse drag requires focus");
   }
+  if (const auto* mouse = std::get_if<MouseInput>(&input.payload);
+      mouse && mouse->pen && mouse->action == MouseInput::Action::down &&
+      held_pointers_.size() >= 16 && !held_pointers_.contains(mouse->pen->id))
+    return Fail(ErrorCode::resource_limit, "Too many active pointers");
   const bool routed = std::holds_alternative<MouseInput>(input.payload) ||
                       std::holds_alternative<WheelInput>(input.payload) ||
                       std::holds_alternative<TouchInput>(input.payload) ||
@@ -380,7 +412,7 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
         if constexpr (std::is_same_v<T, KeyInput>) {
           if (value.action == KeyInput::Action::down)
             HideTouchSelection(root_view);
-          int modifiers = static_cast<int>(value.modifiers);
+          int modifiers = static_cast<int>(value.modifiers) | KeyLocationModifiers(value);
           if (value.repeat)
             modifiers |= blink::WebInputEvent::kIsAutoRepeat;
           input::NativeWebKeyboardEvent event(
@@ -419,6 +451,7 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
                       : value.action == MouseInput::Action::leave ? Type::kMouseLeave
                                                                   : Type::kMouseUp;
           blink::WebMouseEvent event(type, static_cast<int>(value.modifiers), now);
+          SetPenProperties(event, value.pen);
           event.SetPositionInWidget(static_cast<float>(value.x), static_cast<float>(value.y));
           event.SetPositionInScreen(ViewportToScreen(root_view, event.PositionInWidget()));
           event.button = value.action == MouseInput::Action::move ? MouseMoveButton(value.modifiers)
@@ -427,11 +460,18 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
                                value.action == MouseInput::Action::leave)
                                   ? 0
                                   : value.click_count;
-          last_mouse_ = value;
+          const auto pointer = value.pen ? std::optional(value.pen->id) : std::nullopt;
           if (value.button && value.action == MouseInput::Action::down)
-            pressed_mouse_buttons_.insert(value.button);
-          else if (value.action == MouseInput::Action::up)
-            pressed_mouse_buttons_.erase(value.button);
+            held_pointers_[pointer].buttons.insert(value.button);
+          auto held = held_pointers_.find(pointer);
+          if (held != held_pointers_.end()) {
+            held->second.last_event = value;
+            if (value.action == MouseInput::Action::up) {
+              held->second.buttons.erase(value.button);
+              if (held->second.buttons.empty())
+                held_pointers_.erase(held);
+            }
+          }
           router->RouteMouseEvent(root_view, &event, ui::LatencyInfo());
         } else if constexpr (std::is_same_v<T, WheelInput>) {
           HideTouchSelection(root_view);

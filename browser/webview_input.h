@@ -58,8 +58,11 @@ class InputController {
   base::WeakPtr<content::RenderWidgetHostViewBase> pointer_root_view_;
   base::WeakPtr<content::RenderFrameHostImpl> pointer_frame_;
   std::optional<blink::DocumentToken> pointer_document_;
-  std::set<std::uint8_t> pressed_mouse_buttons_;
-  MouseInput last_mouse_;
+  struct HeldPointer {
+    MouseInput last_event;
+    std::set<std::uint8_t> buttons;
+  };
+  std::map<std::optional<std::uint32_t>, HeldPointer> held_pointers_;
   std::set<std::int64_t> input_commit_navigations_;
 };
 }  // namespace remotekit::browser

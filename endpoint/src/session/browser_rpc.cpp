@@ -122,9 +122,15 @@ Result<Json> BrowserRpc::Request(Json command,
                                  uint32_t timeout_ms,
                                  bool opportunistic,
                                  const std::function<bool()>& admitted) {
+  const bool credentials = command.contains("username") || command.contains("password");
   auto reply = Exchange(std::move(command), expected_control, timeout_ms, opportunistic, admitted);
   if (!reply)
     return reply;
+  if (credentials) {
+    if (!reply.value().value("ok", false))
+      return Error{ReplyError(reply.value()).code, "page authentication reply rejected"};
+    return Json{{"ok", true}};
+  }
   return CheckReply(std::move(reply).value());
 }
 Error BrowserRpc::ReplyError(const Json& reply) {

@@ -6,6 +6,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -54,6 +55,21 @@ class PageRequests final : public content::WebContentsDelegate,
   };
   base::DictValue Command(const base::DictValue& command);
   void CancelAll(const std::string& reason);
+  static PageRequests* ForContents(content::WebContents*);
+  static void SitePreferencesChanged(content::BrowserContext*);
+  void RequestPermission(content::RenderFrameHost*,
+                         const std::vector<std::string>&,
+                         base::OnceCallback<void(const std::string&)>);
+  using AuthCallback = base::OnceCallback<void(bool, const std::string&, const std::string&)>;
+  std::uint64_t RequestAuth(base::DictValue, AuthCallback);
+  void CancelRequest(std::uint64_t id);
+  void SetRepostHandler(base::OnceCallback<void(bool)> handler);
+  bool HasPendingRepost() const;
+  base::WeakPtr<PageRequests> GetWeakPtr() { return weak_factory_.GetWeakPtr(); }
+  void RegisterProtocolHandler(content::RenderFrameHost*,
+                               const std::string&,
+                               const GURL&,
+                               bool) override;
   size_t pending_count() const { return pending_.size(); }
   bool fullscreen() const { return fullscreen_; }
   // Public delegate/observer APIs do not expose widget tooltip updates. A native
@@ -138,10 +154,16 @@ class PageRequests final : public content::WebContentsDelegate,
     base::DictValue result;
     SelectionBinding binding;
   };
+  struct ReplyReceipt {
+    content::WeakDocumentPtr document;
+    std::string decision;
+    std::optional<bool> accept;
+  };
   std::uint64_t Add(std::unique_ptr<Pending>);
   void Event(base::DictValue);
   void Cancel(std::uint64_t id, const std::string& reason);
   void Prune();
+  void ResolveStoredDecisions();
   void FilesValidated(std::uint64_t, std::vector<SelectedFile>, std::string);
   void FileResult(std::uint64_t,
                   const char*,
@@ -163,12 +185,14 @@ class PageRequests final : public content::WebContentsDelegate,
   std::map<std::uint64_t, std::unique_ptr<Pending>> pending_;
   std::deque<base::DictValue> events_;
   std::map<std::uint64_t, FileReceipt> file_results_;
+  std::map<std::uint64_t, ReplyReceipt> reply_results_;
   bool fullscreen_ = false;
   bool cancelling_ = false;
   content::WeakDocumentPtr find_document_;
   int find_request_id_ = -1;
   bool find_pending_ = false;
   PopupHandler popup_handler_;
+  base::OnceCallback<void(bool)> repost_handler_;
   base::WeakPtrFactory<PageRequests> weak_factory_{this};
 };
 

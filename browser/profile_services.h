@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
-#include <tuple>
+#include <vector>
 
 #include "base/files/file_path.h"
 #include "base/memory/raw_ptr.h"
@@ -16,6 +16,10 @@
 #include "content/public/browser/weak_document_ptr.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
 
+namespace content {
+class NavigationHandle;
+}
+
 namespace remotekit::browser {
 
 // Both services are UI-sequence-only and owned by one Session Profile. The
@@ -24,9 +28,9 @@ class ProfilePermissions final : public content::PermissionControllerDelegate {
  public:
   explicit ProfilePermissions(content::BrowserContext* context);
   ~ProfilePermissions() override;
-  // action=snapshot|set|reset|reset_all; set/reset use origin,
-  // embedding_origin (defaults to origin), permission; set uses allow(bool).
-  base::DictValue Command(const base::DictValue&);
+  void SitePreferencesChanged();
+  void NavigationCommitted(content::NavigationHandle*);
+  void DocumentDestroyed(content::RenderFrameHost*);
   void RequestPermissionsFromCurrentDocument(
       content::RenderFrameHost*,
       const content::PermissionRequestDescription&,
@@ -60,14 +64,17 @@ class ProfilePermissions final : public content::PermissionControllerDelegate {
                                base::optional_ref<const url::Origin>) override;
 
  private:
-  using Key = std::tuple<std::string, std::string, blink::PermissionType>;
   content::PermissionResult Lookup(blink::PermissionType,
                                    const url::Origin&,
                                    const url::Origin&) const;
   content::PermissionResult SubscriptionResult(content::PermissionController::SubscriptionId);
   void NotifyChanged();
   raw_ptr<content::BrowserContext> context_;
-  std::map<Key, bool> policy_;
+  struct OneTimeGrant {
+    content::WeakDocumentPtr document;
+    blink::PermissionType permission;
+  };
+  std::vector<OneTimeGrant> one_time_;
   std::map<content::PermissionController::SubscriptionId, content::WeakDocumentPtr> documents_;
   base::WeakPtrFactory<ProfilePermissions> weak_factory_{this};
 };
@@ -79,10 +86,13 @@ class ProfileDownloads final : public content::DownloadManagerDelegate,
   ProfileDownloads(content::BrowserContext* context, const base::FilePath& profile_path);
   ~ProfileDownloads() override;
   bool Bind(content::DownloadManager* manager);
-  // action=snapshot|cancel|pause|resume; mutations use id(decimal string).
+  // action=snapshot|cancel|pause|resume use id; remove uses guid.
   // file_reference is relative to profile_path and present only after COMPLETE.
   base::DictValue Command(const base::DictValue&);
+  void Remove(const std::string& guid, base::OnceCallback<void(base::DictValue)>);
   size_t InProgressCount() const;
+  base::ListValue Events() const;
+  void Acknowledge(const base::ListValue&);
   void Shutdown() override;
   void GetNextId(content::DownloadIdCallback) override;
   bool DetermineDownloadTarget(download::DownloadItem*, download::DownloadTargetCallback*) override;
@@ -114,6 +124,7 @@ class ProfileDownloads final : public content::DownloadManagerDelegate,
     base::FilePath target;
     base::DictValue snapshot;
     std::string error;
+    bool completion_recorded = false;
   };
   void OnDownloadCreated(content::DownloadManager*, download::DownloadItem*) override;
   void OnDownloadUpdated(download::DownloadItem*) override;
@@ -128,6 +139,7 @@ class ProfileDownloads final : public content::DownloadManagerDelegate,
   base::FilePath downloads_path_;
   std::map<std::string, Record> records_;
   std::map<std::string, download::DownloadTargetCallback> targets_;
+  std::map<std::string, base::DictValue> events_;
   std::uint32_t next_id_ = 1;
   bool shutdown_ = false;
   base::WeakPtrFactory<ProfileDownloads> weak_factory_{this};

@@ -190,6 +190,8 @@ Session::Session(media::Sdk& api,
   views.SetStopRuntime([this] { return Stop(); });
   views.SetBeforeViews([this] { return clipboard.BeforeViews(); });
   output.SetClipboardPoll([this](bool force) { return clipboard.Poll(force); });
+  views.SetDownloadImport(
+      [this](const Json& download) { return files.Library().ImportDownload(download); });
   output.Slots().SetTrace(trace);
 }
 Result<Json> Session::Open(const Json& request) {
@@ -284,6 +286,13 @@ Result<void> Session::Stop() {
   return CloseRuntime(false);
 }
 Result<void> Session::Shutdown() {
+  if (browser.Alive()) {
+    RK_ASSIGN_OR_RETURN(snapshot, Snapshot());
+    if (views.PendingDownloads() || snapshot.value("downloadsInProgress", 0) != 0)
+      return Error{ErrorCode::kConflict, "shutdown blocked: pending downloads"};
+  } else if (views.PendingDownloads()) {
+    return Error{ErrorCode::kConflict, "shutdown blocked: pending downloads"};
+  }
   return CloseRuntime(true);
 }
 Result<void> Session::CloseRuntime(bool graceful) {
@@ -322,6 +331,7 @@ Result<Json> Session::Snapshot(bool output_diagnostics) {
   blockers["unacknowledgedClosedEvents"] = snapshot["events"].size();
   blockers["pendingPageRequests"] = 0;
   blockers["downloadsInProgress"] = snapshot["downloadsInProgress"];
+  blockers["pendingDownloadImports"] = views.PendingDownloads();
   blockers["rtcConnected"] = peer_controller.Handle() != 0;
   blockers["lifecycleUncertain"] =
       navigation.RecoverySnapshot().value("pending", false) ||

@@ -79,11 +79,17 @@ struct KeyInput {
 };
 struct MouseInput {
   enum class Action { move, down, up, leave };
+  struct Pen {
+    std::uint32_t id;
+    double pressure, tilt_x, tilt_y, twist;
+    bool eraser;
+  };
   Action action{};
   double x{}, y{};
   std::uint8_t button{};
   std::uint32_t modifiers{};
   std::uint8_t click_count{1};
+  std::optional<Pen> pen{};
 };
 struct WheelInput {
   double x{}, y{}, delta_x{}, delta_y{};
@@ -92,6 +98,7 @@ struct WheelInput {
 struct TouchPoint {
   std::uint32_t id{};
   double x{}, y{}, pressure{};
+  double width{}, height{};
 };
 struct TouchInput {
   enum class Action { start, move, end, cancel };

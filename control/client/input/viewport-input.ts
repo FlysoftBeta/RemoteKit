@@ -2,9 +2,17 @@ import type { EditingSession } from '../editing/editing-session';
 import { EditingView, type ResizeObservation } from '../editing/editing-view';
 import type { PresentationSession } from '../presentation/presentation-session';
 import type { Surface } from '../presentation/types';
-import { clientPointToDip, pointerPointToDip, wheelDeltaToDip, type PointerAction } from './coordinates';
+import {
+  clientPointToDip,
+  pointerPointToDip,
+  pointerContactToDip,
+  wheelDeltaToDip,
+  type PointerAction,
+} from './coordinates';
 import type { InputPipeline } from './input-pipeline';
-import { mouseButtonModifiers } from './keys';
+import { modifiers, mouseButtonModifiers } from './keys';
+import { penInput } from './pen-input';
+import type { PenInput } from '../rtc/protocol';
 import { pointerSampleTime } from './touch-input';
 import type { TouchSession } from './touch-session';
 import { TouchView } from './touch-view';
@@ -36,7 +44,15 @@ export class ViewportInput {
   readonly editing: EditingView;
   readonly touch: TouchView;
   private readonly remove: (() => void)[] = [];
-  private pressed?: { pointerId: number; identity: string; button: number; x: number; y: number };
+  private pressed?: {
+    pointerId: number;
+    identity: string;
+    button: number;
+    x: number;
+    y: number;
+    modifiers: number;
+    pen?: PenInput;
+  };
   private tap?: { id: number; x: number; y: number; at: number };
   constructor(
     private readonly ports: ViewportInputPorts,
@@ -124,8 +140,9 @@ export class ViewportInput {
           x: held.x,
           y: held.y,
           button: held.button,
-          modifiers: 0,
+          modifiers: held.modifiers,
           click_count: 1,
+          ...(held.pen ? { pen: { ...held.pen, pressure: 0 } } : {}),
         });
       if (this.canvas.hasPointerCapture(held.pointerId)) this.canvas.releasePointerCapture(held.pointerId);
       this.pressed = undefined;
@@ -135,6 +152,8 @@ export class ViewportInput {
   }
   private pointer(event: PointerEvent, action: PointerAction) {
     const touch = event.pointerType === 'touch';
+    const pen = penInput(event);
+    const button = pen && event.button === 5 ? 1 : ([1, 2, 3, 4, 5][event.button] ?? 0);
     const surface = this.surface;
     if (
       touch &&
@@ -195,11 +214,13 @@ export class ViewportInput {
         this.pressed = {
           pointerId: event.pointerId,
           identity: this.identity(surface),
-          button: [1, 2, 3, 4, 5][event.button] ?? 0,
+          button,
+          modifiers: modifiers(event),
+          pen,
           ...point,
         };
     }
-    if (pressed) Object.assign(pressed, point);
+    if (pressed) Object.assign(pressed, point, { modifiers: modifiers(event), pen });
     if (touch) {
       const now = performance.now();
       const history =
@@ -227,7 +248,12 @@ export class ViewportInput {
           position &&
           !this.touch.sample(
             action === 'down' ? 'start' : action === 'up' ? 'end' : 'move',
-            { id: event.pointerId, ...position, pressure: sample.pressure },
+            {
+              id: event.pointerId,
+              ...position,
+              pressure: sample.pressure,
+              ...pointerContactToDip(surface, bounds, sample),
+            },
             at,
           )
         )
@@ -243,14 +269,11 @@ export class ViewportInput {
         type: 'mouse',
         action: action === 'cancel' ? 'up' : action,
         ...point,
-        button:
-          action === 'cancel'
-            ? pressed!.button
-            : action === 'move' || action === 'leave'
-              ? 0
-              : ([1, 2, 3, 4, 5][event.button] ?? 0),
-        modifiers: this.modifiers(event) | mouseButtonModifiers(event.buttons),
+        button: action === 'cancel' ? pressed!.button : action === 'move' || action === 'leave' ? 0 : button,
+        modifiers:
+          modifiers(event) | mouseButtonModifiers(event.buttons) | (pen && event.buttons & 32 ? 1 << 6 : 0),
         click_count: action === 'move' || action === 'leave' ? 0 : Math.min(3, Math.max(1, event.detail)),
+        ...(pen ? { pen } : {}),
       });
     release();
   }
@@ -272,15 +295,7 @@ export class ViewportInput {
       ...point,
       dx: -delta.x,
       dy: -delta.y,
-      modifiers: this.modifiers(event),
+      modifiers: modifiers(event),
     });
-  }
-  private modifiers(event: MouseEvent) {
-    return (
-      Number(event.shiftKey) |
-      (Number(event.ctrlKey) << 1) |
-      (Number(event.altKey) << 2) |
-      (Number(event.metaKey) << 3)
-    );
   }
 }

@@ -20,7 +20,8 @@ Result<void> ObjectService::Committed(const ObjectInfo& info, const std::string&
     fields["derivedFrom"] = derived_from;
   auto reply = control_.Request("object.committed", std::move(fields));
   if (!reply) {
-    if (reply.error().code == ErrorCode::kConflict)
+    if (reply.error().code == ErrorCode::kConflict ||
+        reply.error().code == ErrorCode::kLimitExceeded)
       RK_RETURN_IF_ERROR(store_.Delete(info.tenant, info.id));
     return reply.error();
   }

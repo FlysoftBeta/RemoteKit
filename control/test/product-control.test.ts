@@ -850,7 +850,6 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
       'lease',
     );
     assert.deepEqual(store.workspaces.workspace(tenantId).sites[origin], {
-      tabletUa: false,
       manualKeyboard: true,
     });
     const cleared = endpoint.calls.filter((c) => c.method === 'session.sitePreferences');
@@ -869,7 +868,6 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     );
     assert.deepEqual(store.workspaces.workspace(tenantId).sites[origin], {
       tabletUa: true,
-      manualKeyboard: false,
     });
     const applied = endpoint.calls.filter((c) => c.method === 'session.sitePreferences');
     assert.ok(applied.length);
@@ -933,8 +931,8 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
       true,
     );
     assert.deepEqual(control.viewers.productState(tenantId).workspace.sites, {
-      [origin]: { tabletUa: true, manualKeyboard: false },
-      [unrelated]: { tabletUa: false, manualKeyboard: true },
+      [origin]: { tabletUa: true },
+      [unrelated]: { manualKeyboard: true },
     });
     assert.deepEqual(control.operations.operationStatus(tenantId, keyboard), receipt);
     await control.viewers.detachViewer(tenantId, 'new-lease');
@@ -1193,12 +1191,12 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
       control.operations.productAction(other.tenantId, {
         type: 'page.reply',
         dialogId: dialog.id,
-        accept: true,
+        reply: { kind: 'dialog', accept: true },
       }),
     );
     await control.operations.productAction(
       user.tenantId,
-      { type: 'page.reply', dialogId: dialog.id, accept: false, text: '取消' },
+      { type: 'page.reply', dialogId: dialog.id, reply: { kind: 'dialog', accept: false, text: '取消' } },
       'lease',
     );
     assert.equal(control.viewers.productState(user.tenantId).pageDialogs.length, 0);
@@ -1207,7 +1205,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     await assert.rejects(
       control.operations.productAction(
         user.tenantId,
-        { type: 'page.reply', dialogId: dialog.id, accept: true },
+        { type: 'page.reply', dialogId: dialog.id, reply: { kind: 'dialog', accept: true } },
         'lease',
       ),
       { code: 'conflict' },
@@ -1219,7 +1217,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     await assert.rejects(
       control.operations.productAction(
         user.tenantId,
-        { type: 'page.reply', dialogId: old.id, accept: true },
+        { type: 'page.reply', dialogId: old.id, reply: { kind: 'dialog', accept: true } },
         'lease',
       ),
       { code: 'conflict' },
@@ -1230,7 +1228,7 @@ test('pageDialogs are transient, tenant/token bound and cancellation never delet
     await assert.rejects(
       control.operations.productAction(
         user.tenantId,
-        { type: 'page.reply', dialogId: previousBrowser.id, accept: true },
+        { type: 'page.reply', dialogId: previousBrowser.id, reply: { kind: 'dialog', accept: true } },
         'lease',
       ),
       { code: 'conflict' },

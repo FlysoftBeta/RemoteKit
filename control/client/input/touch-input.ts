@@ -10,6 +10,8 @@ export interface TouchPoint {
   x: number;
   y: number;
   pressure: number;
+  width?: number;
+  height?: number;
 }
 export interface TouchSample {
   sampleElapsedUs: number;

@@ -1,4 +1,10 @@
-import type { AppliedMediaPolicy, OperationReceipt, ProductOperation } from '../../shared/product';
+import type {
+  AppliedMediaPolicy,
+  OperationReceipt,
+  PageDialogReply,
+  ProductOperation,
+  SitePreferences,
+} from '../../shared/product';
 import type { ErrorCode } from '../../shared/errors';
 export type EndpointErrorReason = 'browser_crashed' | 'browser_restarting' | 'output_failed';
 export type ClipboardChangedEvent = {
@@ -85,6 +91,7 @@ export interface EndpointSnapshot {
     inFlightUploads: number;
     pendingPageRequests: number;
     downloadsInProgress: number;
+    pendingDownloadImports: number;
     rtcConnected: boolean;
     lifecycleUncertain: boolean;
   };
@@ -98,6 +105,14 @@ export interface EndpointSnapshot {
   pendingPopups?: Record<string, unknown>[];
   [key: string]: unknown;
 }
+export type DownloadEvent = {
+  eventId: string;
+  name: string;
+  origin: string;
+} & (
+  | { type: 'download.imported'; assetId: string; mimeType: string; size: string }
+  | { type: 'download.failed'; reason: string }
+);
 export interface ViewConfiguration {
   viewId: string;
   width?: number;
@@ -130,6 +145,20 @@ export interface PageIdentity {
   instance: string;
   document: string;
 }
+export interface SessionSitePreferencesRequest {
+  sites: Record<string, Pick<SitePreferences, 'permissions' | 'protocolHandlers'> & { tabletUa?: true }>;
+}
+export type PageReplyFields =
+  | {
+      decision: Extract<PageDialogReply, { kind: 'permission' }>['decision'];
+      accept?: never;
+      text?: never;
+      username?: never;
+      password?: never;
+    }
+  | { accept: boolean; text?: string; decision?: never; username?: never; password?: never }
+  | { accept: true; username: string; password: string; decision?: never; text?: never };
+export type PageReplyRequest = PageIdentity & { requestId: string } & PageReplyFields;
 export interface FileBinding {
   browserIncarnation: string;
   view: string;

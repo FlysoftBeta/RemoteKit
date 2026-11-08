@@ -2,6 +2,7 @@ import {
   Add,
   AppsOutlined,
   DeleteOutline,
+  DownloadOutlined,
   EditOutlined,
   FolderOutlined,
   InboxOutlined,
@@ -502,8 +503,9 @@ function NavRow({
   );
 }
 
-function sourceIcon(view: FilesView) {
+export function sourceIcon(view: FilesView) {
   const app = typeof view === 'object' && 'source' in view ? view.source.app : '';
+  if (app === 'download') return <DownloadOutlined />;
   if (app === 'browser') return <LanguageOutlined />;
   if (app === 'files') return <FolderOutlined />;
   return <AppsOutlined />;

@@ -92,6 +92,18 @@ import type { MediaFeedback } from '../media/media-feedback';
 import type { PresentationBarrier } from '../presentation/video-presentation';
 
 type Authorized = { authEpoch?: number };
+export interface PenInput {
+  id: number;
+  pressure: number;
+  tiltX: number;
+  tiltY: number;
+  twist: number;
+  eraser: boolean;
+}
+export interface KeyboardLayoutMessage {
+  type: 'keyboard.layout';
+  entries: [code: string, key: string][];
+}
 export type InputResultMessage = {
   type: 'input.result';
   clientSequence: string;
@@ -176,6 +188,7 @@ export type Outgoing = Authorized &
     | { type: 'media.refresh' }
     | { type: 'media.presentation'; version: 1; backend: 'video'; restart?: true }
     | MediaFeedback
+    | KeyboardLayoutMessage
     | ({ type: 'presentation.ready' } & PresentationBarrier)
     | ({
         type: 'input';

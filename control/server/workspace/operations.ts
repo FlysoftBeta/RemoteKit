@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
+import { recordedAction } from '../../shared/recorded-action';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
 import { applyCommand } from './commands';
 
@@ -25,7 +26,6 @@ function operationPayload(value: unknown): string {
         : input;
   return JSON.stringify(canonical(value));
 }
-
 export class OperationPipeline {
   constructor(
     private readonly context: DomainContext,
@@ -130,7 +130,7 @@ export class OperationPipeline {
           status: 'expired',
           error: '操作收据代次已过期',
         };
-      const payload = operationPayload(operation.action),
+      const payload = operationPayload(recordedAction(operation.action)),
         existing = this.context.store.operations.operation(tenant, operation.operationId);
       if (existing) {
         if (existing.payload !== payload) throw new RemoteKitError('conflict', '同一操作ID不能用于不同内容');
@@ -272,6 +272,8 @@ export class OperationPipeline {
       }
     });
     this.services.viewers.push(tenant);
+    if (['site.permission', 'site.protocolHandler.remove', 'site.permissions.reset'].includes(body.type))
+      await this.services.policy.applySites(tenant, state);
     for (const effect of plan.effects) {
       switch (effect.kind) {
         case 'navigate':
@@ -314,7 +316,12 @@ export class OperationPipeline {
     if (receipt && !['tab.navigate', 'tab.command'].includes(action.type) && !closePending)
       settle(receipt, { status: 'committed', application });
     this.saveWorkspace(state, receipt);
-    if (action.type !== 'window.state' && (action.type !== 'site.set' || plan.siteUaChanged))
+    if (
+      !['window.state', 'site.permission', 'site.protocolHandler.remove', 'site.permissions.reset'].includes(
+        action.type,
+      ) &&
+      (action.type !== 'site.set' || plan.siteUaChanged)
+    )
       await this.services.reconciler.reconcileProduct(tenant).catch(() => {});
     if (plan.siteUaChanged) {
       const latest = this.context.store.workspaces.workspace(tenant);

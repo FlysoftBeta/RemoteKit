@@ -1,4 +1,8 @@
 #include "remotekit/browser/browser_context.h"
+#include "browser/site_preferences.h"
+#include "browser/page_requests.h"
+#include "base/strings/escape.h"
+#include "base/strings/string_util.h"
 #include "remotekit/browser/compat.h"
 #include "base/files/file_util.h"
 #include "base/rand_util.h"
@@ -88,26 +92,39 @@ content::PushMessagingService* BrowserContext::GetPushMessagingService() {
   return push_.get();
 }
 bool BrowserContext::SetSitePreferences(const base::DictValue& sites, std::string* error) {
-  if (sites.size() > 4096) {
-    *error = "site_preference_limit";
+  if (!ValidSitePreferences(sites)) {
+    *error = "invalid_site_preference";
     return false;
   }
-  std::map<std::string, bool> next;
-  for (const auto [key, value] : sites) {
-    const GURL url(key);
-    if (!url.SchemeIsHTTPOrHTTPS() || url::Origin::Create(url).Serialize() != key ||
-        !value.is_dict() || !value.GetDict().FindBool("tabletUa")) {
-      *error = "invalid_site_preference";
-      return false;
-    }
-    next[key] = *value.GetDict().FindBool("tabletUa");
-  }
-  site_preferences_ = std::move(next);
+  site_preferences_ = sites.Clone();
+  permissions_->SitePreferencesChanged();
+  PageRequests::SitePreferencesChanged(this);
   return true;
 }
 bool BrowserContext::TabletUaFor(const GURL& url) const {
-  const auto found = site_preferences_.find(url::Origin::Create(url).Serialize());
-  return url.SchemeIsHTTPOrHTTPS() && found != site_preferences_.end() && found->second;
+  const auto* site = site_preferences_.FindDict(url::Origin::Create(url).Serialize());
+  return site && site->FindBool("tabletUa").value_or(false);
+}
+GURL BrowserContext::TranslateProtocolUrl(const GURL& url) const {
+  for (const auto [origin, site] : site_preferences_) {
+    const auto* handlers = site.GetDict().FindList("protocolHandlers");
+    if (!handlers)
+      continue;
+    for (const auto& value : *handlers) {
+      const auto& handler = value.GetDict();
+      if (*handler.FindString("protocol") != url.scheme() || !*handler.FindBool("allowed"))
+        continue;
+      GURL::Replacements replacements;
+      replacements.ClearUsername();
+      replacements.ClearPassword();
+      auto target = *handler.FindString("url");
+      base::ReplaceFirstSubstringAfterOffset(
+          &target, 0, "%s",
+          base::EscapeQueryParamValue(url.ReplaceComponents(replacements).spec(), false));
+      return GURL(target);
+    }
+  }
+  return url;
 }
 BrowserContext::BrowserContext(base::FilePath path, std::unique_ptr<ProfileKey> key)
     : path_(std::move(path)) {
@@ -159,10 +176,14 @@ content::DownloadManagerDelegate* BrowserContext::GetDownloadManagerDelegate() {
 content::PermissionControllerDelegate* BrowserContext::GetPermissionControllerDelegate() {
   return permissions_.get();
 }
-base::DictValue BrowserContext::PermissionsCommand(const base::DictValue& command) {
-  return permissions_->Command(command);
-}
 base::DictValue BrowserContext::DownloadsCommand(const base::DictValue& command) {
   return downloads_->Command(command);
+}
+void BrowserContext::RemoveDownload(const std::string& guid,
+                                    base::OnceCallback<void(base::DictValue)> callback) {
+  downloads_->Remove(guid, std::move(callback));
+}
+void BrowserContext::AcknowledgeDownloadEvents(const base::ListValue& ids) {
+  downloads_->Acknowledge(ids);
 }
 }  // namespace remotekit::browser

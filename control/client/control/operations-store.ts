@@ -1,5 +1,6 @@
 import { RemoteKitError } from '../../shared/errors';
 import type { OperationReceipt, ProductAction, ProductOperation, ProductState } from '../../shared/product';
+import { recordedAction, type RecordedAction } from '../../shared/recorded-action';
 import { diagnostics } from '../media/diagnostics';
 import type { Incoming, Outgoing } from '../rtc/protocol';
 import { RequestTracker } from '../util/request-tracker';
@@ -8,7 +9,8 @@ import { operationId, projectOperations, snapshotNewer, type PendingOperation } 
 
 export type OperationPhase =
   'unsent' | 'sent' | 'accepted' | 'applying' | 'committed' | 'rejected' | 'unknown' | 'expired';
-export interface OperationIntent extends PendingOperation {
+export interface OperationIntent extends Omit<PendingOperation, 'action'> {
+  action: RecordedAction;
   phase: OperationPhase;
 }
 export interface OperationsSnapshot {
@@ -94,7 +96,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     const operation: OperationIntent = {
       operationId: operationId(),
       operationGeneration: source.operationGeneration,
-      action: command,
+      action: recordedAction(command),
       phase: 'unsent',
     };
     const scope = this.scope;
@@ -108,7 +110,7 @@ export class OperationsStore extends Store<OperationsSnapshot> {
           version: 1,
           operationId: operation.operationId,
           operationGeneration: operation.operationGeneration,
-          action: operation.action,
+          action: command,
         });
         sent = true;
         this.update(
@@ -172,18 +174,24 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     authoritative = this.getSnapshot().authoritative,
     error = this.getSnapshot().error,
   ) {
-    this.publish({ authoritative, pending, state: projectOperations(authoritative, pending), error });
+    const projections = pending.filter(
+      (entry): entry is OperationIntent & PendingOperation => entry.action.type !== 'page.reply',
+    );
+    this.publish({ authoritative, pending, state: projectOperations(authoritative, projections), error });
     this.schedule();
   }
 
-  private async query(operation: ProductOperation): Promise<OperationReceipt> {
+  private async query({
+    operationId,
+    operationGeneration,
+  }: Pick<ProductOperation, 'operationId' | 'operationGeneration'>): Promise<OperationReceipt> {
     try {
-      return await this.port.status(operation);
+      return await this.port.status({ operationId, operationGeneration });
     } catch (error) {
       diagnostics.record('operation-status', error);
       return {
-        operationId: operation.operationId,
-        operationGeneration: operation.operationGeneration,
+        operationId,
+        operationGeneration,
         status: 'unknown',
       };
     }

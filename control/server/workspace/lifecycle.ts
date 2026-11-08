@@ -30,7 +30,8 @@ export class UncertainRecovery {
       return '有正在执行的操作';
     if (blockers.inFlightUploads !== 0 || blockers.pendingNativeSelections !== 0)
       return '有正在进行的文件传输';
-    if (blockers.downloadsInProgress !== 0) return '有正在进行的下载';
+    if (blockers.downloadsInProgress !== 0 || blockers.pendingDownloadImports !== 0)
+      return '有正在进行的下载';
     if (blockers.pendingPageRequests !== 0) return '页面有等待处理的请求';
     if (
       blockers.unacknowledgedClosedEvents !== 0 ||

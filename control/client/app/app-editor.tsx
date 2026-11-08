@@ -18,46 +18,9 @@ import { useEffect, useState } from 'react';
 import type { AppDefinition, AppInspectResult, ProductState } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import type { WorkspaceCall } from './window-state';
-import { SettingSwitch } from './setting-layout';
+import { SiteSettingsBody } from './site-settings';
 import { ScaledSelect } from './scaled-select';
 import { formatError } from '../util/format-error';
-
-export function SiteCompatibility({
-  origin,
-  state,
-  action,
-  online,
-  tabId,
-}: {
-  origin: string;
-  state: ProductState;
-  action: Action;
-  online: boolean;
-  tabId?: string;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  return (
-    <div>
-      {(['tabletUa', 'manualKeyboard'] as const).map((key) => (
-        <SettingSwitch
-          key={key}
-          title={key === 'tabletUa' ? '使用平板版网站' : '不自动弹出键盘'}
-          checked={!!state.workspace.sites[origin]?.[key]}
-          disabled={!online || busy || !origin || (key === 'tabletUa' && !state.integrations.siteUa)}
-          onChange={(value) => {
-            setBusy(true);
-            setError('');
-            void action({ type: 'site.set', origin, tabId, ...{ [key]: value } } as Parameters<Action>[0])
-              .catch((error) => setError(formatError(error)))
-              .finally(() => setBusy(false));
-          }}
-        />
-      ))}
-      {error && <Alert severity="error">{error}</Alert>}
-    </div>
-  );
-}
 
 export function AppFields({
   value,
@@ -139,7 +102,8 @@ export function InstallDialog({
   }, [tabId, call]);
   let origin = '';
   try {
-    origin = new URL(value?.startUrl ?? '').origin;
+    const url = new URL(value?.startUrl ?? '');
+    if (url.protocol === 'http:' || url.protocol === 'https:') origin = url.origin;
   } catch {
     /* Editable URL. */
   }
@@ -171,10 +135,14 @@ export function InstallDialog({
               <AccordionSummary expandIcon={<ExpandMore />}>高级选项</AccordionSummary>
               <AccordionDetails>
                 <AppFields value={value} onChange={(next) => setValue({ ...value, ...next })} />
-                <Typography variant="subtitle2" sx={{ mt: 2 }}>
-                  网页兼容性 · {origin}
-                </Typography>
-                <SiteCompatibility origin={origin} state={state} action={action} online tabId={tabId} />
+                {origin && (
+                  <>
+                    <Typography variant="subtitle2" sx={{ mt: 2 }}>
+                      网站设置 · {origin}
+                    </Typography>
+                    <SiteSettingsBody origin={origin} state={state} action={action} online tabId={tabId} />
+                  </>
+                )}
               </AccordionDetails>
             </Accordion>
           </>

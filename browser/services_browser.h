@@ -40,6 +40,27 @@ class ServicesBrowserClient : public content::ContentBrowserClient {
   void OpenURL(content::SiteInstance*,
                const content::OpenURLParams&,
                base::OnceCallback<void(content::WebContents*)>) override;
+  std::unique_ptr<content::LoginDelegate> CreateLoginDelegate(
+      const net::AuthChallengeInfo&,
+      content::WebContents*,
+      content::BrowserContext*,
+      const content::GlobalRequestID&,
+      bool,
+      bool,
+      const GURL&,
+      scoped_refptr<net::HttpResponseHeaders>,
+      bool,
+      bool,
+      content::GuestPageHolder*,
+      content::LoginDelegate::LoginAuthRequiredCallback) override;
+  std::vector<std::unique_ptr<blink::URLLoaderThrottle>> CreateURLLoaderThrottles(
+      const network::ResourceRequest&,
+      content::BrowserContext*,
+      const base::RepeatingCallback<content::WebContents*()>&,
+      content::NavigationUIData*,
+      content::FrameTreeNodeId,
+      std::optional<int64_t>) override;
+  bool HasCustomSchemeHandler(content::BrowserContext*, const std::string&) override;
 };
 
 void InstallServiceOrientationDelegate();

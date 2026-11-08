@@ -1,0 +1,34 @@
+.permission-prompt.MuiPaper-root {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 10;
+  box-sizing: border-box;
+  width: 320px;
+  max-width: calc(100% - 16px);
+  max-height: calc(100% - 16px);
+  overflow-y: auto;
+  padding: 16px;
+  border-radius: 12px;
+}
+.permission-prompt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.permission-prompt-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.permission-prompt-row > svg {
+  flex-shrink: 0;
+}
+.permission-prompt-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}

@@ -14,9 +14,8 @@ Result<ProfileCommandRequest> DecodeProfileCommand(const base::DictValue& wire,
   RequestDecoder decoder(wire);
   request.command = decoder.Optional<base::DictValue>("command");
   request.session = decoder.Optional<uint64_t>("session");
-  request.view = decoder.Optional<uint64_t>("view");
-  if (!request.session || !request.view)
-    return {{}, {ErrorCode::invalid_request, "Session and view required"}};
+  if (!request.session)
+    return {{}, {ErrorCode::invalid_request, "Session required"}};
   return decoder.Finish(std::move(request));
 }
 
@@ -58,27 +57,9 @@ Result<ExitFullscreenRequest> DecodeExitFullscreen(const base::DictValue& wire,
 
 ControlResult ControlDispatcher::HandleProfileCommand(const ProfileCommandRequest& request) {
   const int id = request.id;
-  const auto* method = &request.method;
-  auto reply = ControlResult::Success(id);
-  auto error = [&](std::string detail) {
-    return ControlResult::Failure(id, detail, std::move(reply));
-  };
-  const auto session = request.session.value_or(0);
-  const auto view = request.view.value_or(0);
-  auto* record = runtime_.views.Find(session, view);
-  if (!record || !runtime_.view_model.FindWebView(session, view))
-    return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
-
-  const auto* command = Ptr(request.command);
-  if (!command)
-    return error("profile_command_required");
-  auto profile = runtime_.view_model.FindWebView(session, view)->profile;
-  auto found = std::find(runtime_.profiles.begin(), runtime_.profiles.end(), profile);
-  if (found == runtime_.profiles.end())
-    return error("profile_missing");
-  auto* context = runtime_.contexts[static_cast<size_t>(found - runtime_.profiles.begin())].get();
-  auto result = *method == "profile.permissions" ? context->PermissionsCommand(*command)
-                                                 : context->DownloadsCommand(*command);
+  if (request.session != runtime_.session_id || !request.command)
+    return ControlResult::Failure(id, ErrorCode::invalid_request, "Session and command required");
+  auto result = runtime_.contexts.front()->DownloadsCommand(*request.command);
   result.Set("version", protocol::kControlVersion);
   result.Set("id", id);
   return result;

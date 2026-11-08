@@ -19,7 +19,7 @@
 ### 窗口种类
 
 - **browser**：标签栏 + 工具栏，即原来的 Window。可以有任意多个 browser 窗口。关闭最后一个 Tab 保留空窗口（显示起始页）。Tab 的 `kind` 只有 `start | remote`。
-- **web:&lt;id&gt;**：恰好一个 Tab。紧凑标题栏：图标、页面标题、后退、更多（刷新、复制链接、在浏览器中打开、网页兼容性、App 设置）。离开作用域的导航留在窗口内，标题栏显示来源域名条；`display=browser` 的 App 始终显示只读地址条。关闭 Tab 即关闭窗口。同一 App 可以开多个窗口。
+- **web:&lt;id&gt;**：恰好一个 Tab。紧凑标题栏：图标、页面标题、后退、更多（刷新、复制链接、在浏览器中打开、网站设置、App 设置）。离开作用域的导航留在窗口内，标题栏显示来源域名条；`display=browser` 的 App 始终显示只读地址条。关闭 Tab 即关闭窗口。同一 App 可以开多个窗口。
 - **files**：本地渲染，可以开多个窗口，每个窗口有自己的视图状态。
 - **settings**：本地渲染，单例；再次打开时聚焦已有窗口。
 - **admin**（管理）：本地渲染，单例，只有管理员能打开（见[控制面 · 账户与管理 App](control-plane.md#账户与管理-app)）。
@@ -172,12 +172,12 @@ WS `launcher.get` 返回 `{ items: LauncherItem[] }`：每项 `{ key, kind: 'app
 
 浏览器的更多菜单 → "安装为 App…"。Control 经 Endpoint 调用 Browser 的 `view.appInfo`：返回页面标题、URL、manifest 摘要（name、short_name、start_url、scope、theme_color、display，如有）和一个图标（manifest 图标中不小于 96px 的最佳一个，否则 favicon；Browser 用 `WebContents::DownloadImage` 取回并缩放为 192px PNG，不超过 64KiB）。Control 把图标放进内存表（10 分钟，按随机 `iconToken`），把其余字段作为建议返回给 Viewer。
 
-安装对话框只显示名称与图标；manifest 只提供默认值，不照搬 PWA 行为。"高级选项"展开：起始 URL、作用域（默认起始 URL 所在目录）、显示方式（独立窗口 / 显示地址条）、主题色、以及该 origin 的网页兼容性（平板版网站、不自动弹出键盘——与站点偏好是同一份数据）。确认后 `app.install{…, iconToken}`，Control 把图标写入 `installed_apps`。已安装 App 在设置 → App 中编辑、卸载。
+安装对话框只显示名称与图标；manifest 只提供默认值，不照搬 PWA 行为。"高级选项"展开：起始 URL、作用域（默认起始 URL 所在目录）、显示方式（独立窗口 / 显示地址条）、主题色、以及该 origin 的网站设置（平板版网站、不自动弹出键盘、权限——与站点偏好是同一份数据）。确认后 `app.install{…, iconToken}`，Control 把图标写入 `installed_apps`。已安装 App 在设置 → App 中编辑、卸载。
 
 ## 设置拆分
 
 - **设置 App**（工作区）：外观（界面缩放、顶部留空、打开时全屏）、画面与声音（质量、声道、统计叠层、音画同步）、安全（密码、PIN、人脸、锁屏）、App（已安装网页 App 管理）、会话导入、诊断、公告（全部公告，未读有标记）、账户（退出）、清除使用记录。管理不在设置里，是独立的管理 App。
-- **浏览器设置**（浏览器窗口更多 → 设置）：搜索引擎、Memory Saver、网页兼容性列表（所有站点偏好）、收藏管理、清除浏览记录。
+- **浏览器设置**（浏览器窗口更多 → 设置）：搜索引擎、Memory Saver、网站设置列表（所有站点的兼容性选项、权限与协议处理器）、收藏管理、清除浏览记录。
 - **我的文件设置**（files 窗口侧栏 → 设置）：来源（排除、清除来源中的文件）、分区管理。
 
 `ProductSettings` 变成 `{ workspace: {...}, browser: { searchEngine, memorySaverEnabled } }`，`settings.update` 接受两层的部分更新。我的文件的设置归文件库所有，不在 `ProductSettings` 里。
@@ -188,7 +188,7 @@ WS `launcher.get` 返回 `{ items: LauncherItem[] }`：每项 `{ key, kind: 'app
 
 ### 模型
 
-- 条目：`source: {app, channel} | null`、`partitionId | null`、`collected`、名称、类型、大小、资产等。`app` 是产生文件的 App（`browser`、`web:<id>`、`files`），`channel` 是该 App 自己的渠道：browser 为页面主机名（`example.com`），web App 为空串，files 为 `upload` 或 `camera`。来源由服务端从上下文推断：文件选择的导入看请求所属 Tab 的窗口 App 与 origin，files 窗口的上传看客户端声明的渠道；浏览器下载的文件（如有）记为 browser/下载页主机名。
+- 条目保存 `source: {app, channel} | null`、`partitionId | null`、`collected`、名称、类型、大小和资产。文件选择从请求所属 Tab 的窗口 App 与 origin 推断来源，`browser` 使用页面主机名，`web:<id>` 使用空渠道。「我的文件」的上传和拍照使用 `files/upload` 与 `files/camera`。网页下载完成后由 Control 按 `download/<页面主机>` 收集为未分组条目，来源在界面显示为「下载」。排除该来源后，新下载不入目录。
 - 引用：条目存活当且仅当在文件篮中、被未决选择持有、在某个分区中，或 `collected && source ≠ null`。字节仍按 hash 存储，由对象索引引用计数。
 - 分区：扁平，`{id, name}`，一个条目最多属于一个分区。
 - 来源列表由条目派生：`{app, channel, count, excluded}`；`excluded` 存在文件库的 `excludedSources`。

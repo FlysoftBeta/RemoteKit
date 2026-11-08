@@ -39,9 +39,11 @@ DataChannel 上的 `input` 消息携带全部身份、连接内 `sequence` 和�
 
 ## 鼠标、滚轮、键盘
 
-- 修饰位使用 Blink `WebInputEvent` 位：Shift=1、Ctrl=2、Alt=4、Meta=8；按住左/中/右键 64/128/256，后退/前进 1048576/2097152。down/up 的 `button` 表示变化的那个键；move 的 Blink button 由按住的修饰位推出。直接把 wire 上 move 的 button=0 当作 NoButton 会让原生滚动条拖动被取消。`click_count` 支持 1–3。
+- 修饰位使用 Blink `WebInputEvent` 位：Shift=1、Ctrl=2、Alt=4、Meta=8，CapsLock=512、NumLock=1024。按住左/中/右键为 64/128/256，后退/前进为 1048576/2097152。down/up 的 `button` 表示变化的那个键，move 的 Blink button 由按住的修饰位推出。直接把 wire 上 move 的 button=0 当作 NoButton 会让原生滚动条拖动被取消。`click_count` 支持 1–3。
 - 滚轮先确认焦点，再复用 Aura 的 `MouseWheelPhaseHandler` 建立 begin/update/end 序列，然后走 `InputEventRouter`。phase=None 直接进 router 不会完成首次 hit-test——曾表现为输入回执成功但页面没有 wheel 事件、也不滚动。零 delta 不建立序列。line 模式 ×16 换算为 DIP，page 模式按 viewport 对应轴。
 - 键盘事件携带 physical code、Windows 虚拟键、DomCode、DomKey（十进制字符串）、修饰、repeat、text、unmodified_text。`char` 只投字符事件；旧式"down 带 text"也会产生字符事件，二者不能对同一字符同时使用。Enter 的 RawKeyDown/KeyUp 必须跟一个 `\r` 字符事件，否则 textarea 不换行。键盘与 IME 投递到实际聚焦的 widget/frame；指针保留根路由（含 OOPIF 变换）。
+- Browser 用 Chromium 的 DomCode 映射补出左右键位和小键盘标志。支持 Keyboard API 的 Viewer 在连接建立或布局变化时发送 `keyboard.layout`。Endpoint 按当前 RTC 授权接收这项 Session 元数据，首帧可交互前即可更新。Browser 在内存中为当前 Session 提供布局表。
+- 手写笔沿用鼠标路由，保留指针 ID、压力、倾角、旋转与橡皮状态。Browser 合成释放时沿用被释放笔的身份，压力归零。触点尺寸随坐标换算成 DIP，普通采样和合并历史共用同一字段，Browser 以宽高的一半生成触点半径。
 
 ## IME 与文本
 

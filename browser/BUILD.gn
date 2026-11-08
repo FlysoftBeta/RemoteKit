@@ -88,6 +88,9 @@ executable("remotekit_browser") {
     "services_binders.cc",
     "services_devices.cc",
     "services_flash.cc",
+    "services_prompts.cc",
+    "site_preferences.cc",
+    "site_preferences.h",
     "page_requests.cc",
     "page_requests.h",
     "popup_registry.cc",
@@ -345,4 +348,11 @@ executable("remotekit_render_wire_probe") {
   sources = [ "render_wire_probe.cc" ]
   include_dirs = [ "//remotekit" ]
   deps = [ "//base" ]
+}
+
+executable("remotekit_site_preferences_tests") {
+  testonly = true
+  sources = [ "site_preferences.cc", "site_preferences_tests.cc" ]
+  include_dirs = [ "//remotekit" ]
+  deps = [ "//base", "//url" ]
 }

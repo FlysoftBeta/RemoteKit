@@ -135,6 +135,117 @@ test('operation polling follows receipts and authoritative revision retires a co
   assert.equal(store.getSnapshot().state?.workspace.windows.length, 0);
 });
 
+test('HTTP auth credentials are sent once and never enter pending snapshots through receipt polling', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  const phases: string[] = [];
+  const store = new OperationsStore({
+    ready: () => true,
+    send: (message) => {
+      if (message.type === 'product.action') sent.push(message);
+    },
+    status: async (operation) => {
+      assert.deepEqual(operation, {
+        operationId: sent[0].operationId,
+        operationGeneration: sent[0].operationGeneration,
+      });
+      return { ...operation, status: 'committed', revision: 1 };
+    },
+  });
+  t.after(() => store.reset());
+  store.subscribe(() => {
+    const snapshot = store.getSnapshot();
+    assert.ok(!JSON.stringify(snapshot).includes('AUTH_SECRET'));
+    for (const entry of snapshot.pending) {
+      assert.deepEqual(entry.action, {
+        type: 'page.reply',
+        dialogId: 'auth-dialog',
+        reply: { kind: 'http_auth', accept: true },
+      });
+      assert.equal('username' in entry.action.reply, false);
+      assert.equal('password' in entry.action.reply, false);
+      phases.push(entry.phase);
+    }
+  });
+  store.acceptSnapshot(productSnapshot());
+  const action = {
+    type: 'page.reply' as const,
+    dialogId: 'auth-dialog',
+    reply: {
+      kind: 'http_auth' as const,
+      accept: true as const,
+      username: 'AUTH_SECRET_USER',
+      password: 'AUTH_SECRET_PASSWORD',
+    },
+  };
+  const response = store.action(action);
+  assert.deepEqual(sent[0].action, action);
+  store.handle({
+    type: 'product.result',
+    version: 1,
+    operationId: sent[0].operationId,
+    operationGeneration: sent[0].operationGeneration,
+    result: {
+      operationId: sent[0].operationId,
+      operationGeneration: sent[0].operationGeneration,
+      status: 'unknown',
+    },
+  });
+  assert.equal((await response).status, 'unknown');
+  assert.equal(store.getSnapshot().pending[0].phase, 'unknown');
+  t.mock.timers.tick(2000);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(store.getSnapshot().pending[0].phase, 'committed');
+  const state = productSnapshot();
+  state.snapshotSequence = 2;
+  state.workspace.revision = 1;
+  store.acceptSnapshot(state);
+  assert.deepEqual(store.getSnapshot().pending, []);
+  assert.equal(sent.length, 1);
+  assert.ok(['unsent', 'sent', 'unknown', 'committed'].every((phase) => phases.includes(phase)));
+  assert.equal(action.reply.password, 'AUTH_SECRET_PASSWORD');
+});
+
+test('HTTP auth outcome_unknown queries use only operation identity and never resend the action', async (t) => {
+  const sent: Extract<Outgoing, { type: 'product.action' }>[] = [];
+  const queries: unknown[] = [];
+  const store = new OperationsStore({
+    ready: () => true,
+    send: (message) => {
+      if (message.type === 'product.action') sent.push(message);
+    },
+    status: async (operation) => {
+      queries.push(operation);
+      return { ...operation, status: 'committed', revision: 1 };
+    },
+  });
+  t.after(() => store.reset());
+  store.acceptSnapshot(productSnapshot());
+  const response = store.action({
+    type: 'page.reply',
+    dialogId: 'auth-dialog',
+    reply: {
+      kind: 'http_auth',
+      accept: true,
+      username: 'AUTH_SECRET_USER',
+      password: 'AUTH_SECRET_PASSWORD',
+    },
+  });
+  store.handle({
+    type: 'product.result',
+    version: 1,
+    operationId: sent[0].operationId,
+    operationGeneration: sent[0].operationGeneration,
+    error: { code: 'outcome_unknown', message: '回复丢失' },
+  });
+  assert.equal((await response).status, 'committed');
+  assert.deepEqual(queries, [
+    { operationId: sent[0].operationId, operationGeneration: sent[0].operationGeneration },
+  ]);
+  assert.equal(sent.length, 1);
+  assert.ok(!JSON.stringify(store.getSnapshot()).includes('AUTH_SECRET'));
+});
+
 test('authorization loss clears optimistic work and rejects its old correlation', async () => {
   const store = new OperationsStore({
     ready: () => true,

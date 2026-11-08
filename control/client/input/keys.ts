@@ -537,6 +537,22 @@ export function keyIdentity(code: string, key: string) {
   const dom_key = keys[key] ?? (Array.from(key).length === 1 ? 0x400000 | key.codePointAt(0)! : 0x200001);
   return { dom_code, physical_code, dom_key: String(dom_key) };
 }
+export function modifiers(event: {
+  shiftKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  getModifierState?: (key: string) => boolean;
+}) {
+  return (
+    Number(event.shiftKey) |
+    (Number(event.ctrlKey) << 1) |
+    (Number(event.altKey) << 2) |
+    (Number(event.metaKey) << 3) |
+    (event.getModifierState?.('CapsLock') ? 1 << 9 : 0) |
+    (event.getModifierState?.('NumLock') ? 1 << 10 : 0)
+  );
+}
 /** DOM buttons -> Blink WebInputEvent held-button modifier bits. */
 export function mouseButtonModifiers(buttons: number) {
   return (

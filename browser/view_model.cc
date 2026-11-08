@@ -28,6 +28,13 @@ bool Boundary(const std::u16string& s, std::size_t p) {
 bool Finite(double a, double b) {
   return std::isfinite(a) && std::isfinite(b);
 }
+bool InRange(double value, double minimum, double maximum) {
+  return value >= minimum && value <= maximum;
+}
+bool ValidTouchPoint(const TouchPoint& point) {
+  return Finite(point.x, point.y) && InRange(point.pressure, 0, 1) &&
+         InRange(point.width, 0, 1000) && InRange(point.height, 0, 1000);
+}
 }  // namespace
 Status ValidateInput(const InputPayload& p) {
   bool ok = std::visit(
@@ -40,7 +47,9 @@ Status ValidateInput(const InputPayload& p) {
           return Utf16(v.text);
         else if constexpr (std::is_same_v<T, MouseInput>)
           return Finite(v.x, v.y) && v.button <= 5 && v.action >= MouseInput::Action::move &&
-                 v.action <= MouseInput::Action::leave && v.click_count <= 3;
+                 v.action <= MouseInput::Action::leave && v.click_count <= 3 &&
+                 (!v.pen || (InRange(v.pen->pressure, 0, 1) && InRange(v.pen->tilt_x, -90, 90) &&
+                             InRange(v.pen->tilt_y, -90, 90) && InRange(v.pen->twist, 0, 359)));
         else if constexpr (std::is_same_v<T, WheelInput>)
           return Finite(v.x, v.y) && Finite(v.delta_x, v.delta_y);
         else if constexpr (std::is_same_v<T, TouchInput>) {
@@ -69,8 +78,7 @@ Status ValidateInput(const InputPayload& p) {
             previous = sample.elapsed_us;
             std::set<std::uint32_t> sample_ids;
             for (const auto& point : sample.points)
-              if (!Finite(point.x, point.y) || !std::isfinite(point.pressure) ||
-                  point.pressure < 0 || point.pressure > 1 || !sample_ids.insert(point.id).second)
+              if (!ValidTouchPoint(point) || !sample_ids.insert(point.id).second)
                 return false;
           }
           std::set<std::uint32_t> ids;
@@ -78,8 +86,7 @@ Status ValidateInput(const InputPayload& p) {
               (v.points.empty() && v.action != TouchInput::Action::cancel))
             return false;
           for (const auto& t : v.points)
-            if (!Finite(t.x, t.y) || !std::isfinite(t.pressure) || t.pressure < 0 ||
-                t.pressure > 1 || !ids.insert(t.id).second)
+            if (!ValidTouchPoint(t) || !ids.insert(t.id).second)
               return false;
           return true;
         } else if constexpr (std::is_same_v<T, GestureInput>)

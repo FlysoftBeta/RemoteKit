@@ -2,7 +2,6 @@ import './window-menus.css';
 import React, { useEffect, useState } from 'react';
 import {
   Add,
-  ArrowBack,
   Close,
   DriveFileMoveOutlined,
   InstallDesktopOutlined,
@@ -13,15 +12,16 @@ import {
   SettingsOutlined,
   TuneOutlined,
 } from '@mui/icons-material';
-import { Divider, ListItemIcon, ListItemText, Menu, MenuItem, MenuList, Popover } from '@mui/material';
+import { Divider, ListItemIcon, Menu, MenuItem, MenuList, Popover } from '@mui/material';
 import type { ProductState, ProductTab, ProductWindow } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { ViewerSession } from '../viewer-session';
 import type { Action } from './product-dialogs';
 import { waitForWorkspaceRevision, type WorkspaceCall } from './window-state';
 import { BrowserSettingsSheet } from './browser-settings';
-import { InstallDialog, SiteCompatibility } from './app-editor';
+import { InstallDialog } from './app-editor';
 import { scaledAnchor } from './ui-scale';
+import { SiteSettings } from './site-settings';
 const dropDown = {
   anchorOrigin: { vertical: 'bottom', horizontal: 'right' },
   transformOrigin: { vertical: 'top', horizontal: 'right' },
@@ -33,29 +33,24 @@ export function useWindowMenus(fullscreenWindowId?: string) {
     tab: ProductTab;
     fromToolbar?: boolean;
   } | null>(null);
-  const [siteMenuOrigin, setSiteMenuOrigin] = useState<string>();
   const [browserSettings, setBrowserSettings] = useState(false);
   const [install, setInstall] = useState(false);
   useEffect(() => {
     if (!fullscreenWindowId) return;
     setMenu(null);
     setTabMenu(null);
-    setSiteMenuOrigin(undefined);
   }, [fullscreenWindowId]);
   const closeMore = () => {
     setMenu(null);
-    setSiteMenuOrigin(undefined);
   };
   return {
     menu,
     tabMenu,
-    siteMenuOrigin,
     browserSettings,
     install,
     openMore: setMenu,
     openTab: setTabMenu,
     closeMore,
-    setSiteMenuOrigin,
     setBrowserSettings,
     setInstall,
   };
@@ -93,15 +88,14 @@ export function WindowMenus({
   const {
     menu,
     tabMenu,
-    siteMenuOrigin,
     browserSettings,
     install,
     openTab: setTabMenu,
     closeMore,
-    setSiteMenuOrigin,
     setBrowserSettings,
     setInstall,
   } = controls;
+  const [siteSettings, setSiteSettings] = useState<{ origin: string; tabId?: string }>();
   const openBrowser = () => {
     const target = [...state.workspace.windows]
       .filter((window) => window.appId === 'browser')
@@ -166,80 +160,58 @@ export function WindowMenus({
           },
         }}
       >
-        {origin && siteMenuOrigin === origin ? (
-          <MenuList aria-label="网页兼容性" dense>
-            <MenuItem autoFocus onClick={() => setSiteMenuOrigin(undefined)}>
-              <ListItemIcon>
-                <ArrowBack fontSize="small" />
-              </ListItemIcon>
-              <ListItemText
-                primary="网页兼容性"
-                secondary={origin}
-                slotProps={{ secondary: { sx: { overflowWrap: 'anywhere' } } }}
-              />
-            </MenuItem>
-          </MenuList>
-        ) : (
-          <MenuList autoFocusItem={!!menu} dense>
-            {moreItems.map((item) => (
-              <MenuItem
-                key={item.label}
-                disabled={item.disabled}
-                onClick={() => {
-                  closeMore();
-                  item.select();
-                }}
-              >
-                <ListItemIcon>{item.icon}</ListItemIcon>
-                {item.label}
-              </MenuItem>
-            ))}
-            {origin && (
-              <MenuItem onClick={() => setSiteMenuOrigin(origin)}>
-                <ListItemIcon>
-                  <TuneOutlined />
-                </ListItemIcon>
-                网页兼容性
-              </MenuItem>
-            )}
-            <Divider />
+        <MenuList autoFocusItem={!!menu} dense>
+          {moreItems.map((item) => (
             <MenuItem
+              key={item.label}
+              disabled={item.disabled}
               onClick={() => {
                 closeMore();
-                if (browser) setBrowserSettings(true);
-                else {
-                  void action({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } })
-                    .then(async (receipt) => {
-                      const workspace = await waitForWorkspaceRevision(
-                        transport,
-                        receipt.revision ?? state.workspace.revision,
-                      );
-                      const settings = workspace.windows.find((window) => window.appId === 'settings');
-                      if (settings)
-                        await call('window.state', { windowId: settings.id, state: { section: 'apps' } });
-                    })
-                    .catch(report);
-                }
+                item.select();
               }}
             >
-              <ListItemIcon>
-                <SettingsOutlined />
-              </ListItemIcon>
-              {browser ? '设置' : 'App 设置'}
+              <ListItemIcon>{item.icon}</ListItemIcon>
+              {item.label}
             </MenuItem>
-          </MenuList>
-        )}
-        {origin && siteMenuOrigin === origin && (
-          <div className="site-menu-content">
-            <SiteCompatibility
-              origin={origin}
-              tabId={active?.id}
-              state={state}
-              action={action}
-              online={online}
-            />
-          </div>
-        )}
+          ))}
+          <MenuItem
+            disabled={!origin || !online}
+            onClick={() => {
+              closeMore();
+              setSiteSettings({ origin, tabId: active?.id });
+            }}
+          >
+            <ListItemIcon>
+              <TuneOutlined />
+            </ListItemIcon>
+            网站设置
+          </MenuItem>
+          <Divider />
+          <MenuItem
+            onClick={() => {
+              closeMore();
+              if (browser) setBrowserSettings(true);
+              else {
+                void action({ type: 'window.open', appId: 'settings', placement: { mode: 'space' } })
+                  .then(async (receipt) => {
+                    const workspace = await waitForWorkspaceRevision(
+                      transport,
+                      receipt.revision ?? state.workspace.revision,
+                    );
+                    const settings = workspace.windows.find((window) => window.appId === 'settings');
+                    if (settings)
+                      await call('window.state', { windowId: settings.id, state: { section: 'apps' } });
+                  })
+                  .catch(report);
+              }
+            }}
+          >
+            <ListItemIcon>
+              <SettingsOutlined />
+            </ListItemIcon>
+            {browser ? '设置' : 'App 设置'}
+          </MenuItem>
+        </MenuList>
       </Popover>
       <Menu
         anchorEl={scaledAnchor(tabMenu?.anchor)}
@@ -316,7 +288,18 @@ export function WindowMenus({
           action={action}
           call={call}
           online={online}
+          currentSite={origin && active ? { origin, tabId: active.id } : undefined}
           onClose={() => setBrowserSettings(false)}
+        />
+      )}
+      {siteSettings && (
+        <SiteSettings
+          origin={siteSettings.origin}
+          tabId={siteSettings.tabId}
+          state={state}
+          action={action}
+          online={online}
+          onClose={() => setSiteSettings(undefined)}
         />
       )}
       {install && active && (

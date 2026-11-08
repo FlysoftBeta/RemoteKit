@@ -27,6 +27,7 @@ const clearSnapshot = (): EndpointSnapshot => ({
     inFlightUploads: 0,
     pendingPageRequests: 0,
     downloadsInProgress: 0,
+    pendingDownloadImports: 0,
     rtcConnected: false,
     lifecycleUncertain: false,
   },

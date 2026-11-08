@@ -10,7 +10,12 @@ using media::QpcNow;
 using media::TraceIds;
 void InputController::ReplyInput(Json reply, const Json& request, uint64_t stamp) {
   const bool focus = request.is_object() && request.value("type", Json()) == "focus";
+  const bool layout = request.is_object() && request.value("type", Json()) == "keyboard.layout";
+  if (layout && reply.value("ok", false))
+    return;
   reply["type"] = focus ? "focus" : "input.result";
+  if (layout)
+    reply["type"] = "error";
   if (focus) {
     reply["focusRequestId"] = request.value("focusRequestId", Json());
     reply["layoutEpoch"] = request.value("layoutEpoch", Json());
@@ -44,9 +49,24 @@ void InputController::HandleData(const Event& event) {
   if (command.is_discarded() || !command.is_object())
     return;
   auto type = command.value("type", std::string());
-  if (type != "input" && type != "focus")
+  if (type != "input" && type != "focus" && type != "keyboard.layout")
     return;
   const auto request = command;
+  if (type == "keyboard.layout") {
+    if (!current_token())
+      return;
+    Json input = {{"method", "input"}, {"session", session_id_}, {"event", command}};
+    input["event"].erase("authEpoch");
+    auto response = hooks_.rpc(std::move(input), hooks_.control(), 10000, false, current_token);
+    if (current_token()) {
+      if (response)
+        ReplyInput(std::move(response).value(), request, event.authorization);
+      else
+        ReplyInput({{"ok", false}, {"error", WireError(response.error())}}, request,
+                   event.authorization);
+    }
+    return;
+  }
   if (!admitted()) {
     RejectInput("input_not_authorized", request, event);
     return;
@@ -136,9 +156,10 @@ void InputController::QueueInput(const Event& event) {
   if (!parsed.is_object())
     return;
   const auto type = parsed.value("type", std::string());
-  if (type != "input" && type != "focus")
+  if (type != "input" && type != "focus" && type != "keyboard.layout")
     return;
-  if (hooks_.input_stamp() != event.authorization) {
+  // A Session keyboard layout can arrive before the first input-ready frame.
+  if (type != "keyboard.layout" && hooks_.input_stamp() != event.authorization) {
     RejectInput("input_not_authorized", parsed, event);
     return;
   }

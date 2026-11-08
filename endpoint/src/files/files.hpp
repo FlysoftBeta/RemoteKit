@@ -52,6 +52,12 @@ class LibraryController : private ControllerContext {
         file_library(directory / "file-library", objects, tenant, object_keys),
         photos(context, file_library, files, authorization) {}
   Result<void> Initialize();
+  Result<Json> ImportDownload(const Json& download) {
+    auto imported = file_library.ImportDownload(directory / "session-1" / "profile-1", download);
+    if (!imported)
+      return imported.error();
+    return imported.value().Json();
+  }
   Result<void> SweepDirectFiles();
   static uint64_t FileUnsigned(const Json& value);
   Json SelectionBrowserCommand(const FileBinding& binding, const char* method);

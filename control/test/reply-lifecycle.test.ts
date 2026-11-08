@@ -178,7 +178,7 @@ test('reply execution rejects Browser replacement after snapshot even when PID a
     await assert.rejects(
       control.operations.productAction(
         tenant,
-        { type: 'page.reply', dialogId: dialog.id, accept: true },
+        { type: 'page.reply', dialogId: dialog.id, reply: { kind: 'dialog', accept: true } },
         'lease',
       ),
       { code: 'conflict' },

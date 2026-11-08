@@ -37,6 +37,8 @@ Worker 跟随自己的 origin 选择身份，而不是创建它的页面：servi
 
 **宿主设备隔离**：服务器自身的摄像头、麦克风、USB、HID、串口、蓝牙、Windows Hello/平台验证器和 Windows 定位属于宿主，不属于租户。补丁 `0018-host-device-isolation` 给 content 增加 `ContentBrowserClient::AllowHostDeviceAccess()`，RemoteKit 返回 false，content 在媒体设备枚举、蓝牙、WebAuthn 发现与语音识别入口处直接走"没有设备"的路径。页面结果：`enumerateDevices()` 为空、`getUserMedia` 为 `NotFoundError`、`getDisplayMedia` 为 `NotAllowedError`；USB/串口/蓝牙的选择以 `NotFoundError` 结束、HID 返回空列表；`isUserVerifyingPlatformAuthenticatorAvailable()` 为 false，`create/get` 在超时内以 `NotAllowedError` 拒绝，服务器桌面上不会出现 Windows Hello；地理位置在获准后报告 `POSITION_UNAVAILABLE`。媒体设备 ID 的 salt 按 Profile 持久化。客户端证书：空证书库，TLS 在没有客户端证书的情况下继续。
 
+**权限与页面提示**：地理位置、剪贴板读取、本机字体、窗口管理、MIDI SysEx、空闲检测按 Chrome 的 `ASK` 默认值处理，`navigator.permissions.query` 报告 `prompt`，请求时 Viewer 显示权限卡片：允许和不允许按站点存入网站设置，"仅限这一次"只在当前文档存活期间有效，关闭提示只拒绝本次请求。其他权限按 Chrome 的内置默认值直接决定（传感器、后台同步允许；通知拒绝，没有通知后端）。HTTP/代理认证、POST 重新提交确认和 `registerProtocolHandler` 同样走页面请求；获准的协议处理器把 `web+…`/`mailto:` 等导航按 Chrome 的转义规则改写为处理器 URL。下载不弹保存对话框，完成后进入「我的文件」的「下载」来源，超过 256 MiB 取消。
+
 **其他 Chrome 行为**：Ctrl/中键点击与带修饰键的打开经 `OpenURLFromTab` 走与 popup 相同的产品 Tab 路径；service worker 的 `clients.openWindow` 经 `ContentBrowserClient::OpenURL` 打开产品 Tab。全屏时 `display-mode: fullscreen` 成立并触发 change；启用 back/forward cache；安装 Chrome 的 origin trial 策略；随包提供断字词典，`hyphens: auto` 生效；旧的 YouTube/Dailymotion/Vimeo Flash 嵌入按 Chrome 规则改写为 HTML 播放器。平板身份额外提供 Android 的 `navigator.connection.type`（`wifi`）/`downlinkMax`/`ontypechange`；`screen.orientation.lock()` 在全屏且方向已匹配时成功，否则以不支持拒绝（无法旋转 Viewer），桌面身份按 Windows Chrome 拒绝。
 
 **`window.chrome`**：通过 renderer 原生绑定建立（`CompatRendererClient`），不注入页面脚本——注入的 JS 对象无法得到正确的绑定寿命和 world 控制。

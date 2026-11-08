@@ -27,6 +27,15 @@ bool Finite(double a, double b) {
   return std::isfinite(a) && std::isfinite(b);
 }
 }  // namespace
+bool ValidPen(const PenInput& pen) {
+  return std::isfinite(pen.pressure) && pen.pressure >= 0 && pen.pressure <= 1 &&
+         Finite(pen.tilt_x, pen.tilt_y) && pen.tilt_x >= -90 && pen.tilt_x <= 90 &&
+         pen.tilt_y >= -90 && pen.tilt_y <= 90 && std::isfinite(pen.twist) && pen.twist >= 0 &&
+         pen.twist <= 359;
+}
+bool ValidContactSize(const std::optional<double>& size) {
+  return !size || (std::isfinite(*size) && *size >= 0 && *size <= 1000);
+}
 Result<void> ValidateInput(const InputPayload& p) {
   bool ok = std::visit(
       [](const auto& v) {
@@ -38,9 +47,11 @@ Result<void> ValidateInput(const InputPayload& p) {
           return Utf16(v.text);
         else if constexpr (std::is_same_v<T, MouseInput>)
           return Finite(v.x, v.y) && v.button <= 5 && v.action >= MouseInput::Action::move &&
-                 v.action <= MouseInput::Action::leave && v.click_count <= 3;
+                 v.action <= MouseInput::Action::leave && v.click_count <= 3 &&
+                 !(v.modifiers & ~kInputModifiers) && (!v.pen || ValidPen(*v.pen));
         else if constexpr (std::is_same_v<T, WheelInput>)
-          return Finite(v.x, v.y) && Finite(v.delta_x, v.delta_y);
+          return Finite(v.x, v.y) && Finite(v.delta_x, v.delta_y) &&
+                 !(v.modifiers & ~kInputModifiers);
         else if constexpr (std::is_same_v<T, TouchInput>) {
           if (v.gestures.size() > 8 || (!v.client_gestures && !v.gestures.empty()) ||
               (v.client_gestures && !v.clock))
@@ -69,7 +80,8 @@ Result<void> ValidateInput(const InputPayload& p) {
             std::set<std::uint32_t> sample_ids;
             for (const auto& point : sample.points)
               if (!Finite(point.x, point.y) || !std::isfinite(point.pressure) ||
-                  point.pressure < 0 || point.pressure > 1 || !sample_ids.insert(point.id).second)
+                  point.pressure < 0 || point.pressure > 1 || !ValidContactSize(point.width) ||
+                  !ValidContactSize(point.height) || !sample_ids.insert(point.id).second)
                 return false;
           }
           std::set<std::uint32_t> ids;
@@ -78,7 +90,8 @@ Result<void> ValidateInput(const InputPayload& p) {
             return false;
           for (const auto& t : v.points)
             if (!Finite(t.x, t.y) || !std::isfinite(t.pressure) || t.pressure < 0 ||
-                t.pressure > 1 || !ids.insert(t.id).second)
+                t.pressure > 1 || !ValidContactSize(t.width) || !ValidContactSize(t.height) ||
+                !ids.insert(t.id).second)
               return false;
           return true;
         } else if constexpr (std::is_same_v<T, GestureInput>)
@@ -98,8 +111,21 @@ Result<void> ValidateInput(const InputPayload& p) {
           return v.action >= KeyInput::Action::down && v.action <= KeyInput::Action::character &&
                  (v.action != KeyInput::Action::character || !v.text.empty()) &&
                  v.text.size() <= 4 && v.unmodified_text.size() <= 4 && Utf16(v.text) &&
-                 Utf16(v.unmodified_text) && v.dom_key <= std::numeric_limits<std::uint32_t>::max();
-        else
+                 Utf16(v.unmodified_text) &&
+                 v.dom_key <= std::numeric_limits<std::uint32_t>::max() &&
+                 !(v.modifiers & ~kInputModifiers);
+        else if constexpr (std::is_same_v<T, KeyboardLayoutInput>) {
+          if (v.entries.size() > 256)
+            return false;
+          for (const auto& [code, key] : v.entries) {
+            if (code.empty() || code.size() > 32 || key.empty() || key.size() > 4 || !Utf16(key))
+              return false;
+            for (const auto c : code)
+              if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+                return false;
+          }
+          return true;
+        } else
           return true;
       },
       p);

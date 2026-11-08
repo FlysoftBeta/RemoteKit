@@ -1,4 +1,5 @@
 #include "rtc/data_router.hpp"
+#include "input/wire_validation.hpp"
 #include "util/wire_error.hpp"
 #include "rtc/dc_services.hpp"
 #include <charconv>
@@ -15,6 +16,12 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
     return Kind::kProduct;
   if (type == "media.presentation" || type == "presentation.ready")
     return Kind::kPresentation;
+  if (type == "keyboard.layout") {
+    const auto layout = ParseKeyboardLayout(message);
+    if (!layout)
+      return layout.error();
+    return Kind::kInput;
+  }
   if (type == "input") {
     const auto raw = message.find("event");
     if (raw != message.end() && raw->is_object() &&
@@ -22,6 +29,9 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
         raw->value("gestureMode", Json()) != "client-v1")
       return Error{ErrorCode::kInvalidRequest, "gestureMode must be client-v1"};
     if (raw != message.end() && raw->is_object()) {
+      const auto valid = ValidateInputFidelity(*raw);
+      if (!valid)
+        return valid.error();
       const auto event_type = raw->value("type", Json());
       if (event_type == "selection_command") {
         uint64_t menu = 0;

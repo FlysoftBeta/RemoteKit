@@ -361,8 +361,8 @@ try {
   }
   await registerViewer({ click, fill, username: 'keyboard-qa', password: randomBytes(18).toString('hex') });
   await wait(() => keyboardQA.channels.filter((channel) => channel.readyState === 'open').length === 2);
-  await click('button', '新建窗口');
-  await fill('.address-form input', fixtureOrigin);
+  await page.getByRole('button', { name: '打开开始屏幕', exact: true }).click();
+  await fill('.launcher-search input', fixtureOrigin + '/');
   await page.keyboard.press('Enter');
 
   const ready = () =>
@@ -751,47 +751,42 @@ try {
 
   const siteSwitches = () =>
     page.evaluate(() => {
-      const menu = document.querySelector('[aria-label="网页兼容性处理"]');
+      const dialog = document.querySelector('[role=dialog][aria-label="网站设置"]');
       return {
         checks: Object.fromEntries(
-          [...menu.querySelectorAll('[role=menuitemcheckbox]')].map((item) => [
-            item.textContent.trim(),
-            item.getAttribute('aria-checked'),
+          [...dialog.querySelectorAll('label.setting-toggle')].map((label) => [
+            label.querySelector('.setting-text').textContent.trim(),
+            label.querySelector('input[type=checkbox]').checked,
           ]),
         ),
-        inputs: menu.querySelectorAll('input[type=checkbox]').length,
+        inputs: dialog.querySelectorAll('input[type=checkbox]').length,
       };
     });
   const toggleManualKeyboard = async (enabled) => {
     await click('button[aria-label="更多"]');
-    await click('[role=menuitem]', '网页兼容性处理');
-    await wait(() => !!document.querySelector('[aria-label="网页兼容性处理"]'));
+    await click('[role=menuitem]', '网站设置');
+    await wait(() => !!document.querySelector('[role=dialog][aria-label="网站设置"]'));
     const initial = await siteSwitches();
     assert(
-      initial.checks['使用平板版网站'] === 'false' && initial.inputs === 2,
-      'Compatibility submenu is missing an independent site switch',
+      initial.checks['平板版网站'] === false && initial.inputs === 2,
+      'Site settings dialog is missing an independent site switch',
     );
-    assert(
-      initial.checks['不自动弹出键盘'] === String(!enabled),
-      'Unexpected initial manual keyboard preference',
-    );
-    await click('[aria-label="网页兼容性处理"] [role=menuitemcheckbox]', '不自动弹出键盘');
+    assert(initial.checks['不自动弹出键盘'] === !enabled, 'Unexpected initial manual keyboard preference');
+    await click('[role=dialog][aria-label="网站设置"] label.setting-toggle', '不自动弹出键盘');
     await wait((enabled) => {
-      const item = [
-        ...document.querySelectorAll('[aria-label="网页兼容性处理"] [role=menuitemcheckbox]'),
-      ].find((element) => element.textContent.trim() === '不自动弹出键盘');
-      return (
-        item?.getAttribute('aria-checked') === String(enabled) &&
-        item.getAttribute('aria-disabled') !== 'true'
-      );
+      const label = [
+        ...document.querySelectorAll('[role=dialog][aria-label="网站设置"] label.setting-toggle'),
+      ].find((element) => element.querySelector('.setting-text').textContent.trim() === '不自动弹出键盘');
+      const input = label?.querySelector('input[type=checkbox]');
+      return input?.checked === enabled && !input.disabled;
     }, enabled);
     assert(
-      (await siteSwitches()).checks['使用平板版网站'] === initial.checks['使用平板版网站'],
+      (await siteSwitches()).checks['平板版网站'] === initial.checks['平板版网站'],
       'Manual keyboard switch changed tablet UA',
     );
-    if (enabled) await screenshot('site-compatibility-menu');
-    await page.keyboard.press('Escape');
-    await wait(() => !document.querySelector('.MuiPopover-root'));
+    if (enabled) await screenshot('site-settings-dialog');
+    await click('[role=dialog][aria-label="网站设置"] button', '完成');
+    await wait(() => !document.querySelector('[role=dialog][aria-label="网站设置"]'));
   };
   const hiddenKeyboard = () =>
     wait(

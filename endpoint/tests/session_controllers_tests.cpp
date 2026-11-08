@@ -5,11 +5,13 @@
 #include "rtc/peer.hpp"
 #include "media/presentation.hpp"
 #include "input/input.hpp"
+#include "input/wire_validation.hpp"
 #include "session/session.hpp"
 #include "management/methods.hpp"
 #include "persistence/session_store.hpp"
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 using namespace remotekit;
@@ -313,6 +315,100 @@ void SessionManagementRequests() {
   fs::create_directories(session_directory);
   CHECK(SessionStore(session_directory).Save("views.json", Json::array({Json{{"viewId", "1"}}})));
   CHECK(session.Views().Initialize());
+  const Json handler = {
+      {"protocol", "web+notes"}, {"url", "https://example.test/open?url=%s"}, {"allowed", true}};
+  const Json site = {{"tabletUa", true},
+                     {"permissions",
+                      {{"geolocation", "allow"},
+                       {"clipboard_read", "allow"},
+                       {"local_fonts", "allow"},
+                       {"window_management", "block"},
+                       {"midi_sysex", "allow"},
+                       {"idle_detection", "block"}}},
+                     {"protocolHandlers", Json::array({handler})}};
+  const Json preferences = {{"sites", {{"https://example.test", site}}}};
+  CHECK(session.Views().ManageSessionSitePreferences(preferences));
+  CHECK(SessionStore(session_directory).Load("site-preferences.json", Json()) ==
+        preferences["sites"]);
+  auto normalized_handler = handler;
+  normalized_handler["url"] = "HTTPS://EXAMPLE.TEST:443/?%s";
+  CHECK(session.Views().ManageSessionSitePreferences(
+      {{"sites",
+        {{"https://example.test", {{"protocolHandlers", Json::array({normalized_handler})}}}}}}));
+  const Json local_handler = {
+      {"protocol", "mailto"}, {"url", "http://localhost:8080/?%s"}, {"allowed", false}};
+  const Json local_site = {{"protocolHandlers", Json::array({local_handler})}};
+  CHECK(session.Views().ManageSessionSitePreferences(
+      {{"sites", {{"http://localhost:8080", local_site}}}}));
+  CHECK(session.Views().ManageSessionSitePreferences(
+      {{"sites",
+        {{"http://127.0.0.1", {{"tabletUa", true}}},
+         {"https://[::1]:8443", {{"tabletUa", true}}}}}}));
+  const auto invalid_preferences = [&](const Json& request) {
+    const auto result = session.Views().ManageSessionSitePreferences(request);
+    CHECK(!result && result.error().code == ErrorCode::kInvalidRequest);
+  };
+  invalid_preferences(Json::object());
+  invalid_preferences({{"sites", Json::array()}});
+  invalid_preferences({{"sites", Json::object()}, {"extra", true}});
+  for (const auto* origin :
+       {"https://example.test/path", "https://example.test/", "https://EXAMPLE.test",
+        "https://example.test:443", "http://example.test:80", "https://user@example.test",
+        "https://example.test:99999", "file://example.test", "https://127.1", "https://[not-ip]"})
+    invalid_preferences({{"sites", {{origin, site}}}});
+  invalid_preferences({{"sites", {{"https://" + std::string(2048, 'a'), site}}}});
+  for (const auto& invalid :
+       {Json(), Json(false), Json::array(), Json::object(), Json{{"unknown", true}},
+        Json{{"tabletUa", false}}, Json{{"tabletUa", 1}}, Json{{"manualKeyboard", true}},
+        Json{{"permissions", Json::object()}}, Json{{"permissions", Json::array()}},
+        Json{{"permissions", {{"camera", "allow"}}}},
+        Json{{"permissions", {{"notifications", "allow"}}}},
+        Json{{"permissions", {{"geolocation", "ask"}}}},
+        Json{{"permissions", {{"geolocation", true}}}}, Json{{"protocolHandlers", Json::array()}},
+        Json{{"protocolHandlers", Json::object()}},
+        Json{{"protocolHandlers", Json::array({Json::object()})}}})
+    invalid_preferences({{"sites", {{"https://example.test", invalid}}}});
+  for (const auto* key : {"protocol", "url", "allowed"}) {
+    auto missing = handler;
+    missing.erase(key);
+    invalid_preferences(
+        {{"sites", {{"https://example.test", {{"protocolHandlers", Json::array({missing})}}}}}});
+    auto wrong = handler;
+    wrong[key] = 1;
+    invalid_preferences(
+        {{"sites", {{"https://example.test", {{"protocolHandlers", Json::array({wrong})}}}}}});
+  }
+  for (const auto* protocol : {"https", "web+", "web+Notes", "web+notes1", "mailto:"}) {
+    auto wrong = handler;
+    wrong["protocol"] = protocol;
+    invalid_preferences(
+        {{"sites", {{"https://example.test", {{"protocolHandlers", Json::array({wrong})}}}}}});
+  }
+  for (const auto& url :
+       {std::string("https://other.test/?%s"), std::string("https://example.test.evil/?%s"),
+        std::string("https://example.test@evil.test/?%s"),
+        std::string("https://example.test/no-placeholder"), std::string("http://example.test/?%s"),
+        std::string("/relative?%s"), std::string("https://example.test/\n?%s"),
+        std::string("https://example.test/") + std::string(2048, 'a') + "%s"}) {
+    auto wrong = handler;
+    wrong["url"] = url;
+    invalid_preferences(
+        {{"sites", {{"https://example.test", {{"protocolHandlers", Json::array({wrong})}}}}}});
+  }
+  auto extra_handler = handler;
+  extra_handler["extra"] = true;
+  invalid_preferences(
+      {{"sites",
+        {{"https://example.test", {{"protocolHandlers", Json::array({extra_handler})}}}}}});
+  Json too_many = Json::array();
+  for (int i = 0; i < 33; ++i)
+    too_many.push_back(handler);
+  invalid_preferences({{"sites", {{"https://example.test", {{"protocolHandlers", too_many}}}}}});
+  Json many_sites = Json::object();
+  for (int i = 0; i < 4097; ++i)
+    many_sites["https://site" + std::to_string(i) + ".test"] = {{"tabletUa", true}};
+  invalid_preferences({{"sites", many_sites}});
+  CHECK(session.Views().ManageSessionSitePreferences({{"sites", Json::object()}}));
   auto app_info = ManagementMethods::Find("view.appInfo");
   CHECK(app_info);
   const auto unknown_view = app_info(session, {{"viewId", "2"}});
@@ -374,6 +470,32 @@ void SessionManagementRequests() {
             .ManageRtcOffer({{"connectionId", "connection"}, {"sdp", "offer"}})
             .error()
             .code == ErrorCode::kInvalidRequest);
+  SessionStore download_store(session_directory);
+  CHECK(download_store.Save("download-imports.json",
+                            {{"records", Json::array({{{"browserAck", false}}})}}));
+  CHECK(session.Views().Initialize());
+  CHECK(session.Snapshot().value().at("hibernation").at("pendingDownloadImports") == 1);
+  CHECK(session.Hibernate(objects).error().message ==
+        "hibernation blocked: pendingDownloadImports");
+  CHECK(session.Shutdown().error().code == ErrorCode::kConflict);
+  CHECK(download_store.Save("download-imports.json", {{"records", Json::array()}}));
+  CHECK(session.Views().Initialize());
+  CHECK(session.Snapshot().value().at("hibernation").at("pendingDownloadImports") == 0);
+  const Json imported = {{"type", "download.imported"},
+                         {"eventId", "download-test"},
+                         {"assetId", std::string(64, 'a')},
+                         {"name", "page.txt"},
+                         {"mimeType", "text/plain"},
+                         {"size", "8"},
+                         {"origin", ""}};
+  CHECK(download_store.Save(
+      "download-imports.json",
+      {{"records", Json::array({{{"browserAck", true}, {"result", imported}}})}}));
+  CHECK(session.Views().Initialize());
+  CHECK(session.Snapshot().value().at("events") == Json::array({imported}));
+  CHECK(session.Views().ManageSessionEventsAck({{"eventIds", {"download-test"}}}));
+  CHECK(download_store.Load("download-imports.json").at("records").empty());
+  CHECK(session.Snapshot().value().at("events").empty());
 }
 
 void PeerFailureCleanup() {
@@ -661,7 +783,216 @@ void ClipboardSynchronization() {
     CHECK(!ClipboardController::Valid({{"revision", invalid}, {"text", ""}, {"html", ""}}));
 }
 
-int main() {
+void InputFidelityValidation() {
+  const auto nan = std::numeric_limits<double>::quiet_NaN();
+  const auto infinity = std::numeric_limits<double>::infinity();
+  for (uint32_t bit = 1; bit; bit <<= 1) {
+    KeyInput key;
+    MouseInput mouse;
+    WheelInput wheel;
+    key.modifiers = mouse.modifiers = wheel.modifiers = bit;
+    CHECK(bool(ValidateInput(key)) == bool(bit & kInputModifiers));
+    CHECK(bool(ValidateInput(mouse)) == bool(bit & kInputModifiers));
+    CHECK(bool(ValidateInput(wheel)) == bool(bit & kInputModifiers));
+    for (const auto* type : {"key", "mouse", "wheel"}) {
+      Json event = {{"type", type}, {"modifiers", bit}};
+      CHECK(bool(ValidateInputFidelity(event)) == bool(bit & kInputModifiers));
+    }
+  }
+  for (const auto& invalid :
+       {Json(-1), Json(0.5), Json("512"), Json(nullptr), Json(uint64_t{1} << 32)})
+    CHECK(!ValidateInputFidelity({{"type", "key"}, {"modifiers", invalid}}));
+  MouseInput mouse;
+  mouse.pen = PenInput{UINT32_MAX, 1, -90, 90, 359, true};
+  CHECK(ValidateInput(mouse));
+  Json pen = {{"id", UINT32_MAX}, {"pressure", 1}, {"tiltX", -90},
+              {"tiltY", 90},      {"twist", 359},  {"eraser", true}};
+  CHECK(ParsePen(pen));
+  CHECK(ParsePen(pen).value().id == UINT32_MAX);
+  for (const auto* field : {"id", "pressure", "tiltX", "tiltY", "twist", "eraser"}) {
+    auto invalid = pen;
+    invalid.erase(field);
+    CHECK(!ParsePen(invalid));
+    invalid[field] = "bad";
+    CHECK(!ParsePen(invalid));
+  }
+  for (const auto& [field, value] :
+       std::vector<std::pair<std::string, double>>{{"id", -1},
+                                                   {"id", 0.5},
+                                                   {"id", 4294967296.0},
+                                                   {"pressure", -0.1},
+                                                   {"pressure", 1.1},
+                                                   {"tiltX", -91},
+                                                   {"tiltX", 91},
+                                                   {"tiltY", -91},
+                                                   {"tiltY", 91},
+                                                   {"twist", -1},
+                                                   {"twist", 360},
+                                                   {"pressure", nan},
+                                                   {"tiltX", infinity},
+                                                   {"tiltY", nan},
+                                                   {"twist", infinity}}) {
+    auto invalid = pen;
+    invalid[field] = value;
+    CHECK(!ParsePen(invalid));
+    CHECK(!DataRouter::Classify(
+        {{"type", "input"}, {"event", {{"type", "mouse"}, {"pen", invalid}}}}));
+  }
+  CHECK(!ParsePen(nullptr));
+  CHECK(DataRouter::Classify({{"type", "input"}, {"event", {{"type", "mouse"}, {"pen", pen}}}}));
+  mouse.pen->pressure = nan;
+  CHECK(!ValidateInput(mouse));
+
+  TouchInput touch{TouchInput::Action::move, {{1, 10, 20, 0.5, 0, 1000}}};
+  touch.clock = TouchInput::Clock{"1", false, 10, 0};
+  touch.samples = {{5, touch.points}};
+  CHECK(ValidateInput(touch));
+  for (const auto size : {-1.0, 1000.1, nan, infinity}) {
+    touch.points[0].width = size;
+    CHECK(!ValidateInput(touch));
+    touch.points[0].width = 0;
+    touch.samples[0].points[0].height = size;
+    CHECK(!ValidateInput(touch));
+    touch.samples[0].points[0].height = 1000;
+  }
+  for (const auto& size :
+       {Json(-1), Json(1000.1), Json(nan), Json(infinity), Json("10"), Json(nullptr)}) {
+    for (const auto* field : {"width", "height"}) {
+      Json event = {{"type", "touch"},
+                    {"gestureMode", "client-v1"},
+                    {"points", {{{"id", 1}, {field, size}}}}};
+      CHECK(!ValidateInputFidelity(event));
+      CHECK(!DataRouter::Classify({{"type", "input"}, {"event", event}}));
+      event["samples"] = {{{"points", event["points"]}}};
+      event["points"][0].erase(field);
+      CHECK(!ValidateInputFidelity(event));
+    }
+  }
+  CHECK(ValidateInputFidelity({{"type", "touch"}, {"points", {{{"width", 0}, {"height", 1000}}}}}));
+
+  Json layout = {
+      {"type", "keyboard.layout"},
+      {"entries", Json::array({Json::array({"KeyA", "q"}), Json::array({"KeyE", "😀😀"})})}};
+  CHECK(ParseKeyboardLayout(layout));
+  CHECK(ParseKeyboardLayout(layout).value().entries[1].second.size() == 4);
+  CHECK(DataRouter::Classify(layout).value() == DataRouter::Kind::kInput);
+  for (const auto& entry :
+       {Json::array(), Json::array({"KeyA"}), Json::array({"KeyA", "a", "b"}),
+        Json::array({1, "a"}), Json::array({"KeyA", 1}), Json::array({"", "a"}),
+        Json::array({"Bad-Code", "a"}), Json::array({std::string(33, 'A'), "a"}),
+        Json::array({"KeyA", ""}), Json::array({"KeyA", "abcde"}), Json::array({"KeyA", "😀😀a"}),
+        Json::array({"KeyA", std::string("\xff")})}) {
+    layout["entries"] = Json::array({entry});
+    CHECK(!ParseKeyboardLayout(layout));
+    CHECK(!DataRouter::Classify(layout));
+  }
+  layout["entries"] = Json::array();
+  CHECK(ParseKeyboardLayout(layout));
+  for (int index = 0; index < 256; ++index)
+    layout["entries"].push_back({"Key" + std::to_string(index), "a"});
+  CHECK(ParseKeyboardLayout(layout));
+  layout["entries"].push_back({"KeyExtra", "a"});
+  CHECK(!ParseKeyboardLayout(layout));
+  CHECK(!ParseKeyboardLayout({{"entries", nullptr}}));
+}
+
+void InputFidelityForwarding() {
+  std::mutex mutex;
+  std::condition_variable wake;
+  std::vector<Json> dispatched;
+  std::atomic<uint64_t> input_stamp{0};
+  InputController controller(
+      "tenant-session",
+      {.control = [] { return 3; },
+       .input_stamp = [&] { return input_stamp.load(); },
+       .epoch = [] { return 5; },
+       .admitted = [](const auto&) { return true; },
+       .admission = [] { return AuthorizationController::AdmissionToken{1, 2, 1}; },
+       .revalidate = [](const auto&) { return true; },
+       .allows = [](const auto&, uint64_t) { return true; },
+       .rpc = [&](Json request, uint64_t control, uint32_t, bool,
+                  const std::function<bool()>& admitted) -> Result<Json> {
+         CHECK(control == 3 && admitted());
+         CHECK(request["method"] == "input" && request["session"] == "tenant-session");
+         std::lock_guard lock(mutex);
+         dispatched.push_back(request);
+         wake.notify_all();
+         return Json{{"ok", true}};
+       },
+       .send = [](const Json&, uint64_t) {},
+       .failed = [] { CHECK(false); },
+       .trace = [] { return std::shared_ptr<media::ServerTrace>(); }});
+  controller.Start(1);
+  const Json layout = {{"type", "keyboard.layout"},
+                       {"entries", Json::array({Json::array({"KeyA", "q"})})},
+                       {"authEpoch", 1}};
+  const Json pen = {{"type", "mouse"},
+                    {"action", "down"},
+                    {"x", 10},
+                    {"y", 20},
+                    {"button", 1},
+                    {"modifiers", (1 << 9) | (1 << 10)},
+                    {"click_count", 1},
+                    {"pen",
+                     {{"id", 7},
+                      {"pressure", 0.5},
+                      {"tiltX", -20},
+                      {"tiltY", 30},
+                      {"twist", 90},
+                      {"eraser", true}}}};
+  const Json point = {{"id", 1},         {"x", 10},     {"y", 20},
+                      {"pressure", 0.5}, {"width", 18}, {"height", 20}};
+  auto history_point = point;
+  history_point["width"] = 16;
+  history_point["height"] = 18;
+  const Json sample = {{"sampleElapsedUs", 5}, {"points", Json::array({history_point})}};
+  const Json touch = {{"type", "touch"},
+                      {"action", "move"},
+                      {"gestureMode", "client-v1"},
+                      {"points", Json::array({point})},
+                      {"samples", Json::array({sample})}};
+  uint64_t sequence = 0;
+  for (const auto& message : {layout, pen, touch}) {
+    RtcEvent event{};
+    event.peer = 1;
+    event.authorization = 2;
+    event.message = message == layout ? message
+                                      : Json{{"type", "input"},
+                                             {"session", "tenant-session"},
+                                             {"view", "2"},
+                                             {"layoutEpoch", "5"},
+                                             {"sequence", std::to_string(++sequence)},
+                                             {"event", message}};
+    CHECK(DataRouter::Classify(event.message));
+    controller.QueueInput(event);
+    if (message == layout) {
+      std::unique_lock lock(mutex);
+      CHECK(wake.wait_for(lock, std::chrono::seconds(5), [&] { return dispatched.size() == 1; }));
+      input_stamp = 2;
+    }
+  }
+  {
+    std::unique_lock lock(mutex);
+    CHECK(wake.wait_for(lock, std::chrono::seconds(5), [&] { return dispatched.size() == 3; }));
+  }
+  controller.Stop();
+  CHECK(dispatched[0] ==
+        Json({{"method", "input"},
+              {"session", "tenant-session"},
+              {"event", {{"type", "keyboard.layout"}, {"entries", layout["entries"]}}}}));
+  CHECK(dispatched[1]["event"] == pen && dispatched[2]["event"] == touch);
+  CHECK(dispatched[1]["sequence"] == "1" && dispatched[2]["sequence"] == "2");
+}
+
+int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--input-validation") {
+    InputFidelityValidation();
+    InputFidelityForwarding();
+    OrderedTouchInput();
+    return 0;
+  }
+  InputFidelityValidation();
+  InputFidelityForwarding();
   ClipboardSynchronization();
   RouterClassificationAndAdmission();
   OutboxPriorityAndEpoch();

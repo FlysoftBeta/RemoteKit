@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { DownloadOutlined } from '@mui/icons-material';
+import { sourceIcon } from '../client/files/files-organization';
 import type { LibraryEntry, LibrarySnapshot } from '../shared/file-library';
 import { filesInView, readFilesState, removalCounts, sourceAppName } from '../client/files/files-app-state';
 
@@ -87,6 +89,8 @@ test('partition and source removal counts honor the remaining references', () =>
 });
 
 test('source names use installed app names and retain the app ID fallback', () => {
+  assert.equal(sourceAppName('download'), '下载');
+  assert.equal(sourceIcon({ source: { app: 'download', channel: 'example.com' } }).type, DownloadOutlined);
   assert.equal(sourceAppName('browser'), '浏览器');
   assert.equal(sourceAppName('web:docs', [{ id: 'docs', name: '文档' }]), '文档');
   assert.equal(sourceAppName('web:missing'), 'web:missing');

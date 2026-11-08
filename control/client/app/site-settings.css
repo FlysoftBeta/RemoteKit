@@ -1,0 +1,33 @@
+.site-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.site-settings-row > .MuiTypography-root {
+  flex: 1;
+}
+.site-settings-row > svg {
+  flex-shrink: 0;
+}
+.site-settings-row .MuiSelect-select {
+  min-width: 56px;
+}
+.site-settings-body > .setting-section:first-of-type {
+  padding-top: 0;
+}
+.site-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 16px;
+}
+.site-settings-entry.site-row {
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+}
+.site-settings-entry .site-row-options {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}

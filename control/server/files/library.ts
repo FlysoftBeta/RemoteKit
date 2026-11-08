@@ -11,6 +11,7 @@ import type {
   SelectionState,
 } from '../../shared/file-library';
 import type { EndpointGateway } from '../endpoint/gateway';
+import type { DownloadEvent } from '../endpoint/types';
 import { LibraryRepository, sameSource, sourceExcluded, type Selection } from '../persistence/library';
 import { KeyedSerialQueue } from '../util/serial-queue';
 import { type FileLimits, type InternalFileRequest } from '../workspace/page-requests';
@@ -46,9 +47,20 @@ function librarySource(value: unknown): LibrarySource {
   if (typeof app !== 'string' || typeof channel !== 'string') throw invalid('Invalid source');
   if (app === 'files' && (channel === 'upload' || channel === 'camera')) return { app, channel };
   if (/^web:[a-zA-Z0-9_-]{1,128}$/.test(app) && channel === '') return { app, channel };
-  if (app === 'browser' && channel.length > 0 && channel.length <= 253) {
+  if (app === 'download' && channel === '') return { app, channel };
+  if (
+    (app === 'browser' || app === 'download') &&
+    channel.length > 0 &&
+    channel.length <= (app === 'download' ? 259 : 253)
+  ) {
     try {
-      if (new URL('https://' + channel).hostname === channel) return { app, channel };
+      const url = new URL('https://' + channel);
+      if (
+        app === 'download'
+          ? url.host === channel || `${url.hostname}:443` === channel
+          : url.hostname === channel
+      )
+        return { app, channel };
     } catch {}
   }
   throw invalid('Invalid source');
@@ -138,6 +150,73 @@ export class FileLibrary {
     private readonly objects: Pick<ObjectIndex, 'require'>,
     private readonly fileSourceForRequest: (tenant: string, requestId: string) => LibrarySource | null,
   ) {}
+  consumeDownload(tenant: string, event: DownloadEvent) {
+    return this.queues.run(tenant, async () => {
+      const operationId = operationHash('download', event.eventId);
+      const payload = operationHash(
+        event.type,
+        event.eventId,
+        event.name,
+        event.origin,
+        event.type === 'download.imported' ? [event.assetId, event.mimeType, event.size] : event.reason,
+      );
+      if (this.repository.operation(tenant, operationId, payload)) return;
+      if (event.type === 'download.failed') {
+        console.warn('Page download failed', {
+          tenant,
+          name: event.name,
+          origin: event.origin,
+          reason: event.reason,
+        });
+        this.repository.change(tenant, operationId, payload, () => {});
+        return;
+      }
+      const assetId = id(event.assetId),
+        name = fileName(event.name);
+      const size = Number(event.size);
+      if (
+        typeof event.size !== 'string' ||
+        !/^(0|[1-9][0-9]*)$/.test(event.size) ||
+        !Number.isSafeInteger(size) ||
+        size > this.limits.maxFileBytes
+      )
+        throw invalid('Invalid download size');
+      if (
+        typeof event.mimeType !== 'string' ||
+        Buffer.byteLength(event.mimeType) > 255 ||
+        /[\x00-\x1f\x7f]/.test(event.mimeType)
+      )
+        throw invalid('Invalid download type');
+      let channel = '';
+      if (event.origin && event.origin !== 'null') {
+        try {
+          channel = new URL(event.origin).host;
+        } catch {
+          throw invalid('Invalid download origin');
+        }
+      }
+      const source = { app: 'download', channel };
+      this.repository.change(tenant, operationId, payload, (snapshot) => {
+        if (sourceExcluded(snapshot, source)) return;
+        if (snapshot.entries.length >= MAX_CATALOG) {
+          console.warn('Page download omitted: file catalog full', { tenant, assetId, name });
+          return;
+        }
+        this.objects.require(tenant, assetId);
+        snapshot.entries.unshift({
+          id: randomUUID(),
+          assetId,
+          name,
+          type: event.mimeType,
+          size,
+          createdAt: Date.now(),
+          source,
+          partitionId: null,
+          collected: true,
+        });
+      });
+    });
+  }
   entryExists(tenant: string, entryId: string): boolean {
     return this.repository.snapshot(tenant).entries.some((entry) => entry.id === entryId);
   }

@@ -26,10 +26,13 @@ class BrowserContext final : public content::BrowserContext {
       const base::FilePath&) override;
   content::ClientHintsControllerDelegate* GetClientHintsControllerDelegate() override;
   content::DownloadManagerDelegate* GetDownloadManagerDelegate() override;
-  base::DictValue PermissionsCommand(const base::DictValue&);
   base::DictValue DownloadsCommand(const base::DictValue&);
+  void RemoveDownload(const std::string& guid, base::OnceCallback<void(base::DictValue)>);
+  void AcknowledgeDownloadEvents(const base::ListValue&);
   bool SetSitePreferences(const base::DictValue&, std::string* error);
   bool TabletUaFor(const GURL&) const;
+  const base::DictValue& site_preferences() const { return site_preferences_; }
+  GURL TranslateProtocolUrl(const GURL&) const;
   void ConfigureNetworkContext(bool in_memory,
                                const base::FilePath& relative_partition_path,
                                network::mojom::NetworkContextParams* params);
@@ -65,6 +68,6 @@ class BrowserContext final : public content::BrowserContext {
   std::unique_ptr<ProfilePermissions> permissions_;
   std::unique_ptr<ProfileDownloads> downloads_;
   std::unique_ptr<ProfileNetworkState> network_state_;
-  std::map<std::string, bool> site_preferences_;
+  base::DictValue site_preferences_;
 };
 }  // namespace remotekit::browser

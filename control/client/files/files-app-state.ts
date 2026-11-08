@@ -30,7 +30,7 @@ export function readFilesState(value: unknown): FilesState {
           view.source &&
           identifier(view.source.app) &&
           typeof view.source.channel === 'string' &&
-          view.source.channel.length <= 253)));
+          view.source.channel.length <= (view.source.app === 'download' ? 259 : 253))));
   if (
     !validView ||
     typeof state.query !== 'string' ||
@@ -54,6 +54,7 @@ export const sameSource = (a: LibrarySource | null, b: LibrarySource) =>
   a?.app === b.app && a.channel === b.channel;
 export const sourceKey = (source: LibrarySource) => JSON.stringify([source.app, source.channel]);
 export function sourceAppName(app: string, apps: readonly { id: string; name: string }[] = []) {
+  if (app === 'download') return '下载';
   if (app === 'browser') return '浏览器';
   if (app === 'files') return '我的文件';
   return apps.find((item) => `web:${item.id}` === app)?.name ?? app;

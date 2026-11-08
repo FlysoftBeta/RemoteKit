@@ -49,6 +49,30 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
     HandleAppInfo(decoded.value, std::move(reply));
     return;
   }
+  const auto* profile_command = request.FindDict("command");
+  if (*name == "profile.downloads" && profile_command && profile_command->FindString("action") &&
+      *profile_command->FindString("action") == "remove") {
+    auto decoded = DecodeProfileCommand(request, {id, *name});
+    if (!decoded) {
+      std::move(reply).Run(
+          ControlResult::Failure(id, decoded.status.error, decoded.status.message));
+      return;
+    }
+    const auto* guid = profile_command->FindString("guid");
+    if (decoded.value.session != runtime_.session_id || !guid || guid->empty() ||
+        guid->size() > 128) {
+      std::move(reply).Run(ControlResult::Failure(id, ErrorCode::invalid_request,
+                                                  "Session and download GUID required"));
+      return;
+    }
+    runtime_.contexts.front()->RemoveDownload(
+        *guid, base::BindOnce(
+                   [](int id, Reply reply, base::DictValue result) {
+                     std::move(reply).Run(ControlResult::FromFields(id, std::move(result)));
+                   },
+                   id, std::move(reply)));
+    return;
+  }
   struct Method {
     std::string_view name;
     base::DictValue (*handler)(ControlDispatcher&, const base::DictValue&, RequestEnvelope);
@@ -94,8 +118,6 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
        &Invoke<RecreateViewRequest, DecodeRecreateView, &ControlDispatcher::HandleRecreateView>},
       {"view.configure",
        &Invoke<ConfigureViewRequest, DecodeConfigureView, &ControlDispatcher::HandleConfigureView>},
-      {"profile.permissions", &Invoke<ProfileCommandRequest, DecodeProfileCommand,
-                                      &ControlDispatcher::HandleProfileCommand>},
       {"profile.downloads", &Invoke<ProfileCommandRequest, DecodeProfileCommand,
                                     &ControlDispatcher::HandleProfileCommand>},
       {"page.contextMenu",

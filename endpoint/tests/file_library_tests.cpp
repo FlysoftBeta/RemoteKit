@@ -68,6 +68,8 @@ class Control final : public remotekit::ManagementLink {
     return remotekit::Json{{"sources", sources}};
   }
 };
+#include "download_imports_tests.hpp"
+
 int main(int argc, char** argv) {
   CHECK(argc == 2);
   const auto root = fs::path(argv[1]) /
@@ -262,6 +264,7 @@ int main(int argc, char** argv) {
   }
   CHECK(!fs::exists(session / "references.json") && !fs::exists(session / "payload") &&
         !fs::exists(session / "assets"));
+  DownloadImportTests(root, objects, control, keys);
   fs::remove_all(root);
   return 0;
 }

@@ -1,5 +1,6 @@
 #pragma once
 #include "browser/webview.h"
+#include "content/public/browser/weak_document_ptr.h"
 
 namespace remotekit::browser {
 class NavigationCoordinator {
@@ -34,6 +35,14 @@ class NavigationCoordinator {
   void NavigationListPruned(const content::PrunedDetails&);
 
  private:
+  base::WeakPtr<content::NavigationHandle> PendingReloadNavigation() const;
+  void FinishNavigationCollection(NavigationOperations::Record*,
+                                  const std::vector<base::WeakPtr<content::NavigationHandle>>&,
+                                  bool no_navigation = false,
+                                  bool cancelled_during_start = false);
+  void ReplyToRepost(content::WeakDocumentPtr,
+                     std::optional<NavigationOperations::Identity>,
+                     bool accept);
   friend class WebView;
   friend class WebViewExecution;
   friend class DeviceConfiguration;

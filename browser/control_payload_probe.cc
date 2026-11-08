@@ -96,6 +96,55 @@ void ControlContract() {
   CHECK(DecodeControlInput(wire, 1, 1));
   wire.FindDict("event")->Remove("x");
   CHECK(!DecodeControlInput(wire, 1, 1));
+
+  wire.Set("event", base::DictValue()
+                        .Set("type", "mouse")
+                        .Set("action", "down")
+                        .Set("x", 10)
+                        .Set("y", 20)
+                        .Set("button", 1)
+                        .Set("pen", base::DictValue()
+                                        .Set("id", 4294967295.0)
+                                        .Set("pressure", 0.6)
+                                        .Set("tiltX", 20)
+                                        .Set("tiltY", -30)
+                                        .Set("twist", 90)
+                                        .Set("eraser", true)));
+  const auto pen_input = DecodeControlInput(wire, 1, 1);
+  CHECK(pen_input);
+  const auto& pen = std::get<MouseInput>(pen_input.value.payload).pen;
+  CHECK(pen && pen->id == UINT32_MAX && pen->pressure == 0.6 && pen->tilt_x == 20 &&
+        pen->tilt_y == -30 && pen->twist == 90 && pen->eraser);
+  wire.FindDict("event")->FindDict("pen")->Set("pressure", 2);
+  CHECK(!DecodeControlInput(wire, 1, 1));
+
+  const auto contact = base::DictValue()
+                           .Set("id", 1)
+                           .Set("x", 10)
+                           .Set("y", 20)
+                           .Set("pressure", 0.5)
+                           .Set("width", 18)
+                           .Set("height", 24);
+  wire.Set("event",
+           base::DictValue()
+               .Set("type", "touch")
+               .Set("action", "move")
+               .Set("gestureMode", "client-v1")
+               .Set("gestures", base::ListValue())
+               .Set("clockMode", "arrival-fallback")
+               .Set("sequenceId", "touch-1")
+               .Set("sampleElapsedUs", 100)
+               .Set("points", base::ListValue().Append(contact.Clone()))
+               .Set("samples", base::ListValue().Append(
+                                   base::DictValue()
+                                       .Set("sampleElapsedUs", 50)
+                                       .Set("points", base::ListValue().Append(contact.Clone())))));
+  const auto touch_input = DecodeControlInput(wire, 1, 1);
+  CHECK(touch_input);
+  const auto& decoded_touch = std::get<TouchInput>(touch_input.value.payload);
+  CHECK(decoded_touch.points[0].width == 18 && decoded_touch.points[0].height == 24);
+  CHECK(decoded_touch.samples[0].points[0].width == 18 &&
+        decoded_touch.samples[0].points[0].height == 24);
 }
 void Responses() {
   base::DictValue request;

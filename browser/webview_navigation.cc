@@ -1,4 +1,5 @@
 #include "browser/webview_navigation.h"
+#include "browser/page_requests.h"
 #include "browser/webview_internal.h"
 #include "browser/webview_execution.h"
 #include "browser/device_configuration.h"
@@ -172,11 +173,6 @@ Status NavigationCoordinator::RunNavigation(
     invalid = "no_back_entry";
   if (action == "forward" && !controller.CanGoForward())
     invalid = "no_forward_entry";
-  // A repost prompt has no product reply protocol. Do not guess a navigation
-  // identity or silently replay POST data as a GET.
-  if (action == "reload" && controller.GetLastCommittedEntry() &&
-      controller.GetLastCommittedEntry()->GetHasPostData())
-    invalid = "reload_post_confirmation_unsupported";
   if (invalid) {
     if (operation)
       navigation_operations_.Finish(*operation, "failed", invalid);
@@ -203,6 +199,7 @@ Status NavigationCoordinator::RunNavigation(
   std::vector<base::WeakPtr<content::NavigationHandle>> handles;
   bool no_navigation = false;
   bool cancelled_during_start = false;
+  bool waiting_for_repost = false;
   if (action == "navigate") {
     content::NavigationController::LoadURLParams params(url);
     params.override_user_agent = content::NavigationController::UA_OVERRIDE_FALSE;
@@ -219,17 +216,61 @@ Status NavigationCoordinator::RunNavigation(
   } else if (action == "forward") {
     handles = controller.GoForward();
   } else {
+    auto* requests = PageRequests::ForContents(owner_.contents());
+    if (requests)
+      requests->SetRepostHandler(
+          base::BindOnce(&NavigationCoordinator::ReplyToRepost, weak_factory_.GetWeakPtr(),
+                         owner_.contents()->GetPrimaryMainFrame()->GetWeakDocumentPtr(), identity));
     controller.Reload(content::ReloadType::NORMAL, true);
-    // Reload's public API returns void. Read the actual request created by
-    // that call, including a request waiting for beforeunload, rather than
-    // assigning the next unrelated DidStartNavigation to this operation.
-    auto* reload_request = static_cast<content::WebContentsImpl*>(owner_.contents())
-                               ->GetPrimaryFrameTree()
-                               .root()
-                               ->navigation_request();
-    if (reload_request && reload_request->GetReloadType() != content::ReloadType::NONE)
-      handles.push_back(reload_request->GetWeakPtr());
+    if (requests) {
+      waiting_for_repost = requests->HasPendingRepost();
+      requests->SetRepostHandler({});
+    }
+    if (auto handle = PendingReloadNavigation())
+      handles.push_back(handle);
   }
+  if (waiting_for_repost) {
+    issuing_navigation_.reset();
+    return {};
+  }
+  FinishNavigationCollection(operation, handles, no_navigation, cancelled_during_start);
+  return {};
+}
+base::WeakPtr<content::NavigationHandle> NavigationCoordinator::PendingReloadNavigation() const {
+  auto* request = static_cast<content::WebContentsImpl*>(owner_.contents())
+                      ->GetPrimaryFrameTree()
+                      .root()
+                      ->navigation_request();
+  if (request && request->GetReloadType() != content::ReloadType::NONE)
+    return request->GetWeakPtr();
+  return {};
+}
+void NavigationCoordinator::ReplyToRepost(content::WeakDocumentPtr document,
+                                          std::optional<NavigationOperations::Identity> identity,
+                                          bool accept) {
+  auto* operation = identity ? navigation_operations_.Find(*identity) : nullptr;
+  auto* contents = owner_.contents();
+  if (!contents)
+    return;
+  if (!accept || document.AsRenderFrameHostIfValid() != contents->GetPrimaryMainFrame() ||
+      (identity && (!operation || operation->terminal()))) {
+    contents->GetController().CancelPendingReload();
+    if (operation)
+      navigation_operations_.Finish(*operation, "cancelled", "repost_cancelled");
+    return;
+  }
+  issuing_navigation_ = identity;
+  contents->GetController().ContinuePendingReload();
+  std::vector<base::WeakPtr<content::NavigationHandle>> handles;
+  if (auto handle = PendingReloadNavigation())
+    handles.push_back(handle);
+  FinishNavigationCollection(operation, handles);
+}
+void NavigationCoordinator::FinishNavigationCollection(
+    NavigationOperations::Record* operation,
+    const std::vector<base::WeakPtr<content::NavigationHandle>>& handles,
+    bool no_navigation,
+    bool cancelled_during_start) {
   for (const auto& handle : handles) {
     if (!handle)
       continue;
@@ -248,7 +289,6 @@ Status NavigationCoordinator::RunNavigation(
   if (!navigation_handles_.empty() && !navigation_operation_timer_.IsRunning())
     navigation_operation_timer_.Start(FROM_HERE, base::Milliseconds(50), this,
                                       &NavigationCoordinator::PollNavigationOperations);
-  return {};
 }
 void NavigationCoordinator::BindNavigation(content::NavigationHandle* navigation, bool started) {
   auto* record = navigation_operations_.ByNavigation(navigation->GetNavigationId());

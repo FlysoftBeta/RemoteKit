@@ -514,6 +514,8 @@ Status TouchController::InjectTouches(const TouchInput& touch) {
       p.SetPositionInScreen(
           ViewportToScreen(owner_.input_->pointer_root_view_.get(), p.PositionInWidget()));
       p.force = static_cast<float>(point.pressure);
+      p.radius_x = static_cast<float>(point.width / 2);
+      p.radius_y = static_cast<float>(point.height / 2);
       using State = blink::WebTouchPoint::State;
       p.state = type == Type::kTouchCancel  ? State::kStateCancelled
                 : changed != id             ? State::kStateStationary

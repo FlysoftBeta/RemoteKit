@@ -31,8 +31,10 @@ import type {
   LogWindowRequest,
   OperationIdentity,
   PageIdentity,
+  PageReplyRequest,
   PrepareSelection,
   RtcSignal,
+  SessionSitePreferencesRequest,
   ViewConfiguration,
   ViewAppInfo,
 } from './types';
@@ -284,10 +286,7 @@ export class EndpointGateway {
   ): Promise<Accepted> {
     return this.invoke<Accepted>('view.close.reply', tenant, args);
   }
-  async replyPage(
-    tenant: string,
-    args: PageIdentity & { requestId: string; accept: boolean; text?: string },
-  ): Promise<Accepted> {
+  async replyPage(tenant: string, args: PageReplyRequest): Promise<Accepted> {
     return this.invoke<Accepted>('view.page.reply', tenant, args);
   }
   async exitFullscreen(tenant: string, args: PageIdentity): Promise<Accepted> {
@@ -308,10 +307,7 @@ export class EndpointGateway {
   async mediaPolicy(tenant: string, args: MediaPolicy): Promise<Accepted> {
     return this.invoke<Accepted>('session.mediaPolicy', tenant, args);
   }
-  async sitePreferences(
-    tenant: string,
-    args: { sites: Record<string, { tabletUa: boolean }> },
-  ): Promise<Accepted> {
+  async sitePreferences(tenant: string, args: SessionSitePreferencesRequest): Promise<Accepted> {
     return this.invoke<Accepted>('session.sitePreferences', tenant, args);
   }
   async authorizeFiles(tenant: string, args: FileAuthorization): Promise<Accepted> {

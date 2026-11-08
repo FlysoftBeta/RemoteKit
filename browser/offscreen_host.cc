@@ -29,6 +29,11 @@
 
 namespace remotekit::browser {
 namespace {
+base::flat_map<std::string, std::string>& SessionKeyboardLayout() {
+  static base::NoDestructor<base::flat_map<std::string, std::string>> layout;
+  return *layout;
+}
+
 // UI-sequence service display metrics; never inherit a monitor/RDP DPI.
 std::map<aura::Window*, float>& OutputScales() {
   static base::NoDestructor<std::map<aura::Window*, float>> scales;
@@ -421,7 +426,10 @@ bool OffscreenHost::IsKeyLocked(ui::DomCode) {
   return false;
 }
 base::flat_map<std::string, std::string> OffscreenHost::GetKeyboardLayoutMap() {
-  return {};
+  return SessionKeyboardLayout();
+}
+void OffscreenHost::SetKeyboardLayoutMap(base::flat_map<std::string, std::string> layout) {
+  SessionKeyboardLayout() = std::move(layout);
 }
 void OffscreenHost::SetCursorNative(gfx::NativeCursor) {}
 void OffscreenHost::MoveCursorToScreenLocationInPixels(const gfx::Point&) {}

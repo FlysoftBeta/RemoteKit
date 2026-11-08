@@ -2,6 +2,7 @@
 #include "protocol/atlas_plan.hpp"
 #include "protocol/atlas_dimensions.hpp"
 #include "session/context.hpp"
+#include "files/download_imports.hpp"
 namespace remotekit {
 class PeerController;
 class PresentationController;
@@ -24,7 +25,8 @@ class ViewController : private ControllerContext {
         output(output),
         registry(registry),
         navigation(navigation),
-        diagnostics(diagnostics) {}
+        diagnostics(diagnostics),
+        downloads(context.store) {}
   struct Geometry {
     int width = 16, height = 16;
     float scale = 1;
@@ -32,6 +34,19 @@ class ViewController : private ControllerContext {
   void SetStopRuntime(std::function<Result<void>()> stop) { stop_runtime = std::move(stop); }
   void SetBeforeViews(std::function<Result<void>()> callback) {
     before_views = std::move(callback);
+  }
+  void SetDownloadImport(DownloadImports::Import import) { downloads.SetImport(std::move(import)); }
+  size_t PendingDownloads() const {
+    return std::max(downloads.Pending(), size_t(download_reconciliation_failed));
+  }
+  Json Events() const {
+    auto events = durable_events;
+    for (const auto& event : downloads.Events()) {
+      if (events.size() >= 256)
+        break;
+      events.push_back(event);
+    }
+    return events;
   }
   Result<void> Initialize();
   void Reset();
@@ -85,6 +100,8 @@ class ViewController : private ControllerContext {
   EncoderRegistry& registry;
   NavigationRecovery& navigation;
   Diagnostics& diagnostics;
+  DownloadImports downloads;
+  bool download_reconciliation_failed = false;
   std::map<std::string, Json> desired;
   int atlas_width = 1920, atlas_height = 1080;
   float atlas_scale = 1;

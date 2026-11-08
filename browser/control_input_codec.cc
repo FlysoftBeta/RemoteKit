@@ -77,6 +77,20 @@ Result<InputPayload> DecodeKey(const base::DictValue* event) {
 
   return {std::move(payload), {}};
 }
+std::optional<TouchPoint> DecodeTouchPoint(const base::Value& value) {
+  const auto* point = value.GetIfDict();
+  if (!point)
+    return std::nullopt;
+  const auto id = point->FindInt("id");
+  const auto x = Number(*point, "x"), y = Number(*point, "y"),
+             pressure = Number(*point, "pressure"), width = Number(*point, "width"),
+             height = Number(*point, "height");
+  if (!id || *id < 0 || !x || !y || !pressure || (point->contains("width") && !width) ||
+      (point->contains("height") && !height))
+    return std::nullopt;
+  return TouchPoint{static_cast<uint32_t>(*id), *x, *y, *pressure, width.value_or(0),
+                    height.value_or(0)};
+}
 Result<InputPayload> DecodeTouch(const base::DictValue* event) {
   InputPayload payload;
 
@@ -161,28 +175,19 @@ Result<InputPayload> DecodeTouch(const base::DictValue* event) {
         return PayloadError("invalid_touch_sample");
       TouchInput::Sample value{static_cast<int64_t>(*elapsed), {}};
       for (const auto& point : *changed) {
-        const auto* point_dict = point.GetIfDict();
-        if (!point_dict)
+        auto decoded = DecodeTouchPoint(point);
+        if (!decoded)
           return PayloadError("invalid_touch_sample_point");
-        const auto contact_id = point_dict->FindInt("id");
-        const auto x = Number(*point_dict, "x"), y = Number(*point_dict, "y"),
-                   pressure = Number(*point_dict, "pressure");
-        if (!contact_id || *contact_id < 0 || !x || !y || !pressure)
-          return PayloadError("invalid_touch_sample_point");
-        value.points.push_back({static_cast<uint32_t>(*contact_id), *x, *y, *pressure});
+        value.points.push_back(*decoded);
       }
       touch.samples.push_back(std::move(value));
     }
   }
   for (const auto& point : *points) {
-    const auto* dict = point.GetIfDict();
-    if (!dict)
+    auto decoded = DecodeTouchPoint(point);
+    if (!decoded)
       return PayloadError("invalid_touch_point");
-    auto point_id = dict->FindInt("id");
-    auto x = Number(*dict, "x"), y = Number(*dict, "y"), pressure = Number(*dict, "pressure");
-    if (!point_id || *point_id < 0 || !x || !y || !pressure)
-      return PayloadError("invalid_touch_point");
-    touch.points.push_back({static_cast<uint32_t>(*point_id), *x, *y, *pressure});
+    touch.points.push_back(*decoded);
   }
   payload = std::move(touch);
 
@@ -225,8 +230,6 @@ Result<InputPayload> DecodeGesture(const base::DictValue* event) {
   return {std::move(payload), {}};
 }
 Result<InputPayload> DecodeMouse(const base::DictValue* event) {
-  InputPayload payload;
-
   const auto* action = event->FindString("action");
   const auto x = Number(*event, "x"), y = Number(*event, "y");
   const auto button = event->FindInt("button");
@@ -245,14 +248,28 @@ Result<InputPayload> DecodeMouse(const base::DictValue* event) {
     kind = MouseInput::Action::leave;
   else
     return PayloadError("invalid_mouse_action");
-  payload = MouseInput{kind,
-                       *x,
-                       *y,
-                       static_cast<uint8_t>(*button),
-                       static_cast<uint32_t>(event->FindInt("modifiers").value_or(0)),
-                       static_cast<uint8_t>(clicks)};
-
-  return {std::move(payload), {}};
+  MouseInput mouse{kind,
+                   *x,
+                   *y,
+                   static_cast<uint8_t>(*button),
+                   static_cast<uint32_t>(event->FindInt("modifiers").value_or(0)),
+                   static_cast<uint8_t>(clicks),
+                   std::nullopt};
+  if (event->contains("pen")) {
+    const auto* pen = event->FindDict("pen");
+    if (!pen)
+      return PayloadError("invalid_pen");
+    const auto id = Number(*pen, "id"), pressure = Number(*pen, "pressure"),
+               tilt_x = Number(*pen, "tiltX"), tilt_y = Number(*pen, "tiltY"),
+               twist = Number(*pen, "twist");
+    const auto eraser = pen->FindBool("eraser");
+    if (!id || *id < 0 || *id > UINT32_MAX || std::floor(*id) != *id || !pressure || !tilt_x ||
+        !tilt_y || !twist || !eraser)
+      return PayloadError("invalid_pen");
+    mouse.pen =
+        MouseInput::Pen{static_cast<uint32_t>(*id), *pressure, *tilt_x, *tilt_y, *twist, *eraser};
+  }
+  return {std::move(mouse), {}};
 }
 Result<InputPayload> DecodeWheel(const base::DictValue* event) {
   InputPayload payload;
