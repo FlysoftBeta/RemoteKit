@@ -1,4 +1,10 @@
-import type { LauncherItem, ProductAction, ProductWorkspace, WindowPlacement } from '../../shared/product';
+import {
+  isSingletonApp,
+  type LauncherItem,
+  type ProductAction,
+  type ProductWorkspace,
+  type WindowPlacement,
+} from '../../shared/product';
 
 export function launcherActions(
   workspace: ProductWorkspace,
@@ -17,7 +23,7 @@ export function launcherActions(
     .filter((win) => win.appId === (item.kind === 'page' ? 'browser' : appId))
     .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
   const url = item.kind === 'page' ? item.url : undefined;
-  if (existing && (reuseExisting || appId === 'settings')) {
+  if (existing && (reuseExisting || isSingletonApp(appId))) {
     if (item.kind === 'page') return [{ type: 'tab.create', windowId: existing.id, url, source: 'launcher' }];
     return [{ type: 'window.focus', windowId: existing.id, source: 'launcher' }];
   }

@@ -4,7 +4,7 @@ import { diagnostics } from '../media/diagnostics';
 import { Typography } from '@mui/material';
 import React, { useEffect, useRef } from 'react';
 import type { ProductState, ProductWindow } from '../../shared/product';
-import { SEARCH_ENGINES } from '../../shared/product';
+import { BUILTIN_APP_TITLES, SEARCH_ENGINES, isBuiltinApp, isLocalApp } from '../../shared/product';
 import { FilesApp } from '../files/files-app';
 import { WindowHandle } from './window-handle';
 import { useWindowState, type WorkspaceCall } from './window-state';
@@ -22,7 +22,7 @@ export function WindowFrame({
   transport,
   action,
   online,
-  settingsContent,
+  appContent,
   fileChooser,
   call,
   weight,
@@ -37,7 +37,11 @@ export function WindowFrame({
   action: Action;
   online: boolean;
   fileChooser?: React.ReactNode;
-  settingsContent: (viewState: Record<string, unknown>, onState: (state: unknown) => void) => React.ReactNode;
+  appContent: (
+    appId: 'settings' | 'admin',
+    viewState: Record<string, unknown>,
+    onState: (state: unknown) => void,
+  ) => React.ReactNode;
   call: WorkspaceCall;
   weight: number;
   report: (error: unknown) => void;
@@ -56,9 +60,10 @@ export function WindowFrame({
   const [viewState, onState] = useWindowState(win, call, report);
   const app = state.workspace.apps.find((app) => `web:${app.id}` === win.appId);
   const browser = win.appId === 'browser';
-  const local = win.appId === 'files' || win.appId === 'settings';
-  const title =
-    win.appId === 'files' ? '我的文件' : win.appId === 'settings' ? '设置' : (app?.name ?? '浏览器');
+  const local = isLocalApp(win.appId);
+  const title = isBuiltinApp(win.appId)
+    ? BUILTIN_APP_TITLES[win.appId]
+    : (app?.name ?? BUILTIN_APP_TITLES.browser);
   const creatingTab = win.id.startsWith('pending-') || !!win.activeTabId?.startsWith('pending-');
   const navigationReady = online && !creatingTab;
   const content = useRef<HTMLDivElement>(null);
@@ -132,7 +137,7 @@ export function WindowFrame({
                 }
               />
             ) : (
-              settingsContent(viewState, onState)
+              appContent(win.appId as 'settings' | 'admin', viewState, onState)
             )}
           </div>
         </>

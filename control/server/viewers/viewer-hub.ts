@@ -18,12 +18,13 @@ export class ViewerHub {
     const runtime = this.context.tenants.get(tenant);
     runtime.snapshotSequence = (runtime.snapshotSequence ?? 0) + 1;
     const workspace = this.context.store.workspaces.workspace(tenant);
+    const user = this.context.store.accounts.userForTenant(tenant);
     return {
       operationReceipts: this.context.store.operations.recentOperations(tenant),
       serverIncarnation: this.context.serverIncarnation,
       snapshotSequence: runtime.snapshotSequence!,
       operationGeneration: this.context.store.operations.operationGeneration(tenant),
-      user: this.context.store.accounts.userForTenant(tenant)!,
+      user: user!,
       workspace,
       pageFullscreen: this.services.pageRequests.fullscreenBinding(workspace)?.page,
       pageDialogs: (runtime.pageRequests.dialogs ?? []).map(
@@ -36,6 +37,7 @@ export class ViewerHub {
       viewer: {
         connected: runtime.viewer !== undefined,
       },
+      announcements: user ? this.context.store.announcements.forUser(user.id) : [],
       integrations: { siteUa: true, lifecycle: true, popupAdoption: true },
     };
   }

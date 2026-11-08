@@ -1,6 +1,7 @@
 import { focusWindow, replaceWindow, placeWindow, windowClosing } from '../../server/workspace/model';
 import { RemoteKitError } from '../../shared/errors';
 import {
+  isSingletonApp,
   placeTab,
   type OperationReceipt,
   type ProductAction,
@@ -55,7 +56,7 @@ export function projectOperations(
       continue;
     switch (a.type) {
       case 'window.open': {
-        const existing = a.appId === 'settings' && w.windows.find((win) => win.appId === 'settings');
+        const existing = isSingletonApp(a.appId) && w.windows.find((win) => win.appId === a.appId);
         if (existing) {
           focusWindow(w, existing.id);
           break;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { ViewerSession } from '../viewer-session';
 import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import { UnlockView } from '../auth/unlock-view';
@@ -13,6 +13,9 @@ import { useSystemControls } from './system-controls';
 import { WorkspaceSettings } from './workspace-settings';
 import { selectVisibility } from './visibility';
 import { WindowDragProvider } from './window-drag';
+
+// Only the administrator downloads the console App.
+const AdminApp = lazy(() => import('./admin/console').then((m) => ({ default: m.AdminApp })));
 
 export function WorkspaceView({ logout, expired }: { logout(): void; expired(): void }) {
   const [media] = useState(() => new ViewerSession());
@@ -34,7 +37,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
     showShell,
     floatingActions,
   });
-  const overlays = useWorkspaceOverlays(!!state?.user.isAdmin);
+  const overlays = useWorkspaceOverlays();
   const adminCall = useCallback<AdminCall>(
     (method, params) => media.control.request(method, params),
     [media],
@@ -80,7 +83,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
   if (!state) return <BlankScreen />;
   const pending = state.workspace.pendingClose;
   const foreground =
-    !overlays.launcherOpen && !overlays.admin && !(pending && !pending.awaiting)
+    !overlays.launcherOpen && !(pending && !pending.awaiting)
       ? selectVisibility(state, stage.width).foreground
       : null;
   return (
@@ -124,23 +127,33 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
             obscured={overlays.launcherOpen}
             foreground={foreground}
             openLauncher={overlays.openLauncher}
-            openAdmin={overlays.openAdmin}
             logout={logout}
-            settingsContent={(viewState, onState) => (
-              <WorkspaceSettings
-                state={state}
-                viewState={viewState}
-                onState={onState}
-                action={stage.action}
-                call={stage.call}
-                sessionImportCall={sessionImportCall}
-                controls={controls}
-                workspaceState={workspaceState}
-                auth={auth}
-                logout={logout}
-                openAdmin={overlays.openAdmin}
-              />
-            )}
+            appContent={(appId, viewState, onState) =>
+              appId === 'admin' ? (
+                <Suspense fallback={null}>
+                  <AdminApp
+                    online={controls.productReady}
+                    self={state.user.username}
+                    call={adminCall}
+                    viewState={viewState}
+                    onState={onState}
+                  />
+                </Suspense>
+              ) : (
+                <WorkspaceSettings
+                  state={state}
+                  viewState={viewState}
+                  onState={onState}
+                  action={stage.action}
+                  call={stage.call}
+                  sessionImportCall={sessionImportCall}
+                  controls={controls}
+                  workspaceState={workspaceState}
+                  auth={auth}
+                  logout={logout}
+                />
+              )
+            }
           >
             <OverlayHost
               state={state}
@@ -149,8 +162,7 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
               controls={controls}
               overlays={overlays}
               foreground={foreground}
-              adminCall={adminCall}
-              status={status}
+              readAnnouncement={(id) => media.control.request('announcement.read', { id })}
             />
           </Stage>
         </WindowDragProvider>

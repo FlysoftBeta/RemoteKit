@@ -25,7 +25,6 @@ export function WorkspaceSettings({
   workspaceState,
   auth,
   logout,
-  openAdmin,
 }: {
   state: ProductState;
   viewState: Record<string, unknown>;
@@ -40,7 +39,6 @@ export function WorkspaceSettings({
   workspaceState: WorkspaceSnapshot;
   auth: NonNullable<WorkspaceSnapshot['auth']>;
   logout(): void;
-  openAdmin(): void;
 }) {
   const { status } = workspaceState;
   const { authRequest, camera, idle, lock, diagnosticState, diagnostics, productReady } = controls;
@@ -54,7 +52,6 @@ export function WorkspaceSettings({
       call={call}
       online={productReady}
       logout={logout}
-      admin={() => openAdmin()}
       security={
         <SecuritySettings
           auth={auth}

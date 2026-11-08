@@ -29,6 +29,7 @@ const startTab: ProductTab = {
 function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
   return {
     user: { id: 'user-id', username: 'viewer', isAdmin: false },
+    announcements: [],
     workspace: {
       ...emptyWorkspace('tenant-id'),
       windows: win ? [win] : [],
@@ -82,7 +83,7 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
       online,
       action: unexpected,
       report: unexpected,
-      settingsContent: () => null,
+      appContent: () => null,
       call: unexpected,
       weight: 1,
       onGeometry: unexpected,

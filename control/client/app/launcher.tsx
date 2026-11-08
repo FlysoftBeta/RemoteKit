@@ -22,7 +22,12 @@ import {
   Typography,
 } from '@mui/material';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import type { LauncherItem, ProductState, WindowPlacement } from '../../shared/product';
+import {
+  isSingletonApp,
+  type LauncherItem,
+  type ProductState,
+  type WindowPlacement,
+} from '../../shared/product';
 import { fileTypeColor, FileThumbnail, FileTypeIcon } from '../files/file-thumbnail';
 import { useLibrary } from '../files/file-library-state';
 import { launcherLayout, contrastColor, originColor, type LauncherTile } from './launcher-layout';
@@ -153,7 +158,9 @@ export function Launcher({
   };
   const checkCapacity = (item?: LauncherItem, reuseExisting = false) => {
     const singleton =
-      item?.appId === 'settings' && state.workspace.windows.some((win) => win.appId === 'settings');
+      !!item?.appId &&
+      isSingletonApp(item.appId) &&
+      state.workspace.windows.some((win) => win.appId === item.appId);
     const reuse =
       reuseExisting &&
       state.workspace.windows.some((win) => win.appId === (item?.kind === 'file' ? 'files' : 'browser'));
@@ -275,7 +282,9 @@ export function Launcher({
                             ? '#b77713'
                             : tile.appId === 'settings'
                               ? '#475569'
-                              : (tile.themeColor ?? originColor(tile.url ?? tile.key)),
+                              : tile.appId === 'admin'
+                                ? '#7c3aed'
+                                : (tile.themeColor ?? originColor(tile.url ?? tile.key)),
                     );
                     return (
                       <LauncherTileView

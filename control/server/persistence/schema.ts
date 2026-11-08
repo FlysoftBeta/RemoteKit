@@ -4,8 +4,9 @@ import { migrateLibrarySnapshots } from './library';
 import { normalizedUsagePage } from '../navigation-url';
 import { cleanUrl } from '../url-clean';
 import type { Favorite } from '../../shared/product';
+import { createAnnouncementTables } from './announcements';
 
-const version = 8;
+const version = 9;
 
 function createWorkspaceItems(db: Database.Database) {
   db.exec(`CREATE TABLE installed_apps (
@@ -35,6 +36,7 @@ function tableExists(db: Database.Database, name: string) {
 
 // Each entry upgrades a database written at that version to the next one.
 const migrations: Record<number, (db: Database.Database) => void> = {
+  8: createAnnouncementTables,
   7: (db) => {
     const events = db.prepare("SELECT id,item FROM usage_events WHERE item LIKE 'page:%'").all() as {
       id: bigint;
@@ -288,6 +290,7 @@ export function createSchema(db: Database.Database) {
       CREATE INDEX session_imports_retention ON session_imports(finished_at) WHERE state!='pending';`);
     createWorkspaceItems(db);
     createPagePreviews(db);
+    createAnnouncementTables(db);
     writeVersion(db);
   })();
 }

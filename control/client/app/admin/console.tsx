@@ -1,86 +1,73 @@
 import './console.css';
 import BugReportOutlined from '@mui/icons-material/BugReportOutlined';
-import Close from '@mui/icons-material/Close';
+import CampaignOutlined from '@mui/icons-material/CampaignOutlined';
 import DashboardOutlined from '@mui/icons-material/DashboardOutlined';
 import DnsOutlined from '@mui/icons-material/DnsOutlined';
 import PeopleOutline from '@mui/icons-material/PeopleOutline';
 import StorageOutlined from '@mui/icons-material/StorageOutlined';
-import {
-  Alert,
-  Box,
-  Dialog,
-  IconButton,
-  List,
-  ListItemButton,
-  ListItemIcon,
-  ListItemText,
-  Tab,
-  Tabs,
-  Typography,
-} from '@mui/material';
-import { useState, type ReactElement } from 'react';
+import { Alert, Box, List, ListItemButton, ListItemIcon, ListItemText, Tab, Tabs } from '@mui/material';
+import { useEffect, useRef, useState, type ReactElement } from 'react';
+import { AdminAnnouncementsSection } from './announcements';
 import { AdminDiagnosticsSection } from './diagnostics';
 import { AdminNodesSection } from './nodes';
 import { AdminOverviewSection } from './overview';
 import type { AdminCall } from './shared';
 import { AdminStorageSection } from './storage';
 import { AdminUsersSection } from './users';
-import { useLayoutNarrow } from '../ui-scale';
 
 const sections = [
   { key: 'overview', label: '概览', icon: <DashboardOutlined /> },
   { key: 'users', label: '用户', icon: <PeopleOutline /> },
+  { key: 'announcements', label: '公告', icon: <CampaignOutlined /> },
   { key: 'nodes', label: '节点', icon: <DnsOutlined /> },
   { key: 'storage', label: '存储', icon: <StorageOutlined /> },
   { key: 'diagnostics', label: '诊断', icon: <BugReportOutlined /> },
 ] as const;
 type Section = (typeof sections)[number]['key'];
 
-export function AdminConsole({
-  open,
+/** The administrator's console, shown as the built-in `admin` App inside a Window. */
+export function AdminApp({
   online,
   self,
   call,
-  onClose,
+  viewState,
+  onState,
 }: {
-  open: boolean;
   online: boolean;
   self: string;
   call: AdminCall;
-  onClose: () => void;
+  viewState: Record<string, unknown>;
+  onState(state: unknown): void;
 }) {
-  const compact = useLayoutNarrow('compact');
-  const [section, setSection] = useState<Section>('overview');
+  const host = useRef<HTMLDivElement>(null);
+  const [compact, setCompact] = useState(false);
+  useEffect(() => {
+    const node = host.current;
+    if (!node) return;
+    const measure = () => setCompact(node.offsetWidth < 640);
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    measure();
+    return () => observer.disconnect();
+  }, []);
+  const section: Section = sections.find((item) => item.key === viewState.section)?.key ?? 'overview';
+  const select = (key: Section) => onState({ ...viewState, section: key });
   const content: Record<Section, ReactElement> = {
     overview: <AdminOverviewSection online={online} call={call} />,
     users: <AdminUsersSection online={online} call={call} self={self} />,
+    announcements: <AdminAnnouncementsSection online={online} call={call} />,
     nodes: <AdminNodesSection online={online} call={call} />,
     storage: <AdminStorageSection online={online} call={call} />,
     diagnostics: <AdminDiagnosticsSection online={online} call={call} />,
   };
   return (
-    <Dialog
-      open={open}
-      onClose={onClose}
-      fullScreen={compact}
-      fullWidth
-      maxWidth="lg"
-      disableScrollLock
-      PaperProps={{ className: 'admin-paper' }}
-    >
-      <Box className="admin-header">
-        <Typography variant="h6" component="h1" fontWeight={600}>
-          管理员面板
-        </Typography>
-        <IconButton aria-label="关闭管理员面板" onClick={onClose}>
-          <Close />
-        </IconButton>
-      </Box>
+    <div ref={host} className={`admin-app${compact ? ' admin-compact' : ''}`}>
       {compact && (
         <Tabs
           value={section}
-          onChange={(_, value: Section) => setSection(value)}
-          variant="fullWidth"
+          onChange={(_, value: Section) => select(value)}
+          variant="scrollable"
+          scrollButtons={false}
           className="admin-tabs"
         >
           {sections.map((item) => (
@@ -90,13 +77,9 @@ export function AdminConsole({
       )}
       <Box className="admin-body">
         {!compact && (
-          <List component="nav" className="admin-nav" aria-label="管理员面板分区">
+          <List component="nav" className="admin-nav" aria-label="管理分区">
             {sections.map((item) => (
-              <ListItemButton
-                key={item.key}
-                selected={section === item.key}
-                onClick={() => setSection(item.key)}
-              >
+              <ListItemButton key={item.key} selected={section === item.key} onClick={() => select(item.key)}>
                 <ListItemIcon>{item.icon}</ListItemIcon>
                 <ListItemText primary={item.label} />
               </ListItemButton>
@@ -105,9 +88,9 @@ export function AdminConsole({
         )}
         <Box className="admin-content">
           {!online && <Alert severity="warning">连接恢复后可继续管理。</Alert>}
-          {open && content[section]}
+          {content[section]}
         </Box>
       </Box>
-    </Dialog>
+    </div>
   );
 }

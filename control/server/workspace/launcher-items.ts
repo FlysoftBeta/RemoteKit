@@ -15,6 +15,7 @@ export function launcherItems(input: {
   query?: string;
   favorites: readonly { url: string; title: string }[];
   apps: readonly InstalledApp[];
+  admin: boolean;
   files: readonly LauncherFileEntry[];
   previews: ReadonlyMap<string, string>;
 }): LauncherItem[] {
@@ -61,6 +62,18 @@ export function launcherItems(input: {
       appId: 'settings',
       score: scores.get('app:settings') ?? 0,
     },
+    ...(input.admin
+      ? [
+          {
+            key: 'app:admin',
+            kind: 'app',
+            group: 'apps',
+            title: '管理',
+            appId: 'admin',
+            score: scores.get('app:admin') ?? 0,
+          } satisfies LauncherItem,
+        ]
+      : []),
     ...input.apps
       .map((app): LauncherItem => ({
         key: 'app:web:' + app.id,

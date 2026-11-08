@@ -1,15 +1,10 @@
-.admin-paper {
-  height: min(780px, calc(100% - 64px));
+.admin-app {
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-width: 0;
   overflow: hidden;
-}
-.admin-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 12px 12px 24px;
-  border-bottom: 1px solid var(--border-section);
+  background: var(--surface);
 }
 .admin-tabs {
   border-bottom: 1px solid var(--border-section);
@@ -183,29 +178,32 @@
   border-radius: var(--radius-md);
   background: var(--surface-subtle);
 }
-html.layout-compact .admin-paper {
-  height: 100%;
-}
-html.layout-compact .admin-header {
-  padding-left: 16px;
-}
-html.layout-compact .admin-content {
+.admin-compact .admin-content {
   padding: 16px;
 }
-html.layout-compact .admin-wide {
+.admin-compact .admin-wide {
   display: none !important;
 }
-html.layout-compact .admin-narrow {
+.admin-compact .admin-narrow {
   display: block !important;
 }
-html.layout-compact .admin-tabs .MuiTab-root {
+.admin-compact .admin-tabs .MuiTab-root {
   min-width: 0;
   padding-left: 4px;
   padding-right: 4px;
 }
-html.layout-compact .admin-node-grid {
+.admin-compact .admin-node-grid {
   grid-template-columns: minmax(0, 1fr);
 }
-html.layout-compact .admin-section-header {
+.admin-compact .admin-section-header {
   flex-wrap: wrap;
+}
+.admin-announcement {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.admin-announcement-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

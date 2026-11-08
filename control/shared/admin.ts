@@ -83,7 +83,18 @@ export interface AdminDiagnostic {
   bytes: number;
   reason: string;
 }
+export interface AdminAnnouncement {
+  id: string;
+  title: string;
+  body: string;
+  publishedAt: number;
+  updatedAt: number;
+  /** Users who dismissed it since it was last published, out of all enabled users. */
+  reads: number;
+  recipients: number;
+}
 type User = { username: string };
+type AnnouncementDraft = { title: string; body: string };
 export interface AdminSocketMethods {
   'admin.overview': { params: Record<string, never>; result: AdminOverview };
   'admin.users': { params: Record<string, never>; result: AdminUser[] };
@@ -103,5 +114,13 @@ export interface AdminSocketMethods {
   'admin.diagnostics': { params: Record<string, never>; result: AdminDiagnostic[] };
   'admin.deleteDiagnostic': { params: { id: string }; result: AdminDiagnostic[] };
   'admin.sessionImportDeployment': { params: Record<string, never>; result: ImportDeployment };
+  'admin.announcements': { params: Record<string, never>; result: AdminAnnouncement[] };
+  'admin.publishAnnouncement': { params: AnnouncementDraft; result: AdminAnnouncement[] };
+  /** `republish` shows the edited announcement again to users who already dismissed it. */
+  'admin.updateAnnouncement': {
+    params: AnnouncementDraft & { id: string; republish: boolean };
+    result: AdminAnnouncement[];
+  };
+  'admin.deleteAnnouncement': { params: { id: string }; result: AdminAnnouncement[] };
   'admin.downloadDiagnostic': { params: { id: string }; result: { url: string } };
 }

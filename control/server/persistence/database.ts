@@ -2,6 +2,7 @@ import Sqlite from 'better-sqlite3';
 import { AtRestKey } from '../auth/crypto';
 import { systemClock, type Clock } from '../util/clock';
 import { AccountsRepository } from './accounts';
+import { AnnouncementsRepository } from './announcements';
 import { LibraryRepository } from './library';
 import { OperationsRepository } from './operations';
 import { createSchema } from './schema';
@@ -17,6 +18,7 @@ export class ControlDatabase {
   readonly operations: OperationsRepository;
   readonly library: LibraryRepository;
   readonly sessionImports: SessionImportsRepository;
+  readonly announcements: AnnouncementsRepository;
   constructor(path: string, clock: Clock = systemClock) {
     this.db = new Sqlite(path);
     this.db.defaultSafeIntegers(true);
@@ -34,6 +36,7 @@ export class ControlDatabase {
     this.operations = new OperationsRepository(this.db, this.workspaces);
     this.library = new LibraryRepository(this.db);
     this.sessionImports = new SessionImportsRepository(this.db, this.atRestKey);
+    this.announcements = new AnnouncementsRepository(this.db);
   }
   transaction<T>(fn: () => T): T {
     return transaction(this.db, fn);

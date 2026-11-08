@@ -63,6 +63,7 @@ export function productSnapshot(): import('../shared/product').ProductState {
     snapshotSequence: 1,
     operationGeneration: 'generation',
     user: { id: 'user-id', username: 'viewer', isAdmin: false },
+    announcements: [],
     workspace: {
       tenantId: 'tenant-id',
       revision: 0,

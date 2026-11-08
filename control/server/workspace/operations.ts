@@ -236,6 +236,12 @@ export class OperationPipeline {
     execution?: ExecutionContext,
     receipt?: OperationReceipt,
   ): Promise<ProductActionResult> {
+    if (
+      body.type === 'window.open' &&
+      body.appId === 'admin' &&
+      !this.context.store.accounts.userForTenant(tenant)?.isAdmin
+    )
+      throw new RemoteKitError('forbidden', '需要管理员权限');
     const runtime = this.context.tenants.get(tenant);
     const before = this.context.store.workspaces.workspace(tenant);
     const icon =

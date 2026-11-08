@@ -6,7 +6,7 @@
 
 | 对象 | 所有者 | 说明 |
 |---|---|---|
-| App | Control | `appId`：`browser`、`files`、`settings`，或 `web:<id>`（已安装的网页 App） |
+| App | Control | `appId`：`browser`、`files`、`settings`、`admin`（仅管理员），或 `web:<id>`（已安装的网页 App） |
 | Window | Control | 恰好承载一个 App 的一个实例；`appId`、`lastActiveAt`、App 视图状态 `state` |
 | Tab | Control | 仍是远端页面的产品对象，只属于 browser 或 web 窗口 |
 | Space | Control | 有序的 `windowIds`（1–3 个）、对应 `weights`、`focusedWindowId`、`lastActiveAt` |
@@ -22,8 +22,9 @@
 - **web:&lt;id&gt;**：恰好一个 Tab。紧凑标题栏：图标、页面标题、后退、更多（刷新、复制链接、在浏览器中打开、网页兼容性、App 设置）。离开作用域的导航留在窗口内，标题栏显示来源域名条；`display=browser` 的 App 始终显示只读地址条。关闭 Tab 即关闭窗口。同一 App 可以开多个窗口。
 - **files**：本地渲染，可以开多个窗口，每个窗口有自己的视图状态。
 - **settings**：本地渲染，单例；再次打开时聚焦已有窗口。
+- **admin**（管理）：本地渲染，单例，只有管理员能打开（见[控制面 · 账户与管理 App](control-plane.md#账户与管理-app)）。
 
-本地窗口（files、settings）不产生远端渲染需求。App 视图状态（files 的当前视图/搜索/排列，settings 的分区）是窗口的 `state`：有界 JSON（≤4KiB），客户端 500ms 去抖后经 WS `window.state` 写回，不走 DataChannel 与操作收据；重连或换设备后原样恢复。地址草稿、滚动位置不持久化。
+内置 App 的 appId、标题与单例/本地属性集中在 `shared/product.ts`（`BUILTIN_APP_TITLES`、`isSingletonApp`、`isLocalApp`）。本地窗口（files、settings、admin）不产生远端渲染需求。App 视图状态（files 的当前视图/搜索/排列，settings 与 admin 的分区）是窗口的 `state`：有界 JSON（≤4KiB），客户端 500ms 去抖后经 WS `window.state` 写回，不走 DataChannel 与操作收据；重连或换设备后原样恢复。地址草稿、滚动位置不持久化。
 
 ### 弹窗与新 Tab
 
@@ -42,7 +43,7 @@
 
 | 操作 | 结果 |
 |---|---|
-| `window.open{appId, url?, placement}` | `placement` 为 `{mode:'space'}`（新窗口组并切过去）、`{mode:'split', besideWindowId, side}`（插入该窗口左/右侧）或 `{mode:'replace', windowId}`（占据该窗口的位置与比例，被替换的窗口移到自己的新窗口组，不关闭）。settings 已存在时聚焦它 |
+| `window.open{appId, url?, placement}` | `placement` 为 `{mode:'space'}`（新窗口组并切过去）、`{mode:'split', besideWindowId, side}`（插入该窗口左/右侧）或 `{mode:'replace', windowId}`（占据该窗口的位置与比例，被替换的窗口移到自己的新窗口组，不关闭）。settings、admin 已存在时聚焦它 |
 | `window.focus{windowId}` | 切到其窗口组并聚焦；更新 `lastActiveAt` |
 | `window.place{windowId, placement}` | 移到新窗口组、移到某个窗口旁边（同组为重排，跨组为移入） |
 | `window.close{windowId}` | 关闭窗口及其 Tab（beforeunload 流程不变） |
@@ -88,7 +89,7 @@
 
 激活：
 
-- **点按**：作为新窗口追加到目标组的右侧并关闭开始屏幕。目标是 **+** 或当前没有窗口组时在新窗口组打开；目标组已满时改为在新窗口组打开，并在舞台上短暂提示"当前窗口组已满，已在新窗口组打开"。App 磁贴新建该 App 的窗口（settings 是单例，切到它所在的组）；网页磁贴新建 browser 窗口打开该网页，若某个已安装 App 的作用域覆盖该 URL 则新建该 App 的窗口；文件磁贴新建 files 窗口并预览该文件。窗口数已满时不关闭开始屏幕，提示先关闭一些窗口。
+- **点按**：作为新窗口追加到目标组的右侧并关闭开始屏幕。目标是 **+** 或当前没有窗口组时在新窗口组打开；目标组已满时改为在新窗口组打开，并在舞台上短暂提示"当前窗口组已满，已在新窗口组打开"。App 磁贴新建该 App 的窗口（settings、admin 是单例，切到它所在的组）；网页磁贴新建 browser 窗口打开该网页，若某个已安装 App 的作用域覆盖该 URL 则新建该 App 的窗口；文件磁贴新建 files 窗口并预览该文件。窗口数已满时不关闭开始屏幕，提示先关闭一些窗口。
 - **拖动**（鼠标移动超过 4px；触摸和触控笔长按 400ms）：磁贴浮起跟随指针，磁贴区域淡出，露出舞台，窗口组栏保持可见。可放置的位置：
   - 当前组的插入线：每个窗口左右两侧各五分之一（48–120px）以及分隔线是插入区，在该处插入（组满时不出现）。
   - 舞台上的某个窗口的中部：替换它（`placement: replace`），被替换的窗口移到自己的新窗口组；悬停时该窗口显示替换高亮和"替换此窗口"字样。组满时整个窗口都是替换区。
@@ -101,7 +102,7 @@
 - **网页**：显示页面预览——Viewer 在网页可见时截取的最后一帧（见下），铺满磁贴，底部渐变遮罩上是标题和域名；背景色取预览的主色。没有预览时用站点主题色（安装过的 App）或按 origin 的固定调色板，显示网站图标。
 - **图片文件**：缩略图铺满，背景色取缩略图主色；名称只在悬停或键盘聚焦时出现（触摸设备不显示）。
 - **其他文件**：按类型着色，显示类型图标与文件名。
-- **App**：内置 App 用固定色（浏览器蓝、我的文件琥珀、设置石板灰），网页 App 用主题色和它的图标。
+- **App**：内置 App 用固定色（浏览器蓝、我的文件琥珀、设置石板灰、管理紫），网页 App 用主题色和它的图标。
 - 主色：客户端把图片缩到 16×16 求平均色，再在 HSL 中压低亮度保证白字 4.5:1 对比度。
 
 **网页预览**：Viewer 在 Tab 处于可见窗口中、页面加载完成后 2 秒以及离开（切 Tab、切窗口组、导航）时，从该窗口的 video 裁出当前页面，缩到 320×200 以内编码为 JPEG（≤ 24KiB），经 WS `page.preview{url, image}` 交给 Control。Control 按规范化 URL（与 frecency 的 `page:` 键相同）保存到 `page_previews`，每 Tenant 最多 200 条，按更新时间淘汰；`launcher.get` 的网页项带 `previewUrl`（鉴权的 `/api/previews/<hash>`）。"清除浏览记录"与"清除使用记录"同时清除预览。
@@ -175,7 +176,7 @@ WS `launcher.get` 返回 `{ items: LauncherItem[] }`：每项 `{ key, kind: 'app
 
 ## 设置拆分
 
-- **设置 App**（工作区）：外观（界面缩放、顶部留空、打开时全屏）、画面与声音（质量、声道、统计叠层、音画同步）、安全（密码、PIN、人脸、锁屏）、App（已安装网页 App 管理）、会话导入、诊断、账户（退出；管理员入口打开管理员面板）、清除使用记录。
+- **设置 App**（工作区）：外观（界面缩放、顶部留空、打开时全屏）、画面与声音（质量、声道、统计叠层、音画同步）、安全（密码、PIN、人脸、锁屏）、App（已安装网页 App 管理）、会话导入、诊断、公告（全部公告，未读有标记）、账户（退出）、清除使用记录。管理不在设置里，是独立的管理 App。
 - **浏览器设置**（浏览器窗口更多 → 设置）：搜索引擎、Memory Saver、网页兼容性列表（所有站点偏好）、收藏管理、清除浏览记录。
 - **我的文件设置**（files 窗口侧栏 → 设置）：来源（排除、清除来源中的文件）、分区管理。
 

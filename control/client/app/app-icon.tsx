@@ -1,16 +1,23 @@
-import { FolderOutlined, InsertDriveFileOutlined, Language, SettingsOutlined } from '@mui/icons-material';
-import type { ProductWorkspace, ProductWindow } from '../../shared/product';
+import {
+  AdminPanelSettingsOutlined,
+  FolderOutlined,
+  InsertDriveFileOutlined,
+  Language,
+  SettingsOutlined,
+} from '@mui/icons-material';
+import {
+  BUILTIN_APP_TITLES,
+  isBuiltinApp,
+  type ProductWorkspace,
+  type ProductWindow,
+} from '../../shared/product';
 
 export function appName(workspace: ProductWorkspace, win: ProductWindow) {
   return (
     workspace.tabs.find((tab) => tab.id === win.activeTabId)?.title ||
-    (win.appId === 'browser'
-      ? '浏览器'
-      : win.appId === 'files'
-        ? '我的文件'
-        : win.appId === 'settings'
-          ? '设置'
-          : (workspace.apps.find((app) => `web:${app.id}` === win.appId)?.name ?? 'App'))
+    (isBuiltinApp(win.appId)
+      ? BUILTIN_APP_TITLES[win.appId]
+      : (workspace.apps.find((app) => `web:${app.id}` === win.appId)?.name ?? 'App'))
   );
 }
 export function AppIcon({ appId, iconUrl, file }: { appId?: string; iconUrl?: string; file?: boolean }) {
@@ -21,6 +28,8 @@ export function AppIcon({ appId, iconUrl, file }: { appId?: string; iconUrl?: st
       ? FolderOutlined
       : appId === 'settings'
         ? SettingsOutlined
-        : Language;
+        : appId === 'admin'
+          ? AdminPanelSettingsOutlined
+          : Language;
   return <Icon fontSize="inherit" />;
 }

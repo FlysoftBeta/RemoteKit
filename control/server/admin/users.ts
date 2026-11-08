@@ -7,7 +7,7 @@ import type { StoredUser } from '../persistence/accounts';
 
 type Services = Pick<
   DomainServices,
-  'accounts' | 'viewers' | 'lifecycle' | 'objects' | 'sessionPurge' | 'sessionImporter'
+  'accounts' | 'viewers' | 'lifecycle' | 'objects' | 'sessionPurge' | 'sessionImporter' | 'operations'
 >;
 
 export class UserAdmin {
@@ -115,11 +115,15 @@ export class UserAdmin {
     if (disabled) await this.disconnect(user.tenant);
     return this.list();
   }
-  transferAdmin(actor: string, username: unknown) {
+  async transferAdmin(actor: string, username: unknown) {
     const user = this.other(actor, username);
     if (user.disabledAt !== null) throw new RemoteKitError('conflict', '不能转让给已停用的账户');
     const current = this.context.store.accounts.userForTenant(actor)!;
     this.context.store.transaction(() => this.context.store.accounts.transferAdmin(current.id, user.id));
+    // The console App belongs to the administrator role; the former administrator's copy closes.
+    for (const window of this.context.store.workspaces.workspace(actor).windows)
+      if (window.appId === 'admin')
+        await this.services.operations.productAction(actor, { type: 'window.close', windowId: window.id });
     this.services.viewers.push(actor);
     this.services.viewers.push(user.tenant);
     return this.list();
@@ -167,6 +171,7 @@ export class UserAdmin {
         store.operations.deleteTenant(user.tenant);
         store.workspaces.deleteTenant(user.tenant);
         store.security.deleteUser(user.id);
+        store.announcements.deleteUser(user.id);
         const importMail = this.services.sessionImporter.deleteUser(user.tenant);
         store.accounts.deleteUser(user.id);
         return importMail;

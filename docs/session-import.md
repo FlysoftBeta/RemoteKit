@@ -24,7 +24,7 @@ RemoteKit 部署在内网，用户使用时通常拿不到手机，短信/动态
 
 ## 部署配置
 
-App 需要的部署信息在构建时内置，没有运行时的发现步骤。管理员在管理员面板→概览→会话导入里下载 `deployment.json`，放到 `android/deployment.json` 后构建 App（不入库）。一个 App 构建对应一个部署；Control 换导入密钥或 Browser 升级后需要重新下载并重新构建。
+App 需要的部署信息在构建时内置，没有运行时的发现步骤。管理员在管理 App →概览→会话导入里下载 `deployment.json`，放到 `android/deployment.json` 后构建 App（不入库）。一个 App 构建对应一个部署；Control 换导入密钥或 Browser 升级后需要重新下载并重新构建。
 
 ```json
 {
@@ -173,7 +173,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
   - 同 `id` 已存在且属于其他设备 → `importFailed`（"导入 ID 冲突"，`retryable: false`）。属于本设备：`pending` 或 `applied` → 按当前状态重发 `importReceived`/`importApplied`；`failed` 或 `discarded` → 用新载荷重置为 `pending`（即重试）。
   - 新 `id` → 保存为 `pending`，回复 `importReceived`。
 - `withdraw`：`pending` → `discarded` 并回复 `importDiscarded`；其他状态按当前状态回复。
-- 邮件收取失败只影响本轮；状态（最近一次成功/失败）只显示在管理员面板概览，失败同时列为概览问题。
+- 邮件收取失败只影响本轮；状态（最近一次成功/失败）只显示在管理 App 概览，失败同时列为概览问题。
 
 ## Control 存储
 
@@ -199,7 +199,7 @@ Control → 设备（`ref` 是所回复的设备事件 seq）：
 
 - `out` 事件写库与状态变化在同一事务中。发件循环按设备取 `mailed_at` 为空的事件，满足合并条件后封装成一封信（`ack` 取该设备 `in_seq`），经 nodemailer 以 TLS 发出，成功后记 `mailed_at`。
 - `pairRejected` 也走同一循环；未知用户的配对失败不入库，只在内存中排队发送，进程退出即丢弃。
-- 发送失败按 1 分钟起翻倍、最长 1 小时退避重试；待发数量与最近一次失败显示在管理员面板概览，持续失败列为概览问题。
+- 发送失败按 1 分钟起翻倍、最长 1 小时退避重试；待发数量与最近一次失败显示在管理 App 概览，持续失败列为概览问题。
 - 补发：清除未确认区间的 `mailed_at`，由发件循环重新发送。
 
 ## Endpoint 与 Browser
@@ -223,7 +223,7 @@ Browser 控制方法：
 - **设备**：配对开关；打开时显示 5 个单词的配对码（可复制）与剩余有效期，关闭原因显示一行。下面是已配对设备列表（设备名、key id、配对时间、最近一次请求），每台可移除。
 - **Timeline**：该用户所有设备的事件，按接收时间倒序；每张卡片是一个设备请求（配对、导入、撤回），Control 的回复按时间顺序挂在卡片下方，回复式显示在同一页面。点开卡片查看详情：设备、seq、各事件时间、站点列表、cookie/storage 数量与写入结果、失败原因。`pending` 导入可放弃（发出 `importDiscarded`），`applied` 导入的每个站点可在新标签页打开。
 
-功能未开启时提示一行，不展示邮箱、密钥等部署细节。对话框可见时每 5 秒刷新。管理员面板→概览有"会话导入"面板：收信状态、发件队列状态与"App 部署配置"下载。
+功能未开启时提示一行，不展示邮箱、密钥等部署细节。对话框可见时每 5 秒刷新。管理 App →概览有"会话导入"面板：收信状态、发件队列状态与"App 部署配置"下载。
 
 WS 方法（均要求产品租约）：`sessionImport.state` → `{receiving, pairing, devices, timeline}`；`sessionImport.pairing {open}`；`sessionImport.removeDevice {keyId}`；`sessionImport.discard {id}`；`admin.sessionImportDeployment` 仅管理员；收信与发件状态随 `admin.overview` 的 `sessionImport` 字段返回。
 

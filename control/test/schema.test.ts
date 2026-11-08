@@ -11,7 +11,7 @@ import { createSchema } from '../server/persistence/schema';
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 8n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 9n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -89,11 +89,14 @@ test('version seven cleans remembered URLs and resolves collisions per tenant', 
         200,
       );
     }
-    store.db.exec(`DROP TABLE schema_version;
+    store.db.exec(`DROP TABLE announcement_reads;
+      DROP TABLE announcements;
+      DROP TABLE schema_version;
       CREATE TABLE schema_version(version INTEGER CHECK(version=7));
       INSERT INTO schema_version VALUES(7);`);
     createSchema(store.db);
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 8n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 9n }]);
+    assert.deepEqual(store.db.prepare('SELECT count(*) AS n FROM announcements').get(), { n: 0n });
     for (const tenant of ['tenant', 'other']) {
       const rows = store.db
         .prepare('SELECT item,at,title,window_id,context,chain FROM usage_events WHERE tenant=? ORDER BY id')
@@ -222,6 +225,8 @@ test('legacy workspaces migrate in order, drop files tabs and split settings', a
       CREATE TABLE workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_window TEXT, layout_mode TEXT NOT NULL, pending TEXT);
       CREATE TABLE workspace_windows (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, active_tab TEXT, weight REAL NOT NULL);
       DROP TABLE IF EXISTS page_previews;
+      DROP TABLE announcement_reads;
+      DROP TABLE announcements;
       DROP TABLE schema_version;
       CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=4));
       INSERT INTO schema_version(version) VALUES (4);`);
@@ -269,7 +274,7 @@ test('legacy workspaces migrate in order, drop files tabs and split settings', a
     store.db.close();
     store = new ControlDatabase(path);
     try {
-      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 8n }]);
+      assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 9n }]);
       const migrated = store.workspaces.workspace(account.tenantId);
       assert.equal('clientScaleOverride' in migrated.settings.workspace, false);
       assert.equal(migrated.settings.workspace.uiScale, 1);
@@ -315,7 +320,7 @@ test('databases without a migration path are rejected', async () => {
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
       ['v3', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (3)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (9)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (10)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',
@@ -452,12 +457,14 @@ test('version six migrates previews without changing workspace state', async () 
       .prepare("UPDATE user_settings SET data=json_set(data,'$.workspace.groupRail',1) WHERE tenant=?")
       .run(account.tenantId);
     store.db.exec(`DROP TABLE page_previews;
+      DROP TABLE announcement_reads;
+      DROP TABLE announcements;
       DROP TABLE schema_version;
       CREATE TABLE schema_version(version INTEGER CHECK(version=6));
       INSERT INTO schema_version VALUES(6);`);
     store.db.close();
     store = new ControlDatabase(path);
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 8n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 9n }]);
     assert.deepEqual(store.workspaces.workspace(account.tenantId), workspace);
     store.workspaces.items.savePreview(account.tenantId, 'page:https://example.com/', Buffer.from('jpeg'), 1);
     assert.equal(store.workspaces.items.previewHashes(account.tenantId).size, 1);

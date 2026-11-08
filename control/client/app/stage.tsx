@@ -153,9 +153,8 @@ export function Stage({
   viewportNotice,
   obscured,
   foreground,
-  settingsContent,
+  appContent,
   openLauncher,
-  openAdmin,
   logout,
   children,
 }: {
@@ -170,9 +169,8 @@ export function Stage({
   viewportNotice: string;
   obscured: boolean;
   foreground: ReturnType<typeof selectVisibility>['foreground'];
-  settingsContent: React.ComponentProps<typeof WindowFrame>['settingsContent'];
+  appContent: React.ComponentProps<typeof WindowFrame>['appContent'];
   openLauncher(): void;
-  openAdmin(): void;
   logout(): void;
   children: React.ReactNode;
 }) {
@@ -300,7 +298,7 @@ export function Stage({
                 online={productReady}
                 call={call}
                 weight={sideBySide && position >= 0 ? activeSpace!.weights[position] : 1}
-                settingsContent={settingsContent}
+                appContent={appContent}
                 fileChooser={
                   fileRequest?.windowId === w.id ? (
                     <FileChooserDialog
@@ -343,10 +341,16 @@ export function Stage({
                     size="small"
                     color="inherit"
                     startIcon={<AdminPanelSettingsOutlined />}
-                    disabled={status !== 'online'}
-                    onClick={() => openAdmin()}
+                    disabled={!productReady}
+                    onClick={() =>
+                      void action({
+                        type: 'window.open',
+                        appId: 'admin',
+                        placement: { mode: 'space' },
+                      }).catch(report)
+                    }
                   >
-                    管理员面板
+                    管理
                   </Button>
                 )}
                 <Button size="small" color="inherit" startIcon={<Logout />} onClick={logout}>

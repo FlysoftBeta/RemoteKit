@@ -7,6 +7,7 @@ import type {
   ProductTab,
   ProductWorkspace,
 } from '../../shared/product';
+import { isSingletonApp } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import { normalizedUsagePage } from '../navigation-url';
 import { launcherItems } from './launcher-items';
@@ -104,9 +105,9 @@ export class Workspace {
     if (action.type === 'window.open') {
       const opened = state.windows.find((window) => !before.windows.some((old) => old.id === window.id));
       if (opened) windows.add(opened.id);
-      else if (action.appId === 'settings') {
-        const settings = state.windows.find((window) => window.appId === 'settings');
-        if (settings) windows.add(settings.id);
+      else if (isSingletonApp(action.appId)) {
+        const singleton = state.windows.find((window) => window.appId === action.appId);
+        if (singleton) windows.add(singleton.id);
       }
     } else if (action.type === 'window.focus') windows.add(action.windowId);
     else if (action.type === 'space.activate') {
@@ -212,6 +213,7 @@ export class Workspace {
         query,
         favorites: state.favorites,
         apps: state.apps,
+        admin: !!this.context.store.accounts.userForTenant(tenant)?.isAdmin,
         files: library.entries.map((entry) => ({
           id: entry.id,
           name: entry.name,

@@ -8,7 +8,16 @@ const now = 1_800_000_000_000;
 function input(
   overrides: Partial<Parameters<typeof launcherItems>[0]> = {},
 ): Parameters<typeof launcherItems>[0] {
-  return { events: [], now, favorites: [], apps: [], files: [], previews: new Map(), ...overrides };
+  return {
+    events: [],
+    now,
+    favorites: [],
+    apps: [],
+    admin: false,
+    files: [],
+    previews: new Map(),
+    ...overrides,
+  };
 }
 function app(id: string, scope = `https://${id}.test/`): InstalledApp {
   return {

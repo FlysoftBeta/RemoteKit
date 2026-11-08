@@ -28,7 +28,7 @@ const UNIT = { preferred: 104, minimum: 64, maximum: 120 };
 const MAX_ROWS = 4;
 const SPANS: Record<TileSize, [number, number]> = { small: [1, 1], wide: [2, 1], large: [2, 2] };
 const titles = { frequent: '常用', apps: 'App', pages: '网页', files: '文件' };
-const builtin = ['browser', 'files', 'settings'];
+const builtin = ['browser', 'files', 'settings', 'admin'];
 const byScore = (a: LauncherItem, b: LauncherItem) => b.score - a.score;
 
 /**

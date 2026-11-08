@@ -78,6 +78,9 @@ const handlers: Record<string, Handler> = {
   'usage.record': product(({ services, authority }, params) =>
     services.workspace.recordFile(authority.tenantId, params),
   ),
+  'announcement.read': product(({ services, authority }, params) =>
+    services.announcements.markRead(authority.tenantId, params.id),
+  ),
   'usage.clear': product(({ services, authority }, params) =>
     services.workspace.clearUsage(authority.tenantId, params.scope),
   ),
@@ -189,6 +192,14 @@ Object.assign(handlers, {
     await archives(ctx).deleteArchive(params.id);
     return archives(ctx).archives(tenants(ctx));
   }),
+  'admin.announcements': admin(({ services }) => services.announcements.list()),
+  'admin.publishAnnouncement': admin(({ services, authority }, params) =>
+    services.announcements.publish(authority.tenantId, params.title, params.body),
+  ),
+  'admin.updateAnnouncement': admin(({ services, authority }, params) =>
+    services.announcements.update(authority.tenantId, params.id, params.title, params.body, params.republish),
+  ),
+  'admin.deleteAnnouncement': admin(({ services }, params) => services.announcements.delete(params.id)),
   'admin.downloadDiagnostic': admin(async (ctx, params) => ({
     url: '/api/admin/diagnostics/' + (await archives(ctx).downloadTicket(params.id)),
   })),

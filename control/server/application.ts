@@ -1,3 +1,4 @@
+import { Announcements } from './admin/announcements';
 import { UserAdmin } from './admin/users';
 import { NodeAdmin } from './cluster/node-admin';
 import { SessionPurge } from './cluster/session-purge';
@@ -43,6 +44,7 @@ export interface DomainServices extends DomainContext {
   nodeAdmin: NodeAdmin;
   sessionPurge: SessionPurge;
   userAdmin: UserAdmin;
+  announcements: Announcements;
   navigation: Navigation;
   viewers: ViewerHub;
   rtc: RtcSignaling;
@@ -105,6 +107,7 @@ export function createApplication(
   services.policy = new SitePolicy(context);
   services.accounts = new AccountService(store);
   services.userAdmin = new UserAdmin(context, services);
+  services.announcements = new Announcements(context, services);
   services.workspace = new Workspace(context, services);
   services.library = new FileLibrary(
     store.library,

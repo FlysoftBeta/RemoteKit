@@ -4,6 +4,7 @@ import {
   AppsOutlined,
   ArrowBack,
   BugReportOutlined,
+  CampaignOutlined,
   ExpandMore,
   ImportExportOutlined,
   LockOutlined,
@@ -35,6 +36,7 @@ import type { WorkspaceCall } from './window-state';
 import { AppFields } from './app-editor';
 import { AppIcon } from './app-icon';
 import { WorkspacePreferences } from './workspace-preferences';
+import { AnnouncementList } from './announcements';
 import { formatError } from '../util/format-error';
 
 const sections = [
@@ -44,6 +46,7 @@ const sections = [
   ['apps', 'App', <AppsOutlined />],
   ['import', '会话导入', <ImportExportOutlined />],
   ['diagnostics', '诊断', <BugReportOutlined />],
+  ['announcements', '公告', <CampaignOutlined />],
   ['account', '账户', <AccountCircleOutlined />],
 ] as const;
 
@@ -58,7 +61,6 @@ export function SettingsApp({
   diagnostics,
   sessionImport,
   logout,
-  admin,
 }: {
   state: ProductState;
   viewState: Record<string, unknown>;
@@ -70,7 +72,6 @@ export function SettingsApp({
   diagnostics: ReactNode;
   sessionImport: ReactNode;
   logout(): void;
-  admin(): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
@@ -124,6 +125,7 @@ export function SettingsApp({
           {section === 'security' && security}
           {section === 'diagnostics' && diagnostics}
           {section === 'import' && sessionImport}
+          {section === 'announcements' && <AnnouncementList announcements={state.announcements} />}
           {section === 'apps' && (
             <div className="installed-apps">
               {state.workspace.apps.length === 0 && (
@@ -151,11 +153,6 @@ export function SettingsApp({
                 {state.user.isAdmin && <Chip size="small" label="管理员" />}
               </div>
               <div className="account-actions">
-                {state.user.isAdmin && (
-                  <Button variant="outlined" onClick={admin}>
-                    管理员面板
-                  </Button>
-                )}
                 <Button variant="outlined" disabled={!online} onClick={() => setClearing(true)}>
                   清除使用记录
                 </Button>

@@ -1,23 +1,25 @@
-import React, { Suspense, lazy, useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Button, Dialog, DialogActions, DialogContent, DialogTitle } from '@mui/material';
-import type { LauncherItem, ProductState, WindowPlacement } from '../../shared/product';
+import {
+  isSingletonApp,
+  type LauncherItem,
+  type ProductState,
+  type WindowPlacement,
+} from '../../shared/product';
 import type { ViewerSession } from '../viewer-session';
-import type { WorkspaceSnapshot } from '../control/workspace-session';
-import type { AdminCall } from './admin/shared';
 import { Launcher } from './launcher';
 import { launcherActions, launcherNavigation, launcherPlacement } from './launcher-actions';
 import { HomeBar } from './home-bar';
 import { PageDialogs, type Action } from './product-dialogs';
 import { AudioControls } from './audio-controls';
 import { SyncStatus } from './sync-status';
+import { AnnouncementDialog } from './announcements';
 import { waitForWorkspaceRevision, type WorkspaceCall } from './window-state';
 import type { WorkspaceStage } from './stage';
 import type { SystemControls } from './system-controls';
 import type { selectVisibility } from './visibility';
 
-// Only administrator sessions download the console.
-const AdminConsole = lazy(() => import('./admin/console').then((m) => ({ default: m.AdminConsole })));
-export function useWorkspaceOverlays(isAdmin: boolean) {
+export function useWorkspaceOverlays() {
   const [overlay, setOverlay] = useState<{ kind: 'launcher' }>();
   const [visibleLauncher, setVisibleLauncher] = useState<typeof overlay>();
   useEffect(() => {
@@ -28,8 +30,6 @@ export function useWorkspaceOverlays(isAdmin: boolean) {
     const timer = setTimeout(() => setVisibleLauncher(undefined), overlay ? 0 : 160);
     return () => clearTimeout(timer);
   }, [overlay]);
-  const [adminRequested, setAdmin] = useState(false);
-  const admin = adminRequested && isAdmin;
   useEffect(() => {
     if (!overlay) return;
     const escape = (event: KeyboardEvent) => {
@@ -45,11 +45,8 @@ export function useWorkspaceOverlays(isAdmin: boolean) {
   return {
     launcherOpen: overlay?.kind === 'launcher',
     launcherVisible: visibleLauncher?.kind === 'launcher',
-    admin,
     openLauncher: () => setOverlay({ kind: 'launcher' }),
     closeLauncher: () => setOverlay(undefined),
-    openAdmin: () => setAdmin(true),
-    closeAdmin: () => setAdmin(false),
   };
 }
 export type WorkspaceOverlays = ReturnType<typeof useWorkspaceOverlays>;
@@ -74,7 +71,8 @@ export async function openLauncherItem({
 }) {
   const workspace = state.workspace;
   const activeSpace = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
-  const singleton = item.appId === 'settings' && workspace.windows.some((win) => win.appId === 'settings');
+  const singleton =
+    !!item.appId && isSingletonApp(item.appId) && workspace.windows.some((win) => win.appId === item.appId);
   if (workspace.windows.length >= 16 && !singleton && !reuseExisting)
     throw new Error('窗口已满，请先关闭一些窗口');
   const wasFull =
@@ -113,8 +111,7 @@ export function OverlayHost({
   controls,
   overlays,
   foreground,
-  adminCall,
-  status,
+  readAnnouncement,
 }: {
   state: ProductState;
   media: ViewerSession;
@@ -122,8 +119,7 @@ export function OverlayHost({
   controls: Pick<SystemControls, 'productReady' | 'lock' | 'audio' | 'sync' | 'browserFullscreen'>;
   overlays: WorkspaceOverlays;
   foreground: ReturnType<typeof selectVisibility>['foreground'];
-  adminCall: AdminCall;
-  status: WorkspaceSnapshot['status'];
+  readAnnouncement(id: string): Promise<unknown>;
 }) {
   const { shell, snapshots, call, action, notify } = stage;
   const { productReady, lock } = controls;
@@ -142,16 +138,8 @@ export function OverlayHost({
           activeId={foreground?.kind === 'page' ? foreground.id : null}
         />
       )}
-      {state.user.isAdmin && (
-        <Suspense fallback={null}>
-          <AdminConsole
-            open={overlays.admin}
-            online={status === 'online'}
-            self={state.user.username}
-            call={adminCall}
-            onClose={() => overlays.closeAdmin()}
-          />
-        </Suspense>
+      {productReady && !overlays.launcherOpen && (
+        <AnnouncementDialog announcements={state.announcements} read={readAnnouncement} report={report} />
       )}
       <HomeBar
         launcher={() => {

@@ -1,7 +1,9 @@
 import { cleanUrl } from '../url-clean';
 import { RemoteKitError } from '../../shared/errors';
 import {
+  isBuiltinApp,
   isLocalTab,
+  isSingletonApp,
   placeTab,
   DEAD_ZONE_MAX,
   SEARCH_ENGINES,
@@ -135,8 +137,8 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
   let siteUaChanged = false;
   switch (action.type) {
     case 'window.open': {
-      if (action.appId === 'settings') {
-        const existing = state.windows.find((window) => window.appId === 'settings');
+      if (isSingletonApp(action.appId)) {
+        const existing = state.windows.find((window) => window.appId === action.appId);
         if (existing) {
           focusWindow(state, existing.id, now);
           break;
@@ -144,7 +146,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       }
       if (
         typeof action.appId !== 'string' ||
-        (!['browser', 'files', 'settings'].includes(action.appId) && !action.appId.startsWith('web:'))
+        (!isBuiltinApp(action.appId) && !action.appId.startsWith('web:'))
       )
         throw new RemoteKitError('invalid_request', 'Invalid App');
       const installed = action.appId.startsWith('web:') ? app() : undefined;
