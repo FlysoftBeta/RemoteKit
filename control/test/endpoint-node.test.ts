@@ -280,9 +280,6 @@ test('clipboard management events cross the encrypted link and reject stale node
       warn.mock.restore();
     }
     assert.equal(alpha.requests.length, before);
-    await h.gateway.setClipboard('one', { revision: '4', text: '', html: '' });
-    assert.equal(alpha.requests[alpha.requests.length - 1]?.method, 'session.clipboard.set');
-    assert.equal(alpha.requests[alpha.requests.length - 1]?.revision, '4');
   } finally {
     await control.close();
     await h.close();

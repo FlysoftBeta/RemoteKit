@@ -35,7 +35,6 @@ class Session {
   uint64_t PlacementEpoch() const { return config.placement_epoch; }
   Result<Json> Open(const Json& request);
   Result<Json> Ensure(const Json& request);
-  Result<Json> SetClipboard(const Json& request);
   const std::string& Id() const { return config.id; }
   void BeginManagementRequest(uint64_t generation) {
     generation_ = generation;

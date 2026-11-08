@@ -143,15 +143,11 @@ export class UserAdmin {
   async resetSession(username: unknown) {
     const user = this.find(username);
     await this.context.tenants.serial(user.tenant, async () => {
-      const clipboard = this.context.store.clipboards.latest(user.id);
-      this.context.store.clipboards.clear(user.id);
+      // A running Browser still owns live pages and RTC; reset only discards a hibernated Session.
       if (this.context.endpoint.placement.peek(user.tenant)?.state === 'active')
-        await this.context.endpoint.setClipboard(user.tenant, {
-          revision: String(BigInt(clipboard?.revision ?? '0') + 1n),
-          text: '',
-          html: '',
-        });
+        throw new RemoteKitError('conflict', '需先休眠');
       this.context.store.transaction(() => {
+        this.context.store.clipboards.clear(user.id);
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
         if (sessionId) this.services.sessionPurge.enqueue(sessionId);
       });

@@ -224,10 +224,6 @@ Result<Json> Session::Ensure(const Json& request) {
     RK_RETURN_IF_ERROR(clipboard.Seed(request["clipboard"]));
   return views.ManageSessionEnsure(request);
 }
-Result<Json> Session::SetClipboard(const Json& request) {
-  RK_RETURN_IF_ERROR(clipboard.Set(request));
-  return Json::object();
-}
 Result<void> Session::Initialize() {
   auto loaded = views.Initialize();
   if (!loaded)

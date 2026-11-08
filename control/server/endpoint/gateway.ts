@@ -57,9 +57,6 @@ export class EndpointGateway {
     );
     return () => unsubscribe.forEach((fn) => fn());
   }
-  setClipboard(tenant: string, value: ClipboardValue): Promise<Accepted> {
-    return this.invoke('session.clipboard.set', tenant, value);
-  }
   storageImport(tenant: string, args: ImportChunk): Promise<StorageImportJob> {
     return this.invoke('session.storage.import', tenant, args);
   }

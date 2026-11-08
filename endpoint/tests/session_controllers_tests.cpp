@@ -309,10 +309,6 @@ void SessionManagementRequests() {
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
                   cluster::Key{}, link, objects, objects::Keys{});
-  const auto set_clipboard = ManagementMethods::Find("session.clipboard.set");
-  CHECK(set_clipboard);
-  CHECK(set_clipboard(session, {{"revision", "0"}, {"text", ""}, {"html", ""}}));
-  CHECK(!set_clipboard(session, {{"revision", 1}, {"text", ""}, {"html", ""}}));
   const auto session_directory = parsed.value().data / "sessions" / session.Id();
   fs::create_directories(session_directory);
   CHECK(SessionStore(session_directory).Save("views.json", Json::array({Json{{"viewId", "1"}}})));
@@ -597,7 +593,7 @@ void ClipboardSynchronization() {
                                        events.push_back(event);
                                        return true;
                                      }});
-  CHECK(clipboard.Set({{"revision", "7"}, {"text", "seed"}, {"html", "<b>seed</b>"}}));
+  CHECK(clipboard.Seed({{"revision", "7"}, {"text", "seed"}, {"html", "<b>seed</b>"}}));
   CHECK(operations.empty());
   ready = true;
   CHECK(clipboard.BeforeViews());
@@ -647,11 +643,6 @@ void ClipboardSynchronization() {
   const auto count = events.size();
   CHECK(clipboard.Poll(true));
   CHECK(events.size() == count + 1 && events.back()["text"] == "" && events.back()["html"] == "");
-  ++sequence;
-  contents["text"] = "pending copy before reset";
-  CHECK(clipboard.Set({{"revision", "8"}, {"text", ""}, {"html", ""}}));
-  CHECK(clipboard.Poll(true));
-  CHECK(events.size() == count + 1);
   CHECK(clipboard.Seed({{"revision", "9"}, {"text", "stored"}, {"html", ""}}));
   const auto seeded_operations = operations.size();
   CHECK(clipboard.BeforeViews());

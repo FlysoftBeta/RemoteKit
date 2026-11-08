@@ -28,29 +28,6 @@ class ClipboardController {
       return false;
     return Sequence(value["revision"]).has_value();
   }
-  Result<void> Set(const Json& value) {
-    if (!Valid(value))
-      return Error{ErrorCode::kInvalidRequest, "invalid clipboard value"};
-    std::lock_guard lock(mutex_);
-    std::optional<uint64_t> superseded;
-    if (hooks_.ready()) {
-      auto read = hooks_.read();
-      if (!read)
-        return read.error();
-      if (read.value().contains("sequence"))
-        superseded = Sequence(read.value()["sequence"]);
-      if (!superseded)
-        return Error{ErrorCode::kUnavailable, "invalid clipboard response"};
-    }
-    seed_ = value;
-    applied_incarnation_.clear();
-    auto applied = hooks_.ready() ? ApplyLocked() : Result<void>{};
-    if (applied && superseded) {
-      reported_incarnation_ = hooks_.incarnation();
-      reported_sequence_ = *superseded;
-    }
-    return applied;
-  }
   Result<void> Seed(const Json& value) {
     if (!Valid(value))
       return Error{ErrorCode::kInvalidRequest, "invalid clipboard value"};

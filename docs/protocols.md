@@ -122,7 +122,6 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | 方法 | 说明 |
 |---|---|
 | `session.open` | 创建或确认 Session：sessionId、placementEpoch、checkpoint、profileKey/objectKey/objectIdKey、可选 clipboard {revision,text,html}（在任何 view 之前写入 Browser）；其他方法只对已打开的 Tenant 有效 |
-| `session.clipboard.set` | `{revision, text, html}`：改写运行中 Browser 的剪贴板（不回报为本地写入） |
 | `session.hibernate` | 优雅关闭 Browser 并生成 checkpoint，回复 manifest id；有阻塞项时 `conflict` |
 | `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
 | `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |

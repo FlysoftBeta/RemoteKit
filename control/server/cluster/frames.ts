@@ -5,10 +5,7 @@ export const MAX_JSON = 1024 * 1024;
 const MAX_CLIPBOARD_JSON = 20 * 1024 * 1024 - 1;
 function jsonLimit(value: Record<string, unknown>) {
   if (value.type === 'clipboard.changed') return 4 * 1024 * 1024 - 1;
-  if (
-    value.method === 'session.clipboard.set' ||
-    ((value.method === 'session.open' || value.method === 'session.ensure') && value.clipboard)
-  )
+  if ((value.method === 'session.open' || value.method === 'session.ensure') && value.clipboard)
     return MAX_CLIPBOARD_JSON;
   return MAX_JSON;
 }

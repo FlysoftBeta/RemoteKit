@@ -198,7 +198,7 @@ test('transferring the administrator role demotes the current administrator', as
   }
 });
 
-test('reset browser data clears stored clipboard, clears a live Browser and purges its session', async () => {
+test('reset browser data refuses a running Session, then clears clipboard and purges once hibernated', async () => {
   const h = await stack();
   try {
     await h.call('admin.createUser', { username: 'reset-user', password });
@@ -206,13 +206,12 @@ test('reset browser data clears stored clipboard, clears a live Browser and purg
     const placement = h.control.endpoint.placement.resolve(user.tenant);
     h.store.clipboards.record(user.id, { text: 'private clipboard', html: '<p>private</p>' });
     h.store.clipboards.record(user.id, { text: 'latest clipboard', html: '' });
+    await assert.rejects(h.call('admin.resetSession', { username: user.username }), /需先休眠/);
+    assert.equal(h.store.clipboards.latest(user.id)?.text, 'latest clipboard');
+    assert.equal(h.control.endpoint.placement.peek(user.tenant)?.sessionId, placement.sessionId);
+    placement.state = 'hibernated';
     await h.call('admin.resetSession', { username: user.username });
     assert.equal(h.store.clipboards.latest(user.id), undefined);
-    assert.deepEqual(h.requests.find((request) => request.method === 'session.clipboard.set')?.args, {
-      revision: '3',
-      text: '',
-      html: '',
-    });
     assert.equal(h.control.endpoint.placement.peek(user.tenant), undefined);
     await h.control.sessionPurge.flush();
     assert.ok(
@@ -238,9 +237,7 @@ test('reset browser data clears clipboard without starting an absent or hibernat
       await h.call('admin.resetSession', { username });
       assert.equal(h.store.clipboards.latest(user.id), undefined);
       assert.equal(
-        h.requests
-          .slice(before)
-          .some((request) => ['session.ensure', 'session.clipboard.set'].includes(request.method)),
+        h.requests.slice(before).some((request) => request.method === 'session.ensure'),
         false,
       );
     }

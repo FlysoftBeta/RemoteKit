@@ -254,9 +254,24 @@ try {
   assert.equal(Buffer.byteLength(large), 3 * 1024 * 1024);
   assert(large.startsWith(oversizeMarker));
   result('4 oversize remains local', { bytes: Buffer.byteLength(large), revision: revision() });
+  await assert.rejects(admin.call('admin.resetSession', { username: 'clipboard-user' }), /需先休眠/);
+  assert.deepEqual(row(), retained);
+  await user.context.close();
+  await until(
+    async () =>
+      !(await admin.call('admin.users')).find((entry) => entry.username === 'clipboard-user').online,
+    'viewer detached before reset',
+  );
+  await until(
+    async () => {
+      const users = await admin.call('admin.hibernate', { username: 'clipboard-user' });
+      return users.find((entry) => entry.username === 'clipboard-user').session.state === 'hibernated';
+    },
+    'Session hibernated before reset',
+    90000,
+  );
   await admin.call('admin.resetSession', { username: 'clipboard-user' });
   assert.equal(row(), undefined);
-  await user.context.close();
   user = await connect('clipboard-user');
   await ready();
   await until(() => latest().pasted === '', 'fresh reset page');

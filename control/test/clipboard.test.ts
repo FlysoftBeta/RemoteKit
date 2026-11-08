@@ -255,8 +255,8 @@ test('clipboard frames carry maximum payloads and escaped seeds while other JSON
     text: 'a'.repeat(clipboardLimits.text),
     html: 'b'.repeat(clipboardLimits.html),
   };
-  for (const method of ['session.open', 'session.ensure', 'session.clipboard.set']) {
-    const message = method === 'session.clipboard.set' ? { method, ...clipboard } : { method, clipboard };
+  for (const method of ['session.open', 'session.ensure']) {
+    const message = { method, clipboard };
     assert.deepEqual(decodeFrame(encodeJson(message)), { kind: 'json', message });
   }
   const message = {

@@ -9,8 +9,7 @@ size_t JsonLimit(const Json& message) {
   if (message.value("type", Json()) == "clipboard.changed")
     return 4 * 1024 * 1024 - 1;
   const auto method = message.value("method", Json());
-  if (method == "session.clipboard.set" ||
-      ((method == "session.open" || method == "session.ensure") && message.contains("clipboard")))
+  if ((method == "session.open" || method == "session.ensure") && message.contains("clipboard"))
     return kMaxPlaintext - 1;
   return kMaxJson;
 }

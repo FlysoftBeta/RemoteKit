@@ -134,9 +134,9 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 
 - 记录的格式只有纯文本（≤1 MiB UTF-8）和 HTML（≤2 MiB）。超限的写入不记录：Control 保留原值并记一条不含内容的警告，Browser 在本次运行内仍保有它。只有图片等其他格式的写入记录为空剪贴板。
 - 上报：Browser 的 `ClipboardBridge` 观察 UI 线程剪贴板（页面复制/剪切、`navigator.clipboard`、`execCommand`、快捷菜单与上下文菜单命令都经过它），每次变化递增 `clipboard_sequence` 并写到共享映射头部。Endpoint 看到序号变化后调用 `clipboard.read` 取内容（较新的序号使在途读取作废），发管理事件 `clipboard.changed`；输出打开时和休眠/关闭 Browser 前也各读一次，补上映射不存在期间的写入。Control 按 Tenant 串行应用，revision 加一，不回推给产生它的 Browser。
-- 回填：`session.open` / `session.ensure` 带上 `clipboard {revision, text, html}`，Endpoint 在 Browser 启动后、创建或收养任何 view 之前调用 `clipboard.write`，页面看不到过期的空剪贴板。Browser 应用回填期间的写入不上报（显式的作用域状态，不靠时间判断）。`session.clipboard.set` 用于 Control 主动改写正在运行的 Browser。
-- "重置浏览器数据"清除保存的剪贴板和运行中 Browser 的剪贴板；删除用户删除它。
-- 剪贴板内容不进入日志、追踪、诊断包或错误消息，只记录大小与 revision。集群帧按消息类型放宽上限：`clipboard.changed` 4 MiB，带剪贴板的回填 20 MiB（JSON 转义后的最坏情况），其余消息仍是 1 MiB。
+- 回填：`session.open` / `session.ensure` 带上 `clipboard {revision, text, html}`，Endpoint 在 Browser 启动后、创建或收养任何 view 之前调用 `clipboard.write`，页面看不到过期的空剪贴板。Browser 应用回填期间的写入不上报（显式的作用域状态，不靠时间判断）。
+- "重置浏览器数据"只接受已休眠的 Session（运行中返回 `conflict`"需先休眠"，与管理员面板一致：休眠要求用户离线），同时清除保存的剪贴板，下次启动的 Browser 从空剪贴板开始；删除用户删除它。
+- 剪贴板内容不进入日志、追踪、诊断包或错误消息，只记录大小与 revision。集群帧按消息类型放宽上限：`clipboard.changed` 4 MiB，带剪贴板的 `session.open`/`session.ensure` 20 MiB（JSON 转义后的最坏情况），其余消息仍是 1 MiB。
 
 ## 设置
 
