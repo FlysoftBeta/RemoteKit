@@ -195,6 +195,9 @@ test('Xinjiaoyu captures identity headers and validates subjects before saving',
       result: {
         authorization: 'JBY token',
         accesstoken: 'access',
+        clientsession: 'page-client',
+        device: 'mobile',
+        devicetype: 'Other',
         'user-agent': 'Browser',
         'accept-language': 'zh-CN',
         'sec-ch-ua': 'Chromium',
@@ -206,7 +209,32 @@ test('Xinjiaoyu captures identity headers and validates subjects before saving',
     assert.equal(f.subjectsRead, true);
     assert.equal(f.accounts.session('tenant', 'xinjiaoyu').token, 'token');
     assert.equal(f.accounts.session('tenant', 'xinjiaoyu').userAgent, 'Browser');
+    assert.equal(f.accounts.session('tenant', 'xinjiaoyu').clientSessionId, 'page-client');
+    assert.equal(f.accounts.session('tenant', 'xinjiaoyu').device, 'mobile');
+    assert.equal(f.accounts.session('tenant', 'xinjiaoyu').deviceType, 'Other');
     assert.equal(f.workspace.tabs.length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test('Xinjiaoyu requires the captured client session before validation', async () => {
+  const f = fixture();
+  try {
+    f.signIn.start('tenant', { provider: 'xinjiaoyu', windowId: 'bank' });
+    await until(() => f.workspace.tabs.length === 1);
+    f.signIn.consume('tenant', 'browser', {
+      type: 'view.signIn',
+      version: 1,
+      eventId: 'xj',
+      webviewId: 'view',
+      provider: 'xinjiaoyu',
+      result: { authorization: 'JBY token', accesstoken: 'access' },
+    });
+    await until(() => f.accounts.state('tenant', 'xinjiaoyu').status === 'failed');
+    assert.equal(f.subjectsRead, false);
+    assert.equal(f.workspace.tabs.length, 0);
+    assert.equal(f.store.db.prepare('SELECT * FROM learning_accounts').all().length, 0);
   } finally {
     await f.close();
   }

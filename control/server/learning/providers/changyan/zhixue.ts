@@ -49,7 +49,7 @@ export class ZhixueClient {
   private readonly auth: ZhixueAuthClient;
 
   constructor(options: HttpOptions = {}) {
-    this.http = new HttpClient(options);
+    this.http = new HttpClient(options, 'zhixue');
     this.auth = new ZhixueAuthClient(options);
   }
 

@@ -1012,7 +1012,14 @@ void SignInValidation() {
   CHECK(!ValidSignInEvent(event));
   event["provider"] = "xinjiaoyu";
   event["result"] = {{"authorization", "JBY example"}, {"accesstoken", "example"}};
+  CHECK(!ValidSignInEvent(event));
+  event["result"]["clientsession"] = "page-client";
+  event["result"]["device"] = "mobile";
+  event["result"]["devicetype"] = "Other";
   CHECK(ValidSignInEvent(event));
+  event["result"]["clientsession"] = "";
+  CHECK(!ValidSignInEvent(event));
+  event["result"]["clientsession"] = "page-client";
   event["result"]["cookie"] = "forbidden";
   CHECK(!ValidSignInEvent(event));
 }

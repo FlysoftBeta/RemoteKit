@@ -150,6 +150,7 @@ export class SignIn {
       return true;
     const result = value.result;
     if (!result || typeof result !== 'object' || Array.isArray(result)) return true;
+    if (Buffer.byteLength(JSON.stringify(result), 'utf8') > 8192) return true;
     flow.finishing = true;
     this.run(
       (async () => {
@@ -175,6 +176,9 @@ export class SignIn {
           const session: XinjiaoyuSession = {
             token: field('authorization').replace(/^JBY\s+/i, ''),
             accessToken: field('accesstoken'),
+            clientSessionId: field('clientsession'),
+            device: field('device'),
+            deviceType: field('devicetype'),
             userAgent: field('user-agent'),
             acceptLanguage: field('accept-language'),
             secChUa: field('sec-ch-ua'),

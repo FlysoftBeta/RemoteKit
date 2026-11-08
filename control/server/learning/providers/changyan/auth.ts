@@ -51,7 +51,7 @@ export class AuthClient {
   private readonly http: HttpClient;
 
   constructor(options: HttpOptions = {}) {
-    this.http = new HttpClient(options);
+    this.http = new HttpClient(options, 'changyan');
   }
 
   async captchaPolicy(): Promise<CaptchaPolicy> {

@@ -55,6 +55,7 @@ export function serviceError(code: unknown, service: string, auth = false): neve
   }
   if (
     ['401', '416', '900004'].includes(value) ||
+    (service === '新教育' && value === '410') ||
     auth ||
     /token|tgt|ticket|password|account|credential/.test(value)
   ) {
@@ -75,7 +76,10 @@ export class HttpClient {
   readonly retryBaseMs: number;
   readonly timeoutMs: number;
 
-  constructor(options: HttpOptions = {}) {
+  constructor(
+    options: HttpOptions = {},
+    private readonly provider?: 'changyan' | 'zhixue' | 'xinjiaoyu',
+  ) {
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? 20_000;
     this.maxRetries = options.maxRetries ?? 3;
@@ -90,6 +94,14 @@ export class HttpClient {
           ...init,
           signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
         });
+        if (!response.ok && this.provider) {
+          let message: unknown = response.statusText;
+          try {
+            const value = await response.clone().json();
+            message = value.msg ?? value.message ?? value.errorInfo ?? response.statusText;
+          } catch {}
+          this.logRejection(url, init, response.status, message);
+        }
         if (response.status === 401 || response.status === 403 || response.status === 416) {
           await response.body?.cancel();
           throw new RemoteKitError('unauthenticated', '学习服务登录已失效，请重新登录');
@@ -115,16 +127,74 @@ export class HttpClient {
 
   async json(url: string | URL, init: RequestInit = {}, retries = this.maxRetries): Promise<unknown> {
     const response = await this.response(url, init, retries);
-    return this.parseJson(response);
+    return this.parseJson(response, url, init);
   }
 
-  async parseJson(response: Response): Promise<unknown> {
+  async parseJson(response: Response, url?: string | URL, init: RequestInit = {}): Promise<unknown> {
     try {
-      return await response.json();
+      const value: unknown = await response.json();
+      if (url && value && typeof value === 'object' && !Array.isArray(value)) {
+        const envelope = value as Record<string, unknown>;
+        const code = envelope.errorCode ?? envelope.code;
+        if (
+          (typeof code === 'string' || typeof code === 'number') &&
+          !['200', '0', '000000', 'success'].includes(String(code))
+        ) {
+          this.logRejection(url, init, code, envelope.msg ?? envelope.message ?? envelope.errorInfo);
+        }
+      }
+      return value;
     } catch (error) {
       if (error instanceof SyntaxError) return malformed();
       throw new RemoteKitError('unavailable', '学习服务读取超时或连接中断，请稍后重试');
     }
+  }
+
+  private logRejection(url: string | URL, init: RequestInit, code: string | number, message: unknown) {
+    if (!this.provider) return;
+    const address = new URL(url);
+    const sensitive = new Set<string>();
+    const collect = (value: unknown): void => {
+      if (typeof value === 'string' && value.length > 0) sensitive.add(value);
+      else if (value && typeof value === 'object') Object.values(value).forEach(collect);
+    };
+    for (const [name, value] of new Headers(init.headers)) {
+      if (!/authorization|token|cookie|session|user/.test(name)) continue;
+      collect(value);
+      const token = value.replace(/^(?:JBY|Bearer)\s+/i, '');
+      collect(token);
+      if (name === 'cookie') {
+        for (const cookie of value.split(';')) collect(cookie.slice(cookie.indexOf('=') + 1).trim());
+      }
+      try {
+        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+        collect(payload);
+        if (typeof payload.sub === 'string') collect(JSON.parse(payload.sub));
+      } catch {}
+    }
+    for (const value of address.searchParams.values()) collect(value);
+    if (typeof init.body === 'string') {
+      try {
+        collect(JSON.parse(init.body));
+      } catch {
+        for (const value of new URLSearchParams(init.body).values()) collect(value);
+      }
+    } else if (init.body instanceof URLSearchParams) {
+      for (const value of init.body.values()) collect(value);
+    }
+    let serviceMessage = typeof message === 'string' ? message : '';
+    for (const value of [...sensitive].sort((a, b) => b.length - a.length)) {
+      serviceMessage = serviceMessage.split(value).join('[redacted]');
+    }
+    serviceMessage = serviceMessage
+      .replace(/\b(?:JBY|Bearer)\s+\S+/gi, '[redacted]')
+      .replace(/\beyJ[\w-]+\.[\w-]+(?:\.[\w-]+)?/g, '[redacted]');
+    console.warn('Learning provider rejected', {
+      provider: this.provider,
+      path: address.pathname,
+      code: Number.isFinite(Number(code)) ? Number(code) : code,
+      message: serviceMessage.slice(0, 1024),
+    });
   }
 
   async retry<T>(run: () => Promise<T>): Promise<T> {

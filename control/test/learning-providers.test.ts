@@ -3,7 +3,7 @@ import { createCipheriv, createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { RemoteKitError, type ErrorCode } from '../shared/errors.js';
-import { HttpClient } from '../server/learning/providers/http.js';
+import { HttpClient, serviceError } from '../server/learning/providers/http.js';
 import { collectMediaUrls } from '../server/learning/providers/html.js';
 import { AuthClient, type AccountSession } from '../server/learning/providers/changyan/auth.js';
 import { AUTH_CONFIG } from '../server/learning/providers/changyan/config.js';
@@ -16,7 +16,6 @@ import { normalizeHomeworkQuestions } from '../server/learning/providers/changya
 import { APIClient, type XinjiaoyuSession } from '../server/learning/providers/xinjiaoyu/client.js';
 import {
   AES_KEY,
-  createClientSession,
   createHandshakeEncrypt,
   createRequestEncrypt,
   decryptSafeCode,
@@ -66,6 +65,8 @@ const xjSession: XinjiaoyuSession = {
   token: jwt({ sub: JSON.stringify({ id: 'account', school: { schoolId: 'school' } }) }),
   accessToken: 'test-access',
   clientSessionId: 'test-client',
+  device: 'mobile',
+  deviceType: 'Other',
   safeCode: 'test-safe',
 };
 const rateLimit = { minIntervalMs: 0, jitterMs: 0, maxRetries: 0, retryBaseMs: 0 };
@@ -91,7 +92,6 @@ test('reference signing vectors, RSA ciphertext and AES handshake', () => {
   assert.equal(createHandshakeEncrypt('session', 123), 'c5fa75cc69ce004e0ceb18deac9fe3db');
   assert.equal(createRequestEncrypt('safe-code', 'session', 123), 'e950f4083b9a585593fe1076546ac7e7');
   assert.equal(decryptSafeCode(encryptSafeCode('safe-code')), 'safe-code');
-  assert.match(createClientSession(123), /^123[A-Za-z0-9]{10}$/);
   assert.match(encryptPassword('demo-password'), /^[0-9a-f]{256}$/);
   assert.equal(
     gatewaySignatureWithAppId(
@@ -410,8 +410,16 @@ test('Xinjiaoyu handshake signing and caller-owned session carry safeCode forwar
   const client = new APIClient({
     rateLimit,
     fetch: mockFetch((url, _body, headers) => {
+      assert.equal(headers.get('referer'), 'https://www.xinjiaoyu.com/teacher/question_base_paper/selectNew');
       if (url.pathname.endsWith('/system/code')) {
         handshakeCount += 1;
+        assert.equal(url.searchParams.get('clientSessionId'), xjSession.clientSessionId);
+        assert.equal(headers.get('clientsession'), xjSession.clientSessionId);
+        assert.equal(headers.get('device'), xjSession.device);
+        assert.equal(headers.get('devicetype'), xjSession.deviceType);
+        assert.equal(headers.get('authorization'), `JBY ${xjSession.token}`);
+        assert.equal(headers.get('accesstoken'), xjSession.accessToken);
+        assert.equal(headers.get('encrypt'), '');
         assert.equal(
           url.searchParams.get('encrypt'),
           createHandshakeEncrypt(url.searchParams.get('clientSessionId')!, Number(url.searchParams.get('t'))),
@@ -420,6 +428,7 @@ test('Xinjiaoyu handshake signing and caller-owned session carry safeCode forwar
       }
       assert.equal(headers.get('authorization'), `JBY ${xjSession.token}`);
       assert.equal(headers.get('accesstoken'), 'test-access');
+      assert.equal(headers.get('clientsession'), xjSession.clientSessionId);
       assert.equal(
         headers.get('encrypt'),
         createRequestEncrypt('safe-code', headers.get('clientsession')!, Number(headers.get('t'))),
@@ -427,12 +436,16 @@ test('Xinjiaoyu handshake signing and caller-owned session carry safeCode forwar
       return success([]);
     }),
   });
-  const input = { token: xjSession.token, accessToken: xjSession.accessToken };
+  const { safeCode: _safeCode, ...input } = xjSession;
   const result = await client.get(input, '/read');
   assert.equal(result.session.safeCode, 'safe-code');
   assert.equal('safeCode' in input, false);
   await client.get(result.session, '/read');
   assert.equal(handshakeCount, 1);
+  await client.get(input, '/read');
+  assert.equal(handshakeCount, 2);
+  await rejectsCode(client.get({ ...input, clientSessionId: '' }, '/read'), 'unauthenticated');
+  assert.equal(handshakeCount, 2);
 });
 
 test('Xinjiaoyu subjects, all textbook editions and recursive scene question types', async () => {
@@ -476,6 +489,82 @@ test('Xinjiaoyu subjects, all textbook editions and recursive scene question typ
   assert.equal(types[1].id, 'listen');
   assert.equal((await provider.books(xjSession, '1')).data.length, 2);
   assert.deepEqual(editions, ['edition1', 'edition2']);
+});
+
+test('provider rejections log service, path, code and message with request identities redacted', async (t) => {
+  const warnings = t.mock.method(console, 'warn', () => {});
+  const client = new APIClient({
+    rateLimit,
+    fetch: mockFetch(() => ({
+      code: 416,
+      msg: `登录会话不匹配 JBY ${xjSession.token} test-access test-client`,
+    })),
+  });
+  await rejectsCode(client.get(xjSession, '/api/v3/read'), 'unauthenticated');
+  assert.deepEqual(warnings.mock.calls[0].arguments, [
+    'Learning provider rejected',
+    {
+      provider: 'xinjiaoyu',
+      path: '/api/v3/read',
+      code: 416,
+      message: '登录会话不匹配 [redacted] [redacted] [redacted]',
+    },
+  ]);
+  const auth = new AuthClient({
+    fetch: async () => Response.json({ code: '401', message: '登录被拒绝' }),
+  });
+  await rejectsCode(auth.captchaPolicy(), 'unauthenticated');
+  assert.equal(warnings.mock.calls[warnings.mock.calls.length - 1].arguments[1].provider, 'changyan');
+  const http = new HttpClient(
+    {
+      maxRetries: 0,
+      fetch: async () => Response.json({ message: '禁止访问 private-user private-cookie' }, { status: 403 }),
+    },
+    'zhixue',
+  );
+  await rejectsCode(
+    http.json('https://www.zhixue.com/read?account=private-user', {
+      headers: { cookie: 'session=private-cookie' },
+    }),
+    'unauthenticated',
+  );
+  assert.deepEqual(warnings.mock.calls[warnings.mock.calls.length - 1].arguments[1], {
+    provider: 'zhixue',
+    path: '/read',
+    code: 403,
+    message: '禁止访问 [redacted] [redacted]',
+  });
+  const identities = ['private-name', 'private-id', 'private-query', 'private-body'];
+  const rejection = new HttpClient(
+    { fetch: async () => Response.json({ code: 416, msg: `拒绝 ${identities.join(' ')}` }) },
+    'xinjiaoyu',
+  );
+  await rejection.json('https://www.xinjiaoyu.com/read?search=private-query', {
+    method: 'POST',
+    headers: {
+      authorization: `JBY ${jwt({ sub: JSON.stringify({ name: identities[0], id: identities[1] }) })}`,
+    },
+    body: JSON.stringify({ nested: { value: identities[3] } }),
+  });
+  assert.deepEqual(warnings.mock.calls[warnings.mock.calls.length - 1].arguments[1], {
+    provider: 'xinjiaoyu',
+    path: '/read',
+    code: 416,
+    message: '拒绝 [redacted] [redacted] [redacted] [redacted]',
+  });
+});
+
+test('410 means unauthenticated only for Xinjiaoyu', () => {
+  for (const [service, code] of [
+    ['新教育', 'unauthenticated'],
+    ['畅言', 'rejected'],
+    ['智学', 'rejected'],
+  ]) {
+    assert.throws(
+      () => serviceError(410, service),
+      (error: unknown) => error instanceof RemoteKitError && error.code === code,
+    );
+  }
 });
 
 test('Xinjiaoyu no textbook type, no books and empty catalog still permit querying', async () => {
@@ -641,7 +730,7 @@ test('media collection includes unquoted attributes, srcset, CSS and nested file
 });
 
 test('provider auth errors are distinct, malformed payloads are internal and failures never expose response text', async () => {
-  for (const code of [401, 416]) {
+  for (const code of [401, 410, 416, 900004]) {
     const client = new APIClient({
       rateLimit,
       fetch: mockFetch(() => ({ code, msg: 'private-token-must-not-leak' })),

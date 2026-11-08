@@ -24,12 +24,19 @@ void SignInResults() {
   headers.SetHeader("Authorization", "JBY example");
   CHECK(!XinjiaoyuSignInResult(api, headers));
   headers.SetHeader("AccessToken", "example");
+  CHECK(!XinjiaoyuSignInResult(api, headers));
+  headers.SetHeader("ClientSession", "page-client");
+  headers.SetHeader("Device", "mobile");
+  headers.SetHeader("DeviceType", "Other");
   headers.SetHeader("Cookie", "must-not-leave-browser");
   for (const auto* name :
        {"user-agent", "accept-language", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"})
     headers.SetHeader(name, "identity");
   auto result = XinjiaoyuSignInResult(api, headers);
-  CHECK(result && result->size() == 7 && !result->contains("cookie"));
+  CHECK(result && result->size() == 10 && !result->contains("cookie"));
+  CHECK(*result->FindString("clientsession") == "page-client");
+  CHECK(*result->FindString("device") == "mobile");
+  CHECK(*result->FindString("devicetype") == "Other");
   for (const auto* url : {"https://www.xinjiaoyu.com/api/v3/server_system/system/code",
                           "https://www.xinjiaoyu.com/api/v3/server_system/auth/login",
                           "http://www.xinjiaoyu.com/api/v3/student/info",

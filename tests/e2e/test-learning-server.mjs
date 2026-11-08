@@ -245,6 +245,8 @@ try {
       'Browser observed signed_in',
     );
     assert(!(await first.state()).workspace.tabs.some((tab) => tab.signIn === 'xinjiaoyu'));
+    assert([...provider.sessions.values()].some((handshakes) => handshakes === 2));
+    assert(!provider.events.some((event) => event.type === 'binding-rejected'));
   });
   await stage('bank-filters-svg-and-media', async () => {
     const studyWindow = (await first.state()).workspace.windows.find((window) => window.appId === 'study');

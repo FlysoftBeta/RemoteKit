@@ -15,6 +15,8 @@ test('bank maps every filter, subtype, difficulty, catalog, rich field and media
     token: 'token',
     accessToken: 'access',
     clientSessionId: 'client',
+    device: 'pc',
+    deviceType: 'Chrome',
     safeCode: 'safe',
   });
   const bodies: { path: string; body: Record<string, unknown> }[] = [];

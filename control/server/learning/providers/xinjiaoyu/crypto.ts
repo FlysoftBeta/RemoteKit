@@ -1,19 +1,10 @@
-import { createDecipheriv, createHash, randomInt } from 'node:crypto';
+import { createDecipheriv, createHash } from 'node:crypto';
 
 export const CLIENT = 'front';
 export const AES_KEY = '6f0c5ba452b24fa28989e9524d77407a';
-const SESSION_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
 export function md5(value: string): string {
   return createHash('md5').update(value).digest('hex');
-}
-
-export function createClientSession(now = Date.now()): string {
-  let value = String(now);
-  for (let index = 0; index < 10; index += 1) {
-    value += SESSION_ALPHABET[randomInt(SESSION_ALPHABET.length)];
-  }
-  return value;
 }
 
 export function createHandshakeEncrypt(clientSessionId: string, timestamp: number): string {

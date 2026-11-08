@@ -39,12 +39,14 @@ inline std::optional<base::DictValue> XinjiaoyuSignInResult(
     return std::nullopt;
   const auto authorization = headers.GetHeader("authorization");
   const auto access_token = headers.GetHeader("accesstoken");
+  const auto client_session = headers.GetHeader("clientsession");
   if (!authorization || !authorization->starts_with("JBY ") || !access_token ||
-      access_token->empty())
+      access_token->empty() || !client_session || client_session->empty())
     return std::nullopt;
   base::DictValue result;
-  for (const auto* name : {"authorization", "accesstoken", "user-agent", "accept-language",
-                           "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"}) {
+  for (const auto* name :
+       {"authorization", "accesstoken", "clientsession", "device", "devicetype", "user-agent",
+        "accept-language", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"}) {
     if (auto value = headers.GetHeader(name))
       result.Set(name, *value);
   }

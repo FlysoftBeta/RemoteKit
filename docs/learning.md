@@ -25,11 +25,11 @@
 Browser 侧是**专用的登录视图**，而不是通用的脚本执行或 Cookie 读取：view 创建时带 `signIn: 'changyan' | 'xinjiaoyu'`，Browser 按用途用固定代码处理，只把约定的结果以 `view.signIn` 事件交给 Endpoint，再经 `session.events` 到 Control。结果不超过 8KiB，Browser 与 Endpoint 只记录"view N 登录完成"，不记录内容。登录视图不能打开弹窗。
 
 - **畅言**：用户在 App 里输入账号密码，Control 查询验证策略；需要验证时，登录 Tab 打开 Browser 内置的 `remotekit-signin://changyan/verify?…` 页（自定义 standard+secure scheme，只有登录视图能加载），页面加载官方极验 v4 并立即弹出；用户完成后页面跳到 `remotekit-signin://changyan/done?…`，Browser 拦下这次导航，把 `lot_number/captcha_output/pass_token/gen_time` 作为结果上报。Control 用它完成账号登录、换取畅言 token、扩展到智学并登录智学。口令只在这次流程的内存里。
-- **新教育**：登录 Tab 打开 `https://www.xinjiaoyu.com/auth/login`，用户自己登录。Browser 观察这个 WebContents 发往 `www.xinjiaoyu.com/api/v3/` 的请求，第一个同时带 `JBY` authorization 与 accesstoken 的业务请求（排除握手与登录本身）即为登录完成，上报这两个头与浏览器标识头（UA、Accept-Language、`sec-ch-ua*`）。Control 自己建立签名会话（safeCode 握手），用一次只读请求验证后保存。请求观察挂在 WebContents 级的 URLLoaderFactory 上：浏览器侧的 URLLoaderThrottle 看不到页面的 fetch/XHR。
+- **新教育**：登录 Tab 打开 `https://www.xinjiaoyu.com/auth/login`，用户自己登录。Browser 观察这个 WebContents 发往 `www.xinjiaoyu.com/api/v3/` 的请求，第一个同时带 `JBY` authorization 与 accesstoken 的业务请求（排除握手与登录本身）即为登录完成，上报这两个头、同一请求的 `clientsession`/`device`/`devicetype` 与浏览器标识头（UA、Accept-Language、`sec-ch-ua*`）。新教育的 token 绑定登录时页面用的 `clientsession`：换一个会话 ID 再用就会被当成未登录，所以 Control 沿用捕获的 ID，只为它重新做 safeCode 握手（网页刷新后丢了 safeCode 也是这样做），用一次只读请求验证后保存。请求观察挂在 WebContents 级的 URLLoaderFactory 上：浏览器侧的 URLLoaderThrottle 看不到页面的 fetch/XHR。
 
 ### 过期
 
-服务返回认证失败时先续期（畅言用 TGT 换新 token，智学用共享 SSO 续 CAS）；续不上则标记为已过期，App 顶部提示重新登录，用户名预填。退出登录删除登录态；已下载的文件留在我的文件里。
+服务拒绝请求时，Control 日志记录服务、接口路径、错误码与服务给出的提示文字（剔除请求里出现的 token、Cookie、账号与参数值），便于排查；认证失败时先续期（畅言用 TGT 换新 token，智学用共享 SSO 续 CAS）；续不上则标记为已过期，App 顶部提示重新登录，用户名预填。退出登录删除登录态；已下载的文件留在我的文件里。
 
 ## 学习
 

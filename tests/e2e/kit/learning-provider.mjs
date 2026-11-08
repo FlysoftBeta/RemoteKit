@@ -52,9 +52,10 @@ export async function fakeLearningProvider(run, browser) {
     sharePersonId: 'teacher',
     sharePersonName: '老师',
   }));
-  const token = jwt({
-    sub: JSON.stringify({ id: 'student', name: '测试同学', school: { schoolId: 'school' } }),
-  });
+  let signInCount = 0;
+  const tokens = new Map();
+  const sessions = new Map();
+  const md5 = (value) => createHash('md5').update(value).digest('hex');
   const handshake = createCipheriv('aes-256-ecb', Buffer.from('6f0c5ba452b24fa28989e9524d77407a'), null);
   const safeCode = Buffer.concat([handshake.update('learning-safe-code'), handshake.final()]).toString(
     'base64',
@@ -85,6 +86,23 @@ export async function fakeLearningProvider(run, browser) {
         return json({ ok: true });
       }
       if (url.pathname === '/auth/login') {
+        const clientSessionId = 'learning-page-' + ++signInCount;
+        const timestamp = Date.now();
+        const headers = {
+          clientsession: clientSessionId,
+          client: 'front',
+          device: 'mobile',
+          devicetype: 'Other',
+          platformtype: '1',
+          t: String(timestamp),
+          encrypt: md5('learning-safe-code' + timestamp + clientSessionId + 'front'),
+        };
+        const query = new URLSearchParams({
+          clientSessionId,
+          t: String(timestamp),
+          client: 'front',
+          encrypt: md5('front' + clientSessionId + timestamp),
+        });
         return res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(`<!doctype html>
           <meta name="viewport" content="width=device-width,initial-scale=1">
           <title>新教育测试登录</title>
@@ -107,9 +125,16 @@ export async function fakeLearningProvider(run, browser) {
             addEventListener('resize', geometry);
             username.oninput = () => report('input', { value: username.value });
             username.onfocus = () => report('focus');
-            login.onclick = () => fetch('/api/v3/server_system/audit/cfg/query', {
-              headers: { authorization: ${JSON.stringify('JBY ' + token)}, accesstoken: 'learning-access' },
-            });
+            const headers = ${JSON.stringify(headers)};
+            const ready = fetch('/api/v3/server_system/system/code?${query}', { headers });
+            login.onclick = async () => {
+              await ready;
+              const response = await fetch('/api/v3/server_system/auth/login', { method: 'POST', headers });
+              const { data } = await response.json();
+              await fetch('/api/v3/server_system/audit/cfg/query', {
+                headers: { ...headers, authorization: 'JBY ' + data.token, accesstoken: 'learning-access' },
+              });
+            };
             let tick = 0;
             setInterval(() => {
               const drawing = document.querySelector('canvas').getContext('2d');
@@ -194,7 +219,48 @@ export async function fakeLearningProvider(run, browser) {
         return cy([
           { resId: url.searchParams.get('resId'), md5: files.get(url.searchParams.get('resId')).md5 },
         ]);
-      if (url.pathname === '/api/v3/server_system/system/code') return cy(safeCode);
+      if (url.pathname === '/api/v3/server_system/system/code') {
+        const clientSessionId = url.searchParams.get('clientSessionId');
+        assert(clientSessionId);
+        assert.equal(req.headers.clientsession, clientSessionId);
+        assert.equal(
+          url.searchParams.get('encrypt'),
+          md5('front' + clientSessionId + url.searchParams.get('t')),
+        );
+        sessions.set(clientSessionId, (sessions.get(clientSessionId) ?? 0) + 1);
+        return cy(safeCode);
+      }
+      if (url.pathname.startsWith('/api/v3/')) {
+        const clientSessionId = req.headers.clientsession;
+        if (!sessions.has(clientSessionId)) return json({ code: 410, msg: '签名会话不存在' });
+        assert.equal(
+          req.headers.encrypt,
+          md5('learning-safe-code' + req.headers.t + clientSessionId + 'front'),
+        );
+        assert.equal(req.headers.device, 'mobile');
+        assert.equal(req.headers.devicetype, 'Other');
+        if (url.pathname === '/api/v3/server_system/auth/login') {
+          const token = jwt({
+            sid: clientSessionId,
+            sub: JSON.stringify({
+              id: 'account',
+              name: '测试账户',
+              school: { schoolId: 'school' },
+            }),
+          });
+          tokens.set(token, clientSessionId);
+          return cy({ token });
+        }
+        const boundSession = tokens.get(req.headers.authorization?.replace(/^JBY /, ''));
+        if (
+          !boundSession ||
+          boundSession !== clientSessionId ||
+          req.headers.accesstoken !== 'learning-access'
+        ) {
+          events.push({ type: 'binding-rejected' });
+          return json({ code: 416, msg: '登录会话不匹配' });
+        }
+      }
       if (url.pathname === '/api/v3/server_system/audit/cfg/query')
         return cy({
           unints: [
@@ -301,6 +367,7 @@ export async function fakeLearningProvider(run, browser) {
   return {
     requests,
     events,
+    sessions,
     launcher,
     env: {
       NODE_ENV: 'test',

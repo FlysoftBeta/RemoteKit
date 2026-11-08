@@ -19,7 +19,7 @@ export class GatewayClient {
   private readonly gatewayUrl = 'https://xktptapi.changyan.com';
 
   constructor(options: HttpOptions & { now?: () => number; nonce?: () => string } = {}) {
-    this.http = new HttpClient(options);
+    this.http = new HttpClient(options, 'changyan');
     this.auth = new AuthClient(options);
     this.now = options.now ?? Date.now;
     this.nonce = options.nonce ?? randomUUID;

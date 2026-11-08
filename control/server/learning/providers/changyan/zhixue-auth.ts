@@ -28,7 +28,7 @@ export class ZhixueAuthClient {
   constructor(
     options: HttpOptions & { now?: () => number; uuid?: () => string; randomHex?: () => string } = {},
   ) {
-    this.http = new HttpClient(options);
+    this.http = new HttpClient(options, 'zhixue');
     this.auth = new AuthClient(options);
     this.now = options.now ?? Date.now;
     this.uuid = options.uuid ?? randomUUID;
@@ -94,22 +94,20 @@ export class ZhixueAuthClient {
         'AX-SIGN': this.randomHex(),
         ...cookieHeader(previous?.cookies),
       };
-      const response = await this.http.response(
-        `${ZHIXUE_BASE_URL}/container/app/login/casLogin`,
-        {
-          method: 'POST',
-          headers,
-          body: new URLSearchParams({
-            at: accessTicket,
-            loginType: '',
-            tokenTimeout: '0',
-            userId,
-            autoLogin: 'true',
-          }),
-        },
-        0,
-      );
-      const envelope = record(await this.http.parseJson(response)) as {
+      const url = `${ZHIXUE_BASE_URL}/container/app/login/casLogin`;
+      const init = {
+        method: 'POST',
+        headers,
+        body: new URLSearchParams({
+          at: accessTicket,
+          loginType: '',
+          tokenTimeout: '0',
+          userId,
+          autoLogin: 'true',
+        }),
+      };
+      const response = await this.http.response(url, init, 0);
+      const envelope = record(await this.http.parseJson(response, url, init)) as {
         errorCode?: number;
         errorInfo?: string;
         result?: CasLoginResult;

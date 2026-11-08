@@ -63,7 +63,7 @@ export class StudyClient {
 
   constructor(options: HttpOptions = {}) {
     this.gateway = new GatewayClient(options);
-    this.http = new HttpClient(options);
+    this.http = new HttpClient(options, 'changyan');
   }
 
   async subjects(session: AccountSession): Promise<ProviderResult<Subject[], AccountSession>> {

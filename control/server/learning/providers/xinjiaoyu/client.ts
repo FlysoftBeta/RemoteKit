@@ -9,20 +9,15 @@ import {
   serviceError,
 } from '../http.js';
 import type { ProviderResult } from '../models.js';
-import {
-  CLIENT,
-  createClientSession,
-  createHandshakeEncrypt,
-  createRequestEncrypt,
-  decryptSafeCode,
-} from './crypto.js';
+import { CLIENT, createHandshakeEncrypt, createRequestEncrypt, decryptSafeCode } from './crypto.js';
 import { DEFAULT_RATE_LIMIT, RateLimiter } from './rate-limiter.js';
 
 export interface XinjiaoyuSession {
   token: string;
   accessToken: string;
-  cookie?: string;
-  clientSessionId?: string;
+  clientSessionId: string;
+  device: string;
+  deviceType: string;
   safeCode?: string;
   userAgent?: string;
   acceptLanguage?: string;
@@ -52,7 +47,7 @@ export class APIClient {
   private readonly baseUrl = 'https://www.xinjiaoyu.com';
 
   constructor(options: XinjiaoyuOptions = {}) {
-    this.http = new HttpClient(options);
+    this.http = new HttpClient(options, 'xinjiaoyu');
     this.stageId = options.stageId ?? '10000';
     this.rateLimit = { ...DEFAULT_RATE_LIMIT, ...options.rateLimit };
     if (
@@ -86,8 +81,10 @@ export class APIClient {
   }
 
   async handshake(input: XinjiaoyuSession): Promise<XinjiaoyuSession> {
-    if (input.clientSessionId && input.safeCode) return input;
-    const clientSessionId = input.clientSessionId ?? createClientSession();
+    if (!input.clientSessionId || !input.device || !input.deviceType)
+      throw new RemoteKitError('unauthenticated', '请重新登录新教育');
+    if (input.safeCode) return input;
+    const clientSessionId = input.clientSessionId;
     const data = await this.retry(() =>
       this.limiter.schedule(async () => {
         const timestamp = Date.now();
@@ -98,7 +95,21 @@ export class APIClient {
           client: CLIENT,
           encrypt: createHandshakeEncrypt(clientSessionId, timestamp),
         }).toString();
-        return this.envelope(await this.http.json(url, { headers: this.deviceHeaders(clientSessionId) }, 0));
+        return this.envelope(
+          await this.http.json(
+            url,
+            {
+              headers: {
+                ...this.deviceHeaders(input),
+                authorization: `JBY ${input.token}`,
+                accesstoken: input.accessToken,
+                t: String(timestamp),
+                encrypt: '',
+              },
+            },
+            0,
+          ),
+        );
       }),
     );
     let safeCode: string;
@@ -129,19 +140,13 @@ export class APIClient {
           }
         }
         const headers = {
-          ...this.deviceHeaders(session.clientSessionId!),
+          ...this.deviceHeaders(session),
           ...(method === 'POST' ? { 'content-type': 'application/json' } : {}),
+          ...(method === 'POST' ? { origin: this.baseUrl } : {}),
           authorization: `JBY ${session.token}`,
           accesstoken: session.accessToken,
-          ...(session.cookie ? { cookie: session.cookie } : {}),
-          ...(session.userAgent ? { 'user-agent': session.userAgent } : {}),
-          ...(session.acceptLanguage ? { 'accept-language': session.acceptLanguage } : {}),
-          ...(session.secChUa ? { 'sec-ch-ua': session.secChUa } : {}),
-          ...(session.secChUaMobile ? { 'sec-ch-ua-mobile': session.secChUaMobile } : {}),
-          ...(session.secChUaPlatform ? { 'sec-ch-ua-platform': session.secChUaPlatform } : {}),
-          referer: `${this.baseUrl}/teacher/question_base_paper/selectNew`,
           t: String(timestamp),
-          encrypt: createRequestEncrypt(session.safeCode!, session.clientSessionId!, timestamp),
+          encrypt: createRequestEncrypt(session.safeCode!, session.clientSessionId, timestamp),
         };
         return this.envelope(
           await this.http.json(
@@ -167,14 +172,20 @@ export class APIClient {
     return envelope.data;
   }
 
-  private deviceHeaders(clientSessionId: string): Record<string, string> {
+  private deviceHeaders(session: XinjiaoyuSession): Record<string, string> {
     return {
       accept: 'application/json, text/plain, */*',
       client: CLIENT,
-      clientsession: clientSessionId,
-      device: 'pc',
-      devicetype: 'Chrome',
+      clientsession: session.clientSessionId,
+      device: session.device,
+      devicetype: session.deviceType,
       platformtype: '1',
+      referer: `${this.baseUrl}/teacher/question_base_paper/selectNew`,
+      ...(session.userAgent ? { 'user-agent': session.userAgent } : {}),
+      ...(session.acceptLanguage ? { 'accept-language': session.acceptLanguage } : {}),
+      ...(session.secChUa ? { 'sec-ch-ua': session.secChUa } : {}),
+      ...(session.secChUaMobile ? { 'sec-ch-ua-mobile': session.secChUaMobile } : {}),
+      ...(session.secChUaPlatform ? { 'sec-ch-ua-platform': session.secChUaPlatform } : {}),
     };
   }
 
@@ -197,7 +208,11 @@ export class APIClient {
   }
 }
 
-export function decodeIdentity(token: string): { userId?: string; schoolId?: string; displayName?: string } {
+export function decodeIdentity(token: string): {
+  userId?: string;
+  schoolId?: string;
+  displayName?: string;
+} {
   try {
     const payload = record(JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8')));
     const subject = record(typeof payload.sub === 'string' ? JSON.parse(payload.sub) : payload.sub);

@@ -73,12 +73,19 @@ try {
         const sample = document.createElement('canvas');
         sample.width = sample.height = 1;
         const draw = sample.getContext('2d');
-        draw.drawImage(video, video.videoWidth * 0.2, video.videoHeight * 0.5, 1, 1, 0, 0, 1, 1);
-        const [red, , blue] = draw.getImageData(0, 0, 1, 1).data;
-        return red > 100 && blue > red + 10;
+        draw.drawImage(video, video.videoWidth * 0.64, video.videoHeight * 0.46, 1, 1, 0, 0, 1, 1);
+        const [red, green, blue] = draw.getImageData(0, 0, 1, 1).data;
+        if (red < 235 || green < 235 || blue < 235) return false;
+        draw.drawImage(video, video.videoWidth * 0.64, video.videoHeight * 0.72, 1, 1, 0, 0, 1, 1);
+        const [buttonRed, buttonGreen, buttonBlue] = draw.getImageData(0, 0, 1, 1).data;
+        return buttonBlue > buttonRed + 80 && buttonBlue > buttonGreen + 60;
       });
       await page.locator('.learning-sign-in-view .resize-waiting').waitFor({ state: 'hidden' });
-      await page.mouse.click(bounds.x + bounds.width * 0.64, bounds.y + bounds.height * 0.46);
+      const inputBounds = await box.boundingBox();
+      await page.mouse.click(
+        inputBounds.x + inputBounds.width * 0.64,
+        inputBounds.y + inputBounds.height * 0.46,
+      );
       await page.locator('.remote-open-keyboard').waitFor();
       await page.keyboard.type('remotekit-keyboard-check', { delay: 35 });
       await page.keyboard.insertText('中文');
