@@ -82,6 +82,9 @@ void MediaPipeline::MediaLoop() {
       presentation_refresh.Update(refresh_connected.exchange(false), now_ms);
   };
   while (state == State::kRunning) {
+    auto clipboard_result = output.PollClipboard();
+    if (!clipboard_result)
+      fprintf(stderr, "clipboard synchronization unavailable\n");
     const auto stamp = authorization.Stamp();
     if (stamp != active_authorization) {
       authorization.SetFrame(0);

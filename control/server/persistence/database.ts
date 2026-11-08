@@ -3,6 +3,7 @@ import { AtRestKey } from '../auth/crypto';
 import { systemClock, type Clock } from '../util/clock';
 import { AccountsRepository } from './accounts';
 import { AnnouncementsRepository } from './announcements';
+import { ClipboardsRepository } from './clipboards';
 import { LibraryRepository } from './library';
 import { OperationsRepository } from './operations';
 import { createSchema } from './schema';
@@ -19,6 +20,7 @@ export class ControlDatabase {
   readonly library: LibraryRepository;
   readonly sessionImports: SessionImportsRepository;
   readonly announcements: AnnouncementsRepository;
+  readonly clipboards: ClipboardsRepository;
   constructor(path: string, clock: Clock = systemClock) {
     this.db = new Sqlite(path);
     this.db.defaultSafeIntegers(true);
@@ -37,6 +39,7 @@ export class ControlDatabase {
     this.library = new LibraryRepository(this.db);
     this.sessionImports = new SessionImportsRepository(this.db, this.atRestKey);
     this.announcements = new AnnouncementsRepository(this.db);
+    this.clipboards = new ClipboardsRepository(this.db, clock);
   }
   transaction<T>(fn: () => T): T {
     return transaction(this.db, fn);

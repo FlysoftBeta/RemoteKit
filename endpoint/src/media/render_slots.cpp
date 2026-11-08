@@ -268,6 +268,7 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,
                        std::string& error) {
   PublishGuard publish{*this};
   Reap();
+  clipboard_state_.store(nullptr);
   if (state_) {
     state_->RequestStop();
     retired_.push_back(std::move(state_));
@@ -329,6 +330,7 @@ bool RenderSlots::Open(remotekit_sdk_render_setup setup,
     error = "render channel connect failed";
     return false;
   }
+  clipboard_state_.store(s);
   return true;
 }
 bool RenderSlots::Begin(uint32_t interval, bool force, std::string& error, bool* sent) {
@@ -477,11 +479,19 @@ RenderSlots::Result RenderSlots::Poll(remotekit_rtc_frame& frame,
     }
   return Result::idle;
 }
+std::optional<uint64_t> RenderSlots::ClipboardSequence() const {
+  const auto state = clipboard_state_.load();
+  if (!state)
+    return std::nullopt;
+  return static_cast<uint64_t>(InterlockedCompareExchange64(
+      reinterpret_cast<volatile LONG64*>(&state->mapping->clipboard_sequence), 0, 0));
+}
 SharedAtlasFrame RenderSlots::LatestMetadata() const {
   return state_ ? state_->latest : SharedAtlasFrame{};
 }
 bool RenderSlots::Close(std::string& error) {
   PublishGuard publish{*this};
+  clipboard_state_.store(nullptr);
   if (state_) {
     state_->RequestStop();
     retired_.push_back(std::move(state_));

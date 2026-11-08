@@ -15,10 +15,12 @@ import type {
 } from '../../shared/session-import';
 import type { NodeRegistry } from '../cluster/node-link';
 import type { Placement, SessionPlacement } from '../cluster/placement';
+import type { ClipboardValue } from '../persistence/clipboards';
 import type {
   Accepted,
   ActionResult,
   ClientActionEvent,
+  ClipboardChangedEvent,
   EndpointSnapshot,
   EndpointErrorReason,
   FaceBinding,
@@ -35,6 +37,29 @@ import type {
   ViewAppInfo,
 } from './types';
 export class EndpointGateway {
+  private clipboardSource: (tenant: string) => ClipboardValue | undefined = () => undefined;
+  setClipboardSource(source: (tenant: string) => ClipboardValue | undefined) {
+    this.clipboardSource = source;
+  }
+  private clipboardParams(tenant: string) {
+    const clipboard = this.clipboardSource(tenant);
+    return clipboard ? { clipboard } : {};
+  }
+  onClipboardChanged(listener: (event: ClipboardChangedEvent) => void) {
+    const unsubscribe = this.nodes.all().map((node) =>
+      node.onClipboardChanged((event) => {
+        if (
+          this.isPlacedOn(event.tenantId, node.nodeId) &&
+          this.placement.peek(event.tenantId)?.sessionId === event.sessionId
+        )
+          listener(event);
+      }),
+    );
+    return () => unsubscribe.forEach((fn) => fn());
+  }
+  setClipboard(tenant: string, value: ClipboardValue): Promise<Accepted> {
+    return this.invoke('session.clipboard.set', tenant, value);
+  }
   storageImport(tenant: string, args: ImportChunk): Promise<StorageImportJob> {
     return this.invoke('session.storage.import', tenant, args);
   }
@@ -116,6 +141,7 @@ export class EndpointGateway {
         placementEpoch: placement.placementEpoch,
         ...this.placement.keys(placement),
         checkpoint: placement.checkpoint,
+        ...this.clipboardParams(placement.tenant),
       })
       .then(() => {
         if (node.state.state !== 'ready' || node.state.connectionEpoch !== entry.epoch)
@@ -137,13 +163,19 @@ export class EndpointGateway {
       await this.openSession(placement);
       let reply: unknown;
       try {
-        reply = await node.request(method, tenant, args as Record<string, unknown>);
+        reply = await node.request(method, tenant, {
+          ...args,
+          ...(method === 'session.ensure' ? this.clipboardParams(tenant) : {}),
+        });
       } catch (error) {
         if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'not_found')
           throw error;
         this.opened.delete(tenant);
         await this.openSession(placement);
-        reply = await node.request(method, tenant, args as Record<string, unknown>);
+        reply = await node.request(method, tenant, {
+          ...args,
+          ...(method === 'session.ensure' ? this.clipboardParams(tenant) : {}),
+        });
       }
       if (reply && typeof reply === 'object' && 'accepted' in reply && reply.accepted === false)
         throw new RemoteKitError('rejected', 'Endpoint 拒绝请求');

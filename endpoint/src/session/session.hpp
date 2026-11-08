@@ -10,6 +10,7 @@
 #include "diagnostics/timing.hpp"
 #include "rtc/channel.hpp"
 #include "session/views.hpp"
+#include "session/clipboard.hpp"
 namespace remotekit {
 class Session {
  public:
@@ -32,7 +33,9 @@ class Session {
   Result<Json> ReadLog(const Json& request) const;
   Result<Json> Hibernate(objects::ObjectService& objects);
   uint64_t PlacementEpoch() const { return config.placement_epoch; }
-  Result<Json> Open(const Json& request) const;
+  Result<Json> Open(const Json& request);
+  Result<Json> Ensure(const Json& request);
+  Result<Json> SetClipboard(const Json& request);
   const std::string& Id() const { return config.id; }
   void BeginManagementRequest(uint64_t generation) {
     generation_ = generation;
@@ -68,7 +71,8 @@ class Session {
   SessionStore store;
   const std::shared_ptr<media::ServerTrace> trace;
   ControllerContext context;
-  uint64_t generation_ = 0;
+  std::atomic<uint64_t> generation_{0};
+  ClipboardController clipboard;
   ConnectionTiming timing;
   AuthorizationController authorization;
   InputController input;

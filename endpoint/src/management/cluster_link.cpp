@@ -12,7 +12,7 @@
 namespace remotekit {
 namespace {
 using namespace std::chrono_literals;
-constexpr size_t kMaxQueuedBytes = 4 * 1024 * 1024;
+constexpr size_t kMaxQueuedBytes = cluster::kMaxPlaintext;
 bool ValidEpoch(const Json& value) {
   if (!value.is_string())
     return false;
@@ -346,7 +346,7 @@ bool ClusterLink::Queue(const Json& message, uint64_t generation) {
   std::lock_guard lock(impl_->mutex);
   if (!generation || generation != impl_->active || impl_->stopping || impl_->overload)
     return false;
-  if (bytes.size() > cluster::kMaxJson || impl_->outgoing.size() >= 256 ||
+  if (bytes.size() > cluster::JsonLimit(message) || impl_->outgoing.size() >= 256 ||
       impl_->outgoing_bytes + bytes.size() > kMaxQueuedBytes) {
     impl_->overload = true;
     return false;

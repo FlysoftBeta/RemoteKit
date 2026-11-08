@@ -82,6 +82,24 @@ void NativeTests() {
   Check(!oversized && oversized.error().code == ErrorCode::kLimitExceeded);
   auto json_limit = init.channel->Send({{"large", std::string(kMaxJson, 'x')}});
   Check(!json_limit);
+  const Json clipboard{{"type", "clipboard.changed"},
+                       {"tenantId", "tenant"},
+                       {"sessionId", "session"},
+                       {"browserSequence", "1"},
+                       {"text", std::string(1024 * 1024, 't')},
+                       {"html", std::string(2 * 1024 * 1024, 'h')}};
+  Take(init.channel->Send(clipboard));
+  Check(Take(resp.channel->Receive(5s)).json == clipboard);
+  const Json seed{{"method", "session.ensure"},
+                  {"clipboard",
+                   {{"revision", "1"},
+                    {"text", std::string(1024 * 1024, '\x01')},
+                    {"html", std::string(2 * 1024 * 1024, '\x01')}}}};
+  Take(resp.channel->Send(seed));
+  Check(Take(init.channel->Receive(5s)).json == seed);
+  auto oversized_clipboard = clipboard;
+  oversized_clipboard["text"] = std::string(4 * 1024 * 1024, 't');
+  Check(!init.channel->Send(oversized_clipboard));
   raw->tamper = true;
   Take(init.channel->Send({{"tampered", true}}));
   auto closed = resp.channel->Receive(2s);

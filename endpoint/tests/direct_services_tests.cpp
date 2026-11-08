@@ -25,11 +25,13 @@ Json Action(unsigned n = 0) {
 }
 void ContextMenuTests() {
   using namespace remotekit;
-  static_assert(kSharedRenderVersion == 4);
+  static_assert(kSharedRenderVersion == 5);
   static_assert(sizeof(SharedAtlasView) == 176);
   static_assert(offsetof(SharedAtlasView, context_menu) == 160);
   static_assert(sizeof(SharedAtlasFrame) == 11320);
   static_assert(offsetof(SharedRenderMapping, slots) == 11392);
+  static_assert(offsetof(SharedRenderMapping, clipboard_sequence) == 24);
+  static_assert(offsetof(SharedRenderMapping, latest_layout) == 32);
   static_assert(sizeof(SharedRenderMapping) == 56704);
   DirectServices services;
   services.Bind(3);

@@ -9,6 +9,7 @@ struct Message {
   Bytes bytes;
 };
 inline constexpr size_t kMaxJson = 1024 * 1024;
+size_t JsonLimit(const Json& message);
 Result<Bytes> EncodeJson(const Json& message);
 Result<Bytes> EncodeBinary(const Json& header, std::span<const uint8_t> bytes);
 Result<Message> DecodeFrame(std::span<const uint8_t> plaintext);

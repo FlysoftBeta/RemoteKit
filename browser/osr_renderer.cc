@@ -16,6 +16,9 @@ bool OsrRenderer::IsGpuFaultSealed() {
 void OsrRenderer::SetViews(std::vector<View> views) {
   state_->SetViews(std::move(views));
 }
+void OsrRenderer::PublishClipboardSequence(uint64_t sequence) {
+  state_->PublishClipboardSequence(sequence);
+}
 void OsrRenderer::StopView(uint64_t id) {
   state_->StopView(id);
 }

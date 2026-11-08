@@ -39,8 +39,7 @@ Result<void> OutputController::OpenOutput() {
                      AdapterLuid({setup.adapter_luid_low, setup.adapter_luid_high})};
   capture_clock_uncertainty_ms = pool.clock_uncertainty_us() / 1000;
   timing.MarkConnection(ConnectionPhase::output_open_end);
-
-  return {};
+  return PollClipboard(true);
 }
 
 Result<bool> OutputController::PauseOutput(bool reconfiguring) {

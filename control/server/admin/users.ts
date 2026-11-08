@@ -4,6 +4,7 @@ import type { DomainContext, DomainServices } from '../application';
 import { validPassword } from '../auth/accounts';
 import { hashSecret } from '../auth/crypto';
 import type { StoredUser } from '../persistence/accounts';
+import { isLocalTab } from '../../shared/product';
 
 type Services = Pick<
   DomainServices,
@@ -139,16 +140,30 @@ export class UserAdmin {
     });
     return this.list();
   }
-  // Hibernated tabs are already discarded; the next start opens a blank Profile and restores them by URL.
   async resetSession(username: unknown) {
     const user = this.find(username);
     await this.context.tenants.serial(user.tenant, async () => {
+      const clipboard = this.context.store.clipboards.latest(user.id);
+      this.context.store.clipboards.clear(user.id);
       if (this.context.endpoint.placement.peek(user.tenant)?.state === 'active')
-        throw new RemoteKitError('conflict', '请先休眠会话');
+        await this.context.endpoint.setClipboard(user.tenant, {
+          revision: String(BigInt(clipboard?.revision ?? '0') + 1n),
+          text: '',
+          html: '',
+        });
       this.context.store.transaction(() => {
         const sessionId = this.context.endpoint.placement.forgetTenant(user.tenant);
         if (sessionId) this.services.sessionPurge.enqueue(sessionId);
       });
+      this.context.endpoint.forget(user.tenant);
+      this.context.tenants.get(user.tenant).resetEndpoint();
+      const workspace = this.context.store.workspaces.workspace(user.tenant);
+      for (const tab of workspace.tabs)
+        if (!isLocalTab(tab)) {
+          tab.residency = 'discarded';
+          tab.restoring = false;
+        }
+      this.services.operations.saveWorkspace(workspace);
     });
     void this.services.sessionPurge.flush();
     return this.list();
@@ -172,6 +187,7 @@ export class UserAdmin {
         store.workspaces.deleteTenant(user.tenant);
         store.security.deleteUser(user.id);
         store.announcements.deleteUser(user.id);
+        store.clipboards.clear(user.id);
         const importMail = this.services.sessionImporter.deleteUser(user.tenant);
         store.accounts.deleteUser(user.id);
         return importMail;

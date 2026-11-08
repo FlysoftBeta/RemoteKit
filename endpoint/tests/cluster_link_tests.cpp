@@ -118,6 +118,14 @@ void Local() {
   Check(Take(server->Receive(2s)).json["id"] == 1, "encrypted reply");
   Check(link.SendEvent({{"event", "rtc.signal"}}, generation), "event enqueued");
   Check(Take(server->Receive(2s)).json["event"] == "rtc.signal", "encrypted event");
+  const Json clipboard{{"type", "clipboard.changed"},
+                       {"tenantId", "tenant"},
+                       {"sessionId", "session"},
+                       {"browserSequence", "1"},
+                       {"text", std::string(1024 * 1024 + 1, 't')},
+                       {"html", ""}};
+  Check(link.SendEvent(clipboard, generation), "large clipboard event enqueued");
+  Check(Take(server->Receive(5s)).json == clipboard, "large clipboard event delivered");
   server->Close();
   bool eof = false;
   std::string bytes;

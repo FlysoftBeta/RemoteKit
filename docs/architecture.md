@@ -52,7 +52,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 ## 服务参数独立于宿主
 
-服务端的渲染与输入不依赖服务器的显示器、DPI、刷新率或 RDP 会话：每个视图一块虚拟显示器（尺寸等于视图 viewport，DSF 为 Viewer 上报的 DPR，即设备 DPR × 界面缩放），主 frame 与跨进程 iframe 读到同一块屏幕；指针/触控能力与配色偏好是固定值，不读服务器硬件与 Windows 主题（见[兼容性](compatibility.md)）；节拍由 Comp 的高精度定时器和 WebRTC 反馈决定；触控惯性在客户端计算，不经过原生 fling 物理参数；剪贴板不使用系统剪贴板。客户端的 DPR、刷新能力和产品媒体策略仍作为适配输入。
+服务端的渲染与输入不依赖服务器的显示器、DPI、刷新率或 RDP 会话：每个视图一块虚拟显示器（尺寸等于视图 viewport，DSF 为 Viewer 上报的 DPR，即设备 DPR × 界面缩放），主 frame 与跨进程 iframe 读到同一块屏幕；指针/触控能力与配色偏好是固定值，不读服务器硬件与 Windows 主题（见[兼容性](compatibility.md)）；节拍由 Comp 的高精度定时器和 WebRTC 反馈决定；触控惯性在客户端计算，不经过原生 fling 物理参数；剪贴板不使用系统剪贴板，由 Control 保存、Browser 缓存。客户端的 DPR、刷新能力和产品媒体策略仍作为适配输入。
 
 ## 错误模型
 

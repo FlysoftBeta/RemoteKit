@@ -20,6 +20,7 @@
 namespace remotekit::browser {
 class RemoteTouchSelectionMenuRunner;
 class RemoteContextMenu;
+class ClipboardBridge;
 class BrowserRuntime : public content::GpuDataManagerObserver {
  public:
   BrowserRuntime();
@@ -48,6 +49,7 @@ class BrowserRuntime : public content::GpuDataManagerObserver {
   std::vector<std::unique_ptr<BrowserContext>> contexts;
   std::unique_ptr<ControlServer> control;
   std::unique_ptr<OsrRenderer> output;
+  std::unique_ptr<ClipboardBridge> clipboard;
   std::unique_ptr<ControlDispatcher> dispatcher;
   base::RepeatingTimer output_timer;
   std::set<WebViewId> paused_output;

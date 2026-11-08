@@ -91,7 +91,7 @@ lifecycle_uncertain
 - Cookie 密钥由 Control 从 Tenant DEK 派生，经只继承给 Browser 的匿名管道传入（`--profile-key-handle`），Browser 在创建 BrowserContext 之前读出恰好 32 字节，只保存在内存里（`ProfileKey`，销毁时清零）。提供者标签 `rk1`、AES-256-GCM、唯一一个提供者。磁盘上没有任何密钥文件，也不依赖 DPAPI，所以 Profile 目录可以搬到另一台机器的另一个路径；单独拿到目录无法解密 Cookie。密钥不对或缺失时启动失败，不退回明文或内存存储。
 - 会话 cookie 跨 Browser 重启保留（persist/restore_old 打开）：Browser 的关闭多半是休眠而不是用户关闭浏览器。
 - 优雅关闭（`browser.shutdown`）：停止接受新命令（之后一律 `unavailable`），持久化 sessionStorage namespace，直接销毁 WebContents（不运行 beforeunload），在 10 秒内等 cookie 与各 StoragePartition 的 flush 回调，退出码 0；任一步失败以退出码 70 退出并记录失败的步骤。Endpoint 只把退出码 0 且作业为空视为干净关闭；强制终止会跳过这些 flush。
-- 剪贴板使用官方的 `ClipboardNonBacked`：不同 Tenant 的 Browser 进程如果用系统剪贴板，会共享同一个 Windows 剪贴板。同一 Session 内的页面共享它，Browser 重启清空。跨设备剪贴板是另一项工作。
+- 剪贴板不用系统剪贴板（不同 Tenant 的 Browser 进程会共享同一个 Windows 剪贴板），而用 Chromium 的 headless 内存剪贴板（`ClipboardNonBacked`），UI 与 IO 线程各一个。它只是 Control 剪贴板的缓存，见 [Control · 剪贴板](control-plane.md#剪贴板)。
 - 关闭顺序：`PostMainMessageLoopRun` 先关闭生产者，解绑 delegate 并取消请求，销毁 pending 弹窗和正式 contents，排空延迟的宿主删除，最后销毁 Context 与 Screen。成员声明顺序不是关闭协议（曾经 BrowserContext 先于 pending 弹窗的 WebContents 被销毁）。
 
 ## 权限、下载与页面命令
@@ -102,4 +102,4 @@ lifecycle_uncertain
 
 ## 尚未实现
 
-多 Profile（当前每 Session 一个 Profile，层级上保留余量）、跨 Browser 的 sessionStorage、原生 popup widget 的像素与命中、目录上传、HTTP/代理认证与证书选择、跨端剪贴板、PDF 与打印、原生长按、POST 重新提交确认、IPC 传输故障后同一 Browser incarnation 的重新附着。
+多 Profile（当前每 Session 一个 Profile，层级上保留余量）、跨 Browser 的 sessionStorage、原生 popup widget 的像素与命中、目录上传、HTTP/代理认证与证书选择、剪贴板图片格式与跨端同步、PDF 与打印、原生长按、POST 重新提交确认、IPC 传输故障后同一 Browser incarnation 的重新附着。

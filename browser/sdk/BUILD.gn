@@ -4,7 +4,12 @@ executable("remotekit_service_gpu_policy_probe") {
   testonly = true
   sources = [ "service_gpu_policy_probe.cc" ]
   include_dirs = [ "//remotekit" ]
-  deps = [ "//base", "//gpu/config", "//ui/gfx", "//ui/gl" ]
+  deps = [
+    "//base",
+    "//gpu/config",
+    "//ui/gfx",
+    "//ui/gl",
+  ]
 }
 
 sdk_headers = [
@@ -13,6 +18,7 @@ sdk_headers = [
 ]
 
 sdk_sources = [
+  "../control_clipboard.h",
   "sdk_control.cc",
   "sdk_internal.h",
   "sdk_render.cc",
@@ -63,7 +69,11 @@ executable("remotekit_sdk_control_lifetime_probe") {
   testonly = true
   include_dirs = [ "//remotekit" ]
   configs -= [ "//build/config/clang:find_bad_constructs" ]
-  sources = [ "control_channel_lifetime_probe.cc" ] + sdk_headers + sdk_sources
+  sources = [
+              "../control_response.cc",
+              "../control_response.h",
+              "control_channel_lifetime_probe.cc",
+            ] + sdk_headers + sdk_sources
   defines = [ "REMOTEKIT_SDK_IMPLEMENTATION" ]
   deps = [
     "//base",

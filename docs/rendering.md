@@ -99,7 +99,7 @@ Begin/Reject/Stop/Stopped/Wake 走一条独立的 Mojo message pipe（编解码�
 
 ## 共享映射
 
-`SharedRenderMapping` v4（`protocol/shared_render_slots.h`）只承载元数据：最新布局，以及每个 Slot 独立的帧快照（最多 64 个 view，每个 view 包含 Session/WebView/instance/document/focus 身份、atlas 像素矩形、输出像素每 DIP、页面 DPR、stale 标记、文本输入状态与稳定的编辑目标 ID、触控选择快捷菜单、上下文菜单 ID）。全局布局和每个 Slot 的快照各有独立的 seqlock。seqlock 读到一致数据只证明元数据一致，不证明 GPU 写入完成。
+`SharedRenderMapping` v5（`protocol/shared_render_slots.h`）只承载元数据：最新布局、剪贴板序号，以及每个 Slot 独立的帧快照（最多 64 个 view，每个 view 包含 Session/WebView/instance/document/focus 身份、atlas 像素矩形、输出像素每 DIP、页面 DPR、stale 标记、文本输入状态与稳定的编辑目标 ID、触控选择快捷菜单、上下文菜单 ID）。全局布局和每个 Slot 的快照各有独立的 seqlock。seqlock 读到一致数据只证明元数据一致，不证明 GPU 写入完成。
 
 ## Slot 与 Fence
 

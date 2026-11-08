@@ -309,6 +309,10 @@ void SessionManagementRequests() {
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
                   cluster::Key{}, link, objects, objects::Keys{});
+  const auto set_clipboard = ManagementMethods::Find("session.clipboard.set");
+  CHECK(set_clipboard);
+  CHECK(set_clipboard(session, {{"revision", "0"}, {"text", ""}, {"html", ""}}));
+  CHECK(!set_clipboard(session, {{"revision", 1}, {"text", ""}, {"html", ""}}));
   const auto session_directory = parsed.value().data / "sessions" / session.Id();
   fs::create_directories(session_directory);
   CHECK(SessionStore(session_directory).Save("views.json", Json::array({Json{{"viewId", "1"}}})));
@@ -558,7 +562,116 @@ void OrderedTouchInput() {
   CHECK(controller.Snapshot().at("inputBusyRetries") == 1);
 }
 
+void ClipboardSynchronization() {
+  uint64_t sequence = 0;
+  std::string incarnation = "first";
+  bool ready = false, supersede = false, reject_send = false;
+  int reads = 0;
+  std::vector<std::string> operations;
+  std::vector<Json> events;
+  Json contents{{"text", "plain"}, {"html", "<p>plain</p>"}};
+  ClipboardController clipboard("tenant", "session",
+                                {.ready = [&] { return ready; },
+                                 .incarnation = [&] { return incarnation; },
+                                 .read = [&]() -> Result<Json> {
+                                   ++reads;
+                                   auto result = contents;
+                                   result["sequence"] = std::to_string(sequence);
+                                   if (supersede) {
+                                     supersede = false;
+                                     ++sequence;
+                                     contents["text"] = "newer";
+                                   }
+                                   return result;
+                                 },
+                                 .write = [&](const Json& value) -> Result<void> {
+                                   operations.push_back("seed");
+                                   contents = {{"text", value["text"]}, {"html", value["html"]}};
+                                   return {};
+                                 },
+                                 .sequence = [&]() -> std::optional<uint64_t> { return sequence; },
+                                 .send =
+                                     [&](const Json& event) {
+                                       if (reject_send)
+                                         return false;
+                                       events.push_back(event);
+                                       return true;
+                                     }});
+  CHECK(clipboard.Set({{"revision", "7"}, {"text", "seed"}, {"html", "<b>seed</b>"}}));
+  CHECK(operations.empty());
+  ready = true;
+  CHECK(clipboard.BeforeViews());
+  operations.push_back("view.create");
+  CHECK((operations == std::vector<std::string>{"seed", "view.create"}));
+  CHECK(clipboard.BeforeViews());
+  CHECK(operations.size() == 2);
+  CHECK(clipboard.Poll(true));
+  CHECK(reads == 1 && events.empty());
+  CHECK(clipboard.Poll());
+  CHECK(reads == 1);
+  ++sequence;
+  contents = {{"text", "copy"}, {"html", "<p>copy</p>"}};
+  CHECK(clipboard.Poll());
+  CHECK(events.size() == 1 && events.back()["text"] == "copy");
+  CHECK(events.back()["type"] == "clipboard.changed");
+  CHECK(events.back()["tenantId"] == "tenant" && events.back()["sessionId"] == "session");
+  CHECK(events.back()["browserSequence"] == "1");
+  ++sequence;
+  supersede = true;
+  CHECK(clipboard.Poll());
+  CHECK(events.size() == 1);
+  CHECK(clipboard.Poll());
+  CHECK(events.size() == 2 && events.back()["text"] == "newer");
+  CHECK(events.back()["browserSequence"] == "3");
+  // Individual format limits belong to Control, so these still carry content.
+  ++sequence;
+  contents = {{"text", std::string(1024 * 1024 + 1, 't')}, {"html", ""}};
+  CHECK(clipboard.Poll());
+  CHECK(!events.back().contains("oversize") && events.back()["text"] == contents["text"]);
+  ++sequence;
+  contents = {{"text", ""}, {"html", std::string(4 * 1024 * 1024 + 1, 'h')}};
+  CHECK(clipboard.Poll());
+  CHECK(events.back()["oversize"] == true && events.back()["textBytes"] == 0);
+  CHECK(events.back()["htmlBytes"] == 4 * 1024 * 1024 + 1);
+  CHECK(!events.back().contains("text") && !events.back().contains("html"));
+  // JSON escaping also counts toward the event envelope limit.
+  ++sequence;
+  contents = {{"text", std::string(1024 * 1024, '\x01')}, {"html", ""}};
+  CHECK(clipboard.Poll());
+  CHECK(events.back()["oversize"] == true);
+  ++sequence;
+  contents = {{"text", ""}, {"html", ""}};
+  reject_send = true;
+  CHECK(!clipboard.Poll(true));
+  reject_send = false;
+  const auto count = events.size();
+  CHECK(clipboard.Poll(true));
+  CHECK(events.size() == count + 1 && events.back()["text"] == "" && events.back()["html"] == "");
+  ++sequence;
+  contents["text"] = "pending copy before reset";
+  CHECK(clipboard.Set({{"revision", "8"}, {"text", ""}, {"html", ""}}));
+  CHECK(clipboard.Poll(true));
+  CHECK(events.size() == count + 1);
+  CHECK(clipboard.Seed({{"revision", "9"}, {"text", "stored"}, {"html", ""}}));
+  const auto seeded_operations = operations.size();
+  CHECK(clipboard.BeforeViews());
+  CHECK(operations.size() == seeded_operations && contents["text"] == "");
+  incarnation = "replacement";
+  sequence = 0;
+  CHECK(clipboard.BeforeViews());
+  CHECK(operations.back() == "seed" && contents["text"] == "stored");
+  CHECK(clipboard.Poll(true));
+  CHECK(events.size() == count + 1);
+  ++sequence;
+  supersede = true;
+  CHECK(clipboard.Poll(true));
+  CHECK(events.size() == count + 2 && events.back()["text"] == "newer");
+  for (const auto* invalid : {"01", "-1", "18446744073709551616"})
+    CHECK(!ClipboardController::Valid({{"revision", invalid}, {"text", ""}, {"html", ""}}));
+}
+
 int main() {
+  ClipboardSynchronization();
   RouterClassificationAndAdmission();
   OutboxPriorityAndEpoch();
   PresentationOwnership();

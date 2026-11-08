@@ -5,6 +5,15 @@ Error Invalid() {
   return {ErrorCode::kInvalidRequest, "invalid cluster frame"};
 }
 }  // namespace
+size_t JsonLimit(const Json& message) {
+  if (message.value("type", Json()) == "clipboard.changed")
+    return 4 * 1024 * 1024 - 1;
+  const auto method = message.value("method", Json());
+  if (method == "session.clipboard.set" ||
+      ((method == "session.open" || method == "session.ensure") && message.contains("clipboard")))
+    return kMaxPlaintext - 1;
+  return kMaxJson;
+}
 std::array<uint8_t, 4> EncodeLength(uint32_t n) {
   return {static_cast<uint8_t>(n), static_cast<uint8_t>(n >> 8), static_cast<uint8_t>(n >> 16),
           static_cast<uint8_t>(n >> 24)};
@@ -17,8 +26,8 @@ Result<Bytes> EncodeJson(const Json& message) {
     return Invalid();
   try {
     auto json = message.dump();
-    if (json.size() > kMaxJson)
-      return Error{ErrorCode::kLimitExceeded, "JSON exceeds 1 MiB"};
+    if (json.size() > JsonLimit(message))
+      return Error{ErrorCode::kLimitExceeded, "JSON exceeds frame limit"};
     Bytes out{1};
     out.insert(out.end(), json.begin(), json.end());
     return out;
@@ -32,7 +41,7 @@ Result<Bytes> EncodeBinary(const Json& header, std::span<const uint8_t> bytes) {
   try {
     auto json = header.dump();
     if (json.size() > kMaxJson || json.size() + bytes.size() + 5 > kMaxPlaintext)
-      return Error{ErrorCode::kLimitExceeded, "BINARY exceeds 4 MiB"};
+      return Error{ErrorCode::kLimitExceeded, "BINARY exceeds frame limit"};
     Bytes out{2};
     auto n = EncodeLength(static_cast<uint32_t>(json.size()));
     out.insert(out.end(), n.begin(), n.end());
@@ -55,10 +64,12 @@ Result<Message> DecodeFrame(std::span<const uint8_t> plain) {
     length = DecodeLength(std::span<const uint8_t, 4>(plain.data() + 1, 4));
   } else if (plain[0] != 1)
     return Invalid();
-  if (length > kMaxJson || length > plain.size() - start)
+  if ((binary && length > kMaxJson) || length > plain.size() - start)
     return Invalid();
   auto json = Json::parse(plain.begin() + start, plain.begin() + start + length, nullptr, false);
   if (!json.is_object())
+    return Invalid();
+  if (!binary && length > JsonLimit(json))
     return Invalid();
   Bytes bytes;
   if (binary)

@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 import { createAnnouncementTables } from './announcements';
 
-const version = 9;
+const version = 10;
 
 function createWorkspaceItems(db: Database.Database) {
   db.exec(`CREATE TABLE installed_apps (
@@ -49,6 +49,8 @@ export function createSchema(db: Database.Database) {
     db.exec(`CREATE TABLE view_ids (id INTEGER PRIMARY KEY AUTOINCREMENT);
       CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE COLLATE NOCASE, tenant TEXT NOT NULL UNIQUE, salt TEXT NOT NULL, password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0, last_login_at INTEGER, disabled_at INTEGER);
       CREATE TABLE auth_tokens (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+      CREATE TABLE clipboards (user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        revision INTEGER NOT NULL, text TEXT NOT NULL, html TEXT NOT NULL, updated_at INTEGER NOT NULL);
       CREATE TABLE workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_space TEXT, pending TEXT);
       CREATE TABLE workspace_windows (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, app_id TEXT NOT NULL, active_tab TEXT, state TEXT, last_active_at INTEGER NOT NULL);
       CREATE TABLE workspace_spaces (id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);

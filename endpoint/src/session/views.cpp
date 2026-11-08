@@ -123,6 +123,11 @@ Result<void> ViewController::Start() {
     observed_closed.clear();
     navigation.Reset();
   }
+  if (before_views) {
+    auto seeded = before_views();
+    if (!seeded)
+      return seeded.error();
+  }
   {
     auto session_sitePreferences_result = browser.Rpc().Request(
         {{"method", "session.sitePreferences"}, {"session", id}, {"sites", site_preferences}});

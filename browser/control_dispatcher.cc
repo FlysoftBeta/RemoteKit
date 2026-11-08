@@ -1,4 +1,5 @@
 #include "browser/control_dispatcher.h"
+#include "browser/clipboard_bridge.h"
 #include "browser/control_requests.h"
 #include "browser/control_response.h"
 #include "browser/browser_runtime.h"
@@ -28,6 +29,14 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
   if (id <= 0 || request.FindInt("version") != protocol::kControlVersion || !name) {
     std::move(reply).Run(
         ControlResult::Failure(id, ErrorCode::invalid_request, "Invalid control envelope"));
+    return;
+  }
+  if (*name == "clipboard.read") {
+    std::move(reply).Run(runtime_.clipboard->Read(id));
+    return;
+  }
+  if (*name == "clipboard.write") {
+    std::move(reply).Run(runtime_.clipboard->Write(id, request));
     return;
   }
   if (*name == protocol::kViewAppInfo) {

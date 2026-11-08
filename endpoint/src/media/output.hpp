@@ -38,6 +38,12 @@ class OutputController : private ControllerContext {
   Result<void> OpenOutput();
   Result<bool> PauseOutput(bool reconfiguring = false);
   Result<void> ResumeOutput(bool active);
+  void SetClipboardPoll(std::function<Result<void>(bool)> poll) {
+    clipboard_poll = std::move(poll);
+  }
+  Result<void> PollClipboard(bool force = false) {
+    return clipboard_poll ? clipboard_poll(force) : Result<void>{};
+  }
 
  private:
   PeerController& peer_controller;
@@ -47,6 +53,7 @@ class OutputController : private ControllerContext {
   MediaPipeline& pipeline;
   ConnectionTiming& timing;
   RenderSlots pool;
+  std::function<Result<void>(bool)> clipboard_poll;
   std::atomic<bool> output_suspended{false}, has_visible_output{false};
   std::atomic<double> capture_clock_uncertainty_ms{0};
 };

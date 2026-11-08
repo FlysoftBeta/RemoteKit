@@ -52,7 +52,8 @@ REMOTEKIT_SDK_API int remotekit_sdk_webrtc_time_millis(int64_t* value);
  * A-Z/a-z/0-9/underscore/hyphen/dot). Connect uses the OS named-pipe wait.
  * Handles belong to this SDK instance and are never reused. */
 REMOTEKIT_SDK_API int remotekit_sdk_control_connect(const char* name_utf8, uint64_t* handle);
-/* One raw UTF-8 JSON message/reply, at most 1 MiB each. Browser validates UTF-8.
+/* One raw UTF-8 JSON message/reply, at most 1 MiB each, except clipboard.read
+ * replies and clipboard.write requests (18 MiB + 64 KiB). Browser validates UTF-8.
  * timeout_ms must be 1..30000. Requests serialize per channel; independent
  * channels may run concurrently. Timeout bounds the active request, not queue
  * time. Close cancels active/queued requests; shutdown rejects new operations
@@ -172,7 +173,7 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_command_token(uint64_t handle,
                                                           struct remotekit_sdk_token* token);
 /* Initialize struct_size. consumer_pid must be this process, timeout 1..30000.
  * Opens then polls describe within one budget. All 13 returned Windows handles
- * are caller-owned. Mapping is SharedRenderMapping v4. Endpoint owns pacing.
+ * are caller-owned. Mapping is SharedRenderMapping v5. Endpoint owns pacing.
  * A successful describe must attach exactly one empty Mojo message pipe. SDK
  * retains that endpoint under the original Control connection until one-use
  * render_connect claims its opaque token. Failure closes all reply attachments

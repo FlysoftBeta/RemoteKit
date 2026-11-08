@@ -30,6 +30,9 @@ class ViewController : private ControllerContext {
     float scale = 1;
   };
   void SetStopRuntime(std::function<Result<void>()> stop) { stop_runtime = std::move(stop); }
+  void SetBeforeViews(std::function<Result<void>()> callback) {
+    before_views = std::move(callback);
+  }
   Result<void> Initialize();
   void Reset();
   bool Contains(const std::string& view) const { return desired.contains(view); }
@@ -74,6 +77,7 @@ class ViewController : private ControllerContext {
   Result<Json> ManageViewConfigure(const Json& request);
 
  private:
+  std::function<Result<void>()> before_views;
   std::function<Result<void>()> stop_runtime;
   PeerController& peer_controller;
   PresentationController& presentation;

@@ -22,6 +22,26 @@ Session::Session(media::Sdk& api,
       trace(media::ServerTrace::Create(config.tenant, config.id)),
       context{sdk,   config.options, config.tenant, config.id, config.directory,  browser,
               store, management,     trace,         objects,   config.object_keys},
+      clipboard(
+          config.tenant,
+          config.id,
+          {.ready =
+               [this] { return browser.Alive() && browser.Rpc().Control() && !browser.Stopping(); },
+           .incarnation = [this] { return browser.ProcessIncarnation(); },
+           .read = [this] { return browser.Rpc().Request({{"method", "clipboard.read"}}); },
+           .write = [this](const Json& value) -> Result<void> {
+             auto request = value;
+             request["method"] = "clipboard.write";
+             auto result = browser.Rpc().Request(std::move(request));
+             if (!result)
+               return result.error();
+             return {};
+           },
+           .sequence = [this] { return output.Slots().ClipboardSequence(); },
+           .send =
+               [this](const Json& event) {
+                 return management.SendEvent(event, generation_.load());
+               }}),
       timing(context),
       authorization(
           api,
@@ -168,9 +188,11 @@ Session::Session(media::Sdk& api,
               views,
               timing) {
   views.SetStopRuntime([this] { return Stop(); });
+  views.SetBeforeViews([this] { return clipboard.BeforeViews(); });
+  output.SetClipboardPoll([this](bool force) { return clipboard.Poll(force); });
   output.Slots().SetTrace(trace);
 }
-Result<Json> Session::Open(const Json& request) const {
+Result<Json> Session::Open(const Json& request) {
   auto key = cluster::DecodeKey(request.at("profileKey").get<std::string>());
   if (!key)
     return key.error();
@@ -193,7 +215,18 @@ Result<Json> Session::Open(const Json& request) const {
   SecureZeroMemory(id_key.value().data(), id_key.value().size());
   if (!identical)
     return Error{ErrorCode::kConflict, "session placement conflicts with the open session"};
+  if (request.contains("clipboard"))
+    RK_RETURN_IF_ERROR(clipboard.Seed(request["clipboard"]));
   return Json{{"sessionId", config.id}, {"placementEpoch", config.placement_epoch}};
+}
+Result<Json> Session::Ensure(const Json& request) {
+  if (request.contains("clipboard"))
+    RK_RETURN_IF_ERROR(clipboard.Seed(request["clipboard"]));
+  return views.ManageSessionEnsure(request);
+}
+Result<Json> Session::SetClipboard(const Json& request) {
+  RK_RETURN_IF_ERROR(clipboard.Set(request));
+  return Json::object();
 }
 Result<void> Session::Initialize() {
   auto loaded = views.Initialize();
@@ -259,9 +292,17 @@ Result<void> Session::Shutdown() {
 }
 Result<void> Session::CloseRuntime(bool graceful) {
   peer_controller.Close();
+  if (!graceful) {
+    auto clipboard_flushed = clipboard.Poll(true);
+    if (!clipboard_flushed)
+      fprintf(stderr, "final clipboard synchronization unavailable\n");
+  }
   const bool had_process = browser.Present();
-  auto stopped =
-      graceful ? browser.Shutdown([this] { return navigation.FinalExport(); }) : browser.Stop();
+  auto stopped = graceful ? browser.Shutdown([this]() -> Result<void> {
+    RK_RETURN_IF_ERROR(navigation.FinalExport());
+    return clipboard.Poll(true);
+  })
+                          : browser.Stop();
   if (browser.Alive())
     return stopped;
   navigation.Reset();

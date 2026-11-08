@@ -1,6 +1,14 @@
 import type { AppliedMediaPolicy, OperationReceipt, ProductOperation } from '../../shared/product';
 import type { ErrorCode } from '../../shared/errors';
 export type EndpointErrorReason = 'browser_crashed' | 'browser_restarting' | 'output_failed';
+export type ClipboardChangedEvent = {
+  type: 'clipboard.changed';
+  tenantId: string;
+  sessionId: string;
+  browserSequence: string;
+} & (
+  { oversize: true; textBytes: number; htmlBytes: number } | { oversize?: false; text: string; html: string }
+);
 export interface RtcSignal {
   tenantId: string;
   connectionId: string;

@@ -1,4 +1,5 @@
 #include "remotekit/browser/browser_runtime.h"
+#include "browser/clipboard_bridge.h"
 #include "remotekit/browser/audio_target.h"
 
 #include <algorithm>
@@ -72,6 +73,12 @@ class ServiceIoClipboard final : public base::CurrentThread::DestructionObserver
 }  // namespace
 
 BrowserRuntime::BrowserRuntime() {
+  clipboard = std::make_unique<ClipboardBridge>(base::BindRepeating(
+      [](BrowserRuntime* runtime, uint64_t sequence) {
+        if (runtime->output)
+          runtime->output->PublishClipboardSequence(sequence);
+      },
+      base::Unretained(this)));
   CHECK(!ui::TouchSelectionMenuRunner::GetInstance());
   selection_menu = std::make_unique<RemoteTouchSelectionMenuRunner>(views);
   context_menu = std::make_unique<RemoteContextMenu>(views);
@@ -148,6 +155,7 @@ void BrowserRuntime::UpdateOutput() {
   }
   if (!output)
     return;
+  output->PublishClipboardSequence(clipboard->sequence());
   std::vector<OsrRenderer::View> render_views;
   for (auto& [i, record] : views.records) {
     if (!record.spec.visible)

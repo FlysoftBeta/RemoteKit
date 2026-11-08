@@ -43,6 +43,7 @@ class RenderSlots {
   HANDLE EventHandle() const;
   Result Poll(remotekit_rtc_frame&, SharedAtlasFrame&, std::string&);
   SharedAtlasFrame LatestMetadata() const;
+  std::optional<uint64_t> ClipboardSequence() const;
   bool Close(std::string&);
   int64_t MonotonicMicros() const;
   std::optional<double> capture_to_ready_ms() const;
@@ -54,6 +55,7 @@ class RenderSlots {
  private:
   struct State;
   std::shared_ptr<State> state_;
+  std::atomic<std::shared_ptr<State>> clipboard_state_;
   std::vector<std::shared_ptr<State>> retired_;
   void Reap();
   void PublishStats();

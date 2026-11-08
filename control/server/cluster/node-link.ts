@@ -11,7 +11,7 @@ import { MetricsHistory } from './metrics';
 import { RemoteKitError, toRemoteKitError } from '../../shared/errors';
 import type { ConfiguredNode, NodeConfig } from '../config';
 import { readyTransition, type EndpointLink, type EndpointLinkState } from '../endpoint/link';
-import type { ClientActionEvent, RtcSignal } from '../endpoint/types';
+import type { ClipboardChangedEvent, ClientActionEvent, RtcSignal } from '../endpoint/types';
 import {
   decodeFrame,
   encodeBinary,
@@ -153,6 +153,12 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       this.off('rtc.signal', listener);
     };
   }
+  onClipboardChanged(listener: (event: ClipboardChangedEvent) => void) {
+    this.on('clipboard.changed', listener);
+    return () => {
+      this.off('clipboard.changed', listener);
+    };
+  }
   start() {
     const launch = this.configured.local;
     if (!launch || this.stopped || this.child || this.registry.isRemoved(this.nodeId)) return;
@@ -266,6 +272,20 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           clearTimeout(timer);
           this.incoming--;
         });
+      return;
+    }
+    if (message.type === 'clipboard.changed') {
+      if (
+        typeof message.tenantId !== 'string' ||
+        typeof message.sessionId !== 'string' ||
+        typeof message.browserSequence !== 'string' ||
+        !/^\d{1,20}$/.test(message.browserSequence) ||
+        (message.oversize === true
+          ? ![message.textBytes, message.htmlBytes].every((size) => Number.isSafeInteger(size) && size >= 0)
+          : typeof message.text !== 'string' || typeof message.html !== 'string')
+      )
+        throw new Error('Invalid clipboard event');
+      this.emit('clipboard.changed', message);
       return;
     }
     if (message.event === 'client.action' || message.event === 'rtc.signal') {

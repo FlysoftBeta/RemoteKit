@@ -1,6 +1,17 @@
 import { MAX_CIPHERTEXT, MAX_TRANSPORT } from './noise';
 
 export const MAX_JSON = 1024 * 1024;
+// JSON escaping can expand the 3 MiB clipboard payload to 18 MiB.
+const MAX_CLIPBOARD_JSON = 20 * 1024 * 1024 - 1;
+function jsonLimit(value: Record<string, unknown>) {
+  if (value.type === 'clipboard.changed') return 4 * 1024 * 1024 - 1;
+  if (
+    value.method === 'session.clipboard.set' ||
+    ((value.method === 'session.open' || value.method === 'session.ensure') && value.clipboard)
+  )
+    return MAX_CLIPBOARD_JSON;
+  return MAX_JSON;
+}
 const decoder = new TextDecoder('utf-8', { fatal: true });
 export function jsonObject(bytes: Buffer): Record<string, any> {
   const value: unknown = JSON.parse(decoder.decode(bytes));
@@ -9,7 +20,7 @@ export function jsonObject(bytes: Buffer): Record<string, any> {
 }
 export function encodeJson(value: object): Buffer {
   const json = Buffer.from(JSON.stringify(value));
-  if (json.length > MAX_JSON) throw new Error('JSON exceeds 1 MiB');
+  if (json.length > jsonLimit(value as Record<string, unknown>)) throw new Error('JSON frame too large');
   return Buffer.concat([Buffer.from([1]), json]);
 }
 export function encodeBinary(header: object, bytes: Buffer): Buffer {
@@ -27,8 +38,11 @@ export function decodeFrame(
   | { kind: 'json'; message: Record<string, any> }
   | { kind: 'binary'; header: Record<string, any>; bytes: Buffer } {
   if (bytes.length > MAX_TRANSPORT) throw new Error('Frame too large');
-  if (bytes[0] === 1 && bytes.length - 1 <= MAX_JSON)
-    return { kind: 'json', message: jsonObject(bytes.subarray(1)) };
+  if (bytes[0] === 1) {
+    const message = jsonObject(bytes.subarray(1));
+    if (bytes.length - 1 > jsonLimit(message)) throw new Error('JSON frame too large');
+    return { kind: 'json', message };
+  }
   if (bytes[0] === 2 && bytes.length >= 5) {
     const length = bytes.readUInt32LE(1);
     if (length > MAX_JSON || length > bytes.length - 5) throw new Error('Invalid binary header length');

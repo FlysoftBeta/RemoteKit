@@ -37,6 +37,7 @@ class OsrRenderer final {
   OsrRenderer& operator=(const OsrRenderer&) = delete;
   static bool IsGpuFaultSealed();
   void SetViews(std::vector<View> views);
+  void PublishClipboardSequence(uint64_t sequence);
   void StopView(uint64_t webview_id);
   base::DictValue DescribeForConsumer(uint32_t pid);
   mojo::ScopedMessagePipeHandle TakeRenderEndpoint(std::string_view token, uint32_t consumer_pid);

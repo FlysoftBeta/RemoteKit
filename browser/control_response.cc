@@ -1,4 +1,5 @@
 #include "remotekit/browser/control_response.h"
+#include "browser/control_clipboard.h"
 
 #include "base/json/json_writer.h"
 #include <algorithm>
@@ -42,11 +43,9 @@ base::DictValue ControlResult::Failure(int id,
 base::DictValue ControlResult::Failure(int id, std::string_view detail, base::DictValue fields) {
   auto code = protocol::ErrorCode::invalid_request;
   if (detail == "view_closing" || detail.starts_with("close_output_before") ||
-      detail == "output_pending" ||
-      detail.ends_with("_already_pending"))
+      detail == "output_pending" || detail.ends_with("_already_pending"))
     code = protocol::ErrorCode::busy;
-  else if (detail.starts_with("stale_") ||
-           detail.ends_with("identity_mismatch"))
+  else if (detail.starts_with("stale_") || detail.ends_with("identity_mismatch"))
     code = protocol::ErrorCode::stale_identity;
   else if (detail == "atlas_no_space" || detail.ends_with("_limit") || detail == "queue_full" ||
            detail.ends_with("_limit_reached") || detail == "atlas_resource_budget_exceeded")
@@ -83,7 +82,7 @@ bool WriteControlResponse(const base::DictValue& request,
   if (!encoded)
     return false;
   bool original_reply = true;
-  if (encoded->size() > 1024 * 1024) {
+  if (encoded->size() > ControlResponseJsonLimit(request)) {
     original_reply = false;
     const auto error = ControlResult::Failure(
         request.FindInt("id").value_or(0), protocol::ErrorCode::resource_limit,

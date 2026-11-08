@@ -101,11 +101,12 @@ struct alignas(64) SharedRenderMapping {
   std::uint32_t reserved;
   // Global snapshot publishes generation, dimensions, status and latest layout.
   alignas(8) std::int64_t publication_sequence;
+  std::uint64_t clipboard_sequence;
   SharedAtlasFrame latest_layout;
   SharedRenderSlot slots[kSharedAtlasSlotCount];
 };
 inline constexpr std::uint32_t kSharedRenderMagic = 0x524B5253;  // RKRS
-inline constexpr std::uint32_t kSharedRenderVersion = 4;
+inline constexpr std::uint32_t kSharedRenderVersion = 5;
 inline constexpr std::uint32_t kRenderSlotCount = kSharedAtlasSlotCount;
 using RenderView = SharedAtlasView;
 using RenderFrame = SharedAtlasFrame;
@@ -121,7 +122,9 @@ static_assert(offsetof(SharedAtlasView, context_menu) == 160);
 static_assert(sizeof(SharedAtlasView) == 176);
 static_assert(sizeof(SharedAtlasFrame) == 11320);
 static_assert(sizeof(SharedRenderSlot) == 11328);
-static_assert(offsetof(SharedRenderMapping, latest_layout) == 24);
+static_assert(offsetof(SharedRenderMapping, clipboard_sequence) == 24);
+static_assert(offsetof(SharedRenderMapping, clipboard_sequence) % 8 == 0);
+static_assert(offsetof(SharedRenderMapping, latest_layout) == 32);
 static_assert(offsetof(SharedRenderMapping, slots) == 11392);
 static_assert(sizeof(SharedRenderMapping) == 56704);
 // Only consumed_fences[slot] >= value releases that slot. UINT64_MAX means

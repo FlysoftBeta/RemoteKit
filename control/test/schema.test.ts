@@ -10,7 +10,7 @@ import { ControlDatabase } from '../server/persistence/database';
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 9n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 10n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -18,6 +18,7 @@ test('fresh schema includes workspace spaces, installed apps, favorites and usag
     );
     for (const name of [
       'users',
+      'clipboards',
       'auth_tokens',
       'workspaces',
       'workspace_spaces',
@@ -39,6 +40,15 @@ test('fresh schema includes workspace spaces, installed apps, favorites and usag
       (column) => column.name,
     );
     for (const name of ['last_login_at', 'disabled_at']) assert.ok(columns.includes(name), name);
+    assert.deepEqual(
+      (store.db.prepare('PRAGMA table_info(clipboards)').all() as { name: string }[]).map(
+        (column) => column.name,
+      ),
+      ['user_id', 'revision', 'text', 'html', 'updated_at'],
+    );
+    const foreignKey = store.db.prepare('PRAGMA foreign_key_list(clipboards)').get() as any;
+    assert.equal(foreignKey.table, 'users');
+    assert.equal(foreignKey.on_delete, 'CASCADE');
   } finally {
     store.db.close();
   }
@@ -50,6 +60,7 @@ test('reopening keeps accounts, workspace and the view allocator', async () => {
   let store = new ControlDatabase(path);
   try {
     const account = await registerUser(store, 'schema-user', 'schema-password123');
+    store.clipboards.record(account.user.id, { text: 'persisted clipboard', html: '<b>persisted</b>' });
     const firstView = store.workspaces.viewId();
     const workspace = store.workspaces.workspace(account.tenantId);
     workspace.windows.push({ id: 'window', appId: 'browser', activeTabId: 'tab', lastActiveAt: 100 });
@@ -73,6 +84,11 @@ test('reopening keeps accounts, workspace and the view allocator', async () => {
     store.db.close();
     store = new ControlDatabase(path);
     assert.equal(store.accounts.identity(account.token)?.user.id, account.user.id);
+    assert.deepEqual(store.clipboards.latest(account.user.id), {
+      revision: '1',
+      text: 'persisted clipboard',
+      html: '<b>persisted</b>',
+    });
     assert.equal(store.workspaces.workspace(account.tenantId).tabs[0].webviewId, firstView);
     assert.ok(BigInt(store.workspaces.viewId()) > BigInt(firstView));
     assert.equal(
@@ -90,9 +106,9 @@ test('databases at another schema version are rejected', async () => {
   try {
     for (const [name, setup] of [
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
-      ['previous', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (8)'],
+      ['previous', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (9)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (10)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (11)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',

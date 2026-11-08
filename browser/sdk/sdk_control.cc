@@ -1,5 +1,6 @@
 #include "remotekit/browser/sdk/sdk_internal.h"
 #include "remotekit/browser/sdk/sdk_resources.h"
+#include "browser/control_clipboard.h"
 
 using namespace remotekit::sdk;
 namespace remotekit::sdk {
@@ -18,7 +19,10 @@ int ExchangeJson(uint64_t handle,
                  uint32_t timeout_ms,
                  std::optional<base::DictValue>* reply,
                  std::vector<mojo::ScopedHandle>* attachments) {
-  std::vector<uint8_t> response(kMaxMessageSize);
+  const auto parsed = base::JSONReader::ReadDict(request, base::JSON_PARSE_RFC, 32);
+  if (!parsed)
+    return REMOTEKIT_SDK_INVALID_ARGUMENT;
+  std::vector<uint8_t> response(browser::ControlResponseJsonLimit(*parsed));
   size_t size = 0;
   // control_request serializes the exchange on this channel only.
   int status = ControlRequestInternal(handle, request.data(), request.size(), response.data(),
@@ -58,7 +62,7 @@ int Command(uint64_t handle,
     return REMOTEKIT_SDK_CHANNEL_CLOSED;
   if (token)
     *token = {};
-  if (!json || !size || size > kMaxMessageSize || !timeout_ms || timeout_ms > 30000)
+  if (!json || !size || size > browser::kClipboardJsonLimit || !timeout_ms || timeout_ms > 30000)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   // SAFETY: the caller supplies size bytes of JSON as required by this C ABI.
   const auto request = UNSAFE_BUFFERS(std::string_view(json, size));
@@ -151,19 +155,20 @@ int ControlRequestInternal(uint64_t handle,
       RetireChannel(handle, channel);
     return status;
   };
-  if (!output_size || size > kMaxMessageSize || (size && !input) || (capacity && !output) ||
-      timeout_ms == 0 || timeout_ms > 30000) {
+  if (!output_size || size > browser::kClipboardJsonLimit || (size && !input) ||
+      (capacity && !output) || timeout_ms == 0 || timeout_ms > 30000) {
     return fail(REMOTEKIT_SDK_INVALID_ARGUMENT);
   }
   const auto bytes = UNSAFE_BUFFERS(std::string_view(static_cast<const char*>(input), size));
   auto request = base::JSONReader::ReadDict(bytes, base::JSON_PARSE_RFC, 32);
-  if (!request || !request->FindInt("id") || channel->next_request_id == INT_MAX)
+  if (!request || size > browser::ControlRequestJsonLimit(*request) || !request->FindInt("id") ||
+      channel->next_request_id == INT_MAX)
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   const int caller_id = *request->FindInt("id");
   const int wire_id = ++channel->next_request_id;
   request->Set("id", wire_id);
   const auto encoded = base::WriteJson(*request);
-  if (!encoded)
+  if (!encoded || encoded->size() > browser::ControlRequestJsonLimit(*request))
     return REMOTEKIT_SDK_INVALID_ARGUMENT;
   const auto started = base::TimeTicks::Now();
   const base::TimeTicks deadline = started + base::Milliseconds(timeout_ms);
@@ -172,7 +177,7 @@ int ControlRequestInternal(uint64_t handle,
                                              MOJO_WRITE_MESSAGE_FLAG_NONE);
   if (written != MOJO_RESULT_OK)
     return fail(written == MOJO_RESULT_FAILED_PRECONDITION ? REMOTEKIT_SDK_CHANNEL_CLOSED
-                                                         : REMOTEKIT_SDK_MOJO_ERROR);
+                                                           : REMOTEKIT_SDK_MOJO_ERROR);
   std::vector<uint8_t> response;
   std::vector<mojo::ScopedHandle> received_handles;
   for (;;) {
@@ -189,8 +194,10 @@ int ControlRequestInternal(uint64_t handle,
     const MojoResult result =
         mojo::ReadMessageRaw(pipe, &response, &received_handles, MOJO_READ_MESSAGE_FLAG_NONE);
     if (result == MOJO_RESULT_OK) {
+      if (response.size() > browser::kClipboardJsonLimit)
+        return fail(REMOTEKIT_SDK_MOJO_ERROR);
       auto reply = base::JSONReader::ReadDict(base::as_string_view(base::span(response)),
-                                             base::JSON_PARSE_RFC, 32);
+                                              base::JSON_PARSE_RFC, 32);
       if (!reply)
         return REMOTEKIT_SDK_DATA_MISMATCH;
       const auto reply_id = reply->FindInt("id");
@@ -206,6 +213,10 @@ int ControlRequestInternal(uint64_t handle,
         response.clear();
         continue;
       }
+      if (response.size() > browser::ControlResponseJsonLimit(*request)) {
+        ReplyHandles discard(*reply);
+        return fail(REMOTEKIT_SDK_MOJO_ERROR);
+      }
       reply->Set("id", caller_id);
       const auto restored = base::WriteJson(*reply);
       if (!restored)
@@ -214,19 +225,19 @@ int ControlRequestInternal(uint64_t handle,
         ReplyHandles discard(*reply);
         *output_size = restored->size();
         return restored->size() > capacity ? REMOTEKIT_SDK_BUFFER_TOO_SMALL
-                                          : REMOTEKIT_SDK_DATA_MISMATCH;
+                                           : REMOTEKIT_SDK_DATA_MISMATCH;
       }
       response.assign(restored->begin(), restored->end());
       break;
     }
     if (result != MOJO_RESULT_SHOULD_WAIT)
       return fail(result == MOJO_RESULT_FAILED_PRECONDITION ? REMOTEKIT_SDK_CHANNEL_CLOSED
-                                                          : REMOTEKIT_SDK_MOJO_ERROR);
+                                                            : REMOTEKIT_SDK_MOJO_ERROR);
     base::PlatformThread::Sleep(base::Milliseconds(1));
   }
   if (!attachments && !received_handles.empty())
     return fail(REMOTEKIT_SDK_DATA_MISMATCH);
-  if (response.size() > kMaxMessageSize)
+  if (response.size() > browser::ControlResponseJsonLimit(*request))
     return fail(REMOTEKIT_SDK_MOJO_ERROR);
   if (response.size() > capacity) {
     *output_size = response.size();

@@ -144,6 +144,7 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       }
     }
     if (sessions_.at(tenant)->PlacementEpoch() == epoch) {
+      sessions_.at(tenant)->BeginManagementRequest(generation);
       auto identity = sessions_.at(tenant)->Open(request);
       if (!identity)
         return identity.error();

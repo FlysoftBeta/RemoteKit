@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Clipboard real-stack fixture</title>
+  <style>
+    body {
+      margin: 40px;
+      background: white;
+      color: #222;
+      font: 22px monospace;
+    }
+    p,
+    a,
+    button,
+    textarea {
+      display: block;
+      margin: 30px 0;
+    }
+    #copy,
+    #quick {
+      width: max-content;
+      white-space: nowrap;
+    }
+    textarea {
+      width: 80%;
+      height: 100px;
+    }
+  </style>
+  <p id="copy">CLIPBOARD_MARKER</p>
+  <a id="link" href="/linked">Copy link address</a>
+  <p id="quick">quickclipboardword</p>
+  <button id="large">Copy 3 MiB</button>
+  <textarea id="paste" placeholder="Paste here"></textarea>
+  <script>
+    const copy = document.querySelector('#copy');
+    const quick = document.querySelector('#quick');
+    const paste = document.querySelector('#paste');
+    const incarnation = crypto.randomUUID();
+    let serial = 0;
+    let startup;
+    const report = () =>
+      fetch('/event', {
+        method: 'POST',
+        body: JSON.stringify({
+          incarnation,
+          serial: ++serial,
+          width: innerWidth,
+          height: innerHeight,
+          selection: getSelection().toString(),
+          pasted: paste.value,
+          startup,
+          geometry: Object.fromEntries(
+            ['copy', 'link', 'quick', 'large', 'paste'].map((id) => [
+              id,
+              document.getElementById(id).getBoundingClientRect().toJSON(),
+            ]),
+          ),
+        }),
+      });
+    document.querySelector('#large').onclick = () => {
+      const source = document.createElement('textarea');
+      source.value = 'OVERSIZE_MARKER' + 'x'.repeat(3 * 1024 * 1024 - 'OVERSIZE_MARKER'.length);
+      document.body.append(source);
+      source.select();
+      document.execCommand('copy');
+      source.remove();
+      report();
+    };
+    navigator.clipboard
+      .readText()
+      .then((value) => {
+        startup = { value };
+        report();
+      })
+      .catch((error) => {
+        startup = { error: error.name };
+        report();
+      });
+    for (const event of ['selectionchange', 'input', 'paste', 'copy'])
+      document.addEventListener(event, () => setTimeout(report, 25));
+    addEventListener('resize', report);
+    report();
+  </script>
+</html>

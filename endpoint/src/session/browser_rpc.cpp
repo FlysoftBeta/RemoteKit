@@ -77,7 +77,8 @@ Result<Json> BrowserRpc::Exchange(Json command,
       view["session"] = "1";
   command["id"] = ++serial_;
   const auto encoded = command.dump();
-  std::vector<char> response(1024 * 1024);
+  const bool clipboard = command.value("method", std::string()).starts_with("clipboard.");
+  std::vector<char> response(clipboard ? 32 * 1024 * 1024 : 1024 * 1024);
   size_t count = 0;
   record("input_rpc_sdk_call");
   const auto started = std::chrono::steady_clock::now();

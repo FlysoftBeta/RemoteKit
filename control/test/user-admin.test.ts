@@ -198,6 +198,57 @@ test('transferring the administrator role demotes the current administrator', as
   }
 });
 
+test('reset browser data clears stored clipboard, clears a live Browser and purges its session', async () => {
+  const h = await stack();
+  try {
+    await h.call('admin.createUser', { username: 'reset-user', password });
+    const user = h.store.accounts.byUsername('reset-user')!;
+    const placement = h.control.endpoint.placement.resolve(user.tenant);
+    h.store.clipboards.record(user.id, { text: 'private clipboard', html: '<p>private</p>' });
+    h.store.clipboards.record(user.id, { text: 'latest clipboard', html: '' });
+    await h.call('admin.resetSession', { username: user.username });
+    assert.equal(h.store.clipboards.latest(user.id), undefined);
+    assert.deepEqual(h.requests.find((request) => request.method === 'session.clipboard.set')?.args, {
+      revision: '3',
+      text: '',
+      html: '',
+    });
+    assert.equal(h.control.endpoint.placement.peek(user.tenant), undefined);
+    await h.control.sessionPurge.flush();
+    assert.ok(
+      h.requests.some(
+        (request) => request.method === 'session.delete' && request.args.sessionId === placement.sessionId,
+      ),
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test('reset browser data clears clipboard without starting an absent or hibernated Session', async () => {
+  const h = await stack();
+  try {
+    for (const username of ['absent-user', 'hibernated-user']) {
+      await h.call('admin.createUser', { username, password });
+      const user = h.store.accounts.byUsername(username)!;
+      h.store.clipboards.record(user.id, { text: 'private clipboard', html: '' });
+      if (username === 'hibernated-user')
+        h.control.endpoint.placement.resolve(user.tenant).state = 'hibernated';
+      const before = h.requests.length;
+      await h.call('admin.resetSession', { username });
+      assert.equal(h.store.clipboards.latest(user.id), undefined);
+      assert.equal(
+        h.requests
+          .slice(before)
+          .some((request) => ['session.ensure', 'session.clipboard.set'].includes(request.method)),
+        false,
+      );
+    }
+  } finally {
+    await h.close();
+  }
+});
+
 test('deleting a user removes every row of its tenant and queues node data deletion', async () => {
   const h = await stack();
   try {
@@ -205,6 +256,7 @@ test('deleting a user removes every row of its tenant and queues node data delet
     const leaving = await accountsFor(h.store).login('leaving', password);
     await h.attach(leaving);
     const user = h.store.accounts.byUsername('leaving')!;
+    h.store.clipboards.record(user.id, { text: 'private clipboard', html: '<p>private</p>' });
     h.store.sessionImports.openPairing(user.tenant, pairEvent().code, Date.now());
     h.store.sessionImports.addDevice(deviceKeyId, user.tenant, devicePublic, 'phone', Date.now());
     h.store.sessionImports.incoming(user.tenant, deviceKeyId, devicePublic, 'phone', pairEvent(), Date.now());

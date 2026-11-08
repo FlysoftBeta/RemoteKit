@@ -1,6 +1,8 @@
 // Register local Mojo peers through internal types and link production objects.
 #include "sdk_internal.h"
 #include "sdk_resources.h"
+#include "browser/control_clipboard.h"
+#include "browser/control_response.h"
 using namespace remotekit::sdk;
 
 #include <chrono>
@@ -56,19 +58,21 @@ void Reply(mojo::MessagePipeHandle pipe, const std::vector<uint8_t>& bytes) {
 }
 
 int Payload(const std::vector<uint8_t>& bytes) {
-  auto request = base::JSONReader::ReadDict(base::as_string_view(base::span(bytes)),
-                                           base::JSON_PARSE_RFC);
+  auto request =
+      base::JSONReader::ReadDict(base::as_string_view(base::span(bytes)), base::JSON_PARSE_RFC);
   CHECK(request);
   return *request->FindInt("probe");
 }
 int Request(uint64_t id, uint8_t byte, uint32_t timeout_ms = 5000) {
-  const auto input = base::WriteJson(base::DictValue().Set("id", int(byte)).Set("probe", int(byte)));
+  const auto input =
+      base::WriteJson(base::DictValue().Set("id", int(byte)).Set("probe", int(byte)));
   std::array<char, 512> output{};
   size_t size = 0;
-  const int status = remotekit_sdk_control_request(id, input->data(), input->size(),
-      output.data(), output.size(), &size, timeout_ms);
+  const int status = remotekit_sdk_control_request(id, input->data(), input->size(), output.data(),
+                                                   output.size(), &size, timeout_ms);
   if (status == REMOTEKIT_SDK_OK) {
-    auto reply = base::JSONReader::ReadDict(std::string_view(output.data(), size), base::JSON_PARSE_RFC);
+    auto reply =
+        base::JSONReader::ReadDict(std::string_view(output.data(), size), base::JSON_PARSE_RFC);
     CHECK(reply);
     CHECK_EQ(*reply->FindInt("probe"), int(byte));
     CHECK_EQ(*reply->FindInt("id"), int(byte));
@@ -452,6 +456,87 @@ void ShutdownDrainsLeases() {
   CHECK_EQ(shutdown_status, REMOTEKIT_SDK_OK);
   CHECK_EQ(remotekit_sdk_initialize(), REMOTEKIT_SDK_INVALID_STATE);
 }
+
+void ClipboardPayloadBounds() {
+  using namespace remotekit::browser;
+  auto channel = NewChannel();
+  const std::string text(1024 * 1024, '\x01');
+  const std::string html(2 * 1024 * 1024, '\x02');
+  auto write = base::DictValue()
+                   .Set("id", 901)
+                   .Set("method", "clipboard.write")
+                   .Set("revision", "1")
+                   .Set("text", text)
+                   .Set("html", html);
+  CHECK(ValidClipboardWrite(write));
+  const auto encoded = base::WriteJson(write);
+  CHECK_GT(encoded->size(), kControlJsonLimit);
+  CHECK_LE(encoded->size(), kClipboardJsonLimit);
+  std::thread responder([&] {
+    const auto received = ReadJsonRequest(channel.peer.get());
+    CHECK_EQ(*received.FindString("text"), text);
+    CHECK_EQ(*received.FindString("html"), html);
+    const auto response = base::WriteJson(ControlResult::Success(*received.FindInt("id")));
+    CHECK_EQ(mojo::WriteMessageRaw(channel.peer.get(), response->data(), response->size(), nullptr,
+                                   0, MOJO_WRITE_MESSAGE_FLAG_NONE),
+             MOJO_RESULT_OK);
+  });
+  std::optional<base::DictValue> reply;
+  CHECK_EQ(ExchangeJson(channel.id, *encoded, 5000, &reply), REMOTEKIT_SDK_OK);
+  responder.join();
+  write.Set("method", "view.navigate");
+  const auto ordinary = base::WriteJson(write);
+  CHECK_EQ(ExchangeJson(channel.id, *ordinary, 5000, &reply), REMOTEKIT_SDK_INVALID_ARGUMENT);
+
+  auto read = base::DictValue().Set("id", 902).Set("method", "clipboard.read");
+  const auto value = ControlResult::Success(
+      902, base::DictValue().Set("sequence", "1").Set("text", text).Set("html", html));
+  bool original = false;
+  const auto capture = base::BindRepeating(
+      [](bool* original, std::string_view, bool application_reply) {
+        *original = application_reply;
+        return true;
+      },
+      base::Unretained(&original));
+  CHECK(WriteControlResponse(read, value, capture));
+  CHECK(original);
+  auto ordinary_read = base::DictValue().Set("id", 902).Set("method", "session.describe");
+  CHECK(WriteControlResponse(ordinary_read, value, capture));
+  CHECK(!original);
+  std::thread reader([&] {
+    const auto received = ReadJsonRequest(channel.peer.get());
+    CHECK(WriteControlResponse(
+        received, ControlResult::Success(*received.FindInt("id"), value.Clone()),
+        base::BindRepeating(
+            [](mojo::MessagePipeHandle pipe, std::string_view bytes, bool application_reply) {
+              CHECK(application_reply);
+              return mojo::WriteMessageRaw(pipe, bytes.data(), bytes.size(), nullptr, 0,
+                                           MOJO_WRITE_MESSAGE_FLAG_NONE) == MOJO_RESULT_OK;
+            },
+            channel.peer.get())));
+  });
+  const auto read_json = base::WriteJson(read);
+  CHECK_EQ(ExchangeJson(channel.id, *read_json, 5000, &reply), REMOTEKIT_SDK_OK);
+  reader.join();
+  CHECK_EQ(*reply->FindString("text"), text);
+  CHECK_EQ(*reply->FindString("html"), html);
+  CHECK_EQ(remotekit_sdk_control_close(channel.id), REMOTEKIT_SDK_OK);
+
+  auto invalid_response = NewChannel();
+  std::thread invalid_reader([&] {
+    auto received = ReadJsonRequest(invalid_response.peer.get());
+    const auto oversized =
+        base::WriteJson(ControlResult::Success(*received.FindInt("id"), value.Clone()));
+    CHECK_EQ(mojo::WriteMessageRaw(invalid_response.peer.get(), oversized->data(),
+                                   oversized->size(), nullptr, 0, MOJO_WRITE_MESSAGE_FLAG_NONE),
+             MOJO_RESULT_OK);
+  });
+  const auto ordinary_json = base::WriteJson(ordinary_read);
+  CHECK_EQ(ExchangeJson(invalid_response.id, *ordinary_json, 5000, &reply),
+           REMOTEKIT_SDK_MOJO_ERROR);
+  invalid_reader.join();
+  CHECK_EQ(remotekit_sdk_control_close(invalid_response.id), REMOTEKIT_SDK_OK);
+}
 }  // namespace
 
 int main() {
@@ -467,6 +552,7 @@ int main() {
   UnclaimedControlClose();
   RawControlRejectsAttachments();
   TimeoutDiscardsLateReplyAndAttachments();
+  ClipboardPayloadBounds();
   ShutdownDrainsLeases();
   std::puts("SDK channel concurrency, queued close, and shutdown lease tests passed");
 }

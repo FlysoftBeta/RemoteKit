@@ -10,7 +10,7 @@ import {
   type KeyObject,
 } from 'node:crypto';
 
-export const MAX_TRANSPORT = 4 * 1024 * 1024;
+export const MAX_TRANSPORT = 20 * 1024 * 1024;
 export const MAX_CIPHERTEXT = MAX_TRANSPORT + 16;
 const EMPTY = Buffer.alloc(0);
 const PROTOCOL = 'Noise_NNpsk0_25519_AESGCM_SHA256';
@@ -50,7 +50,7 @@ export class CipherState {
     return nonce;
   }
   encrypt(plaintext: Buffer, aad: Buffer = EMPTY): Buffer {
-    if (plaintext.length > MAX_TRANSPORT) throw new Error('Noise message exceeds 4 MiB');
+    if (plaintext.length > MAX_TRANSPORT) throw new Error('Noise message exceeds 20 MiB');
     const cipher = createCipheriv('aes-256-gcm', this.key, this.nextNonce());
     cipher.setAAD(aad);
     return Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);

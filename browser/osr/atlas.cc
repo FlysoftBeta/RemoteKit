@@ -85,6 +85,14 @@ void Atlas::Initialize() {
   }
 }
 
+void Generation::PublishClipboardSequence(uint64_t sequence) {
+  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_);
+  if (atlas_.mapping_) {
+    InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&atlas_.mapping_->clipboard_sequence),
+                          static_cast<LONG64>(sequence));
+  }
+}
+
 bool Atlas::RefreshCurrentWork(Work& work) {
   if (work.reads.size() != owner_.plane_pool_.order_.size())
     return false;
@@ -129,7 +137,7 @@ void Atlas::CompleteWork() {
   // Submitted writes must retain their target even when a sibling root has
   // no output. Cache owns those real writes; they are never guessed complete.
   if (auto reject = CachedWorkReject(missing, work->updated, work->begin.force,
-                                      work->revision == published_revision_)) {
+                                     work->revision == published_revision_)) {
     owner_.FinishReject(*reject);
     return;
   }
@@ -253,7 +261,9 @@ base::DictValue Atlas::Describe(uint32_t pid) {
         .Set("code", static_cast<int>(ErrorCode::unavailable))
         .Set("reason", owner_.failed_ ? "hardware_output_unavailable" : "output_stopped")
         .Set("retryable", false)
-        .Set("detail", "当前会话没有可用的硬件 GPU 输出（RDP 会话默认使用 Microsoft Basic Render Driver）：" + owner_.error_);
+        .Set("detail",
+             "当前会话没有可用的硬件 GPU 输出（RDP 会话默认使用 Microsoft Basic Render Driver）：" +
+                 owner_.error_);
   if (consumer_) {
     if (consumer_->pid == pid) {
       if (render_endpoint_delivered_)

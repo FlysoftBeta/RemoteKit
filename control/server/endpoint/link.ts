@@ -1,4 +1,4 @@
-import type { ClientActionEvent, RtcSignal } from './types';
+import type { ClipboardChangedEvent, ClientActionEvent, RtcSignal } from './types';
 export type EndpointLinkState =
   | { state: 'offline' }
   | { state: 'connecting' }
@@ -18,4 +18,5 @@ export interface EndpointLink {
   request(method: string, tenantId: string, args?: Record<string, unknown>): Promise<unknown>;
   onClientAction?(listener: (event: ClientActionEvent) => void): () => void;
   onSignal?(listener: (event: RtcSignal) => void): () => void;
+  onClipboardChanged?(listener: (event: ClipboardChangedEvent) => void): () => void;
 }

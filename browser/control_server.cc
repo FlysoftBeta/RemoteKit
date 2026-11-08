@@ -1,4 +1,5 @@
 #include "remotekit/browser/control_server.h"
+#include "browser/control_clipboard.h"
 #include "remotekit/browser/control_response.h"
 #include <vector>
 #include "base/check.h"
@@ -47,12 +48,16 @@ void ControlServer::OnReadable(MojoResult result) {
     auto read = mojo::ReadMessageRaw(pipe_.get(), &data, nullptr, MOJO_READ_MESSAGE_FLAG_NONE);
     if (read == MOJO_RESULT_SHOULD_WAIT)
       return;
-    if (read != MOJO_RESULT_OK || data.size() > 1024 * 1024) {
+    if (read != MOJO_RESULT_OK || data.size() > kClipboardJsonLimit) {
       Close();
       return;
     }
     const std::string request(data.begin(), data.end());
     auto parsed = base::JSONReader::ReadDict(request, base::JSON_PARSE_RFC, 32);
+    if (data.size() > (parsed ? ControlRequestJsonLimit(*parsed) : kControlJsonLimit)) {
+      Close();
+      return;
+    }
     if (!parsed) {
       SendReply({}, ControlResult::Failure(0, protocol::ErrorCode::invalid_request,
                                            "Invalid control JSON"));

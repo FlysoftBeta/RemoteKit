@@ -219,6 +219,76 @@ test('sticky balanced placement seals keys, opens per epoch, retries not_found o
   }
 });
 
+test('clipboard management events cross the encrypted link and reject stale nodes and sessions', async () => {
+  const h = await harness();
+  const control = createApplication(h.store, h.gateway);
+  try {
+    h.store.accounts.insertUser({
+      id: 'one',
+      username: 'one',
+      tenant: 'one',
+      salt: '',
+      password_hash: '',
+      is_admin: 0,
+    });
+    const alpha = await h.connect();
+    const beta = await h.connect({ nodeId: 'beta' });
+    h.store.clipboards.record('one', { text: 'seed', html: '' });
+    await h.gateway.ensureSession('one');
+    for (const method of ['session.open', 'session.ensure'])
+      assert.deepEqual(alpha.requests.find((request) => request.method === method)?.clipboard, {
+        revision: '1',
+        text: 'seed',
+        html: '',
+      });
+    const sessionId = h.placement.peek('one')!.sessionId;
+    const event = {
+      type: 'clipboard.changed',
+      tenantId: 'one',
+      sessionId,
+      browserSequence: '1',
+      text: 'first',
+      html: '',
+    };
+    alpha.send(event);
+    alpha.send({ ...event, browserSequence: '2', text: 'last' });
+    alpha.send({ ...event, sessionId: 'stale', text: 'wrong session' });
+    beta.send({ ...event, text: 'wrong node' });
+    await Promise.all([alpha.barrier(), beta.barrier()]);
+    await control.tenants.drain();
+    assert.deepEqual(h.store.clipboards.latest('one'), { revision: '3', text: 'last', html: '' });
+    const before = alpha.requests.length;
+    const warn = test.mock.method(console, 'warn', () => {});
+    try {
+      alpha.send({
+        type: 'clipboard.changed',
+        tenantId: 'one',
+        sessionId,
+        browserSequence: '3',
+        oversize: true,
+        textBytes: 5 * 1024 * 1024,
+        htmlBytes: 0,
+      });
+      await alpha.barrier();
+      await control.tenants.drain();
+      assert.equal(h.store.clipboards.latest('one')?.revision, '3');
+      assert.deepEqual(warn.mock.calls[0].arguments, [
+        'Clipboard write exceeds limits',
+        { textBytes: 5 * 1024 * 1024, htmlBytes: 0 },
+      ]);
+    } finally {
+      warn.mock.restore();
+    }
+    assert.equal(alpha.requests.length, before);
+    await h.gateway.setClipboard('one', { revision: '4', text: '', html: '' });
+    assert.equal(alpha.requests[alpha.requests.length - 1]?.method, 'session.clipboard.set');
+    assert.equal(alpha.requests[alpha.requests.length - 1]?.revision, '4');
+  } finally {
+    await control.close();
+    await h.close();
+  }
+});
+
 test('updater resumes binary release downloads and receives no_release in dev', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-release-'));
   const archive = join(directory, 'node.tar.zst');

@@ -1,6 +1,7 @@
 // CPU-only: calls the exact production response writer and accept exporter.
 #include "remotekit/browser/control_response.h"
 #include "browser/control_input_codec.h"
+#include "browser/control_clipboard.h"
 #include "remotekit/browser/file_chooser_accept.h"
 
 #include <cstdio>
@@ -15,6 +16,18 @@ namespace {
 void ControlContract() {
   using namespace remotekit;
   using namespace remotekit::browser;
+  base::DictValue clipboard;
+  clipboard.Set("revision", "18446744073709551615");
+  clipboard.Set("text", "clipboard text");
+  clipboard.Set("html", "<p>clipboard text</p>");
+  CHECK(ValidClipboardWrite(clipboard));
+  for (const auto* revision : {"", "01", "-1", "18446744073709551616"}) {
+    clipboard.Set("revision", revision);
+    CHECK(!ValidClipboardWrite(clipboard));
+  }
+  clipboard.Set("revision", "0");
+  clipboard.Remove("html");
+  CHECK(!ValidClipboardWrite(clipboard));
   auto busy = ControlResult::Failure(19, protocol::ErrorCode::busy, "Page request pending");
   CHECK(busy.FindBool("ok") == false && busy.FindInt("code") == 6);
   CHECK(*busy.FindString("error") == "busy" &&

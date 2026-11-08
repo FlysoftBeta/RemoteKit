@@ -106,7 +106,7 @@ const clientFields = words(`
 // content, connection addresses and free-form status/error text are dropped.
 const nativeKey = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
 const excludedNativeKey =
-  /(?:token|secret|credential|password|(?:^|_)id$|Id$|Incarnation$|url|title|origin$|address|candidate|sdp|handle|channel|message|detail|identifier|fingerprint|content|text|filename|username|href|navigation|input|auth|path)/i;
+  /(?:clipboard|html|token|secret|credential|password|(?:^|_)id$|Id$|Incarnation$|url|title|origin$|address|candidate|sdp|handle|channel|message|detail|identifier|fingerprint|content|text|filename|username|href|navigation|input|auth|path)/i;
 const nativeViewFields =
   words(`actual desired pending focused last_lifecycle close_state width height device deviceScaleFactor compositor visible
   lifecycle_uncertain canDiscard touch_code pending_page_requests loading audible crashed fullscreen recovery browserPending browserDesired`);

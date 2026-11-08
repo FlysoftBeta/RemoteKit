@@ -15,6 +15,7 @@ import type { NodeRegistry } from './cluster/node-link';
 import { FileLibrary } from './files/library';
 import type { createHttp } from './http/server';
 import type { ControlDatabase } from './persistence/database';
+import { warnClipboardOversize } from './persistence/clipboards';
 import { TenantRegistry } from './tenants/tenant-registry';
 import { systemClock, type Clock } from './util/clock';
 import { RtcSignaling } from './viewers/rtc-signaling';
@@ -79,6 +80,10 @@ export function createApplication(
     closed: false,
   };
   const services = context as DomainServices;
+  endpoint.setClipboardSource((tenant) => {
+    const user = store.accounts.userForTenant(tenant);
+    return user && store.clipboards.latest(user.id);
+  });
   services.sessionImporter = new SessionImporter(
     store,
     endpoint,
@@ -152,10 +157,26 @@ export function createApplication(
     void services.operations.handleEndpointAction(event).catch(() => {});
   });
   const unsubscribeSignals = endpoint.onSignal?.((event) => services.rtc.receiveSignal(event));
+  const unsubscribeClipboard = endpoint.onClipboardChanged((event) => {
+    void context.tenants
+      .serial(event.tenantId, async () => {
+        if (endpoint.placement.peek(event.tenantId)?.sessionId !== event.sessionId) return;
+        const user = store.accounts.userForTenant(event.tenantId);
+        if (!user) return;
+        if (event.oversize === true) {
+          warnClipboardOversize(event.textBytes, event.htmlBytes);
+          return;
+        }
+        store.clipboards.record(user.id, { text: event.text, html: event.html });
+      })
+      .catch(() => console.warn('Clipboard write failed'));
+  });
   services.close = async () => {
     context.closed = true;
     unsubscribeActions?.();
     unsubscribeSignals?.();
+    unsubscribeClipboard();
+    endpoint.setClipboardSource(() => undefined);
     await services.sessionImporter.stop();
     await context.tenants.close();
     await services.objects.close();

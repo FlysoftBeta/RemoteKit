@@ -9,7 +9,7 @@ SQLite 带 `schema_version`（当前 9）。空库在一个事务里建表并写
 | 所有者 | 数据 |
 |---|---|
 | Control 配置文件 | HTTP 监听、集群密钥文件、每个节点的配置、配额 |
-| Control SQLite | 账户（含最近登录、停用时间）、口令/PIN hash、token hash、人脸模板（加密）；workspace（Space、Window、Tab、active 关系、地址意图、恢复阶段、窗口视图状态）；已安装 App 与图标；收藏；使用记录；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务；会话放置与加密的 Tenant 密钥；对象索引与副本；checkpoint；被移除的节点；待各节点清理的已删除 Session |
+| Control SQLite | 账户（含最近登录、停用时间）、口令/PIN hash、token hash、人脸模板（加密）；workspace（Space、Window、Tab、active 关系、地址意图、恢复阶段、窗口视图状态）；已安装 App 与图标；收藏；使用记录；设置；站点偏好；操作收据；弹窗收养收据；文件目录、分组、篮子顺序、选择事务；剪贴板；会话放置与加密的 Tenant 密钥；对象索引与副本；checkpoint；被移除的节点；待各节点清理的已删除 Session |
 | Control 内存 | Viewer 租约、实际内容区尺寸、页面对话框/全屏/文件请求的临时投影、节点连接状态与指标、Memory Saver 计时 |
 | Endpoint Session | Browser 进程、期望的 view 配置（views.json）、自然关闭事件（events.json）、导航恢复文件、站点 UA 与媒体策略的运行缓存、文件草稿与暂存、媒体/输入/GPU 资源、内存中的 Tenant 密钥 |
 | Endpoint 节点 | 加密对象（文件库资产、缩略图、checkpoint 块）、Session 热/冷副本 |
@@ -127,6 +127,16 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 **公告**是全局的，由管理员发布给所有用户。`announcements(id, title, body, published_at, updated_at)` 保存公告，`announcement_reads(announcement_id, user_id)` 记录谁已读；标题至多 100 字、内容至多 5000 字纯文本（Viewer 保留换行，不解析 HTML/链接）。每个用户的 `ProductState.announcements` 是全部公告按发布时间倒序、带本人的 `read` 标记；发布、编辑、删除后向所有在线 Viewer 推送新快照。Viewer 在产品就绪且开始屏幕未打开时，用对话框从最早的未读公告起逐条显示，关闭即 WS `announcement.read{id}`（幂等）；设置 → 公告列出全部公告。读记录只属于一次发布：编辑时选择重新提醒会更新 `published_at` 并清空该公告的读记录，否则保留。删除用户时删除其读记录；已读统计只计启用的用户。
 
 **诊断下载**是普通 HTTP GET，不能证明 Viewer 已解锁，所以由 `admin.downloadDiagnostic` 在已解锁的租约上签发 60 秒有效、只能使用一次的票据，下载路由 `GET /api/admin/diagnostics/<票据>` 另外要求管理员 cookie。
+
+## 剪贴板
+
+剪贴板归 Control 所有，每个用户一份，存最新值（历史记录和与用户设备的同步以后挂在同一个仓库接口后面）。Browser 的剪贴板只是缓存：粘贴读本地，不等网络；每次本地写入都上报给 Control，Session 打开时由 Control 回填。这样 Browser 重启、休眠、Session 换节点都不会丢失剪贴板。
+
+- 记录的格式只有纯文本（≤1 MiB UTF-8）和 HTML（≤2 MiB）。超限的写入不记录：Control 保留原值并记一条不含内容的警告，Browser 在本次运行内仍保有它。只有图片等其他格式的写入记录为空剪贴板。
+- 上报：Browser 的 `ClipboardBridge` 观察 UI 线程剪贴板（页面复制/剪切、`navigator.clipboard`、`execCommand`、快捷菜单与上下文菜单命令都经过它），每次变化递增 `clipboard_sequence` 并写到共享映射头部。Endpoint 看到序号变化后调用 `clipboard.read` 取内容（较新的序号使在途读取作废），发管理事件 `clipboard.changed`；输出打开时和休眠/关闭 Browser 前也各读一次，补上映射不存在期间的写入。Control 按 Tenant 串行应用，revision 加一，不回推给产生它的 Browser。
+- 回填：`session.open` / `session.ensure` 带上 `clipboard {revision, text, html}`，Endpoint 在 Browser 启动后、创建或收养任何 view 之前调用 `clipboard.write`，页面看不到过期的空剪贴板。Browser 应用回填期间的写入不上报（显式的作用域状态，不靠时间判断）。`session.clipboard.set` 用于 Control 主动改写正在运行的 Browser。
+- "重置浏览器数据"清除保存的剪贴板和运行中 Browser 的剪贴板；删除用户删除它。
+- 剪贴板内容不进入日志、追踪、诊断包或错误消息，只记录大小与 revision。集群帧按消息类型放宽上限：`clipboard.changed` 4 MiB，带剪贴板的回填 20 MiB（JSON 转义后的最坏情况），其余消息仍是 1 MiB。
 
 ## 设置
 
