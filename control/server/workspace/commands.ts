@@ -16,7 +16,7 @@ import {
   type InstalledApp,
   type AppDefinition,
 } from '../../shared/product';
-import { resolveNavigation } from '../navigation-url';
+import { resolveNavigation, resolveSearch } from '../navigation-url';
 import {
   assertWindowMutable,
   findTab,
@@ -56,9 +56,10 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
   const nextId = () => ctx.ids[idIndex++];
   const tab = () => findTab(state, action.tabId);
   const window = () => findWindow(state, action.windowId);
-  const navigationUrl = (value: unknown) => {
+  const navigationUrl = (value: unknown, searchOnly = false) => {
     try {
-      return resolveNavigation(value, state.settings.browser.searchEngine);
+      const resolve = searchOnly ? resolveSearch : resolveNavigation;
+      return resolve(value, state.settings.browser.searchEngine);
     } catch (error) {
       throw new RemoteKitError(
         'invalid_request',
@@ -66,7 +67,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       );
     }
   };
-  const createTab = (windowId: string, address: string | undefined = action.url) => {
+  const createTab = (windowId: string, address: string | undefined = action.url, searchOnly = false) => {
     assertWindowMutable(state, windowId);
     const target = findWindow(state, windowId);
     if (target.appId !== 'browser' && !target.appId.startsWith('web:'))
@@ -82,7 +83,7 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       webviewId: ctx.viewId,
       kind,
       title: String(action.title ?? 'New tab').slice(0, 120),
-      url: kind === 'remote' ? navigationUrl(address) : '',
+      url: kind === 'remote' ? navigationUrl(address, searchOnly) : '',
       ...(action.source === 'launcher' ? { usageSource: 'launcher' as const } : {}),
     };
     state.tabs.push(next);
@@ -256,7 +257,13 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       break;
     }
     case 'tab.create':
-      createTab(window().id);
+      if (action.url !== undefined && action.query !== undefined)
+        throw new RemoteKitError('invalid_request', 'URL and query are mutually exclusive');
+      createTab(
+        window().id,
+        action.query === undefined ? action.url : action.query,
+        action.query !== undefined,
+      );
       break;
     case 'tab.activate': {
       const t = tab();

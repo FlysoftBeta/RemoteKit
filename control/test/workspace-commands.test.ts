@@ -43,6 +43,35 @@ function open(workspace: ProductWorkspace, appId = 'browser') {
   return command(workspace, { type: 'window.open', appId, placement: { mode: 'space' } }).workspace;
 }
 
+test('tab.create query always searches with the current engine and rejects URL/query ambiguity', () => {
+  for (const [engine, prefix] of [
+    ['google', 'https://www.google.com/search?q='],
+    ['bing', 'https://www.bing.com/search?q='],
+    ['duckduckgo', 'https://duckduckgo.com/?q='],
+    ['baidu', 'https://www.baidu.com/s?wd='],
+  ] as const) {
+    const workspace = open(empty());
+    workspace.settings.browser.searchEngine = engine;
+    const windowId = workspace.windows[0].id;
+    for (const query of ['example.com', 'https://example.com/path', '中文 & 😀']) {
+      const next = command(workspace, { type: 'tab.create', windowId, query }).workspace;
+      assert.equal(next.tabs[next.tabs.length - 1].url, prefix + encodeURIComponent(query));
+      assert.equal(next.tabs[next.tabs.length - 1].kind, 'remote');
+    }
+    const exactQuery = 'a'.repeat(8192 - prefix.length);
+    const exact = command(workspace, { type: 'tab.create', windowId, query: exactQuery }).workspace;
+    assert.equal(exact.tabs[exact.tabs.length - 1].url.length, 8192);
+    for (const query of ['', ' ', '\ud800', 'a'.repeat(8193), exactQuery + 'a', '中'.repeat(1000), 42, null])
+      assert.throws(() => command(workspace, { type: 'tab.create', windowId, query } as ProductAction), {
+        code: 'invalid_request',
+      });
+    assert.throws(
+      () => command(workspace, { type: 'tab.create', windowId, url: 'https://example.com', query: 'text' }),
+      { code: 'invalid_request' },
+    );
+  }
+});
+
 test('spaces place windows, retain proportions when reordering, and remove empty spaces', () => {
   let workspace = open(open(empty()));
   const [first, second] = workspace.windows;

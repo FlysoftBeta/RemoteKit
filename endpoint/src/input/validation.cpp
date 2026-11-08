@@ -90,7 +90,10 @@ Result<void> ValidateInput(const InputPayload& p) {
                  Finite(v.x, v.y) && std::abs(v.x) <= 1e7 && std::abs(v.y) <= 1e7;
         else if constexpr (std::is_same_v<T, SelectionCommand>)
           return v.menu && v.command >= SelectionCommand::Command::cut &&
-                 v.command <= SelectionCommand::Command::select_all;
+                 v.command <= SelectionCommand::Command::context_menu;
+        else if constexpr (std::is_same_v<T, ContextCommand>)
+          return v.menu && v.command >= ContextCommand::Command::undo &&
+                 v.command <= ContextCommand::Command::dismiss;
         else if constexpr (std::is_same_v<T, KeyInput>)
           return v.action >= KeyInput::Action::down && v.action <= KeyInput::Action::character &&
                  (v.action != KeyInput::Action::character || !v.text.empty()) &&

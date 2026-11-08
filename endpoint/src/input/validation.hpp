@@ -87,7 +87,23 @@ struct ImeCommit {
 };
 struct SelectionCommand {
   std::uint64_t menu{};
-  enum class Command { cut, copy, paste, select_all };
+  enum class Command { cut, copy, paste, select_all, context_menu };
+  Command command{};
+};
+struct ContextCommand {
+  std::uint64_t menu{};
+  enum class Command {
+    undo,
+    redo,
+    cut,
+    copy,
+    paste,
+    select_all,
+    copy_link_address,
+    copy_image,
+    copy_image_address,
+    dismiss
+  };
   Command command{};
 };
 struct ImeCancel {};
@@ -101,6 +117,7 @@ using InputPayload = std::variant<KeyInput,
                                   ImeCommit,
                                   ImeCancel,
                                   ImeFinish,
-                                  SelectionCommand>;
+                                  SelectionCommand,
+                                  ContextCommand>;
 Result<void> ValidateInput(const InputPayload&);
 }  // namespace remotekit

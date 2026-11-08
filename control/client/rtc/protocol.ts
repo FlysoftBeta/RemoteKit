@@ -46,6 +46,7 @@ export interface EditableMessage {
 
 export const SELECTION_COMMANDS = ['cut', 'copy', 'paste', 'selectAll'] as const;
 export type SelectionCommand = (typeof SELECTION_COMMANDS)[number];
+export type SelectionAction = SelectionCommand | 'contextMenu';
 export type SelectionView = Pick<EditableView, 'session' | 'id' | 'instance' | 'document'>;
 export interface SelectionMenu {
   id: string;
@@ -55,6 +56,7 @@ export interface SelectionMenu {
   height: number;
   handleHeight: number;
   commands: SelectionCommand[];
+  more: boolean;
 }
 export interface SelectionMessage {
   type: 'input.selection';
@@ -62,6 +64,26 @@ export interface SelectionMessage {
   revision: string;
   view: SelectionView | null;
   menu: SelectionMenu | null;
+}
+
+export type ContextCommand =
+  SelectionCommand | 'undo' | 'redo' | 'copyLinkAddress' | 'copyImage' | 'copyImageAddress' | 'dismiss';
+export interface ContextMenu {
+  id: string;
+  x: number;
+  y: number;
+  source: 'mouse' | 'touch' | 'keyboard';
+  link?: { url: string; text: string };
+  image?: { src: string };
+  selection?: string;
+  editable?: Record<'undo' | 'redo' | SelectionCommand, boolean>;
+}
+export interface ContextMenuMessage {
+  type: 'input.contextMenu';
+  version: 1;
+  revision: string;
+  view: SelectionView | null;
+  menu: ContextMenu | null;
 }
 
 import type { OperationReceipt, ProductOperation } from '../../shared/product';
@@ -111,6 +133,7 @@ export type Incoming = Authorized &
     | Layout
     | EditableMessage
     | SelectionMessage
+    | ContextMenuMessage
     | InputResultMessage
     | FocusMessage
     | FrameMessage
@@ -208,6 +231,25 @@ function receipt(v: unknown) {
     optional(v, 'resolved', (value) => typeof value === 'boolean')
   );
 }
+function contextUrl(value: unknown): boolean {
+  if (!string(value) || new TextEncoder().encode(value).length > 2048) return false;
+  try {
+    return ['http:', 'https:'].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+function contextSelection(value: unknown): boolean {
+  return (
+    string(value) &&
+    value === value.trim() &&
+    value.length <= 256 &&
+    Array.from(value).every((point) => {
+      const code = point.codePointAt(0)!;
+      return code < 0xd800 || code > 0xdfff;
+    })
+  );
+}
 function valid(v: Record<string, unknown>): boolean {
   switch (v.type) {
     case 'layout':
@@ -262,6 +304,7 @@ function valid(v: Record<string, unknown>): boolean {
             Number(menu.width) >= 0 &&
             Number(menu.height) >= 0 &&
             Number(menu.handleHeight) >= 0 &&
+            typeof menu.more === 'boolean' &&
             Array.isArray(menu.commands) &&
             menu.commands.every(
               (command, index, commands) =>
@@ -269,6 +312,35 @@ function valid(v: Record<string, unknown>): boolean {
                 (index === 0 ||
                   SELECTION_COMMANDS.indexOf(command) > SELECTION_COMMANDS.indexOf(commands[index - 1])),
             ))
+      );
+    }
+    case 'input.contextMenu': {
+      const menu = v.menu;
+      return (
+        v.version === 1 &&
+        sequence(v.revision) &&
+        (v.view === null
+          ? menu === null
+          : object(v.view) &&
+            strings(v.view, ['session', 'id', 'instance', 'document']) &&
+            (menu === null ||
+              (object(menu) &&
+                sequence(menu.id) &&
+                menu.id !== '0' &&
+                numbers(menu, ['x', 'y']) &&
+                ['mouse', 'touch', 'keyboard'].includes(String(menu.source)) &&
+                optional(menu, 'link', (link) => object(link) && contextUrl(link.url) && string(link.text)) &&
+                optional(menu, 'image', (image) => object(image) && contextUrl(image.src)) &&
+                optional(menu, 'selection', contextSelection) &&
+                optional(
+                  menu,
+                  'editable',
+                  (editable) =>
+                    object(editable) &&
+                    ['undo', 'redo', ...SELECTION_COMMANDS].every(
+                      (command) => typeof editable[command] === 'boolean',
+                    ),
+                ))))
       );
     }
     case 'input.result':

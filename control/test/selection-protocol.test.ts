@@ -37,6 +37,7 @@ const message = (revision = '1'): SelectionMessage => ({
     height: 20,
     handleHeight: 25,
     commands: ['cut', 'copy', 'paste', 'selectAll'],
+    more: true,
   },
 });
 
@@ -72,6 +73,8 @@ test('selection protocol rejects malformed identity, geometry, revisions and com
       { commands: ['copy', 'copy'] },
       { commands: ['delete'] },
       { commands: null },
+      { more: undefined },
+      { more: 1 },
     ].map((menu) => ({ ...valid, menu: { ...valid.menu!, ...menu } })),
   ])
     assert.equal(decodeIncoming(value).type, 'decode-error', JSON.stringify(value));

@@ -83,7 +83,7 @@ RPC 受理、导航开始、文档提交、资源加载完成是不同结果。
 - 网络失败也可能提交一个 Chromium 错误文档：收据 failed 与 `documentCommitted=true` 同时成立，Tab 保持 remote 并显示真实失败 URL。只有未提交文档的失败或取消才恢复到之前的本地页（start/files）。错误页是转义后的静态 HTML（失败 URL、网络错误、提示用工具栏刷新），没有脚本、外部资源或隐藏重试。
 - `stop` 有自己的收据，不替换 Tab 当前的导航 owner 和之前的 kind/URL。首次远端导航在提交前被停止时，原 owner 回滚到 start 并清除 loading；已有的 Native 执行实例用 `requireRunning` 隐藏，而不是重新 ensure。
 - POST reload 明确返回 `reload_post_confirmation_unsupported`；导航恢复也拒绝 POST 历史。不悄悄把请求转成 GET，也不重放上传。
-- 地址栏与起始页共用 `resolveNavigation`：去空白，允许真实的 about:blank 和合法 HTTP(S)，识别裸域名/localhost/IP 主机，其他文本交给保存的搜索引擎（Google 默认，另有 Bing、DuckDuckGo、Baidu，`encodeURIComponent` 编码），不执行任意 scheme。输入上限 8192 个 UTF-16 单元，规范化/编码后的 URL 另限 8192 个 UTF-8 字节（Unicode 展开曾让合法长度的输入生成巨大的快照），超限在记录意图前拒绝而不是截断。组合输入中（isComposing / 229）的回车不提交。
+- 地址栏与起始页共用 `resolveNavigation`：去空白，允许真实的 about:blank 和合法 HTTP(S)，识别裸域名/localhost/IP 主机，其他文本交给保存的搜索引擎（Google 默认，另有 Bing、DuckDuckGo、Baidu，`encodeURIComponent` 编码），不执行任意 scheme。输入上限 8192 个 UTF-16 单元，规范化/编码后的 URL 另限 8192 个 UTF-8 字节（Unicode 展开曾让合法长度的输入生成巨大的快照），超限在记录意图前拒绝而不是截断。`tab.create` 的 `query`（页面上下文菜单的"搜索"）不经过地址识别，总是生成搜索 URL，与 `url` 互斥，长度限制相同。组合输入中（isComposing / 229）的回车不提交。
 
 ## 对账
 

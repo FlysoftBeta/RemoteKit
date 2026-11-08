@@ -27,8 +27,18 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
         uint64_t menu = 0;
         const auto command = raw->value("command", Json());
         if (!Number(*raw, "menu", menu) || !menu ||
-            (command != "cut" && command != "copy" && command != "paste" && command != "selectAll"))
+            (command != "cut" && command != "copy" && command != "paste" &&
+             command != "selectAll" && command != "contextMenu"))
           return Error{ErrorCode::kInvalidRequest, "invalid selection command"};
+      }
+      if (event_type == "context_command") {
+        uint64_t menu = 0;
+        const auto command = raw->value("command", Json());
+        if (!Number(*raw, "menu", menu) || !menu ||
+            (command != "undo" && command != "redo" && command != "cut" && command != "copy" &&
+             command != "paste" && command != "selectAll" && command != "copyLinkAddress" &&
+             command != "copyImage" && command != "copyImageAddress" && command != "dismiss"))
+          return Error{ErrorCode::kInvalidRequest, "invalid context command"};
       }
       if (event_type == "gesture" && raw->value("action", Json()) == "longPress") {
         const auto elapsed = raw->find("sampleElapsedUs");

@@ -1,5 +1,6 @@
 #include "browser/webview_input.h"
 #include "browser/touch_selection.h"
+#include "browser/context_menu.h"
 #include "browser/webview_internal.h"
 #include "browser/webview_execution.h"
 #include "browser/device_configuration.h"
@@ -366,6 +367,8 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
   }
   if (const auto* command = std::get_if<SelectionCommand>(&input.payload))
     return RemoteTouchSelectionMenuRunner::Get().Execute(owner_.session_, owner_.view_, *command);
+  if (const auto* command = std::get_if<ContextCommand>(&input.payload))
+    return RemoteContextMenu::Get().Execute(owner_.session_, owner_.view_, *command);
   if (const auto* touch = std::get_if<TouchInput>(&input.payload))
     return owner_.touch_->DispatchTouches(*touch, input.token);
   if (const auto* gesture = std::get_if<GestureInput>(&input.payload))

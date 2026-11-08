@@ -1,8 +1,9 @@
 import './selection-menu.css';
 import { ButtonBase, Paper } from '@mui/material';
+import { MoreHoriz } from '@mui/icons-material';
 import { useLayoutEffect, useRef } from 'react';
 import type { Surface } from '../presentation/types';
-import type { SelectionCommand, SelectionMenu as Menu } from '../rtc/protocol';
+import type { SelectionAction, SelectionCommand, SelectionMenu as Menu } from '../rtc/protocol';
 import { placeSelectionMenu, type ViewportGeometry } from './viewport-geometry';
 
 const labels: Record<SelectionCommand, string> = {
@@ -21,7 +22,7 @@ export function SelectionMenu({
   menu: Menu;
   surface: Surface;
   geometry: ViewportGeometry;
-  onCommand: (command: SelectionCommand) => void;
+  onCommand: (command: SelectionAction) => void;
 }) {
   const root = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
@@ -37,7 +38,7 @@ export function SelectionMenu({
     observer.observe(node);
     return () => observer.disconnect();
   }, [surface, menu, geometry]);
-  if (!menu.commands.length) return null;
+  if (!menu.commands.length && !menu.more) return null;
   return (
     <Paper ref={root} className="selection-menu" elevation={0} role="toolbar" aria-label="文本选择">
       {menu.commands.map((command) => (
@@ -51,6 +52,16 @@ export function SelectionMenu({
           {labels[command]}
         </ButtonBase>
       ))}
+      {menu.more && (
+        <ButtonBase
+          className="selection-menu-command"
+          aria-label="更多"
+          onPointerDown={(event) => event.preventDefault()}
+          onClick={() => onCommand('contextMenu')}
+        >
+          <MoreHoriz fontSize="small" />
+        </ButtonBase>
+      )}
     </Paper>
   );
 }

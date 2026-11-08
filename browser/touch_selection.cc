@@ -19,7 +19,7 @@ constexpr std::array commands = {
     ui::TouchEditable::MenuCommands::kCut, ui::TouchEditable::MenuCommands::kCopy,
     ui::TouchEditable::MenuCommands::kPaste, ui::TouchEditable::MenuCommands::kSelectAll};
 uint32_t Enabled(const ui::TouchSelectionMenuClient* client, bool can_paste) {
-  uint32_t mask = 0;
+  uint32_t mask = kAtlasSelectionCanContextMenu;
   for (size_t i = 0; i < commands.size(); ++i)
     if (client->IsCommandIdEnabled(std::to_underlying(commands[i]), can_paste))
       mask |= 2u << i;
@@ -90,8 +90,15 @@ Status RemoteTouchSelectionMenuRunner::Execute(SessionId session,
                                                WebViewId view,
                                                const SelectionCommand& value) {
   const auto index = static_cast<size_t>(value.command);
-  if (!StateFor(session, view).menu_id || open_->menu.menu_id != value.menu ||
-      index >= commands.size())
+  if (!StateFor(session, view).menu_id || open_->menu.menu_id != value.menu)
+    return {ErrorCode::stale_identity, "Selection menu changed"};
+  if (value.command == SelectionCommand::Command::context_menu) {
+    auto client = open_->client;
+    CloseMenu();
+    client->RunContextMenu();
+    return {};
+  }
+  if (index >= commands.size())
     return {ErrorCode::stale_identity, "Selection menu changed"};
   const int command = std::to_underlying(commands[index]);
   auto client = open_->client;

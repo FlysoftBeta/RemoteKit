@@ -21,6 +21,11 @@ inline constexpr std::uint32_t kAtlasSelectionCanCut = 2;
 inline constexpr std::uint32_t kAtlasSelectionCanCopy = 4;
 inline constexpr std::uint32_t kAtlasSelectionCanPaste = 8;
 inline constexpr std::uint32_t kAtlasSelectionCanSelectAll = 16;
+inline constexpr std::uint32_t kAtlasSelectionCanContextMenu = 32;
+struct SharedAtlasContextMenu {
+  std::uint64_t menu_id;
+  float x, y;
+};
 struct SharedAtlasSelectionMenu {
   std::uint64_t menu_id;
   std::uint32_t flags;
@@ -63,6 +68,7 @@ struct SharedAtlasView {
   std::uint32_t reserved;
   SharedAtlasTextInput text_input;
   SharedAtlasSelectionMenu selection_menu;
+  SharedAtlasContextMenu context_menu;
 };
 
 struct SharedAtlasFrame {
@@ -99,7 +105,7 @@ struct alignas(64) SharedRenderMapping {
   SharedRenderSlot slots[kSharedAtlasSlotCount];
 };
 inline constexpr std::uint32_t kSharedRenderMagic = 0x524B5253;  // RKRS
-inline constexpr std::uint32_t kSharedRenderVersion = 3;
+inline constexpr std::uint32_t kSharedRenderVersion = 4;
 inline constexpr std::uint32_t kRenderSlotCount = kSharedAtlasSlotCount;
 using RenderView = SharedAtlasView;
 using RenderFrame = SharedAtlasFrame;
@@ -110,12 +116,14 @@ static_assert(offsetof(SharedRenderSlot, frame) == 8);
 static_assert(sizeof(SharedAtlasTextInput) == 48);
 static_assert(sizeof(SharedAtlasSelectionMenu) == 40);
 static_assert(offsetof(SharedAtlasView, selection_menu) == 120);
-static_assert(sizeof(SharedAtlasView) == 160);
-static_assert(sizeof(SharedAtlasFrame) == 10296);
-static_assert(sizeof(SharedRenderSlot) == 10304);
+static_assert(sizeof(SharedAtlasContextMenu) == 16);
+static_assert(offsetof(SharedAtlasView, context_menu) == 160);
+static_assert(sizeof(SharedAtlasView) == 176);
+static_assert(sizeof(SharedAtlasFrame) == 11320);
+static_assert(sizeof(SharedRenderSlot) == 11328);
 static_assert(offsetof(SharedRenderMapping, latest_layout) == 24);
-static_assert(offsetof(SharedRenderMapping, slots) == 10368);
-static_assert(sizeof(SharedRenderMapping) == 51584);
+static_assert(offsetof(SharedRenderMapping, slots) == 11392);
+static_assert(sizeof(SharedRenderMapping) == 56704);
 // Only consumed_fences[slot] >= value releases that slot. UINT64_MAX means
 // device loss, never completion. No other slot's fence value releases it.
 }  // namespace remotekit

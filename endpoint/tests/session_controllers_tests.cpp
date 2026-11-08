@@ -53,6 +53,24 @@ void RouterClassificationAndAdmission() {
   selection["event"]["menu"] = "1";
   selection["event"]["command"] = "delete";
   CHECK(!DataRouter::Classify(selection));
+  selection["event"]["command"] = "contextMenu";
+  CHECK(DataRouter::Classify(selection));
+  Json context_command = selection;
+  context_command["event"]["type"] = "context_command";
+  for (const auto* command : {"undo", "redo", "cut", "copy", "paste", "selectAll",
+                              "copyLinkAddress", "copyImage", "copyImageAddress", "dismiss"}) {
+    context_command["event"]["command"] = command;
+    CHECK(DataRouter::Classify(context_command));
+  }
+  context_command["event"]["menu"] = "0";
+  CHECK(!DataRouter::Classify(context_command));
+  context_command["event"]["menu"] = "01";
+  CHECK(!DataRouter::Classify(context_command));
+  context_command["event"]["menu"] = "18446744073709551616";
+  CHECK(!DataRouter::Classify(context_command));
+  context_command["event"]["menu"] = "1";
+  context_command["event"]["command"] = "contextMenu";
+  CHECK(!DataRouter::Classify(context_command));
   Json long_press = {{"type", "input"},
                      {"event",
                       {{"type", "gesture"},

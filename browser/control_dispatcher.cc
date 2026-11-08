@@ -89,6 +89,8 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
                                       &ControlDispatcher::HandleProfileCommand>},
       {"profile.downloads", &Invoke<ProfileCommandRequest, DecodeProfileCommand,
                                     &ControlDispatcher::HandleProfileCommand>},
+      {"page.contextMenu",
+       &Invoke<PageControlRequest, DecodePageRequest, &ControlDispatcher::HandlePageRequest>},
       {"page.requests",
        &Invoke<PageControlRequest, DecodePageRequest, &ControlDispatcher::HandlePageRequest>},
       {"page.reply",

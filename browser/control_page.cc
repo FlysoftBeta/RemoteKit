@@ -2,7 +2,9 @@
 #include "browser/control_requests.h"
 #include "browser/control_response.h"
 #include "browser/browser_runtime.h"
+#include "browser/context_menu.h"
 #include <algorithm>
+#include "base/strings/string_number_conversions.h"
 
 namespace remotekit::browser {
 Result<ProfileCommandRequest> DecodeProfileCommand(const base::DictValue& wire,
@@ -96,6 +98,18 @@ ControlResult ControlDispatcher::HandlePageRequest(const PageControlRequest& req
     return ControlResult::Failure(request.id, ErrorCode::not_found, "View is not in session");
   auto& adapter = *record->webview;
 
+  if (*method == "page.contextMenu") {
+    uint64_t menu = 0;
+    const auto* text = request.payload.FindString("menu");
+    if (!text || !base::StringToUint64(*text, &menu) || !menu ||
+        *text != base::NumberToString(menu))
+      return ControlResult::Failure(id, ErrorCode::invalid_request, "Menu required");
+    auto details = runtime_.context_menu->Details(session, view, menu);
+    if (!details)
+      return ControlResult::Failure(id, details.status.error, details.status.message);
+    reply.Set("menu", std::move(details.value));
+    return reply;
+  }
   const auto token = runtime_.view_model.Token(session, view).value;
   PageRequests::SelectionBinding binding{token.instance, token.document};
   bool terminal_only = false;

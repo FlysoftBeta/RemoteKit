@@ -281,9 +281,36 @@ Result<InputPayload> DecodeSelectionCommand(const base::DictValue* event) {
     value.command = SelectionCommand::Command::paste;
   else if (*command == "selectAll")
     value.command = SelectionCommand::Command::select_all;
+  else if (*command == "contextMenu")
+    value.command = SelectionCommand::Command::context_menu;
   else
     return PayloadError("invalid_selection_command");
   return {value, {}};
+}
+Result<InputPayload> DecodeContextCommand(const base::DictValue* event) {
+  ContextCommand value;
+  const auto* menu = event->FindString("menu");
+  const auto* command = event->FindString("command");
+  if (!menu || !ReadId(*event, "menu", &value.menu) || *menu != base::NumberToString(value.menu) ||
+      !command)
+    return PayloadError("invalid_context_command");
+  static constexpr std::array<std::string_view, 10> names = {"undo",
+                                                             "redo",
+                                                             "cut",
+                                                             "copy",
+                                                             "paste",
+                                                             "selectAll",
+                                                             "copyLinkAddress",
+                                                             "copyImage",
+                                                             "copyImageAddress",
+                                                             "dismiss"};
+  for (size_t i = 0; i < std::size(names); ++i) {
+    if (*command == names[i]) {
+      value.command = static_cast<ContextCommand::Command>(i);
+      return {value, {}};
+    }
+  }
+  return PayloadError("invalid_context_command");
 }
 Result<InputPayload> DecodePayload(const base::DictValue* event, std::string_view type) {
   struct Decoder {
@@ -298,6 +325,7 @@ Result<InputPayload> DecodePayload(const base::DictValue* event, std::string_vie
       {"key", DecodeKey},
       {"touch", DecodeTouch},
       {"selection_command", DecodeSelectionCommand},
+      {"context_command", DecodeContextCommand},
       {"gesture", DecodeGesture},
       {"mouse", DecodeMouse},
       {"wheel", DecodeWheel},

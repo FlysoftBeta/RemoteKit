@@ -31,17 +31,29 @@ export function normalizedUsagePage(value: string): string | null {
 
 /** User text is resolved only here, shared by address-bar and start-page actions. */
 export function resolveNavigation(value: unknown, engine: SearchEngine): string {
-  const url = resolveInput(value, engine);
+  return boundedUrl(resolveInput(value, engine));
+}
+
+export function resolveSearch(value: unknown, engine: SearchEngine): string {
+  return boundedUrl(searchUrls[engine] + encodeURIComponent(inputText(value)));
+}
+
+function boundedUrl(url: string): string {
   if (Buffer.byteLength(url, 'utf8') > 8192)
     throw new RemoteKitError('invalid_request', '网址或搜索内容编码后过长（最多 8192 字节）');
   return url;
 }
 
-function resolveInput(value: unknown, engine: SearchEngine): string {
+function inputText(value: unknown): string {
   if (typeof value !== 'string' || value.length > 8192)
     throw new RemoteKitError('invalid_request', '无效网址或搜索内容');
   const text = value.trim();
   if (!text) throw new RemoteKitError('invalid_request', '请输入网址或搜索内容');
+  return text;
+}
+
+function resolveInput(value: unknown, engine: SearchEngine): string {
+  const text = inputText(value);
   if (text === 'about:blank') return text;
   if (/^https?:\/\//i.test(text)) {
     try {
@@ -67,5 +79,5 @@ function resolveInput(value: unknown, engine: SearchEngine): string {
       /* Search text, including malformed schemes. */
     }
   }
-  return (searchUrls[engine] ?? searchUrls.google) + encodeURIComponent(text);
+  return searchUrls[engine] + encodeURIComponent(text);
 }

@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Context menu fixture</title>
+  <style>
+    body {
+      margin: 0;
+      background: white;
+      color: #222;
+      font: 24px monospace;
+    }
+    #link {
+      position: absolute;
+      left: 80px;
+      top: 80px;
+      width: 180px;
+      height: 60px;
+      background: #2767b0;
+    }
+    #word {
+      position: absolute;
+      left: 80px;
+      top: 210px;
+      white-space: nowrap;
+    }
+    #editor,
+    #paste {
+      position: absolute;
+      left: 80px;
+      width: 340px;
+      height: 42px;
+      font: inherit;
+    }
+    #editor {
+      top: 300px;
+    }
+    #paste {
+      top: 390px;
+    }
+    #image {
+      position: absolute;
+      left: 520px;
+      top: 80px;
+      width: 100px;
+      height: 80px;
+      image-rendering: pixelated;
+    }
+    #rich {
+      position: absolute;
+      left: 520px;
+      top: 300px;
+      width: 230px;
+      height: 120px;
+      border: 2px solid #555;
+    }
+    #blank {
+      position: absolute;
+      left: 80px;
+      top: 520px;
+      width: 120px;
+      height: 60px;
+    }
+    #next {
+      position: absolute;
+      left: 520px;
+      top: 500px;
+    }
+  </style>
+  <a id="link" href="/linked" aria-label="Link without selectable text"></a>
+  <span id="word">example.com</span>
+  <input id="editor" value="context roundtrip" />
+  <input id="paste" />
+  <img id="image" src="/image.png" />
+  <div id="rich" contenteditable="true"></div>
+  <div id="blank"></div>
+  <a id="next" href="/history">History page</a>
+  <script>
+    const loadCount = Number(sessionStorage.contextLoads || 0) + 1;
+    sessionStorage.contextLoads = loadCount;
+    const loadId = crypto.randomUUID();
+    const menus = [];
+    const pastes = [];
+    const box = (id) => document.getElementById(id).getBoundingClientRect().toJSON();
+    let serial = 0;
+    function report() {
+      const editor = document.getElementById('editor');
+      const rich = document.getElementById('rich');
+      fetch('/event', {
+        method: 'POST',
+        body: JSON.stringify({
+          loadId,
+          loadCount,
+          serial: ++serial,
+          url: location.href,
+          width: innerWidth,
+          height: innerHeight,
+          selection: getSelection().toString(),
+          focused: document.activeElement.id,
+          value: editor.value,
+          start: editor.selectionStart,
+          end: editor.selectionEnd,
+          pasted: document.getElementById('paste').value,
+          rich: rich.innerHTML,
+          images: [...rich.querySelectorAll('img')].map((img) => img.src),
+          geometry: Object.fromEntries(
+            ['link', 'word', 'editor', 'paste', 'image', 'rich', 'blank', 'next'].map((id) => [id, box(id)]),
+          ),
+          menus,
+          pastes,
+        }),
+      }).catch(() => {});
+    }
+    document.addEventListener('contextmenu', (event) => {
+      menus.push({
+        target: event.target.id,
+        x: event.clientX,
+        y: event.clientY,
+        pointerType: event.pointerType,
+      });
+      report();
+    });
+    document.addEventListener('paste', (event) => {
+      pastes.push({
+        target: event.target.id,
+        types: [...event.clipboardData.types],
+        items: [...event.clipboardData.items].map((item) => ({ kind: item.kind, type: item.type })),
+        text: event.clipboardData.getData('text/plain'),
+        html: event.clipboardData.getData('text/html'),
+        files: [...event.clipboardData.files].map((file) => ({
+          name: file.name,
+          type: file.type,
+          size: file.size,
+        })),
+      });
+      setTimeout(report, 0);
+    });
+    setInterval(report, 100);
+    report();
+  </script>
+</html>

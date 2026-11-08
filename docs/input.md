@@ -99,9 +99,24 @@ Browser 的仲裁（patch 0010）：
 
 快捷菜单由 Chromium 决定何时出现、何时因触摸或滚动暂时隐藏、指向哪里，由 Viewer 绘制。Browser 安装自己的 `ui::TouchSelectionMenuRunner`（`RemoteTouchSelectionMenuRunner`，进程内唯一，持有当前唯一打开的菜单）：`OpenMenu` 记录菜单 ID、客户端、换算到根 DIP 的锚点矩形和手柄高度；可用命令在每次发布时从 `IsCommandIdEnabled` 重新读取。菜单随每 view 元数据发布，Endpoint 转成 `input.selection`。Viewer 在锚点上方（放不下则在下方并让开手柄）显示剪切/复制/粘贴/全选胶囊按钮，按钮在 pointerdown 阻止默认行为，不抢编辑代理的焦点。点击发送 `selection_command`，走与键盘相同的身份与焦点门禁；菜单 ID 不是当前打开的菜单或命令已不可用时返回 `conflict`，不执行。Viewer 点击后立即在本地隐藏该菜单，最终状态以 Browser 的下一条 `input.selection` 为准。
 
-长按文字后 Blink 选词并发出 contextmenu；`WebContentsViewAura::ShowContextMenu` 先交给 `TouchSelectionControllerClientAura::HandleContextMenu`，有触控选区时由它显示快捷菜单。因此 `WebContentsDelegate` 不拦截上下文菜单。
+快捷菜单末尾的"⋯"对应 Chromium Views 菜单里的同名按钮：`selection_command {contextMenu}` 调用客户端的 `RunContextMenu()`，随后出现的是下文的页面上下文菜单。
 
 被否决的方案：在 Viewer 里用 DOM 画手柄（手柄随手指即时移动而选区高亮滞后一个往返，两者错位）；把触摸改走 Aura 事件派发以获得现成接线（Aura 会在服务端按到达时间重新识别手势并加上原生 fling，抵消客户端手势的设计；OOPIF 路由本来就由同一个 router 完成）；远程渲染 Views 的 `TouchSelectionMenuViews`（需要引入 Views 基础设施和单独的菜单命中路径，按钮反馈要等一个往返）。
+
+## 页面上下文菜单
+
+Chromium 的顺序保持不变：`WebContentsImpl::ShowContextMenu` → `WebContentsViewAura::ShowContextMenu` 先交给 `TouchSelectionControllerClientAura::HandleContextMenu`（长按文字且有触控选区时显示上面的快捷菜单），否则交给 `WebContentsViewDelegate`。Browser 通过 `ContentBrowserClient::GetWebContentsViewDelegate` 提供这个 delegate，`WebContentsDelegate` 不拦截上下文菜单。
+
+`RemoteContextMenu`（`browser/context_menu.cc`，进程内唯一）持有当前唯一打开的菜单：菜单 ID、所属 view、按 `WeakDocumentPtr` 绑定的帧与文档，以及从 `ContextMenuParams` 取出的链接、图片地址、选中文字（最多 256 个 UTF-16 单元）、编辑能力和来源（鼠标/触控/键盘）。新菜单取代旧菜单；执行命令、关闭、帧或文档失效、页面切换、view 隐藏或销毁都会关闭它，并且每个菜单恰好调用一次 `NotifyContextMenuClosed`，结束 Blink 的菜单状态。
+
+传输分两步，因为 Browser 到 Endpoint 只有共享元数据这一条推送通道，而菜单含有任意长度的字符串：每 view 元数据只带菜单 ID 和按下点（`SharedAtlasContextMenu`）；Endpoint 看到新 ID 后在 Session 的 RPC 路径上调用 `page.contextMenu` 取详情（不在 dc_services 锁内，后来的 ID 使在途的取数作废），再向已授权的 peer 发 `input.contextMenu`。ID 归零直接发关闭。
+
+命令按状态所有者分流：
+
+- 页面内的操作走输入路径（`context_command`，与键盘相同的身份、焦点与序号门禁）：撤销、重做、剪切、复制、粘贴、全选、复制链接地址、复制图片、复制图片地址、dismiss。编辑命令要求菜单所在帧仍是焦点帧且对应 edit flag 可用；菜单已变化时返回 `conflict`，不执行。地址类复制写入 Browser 剪贴板，每种写入只有一处调用。
+- 产品状态的变化走 Control：在新标签页打开链接或图片是 `tab.create {url}`；搜索选中文字是 `tab.create {query}`，`query` 总是用用户当前的搜索引擎生成搜索 URL，即使看起来像域名也不直接导航；返回、前进、重新加载是 `tab.command`。之后 Viewer 发一次 `dismiss` 让 Blink 结束菜单。
+
+Viewer 在按下点显示 MUI 菜单（触控来源下移 24px，避免被手指挡住），分组顺序与 Chrome 一致：链接、图片、可编辑区（撤销/重做 | 剪切/复制/粘贴/全选，不可用的项显示为禁用）、非编辑选区（复制、使用某引擎搜索"前 16 个字符…"）；都不适用时显示返回/前进/重新加载，可用性取自 Viewer 的产品 Tab 状态。Esc、点外部、窗口失焦或选择菜单项关闭菜单，非 Browser 引起的关闭恰好发一次 dismiss；关闭后若编辑代理原本有焦点则还给它，不打断输入法。
 
 ## 惯性
 

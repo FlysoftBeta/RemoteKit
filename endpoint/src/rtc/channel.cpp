@@ -90,6 +90,28 @@ void ChannelController::FlushSignals() {
                            output.Suspended());
   direct_services.Selection(peer_controller.Handle(), output.Slots().LatestMetadata(),
                             output.Suspended());
+  if (stamp && authorization.Current(stamp)) {
+    const auto peer = peer_controller.Handle();
+    direct_services.ContextMenu(
+        peer, output.Slots().LatestMetadata(), output.Suspended(),
+        [&](const Json& identity) -> Json {
+          if (!authorization.Current(stamp) || !browser.Alive() || !browser.Rpc().Control())
+            return nullptr;
+          auto reply = browser.Rpc().Request({{"method", "page.contextMenu"},
+                                              {"session", id},
+                                              {"view", identity["view"]["id"]},
+                                              {"menu", identity["menu"]}});
+          if (!reply || !authorization.Current(stamp))
+            return nullptr;
+          return reply.value().value("menu", Json());
+        },
+        [&] {
+          return authorization.Current(stamp)
+                     ? DirectServices::ContextMenuIdentity(output.Slots().LatestMetadata(),
+                                                           output.Suspended())
+                     : Json();
+        });
+  }
   FlushControl();
   FlushServices();
 }

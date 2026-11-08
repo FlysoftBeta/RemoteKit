@@ -19,6 +19,7 @@
 #include "ui/display/screen.h"
 namespace remotekit::browser {
 class RemoteTouchSelectionMenuRunner;
+class RemoteContextMenu;
 class BrowserRuntime : public content::GpuDataManagerObserver {
  public:
   BrowserRuntime();
@@ -38,6 +39,7 @@ class BrowserRuntime : public content::GpuDataManagerObserver {
   ViewModel view_model;
   ViewRegistry views;
   std::unique_ptr<RemoteTouchSelectionMenuRunner> selection_menu;
+  std::unique_ptr<RemoteContextMenu> context_menu;
   LayoutTransaction layout_transaction{views};
   ClosedViews closed;
   PopupRegistry popups{shutting_down};

@@ -41,6 +41,7 @@
 #include "remotekit/browser/view_model.h"
 #include "browser/view_registry.h"
 #include "browser/touch_selection.h"
+#include "browser/context_menu.h"
 #include "browser/layout_transaction.h"
 #include "browser/popup_registry.h"
 #include "browser/closed_views.h"
@@ -73,6 +74,7 @@ class ServiceIoClipboard final : public base::CurrentThread::DestructionObserver
 BrowserRuntime::BrowserRuntime() {
   CHECK(!ui::TouchSelectionMenuRunner::GetInstance());
   selection_menu = std::make_unique<RemoteTouchSelectionMenuRunner>(views);
+  context_menu = std::make_unique<RemoteContextMenu>(views);
   content::GpuDataManager::GetInstance()->AddObserver(this);
 }
 void BrowserRuntime::OnGpuInfoUpdate() {
@@ -133,6 +135,7 @@ Status BrowserRuntime::CanDiscard(WebViewId index) const {
   return views.records.at(index).webview->CanDiscard();
 }
 void BrowserRuntime::UpdateOutput() {
+  context_menu->Prune();
   for (auto& [i, record] : views.records) {
     const auto& adapter = record.webview;
     if (adapter->offscreen_host())
@@ -172,6 +175,7 @@ void BrowserRuntime::UpdateOutput() {
     view.metadata.text_input = adapter.TextInputState();
     view.metadata.selection_menu =
         selection_menu->StateFor(adapter.session_id(), adapter.view_id());
+    view.metadata.context_menu = context_menu->StateFor(adapter.session_id(), adapter.view_id());
     view.offscreen_host = adapter.offscreen_host();
     view.render_enabled = adapter.contents() && model->actual == Residency::live &&
                           !model->pending && output_enabled &&

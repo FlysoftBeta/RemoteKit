@@ -54,6 +54,7 @@ const menu: SelectionMenu = {
   width: 100,
   height: 40,
   handleHeight: 30,
+  more: false,
   commands: ['copy', 'paste'],
 };
 

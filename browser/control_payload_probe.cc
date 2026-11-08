@@ -59,6 +59,17 @@ void ControlContract() {
                         .Set("menu", "18446744073709551615")
                         .Set("command", "copy"));
   CHECK(DecodeControlInput(wire, 1, 1));
+  wire.FindDict("event")->Set("command", "contextMenu");
+  CHECK(DecodeControlInput(wire, 1, 1));
+  wire.FindDict("event")->Set("type", "context_command");
+  for (const auto* command : {"undo", "redo", "cut", "copy", "paste", "selectAll",
+                              "copyLinkAddress", "copyImage", "copyImageAddress", "dismiss"}) {
+    wire.FindDict("event")->Set("command", command);
+    CHECK(DecodeControlInput(wire, 1, 1));
+  }
+  wire.FindDict("event")->Set("command", "contextMenu");
+  CHECK(!DecodeControlInput(wire, 1, 1));
+  wire.FindDict("event")->Set("command", "copy");
   wire.FindDict("event")->Set("menu", "01");
   CHECK(!DecodeControlInput(wire, 1, 1));
   wire.Set("event", base::DictValue()

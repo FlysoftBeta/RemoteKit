@@ -1,0 +1,10 @@
+.page-context-menu.MuiPaper-root {
+  min-width: 180px;
+  background: var(--surface);
+  color: var(--text-primary);
+  box-shadow: var(--frosted-panel-shadow);
+}
+.page-context-menu .MuiMenuItem-root {
+  min-height: 32px;
+  font-size: 14px;
+}

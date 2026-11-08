@@ -34,6 +34,8 @@ executable("remotekit_browser") {
     "control_navigation.cc",
     "control_output.cc",
     "control_page.cc",
+    "context_menu.cc",
+    "context_menu.h",
     "control_requests.h",
     "control_response.cc",
     "control_response.h",

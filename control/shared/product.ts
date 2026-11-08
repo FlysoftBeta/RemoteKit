@@ -12,7 +12,12 @@ export interface ProductUser {
 }
 // Built-in Apps render in the Viewer shell instead of a remote page. Settings and the admin
 // console are singletons; the admin console exists only for the administrator.
-export const BUILTIN_APP_TITLES = { browser: '浏览器', files: '我的文件', settings: '设置', admin: '管理' } as const;
+export const BUILTIN_APP_TITLES = {
+  browser: '浏览器',
+  files: '我的文件',
+  settings: '设置',
+  admin: '管理',
+} as const;
 export type BuiltinApp = keyof typeof BUILTIN_APP_TITLES;
 export const isBuiltinApp = (appId: string): appId is BuiltinApp =>
   Object.prototype.hasOwnProperty.call(BUILTIN_APP_TITLES, appId);
@@ -334,7 +339,14 @@ export type ProductAction =
   | { type: 'app.uninstall'; appId: string }
   | { type: 'favorite.add'; url: string; title: string }
   | { type: 'favorite.remove'; id: string }
-  | { type: 'tab.create'; windowId: string; url?: string; title?: string; source?: 'launcher' }
+  | {
+      type: 'tab.create';
+      windowId: string;
+      url?: string;
+      query?: string;
+      title?: string;
+      source?: 'launcher';
+    }
   | {
       type: 'tab.activate' | 'tab.close';
       tabId: string;

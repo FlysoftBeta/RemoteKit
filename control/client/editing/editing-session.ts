@@ -3,7 +3,7 @@ import { freezeSnapshot } from '../util/store';
 import { EditingView, type EditingViewPorts } from './editing-view';
 import { MobileEditingState, sameEditingDocument } from './mobile-editing-state';
 
-import { type Incoming, type SelectionMessage } from '../rtc/protocol';
+import { type Incoming, type SelectionMessage, type ContextMenuMessage } from '../rtc/protocol';
 
 import type { RtcSession } from '../rtc/rtc-session';
 
@@ -16,6 +16,8 @@ export class EditingSession {
   readonly mobileEditing = new MobileEditingState();
   private selectionRevision?: bigint;
   private selection?: SelectionMessage;
+  private contextMenuRevision?: bigint;
+  private contextMenu?: ContextMenuMessage;
 
   editingSurface(viewId: string) {
     return this.mobileEditing.surface(viewId);
@@ -28,7 +30,7 @@ export class EditingSession {
   handle(message: Incoming) {
     if (message.type === 'layout') {
       this.mobileEditing.acceptLayout(message);
-      this.reconcileSelection();
+      this.reconcileMenus();
       this.notify();
     }
     if (message.type === 'input.editable') {
@@ -48,30 +50,44 @@ export class EditingSession {
       if (this.selectionRevision !== undefined && revision <= this.selectionRevision) return;
       this.selectionRevision = revision;
       this.selection = message;
-      this.reconcileSelection();
+      this.reconcileMenus();
+      this.notify();
+    }
+    if (message.type === 'input.contextMenu') {
+      const revision = BigInt(message.revision);
+      if (this.contextMenuRevision !== undefined && revision <= this.contextMenuRevision) return;
+      this.contextMenuRevision = revision;
+      this.contextMenu = message;
+      this.reconcileMenus();
       this.notify();
     }
   }
 
-  private reconcileSelection(views: readonly Surface[] = this.mobileEditing.views) {
+  private reconcileMenus(views: readonly Surface[] = this.mobileEditing.views) {
     const view = this.selection?.view;
     if (view && !views.some((surface) => sameEditingDocument(surface, view))) this.selection = undefined;
+    const contextView = this.contextMenu?.view;
+    if (contextView && !views.some((surface) => sameEditingDocument(surface, contextView)))
+      this.contextMenu = undefined;
   }
 
   clear() {
     this.mobileEditing.clear();
     this.selection = undefined;
+    this.contextMenu = undefined;
     this.notify();
   }
   reconcile(views: Surface[]) {
     this.mobileEditing.reconcile(views);
-    this.reconcileSelection(views);
+    this.reconcileMenus(views);
     this.notify();
   }
   reset() {
     this.mobileEditing.reset();
     this.selection = undefined;
     this.selectionRevision = undefined;
+    this.contextMenu = undefined;
+    this.contextMenuRevision = undefined;
     this.notify();
   }
 
@@ -91,6 +107,16 @@ export class EditingSession {
           commands: [...this.selection.menu.commands],
         },
       },
+      contextMenu: this.contextMenu && {
+        ...this.contextMenu,
+        view: this.contextMenu.view && { ...this.contextMenu.view },
+        menu: this.contextMenu.menu && {
+          ...this.contextMenu.menu,
+          link: this.contextMenu.menu.link && { ...this.contextMenu.menu.link },
+          image: this.contextMenu.menu.image && { ...this.contextMenu.menu.image },
+          editable: this.contextMenu.menu.editable && { ...this.contextMenu.menu.editable },
+        },
+      },
       views: this.mobileEditing.views.map((view) => ({ ...view })),
       layoutPending: this.mobileEditing.layoutPending,
       attempt: this.ports.rtc.attempt,
@@ -103,6 +129,7 @@ export class EditingSession {
   private snapshot: {
     current?: import('../rtc/protocol').EditableMessage;
     selection?: SelectionMessage;
+    contextMenu?: ContextMenuMessage;
     views: Surface[];
     layoutPending: boolean;
     attempt: number;

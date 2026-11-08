@@ -57,6 +57,10 @@ class DirectServices {
   std::string connection_;
   std::map<std::string, Pending> pending_;
   std::deque<std::string> results_;
+  std::string context_menu_;
+  ServiceJson context_menu_identity_;
+  uint64_t context_menu_ticket_ = 0;
+  uint64_t context_menu_revision_ = 0;
   std::string selection_;
   ServiceJson selection_value_;
   uint64_t selection_revision_ = 0;
@@ -96,6 +100,10 @@ class DirectServices {
     selection_.clear();
     selection_value_ = nullptr;
     selection_revision_ = 0;
+    context_menu_.clear();
+    context_menu_identity_ = nullptr;
+    ++context_menu_ticket_;
+    context_menu_revision_ = 0;
   }
   bool Admit(uint64_t peer, const ServiceJson& message, double now) {
     std::lock_guard lock(mutex_);
@@ -160,6 +168,9 @@ class DirectServices {
     editable_.clear();
     selection_value_ = nullptr;
     selection_.clear();
+    context_menu_.clear();
+    context_menu_identity_ = nullptr;
+    ++context_menu_ticket_;
   }
   void Editable(uint64_t peer, const SharedAtlasFrame& frame, bool output_suspended = false) {
     std::lock_guard lock(mutex_);
@@ -253,7 +264,8 @@ class DirectServices {
                        {"width", finite(menu.anchor_width)},
                        {"height", finite(menu.anchor_height)},
                        {"handleHeight", finite(menu.handle_height)},
-                       {"commands", commands}};
+                       {"commands", commands},
+                       {"more", (menu.flags & kAtlasSelectionCanContextMenu) != 0}};
       break;
     }
     if (value == selection_value_)
@@ -263,6 +275,62 @@ class DirectServices {
     value["version"] = 1;
     value["revision"] = std::to_string(++selection_revision_);
     selection_ = value.dump();
+  }
+  static ServiceJson ContextMenuIdentity(const SharedAtlasFrame& frame, bool suspended) {
+    if (suspended || frame.status == SharedAtlasStatus::kStopped ||
+        frame.status == SharedAtlasStatus::kFailed)
+      return {{"view", nullptr}, {"menu", nullptr}};
+    if (!frame.generation || frame.view_count > kSharedAtlasMaxViews)
+      return nullptr;
+    for (uint32_t i = 0; i < frame.view_count; ++i) {
+      const auto& view = frame.views[i];
+      if (!view.context_menu.menu_id)
+        continue;
+      return {{"view",
+               {{"session", std::to_string(view.session_id)},
+                {"id", std::to_string(view.webview_id)},
+                {"instance", std::to_string(view.instance_generation)},
+                {"document", std::to_string(view.document_generation)}}},
+              {"menu", std::to_string(view.context_menu.menu_id)}};
+    }
+    return {{"view", nullptr}, {"menu", nullptr}};
+  }
+  // Fetch runs on the session thread without mutex_: Browser RPCs must never
+  // block DataChannel callbacks or the media thread. Latest rejects a result
+  // whose menu or surface was superseded while the RPC was in flight.
+  template <class Fetch, class Latest>
+  void ContextMenu(uint64_t peer,
+                   const SharedAtlasFrame& frame,
+                   bool suspended,
+                   Fetch fetch,
+                   Latest latest) {
+    auto identity = ContextMenuIdentity(frame, suspended);
+    if (identity.is_null())
+      return;
+    uint64_t ticket;
+    {
+      std::lock_guard lock(mutex_);
+      if (!peer || peer != peer_ || identity == context_menu_identity_)
+        return;
+      context_menu_identity_ = identity;
+      ticket = ++context_menu_ticket_;
+      context_menu_.clear();
+    }
+    auto value = identity;
+    if (!identity["menu"].is_null()) {
+      value["menu"] = fetch(identity);
+      if (!value["menu"].is_object())
+        return;
+    }
+    if (identity != latest())
+      return;
+    std::lock_guard lock(mutex_);
+    if (peer != peer_ || ticket != context_menu_ticket_)
+      return;
+    value["type"] = "input.contextMenu";
+    value["version"] = 1;
+    value["revision"] = std::to_string(++context_menu_revision_);
+    context_menu_ = value.dump();
   }
   template <class Send>
   void Flush(uint64_t peer, Send send) {
@@ -278,6 +346,8 @@ class DirectServices {
       editable_.clear();
     if (!selection_.empty() && send(selection_) == 0)
       selection_.clear();
+    if (!context_menu_.empty() && send(context_menu_) == 0)
+      context_menu_.clear();
   }
 };
 

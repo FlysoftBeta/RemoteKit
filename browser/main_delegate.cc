@@ -1,4 +1,5 @@
 #include "browser/device_configuration.h"
+#include "browser/context_menu.h"
 #include "remotekit/browser/main_delegate.h"
 #include "remotekit/browser/crash_reporter.h"
 #include "remotekit/browser/audio_target.h"
@@ -48,6 +49,10 @@ class ContentClient final : public content::ContentClient {
 };
 class BrowserClient final : public content::ContentBrowserClient {
  public:
+  std::unique_ptr<content::WebContentsViewDelegate> GetWebContentsViewDelegate(
+      content::WebContents* contents) override {
+    return CreateRemoteContextMenuDelegate(contents);
+  }
   std::unique_ptr<media::AudioManager> CreateAudioManager(media::AudioLogFactory* log) override {
     return CreateAudioTarget(log);
   }

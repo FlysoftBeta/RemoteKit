@@ -11,6 +11,7 @@ import { useViewportTransition } from '../presentation/use-viewport-transition';
 import type { ViewerSession } from '../viewer-session';
 import { sameEditingDocument } from '../editing/mobile-editing-state';
 import { SelectionMenu } from './selection-menu';
+import { ContextMenu } from './context-menu';
 import { useViewportGeometry } from './use-viewport-geometry';
 import { projectEditableCaret } from './viewport-geometry';
 
@@ -38,6 +39,8 @@ export function RemoteViewport({
   const [controller, setController] = useState<ViewportInput>();
   const [frameReady, setFrameReady] = useState(false);
   const [dismissedMenu, setDismissedMenu] = useState<string>();
+  const [dismissedContextMenu, setDismissedContextMenu] = useState<string>();
+  const product = useSyncExternalStore(transport.operations.subscribe, transport.operations.getSnapshot);
   const geometry = useViewportGeometry(viewport, canvas);
   const surface = snapshot.presentation.layout?.views.find((view) => view.id === viewId);
   const editingSurface = snapshot.editing.views.find((view) => view.id === viewId);
@@ -107,6 +110,17 @@ export function RemoteViewport({
     `${owner}:${selection.menu?.id}` !== dismissedMenu
       ? selection.menu
       : undefined;
+  const context = snapshot.editing.contextMenu;
+  const contextMenu =
+    context?.view &&
+    surface &&
+    sameEditingDocument(surface, context.view) &&
+    frameReady &&
+    !resize.waiting &&
+    `${owner}:${context.menu?.id}` !== dismissedContextMenu
+      ? context.menu
+      : undefined;
+  const tab = product.state?.workspace.tabs.find((tab) => tab.webviewId === viewId);
   useFloatingAction(
     `keyboard:${viewId}`,
     controller &&
@@ -156,6 +170,20 @@ export function RemoteViewport({
             transport.input.sendInput(surface, { type: 'selection_command', menu: menu.id, command });
             setDismissedMenu(`${owner}:${menu.id}`);
           }}
+        />
+      )}
+      {contextMenu && surface && geometry && tab && product.state && (
+        <ContextMenu
+          key={`${owner}:${contextMenu.id}`}
+          menu={contextMenu}
+          surface={surface}
+          geometry={geometry}
+          viewport={viewport}
+          editor={editor}
+          transport={transport}
+          tab={tab}
+          engine={product.state.workspace.settings.browser.searchEngine}
+          onClosed={() => setDismissedContextMenu(`${owner}:${contextMenu.id}`)}
         />
       )}
       {editing.error && (
