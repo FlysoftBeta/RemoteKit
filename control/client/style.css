@@ -121,10 +121,15 @@ textarea {
   background: #fff;
   overflow: hidden;
 }
-.window-frame.focused-window {
-  box-shadow: inset 0 0 0 1px var(--mui-palette-primary-main, #245db5);
-  outline: 1px solid var(--mui-palette-primary-main, #245db5);
-  outline-offset: -1px;
+/* A pseudo-element, not outline (square before Chrome 94) or inset shadow (covered by content). */
+.window-frame.focused-window::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  border: 1px solid var(--mui-palette-primary-main, #245db5);
+  border-radius: 8px;
+  pointer-events: none;
 }
 .window-workspace.side-by-side > .window-frame {
   min-width: 360px;
@@ -1579,9 +1584,14 @@ html.layout-compact .admin-section-header {
 .launcher-tile:active {
   transform: scale(0.97);
 }
-.launcher-tile.Mui-focusVisible {
-  outline: 3px solid #fff;
-  outline-offset: -5px;
+.launcher-tile.Mui-focusVisible::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  z-index: 2;
+  border: 3px solid #fff;
+  border-radius: 6px;
+  pointer-events: none;
 }
 .tile-icon {
   flex: none;
@@ -1871,7 +1881,7 @@ html.layout-compact .admin-section-header {
   cursor: not-allowed;
 }
 [data-window-drop-hover]:not(.drop-disabled) {
-  outline: 2px solid #245db5;
+  box-shadow: inset 0 0 0 2px #245db5;
   border-radius: 6px;
   background: #d5e5ff;
 }
@@ -1998,8 +2008,7 @@ html.layout-compact .admin-section-header {
 }
 .launcher-space-card.target-space,
 .launcher-space-new.target-space {
-  outline: 1px solid var(--mui-palette-primary-main, #245db5);
-  outline-offset: -1px;
+  box-shadow: inset 0 0 0 1px var(--mui-palette-primary-main, #245db5);
 }
 .launcher-space-card.MuiButtonBase-root {
   position: relative;
@@ -2108,7 +2117,7 @@ html.layout-compact .admin-section-header {
   color: white;
   outline-color: #d32f2f;
 }
-[data-window-replace]::before {
+.window-frame[data-window-replace]::before {
   content: '';
   position: absolute;
   inset: 0;
@@ -2118,7 +2127,7 @@ html.layout-compact .admin-section-header {
   border-radius: 8px;
   pointer-events: none;
 }
-[data-window-replace]::after {
+.window-frame[data-window-replace]::after {
   content: '替换此窗口';
   position: absolute;
   top: 50%;
