@@ -44,6 +44,7 @@ import {
   sourceKey,
   type FilesView,
 } from './files-app-state';
+import { OverflowText } from '../app/overflow-text';
 
 export function FilesOrganization({
   mode,
@@ -483,10 +484,13 @@ function NavRow({
     >
       <ListItemIcon sx={{ minWidth: 32, color: 'inherit', '& svg': { fontSize: 20 } }}>{icon}</ListItemIcon>
       <ListItemText
-        primary={item.label}
+        primary={
+          <OverflowText component="span" variant="inherit" display="block">
+            {item.label}
+          </OverflowText>
+        }
         secondary={secondary}
         slotProps={{
-          primary: { noWrap: true, title: item.label },
           secondary: { noWrap: true, variant: 'caption' },
         }}
         sx={{ my: 0 }}

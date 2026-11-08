@@ -23,6 +23,7 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import { useState } from 'react';
@@ -357,10 +358,13 @@ export function AdminUsersSection({
                 <TableRow key={user.username} hover>
                   <TableCell>
                     <Box className="admin-user">
-                      <span
-                        className={`admin-dot${user.online ? ' admin-dot-on' : ''}`}
-                        title={user.online ? '在线' : '离线'}
-                      />
+                      <Tooltip title={user.online ? '在线' : '离线'}>
+                        <span
+                          className={`admin-dot${user.online ? ' admin-dot-on' : ''}`}
+                          role="img"
+                          aria-label={user.online ? '在线' : '离线'}
+                        />
+                      </Tooltip>
                       <Typography component="span" fontWeight={500} noWrap>
                         {user.username}
                       </Typography>

@@ -79,9 +79,11 @@ export function AdminDiagnosticsSection({ online, call }: { online: boolean; cal
               {data.map((item) => (
                 <TableRow key={item.id} hover>
                   <TableCell>
-                    <Typography className="admin-mono" variant="body2" title={item.id}>
-                      {item.id.slice(0, 8)}
-                    </Typography>
+                    <Tooltip title={item.id}>
+                      <Typography className="admin-mono" variant="body2">
+                        {item.id.slice(0, 8)}
+                      </Typography>
+                    </Tooltip>
                   </TableCell>
                   <TableCell>{item.username ?? '—'}</TableCell>
                   <TableCell className="admin-wide">

@@ -12,6 +12,7 @@ import {
   useAdminResource,
   type AdminCall,
 } from './shared';
+import { OverflowText } from '../overflow-text';
 
 const states: Record<
   AdminNode['state'],
@@ -111,9 +112,9 @@ function NodeCard({
           />
           {metrics.gpus.map((gpu, index) => (
             <Box key={index} className="admin-gpu">
-              <Typography variant="caption" color="text.secondary" noWrap title={gpu.name}>
+              <OverflowText variant="caption" color="text.secondary">
                 {gpu.name}
-              </Typography>
+              </OverflowText>
               <Meter label="3D" value={gpu.engine3d} detail={formatPercent(gpu.engine3d)} />
               <Meter
                 label="视频编码"

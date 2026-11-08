@@ -34,6 +34,7 @@ import type { PhotoJob } from './photo-job-store';
 import { PhotoOptions } from './photo-options';
 import { BasketPartitionMenu } from './partition-menu';
 import { SortableFileItems, type FileView } from './sortable-file-items';
+import { OverflowText } from '../app/overflow-text';
 
 export type BasketPanel = { id: string; view: 'photo' | 'image' };
 
@@ -266,9 +267,7 @@ export function BasketItems({
       >
         {menuItem?.entry && [
           <Box key="title" sx={{ px: 2, pt: 0.5, pb: 1, maxWidth: 260 }}>
-            <Typography variant="subtitle2" noWrap title={menuItem.name}>
-              {menuItem.name}
-            </Typography>
+            <OverflowText variant="subtitle2">{menuItem.name}</OverflowText>
             <Typography variant="caption" color="text.secondary">
               {formatFileSize(menuItem.entry.size)}
             </Typography>
@@ -350,9 +349,9 @@ export function BasketItems({
           }}
         >
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-            <Typography variant="subtitle2" sx={{ flex: 1, minWidth: 0 }} noWrap title={active.name}>
+            <OverflowText variant="subtitle2" sx={{ flex: 1, minWidth: 0 }}>
               {active.name}
-            </Typography>
+            </OverflowText>
             <IconButton aria-label="收起项目" onClick={() => setPanel(undefined)}>
               <Close fontSize="small" />
             </IconButton>

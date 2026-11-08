@@ -2,6 +2,7 @@ import { Box, ButtonBase, CircularProgress, Typography } from '@mui/material';
 import React, { useRef } from 'react';
 import { FileThumbnail } from './file-thumbnail';
 import type { SortActivator } from './sortable-file-items';
+import { OverflowText } from '../app/overflow-text';
 
 export interface FileStatus {
   label: string;
@@ -179,13 +180,11 @@ export function FileTile({
           )}
         </Box>
         <Box sx={{ px: compact ? 0.75 : 1, py: compact ? 0.5 : 0.75 }}>
-          <Typography
-            noWrap
-            title={name}
+          <OverflowText
             sx={{ fontSize: compact ? 12 : 13, fontWeight: 500, lineHeight: compact ? '16px' : '18px' }}
           >
             {name}
-          </Typography>
+          </OverflowText>
           <Typography
             noWrap
             color="text.secondary"
@@ -277,9 +276,7 @@ export function FileRow({
         sx={{ width: 40, height: 40, flex: 'none', borderRadius: '8px' }}
       />
       <Box sx={{ flex: 1, minWidth: 0 }}>
-        <Typography noWrap title={name} sx={{ fontSize: 14, lineHeight: '20px' }}>
-          {name}
-        </Typography>
+        <OverflowText sx={{ fontSize: 14, lineHeight: '20px' }}>{name}</OverflowText>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
           {status && <StatusBadge status={status} />}
           <Typography noWrap color="text.secondary" sx={{ fontSize: 12, lineHeight: '18px' }}>

@@ -18,6 +18,7 @@ import type { WorkspaceCall } from './window-state';
 import { SettingNote, SettingRow, SettingSection, SettingSwitch } from './setting-layout';
 import { ScaledSelect } from './scaled-select';
 import { formatError } from '../util/format-error';
+import { OverflowText } from './overflow-text';
 
 const SITE_OPTIONS = [
   ['tabletUa', '平板版网站'],
@@ -82,9 +83,9 @@ export function BrowserSettingsSheet({
         <SettingSection title="网页兼容性">
           {sites.map(([origin, preference]) => (
             <div key={origin} className="site-row">
-              <Typography className="site-row-origin" noWrap title={origin}>
+              <OverflowText className="site-row-origin" tip={origin}>
                 {origin.replace(/^https?:\/\//, '')}
-              </Typography>
+              </OverflowText>
               <div className="site-row-options">
                 {SITE_OPTIONS.map(([key, label]) => (
                   <Chip
@@ -124,9 +125,7 @@ export function BrowserSettingsSheet({
           {state.workspace.favorites.map((favorite) => (
             <div className="favorite-row" key={favorite.id}>
               <div>
-                <Typography noWrap title={favorite.title}>
-                  {favorite.title || favorite.url}
-                </Typography>
+                <OverflowText>{favorite.title || favorite.url}</OverflowText>
                 <Typography variant="caption" color="text.secondary" noWrap component="div">
                   {favorite.url}
                 </Typography>
