@@ -1552,15 +1552,9 @@ html.layout-compact .admin-section-header {
   opacity: 0.75;
 }
 .launcher-row {
-  display: flex;
-}
-.launcher-row > .launcher-tile {
-  flex: none;
-  height: 100%;
-  margin-right: 12px;
-}
-.launcher-row > .launcher-tile:last-child {
-  margin-right: 0;
+  display: grid;
+  grid-auto-flow: column;
+  justify-content: start;
 }
 .launcher-tile.MuiButtonBase-root {
   position: relative;
@@ -1639,7 +1633,7 @@ html.layout-compact .admin-section-header {
   text-overflow: ellipsis;
   margin-bottom: auto;
 }
-.tile-wide .tile-label {
+.tile-large .tile-label {
   line-height: 20px;
   font-size: 15px;
   font-weight: 600;

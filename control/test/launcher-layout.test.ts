@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { contrastColor, launcherLayout, originColor, whiteContrast } from '../client/app/launcher-layout';
+import {
+  contrastColor,
+  launcherLayout,
+  originColor,
+  packTiles,
+  whiteContrast,
+} from '../client/app/launcher-layout';
 import type { LauncherItem } from '../shared/product';
 
 const item = (
@@ -17,13 +23,31 @@ const item = (
   ...extra,
 });
 
-test('rows share the available height within bounds', () => {
-  const rows = [item('a', 'frequent', 1), item('b', 'apps', 1), item('c', 'pages', 1), item('d', 'files', 1)];
-  assert.equal(launcherLayout(rows, 800).height, 152);
-  assert.equal(launcherLayout(rows, 2000).height, 168);
-  assert.equal(launcherLayout(rows, 200).height, 88);
-  assert.equal(launcherLayout(rows.slice(0, 2), 400).height, 152);
-  assert.equal(launcherLayout(rows, 2000, '', 390).height, 111);
+test('the tile unit fits every group into the available height', () => {
+  const groups = [
+    item('a', 'frequent', 1),
+    item('b', 'apps', 1),
+    item('c', 'pages', 1),
+    item('d', 'files', 1),
+  ];
+  const layout = launcherLayout(groups, 800, '', 1200);
+  assert.deepEqual(
+    layout.groups.map((group) => group.rows),
+    [1, 1, 1, 1],
+  );
+  assert.equal(layout.unit, 120);
+  assert.equal(launcherLayout(groups, 500, '', 1200).unit, 77);
+  assert.equal(launcherLayout(groups, 2000, '', 358).unit, 114);
+  const pair = [item('w', 'frequent', 9), item('w2', 'frequent', 6), item('s', 'frequent', 1)];
+  assert.equal(launcherLayout(pair, 700, '', 358).groups[0].rows, 3);
+  const many = Array.from({ length: 12 }, (_, index) => item('f' + index, 'frequent', 1));
+  const tall = launcherLayout(many, 700, '', 400);
+  assert.equal(tall.groups[0].rows, 4);
+  assert.ok(tall.unit * 4 + 3 * tall.gap + 48 <= 700);
+  const short = launcherLayout(many, 150, '', 400);
+  assert.equal(short.groups[0].rows, 1);
+  assert.equal(short.unit, 102);
+  assert.ok(short.groups[0].tiles.every((tile) => tile.size !== 'large' && tile.rows === 1));
 });
 
 test('launcher grouping applies limits, ordering, and frequent de-duplication', () => {
@@ -55,38 +79,54 @@ test('launcher grouping applies limits, ordering, and frequent de-duplication', 
   }
 });
 
-test('tile spans follow group semantics and score ratios at boundaries', () => {
-  const entries = [
-    item('a', 'frequent', 9),
-    item('b', 'frequent', 6),
-    item('c', 'frequent', 4.5),
-    item('d', 'frequent', 4.49),
-  ];
-  const tiles = launcherLayout(entries, 600).groups[0].tiles;
+test('tile sizes follow relative use, gated by rank so sizes stay mixed', () => {
+  const scores = [10, 7, 5, 3, 2.4, 1, 0];
+  const entries = scores.map((score, index) => item('t' + index, 'frequent', score));
   assert.deepEqual(
-    tiles.map((tile) => [tile.size, tile.span]),
+    launcherLayout(entries, 800, '', 1200).groups[0].tiles.map((tile) => tile.size),
+    ['large', 'wide', 'wide', 'wide', 'small', 'small', 'small'],
+  );
+  const equal = Array.from({ length: 6 }, (_, index) => item('e' + index, 'apps', 1));
+  assert.deepEqual(
+    launcherLayout(equal, 800, '', 1200).groups[0].tiles.map((tile) => tile.size),
+    ['large', 'wide', 'wide', 'small', 'small', 'small'],
+  );
+  const unused = Array.from({ length: 4 }, (_, index) => item('u' + index, 'apps', 0));
+  assert.ok(launcherLayout(unused, 800).groups[0].tiles.every((tile) => tile.size === 'small'));
+  assert.equal(
+    launcherLayout([item('a', 'frequent', 9), item('b', 'frequent', 7)], 800).groups[0].tiles[0].size,
+    'wide',
+  );
+});
+
+test('packing fills the first column top to bottom before extending right', () => {
+  assert.deepEqual(
+    packTiles(['large', 'wide', 'small', 'small', 'small'], 3).cells.map((cell) => [cell.column, cell.row]),
     [
-      ['wide', 3],
-      ['medium', 2],
-      ['medium', 2],
-      ['small', 1],
+      [0, 0],
+      [0, 2],
+      [2, 0],
+      [2, 1],
+      [2, 2],
     ],
   );
-  assert.equal(
-    launcherLayout([item('a', 'frequent', 9), item('b', 'frequent', 7)], 600).groups[0].tiles[0].size,
-    'medium',
-  );
-  const semantic = [
-    item('builtin', 'apps', 0, { appId: 'browser' }),
-    item('used', 'apps', 0.01, { appId: 'web:x' }),
-    item('unused', 'apps', 0, { appId: 'web:y' }),
-    item('favorite', 'pages', 0, { favorite: true }),
-    item('plain', 'pages', 100),
-    item('file', 'files', 0, { organized: true }),
-  ];
+  const packed = packTiles(['wide', 'small', 'wide', 'small'], 2);
   assert.deepEqual(
-    launcherLayout(semantic, 600).groups.flatMap((group) => group.tiles.map((tile) => tile.size)),
-    ['small', 'small', 'small', 'medium', 'medium', 'medium'],
+    packed.cells.map((cell) => [cell.column, cell.row]),
+    [
+      [0, 0],
+      [0, 1],
+      [1, 1],
+      [2, 0],
+    ],
+  );
+  assert.equal(packed.columns, 3);
+  assert.deepEqual(
+    packTiles(['large', 'small'], 1).cells.map((cell) => [cell.size, cell.column]),
+    [
+      ['wide', 0],
+      ['small', 2],
+    ],
   );
 });
 

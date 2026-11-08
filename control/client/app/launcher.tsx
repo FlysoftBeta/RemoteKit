@@ -140,7 +140,7 @@ export function Launcher({
     };
   }, [call, query]);
   const layout = launcherLayout(items, bounds.height, query, bounds.width);
-  useLayoutEffect(measureEdges, [layout.height, items]);
+  useLayoutEffect(measureEdges, [layout.unit, items]);
   const perform = (task: () => Promise<void>) => {
     if (busy || !online) return;
     setBusy(true);
@@ -251,7 +251,14 @@ export function Launcher({
             {layout.groups.map((group) => (
               <section className="launcher-group" key={group.id}>
                 <Typography variant="subtitle1">{group.title}</Typography>
-                <div className="launcher-row" style={{ height: layout.height }}>
+                <div
+                  className="launcher-row"
+                  style={{
+                    gridTemplateRows: `repeat(${group.rows}, ${layout.unit}px)`,
+                    gridAutoColumns: `${layout.unit}px`,
+                    gap: layout.gap,
+                  }}
+                >
                   {group.tiles.map((tile) => {
                     const entry = library.snapshot?.entries.find((entry) => entry.id === tile.entryId);
                     const color = contrastColor(
@@ -427,7 +434,8 @@ function LauncherTileView({
       style={
         {
           backgroundColor: imageColor ?? color,
-          width: tile.width,
+          gridColumn: `${tile.column + 1} / span ${tile.columns}`,
+          gridRow: `${tile.row + 1} / span ${tile.rows}`,
           '--tile-color': imageColor ?? color,
         } as React.CSSProperties
       }
@@ -544,9 +552,7 @@ function LauncherTileView({
         )}
       </span>
       <span className="tile-label">{tile.title}</span>
-      {(tile.size === 'wide' || preview) && tile.subtitle && (
-        <span className="tile-subtitle">{tile.subtitle}</span>
-      )}
+      {tile.size !== 'small' && tile.subtitle && <span className="tile-subtitle">{tile.subtitle}</span>}
     </ButtonBase>
   );
 }

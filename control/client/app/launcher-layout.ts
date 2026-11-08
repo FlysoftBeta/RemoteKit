@@ -1,44 +1,117 @@
 import type { LauncherItem } from '../../shared/product';
 
-export type TileSize = 'small' | 'medium' | 'wide';
+export type TileSize = 'small' | 'wide' | 'large';
 export interface LauncherTile extends LauncherItem {
   size: TileSize;
-  /** Width in row-height units; every tile in a row shares the row height. */
-  span: number;
-  width: number;
+  /** Grid cell of the top-left corner and the span, in tile units. */
+  column: number;
+  row: number;
+  columns: number;
+  rows: number;
 }
 export interface LauncherGroup {
   id: string;
   title: string;
+  rows: number;
+  columns: number;
   tiles: LauncherTile[];
 }
-export const LAUNCHER_SPACING = 12;
-// Group label plus the space between rows.
-export const LAUNCHER_ROW_CHROME = 48;
-const SPANS: Record<TileSize, number> = { small: 1, medium: 2, wide: 3 };
+export interface LauncherLayout {
+  unit: number;
+  gap: number;
+  groups: LauncherGroup[];
+}
+export const LAUNCHER_GAP = 8;
+// Group label plus the space between groups.
+export const LAUNCHER_GROUP_CHROME = 48;
+const UNIT = { preferred: 104, minimum: 64, maximum: 120 };
+const MAX_ROWS = 4;
+const SPANS: Record<TileSize, [number, number]> = { small: [1, 1], wide: [2, 1], large: [2, 2] };
 const titles = { frequent: '常用', apps: 'App', pages: '网页', files: '文件' };
 const builtin = ['browser', 'files', 'settings'];
 const byScore = (a: LauncherItem, b: LauncherItem) => b.score - a.score;
 
-export function tileSize(item: LauncherItem, index: number, items: LauncherItem[]): TileSize {
-  const scores = items.map((entry) => entry.score).sort((a, b) => b - a);
-  const maximum = scores[0] ?? 0;
+/**
+ * Size follows how used an item is relative to its group: the score ratio to the group's top
+ * score, gated by rank so that a group of equally used items still mixes sizes.
+ */
+export function tileSize(item: LauncherItem, rank: number, items: LauncherItem[]): TileSize {
+  const maximum = Math.max(0, ...items.map((entry) => entry.score));
   const ratio = maximum > 0 ? item.score / maximum : 0;
-  const leads = maximum > 0 && item.score === maximum && maximum >= (scores[1] ?? 0) * 1.25;
-  if (index === 0 && items.length >= 3 && leads) return 'wide';
-  if (item.favorite || item.organized || (item.kind === 'app' && builtin.includes(item.appId ?? '')))
-    return 'medium';
-  return ratio >= 0.5 ? 'medium' : 'small';
+  const count = items.length;
+  if (count >= 3 && ratio >= 0.6 && rank < Math.max(1, Math.floor(count / 6))) return 'large';
+  if (ratio >= 0.25 && rank < Math.ceil(count / 2)) return 'wide';
+  return 'small';
 }
 
-export function rowHeight(availableHeight: number, rowCount: number, width = Infinity) {
-  const rows = Math.max(1, rowCount);
-  // On narrow screens about three tile units fit across, so a row never shows a single tile.
-  const across = (width - 32 - 2 * LAUNCHER_SPACING) / 3;
-  return Math.round(Math.max(88, Math.min(168, across, availableHeight / rows - LAUNCHER_ROW_CHROME)));
+/**
+ * Column-first packing: each tile takes the leftmost column with room, top to bottom, so the
+ * first columns hold the most used items and a group grows to the right only once they are full.
+ */
+export function packTiles(sizes: TileSize[], rows: number) {
+  const taken: boolean[][] = [];
+  const free = (column: number, row: number) => !taken[column]?.[row];
+  let columns = 0;
+  const cells = sizes.map((requested) => {
+    const size = requested === 'large' && rows < 2 ? 'wide' : requested;
+    const [width, height] = SPANS[size];
+    for (let column = 0; ; column++) {
+      for (let row = 0; row + height <= rows; row++) {
+        let fits = true;
+        for (let x = 0; x < width && fits; x++)
+          for (let y = 0; y < height && fits; y++) fits = free(column + x, row + y);
+        if (!fits) continue;
+        for (let x = 0; x < width; x++)
+          for (let y = 0; y < height; y++) (taken[column + x] ??= [])[row + y] = true;
+        columns = Math.max(columns, column + width);
+        return { size, column, row, columns: width, rows: height };
+      }
+    }
+  });
+  return { cells, columns };
 }
 
-export function launcherLayout(items: LauncherItem[], availableHeight: number, query = '', width = Infinity) {
+function groupRows(sizes: TileSize[], visibleColumns: number) {
+  const area = sizes.reduce((sum, size) => sum + SPANS[size][0] * SPANS[size][1], 0);
+  const minimum = sizes.includes('large') ? 2 : 1;
+  return Math.max(minimum, Math.min(MAX_ROWS, Math.ceil(area / Math.max(1, visibleColumns))));
+}
+
+/** Rows per group and the tile unit that make every group fit the available height. */
+export function fitGroups(groupSizes: TileSize[][], availableHeight: number, width: number) {
+  const columnsAt = (unit: number) => Math.max(2, Math.floor((width + LAUNCHER_GAP) / (unit + LAUNCHER_GAP)));
+  // Narrow screens show at least about three columns.
+  const maximum = Math.max(UNIT.minimum, Math.min(UNIT.maximum, Math.floor((width - 2 * LAUNCHER_GAP) / 3)));
+  const unitFor = (rows: number[]) => {
+    const total = rows.reduce((sum, value) => sum + value, 0);
+    const space = availableHeight - groupSizes.length * LAUNCHER_GROUP_CHROME;
+    return Math.floor((space + LAUNCHER_GAP * groupSizes.length) / Math.max(1, total) - LAUNCHER_GAP);
+  };
+  let unit = Math.min(UNIT.preferred, maximum);
+  let rows: number[] = [];
+  // Rows depend on the visible columns, which depend on the unit; a few rounds settle both.
+  for (let round = 0; round < 4; round++) {
+    let next = groupSizes.map((sizes) => groupRows(sizes, columnsAt(unit)));
+    while (unitFor(next) < UNIT.minimum) {
+      const tallest = next.indexOf(Math.max(...next));
+      if (next[tallest] <= 1) break;
+      next = next.map((value, index) => (index === tallest ? value - 1 : value));
+    }
+    const fitted = Math.max(UNIT.minimum, Math.min(maximum, unitFor(next)));
+    const stable = fitted === unit && next.every((value, index) => value === rows[index]);
+    unit = fitted;
+    rows = next;
+    if (stable) break;
+  }
+  return { unit, rows };
+}
+
+export function launcherLayout(
+  items: LauncherItem[],
+  availableHeight: number,
+  query = '',
+  width = Infinity,
+): LauncherLayout {
   const frequent = items
     .filter((item) => item.group === 'frequent')
     .sort(byScore)
@@ -77,20 +150,21 @@ export function launcherLayout(items: LauncherItem[], availableHeight: number, q
       rows.push({ id, title: titles[id as keyof typeof titles], entries });
   }
   const groups = rows.filter((row) => row.entries.length);
-  const height = rowHeight(availableHeight, groups.length, width);
+  const sizes = groups.map(({ entries }) => entries.map((item, rank) => tileSize(item, rank, entries)));
+  const fit = fitGroups(sizes, availableHeight, Number.isFinite(width) ? width : 1600);
   return {
-    height,
-    spacing: LAUNCHER_SPACING,
-    groups: groups.map(({ id, title, entries }): LauncherGroup => ({
-      id,
-      title,
-      tiles: entries.map((item, index) => {
-        // The App row is a catalog of everything installed, so its tiles stay uniform.
-        const size = id === 'apps' ? 'small' : tileSize(item, index, entries);
-        const span = SPANS[size];
-        return { ...item, size, span, width: span * height + (span - 1) * LAUNCHER_SPACING };
-      }),
-    })),
+    unit: fit.unit,
+    gap: LAUNCHER_GAP,
+    groups: groups.map(({ id, title, entries }, index): LauncherGroup => {
+      const packed = packTiles(sizes[index], fit.rows[index]);
+      return {
+        id,
+        title,
+        rows: fit.rows[index],
+        columns: packed.columns,
+        tiles: entries.map((item, rank) => ({ ...item, ...packed.cells[rank] })),
+      };
+    }),
   };
 }
 
