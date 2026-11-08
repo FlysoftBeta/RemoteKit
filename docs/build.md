@@ -83,11 +83,11 @@ Control 只读一个环境变量 `REMOTEKIT_CONTROL_CONFIG`（默认 `control/da
 C:\src\depot_tools\python3.bat tools/release.py
 ```
 
-`tools/release.py` 是唯一的发布入口：工作树有未提交改动时拒绝；依次执行 stage、Chromium `out/rel` 构建（Browser + SDK）、SDK 导出、Endpoint 打包构建、Control 构建，再运行 `package-runtime.py --smoke`，最后打印归档路径、大小、SHA-256 与 manifest 的来源摘要。任一步失败即停止。
+`tools/release.py` 是唯一的发布入口：工作树有未提交改动时拒绝；依次执行 stage、Chromium `out/rel` 构建（Browser + SDK）、SDK 导出、Endpoint 打包构建、Control 构建，再运行 `package-runtime.py --smoke`（对解包目录做启动 smoke），然后解压生成的 Control 归档再跑一遍 smoke，并核对 manifest 的来源与安装出的运行时二进制一致。任一步失败即停止。
 
 `tools/package-runtime.py` 也可单独运行（默认 `--out rel`），在 `develop/tmp/<时间戳>/` 输出两套解包目录、`.tar.zst` 和 `.tar.zst.sha256`。它先检查产物是否新鲜，任一项不满足就拒绝打包并指出是哪个组件：`tools/chromium.py stage --check` 有待同步的源码；Chromium out 目录对 `remotekit_browser remotekit_sdk` 还有待执行的构建（ninja 干跑）；Endpoint 打包构建目录还有待执行的构建；`control/dist` 比 `control/server`、`client`、`shared` 下最新的源文件旧。
 
-**来源**：manifest 记录 `source{commit, dirty}`（dirty 指 browser/、endpoint/、control/、protocol/、sdk/、tools/、patches/ 下有未提交改动；只有 `release.py` 保证为 false）和 `artifacts`（实际打包的 Browser、Endpoint、Node、Control 服务端文件的 SHA-256），据此可以确认某个修复是否在包里。
+**来源**：manifest 记录 `source{commit, dirty}`（dirty 指 browser/、endpoint/、control/、protocol/、sdk/、tools/、patches/ 下有未提交改动；只有 `release.py` 保证为 false）和 `artifacts`（实际打包的 Browser、Endpoint、Node、Control 服务端文件的 SHA-256），据此可以确认某个修复是否在包里。来源只写在 Control 包与引导包的 `manifest.json`；`build.json`（`{buildId}`）与 `release/node.json`（`{buildId, sha256, size}`）是更新器和 Control 严格校验的运行时契约，不放额外字段。
 
 **Node 运行时**：`tools/node_runtime.py` 固定一个版本（v24.20.0，ABI 137，与 Control 的 better-sqlite3 匹配），从 nodejs.org 下载官方 Windows x64 zip，用脚本内写死的 SHA-256 校验，解压到仓库外的构建缓存 `%LOCALAPPDATA%/RemoteKit/build-cache/`，带官方 `LICENSE`。打包只用这个运行时，不接受手动指定。
 

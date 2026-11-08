@@ -557,17 +557,9 @@ def package_runtime(args, node_runtime):
                 build_lines.append(f'{prefix}{file.relative_to(root).as_posix()}\t{digest(file)}\n')
     build_id = hashlib.sha256(''.join(sorted(build_lines)).encode('utf-8')).hexdigest()
     for root in (package, node_runtime):
-        (root / 'build.json').write_text(
-            json.dumps(
-                {
-                    'buildId': build_id,
-                    'source': source_metadata,
-                    'artifacts': artifacts,
-                }
-            )
-            + '\n',
-            encoding='utf-8',
-        )
+        # build.json and release/node.json are exact runtime contracts; provenance lives in
+        # manifest.json.
+        (root / 'build.json').write_text(json.dumps({'buildId': build_id}) + '\n', encoding='utf-8')
     (package / 'release').mkdir()
     node_archive, node_checksum = create_archive(
         node_runtime, node, archive=package / 'release/node.tar.zst'
@@ -578,8 +570,6 @@ def package_runtime(args, node_runtime):
                 'buildId': build_id,
                 'sha256': node_checksum,
                 'size': node_archive.stat().st_size,
-                'source': source_metadata,
-                'artifacts': artifacts,
             }
         )
         + '\n',

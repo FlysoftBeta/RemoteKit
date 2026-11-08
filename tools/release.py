@@ -66,6 +66,12 @@ def main():
     spec.loader.exec_module(packager)
     print('> package-runtime.py --out ' + args.out + ' --smoke', flush=True)
     result = packager.main(['--out', args.out, '--smoke'])
+    # Check what ships: extract the Control archive and verify its manifest provenance against
+    # the runtime it installs.
+    run(
+        [sys.executable, 'tests/e2e/test-streaming-package.py', '--archive', result['archives'][0]['path']],
+        env,
+    )
     print(json.dumps(result, indent=2), flush=True)
 
 

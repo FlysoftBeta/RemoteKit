@@ -106,10 +106,8 @@ def main():
             result['package'] = str(package)
         metadata = json.loads((package / 'build.json').read_text(encoding='utf-8'))
         build_id = metadata['buildId']
-        if manifest is not None:
-            for field in ('source', 'artifacts'):
-                if manifest[field] != metadata[field]:
-                    raise ValueError(f'Package manifest/build metadata mismatch: {field}')
+        if manifest is not None and manifest['buildId'] != build_id:
+            raise ValueError('Package manifest/build.json buildId mismatch')
         # Packaged Control runs the runtime installed for its own build under data/local, as run.cmd does.
         subprocess.run(
             [
@@ -121,8 +119,10 @@ def main():
             check=True,
         )
         binary = package / 'data/local/runtime' / build_id / 'bin'
-        verify_provenance(metadata, package, binary)
-        result.update(source=metadata['source'], artifacts=metadata['artifacts'])
+        # Packaging smoke-tests the tree before manifest.json exists; archives carry it.
+        if manifest is not None:
+            verify_provenance(manifest, package, binary)
+            result.update(source=manifest['source'], artifacts=manifest['artifacts'])
         result['endpointSha256'] = hashlib.sha256(
             (binary / 'endpoint_service.exe').read_bytes()
         ).hexdigest()
