@@ -332,6 +332,7 @@ test('launcher groups obey caps, favorite and organized priority, source exclusi
     };
     for (const app of state.apps) record('app:web:' + app.id, 40);
     for (let index = 0; index < 30; index++) record(`page:https://pages.test/${index}`, 2, `Page ${index}`);
+    record('page:https://once.test/sign-in', 1, 'Sign in once');
     for (const entry of library.entries.filter((entry) => entry.id !== 'unused'))
       record('file:' + entry.id, entry.id === 'file-0' ? 100 : 1);
     const { items } = await f.request('launcher.get', {});
@@ -368,6 +369,15 @@ test('launcher groups obey caps, favorite and organized priority, source exclusi
     assert.deepEqual(
       search.items.map((item: any) => item.url),
       ['https://app0.test/favorite'],
+    );
+    assert.equal(
+      items.some((item: any) => item.url === 'https://once.test/sign-in'),
+      false,
+    );
+    const once = await f.request('launcher.get', { query: 'sign in once' });
+    assert.deepEqual(
+      once.items.map((item: any) => item.url),
+      ['https://once.test/sign-in'],
     );
     const unused = await f.request('launcher.get', { query: 'unused searchable' });
     assert.deepEqual(

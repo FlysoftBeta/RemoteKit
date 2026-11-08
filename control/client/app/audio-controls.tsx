@@ -36,7 +36,7 @@ export function AudioControls({
     if (value.left || value.right) resume();
     save(value);
   };
-  const status = error || (busy ? '正在保存…' : '');
+  const status = error;
   return (
     <div className="menu-audio">
       <div className="menu-audio-row">

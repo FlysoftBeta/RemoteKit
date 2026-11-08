@@ -1,5 +1,6 @@
 import type { LauncherItem, WindowPlacement } from '../../shared/product';
 import { formatError } from '../util/format-error';
+import { SyncStatus } from './sync-status';
 import { Add, AdminPanelSettingsOutlined, Logout, WebAssetOutlined } from '@mui/icons-material';
 import { Alert, Button, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from '@mui/material';
 import React, {
@@ -438,6 +439,14 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     await openLauncherItem(item, placement);
     setOverlay(undefined);
   };
+  const syncStatus = (
+    <SyncStatus
+      pending={pendingOperations.length}
+      unknown={pendingOperations.some((entry) => entry.receipt?.status === 'unknown')}
+      channelReady={snapshot.observations.channel === '已连接'}
+      dismissUnknown={() => media.operations.dismissUnknown()}
+    />
+  );
   const audioControls = workspace && (
     <AudioControls
       channels={workspace.settings.workspace.audioChannels}
@@ -515,24 +524,6 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
                     (state.quality.resourceLimitation
                       ? '当前画面尺寸超出可用范围，请缩小窗口或关闭部分窗口。'
                       : state.endpointError)}
-                </Alert>
-              )}
-              {pendingOperations.length > 0 && (
-                <Alert
-                  severity="info"
-                  action={
-                    pendingOperations.some((entry) => entry.receipt?.status === 'unknown') ? (
-                      <Button color="inherit" size="small" onClick={() => media.operations.dismissUnknown()}>
-                        以当前工作区为准
-                      </Button>
-                    ) : undefined
-                  }
-                >
-                  {pendingOperations.length} 个操作
-                  {pendingOperations.some((entry) => entry.receipt?.status === 'unknown')
-                    ? '结果未知，请核对工作区'
-                    : '正在同步'}
-                  {snapshot.observations.channel !== '已连接' ? '，等待数据通道连接' : ''}
                 </Alert>
               )}
             </div>
@@ -711,6 +702,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
               <Launcher
                 state={state}
                 audio={audioControls}
+                sync={syncStatus}
                 lock={() => lock('manual')}
                 snapshots={snapshots}
                 action={action}

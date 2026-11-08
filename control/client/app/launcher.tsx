@@ -44,6 +44,7 @@ export function Launcher({
   navigate,
   exiting,
   audio,
+  sync,
   lock,
   snapshots,
   action,
@@ -58,6 +59,8 @@ export function Launcher({
   online: boolean;
   /** Workspace-wide audio channels; quick to reach from wherever the user is. */
   audio: React.ReactNode;
+  /** Whether workspace operations have reached the Endpoint; shown only here. */
+  sync: React.ReactNode;
   close(): void;
   activate(item: LauncherItem, placement?: WindowPlacement, reuseExisting?: boolean): Promise<void>;
   navigate(value: string, placement?: WindowPlacement): Promise<void>;
@@ -184,6 +187,7 @@ export function Launcher({
       <div className="launcher-heading">
         <Typography variant="h5">开始</Typography>
         <div className="launcher-system-controls">
+          {sync}
           <div className="launcher-audio">{audio}</div>
           <IconButton aria-label="锁定" title="锁定" onClick={lock}>
             <LockOutlined />

@@ -95,7 +95,6 @@ textarea {
   background: #edf0f5;
 }
 .window-workspace {
-  padding: 8px;
   flex: 1;
   display: flex;
   min-height: 0;
@@ -112,7 +111,6 @@ textarea {
 }
 .window-frame {
   position: relative;
-  border-radius: 8px;
   display: flex;
   flex-direction: column;
   flex-basis: 0;
@@ -120,16 +118,6 @@ textarea {
   min-height: 0;
   background: #fff;
   overflow: hidden;
-}
-/* A pseudo-element, not outline (square before Chrome 94) or inset shadow (covered by content). */
-.window-frame.focused-window::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  z-index: 20;
-  border: 1px solid var(--mui-palette-primary-main, #245db5);
-  border-radius: 8px;
-  pointer-events: none;
 }
 .window-workspace.side-by-side > .window-frame {
   min-width: 360px;
@@ -453,16 +441,25 @@ textarea {
   margin-top: 8px;
   color: #5f6b7a;
 }
+/* A 1px separator; the transparent ::before widens what the pointer can grab. */
 .window-divider {
-  width: 8px;
+  position: relative;
+  z-index: 5;
+  width: 1px;
   flex-shrink: 0;
-  background: #e3e7ed;
+  background: #c9d1dc;
   cursor: col-resize;
   touch-action: none;
 }
+.window-divider::before {
+  content: '';
+  position: absolute;
+  inset: 0 -5px;
+}
 .window-divider:hover,
 .window-divider:focus {
-  background: #95b3df;
+  background: #245db5;
+  box-shadow: 0 0 0 1px #245db5;
 }
 .auth-page {
   height: 100%;
@@ -2080,36 +2077,44 @@ html.layout-compact .admin-section-header {
   padding: 8px;
   box-shadow: 0 8px 32px rgba(20, 40, 70, 0.18);
 }
-.window-drop-zones {
+/* Placed where Start's group column sits, so both drags offer the same targets. */
+.window-drop-column {
   position: fixed;
-  bottom: 0;
-  height: 64px;
-  display: flex;
+  top: 160px;
+  right: 40px;
+  width: 216px;
+  max-height: calc(100% - 200px);
   z-index: 1500;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 8px;
-  gap: 8px;
-  background: #edf0f5;
+  border-radius: 12px;
+  background: rgba(240, 243, 248, 0.94);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 8px 32px rgba(20, 40, 70, 0.18);
 }
-.window-drop-zone {
-  flex: 1;
+.window-drop-column > .launcher-spaces {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+.window-drop-close {
+  flex: none;
+  height: 48px;
+  margin: 0 2px 2px;
   display: flex;
   justify-content: center;
   align-items: center;
   gap: 8px;
-  background: #e0eafb;
-  color: #245db5;
-  border: 1px dashed currentColor;
   border-radius: 8px;
-  font-size: 14px;
-}
-.window-trash {
-  background: #f1e8e8;
+  background: #f6e9e9;
   color: #a54545;
+  font-size: 12px;
 }
-.window-trash[data-window-drop-hover] {
+.window-drop-close[data-window-drop-hover] {
   background: #d32f2f;
-  color: white;
-  outline-color: #d32f2f;
+  color: #fff;
+  box-shadow: none;
 }
 .window-frame[data-window-replace]::before {
   content: '';
@@ -2118,7 +2123,6 @@ html.layout-compact .admin-section-header {
   z-index: 20;
   background: rgba(36, 93, 181, 0.18);
   border: 2px solid #245db5;
-  border-radius: 8px;
   pointer-events: none;
 }
 .window-frame[data-window-replace]::after {
@@ -2177,6 +2181,15 @@ html.layout-compact .admin-section-header {
   }
 }
 @media (max-width: 719px) {
+  .window-drop-column {
+    top: 16px;
+    left: 16px;
+    right: 16px;
+    width: auto;
+  }
+  .window-drop-column > .launcher-spaces {
+    flex: 0 0 110px;
+  }
   .workspace-overlay {
     padding: 16px;
   }

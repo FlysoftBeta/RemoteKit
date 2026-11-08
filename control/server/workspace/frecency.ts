@@ -18,6 +18,8 @@ export interface FrecencyScore {
   visits: number;
   weight: number;
   transitWeight: number;
+  /** Distinct chains in which the item was a destination rather than a pass-through. */
+  returns: number;
 }
 
 const week = 7 * 24 * 60 * 60 * 1000;
@@ -38,6 +40,7 @@ export function computeFrecency(
   }
 
   const scores = new Map<string, FrecencyScore>();
+  const returnChains = new Map<string, Set<string>>();
   const destinations = new Map<string, Map<string, number>>();
   for (const { event } of ordered) {
     const weight = 2 ** (-Math.max(0, now - event.at) / week);
@@ -45,11 +48,17 @@ export function computeFrecency(
     const transit = !!successor && Math.min(10 * 60 * 1000, successor.at - event.at) < 15 * 1000;
     let score = scores.get(event.item);
     if (!score) {
-      score = { score: 0, direct: 0, hub: 0, visits: 0, weight: 0, transitWeight: 0 };
+      score = { score: 0, direct: 0, hub: 0, visits: 0, weight: 0, transitWeight: 0, returns: 0 };
       scores.set(event.item, score);
     }
     score.visits += weight * (transit ? 0.3 : 1);
     score.weight += weight;
+    if (!transit) {
+      let chains = returnChains.get(event.item);
+      if (!chains) returnChains.set(event.item, (chains = new Set()));
+      chains.add(event.chain);
+      score.returns = chains.size;
+    }
     if (transit) {
       score.transitWeight += weight;
       let distribution = destinations.get(event.item);
@@ -102,12 +111,4 @@ export function computeFrecency(
       score.score *= 1.5;
   }
   return scores;
-}
-
-export function scoreFrecency(
-  events: readonly UsageEvent[],
-  now: number,
-  boosts: FrecencyBoosts = {},
-): Map<string, number> {
-  return new Map([...computeFrecency(events, now, boosts)].map(([item, score]) => [item, score.score]));
 }

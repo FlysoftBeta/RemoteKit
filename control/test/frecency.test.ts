@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeFrecency, scoreFrecency, type UsageEvent } from '../server/workspace/frecency';
+import { computeFrecency, type FrecencyBoosts, type UsageEvent } from '../server/workspace/frecency';
+
+const scoreFrecency = (events: UsageEvent[], now: number, boosts?: FrecencyBoosts) =>
+  new Map([...computeFrecency(events, now, boosts)].map(([item, score]) => [item, score.score]));
 
 const now = 30 * 24 * 60 * 60 * 1000;
 
@@ -92,4 +95,21 @@ test('dwell at fifteen seconds and chain tails count as destinations', () => {
     assert.equal(score.transitWeight, 0);
     assert.equal(score.direct, score.weight);
   }
+});
+
+test('returns count distinct chains where an item was a destination, not a pass-through', () => {
+  const now = 1_000_000_000;
+  const at = (minutes: number) => now - minutes * 60_000;
+  const events: UsageEvent[] = [
+    { at: at(60), item: 'page:login', windowId: 'w', chain: 'a' },
+    { at: at(60) + 5_000, item: 'page:app', windowId: 'w', chain: 'a' },
+    { at: at(30), item: 'page:login', windowId: 'w', chain: 'b' },
+    { at: at(30) + 5_000, item: 'page:app', windowId: 'w', chain: 'b' },
+    { at: at(10), item: 'page:once', windowId: 'w', chain: 'c' },
+    { at: at(9), item: 'page:once', windowId: 'w', chain: 'c' },
+  ];
+  const scores = computeFrecency(events, now);
+  assert.equal(scores.get('page:login')!.returns, 0);
+  assert.equal(scores.get('page:app')!.returns, 2);
+  assert.equal(scores.get('page:once')!.returns, 1);
 });

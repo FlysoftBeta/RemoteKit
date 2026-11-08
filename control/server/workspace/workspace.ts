@@ -9,7 +9,7 @@ import type {
 } from '../../shared/product';
 import type { DomainContext, DomainServices } from '../application';
 import { normalizedUsagePage } from '../navigation-url';
-import { scoreFrecency } from './frecency';
+import { computeFrecency } from './frecency';
 import { findTab, findWindow } from './model';
 
 export function pageUsageIdentity(tab: ProductTab, current: any, browser: unknown): string | undefined {
@@ -215,10 +215,15 @@ export class Workspace {
     const organizedBoost = new Set(
       [...usedFiles].filter((id) => organized.has(id) && this.services.library.organized(tenant, id)),
     );
-    const scores = scoreFrecency(events, this.context.clock.wallMs(), {
+    const frecency = computeFrecency(events, this.context.clock.wallMs(), {
       favorites,
       organized: organizedBoost,
     });
+    const scores = new Map([...frecency].map(([item, score]) => [item, score.score]));
+    // A page visited once, or only passed through (sign-in, challenge and redirect pages), is
+    // history, not a frequent page; it stays searchable.
+    const established = (item: LauncherItem) =>
+      item.kind !== 'page' || !!item.favorite || (frecency.get(item.key)?.returns ?? 0) >= 2;
     const matchingApp = (url: string) =>
       state.apps
         .filter((app) => url.startsWith(app.scope))
@@ -312,7 +317,7 @@ export class Workspace {
       };
     }
     const frequent = [...apps, ...pages, ...files]
-      .filter((item) => item.score > 0)
+      .filter((item) => item.score > 0 && established(item))
       .sort((a, b) => b.score - a.score)
       .slice(0, 12);
     const frequentKeys = new Set(frequent.map((item) => item.key));
@@ -320,7 +325,7 @@ export class Workspace {
       items: [
         ...frequent.map((item): LauncherItem => ({ ...item, group: 'frequent' })),
         ...apps,
-        ...pages.filter((item) => !frequentKeys.has(item.key)).slice(0, 16),
+        ...pages.filter((item) => established(item) && !frequentKeys.has(item.key)).slice(0, 16),
         ...files
           .filter((item) => !frequentKeys.has(item.key) && (item.organized || scores.has(item.key)))
           .slice(0, 12),

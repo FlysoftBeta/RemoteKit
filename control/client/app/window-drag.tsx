@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { DeleteOutline, Add } from '@mui/icons-material';
+import { DeleteOutline } from '@mui/icons-material';
 import type {
   LauncherItem,
   ProductAction,
@@ -10,6 +10,7 @@ import type {
 } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import { AppIcon, appName } from './app-icon';
+import { LauncherSpaces } from './launcher-spaces';
 import { SpaceSnapshots } from './space-snapshots';
 import { uiScale } from './ui-scale';
 
@@ -40,8 +41,8 @@ function insertionPositions(stage: HTMLElement, space: ProductSpace) {
   );
   if (frames.length === space.windowIds.length)
     return [
-      frames[0].getBoundingClientRect().left - 4 * uiScale(),
-      ...frames.map((frame) => frame.getBoundingClientRect().right + 4 * uiScale()),
+      frames[0].getBoundingClientRect().left,
+      ...frames.map((frame) => frame.getBoundingClientRect().right),
     ];
   return [
     bounds.left,
@@ -101,17 +102,21 @@ export function WindowDragProvider({
     boundaries.forEach((position, index) => {
       if (Math.abs(x - position) < Math.abs(x - boundaries[slot])) slot = index;
     });
-    if (
-      'item' in source &&
-      (active.windowIds.length >= 3 || Math.abs(x - boundaries[slot]) > 18 * uiScale())
-    ) {
+    if ('item' in source) {
+      // The outer fifth of each window inserts beside it; its middle replaces it.
       const frame = element?.closest<HTMLElement>('[data-window-id]');
-      if (frame && active.windowIds.includes(frame.dataset.windowId!))
-        return {
-          placement: { mode: 'replace', windowId: frame.dataset.windowId! },
-          replaceId: frame.dataset.windowId,
-        };
-      return;
+      const id = frame?.dataset.windowId;
+      if (!frame || !id || !active.windowIds.includes(id)) {
+        // Over a separator: insert at the nearest boundary.
+        if (active.windowIds.length >= 3 || !element?.closest('.window-divider')) return;
+      } else {
+        const rect = frame.getBoundingClientRect();
+        const edge = Math.max(48 * uiScale(), Math.min(120 * uiScale(), rect.width / 5));
+        const index = active.windowIds.indexOf(id);
+        if (active.windowIds.length >= 3 || (x - rect.left > edge && rect.right - x > edge))
+          return { placement: { mode: 'replace', windowId: id }, replaceId: id };
+        slot = x - rect.left <= edge ? index : index + 1;
+      }
     }
     if (!own && active.windowIds.length >= 3) return;
     const remaining = active.windowIds.filter((id) => id !== movingId);
@@ -245,17 +250,21 @@ export function WindowDragProvider({
             {drag &&
               win &&
               createPortal(
-                <div
-                  className="window-drop-zones"
-                  style={{ left: (stage?.left ?? 0) / uiScale(), width: (stage?.width ?? 0) / uiScale() }}
-                >
-                  <div className="window-drop-zone" data-new-group>
-                    <Add />
-                    新窗口组
-                  </div>
-                  <div className="window-drop-zone window-trash" data-close-window>
+                // The same group column Start shows while a tile is dragged, plus closing.
+                <div className="window-drop-column">
+                  <LauncherSpaces
+                    state={state}
+                    snapshots={snapshots}
+                    action={action}
+                    online
+                    newTarget={false}
+                    targetNew={() => {}}
+                    close={() => {}}
+                    report={report}
+                  />
+                  <div className="window-drop-close" data-close-window>
                     <DeleteOutline />
-                    关闭
+                    关闭窗口
                   </div>
                 </div>,
                 document.body,
@@ -284,7 +293,8 @@ export function WindowDragProvider({
                     <div
                       className="window-insertion-marker"
                       style={{
-                        left: drag.target.marker / uiScale(),
+                        left:
+                          Math.max(stage.left + 2, Math.min(stage.right - 2, drag.target.marker)) / uiScale(),
                         top: stage.top / uiScale(),
                         height: stage.height / uiScale(),
                       }}

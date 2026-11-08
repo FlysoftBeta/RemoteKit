@@ -51,15 +51,8 @@ export function WorkspacePreferences({
     setResult((p) => ({ ...p, [key]: '' }));
     try {
       const receipt = await action({ type: 'settings.update', settings: { workspace: value } });
-      setResult((p) => ({
-        ...p,
-        [key]:
-          receipt.status === 'committed'
-            ? '已保存'
-            : receipt.status === 'unknown'
-              ? '结果未知，请核对'
-              : '正在同步',
-      }));
+      // Progress lives in the Start sync indicator; a setting only reports what needs attention.
+      setResult((p) => ({ ...p, [key]: receipt.status === 'unknown' ? '结果未知，请核对' : '' }));
     } catch (e) {
       setResult((p) => ({ ...p, [key]: `未保存，请重试：${formatError(e)}` }));
     } finally {
@@ -67,8 +60,8 @@ export function WorkspacePreferences({
     }
   };
   const note = (key: string) => {
-    const text = busy[key] ? '正在保存…' : (result[key] ?? '');
-    return <SettingNote text={text} error={!busy[key] && !!text && text !== '已保存'} />;
+    const text = busy[key] ? '' : (result[key] ?? '');
+    return <SettingNote text={text} error={!!text} />;
   };
   const scaleIndex = UI_SCALE_STEPS.findIndex((step) => step >= settings.uiScale - 0.001);
   const stepScale = (direction: 1 | -1) => {
