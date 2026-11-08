@@ -8,6 +8,12 @@
 
 **平板版网站**：按 origin 选择平板身份（Android 平板，mobile=false），在首次导航、redirect、history、reload、restore 的请求之前决定；子 frame 继承页面身份。只改 UA/CH，不改 viewport、DPR、触控或指针特征——早期的"平板设备模式"把 UA、viewport meta、移动指标、touch/coarse/no-hover、navigator.platform 绑在一起，导致一个兼容性偏好悄悄改变布局和输入能力，现已拆开。
 
+平板身份同时提供 Android 才有的 `window.orientation` 与 `onorientationchange`：看到移动 UA 的站点（如网易云游戏）只按 `window.orientation` 判断横竖屏，缺失即视为竖屏，横版画面会被页面自己旋转 90°。Blink 用进程全局的 OrientationEvent 开关控制这两个属性（DevTools 移动模拟就是翻转它），会波及同进程的桌面身份页面，所以改由 `CompatRendererClient` 在平板身份文档的主 world 里按 context 安装原生 accessor：
+
+- `orientation` 取 frame widget 的（已模拟）屏幕角度，换算到 WebKit 的 [-90, 180]，与 `screen.orientation.angle` 一致：横屏 90、竖屏 0。
+- `onorientationchange` 按 EventHandler 语义保存对象、其他值变为 null；`screen.orientation` 的 change 来自同一次 widget 方向更新，据此在 window 上派发 `orientationchange`。Event 构造器和 `dispatchEvent` 在页面脚本运行前取得。与原生实现的差别：事件 `isTrusted` 为 false，handler 的监听位置固定在页面所有监听器之前。
+- 桌面身份不暴露这两个属性，与桌面 Chrome 一致。
+
 **`window.chrome`**：通过 renderer 原生绑定建立（`CompatRendererClient`），不注入页面脚本——注入的 JS 对象无法得到正确的绑定寿命和 world 控制。
 
 | 接口 | 行为 |
