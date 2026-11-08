@@ -1417,17 +1417,13 @@ html.layout-compact .admin-section-header {
   position: absolute;
   inset: 0 0 16px;
   z-index: 1300;
-  background: rgba(240, 243, 248, 0.72);
+  background: rgba(240, 243, 248, 0.86);
   backdrop-filter: blur(24px) saturate(1.2);
   color: #19283d;
   display: flex;
   flex-direction: column;
   padding: 28px 40px;
   overflow: hidden;
-}
-.workspace-overlay[data-theme='dark'] {
-  background: rgba(16, 18, 24, 0.72);
-  color: #edf0f5;
 }
 .launcher {
   animation: launcher-open 160ms ease-out both;
@@ -1991,10 +1987,6 @@ html.layout-compact .admin-section-header {
   color: inherit;
   padding: 8px;
   overflow: hidden;
-}
-.launcher[data-theme='dark'] .launcher-space-card,
-.launcher[data-theme='dark'] .launcher-space-new {
-  background: rgba(255, 255, 255, 0.08);
 }
 .launcher-space-new.MuiButtonBase-root {
   flex-direction: row;

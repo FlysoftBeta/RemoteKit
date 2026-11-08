@@ -266,16 +266,7 @@ export function WindowDragProvider({
                 <>
                   <div
                     className="window-drag-ghost"
-                    style={{
-                      left: Math.max(
-                        0,
-                        Math.min((drag.x + 14) / uiScale(), window.innerWidth / uiScale() - 192),
-                      ),
-                      top: Math.max(
-                        0,
-                        Math.min((drag.y + 14) / uiScale(), window.innerHeight / uiScale() - 136),
-                      ),
-                    }}
+                    style={ghostPosition(drag.x / uiScale(), drag.y / uiScale())}
                   >
                     {win && snapshots.get(win.id) ? (
                       <img src={snapshots.get(win.id)} alt="" />
@@ -325,4 +316,15 @@ export function WindowDragProvider({
       </ItemDragContext.Provider>
     </WindowDragContext.Provider>
   );
+}
+
+const GHOST = { width: 180, height: 124, gap: 16 };
+// Above the pointer so neither the preview nor a finger covers the drop target under it.
+function ghostPosition(x: number, y: number) {
+  const width = window.innerWidth / uiScale();
+  const above = y - GHOST.gap - GHOST.height;
+  return {
+    left: Math.max(0, Math.min(x - GHOST.width / 2, width - GHOST.width)),
+    top: above >= 0 ? above : y + GHOST.gap,
+  };
 }

@@ -18,7 +18,6 @@ import {
   MenuItem,
   TextField,
   Typography,
-  useTheme,
 } from '@mui/material';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LauncherItem, ProductState, WindowPlacement } from '../../shared/product';
@@ -64,7 +63,6 @@ export function Launcher({
   navigate(value: string, placement?: WindowPlacement): Promise<void>;
   exiting?: boolean;
 }) {
-  const theme = useTheme();
   const [newTarget, setNewTarget] = useState(false);
   useEffect(() => {
     if (!exiting) setNewTarget(false);
@@ -176,7 +174,6 @@ export function Launcher({
   return (
     <div
       className={`workspace-overlay launcher${exiting ? ' overlay-exiting' : ''}${dragging && 'item' in dragging ? ' launcher-lifted' : ''}`}
-      data-theme={theme.palette.mode}
       role="dialog"
       aria-label="开始屏幕"
       ref={host}
