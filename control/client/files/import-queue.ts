@@ -13,12 +13,11 @@ interface ImportJob {
 }
 interface ImportBatch {
   jobs: ImportJob[];
-  groupId: string | null;
+  origin: LibraryMethods['library.import']['params']['origin'];
   afterId?: string;
 }
 interface ImportState {
   remaining: number;
-  picking: boolean;
   busy: boolean;
   error?: string;
 }
@@ -39,7 +38,7 @@ export class ImportQueue extends Store<ImportState> {
     private readonly services: ImportServices,
     private readonly destination: 'library' | 'basket',
   ) {
-    super({ remaining: 0, picking: false, busy: false });
+    super({ remaining: 0, busy: false });
   }
   configure(online: boolean, scope: string | undefined) {
     if (scope !== this.scope) this.discard();
@@ -47,7 +46,7 @@ export class ImportQueue extends Store<ImportState> {
     this.online = online;
     if (!online) this.controller?.abort();
   }
-  enqueue = (files: File[], basketSize: number, chooseGroup: boolean, afterId?: string) => {
+  enqueue = (files: File[], basketSize: number, origin: ImportBatch['origin'], afterId?: string) => {
     if (!files.length || this.batch) return;
     const maxFiles = this.destination === 'basket' ? 64 - basketSize : 64;
     if (files.length > maxFiles || files.some((file) => file.size > FILE_LIMITS.maxFileBytes)) {
@@ -55,22 +54,16 @@ export class ImportQueue extends Store<ImportState> {
     }
     this.batch = {
       jobs: files.map((file) => ({ file, operationId: operationId() })),
-      groupId: null,
+      origin: { ...origin },
       afterId,
     };
-    this.publish({ remaining: files.length, picking: chooseGroup, busy: false });
-    if (!chooseGroup) void this.upload();
-  };
-  choose = (groupId: string | null) => {
-    if (!this.batch) return;
-    this.batch.groupId = groupId;
-    this.publish({ ...this.getSnapshot(), picking: false });
+    this.publish({ remaining: files.length, busy: false });
     void this.upload();
   };
   discard = () => {
     this.controller?.abort();
     this.batch = undefined;
-    this.publish({ remaining: 0, picking: false, busy: false });
+    this.publish({ remaining: 0, busy: false });
   };
   dispose = () => {
     this.online = false;
@@ -93,7 +86,7 @@ export class ImportQueue extends Store<ImportState> {
           operationId: job.operationId,
           assetId: job.assetId,
           name: job.file.name,
-          groupId: batch.groupId,
+          origin: batch.origin,
           destination: this.destination,
           afterId: batch.afterId,
         });
@@ -113,7 +106,7 @@ export class ImportQueue extends Store<ImportState> {
     } finally {
       this.controller = undefined;
       if (this.batch === batch) this.publish({ ...this.getSnapshot(), busy: false });
-      else if (this.batch && !this.getSnapshot().picking) void this.upload();
+      else if (this.batch) void this.upload();
     }
   };
 }

@@ -45,6 +45,7 @@ function environment(t: TestContext) {
     isConnected = true;
     width = 0;
     height = 0;
+    offsetWidth = 320;
     videoWidth = 1296;
     videoHeight = 488;
     srcObject: unknown;
@@ -193,6 +194,17 @@ test('video crop scales only atlas ROI against actual client bounds, including n
   assert.equal(videoPlaneGeometry({ ...first, x: 1290 }, layout, { width: 320, height: 180 }), undefined);
   assert.equal(presentationBarrier({ ...key, barrierId: 1 }), undefined);
   assert.deepEqual(presentationBarrier(key), key);
+});
+
+test('fractional flex bounds do not masquerade as UI scaling on the other axis', (t) => {
+  const f = environment(t);
+  f.canvases[0].getBoundingClientRect = () => ({ left: 10, top: 20, width: 320.25, height: 180 });
+  f.authorize();
+  const video = f.videos[1];
+  assert.equal(video.parentElement?.style.width, '320.25px');
+  assert.equal(video.parentElement?.style.height, '180px');
+  assert.equal(video.style.height, '183px');
+  assert.equal(video.style.top, '-1.5px');
 });
 
 test('video FPS and feedback count compositor deltas rather than rVFC callback count', () => {

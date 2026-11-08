@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, useSyncExternalStore } from 'react';
 import type { FileChannel } from './file-channel';
 import { LibraryStore, type LibraryRequest } from './library-store';
+import type { ProductState } from '../../shared/product';
 export type { LibraryRequest } from './library-store';
 export function useFileLibrary(
   request: LibraryRequest,
@@ -9,6 +10,7 @@ export function useFileLibrary(
   enabled: boolean,
   identity: string | undefined,
   requestIds: string[],
+  product?: Pick<ProductState, 'workspace'> | null,
 ) {
   const [store] = useState(() => new LibraryStore(request, rpc));
   useEffect(() => {
@@ -23,7 +25,9 @@ export function useFileLibrary(
   );
   return {
     ...state,
+    apps: product?.workspace.apps ?? [],
     refresh: store.refresh,
+    recordUsage: store.recordUsage,
     mutate: store.mutate,
     select: store.select,
     cancelSelection: store.cancelSelection,

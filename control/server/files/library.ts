@@ -145,10 +145,7 @@ export class FileLibrary {
     const snapshot = this.repository.snapshot(tenant);
     return new Set(
       snapshot.entries
-        .filter(
-          (entry) =>
-            entry.partitionId === null && entry.source !== null && sourceExcluded(snapshot, entry.source),
-        )
+        .filter((entry) => entry.source !== null && sourceExcluded(snapshot, entry.source))
         .map((entry) => entry.id),
     );
   }

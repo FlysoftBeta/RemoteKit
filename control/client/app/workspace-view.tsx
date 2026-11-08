@@ -27,7 +27,7 @@ import { setUiScale } from './ui-scale';
 import { FileLibraryContext, useFileLibrary, type LibraryRequest } from '../files/file-library-state';
 import { BlankScreen, RevealScreen } from '../auth/lock-screen';
 import type { AudioChannels } from '../media/audio-output';
-import { PageDialogs, SettingsDialog, type Action } from './product-dialogs';
+import { PageDialogs, type Action } from './product-dialogs';
 import { SecuritySettings } from '../auth/security-settings';
 import { SessionImportSettings, type SessionImportCall } from './session-import';
 import { UnlockView } from '../auth/unlock-view';
@@ -35,7 +35,18 @@ import { useAutoFullscreen } from './use-auto-fullscreen';
 import { useViewerSession } from './use-viewer-session';
 import { ViewerSession } from '../viewer-session';
 import { selectVisibility } from './visibility';
-import { WindowDivider, WindowFrame } from './window-frame';
+import { WindowFrame } from './window-frame';
+import { WindowDivider } from './window-divider';
+import { Launcher } from './launcher';
+import { launcherActions, launcherNavigation } from './launcher-actions';
+import { SpaceSwitcher } from './space-switcher';
+import { SpaceSnapshots } from './space-snapshots';
+import { HomeBar } from './home-bar';
+import { SettingsApp } from './settings-app';
+import { AudioControls } from './audio-controls';
+import { appName } from './app-icon';
+import type { WindowPlacement } from '../../shared/product';
+import { waitForWorkspaceRevision, type WorkspaceCall } from './window-state';
 
 const FULLSCREEN_EXIT_ANCHORS = ['top-left', 'top', 'top-right'] as const;
 
@@ -48,14 +59,24 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
   const operationState = useSyncExternalStore(media.operations.subscribe, media.operations.getSnapshot);
   const { state, pending: pendingOperations } = operationState;
   const viewportNotice = useSyncExternalStore(media.viewport.subscribe, media.viewport.getSnapshot);
-  const [settings, setSettings] = useState(false);
+  const [overlay, setOverlay] = useState<{ kind: 'launcher' | 'switcher'; placement?: WindowPlacement }>();
+  const [visibleLauncher, setVisibleLauncher] = useState<typeof overlay>();
+  useEffect(() => {
+    if (overlay?.kind === 'launcher') {
+      setVisibleLauncher(overlay);
+      return;
+    }
+    const timer = setTimeout(() => setVisibleLauncher(undefined), overlay ? 0 : 160);
+    return () => clearTimeout(timer);
+  }, [overlay]);
+  const [snapshots] = useState(() => new SpaceSnapshots());
   const [adminRequested, setAdmin] = useState(false);
   const admin = adminRequested && !!state?.user.isAdmin;
   const [audioSaving, setAudioSaving] = useState(false);
   const [audioError, setAudioError] = useState('');
-  const [focusAddress, setFocusAddress] = useState<string | null>(null);
   const [width, setWidth] = useState(0);
   const shell = useRef<HTMLElement>(null);
+  const previousSpace = useRef<{ id: string | null; windowIds: string[] } | undefined>(undefined);
   const audioPending = useRef(false);
   const connection = useRef(media.control);
   const showShell = !!state && !localLock && auth?.locked === false;
@@ -91,10 +112,10 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
   useEffect(() => {
     if (status === 'expired') expired();
   }, [status, expired]);
-  useAutoFullscreen(showShell && state.workspace.settings.autoFullscreen === true);
-  const scale = state?.workspace.settings.uiScale ?? 1;
+  useAutoFullscreen(showShell && state.workspace.settings.workspace.autoFullscreen === true);
+  const scale = state?.workspace.settings.workspace.uiScale ?? 1;
   const insets = useTopInsetProbe();
-  const deadZone = deadZoneHeight(state?.workspace.settings.topDeadZone ?? 'off', insets);
+  const deadZone = deadZoneHeight(state?.workspace.settings.workspace.topDeadZone ?? 'off', insets);
   useLayoutEffect(() => {
     setUiScale(scale);
   }, [scale]);
@@ -118,7 +139,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
       setWidth(width);
       media.viewport.measure(
         width,
-        height,
+        Math.max(1, height - 16),
         (window.devicePixelRatio || 1) * scale,
         document.visibilityState !== 'hidden',
       );
@@ -140,14 +161,57 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     };
   }, [showShell, media, scale, deadZone]);
   const onGeometry = media.viewport.setGeometry;
-  const action: Action = media.operations.action;
+  const action: Action = useCallback(
+    async (command) => {
+      const current = media.operations.getSnapshot().authoritative?.workspace;
+      if (
+        current &&
+        shell.current &&
+        [
+          'window.open',
+          'window.focus',
+          'window.place',
+          'space.activate',
+          'space.close',
+          'tab.create',
+          'tab.activate',
+        ].includes(command.type)
+      ) {
+        const space = current.spaces.find((space) => space.id === current.activeSpaceId);
+        if (space) snapshots.capture(shell.current, space.windowIds);
+      }
+      return media.operations.action(command);
+    },
+    [media, snapshots],
+  );
+  const call: WorkspaceCall = useCallback((method, params) => media.control.request(method, params), [media]);
+  useEffect(() => {
+    if (!overlay) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setOverlay(undefined);
+      }
+    };
+    document.addEventListener('keydown', escape, true);
+    return () => document.removeEventListener('keydown', escape, true);
+  }, [overlay]);
+  useLayoutEffect(() => {
+    const workspace = state?.workspace;
+    if (previousSpace.current && previousSpace.current.id !== workspace?.activeSpaceId && shell.current)
+      snapshots.capture(shell.current, previousSpace.current.windowIds);
+    const space = workspace?.spaces.find((space) => space.id === workspace.activeSpaceId);
+    previousSpace.current = { id: workspace?.activeSpaceId ?? null, windowIds: space?.windowIds ?? [] };
+    snapshots.retain(state?.workspace.windows.map((win) => win.id) ?? []);
+  }, [state?.workspace.activeSpaceId, state?.workspace.windows, snapshots]);
   const report = media.workspace.report;
   const saveAudio = (channels: AudioChannels) => {
     if (audioPending.current || status !== 'online' || !snapshot.authorization.ready) return;
     audioPending.current = true;
     setAudioSaving(true);
     setAudioError('');
-    void action({ type: 'settings.update', settings: { audioChannels: channels } })
+    void action({ type: 'settings.update', settings: { workspace: { audioChannels: channels } } })
       .catch(() => {
         setAudioError('声音设置未保存，请重试');
       })
@@ -206,12 +270,13 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     showShell,
     auth?.user.id,
     state?.fileRequests.map((request) => request.id) ?? [],
+    state,
   );
   const audioBlocked =
     productReady &&
     media.observations.audio.state === 'blocked' &&
-    (state?.workspace.settings.audioChannels?.left !== false ||
-      state?.workspace.settings.audioChannels?.right !== false);
+    (state?.workspace.settings.workspace.audioChannels?.left !== false ||
+      state?.workspace.settings.workspace.audioChannels?.right !== false);
   useFloatingAction(
     'fullscreen',
     fullscreenTarget
@@ -232,7 +297,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
     audioBlocked
       ? {
           order: 20,
-          anchor: 'top',
+          anchor: 'bottom-right',
           label: '开启声音',
           detail: '浏览器拦截了自动播放',
           icon: 'sound',
@@ -285,10 +350,16 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
 
   const workspace = state.workspace,
     sideBySide = selectVisibility(state, width).sideBySide,
-    windows = workspace.windows,
+    activeSpace = selectVisibility(state, width).space,
+    visibility = selectVisibility(state, width),
+    windows = [...workspace.windows].sort((a, b) => {
+      const ai = activeSpace?.windowIds.indexOf(a.id) ?? -1;
+      const bi = activeSpace?.windowIds.indexOf(b.id) ?? -1;
+      return (ai < 0 ? 100 : ai) - (bi < 0 ? 100 : bi);
+    }),
     pending = workspace.pendingClose;
   const foreground =
-    !settings && !admin && !(pending && !pending.awaiting) ? selectVisibility(state, width).foreground : null;
+    !overlay && !admin && !(pending && !pending.awaiting) ? selectVisibility(state, width).foreground : null;
   const fileRequest =
     foreground?.kind === 'file'
       ? state.fileRequests.find((request) => request.id === foreground.id)
@@ -304,7 +375,7 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
           />
         )}
         <main
-          className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}`}
+          className={`viewer-shell${fullscreen ? ' remote-page-fullscreen' : ''}${windows.length ? '' : ' no-windows'}${!sideBySide && activeSpace && activeSpace.windowIds.length > 1 && !fullscreen ? ' window-pill-visible' : ''}`}
           ref={shell}
         >
           <DiagnosticCollectionView state={diagnosticState} dismiss={() => diagnostics.dismiss()} />
@@ -373,43 +444,127 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
             )}
           </div>
           <FloatingDock actions={floatingActions} />
-          <div className={`window-workspace ${sideBySide ? 'side-by-side' : ''}`}>
-            {windows.map((w, index) => (
-              <React.Fragment key={w.id}>
-                {sideBySide && index > 0 && (
-                  <WindowDivider
-                    before={windows[index - 1]}
-                    after={w}
-                    windows={workspace.windows}
-                    online={productReady}
+          {!sideBySide && activeSpace && activeSpace.windowIds.length > 1 && !fullscreen && (
+            <div className="narrow-window-switcher" aria-label="空间内窗口">
+              {activeSpace.windowIds.map((id) => {
+                const win = workspace.windows.find((win) => win.id === id)!;
+                return (
+                  <Button
+                    key={id}
+                    size="small"
+                    variant={id === activeSpace.focusedWindowId ? 'contained' : 'text'}
+                    disabled={!productReady}
+                    onClick={() => void action({ type: 'window.focus', windowId: id }).catch(report)}
+                  >
+                    {appName(workspace, win)}
+                  </Button>
+                );
+              })}
+            </div>
+          )}
+          <div
+            className={`window-workspace ${sideBySide ? 'side-by-side' : ''}${overlay ? ' space-obscured' : ''}`}
+          >
+            {windows.map((w) => {
+              const position = activeSpace?.windowIds.indexOf(w.id) ?? -1;
+              return (
+                <React.Fragment key={w.id}>
+                  {sideBySide && activeSpace && position > 0 && (
+                    <WindowDivider
+                      space={activeSpace}
+                      index={position - 1}
+                      online={productReady}
+                      action={action}
+                      report={report}
+                    />
+                  )}
+                  <WindowFrame
+                    win={w}
+                    state={state}
+                    transport={media}
                     action={action}
+                    online={productReady}
+                    call={call}
+                    weight={sideBySide && position >= 0 ? activeSpace!.weights[position] : 1}
+                    onSplit={(windowId, side) =>
+                      setOverlay({
+                        kind: 'launcher',
+                        placement: { mode: 'split', besideWindowId: windowId, side },
+                      })
+                    }
+                    settingsContent={(viewState, onState) => (
+                      <SettingsApp
+                        state={state}
+                        viewState={viewState}
+                        onState={onState}
+                        action={action}
+                        call={call}
+                        online={productReady}
+                        logout={logout}
+                        admin={() => setAdmin(true)}
+                        audio={
+                          <AudioControls
+                            channels={workspace.settings.workspace.audioChannels}
+                            online={productReady}
+                            playback={media.observations.audio.state}
+                            resume={() => media.observations.audio.resume()}
+                            save={saveAudio}
+                            busy={audioSaving}
+                            error={audioError}
+                          />
+                        }
+                        security={
+                          <SecuritySettings
+                            auth={auth}
+                            online={status === 'online'}
+                            request={authRequest}
+                            camera={camera}
+                            idle={idle}
+                            lock={() => lock('manual')}
+                          />
+                        }
+                        sessionImport={
+                          <SessionImportSettings
+                            online={productReady}
+                            call={sessionImportCall}
+                            action={action}
+                            windowId={
+                              workspace.windows
+                                .filter((win) => win.appId === 'browser')
+                                .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0]?.id ?? null
+                            }
+                            opened={() => {}}
+                          />
+                        }
+                        diagnostics={
+                          <DiagnosticSettings
+                            state={diagnosticState}
+                            online={status === 'online'}
+                            start={() => {
+                              void diagnostics.start(diagnosticEnvironment());
+                            }}
+                          />
+                        }
+                      />
+                    )}
+                    fileChooser={
+                      fileRequest?.windowId === w.id ? (
+                        <FileChooserDialog
+                          key={fileRequest.id}
+                          request={fileRequest}
+                          transport={media}
+                          viewId={workspace.tabs.find((tab) => tab.id === fileRequest.tabId)?.webviewId}
+                        />
+                      ) : undefined
+                    }
                     report={report}
+                    onGeometry={onGeometry}
+                    visible={visibility.visibleWindowIds.includes(w.id)}
+                    fullscreen={fullscreen?.windowId === w.id}
                   />
-                )}
-                <WindowFrame
-                  win={w}
-                  state={state}
-                  transport={media}
-                  action={action}
-                  online={productReady}
-                  onSettings={() => setSettings(true)}
-                  onAdmin={() => setAdmin(true)}
-                  onLogout={logout}
-                  report={report}
-                  onGeometry={onGeometry}
-                  focusAddress={focusAddress}
-                  visible={
-                    fullscreen
-                      ? w.id === fullscreen.windowId
-                      : sideBySide || w.id === workspace.activeWindowId
-                  }
-                  fullscreen={fullscreen?.windowId === w.id}
-                  audioSaving={audioSaving}
-                  audioError={audioError}
-                  saveAudio={saveAudio}
-                />
-              </React.Fragment>
-            ))}
+                </React.Fragment>
+              );
+            })}
             {windows.length === 0 && (
               <div className="workspace-empty">
                 <div className="workspace-empty-body">
@@ -418,15 +573,15 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
                     没有打开的窗口
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    新建一个窗口开始浏览
+                    从开始屏幕打开 App
                   </Typography>
                   <Button
                     variant="contained"
                     startIcon={<Add />}
                     disabled={!productReady}
-                    onClick={() => void action({ type: 'window.create' }).catch(report)}
+                    onClick={() => setOverlay({ kind: 'launcher' })}
                   >
-                    新建窗口
+                    打开开始屏幕
                   </Button>
                   <div className="workspace-empty-links">
                     {state.user.isAdmin && (
@@ -455,14 +610,6 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
               activeId={foreground?.kind === 'page' ? foreground.id : null}
             />
           )}
-          {fileRequest && (
-            <FileChooserDialog
-              key={fileRequest.id}
-              request={fileRequest}
-              transport={media}
-              viewId={workspace.tabs.find((tab) => tab.id === fileRequest.tabId)?.webviewId}
-            />
-          )}
           {state.user.isAdmin && (
             <AdminConsole
               open={admin}
@@ -472,50 +619,68 @@ export function WorkspaceView({ logout, expired }: { logout: () => void; expired
               onClose={() => setAdmin(false)}
             />
           )}
-          <SettingsDialog
-            online={productReady}
-            state={state}
-            open={settings}
-            onClose={() => setSettings(false)}
-            action={action}
-            logout={logout}
-            sessionImport={
-              settings && (
-                <SessionImportSettings
-                  online={productReady}
-                  call={sessionImportCall}
-                  action={action}
-                  windowId={state.workspace.activeWindowId}
-                  opened={() => setSettings(false)}
-                />
-              )
-            }
-            diagnostics={
-              settings && (
-                <DiagnosticSettings
-                  state={diagnosticState}
-                  online={status === 'online'}
-                  start={() => {
-                    void diagnostics.start(diagnosticEnvironment()).then((started) => {
-                      if (started) setSettings(false);
-                    });
-                  }}
-                />
-              )
-            }
-            security={
-              settings && (
-                <SecuritySettings
-                  auth={auth}
-                  online={status === 'online'}
-                  request={authRequest}
-                  camera={camera}
-                  idle={idle}
-                  lock={() => lock('manual')}
-                />
-              )
-            }
+          <HomeBar
+            launcher={() => setOverlay((current) => (current ? undefined : { kind: 'launcher' }))}
+            switcher={() => {
+              if (shell.current && activeSpace) snapshots.capture(shell.current, activeSpace.windowIds);
+              setOverlay({ kind: 'switcher' });
+            }}
+            previous={() => {
+              const previous = [...workspace.spaces]
+                .filter((space) => space.id !== workspace.activeSpaceId)
+                .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+              if (previous) void action({ type: 'space.activate', spaceId: previous.id }).catch(report);
+            }}
           />
+          {visibleLauncher?.kind === 'launcher' && (
+            <Launcher
+              state={state}
+              call={call}
+              placement={visibleLauncher.placement}
+              exiting={overlay?.kind !== 'launcher'}
+              online={productReady}
+              close={() => setOverlay(undefined)}
+              navigate={async (value, placement) => {
+                await action(launcherNavigation(workspace, value, placement));
+              }}
+              activate={async (item, placement, newWindow) => {
+                const commands = launcherActions(workspace, item, placement, newWindow);
+                for (const command of commands) {
+                  const receipt = await action(command);
+                  if (item.kind === 'file' && item.entryId) {
+                    const authoritative = await waitForWorkspaceRevision(
+                      media,
+                      receipt.revision ?? workspace.revision,
+                    );
+                    const win = [...authoritative.windows]
+                      .filter((win) => win.appId === 'files')
+                      .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
+                    if (win) {
+                      await call('window.state', {
+                        windowId: win.id,
+                        state: { ...win.state, previewEntryId: item.entryId },
+                      });
+                      await call('usage.record', {
+                        item: `file:${item.entryId}`,
+                        windowId: win.id,
+                        source: 'launcher',
+                      });
+                    }
+                  }
+                }
+              }}
+            />
+          )}
+          {overlay?.kind === 'switcher' && (
+            <SpaceSwitcher
+              state={state}
+              snapshots={snapshots}
+              action={action}
+              close={() => setOverlay(undefined)}
+              report={report}
+              online={productReady}
+            />
+          )}
           <Dialog
             open={productReady && !!pending && !pending.awaiting}
             onClose={() =>

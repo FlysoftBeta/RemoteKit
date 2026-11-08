@@ -1,4 +1,5 @@
 import type { Layout } from './types';
+import { uiScale } from '../app/ui-scale';
 import { surfacePixelScale } from '../input/coordinates';
 import type { PresentedPlaneSource } from './plane-source';
 import type { PlaneRenderer, VideoObservation } from './types';
@@ -45,7 +46,7 @@ export class VideoPlane {
     clip.setAttribute('aria-hidden', 'true');
     Object.assign(clip.style, {
       position: 'absolute',
-      overflow: 'hidden',
+      clipPath: 'inset(0)',
       pointerEvents: 'none',
       opacity: '0',
     });
@@ -86,7 +87,7 @@ export class VideoPlane {
     const visual = canvas.getBoundingClientRect(),
       container = parent.getBoundingClientRect();
     // Styles are layout px; client rects are visual px under the Viewer's UI scale transform.
-    const scale = canvas.offsetWidth ? visual.width / canvas.offsetWidth : 1;
+    const scale = uiScale();
     const bounds = { width: visual.width / scale, height: visual.height / scale };
     const geometry = videoPlaneGeometry(view, layout, bounds);
     if (!geometry) return false;

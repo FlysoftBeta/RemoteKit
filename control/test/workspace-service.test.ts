@@ -148,6 +148,7 @@ test('app inspection binds expiring icon tokens to tenants and installed icons r
         display: 'browser',
         themeColor: '#123456',
         iconToken: undefined,
+        iconDataUrl: `data:image/png;base64,${png.toString('base64')}`,
       },
     );
     assert.ok(info.iconToken);
@@ -304,6 +305,11 @@ test('launcher groups obey caps, favorite and organized priority, source exclusi
       collected: true,
     }));
     library.entries.push({
+      ...library.entries[20],
+      id: 'excluded-organized',
+      source: { app: 'files', channel: 'camera' },
+    });
+    library.entries.push({
       id: 'unused',
       name: 'Unused searchable file',
       assetId: 'unused-asset',
@@ -349,6 +355,10 @@ test('launcher groups obey caps, favorite and organized priority, source exclusi
     );
     assert.equal(
       items.some((item: any) => item.entryId === 'file-0'),
+      false,
+    );
+    assert.equal(
+      items.some((item: any) => item.entryId === 'excluded-organized'),
       false,
     );
     const frequent = new Set(group('frequent').map((item: any) => item.key));

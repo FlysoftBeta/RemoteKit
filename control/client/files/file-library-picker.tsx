@@ -1,15 +1,17 @@
 import { ArrowBack, CheckCircle, Search } from '@mui/icons-material';
-import { Box, Button, IconButton, InputAdornment, TextField, Typography } from '@mui/material';
+import { Box, Button, Chip, IconButton, InputAdornment, TextField, Typography } from '@mui/material';
 import { useState } from 'react';
 import type { LibraryEntry } from '../../shared/file-library';
 import { formatFileSize } from './file-format';
 import { FileTile } from './file-tile';
+import { useLibrary } from './file-library-state';
+import { filesInView, sourceAppName, sourceChannelName, sourceKey, type FilesView } from './files-app-state';
 
 const PAGE = 48;
 
 // Picks files from My Files into the basket: newest first, filter by name, several at once in
 // the order they were picked.
-export function ArchivePicker({
+export function FileLibraryPicker({
   entries,
   capacity,
   onAdd,
@@ -23,8 +25,13 @@ export function ArchivePicker({
   const [picked, setPicked] = useState<string[]>([]);
   const [query, setQuery] = useState('');
   const [limit, setLimit] = useState(PAGE);
+  const { snapshot, apps } = useLibrary();
+  const [filter, setFilter] = useState<FilesView>('all');
   const needle = query.trim().toLowerCase();
-  const shown = needle ? entries.filter((entry) => entry.name.toLowerCase().includes(needle)) : entries;
+  const allowed = new Set(snapshot ? filesInView(snapshot, filter).map((entry) => entry.id) : []);
+  const shown = entries.filter(
+    (entry) => allowed.has(entry.id) && (!needle || entry.name.toLowerCase().includes(needle)),
+  );
   const valid = picked.filter((id) => entries.some((entry) => entry.id === id));
   const full = valid.length >= capacity;
   const toggle = (id: string) =>
@@ -40,6 +47,61 @@ export function ArchivePicker({
         <Typography variant="subtitle2" sx={{ flex: 1 }}>
           从我的文件选择
         </Typography>
+      </Box>
+      <Box
+        aria-label="来源和分区筛选"
+        sx={{
+          display: 'flex',
+          overflowX: 'auto',
+          pb: 0.5,
+          '& > *': { flex: 'none' },
+          columnGap: 0.5,
+        }}
+      >
+        <Chip
+          size="small"
+          label="全部"
+          color={filter === 'all' ? 'primary' : 'default'}
+          onClick={() => {
+            setFilter('all');
+            setLimit(PAGE);
+          }}
+        />
+        {snapshot?.partitions.map((partition) => (
+          <Chip
+            key={partition.id}
+            size="small"
+            label={`分区 · ${partition.name}`}
+            color={
+              typeof filter === 'object' && 'partition' in filter && filter.partition === partition.id
+                ? 'primary'
+                : 'default'
+            }
+            onClick={() => {
+              setFilter({ partition: partition.id });
+              setLimit(PAGE);
+            }}
+          />
+        ))}
+        {snapshot?.sources.map((source) => (
+          <Chip
+            key={sourceKey(source)}
+            size="small"
+            label={[sourceAppName(source.app, apps), sourceChannelName(source)].filter(Boolean).join(' › ')}
+            color={
+              typeof filter === 'object' &&
+              'source' in filter &&
+              sourceKey(filter.source) === sourceKey(source)
+                ? 'primary'
+                : 'default'
+            }
+            sx={{ color: source.excluded ? 'text.disabled' : undefined }}
+            onClick={() => {
+              setFilter({ source });
+              setLimit(PAGE);
+            }}
+          />
+        ))}
       </Box>
       {entries.length > 6 && (
         <TextField

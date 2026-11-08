@@ -1,13 +1,16 @@
 import { formatError } from '../util/format-error';
 import { ArrowForward, Search } from '@mui/icons-material';
-import { IconButton, InputBase, Typography } from '@mui/material';
+import type { Favorite } from '../../shared/product';
+import { ButtonBase, IconButton, InputBase, Typography } from '@mui/material';
 import { useRef, useState } from 'react';
 
 export function StartPage({
   engineLabel,
   online,
   onSubmit,
+  favorites,
 }: {
+  favorites: Favorite[];
   engineLabel: string;
   online: boolean;
   onSubmit: (value: string) => Promise<void>;
@@ -77,6 +80,26 @@ export function StartPage({
         <Typography className="start-page-hint" color="text.secondary">
           使用 {engineLabel} 搜索 · 可在更多 → 设置中更改
         </Typography>
+        <div className="start-favorites">
+          {favorites.map((favorite) => (
+            <ButtonBase
+              key={favorite.id}
+              className="start-favorite"
+              disabled={!online || busy}
+              onClick={() => {
+                setBusy(true);
+                void onSubmit(favorite.url)
+                  .catch((error) => setError(formatError(error)))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              <span>★</span>
+              <Typography variant="body2" noWrap>
+                {favorite.title}
+              </Typography>
+            </ButtonBase>
+          ))}
+        </div>
         {error && (
           <Typography className="start-page-error" color="error" role="alert">
             {error}

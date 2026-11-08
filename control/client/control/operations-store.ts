@@ -83,7 +83,12 @@ export class OperationsStore extends Store<OperationsSnapshot> {
     const source = current.authoritative;
     if (!source?.operationGeneration || !this.port.ready())
       throw new RemoteKitError('unavailable', '正在连接浏览器');
-    if (Object.values(command).some((value) => typeof value === 'string' && value.startsWith('pending-')))
+    const targets = Object.entries(command)
+      .filter(([key]) => key === 'id' || key.endsWith('Id'))
+      .map(([, value]) => value);
+    if ('placement' in command && command.placement.mode === 'split')
+      targets.push(command.placement.besideWindowId);
+    if (targets.some((value) => typeof value === 'string' && /^(web:)?pending-/.test(value)))
       throw new RemoteKitError('conflict', '操作正在等待确认');
     if (current.pending.length >= 64) throw new RemoteKitError('limit_exceeded', '待确认操作过多');
     const operation: OperationIntent = {

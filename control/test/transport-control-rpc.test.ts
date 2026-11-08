@@ -46,6 +46,7 @@ function environment(t: TestContext) {
   }
   for (const [name, value] of Object.entries({
     navigator: { userAgent: 'Chrome/89.0' },
+    window: { devicePixelRatio: 1, screen: { width: 1600, height: 900 } },
     RTCPeerConnection: Peer,
     RTCRtpReceiver: { getCapabilities: () => ({ codecs: [] }) },
   })) {
@@ -256,15 +257,15 @@ test('AV sync restarts immediately once per authoritative change, while audio ch
   peers[0].onconnectionstatechange?.();
   assert.equal(rtc.confirmedAvSync, false);
   projected = structuredClone(current);
-  projected.workspace.settings.avSync = true;
+  projected.workspace.settings.workspace.avSync = true;
   workspace.operationsChanged();
   assert.equal(offers, 1);
   projected = undefined;
   current = structuredClone(current);
-  current.workspace.settings.audioChannels = { left: false, right: false };
+  current.workspace.settings.workspace.audioChannels = { left: false, right: false };
   workspace.operationsChanged();
   assert.equal(offers, 1);
-  current.workspace.settings.avSync = true;
+  current.workspace.settings.workspace.avSync = true;
   workspace.operationsChanged();
   workspace.operationsChanged();
   assert.equal(peers[0].closed, true);
@@ -276,7 +277,7 @@ test('AV sync restarts immediately once per authoritative change, while audio ch
   finish!({ ...answer, avSync: true, connectionId: 'synced' });
   await flush();
   assert.equal(rtc.confirmedAvSync, true);
-  current.workspace.settings.avSync = false;
+  current.workspace.settings.workspace.avSync = false;
   workspace.operationsChanged();
   assert.equal(offers, 2);
   peers[1].connectionState = 'connected';

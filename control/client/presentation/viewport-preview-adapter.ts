@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react';
+import { uiScale } from '../app/ui-scale';
 import { RemoteKitError } from '../../shared/errors';
 import { diagnostics } from '../media/diagnostics';
 import type { Surface } from './types';
@@ -8,6 +9,7 @@ import {
   KeyboardViewport,
   ResizePreview,
   ViewportTransition,
+  pixelAlignedViewportBounds,
   resizeSnapshotSize,
   sameViewportBounds,
   sameViewportSize,
@@ -218,16 +220,11 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
             };
       // Client rects are visual px; surfaces and element styles use layout px, which differ by the
       // Viewer's UI scale transform.
-      const scale = parent.offsetWidth ? content.width / parent.offsetWidth : 1;
-      const bounds = {
-        left: seen.left / scale,
-        top: seen.top / scale,
-        width: seen.width / scale,
-        height: seen.height / scale,
-      };
+      const scale = uiScale();
+      const bounds = pixelAlignedViewportBounds(seen, scale, window.devicePixelRatio || 1);
       const next = {
-        left: (seen.left - content.left) / scale,
-        top: (seen.top - content.top) / scale,
+        left: bounds.left - content.left / scale,
+        top: bounds.top - content.top / scale,
         width: bounds.width,
         height: bounds.height,
       };

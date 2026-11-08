@@ -1,16 +1,11 @@
 import { diagnostics } from '../media/diagnostics';
 import {
-  Add,
-  AllInboxOutlined,
   ArrowDropDown,
   CheckBoxOutlined,
   Close,
   CloudUploadOutlined,
   DeleteOutline,
   DriveFileMoveOutlined,
-  EditOutlined,
-  FolderOffOutlined,
-  FolderOutlined,
   MoreVert,
   PhotoCameraOutlined,
   Search,
@@ -26,7 +21,6 @@ import {
   Box,
   Button,
   Checkbox,
-  Chip,
   Dialog,
   DialogActions,
   DialogContent,
@@ -35,8 +29,6 @@ import {
   IconButton,
   InputAdornment,
   LinearProgress,
-  List,
-  ListItemButton,
   ListItemIcon,
   ListItemText,
   Menu,
@@ -45,9 +37,9 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import type { LibraryEntry, LibraryGroup } from '../../shared/file-library';
-import { scaledAnchor, useLayoutNarrow } from '../app/ui-scale';
+import React, { type JSX, useCallback, useEffect, useRef, useState } from 'react';
+import type { LibraryEntry } from '../../shared/file-library';
+import { scaledAnchor } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
 import { photoStatus } from './basket-items';
 import { FileBasketDialog } from './file-chooser-dialog';
@@ -57,31 +49,46 @@ import {
   basketEntries,
   fileError,
   FileDropZone,
-  GroupPicker,
+  PartitionPicker,
   useDeviceImport,
 } from './file-library-controls';
 import { useLibrary } from './file-library-state';
 import { FileRow, FileTile } from './file-tile';
-import { FileViewToggle, useFileView } from './file-view';
+import { FileViewToggle } from './file-view';
 import { PhotoCapture } from './photo-library-capture';
 import type { PhotoJob } from './photo-job-store';
 import { PhotoOptions } from './photo-options';
+import {
+  filesInView,
+  readFilesState,
+  sourceAppName,
+  sourceChannelName,
+  type FilesView,
+} from './files-app-state';
+import { FilesOrganization } from './files-organization';
 
 const PAGE_SIZE = 60;
 const MAX_BASKET = 64;
 
-// '*' is every file, null the files without a group, otherwise a group id.
-type Filter = string | null;
-
-const matches = (filter: Filter, groupId: string | null) => filter === '*' || groupId === filter;
-
-export function MyFiles({ visible }: { visible: boolean }) {
-  const { snapshot, online, refresh, mutate, photos } = useLibrary();
+export function FilesApp({
+  windowId,
+  state,
+  onState,
+  previewEntryId,
+}: {
+  windowId: string;
+  state: unknown;
+  onState(state: unknown): void;
+  previewEntryId?: string;
+}): JSX.Element {
+  const { snapshot, online, refresh, mutate, photos, recordUsage, apps } = useLibrary();
+  const restored = readFilesState(state);
   const pane = useRef<HTMLDivElement>(null);
   const [paneNarrow, setPaneNarrow] = useState(false);
-  const narrow = useLayoutNarrow() || paneNarrow;
-  const [filter, setFilter] = useState<Filter>('*');
-  const [query, setQuery] = useState('');
+  const narrow = paneNarrow;
+  const filter = restored.view;
+  const query = restored.query;
+  const setQuery = (query: string) => onState({ ...restored, query: query.slice(0, 512) });
   const [searching, setSearching] = useState(false);
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [error, setError] = useState('');
@@ -89,34 +96,42 @@ export function MyFiles({ visible }: { visible: boolean }) {
   const [selected, setSelected] = useState<string[]>();
   const [menu, setMenu] = useState<{ anchor: HTMLElement; id: string }>();
   const [uploadMenu, setUploadMenu] = useState<HTMLElement>();
-  const [camera, setCamera] = useState<{ groupId?: string | null; replace?: LibraryEntry }>();
-  const [cameraGroup, setCameraGroup] = useState(false);
+  const [camera, setCamera] = useState<{ partitionId?: string | null; replace?: LibraryEntry }>();
   const [showBasket, setShowBasket] = useState(false);
   const [preview, setPreview] = useState<LibraryEntry>();
   const [photo, setPhoto] = useState<string>();
   const [move, setMove] = useState<string[]>();
   const [deletion, setDeletion] = useState<{ ids: string[]; operationId: string }>();
-  const [groupEdit, setGroupEdit] = useState<{ group?: LibraryGroup; name: string }>();
 
-  const groups = snapshot?.groups ?? [];
+  const partitions = snapshot?.partitions ?? [];
   const basket = basketEntries(snapshot);
   const inBasket = new Set(basket.map((entry) => entry.id));
-  const catalog =
-    snapshot?.entries
-      .filter((entry) => entry.archived)
-      .sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id)) ?? [];
+  const catalog = snapshot?.entries ?? [];
   const needle = query.trim().toLowerCase();
-  const entries = catalog.filter(
-    (entry) => matches(filter, entry.groupId) && (!needle || entry.name.toLowerCase().includes(needle)),
+  const entries = (snapshot ? filesInView(snapshot, filter) : []).filter(
+    (entry) => !needle || entry.name.toLowerCase().includes(needle),
   );
+  const currentPartition =
+    typeof filter === 'object' && 'partition' in filter
+      ? partitions.find((item) => item.id === filter.partition)
+      : undefined;
   const pending = needle
     ? []
     : photos.jobs.filter(
-        (job) => job.destination === 'library' && !job.replace && matches(filter, job.groupId ?? null),
+        (job) =>
+          job.destination === 'library' &&
+          !job.replace &&
+          (filter === 'all' ||
+            filter === 'recent' ||
+            (currentPartition &&
+              job.origin.kind === 'files' &&
+              job.origin.partitionId === currentPartition.id)),
       );
-  const view = useFileView(entries);
-  const currentGroup = groups.find((group) => group.id === filter);
-  const groupOf = (id: string | null) => groups.find((group) => group.id === id)?.name ?? '未分组';
+  const view = {
+    mode: restored.layout === 'grid' ? ('cards' as const) : ('list' as const),
+    set: (mode: 'cards' | 'list') => onState({ ...restored, layout: mode === 'cards' ? 'grid' : 'list' }),
+  };
+  const partitionOf = (id: string | null) => partitions.find((item) => item.id === id)?.name ?? '';
   const disabled = !online || busy || !snapshot;
   const selecting = selected !== undefined;
   const chosen = new Set(selected);
@@ -126,34 +141,22 @@ export function MyFiles({ visible }: { visible: boolean }) {
   const reportError = useCallback((message: string) => setError(message), []);
   const upload = useDeviceImport({
     destination: 'library',
+    windowId,
     disabled,
-    initialGroup: currentGroup?.id ?? null,
+    partitionId: currentPartition?.id ?? null,
     onError: reportError,
   });
 
   useEffect(() => {
-    if (online && visible) void refresh().catch((failure) => diagnostics.record('my-files', failure));
-  }, [online, visible]);
+    if (online) void refresh().catch((failure) => diagnostics.record('my-files', failure));
+  }, [online]);
   useEffect(() => {
     const node = pane.current;
     if (!node || typeof ResizeObserver === 'undefined') return;
-    const resize = new ResizeObserver(([entry]) => setPaneNarrow(entry.contentRect.width < 640));
+    const resize = new ResizeObserver(([entry]) => setPaneNarrow(entry.contentRect.width < 600));
     resize.observe(node);
     return () => resize.disconnect();
   }, []);
-  useEffect(() => {
-    if (visible) return;
-    setCamera(undefined);
-    setCameraGroup(false);
-    setShowBasket(false);
-    setMove(undefined);
-    setGroupEdit(undefined);
-    setDeletion(undefined);
-    setMenu(undefined);
-    setUploadMenu(undefined);
-    setPreview(undefined);
-    setPhoto(undefined);
-  }, [visible]);
   // Drop selections of entries that disappeared (deleted elsewhere, filtered out).
   useEffect(() => {
     if (!selected) return;
@@ -172,8 +175,8 @@ export function MyFiles({ visible }: { visible: boolean }) {
       setBusy(false);
     }
   }
-  const selectFilter = (next: Filter) => {
-    setFilter(next);
+  const selectFilter = (next: FilesView) => {
+    onState({ ...restored, view: next });
     setLimit(PAGE_SIZE);
     setSelected(undefined);
   };
@@ -197,14 +200,23 @@ export function MyFiles({ visible }: { visible: boolean }) {
       setError(`文件篮最多放 ${MAX_BASKET} 项，还能再放 ${MAX_BASKET - order.length} 项`);
       return;
     }
-    if (fresh.length) void saveBasket([...order, ...fresh]);
+    if (fresh.length)
+      void run(async () => {
+        if (!snapshot) return;
+        await mutate(
+          'library.basket',
+          {
+            operationId: operationId(),
+            ids: [...order, ...fresh],
+            expectedRevision: snapshot.revision,
+          },
+          windowId,
+        );
+      });
   };
   const removeFromBasket = (id: string) =>
     void saveBasket(basket.map((entry) => entry.id).filter((value) => value !== id));
-  const startCamera = () => {
-    if (groups.length) setCameraGroup(true);
-    else setCamera({ groupId: null });
-  };
+  const startCamera = () => setCamera({ partitionId: currentPartition?.id ?? null });
   const visibleEntries = entries.slice(0, limit);
   const sections = new Map<string, { entries: LibraryEntry[]; jobs: PhotoJob[] }>();
   if (pending.length) sections.set('今天', { entries: [], jobs: pending });
@@ -214,21 +226,32 @@ export function MyFiles({ visible }: { visible: boolean }) {
     section.entries.push(entry);
     sections.set(key, section);
   }
-  const counts = new Map<Filter, number>([['*', catalog.length]]);
-  for (const entry of catalog) counts.set(entry.groupId, (counts.get(entry.groupId) ?? 0) + 1);
-  const filters: { value: Filter; label: string; icon: React.ReactNode }[] = [
-    { value: '*', label: '全部文件', icon: <AllInboxOutlined fontSize="small" /> },
-    { value: null, label: '未分组', icon: <FolderOffOutlined fontSize="small" /> },
-    ...groups.map((group) => ({
-      value: group.id,
-      label: group.name,
-      icon: <FolderOutlined fontSize="small" />,
-    })),
-  ];
   const heading = needle
     ? `搜索“${query.trim()}”`
-    : (filters.find((item) => item.value === filter)?.label ?? '全部文件');
-
+    : filter === 'settings'
+      ? '设置'
+      : filter === 'recent'
+        ? '最近'
+        : filter === 'all'
+          ? '全部'
+          : 'partition' in filter
+            ? (currentPartition?.name ?? '分区')
+            : [sourceAppName(filter.source.app, apps), sourceChannelName(filter.source)]
+                .filter(Boolean)
+                .join(' › ');
+  const openPreview = (entry: LibraryEntry) => {
+    if (entry.photo) setPhoto(entry.id);
+    else setPreview(entry);
+    void recordUsage(entry.id, windowId).catch((failure) => diagnostics.record('file-usage', failure));
+  };
+  const launchedPreview = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!previewEntryId || launchedPreview.current === previewEntryId) return;
+    const entry = catalog.find((item) => item.id === previewEntryId);
+    if (!entry) return;
+    launchedPreview.current = previewEntryId;
+    openPreview(entry);
+  }, [previewEntryId, snapshot]);
   const entryCheckbox = (entry: LibraryEntry, tile: boolean) => (
     <Checkbox
       className="library-check"
@@ -270,20 +293,23 @@ export function MyFiles({ visible }: { visible: boolean }) {
     ) : undefined;
   const openEntry = (entry: LibraryEntry, anchor: HTMLElement) => {
     if (selecting) toggleSelected(entry.id);
-    else if (entry.photo?.pending) setPhoto(entry.id);
+    else if (entry.photo?.pending) openPreview(entry);
     else setMenu({ anchor, id: entry.id });
   };
   const entryMeta = (entry: LibraryEntry) =>
     [
       formatFileSize(entry.size),
       formatTime(entry.createdAt),
-      groups.length && (filter === '*' || needle) ? groupOf(entry.groupId) : '',
+      entry.source
+        ? [sourceAppName(entry.source.app, apps), sourceChannelName(entry.source)].filter(Boolean).join(' / ')
+        : '已整理',
+      partitions.length && (!currentPartition || needle) ? partitionOf(entry.partitionId) : '',
     ]
       .filter(Boolean)
       .join(' · ');
 
   const header = selecting ? (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minHeight: 40 }}>
+    <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, minHeight: 40 }}>
       <Tooltip title="退出选择">
         <IconButton aria-label="退出选择" onClick={() => setSelected(undefined)}>
           <Close />
@@ -301,7 +327,7 @@ export function MyFiles({ visible }: { visible: boolean }) {
       {(
         [
           ['加入文件篮', <ShoppingBasketOutlined fontSize="small" />, () => addToBasket([...chosen]), false],
-          ['移动', <DriveFileMoveOutlined fontSize="small" />, () => setMove([...chosen]), !groups.length],
+          ['移到分区', <DriveFileMoveOutlined fontSize="small" />, () => setMove([...chosen]), false],
           [
             '删除',
             <DeleteOutline fontSize="small" />,
@@ -339,7 +365,7 @@ export function MyFiles({ visible }: { visible: boolean }) {
       )}
     </Box>
   ) : (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minHeight: 40 }}>
+    <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, minHeight: 40 }}>
       <Box sx={{ mr: 'auto', minWidth: 0 }}>
         <Typography variant="h6" sx={{ fontWeight: 600, lineHeight: 1.3 }}>
           我的文件
@@ -430,91 +456,13 @@ export function MyFiles({ visible }: { visible: boolean }) {
             <SearchField value={query} onChange={setQuery} autoFocus fullWidth />
           </Box>
         )}
-        {narrow && snapshot && (
-          <Box
-            role="tablist"
-            aria-label="分组"
-            sx={{
-              display: 'flex',
-              gap: 0.75,
-              overflowX: 'auto',
-              pt: 1,
-              pb: 0.25,
-              scrollbarWidth: 'none',
-              '&::-webkit-scrollbar': { display: 'none' },
-            }}
-          >
-            {filters.map((item) => (
-              <Chip
-                key={String(item.value)}
-                role="tab"
-                aria-selected={filter === item.value}
-                label={`${item.label} ${counts.get(item.value) ?? 0}`}
-                color={filter === item.value ? 'primary' : 'default'}
-                variant={filter === item.value ? 'filled' : 'outlined'}
-                onClick={() => selectFilter(item.value)}
-                sx={{ flex: 'none' }}
-              />
-            ))}
-            <Chip
-              icon={<Add />}
-              label="新建分组"
-              variant="outlined"
-              disabled={disabled}
-              onClick={() => setGroupEdit({ name: '' })}
-              sx={{ flex: 'none' }}
-            />
-          </Box>
-        )}
+        {narrow && <FilesOrganization mode="chips" view={filter} onView={selectFilter} />}
       </Box>
       <Box sx={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        {!narrow && snapshot && (
-          <Box
-            component="nav"
-            aria-label="分组"
-            sx={{
-              width: 220,
-              flex: 'none',
-              overflowY: 'auto',
-              borderRight: '1px solid',
-              borderColor: 'divider',
-              p: 1,
-            }}
-          >
-            <List dense disablePadding>
-              {filters.map((item) => (
-                <ListItemButton
-                  key={String(item.value)}
-                  selected={filter === item.value}
-                  onClick={() => selectFilter(item.value)}
-                  sx={{ borderRadius: '8px', mb: '2px' }}
-                >
-                  <ListItemIcon sx={{ minWidth: 34 }}>{item.icon}</ListItemIcon>
-                  <ListItemText
-                    primary={item.label}
-                    slotProps={{ primary: { noWrap: true, title: item.label } }}
-                  />
-                  <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                    {counts.get(item.value) ?? 0}
-                  </Typography>
-                </ListItemButton>
-              ))}
-              <ListItemButton
-                disabled={disabled}
-                onClick={() => setGroupEdit({ name: '' })}
-                sx={{ borderRadius: '8px', color: 'primary.main' }}
-              >
-                <ListItemIcon sx={{ minWidth: 34, color: 'inherit' }}>
-                  <Add fontSize="small" />
-                </ListItemIcon>
-                <ListItemText primary="新建分组" />
-              </ListItemButton>
-            </List>
-          </Box>
-        )}
+        {!narrow && <FilesOrganization mode="nav" view={filter} onView={selectFilter} />}
         <FileDropZone
           label="松开以上传到我的文件"
-          disabled={disabled}
+          disabled={disabled || filter === 'settings'}
           onFiles={upload.add}
           sx={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}
         >
@@ -538,25 +486,15 @@ export function MyFiles({ visible }: { visible: boolean }) {
               </Box>
             )}
             <Box sx={{ '&:not(:empty)': { pt: 1.5 } }}>{upload.view}</Box>
-            {snapshot && (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, pt: 2, pb: 0.5 }}>
-                <Typography variant="subtitle1" sx={{ fontWeight: 600 }} noWrap>
+            {snapshot && filter !== 'settings' && (
+              <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, pt: 2, pb: 0.5 }}>
+                <Typography variant="subtitle1" sx={{ fontWeight: 600, minWidth: 0 }} noWrap>
                   {heading}
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ flex: 'none' }}>
                   {entries.length} 个文件
                 </Typography>
-                {currentGroup && !needle && (
-                  <Tooltip title="重命名分组">
-                    <IconButton
-                      aria-label="重命名分组"
-                      disabled={disabled}
-                      onClick={() => setGroupEdit({ group: currentGroup, name: currentGroup.name })}
-                    >
-                      <EditOutlined fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                )}
+                <FilesOrganization mode="source" view={filter} onView={selectFilter} />
                 <Box sx={{ flex: 1 }} />
                 {narrow && <FileViewToggle mode={view.mode} onChange={view.set} />}
                 {!selecting && !!entries.length && !narrow && (
@@ -566,13 +504,16 @@ export function MyFiles({ visible }: { visible: boolean }) {
                 )}
               </Box>
             )}
-            {snapshot && !entries.length && !pending.length && (
+            {snapshot && filter !== 'settings' && !entries.length && !pending.length && (
               <EmptyLibrary
-                kind={needle ? 'search' : catalog.length ? 'group' : 'none'}
+                kind={needle ? 'search' : catalog.length ? 'partition' : 'none'}
                 disabled={disabled}
                 onUpload={upload.pick}
                 onCamera={startCamera}
               />
+            )}
+            {filter === 'settings' && (
+              <FilesOrganization mode="settings" view={filter} onView={selectFilter} />
             )}
             {[...sections].map(([label, section]) => (
               <Box key={label} component="section" aria-label={label}>
@@ -611,7 +552,7 @@ export function MyFiles({ visible }: { visible: boolean }) {
                         assetId={job.id}
                         blob={job.preview}
                         localOnly
-                        meta={groupOf(job.groupId ?? null)}
+                        meta={partitionOf(job.origin.kind === 'files' ? job.origin.partitionId : null)}
                         status={photoStatus(undefined, job)}
                         onOpen={() => setPhoto(job.id)}
                       />
@@ -651,7 +592,7 @@ export function MyFiles({ visible }: { visible: boolean }) {
                         assetId={job.id}
                         blob={job.preview}
                         localOnly
-                        meta={groupOf(job.groupId ?? null)}
+                        meta={partitionOf(job.origin.kind === 'files' ? job.origin.partitionId : null)}
                         status={photoStatus(undefined, job)}
                         leading={<Box sx={{ width: 40 }} />}
                         onOpen={() => setPhoto(job.id)}
@@ -759,7 +700,7 @@ export function MyFiles({ visible }: { visible: boolean }) {
           <ListItemText>摄像头拍照</ListItemText>
         </MenuItem>
       </Menu>
-      {visible && (
+      {
         <Menu
           anchorEl={scaledAnchor(menu?.anchor)}
           open={!!menuEntry && !disabled}
@@ -773,29 +714,27 @@ export function MyFiles({ visible }: { visible: boolean }) {
               </Typography>
               <Typography variant="caption" color="text.secondary">
                 {dayLabel(menuEntry.createdAt)} {formatTime(menuEntry.createdAt)} ·{' '}
-                {formatFileSize(menuEntry.size)} · {groupOf(menuEntry.groupId)}
+                {formatFileSize(menuEntry.size)} · {partitionOf(menuEntry.partitionId)}
               </Typography>
             </Box>,
             <Divider key="divider" />,
-            canPreviewFile(menuEntry) && (
-              <MenuItem
-                key="view"
-                onClick={() => {
-                  setPreview(menuEntry);
-                  setMenu(undefined);
-                }}
-              >
-                <ListItemIcon>
-                  <VisibilityOutlined fontSize="small" />
-                </ListItemIcon>
-                <ListItemText>查看大图</ListItemText>
-              </MenuItem>
-            ),
+            <MenuItem
+              key="view"
+              onClick={() => {
+                openPreview(menuEntry);
+                setMenu(undefined);
+              }}
+            >
+              <ListItemIcon>
+                <VisibilityOutlined fontSize="small" />
+              </ListItemIcon>
+              <ListItemText>{canPreviewFile(menuEntry) ? '查看大图' : '预览'}</ListItemText>
+            </MenuItem>,
             menuEntry.photo && (
               <MenuItem
                 key="photo"
                 onClick={() => {
-                  setPhoto(menuEntry.id);
+                  openPreview(menuEntry);
                   setMenu(undefined);
                 }}
               >
@@ -821,7 +760,6 @@ export function MyFiles({ visible }: { visible: boolean }) {
             </MenuItem>,
             <MenuItem
               key="move"
-              disabled={!groups.length}
               onClick={() => {
                 setMove([menuEntry.id]);
                 setMenu(undefined);
@@ -830,8 +768,26 @@ export function MyFiles({ visible }: { visible: boolean }) {
               <ListItemIcon>
                 <DriveFileMoveOutlined fontSize="small" />
               </ListItemIcon>
-              <ListItemText>移动到分组…</ListItemText>
+              <ListItemText>移到分区…</ListItemText>
             </MenuItem>,
+            menuEntry.partitionId !== null && (
+              <MenuItem
+                key="unpartition"
+                onClick={() => {
+                  const id = menuEntry.id;
+                  setMenu(undefined);
+                  void run(async () => {
+                    await mutate('library.move', {
+                      operationId: operationId(),
+                      ids: [id],
+                      partitionId: null,
+                    });
+                  });
+                }}
+              >
+                移出分区
+              </MenuItem>
+            ),
             <MenuItem
               key="select"
               onClick={() => {
@@ -860,42 +816,34 @@ export function MyFiles({ visible }: { visible: boolean }) {
             </MenuItem>,
           ]}
         </Menu>
-      )}
-      {visible && camera && (
-        <PhotoCapture destination="library" {...camera} onClose={() => setCamera(undefined)} />
-      )}
-      {visible && cameraGroup && (
-        <GroupPicker
-          title="照片保存到哪个分组？"
-          groups={groups}
-          initial={currentGroup?.id ?? null}
-          disabled={disabled}
-          onClose={() => setCameraGroup(false)}
-          onChoose={(groupId) => {
-            setCameraGroup(false);
-            setCamera({ groupId });
-          }}
+      }
+      {camera && (
+        <PhotoCapture
+          windowId={windowId}
+          destination="library"
+          {...camera}
+          onClose={() => setCamera(undefined)}
         />
       )}
-      {visible && move && (
-        <GroupPicker
+      {move && (
+        <PartitionPicker
           title={move.length > 1 ? `移动 ${move.length} 个文件` : '移动文件'}
-          groups={groups}
+          partitions={partitions}
           initial={
-            move.length === 1 ? (catalog.find((entry) => entry.id === move[0])?.groupId ?? null) : null
+            move.length === 1 ? (catalog.find((entry) => entry.id === move[0])?.partitionId ?? null) : null
           }
           onClose={() => setMove(undefined)}
-          onChoose={(groupId) => {
+          onChoose={(partitionId) => {
             const ids = move;
             setMove(undefined);
             void run(async () => {
-              await mutate('library.move', { operationId: operationId(), ids, groupId });
+              await mutate('library.move', { operationId: operationId(), ids, partitionId });
               setSelected(undefined);
             });
           }}
         />
       )}
-      {visible && deletion && (
+      {deletion && (
         <Dialog
           open
           fullWidth
@@ -942,60 +890,44 @@ export function MyFiles({ visible }: { visible: boolean }) {
           </DialogActions>
         </Dialog>
       )}
-      {visible && groupEdit && (
-        <Dialog open fullWidth maxWidth="xs" onClose={() => setGroupEdit(undefined)}>
-          <Box
-            component="form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (disabled || !groupEdit.name.trim()) return;
-              const { group, name } = groupEdit;
-              setGroupEdit(undefined);
-              void run(async () => {
-                await mutate('library.group', {
-                  operationId: operationId(),
-                  id: group?.id,
-                  name: name.trim(),
-                });
-              });
-            }}
-          >
-            <DialogTitle>{groupEdit.group ? '重命名分组' : '新建分组'}</DialogTitle>
-            <DialogContent>
-              <TextField
-                autoFocus
-                fullWidth
-                label="分组名称"
-                size="small"
-                value={groupEdit.name}
-                slotProps={{ htmlInput: { maxLength: 80 } }}
-                sx={{ mt: 1 }}
-                onChange={(event) => setGroupEdit({ ...groupEdit, name: event.target.value })}
-              />
-            </DialogContent>
-            <DialogActions>
-              <Button onClick={() => setGroupEdit(undefined)}>取消</Button>
-              <Button type="submit" variant="contained" disabled={disabled || !groupEdit.name.trim()}>
-                保存
-              </Button>
-            </DialogActions>
-          </Box>
-        </Dialog>
-      )}
-      {visible && (photoEntry || photoJob) && (
+      {(photoEntry || photoJob) && (
         <PhotoDialog
           entry={photoEntry}
           job={photoJob}
           disabled={disabled}
           onRetake={(entry) => {
             setPhoto(undefined);
-            setCamera({ replace: entry, groupId: entry.groupId });
+            setCamera({ replace: entry, partitionId: entry.partitionId });
           }}
           onClose={() => setPhoto(undefined)}
         />
       )}
-      {visible && showBasket && <FileBasketDialog onClose={() => setShowBasket(false)} />}
-      {visible && preview && <FileImagePreview entry={preview} onClose={() => setPreview(undefined)} />}
+      {showBasket && <FileBasketDialog windowId={windowId} onClose={() => setShowBasket(false)} />}
+      {preview &&
+        (canPreviewFile(preview) ? (
+          <FileImagePreview entry={preview} onClose={() => setPreview(undefined)} />
+        ) : (
+          <Dialog open fullWidth maxWidth="xs" onClose={() => setPreview(undefined)}>
+            <DialogTitle sx={{ overflowWrap: 'anywhere' }}>{preview.name}</DialogTitle>
+            <DialogContent>
+              <Typography>
+                {preview.type || '文件'} · {formatFileSize(preview.size)}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                此类型暂不支持内容预览，可加入文件篮供网页选择。
+              </Typography>
+            </DialogContent>
+            <DialogActions>
+              <Button
+                disabled={disabled || inBasket.has(preview.id)}
+                onClick={() => addToBasket([preview.id])}
+              >
+                加入文件篮
+              </Button>
+              <Button onClick={() => setPreview(undefined)}>返回</Button>
+            </DialogActions>
+          </Dialog>
+        ))}
     </Box>
   );
 }
@@ -1054,14 +986,14 @@ function EmptyLibrary({
   onUpload,
   onCamera,
 }: {
-  kind: 'none' | 'group' | 'search';
+  kind: 'none' | 'partition' | 'search';
   disabled: boolean;
   onUpload: () => void;
   onCamera: () => void;
 }) {
   const text = {
     none: ['还没有文件', '上传文件或拍照，之后在网页里上传时可以直接选用。也可以把文件拖到这里。'],
-    group: ['这里还没有文件', '上传到这个分组，或把其他文件移动过来。'],
+    partition: ['这里还没有文件', '上传到这个分区，或把其他文件移动过来。'],
     search: ['没有找到匹配的文件', '换个关键词试试。'],
   }[kind];
   return (
@@ -1071,7 +1003,7 @@ function EmptyLibrary({
         display: 'flex',
         flexDirection: 'column',
         alignItems: 'center',
-        gap: 1,
+        columnGap: 1,
         textAlign: 'center',
       }}
     >
@@ -1083,7 +1015,15 @@ function EmptyLibrary({
         {text[1]}
       </Typography>
       {kind !== 'search' && (
-        <Box sx={{ display: 'flex', gap: 1, mt: 1.5, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <Box
+          sx={{
+            display: 'flex',
+            columnGap: 1,
+            mt: 1.5,
+            flexWrap: 'wrap',
+            justifyContent: 'center',
+          }}
+        >
           <Button
             variant="contained"
             startIcon={<UploadFileOutlined />}

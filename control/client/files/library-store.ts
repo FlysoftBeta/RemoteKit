@@ -2,19 +2,20 @@ import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
 import { RemoteKitError } from '../../shared/errors';
 import type { LibraryMethods, LibrarySnapshot, SelectionState } from '../../shared/file-library';
+import type { SocketMethods } from '../../shared/product';
 import { operationId } from '../control/product-operations';
 import { FileThumbnails } from './file-thumbnails';
 import type { FileChannel } from './file-channel';
 import { PhotoJobStore } from './photo-job-store';
 
-export type LibraryRequest = <K extends keyof LibraryMethods>(
+type ClientMethods = LibraryMethods & Pick<SocketMethods, 'usage.record'>;
+export type LibraryRequest = <K extends keyof ClientMethods>(
   method: K,
-  params: LibraryMethods[K]['params'],
-) => Promise<LibraryMethods[K]['result']>;
+  params: ClientMethods[K]['params'],
+) => Promise<ClientMethods[K]['result']>;
 interface Checkout {
   operationId: string;
   entryIds: string[];
-  groupId: string | null;
   selectionId?: string;
   state: SelectionState;
   active: boolean;
@@ -126,17 +127,28 @@ export class LibraryStore extends Store<LibraryState> {
       | 'library.import'
       | 'library.replace'
       | 'library.basket'
-      | 'library.group'
+      | 'library.partition'
+      | 'library.partitionDelete'
+      | 'library.source'
+      | 'library.sourcePurge'
+      | 'library.basketPartition'
       | 'library.move'
       | 'library.delete',
   >(
     method: K,
     params: LibraryMethods[K]['params'],
+    windowId?: string,
   ) => {
     const epoch = this.epoch;
+    const before = new Set(this.librarySnapshot?.basket);
     try {
       const next = await this.request(method, params);
       this.accept(next, epoch);
+      if (windowId && this.current(epoch) && (method === 'library.import' || method === 'library.basket')) {
+        for (const id of next.basket.filter((id) => !before.has(id))) {
+          void this.recordUsage(id, windowId).catch((error) => diagnostics.record('file-usage', error));
+        }
+      }
       return next;
     } catch (error) {
       if (
@@ -151,6 +163,9 @@ export class LibraryStore extends Store<LibraryState> {
       throw error;
     }
   };
+
+  recordUsage = (entryId: string, windowId: string) =>
+    this.request('usage.record', { item: `file:${entryId}`, windowId });
 
   refresh = async () => {
     const epoch = this.epoch;
@@ -170,7 +185,6 @@ export class LibraryStore extends Store<LibraryState> {
             operationId: transaction.operationId,
             requestId,
             entryIds: transaction.entryIds,
-            groupId: transaction.groupId,
           });
           transaction.selectionId = selectionId;
         } catch (error) {
@@ -202,13 +216,12 @@ export class LibraryStore extends Store<LibraryState> {
     }
   }
 
-  select = async (requestId: string, entryIds: string[], groupId: string | null) => {
+  select = async (requestId: string, entryIds: string[]) => {
     let transaction = this.checkouts.get(requestId);
     if (!transaction) {
       transaction = {
         operationId: operationId(),
         entryIds: [...entryIds],
-        groupId,
         state: 'pending',
         active: false,
         nextCheck: 0,

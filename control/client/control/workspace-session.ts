@@ -136,13 +136,13 @@ export class WorkspaceSession extends Store<WorkspaceSnapshot> {
     const { state, authoritative } = this.ports.operations.getSnapshot();
     this.availabilityChanged();
     if (state) {
-      this.ports.setAudioChannels(state.workspace.settings.audioChannels);
+      this.ports.setAudioChannels(state.workspace.settings.workspace.audioChannels);
       const rtc = this.ports.rtc;
       if (
         rtc.getSnapshot().phase === 'connected' &&
         rtc.confirmedAvSync !== undefined &&
         authoritative &&
-        authoritative.workspace.settings.avSync !== rtc.confirmedAvSync
+        authoritative.workspace.settings.workspace.avSync !== rtc.confirmedAvSync
       )
         rtc.restart('音视频同步设置已变更');
     }

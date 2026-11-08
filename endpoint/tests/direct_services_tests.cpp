@@ -26,8 +26,15 @@ Json Action(unsigned n = 0) {
 int main() {
   Check(remotekit::ProductActionEnvelope(Action(), 200), "valid action");
   auto invalid = Action();
-  invalid["action"]["type"] = "session.snapshot";
-  Check(!remotekit::ProductActionEnvelope(invalid, 200), "reject nonproduct method");
+  invalid["action"]["type"] = "window.open";
+  Check(remotekit::ProductActionEnvelope(invalid, 200), "forward workspace action");
+  invalid["action"]["type"] = "future.action";
+  Check(remotekit::ProductActionEnvelope(invalid, 200), "Control owns action semantics");
+  for (const auto& type :
+       {Json(), Json(1), Json(""), Json("bad type"), Json(std::string(129, 'a'))}) {
+    invalid["action"]["type"] = type;
+    Check(!remotekit::ProductActionEnvelope(invalid, 200), "reject malformed action type");
+  }
   invalid = Action();
   invalid["operationId"] = "not-uuid";
   Check(!remotekit::ProductActionEnvelope(invalid, 200), "reject invalid operation id");

@@ -32,6 +32,7 @@ import { useLibrary } from './file-library-state';
 import { FileRow, FileTile, type FileStatus } from './file-tile';
 import type { PhotoJob } from './photo-job-store';
 import { PhotoOptions } from './photo-options';
+import { BasketPartitionMenu } from './partition-menu';
 import { SortableFileItems, type FileView } from './sortable-file-items';
 
 export type BasketPanel = { id: string; view: 'photo' | 'image' };
@@ -273,6 +274,7 @@ export function BasketItems({
             </Typography>
           </Box>,
           <Divider key="divider" />,
+          <BasketPartitionMenu key="partition" ids={[menuItem.id]} disabled={locked} />,
           canPreviewFile(menuItem.entry) && (
             <MenuItem
               key="view"

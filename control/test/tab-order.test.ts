@@ -64,7 +64,8 @@ test('tab.move reorders within a window and moves across windows at a position',
     assert.throws(() => move(workspace(), 'a', 'w1', index), /无效的标签页位置/);
 });
 
-test('the optimistic projection orders a pending move like the server', () => {
+test('the optimistic projection orders a pending move like the server', (t) => {
+  t.mock.method(Date, 'now', () => 1);
   const state = { workspace: workspace() } as ProductState;
   const projected = projectOperations(state, [
     {

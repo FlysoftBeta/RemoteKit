@@ -80,6 +80,7 @@ export class Workspace {
         const token = randomUUID();
         this.icons.set(token, { tenant, png, expires: this.context.clock.wallMs() + 600000 });
         suggestions.iconToken = token;
+        suggestions.iconDataUrl = `data:image/png;base64,${png.toString('base64')}`;
       }
     }
     return suggestions;

@@ -50,13 +50,17 @@ const viewport = () => {
 export function PhotoCapture({
   afterId,
   destination = 'basket',
-  groupId = null,
+  partitionId = null,
+  requestId,
+  windowId,
   replace,
   onClose,
 }: {
   afterId?: string;
   destination?: 'basket' | 'library';
-  groupId?: string | null;
+  partitionId?: string | null;
+  requestId?: string;
+  windowId?: string;
   replace?: LibraryEntry;
   onClose: () => void;
 }) {
@@ -77,13 +81,10 @@ export function PhotoCapture({
   const close = useRef(onClose);
   close.current = onClose;
   const basketCount = snapshot?.basket.length ?? 0;
-  const destinationCount =
-    destination === 'basket'
-      ? basketCount
-      : (snapshot?.entries.filter((entry) => entry.archived).length ?? 0);
+  const destinationCount = destination === 'basket' ? basketCount : (snapshot?.entries.length ?? 0);
   const pending = photos.jobs.filter((job) => job.destination === destination && !job.replace);
   const latestEntry = snapshot?.entries.find((entry) =>
-    destination === 'basket' ? snapshot.basket.includes(entry.id) : entry.archived,
+    destination === 'basket' ? snapshot.basket.includes(entry.id) : true,
   );
   const newest = [...pending].reverse().find((job) => job.preview);
   const basketFull = destination === 'basket' && !replace && basketCount + pending.length >= 64;
@@ -190,7 +191,18 @@ export function PhotoCapture({
   function shutter() {
     const node = video;
     if (!node || !ready || active.current || full || basketFull) return;
-    const shot = photos.reserve({ destination, insertion: insertion.current, groupId, replace }, mode);
+    const shot = photos.reserve(
+      {
+        windowId,
+        destination,
+        insertion: insertion.current,
+        origin: requestId
+          ? { kind: 'request', requestId }
+          : { kind: 'files', channel: 'camera', partitionId },
+        replace,
+      },
+      mode,
+    );
     if (!shot) return;
     const { id, signal } = shot;
     active.current = { id, cancel: () => photos.cancel(id) };

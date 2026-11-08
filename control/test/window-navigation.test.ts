@@ -11,7 +11,12 @@ import { WindowFrame } from '../client/app/window-frame';
 import { emptyWorkspace } from '../server/persistence/workspaces';
 import type { ProductState, ProductTab, ProductWindow } from '../shared/product';
 
-const windowWithTab: ProductWindow = { id: 'window-id', activeTabId: 'tab-id', weight: 1 };
+const windowWithTab: ProductWindow = {
+  id: 'window-id',
+  activeTabId: 'tab-id',
+  appId: 'browser',
+  lastActiveAt: 1,
+};
 const startTab: ProductTab = {
   id: 'tab-id',
   windowId: windowWithTab.id,
@@ -28,7 +33,10 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
       ...emptyWorkspace('tenant-id'),
       windows: win ? [win] : [],
       tabs: tab ? [tab] : [],
-      activeWindowId: win?.id ?? null,
+      activeSpaceId: win ? 's1' : null,
+      spaces: win
+        ? [{ id: 's1', windowIds: [win.id], weights: [1], focusedWindowId: win.id, lastActiveAt: 1 }]
+        : [],
     },
     pageDialogs: [],
     fileRequests: [],
@@ -38,7 +46,7 @@ function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
       preference: 'auto',
       clientScale: 1,
       effectiveDpr: 1,
-      requested: { degradationPreference: 'balanced', maxFps: 60, audio: true },
+      requested: { degradationPreference: 'maintain-resolution', maxFps: 60, audio: true },
       applied: null,
       estimatedLatencyMs: null,
       clockUncertaintyMs: null,
@@ -59,7 +67,11 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
     files: new FileChannel(() => null),
   };
   const library = useFileLibrary(unexpected, transport.files, false, false, undefined, []);
-  const win = state.workspace.windows.find((window) => window.id === state.workspace.activeWindowId)!;
+  const win = state.workspace.windows.find(
+    (window) =>
+      window.id ===
+      state.workspace.spaces.find((space) => space.id === state.workspace.activeSpaceId)?.focusedWindowId,
+  )!;
   return createElement(
     FileLibraryContext.Provider,
     { value: library },
@@ -70,16 +82,13 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
       online,
       action: unexpected,
       report: unexpected,
-      onSettings: unexpected,
-      onAdmin: unexpected,
-      onLogout: unexpected,
+      settingsContent: () => null,
+      onSplit: unexpected,
+      call: unexpected,
+      weight: 1,
       onGeometry: unexpected,
-      focusAddress: null,
       visible: true,
       fullscreen: false,
-      audioSaving: false,
-      audioError: '',
-      saveAudio: unexpected,
     }),
   );
 }
@@ -104,7 +113,7 @@ test('projected window and tab cannot take navigation drafts before their IDs ar
     {
       operationId: 'create-window',
       operationGeneration: 'generation',
-      action: { type: 'window.create' },
+      action: { type: 'window.open', appId: 'browser', placement: { mode: 'space' } },
     },
   ])!;
   const pendingTab = projectOperations(confirmed, [
@@ -125,7 +134,6 @@ test('projected window and tab cannot take navigation drafts before their IDs ar
   checkNavigation(confirmed, { inputs: 2, disabled: true, online: false });
 });
 
-test('confirmed empty windows and file tabs keep their address controls', () => {
+test('confirmed empty browser windows keep their address controls', () => {
   checkNavigation(snapshot({ ...windowWithTab, activeTabId: null }), { inputs: 2, disabled: false });
-  checkNavigation(snapshot(windowWithTab, { ...startTab, kind: 'files' }), { inputs: 1, disabled: false });
 });

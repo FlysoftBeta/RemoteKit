@@ -1,7 +1,7 @@
 import { FileUploadOutlined } from '@mui/icons-material';
 import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from '@mui/material';
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { LibraryEntry, LibraryGroup, LibrarySnapshot } from '../../shared/file-library';
+import type { LibraryEntry, LibraryPartition, LibrarySnapshot } from '../../shared/file-library';
 import { ScaledSelect } from '../app/scaled-select';
 import { formatError } from '../util/format-error';
 import { useLibrary } from './file-library-state';
@@ -20,81 +20,49 @@ export function basketEntries(snapshot?: LibrarySnapshot): LibraryEntry[] {
   });
 }
 
-export function GroupField({
-  groups,
+export function PartitionField({
+  partitions,
   value,
   onChange,
 }: {
-  groups: LibraryGroup[];
+  partitions: LibraryPartition[];
   value: string | null;
   onChange: (value: string | null) => void;
 }) {
   return (
     <ScaledSelect
       fullWidth
-      label="分组"
+      label="分区"
       value={value ?? ''}
       onChange={(value) => onChange(value || null)}
       options={[
-        { value: '', label: '不分组' },
-        ...groups.map((group) => ({ value: group.id, label: group.name })),
+        { value: '', label: '移出分区' },
+        ...partitions.map((partition) => ({ value: partition.id, label: partition.name })),
       ]}
     />
   );
 }
 
-interface GroupChoice {
-  groups: LibraryGroup[];
+interface PartitionChoice {
+  partitions: LibraryPartition[];
   title: string;
   detail?: string;
   initial?: string | null;
   disabled?: boolean;
   onClose: () => void;
-  onChoose: (groupId: string | null) => void;
+  onChoose: (partitionId: string | null) => void;
 }
 
-// Inline form, used where the surrounding surface must stay put (the anchored file basket).
-export function GroupConfirm({
-  groups,
+export function PartitionPicker({
+  partitions,
   title,
   detail,
   onClose,
   onChoose,
   initial = null,
   disabled = false,
-}: GroupChoice) {
-  const [group, setGroup] = useState(initial);
-  return (
-    <Box sx={{ p: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
-      <Box>
-        <Typography variant="subtitle2">{title}</Typography>
-        {detail && (
-          <Typography variant="caption" color="text.secondary">
-            {detail}
-          </Typography>
-        )}
-      </Box>
-      <GroupField groups={groups} value={group} onChange={setGroup} />
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1 }}>
-        <Button onClick={onClose}>返回</Button>
-        <Button variant="contained" disabled={disabled} onClick={() => onChoose(group)}>
-          确认
-        </Button>
-      </Box>
-    </Box>
-  );
-}
-
-export function GroupPicker({
-  groups,
-  title,
-  detail,
-  onClose,
-  onChoose,
-  initial = null,
-  disabled = false,
-}: GroupChoice) {
-  const [group, setGroup] = useState(initial);
+}: PartitionChoice) {
+  const [partition, setPartition] = useState(initial);
   return (
     <Dialog open fullWidth maxWidth="xs" onClose={onClose}>
       <DialogTitle>{title}</DialogTitle>
@@ -105,12 +73,12 @@ export function GroupPicker({
           </Typography>
         )}
         <Box sx={{ pt: detail ? 0 : 1 }}>
-          <GroupField groups={groups} value={group} onChange={setGroup} />
+          <PartitionField partitions={partitions} value={partition} onChange={setPartition} />
         </Box>
       </DialogContent>
       <DialogActions>
         <Button onClick={onClose}>取消</Button>
-        <Button variant="contained" disabled={disabled} onClick={() => onChoose(group)}>
+        <Button variant="contained" disabled={disabled} onClick={() => onChoose(partition)}>
           确认
         </Button>
       </DialogActions>
@@ -118,16 +86,14 @@ export function GroupPicker({
   );
 }
 
-// Uploads from the device into the library or the basket. `pick` opens the system picker,
-// `add` takes dropped files; once groups exist every batch asks for its group explicitly.
-// `view` renders the hidden input, the group choice and the resume controls.
 export function useDeviceImport({
   destination,
   accept,
   disabled,
   afterId,
-  initialGroup = null,
-  inlineChoice = false,
+  partitionId = null,
+  requestId,
+  windowId,
   onDone,
   onError,
 }: {
@@ -135,16 +101,18 @@ export function useDeviceImport({
   accept?: string[];
   disabled: boolean;
   afterId?: string;
-  initialGroup?: string | null;
-  inlineChoice?: boolean;
+  partitionId?: string | null;
+  requestId?: string;
+  windowId?: string;
   onDone?: () => void;
   onError: (message: string) => void;
 }) {
   const { rpc, snapshot, mutate, online, scope } = useLibrary();
-  const groups = snapshot?.groups ?? [];
   const input = useRef<HTMLInputElement>(null);
-  const [queue] = useState(() => new ImportQueue({ rpc, mutate }, destination));
-  const { picking, remaining, busy, error } = useSyncExternalStore(
+  const [queue] = useState(
+    () => new ImportQueue({ rpc, mutate: (method, params) => mutate(method, params, windowId) }, destination),
+  );
+  const { remaining, busy, error } = useSyncExternalStore(
     queue.subscribe,
     queue.getSnapshot,
     queue.getSnapshot,
@@ -162,12 +130,16 @@ export function useDeviceImport({
   const add = (files: File[]) => {
     if (disabled || !files.length) return;
     try {
-      queue.enqueue(files, snapshot?.basket.length ?? 0, groups.length > 0, afterId);
+      queue.enqueue(
+        files,
+        snapshot?.basket.length ?? 0,
+        requestId ? { kind: 'request', requestId } : { kind: 'files', channel: 'upload', partitionId },
+        afterId,
+      );
     } catch (failure) {
       onError(fileError(failure));
     }
   };
-  const Choose = inlineChoice ? GroupConfirm : GroupPicker;
   const view = (
     <>
       <input
@@ -182,18 +154,7 @@ export function useDeviceImport({
           add(files);
         }}
       />
-      {picking && (
-        <Choose
-          title="上传到哪个分组？"
-          detail={`${remaining} 个文件`}
-          disabled={disabled}
-          groups={groups}
-          initial={initialGroup}
-          onClose={queue.discard}
-          onChoose={queue.choose}
-        />
-      )}
-      {!!remaining && !picking && !busy && !disabled && (
+      {!!remaining && !busy && !disabled && (
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
           <Typography variant="body2" sx={{ mr: 'auto' }}>
             还有 {remaining} 个文件未上传

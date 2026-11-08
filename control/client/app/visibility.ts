@@ -2,19 +2,21 @@ import type { ProductState } from '../../shared/product';
 
 export function selectVisibility(state: ProductState, shellWidth: number) {
   const workspace = state.workspace;
+  const space = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
   const sideBySide =
     !state.pageFullscreen &&
-    workspace.layoutMode === 'side-by-side' &&
-    shellWidth >= Math.max(720, workspace.windows.length * 365 - 5);
-  const visibleWindowIds = workspace.windows
-    .filter((window) =>
-      state.pageFullscreen
-        ? window.id === state.pageFullscreen.windowId
-        : sideBySide || window.id === workspace.activeWindowId,
-    )
-    .map((window) => window.id);
+    !!space &&
+    space.windowIds.length > 1 &&
+    shellWidth - (space.windowIds.length - 1) * 5 >= space.windowIds.length * 360;
+  const visibleWindowIds = state.pageFullscreen
+    ? [state.pageFullscreen.windowId]
+    : space
+      ? sideBySide
+        ? space.windowIds
+        : [space.focusedWindowId]
+      : [];
   const windows = [...workspace.windows].sort(
-    (a, b) => Number(b.id === workspace.activeWindowId) - Number(a.id === workspace.activeWindowId),
+    (a, b) => Number(b.id === space?.focusedWindowId) - Number(a.id === space?.focusedWindowId),
   );
   let foreground: { kind: 'page' | 'file'; id: string } | null = null;
   for (const window of windows) {
@@ -30,5 +32,5 @@ export function selectVisibility(state: ProductState, shellWidth: number) {
       break;
     }
   }
-  return { sideBySide, visibleWindowIds, foreground };
+  return { space, sideBySide, visibleWindowIds, foreground };
 }

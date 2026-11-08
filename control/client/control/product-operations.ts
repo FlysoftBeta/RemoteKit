@@ -1,3 +1,4 @@
+import { focusWindow, placeWindow, windowClosing } from '../../server/workspace/model';
 import { RemoteKitError } from '../../shared/errors';
 import {
   placeTab,
@@ -5,6 +6,8 @@ import {
   type ProductAction,
   type ProductOperation,
   type ProductState,
+  type ProductWorkspace,
+  type WindowPlacement,
 } from '../../shared/product';
 /** Product actions return execution receipts, never an authoritative workspace. */
 export type ProductActionHandler = (action: ProductAction) => Promise<OperationReceipt>;
@@ -15,6 +18,17 @@ export function requireAcceptedReceipt(receipt: OperationReceipt): OperationRece
 }
 export interface PendingOperation extends ProductOperation {
   receipt?: OperationReceipt;
+}
+function canPlace(workspace: ProductWorkspace, windowId: string, placement: WindowPlacement) {
+  if (windowClosing(workspace, windowId)) return false;
+  if (placement.mode === 'space') return true;
+  const target = workspace.spaces.find((space) => space.windowIds.includes(placement.besideWindowId));
+  return (
+    !!target &&
+    placement.besideWindowId !== windowId &&
+    !windowClosing(workspace, placement.besideWindowId) &&
+    (target.windowIds.includes(windowId) || target.windowIds.length < 3)
+  );
 }
 /** Snapshots are the only product authority; projections live for this page only. */
 export function projectOperations(
@@ -35,59 +49,115 @@ export function projectOperations(
     )
       continue;
     switch (a.type) {
-      case 'window.create':
-        w.windows.push({ id, activeTabId: id + '-tab', weight: 1 });
-        w.tabs.push({
-          id: id + '-tab',
-          windowId: id,
-          webviewId: '',
-          kind: 'start',
-          title: '新窗口（待确认）',
-          url: '',
-        });
-        w.activeWindowId = id;
-        break;
-      case 'tab.create': {
-        const window = w.windows.find((x) => x.id === a.windowId);
-        if (window) {
+      case 'window.open': {
+        const existing = a.appId === 'settings' && w.windows.find((win) => win.appId === 'settings');
+        if (existing) {
+          focusWindow(w, existing.id);
+          break;
+        }
+        if (w.windows.length >= 12 || !canPlace(w, id, a.placement)) break;
+        w.windows.push({ id, appId: a.appId, activeTabId: null, lastActiveAt: Date.now() });
+        placeWindow(w, id, a.placement, id + '-space');
+        if (a.appId === 'browser' || a.appId.startsWith('web:')) {
+          const url = a.url ?? w.apps.find((app) => `web:${app.id}` === a.appId)?.startUrl;
           w.tabs.push({
-            id,
-            windowId: window.id,
+            id: id + '-tab',
+            windowId: id,
             webviewId: '',
             kind: 'start',
-            title: '新标签页（待确认）',
+            title: '正在打开…',
             url: '',
+            pendingUrl: url,
           });
-          window.activeTabId = id;
-          w.activeWindowId = window.id;
+          w.windows.find((win) => win.id === id)!.activeTabId = id + '-tab';
         }
         break;
       }
-      case 'tab.files': {
-        const window = w.windows.find((x) => x.id === a.windowId);
-        if (window) {
-          const existing = w.tabs.find((tab) => tab.windowId === window.id && tab.kind === 'files');
-          if (!existing)
-            w.tabs.push({
-              id,
-              windowId: window.id,
-              webviewId: '',
-              kind: 'files',
-              title: '我的文件',
-              url: '',
-            });
-          window.activeTabId = existing?.id ?? id;
-          w.activeWindowId = window.id;
+      case 'window.focus':
+        if (w.windows.some((win) => win.id === a.windowId)) focusWindow(w, a.windowId);
+        break;
+      case 'window.place':
+        if (w.windows.some((win) => win.id === a.windowId) && canPlace(w, a.windowId, a.placement))
+          placeWindow(w, a.windowId, a.placement, id + '-space');
+        break;
+      case 'space.activate': {
+        const space = w.spaces.find((space) => space.id === a.spaceId);
+        if (space) focusWindow(w, space.focusedWindowId);
+        break;
+      }
+      case 'space.layout': {
+        const space = w.spaces.find((space) => space.id === a.spaceId);
+        if (space) {
+          const sum = a.weights.reduce((sum, value) => sum + value, 0);
+          space.weights = a.weights.map((value) => value / sum);
         }
         break;
       }
-      case 'window.activate':
-        w.activeWindowId = a.windowId;
+      case 'window.state': {
+        const win = w.windows.find((win) => win.id === a.windowId);
+        if (win) win.state = a.state;
         break;
+      }
+      case 'settings.update':
+        if (a.settings.workspace) Object.assign(w.settings.workspace, a.settings.workspace);
+        if (a.settings.browser) Object.assign(w.settings.browser, a.settings.browser);
+        break;
+      case 'favorite.add':
+        if (!w.favorites.some((favorite) => favorite.url === a.url))
+          w.favorites.push({ id, title: a.title, url: a.url, createdAt: Date.now() });
+        break;
+      case 'favorite.remove':
+        w.favorites = w.favorites.filter((favorite) => favorite.id !== a.id);
+        break;
+      case 'app.update': {
+        const app = w.apps.find((app) => `web:${app.id}` === a.appId);
+        const { type, appId, ...changes } = a;
+        if (app) Object.assign(app, changes);
+        break;
+      }
+      case 'app.uninstall':
+        w.pendingAppUninstallId = a.appId.slice(4);
+        break;
+      case 'app.install':
+        w.apps.push({
+          id,
+          name: a.name,
+          startUrl: a.startUrl,
+          scope: a.scope ?? a.startUrl,
+          display: a.display ?? 'standalone',
+          themeColor: a.themeColor,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        });
+        break;
+      case 'site.set':
+        w.sites[a.origin] = {
+          ...w.sites[a.origin],
+          tabletUa: a.tabletUa ?? w.sites[a.origin]?.tabletUa ?? false,
+          manualKeyboard: a.manualKeyboard ?? w.sites[a.origin]?.manualKeyboard ?? false,
+        };
+        break;
+      case 'tab.create': {
+        const win = w.windows.find((win) => win.id === a.windowId);
+        if (win) {
+          w.tabs.push({
+            id,
+            windowId: win.id,
+            webviewId: '',
+            kind: 'start',
+            title: '正在打开…',
+            url: '',
+            pendingUrl: a.url,
+          });
+          win.activeTabId = id;
+          focusWindow(w, win.id);
+        }
+        break;
+      }
       case 'tab.activate': {
         const tab = w.tabs.find((t) => t.id === a.tabId);
         if (tab) {
-          w.activeWindowId = tab.windowId;
+          focusWindow(w, tab.windowId);
           w.windows.find((x) => x.id === tab.windowId)!.activeTabId = tab.id;
         }
         break;
@@ -101,7 +171,7 @@ export function projectOperations(
           if (source && source !== target && source.activeTabId === tab.id)
             source.activeTabId = w.tabs.find((t) => t.windowId === source.id)?.id ?? null;
           target.activeTabId = tab.id;
-          w.activeWindowId = target.id;
+          focusWindow(w, target.id);
         }
         break;
       }
@@ -119,6 +189,11 @@ export function projectOperations(
         if (tab) tab.title = tab.title.replace(/（待确认）$/, '') + '（待确认）';
         break;
       }
+      case 'space.close':
+        for (const winId of w.spaces.find((space) => space.id === a.spaceId)?.windowIds ?? [])
+          for (const tab of w.tabs.filter((tab) => tab.windowId === winId))
+            tab.title = tab.title.replace(/（待确认）$/, '') + '（待确认）';
+        break;
       case 'window.close':
         for (const tab of w.tabs.filter((t) => t.windowId === a.windowId))
           tab.title = tab.title.replace(/（待确认）$/, '') + '（待确认）';

@@ -47,7 +47,7 @@ test('Files view state validates and emits bounded canonical JSON', () => {
   assert.deepEqual(readFilesState(circular), defaults);
 });
 
-test('aggregate views hide excluded sources unless partitioned; source view retains them', () => {
+test('aggregate views hide excluded sources; partition and source views retain them', () => {
   const data = snapshot([
     entry('hidden'),
     entry('organized', { partitionId: 'p' }),
@@ -56,11 +56,11 @@ test('aggregate views hide excluded sources unless partitioned; source view reta
   ]);
   assert.deepEqual(
     filesInView(data, 'all', now).map((item) => item.id),
-    ['organized', 'upload', 'old'],
+    ['upload', 'old'],
   );
   assert.deepEqual(
     filesInView(data, 'recent', now).map((item) => item.id),
-    ['organized', 'upload'],
+    ['upload'],
   );
   assert.deepEqual(
     filesInView(data, { source }, now).map((item) => item.id),

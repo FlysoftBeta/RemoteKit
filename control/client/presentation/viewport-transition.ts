@@ -1,4 +1,4 @@
-import { surfaceDipSize } from '../input/coordinates';
+import { surfaceDipSize, surfacePixelScale } from '../input/coordinates';
 import type { Surface } from './types';
 export interface ViewportBounds {
   left: number;
@@ -17,6 +17,23 @@ export interface ViewportMetrics {
   scale: number;
   layoutWidth: number;
   layoutHeight: number;
+}
+export function pixelAlignedViewportBounds(
+  bounds: ViewportBounds,
+  scale: number,
+  dpr: number,
+): ViewportBounds {
+  // Integer DIP sizes match the Chromium viewport request. Align the origin so
+  // video filtering cannot sample the atlas gutter at a fractional flex edge.
+  // Float noise in devicePixelRatio must not place an integer origin just below
+  // the browser's layout grid.
+  const ratio = Math.round(dpr * 1e6) / 1e6;
+  return {
+    left: Math.round(bounds.left * ratio) / ratio / scale,
+    top: Math.round(bounds.top * ratio) / ratio / scale,
+    width: Math.round(bounds.width / scale),
+    height: Math.round(bounds.height / scale),
+  };
 }
 export function visibleContentBounds(content: ViewportBounds, visual?: VisualBounds | null): ViewportBounds {
   if (!visual) return { ...content };
@@ -242,7 +259,9 @@ export function surfaceMatchesViewport(surface: Surface, bounds: Pick<ViewportBo
     [size.width, size.height, bounds.width, bounds.height].every(Number.isFinite) &&
     size.width > 0 &&
     size.height > 0 &&
-    Math.abs(size.width - Math.round(bounds.width)) <= 1 &&
-    Math.abs(size.height - Math.round(bounds.height)) <= 1
+    // Atlas dimensions round to whole encoded pixels; downsampling magnifies
+    // that rounding when converted back to CSS pixels.
+    Math.abs(surface.width - Math.round(bounds.width) * surfacePixelScale(surface)) <= 1 &&
+    Math.abs(surface.height - Math.round(bounds.height) * surfacePixelScale(surface, 'y')) <= 1
   );
 }

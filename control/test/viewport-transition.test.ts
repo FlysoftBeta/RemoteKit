@@ -4,6 +4,7 @@ import {
   KeyboardViewport,
   ResizePreview,
   ViewportTransition,
+  pixelAlignedViewportBounds,
   resizeSnapshotSize,
   visibleContentBounds,
   FREEZE_MAX_PIXELS,
@@ -34,6 +35,22 @@ test('only settled full height restoration reports a system dismissal', () => {
 });
 const old = { left: 0, top: 80, width: 390, height: 764 },
   small = { ...old, height: 364 };
+test('fractional split bounds keep integer DIP sizes and device pixel origins', () => {
+  assert.deepEqual(pixelAlignedViewportBounds({ left: 802.5, top: 40, width: 797.5, height: 844 }, 1, 1), {
+    left: 803,
+    top: 40,
+    width: 798,
+    height: 844,
+  });
+  assert.deepEqual(
+    pixelAlignedViewportBounds({ left: 100.4, top: 50.4, width: 500.1, height: 300 }, 1.25, 2),
+    { left: 80.4, top: 40.4, width: 400, height: 240 },
+  );
+  assert.deepEqual(
+    pixelAlignedViewportBounds({ left: 802.5, top: 40, width: 797.5, height: 844 }, 1, 1.0000000298023224),
+    { left: 803, top: 40, width: 798, height: 844 },
+  );
+});
 test('visual viewport offset and size intersect actual content bounds', () => {
   assert.deepEqual(visibleContentBounds(old, { offsetLeft: 10, offsetTop: 100, width: 350, height: 400 }), {
     left: 10,
@@ -96,6 +113,16 @@ test('viewport readiness checks both exact sampling axes and rejects old geometr
   );
   assert.equal(surfaceMatchesViewport(surface, { width: 800, height: 500 }), false);
   assert.equal(surfaceMatchesViewport({ ...surface, mediaScaleY: NaN }, { width: 800, height: 600 }), false);
+  const downsampled = {
+    ...surface,
+    width: 534,
+    height: 282,
+    deviceScaleFactor: 1,
+    mediaScaleX: 1 / 3,
+    mediaScaleY: 1 / 3,
+  };
+  assert.ok(surfaceMatchesViewport(downsampled, { width: 1600, height: 844 }));
+  assert.equal(surfaceMatchesViewport(downsampled, { width: 1590, height: 844 }), false);
 });
 test('simultaneous layout and visual viewport shrink is classified on coarse pointers', () => {
   const keyboard = new KeyboardViewport();

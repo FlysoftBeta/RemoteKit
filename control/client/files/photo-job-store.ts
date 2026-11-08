@@ -11,6 +11,7 @@ export interface PhotoServices {
   mutate<K extends 'library.import' | 'library.replace'>(
     method: K,
     params: LibraryMethods[K]['params'],
+    windowId?: string,
   ): Promise<LibrarySnapshot>;
   latestSnapshot: () => LibrarySnapshot | undefined;
   rpc: Pick<FileChannel, 'uploadAsset' | 'processPhoto'>;
@@ -21,9 +22,10 @@ const maxPhotoJobs = 2;
 const lowQualityWarning = '照片可能不够清晰，可查看或重拍';
 
 export interface PhotoDestination {
+  windowId?: string;
   destination: 'basket' | 'library';
   insertion?: { afterId?: string };
-  groupId: string | null;
+  origin: LibraryMethods['library.import']['params']['origin'];
   replace?: LibraryEntry;
 }
 
@@ -72,6 +74,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
     this.publish(
       [...this.tasks.values()].map(({ controller, burst, retake, resume, waiting, ...job }) => ({
         ...job,
+        origin: { ...job.origin },
         insertion: job.insertion && { ...job.insertion },
         candidates: job.candidates && [...job.candidates],
       })),
@@ -95,6 +98,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       return;
     const task: Task = {
       ...destination,
+      origin: { ...destination.origin },
       id: operationId(),
       mode,
       state: 'sampling',
@@ -160,12 +164,12 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
         photo,
         originalAssetId,
         name,
-        groupId: task.groupId,
+        origin: task.origin,
         destination: task.destination,
         afterId: task.insertion?.afterId,
       };
       task.resume = async () => {
-        const next = await this.services.mutate('library.import', params);
+        const next = await this.services.mutate('library.import', params, task.windowId);
         if (task.insertion && task.insertion.afterId && this.valid(task)) {
           const inserted = next.entries.find((entry) => entry.name === name);
           if (inserted) task.insertion.afterId = inserted.id;
@@ -341,7 +345,7 @@ export class PhotoJobStore extends Store<readonly PhotoJob[]> {
       id: operationId(),
       controller: new AbortController(),
       destination,
-      groupId: entry.groupId,
+      origin: { kind: 'files', channel: 'camera', partitionId: entry.partitionId },
       replace: entry,
       mode: entry.photo!.mode,
       state: 'processing',

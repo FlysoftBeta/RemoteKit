@@ -163,6 +163,7 @@ export interface LauncherItem {
   iconUrl?: string;
 }
 export interface AppInspectResult {
+  iconDataUrl?: string;
   name: string;
   startUrl: string;
   scope: string;

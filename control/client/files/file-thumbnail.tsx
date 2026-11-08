@@ -28,6 +28,10 @@ const KINDS: Record<FileKind, { icon: React.ElementType; color: string; backgrou
   other: { icon: InsertDriveFileOutlined, color: '#4b5563', background: '#eef1f4' },
 };
 
+export function fileTypeColor(type: string, name: string): string {
+  return KINDS[fileKind(type, name)].color;
+}
+
 // A file's visual: the cached thumbnail for decodable images (cropped to fill unless `fit` says
 // otherwise), or a tinted icon for its kind with the extension underneath when there is room.
 export function FileThumbnail({

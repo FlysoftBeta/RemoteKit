@@ -511,7 +511,7 @@ test('request imports infer browser and web app sources and replay without the r
   });
 });
 
-test('source exclusion hides unorganized entries, supports undo, and permits explicit library uploads', async (t) => {
+test('source exclusion hides aggregate entries, supports undo, and permits explicit library uploads', async (t) => {
   const f = fixture();
   t.after(() => f.db.close());
   const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Saved' })).partitions[0]
@@ -524,7 +524,7 @@ test('source exclusion hides unorganized entries, supports undo, and permits exp
   ).entries[0];
   const excluded = await f.run('source', { operationId: 'exclude', source: uploadSource, excluded: true });
   assert.deepEqual(excluded.sources, [{ ...uploadSource, count: 2, excluded: true }]);
-  assert.deepEqual(f.hidden(), new Set([first.id]));
+  assert.deepEqual(f.hidden(), new Set([first.id, second.id]));
   assert.equal(f.exists(first.id), true);
   assert.equal(f.exists('missing'), false);
   assert.equal(f.organized(second.id), true);
@@ -557,7 +557,7 @@ test('finish uses current exclusions and basket partition and settles exactly on
   const result = await f.run<Finish>('finish', selection);
   assert.deepEqual(result.snapshot.basket, []);
   assert.deepEqual(result.snapshot.entries, [{ ...initial.entries[0], partitionId }]);
-  assert.deepEqual(f.hidden(), new Set());
+  assert.deepEqual(f.hidden(), new Set([entryId]));
   await f.run('source', { operationId: 'include', source, excluded: false });
   await f.run('basketPartition', { operationId: 'clear-destination', partitionId: null });
   const latest = await f.run('get');

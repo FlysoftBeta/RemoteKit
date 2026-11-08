@@ -33,24 +33,19 @@ import { FloatingPanel } from '../app/floating-panel';
 import { scaledAnchor, uiScale } from '../app/ui-scale';
 import { operationId } from '../control/product-operations';
 import type { ViewerSession } from '../viewer-session';
-import { ArchivePicker } from './archive-picker';
+import { FileLibraryPicker } from './file-library-picker';
 import { BasketItems, type BasketPanel } from './basket-items';
 import { placeFileChooser } from './file-chooser-anchor';
-import {
-  basketEntries,
-  fileError,
-  FileDropZone,
-  GroupConfirm,
-  useDeviceImport,
-} from './file-library-controls';
+import { basketEntries, fileError, FileDropZone, useDeviceImport } from './file-library-controls';
 import { useLibrary } from './file-library-state';
 import { fileChooserAccept, selectionViewModel, validateSelection } from './file-selection';
 import { useFileView } from './file-view';
 import { PhotoCapture } from './photo-library-capture';
+import { BasketPartitionMenu } from './partition-menu';
 
 const MAX_BASKET = 64;
 
-type Step = 'archive' | 'group';
+type Step = 'library';
 type Camera = { afterId?: string; replace?: LibraryEntry };
 type AddMenu = { anchor: HTMLElement; afterId?: string };
 
@@ -67,14 +62,26 @@ export function FileBasketDialog({
   viewId,
   transport,
   onClose,
+  windowId,
 }: {
+  windowId?: string;
   request?: FileRequest;
   viewId?: string;
   transport?: ViewerSession;
   onClose?: () => void;
 }) {
-  const { online, snapshot, refresh, mutate, select, cancelSelection, cancellations, checkout, photos } =
-    useLibrary();
+  const {
+    online,
+    snapshot,
+    refresh,
+    mutate,
+    select,
+    cancelSelection,
+    cancellations,
+    checkout,
+    photos,
+    recordUsage,
+  } = useLibrary();
   const transaction = request && checkout(request.id);
   const [chosen, setChosen] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -99,12 +106,10 @@ export function FileBasketDialog({
   const blocked =
     selection.filter((entry) => entry.photo?.pending || retaking.has(entry.id)).length +
     (request?.multiple ? pending.length : 0);
-  const groups = snapshot?.groups ?? [];
   const basketIds = new Set(snapshot?.basket);
-  const archived =
-    snapshot?.entries
-      .filter((entry) => entry.archived && !basketIds.has(entry.id))
-      .sort((a, b) => b.createdAt - a.createdAt) ?? [];
+  const available =
+    snapshot?.entries.filter((entry) => !basketIds.has(entry.id)).sort((a, b) => b.createdAt - a.createdAt) ??
+    [];
   const outcome = selectionViewModel(transaction?.state, cancelOutcome);
   const final = outcome.terminal;
   const waiting = request?.state === 'validating' || !!transaction || cancelOutcome !== undefined;
@@ -113,9 +118,10 @@ export function FileBasketDialog({
   const clearInsertion = useCallback(() => setAfterId(undefined), []);
   const upload = useDeviceImport({
     destination: 'basket',
+    windowId: request?.windowId ?? windowId,
     afterId,
     accept: request ? fileChooserAccept(request) : undefined,
-    inlineChoice: true,
+    requestId: request?.id,
     disabled: !online || busy || !snapshot || waiting || final || dragging,
     onError: reportError,
     onDone: clearInsertion,
@@ -203,22 +209,25 @@ export function FileBasketDialog({
   const saveBasket = (ids: string[], revision = snapshot?.revision) =>
     run(async () => {
       if (revision !== undefined)
-        await mutate('library.basket', { operationId: operationId(), ids, expectedRevision: revision });
+        await mutate(
+          'library.basket',
+          { operationId: operationId(), ids, expectedRevision: revision },
+          request?.windowId ?? windowId,
+        );
     });
-  const submit = (groupId: string | null) => {
+  const submit = () => {
     if (!request || (!transaction && blocked)) return;
     void run(async () => {
       await select(
         request.id,
         selection.map((entry) => entry.id),
-        groupId,
       );
     });
   };
   function beginSelection() {
     if (!request) return;
     if (transaction) {
-      submit(transaction.groupId);
+      submit();
       return;
     }
     const problem = validateSelection(selection, request);
@@ -226,14 +235,13 @@ export function FileBasketDialog({
       setError(problem);
       return;
     }
-    if (groups.length) setStep('group');
-    else submit(null);
+    submit();
   }
   const openAdd = (anchor: HTMLElement, insertAfter?: string) => {
     setAfterId(insertAfter);
     setAddMenu({ anchor, afterId: insertAfter });
   };
-  const addFromArchive = (ids: string[]) => {
+  const addFromLibrary = (ids: string[]) => {
     const order = basket.map((item) => item.id);
     const index = afterId ? order.indexOf(afterId) : -1;
     if (afterId && index < 0) {
@@ -261,11 +269,11 @@ export function FileBasketDialog({
       run: () => setCamera({ afterId }),
     },
     {
-      key: 'archive',
+      key: 'library',
       icon: <FolderOutlined fontSize="small" />,
       label: '从我的文件选择',
-      disabled: !canAdd || !archived.length,
-      run: () => setStep('archive'),
+      disabled: !canAdd || !available.length,
+      run: () => setStep('library'),
     },
   ];
   const sendLabel = transaction
@@ -364,7 +372,20 @@ export function FileBasketDialog({
                   dragging={dragging}
                   onDragging={setDragging}
                   panel={panel}
-                  setPanel={setPanel}
+                  setPanel={(next) => {
+                    setPanel(next);
+                    const owner = request?.windowId ?? windowId;
+                    if (
+                      owner &&
+                      next &&
+                      snapshot.entries.some((entry) => entry.id === next.id) &&
+                      (next.id !== panel?.id || next.view !== panel.view)
+                    ) {
+                      void recordUsage(next.id, owner).catch((failure) =>
+                        diagnostics.record('file-usage', failure),
+                      );
+                    }
+                  }}
                   onChange={saveBasket}
                   onInsert={(id, anchor) => openAdd(anchor, id)}
                   onRetake={(replace) => setCamera({ replace })}
@@ -446,25 +467,12 @@ export function FileBasketDialog({
               </Tooltip>
             </Box>
           </FileDropZone>
-          {step === 'archive' && (
-            <ArchivePicker
-              entries={archived}
+          {step === 'library' && (
+            <FileLibraryPicker
+              entries={available}
               capacity={capacity}
               onClose={() => setStep(undefined)}
-              onAdd={addFromArchive}
-            />
-          )}
-          {step === 'group' && (
-            <GroupConfirm
-              groups={groups}
-              onClose={() => setStep(undefined)}
-              title="发送后保存到哪个分组？"
-              detail="发送的文件会同时保存到我的文件"
-              disabled={disabled || blocked > 0}
-              onChoose={(group) => {
-                setStep(undefined);
-                submit(group);
-              }}
+              onAdd={addFromLibrary}
             />
           )}
           {upload.view}
@@ -534,6 +542,7 @@ export function FileBasketDialog({
           </ListItemIcon>
           <ListItemText>{view.mode === 'cards' ? '切换到列表' : '切换到卡片'}</ListItemText>
         </MenuItem>
+        <BasketPartitionMenu disabled={toolbarDisabled} />
         <Divider />
         <MenuItem
           disabled={disabled || final || dragging}
@@ -550,6 +559,8 @@ export function FileBasketDialog({
       </Menu>
       {camera && (
         <PhotoCapture
+          requestId={request?.id}
+          windowId={request?.windowId ?? windowId}
           {...camera}
           onClose={() => {
             setCamera(undefined);

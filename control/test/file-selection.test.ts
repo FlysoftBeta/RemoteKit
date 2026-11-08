@@ -42,8 +42,8 @@ test('file selection respects multiple and size limits', () => {
 test('one foreground modal uses active visible window; background requests wait', () => {
   const state = {
     workspace: {
-      layoutMode: 'side-by-side',
-      activeWindowId: 'w2',
+      activeSpaceId: 'space',
+      spaces: [{ id: 'space', windowIds: ['w1', 'w2'], weights: [0.5, 0.5], focusedWindowId: 'w2' }],
       windows: [
         { id: 'w1', activeTabId: 'a' },
         { id: 'w2', activeTabId: 'b' },

@@ -65,7 +65,7 @@ for (const status of ['accepted', 'applying', 'committed', 'unknown', 'rejected'
     });
     t.after(() => store.reset());
     store.acceptSnapshot(productSnapshot());
-    const result = store.action({ type: 'window.create' });
+    const result = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
     const rejection = ['rejected', 'expired'].includes(status)
       ? assert.rejects(result, { code: 'rejected' })
       : undefined;
@@ -110,7 +110,7 @@ test('operation polling follows receipts and authoritative revision retires a co
   });
   t.after(() => store.reset());
   store.acceptSnapshot(productSnapshot());
-  const response = store.action({ type: 'window.create' });
+  const response = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
   const receipt = {
     operationId: operation.operationId,
     operationGeneration: operation.operationGeneration,
@@ -144,7 +144,10 @@ test('authorization loss clears optimistic work and rejects its old correlation'
     },
   });
   store.acceptSnapshot(productSnapshot());
-  const response = assert.rejects(store.action({ type: 'window.create' }), { code: 'outcome_unknown' });
+  const response = assert.rejects(
+    store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
+    { code: 'outcome_unknown' },
+  );
   store.reset(2);
   await response;
   assert.equal(store.getSnapshot().state, null);
@@ -168,7 +171,7 @@ test('an old scope status request cannot block polling in a new scope', async (t
   t.after(() => store.reset());
   const submit = async () => {
     store.acceptSnapshot(productSnapshot());
-    const result = store.action({ type: 'window.create' });
+    const result = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
     const operation = sent[sent.length - 1];
     store.handle({
       type: 'product.result',
@@ -287,7 +290,7 @@ test('product transport rejection retains its code without querying an unadmitte
   });
   t.after(() => store.reset());
   store.acceptSnapshot(productSnapshot());
-  const response = store.action({ type: 'window.create' });
+  const response = store.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
   store.handle({
     type: 'product.result',
     version: 1,
