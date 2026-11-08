@@ -75,17 +75,21 @@ export function FilesApp({
   state,
   onState,
   previewEntryId,
+  previewRequestId,
 }: {
   windowId: string;
   state: unknown;
   onState(state: unknown): void;
   previewEntryId?: string;
+  previewRequestId?: string;
 }): JSX.Element {
   const { snapshot, online, refresh, mutate, photos, recordUsage, apps } = useLibrary();
   const restored = readFilesState(state);
   const pane = useRef<HTMLDivElement>(null);
-  const [paneNarrow, setPaneNarrow] = useState(false);
-  const narrow = paneNarrow;
+  const [paneWidth, setPaneWidth] = useState(Infinity);
+  // narrow: chips replace the side navigation; compact: header actions become icons.
+  const narrow = paneWidth < 600;
+  const compact = paneWidth < 900;
   const filter = restored.view;
   const query = restored.query;
   const setQuery = (query: string) => onState({ ...restored, query: query.slice(0, 512) });
@@ -153,7 +157,7 @@ export function FilesApp({
   useEffect(() => {
     const node = pane.current;
     if (!node || typeof ResizeObserver === 'undefined') return;
-    const resize = new ResizeObserver(([entry]) => setPaneNarrow(entry.contentRect.width < 600));
+    const resize = new ResizeObserver(([entry]) => setPaneWidth(entry.contentRect.width));
     resize.observe(node);
     return () => resize.disconnect();
   }, []);
@@ -246,12 +250,12 @@ export function FilesApp({
   };
   const launchedPreview = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!previewEntryId || launchedPreview.current === previewEntryId) return;
+    if (!previewEntryId || !previewRequestId || launchedPreview.current === previewRequestId) return;
     const entry = catalog.find((item) => item.id === previewEntryId);
     if (!entry) return;
-    launchedPreview.current = previewEntryId;
+    launchedPreview.current = previewRequestId;
     openPreview(entry);
-  }, [previewEntryId, snapshot]);
+  }, [previewEntryId, previewRequestId, snapshot]);
   const entryCheckbox = (entry: LibraryEntry, tile: boolean) => (
     <Checkbox
       className="library-check"
@@ -366,10 +370,15 @@ export function FilesApp({
     </Box>
   ) : (
     <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, minHeight: 40 }}>
-      <Box sx={{ mr: 'auto', minWidth: 0 }}>
-        <Typography variant="h6" sx={{ fontWeight: 600, lineHeight: 1.3 }}>
-          我的文件
+      <Box sx={{ mr: 'auto', minWidth: 0, display: 'flex', alignItems: 'baseline', columnGap: 1 }}>
+        <Typography variant="h6" sx={{ fontWeight: 600, lineHeight: 1.3, minWidth: 0 }} noWrap>
+          {heading}
         </Typography>
+        {snapshot && filter !== 'settings' && (
+          <Typography variant="body2" color="text.secondary" sx={{ flex: 'none' }}>
+            {entries.length} 个文件
+          </Typography>
+        )}
       </Box>
       {narrow ? (
         <Tooltip title="搜索">
@@ -385,7 +394,7 @@ export function FilesApp({
         <SearchField value={query} onChange={setQuery} />
       )}
       {!narrow && <FileViewToggle mode={view.mode} onChange={view.set} />}
-      {narrow ? (
+      {compact ? (
         <Tooltip title="文件篮">
           <span>
             <IconButton
@@ -412,14 +421,18 @@ export function FilesApp({
       <Button
         variant="contained"
         startIcon={<CloudUploadOutlined />}
-        endIcon={narrow ? undefined : <ArrowDropDown />}
+        endIcon={compact ? undefined : <ArrowDropDown />}
         disabled={disabled}
         aria-haspopup="menu"
         onClick={(event) => setUploadMenu(event.currentTarget)}
-        sx={narrow ? { minWidth: 0, px: 1.25, '& .MuiButton-startIcon': { m: 0 } } : undefined}
+        sx={{
+          flex: 'none',
+          whiteSpace: 'nowrap',
+          ...(compact && { minWidth: 0, px: 1.25, '& .MuiButton-startIcon': { m: 0 } }),
+        }}
         aria-label="添加文件"
       >
-        {narrow ? '' : '添加文件'}
+        {compact ? '' : '添加文件'}
       </Button>
     </Box>
   );
@@ -487,13 +500,7 @@ export function FilesApp({
             )}
             <Box sx={{ '&:not(:empty)': { pt: 1.5 } }}>{upload.view}</Box>
             {snapshot && filter !== 'settings' && (
-              <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, pt: 2, pb: 0.5 }}>
-                <Typography variant="subtitle1" sx={{ fontWeight: 600, minWidth: 0 }} noWrap>
-                  {heading}
-                </Typography>
-                <Typography variant="body2" color="text.secondary" sx={{ flex: 'none' }}>
-                  {entries.length} 个文件
-                </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', columnGap: 1, pt: 1.5, pb: 0.5 }}>
                 <FilesOrganization mode="source" view={filter} onView={selectFilter} />
                 <Box sx={{ flex: 1 }} />
                 {narrow && <FileViewToggle mode={view.mode} onChange={view.set} />}

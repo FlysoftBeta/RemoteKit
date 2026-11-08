@@ -1,4 +1,15 @@
-import { Add, DeleteOutline, EditOutlined, MoreVert, SettingsOutlined } from '@mui/icons-material';
+import {
+  Add,
+  AppsOutlined,
+  DeleteOutline,
+  EditOutlined,
+  FolderOutlined,
+  InboxOutlined,
+  LanguageOutlined,
+  MoreVert,
+  ScheduleOutlined,
+  SettingsOutlined,
+} from '@mui/icons-material';
 import {
   Alert,
   Box,
@@ -11,6 +22,7 @@ import {
   IconButton,
   List,
   ListItemButton,
+  ListItemIcon,
   ListItemText,
   Menu,
   MenuItem,
@@ -159,45 +171,77 @@ export function FilesOrganization({
             p: 1,
           }}
         >
-          <List dense sx={{ flex: 1, overflowY: 'auto' }}>
-            {items.map((item, index) => (
-              <Box key={item.key}>
-                {item.section && item.section !== items[index - 1]?.section && (
-                  <Typography
-                    variant="overline"
-                    color="text.secondary"
-                    sx={{ display: 'block', px: 1, mt: 1 }}
-                  >
-                    {item.section === '分区' ? '分区' : `来源 · ${item.section}`}
-                  </Typography>
-                )}
-                <ListItemButton
+          <List dense sx={{ flex: 1, overflowY: 'auto', py: 0 }}>
+            {items
+              .filter((item) => !item.section)
+              .map((item) => (
+                <NavRow
+                  key={item.key}
+                  item={item}
+                  icon={item.view === 'recent' ? <ScheduleOutlined /> : <InboxOutlined />}
                   selected={selected(item.view)}
-                  onClick={() => onView(item.view)}
-                  sx={{ borderRadius: 1, color: item.muted ? 'text.disabled' : undefined }}
+                  onSelect={onView}
+                />
+              ))}
+            <NavHeader
+              title="分区"
+              action={
+                <IconButton
+                  size="small"
+                  aria-label="新建分区"
+                  disabled={disabled}
+                  onClick={() => editPartition()}
                 >
-                  <ListItemText
-                    primary={item.label}
-                    slotProps={{ primary: { noWrap: true, title: item.label } }}
-                  />
-                  <Typography variant="caption" sx={{ ml: 1 }}>
-                    {item.count}
-                  </Typography>
-                </ListItemButton>
-              </Box>
-            ))}
-            <ListItemButton disabled={disabled} onClick={() => editPartition()}>
-              <Add fontSize="small" sx={{ mr: 1 }} />
-              <ListItemText primary="新建分区" />
+                  <Add fontSize="small" />
+                </IconButton>
+              }
+            />
+            {items
+              .filter((item) => item.section === '分区')
+              .map((item) => (
+                <NavRow
+                  key={item.key}
+                  item={item}
+                  icon={<FolderOutlined />}
+                  selected={selected(item.view)}
+                  onSelect={onView}
+                />
+              ))}
+            {!snapshot.partitions.length && (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: 'block', px: 1.5, py: 0.5 }}
+              >
+                把文件整理到分区，来源被清除时也会保留
+              </Typography>
+            )}
+            {snapshot.sources.length > 0 && <NavHeader title="来源" />}
+            {items
+              .filter((item) => item.section && item.section !== '分区')
+              .map((item) => (
+                <NavRow
+                  key={item.key}
+                  item={item}
+                  secondary={item.label === item.section ? undefined : item.section}
+                  icon={sourceIcon(item.view)}
+                  selected={selected(item.view)}
+                  onSelect={onView}
+                />
+              ))}
+          </List>
+          <List dense sx={{ py: 0, borderTop: '1px solid', borderColor: 'divider', pt: 0.5 }}>
+            <ListItemButton
+              selected={view === 'settings'}
+              onClick={() => onView('settings')}
+              sx={{ borderRadius: 1 }}
+            >
+              <ListItemIcon sx={{ minWidth: 32 }}>
+                <SettingsOutlined fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primary="设置" />
             </ListItemButton>
           </List>
-          <Button
-            startIcon={<SettingsOutlined />}
-            onClick={() => onView('settings')}
-            sx={{ justifyContent: 'flex-start', mt: 1 }}
-          >
-            设置
-          </Button>
         </Box>
       )}
       {mode === 'source' && activeSource && (
@@ -405,4 +449,58 @@ export function FilesOrganization({
       )}
     </>
   );
+}
+
+function NavHeader({ title, action }: { title: string; action?: React.ReactNode }) {
+  return (
+    <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, pt: 2, pb: 0.5, minHeight: 28 }}>
+      <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, flex: 1 }}>
+        {title}
+      </Typography>
+      {action}
+    </Box>
+  );
+}
+
+function NavRow({
+  item,
+  icon,
+  secondary,
+  selected,
+  onSelect,
+}: {
+  item: { label: string; view: FilesView; count: number; muted?: boolean };
+  icon: React.ReactElement;
+  secondary?: string;
+  selected: boolean;
+  onSelect: (view: FilesView) => void;
+}) {
+  return (
+    <ListItemButton
+      selected={selected}
+      onClick={() => onSelect(item.view)}
+      sx={{ borderRadius: 1, minHeight: 36, color: item.muted ? 'text.disabled' : undefined }}
+    >
+      <ListItemIcon sx={{ minWidth: 32, color: 'inherit', '& svg': { fontSize: 20 } }}>{icon}</ListItemIcon>
+      <ListItemText
+        primary={item.label}
+        secondary={secondary}
+        slotProps={{
+          primary: { noWrap: true, title: item.label },
+          secondary: { noWrap: true, variant: 'caption' },
+        }}
+        sx={{ my: 0 }}
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+        {item.count}
+      </Typography>
+    </ListItemButton>
+  );
+}
+
+function sourceIcon(view: FilesView) {
+  const app = typeof view === 'object' && 'source' in view ? view.source.app : '';
+  if (app === 'browser') return <LanguageOutlined />;
+  if (app === 'files') return <FolderOutlined />;
+  return <AppsOutlined />;
 }

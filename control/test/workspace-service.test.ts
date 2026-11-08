@@ -728,3 +728,53 @@ test('space close and App uninstall stop at beforeunload, preserve cancelled tar
     await f.close();
   }
 });
+
+test('merge uses product receipts, preserves creation order and rejects capacity without partial changes', async () => {
+  const f = await fixture();
+  try {
+    for (let index = 0; index < 4; index++)
+      await f.action({ type: 'window.open', appId: 'files', placement: { mode: 'space' } });
+    let state = f.store.workspaces.workspace(f.user.tenantId);
+    const [target, second, third, fourth] = state.spaces;
+    const submit = (action: ProductAction) =>
+      f.control.operations.submitOperation(
+        f.user.tenantId,
+        {
+          operationId: randomUUID(),
+          operationGeneration: f.store.operations.operationGeneration(f.user.tenantId),
+          action,
+        },
+        'lease',
+      );
+    await submit({ type: 'space.activate', spaceId: second.id });
+    assert.deepEqual(
+      f.store.workspaces.workspace(f.user.tenantId).spaces.map((space) => space.id),
+      state.spaces.map((space) => space.id),
+    );
+    const operation = {
+      operationId: randomUUID(),
+      operationGeneration: f.store.operations.operationGeneration(f.user.tenantId),
+      action: { type: 'space.merge', spaceId: second.id, intoSpaceId: target.id } as ProductAction,
+    };
+    const receipt = await f.control.operations.submitOperation(f.user.tenantId, operation, 'lease');
+    assert.equal(receipt.status, 'committed');
+    assert.equal(
+      (await f.control.operations.submitOperation(f.user.tenantId, operation, 'lease')).status,
+      'committed',
+    );
+    state = f.store.workspaces.workspace(f.user.tenantId);
+    assert.deepEqual(state.spaces[0].windowIds, [...target.windowIds, ...second.windowIds]);
+    assert.deepEqual(
+      state.spaces.map((space) => space.id),
+      [target.id, third.id, fourth.id],
+    );
+    await submit({ type: 'space.merge', spaceId: third.id, intoSpaceId: target.id });
+    const before = f.store.workspaces.workspace(f.user.tenantId);
+    const rejected = await submit({ type: 'space.merge', spaceId: fourth.id, intoSpaceId: target.id });
+    assert.equal(rejected.status, 'rejected');
+    assert.match(rejected.error!, /3 windows/);
+    assert.deepEqual(f.store.workspaces.workspace(f.user.tenantId).spaces, before.spaces);
+  } finally {
+    await f.close();
+  }
+});

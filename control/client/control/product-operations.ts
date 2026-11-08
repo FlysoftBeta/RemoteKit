@@ -1,4 +1,4 @@
-import { focusWindow, placeWindow, windowClosing } from '../../server/workspace/model';
+import { focusWindow, mergeSpaces, placeWindow, windowClosing } from '../../server/workspace/model';
 import { RemoteKitError } from '../../shared/errors';
 import {
   placeTab,
@@ -55,7 +55,7 @@ export function projectOperations(
           focusWindow(w, existing.id);
           break;
         }
-        if (w.windows.length >= 12 || !canPlace(w, id, a.placement)) break;
+        if (w.windows.length >= 16 || !canPlace(w, id, a.placement)) break;
         w.windows.push({ id, appId: a.appId, activeTabId: null, lastActiveAt: Date.now() });
         placeWindow(w, id, a.placement, id + '-space');
         if (a.appId === 'browser' || a.appId.startsWith('web:')) {
@@ -83,6 +83,19 @@ export function projectOperations(
       case 'space.activate': {
         const space = w.spaces.find((space) => space.id === a.spaceId);
         if (space) focusWindow(w, space.focusedWindowId);
+        break;
+      }
+      case 'space.merge': {
+        const source = w.spaces.find((space) => space.id === a.spaceId);
+        const target = w.spaces.find((space) => space.id === a.intoSpaceId);
+        if (
+          source &&
+          target &&
+          source !== target &&
+          source.windowIds.length + target.windowIds.length <= 3 &&
+          [...source.windowIds, ...target.windowIds].every((id) => !windowClosing(w, id))
+        )
+          mergeSpaces(w, source.id, target.id);
         break;
       }
       case 'space.layout': {

@@ -11,6 +11,7 @@ export const defaultSettings = () => ({
     topDeadZone: 'off' as const,
     showStats: false,
     autoFullscreen: false,
+    groupRail: true,
     avSync: false,
     audioChannels: { left: true, right: true },
   },
@@ -50,12 +51,14 @@ export class WorkspacesRepository {
     const settings = this.db.prepare('SELECT data FROM user_settings WHERE tenant=?').get(tenant) as {
       data: string;
     };
+    const productSettings = JSON.parse(settings.data);
+    productSettings.workspace.groupRail ??= true;
     return {
       tenantId: tenant,
       revision: Number(row.revision),
       activeSpaceId: row.active_space,
       ...JSON.parse(row.pending ?? '{}'),
-      settings: JSON.parse(settings.data),
+      settings: productSettings,
       windows: (
         this.db
           .prepare(

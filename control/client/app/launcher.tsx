@@ -1,21 +1,23 @@
-import { Close, Search } from '@mui/icons-material';
+import { AddToQueue, Close, OpenInNew, Search, ViewWeekOutlined } from '@mui/icons-material';
 import {
   Alert,
   ButtonBase,
   IconButton,
   InputAdornment,
+  ListItemIcon,
   Menu,
   MenuItem,
   TextField,
   Typography,
   useTheme,
 } from '@mui/material';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { LauncherItem, ProductState, WindowPlacement } from '../../shared/product';
 import { fileTypeColor, FileThumbnail } from '../files/file-thumbnail';
 import { useLibrary } from '../files/file-library-state';
 import { launcherLayout, contrastColor, originColor, type LauncherTile } from './launcher-layout';
 import { AppIcon } from './app-icon';
+import { useItemDrag, useWindowDragging, type PointerStart } from './window-drag';
 import { scaledAnchor, uiScale } from './ui-scale';
 import type { WorkspaceCall } from './window-state';
 import { formatError } from '../util/format-error';
@@ -23,20 +25,21 @@ import { formatError } from '../util/format-error';
 export function Launcher({
   state,
   call,
-  placement,
   online,
   close,
   activate,
   navigate,
   exiting,
+  audio,
 }: {
   state: ProductState;
   call: WorkspaceCall;
-  placement?: WindowPlacement;
   online: boolean;
+  /** Workspace-wide audio channels; quick to reach from wherever the user is. */
+  audio: React.ReactNode;
   close(): void;
-  activate(item: LauncherItem, placement?: WindowPlacement, newWindow?: boolean): Promise<void>;
-  navigate(value: string, placement?: WindowPlacement): Promise<void>;
+  activate(item: LauncherItem, placement?: WindowPlacement, reuseExisting?: boolean): Promise<void>;
+  navigate(value: string): Promise<void>;
   exiting?: boolean;
 }) {
   const theme = useTheme();
@@ -106,7 +109,7 @@ export function Launcher({
       clearTimeout(timer);
     };
   }, [call, query]);
-  const layout = launcherLayout(items, bounds.height, query);
+  const layout = launcherLayout(items, bounds.height, query, bounds.width);
   useLayoutEffect(measureEdges, [layout.height, items]);
   const perform = (task: () => Promise<void>) => {
     if (busy || !online) return;
@@ -116,21 +119,31 @@ export function Launcher({
       .catch((error) => setError(formatError(error)))
       .finally(() => setBusy(false));
   };
-  const open = (item: LauncherItem, target = placement, newWindow = false) =>
-    perform(() => activate(item, target, newWindow));
-  const split = (side: 'left' | 'right'): WindowPlacement | undefined => {
-    const space = state.workspace.spaces.find((space) => space.id === state.workspace.activeSpaceId);
-    return space && space.windowIds.length < 3
-      ? {
-          mode: 'split',
-          besideWindowId: space.windowIds[side === 'left' ? 0 : space.windowIds.length - 1],
-          side,
-        }
-      : undefined;
+  const checkCapacity = (item?: LauncherItem, reuseExisting = false) => {
+    const singleton =
+      item?.appId === 'settings' && state.workspace.windows.some((win) => win.appId === 'settings');
+    const reuse =
+      reuseExisting &&
+      state.workspace.windows.some((win) => win.appId === (item?.kind === 'file' ? 'files' : 'browser'));
+    if (state.workspace.windows.length >= 16 && !singleton && !reuse)
+      throw new Error('窗口已满，请先关闭一些窗口');
   };
+  const open = (item: LauncherItem, target?: WindowPlacement, reuseExisting = false) =>
+    perform(async () => {
+      checkCapacity(item, reuseExisting);
+      await activate(item, target, reuseExisting);
+    });
+  const space = state.workspace.spaces.find((space) => space.id === state.workspace.activeSpaceId);
+  const full = !space || space.windowIds.length >= 3;
+  const place = (target?: WindowPlacement, reuseExisting = false) => {
+    if (menu) open(menu.item, target, reuseExisting);
+    setMenu(undefined);
+  };
+  const liftItem = useItemDrag();
+  const dragging = useWindowDragging();
   return (
     <div
-      className={`workspace-overlay launcher${exiting ? ' overlay-exiting' : ''}`}
+      className={`workspace-overlay launcher${exiting ? ' overlay-exiting' : ''}${dragging && 'item' in dragging ? ' launcher-lifted' : ''}`}
       data-theme={theme.palette.mode}
       role="dialog"
       aria-label="开始屏幕"
@@ -140,9 +153,8 @@ export function Launcher({
       }}
     >
       <div className="launcher-heading">
-        <Typography variant="h5">
-          {placement?.mode === 'split' ? (placement.side === 'left' ? '在左侧分屏' : '在右侧分屏') : '开始'}
-        </Typography>
+        <Typography variant="h5">开始</Typography>
+        <div className="launcher-audio">{audio}</div>
         <IconButton aria-label="关闭开始屏幕" onClick={close}>
           <Close />
         </IconButton>
@@ -155,8 +167,9 @@ export function Launcher({
           perform(async () => {
             const result = await call('launcher.get', { query });
             const first = launcherLayout(result.items, bounds.height, query).groups[0]?.tiles[0];
-            if (first) await activate(first, placement);
-            else await navigate(query.trim(), placement);
+            checkCapacity(first);
+            if (first) await activate(first);
+            else await navigate(query.trim());
           });
         }}
       >
@@ -218,10 +231,7 @@ export function Launcher({
                       disabled={!online || busy}
                       open={() => open(tile)}
                       menu={(anchor) => setMenu({ item: tile, anchor })}
-                      edge={(side) => {
-                        const target = split(side);
-                        if (target) open(tile, target);
-                      }}
+                      lift={(pointer) => liftItem(pointer, tile)}
                     >
                       {entry?.type.startsWith('image/') && tile.size !== 'small' && (
                         <div className="launcher-file-image">
@@ -242,28 +252,50 @@ export function Launcher({
         </div>
         {query && !layout.groups.length && <Typography>没有匹配项，按回车搜索或打开网址</Typography>}
       </div>
-      <Menu anchorEl={scaledAnchor(menu?.anchor)} open={!!menu} onClose={() => setMenu(undefined)}>
-        <MenuItem
-          onClick={() => {
-            if (menu) open(menu.item, undefined, true);
-            setMenu(undefined);
-          }}
-        >
-          新窗口
+      <Menu
+        anchorEl={scaledAnchor(menu?.anchor)}
+        open={!!menu}
+        onClose={() => setMenu(undefined)}
+        slotProps={{ list: { dense: true } }}
+      >
+        <MenuItem onClick={() => place()}>
+          <ListItemIcon>
+            <AddToQueue fontSize="small" />
+          </ListItemIcon>
+          在新窗口组打开
         </MenuItem>
-        {(['left', 'right'] as const).map((side) => (
-          <MenuItem
-            key={side}
-            disabled={!split(side)}
-            onClick={() => {
-              const target = split(side);
-              if (menu && target) open(menu.item, target);
-              setMenu(undefined);
-            }}
-          >
-            {side === 'left' ? '在左侧分屏' : '在右侧分屏'}
+        <MenuItem
+          disabled={full}
+          onClick={() =>
+            space &&
+            place({
+              mode: 'split',
+              besideWindowId: space.windowIds[space.windowIds.length - 1],
+              side: 'right',
+            })
+          }
+        >
+          <ListItemIcon>
+            <ViewWeekOutlined fontSize="small" />
+          </ListItemIcon>
+          {full && space ? '当前窗口组已满' : '在当前窗口组打开'}
+        </MenuItem>
+        {menu?.item.kind === 'page' && state.workspace.windows.some((win) => win.appId === 'browser') && (
+          <MenuItem onClick={() => place(undefined, true)}>
+            <ListItemIcon>
+              <OpenInNew fontSize="small" />
+            </ListItemIcon>
+            在现有浏览器窗口中打开
           </MenuItem>
-        ))}
+        )}
+        {menu?.item.kind === 'file' && state.workspace.windows.some((win) => win.appId === 'files') && (
+          <MenuItem onClick={() => place(undefined, true)}>
+            <ListItemIcon>
+              <OpenInNew fontSize="small" />
+            </ListItemIcon>
+            在现有我的文件窗口中打开
+          </MenuItem>
+        )}
       </Menu>
     </div>
   );
@@ -275,7 +307,7 @@ function LauncherTileView({
   disabled,
   open,
   menu,
-  edge,
+  lift,
   children,
 }: {
   tile: LauncherTile;
@@ -283,7 +315,7 @@ function LauncherTileView({
   disabled: boolean;
   open(): void;
   menu(anchor: HTMLElement): void;
-  edge(side: 'left' | 'right'): void;
+  lift(pointer: PointerStart): void;
   children: React.ReactNode;
 }) {
   const gesture = useRef<
@@ -293,7 +325,6 @@ function LauncherTileView({
         lastX: number;
         lastY: number;
         touch: boolean;
-        armed: boolean;
         scrolling: boolean;
         moved: boolean;
         consumed: boolean;
@@ -328,30 +359,34 @@ function LauncherTileView({
           return;
         }
         const anchor = event.currentTarget;
+        const { pointerId, pointerType } = event;
         gesture.current = {
           x: event.clientX,
           y: event.clientY,
           lastX: event.clientX,
           lastY: event.clientY,
           touch: event.pointerType === 'touch',
-          armed: false,
           scrolling: false,
           moved: false,
           consumed: false,
           timer: setTimeout(() => {
-            if (gesture.current && !gesture.current.moved) {
-              gesture.current.armed = true;
-            }
-          }, 500),
+            const current = gesture.current;
+            if (!current || current.moved) return;
+            current.consumed = true;
+            // The drag provider tracks the pointer from here; the tile stops scrolling the rows.
+            if (anchor.hasPointerCapture(pointerId)) anchor.releasePointerCapture(pointerId);
+            lift({ pointerId, pointerType, clientX: current.lastX, clientY: current.lastY, element: anchor });
+          }, 400),
         };
         anchor.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event) => {
         const current = gesture.current;
+        if (current?.consumed) return;
         if (current && Math.hypot(event.clientX - current.x, event.clientY - current.y) > 10) {
           current.moved = true;
           clearTimeout(current.timer);
-          if (current.touch && !current.armed) current.scrolling = true;
+          if (current.touch && !current.consumed) current.scrolling = true;
         }
         if (current?.scrolling) {
           const scroller = event.currentTarget.closest('.launcher-groups')!;
@@ -366,17 +401,6 @@ function LauncherTileView({
       onPointerUp={(event) => {
         const current = gesture.current;
         clearTimeout(current?.timer);
-        if (current?.moved && !current.scrolling) {
-          const width = document.documentElement.clientWidth;
-          if (event.clientX <= 48 * uiScale()) edge('left');
-          else if (event.clientX >= width - 48 * uiScale()) edge('right');
-          current.consumed = true;
-        } else if (current?.armed && !current.consumed && !current.moved) {
-          current.consumed = true;
-          const anchor = event.currentTarget;
-          // Let the touch's synthesized click finish before mounting a modal backdrop.
-          current.timer = setTimeout(() => menu(anchor), 0);
-        }
         event.currentTarget.releasePointerCapture(event.pointerId);
       }}
       onPointerCancel={() => {

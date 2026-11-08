@@ -13,6 +13,11 @@ import {
   Refresh,
   Stop,
   Tab as TabIcon,
+  InstallDesktopOutlined,
+  LinkOutlined,
+  OpenInBrowser,
+  SettingsOutlined,
+  TuneOutlined,
 } from '@mui/icons-material';
 import {
   Box,
@@ -81,7 +86,6 @@ export function WindowFrame({
   online,
   settingsContent,
   fileChooser,
-  onSplit,
   call,
   weight,
   report,
@@ -96,7 +100,6 @@ export function WindowFrame({
   online: boolean;
   fileChooser?: React.ReactNode;
   settingsContent: (viewState: Record<string, unknown>, onState: (state: unknown) => void) => React.ReactNode;
-  onSplit: (windowId: string, side: 'left' | 'right') => void;
   call: WorkspaceCall;
   weight: number;
   report: (error: unknown) => void;
@@ -253,8 +256,9 @@ export function WindowFrame({
       .catch(report)
       .finally(() => setBusy(false));
   };
+  const favorite = state.workspace.favorites.find((favorite) => favorite.url === active?.url);
+  const favorited = !!favorite;
   const toggleFavorite = () => {
-    const favorite = state.workspace.favorites.find((favorite) => favorite.url === active?.url);
     if (favorite) run({ type: 'favorite.remove', id: favorite.id });
     else if (active) run({ type: 'favorite.add', url: active.url, title: active.title });
   };
@@ -265,37 +269,47 @@ export function WindowFrame({
     if (target) run({ type: 'tab.create', windowId: target.id, url: active?.url });
     else run({ type: 'window.open', appId: 'browser', url: active?.url, placement: { mode: 'space' } });
   };
-  const moreItems = browser
+  const moreItems: { label: string; icon: React.ReactElement; disabled?: boolean; select(): void }[] = browser
     ? [
-        { label: '新建标签页', disabled: !online, select: createStartTab },
+        { label: '新建标签页', icon: <Add />, disabled: !online, select: createStartTab },
         {
           label: '新建窗口',
+          icon: <OpenInNew />,
           disabled: !online,
           select: () => run({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } }),
         },
-        { label: '安装为 App…', disabled: !online || !origin, select: () => setInstall(true) },
-        {
-          label: state.workspace.favorites.some((favorite) => favorite.url === active?.url)
-            ? '取消收藏'
-            : '收藏',
-          disabled: !online || !origin,
-          select: toggleFavorite,
-        },
+        ...(origin
+          ? [
+              {
+                label: '安装为 App…',
+                icon: <InstallDesktopOutlined />,
+                disabled: !online,
+                select: () => setInstall(true),
+              },
+            ]
+          : []),
       ]
     : [
         {
           label: '刷新',
+          icon: <Refresh />,
           disabled: !online || !active,
           select: () => active && run({ type: 'tab.command', tabId: active.id, command: 'reload' }),
         },
         {
           label: '复制链接',
+          icon: <LinkOutlined />,
           disabled: !active,
           select: () => {
             void navigator.clipboard.writeText(active?.url ?? '').catch(report);
           },
         },
-        { label: '在浏览器中打开', disabled: !online || !active, select: openBrowser },
+        {
+          label: '在浏览器中打开',
+          icon: <OpenInBrowser />,
+          disabled: !online || !active,
+          select: openBrowser,
+        },
       ];
   return (
     <section
@@ -308,14 +322,7 @@ export function WindowFrame({
       {local ? (
         <>
           <div className="app-title-bar">
-            <WindowHandle
-              win={win}
-              state={state}
-              online={online}
-              action={action}
-              report={report}
-              onSplit={onSplit}
-            />
+            <WindowHandle win={win} state={state} online={online} action={action} report={report} />
             <Typography variant="subtitle2">{title}</Typography>
           </div>
           <div className="local-app-content">
@@ -326,6 +333,9 @@ export function WindowFrame({
                 onState={onState}
                 previewEntryId={
                   typeof viewState.previewEntryId === 'string' ? viewState.previewEntryId : undefined
+                }
+                previewRequestId={
+                  typeof viewState.previewRequestId === 'string' ? viewState.previewRequestId : undefined
                 }
               />
             ) : (
@@ -338,14 +348,7 @@ export function WindowFrame({
           {browser ? (
             <>
               <div className="tab-bar">
-                <WindowHandle
-                  win={win}
-                  state={state}
-                  online={online}
-                  action={action}
-                  report={report}
-                  onSplit={onSplit}
-                />
+                <WindowHandle win={win} state={state} online={online} action={action} report={report} />
                 <div
                   className={`tab-strip${drag ? ' tab-strip-dragging' : ''}${drag?.target?.windowId === win.id && drag.sourceWindowId !== win.id ? ' tab-drop-target' : ''}`}
                   role="tablist"
@@ -506,27 +509,11 @@ export function WindowFrame({
                     }}
                   />
                 </Box>
-                <Tool
-                  title={
-                    state.workspace.favorites.some((favorite) => favorite.url === active?.url)
-                      ? '取消收藏'
-                      : '收藏'
-                  }
-                  disabled={!online || !origin}
-                  onClick={() => {
-                    const favorite = state.workspace.favorites.find(
-                      (favorite) => favorite.url === active?.url,
-                    );
-                    if (favorite) run({ type: 'favorite.remove', id: favorite.id });
-                    else if (active) run({ type: 'favorite.add', url: active.url, title: active.title });
-                  }}
-                >
-                  {state.workspace.favorites.some((favorite) => favorite.url === active?.url) ? (
-                    <Star fontSize="small" />
-                  ) : (
-                    <StarBorder fontSize="small" />
-                  )}
-                </Tool>
+                {origin && (
+                  <Tool title={favorited ? '取消收藏' : '收藏'} disabled={!online} onClick={toggleFavorite}>
+                    {favorited ? <Star fontSize="small" /> : <StarBorder fontSize="small" />}
+                  </Tool>
+                )}
                 <Tool title="更多" onClick={(e) => setMenu(e.currentTarget)}>
                   <MoreVert fontSize="small" />
                 </Tool>
@@ -535,14 +522,7 @@ export function WindowFrame({
           ) : (
             <>
               <div className="app-title-bar">
-                <WindowHandle
-                  win={win}
-                  state={state}
-                  online={online}
-                  action={action}
-                  report={report}
-                  onSplit={onSplit}
-                />
+                <WindowHandle win={win} state={state} online={online} action={action} report={report} />
                 <span className="app-title-icon">
                   <AppIcon appId={win.appId} iconUrl={app?.iconUrl} />
                 </span>
@@ -616,7 +596,7 @@ export function WindowFrame({
             slotProps={{
               paper: {
                 className: 'more-menu',
-                sx: { width: 320, maxWidth: 'calc(var(--layout-vw) - 24px)' },
+                sx: { minWidth: 220, maxWidth: 'calc(var(--layout-vw) - 24px)' },
               },
             }}
           >
@@ -644,12 +624,19 @@ export function WindowFrame({
                       item.select();
                     }}
                   >
+                    <ListItemIcon>{item.icon}</ListItemIcon>
                     {item.label}
                   </MenuItem>
                 ))}
-                <MenuItem disabled={!origin} onClick={() => setSiteMenuOrigin(origin)}>
-                  网页兼容性
-                </MenuItem>
+                {origin && (
+                  <MenuItem onClick={() => setSiteMenuOrigin(origin)}>
+                    <ListItemIcon>
+                      <TuneOutlined />
+                    </ListItemIcon>
+                    网页兼容性
+                  </MenuItem>
+                )}
+                <Divider />
                 <MenuItem
                   onClick={() => {
                     closeMore();
@@ -669,6 +656,9 @@ export function WindowFrame({
                     }
                   }}
                 >
+                  <ListItemIcon>
+                    <SettingsOutlined />
+                  </ListItemIcon>
                   {browser ? '设置' : 'App 设置'}
                 </MenuItem>
               </MenuList>

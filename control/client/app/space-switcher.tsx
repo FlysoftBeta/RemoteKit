@@ -54,15 +54,7 @@ export function SpaceSwitcher({
   const run = (command: Parameters<Action>[0]) => void action(command).catch(report);
   const merge = async (source: ProductSpace, target: ProductSpace) => {
     if (source.id === target.id || source.windowIds.length + target.windowIds.length > 3) return;
-    let besideWindowId = target.windowIds[target.windowIds.length - 1];
-    for (const windowId of source.windowIds) {
-      await action({
-        type: 'window.place',
-        windowId,
-        placement: { mode: 'split', besideWindowId, side: 'right' },
-      });
-      besideWindowId = windowId;
-    }
+    await action({ type: 'space.merge', spaceId: source.id, intoSpaceId: target.id });
   };
   return (
     <div

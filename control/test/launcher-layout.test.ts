@@ -23,6 +23,7 @@ test('rows share the available height within bounds', () => {
   assert.equal(launcherLayout(rows, 2000).height, 168);
   assert.equal(launcherLayout(rows, 200).height, 88);
   assert.equal(launcherLayout(rows.slice(0, 2), 400).height, 152);
+  assert.equal(launcherLayout(rows, 2000, '', 390).height, 111);
 });
 
 test('launcher grouping applies limits, ordering, and frequent de-duplication', () => {

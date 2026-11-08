@@ -316,3 +316,23 @@ test('installed app metadata survives icon updates and tenant deletion removes w
     store.db.close();
   }
 });
+
+test('group rail defaults on JSON read and persists an explicit collapse', async () => {
+  const store = new ControlDatabase(':memory:');
+  try {
+    const account = await registerUser(store, 'rail-user', 'schema-password123');
+    const state = store.workspaces.workspace(account.tenantId);
+    assert.equal(state.settings.workspace.groupRail, true);
+    const oldSettings = JSON.parse(JSON.stringify(state.settings));
+    delete oldSettings.workspace.groupRail;
+    store.db
+      .prepare('UPDATE user_settings SET data=? WHERE tenant=?')
+      .run(JSON.stringify(oldSettings), account.tenantId);
+    assert.equal(store.workspaces.workspace(account.tenantId).settings.workspace.groupRail, true);
+    state.settings.workspace.groupRail = false;
+    store.workspaces.saveWorkspace(state);
+    assert.equal(store.workspaces.workspace(account.tenantId).settings.workspace.groupRail, false);
+  } finally {
+    store.db.close();
+  }
+});

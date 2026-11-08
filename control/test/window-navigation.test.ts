@@ -83,7 +83,6 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
       action: unexpected,
       report: unexpected,
       settingsContent: () => null,
-      onSplit: unexpected,
       call: unexpected,
       weight: 1,
       onGeometry: unexpected,

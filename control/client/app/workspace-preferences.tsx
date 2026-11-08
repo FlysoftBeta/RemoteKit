@@ -32,13 +32,11 @@ export function WorkspacePreferences({
   state,
   action,
   section,
-  audio,
 }: {
   state: ProductState;
   online: boolean;
   action: Action;
   section: string;
-  audio: React.ReactNode;
 }) {
   const settings = state.workspace.settings.workspace;
   const insets = useTopInsetProbe();
@@ -173,6 +171,16 @@ export function WorkspacePreferences({
             )}
             {note('deadZone')}
           </SettingSection>
+          <SettingSection title="窗口组">
+            <SettingSwitch
+              title="显示组栏"
+              description="宽屏左侧常驻窗口组"
+              checked={settings.groupRail}
+              disabled={!online || busy.groupRail}
+              onChange={(checked) => void save('groupRail', { groupRail: checked })}
+            />
+            {note('groupRail')}
+          </SettingSection>
           <SettingSection title="全屏">
             {' '}
             <SettingSwitch
@@ -233,7 +241,6 @@ export function WorkspacePreferences({
             {note('stats')}
           </SettingSection>
           <SettingSection title="声音">
-            {' '}
             <SettingSwitch
               title="音视频同步"
               description="声音与画面对齐，画面延迟会增加；切换时重新建立媒体连接"
@@ -242,7 +249,6 @@ export function WorkspacePreferences({
               onChange={(checked) => void save('avSync', { avSync: checked })}
             />
             {note('avSync')}
-            {audio}
           </SettingSection>
         </>
       )}

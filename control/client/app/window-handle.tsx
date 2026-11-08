@@ -1,9 +1,10 @@
-import { MoreHoriz } from '@mui/icons-material';
+import { DragIndicator } from '@mui/icons-material';
 import { IconButton, Menu, MenuItem } from '@mui/material';
-import { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import type { ProductState, ProductWindow } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import { scaledAnchor } from './ui-scale';
+import { useWindowDrag } from './window-drag';
 
 export function WindowHandle({
   win,
@@ -11,18 +12,17 @@ export function WindowHandle({
   online,
   action,
   report,
-  onSplit,
 }: {
   win: ProductWindow;
   state: ProductState;
   online: boolean;
   action: Action;
   report(error: unknown): void;
-  onSplit(windowId: string, side: 'left' | 'right'): void;
 }) {
   const [menu, setMenu] = useState<HTMLElement | null>(null);
-  const drag = useRef<{ x: number; y: number; moved: boolean } | undefined>(undefined);
+  const begin = useWindowDrag();
   const space = state.workspace.spaces.find((space) => space.windowIds.includes(win.id));
+  const index = space?.windowIds.indexOf(win.id) ?? -1;
   const run = (command: Parameters<Action>[0]) => {
     setMenu(null);
     void action(command).catch(report);
@@ -30,62 +30,38 @@ export function WindowHandle({
   return (
     <>
       <IconButton
-        aria-label="窗口菜单"
+        aria-label="窗口把手"
         disabled={!online}
         className="window-handle"
-        onClick={(event) => {
-          if (!drag.current?.moved) setMenu(event.currentTarget);
-        }}
-        onPointerDown={(event) => {
-          drag.current = { x: event.clientX, y: event.clientY, moved: false };
-          event.currentTarget.setPointerCapture(event.pointerId);
-        }}
-        onPointerMove={(event) => {
-          if (drag.current && Math.abs(event.clientX - drag.current.x) > 8) drag.current.moved = true;
-        }}
-        onPointerUp={(event) => {
-          if (drag.current?.moved) {
-            const target = document
-              .elementFromPoint(event.clientX, event.clientY)
-              ?.closest<HTMLElement>('[data-window-id]');
-            if (target && target.dataset.windowId !== win.id) {
-              const bounds = target.getBoundingClientRect();
-              if (event.clientY < bounds.top + bounds.height / 2)
-                run({
-                  type: 'window.place',
-                  windowId: win.id,
-                  placement: {
-                    mode: 'split',
-                    besideWindowId: target.dataset.windowId!,
-                    side: event.clientX < bounds.left + bounds.width / 2 ? 'left' : 'right',
-                  },
-                });
-            }
-          }
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }}
-        onPointerCancel={() => {
-          drag.current = undefined;
-        }}
+        onPointerDown={(event) => begin(event, { windowId: win.id })}
+        onClick={(event) => setMenu(event.currentTarget)}
       >
-        <MoreHoriz fontSize="small" />
+        <DragIndicator fontSize="small" style={{ transform: 'rotate(90deg)' }} />
       </IconButton>
       <Menu open={!!menu} anchorEl={scaledAnchor(menu)} onClose={() => setMenu(null)}>
         <MenuItem
           onClick={() => run({ type: 'window.place', windowId: win.id, placement: { mode: 'space' } })}
         >
-          单独显示
+          移到新窗口组
         </MenuItem>
         {(['left', 'right'] as const).map((side) => (
           <MenuItem
             key={side}
-            disabled={!space || space.windowIds.length >= 3}
+            disabled={!space || (side === 'left' ? index <= 0 : index >= space.windowIds.length - 1)}
             onClick={() => {
-              setMenu(null);
-              onSplit(win.id, side);
+              if (space)
+                run({
+                  type: 'window.place',
+                  windowId: win.id,
+                  placement: {
+                    mode: 'split',
+                    besideWindowId: space.windowIds[index + (side === 'left' ? -1 : 1)],
+                    side,
+                  },
+                });
             }}
           >
-            {side === 'left' ? '左侧分屏' : '右侧分屏'}
+            {side === 'left' ? '向左移' : '向右移'}
           </MenuItem>
         ))}
         <MenuItem onClick={() => run({ type: 'window.close', windowId: win.id })}>关闭窗口</MenuItem>

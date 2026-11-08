@@ -1366,14 +1366,6 @@ html.layout-compact .admin-section-header {
   min-width: 0;
   overflow: hidden;
 }
-.window-handle.MuiIconButton-root {
-  flex: none;
-  width: 32px;
-  height: 24px;
-  border-radius: 4px;
-  padding: 0;
-  touch-action: none;
-}
 .window-handle > svg {
   opacity: 0.7;
 }
@@ -1409,6 +1401,10 @@ html.layout-compact .admin-section-header {
 .space-obscured {
   pointer-events: none;
 }
+/* A lifted launcher item drops onto the stage underneath the faded launcher. */
+.item-dragging .space-obscured {
+  pointer-events: auto;
+}
 .workspace-overlay {
   position: absolute;
   inset: 0 0 16px;
@@ -1420,6 +1416,9 @@ html.layout-compact .admin-section-header {
   flex-direction: column;
   padding: 28px 40px;
   overflow: hidden;
+}
+.rail-visible .workspace-overlay {
+  bottom: 0;
 }
 .workspace-overlay[data-theme='dark'] {
   background: rgba(16, 18, 24, 0.72);
@@ -1462,6 +1461,18 @@ html.layout-compact .admin-section-header {
 .launcher-heading h5 {
   font-weight: 500;
   letter-spacing: -0.02em;
+}
+.launcher-audio {
+  margin-left: auto;
+  margin-right: 8px;
+  width: 300px;
+  max-width: 60%;
+}
+.launcher-audio .menu-audio {
+  padding: 0;
+}
+.launcher-audio .menu-audio-row .MuiToggleButton-root {
+  background: rgba(255, 255, 255, 0.6);
 }
 .launcher-search {
   max-width: 640px;
@@ -1513,7 +1524,7 @@ html.layout-compact .admin-section-header {
   flex: none;
   width: max-content;
   min-width: 100%;
-  margin-block: auto;
+  padding-top: 8px;
 }
 .launcher-group {
   flex: none;
@@ -1760,8 +1771,7 @@ html.layout-compact .admin-section-header {
   overflow: auto;
 }
 .settings-navigation .MuiListItemButton-root {
-  border-radius: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 .settings-detail {
   flex: 1;
@@ -1793,13 +1803,54 @@ html.layout-compact .admin-section-header {
 .settings-narrow .settings-detail-title > * + * {
   margin-left: 8px;
 }
+.installed-apps {
+  border: 1px solid #e3e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.installed-apps > .MuiTypography-root {
+  padding: 16px;
+}
+.installed-app + .installed-app {
+  border-top: 1px solid #e3e8f0;
+}
+.installed-app-summary.MuiListItemButton-root {
+  padding: 10px 12px;
+}
+.installed-app-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  margin-right: 12px;
+  font-size: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #2563b8;
+}
+.installed-app-icon .launcher-app-icon {
+  border-radius: 7px;
+  padding: 0;
+}
+.installed-app-chevron {
+  color: rgba(0, 0, 0, 0.54);
+  transition: transform 160ms;
+}
+.installed-app.expanded .installed-app-chevron {
+  transform: rotate(180deg);
+}
 .installed-app-editor {
-  padding-bottom: 24px;
-  margin-bottom: 24px;
-  border-bottom: 1px solid #e3e8f0;
+  padding: 4px 16px 16px 56px;
 }
 .installed-app-editor > * + * {
   margin-top: 16px;
+}
+.installed-app-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.installed-app-actions > * + * {
+  margin-left: 8px;
 }
 .app-fields {
   display: grid;
@@ -1827,24 +1878,62 @@ html.layout-compact .admin-section-header {
   padding-top: 8px;
   margin-bottom: 16px;
 }
-.account-settings > * {
-  display: block;
-  margin-bottom: 12px;
+.account-identity {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin-bottom: 20px;
+}
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  margin: -4px;
+}
+.account-actions > * {
+  margin: 4px !important;
+}
+.account-settings > [role='status'] {
+  margin-top: 12px;
 }
 .favorite-row {
   display: flex;
   align-items: center;
-  padding: 10px 0;
+  padding: 8px 0;
 }
 .favorite-row > div {
   flex: 1;
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.site-preference + .site-preference {
-  margin-top: 16px;
-  padding-top: 16px;
+.site-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 0;
+}
+.site-row + .site-row {
   border-top: 1px solid #e3e8f0;
+}
+.site-row-origin.MuiTypography-root {
+  flex: 1 1 160px;
+  min-width: 0;
+  margin-right: 8px;
+}
+.site-row-options {
+  display: flex;
+}
+.site-row-options > * + * {
+  margin-left: 6px;
+}
+.favorite-row + .favorite-row {
+  border-top: 1px solid #e3e8f0;
+}
+.favorite-empty.MuiTypography-root {
+  display: flex;
+  align-items: center;
+}
+.favorite-empty svg {
+  margin-right: 6px;
 }
 .start-favorites {
   display: grid;
@@ -1885,4 +1974,248 @@ html.layout-compact .admin-section-header {
     width: 100% !important;
     margin: 0 0 20px;
   }
+}
+.viewer-shell.rail-visible > .window-workspace {
+  margin-left: 76px;
+}
+.rail-visible > .narrow-window-switcher {
+  margin-left: 76px;
+}
+.group-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 76px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: #e8ecf1;
+  border-right: 1px solid #cdd4dd;
+  padding: 6px 0;
+  z-index: 4;
+}
+.group-rail-list {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 5px;
+}
+.group-rail-entry {
+  margin-bottom: 8px;
+  width: 64px;
+}
+.group-rail-card.MuiButtonBase-root {
+  width: 64px;
+  height: 44px;
+  border-radius: 6px;
+  border: 1px solid #c3cbd7;
+  overflow: hidden;
+  display: flex;
+  background: #d8e0eb;
+  touch-action: none;
+  cursor: grab;
+}
+.group-rail-entry.active .group-rail-card {
+  outline: 2px solid var(--mui-palette-primary-main, #245db5);
+  outline-offset: -2px;
+}
+.group-rail-window {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  flex-basis: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-right: 1px solid #bcc8d8;
+  color: #46638b;
+}
+.group-rail-window:last-child {
+  border-right: 0;
+}
+.group-rail-window svg {
+  width: 20px;
+  height: 20px;
+}
+.group-rail-window.app-browser {
+  background: #dbe6f6;
+  color: #2563b8;
+}
+.group-rail-window.app-files {
+  background: #f5e8cf;
+  color: #9a640f;
+}
+.group-rail-window.app-settings {
+  background: #e1e5eb;
+  color: #475569;
+}
+.group-rail-window.app-web {
+  background: #eef1f5;
+}
+.group-rail-window .launcher-app-icon {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 5px;
+}
+.group-rail-title {
+  display: block;
+  font-size: 11px;
+  line-height: 17px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.group-rail-expand.MuiIconButton-root {
+  position: absolute;
+  left: 4px;
+  bottom: 20px;
+  z-index: 5;
+  background: #e8ecf1;
+  border: 1px solid #cdd4dd;
+}
+.group-rail-new {
+  height: 64px;
+  width: 64px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #7c91b0;
+  border-radius: 6px;
+  font-size: 20px;
+  color: #365e94;
+}
+.group-rail-new span {
+  font-size: 10px;
+}
+.drop-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+[data-window-drop-hover]:not(.drop-disabled) {
+  outline: 2px solid #245db5;
+  border-radius: 6px;
+  background: #d5e5ff;
+}
+.window-handle.MuiIconButton-root {
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  cursor: grab;
+  touch-action: none;
+  flex-shrink: 0;
+  border-radius: 4px;
+}
+.window-dragging,
+.window-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+.window-drag-ghost {
+  position: fixed;
+  width: 180px;
+  height: 124px;
+  background: #e8ecf1;
+  color: #345a8d;
+  box-shadow: 0 10px 32px #162b5066;
+  border-radius: 8px;
+  border: 1px solid #c3cbd7;
+  pointer-events: none;
+  z-index: 1600;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.window-drag-ghost > svg {
+  width: 44px;
+  height: 44px;
+  margin: auto;
+}
+.window-drag-ghost > img {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  object-fit: cover;
+}
+.window-drag-ghost > span {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.window-insertion-marker {
+  position: fixed;
+  width: 4px;
+  transform: translateX(-2px);
+  background: #245db5;
+  box-shadow: 0 0 0 2px #ffffffa6;
+  pointer-events: none;
+  z-index: 1500;
+}
+.window-insertion-guides {
+  position: fixed;
+  pointer-events: none;
+  z-index: 10;
+}
+.window-insertion-guides > i {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: #245db54d;
+  transform: translateX(-1px);
+}
+.window-drop-bar {
+  position: absolute;
+  bottom: 16px;
+  left: 16px;
+  right: 16px;
+  height: 56px;
+  z-index: 20;
+  border: 2px dashed #245db5;
+  border-radius: 10px;
+  background: #e8f0fd;
+  color: #245db5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+.drag-with-rail > .window-drop-bar {
+  display: none;
+}
+.group-merge-target {
+  height: 100%;
+  border: 3px solid #245db5;
+  background: #245db522;
+  color: #245db5;
+  text-align: center;
+  padding: 20px;
+}
+.launcher.launcher-lifted {
+  /* The filled open animation would otherwise pin opacity at 1. */
+  animation: none;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease-out;
+}
+.group-rail-window > img.launcher-app-icon {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+.window-drag-ghost > img.launcher-app-icon {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin: auto;
 }

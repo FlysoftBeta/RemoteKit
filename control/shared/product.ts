@@ -30,6 +30,7 @@ export interface WorkspaceSettings {
   topDeadZone: TopDeadZone;
   showStats: boolean;
   autoFullscreen: boolean;
+  groupRail: boolean;
   avSync: boolean;
   audioChannels: { left: boolean; right: boolean };
 }
@@ -306,6 +307,7 @@ export type ProductAction =
   | { type: 'window.state'; windowId: string; state: Record<string, unknown> }
   | { type: 'space.activate'; spaceId: string; source?: 'launcher' }
   | { type: 'space.close'; spaceId: string }
+  | { type: 'space.merge'; spaceId: string; intoSpaceId: string }
   | { type: 'space.layout'; spaceId: string; weights: number[] }
   | ({ type: 'app.install' } & AppDefinition)
   | ({ type: 'app.update'; appId: string } & Partial<AppDefinition>)

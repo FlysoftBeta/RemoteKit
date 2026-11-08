@@ -6,7 +6,7 @@ import type {
   ProductWorkspace,
   WindowPlacement,
 } from '../../shared/product';
-export const WORKSPACE_LIMITS = Object.freeze({ tabs: 32, windows: 12, windowsPerSpace: 3, sites: 4096 });
+export const WORKSPACE_LIMITS = Object.freeze({ tabs: 32, windows: 16, windowsPerSpace: 3, sites: 4096 });
 export function findTab(workspace: ProductWorkspace, id: string): ProductTab {
   const tab = workspace.tabs.find((tab) => tab.id === id);
   if (!tab) throw new RemoteKitError('not_found', 'Tab does not exist');
@@ -120,4 +120,25 @@ export function placeWindow(
     target!.weights.splice(index, 0, weight);
   }
   focusWindow(workspace, windowId, now);
+}
+
+export function mergeSpaces(
+  workspace: ProductWorkspace,
+  spaceId: string,
+  intoSpaceId: string,
+  now = Date.now(),
+) {
+  const source = findSpace(workspace, spaceId);
+  const target = findSpace(workspace, intoSpaceId);
+  if (source === target) throw new RemoteKitError('invalid_request', 'Choose another space');
+  if (source.windowIds.length + target.windowIds.length > WORKSPACE_LIMITS.windowsPerSpace)
+    throw new RemoteKitError('limit_exceeded', 'Each space supports up to 3 windows');
+  for (const id of [...source.windowIds, ...target.windowIds]) assertWindowMutable(workspace, id);
+  target.windowIds.push(...source.windowIds);
+  target.weights = [
+    ...target.weights.map((weight) => weight / 2),
+    ...source.weights.map((weight) => weight / 2),
+  ];
+  workspace.spaces.splice(workspace.spaces.indexOf(source), 1);
+  focusWindow(workspace, target.focusedWindowId, now);
 }

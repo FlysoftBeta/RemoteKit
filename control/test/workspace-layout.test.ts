@@ -94,7 +94,7 @@ test('space projection handles split, focus, detach, proportions and settings si
   assert.deepEqual(dividerWeights([0.2, 0.3, 0.5], 1, 0.5), [0.2, 0.4, 0.4]);
 });
 
-test('launcher reuse, longest app scope, forced new windows and source tagging', () => {
+test('launcher creates groups, honors longest app scope and explicitly reuses page or file windows', () => {
   const state = workspace().workspace;
   const page: LauncherItem = {
     key: 'page',
@@ -105,7 +105,13 @@ test('launcher reuse, longest app scope, forced new windows and source tagging',
     url: 'https://example.test/app/note',
   };
   assert.deepEqual(launcherActions(state, page), [
-    { type: 'tab.create', windowId: 'c', url: page.url, source: 'launcher' },
+    {
+      type: 'window.open',
+      appId: 'browser',
+      url: page.url,
+      placement: { mode: 'space' },
+      source: 'launcher',
+    },
   ]);
   state.apps = [
     {
@@ -124,24 +130,38 @@ test('launcher reuse, longest app scope, forced new windows and source tagging',
   );
   const app: LauncherItem = { ...page, kind: 'app', appId: 'browser' };
   assert.deepEqual(launcherActions(state, app), [
-    { type: 'window.focus', windowId: 'c', source: 'launcher' },
+    {
+      type: 'window.open',
+      appId: 'browser',
+      url: undefined,
+      placement: { mode: 'space' },
+      source: 'launcher',
+    },
   ]);
   const placement = { mode: 'split', besideWindowId: 'a', side: 'left' } as const;
   assert.deepEqual(launcherActions(state, app, placement), [
     { type: 'window.open', appId: 'browser', url: undefined, placement, source: 'launcher' },
   ]);
-  assert.equal(launcherActions(state, app, undefined, true)[0].type, 'window.open');
-  assert.deepEqual(launcherNavigation(state, page.url!), {
-    type: 'tab.create',
-    windowId: 'c',
+  assert.deepEqual(launcherActions(state, page, undefined, true), [
+    { type: 'tab.create', windowId: 'c', url: page.url, source: 'launcher' },
+  ]);
+  const file: LauncherItem = { ...page, kind: 'file', entryId: 'file' };
+  assert.equal(launcherActions(state, file)[0].type, 'window.open');
+  assert.deepEqual(launcherActions(state, file, undefined, true), [
+    { type: 'window.focus', windowId: 'b', source: 'launcher' },
+  ]);
+  assert.deepEqual(launcherNavigation(page.url!), {
+    type: 'window.open',
+    appId: 'browser',
+    placement: { mode: 'space' },
     url: page.url,
     source: 'launcher',
   });
-  assert.deepEqual(launcherNavigation(state, 'two words', placement), {
+  assert.deepEqual(launcherNavigation('two words'), {
     type: 'window.open',
     appId: 'browser',
     url: 'two words',
-    placement,
+    placement: { mode: 'space' },
     source: 'launcher',
   });
 });
@@ -160,4 +180,20 @@ test('a stale placement target cannot break authoritative snapshot projection', 
     },
   ])!;
   assert.deepEqual(projected.workspace.spaces, state.workspace.spaces);
+});
+
+test('merge projection uses the same atomic order and proportions as server commands', () => {
+  const state = workspace();
+  const merged = projectOperations(state, [
+    {
+      operationId: 'merge',
+      operationGeneration: 'g',
+      action: { type: 'space.merge', spaceId: 'two', intoSpaceId: 'one' },
+    },
+  ])!.workspace;
+  assert.deepEqual(merged.spaces[0].windowIds, ['a', 'b', 'c']);
+  assert.deepEqual(merged.spaces[0].weights, [0.35, 0.15, 0.5]);
+  assert.equal(merged.spaces.length, 1);
+  assert.equal(merged.activeSpaceId, 'one');
+  assert.equal(state.workspace.spaces.length, 2);
 });

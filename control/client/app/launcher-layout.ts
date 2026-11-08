@@ -31,12 +31,14 @@ export function tileSize(item: LauncherItem, index: number, items: LauncherItem[
   return ratio >= 0.5 ? 'medium' : 'small';
 }
 
-export function rowHeight(availableHeight: number, rowCount: number) {
+export function rowHeight(availableHeight: number, rowCount: number, width = Infinity) {
   const rows = Math.max(1, rowCount);
-  return Math.round(Math.max(88, Math.min(168, availableHeight / rows - LAUNCHER_ROW_CHROME)));
+  // On narrow screens about three tile units fit across, so a row never shows a single tile.
+  const across = (width - 32 - 2 * LAUNCHER_SPACING) / 3;
+  return Math.round(Math.max(88, Math.min(168, across, availableHeight / rows - LAUNCHER_ROW_CHROME)));
 }
 
-export function launcherLayout(items: LauncherItem[], availableHeight: number, query = '') {
+export function launcherLayout(items: LauncherItem[], availableHeight: number, query = '', width = Infinity) {
   const frequent = items
     .filter((item) => item.group === 'frequent')
     .sort(byScore)
@@ -75,7 +77,7 @@ export function launcherLayout(items: LauncherItem[], availableHeight: number, q
       rows.push({ id, title: titles[id as keyof typeof titles], entries });
   }
   const groups = rows.filter((row) => row.entries.length);
-  const height = rowHeight(availableHeight, groups.length);
+  const height = rowHeight(availableHeight, groups.length, width);
   return {
     height,
     spacing: LAUNCHER_SPACING,

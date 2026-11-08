@@ -23,6 +23,7 @@ function empty(): ProductWorkspace {
         topDeadZone: 'off',
         showStats: false,
         autoFullscreen: false,
+        groupRail: true,
         avSync: false,
         audioChannels: { left: true, right: true },
       },
@@ -88,8 +89,8 @@ test('window limits and per-space limits reject without changing input state', (
     /3 windows/,
   );
   assert.equal(workspace.windows.length, 3);
-  while (workspace.windows.length < 12) workspace = open(workspace, 'files');
-  assert.throws(() => open(workspace), /12 windows/);
+  while (workspace.windows.length < 16) workspace = open(workspace, 'files');
+  assert.throws(() => open(workspace), /16 windows/);
 });
 
 test('settings are a singleton local App and window state is bounded', () => {
@@ -265,4 +266,82 @@ test('web App popups split beside the opener and new tabs move to the recent bro
   workspace.pendingWindowCloseId = opener.windowId;
   await popupService.observePopups(workspace, { pendingPopups: [popup('closing', 5)] });
   assert.equal(workspace.tabs.length, previousCount);
+});
+
+test('merge appends atomically, retains creation order, focuses destination and rejects full or closing groups', () => {
+  let workspace = open(open(open(empty(), 'files'), 'files'), 'files');
+  const [first, second, third] = workspace.spaces;
+  const originalOrder = workspace.spaces.map((space) => space.id);
+  workspace = command(workspace, { type: 'space.activate', spaceId: first.id }).workspace;
+  assert.deepEqual(
+    workspace.spaces.map((space) => space.id),
+    originalOrder,
+  );
+  workspace = command(workspace, { type: 'space.merge', spaceId: third.id, intoSpaceId: first.id }).workspace;
+  assert.deepEqual(
+    workspace.spaces.map((space) => space.id),
+    [first.id, second.id],
+  );
+  assert.deepEqual(workspace.spaces[0].windowIds, [...first.windowIds, ...third.windowIds]);
+  assert.deepEqual(workspace.spaces[0].weights, [0.5, 0.5]);
+  assert.equal(workspace.activeSpaceId, first.id);
+  workspace = command(workspace, {
+    type: 'space.merge',
+    spaceId: second.id,
+    intoSpaceId: first.id,
+  }).workspace;
+  workspace = open(workspace, 'files');
+  const source = workspace.spaces[1];
+  const before = structuredClone(workspace);
+  assert.throws(
+    () => command(workspace, { type: 'space.merge', spaceId: source.id, intoSpaceId: first.id }),
+    (error: any) => error.code === 'limit_exceeded',
+  );
+  assert.deepEqual(workspace, before);
+  assert.throws(
+    () => command(workspace, { type: 'space.merge', spaceId: source.id, intoSpaceId: source.id }),
+    /another space/,
+  );
+  workspace = open(workspace, 'files');
+  workspace.pendingWindowCloseId = source.windowIds[0];
+  assert.throws(
+    () =>
+      command(workspace, { type: 'space.merge', spaceId: source.id, intoSpaceId: workspace.spaces[2].id }),
+    /closing/,
+  );
+});
+
+test('cross-group placement targets either side, rejects full groups and detaches into a new group', () => {
+  let workspace = open(open(open(open(empty(), 'files'), 'files'), 'files'), 'files');
+  const [a, b, c, d] = workspace.windows;
+  workspace = command(workspace, {
+    type: 'window.place',
+    windowId: b.id,
+    placement: { mode: 'split', besideWindowId: a.id, side: 'left' },
+  }).workspace;
+  workspace = command(workspace, {
+    type: 'window.place',
+    windowId: c.id,
+    placement: { mode: 'split', besideWindowId: a.id, side: 'right' },
+  }).workspace;
+  assert.deepEqual(workspace.spaces[0].windowIds, [b.id, a.id, c.id]);
+  const before = structuredClone(workspace);
+  assert.throws(
+    () =>
+      command(workspace, {
+        type: 'window.place',
+        windowId: d.id,
+        placement: { mode: 'split', besideWindowId: a.id, side: 'right' },
+      }),
+    (error: any) => error.code === 'limit_exceeded',
+  );
+  assert.deepEqual(workspace, before);
+  workspace = command(workspace, {
+    type: 'window.place',
+    windowId: a.id,
+    placement: { mode: 'space' },
+  }).workspace;
+  assert.deepEqual(workspace.spaces[0].windowIds, [b.id, c.id]);
+  assert.deepEqual(workspace.spaces[2].windowIds, [a.id]);
+  assert.equal(workspace.activeSpaceId, workspace.spaces[2].id);
 });
