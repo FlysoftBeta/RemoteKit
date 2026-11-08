@@ -88,6 +88,8 @@ void ChannelController::FlushSignals() {
   peer_controller.FlushSignals();
   direct_services.Editable(peer_controller.Handle(), output.Slots().LatestMetadata(),
                            output.Suspended());
+  direct_services.Selection(peer_controller.Handle(), output.Slots().LatestMetadata(),
+                            output.Suspended());
   FlushControl();
   FlushServices();
 }

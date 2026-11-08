@@ -4,6 +4,7 @@ export type GestureType =
   | 'tapDown'
   | 'tapCancel'
   | 'tap'
+  | 'longTap'
   | 'scrollBegin'
   | 'scrollUpdate'
   | 'scrollEnd'
@@ -25,6 +26,7 @@ export interface GestureCandidate {
 export const GESTURE_SLOP_DIP = 8;
 export const PINCH_SLOP_DIP = 8;
 export const TAP_MAX_US = 500000;
+export const LONG_PRESS_US = 500000;
 export const VELOCITY_WINDOW_US = 100000;
 export const FLING_MIN_VELOCITY = 50;
 export const FLING_MAX_VELOCITY = 8000;
@@ -43,6 +45,15 @@ export interface MomentumPacket extends Record<string, unknown> {
   sampleElapsedUs: number;
   cumulativeX: number;
   cumulativeY: number;
+}
+export interface LongPressPacket extends Record<string, unknown> {
+  type: 'gesture';
+  gestureMode: 'client-v1';
+  sequenceId: string;
+  action: 'longPress';
+  sampleElapsedUs: number;
+  x: number;
+  y: number;
 }
 
 /** Analytic integral; dropped/late animation frames do not change the curve. */
@@ -74,10 +85,20 @@ export class ClientGestures {
   private scrolling = false;
   private pinching = false;
   private tap = true;
+  private longPressed = false;
   private spanOrigin = 0;
   private history: { t: number; x: number; y: number }[] = [];
   private travel = { x: 0, y: 0 };
   momentum?: MomentumPlan;
+  get longPressPending() {
+    return this.tap && !this.longPressed && this.points.size === 1;
+  }
+  longPress(elapsedUs: number) {
+    if (!this.longPressPending || elapsedUs < LONG_PRESS_US) return;
+    this.longPressed = true;
+    const point = this.points.values().next().value!;
+    return { x: point.x, y: point.y };
+  }
   update(
     action: 'start' | 'move' | 'end' | 'cancel',
     changed: TouchPoint[],
@@ -87,7 +108,7 @@ export class ClientGestures {
     const emit = (type: GestureType, center = this.previous ?? this.origin ?? { x: 0, y: 0 }, extra = {}) =>
       result.push({ type, x: center.x, y: center.y, ...extra });
     if (action === 'cancel') {
-      if (this.tap) emit('tapCancel');
+      if (this.tap && !this.longPressed) emit('tapCancel');
       if (this.pinching) emit('pinchEnd');
       if (this.scrolling) emit('scrollEnd');
       this.points.clear();
@@ -110,6 +131,14 @@ export class ClientGestures {
     if (!this.origin) {
       this.origin = center;
       emit('tapDown', center);
+    }
+    if (this.longPressed) {
+      this.previous = center;
+      if (action === 'end') {
+        for (const p of changed) this.points.delete(p.id);
+        if (!this.points.size) emit('longTap', center);
+      }
+      return result;
     }
     if (action === 'start' && beforeCount) {
       if (this.tap) {

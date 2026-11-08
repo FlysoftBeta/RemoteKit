@@ -3,6 +3,7 @@ import {
   type GestureCandidate,
   type MomentumPacket,
   type MomentumPlan,
+  type LongPressPacket,
 } from './client-gestures';
 export interface TouchPoint {
   id: number;
@@ -114,6 +115,25 @@ export class TouchInput {
   }
   matches(identity: string) {
     return !this.active || this.active.identity === identity;
+  }
+  get longPressPending() {
+    return !!this.active && !this.active.terminal && this.active.recognizer.longPressPending;
+  }
+  longPress(at: number): LongPressPacket | undefined {
+    const state = this.active;
+    if (!state || state.terminal) return;
+    const elapsed = Math.max(state.elapsed, Math.round((at - state.origin) * 1000));
+    const point = state.recognizer.longPress(elapsed);
+    if (!point) return;
+    return {
+      type: 'gesture',
+      gestureMode: 'client-v1',
+      sequenceId: state.id,
+      inputIdentity: state.identity,
+      action: 'longPress',
+      sampleElapsedUs: elapsed,
+      ...point,
+    };
   }
   private packet(action: TouchPacket['action'], points: TouchPoint[], elapsed: number): TouchPacket {
     const state = this.active!;

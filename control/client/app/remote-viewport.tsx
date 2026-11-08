@@ -9,6 +9,10 @@ import { StatsOverlay } from './stats-overlay';
 import { useViewerSession } from './use-viewer-session';
 import { useViewportTransition } from '../presentation/use-viewport-transition';
 import type { ViewerSession } from '../viewer-session';
+import { sameEditingDocument } from '../editing/mobile-editing-state';
+import { SelectionMenu } from './selection-menu';
+import { useViewportGeometry } from './use-viewport-geometry';
+import { projectEditableCaret } from './viewport-geometry';
 
 export function RemoteViewport({
   transport,
@@ -33,6 +37,8 @@ export function RemoteViewport({
   focused.current = onFocus;
   const [controller, setController] = useState<ViewportInput>();
   const [frameReady, setFrameReady] = useState(false);
+  const [dismissedMenu, setDismissedMenu] = useState<string>();
+  const geometry = useViewportGeometry(viewport, canvas);
   const surface = snapshot.presentation.layout?.views.find((view) => view.id === viewId);
   const editingSurface = snapshot.editing.views.find((view) => view.id === viewId);
   const owner =
@@ -67,6 +73,40 @@ export function RemoteViewport({
     controller?.editing.subscribe ?? emptySubscribe,
     controller?.editing.getSnapshot ?? emptyEditing,
   );
+  useLayoutEffect(() => {
+    const node = editor.current;
+    if (!node || resize.waiting) return;
+    const position = () => {
+      const caret =
+        document.activeElement === node && surface && geometry
+          ? projectEditableCaret(surface, snapshot.editing.current, geometry)
+          : undefined;
+      Object.assign(node.style, {
+        left: caret ? `${caret.left}px` : '',
+        top: caret ? `${caret.top}px` : '',
+        height: caret ? `${caret.height}px` : '',
+        fontSize: caret ? `${caret.fontSize}px` : '',
+        lineHeight: caret?.lineHeight ?? '',
+      });
+    };
+    position();
+    node.addEventListener('focus', position);
+    node.addEventListener('blur', position);
+    return () => {
+      node.removeEventListener('focus', position);
+      node.removeEventListener('blur', position);
+    };
+  }, [surface, geometry, snapshot.editing.current, resize.waiting]);
+  const selection = snapshot.editing.selection;
+  const menu =
+    selection?.view &&
+    surface &&
+    sameEditingDocument(surface, selection.view) &&
+    frameReady &&
+    !resize.waiting &&
+    `${owner}:${selection.menu?.id}` !== dismissedMenu
+      ? selection.menu
+      : undefined;
   useFloatingAction(
     `keyboard:${viewId}`,
     controller &&
@@ -105,6 +145,19 @@ export function RemoteViewport({
         autoComplete="off"
         spellCheck={false}
       />
+      {menu && surface && geometry && (
+        <SelectionMenu
+          key={menu.id}
+          menu={menu}
+          surface={surface}
+          geometry={geometry}
+          onCommand={(command) => {
+            transport.input.ensureInputFocus(surface);
+            transport.input.sendInput(surface, { type: 'selection_command', menu: menu.id, command });
+            setDismissedMenu(`${owner}:${menu.id}`);
+          }}
+        />
+      )}
       {editing.error && (
         <div role="status" className="input-notice">
           {editing.error}

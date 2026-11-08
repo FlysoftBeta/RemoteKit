@@ -98,13 +98,13 @@ Result<InputPayload> DecodeTouch(const base::DictValue* event) {
       const auto x = g ? Number(*g, "x") : std::nullopt, y = g ? Number(*g, "y") : std::nullopt;
       if (!kind || !x || !y)
         return PayloadError("invalid_gesture");
-      static constexpr std::array<const char*, 11> names = {
+      static constexpr std::array<const char*, 12> names = {
           "tapDown",    "tapCancel",   "tap",      "scrollBegin", "scrollUpdate", "scrollEnd",
-          "pinchBegin", "pinchUpdate", "pinchEnd", "flingStart",  "flingCancel"};
+          "pinchBegin", "pinchUpdate", "pinchEnd", "flingStart",  "flingCancel",  "longTap"};
       int candidate_index = 0;
-      while (candidate_index != 11 && *kind != names[candidate_index])
+      while (candidate_index != 12 && *kind != names[candidate_index])
         ++candidate_index;
-      if (candidate_index == 11)
+      if (candidate_index == 12)
         return PayloadError("invalid_gesture_type");
       for (const auto* field : {"deltaX", "deltaY", "scale", "velocityX", "velocityY"})
         if (g->contains(field) && !Number(*g, field))
@@ -188,27 +188,39 @@ Result<InputPayload> DecodeTouch(const base::DictValue* event) {
 
   return {std::move(payload), {}};
 }
-Result<InputPayload> DecodeMomentum(const base::DictValue* event) {
+Result<InputPayload> DecodeGesture(const base::DictValue* event) {
   InputPayload payload;
 
   const auto* mode = event->FindString("gestureMode");
   const auto* action = event->FindString("action");
   const auto* sequence = event->FindString("sequenceId");
-  const auto elapsed = Number(*event, "sampleElapsedUs"), x = Number(*event, "cumulativeX"),
-             y = Number(*event, "cumulativeY");
+  const bool long_press = action && *action == "longPress";
+  const auto elapsed = Number(*event, "sampleElapsedUs"),
+             x = Number(*event, long_press ? "x" : "cumulativeX"),
+             y = Number(*event, long_press ? "y" : "cumulativeY");
   if (!mode || *mode != "client-v1" || !action || !sequence || !elapsed || !x || !y ||
       *elapsed < 0 || *elapsed > 86400000000.0 || std::floor(*elapsed) != *elapsed)
-    return PayloadError("invalid_momentum");
+    return PayloadError("invalid_client_gesture");
   GestureInput::Action kind;
-  if (*action == "momentum")
+  if (long_press)
+    kind = GestureInput::Action::long_press;
+  else if (*action == "momentum")
     kind = GestureInput::Action::momentum;
   else if (*action == "momentumEnd")
     kind = GestureInput::Action::momentum_end;
   else if (*action == "cancel")
     kind = GestureInput::Action::cancel;
   else
-    return PayloadError("invalid_momentum_action");
-  payload = GestureInput{kind, *sequence, static_cast<int64_t>(*elapsed), *x, *y};
+    return PayloadError("invalid_client_gesture_action");
+  GestureInput gesture{kind, *sequence, static_cast<int64_t>(*elapsed)};
+  if (long_press) {
+    gesture.x = *x;
+    gesture.y = *y;
+  } else {
+    gesture.cumulative_x = *x;
+    gesture.cumulative_y = *y;
+  }
+  payload = std::move(gesture);
 
   return {std::move(payload), {}};
 }
@@ -254,15 +266,41 @@ Result<InputPayload> DecodeWheel(const base::DictValue* event) {
 
   return {std::move(payload), {}};
 }
+Result<InputPayload> DecodeSelectionCommand(const base::DictValue* event) {
+  SelectionCommand value;
+  const auto* menu = event->FindString("menu");
+  const auto* command = event->FindString("command");
+  if (!menu || !ReadId(*event, "menu", &value.menu) || *menu != base::NumberToString(value.menu) ||
+      !command)
+    return PayloadError("invalid_selection_command");
+  if (*command == "cut")
+    value.command = SelectionCommand::Command::cut;
+  else if (*command == "copy")
+    value.command = SelectionCommand::Command::copy;
+  else if (*command == "paste")
+    value.command = SelectionCommand::Command::paste;
+  else if (*command == "selectAll")
+    value.command = SelectionCommand::Command::select_all;
+  else
+    return PayloadError("invalid_selection_command");
+  return {value, {}};
+}
 Result<InputPayload> DecodePayload(const base::DictValue* event, std::string_view type) {
   struct Decoder {
     std::string_view type;
     Result<InputPayload> (*decode)(const base::DictValue*);
   };
   static constexpr Decoder decoders[] = {
-      {"ime_commit", DecodeIme},   {"ime_set", DecodeIme}, {"ime_cancel", DecodeIme},
-      {"ime_finish", DecodeIme},   {"key", DecodeKey},     {"touch", DecodeTouch},
-      {"gesture", DecodeMomentum}, {"mouse", DecodeMouse}, {"wheel", DecodeWheel},
+      {"ime_commit", DecodeIme},
+      {"ime_set", DecodeIme},
+      {"ime_cancel", DecodeIme},
+      {"ime_finish", DecodeIme},
+      {"key", DecodeKey},
+      {"touch", DecodeTouch},
+      {"selection_command", DecodeSelectionCommand},
+      {"gesture", DecodeGesture},
+      {"mouse", DecodeMouse},
+      {"wheel", DecodeWheel},
   };
   for (const auto& decoder : decoders)
     if (decoder.type == type)

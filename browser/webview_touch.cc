@@ -97,6 +97,17 @@ Status TouchController::SupersedeClientTouch() {
   return {};
 }
 Status TouchController::Momentum(const GestureInput& gesture) {
+  if (gesture.action == GestureInput::Action::long_press) {
+    if (gesture.sequence_id != client_touch_sequence_ || !client_gesture_bridge_ ||
+        touches_.empty())
+      return {};
+    if (!TouchTargetAlive())
+      return Fail(ErrorCode::stale_identity, "Long press document/target lost");
+    auto value = gesture;
+    value.x += touch_root_offset_x_;
+    value.y += touch_root_offset_y_;
+    return client_gesture_bridge_->LongPress(value);
+  }
   if (!TouchTargetAlive() || !client_gesture_bridge_)
     return Fail(ErrorCode::stale_identity, "Momentum document/target lost");
   return client_gesture_bridge_->Momentum(gesture);

@@ -99,7 +99,6 @@ class PageRequests final : public content::WebContentsDelegate,
   void EnumerateDirectory(content::WebContents*,
                           scoped_refptr<content::FileSelectListener>,
                           const base::FilePath&) override;
-  bool HandleContextMenu(content::RenderFrameHost&, const content::ContextMenuParams&) override;
   bool CanEnterFullscreenModeForTab(content::RenderFrameHost*) override;
   void EnterFullscreenModeForTab(content::RenderFrameHost*,
                                  const blink::mojom::FullscreenOptions&) override;

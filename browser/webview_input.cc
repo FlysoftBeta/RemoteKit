@@ -1,4 +1,5 @@
 #include "browser/webview_input.h"
+#include "browser/touch_selection.h"
 #include "browser/webview_internal.h"
 #include "browser/webview_execution.h"
 #include "browser/device_configuration.h"
@@ -279,7 +280,12 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
                  blink::WebInputEvent::kRightButtonDown | blink::WebInputEvent::kBackButtonDown |
                  blink::WebInputEvent::kForwardButtonDown));
   owner_.touch_->RefreshClientTouchOwner();
-  if (!owner_.touch_->StartsNewSequence(input) && owner_.touch_->AdmissionPending())
+  const auto* client_gesture = std::get_if<GestureInput>(&input.payload);
+  const bool expired_long_press =
+      client_gesture && client_gesture->action == GestureInput::Action::long_press &&
+      client_gesture->sequence_id != owner_.touch_->client_touch_sequence_;
+  if (!expired_long_press && !owner_.touch_->StartsNewSequence(input) &&
+      owner_.touch_->AdmissionPending())
     return Fail(ErrorCode::busy,
                 "Resolving/draining touch; retry this input with the same sequence");
   if (!input_commit_navigations_.empty())
@@ -358,6 +364,8 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
     PrepareKeyboardTarget(host);
     keyboard_editable_target_id_ = actual_editable_target;
   }
+  if (const auto* command = std::get_if<SelectionCommand>(&input.payload))
+    return RemoteTouchSelectionMenuRunner::Get().Execute(owner_.session_, owner_.view_, *command);
   if (const auto* touch = std::get_if<TouchInput>(&input.payload))
     return owner_.touch_->DispatchTouches(*touch, input.token);
   if (const auto* gesture = std::get_if<GestureInput>(&input.payload))
@@ -367,6 +375,8 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
         using T = std::decay_t<decltype(value)>;
         const auto now = base::TimeTicks::Now();
         if constexpr (std::is_same_v<T, KeyInput>) {
+          if (value.action == KeyInput::Action::down)
+            HideTouchSelection(root_view);
           int modifiers = static_cast<int>(value.modifiers);
           if (value.repeat)
             modifiers |= blink::WebInputEvent::kIsAutoRepeat;
@@ -399,6 +409,8 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
             host->ForwardKeyboardEvent(event);
           }
         } else if constexpr (std::is_same_v<T, MouseInput>) {
+          if (value.action == MouseInput::Action::down)
+            HideTouchSelection(root_view);
           Type type = value.action == MouseInput::Action::move    ? Type::kMouseMove
                       : value.action == MouseInput::Action::down  ? Type::kMouseDown
                       : value.action == MouseInput::Action::leave ? Type::kMouseLeave
@@ -419,6 +431,7 @@ Status InputController::DispatchInput(const InputEvent& input, bool* admitted) {
             pressed_mouse_buttons_.erase(value.button);
           router->RouteMouseEvent(root_view, &event, ui::LatencyInfo());
         } else if constexpr (std::is_same_v<T, WheelInput>) {
+          HideTouchSelection(root_view);
           // Match Aura's OnMouseWheelEvent: zero deltas do not begin a sequence.
           if (value.delta_x == 0 && value.delta_y == 0)
             return;

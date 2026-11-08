@@ -43,6 +43,31 @@ void RouterClassificationAndAdmission() {
   CHECK(DataRouter::Classify(touch).error().code == ErrorCode::kInvalidRequest);
   touch["event"].erase("gestureMode");
   CHECK(!DataRouter::Classify(touch));
+  Json selection = {
+      {"type", "input"},
+      {"event",
+       {{"type", "selection_command"}, {"menu", "18446744073709551615"}, {"command", "copy"}}}};
+  CHECK(DataRouter::Classify(selection));
+  selection["event"]["menu"] = "01";
+  CHECK(!DataRouter::Classify(selection));
+  selection["event"]["menu"] = "1";
+  selection["event"]["command"] = "delete";
+  CHECK(!DataRouter::Classify(selection));
+  Json long_press = {{"type", "input"},
+                     {"event",
+                      {{"type", "gesture"},
+                       {"gestureMode", "client-v1"},
+                       {"action", "longPress"},
+                       {"sequenceId", "touch-1"},
+                       {"sampleElapsedUs", 500000},
+                       {"x", 10},
+                       {"y", 20}}}};
+  CHECK(DataRouter::Classify(long_press));
+  long_press["event"]["sampleElapsedUs"] = 500000.5;
+  CHECK(!DataRouter::Classify(long_press));
+  long_press["event"]["sampleElapsedUs"] = 500000;
+  long_press["event"].erase("x");
+  CHECK(!DataRouter::Classify(long_press));
   uint64_t peer = 7, stamp = 11, epoch = 3;
   std::vector<std::string> dispatched;
   std::vector<Json> replies;

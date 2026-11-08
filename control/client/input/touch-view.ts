@@ -1,7 +1,7 @@
 import type { PresentationSession } from '../presentation/presentation-session';
 import type { Surface } from '../presentation/types';
 import { Store } from '../util/store';
-import { momentumPosition, type MomentumPacket, type MomentumPlan } from './client-gestures';
+import { LONG_PRESS_US, momentumPosition, type MomentumPacket, type MomentumPlan } from './client-gestures';
 import type { InputPipeline } from './input-pipeline';
 import { TouchInput, type TouchPacket, type TouchPoint } from './touch-input';
 import type { InputDelivery, InputResult } from './types';
@@ -21,6 +21,7 @@ export interface TouchViewPorts {
 }
 export class TouchView extends Store<TouchOwnerState> {
   private touchOwner?: TouchOwner;
+  private longPressTimer?: ReturnType<typeof setTimeout>;
   private momentumOwner?: {
     surface: Surface;
     identity: string;
@@ -90,6 +91,13 @@ export class TouchView extends Store<TouchOwnerState> {
       return false;
     }
     this.touchOwner.packet = packet;
+    if (!this.touches.longPressPending || action === 'end') this.stopLongPress();
+    else if (action === 'start' && packet.sampleElapsedUs === 0) {
+      this.longPressTimer = setTimeout(
+        this.longPress,
+        Math.max(0, Math.ceil(LONG_PRESS_US / 1000 - (performance.now() - at))),
+      );
+    }
     const terminal = action === 'end' && this.touches.contactIds.length === 0;
     const plan = this.touches.takeMomentum();
     this.touches.accepted(packet);
@@ -101,6 +109,20 @@ export class TouchView extends Store<TouchOwnerState> {
     }
     return true;
   }
+  private stopLongPress() {
+    clearTimeout(this.longPressTimer);
+    this.longPressTimer = undefined;
+  }
+  private longPress = () => {
+    this.longPressTimer = undefined;
+    this.syncTouchOwner();
+    const owner = this.touchOwner;
+    const current = this.surface;
+    if (!owner || !current || document.hidden) return;
+    const packet = this.touches.longPress(performance.now());
+    if (!packet && this.touches.longPressPending) this.longPressTimer = setTimeout(this.longPress, 1);
+    if (packet && !this.ports.input.sendInput(current, packet)) this.cancelTouches();
+  };
   stopMomentum = () => {
     const owner = this.momentumOwner;
     if (!owner) return;
@@ -162,6 +184,7 @@ export class TouchView extends Store<TouchOwnerState> {
     for (const id of ids) if (this.canvas.hasPointerCapture(id)) this.canvas.releasePointerCapture(id);
   }
   private clearTouchOwner() {
+    this.stopLongPress();
     const ids = this.touches.contactIds;
     this.touchOwner = undefined;
     this.touches.reset();

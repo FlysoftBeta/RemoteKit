@@ -10,6 +10,23 @@ export interface ProductUser {
   username: string;
   isAdmin: boolean;
 }
+// Built-in Apps render in the Viewer shell instead of a remote page. Settings and the admin
+// console are singletons; the admin console exists only for the administrator.
+export const BUILTIN_APP_TITLES = { browser: '浏览器', files: '我的文件', settings: '设置', admin: '管理' } as const;
+export type BuiltinApp = keyof typeof BUILTIN_APP_TITLES;
+export const isBuiltinApp = (appId: string): appId is BuiltinApp =>
+  Object.prototype.hasOwnProperty.call(BUILTIN_APP_TITLES, appId);
+export const isSingletonApp = (appId: string) => appId === 'settings' || appId === 'admin';
+export const isLocalApp = (appId: string) => appId === 'files' || appId === 'settings' || appId === 'admin';
+/** An active announcement as one user sees it. */
+export interface Announcement {
+  id: string;
+  title: string;
+  body: string;
+  publishedAt: number;
+  read: boolean;
+}
+export const ANNOUNCEMENT_LIMITS = { title: 100, body: 5000 } as const;
 export type SearchEngine = 'google' | 'bing' | 'duckduckgo' | 'baidu';
 export const SEARCH_ENGINES: { value: SearchEngine; label: string }[] = [
   { value: 'google', label: 'Google' },
@@ -299,6 +316,8 @@ export interface ProductState {
   endpointGeneration: number;
   endpointError: string | null;
   viewer: { connected: boolean };
+  /** Newest first. */
+  announcements: Announcement[];
   integrations: { siteUa: boolean; lifecycle: boolean; popupAdoption: boolean };
 }
 export type ProductAction =
@@ -386,6 +405,7 @@ export interface SocketMethods
     params: { item: string; windowId: string; source?: 'launcher' };
     result: { recorded: boolean };
   };
+  'announcement.read': { params: { id: string }; result: { read: boolean } };
   'usage.clear': { params: { scope: 'all' | 'pages' }; result: { cleared: boolean } };
   'page.preview': { params: { url: string; image: string }; result: { saved: boolean } };
   'launcher.get': { params: { query?: string }; result: { items: LauncherItem[] } };

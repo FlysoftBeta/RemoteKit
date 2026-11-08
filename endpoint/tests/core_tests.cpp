@@ -209,6 +209,15 @@ int main() {
   CHECK(ValidateInput(ImeCommit{u"你好\U0001f600"}));
   CHECK(ValidateInput(ImeCancel{}));
   CHECK(ValidateInput(ImeFinish{}));
+  CHECK(ValidateInput(SelectionCommand{UINT64_MAX, SelectionCommand::Command::copy}));
+  CHECK(!ValidateInput(SelectionCommand{}));
+  CHECK(!ValidateInput(SelectionCommand{1, static_cast<SelectionCommand::Command>(4)}));
+  GestureInput long_press{GestureInput::Action::long_press, "touch-1", 500000};
+  long_press.x = 10;
+  long_press.y = 20;
+  CHECK(ValidateInput(long_press));
+  long_press.x = std::numeric_limits<double>::infinity();
+  CHECK(!ValidateInput(long_press));
   CHECK(!ValidateInput(TouchInput{TouchInput::Action::start, {{1, 1, 1, .5}, {1, 2, 2, .5}}}));
   TouchInput sampled{TouchInput::Action::move, {{1, 1, 1, .5}}};
   sampled.clock = TouchInput::Clock{"gesture:1", true, 32000, 1700000000000000LL};

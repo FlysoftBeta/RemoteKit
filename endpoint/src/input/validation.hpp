@@ -61,7 +61,8 @@ struct TouchInput {
       pinch_update,
       pinch_end,
       fling_start,
-      fling_cancel
+      fling_cancel,
+      long_tap
     };
     Type type{};
     double x{}, y{}, delta_x{}, delta_y{}, scale{1}, velocity_x{}, velocity_y{};
@@ -70,11 +71,12 @@ struct TouchInput {
   std::vector<Gesture> gestures;
 };
 struct GestureInput {
-  enum class Action { momentum, momentum_end, cancel };
+  enum class Action { momentum, momentum_end, cancel, long_press };
   Action action{};
   std::string sequence_id;
   std::int64_t elapsed_us{};
   double cumulative_x{}, cumulative_y{};
+  double x{}, y{};
 };
 struct ImeSet {
   std::u16string text;
@@ -82,6 +84,11 @@ struct ImeSet {
 };
 struct ImeCommit {
   std::u16string text;
+};
+struct SelectionCommand {
+  std::uint64_t menu{};
+  enum class Command { cut, copy, paste, select_all };
+  Command command{};
 };
 struct ImeCancel {};
 struct ImeFinish {};
@@ -93,6 +100,7 @@ using InputPayload = std::variant<KeyInput,
                                   ImeSet,
                                   ImeCommit,
                                   ImeCancel,
-                                  ImeFinish>;
+                                  ImeFinish,
+                                  SelectionCommand>;
 Result<void> ValidateInput(const InputPayload&);
 }  // namespace remotekit

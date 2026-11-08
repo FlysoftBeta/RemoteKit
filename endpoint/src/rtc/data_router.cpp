@@ -2,6 +2,7 @@
 #include "util/wire_error.hpp"
 #include "rtc/dc_services.hpp"
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <windows.h>
 
@@ -20,6 +21,31 @@ Result<DataRouter::Kind> DataRouter::Classify(const Json& message) {
         (raw->value("type", Json()) == "touch" || raw->contains("gestureMode")) &&
         raw->value("gestureMode", Json()) != "client-v1")
       return Error{ErrorCode::kInvalidRequest, "gestureMode must be client-v1"};
+    if (raw != message.end() && raw->is_object()) {
+      const auto event_type = raw->value("type", Json());
+      if (event_type == "selection_command") {
+        uint64_t menu = 0;
+        const auto command = raw->value("command", Json());
+        if (!Number(*raw, "menu", menu) || !menu ||
+            (command != "cut" && command != "copy" && command != "paste" && command != "selectAll"))
+          return Error{ErrorCode::kInvalidRequest, "invalid selection command"};
+      }
+      if (event_type == "gesture" && raw->value("action", Json()) == "longPress") {
+        const auto elapsed = raw->find("sampleElapsedUs");
+        const auto x = raw->find("x"), y = raw->find("y");
+        const auto sequence = raw->find("sequenceId");
+        if (raw->value("gestureMode", Json()) != "client-v1" || sequence == raw->end() ||
+            !sequence->is_string() || sequence->get_ref<const std::string&>().empty() ||
+            sequence->get_ref<const std::string&>().size() > 128 || elapsed == raw->end() ||
+            !elapsed->is_number() || !std::isfinite(elapsed->get<double>()) ||
+            elapsed->get<double>() < 0 || elapsed->get<double>() > 86400000000.0 ||
+            std::floor(elapsed->get<double>()) != elapsed->get<double>() || x == raw->end() ||
+            !x->is_number() || y == raw->end() || !y->is_number() ||
+            !std::isfinite(x->get<double>()) || !std::isfinite(y->get<double>()) ||
+            std::abs(x->get<double>()) > 1e7 || std::abs(y->get<double>()) > 1e7)
+          return Error{ErrorCode::kInvalidRequest, "invalid long press"};
+      }
+    }
     return Kind::kInput;
   }
   if (type == "focus")

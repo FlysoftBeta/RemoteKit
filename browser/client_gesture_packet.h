@@ -22,10 +22,11 @@ class ClientGestureCandidateState {
               bool first_raw,
               bool last_up,
               size_t raw_pointer_count = 1);
+  bool LongPress();
   bool moved() const { return moved_; }
 
  private:
-  bool tap_{}, scroll_{}, pinch_{}, moved_{};
+  bool tap_{}, scroll_{}, pinch_{}, moved_{}, long_press_{};
 };
 }  // namespace remotekit::browser
 #endif

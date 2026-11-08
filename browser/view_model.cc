@@ -48,7 +48,7 @@ Status ValidateInput(const InputPayload& p) {
             return false;
           for (const auto& g : v.gestures)
             if (g.type < TouchInput::Gesture::Type::tap_down ||
-                g.type > TouchInput::Gesture::Type::fling_cancel || !Finite(g.x, g.y) ||
+                g.type > TouchInput::Gesture::Type::long_tap || !Finite(g.x, g.y) ||
                 !Finite(g.delta_x, g.delta_y) || !Finite(g.velocity_x, g.velocity_y) ||
                 !std::isfinite(g.scale) || g.scale <= 0 || std::abs(g.x) > 1e7 ||
                 std::abs(g.y) > 1e7 || std::abs(g.delta_x) > 1e7 || std::abs(g.delta_y) > 1e7 ||
@@ -84,10 +84,14 @@ Status ValidateInput(const InputPayload& p) {
           return true;
         } else if constexpr (std::is_same_v<T, GestureInput>)
           return v.action >= GestureInput::Action::momentum &&
-                 v.action <= GestureInput::Action::cancel && !v.sequence_id.empty() &&
+                 v.action <= GestureInput::Action::long_press && !v.sequence_id.empty() &&
                  v.sequence_id.size() <= 128 && v.elapsed_us >= 0 &&
                  v.elapsed_us <= 86400000000LL && Finite(v.cumulative_x, v.cumulative_y) &&
-                 std::abs(v.cumulative_x) <= 1e7 && std::abs(v.cumulative_y) <= 1e7;
+                 std::abs(v.cumulative_x) <= 1e7 && std::abs(v.cumulative_y) <= 1e7 &&
+                 Finite(v.x, v.y) && std::abs(v.x) <= 1e7 && std::abs(v.y) <= 1e7;
+        else if constexpr (std::is_same_v<T, SelectionCommand>)
+          return v.menu && v.command >= SelectionCommand::Command::cut &&
+                 v.command <= SelectionCommand::Command::select_all;
         else if constexpr (std::is_same_v<T, KeyInput>)
           return v.action >= KeyInput::Action::down && v.action <= KeyInput::Action::character &&
                  (v.action != KeyInput::Action::character || !v.text.empty()) &&

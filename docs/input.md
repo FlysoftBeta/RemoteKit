@@ -69,9 +69,9 @@ wire 上分为 `ime_set`（组合文本 + 选区）、`ime_commit`（文本）�
 
 ## 客户端手势
 
-`ClientGestures` 在客户端识别 tap、滚动、缩放和 fling 候选，参数：滚动/缩放 slop 8 DIP，tap 时限 500ms，速度历史 100ms，fling 阈值 50、上限 8000 DIP/s。触点集合变化时重置质心历史，增减手指不会凭空产生平移或速度。
+`ClientGestures` 在客户端识别 tap、长按、滚动、缩放和 fling 候选，参数：滚动/缩放 slop 8 DIP，tap 时限 500ms，长按 500ms（Chromium 默认 long_press_time），速度历史 100ms，fling 阈值 50、上限 8000 DIP/s。触点集合变化时重置质心历史，增减手指不会凭空产生平移或速度。
 
-每个 touch 包都带 `gestures` 数组（最多 8 个，可为空）：`tapDown/tapCancel/tap/scrollBegin/scrollUpdate/scrollEnd/pinchBegin/pinchUpdate/pinchEnd/flingStart/flingCancel`。坐标和 delta 为根 DIP，滚动 delta 与速度与手指位移同号，`scale` 为本次倍率，事件时间取所属 touch 的源 elapsed。coalesced 历史先以空候选重放，候选只附在最后一个 raw 包上。pinch 包在 scrollBegin 与 scrollEnd 之间；flingStart 只随最后一根手指的 up 产生，并替代该包的 scrollEnd；双指只抬起一根不是物理终止。
+每个 touch 包都带 `gestures` 数组（最多 8 个，可为空）：`tapDown/tapCancel/tap/longTap/scrollBegin/scrollUpdate/scrollEnd/pinchBegin/pinchUpdate/pinchEnd/flingStart/flingCancel`。坐标和 delta 为根 DIP，滚动 delta 与速度与手指位移同号，`scale` 为本次倍率，事件时间取所属 touch 的源 elapsed。coalesced 历史先以空候选重放，候选只附在最后一个 raw 包上。pinch 包在 scrollBegin 与 scrollEnd 之间；flingStart 只随最后一根手指的 up 产生，并替代该包的 scrollEnd；双指只抬起一根不是物理终止。
 
 Browser 的仲裁（patch 0010）：
 
@@ -84,6 +84,24 @@ Browser 的仲裁（patch 0010）：
 7. 关闭官方 scroll update 的 ACK 延迟补偿，因为客户端已经算好了 delta。
 
 被否决的方案：把整个触摸转成滚轮（破坏 touch-action、preventDefault、canvas 绘制、滑块、缩放、OOPIF）；直接把手势送进 TouchActionFilter 跳过逐包消费仲裁；为了抢默认滚动而提前取消 raw touch（会终止目标和 ACK 状态，新的 TapDown 会把权限重置为 auto）。只发 raw 也不会产生普通点击，tap 候选是必需的。
+
+**长按**由计时器触发，不随 raw 包到达：单触点、未出 slop 时按住 500ms，客户端发 `{type:"gesture", action:"longPress", sequenceId, sampleElapsedUs, x, y}`，每个序列最多一次。Browser 把它作为 `GestureEventDataPacket::FromTouchTimeout` 送进该序列的 `TouchDispositionGestureFilter`——这正是 Chromium 自己的 GestureProvider 投递定时长按的方式，所以 touchstart 被 preventDefault 或 touch-action 禁止时长按同样被丢弃。长按之后这一序列不再开始滚动、缩放或 fling，最后的 up 带 `longTap` 而不是 tap/tapCancel。迟于 up 到达的长按是空操作，不是错误。
+
+## 触控文本选择
+
+文本选择完全复用 Chromium 的 Aura 实现。每个页面是虚拟 Aura 根下的 `RenderWidgetHostViewAura`，它自带 `ui::TouchSelectionController` 与 `TouchSelectionControllerClientAura`：选区边界来自渲染帧元数据（OOPIF 由 `TouchSelectionControllerClientManager` 汇总），水滴形手柄由 `TouchHandleDrawableAura` 作为该 view 窗口下的 Aura layer 绘制。OSR 输出渲染的就是这棵 Aura 树的合成结果，所以手柄随页面一起进入视频，与选区高亮同帧、同延迟，不在客户端另画。
+
+缺的只是输入接线：RemoteKit 的输入直接进 `RenderWidgetHostInputEventRouter`，不经过 Aura 的事件派发，因此 `browser/touch_selection.cc` 照搬 `RenderWidgetHostViewEventHandler` 在 Aura 下做的调用：
+
+- 每个 raw 包路由前先交给 `WillHandleTouchEvent`（`MotionEventWeb`，根 DIP）。若首个 down 被它接住（按在手柄上），整个序列归选择控制器：raw 包与手势候选不进页面，惯性包是空操作，客户端的 ACK 与终止账本照常完成。否则在首个 down 与最后一指抬起时调用 `OnTouchDown`/`OnTouchUp`。
+- 经过手势过滤器放行的 LongPress、双击 TapDown、Tap、ScrollBegin/End 在路由前交给控制器；被页面消费而丢弃的手势不会到达它，与 Aura 一致。
+- 鼠标按下、滚轮、按键按下时隐藏手柄和菜单，对应 Aura 的 `EnvEventObserver`。
+
+快捷菜单由 Chromium 决定何时出现、何时因触摸或滚动暂时隐藏、指向哪里，由 Viewer 绘制。Browser 安装自己的 `ui::TouchSelectionMenuRunner`（`RemoteTouchSelectionMenuRunner`，进程内唯一，持有当前唯一打开的菜单）：`OpenMenu` 记录菜单 ID、客户端、换算到根 DIP 的锚点矩形和手柄高度；可用命令在每次发布时从 `IsCommandIdEnabled` 重新读取。菜单随每 view 元数据发布，Endpoint 转成 `input.selection`。Viewer 在锚点上方（放不下则在下方并让开手柄）显示剪切/复制/粘贴/全选胶囊按钮，按钮在 pointerdown 阻止默认行为，不抢编辑代理的焦点。点击发送 `selection_command`，走与键盘相同的身份与焦点门禁；菜单 ID 不是当前打开的菜单或命令已不可用时返回 `conflict`，不执行。Viewer 点击后立即在本地隐藏该菜单，最终状态以 Browser 的下一条 `input.selection` 为准。
+
+长按文字后 Blink 选词并发出 contextmenu；`WebContentsViewAura::ShowContextMenu` 先交给 `TouchSelectionControllerClientAura::HandleContextMenu`，有触控选区时由它显示快捷菜单。因此 `WebContentsDelegate` 不拦截上下文菜单。
+
+被否决的方案：在 Viewer 里用 DOM 画手柄（手柄随手指即时移动而选区高亮滞后一个往返，两者错位）；把触摸改走 Aura 事件派发以获得现成接线（Aura 会在服务端按到达时间重新识别手势并加上原生 fling，抵消客户端手势的设计；OOPIF 路由本来就由同一个 router 完成）；远程渲染 Views 的 `TouchSelectionMenuViews`（需要引入 Views 基础设施和单独的菜单命中路径，按钮反馈要等一个往返）。
 
 ## 惯性
 
@@ -122,3 +140,7 @@ layoutEpoch 变化时，旧 move/end 仍按过期坐标拒绝。客户端丢弃�
 - Endpoint：`endpoint/src/input/`（InputController、序号、校验）、`endpoint/src/session/control_reliability.hpp`（受理前 BUSY 重试）、`protocol/touch_clock.hpp`
 - Browser：`browser/control_input.cc`、`control_input_codec.*`、`webview_input.*`、`webview_touch.*`、`client_gesture_*`、`service_input_policy.h`
 - 补丁：0010（客户端手势仲裁、惯性期间保持 touch-action）。只接受 `client-v1` 触控；早期基于 TouchEmulator 的服务端手势识别路径及其配套补丁已删除。
+
+## 测试
+
+`tests/e2e/test-touch-selection.mjs` 用隔离的 Viewer、Control 和真实 Native H.264，在 headed Chrome 157 上以 CDP 触控驱动：长按选词与快捷菜单锚点、视频回读中的水滴手柄、拖动手柄不产生页面 touch 事件、复制→粘贴与全选、tap 与鼠标点击隐藏手柄、`touch-action:none` + preventDefault 阻止长按选择，以及输入法代理跟随远端光标并提交组合。

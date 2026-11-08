@@ -44,6 +44,26 @@ export interface EditableMessage {
   editable: RemoteEditable;
 }
 
+export const SELECTION_COMMANDS = ['cut', 'copy', 'paste', 'selectAll'] as const;
+export type SelectionCommand = (typeof SELECTION_COMMANDS)[number];
+export type SelectionView = Pick<EditableView, 'session' | 'id' | 'instance' | 'document'>;
+export interface SelectionMenu {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  handleHeight: number;
+  commands: SelectionCommand[];
+}
+export interface SelectionMessage {
+  type: 'input.selection';
+  version: 1;
+  revision: string;
+  view: SelectionView | null;
+  menu: SelectionMenu | null;
+}
+
 import type { OperationReceipt, ProductOperation } from '../../shared/product';
 import type { CaptureTiming } from '../media/capture-latency';
 import type { MediaFeedback } from '../media/media-feedback';
@@ -90,6 +110,7 @@ export type Incoming = Authorized &
   (
     | Layout
     | EditableMessage
+    | SelectionMessage
     | InputResultMessage
     | FocusMessage
     | FrameMessage
@@ -223,6 +244,31 @@ function valid(v: Record<string, unknown>): boolean {
           'caretWidth',
           'caretHeight',
         ])
+      );
+    }
+    case 'input.selection': {
+      const menu = v.menu;
+      return (
+        v.version === 1 &&
+        sequence(v.revision) &&
+        (v.view === null
+          ? menu === null
+          : object(v.view) &&
+            strings(v.view, ['session', 'id', 'instance', 'document']) &&
+            object(menu) &&
+            sequence(menu.id) &&
+            menu.id !== '0' &&
+            numbers(menu, ['x', 'y', 'width', 'height', 'handleHeight']) &&
+            Number(menu.width) >= 0 &&
+            Number(menu.height) >= 0 &&
+            Number(menu.handleHeight) >= 0 &&
+            Array.isArray(menu.commands) &&
+            menu.commands.every(
+              (command, index, commands) =>
+                SELECTION_COMMANDS.includes(command) &&
+                (index === 0 ||
+                  SELECTION_COMMANDS.indexOf(command) > SELECTION_COMMANDS.indexOf(commands[index - 1])),
+            ))
       );
     }
     case 'input.result':

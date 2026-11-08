@@ -1,7 +1,7 @@
-import type { EditableMessage, EditableView } from '../rtc/protocol';
+import type { EditableMessage, EditableView, SelectionView } from '../rtc/protocol';
 import type { Layout, Surface } from '../presentation/types';
 
-function sameEditingDocument(a: EditableView, b: EditableView) {
+export function sameEditingDocument(a: SelectionView, b: SelectionView) {
   return a.session === b.session && a.id === b.id && a.instance === b.instance && a.document === b.document;
 }
 export function sameEditableView(a: EditableView, b: EditableView) {

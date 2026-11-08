@@ -1,4 +1,5 @@
 #include "browser/client_gesture_bridge.h"
+#include "browser/touch_selection.h"
 
 #include "base/functional/bind.h"
 #include "components/input/events_helper.h"
@@ -43,6 +44,29 @@ Status ClientGestureBridge::Dispatch(blink::WebTouchEvent event,
   if (pending_.size() >= 128)
     return {ErrorCode::busy, "Client touch ACK queue full"};
   event.unique_touch_event_id = ui::GetNextTouchEventId();
+  content::MotionEventWeb selection_motion(event);
+  const bool selection_handled = HandleSelectionTouch(root_.get(), selection_motion);
+  if (!first_id_)
+    selection_owned_ = selection_handled;
+  contact_count_ = event.IsTouchSequenceEnd() ? 0 : event.touches_length;
+  if (selection_motion.GetAction() == ui::MotionEvent::Action::POINTER_UP)
+    --contact_count_;
+  primary_pointer_id_ = selection_motion.GetPointerId(0);
+  if (selection_owned_) {
+    selection_touch_ = event;
+    first_id_ = first_id_ ? first_id_ : event.unique_touch_event_id;
+    terminal_routed_ = terminal_routed_ || event.IsTouchSequenceEnd();
+    processed_.Run(ClientTouchAckState::canonical, event.IsTouchSequenceEnd(), true);
+    return {};
+  }
+  if (!first_id_) {
+    SelectionTouchBoundary(root_.get(), true);
+    selection_touch_down_ = true;
+  }
+  if (event.IsTouchSequenceEnd() && selection_touch_down_) {
+    selection_touch_down_ = false;
+    SelectionTouchBoundary(root_.get(), false);
+  }
   if (!first_id_ && !event.IsTouchSequenceStart())
     return {ErrorCode::invalid_request, "Missing first client touch"};
   const auto first_id = first_id_ ? first_id_ : event.unique_touch_event_id;
@@ -131,6 +155,7 @@ bool ClientGestureBridge::Route(blink::WebGestureEvent event) {
   return router_->RouteClientGestureEvent(root_.get(), event, first_id_, target_.get());
 }
 void ClientGestureBridge::ForwardGestureEvent(const ui::GestureEventData& data) {
+  HandleSelectionGesture(root_.get(), data);
   auto event = ui::CreateWebGestureEventFromGestureEventData(data);
   using T = blink::WebInputEvent::Type;
   if (event.GetType() == T::kGestureFlingStart) {
@@ -173,8 +198,31 @@ void ClientGestureBridge::ForwardGestureEvent(const ui::GestureEventData& data) 
   Route(event);
 }
 
+Status ClientGestureBridge::LongPress(const GestureInput& value) {
+  scoped_refptr<ClientGestureBridge> keep_alive(this);
+  if (value.sequence_id != sequence_ || terminal_routed_ || stopped_ || selection_owned_)
+    return {};
+  auto candidate = candidate_state_;
+  auto source = source_time_;
+  if (contact_count_ != 1 || !candidate.LongPress() || !source.Raw(value.elapsed_us, false))
+    return {ErrorCode::invalid_request, "Invalid long press"};
+  ui::GestureEventDetails details(ui::EventType::kGestureLongPress);
+  details.set_device_type(ui::GestureDeviceType::DEVICE_TOUCHSCREEN);
+  details.set_primary_unique_touch_event_id(first_id_);
+  ui::GestureEventData gesture(details, primary_pointer_id_, ui::MotionEvent::ToolType::FINGER,
+                               origin_ + base::Microseconds(value.elapsed_us), value.x, value.y,
+                               value.x, value.y, 1, gfx::RectF(), 0, first_id_);
+  candidate_state_ = candidate;
+  source_time_ = source;
+  if (filter_.OnGesturePacket(ui::GestureEventDataPacket::FromTouchTimeout(gesture)) !=
+      ui::TouchDispositionGestureFilter::SUCCESS)
+    return {ErrorCode::invalid_request, "Invalid long press packet order"};
+  return {};
+}
 Status ClientGestureBridge::Momentum(const GestureInput& value) {
   scoped_refptr<ClientGestureBridge> keep_alive(this);
+  if (selection_owned_)
+    return {};
   if (stopped_ || value.sequence_id != sequence_ || !root_ || !target_)
     return {ErrorCode::stale_identity, "Momentum owner lost"};
   if (value.action == GestureInput::Action::cancel) {
@@ -248,6 +296,19 @@ void ClientGestureBridge::Cancel(bool deliver) {
     momentum_ = false;
     target_->GetViewRenderInputRouter()->input_router()->SetClientMomentumActive(false);
   }
+  if (selection_owned_ && !terminal_routed_ && selection_touch_ && root_) {
+    auto cancel = *selection_touch_;
+    cancel.SetType(blink::WebInputEvent::Type::kTouchCancel);
+    for (unsigned i = 0; i < cancel.touches_length; ++i)
+      cancel.touches[i].state = blink::WebTouchPoint::State::kStateCancelled;
+    content::MotionEventWeb motion(cancel);
+    HandleSelectionTouch(root_.get(), motion);
+    terminal_routed_ = true;
+  }
+  if (selection_touch_down_ && root_) {
+    selection_touch_down_ = false;
+    SelectionTouchBoundary(root_.get(), false);
+  }
   stopped_ = true;
   filter_.Shutdown();
   if (pending_.empty())
@@ -255,7 +316,7 @@ void ClientGestureBridge::Cancel(bool deliver) {
   else
     timeout_.Start(FROM_HERE, base::Seconds(2),
                    base::BindOnce(&ClientGestureBridge::Timeout, weak_factory_.GetWeakPtr()));
-  if (router_ && first_id_)
+  if (router_ && first_id_ && !selection_owned_)
     router_->OnHandledTouchStartOrFirstTouchMove(first_id_);
   buffered_.reset();
 }

@@ -172,7 +172,7 @@ REMOTEKIT_SDK_API int remotekit_sdk_control_command_token(uint64_t handle,
                                                           struct remotekit_sdk_token* token);
 /* Initialize struct_size. consumer_pid must be this process, timeout 1..30000.
  * Opens then polls describe within one budget. All 13 returned Windows handles
- * are caller-owned. Mapping is SharedRenderMapping v2. Endpoint owns pacing.
+ * are caller-owned. Mapping is SharedRenderMapping v3. Endpoint owns pacing.
  * A successful describe must attach exactly one empty Mojo message pipe. SDK
  * retains that endpoint under the original Control connection until one-use
  * render_connect claims its opaque token. Failure closes all reply attachments

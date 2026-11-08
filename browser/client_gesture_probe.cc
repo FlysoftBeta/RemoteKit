@@ -177,6 +177,35 @@ int main(int argc, char** argv) {
   base::CommandLine::Init(argc, argv);
   TestClientInputTiming();
   {
+    remotekit::browser::ClientGestureCandidateState candidates;
+    CHECK(!candidates.LongPress());
+    CHECK(candidates.Accept({{T::tap_down}}, true, false));
+    CHECK(candidates.LongPress());
+    CHECK(!candidates.LongPress());
+    CHECK(!candidates.Accept({{T::tap}}, false, true));
+    CHECK(!candidates.Accept({{T::scroll_begin, 1, 1, 0, 10}}, false, false));
+    CHECK(candidates.Accept({{T::long_tap}}, false, true));
+  }
+  for (bool consumed : {false, true}) {
+    Sink sink;
+    ui::TouchDispositionGestureFilter filter(&sink);
+    Packet(filter, 1, A::DOWN, {{T::tap_down}}, consumed, false);
+    ui::GestureEventDetails details(E::kGestureLongPress);
+    details.set_device_type(ui::GestureDeviceType::DEVICE_TOUCHSCREEN);
+    details.set_primary_unique_touch_event_id(1);
+    ui::GestureEventData gesture(details, 0, ui::MotionEvent::ToolType::FINGER,
+                                 base::TimeTicks() + base::Milliseconds(1501), 100, 100, 100, 100,
+                                 1, gfx::RectF(), 0, 1);
+    CHECK_EQ(filter.OnGesturePacket(ui::GestureEventDataPacket::FromTouchTimeout(gesture)),
+             ui::TouchDispositionGestureFilter::SUCCESS);
+    CHECK(!sink.Has(E::kGestureLongPress));
+    filter.OnTouchEventAck(1, consumed, true);
+    CHECK_EQ(sink.Has(E::kGestureLongPress), !consumed);
+    Packet(filter, 2, A::UP, {{T::long_tap}}, consumed);
+    CHECK_EQ(sink.Has(E::kGestureLongTap), !consumed);
+    CHECK(!sink.Has(E::kGestureTap));
+  }
+  {
     Sink sink;
     ui::TouchDispositionGestureFilter filter(&sink);
     filter.DisableScrollUpdateCompensation();

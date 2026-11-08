@@ -66,6 +66,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `focus` | 焦点请求结果与新 token |
 | `input.result` | clientSequence、browserSequence、ok/error；触控使用普通有序输入结果 |
 | `input.editable` | revision、页面编辑身份、type/flags/selection/composition/caret、`editable.target` |
+| `input.selection` | revision、页面身份（session/id/instance/document）或 null；`menu`：null 或 {id、根 DIP 锚点 x/y/width/height、handleHeight、commands（cut/copy/paste/selectAll 中可用者，固定顺序）} |
 | `product.result` | 操作收据 |
 | `files.result` | 文件 RPC 结果 |
 | `clock.pong` | serverTimeMs、serverMonotonicMs |
@@ -94,7 +95,8 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `key` | action down/up/char、physical_code、windows_key_code、dom_code、dom_key、modifiers、repeat、text、unmodified_text |
 | `ime_set` / `ime_commit` / `ime_cancel` / `ime_finish` | text、selection_start/end（UTF-16）；附 `editableTarget` |
 | `touch` | action start/move/end/cancel、points（≤16）、gestureMode `client-v1`、sequenceId、clockMode、sampleElapsedUs、startServerWallUs、samples（≤32）、gestures（≤8） |
-| `gesture` | action momentum/momentumEnd/cancel、sequenceId、sampleElapsedUs、cumulativeX/Y |
+| `gesture` | action momentum/momentumEnd/cancel、sequenceId、sampleElapsedUs、cumulativeX/Y；action longPress、sequenceId、sampleElapsedUs、x/y（根 DIP） |
+| `selection_command` | menu（菜单 ID）、command cut/copy/paste/selectAll；需要焦点，过期菜单返回 `conflict` |
 
 **`remotekit-auth`**：`auth.camera.ready/config/accept/frame` JSON 消息，加 68 字节头的 RGB24 二进制块，见[认证](auth.md#人脸验证)。
 
@@ -159,11 +161,11 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 
 **渲染管道**：48 字节定长消息 Begin/Reject/Stop/Stopped/Wake，见[渲染](rendering.md#渲染管道协议)。
 
-**共享内存**：`SharedRenderMapping` v2（布局与每 Slot 帧快照）、`SharedAudio` v1（8 槽 10ms PCM 块）。
+**共享内存**：`SharedRenderMapping` v3（布局与每 Slot 帧快照）、`SharedAudio` v1（8 槽 10ms PCM 块）。
 
 ## SDK C ABI
 
-控制/渲染 ABI 2、RTC ABI 5、SharedRenderMapping v2——三者与 Browser、Endpoint 必须同时更新，不能混用旧版本。跨 DLL 只传 C 类型、整数句柄、显式长度的缓冲、定长结构（带 `struct_size`）和回调指针。
+控制/渲染 ABI 2、RTC ABI 5、SharedRenderMapping v3——三者与 Browser、Endpoint 必须同时更新，不能混用旧版本。跨 DLL 只传 C 类型、整数句柄、显式长度的缓冲、定长结构（带 `struct_size`）和回调指针。
 
 | 族 | 函数 |
 |---|---|

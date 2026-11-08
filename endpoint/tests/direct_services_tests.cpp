@@ -206,5 +206,62 @@ int main() {
   });
   Check(sent.size() == 1 && sent[0]["editable"]["active"] == false,
         "suspended output clears stale authority");
+  services.Bind(3);
+  view.selection_menu = {UINT64_MAX,
+                         remotekit::kAtlasSelectionMenuVisible | remotekit::kAtlasSelectionCanCopy |
+                             remotekit::kAtlasSelectionCanCut |
+                             remotekit::kAtlasSelectionCanSelectAll,
+                         0,
+                         10,
+                         20,
+                         30,
+                         40,
+                         24,
+                         0};
+  services.Selection(3, frame);
+  view.selection_menu.anchor_x = 11;
+  services.Selection(3, frame);
+  sent.clear();
+  services.Flush(3, [&](auto bytes) {
+    sent.push_back(Json::parse(bytes));
+    return 0;
+  });
+  Check(sent.size() == 1 && sent[0]["type"] == "input.selection" && sent[0]["revision"] == "2" &&
+            sent[0]["view"]["document"] == "4" && !sent[0]["view"].contains("focus") &&
+            sent[0]["menu"]["id"] == "18446744073709551615" && sent[0]["menu"]["x"] == 11 &&
+            sent[0]["menu"]["commands"] == Json::array({"cut", "copy", "selectAll"}),
+        "selection publishes latest anchor, identity, uint64 id and fixed command order");
+  services.Selection(3, frame);
+  services.Flush(3, [&](auto) {
+    Check(false, "unchanged selection not resent");
+    return 0;
+  });
+  services.Selection(3, frame, true);
+  services.Flush(3, [&](auto) { return 1; });
+  sent.clear();
+  services.Flush(3, [&](auto bytes) {
+    sent.push_back(Json::parse(bytes));
+    return 0;
+  });
+  Check(sent.size() == 1 && sent[0]["view"].is_null() && sent[0]["menu"].is_null() &&
+            sent[0]["revision"] == "3",
+        "suspension clears selection and failed sends retry");
+  services.RefreshEditable();
+  services.Selection(3, frame);
+  sent.clear();
+  services.Flush(3, [&](auto bytes) {
+    sent.push_back(Json::parse(bytes));
+    return 0;
+  });
+  Check(sent.size() == 1 && sent[0]["revision"] == "4", "refresh republishes selection");
+  view.selection_menu = {};
+  services.Selection(3, frame);
+  sent.clear();
+  services.Flush(3, [&](auto bytes) {
+    sent.push_back(Json::parse(bytes));
+    return 0;
+  });
+  Check(sent.size() == 1 && sent[0]["menu"].is_null() && sent[0]["revision"] == "5",
+        "closing menu clears selection");
   std::cout << "direct services tests passed\n";
 }

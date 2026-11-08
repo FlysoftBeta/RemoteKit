@@ -105,6 +105,8 @@ executable("remotekit_browser") {
     "webview_lifecycle.h",
     "webview_navigation.cc",
     "webview_navigation.h",
+    "touch_selection.cc",
+    "touch_selection.h",
     "webview_touch.cc",
     "webview_touch.h",
   ]
@@ -155,6 +157,7 @@ executable("remotekit_browser") {
     "//ui/compositor",
     "//ui/display",
     "//ui/events:gesture_detection",
+    "//ui/touch_selection",
     "//ui/events/blink",
     "//ui/events/platform",
     "//ui/gfx",

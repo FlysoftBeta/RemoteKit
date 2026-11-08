@@ -19,7 +19,7 @@ ui::EventType Type(TouchInput::Gesture::Type type) {
       ui::EventType::kGestureScrollUpdate, ui::EventType::kGestureScrollEnd,
       ui::EventType::kGesturePinchBegin,   ui::EventType::kGesturePinchUpdate,
       ui::EventType::kGesturePinchEnd,     ui::EventType::kScrollFlingStart,
-      ui::EventType::kScrollFlingCancel};
+      ui::EventType::kScrollFlingCancel,   ui::EventType::kGestureLongTap};
   return types[static_cast<size_t>(type)];
 }
 }  // namespace
@@ -54,6 +54,12 @@ ui::GestureEventDataPacket MakeClientGesturePacket(
   }
   return packet;
 }
+bool ClientGestureCandidateState::LongPress() {
+  if (!tap_ || moved_ || scroll_ || pinch_ || long_press_)
+    return false;
+  long_press_ = true;
+  return true;
+}
 bool ClientGestureCandidateState::Accept(const std::vector<TouchInput::Gesture>& candidates,
                                          bool first_raw,
                                          bool last_up,
@@ -67,7 +73,14 @@ bool ClientGestureCandidateState::Accept(const std::vector<TouchInput::Gesture>&
           return false;
         next.tap_ = true;
         break;
+      case T::long_tap:
+        if (!next.long_press_ || !next.tap_ || !last_up || next.scroll_)
+          return false;
+        next.tap_ = false;
+        break;
       case T::tap:
+        if (next.long_press_)
+          return false;
         if (!next.tap_ || !last_up || next.scroll_)
           return false;
         next.tap_ = false;
@@ -76,7 +89,7 @@ bool ClientGestureCandidateState::Accept(const std::vector<TouchInput::Gesture>&
         next.tap_ = false;
         break;
       case T::scroll_begin:
-        if (next.scroll_)
+        if (next.scroll_ || next.long_press_)
           return false;
         // The official action filter assesses one-finger scrolling from the
         // GSB direction. A zero hint is reserved for wrapping a real multi-

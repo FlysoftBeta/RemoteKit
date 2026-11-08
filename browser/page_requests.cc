@@ -13,7 +13,6 @@
 #include "base/strings/utf_string_conversions.h"
 #include "base/task/thread_pool.h"
 #include "build/build_config.h"
-#include "content/public/browser/context_menu_params.h"
 #include "content/public/browser/file_select_listener.h"
 #include "content/public/browser/host_zoom_map.h"
 #include "content/public/browser/navigation_controller.h"
@@ -118,14 +117,13 @@ ValidatedFiles ValidateFiles(std::vector<PageRequests::SelectedFile> paths) {
 }  // namespace
 
 struct PageRequests::Pending {
-  enum class Type { dialog, file, menu };
+  enum class Type { dialog, file };
   Type type = Type::dialog;
   content::WeakDocumentPtr document;
   base::DictValue data;
   DialogClosedCallback dialog;
   scoped_refptr<content::FileSelectListener> file;
   blink::mojom::FileChooserParams::Mode mode = blink::mojom::FileChooserParams::Mode::kOpen;
-  GURL link;
   bool validating = false;
   std::string selection_id;
   SelectionBinding selection_binding;
@@ -199,8 +197,6 @@ std::uint64_t PageRequests::Add(std::unique_ptr<Pending> request) {
                         : pending_.size() >= kLimit ? "queue_full"
                                                     : "document_invalid_or_id_exhausted");
     Event(std::move(event));
-    if (request->type == Pending::Type::menu && web_contents())
-      web_contents()->NotifyContextMenuClosed(GURL());
     if (request->file)
       request->file->FileSelectionCanceled();
     if (request->dialog)
@@ -225,8 +221,6 @@ void PageRequests::Cancel(std::uint64_t id, const std::string& reason) {
   Event(std::move(event));
   if (request->file)
     FileResult(id, "cancelled", *request, reason);
-  if (request->type == Pending::Type::menu && reason != "context_menu_superseded" && web_contents())
-    web_contents()->NotifyContextMenuClosed(GURL());
   if (request->file)
     request->file->FileSelectionCanceled();
   if (request->dialog)
@@ -451,31 +445,6 @@ void PageRequests::EnumerateDirectory(content::WebContents*,
   Event(std::move(event));
   listener->FileSelectionCanceled();
 }
-bool PageRequests::HandleContextMenu(content::RenderFrameHost& frame,
-                                     const content::ContextMenuParams& params) {
-  std::vector<std::uint64_t> old_menus;
-  for (const auto& [id, request] : pending_)
-    if (request->type == Pending::Type::menu)
-      old_menus.push_back(id);
-  for (auto id : old_menus)
-    Cancel(id, "context_menu_superseded");
-  auto request = std::make_unique<Pending>();
-  request->type = Pending::Type::menu;
-  request->document = frame.GetWeakDocumentPtr();
-  request->link = params.link_url;
-  request->data = Kind("context_menu");
-  request->data.Set("page_url", Clip(params.page_url.spec()));
-  request->data.Set("frame_url", Clip(params.frame_url.spec()));
-  request->data.Set("link_url", Clip(params.link_url.spec()));
-  request->data.Set("source_url", Clip(params.src_url.spec()));
-  request->data.Set("selection", Text(params.selection_text));
-  // RenderFrameHostImpl has already transformed these into root-view DIPs.
-  request->data.Set("x_dip", params.x);
-  request->data.Set("y_dip", params.y);
-  request->data.Set("editable", params.is_editable);
-  Add(std::move(request));
-  return true;
-}
 bool PageRequests::CanEnterFullscreenModeForTab(content::RenderFrameHost*) {
   return true;
 }
@@ -637,44 +606,14 @@ base::DictValue PageRequests::Reply(const base::DictValue& reply, SelectionBindi
     const auto* fallback = request->data.FindString("default_prompt");
     text = base::UTF8ToUTF16(input ? *input : fallback ? *fallback : std::string());
   }
-  std::string choice;
-  if (request->type == Pending::Type::menu) {
-    const auto* selected = reply.FindString("choice");
-    if (!selected || selected->size() > kStringLimit)
-      return Result("choice_required");
-    choice = *selected;
-    if (choice != "copy" && choice != "paste" && choice != "cut" && choice != "select_all" &&
-        choice != "navigate_link")
-      return Result("unsupported_choice");
-    if (choice == "navigate_link") {
-      if (!request->link.is_valid() || !request->link.SchemeIsHTTPOrHTTPS())
-        return Result("link_scheme_unsupported");
-    } else if (!web_contents() || web_contents()->GetFocusedFrame() != frame) {
-      Cancel(id, "context_menu_frame_no_longer_focused");
-      return Result("context_menu_frame_no_longer_focused");
-    }
-  }
   auto completed = std::move(found->second);
   pending_.erase(found);
   auto event = Kind("request_replied");
   event.Set("request", base::NumberToString(id));
   event.Set("state", completed->type == Pending::Type::dialog ? "resolved" : "submitted");
   Event(std::move(event));
-  if (completed->type == Pending::Type::menu)
-    web_contents()->NotifyContextMenuClosed(choice == "navigate_link" ? completed->link : GURL());
-  if (completed->type == Pending::Type::dialog) {
+  if (completed->type == Pending::Type::dialog)
     std::move(completed->dialog).Run(true, text);
-  } else if (choice == "navigate_link") {
-    web_contents()->GetController().LoadURL(completed->link, content::Referrer(),
-                                            ui::PAGE_TRANSITION_LINK, {});
-  } else if (choice == "copy")
-    web_contents()->Copy();
-  else if (choice == "paste")
-    web_contents()->Paste();
-  else if (choice == "cut")
-    web_contents()->Cut();
-  else if (choice == "select_all")
-    web_contents()->SelectAll();
   auto result = Result();
   result.Set("state", completed->type == Pending::Type::dialog ? "resolved" : "submitted");
   return result;

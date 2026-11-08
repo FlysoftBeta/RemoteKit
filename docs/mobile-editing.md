@@ -33,6 +33,10 @@
 
 **暂存**：`DeferredEditingInput` 绑定 attempt/session/view/instance/document/target，最多 32 个事件、64KiB UTF-16 文本、3 秒。只有相邻的 `ime_set` 可以互相替换，commit/delete/Enter 保序。只有在新布局、精确焦点 token、同目标的权威编辑状态和新画面屏障全部满足后才一次性发出。早于焦点 ACK 的新目标候选只维持键盘 UI，不获得暂存资格。这种连续性不放宽旧布局的坐标门禁，也不重建 RTC、DataChannel 或 video。
 
+## 输入法候选窗位置
+
+系统输入法和 Chrome 把候选窗放在本地编辑代理（不可见的 textarea）的光标处，所以代理跟随远端光标：代理聚焦且 `input.editable` 属于当前 surface 的同一文档、带有效光标时，把根 DIP 的光标矩形按 `surfaceDipSize` 与画面元素的布局尺寸（offsetLeft/offsetWidth，不受外壳缩放与过渡变换影响）换算到视口内坐标，放在光标处并把字号设为光标高度（至少 12px），候选窗就出现在远端文字行下方。没有有效光标时退回固定位置；尺寸过渡期间保持上一个位置；定位从不调用 focus/blur。代理保持 1px 宽、opacity 0.01、不接收指针。
+
 ## KeyboardSession
 
 用显式意图替代"从可见性推断"：

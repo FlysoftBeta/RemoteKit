@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Touch selection real-stack fixture</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 180vh;
+      background: white;
+      color: #222;
+      font: 24px monospace;
+    }
+    #plain {
+      position: absolute;
+      left: 90px;
+      top: 160px;
+      white-space: nowrap;
+    }
+    #blocked {
+      position: absolute;
+      left: 90px;
+      top: 360px;
+      touch-action: none;
+    }
+    #editor {
+      position: absolute;
+      left: 52vw;
+      top: 72vh;
+      width: 300px;
+      height: 42px;
+      font: 24px monospace;
+    }
+    #blank {
+      position: absolute;
+      left: 30px;
+      top: 60px;
+      width: 90px;
+      height: 50px;
+    }
+  </style>
+  <div id="blank"></div>
+  <div id="plain">alpha bravo charlie delta echo</div>
+  <div id="blocked">blocked selection words</div>
+  <input id="editor" value="seed " />
+  <script>
+    const plain = document.querySelector('#plain');
+    const editor = document.querySelector('#editor');
+    const blocked = document.querySelector('#blocked');
+    const touches = [];
+    const compositions = [];
+    let serial = 0;
+    const box = (node) => node.getBoundingClientRect().toJSON();
+    const word = (start, end) => {
+      const range = document.createRange();
+      range.setStart(plain.firstChild, start);
+      range.setEnd(plain.firstChild, end);
+      return range.getBoundingClientRect().toJSON();
+    };
+    function report() {
+      const selection = getSelection();
+      const range = selection.rangeCount ? selection.getRangeAt(0) : null;
+      fetch('/event', {
+        method: 'POST',
+        body: JSON.stringify({
+          serial: ++serial,
+          width: innerWidth,
+          height: innerHeight,
+          scrollX,
+          scrollY,
+          selection: selection.toString(),
+          selectionRect: range?.getBoundingClientRect().toJSON(),
+          value: editor.value,
+          start: editor.selectionStart,
+          end: editor.selectionEnd,
+          focused: document.activeElement.id,
+          geometry: {
+            word: word(6, 11),
+            extended: word(6, 25),
+            blocked: box(blocked),
+            editor: box(editor),
+            blank: box(document.querySelector('#blank')),
+          },
+          touches,
+          compositions,
+        }),
+      });
+    }
+    for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
+      document.addEventListener(
+        type,
+        (event) => {
+          touches.push({ type, target: event.target.id });
+        },
+        { passive: true },
+      );
+    }
+    blocked.addEventListener('touchstart', (event) => event.preventDefault(), { passive: false });
+    for (const type of ['compositionstart', 'compositionupdate', 'compositionend']) {
+      editor.addEventListener(type, (event) => compositions.push({ type, data: event.data }));
+    }
+    setInterval(report, 100);
+    report();
+  </script>
+</html>

@@ -57,6 +57,9 @@ class DirectServices {
   std::string connection_;
   std::map<std::string, Pending> pending_;
   std::deque<std::string> results_;
+  std::string selection_;
+  ServiceJson selection_value_;
+  uint64_t selection_revision_ = 0;
   std::string editable_;
   ServiceJson editable_value_;
   uint64_t editable_revision_ = 0;
@@ -90,6 +93,9 @@ class DirectServices {
     editable_.clear();
     editable_value_ = nullptr;
     editable_revision_ = 0;
+    selection_.clear();
+    selection_value_ = nullptr;
+    selection_revision_ = 0;
   }
   bool Admit(uint64_t peer, const ServiceJson& message, double now) {
     std::lock_guard lock(mutex_);
@@ -152,6 +158,8 @@ class DirectServices {
     std::lock_guard lock(mutex_);
     editable_value_ = nullptr;
     editable_.clear();
+    selection_value_ = nullptr;
+    selection_.clear();
   }
   void Editable(uint64_t peer, const SharedAtlasFrame& frame, bool output_suspended = false) {
     std::lock_guard lock(mutex_);
@@ -214,6 +222,48 @@ class DirectServices {
     value["revision"] = std::to_string(++editable_revision_);
     editable_ = value.dump();
   }
+  void Selection(uint64_t peer, const SharedAtlasFrame& frame, bool output_suspended = false) {
+    std::lock_guard lock(mutex_);
+    if (!peer || peer != peer_)
+      return;
+    if (!output_suspended && (!frame.generation ||
+                              (frame.status != SharedAtlasStatus::kStarting &&
+                               frame.status != SharedAtlasStatus::kRunning) ||
+                              frame.view_count > kSharedAtlasMaxViews))
+      return;
+    ServiceJson value = {{"view", nullptr}, {"menu", nullptr}};
+    for (uint32_t i = 0; !output_suspended && i < frame.view_count; ++i) {
+      const auto& view = frame.views[i];
+      const auto& menu = view.selection_menu;
+      if (!(menu.flags & kAtlasSelectionMenuVisible) || !menu.menu_id)
+        continue;
+      value["view"] = {{"session", std::to_string(view.session_id)},
+                       {"id", std::to_string(view.webview_id)},
+                       {"instance", std::to_string(view.instance_generation)},
+                       {"document", std::to_string(view.document_generation)}};
+      auto commands = ServiceJson::array();
+      const char* names[] = {"cut", "copy", "paste", "selectAll"};
+      for (unsigned n = 0; n < 4; ++n)
+        if (menu.flags & (2u << n))
+          commands.push_back(names[n]);
+      auto finite = [](float v) { return std::isfinite(v) ? v : 0.0f; };
+      value["menu"] = {{"id", std::to_string(menu.menu_id)},
+                       {"x", finite(menu.anchor_x)},
+                       {"y", finite(menu.anchor_y)},
+                       {"width", finite(menu.anchor_width)},
+                       {"height", finite(menu.anchor_height)},
+                       {"handleHeight", finite(menu.handle_height)},
+                       {"commands", commands}};
+      break;
+    }
+    if (value == selection_value_)
+      return;
+    selection_value_ = value;
+    value["type"] = "input.selection";
+    value["version"] = 1;
+    value["revision"] = std::to_string(++selection_revision_);
+    selection_ = value.dump();
+  }
   template <class Send>
   void Flush(uint64_t peer, Send send) {
     std::lock_guard lock(mutex_);
@@ -226,6 +276,8 @@ class DirectServices {
     }
     if (!editable_.empty() && send(editable_) == 0)
       editable_.clear();
+    if (!selection_.empty() && send(selection_) == 0)
+      selection_.clear();
   }
 };
 

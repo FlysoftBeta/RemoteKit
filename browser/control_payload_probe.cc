@@ -54,6 +54,24 @@ void ControlContract() {
   touch.Set("sampleElapsedUs", 0);
   wire.Set("event", std::move(touch));
   CHECK(DecodeControlInput(wire, 1, 1));
+  wire.Set("event", base::DictValue()
+                        .Set("type", "selection_command")
+                        .Set("menu", "18446744073709551615")
+                        .Set("command", "copy"));
+  CHECK(DecodeControlInput(wire, 1, 1));
+  wire.FindDict("event")->Set("menu", "01");
+  CHECK(!DecodeControlInput(wire, 1, 1));
+  wire.Set("event", base::DictValue()
+                        .Set("type", "gesture")
+                        .Set("gestureMode", "client-v1")
+                        .Set("sequenceId", "touch-1")
+                        .Set("action", "longPress")
+                        .Set("sampleElapsedUs", 500000)
+                        .Set("x", 10)
+                        .Set("y", 20));
+  CHECK(DecodeControlInput(wire, 1, 1));
+  wire.FindDict("event")->Remove("x");
+  CHECK(!DecodeControlInput(wire, 1, 1));
 }
 void Responses() {
   base::DictValue request;

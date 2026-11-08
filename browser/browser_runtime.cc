@@ -40,6 +40,7 @@
 #include "remotekit/browser/webview.h"
 #include "remotekit/browser/view_model.h"
 #include "browser/view_registry.h"
+#include "browser/touch_selection.h"
 #include "browser/layout_transaction.h"
 #include "browser/popup_registry.h"
 #include "browser/closed_views.h"
@@ -70,6 +71,8 @@ class ServiceIoClipboard final : public base::CurrentThread::DestructionObserver
 }  // namespace
 
 BrowserRuntime::BrowserRuntime() {
+  CHECK(!ui::TouchSelectionMenuRunner::GetInstance());
+  selection_menu = std::make_unique<RemoteTouchSelectionMenuRunner>(views);
   content::GpuDataManager::GetInstance()->AddObserver(this);
 }
 void BrowserRuntime::OnGpuInfoUpdate() {
@@ -167,6 +170,8 @@ void BrowserRuntime::UpdateOutput() {
     view.metadata.atlas_pixels_per_dip = layout_transaction.output_scale;
     view.metadata.page_device_scale_factor = layout_transaction.PageScale(record.spec);
     view.metadata.text_input = adapter.TextInputState();
+    view.metadata.selection_menu =
+        selection_menu->StateFor(adapter.session_id(), adapter.view_id());
     view.offscreen_host = adapter.offscreen_host();
     view.render_enabled = adapter.contents() && model->actual == Residency::live &&
                           !model->pending && output_enabled &&
