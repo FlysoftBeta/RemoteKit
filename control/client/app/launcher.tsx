@@ -279,7 +279,7 @@ export function Launcher({
                         : tile.appId === 'browser'
                           ? '#2563b8'
                           : tile.appId === 'files'
-                            ? '#b77713'
+                            ? '#0d9488'
                             : tile.appId === 'settings'
                               ? '#475569'
                               : tile.appId === 'admin'
