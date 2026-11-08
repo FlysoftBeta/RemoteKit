@@ -1,6 +1,7 @@
+import './sync-status.css';
 import { CloudDoneOutlined, CloudOffOutlined, CloudSyncOutlined, ErrorOutline } from '@mui/icons-material';
-import { Badge, Button, IconButton, Popover, Typography } from '@mui/material';
-import { useState } from 'react';
+import { Badge, Button, IconButton, Popover, Tooltip, Typography } from '@mui/material';
+import { useEffect, useState } from 'react';
 import { scaledAnchor } from './ui-scale';
 
 export interface SyncSummary {
@@ -31,18 +32,27 @@ export function SyncStatus({ pending, unknown, channelReady, dismissUnknown }: S
   ) : (
     <CloudOffOutlined color="action" />
   );
+  // Only the unknown state has something to act on; the others are fully told by the tooltip.
+  useEffect(() => {
+    if (!unknown) setAnchor(undefined);
+  }, [unknown]);
+  const open = unknown && !!anchor;
   return (
     <>
-      <IconButton
-        className="sync-status"
-        aria-label={label}
-        title={label}
-        onClick={(event) => setAnchor(event.currentTarget)}
-      >
-        {icon}
-      </IconButton>
+      <Tooltip title={open ? '' : label} enterTouchDelay={0}>
+        <IconButton
+          className="sync-status"
+          aria-label={label}
+          aria-haspopup={unknown ? 'dialog' : undefined}
+          onClick={(event) => {
+            if (unknown) setAnchor(event.currentTarget);
+          }}
+        >
+          {icon}
+        </IconButton>
+      </Tooltip>
       <Popover
-        open={!!anchor}
+        open={open}
         anchorEl={scaledAnchor(anchor)}
         onClose={() => setAnchor(undefined)}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
@@ -50,17 +60,15 @@ export function SyncStatus({ pending, unknown, channelReady, dismissUnknown }: S
       >
         <div className="sync-status-detail">
           <Typography variant="body2">{label}</Typography>
-          {unknown && (
-            <Button
-              size="small"
-              onClick={() => {
-                dismissUnknown();
-                setAnchor(undefined);
-              }}
-            >
-              以当前工作区为准
-            </Button>
-          )}
+          <Button
+            size="small"
+            onClick={() => {
+              dismissUnknown();
+              setAnchor(undefined);
+            }}
+          >
+            以当前工作区为准
+          </Button>
         </div>
       </Popover>
     </>

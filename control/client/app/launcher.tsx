@@ -18,6 +18,7 @@ import {
   Menu,
   MenuItem,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -187,19 +188,21 @@ export function Launcher({
         <div className="launcher-system-controls">
           {sync}
           <div className="launcher-audio">{audio}</div>
-          <IconButton aria-label="锁定" title="锁定" onClick={lock}>
-            <LockOutlined />
-          </IconButton>
-          <IconButton
-            aria-label={fullscreen ? '退出全屏' : '全屏'}
-            title={fullscreen ? '退出全屏' : '全屏'}
-            onClick={toggleFullscreen}
-          >
-            {fullscreen ? <FullscreenExit /> : <Fullscreen />}
-          </IconButton>
-          <IconButton aria-label="关闭开始屏幕" onClick={close}>
-            <Close />
-          </IconButton>
+          <Tooltip title="锁定">
+            <IconButton aria-label="锁定" onClick={lock}>
+              <LockOutlined />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title={fullscreen ? '退出全屏' : '全屏'}>
+            <IconButton aria-label={fullscreen ? '退出全屏' : '全屏'} onClick={toggleFullscreen}>
+              {fullscreen ? <FullscreenExit /> : <Fullscreen />}
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="关闭开始屏幕">
+            <IconButton aria-label="关闭开始屏幕" onClick={close}>
+              <Close />
+            </IconButton>
+          </Tooltip>
         </div>
       </div>
       <form
