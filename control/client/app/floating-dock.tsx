@@ -1,3 +1,4 @@
+import './floating-dock.css';
 import {
   Close,
   KeyboardHideOutlined,

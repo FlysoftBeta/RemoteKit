@@ -1,3 +1,4 @@
+import './console.css';
 import BugReportOutlined from '@mui/icons-material/BugReportOutlined';
 import Close from '@mui/icons-material/Close';
 import DashboardOutlined from '@mui/icons-material/DashboardOutlined';

@@ -1,0 +1,19 @@
+.quality-option {
+  padding: 7px 0 !important;
+  margin-left: -9px !important;
+}
+.quality-option .MuiFormControlLabel-label {
+  padding: 3px 0;
+}
+.scale-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 12px 0 4px;
+}
+.dead-zone-field {
+  width: 132px;
+}
+.scale-row .MuiButton-root {
+  height: 40px;
+}

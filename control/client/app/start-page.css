@@ -1,0 +1,89 @@
+.start-page {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 32px 24px;
+  background: var(--surface-background);
+}
+.start-page::before {
+  content: '';
+  flex: 1 0 16px;
+}
+.start-page::after {
+  content: '';
+  flex: 2 0 32px;
+}
+.start-page-body {
+  width: 100%;
+  max-width: 520px;
+  flex: 0 0 auto;
+}
+.start-page .start-page-title {
+  font-size: 28px;
+  font-weight: 600;
+  margin-bottom: 24px;
+  text-align: center;
+}
+.start-page-form {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  height: 48px;
+  padding-left: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-notice);
+  background: var(--surface);
+  box-shadow: 0 1px 3px var(--border-notice);
+}
+.start-page-form:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+.start-page-form .MuiInputBase-root {
+  flex: 1;
+  min-width: 0;
+  margin-left: 10px;
+}
+.start-page-form .MuiIconButton-root {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+}
+.start-page .start-page-hint {
+  margin-top: 12px;
+  font-size: 12px;
+  text-align: center;
+}
+.start-page .start-page-error {
+  margin-top: 10px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+.start-favorites {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 12px;
+  max-width: 560px;
+  width: 100%;
+  margin-top: 24px;
+}
+.start-favorite.MuiButtonBase-root {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-tile-hover);
+  min-width: 0;
+}
+.start-favorite > span {
+  color: var(--file-accent);
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+.start-favorite > .MuiTypography-root {
+  max-width: 100%;
+}

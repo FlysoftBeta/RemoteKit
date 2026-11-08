@@ -1,3 +1,4 @@
+import './launcher.css';
 import {
   AddToQueue,
   Close,
@@ -32,7 +33,6 @@ import { LauncherSpaces } from './launcher-spaces';
 import type { SpaceSnapshots } from './space-snapshots';
 import type { Action } from './product-dialogs';
 import { dominantColor } from './dominant-color';
-import { toggleFullscreen } from './use-auto-fullscreen';
 import { formatError } from '../util/format-error';
 
 export function Launcher({
@@ -46,12 +46,16 @@ export function Launcher({
   audio,
   sync,
   lock,
+  fullscreen,
+  toggleFullscreen,
   snapshots,
   action,
   report,
 }: {
   state: ProductState;
   lock(): void;
+  fullscreen: boolean;
+  toggleFullscreen(): void;
   snapshots: SpaceSnapshots;
   action: Action;
   report(error: unknown): void;
@@ -70,12 +74,6 @@ export function Launcher({
   useEffect(() => {
     if (!exiting) setNewTarget(false);
   }, [exiting]);
-  const [fullscreen, setFullscreen] = useState(!!document.fullscreenElement);
-  useEffect(() => {
-    const change = () => setFullscreen(!!document.fullscreenElement);
-    document.addEventListener('fullscreenchange', change);
-    return () => document.removeEventListener('fullscreenchange', change);
-  }, []);
   const [items, setItems] = useState<LauncherItem[]>([]);
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
@@ -195,7 +193,7 @@ export function Launcher({
           <IconButton
             aria-label={fullscreen ? '退出全屏' : '全屏'}
             title={fullscreen ? '退出全屏' : '全屏'}
-            onClick={() => void toggleFullscreen().catch(report)}
+            onClick={toggleFullscreen}
           >
             {fullscreen ? <FullscreenExit /> : <Fullscreen />}
           </IconButton>
@@ -488,7 +486,6 @@ function LauncherTileView({
                     pointerType,
                     clientX: current.lastX,
                     clientY: current.lastY,
-                    element: anchor,
                   });
                 }, 400)
               : undefined,
@@ -511,7 +508,6 @@ function LauncherTileView({
               pointerType: event.pointerType,
               clientX: event.clientX,
               clientY: event.clientY,
-              element: anchor,
             });
           }
         }

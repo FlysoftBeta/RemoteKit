@@ -968,7 +968,11 @@ function SearchField({
       slotProps={{
         htmlInput: { 'aria-label': '搜索文件名' },
         input: {
-          sx: { borderRadius: '8px', bgcolor: '#f2f4f7', '& fieldset': { borderColor: 'transparent' } },
+          sx: {
+            borderRadius: '8px',
+            bgcolor: 'var(--surface-background)',
+            '& fieldset': { borderColor: 'transparent' },
+          },
           startAdornment: (
             <InputAdornment position="start">
               <Search fontSize="small" />
@@ -1014,7 +1018,7 @@ function EmptyLibrary({
         textAlign: 'center',
       }}
     >
-      <CloudUploadOutlined sx={{ fontSize: 48, color: '#9aa6b5' }} />
+      <CloudUploadOutlined sx={{ fontSize: 48, color: 'var(--scrollbar-hover)' }} />
       <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
         {text[0]}
       </Typography>

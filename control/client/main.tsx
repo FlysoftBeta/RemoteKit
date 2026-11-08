@@ -1,4 +1,6 @@
 /// <reference types="vite/client" />
+import './theme/tokens.css';
+import './theme/mui.css';
 import { WorkspaceView } from './app/workspace-view';
 import { formatError } from './util/format-error';
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material';
@@ -12,18 +14,20 @@ import './style.css';
 import { request } from './control/http-request';
 // Automation hooks exist only in dev builds; Vite drops this branch from production.
 if (import.meta.env.DEV) void import('./test-hooks');
+const tokens = getComputedStyle(document.documentElement);
+const token = (name: string) => tokens.getPropertyValue(`--${name}`).trim();
 const theme = createTheme({
   palette: {
-    primary: { main: '#245DB5' },
-    background: { default: '#F2F4F7', paper: '#FFFFFF' },
-    text: { primary: '#1F2937', secondary: '#5F6B7A' },
-    divider: '#DDE2E8',
+    primary: { main: token('primary') },
+    background: { default: token('surface-background'), paper: token('surface') },
+    text: { primary: token('text-primary'), secondary: token('text-secondary') },
+    divider: token('border'),
   },
   typography: {
-    fontFamily: 'Segoe UI, Microsoft YaHei, sans-serif',
+    fontFamily: token('font-family'),
     fontSize: 14,
   },
-  shape: { borderRadius: 8 },
+  shape: { borderRadius: Number.parseFloat(token('radius-md')) },
   components: {
     MuiIconButton: { defaultProps: { size: 'small' } },
     MuiButton: { defaultProps: { disableElevation: true } },

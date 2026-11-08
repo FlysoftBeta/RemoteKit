@@ -1,0 +1,95 @@
+.installed-apps {
+  border: 1px solid var(--border-settings);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.installed-apps > .MuiTypography-root {
+  padding: 16px;
+}
+.installed-app + .installed-app {
+  border-top: 1px solid var(--border-settings);
+}
+.installed-app-summary.MuiListItemButton-root {
+  padding: 10px 12px;
+}
+.installed-app-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  margin-right: 12px;
+  font-size: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary-label);
+}
+.installed-app-icon .launcher-app-icon {
+  border-radius: var(--radius-icon);
+  padding: 0;
+}
+.installed-app-chevron {
+  color: var(--text-tile-subtle);
+  transition: transform 160ms;
+}
+.installed-app.expanded .installed-app-chevron {
+  transform: rotate(180deg);
+}
+.installed-app-editor {
+  padding: 4px 16px 16px 56px;
+}
+.installed-app-editor > * + * {
+  margin-top: 16px;
+}
+.installed-app-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.installed-app-actions > * + * {
+  margin-left: 8px;
+}
+.app-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+.theme-color-field {
+  display: flex;
+  align-items: center;
+}
+.theme-color-field > * + * {
+  margin-left: 12px;
+}
+.theme-color-field > input {
+  width: 40px;
+  height: 40px;
+  border: 0;
+  padding: 0;
+}
+.install-name {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  gap: 20px;
+  padding-top: 8px;
+  margin-bottom: 16px;
+}
+.site-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 8px 0;
+}
+.site-row + .site-row {
+  border-top: 1px solid var(--border-settings);
+}
+.site-row-origin.MuiTypography-root {
+  flex: 1 1 160px;
+  min-width: 0;
+  margin-right: 8px;
+}
+.site-row-options {
+  display: flex;
+}
+.site-row-options > * + * {
+  margin-left: 6px;
+}

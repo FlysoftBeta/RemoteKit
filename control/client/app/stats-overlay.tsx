@@ -1,3 +1,4 @@
+import './stats-overlay.css';
 import { useEffect, useRef, useState } from 'react';
 import { statsViewModel } from '../media/stats-view-model';
 import type { Diagnostics } from '../media/types';

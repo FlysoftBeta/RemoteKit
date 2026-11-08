@@ -1,3 +1,4 @@
+import './home-bar.css';
 import { ButtonBase } from '@mui/material';
 import { useRef } from 'react';
 import { uiScale } from './ui-scale';

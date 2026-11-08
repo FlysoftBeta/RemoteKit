@@ -1,0 +1,347 @@
+.workspace-overlay {
+  position: absolute;
+  inset: 0 0 16px;
+  z-index: var(--z-workspace-overlay);
+  background: var(--frosted-overlay);
+  backdrop-filter: var(--frosted-overlay-filter);
+  color: var(--text-overlay);
+  display: flex;
+  flex-direction: column;
+  padding: 28px 40px;
+  overflow: hidden;
+}
+.launcher {
+  animation: launcher-open 160ms ease-out both;
+}
+.launcher.overlay-exiting {
+  animation: launcher-close 160ms ease-out both;
+  pointer-events: none;
+}
+@keyframes launcher-open {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes launcher-close {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+}
+.launcher-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex: none;
+  margin-bottom: 16px;
+}
+.launcher-heading h5 {
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+.launcher-audio {
+  width: 280px;
+  max-width: 100%;
+}
+.launcher-search {
+  max-width: 640px;
+  width: 100%;
+  flex: none;
+  margin-bottom: 24px;
+}
+.launcher-search .MuiOutlinedInput-root {
+  background: var(--surface-translucent-hover);
+  border-radius: var(--radius-panel);
+}
+.launcher-groups {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: auto;
+  padding-bottom: 16px;
+  scrollbar-width: none;
+  --fade-left: 0px;
+  --fade-right: 0px;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--black) var(--fade-left),
+    var(--black) calc(100% - var(--fade-right)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent,
+    var(--black) var(--fade-left),
+    var(--black) calc(100% - var(--fade-right)),
+    transparent
+  );
+}
+.launcher-groups::-webkit-scrollbar {
+  display: none;
+}
+.launcher-groups.fade-left {
+  --fade-left: 24px;
+}
+.launcher-groups.fade-right {
+  --fade-right: 24px;
+}
+.launcher-rows {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: max-content;
+  min-width: 100%;
+  padding-top: 8px;
+}
+.launcher-group {
+  flex: none;
+  margin-bottom: 20px;
+}
+.launcher-group:last-child {
+  margin-bottom: 0;
+}
+.launcher-group > .MuiTypography-root {
+  position: sticky;
+  left: 0;
+  display: block;
+  width: max-content;
+  line-height: 18px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  opacity: 0.75;
+}
+.launcher-row {
+  display: grid;
+  grid-auto-flow: column;
+  justify-content: start;
+}
+.launcher-tile.MuiButtonBase-root {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  flex-direction: column;
+  color: var(--surface);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  text-align: left;
+  overflow: hidden;
+  transition:
+    filter 80ms,
+    transform 80ms;
+  touch-action: none;
+}
+.launcher-tile:hover {
+  filter: brightness(1.08);
+}
+.launcher-tile:active {
+  transform: scale(0.97);
+}
+.launcher-tile.Mui-focusVisible::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  z-index: var(--z-freeze);
+  border: 3px solid var(--surface);
+  border-radius: var(--radius-scrollbar);
+  pointer-events: none;
+}
+.tile-icon {
+  flex: none;
+  height: 1em;
+  font-size: 24px;
+  line-height: 1;
+  margin-bottom: auto;
+  position: relative;
+}
+.launcher-app-icon {
+  width: 1em;
+  height: 1em;
+  object-fit: contain;
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+.tile-label {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  flex: none;
+  display: block;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  width: 100%;
+  position: relative;
+}
+.tile-small.MuiButtonBase-root {
+  padding: 6px;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.tile-small .tile-icon {
+  font-size: 24px;
+  margin-bottom: 4px;
+  margin-top: auto;
+}
+.tile-small .tile-label {
+  font-size: 11px;
+  display: block;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  margin-bottom: auto;
+}
+.tile-large .tile-label {
+  line-height: 20px;
+  font-size: 15px;
+  font-weight: 600;
+}
+.tile-subtitle {
+  flex: none;
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 16px;
+  font-size: 12px;
+  opacity: 0.8;
+  margin-top: 4px;
+  position: relative;
+}
+.launcher-file-image {
+  position: absolute;
+  inset: 0;
+}
+.launcher-file-image::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(transparent, var(--text-tile));
+}
+.launcher-file-image + .tile-icon {
+  visibility: hidden;
+}
+@media (max-width: 599px) {
+  .workspace-overlay {
+    padding: 20px 16px;
+  }
+}
+
+.launcher-system-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+.launcher-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 24px;
+}
+.launcher.launcher-lifted {
+  animation: none;
+  background: transparent;
+  backdrop-filter: none;
+  pointer-events: none;
+}
+.launcher-lifted .launcher-heading,
+.launcher-lifted .launcher-search,
+.launcher-lifted .launcher-groups {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms;
+}
+.launcher-lifted .launcher-spaces {
+  pointer-events: auto;
+  align-self: flex-start;
+  max-height: 100%;
+  background: var(--frosted-panel);
+  backdrop-filter: var(--frosted-panel-filter);
+  border-radius: var(--radius-panel);
+  padding: 8px;
+  box-shadow: var(--frosted-panel-shadow);
+}
+.launcher-page-image,
+.tile-preview-scrim {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.tile-preview-scrim {
+  background: linear-gradient(transparent 35%, var(--tile-color) 88%);
+}
+.tile-page-preview .tile-icon,
+.tile-image-file .tile-icon {
+  visibility: hidden;
+}
+.tile-page-preview.tile-small.MuiButtonBase-root {
+  align-items: flex-start;
+  justify-content: flex-end;
+  text-align: left;
+}
+.tile-page-preview.tile-small .tile-label {
+  margin-bottom: 0;
+}
+.tile-image-file .tile-label,
+.tile-image-file .tile-subtitle {
+  opacity: 0;
+}
+.tile-image-file .launcher-file-image::after {
+  opacity: 0;
+}
+@media (hover: hover) {
+  .tile-image-file:hover .tile-label,
+  .tile-image-file.Mui-focusVisible .tile-label,
+  .tile-image-file:hover .launcher-file-image::after,
+  .tile-image-file.Mui-focusVisible .launcher-file-image::after {
+    opacity: 1;
+  }
+}
+@media (max-width: 719px) {
+  .workspace-overlay {
+    padding: 16px;
+  }
+  .launcher-heading {
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .launcher-system-controls {
+    gap: 0;
+  }
+  .launcher-audio {
+    width: 204px;
+  }
+  .launcher-system-controls > .MuiIconButton-root {
+    padding: 6px;
+  }
+  .launcher-system-controls > .MuiIconButton-root > svg {
+    font-size: 20px;
+  }
+  .launcher-body {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .launcher-search {
+    margin-bottom: 12px;
+  }
+}

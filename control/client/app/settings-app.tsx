@@ -1,3 +1,4 @@
+import './settings-app.css';
 import {
   AccountCircleOutlined,
   AppsOutlined,

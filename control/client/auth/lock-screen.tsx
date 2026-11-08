@@ -1,3 +1,4 @@
+import './lock-screen.css';
 import React, { useEffect, useState } from 'react';
 
 type Direction = 'Up' | 'Down' | 'Left' | 'Right';

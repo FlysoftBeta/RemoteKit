@@ -1,0 +1,15 @@
+.window-handle > svg {
+  opacity: 0.7;
+}
+.window-handle:hover {
+  background: var(--surface-handle-hover);
+}
+.window-handle.MuiIconButton-root {
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  cursor: grab;
+  touch-action: none;
+  flex-shrink: 0;
+  border-radius: var(--radius-sm);
+}

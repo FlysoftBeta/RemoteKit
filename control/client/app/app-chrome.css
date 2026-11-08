@@ -1,0 +1,34 @@
+.app-title-bar {
+  flex: none;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 6px;
+  background: var(--surface-chrome);
+  gap: 8px;
+}
+.app-title-bar .MuiTypography-root {
+  font-size: 13px;
+}
+.app-title-icon {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+.app-title-icon {
+  font-size: 24px;
+}
+.remote-page-fullscreen .app-title-bar,
+.remote-page-fullscreen .app-origin-strip {
+  display: none;
+}
+.app-origin-strip {
+  flex: none;
+  padding: 5px 14px;
+  color: var(--text-origin);
+  background: var(--surface-app);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

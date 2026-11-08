@@ -1,0 +1,20 @@
+.favorite-row {
+  display: flex;
+  align-items: center;
+  padding: 8px 0;
+}
+.favorite-row > div {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.favorite-row + .favorite-row {
+  border-top: 1px solid var(--border-settings);
+}
+.favorite-empty.MuiTypography-root {
+  display: flex;
+  align-items: center;
+}
+.favorite-empty svg {
+  margin-right: 6px;
+}

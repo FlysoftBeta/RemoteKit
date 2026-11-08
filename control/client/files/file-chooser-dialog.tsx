@@ -410,10 +410,10 @@ export function FileBasketDialog({
                     badgeContent={request.multiple ? selection.length : 0}
                     sx={{
                       '& .MuiBadge-badge': {
-                        bgcolor: '#fff',
+                        bgcolor: 'var(--surface)',
                         color: 'primary.main',
                         fontWeight: 600,
-                        boxShadow: '0 0 0 1px #245db5',
+                        boxShadow: '0 0 0 1px var(--primary)',
                       },
                     }}
                   >
@@ -588,8 +588,8 @@ function EmptyBasket({
         py: 2.5,
         borderRadius: '10px',
         border: '1px dashed',
-        borderColor: '#c8d0da',
-        bgcolor: '#f7f8fa',
+        borderColor: 'var(--border-tab)',
+        bgcolor: 'var(--surface-subtle)',
         textAlign: 'center',
       }}
     >

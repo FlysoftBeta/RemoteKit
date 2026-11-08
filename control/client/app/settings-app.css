@@ -1,0 +1,63 @@
+.settings-app {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  background: var(--surface);
+}
+.settings-navigation {
+  width: 184px;
+  flex: none;
+  border-right: 1px solid var(--border-settings);
+  padding: 12px 8px;
+  overflow: auto;
+}
+.settings-navigation .MuiListItemButton-root {
+  margin-bottom: 2px;
+}
+.settings-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 24px;
+}
+.settings-detail > * {
+  max-width: 840px;
+}
+.settings-detail-title {
+  display: flex;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.settings-detail > .settings-content {
+  padding: 0;
+}
+.settings-detail > .settings-content:empty {
+  display: none;
+}
+.settings-narrow .settings-navigation {
+  flex: 1;
+  width: auto;
+}
+.settings-narrow .settings-detail {
+  padding: 16px;
+}
+.settings-narrow .settings-detail-title > * + * {
+  margin-left: 8px;
+}
+.account-identity {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin-bottom: 20px;
+}
+.account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  margin: -4px;
+}
+.account-actions > * {
+  margin: 4px !important;
+}
+.account-settings > [role='status'] {
+  margin-top: 12px;
+}

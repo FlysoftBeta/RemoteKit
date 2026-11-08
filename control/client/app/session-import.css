@@ -1,0 +1,162 @@
+.import-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 16px;
+  text-align: center;
+}
+.import-section + .import-section {
+  margin-top: 20px;
+}
+.pairing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+.pair-code {
+  margin-top: 12px;
+  padding: 14px 16px 8px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-neutral);
+}
+.pair-words {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.pair-index {
+  display: inline-block;
+  width: 1.4em;
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 0.55;
+}
+.pair-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+}
+.import-devices {
+  margin-top: 8px;
+}
+.import-device {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+.import-device-text {
+  flex: 1;
+  min-width: 0;
+}
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+.timeline-card {
+  border: 1px solid var(--border-neutral);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+.timeline-head.MuiButtonBase-root {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  text-align: left;
+}
+.timeline-head:hover {
+  background: var(--surface-neutral-subtle);
+}
+.timeline-text {
+  flex: 1;
+  min-width: 0;
+}
+.timeline-chevron {
+  flex: none;
+  opacity: 0.6;
+  transition: transform 0.15s;
+}
+.timeline-chevron.open {
+  transform: rotate(180deg);
+}
+.timeline-replies {
+  margin: 0 12px 10px 56px;
+  padding: 0 0 0 12px;
+  border-left: 2px solid rgba(127, 127, 127, 0.3);
+  list-style: none;
+}
+.timeline-reply {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.timeline-reply time {
+  flex: none;
+  opacity: 0.6;
+}
+.timeline-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 0;
+  padding: 10px 12px 12px 56px;
+  border-top: 1px solid var(--border-neutral-subtle);
+  font-size: 13px;
+}
+.timeline-details dt {
+  opacity: 0.65;
+}
+.timeline-details dd {
+  margin: 0;
+  min-width: 0;
+}
+.timeline-sites {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.timeline-sites li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.timeline-site-text {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+.timeline-mono {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.timeline-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 8px 8px;
+}
+html.layout-narrow .timeline-replies {
+  margin-left: 24px;
+}
+html.layout-narrow .timeline-details {
+  padding-left: 12px;
+}

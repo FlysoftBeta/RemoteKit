@@ -1,3 +1,4 @@
+import './browser-tab.css';
 import { BedtimeOutlined, Close, Language } from '@mui/icons-material';
 import { ButtonBase, CircularProgress, IconButton } from '@mui/material';
 import React from 'react';

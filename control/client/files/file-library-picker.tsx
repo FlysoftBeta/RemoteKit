@@ -160,7 +160,7 @@ export function FileLibraryPicker({
                   order >= 0 ? (
                     <CheckCircle
                       color="primary"
-                      sx={{ fontSize: 20, bgcolor: '#fff', borderRadius: '50%' }}
+                      sx={{ fontSize: 20, bgcolor: 'var(--surface)', borderRadius: '50%' }}
                     />
                   ) : undefined
                 }

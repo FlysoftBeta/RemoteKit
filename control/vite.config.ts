@@ -18,5 +18,8 @@ export default defineConfig({
     cssTarget: 'chrome89',
     outDir: 'dist/client',
     emptyOutDir: true,
+    // The Viewer core is MUI + React + the stage (~1.06 MB); rarely used screens are lazy chunks.
+    // Warn once the core grows past that instead of on every build.
+    chunkSizeWarningLimit: 1100,
   },
 });

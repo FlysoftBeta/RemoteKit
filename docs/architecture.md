@@ -97,7 +97,9 @@ control/
     files/ diagnostics/ quality.ts atlas-plan.ts navigation-url.ts
   client/
     main.tsx, viewer-session.ts          入口与控制器组装
-    app/           React 外壳：工作区、Window 框、视口、对话框、设置、统计叠层、管理员面板（admin/）
+    app/           React 外壳：舞台（stage）、叠层编排（overlay-host：开始、管理员、对话框）、Window 框与
+                   browser/app chrome、菜单、视口、设置、统计叠层、管理员面板（admin/）；组件与同名 .css 并置
+    theme/         tokens.css（颜色、圆角、阴影等设计变量，含暗色）与 mui.css；MUI 主题读同一组变量
     control/       ControlSession（WS）、OperationsStore（待确认操作与收据）
     rtc/           RtcSession、DataChannel 协议（类型化编解码）
     auth/          授权作用域、锁屏、空闲策略、人脸相机
@@ -138,6 +140,13 @@ patches/           有序的 Chromium 补丁与 manifest
 tools/             构建、补丁、SDK 导出、打包；tools/measure/ 性能测量；tools/tests/ 工具自身的测试
 tests/             e2e/（真实栈产品场景）、integration/（原生 Endpoint/Browser 集成）
 ```
+
+### Viewer 外壳约定
+
+- 样式与组件并置（`foo.tsx` 导入 `foo.css`），全局 `style.css` 只留重置与根布局；外壳颜色取 `theme/tokens.css` 的变量；字面色值只用于数据色（App 主题色、文件类型色）和压在相机画面上的叠层。
+- 拖放目标走一个注册表：`useDropTarget(kind, payload)` 返回 `{ref, hovered, replace}`，拖动方按指针位置查询登记的矩形，目标自行渲染高亮；开始屏幕的磁贴拖动与窗口把手拖动共用它。
+- 不常用的整屏界面（管理员面板、会话导入）按需 `import()` 成独立 chunk，核心包是 MUI + React + 舞台；Vite 的 chunk 告警阈值按核心包实际大小设置，超过即说明核心包在增长。
+- 自动化钩子 `window.__remotekitTest` 只在开发构建里由 `main.tsx` 动态导入（`import.meta.env.DEV`），发布产物不含它。
 
 ## 文档索引
 

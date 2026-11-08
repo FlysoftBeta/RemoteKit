@@ -1,3 +1,4 @@
+import './product-dialogs.css';
 import { Close } from '@mui/icons-material';
 import {
   Alert,

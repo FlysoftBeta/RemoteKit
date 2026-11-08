@@ -1,3 +1,4 @@
+import './start-page.css';
 import { formatError } from '../util/format-error';
 import { ArrowForward, Search } from '@mui/icons-material';
 import type { Favorite } from '../../shared/product';

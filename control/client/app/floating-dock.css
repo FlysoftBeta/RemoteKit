@@ -1,0 +1,125 @@
+.floating-dock {
+  --dock-top: 97px;
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-dock);
+  pointer-events: none;
+}
+.remote-page-fullscreen .floating-dock,
+.viewer-shell.no-windows .floating-dock {
+  --dock-top: 8px;
+}
+.dock-slot {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dock-top-left,
+.dock-top,
+.dock-top-right {
+  top: var(--dock-top);
+}
+.dock-bottom-left,
+.dock-bottom,
+.dock-bottom-right {
+  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+}
+.dock-top-left,
+.dock-left,
+.dock-bottom-left {
+  left: max(10px, env(safe-area-inset-left));
+}
+.dock-top-right,
+.dock-right,
+.dock-bottom-right {
+  right: max(20px, env(safe-area-inset-right));
+}
+.dock-top,
+.dock-bottom {
+  left: 50%;
+  transform: translateX(-50%);
+}
+.dock-left,
+.dock-right {
+  top: 50%;
+  flex-direction: column;
+  transform: translateY(-50%);
+}
+.dock-top-right,
+.dock-bottom-right {
+  flex-direction: row-reverse;
+}
+.dock-button.MuiButtonBase-root,
+.dock-ghost {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: var(--radius-circle);
+  background: var(--dock-background);
+  color: var(--surface);
+  box-shadow: 0 1px 6px var(--shadow-dock);
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: none;
+  transition:
+    background-color 120ms,
+    opacity 120ms;
+}
+.dock-button:hover:not(.Mui-disabled) {
+  background: var(--dock-background-hover);
+}
+.dock-button.Mui-disabled {
+  opacity: 0.45;
+}
+.dock-button.attention-notice {
+  background: var(--primary);
+  animation: dock-pulse 1.8s ease-out infinite;
+}
+.dock-button.attention-recording::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--surface);
+  border-radius: var(--radius-circle);
+  background: var(--error);
+  animation: dock-blink 1.6s ease-in-out infinite;
+}
+@keyframes dock-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--primary-pulse);
+  }
+  100% {
+    box-shadow: 0 0 0 12px var(--primary-transparent);
+  }
+}
+@keyframes dock-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+.dock-button.dock-ghost {
+  position: absolute;
+  margin: -18px 0 0 -18px;
+  pointer-events: none;
+  opacity: 0.85;
+  box-shadow: 0 4px 14px var(--shadow-dock-target);
+}
+.dock-target {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border: 2px dashed var(--primary-guide);
+  border-radius: var(--radius-circle);
+  background: var(--primary-drop);
+}
+.window-pill-visible .floating-dock {
+  --dock-top: 129px;
+}

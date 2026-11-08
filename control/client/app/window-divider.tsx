@@ -1,3 +1,5 @@
+import './window-divider.css';
+import { useDropTarget } from './window-drag';
 import { useRef } from 'react';
 import type { ProductSpace } from '../../shared/product';
 import type { Action } from './product-dialogs';
@@ -25,6 +27,7 @@ export function WindowDivider({
   action: Action;
   report(error: unknown): void;
 }) {
+  const drop = useDropTarget('divider', undefined);
   const drag = useRef<{ x: number; width: number; ratio: number; weights: number[] } | undefined>(undefined);
   const ratio = space.weights[index] / (space.weights[index] + space.weights[index + 1]);
   const change = (next: number) =>
@@ -94,6 +97,8 @@ export function WindowDivider({
         drag.current = undefined;
         restore(event.currentTarget);
       }}
-    />
+    >
+      <span className="window-divider-target" ref={drop.ref} />
+    </div>
   );
 }

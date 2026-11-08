@@ -1,0 +1,39 @@
+.stats-overlay {
+  pointer-events: none;
+  position: absolute;
+  z-index: var(--z-input-notice);
+  top: 12px;
+  right: 12px;
+  width: 260px;
+  max-width: calc(100% - 24px);
+  padding: 11px 13px;
+  border: 1px solid var(--stats-border);
+  border-radius: var(--radius-md);
+  background: var(--stats-surface);
+  color: var(--stats-text);
+  font:
+    10px/1.5 Segoe UI,
+    sans-serif;
+}
+.stats-overlay-title {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--stats-heading);
+  margin-bottom: 8px;
+}
+.stats-overlay dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(95px, 1fr) auto;
+  gap: 4px 10px;
+}
+.stats-overlay dt {
+  white-space: nowrap;
+  color: var(--stats-label);
+}
+.stats-overlay dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

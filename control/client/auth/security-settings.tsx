@@ -1,3 +1,4 @@
+import './security-settings.css';
 import { LockOutlined } from '@mui/icons-material';
 import { formatError } from '../util/format-error';
 import { diagnostics } from '../media/diagnostics';

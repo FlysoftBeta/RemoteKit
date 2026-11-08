@@ -1,0 +1,132 @@
+/* A lifted launcher item drops onto the stage underneath the faded launcher. */
+.item-dragging .space-obscured {
+  pointer-events: auto;
+}
+.drop-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+[data-window-drop-hover]:not(.drop-disabled) {
+  box-shadow: inset 0 0 0 2px var(--primary);
+  border-radius: var(--radius-scrollbar);
+  background: var(--surface-tile-subtitle);
+}
+.window-dragging,
+.window-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+.window-drag-ghost {
+  position: fixed;
+  width: 180px;
+  height: 124px;
+  background: var(--surface-chrome);
+  color: var(--text-tile-subtitle);
+  box-shadow: 0 10px 32px var(--text-tile-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-tile);
+  pointer-events: none;
+  z-index: var(--z-drop-column);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.window-drag-ghost > svg {
+  width: 44px;
+  height: 44px;
+  margin: auto;
+}
+.window-drag-ghost > img {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  object-fit: cover;
+}
+.window-drag-ghost > span {
+  width: 100%;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.window-insertion-marker {
+  position: fixed;
+  width: 4px;
+  transform: translateX(-2px);
+  background: var(--primary);
+  box-shadow: 0 0 0 2px var(--surface-tile);
+  pointer-events: none;
+  z-index: var(--z-drag);
+}
+.window-insertion-guides {
+  position: fixed;
+  pointer-events: none;
+  z-index: var(--z-insertion-guides);
+}
+.window-insertion-guides > i {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--primary-border);
+  transform: translateX(-1px);
+}
+.window-drag-ghost > img.launcher-app-icon {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  margin: auto;
+}
+/* Placed where Start's group column sits, so both drags offer the same targets. */
+.window-drop-column {
+  position: fixed;
+  top: 160px;
+  right: 40px;
+  width: 216px;
+  max-height: calc(100% - 200px);
+  z-index: var(--z-drag);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px;
+  border-radius: var(--radius-panel);
+  background: var(--frosted-panel);
+  backdrop-filter: var(--frosted-panel-filter);
+  box-shadow: var(--frosted-panel-shadow);
+}
+.window-drop-column > .launcher-spaces {
+  flex: 0 1 auto;
+  min-height: 0;
+}
+.window-drop-close {
+  flex: none;
+  height: 48px;
+  margin: 0 2px 2px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  border-radius: var(--radius-md);
+  background: var(--surface-close);
+  color: var(--text-close);
+  font-size: 12px;
+}
+.window-drop-close[data-window-drop-hover] {
+  background: var(--error);
+  color: var(--surface);
+  box-shadow: none;
+}
+@media (max-width: 719px) {
+  .window-drop-column {
+    top: 16px;
+    left: 16px;
+    right: 16px;
+    width: auto;
+  }
+  .window-drop-column > .launcher-spaces {
+    flex: 0 0 110px;
+  }
+}

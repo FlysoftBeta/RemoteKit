@@ -345,7 +345,7 @@ export function BasketItems({
             mt: 0.5,
             p: 1,
             borderRadius: '10px',
-            bgcolor: '#f5f7fa',
+            bgcolor: 'var(--surface-subtle)',
             overflowWrap: 'anywhere',
           }}
         >

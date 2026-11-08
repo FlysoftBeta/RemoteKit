@@ -132,7 +132,7 @@ export function FloatingPanel({
             mx: 'auto',
             mt: 0.75,
             borderRadius: 2,
-            bgcolor: dragging ? 'primary.main' : '#c8d0da',
+            bgcolor: dragging ? 'primary.main' : 'var(--border-tab)',
           }}
         />
         {header}

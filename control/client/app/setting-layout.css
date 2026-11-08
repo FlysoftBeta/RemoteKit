@@ -1,0 +1,68 @@
+.setting-section {
+  padding: 20px 0 12px;
+}
+.setting-section + .setting-section {
+  border-top: 1px solid var(--border);
+}
+.setting-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  margin-bottom: 4px;
+}
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 48px;
+  padding: 6px 0;
+}
+.setting-toggle {
+  cursor: pointer;
+}
+.setting-toggle.disabled {
+  cursor: default;
+}
+.setting-toggle.disabled .setting-text > :first-child {
+  color: var(--text-result);
+}
+.setting-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.setting-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.setting-indent {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0 8px;
+}
+.setting-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding-top: 12px;
+}
+.setting-result.MuiTypography-root {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.setting-result:not(:empty) {
+  margin-bottom: 6px;
+}
+.setting-result:empty {
+  height: 0;
+  overflow: hidden;
+}

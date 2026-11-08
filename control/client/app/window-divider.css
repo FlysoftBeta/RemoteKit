@@ -1,0 +1,23 @@
+[role='separator']:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+/* The transparent target preserves the separator's wider pointer area. */
+.window-divider {
+  position: relative;
+  z-index: var(--z-notices);
+  width: 1px;
+  flex-shrink: 0;
+  background: var(--border-divider);
+  cursor: col-resize;
+  touch-action: none;
+}
+.window-divider-target {
+  position: absolute;
+  inset: 0 -5px;
+}
+.window-divider:hover,
+.window-divider:focus {
+  background: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}

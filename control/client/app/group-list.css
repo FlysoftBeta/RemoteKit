@@ -1,0 +1,109 @@
+.launcher-spaces {
+  flex: 0 0 200px;
+  width: 200px;
+  overflow-y: auto;
+  padding: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.launcher-space-new.MuiButtonBase-root,
+.launcher-space-card.MuiButtonBase-root {
+  flex: none;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  border-radius: var(--radius-md);
+  background: var(--surface-translucent);
+  color: inherit;
+  padding: 8px;
+  overflow: hidden;
+}
+.launcher-space-new.MuiButtonBase-root {
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  height: 48px;
+  font-size: 12px;
+}
+.launcher-space-card.target-space,
+.launcher-space-new.target-space {
+  box-shadow: inset 0 0 0 1px var(--mui-palette-primary-main, var(--primary));
+}
+.launcher-space-card.MuiButtonBase-root {
+  position: relative;
+}
+.launcher-space-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: var(--z-content);
+  padding: 1px 8px;
+  border-radius: var(--radius-round);
+  background: var(--primary);
+  color: var(--surface);
+  font-size: 11px;
+  line-height: 18px;
+}
+.launcher-space-preview {
+  display: flex;
+  height: 96px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.launcher-window-preview {
+  flex-basis: 0;
+  min-width: 0;
+  position: relative;
+  background: var(--border-preview);
+  color: var(--text-group-badge);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.launcher-window-preview + .launcher-window-preview {
+  border-left: 2px solid var(--surface-preview);
+}
+.launcher-window-preview > img:not(.launcher-app-icon) {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.launcher-window-preview > .MuiTypography-root {
+  position: absolute;
+  bottom: 0;
+  width: 100%;
+  background: var(--frosted-panel);
+  font-size: 12px;
+  line-height: 22px;
+  padding: 0 4px;
+}
+.launcher-window-preview > svg {
+  font-size: 28px;
+  margin-bottom: 16px;
+}
+@media (max-width: 719px) {
+  .launcher-spaces {
+    order: -1;
+    flex: 0 0 110px;
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    gap: 8px;
+  }
+  .launcher-space-card.MuiButtonBase-root {
+    width: 144px;
+  }
+  .launcher-space-new.MuiButtonBase-root {
+    width: 88px;
+    height: 100%;
+    flex-direction: column;
+  }
+  .launcher-space-preview {
+    height: 68px;
+  }
+}

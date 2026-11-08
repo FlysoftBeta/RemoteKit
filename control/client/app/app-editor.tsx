@@ -1,3 +1,4 @@
+import './app-editor.css';
 import { ExpandMore } from '@mui/icons-material';
 import {
   Accordion,

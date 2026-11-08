@@ -1,0 +1,96 @@
+.tab-strip-dragging .browser-tab {
+  transition: transform 150ms ease;
+}
+.browser-tab.tab-drag-source {
+  visibility: hidden;
+}
+.browser-tab.tab-drag-ghost {
+  position: fixed;
+  z-index: var(--z-drag);
+  height: 37px;
+  border-radius: var(--radius-md);
+  box-shadow: 0 6px 18px var(--shadow-tab);
+  pointer-events: none;
+}
+/* A fixed width rather than flex-basis: Chrome 89 sizes the scrolling strip from its items'
+   content widths and ignores their flex-basis. */
+.browser-tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+  width: 180px;
+  padding-right: 4px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  color: var(--text-secondary);
+  transition: background-color 120ms;
+}
+.browser-tab:not(.selected-tab):hover {
+  background: var(--surface-tab-hover);
+}
+.browser-tab:not(.selected-tab) + .browser-tab:not(.selected-tab)::before {
+  content: '';
+  position: absolute;
+  left: -2px;
+  top: 10px;
+  bottom: 10px;
+  width: 1px;
+  background: var(--border-tab);
+}
+.browser-tab:hover::before,
+.browser-tab:hover + .browser-tab::before {
+  visibility: hidden;
+}
+.browser-tab.selected-tab {
+  background: var(--surface);
+  color: var(--text-primary);
+}
+.tab-select.MuiButtonBase-root,
+.tab-drag-ghost .tab-select {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 4px 0 10px;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  font-size: 13px;
+  color: inherit;
+  text-align: left;
+}
+.tab-select.Mui-focusVisible {
+  box-shadow: inset 0 0 0 2px var(--primary);
+}
+.tab-select .tab-icon {
+  flex: none;
+  font-size: 15px;
+}
+.tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.tab-attention {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-circle);
+  background: var(--attention);
+}
+.browser-tab .tab-close {
+  flex: none;
+  padding: 3px;
+  font-size: 15px;
+}
+@media (hover: hover) {
+  .browser-tab:not(.selected-tab):not(:hover):not(:focus-within) .tab-close {
+    opacity: 0;
+  }
+}
+html.layout-narrow .browser-tab {
+  flex-basis: 140px;
+}

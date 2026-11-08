@@ -1,0 +1,49 @@
+.window-frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex-basis: 0;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface);
+  overflow: hidden;
+}
+.window-content {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.local-app-content {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.window-frame[data-window-replace]::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-replace-ring);
+  background: var(--surface-replace);
+  border: 2px solid var(--primary);
+  pointer-events: none;
+}
+.window-frame[data-window-replace]::after {
+  content: '替换此窗口';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: var(--z-replace-label);
+  transform: translate(-50%, -50%);
+  padding: 8px 18px;
+  border-radius: var(--radius-round);
+  background: var(--primary);
+  color: var(--surface);
+  font-size: 15px;
+  font-weight: 500;
+  box-shadow: 0 4px 16px var(--shadow-replace);
+  white-space: nowrap;
+  pointer-events: none;
+}

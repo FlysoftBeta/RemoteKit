@@ -1,3 +1,4 @@
+import './browser-settings.css';
 import { Close, DeleteOutline, StarBorder } from '@mui/icons-material';
 import {
   Button,

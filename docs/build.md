@@ -127,7 +127,7 @@ node tools/tests/streaming-package-real-stack.mjs "C:/RemoteKit/RemoteKit-win-x6
 
 | 位置 | 内容 | 运行 |
 |---|---|---|
-| `control/test/` | Control 服务端与 Viewer 客户端的单元与集成测试 | `npm test`，或 `npx tsx --test test/<file>.test.ts` |
+| `control/test/` | Control 服务端与 Viewer 客户端的单元与集成测试 | `npm test`，或 `npx tsx --import ./test/css-stub.mjs --test test/<file>.test.ts`（组件 CSS 在测试中导入为空） |
 | `endpoint/tests/` | Endpoint 策略、文件、编码器状态机（注入式 NVENC）、集群通道（Noise 向量、通道、ClusterLink）、对象存储与节点间传输、checkpoint、updater（下载、解包、监管、自我替换） | `tools\build-endpoint.cmd` 自带 CTest |
 | `browser/*_probe.cc`、`*_tests.cc` | 直接运行生产代码与官方 Chromium 过滤器的确定性检查（BeginFrame 调度、手势包与仲裁、控制回复、Profile 隔离、渲染通道寿命、滚动策略、导航账本与错误页） | GN 目标，构建后运行 |
 | `sdk/` | SDK 消费者 smoke（控制、渲染、RTC、音频） | `tools\verify-sdk.cmd` |

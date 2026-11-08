@@ -1,0 +1,211 @@
+.admin-paper {
+  height: min(780px, calc(100% - 64px));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 12px 12px 24px;
+  border-bottom: 1px solid var(--border-section);
+}
+.admin-tabs {
+  border-bottom: 1px solid var(--border-section);
+  min-height: 44px !important;
+}
+.admin-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.admin-nav {
+  width: 184px;
+  flex: none;
+  padding: 12px 8px !important;
+  border-right: 1px solid var(--border-section);
+  background: var(--surface-subtle);
+}
+.admin-nav .MuiListItemButton-root {
+  border-radius: var(--radius-md);
+  margin-bottom: 2px;
+}
+.admin-nav .MuiListItemIcon-root {
+  min-width: 36px;
+}
+.admin-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 20px 24px 32px;
+}
+.admin-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.admin-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.admin-section-header h2 {
+  font-weight: 600;
+  line-height: 1.3;
+}
+.admin-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 12px;
+}
+.admin-stat {
+  padding: 14px 16px;
+}
+.admin-stat-value {
+  font-size: 1.6rem !important;
+  font-weight: 600 !important;
+  line-height: 1.3 !important;
+  font-variant-numeric: tabular-nums;
+}
+.admin-panel {
+  padding: 16px;
+}
+.admin-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.admin-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 8px 0 0;
+  font-size: 0.875rem;
+}
+.admin-facts dt {
+  color: var(--text-secondary);
+}
+.admin-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.admin-mono {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace !important;
+  font-size: 0.8125rem !important;
+}
+.admin-table {
+  overflow-x: auto;
+  border: 1px solid var(--border-section);
+  border-radius: var(--radius-md);
+}
+.admin-table .MuiTableCell-head {
+  color: var(--text-secondary);
+  font-weight: 500;
+  background: var(--surface-subtle);
+}
+.admin-table .MuiTableRow-root:last-child .MuiTableCell-body {
+  border-bottom: 0;
+}
+.admin-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.admin-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: var(--radius-circle);
+  background: var(--status-inactive);
+}
+.admin-dot-on {
+  background: var(--success);
+}
+.admin-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 140px;
+}
+.admin-usage .MuiLinearProgress-root,
+.admin-meter .MuiLinearProgress-root {
+  height: 6px;
+  border-radius: var(--radius-xs);
+  background-color: var(--surface-meter);
+}
+.admin-narrow {
+  display: none !important;
+}
+.admin-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 12px;
+}
+.admin-node {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.admin-node-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.admin-node .admin-facts {
+  margin: 0;
+}
+.admin-meters {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.admin-meter-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.admin-meter-label .MuiTypography-root:last-child {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.admin-gpu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+html.layout-compact .admin-paper {
+  height: 100%;
+}
+html.layout-compact .admin-header {
+  padding-left: 16px;
+}
+html.layout-compact .admin-content {
+  padding: 16px;
+}
+html.layout-compact .admin-wide {
+  display: none !important;
+}
+html.layout-compact .admin-narrow {
+  display: block !important;
+}
+html.layout-compact .admin-tabs .MuiTab-root {
+  min-width: 0;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+html.layout-compact .admin-node-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+html.layout-compact .admin-section-header {
+  flex-wrap: wrap;
+}

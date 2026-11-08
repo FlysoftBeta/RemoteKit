@@ -1,0 +1,27 @@
+/* TouchRipple sizes and places ripples from getBoundingClientRect and pointer client coordinates,
+   both visual px under the <body> transform. Undo the scale on the ripple layer so its local px are
+   visual px again; the layer still covers the button exactly. */
+html.ui-scaled .MuiTouchRipple-root {
+  right: auto;
+  bottom: auto;
+  width: calc(100% * var(--ui-scale));
+  height: calc(100% * var(--ui-scale));
+  transform: scale(calc(1 / var(--ui-scale)));
+  transform-origin: 0 0;
+}
+.MuiMenu-paper {
+  max-width: calc(var(--layout-vw) - 24px);
+}
+.MuiMenuItem-root {
+  overflow-wrap: anywhere;
+  gap: 8px;
+}
+.MuiDialog-root .MuiDialog-paper {
+  max-height: calc(100% - 48px);
+}
+html.layout-narrow .MuiDialog-root .MuiDialog-paperFullScreen {
+  max-height: 100%;
+}
+html.layout-narrow .MuiDialogContent-root {
+  padding: 16px !important;
+}

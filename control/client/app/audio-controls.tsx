@@ -1,3 +1,4 @@
+import './audio-controls.css';
 import { VolumeOffOutlined, VolumeUpOutlined } from '@mui/icons-material';
 import { Button, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
 import type { AudioChannels, AudioPlaybackState } from '../media/audio-output';

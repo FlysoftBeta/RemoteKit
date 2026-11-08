@@ -1,3 +1,4 @@
+import './workspace-preferences.css';
 import { Add, Remove } from '@mui/icons-material';
 import {
   Button,

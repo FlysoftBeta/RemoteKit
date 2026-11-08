@@ -1,0 +1,70 @@
+.remote-viewport {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+.remote-viewport canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+}
+.remote-viewport canvas.no-frame {
+  visibility: hidden;
+}
+.remote-viewport.resize-waiting .remote-video-plane {
+  visibility: hidden !important;
+}
+.remote-viewport canvas.remote-resize-freeze {
+  pointer-events: none;
+  z-index: var(--z-freeze);
+  transform-origin: top left;
+  filter: blur(5px);
+  animation: remote-resize-stretch 160ms ease-out both;
+}
+.remote-viewport canvas.remote-resize-freeze.keyboard-peek {
+  bottom: auto;
+  height: var(--resize-peek-height);
+  filter: none;
+  animation: none;
+}
+@keyframes remote-resize-stretch {
+  from {
+    transform: scale(var(--resize-from-x), var(--resize-from-y));
+    filter: blur(1px);
+  }
+  to {
+    transform: scale(1);
+    filter: blur(5px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .remote-viewport canvas.remote-resize-freeze {
+    animation: none;
+  }
+}
+.remote-input {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  font-size: 16px;
+  width: 1px;
+  height: 1px;
+  opacity: 0.01;
+  padding: 0;
+  border: 0;
+  resize: none;
+  pointer-events: none;
+}
+.input-notice {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  background: var(--camera-background);
+  color: var(--surface);
+  padding: 8px;
+  z-index: var(--z-stats);
+}

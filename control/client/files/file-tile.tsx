@@ -131,10 +131,15 @@ export function FileTile({
         position: 'relative',
         borderRadius: '10px',
         bgcolor: 'background.paper',
-        boxShadow: selected ? '0 0 0 2px #245db5' : open ? '0 0 0 1px #245db5' : '0 0 0 1px #dde2e8',
+        boxShadow: selected
+          ? '0 0 0 2px var(--primary)'
+          : open
+            ? '0 0 0 1px var(--primary)'
+            : '0 0 0 1px var(--border)',
         transition: 'box-shadow 120ms',
         '&:hover': {
-          boxShadow: selected || open ? undefined : '0 0 0 1px #b8c2cf, 0 2px 6px rgb(15 23 42 / 8%)',
+          boxShadow:
+            selected || open ? undefined : '0 0 0 1px var(--border-tile), 0 2px 6px rgb(15 23 42 / 8%)',
         },
       }}
     >
@@ -154,7 +159,7 @@ export function FileTile({
           textAlign: 'left',
           borderRadius: '10px',
           overflow: 'hidden',
-          '&.Mui-focusVisible': { boxShadow: 'inset 0 0 0 2px #245db5' },
+          '&.Mui-focusVisible': { boxShadow: 'inset 0 0 0 2px var(--primary)' },
         }}
       >
         <Box sx={{ position: 'relative' }}>
@@ -306,8 +311,8 @@ export function FileRow({
         minHeight: 56,
         px: 0.5,
         borderRadius: '10px',
-        bgcolor: selected ? 'rgb(36 93 181 / 8%)' : 'background.paper',
-        '&:hover': { bgcolor: selected ? 'rgb(36 93 181 / 12%)' : '#f5f7fa' },
+        bgcolor: selected ? 'var(--primary-tab-drop)' : 'background.paper',
+        '&:hover': { bgcolor: selected ? 'rgb(36 93 181 / 12%)' : 'var(--surface-subtle)' },
       }}
     >
       {leading}
@@ -318,7 +323,7 @@ export function FileRow({
           aria-pressed={pressed}
           aria-haspopup={pressed === undefined ? 'menu' : undefined}
           {...press}
-          sx={{ ...bodySx, '&.Mui-focusVisible': { boxShadow: 'inset 0 0 0 2px #245db5' } }}
+          sx={{ ...bodySx, '&.Mui-focusVisible': { boxShadow: 'inset 0 0 0 2px var(--primary)' } }}
         >
           {body}
         </ButtonBase>

@@ -1,3 +1,4 @@
+import './window-handle.css';
 import { ChevronRight, DragHandle } from '@mui/icons-material';
 import { IconButton, Menu, MenuItem } from '@mui/material';
 import React, { useState } from 'react';
