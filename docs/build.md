@@ -99,7 +99,7 @@ C:\src\depot_tools\python3.bat tools/release.py
 
 Control 包包含 Node、Control 生产 bundle、匹配 Node ABI 的 better-sqlite3、updater 与 CRT。Endpoint、Browser、SDK、oneVPL 和人脸模型集中在 `release/node.tar.zst`。本地安装和远端更新共用该归档及记录 buildId、SHA-256 和大小的 `release/node.json`。Endpoint 引导包带 updater、CRT、启动脚本和许可证。
 
-Control 启动脚本首次生成 `config/control.json`。合部署把运行时安装到 `data/local/runtime/<buildId>/`，节点根目录仍为 `data/node/`。升级时停止服务，把新版 Control 包部署到同一根目录并保留 `config/`、`data/`。`run.cmd` 每次启动先安装本包 buildId 的运行时，Control 按自身 buildId 找到本地 Endpoint，升级不改配置。如果切换到仅 Control 模式，先移除本地节点项。
+Control 启动脚本首次生成 `config/control.json`。合部署把运行时安装到 `data/local/runtime/<buildId>/`，节点根目录仍为 `data/node/`。升级时停止服务，把新版 Control 包部署到同一根目录并保留 `config/`、`data/`。`data/control.db` 损坏或版本不被接受时，停止服务后运行 `recover-credentials.cmd`，只保留账户与凭据重建数据库（见[凭据恢复](auth.md#凭据恢复)）。`run.cmd` 每次启动先安装本包 buildId 的运行时，Control 按自身 buildId 找到本地 Endpoint，升级不改配置。如果切换到仅 Control 模式，先移除本地节点项。
 
 默认打开 `http://127.0.0.1:3001` 创建首个管理员账号。归档只收录运行文件与许可证。Control 包 manifest 记录打包时的源码与 Chromium 身份、GN 参数、后端与渲染协议、逐文件 hash。构建 ID 由 Control 包的 `bin/`、`control/` 和归档内 `node/bin/` 的文件路径及 hash 计算。
 

@@ -33,6 +33,23 @@
 - 密码与 PIN（6–12 位数字）各自使用 16 字节随机盐、scrypt 64 字节输出；全局 KDF 并发 4；账户尝试默认每分钟 6 次、同时 1 个在途。异步校验完成后、提交之前，重新校验租约与凭据。
 - 人脸模板用 AES-256-GCM 加密存储，AAD 为用户 + 模型版本，密钥是 Control 的 32 字节静态密钥文件 `<db>.key`（也用于封装 Tenant DEK，见[多节点](cluster.md#会话放置与密钥)）。客户端从不接收模板；Endpoint 只在挑战期间持有，用完清除。
 
+## 凭据恢复
+
+数据库损坏，或停在当前 Control 不接受的 schema 版本时，用 `recover-credentials` 重建，只保留身份与凭据，其余产品状态一概放弃。发布包里是 `recover-credentials.cmd`（固定使用包内 `config/control.json`），开发时是 `node control/dist/recover-credentials.mjs`（经 `REMOTEKIT_CONTROL_CONFIG` 或默认配置定位数据库）。实现在 `control/server/recovery/`。
+
+```text
+recover-credentials.cmd --dry-run      预览：读出哪些账户、放弃什么、为什么
+recover-credentials.cmd                停止 Control 后执行
+  --from <旧库>  --from-key <key>  --admin <用户名>  --no-tokens
+```
+
+- 默认流程：把配置中的数据库及其 `-wal`、`-shm`、`.key`（以及更早版本的 `.face-key`）移到同目录的 `<db>.damaged-<UTC 时间>/`，用当前 schema 新建空库，再写回账户。数据库文件最先移动，Control 仍打开它时 Windows 拒绝重命名，于是什么都不动并提示先停止 Control。写入失败时旧库仍在备份目录，用 `--from` 指向它重试；`--from` 也用于旧库已在别处的情况，此时目标库必须不存在或没有账户。
+- 读取：只读旧库的临时副本，不让 SQLite 回写或 checkpoint 原文件。列按旧表实际结构取，不依赖 schema 版本。整表扫描失败时退回逐 rowid 读取，跳过无法解码的行并报告。
+- 保留：用户 ID、用户名、Tenant ID、密码哈希、管理员、停用状态、最后登录时间、PIN、人脸模板、锁定设置中类型正确的字段、未过期的登录 token。用户 ID 不变，所以人脸 AAD 不变；模板用旧 key 解密并校验后，用新库的 key 重新封装。
+- 放弃：哈希不是上面的 scrypt 格式（hex 盐、128 位 hex 输出）的密码或 PIN（密码放弃即放弃该账户），解不开或模板不合法的人脸（同时关闭人脸验证），与已恢复账户 ID、用户名或 Tenant 重复的行。
+- 管理员：旧库恰有一个管理员时保留；否则用 `--admin` 指定，未指定则取最早的未停用账户。管理员总是启用状态。
+- 放置、checkpoint 与对象索引都不保留，用户下次进入时以新的空 Session 启动；节点上不再被索引的对象由库存对账删除。
+
 ## 人脸验证
 
 **分工**：Control 发起挑战并裁定授权；Endpoint 负责取帧和推理；客户端只采集。图像不经过 Control，不压缩，不落盘。

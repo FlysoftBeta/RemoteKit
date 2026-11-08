@@ -24,40 +24,6 @@ function librarySources(snapshot: LibrarySnapshot): LibrarySnapshot['sources'] {
   return [...sources.values()];
 }
 
-export function migrateLibrarySnapshots(db: Database.Database): void {
-  const rows = db.prepare('SELECT tenant,snapshot FROM file_library').all() as {
-    tenant: string;
-    snapshot: string;
-  }[];
-  const update = db.prepare('UPDATE file_library SET snapshot=? WHERE tenant=?');
-  for (const row of rows) {
-    const { groups, entries, ...snapshot } = JSON.parse(row.snapshot) as {
-      revision: number;
-      basket: string[];
-      groups: { id: string; name: string }[];
-      entries: (Omit<LibraryEntry, 'source' | 'partitionId' | 'collected'> & {
-        groupId: string | null;
-        archived: boolean;
-      })[];
-    };
-    const migrated: LibrarySnapshot = {
-      ...snapshot,
-      partitions: groups,
-      entries: entries.map(({ groupId, archived, ...entry }) => ({
-        ...entry,
-        partitionId: groupId,
-        collected: archived,
-        source: archived ? { app: 'files', channel: 'upload' } : null,
-      })),
-      excludedSources: [],
-      basketPartitionId: null,
-      sources: [],
-    };
-    migrated.sources = librarySources(migrated);
-    update.run(JSON.stringify(migrated), row.tenant);
-  }
-}
-
 type TerminalState = Extract<SelectionState, 'selected' | 'cancelled'>;
 export interface Selection {
   selectionId: string;

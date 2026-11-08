@@ -30,7 +30,7 @@ export class ControlDatabase {
       throw error;
     }
     this.workspaces = new WorkspacesRepository(this.db);
-    this.atRestKey = new AtRestKey(path);
+    this.atRestKey = new AtRestKey(path && path !== ':memory:' ? path + '.key' : null);
     this.security = new SecurityRepository(this.db, this.atRestKey, clock);
     this.accounts = new AccountsRepository(this.db);
     this.operations = new OperationsRepository(this.db, this.workspaces);

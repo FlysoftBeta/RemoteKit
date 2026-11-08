@@ -1,5 +1,5 @@
 import { RemoteKitError } from '../shared/errors';
-import { LibraryRepository, migrateLibrarySnapshots } from '../server/persistence/library';
+import { LibraryRepository } from '../server/persistence/library';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -702,53 +702,6 @@ test('new mutations freeze payloads and reject mismatched operation IDs before s
     }),
     { code: 'invalid_request' },
   );
-});
-
-test('library migration preserves IDs and assets and replaces stored group and archive fields', (t) => {
-  const f = fixture();
-  t.after(() => f.db.close());
-  const entries = [true, false].map((archived, index) => ({
-    id: 'entry-' + index,
-    name: 'image.jpg',
-    assetId: ASSETS.photo,
-    originalAssetId: ASSETS.original,
-    type: 'image/jpeg',
-    size: 3,
-    createdAt: 100,
-    groupId: index === 0 ? 'partition' : null,
-    archived,
-  }));
-  const snapshot = {
-    revision: 7,
-    entries,
-    groups: [{ id: 'partition', name: 'Saved' }],
-    basket: ['entry-1'],
-  };
-  for (const tenant of ['tenant', 'other'])
-    f.db.prepare('INSERT INTO file_library VALUES (?,?)').run(tenant, JSON.stringify(snapshot));
-  migrateLibrarySnapshots(f.db);
-  for (const tenant of ['tenant', 'other']) {
-    const migrated = new LibraryRepository(f.db).snapshot(tenant);
-    assert.equal(migrated.revision, 7);
-    assert.deepEqual(migrated.partitions, snapshot.groups);
-    assert.deepEqual(migrated.basket, snapshot.basket);
-    assert.deepEqual(
-      migrated.entries,
-      entries.map(({ groupId, archived, ...entry }) => ({
-        ...entry,
-        partitionId: groupId,
-        collected: archived,
-        source: archived ? uploadSource : null,
-      })),
-    );
-    assert.deepEqual(migrated.sources, [{ ...uploadSource, count: 1, excluded: false }]);
-    assert.deepEqual(migrated.excludedSources, []);
-    assert.equal(migrated.basketPartitionId, null);
-    const stored = f.db.prepare('SELECT snapshot FROM file_library WHERE tenant=?').get(tenant) as {
-      snapshot: string;
-    };
-    assert.ok(!/"(groups|groupId|archived)"/.test(stored.snapshot));
-  }
 });
 
 test('object GC follows live entry assets, originals, candidates, and pending selections through purge', async (t) => {

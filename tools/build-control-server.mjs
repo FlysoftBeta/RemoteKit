@@ -6,8 +6,12 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '../control');
 const { build } = createRequire(resolve(root, 'package.json'))('esbuild');
 // Node loads CommonJS runtime packages directly, preserving their builtin requires.
 await build({
-  entryPoints: [resolve(root, 'server/main.ts')],
-  outfile: resolve(root, 'dist/server.mjs'),
+  entryPoints: {
+    server: resolve(root, 'server/main.ts'),
+    'recover-credentials': resolve(root, 'server/recover-credentials.ts'),
+  },
+  outdir: resolve(root, 'dist'),
+  outExtension: { '.js': '.mjs' },
   bundle: true,
   platform: 'node',
   format: 'esm',

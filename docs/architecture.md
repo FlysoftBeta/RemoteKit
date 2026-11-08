@@ -88,6 +88,7 @@ control/
     auth/          账户、Viewer 锁定与 peer 授权、人脸挑战、密码学
     admin/         管理员的用户管理（创建、凭据重置、停用、转让、休眠、删除）
     persistence/   schema 与各仓库（账户、安全、workspace、操作收据、文件库）
+    recovery/      损坏数据库的凭据恢复（入口 recover-credentials.ts，单独打包）
     cluster/       集群通道（Noise、帧、节点链路）、放置、密钥派生、对象索引、指标、更新包、节点管理、Session 清理队列
     endpoint/      类型化网关（按 Tenant 路由到所在节点）与管理消息类型
     tenants/       每租户运行时状态

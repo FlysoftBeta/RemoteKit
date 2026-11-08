@@ -72,11 +72,12 @@ export function validFaceTemplate(value: unknown): value is number[] {
 
 export class AtRestKey {
   private key?: Buffer;
-  constructor(private readonly dbPath: string) {}
+  // A null path keeps an ephemeral key, for in-memory databases.
+  constructor(private readonly path: string | null) {}
   private loadKey(create: boolean) {
     if (this.key) return this.key;
-    if (this.dbPath === ':memory:' || !this.dbPath) return (this.key = randomBytes(32));
-    const path = this.dbPath + '.key';
+    if (!this.path) return (this.key = randomBytes(32));
+    const path = this.path;
     try {
       this.key = readFileSync(path);
     } catch (error) {

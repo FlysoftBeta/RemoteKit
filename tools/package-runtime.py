@@ -60,7 +60,12 @@ def check_control_freshness():
         if file.is_file()
     ]
     newest = max(sources, key=lambda file: file.stat().st_mtime_ns)
-    for relative in ('server.mjs', 'client/index.html', 'runtime/manifest.json'):
+    for relative in (
+        'server.mjs',
+        'recover-credentials.mjs',
+        'client/index.html',
+        'runtime/manifest.json',
+    ):
         artifact = control / 'dist' / relative
         if not artifact.is_file() or artifact.stat().st_mtime_ns < newest.stat().st_mtime_ns:
             raise RuntimeError(
@@ -339,10 +344,14 @@ def validate_runtime_tree(root):
             raise RuntimeError('Non-runtime file in package: ' + str(relative))
 
 
-def write_launcher(file, command, setup=''):
+def write_launcher(file, command, setup='', forward_arguments=False):
     file.write_text(
         '@echo off\nsetlocal DisableDelayedExpansion\n'
-        'if not "%~1"=="" exit /b 1\n' + setup + command + '\nexit /b %errorlevel%\n',
+        + ('' if forward_arguments else 'if not "%~1"=="" exit /b 1\n')
+        + setup
+        + command
+        + (' %*' if forward_arguments else '')
+        + '\nexit /b %errorlevel%\n',
         encoding='ascii',
     )
 
@@ -508,11 +517,17 @@ def package_runtime(args, node_runtime):
     control = package / 'control'
     control.mkdir()
     dist = ROOT / 'control/dist'
-    for source in [dist / 'server.mjs', dist / 'client', dist / 'runtime/node_modules']:
+    for source in [
+        dist / 'server.mjs',
+        dist / 'recover-credentials.mjs',
+        dist / 'client',
+        dist / 'runtime/node_modules',
+    ]:
         if not source.exists():
             raise FileNotFoundError('Run npm run build in control first: ' + str(source))
     (control / 'dist').mkdir()
     shutil.copy2(dist / 'server.mjs', control / 'dist/server.mjs')
+    shutil.copy2(dist / 'recover-credentials.mjs', control / 'dist/recover-credentials.mjs')
     shutil.copytree(
         dist / 'client', control / 'dist/client', ignore=shutil.ignore_patterns('*.ts', '*.tsx')
     )
@@ -578,6 +593,16 @@ def package_runtime(args, node_runtime):
     shutil.copy2(ROOT / 'tools/streaming-launcher.cjs', package / 'run-control.cjs')
     for name, mode in [('run.cmd', 'combined'), ('run-control.cmd', 'control')]:
         write_launcher(package / name, f'"%~dp0bin\\node.exe" "%~dp0run-control.cjs" {mode}')
+    # Without a config the command would create a default one and rebuild the wrong database.
+    write_launcher(
+        package / 'recover-credentials.cmd',
+        '"%~dp0bin\\node.exe" "%~dp0control\\dist\\recover-credentials.mjs"',
+        'if exist "%~dp0config\\control.json" goto start\n'
+        'echo config\\control.json not found; run this in the deployed package directory. 1>&2\n'
+        'exit /b 1\n:start\n'
+        'set "REMOTEKIT_CONTROL_CONFIG=%~dp0config\\control.json"\n',
+        forward_arguments=True,
+    )
     write_launcher(
         bootstrap / 'run-endpoint.cmd',
         '"%~dp0remotekit_node.exe" run "--root=%~dp0."',
@@ -592,7 +617,10 @@ def package_runtime(args, node_runtime):
         'The first account becomes administrator.\n'
         'For a remote node, set cluster.controlUrl and add the node under nodes without a local entry.\n'
         'Control writes config/nodes/<node ID>/node.json; copy it unchanged next to run-endpoint.cmd on that node.\n'
-        'Keep release/node.json and release/node.tar.zst together for node installation and updates.\n',
+        'Keep release/node.json and release/node.tar.zst together for node installation and updates.\n'
+        'If data/control.db is damaged, stop Control and run recover-credentials.cmd: it moves the old\n'
+        'database aside and rebuilds it with only accounts, passwords, PINs, faces and sign-ins\n'
+        '(--dry-run to preview, --help for options).\n',
         encoding='utf-8',
     )
     (bootstrap / 'README.txt').write_text(

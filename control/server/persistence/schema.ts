@@ -1,9 +1,5 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
-import { migrateLibrarySnapshots } from './library';
-import { normalizedUsagePage } from '../navigation-url';
-import { cleanUrl } from '../url-clean';
-import type { Favorite } from '../../shared/product';
 import { createAnnouncementTables } from './announcements';
 
 const version = 9;
@@ -34,165 +30,6 @@ function tableExists(db: Database.Database, name: string) {
   return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 }
 
-// Each entry upgrades a database written at that version to the next one.
-const migrations: Record<number, (db: Database.Database) => void> = {
-  8: createAnnouncementTables,
-  7: (db) => {
-    const events = db.prepare("SELECT id,item FROM usage_events WHERE item LIKE 'page:%'").all() as {
-      id: bigint;
-      item: string;
-    }[];
-    const updateEvent = db.prepare('UPDATE usage_events SET item=? WHERE id=?');
-    const deleteEvent = db.prepare('DELETE FROM usage_events WHERE id=?');
-    for (const event of events) {
-      const url = normalizedUsagePage(event.item.slice(5));
-      if (url) updateEvent.run('page:' + url, event.id);
-      else deleteEvent.run(event.id);
-    }
-
-    const previews = db
-      .prepare(
-        "SELECT tenant,key,image,hash,updated_at FROM page_previews WHERE key LIKE 'page:%' ORDER BY updated_at DESC,rowid DESC",
-      )
-      .all() as {
-      tenant: string;
-      key: string;
-      image: Buffer;
-      hash: string;
-      updated_at: bigint;
-    }[];
-    db.exec("DELETE FROM page_previews WHERE key LIKE 'page:%'");
-    const insertPreview = db.prepare('INSERT OR IGNORE INTO page_previews VALUES (?,?,?,?,?)');
-    for (const preview of previews) {
-      const url = normalizedUsagePage(preview.key.slice(5));
-      if (url)
-        insertPreview.run(preview.tenant, 'page:' + url, preview.image, preview.hash, preview.updated_at);
-    }
-
-    const favorites = db
-      .prepare('SELECT tenant,id,data FROM favorites ORDER BY tenant,position,id')
-      .all() as {
-      tenant: string;
-      id: string;
-      data: string;
-    }[];
-    const seen = new Map<string, Set<string>>();
-    const updateFavorite = db.prepare('UPDATE favorites SET data=? WHERE tenant=? AND id=?');
-    const deleteFavorite = db.prepare('DELETE FROM favorites WHERE tenant=? AND id=?');
-    for (const row of favorites) {
-      const favorite = JSON.parse(row.data) as Favorite;
-      const url = cleanUrl(favorite.url);
-      const urls = seen.get(row.tenant) ?? new Set<string>();
-      seen.set(row.tenant, urls);
-      if (!url || urls.has(url)) deleteFavorite.run(row.tenant, row.id);
-      else {
-        urls.add(url);
-        updateFavorite.run(JSON.stringify({ ...favorite, url }), row.tenant, row.id);
-      }
-    }
-  },
-  // The display-scale override became an app-wide UI scale; the top dead zone is new.
-  4: (db) => {
-    const rows = db.prepare('SELECT tenant, data FROM user_settings').all() as {
-      tenant: string;
-      data: string;
-    }[];
-    const update = db.prepare('UPDATE user_settings SET data=? WHERE tenant=?');
-    for (const row of rows) {
-      const { clientScaleOverride: _, ...settings } = JSON.parse(row.data) as Record<string, unknown>;
-      update.run(JSON.stringify({ ...settings, uiScale: 1, topDeadZone: 'off' }), row.tenant);
-    }
-  },
-  6: (db) => {
-    createPagePreviews(db);
-    db.exec("UPDATE user_settings SET data=json_remove(data,'$.workspace.groupRail')");
-  },
-  5: (db) => {
-    db.exec(`CREATE TABLE workspace_spaces (
-        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE new_workspaces (tenant TEXT PRIMARY KEY, revision INTEGER NOT NULL, active_space TEXT, pending TEXT);
-      CREATE TABLE new_workspace_windows (
-        id TEXT PRIMARY KEY, tenant TEXT NOT NULL, position INTEGER NOT NULL,
-        app_id TEXT NOT NULL, active_tab TEXT, state TEXT, last_active_at INTEGER NOT NULL);`);
-    const workspaces = db.prepare('SELECT tenant,revision,active_window,pending FROM workspaces').all() as {
-      tenant: string;
-      revision: bigint;
-      active_window: string | null;
-      pending: string | null;
-    }[];
-    const insertWindow = db.prepare('INSERT INTO new_workspace_windows VALUES (?,?,?,?,?,?,?)');
-    const insertSpace = db.prepare('INSERT INTO workspace_spaces VALUES (?,?,?,?)');
-    const removeTab = db.prepare('DELETE FROM workspace_tabs WHERE tenant=? AND id=?');
-    for (const workspace of workspaces) {
-      const windows = db
-        .prepare('SELECT id,position,active_tab FROM workspace_windows WHERE tenant=? ORDER BY position')
-        .all(workspace.tenant) as { id: string; position: bigint; active_tab: string | null }[];
-      const tabs = db
-        .prepare('SELECT id,data FROM workspace_tabs WHERE tenant=? ORDER BY position')
-        .all(workspace.tenant) as {
-        id: string;
-        data: string;
-      }[];
-      const retained = tabs.filter((tab) => {
-        if (JSON.parse(tab.data).kind !== 'files') return true;
-        removeTab.run(workspace.tenant, tab.id);
-        return false;
-      });
-      for (const window of windows) {
-        const activeTab =
-          retained.find((tab) => tab.id === window.active_tab)?.id ??
-          retained.find((tab) => JSON.parse(tab.data).windowId === window.id)?.id ??
-          null;
-        const lastActiveAt = window.id === workspace.active_window ? 1 : 0;
-        insertWindow.run(
-          window.id,
-          workspace.tenant,
-          window.position,
-          'browser',
-          activeTab,
-          null,
-          lastActiveAt,
-        );
-        insertSpace.run(
-          `space:${window.id}`,
-          workspace.tenant,
-          window.position,
-          JSON.stringify({
-            id: `space:${window.id}`,
-            windowIds: [window.id],
-            weights: [1],
-            focusedWindowId: window.id,
-            lastActiveAt,
-          }),
-        );
-      }
-      db.prepare('INSERT INTO new_workspaces VALUES (?,?,?,?)').run(
-        workspace.tenant,
-        workspace.revision,
-        workspace.active_window ? `space:${workspace.active_window}` : null,
-        workspace.pending,
-      );
-    }
-    db.exec(`DROP TABLE workspaces;
-      ALTER TABLE new_workspaces RENAME TO workspaces;
-      DROP TABLE workspace_windows;
-      ALTER TABLE new_workspace_windows RENAME TO workspace_windows;`);
-    const settingsRows = db.prepare('SELECT tenant,data FROM user_settings').all() as {
-      tenant: string;
-      data: string;
-    }[];
-    for (const row of settingsRows) {
-      const { searchEngine, memorySaverEnabled, ...workspace } = JSON.parse(row.data);
-      db.prepare('UPDATE user_settings SET data=? WHERE tenant=?').run(
-        JSON.stringify({ workspace, browser: { searchEngine, memorySaverEnabled } }),
-        row.tenant,
-      );
-    }
-    createWorkspaceItems(db);
-    migrateLibrarySnapshots(db);
-  },
-};
-
 function writeVersion(db: Database.Database) {
   db.exec(`DROP TABLE IF EXISTS schema_version;
     CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=${version}));
@@ -204,15 +41,8 @@ export function createSchema(db: Database.Database) {
     if (tableExists(db, 'schema_version')) {
       const rows = db.prepare('SELECT version FROM schema_version').all() as { version: bigint }[];
       if (rows.length !== 1) throw new RemoteKitError('internal', 'Unsupported database schema');
-      let current = Number(rows[0].version);
-      if (current === version) return;
-      for (; current < version; current++) {
-        const migrate = migrations[current];
-        if (!migrate) throw new RemoteKitError('internal', 'Unsupported database schema');
-        migrate(db);
-      }
-      if (current !== version) throw new RemoteKitError('internal', 'Unsupported database schema');
-      writeVersion(db);
+      if (Number(rows[0].version) !== version)
+        throw new RemoteKitError('internal', 'Unsupported database schema');
       return;
     }
     if (tableExists(db, 'users')) throw new RemoteKitError('internal', 'Unsupported database schema');
