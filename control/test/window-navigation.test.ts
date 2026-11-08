@@ -4,6 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ViewerAudioOutput } from '../client/media/audio-output';
 import { FileChannel } from '../client/files/file-channel';
+import { Events } from '../client/util/store';
 import { FileLibraryContext, useFileLibrary } from '../client/files/file-library-state';
 import { projectOperations } from '../client/control/product-operations';
 import type { ViewerSession } from '../client/viewer-session';
@@ -28,6 +29,10 @@ const startTab: ProductTab = {
 
 function snapshot(win?: ProductWindow, tab?: ProductTab): ProductState {
   return {
+    learning: {
+      accounts: { changyan: { status: 'signed_out' }, xinjiaoyu: { status: 'signed_out' } },
+      study: { retentionDays: 7, syncing: false },
+    },
     user: { id: 'user-id', username: 'viewer', isAdmin: false },
     announcements: [],
     workspace: {
@@ -67,7 +72,7 @@ function Frame({ state, online }: { state: ProductState; online: boolean }) {
     observations: { audio: new ViewerAudioOutput(unexpected) },
     files: new FileChannel(() => null),
   };
-  const library = useFileLibrary(unexpected, transport.files, false, false, undefined, []);
+  const library = useFileLibrary(unexpected, transport.files, false, false, undefined, [], new Events());
   const win = state.workspace.windows.find(
     (window) =>
       window.id ===

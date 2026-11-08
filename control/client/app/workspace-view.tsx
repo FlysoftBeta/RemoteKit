@@ -57,11 +57,20 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
     showShell,
     auth?.user.id,
     state?.fileRequests.map((request) => request.id) ?? [],
+    media.control.library,
     state,
   );
   useEffect(() => {
-    media.workspace.start();
-    return () => media.workspace.stop();
+    let active = true;
+    const start = async () => {
+      if (import.meta.env.DEV) await import('../test-hooks');
+      if (active) media.workspace.start();
+    };
+    void start();
+    return () => {
+      active = false;
+      media.workspace.stop();
+    };
   }, [media]);
   useEffect(() => {
     if (status === 'expired') expired();

@@ -28,7 +28,7 @@ const UNIT = { preferred: 104, minimum: 64, maximum: 120 };
 const MAX_ROWS = 4;
 const SPANS: Record<TileSize, [number, number]> = { small: [1, 1], wide: [2, 1], large: [2, 2] };
 const titles = { frequent: '常用', apps: 'App', pages: '网页', files: '文件' };
-const builtin = ['browser', 'files', 'settings', 'admin'];
+const builtin = ['browser', 'files', 'study', 'questions', 'settings', 'admin'];
 const byScore = (a: LauncherItem, b: LauncherItem) => b.score - a.score;
 
 /**
@@ -122,7 +122,7 @@ export function launcherLayout(
     .sort((a, b) => {
       const ai = builtin.indexOf(a.appId ?? '');
       const bi = builtin.indexOf(b.appId ?? '');
-      return (ai < 0 ? 3 : ai) - (bi < 0 ? 3 : bi) || byScore(a, b);
+      return (ai < 0 ? builtin.length : ai) - (bi < 0 ? builtin.length : bi) || byScore(a, b);
     });
   const pages = items
     .filter((item) => item.group === 'pages' && !used.has(item.key))

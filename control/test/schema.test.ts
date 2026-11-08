@@ -10,7 +10,7 @@ import { ControlDatabase } from '../server/persistence/database';
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 10n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 12n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -106,9 +106,9 @@ test('databases at another schema version are rejected', async () => {
   try {
     for (const [name, setup] of [
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
-      ['previous', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (9)'],
+      ['previous', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (11)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (11)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (13)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',

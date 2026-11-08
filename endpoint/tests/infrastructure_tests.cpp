@@ -13,6 +13,7 @@
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <sstream>
 #include <thread>
 
 namespace {
@@ -203,10 +204,11 @@ class FixtureLink final : public ManagementLink {
  public:
   SessionStore& store;
   fs::path directory;
+  std::string checkpoint;
   std::vector<Json> replies;
   size_t index = 0;
-  explicit FixtureLink(SessionStore& value, fs::path path)
-      : store(value), directory(std::move(path)) {}
+  explicit FixtureLink(SessionStore& value, fs::path path, std::string manifest)
+      : store(value), directory(std::move(path)), checkpoint(std::move(manifest)) {}
   bool Next(std::string& bytes, uint64_t& generation, bool& eof) override {
     static const std::vector<Json> requests{
         {{"id", 100}, {"method", "session.snapshot"}, {"tenantId", "tenant"}},
@@ -267,9 +269,7 @@ class FixtureLink final : public ManagementLink {
     generation = 7;
     auto request = requests[index++];
     if (request.value("method", std::string()) == "session.open") {
-      request["objectKey"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-      request["objectIdKey"] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-      request["checkpoint"] = std::string(64, 'a');
+      request["checkpoint"] = checkpoint;
       request["placementEpoch"] = request["id"] == 106 ? 1 : 2;
     }
     bytes = request.dump();
@@ -283,15 +283,22 @@ class FixtureLink final : public ManagementLink {
   }
   bool SendEvent(const Json&, uint64_t) override { return true; }
   void OnDisconnect(Disconnect) override {}
-  Result<Json> Request(const std::string&, Json) override {
-    return Error{ErrorCode::kUnavailable, "test Control has no object responder"};
+  Result<Json> Request(const std::string& method, Json fields) override {
+    Check(method == "object.locate" && fields["tenantId"] == "tenant" &&
+              fields["ids"] == Json::array({checkpoint}),
+          "warm restore authorization");
+    return Json{{"sources", {{checkpoint, Json::array()}}}};
   }
 };
 void ManagementDispatch() {
   TemporaryDirectory directory;
   SessionStore store(directory.path);
-  Check(bool(store.Save("sessions/0123456789abcdef0123456789abcdef.checkpoint",
-                        std::string(64, 'a'))),
+  objects::ObjectStore objects(directory.path);
+  std::istringstream content("warm checkpoint manifest");
+  const auto object = objects.Write(objects::Keys{}, content);
+  Check(bool(object), "warm manifest object");
+  const auto checkpoint = object.value().id;
+  Check(bool(store.Save("sessions/0123456789abcdef0123456789abcdef.checkpoint", checkpoint)),
         "warm copy fixture");
   Check(bool(store.Save(
             "sessions/0123456789abcdef0123456789abcdef/events.json",
@@ -303,7 +310,7 @@ void ManagementDispatch() {
   config["dataPath"] = Utf8(directory.path);
   auto parsed = Options(config);
   Check(bool(parsed), "fixture options");
-  FixtureLink link(store, directory.path);
+  FixtureLink link(store, directory.path, checkpoint);
   media::Sdk sdk;
   Service service(sdk, parsed.value(), link, cluster::Key{});
   Check(service.Run() == 0, "management dispatch");

@@ -15,7 +15,7 @@
 | Endpoint（CMake/Ninja） | `tools\build-endpoint.cmd`（构建 + CTest）；`build-only`；`package`（Release `endpoint_service`）；`fresh` | `build/endpoint`、`build/endpoint-package` |
 | Control（npm） | `npm ci`；`npm test`；`npm run build` | `control/dist` |
 
-三者可以并行构建；同一个 Chromium out 目录不要并发构建。Endpoint 不包含 Chromium 私有头，只依赖导出的 SDK；Endpoint 的依赖（nlohmann/json、oneVPL、NVENC 头、zstd 1.5.7 源码）由 `tools/fetch-media-deps.py` 按固定版本与 hash 获取；Endpoint 链接完整 zstd，updater 只链接解压部分，人脸依赖（静态 OpenCV、YuNet/SFace/MiniFASNet 模型与许可证）由 `tools/setup-face-auth.py` 按 `tools/face-auth-deps.json` 准备，必要时从官方权重转换 ONNX。
+三者可以并行构建；同一个 Chromium out 目录不要并发构建。Endpoint 不包含 Chromium 私有头，只依赖导出的 SDK；Endpoint 的依赖（nlohmann/json、oneVPL、NVENC 头、zstd 1.5.7 源码）由 `tools/fetch-media-deps.py` 按固定版本与 hash 获取；Endpoint 链接完整 zstd，updater 只链接解压部分，人脸依赖（静态 OpenCV、YuNet/SFace/MiniFASNet 模型与许可证）由 `tools/setup-face-auth.py` 按 `tools/face-auth-deps.json` 准备，必要时从官方权重转换 ONNX。文档渲染依赖（裁剪后的 LibreOffice 与 pdfrender）由 `tools/fetch-document-deps.py` 准备到 `build/dependencies/documents/`，构建后复制到 `endpoint_service.exe` 旁的 `documents/`，并打进 Endpoint 运行时包（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）；pdfrender 的固定值指向一个 GitHub Actions 产物，过期前需要刷新。
 
 **Chromium 叠加层**：`browser/` 不是 Chromium tracked 源码，由 `tools/chromium.py stage` 复制到 Chromium 树中（只更新变化文件的 mtime，带 hash 保护地清理已删除的文件）。**补丁**：对 Chromium tracked 源码的修改只能放在 `patches/` 的有序补丁里，由 `tools/patchset.py --chromium-root C:/src/chromium/src status|apply|revert` 管理；`patches/manifest.json` 记录顺序与每个补丁的 SHA-256。修改补丁后更新 hash，并验证可以完整撤回与重放。不要 reset 或 clean Chromium checkout（其中还有无关的分支与暂存）。
 

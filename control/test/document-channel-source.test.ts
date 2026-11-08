@@ -1,0 +1,182 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { ChannelDocumentSource } from '../client/documents/channel-source';
+import { RemoteKitError } from '../shared/errors';
+import { documentFixture } from '../client/test-hooks-learning-fixtures';
+import { FileChannel } from '../client/files/file-channel';
+
+test('document source opens the rendition and reconstructs chunked resources', async () => {
+  const requested: number[] = [];
+  const bytes = '文档资源'.repeat(12000);
+  const data = new TextEncoder().encode(bytes);
+  const source = new ChannelDocumentSource(
+    {
+      documentOpen: async () => ({ state: 'ready', ...documentFixture.info }),
+      documentResource: async (_id, _content, offset) => {
+        requested.push(offset);
+        const chunk = data.slice(offset, offset + 16384);
+        return {
+          data: Buffer.from(chunk).toString('base64'),
+          offset: offset + chunk.length,
+          total: data.length,
+          mime: 'text/html',
+        };
+      },
+    },
+    'asset',
+  );
+  const signal = new AbortController().signal;
+  assert.equal((await source.open(signal)).documentId, documentFixture.info.documentId);
+  const resource = await source.resource('html', signal);
+  assert.equal(resource.mime, 'text/html');
+  assert.equal(await resource.data.text(), bytes);
+  assert.deepEqual(requested.slice(0, 3), [0, 16384, 32768]);
+});
+
+test('conversion polling retries at 1.5 seconds and stops on cancellation', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout'] });
+  let attempts = 0;
+  const source = new ChannelDocumentSource(
+    {
+      documentOpen: async () =>
+        ++attempts === 1 ? { state: 'converting' } : { state: 'ready', ...documentFixture.info },
+      documentResource: async () => {
+        throw new Error();
+      },
+    },
+    'asset',
+  );
+  const opening = source.open(new AbortController().signal);
+  await Promise.resolve();
+  context.mock.timers.tick(1499);
+  assert.equal(attempts, 1);
+  context.mock.timers.tick(1);
+  await opening;
+  assert.equal(attempts, 2);
+  const controller = new AbortController();
+  const cancelled = new ChannelDocumentSource(
+    {
+      documentOpen: async () => ({ state: 'converting' }),
+      documentResource: async () => {
+        throw new Error();
+      },
+    },
+    'asset',
+  ).open(controller.signal);
+  await Promise.resolve();
+  controller.abort();
+  await assert.rejects(cancelled, { name: 'AbortError' });
+});
+
+test('conversion timeout and typed unsupported/failure errors reach the caller', async (context) => {
+  context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: 0 });
+  const channel = {
+    documentOpen: async () => ({ state: 'converting' as const }),
+    documentResource: async () => {
+      throw new Error();
+    },
+  };
+  const opening = new ChannelDocumentSource(channel, 'asset').open(new AbortController().signal);
+  await Promise.resolve();
+  context.mock.timers.tick(300000);
+  await assert.rejects(opening, /超时/);
+  for (const code of ['invalid_request', 'rejected'] as const) {
+    const source = new ChannelDocumentSource(
+      {
+        ...channel,
+        documentOpen: async () => {
+          throw new RemoteKitError(code, '转换失败');
+        },
+      },
+      'asset',
+    );
+    await assert.rejects(
+      source.open(new AbortController().signal),
+      (error: unknown) => error instanceof RemoteKitError && error.code === code,
+    );
+  }
+});
+
+test('resource chunks reject non-advancing offsets and changing totals', async () => {
+  for (const response of [
+    { data: '', offset: 0, total: 10, mime: 'text/css' },
+    { data: 'eA==', offset: 3, total: 10, mime: 'text/css' },
+  ]) {
+    const source = new ChannelDocumentSource(
+      {
+        documentOpen: async () => ({ state: 'ready', ...documentFixture.info }),
+        documentResource: async () => response,
+      },
+      'asset',
+    );
+    const signal = new AbortController().signal;
+    await source.open(signal);
+    await assert.rejects(source.resource('css', signal), /数据无效/);
+  }
+});
+
+test('document methods use the authenticated file channel and its library binding', async () => {
+  const messages: any[] = [];
+  const channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    send(encoded: string) {
+      const message = JSON.parse(encoded);
+      messages.push(message);
+      const result =
+        message.method === 'document.open'
+          ? { state: 'ready', ...documentFixture.info }
+          : { data: 'eA==', offset: 1, total: 1, mime: 'text/css' };
+      queueMicrotask(() =>
+        files.handle({ type: 'files.result', version: 1, requestId: message.requestId, ok: true, result }),
+      );
+    },
+  } as unknown as RTCDataChannel;
+  const files = new FileChannel(
+    () => channel,
+    () => 7,
+  );
+  const source = new ChannelDocumentSource(files, 'asset-id');
+  const signal = new AbortController().signal;
+  await source.open(signal);
+  await source.resource('resource-id', signal);
+  assert.deepEqual(
+    messages.map((message) => message.method),
+    ['document.open', 'document.resource'],
+  );
+  assert.ok(messages.every((message) => message.authEpoch === 7 && message.params.requestId === 'library'));
+  assert.deepEqual(messages[1].params, {
+    requestId: 'library',
+    documentId: documentFixture.info.documentId,
+    contentId: 'resource-id',
+    offset: 0,
+  });
+});
+
+test('resource loading limits simultaneous file requests and cancels queued reads', async () => {
+  const pending: (() => void)[] = [];
+  let active = 0;
+  let maximum = 0;
+  const source = new ChannelDocumentSource(
+    {
+      documentOpen: async () => ({ state: 'ready', ...documentFixture.info }),
+      documentResource: async () => {
+        maximum = Math.max(maximum, ++active);
+        await new Promise<void>((resolve) => pending.push(resolve));
+        active--;
+        return { data: 'eA==', offset: 1, total: 1, mime: 'text/css' };
+      },
+    },
+    'asset',
+  );
+  const signal = new AbortController().signal;
+  await source.open(signal);
+  const reads = Array.from({ length: 4 }, (_, index) => source.resource(String(index), signal));
+  const abort = new AbortController();
+  const queued = source.resource('queued', abort.signal);
+  abort.abort();
+  await assert.rejects(queued, { name: 'AbortError' });
+  pending.forEach((resolve) => resolve());
+  await Promise.all(reads);
+  assert.equal(maximum, 4);
+});

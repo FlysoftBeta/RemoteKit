@@ -7,7 +7,7 @@
 #include <array>
 #include <fstream>
 #include <limits>
-#include <map>
+#include <set>
 #include <stdexcept>
 
 namespace remotekit::objects {
@@ -84,27 +84,24 @@ Result<Header> ReadHeader(std::istream& stream) {
   for (int i = 0; i < 8; ++i)
     size |= uint64_t(bytes[8 + i]) << (i * 8);
   const uint64_t count = size / kSegmentSize + (size % kSegmentSize != 0);
-  if (!stream || std::string_view(reinterpret_cast<char*>(bytes.data()), 4) != "RKO1" ||
-      u32(4) != 1 || u32(16) != kSegmentSize || count > UINT32_MAX || u32(20) != count)
+  if (!stream || std::string_view(reinterpret_cast<char*>(bytes.data()), 4) != "RKO2" ||
+      u32(4) != 2 || u32(16) != kSegmentSize || count > UINT32_MAX || u32(20) != count)
     return Corrupt();
   return Header{size, static_cast<uint32_t>(count)};
 }
 Result<Bytes> Crypt(bool encrypt,
                     const Key& key,
-                    const std::string& tenant,
                     const std::string& id,
                     uint32_t index,
                     uint32_t count,
                     std::span<const uint8_t> input) {
   Bytes nonce_input;
-  Append(nonce_input, "nonce");
   Append(nonce_input, id);
   Append32(nonce_input, index);
   Digest nonce_hash(&key);
   nonce_hash.Add(nonce_input);
   auto nonce = nonce_hash.Finish();
   Bytes aad;
-  Append(aad, tenant);
   Append(aad, id);
   Append32(aad, index);
   Append32(aad, count);
@@ -152,7 +149,6 @@ Result<Bytes> Crypt(bool encrypt,
 Result<Bytes> Segment(std::istream& stream,
                       const Header& header,
                       const Keys& keys,
-                      const std::string& tenant,
                       const std::string& id,
                       uint32_t index) {
   std::array<uint8_t, 5> prefix{};
@@ -167,7 +163,7 @@ Result<Bytes> Segment(std::istream& stream,
   stream.read(reinterpret_cast<char*>(encrypted.data()), encrypted.size());
   if (!stream)
     return Corrupt();
-  RK_ASSIGN_OR_RETURN(plain, Crypt(false, keys.object, tenant, id, index, header.count, encrypted));
+  RK_ASSIGN_OR_RETURN(plain, Crypt(false, keys.object, id, index, header.count, encrypted));
   if (prefix[0]) {
     Bytes decoded(expected);
     if (plain.size() >= expected ||
@@ -196,33 +192,28 @@ Keys::~Keys() {
   SecureZeroMemory(id.data(), id.size());
 }
 Json ObjectInfo::Committed() const {
-  return {{"tenantId", tenant},
-          {"objectId", id},
+  return {{"objectId", id},
           {"size", size},
           {"storedSize", stored_size},
           {"storedSha256", stored_sha256}};
 }
 Json ObjectInfo::Inventory() const {
-  return {{"tenantId", tenant},
-          {"id", id},
-          {"storedSize", stored_size},
-          {"storedSha256", stored_sha256}};
+  return {{"id", id}, {"storedSize", stored_size}, {"storedSha256", stored_sha256}};
 }
 ObjectStore::ObjectStore(fs::path data) : root_(std::move(data) / "objects") {
   fs::create_directories(root_);
 }
-std::unique_lock<std::recursive_mutex> ObjectStore::Lock(const std::string& tenant,
-                                                         const std::string& id) const {
-  return std::unique_lock(locks_[std::hash<std::string>{}(tenant + id) % locks_.size()]);
+std::unique_lock<std::recursive_mutex> ObjectStore::Lock(const std::string& id) const {
+  return std::unique_lock(locks_[std::hash<std::string>{}(id) % locks_.size()]);
 }
-Result<fs::path> ObjectStore::StoredPath(const std::string& tenant, const std::string& id) const {
-  if (!ValidTenant(tenant) || !ValidId(id))
+Result<fs::path> ObjectStore::StoredPath(const std::string& id) const {
+  if (!ValidId(id))
     return Error{ErrorCode::kInvalidRequest, "invalid object identity"};
-  return root_ / tenant / id.substr(0, 2) / (id + ".rko");
+  return root_ / id.substr(0, 2) / (id + ".rko");
 }
-Result<ObjectInfo> ObjectStore::Inspect(const std::string& tenant, const std::string& id) const {
-  RK_ASSIGN_OR_RETURN(path, StoredPath(tenant, id));
-  auto lock = Lock(tenant, id);
+Result<ObjectInfo> ObjectStore::Inspect(const std::string& id) const {
+  RK_ASSIGN_OR_RETURN(path, StoredPath(id));
+  auto lock = Lock(id);
   std::ifstream input(path, std::ios::binary);
   if (!input)
     return Error{ErrorCode::kNotFound, "object not found"};
@@ -232,31 +223,25 @@ Result<ObjectInfo> ObjectStore::Inspect(const std::string& tenant, const std::st
   const auto size = fs::file_size(path, error);
   if (error)
     return Io();
-  return ObjectInfo{tenant, id, header.size, size, cluster::Hex(digest)};
+  return ObjectInfo{id, header.size, size, cluster::Hex(digest)};
 }
-Result<ObjectInfo> ObjectStore::Write(const std::string& tenant,
-                                      const Keys& keys,
+Result<ObjectInfo> ObjectStore::Write(const Keys& keys,
                                       const fs::path& source,
                                       const Check& check) {
   std::ifstream input(source, std::ios::binary);
   if (!input)
     return Io();
-  return Write(tenant, keys, input, check);
+  return Write(keys, input, check);
 }
-Result<ObjectInfo> ObjectStore::Write(const std::string& tenant,
-                                      const Keys& keys,
-                                      std::istream& input,
-                                      const Check& check) {
-  if (!ValidTenant(tenant))
-    return Error{ErrorCode::kInvalidRequest, "invalid tenant identity"};
+Result<ObjectInfo> ObjectStore::Write(const Keys& keys, std::istream& input, const Check& check) {
   // Spooling supports non-seekable streams and fixes the plaintext before its id is used as a nonce
   // input.
-  fs::create_directories(root_ / tenant);
+  fs::create_directories(root_);
   std::array<uint8_t, 16> random{};
   if (BCryptGenRandom(nullptr, random.data(), static_cast<ULONG>(random.size()),
                       BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
     return Error{ErrorCode::kInternal, "object spool id failed"};
-  const auto spool = root_ / tenant / (cluster::Hex(random) + ".partial");
+  const auto spool = root_ / (cluster::Hex(random) + ".partial");
   Handle copy{CreateFileW(spool.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                           FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr)};
   if (copy.value == INVALID_HANDLE_VALUE)
@@ -292,8 +277,8 @@ Result<ObjectInfo> ObjectStore::Write(const std::string& tenant,
   if (!SetFilePointerEx(copy.value, LARGE_INTEGER{}, nullptr, FILE_BEGIN))
     return Io();
   const auto id = cluster::Hex(digest.Finish());
-  auto lock = Lock(tenant, id);
-  RK_ASSIGN_OR_RETURN(path, StoredPath(tenant, id));
+  auto lock = Lock(id);
+  RK_ASSIGN_OR_RETURN(path, StoredPath(id));
   fs::create_directories(path.parent_path());
   auto partial = path;
   partial += ".partial";
@@ -304,8 +289,8 @@ Result<ObjectInfo> ObjectStore::Write(const std::string& tenant,
     return Error{ErrorCode::kLimitExceeded, "object too large"};
   const auto count = static_cast<uint32_t>(count64);
   Bytes header;
-  Append(header, "RKO1");
-  Append32(header, 1);
+  Append(header, "RKO2");
+  Append32(header, 2);
   for (int i = 0; i < 8; ++i)
     header.push_back(static_cast<uint8_t>(size >> (8 * i)));
   Append32(header, kSegmentSize);
@@ -327,7 +312,7 @@ Result<ObjectInfo> ObjectStore::Write(const std::string& tenant,
       return Error{ErrorCode::kInternal, "object compression failed"};
     const bool use_compressed = stored < length;
     RK_ASSIGN_OR_RETURN(ciphertext,
-                        Crypt(true, keys.object, tenant, id, index, count,
+                        Crypt(true, keys.object, id, index, count,
                               use_compressed ? std::span<const uint8_t>(compressed.data(), stored)
                                              : std::span<const uint8_t>(buffer.data(), length)));
     Bytes prefix{static_cast<uint8_t>(use_compressed)};
@@ -346,21 +331,20 @@ Result<ObjectInfo> ObjectStore::Write(const std::string& tenant,
   if (!MoveFileExW(partial.c_str(), path.c_str(),
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return Io();
-  return Inspect(tenant, id);
+  return Inspect(id);
 }
-Result<void> ObjectStore::Read(const std::string& tenant,
-                               const Keys& keys,
+Result<void> ObjectStore::Read(const Keys& keys,
                                const std::string& id,
                                std::ostream& output) const {
-  RK_ASSIGN_OR_RETURN(path, StoredPath(tenant, id));
-  auto lock = Lock(tenant, id);
+  RK_ASSIGN_OR_RETURN(path, StoredPath(id));
+  auto lock = Lock(id);
   std::ifstream input(path, std::ios::binary);
   if (!input)
     return Error{ErrorCode::kNotFound, "object not found"};
   RK_ASSIGN_OR_RETURN(header, ReadHeader(input));
   Digest digest(&keys.id);
   for (uint32_t index = 0; index < header.count; ++index) {
-    RK_ASSIGN_OR_RETURN(segment, Segment(input, header, keys, tenant, id, index));
+    RK_ASSIGN_OR_RETURN(segment, Segment(input, header, keys, id, index));
     digest.Add(segment);
     output.write(reinterpret_cast<const char*>(segment.data()), segment.size());
     if (!output)
@@ -370,15 +354,14 @@ Result<void> ObjectStore::Read(const std::string& tenant,
     return Corrupt();
   return {};
 }
-Result<Bytes> ObjectStore::ReadRange(const std::string& tenant,
-                                     const Keys& keys,
+Result<Bytes> ObjectStore::ReadRange(const Keys& keys,
                                      const std::string& id,
                                      uint64_t offset,
                                      size_t length) const {
   if (length > kSegmentSize)
     return Error{ErrorCode::kInvalidRequest, "object range too large"};
-  RK_ASSIGN_OR_RETURN(path, StoredPath(tenant, id));
-  auto lock = Lock(tenant, id);
+  RK_ASSIGN_OR_RETURN(path, StoredPath(id));
+  auto lock = Lock(id);
   std::ifstream input(path, std::ios::binary);
   if (!input)
     return Error{ErrorCode::kNotFound, "object not found"};
@@ -402,7 +385,7 @@ Result<Bytes> ObjectStore::ReadRange(const std::string& tenant,
         return Corrupt();
       continue;
     }
-    RK_ASSIGN_OR_RETURN(segment, Segment(input, header, keys, tenant, id, index));
+    RK_ASSIGN_OR_RETURN(segment, Segment(input, header, keys, id, index));
     const auto left = std::max(begin, offset), right = std::min(begin + segment.size(), end);
     if (left < right)
       result.insert(result.end(), segment.begin() + (left - begin),
@@ -415,12 +398,11 @@ Result<Bytes> ObjectStore::ReadRange(const std::string& tenant,
     return Corrupt();
   return result;
 }
-Result<ObjectInfo> ObjectStore::Import(const std::string& tenant,
-                                       const std::string& id,
+Result<ObjectInfo> ObjectStore::Import(const std::string& id,
                                        uint64_t size,
                                        const std::string& sha256) {
-  RK_ASSIGN_OR_RETURN(path, StoredPath(tenant, id));
-  auto lock = Lock(tenant, id);
+  RK_ASSIGN_OR_RETURN(path, StoredPath(id));
+  auto lock = Lock(id);
   auto partial = path;
   partial += ".partial";
   std::error_code error;
@@ -441,11 +423,11 @@ Result<ObjectInfo> ObjectStore::Import(const std::string& tenant,
   if (!MoveFileExW(partial.c_str(), path.c_str(),
                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return Io();
-  return ObjectInfo{tenant, id, header.value().size, size, sha256};
+  return ObjectInfo{id, header.value().size, size, sha256};
 }
-Result<void> ObjectStore::Delete(const std::string& tenant, const std::string& id) {
-  RK_ASSIGN_OR_RETURN(path, StoredPath(tenant, id));
-  auto lock = Lock(tenant, id);
+Result<void> ObjectStore::Delete(const std::string& id) {
+  RK_ASSIGN_OR_RETURN(path, StoredPath(id));
+  auto lock = Lock(id);
   std::error_code error;
   fs::remove(path, error);
   if (error)
@@ -457,31 +439,28 @@ Result<void> ObjectStore::Delete(const std::string& tenant, const std::string& i
   return {};
 }
 Result<Json> ObjectStore::Inventory(const Json& cursor) const {
-  if (!cursor.is_null() &&
-      (!cursor.is_string() || cursor.get_ref<const std::string&>().size() > 194))
+  if (!cursor.is_null() && (!cursor.is_string() || !ValidId(cursor.get<std::string>())))
     return Error{ErrorCode::kInvalidRequest, "invalid inventory cursor"};
   const auto after = cursor.is_null() ? std::string() : cursor.get<std::string>();
-  std::map<std::string, std::pair<std::string, std::string>> page;
+  std::set<std::string> page;
   for (const auto& entry : fs::recursive_directory_iterator(root_)) {
     if (!entry.is_regular_file() || entry.path().extension() != ".rko")
       continue;
     const auto id = entry.path().stem().string();
-    const auto tenant = entry.path().parent_path().parent_path().filename().string();
-    const auto key = tenant + "/" + id;
-    if (!ValidTenant(tenant) || !ValidId(id) || key <= after)
+    if (!ValidId(id) || id <= after || entry.path() != root_ / id.substr(0, 2) / (id + ".rko"))
       continue;
-    page.emplace(key, std::pair{tenant, id});
+    page.insert(id);
     if (page.size() > 257)
       page.erase(std::prev(page.end()));
   }
   Json objects = Json::array();
   std::string last;
-  for (const auto& [key, identity] : page) {
+  for (const auto& id : page) {
     if (objects.size() == 256)
       break;
-    RK_ASSIGN_OR_RETURN(info, Inspect(identity.first, identity.second));
+    RK_ASSIGN_OR_RETURN(info, Inspect(id));
     objects.push_back(info.Inventory());
-    last = key;
+    last = id;
   }
   return Json{{"objects", objects}, {"next", page.size() > 256 ? Json(last) : Json(nullptr)}};
 }

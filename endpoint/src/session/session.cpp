@@ -12,16 +12,22 @@ Session::Session(media::Sdk& api,
                  const cluster::Key& profile_key,
                  ManagementLink& link,
                  objects::ObjectService& objects,
-                 const objects::Keys& object_keys)
-    : config{options,         std::move(tenant), id,         options.data / "sessions" / id,
-             placement_epoch, profile_key,       object_keys},
+                 std::shared_ptr<objects::SessionObjects> access)
+    : config{options,
+             std::move(tenant),
+             id,
+             options.data / "sessions" / id,
+             placement_epoch,
+             profile_key,
+             access ? std::move(access)
+                    : std::make_shared<objects::SessionObjects>(objects, config.tenant)},
       sdk(api),
       management(link),
       browser(api, config.profile_key),
       store(config.directory),
       trace(media::ServerTrace::Create(config.tenant, config.id)),
-      context{sdk,   config.options, config.tenant, config.id, config.directory,  browser,
-              store, management,     trace,         objects,   config.object_keys},
+      context{sdk,   config.options, config.tenant, config.id, config.directory,    browser,
+              store, management,     trace,         objects,   config.object_access},
       clipboard(
           config.tenant,
           config.id,
@@ -155,7 +161,7 @@ Session::Session(media::Sdk& api,
                channel,
                timing),
       audio({sdk, config.options, config.tenant, BrowserRuntime::kSessionId, config.directory,
-             browser, store, management, trace, objects, config.object_keys},
+             browser, store, management, trace, objects, config.object_access},
             peer_controller,
             authorization),
       face(context, authorization),
@@ -198,23 +204,10 @@ Result<Json> Session::Open(const Json& request) {
   auto key = cluster::DecodeKey(request.at("profileKey").get<std::string>());
   if (!key)
     return key.error();
-  auto object_key = cluster::DecodeKey(request.at("objectKey").get<std::string>());
-  auto id_key = cluster::DecodeKey(request.at("objectIdKey").get<std::string>());
-  if (!object_key || !id_key) {
-    SecureZeroMemory(key.value().data(), key.value().size());
-    if (object_key)
-      SecureZeroMemory(object_key.value().data(), object_key.value().size());
-    if (id_key)
-      SecureZeroMemory(id_key.value().data(), id_key.value().size());
-    return Error{ErrorCode::kInvalidRequest, "invalid object keys"};
-  }
-  const bool identical =
-      request.at("sessionId") == config.id &&
-      request.at("placementEpoch") == config.placement_epoch && key.value() == config.profile_key &&
-      object_key.value() == config.object_keys.object && id_key.value() == config.object_keys.id;
+  const bool identical = request.at("sessionId") == config.id &&
+                         request.at("placementEpoch") == config.placement_epoch &&
+                         key.value() == config.profile_key;
   SecureZeroMemory(key.value().data(), key.value().size());
-  SecureZeroMemory(object_key.value().data(), object_key.value().size());
-  SecureZeroMemory(id_key.value().data(), id_key.value().size());
   if (!identical)
     return Error{ErrorCode::kConflict, "session placement conflicts with the open session"};
   if (request.contains("clipboard"))
@@ -395,7 +388,7 @@ Result<Json> Session::Hibernate(objects::ObjectService& objects) {
   for (const auto* relative :
        {"uploads", "file-library/drafts", "file-library/incoming", "file-library/staging"})
     fs::remove_all(config.directory / relative);
-  return Checkpoints(objects).Create(config.directory, config.tenant, config.object_keys, config.id,
-                                     config.placement_epoch, config.options.build_id);
+  return Checkpoints(objects, config.object_access)
+      .Create(config.directory, config.tenant, config.options.build_id);
 }
 }  // namespace remotekit

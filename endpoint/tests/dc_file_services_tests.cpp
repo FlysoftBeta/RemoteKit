@@ -379,6 +379,24 @@ int main() {
     return replies.size() == 7;
   });
   CHECK(replies.back()["ok"] == true);
+  for (const auto* method : {"document.open", "document.resource"}) {
+    auto document =
+        Request(method == std::string("document.open") ? "00000000-0000-4000-8000-000000000006"
+                                                       : "00000000-0000-4000-8000-000000000007",
+                method);
+    CHECK(FileRequestEnvelope(document, document.dump().size()));
+    library.Admit(9, document);
+    drain();
+    CHECK(replies.back()["error"]["code"] == "forbidden");
+    document["params"]["requestId"] = "library";
+    library.Admit(9, document);
+    const auto count = replies.size();
+    Until([&] {
+      drain();
+      return replies.size() > count;
+    });
+    CHECK(replies.back()["ok"] == true);
+  }
   library.Stop();
   std::cout << "DC file admission, strict base64, receipts and peer retirement passed\n";
 }

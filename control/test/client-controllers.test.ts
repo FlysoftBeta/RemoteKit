@@ -369,6 +369,10 @@ test('control requests map send failures and structured errors without leaving d
   );
   t.after(() => control.close());
   control.connect();
+  const libraries: unknown[] = [];
+  control.library.subscribe((snapshot) => libraries.push(snapshot));
+  socket.onmessage?.({ data: JSON.stringify({ type: 'library', snapshot: { revision: 7 } }) });
+  assert.deepEqual(libraries, [{ revision: 7 }]);
   await assert.rejects(control.request('admin.overview', {}), { code: 'unavailable' });
   socket.fail = false;
   const response = assert.rejects(

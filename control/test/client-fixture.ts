@@ -59,6 +59,10 @@ export function inputFixture() {
 
 export function productSnapshot(): import('../shared/product').ProductState {
   return {
+    learning: {
+      accounts: { changyan: { status: 'signed_out' }, xinjiaoyu: { status: 'signed_out' } },
+      study: { retentionDays: 7, syncing: false },
+    },
     serverIncarnation: 'server',
     snapshotSequence: 1,
     operationGeneration: 'generation',

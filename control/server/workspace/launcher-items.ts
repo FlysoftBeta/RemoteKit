@@ -62,6 +62,14 @@ export function launcherItems(input: {
       appId: 'settings',
       score: scores.get('app:settings') ?? 0,
     },
+    ...(['study', 'questions'] as const).map((appId) => ({
+      key: 'app:' + appId,
+      kind: 'app' as const,
+      group: 'apps' as const,
+      title: appId === 'study' ? '学习' : '题库',
+      appId,
+      score: scores.get('app:' + appId) ?? 0,
+    })),
     ...(input.admin
       ? [
           {

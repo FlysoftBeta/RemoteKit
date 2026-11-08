@@ -3,6 +3,7 @@ import { RemoteKitError } from '../../shared/errors';
 import type { LibraryEntry, LibrarySnapshot, LibrarySource, SelectionState } from '../../shared/file-library';
 import type { FileBinding } from '../endpoint/types';
 import { transaction } from './database';
+import { syncObjectReferences } from './object-references';
 
 export function sameSource(left: LibrarySource | null, right: LibrarySource): boolean {
   return left !== null && left.app === right.app && left.channel === right.channel;
@@ -54,9 +55,14 @@ export class LibraryRepository {
     return snapshot;
   }
   save(tenant: string, snapshot: LibrarySnapshot) {
-    snapshot.sources = librarySources(snapshot);
-    snapshot.revision++;
-    this.db.prepare('INSERT OR REPLACE INTO file_library VALUES (?,?)').run(tenant, JSON.stringify(snapshot));
+    transaction(this.db, () => {
+      snapshot.sources = librarySources(snapshot);
+      snapshot.revision++;
+      this.db
+        .prepare('INSERT OR REPLACE INTO file_library VALUES (?,?)')
+        .run(tenant, JSON.stringify(snapshot));
+      syncObjectReferences(this.db);
+    });
   }
   operation(tenant: string, operationId: string, payload: string) {
     const row = this.db
@@ -136,6 +142,7 @@ export class LibraryRepository {
           .prepare('UPDATE file_library_selections SET checked=? WHERE tenant=? AND id=?')
           .run(Date.now(), tenant, selectionId);
       }
+      syncObjectReferences(this.db);
     });
   }
   pending(tenant: string, limit: number): Selection[] {
@@ -153,12 +160,14 @@ export class LibraryRepository {
         .prepare('INSERT INTO file_library_selections (tenant,id,manifest) VALUES (?,?,?)')
         .run(tenant, manifest.selectionId, JSON.stringify(manifest));
       this.remember(tenant, operationId, payload, manifest.selectionId);
+      syncObjectReferences(this.db);
     });
   }
   saveSelection(tenant: string, manifest: Selection) {
     this.db
       .prepare('UPDATE file_library_selections SET manifest=? WHERE tenant=? AND id=?')
       .run(JSON.stringify(manifest), tenant, manifest.selectionId);
+    syncObjectReferences(this.db);
   }
   entryCount(tenant: string) {
     return this.snapshot(tenant).entries.length;
@@ -167,5 +176,6 @@ export class LibraryRepository {
     this.db.prepare('DELETE FROM file_library WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM file_library_operations WHERE tenant=?').run(tenant);
     this.db.prepare('DELETE FROM file_library_selections WHERE tenant=?').run(tenant);
+    syncObjectReferences(this.db);
   }
 }

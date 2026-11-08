@@ -1,0 +1,26 @@
+.virtual-list-canvas {
+  position: relative;
+}
+.virtual-list-layer {
+  position: absolute;
+  right: 0;
+  left: 0;
+}
+.virtual-measured-row {
+  display: flow-root;
+}
+
+.virtual-list-sticky {
+  position: sticky;
+  top: 0;
+  height: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+.virtual-list-sticky > div {
+  padding: 16px 16px 8px;
+  background: var(--surface-app);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 16px;
+}

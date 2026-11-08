@@ -25,7 +25,7 @@ struct SessionConfig {
   const fs::path directory;
   const uint64_t placement_epoch;
   cluster::Key profile_key;
-  objects::Keys object_keys;
+  std::shared_ptr<objects::SessionObjects> object_access;
   ~SessionConfig() { SecureZeroMemory(profile_key.data(), profile_key.size()); }
 };
 struct ControllerContext {
@@ -39,6 +39,6 @@ struct ControllerContext {
   ManagementLink& management;
   const std::shared_ptr<media::ServerTrace> trace;
   objects::ObjectService& objects;
-  const objects::Keys& object_keys;
+  std::shared_ptr<objects::SessionObjects> object_access;
 };
 }  // namespace remotekit

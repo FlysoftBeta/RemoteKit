@@ -1,4 +1,6 @@
 #include "files/file_library.hpp"
+#include "documents/object_documents.hpp"
+#include "files/dc_file_services.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -44,6 +46,8 @@ class Control final : public remotekit::ManagementLink {
   std::string address;
   std::vector<remotekit::Json> committed;
   unsigned located = 0;
+  std::mutex mutex;
+  std::map<std::string, std::string> documents;
   bool Next(std::string&, uint64_t&, bool&) override { return false; }
   bool Current(uint64_t) override { return true; }
   bool SendReply(uint64_t, const remotekit::Json&) override { return true; }
@@ -51,15 +55,26 @@ class Control final : public remotekit::ManagementLink {
   void OnDisconnect(Disconnect) override {}
   remotekit::Result<remotekit::Json> Request(const std::string& name,
                                              remotekit::Json fields) override {
+    std::lock_guard lock(mutex);
+    if (name == "object.derivation") {
+      const auto found = documents.find(fields.at("params").at("id").get<std::string>());
+      return found == documents.end() ? remotekit::Json(nullptr)
+                                      : remotekit::Json{{"id", found->second}};
+    }
     if (name == "object.committed") {
       last_commit = fields;
       if (reject_commit)
         return remotekit::Error{reject_code, "Control rejected commit"};
       committed.push_back(fields);
+      if (fields.value("kind", std::string()) == "document")
+        documents[fields.at("derivedFrom").get<std::string>()] =
+            fields.at("objectId").get<std::string>();
       return remotekit::Json{{"accepted", true}};
     }
     CHECK(name == "object.locate");
     ++located;
+    if (fields["tenantId"] == "other-tenant")
+      return remotekit::Error{remotekit::ErrorCode::kForbidden, "no tenant claim"};
     remotekit::Json sources = remotekit::Json::object();
     for (const auto& id : fields["ids"])
       sources[id.get<std::string>()] =
@@ -69,6 +84,117 @@ class Control final : public remotekit::ManagementLink {
   }
 };
 #include "download_imports_tests.hpp"
+
+void Documents(const fs::path& root) {
+  Control control;
+  remotekit::objects::ObjectService objects(root / "node", control, {}, "documents", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  const auto live = []() -> remotekit::Result<void> { return {}; };
+  FileLibrary first(root / "first", objects, "tenant");
+  FileLibrary second(root / "second", objects, "second");
+  Take(first.Initialize());
+  Take(second.Initialize());
+  const auto source_path = root / "source";
+  std::ofstream(source_path, std::ios::binary) << "MZunsupported";
+  const auto source = Take(objects.Write(source_path, {}, {{"tenantId", "tenant"}}));
+  if (!objects.Documents().Available()) {
+    CHECK(first.OpenDocument(source.id, live).error().code == remotekit::ErrorCode::kUnavailable);
+    return;
+  }
+  const auto fixture = fs::path(__FILE__).parent_path() / "fixtures/document.zip";
+  const auto document = Take(objects.Write(
+      fixture, {}, {{"tenantId", "tenant"}, {"derivedFrom", source.id}, {"kind", "document"}}));
+  auto unopened = first.DocumentResource(document.id, std::string(64, 'a'), 0, live);
+  CHECK(!unopened && unopened.error().code == remotekit::ErrorCode::kForbidden);
+  const auto info = Take(first.OpenDocument(source.id, live));
+  CHECK(info["state"] == "ready" && info["documentId"] == document.id);
+  const auto archive = Take(remotekit::documents::RenderArchive::OpenFile(fixture));
+  const auto manifest = Take(archive.Info());
+  CHECK(info["pages"].size() == manifest.pages.size() && info["shared"] == manifest.shared);
+  std::set<std::string> resources(manifest.shared.begin(), manifest.shared.end());
+  for (const auto& page : manifest.pages) {
+    resources.insert(page.document);
+    resources.insert(page.dependencies.begin(), page.dependencies.end());
+  }
+  for (const auto& content : resources) {
+    const auto expected = Take(archive.Resource(content));
+    std::vector<uint8_t> actual;
+    uint64_t offset = 0;
+    do {
+      const auto part = Take(first.DocumentResource(document.id, content, offset, live));
+      const auto bytes = part["data"] == "" ? std::vector<uint8_t>{}
+                                            : Take(remotekit::DecodeFileChunk(part["data"]));
+      actual.insert(actual.end(), bytes.begin(), bytes.end());
+      CHECK(part["offset"] == offset + bytes.size() && part["total"] == expected.second.size());
+      CHECK(part["mime"] == expected.first);
+      offset = part["offset"];
+    } while (offset < expected.second.size());
+    CHECK(actual == expected.second && remotekit::documents::Sha256Hex(actual) == content);
+  }
+  CHECK(!first.DocumentResource(document.id, *resources.begin(), UINT64_MAX, live));
+  CHECK(!first.DocumentResource(document.id, std::string(64, 'a'), 0, live));
+  CHECK(Take(second.OpenDocument(source.id, live))["documentId"] == document.id);
+  FileLibrary forbidden(root / "forbidden", objects, "other-tenant");
+  Take(forbidden.Initialize());
+  CHECK(forbidden.OpenDocument(source.id, live).error().code == remotekit::ErrorCode::kForbidden);
+  CHECK(Take(objects.Dispatch({{"method", "object.render"},
+                               {"params", {{"id", source.id}}}}))["documentId"] == document.id);
+  std::ofstream(source_path, std::ios::binary | std::ios::trunc) << "MZother unsupported";
+  const auto unsupported = Take(objects.Write(source_path, {}, {{"tenantId", "tenant"}}));
+  auto failed = first.OpenDocument(unsupported.id, live);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (failed && failed.value()["state"] == "converting") {
+    CHECK(std::chrono::steady_clock::now() < deadline);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    failed = first.OpenDocument(unsupported.id, live);
+  }
+  CHECK(!failed && failed.error().code == remotekit::ErrorCode::kInvalidRequest);
+  const auto located = control.located;
+  for (int attempt = 0; attempt < 3; ++attempt)
+    CHECK(first.OpenDocument(unsupported.id, live).error().message == "unsupported document type");
+  CHECK(control.located == located && fs::is_empty(root / "first/documents"));
+}
+
+void Puts(const fs::path& root) {
+  Control control;
+  remotekit::objects::ObjectService objects(root, control, remotekit::cluster::Key{}, "put", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  const std::string first = "00000000-0000-4000-8000-000000000001";
+  const auto begin = [&](const std::string& id, const std::string& tenant) {
+    return objects.Dispatch({{"method", "object.put.begin"}, {"putId", id}, {"tenantId", tenant}});
+  };
+  Take(begin(first, "first"));
+  CHECK(!begin(first, "first"));
+  Take(objects.PutChunk({{"putId", first}, {"offset", 0}}, std::vector<uint8_t>{'a', 'b', 'c'}));
+  const auto stored = Take(objects.Dispatch({{"method", "object.put.end"}, {"putId", first}}));
+  const auto id = stored["objectId"].get<std::string>();
+  CHECK(control.last_commit["tenantId"] == "first" && control.last_commit["putId"] == first);
+  CHECK(stored["size"] == 3 && !fs::exists(root / "object-puts" / first));
+  Take(begin(first, "second"));
+  Take(objects.PutChunk({{"putId", first}, {"offset", 0}}, std::vector<uint8_t>{'a', 'b', 'c'}));
+  CHECK(Take(objects.Dispatch({{"method", "object.put.end"}, {"putId", first}}))["objectId"] == id);
+  CHECK(control.last_commit["tenantId"] == "second");
+  CHECK(Take(objects.Store().Inventory(nullptr))["objects"].size() == 1);
+  CHECK(!objects.Dispatch({{"method", "object.put.begin"},
+                           {"tenantId", "first"},
+                           {"putId", first},
+                           {"sizeHint", 268435457}}));
+  for (int n = 1; n <= 4; ++n)
+    Take(begin("00000000-0000-4000-8000-00000000000" + std::to_string(n), "first"));
+  CHECK(!begin("00000000-0000-4000-8000-000000000005", "first"));
+  CHECK(!objects.PutChunk({{"putId", first}, {"offset", 1}}, std::vector<uint8_t>{'x'}));
+  CHECK(!objects.Dispatch({{"method", "object.put.end"}, {"putId", first}}));
+  const auto second = "00000000-0000-4000-8000-000000000002";
+  Take(objects.Dispatch({{"method", "object.put.cancel"}, {"putId", second}}));
+  CHECK(!fs::exists(root / "object-puts" / second));
+  objects.CancelPuts();
+  CHECK(fs::is_empty(root / "object-puts"));
+  remotekit::objects::SessionObjects forbidden(objects, "other-tenant");
+  CHECK(!forbidden.Ensure(id));
+  CHECK(objects.Store().Inspect(id));
+}
 
 int main(int argc, char** argv) {
   CHECK(argc == 2);
@@ -80,10 +206,12 @@ int main(int argc, char** argv) {
     return remotekit::Error{remotekit::ErrorCode::kForbidden, "file_transfer_interrupted"};
   };
   const auto session = root / "session";
+  Documents(root / "documents");
   Control control;
-  remotekit::objects::Keys keys;
   remotekit::objects::ObjectService objects(root / "node", control, remotekit::cluster::Key{},
                                             "source", "dev");
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   remotekit::objects::PeerServer peer(objects.Store(), remotekit::cluster::Key{}, "source", "dev");
   Take(peer.Start("127.0.0.1:0"));
   const std::string hash = "fd7adb152c05ef80dccf50a1fa4c05d5a3ec6da95575fc312ae7c5d091836351";
@@ -99,7 +227,7 @@ int main(int argc, char** argv) {
   unsubmitted.id = "aabbccddaabbccddaabbccddaabbccee";
   unsubmitted.binding.request = "5";
   {
-    FileLibrary library(session, objects, "tenant", keys);
+    FileLibrary library(session, objects, "tenant");
     CHECK(library.Initialize());
     const auto draft = Take(library.Begin(1, "operation", spec, live));
     upload = draft["uploadId"];
@@ -112,7 +240,7 @@ int main(int argc, char** argv) {
     CHECK(Fails([&] { return library.Chunk(2, upload, 1, {'b'}, live); }));
   }
   {
-    FileLibrary library(session, objects, "tenant", keys);
+    FileLibrary library(session, objects, "tenant");
     CHECK(library.Initialize());
     CHECK(Fails([&] { return library.Chunk(1, upload, 1, {'b'}, live); }));
     CHECK(Take(library.Begin(1, "operation", spec, live))["offset"] == 1);
@@ -128,7 +256,7 @@ int main(int argc, char** argv) {
           control.committed.back()["tenantId"] == "tenant" &&
           control.committed.back()["size"] == 3 &&
           control.committed.back()["storedSha256"] ==
-              "5282c0a80ba6b75435b918f0fe3cd79840428777d155d5d35b0c66560471a7fa");
+              Take(objects.Store().Inspect(hash)).stored_sha256);
     CHECK(Take(library.Seal(1, upload, live)).id == hash);
     CHECK(Take(library.Read(hash, 1)).second == std::vector<std::uint8_t>({'b', 'c'}));
     CHECK(Take(library.Read(hash, 3)).second.empty());
@@ -146,7 +274,7 @@ int main(int argc, char** argv) {
     CHECK(!derivative.Json().contains("hash"));
     CHECK(Take(library.Read(derivative_id, 0)).second == png_signature);
     CHECK(Fails([&] { return library.Read(hash, 4); }));
-    FileLibrary other(root / "other-session", objects, "other-tenant", keys);
+    FileLibrary other(root / "other-session", objects, "other-tenant");
     CHECK(other.Initialize());
     CHECK(Fails([&] { return other.Describe(hash); }));
     const auto duplicate =
@@ -159,7 +287,7 @@ int main(int argc, char** argv) {
     control.reject_commit = true;
     control.reject_code = remotekit::ErrorCode::kConflict;
     CHECK(!library.Seal(1, conflicted, live));
-    CHECK(!objects.Store().Inspect("tenant", control.last_commit["objectId"].get<std::string>()));
+    CHECK(objects.Store().Inspect(control.last_commit["objectId"].get<std::string>()));
     control.reject_commit = false;
     control.reject_code = remotekit::ErrorCode::kUnavailable;
     CHECK(library.Seal(1, conflicted, live));
@@ -190,7 +318,7 @@ int main(int argc, char** argv) {
     CHECK(!Take(library.Claim(unsubmitted.id, live)));
   }
   {
-    FileLibrary library(session, objects, "tenant", keys);
+    FileLibrary library(session, objects, "tenant");
     CHECK(library.Initialize());
     using State = FileLibrary::Selection::State;
     CHECK(Take(library.Describe(hash)).size == 3);
@@ -222,7 +350,7 @@ int main(int argc, char** argv) {
     // Receipt recovery must not depend on the original source or live Browser.
     const auto& metadata = session / "metadata" / (hash + ".json");
     fs::remove(metadata);
-    FileLibrary library(session, objects, "tenant", keys);
+    FileLibrary library(session, objects, "tenant");
     CHECK(library.Initialize());
     CHECK(library.FindSelection(selection.id)->state == FileLibrary::Selection::State::selected);
   }
@@ -231,18 +359,20 @@ int main(int argc, char** argv) {
     target_control.address = peer.Address();
     remotekit::objects::ObjectService target(root / "target", target_control,
                                              remotekit::cluster::Key{}, "target", "dev");
-    FileLibrary library(root / "remote-session", target, "tenant", keys);
+    Take(target.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                           {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+    FileLibrary library(root / "remote-session", target, "tenant");
     Take(library.Initialize());
-    CHECK(!target.Store().Inspect("tenant", hash));
+    CHECK(!target.Store().Inspect(hash));
     target_control.reject_commit = true;
     CHECK(!library.Path(hash));
-    CHECK(target.Store().Inspect("tenant", hash));
+    CHECK(target.Store().Inspect(hash));
     target_control.reject_commit = false;
     const auto path = Take(library.Path(hash));
     std::ifstream input(path, std::ios::binary);
     CHECK(std::string(std::istreambuf_iterator<char>(input), {}) == "abc");
-    CHECK(target_control.located == 1 && target_control.committed.back()["objectId"] == hash);
-    CHECK(target.Store().Inspect("tenant", hash));
+    CHECK(target_control.located == 1 && target_control.last_commit["objectId"] == hash);
+    CHECK(target.Store().Inspect(hash));
     CHECK(Take(library.Read(hash, 1)).second == std::vector<uint8_t>({'b', 'c'}));
     input.close();
     Take(target.Dispatch(
@@ -258,13 +388,13 @@ int main(int argc, char** argv) {
     CHECK(inventory["objects"].size() == 2);
     Take(target.Dispatch(
         {{"method", "object.delete"}, {"tenantId", "tenant"}, {"ids", {derivative_id}}}));
-    CHECK(!target.Store().Inspect("tenant", derivative_id));
-    CHECK(!target.Dispatch(
-        {{"method", "object.delete"}, {"tenantId", "../tenant"}, {"ids", {hash}}}));
+    CHECK(!target.Store().Inspect(derivative_id));
+    CHECK(!target.Dispatch({{"method", "object.delete"}, {"ids", {"invalid-id"}}}));
   }
   CHECK(!fs::exists(session / "references.json") && !fs::exists(session / "payload") &&
         !fs::exists(session / "assets"));
-  DownloadImportTests(root, objects, control, keys);
+  Puts(root / "puts");
+  DownloadImportTests(root, objects, control);
   fs::remove_all(root);
   return 0;
 }

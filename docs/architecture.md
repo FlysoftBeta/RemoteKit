@@ -32,11 +32,11 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 | **Updater** | C++20，同一 CMake 工程的独立可执行文件 | 节点上的 `remotekit_node.exe`：监管 Endpoint 进程，从 Control 下载并安装与之相同版本的节点运行时。 |
 | **Browser** | C++，Chromium GN | 承载 WebContents 与 Profile；页面生命周期、输入派发、页面请求（对话框/文件选择/权限/下载）、导航状态；Rend 驱动离屏绘制并合成 atlas。 |
 | **SDK** | C ABI DLL（在 Chromium 树内构建） | 把 Mojo（与 Browser 的控制和渲染管道）和 libwebrtc（peer、视频源、外部编码器桥、音频源）包成 C 接口给 Endpoint 用。跨 DLL 不传任何 C++ STL/libc++/Abseil/Chromium 对象。 |
-| **Viewer** | Control 提供的 Web 前端 | App 外壳：浏览器、我的文件、设置与网页 App；Space 分屏多任务与开始屏幕；video 呈现；输入、IME、触控手势；文件篮与相机。 |
+| **Viewer** | Control 提供的 Web 前端 | App 外壳：浏览器、我的文件、设置、学习、题库与网页 App；Space 分屏多任务与开始屏幕；video 呈现；输入、IME、触控手势；文件篮与相机。 |
 
 ## 隔离与身份
 
-- 一个 User = 一个 workspace = 一个 Tenant = 一个 Session。Session 是多租户数据隔离边界：独立的 Browser 进程、Profile 目录、本地 Mojo 通道、GPU atlas、Tenant 密钥与对象命名空间。Session 由 Control 分配的 sessionId 标识，任一时刻只在一个节点上运行，Browser 关闭后可以在任何节点上从 checkpoint 重新打开（见[多节点](cluster.md)）。Window 与 Tab 是 Session 内的产品关系，不是隔离边界。当前每 Session 一个 Profile，层级上为多 Profile 留了位置。
+- 一个 User = 一个 workspace = 一个 Tenant = 一个 Session。Session 是多租户数据隔离边界：独立的 Browser 进程、Profile 目录、本地 Mojo 通道、GPU atlas 与 Profile 密钥。文件字节不是隔离边界的一部分：对象存储按内容寻址、跨 Tenant 去重，读取权限来自 Control 按 Tenant 记录的引用。Session 由 Control 分配的 sessionId 标识，任一时刻只在一个节点上运行，Browser 关闭后可以在任何节点上从 checkpoint 重新打开（见[多节点](cluster.md)）。Window 与 Tab 是 Session 内的产品关系，不是隔离边界。当前每 Session 一个 Profile，层级上为多 Profile 留了位置。
 - 网络用户只能通过已认证的 Control 会话和 RTC 会话进入；Session ID 不是凭据。Tenant 身份由认证用户映射得到，客户端不能指定。
 - 稳定的逻辑身份与可替换的执行实例分开：WebView 是稳定的，WebContents（instance）、文档（document）、焦点（focus）、输出布局（outputGeneration/layoutEpoch）、Browser 进程（browserIncarnation）、Endpoint 进程（endpointIncarnation）、管理连接（connectionEpoch）、会话放置（placementEpoch）、RTC 尝试（attemptId）、产品授权（authEpoch）各有自己的代次。异步结果总是带着它产生时的身份回来，与当前身份不符就作废——旧请求永远不会被改投到新对象上。
 
@@ -95,6 +95,7 @@ control/
     viewers/       Viewer 租约与 RTC 信令
     workspace/     纯命令、操作管线、对账、导航、生命周期与 Memory Saver、页面请求、弹窗、站点策略
     session-import/  会话导入：HPKE 信封、IMAP 拉取、账密校验与写入
+    learning/      学习与题库：服务客户端（providers/）、登录、同步与附件下载、题库查询、富文本与媒体代理
     files/ diagnostics/ quality.ts atlas-plan.ts navigation-url.ts
   client/
     main.tsx, viewer-session.ts          入口与控制器组装
@@ -108,7 +109,10 @@ control/
     input/         InputPipeline、触控会话与手势、坐标、键码
     editing/       编辑会话、键盘会话、IME 翻译
     media/         音频、接收能力、统计与反馈、时钟、诊断收集
-    files/         文件通道、文件库/拍照任务/导入队列、文件篮与相机 UI
+    files/         文件通道、文件库/拍照任务/导入队列、文件篮与相机 UI、文件预览
+    documents/     文档阅读器（虚拟滚动、pdfrender 页面挂载）与 DataChannel 文档源
+    learning/      学习与题库 App、登录视图、题目渲染
+    ui/            通用虚拟列表
   test/            Control 单元与集成测试
 endpoint/
   src/
@@ -124,6 +128,7 @@ endpoint/
     input/         InputController、序号、校验
     auth/          人脸推理、原始相机帧
     files/         文件库、暂存、照片处理、DC 文件服务
+    documents/     文档渲染：类型判断、LibreOffice 转 PDF、pdfrender、渲染队列、归档读取
     diagnostics/ util/
   updater/         remotekit_node.exe：服务、监管、下载、zstd + tar 解包、自我替换
   tests/           CTest 单元测试
@@ -163,7 +168,8 @@ tests/             e2e/（真实栈产品场景）、integration/（原生 Endpo
 | [呈现与音频](presentation.md) | video 平面、布局屏障、RTP 匹配、接收端缓冲、统计口径、音频管线 |
 | [输入](input.md) | 身份与门禁、键鼠/IME、触控时钟、客户端手势、惯性、终止账本、坐标 |
 | [移动编辑](mobile-editing.md) | 编辑目标、键盘会话、resize 事务 |
-| [文件与相机](files-and-camera.md) | 原生文件选择、文件库、拍照选帧、文档扫描 |
+| [文件与相机](files-and-camera.md) | 原生文件选择、文件库、文档预览、拍照选帧、文档扫描 |
+| [学习与题库](learning.md) | 学习/题库 App、服务登录与登录视图、附件同步与保留、题库查询、富文本与媒体代理 |
 | [认证](auth.md) | 账户、锁屏、授权代次、人脸验证 |
 | [会话导入](session-import.md) | 部署配置与账户、HPKE 信封、邮箱队列、Control 导入与写入、Android App |
 | [兼容性](compatibility.md) | UA/Client Hints、window.chrome、Chrome89 |

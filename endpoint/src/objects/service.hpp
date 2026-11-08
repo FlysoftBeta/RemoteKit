@@ -2,6 +2,10 @@
 #include "objects/peer.hpp"
 #include "management/link.hpp"
 #include "objects/work_queue.hpp"
+#include <set>
+namespace remotekit::documents {
+class ObjectDocuments;
+}
 namespace remotekit::objects {
 class ObjectService {
  public:
@@ -10,25 +14,62 @@ class ObjectService {
                 const Key& key,
                 std::string node,
                 std::string build);
+  ~ObjectService();
   Result<void> Start(const std::string& listen);
   ObjectStore& Store() { return store_; }
-  Result<ObjectInfo> Ensure(const std::string& tenant, const std::string& id);
-  Result<void> Committed(const ObjectInfo& info, const std::string& derived_from = {});
-  Result<ObjectInfo> Write(const std::string& tenant,
-                           const Keys& keys,
-                           const std::filesystem::path& path,
+  documents::ObjectDocuments& Documents() { return *documents_; }
+  Result<Json> Derivation(const std::string& id, const std::string& tenant);
+  Result<void> Configure(const Json& keys);
+  const Keys& ObjectKeys() const { return keys_; }
+  Result<Json> Locate(const std::string& id, const Json& reference);
+  Result<ObjectInfo> Ensure(const std::string& id, const Json& sources);
+  Result<void> Committed(const ObjectInfo& info, const Json& claim = Json::object());
+  Result<ObjectInfo> Write(const std::filesystem::path& path,
                            const ObjectStore::Check& check,
-                           const std::string& derived_from = {});
+                           const Json& claim);
   Result<Json> Dispatch(const Json& request);
+  Result<void> PutChunk(const Json& header, std::span<const uint8_t> bytes);
+  void CancelPuts();
 
  private:
-  Result<ObjectInfo> Fetch(const std::string& tenant, const std::string& id, const Json& sources);
-  Result<ObjectInfo> EnsureLocal(const std::string& tenant, const std::string& id);
+  Result<Json> DispatchPut(const Json& request);
+  Result<ObjectInfo> Fetch(const std::string& id, const Json& sources);
+  Result<ObjectInfo> EnsureLocal(const std::string& id, const Json& sources);
+  Keys keys_;
+  bool configured_ = false;
+  std::filesystem::path put_root_;
+  struct Put {
+    std::string tenant;
+    explicit Put(std::string value) : tenant(std::move(value)) {}
+    std::atomic<bool> cancelled{false};
+    bool ending = false;
+    uint64_t offset = 0;
+    std::optional<Error> error;
+  };
+  std::mutex puts_mutex_;
+  std::map<std::string, std::shared_ptr<Put>> puts_;
   ObjectStore store_;
   ManagementLink& control_;
   PeerServer server_;
   PeerClient client_;
   std::array<std::mutex, 16> transfers_;
   WorkQueue work_;
+  std::unique_ptr<documents::ObjectDocuments> documents_;
+};
+class SessionObjects {
+ public:
+  SessionObjects(ObjectService& service, std::string tenant)
+      : service_(service), tenant_(std::move(tenant)) {}
+  Result<ObjectInfo> Ensure(const std::string& id);
+  void Grant(const std::string& id);
+  Result<ObjectInfo> Write(const std::filesystem::path& path,
+                           const ObjectStore::Check& check,
+                           const std::string& derived_from = {});
+
+ private:
+  ObjectService& service_;
+  std::string tenant_;
+  std::mutex mutex_;
+  std::set<std::string> grants_;
 };
 }  // namespace remotekit::objects

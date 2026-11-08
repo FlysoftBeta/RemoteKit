@@ -48,6 +48,7 @@ class ViewController : private ControllerContext {
     }
     return events;
   }
+  void PollSignIn(uint64_t generation);
   Result<void> Initialize();
   void Reset();
   bool Contains(const std::string& view) const { return desired.contains(view); }
@@ -108,6 +109,9 @@ class ViewController : private ControllerContext {
   Json site_preferences = Json::object();
   Json durable_events = Json::array();
   uint64_t next_event = 1;
+  Json sign_in_acknowledged = Json::array();
+  std::string sign_in_incarnation;
+  int64_t next_sign_in_poll = 0;
   std::set<std::string> observed_closed;
   std::atomic<bool> reconciliation_pending{false};
   int64_t next_reconciliation = 0;

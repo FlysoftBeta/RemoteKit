@@ -73,8 +73,8 @@ export async function startStack({
   browser = defaultBrowser,
   endpoint = defaultEndpoint,
   dev = true,
+  run = join(root, 'develop/tmp/e2e', `${scenario}-${Date.now()}`),
 } = {}) {
-  const run = join(root, 'develop/tmp/e2e', `${scenario}-${Date.now()}`);
   mkdirSync(run, { recursive: true });
   const allocated = new Set();
   async function port() {
@@ -139,14 +139,7 @@ export async function startStack({
       record(
         spawn(
           process.execPath,
-          [
-            'node_modules/vite/bin/vite.js',
-            '--host',
-            '127.0.0.1',
-            '--port',
-            String(ports.viewer),
-            '--strictPort',
-          ],
+          [join(root, 'tests/e2e/kit/vite.mjs'), String(ports.viewer), join(run, 'vite-cache')],
           {
             cwd: join(root, 'control'),
             windowsHide: true,

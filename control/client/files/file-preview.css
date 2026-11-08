@@ -1,0 +1,59 @@
+.file-document-preview {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.file-document-preview .MuiButton-root,
+.file-media-preview .MuiButton-root,
+.file-plain-preview .MuiButton-root,
+.file-image-content .MuiButton-root {
+  min-height: 40px;
+}
+.file-image-content {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 16px;
+}
+.file-media-preview,
+.file-plain-preview {
+  margin: auto;
+  padding: 24px;
+  width: 100%;
+  max-width: 680px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+}
+.file-media-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 100%;
+  overflow: auto;
+}
+.file-media-preview video {
+  flex: 1;
+  min-height: 0;
+  object-fit: contain;
+}
+.file-media-preview video,
+.file-media-preview audio {
+  width: 100%;
+  max-height: 100%;
+}
+.file-plain-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.file-plain-icon {
+  font-size: 56px;
+}

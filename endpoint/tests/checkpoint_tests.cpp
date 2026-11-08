@@ -65,13 +65,14 @@ void RoundTrip(const fs::path& root) {
   const auto options = Take(RuntimeOptions::FromConfig(config, root, "dev", "test"));
   Link source_link, target_link;
   cluster::Key cluster_key{7};
-  objects::Keys keys;
-  keys.object.fill(8);
-  keys.id.fill(9);
   objects::ObjectService source(root / "one", source_link, cluster_key, "source", "dev");
   objects::ObjectService target(root / "two", target_link, cluster_key, "target", "dev");
+  Take(source.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                         {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  Take(target.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                         {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
   media::Sdk sdk;
-  Session first(sdk, options, "tenant", session, 1, cluster::Key{}, source_link, source, keys);
+  Session first(sdk, options, "tenant", session, 1, cluster::Key{}, source_link, source);
   Take(first.Initialize());
   Write(directory / "small", "persistent");
   Write(directory / "large", std::string(2 * 1024 * 1024 + 13, 'x'));
@@ -91,7 +92,7 @@ void RoundTrip(const fs::path& root) {
   HANDLE held = CreateFileW((directory / "large").c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL, nullptr);
   Check(held != INVALID_HANDLE_VALUE, "lock unchanged file against content reads");
-  const auto second = Checkpoints(source).Create(directory, "tenant", keys, session, 1, "dev");
+  const auto second = Checkpoints(source).Create(directory, "tenant", "dev");
   CloseHandle(held);
   Check(bool(second) && second.value() == checkpoint,
         "unchanged files reuse chunks without reading");
@@ -105,7 +106,7 @@ void RoundTrip(const fs::path& root) {
       expected[relative] = Read(entry.path());
   }
   fs::remove_all(directory);
-  Take(Checkpoints(source).Restore(directory, "tenant", keys, session, 2, "dev", manifest));
+  Take(Checkpoints(source).Restore(directory, "tenant", "dev", manifest));
   for (const auto& [path, bytes] : expected)
     Check(Read(directory / path) == bytes, "local restored bytes");
   Check(!fs::exists(directory / "profile/Cache") && !fs::exists(directory / "browser.log") &&
@@ -117,15 +118,18 @@ void RoundTrip(const fs::path& root) {
     target_link.sources[id.get<std::string>()] =
         Json::array({{{"nodeId", "source"}, {"address", peer.Address()}}});
   const auto remote_directory = root / "two/sessions" / session;
-  Take(Checkpoints(target).Restore(remote_directory, "tenant", keys, session, 2, "dev", manifest));
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
   for (const auto& [path, bytes] : expected)
     Check(Read(remote_directory / path) == bytes, "peer restored bytes");
   Check(target_link.committed == source_link.committed, "peer copies committed");
+  const auto shared = Take(Checkpoints(target).Create(remote_directory, "other", "dev"));
+  Check(shared["manifestId"] == manifest && shared["objects"] == checkpoint["objects"],
+        "identical checkpoint content shares blocks and manifests across sessions and tenants");
   Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
   Write(remote_directory / "warm-only", "warm");
-  Take(Checkpoints(target).Restore(remote_directory, "tenant", keys, session, 3, "dev", manifest));
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
   Check(fs::exists(remote_directory / "warm-only"), "warm copy used");
-  Take(Checkpoints(target).Restore(remote_directory, "tenant", keys, session, 4, "dev", nullptr));
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", nullptr));
   Check(fs::is_empty(remote_directory), "null checkpoint starts empty");
 }
 void Blockers(const fs::path& root) {
@@ -134,15 +138,16 @@ void Blockers(const fs::path& root) {
   objects::ObjectService objects(options.data, link, cluster::Key{}, "test", "dev");
   media::Sdk sdk;
   Session session(sdk, options, "tenant", std::string(32, 'b'), 1, cluster::Key{}, link, objects,
-                  objects::Keys{});
+                  nullptr);
   Take(session.Initialize());
   Take(session.Views().RecordClosed("1", "closed"));
   const auto snapshot = Take(session.Snapshot());
   Check(snapshot["hibernation"]["unacknowledgedClosedEvents"] == 1, "durable close blocker");
   const auto hibernated = session.Hibernate(objects);
   Check(!hibernated && hibernated.error().code == ErrorCode::kConflict, "close event blocks");
-  objects::Keys keys;
-  FileLibrary library(root / "library", objects, "tenant", keys);
+  Take(objects.Configure({{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                          {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}));
+  FileLibrary library(root / "library", objects, "tenant");
   Take(library.Initialize());
   const auto upload = Take(
       library.Begin(7, "sealed-upload", {"asset", "text/plain", 3}, [] { return Result<void>(); }));
@@ -185,7 +190,10 @@ class FenceLink : public Link {
   uint64_t generation = 1;
   std::vector<Json> replies;
   std::optional<ReadyState> ReadySessions() override {
-    return ReadyState{generation, Json::array()};
+    return ReadyState{generation,
+                      Json::array(),
+                      {{"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+                       {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}}};
   }
   bool Next(std::string& bytes, uint64_t& stamp, bool& eof) override {
     eof = false;
@@ -196,9 +204,7 @@ class FenceLink : public Link {
                  {"sessionId", std::string(32, 'c')},
                  {"placementEpoch", 2},
                  {"checkpoint", nullptr},
-                 {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-                 {"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
-                 {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}};
+                 {"profileKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}};
     else if (step == 1) {
       generation = 2;
       request = {{"method", "session.snapshot"}, {"tenantId", "tenant"}};

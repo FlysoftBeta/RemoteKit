@@ -1,4 +1,5 @@
 #include "browser/control_dispatcher.h"
+#include "browser/signin.h"
 #include "browser/clipboard_bridge.h"
 #include "browser/control_requests.h"
 #include "browser/control_response.h"
@@ -29,6 +30,26 @@ void ControlDispatcher::Dispatch(const base::DictValue& request, Reply reply) {
   if (id <= 0 || request.FindInt("version") != protocol::kControlVersion || !name) {
     std::move(reply).Run(
         ControlResult::Failure(id, ErrorCode::invalid_request, "Invalid control envelope"));
+    return;
+  }
+  if (*name == protocol::kSignInEvents) {
+    const auto* ids = request.FindList("eventIds");
+    if (!ids || ids->size() > 256) {
+      std::move(reply).Run(
+          ControlResult::Failure(id, ErrorCode::invalid_request, "Event IDs required"));
+      return;
+    }
+    base::ListValue events;
+    for (auto& [view, record] : runtime_.views.records) {
+      if (auto* signin = record.webview->sign_in()) {
+        signin->Acknowledge(*ids);
+        if (!signin->event().empty())
+          events.Append(signin->event().Clone());
+      }
+    }
+    auto result = ControlResult::Success(id);
+    result.Set("events", std::move(events));
+    std::move(reply).Run(std::move(result));
     return;
   }
   if (*name == "clipboard.read") {

@@ -1,4 +1,5 @@
 #include "browser/webview_execution.h"
+#include "browser/signin.h"
 #include "browser/webview_internal.h"
 #include "browser/device_configuration.h"
 #include "browser/webview_navigation.h"
@@ -39,6 +40,8 @@ bool WebViewExecution::IsInPrimaryPage(content::NavigationHandle* navigation) co
   return primary;
 }
 void WebViewExecution::InstallContents() {
+  if (owner_.sign_in_)
+    owner_.sign_in_->Attach(contents_.get());
   DeviceConfiguration::InstallSiteIdentity(contents_.get());
   owner_.Observe(contents_.get());
   AttachOffscreenHost();

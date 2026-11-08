@@ -55,7 +55,7 @@ int main() {
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   {
     Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
-                    cluster::Key{}, link, objects, objects::Keys{});
+                    cluster::Key{}, link, objects);
     Check(bool(session.Initialize()), "initialize controller composition");
     Check(!session.Views().Contains("1") && session.Views().Contains("2"),
           "replay durable close events into desired views");

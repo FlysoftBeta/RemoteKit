@@ -331,3 +331,5 @@ if(BUILD_TESTING)
   target_link_libraries(endpoint_atlas_plan_tests PRIVATE remotekit_endpoint)
   add_test(NAME endpoint_atlas_plan COMMAND endpoint_atlas_plan_tests ${PROJECT_SOURCE_DIR}/protocol/atlas-plan-fixtures.txt)
 endif()
+
+include(documents.cmake)

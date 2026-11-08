@@ -33,7 +33,7 @@ export class Workspace {
     const state = this.context.store.workspaces.workspace(tenant);
     const tab = state.tabs.find((tab) => tab.id === request.tabId);
     const window = state.windows.find((window) => window.id === tab?.windowId);
-    if (!tab || !window) return null;
+    if (!tab || !window || tab.signIn) return null;
     if (window.appId.startsWith('web:')) return { app: window.appId, channel: '' };
     if (window.appId !== 'browser') return null;
     try {
@@ -45,7 +45,7 @@ export class Workspace {
 
   async inspect(tenant: string, tabId: string): Promise<AppInspectResult> {
     const tab = findTab(this.context.store.workspaces.workspace(tenant), tabId);
-    if (tab.kind !== 'remote') throw new RemoteKitError('unavailable', '页面尚未运行');
+    if (tab.kind !== 'remote' || tab.signIn) throw new RemoteKitError('unavailable', '页面尚未运行');
     const info = await this.context.endpoint.appInfo(tenant, { viewId: tab.webviewId });
     const page = new URL(info.url);
     if (!['http:', 'https:'].includes(page.protocol))
@@ -136,6 +136,7 @@ export class Workspace {
   }
 
   recordPage(state: ProductWorkspace, tab: ProductTab, current: any, browser: unknown, source?: 'launcher') {
+    if (tab.signIn) return;
     const url = normalizedUsagePage(tab.url);
     if (current.isErrorPage === true) return;
     if (!url) return;
@@ -184,6 +185,12 @@ export class Workspace {
       throw new RemoteKitError('invalid_request', '页面预览必须为不超过 24 KiB 的 JPEG');
     const url = normalizedUsagePage(params.url);
     if (!url) return { saved: false };
+    if (
+      this.context.store.workspaces
+        .workspace(tenant)
+        .tabs.some((tab) => tab.signIn && normalizedUsagePage(tab.url) === url)
+    )
+      return { saved: false };
     this.context.store.workspaces.items.savePreview(
       tenant,
       'page:' + url,

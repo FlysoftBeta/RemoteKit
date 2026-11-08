@@ -1,4 +1,6 @@
 export type FileMethod =
+  | 'document.open'
+  | 'document.resource'
   | 'photo.burst.sample'
   | 'asset.begin'
   | 'asset.chunk'

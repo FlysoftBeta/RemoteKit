@@ -38,6 +38,8 @@ Json Ready(Json config = {{"maxSessions", 3}}) {
   auto text = config.dump();
   return {
       {"type", "node.ready"},
+      {"objectKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+      {"objectIdKey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
       {"sessions", Json::array()},
       {"buildId", "dev"},
       {"connectionEpoch", "12345678-1234-1234-1234-123456789abc"},

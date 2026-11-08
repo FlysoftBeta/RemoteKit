@@ -184,7 +184,7 @@ export function FileBasketDialog({
     };
   }, [viewId, request?.anchor, transport]);
 
-  async function run(operation: () => Promise<void>) {
+  async function run(operation: () => Promise<unknown>) {
     if (disabled) return;
     setBusy(true);
     setError('');

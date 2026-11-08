@@ -1,0 +1,86 @@
+{
+  "definition": {
+    "hwId": "homework",
+    "stuHwId": "student-homework",
+    "title": "示例作业",
+    "description": "<p>作业说明</p>",
+    "hwType": 105,
+    "hwTypeName": "自由出题",
+    "classId": "class",
+    "subjectCode": "02",
+    "subjectName": "数学",
+    "beginTime": 100,
+    "endDateTime": 200,
+    "commit": true,
+    "questions": [
+      {
+        "questionDetail": {
+          "questionId": "definition-question",
+          "title": "1",
+          "sectionName": "选择题",
+          "score": 10
+        },
+        "childQuestions": [
+          {
+            "childQuestionDetail": {
+              "childQuestionId": "definition-child",
+              "questionId": "definition-question",
+              "title": "1",
+              "optionCount": 4,
+              "score": 10,
+              "childQuestionAnswerDetail": {
+                "studentAnswer": "B",
+                "submitAttachment": [{ "path": "https://cdn.example/answer.png" }]
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "submission": {
+    "id": "student-homework",
+    "hwId": "homework",
+    "commit": true,
+    "stuScore": 8,
+    "totalScore": 10,
+    "totalCorrectedQuesCnt": 1,
+    "totalCorrectQuesCnt": 2
+  },
+  "report": {
+    "studentScore": 8,
+    "fullScore": 10,
+    "scoreRate": 0.8,
+    "avgScore": 7,
+    "maxScore": 10,
+    "submittedTime": 150,
+    "videoCourseList": [],
+    "answerTopicList": [{ "questionId": "report-question", "title": "1", "stuScore": 8 }]
+  },
+  "reportDetails": {
+    "hwDescription": "<p>报告说明</p>",
+    "showAnswerResult": true,
+    "questionAttachList": [
+      { "id": "file", "name": "示例.pdf", "path": "https://cdn.example/lesson.pdf", "size": 12 }
+    ],
+    "answerAttachList": [],
+    "mainTopics": [
+      {
+        "sectionName": "填空题",
+        "isObjective": true,
+        "subTopics": [
+          {
+            "questionId": "question",
+            "questionTitle": "<p>求 x<img src=\"https://cdn.example/equation.svg\"></p>",
+            "answers": [{ "value": "\\frac{1}{2}", "alternativeValues": ["0.5"] }],
+            "stuAnswer": "\\frac{1}{2}",
+            "stuScore": 8,
+            "totalScore": 10,
+            "correctCommentList": [{ "commentAudioPath": "https://cdn.example/comment.mp3" }],
+            "submitResList": [{ "path": "https://cdn.example/work.png" }]
+          }
+        ]
+      }
+    ]
+  }
+}

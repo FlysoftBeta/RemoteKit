@@ -1,0 +1,49 @@
+[
+  {
+    "id": "english-passage",
+    "typeId": "reading",
+    "typeName": "阅读理解",
+    "isSubjective": false,
+    "content": "<p>Read the passage.<img src=\"https://cdn.example/passage.png?a=1&amp;b=2\"></p>",
+    "listeningText": "<p>Listening transcript</p>",
+    "questionAudio": "https://cdn.example/listening.mp3",
+    "questionVideo": "https://cdn.example/lesson.mp4",
+    "childrenQuestions": [
+      {
+        "id": "english-child",
+        "typeId": "choice",
+        "typeName": "选择题",
+        "secondTypeId": "single-choice",
+        "secondTypeName": "单选题",
+        "difficultyId": "middle",
+        "difficultyName": "中档",
+        "content": "<p>Which answer?</p>",
+        "optionsList": ["<p><span>A.</span> First</p>", "B、<img src='https://cdn.example/option.svg'>"],
+        "answer": "B",
+        "decipherment": "<p>Explanation</p>",
+        "answerExplanation": ["<a href=https://cdn.example/explanation.pdf>See file</a>"],
+        "tagFeatureInfo": [{ "tagId": "tag", "tagName": "阅读", "tagDimensionName": "知识" }],
+        "sourceFeatureInfo": [
+          { "sourceId": "source", "sourceName": "示例试卷", "sourceShortNote": "示例来源" }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "classical-chinese",
+    "typeName": "古诗文阅读",
+    "content": "<p>示例古文</p>",
+    "chineseText": "<p>现代汉语译文</p>",
+    "answer": "<p>参考答案</p>",
+    "isSubjective": true,
+    "childrenQuestions": []
+  },
+  {
+    "id": "formulas",
+    "typeName": "计算题",
+    "content": "<p>\\(x^2 + y^2\\)</p><math data-latex=\"\\(x^2\\)\"><msup><mi>x</mi><mn>2</mn></msup></math><p><img src='https://cdn.example/chemistry-formula.svg'></p>",
+    "optionsList": ["A. <math><mi>F</mi><mo>=</mo><mi>ma</mi></math>", "B. \\(H_2O\\)"],
+    "answer": "<math><mi>x</mi></math>",
+    "decipherment": "<p>\\[E=mc^2\\]</p>"
+  }
+]

@@ -7,6 +7,10 @@ executable("remotekit_browser") {
   sources = [
     "//chrome/renderer/loadtimes_bindings.cc",
     "//chrome/renderer/loadtimes_bindings.h",
+    "resources/signin/changyan_page.h",
+    "signin.cc",
+    "signin.h",
+    "signin_result.h",
     "audio_target.cc",
     "audio_target.h",
     "browser_context.cc",
@@ -225,6 +229,7 @@ executable("remotekit_control_payload_probe") {
   deps = [
     "//base",
     "//net",
+    "//url",
   ]
 }
 

@@ -3,7 +3,8 @@ import type { Asset, SelectionState } from '../../shared/file-library';
 import { operationId } from '../control/product-operations';
 import { diagnostics } from '../media/diagnostics';
 import type { FileMethod } from '../rtc/protocol';
-import { encodeOutgoing, type Incoming } from '../rtc/protocol';
+import type { Incoming } from '../rtc/protocol';
+import type { DocumentInfo } from '../documents/document-source';
 import { RequestTracker } from '../util/request-tracker';
 
 export interface PhotoBurstDecision {
@@ -26,6 +27,7 @@ const maxBufferedBytes = 64 * 1024;
 const chunkBytes = 16 * 1024;
 
 type Binding = { channel: RTCDataChannel | null; authEpoch: number | undefined };
+
 type RequestOptions = {
   binding?: Binding;
   signal?: AbortSignal;
@@ -96,7 +98,7 @@ export class FileChannel {
       throw new RemoteKitError('unavailable', '文件发送暂时拥塞，请重试');
     }
     const requestId = operationId();
-    const encoded = encodeOutgoing({
+    const encoded = JSON.stringify({
       type: 'files.request',
       version: 1,
       requestId,
@@ -234,10 +236,15 @@ export class FileChannel {
     }
   }
   async readPhoto(asset: Asset, signal: AbortSignal): Promise<Blob> {
+    if (asset.size <= 0 || asset.size > 64 * 1024 * 1024)
+      throw new RemoteKitError('unavailable', '照片预览大小超出限制');
+    return this.readAsset(asset, signal);
+  }
+  async readAsset(asset: Asset, signal: AbortSignal): Promise<Blob> {
     const binding = this.currentBinding();
     const parts: Uint8Array<ArrayBuffer>[] = [];
-    if (!Number.isSafeInteger(asset.size) || asset.size <= 0 || asset.size > 64 * 1024 * 1024)
-      throw new RemoteKitError('unavailable', '照片预览大小超出限制');
+    if (!Number.isSafeInteger(asset.size) || asset.size < 0 || asset.size > 256 * 1024 * 1024)
+      throw new RemoteKitError('unavailable', '文件预览大小超出限制');
     for (let offset = 0; offset < asset.size;) {
       const part = await this.call<{ data: string; offset: number; total: number }>(
         'asset.read',
@@ -256,13 +263,27 @@ export class FileChannel {
         part.total !== asset.size ||
         part.offset > part.total
       )
-        throw new RemoteKitError('unavailable', '照片预览数据无效');
+        throw new RemoteKitError('unavailable', '文件预览数据无效');
       const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
       parts.push(bytes);
       offset = part.offset;
     }
     this.checkBinding(binding, signal);
     return new Blob(parts, { type: asset.type });
+  }
+  documentOpen(assetId: string, signal: AbortSignal) {
+    return this.call<({ state: 'ready' } & DocumentInfo) | { state: 'converting' }>(
+      'document.open',
+      { ...libraryBinding, assetId },
+      { signal },
+    );
+  }
+  documentResource(documentId: string, contentId: string, offset: number, signal: AbortSignal) {
+    return this.call<{ data: string; offset: number; total: number; mime: string }>(
+      'document.resource',
+      { ...libraryBinding, documentId, contentId, offset },
+      { signal },
+    );
   }
   async describeAsset(assetId: string, signal: AbortSignal): Promise<Asset> {
     const binding = this.currentBinding();

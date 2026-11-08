@@ -22,7 +22,7 @@ class Session {
           const cluster::Key& profile_key,
           ManagementLink&,
           objects::ObjectService&,
-          const objects::Keys&);
+          std::shared_ptr<objects::SessionObjects> access = {});
   ~Session();
   Result<void> Initialize();
   Result<void> Stop();
@@ -48,6 +48,7 @@ class Session {
   void MaintainRecovery() {
     browser.RecordCrash();
     navigation.MaintainRecovery();
+    views.PollSignIn(generation_.load());
   }
   void FlushSignals() { channel.FlushSignals(); }
   ViewController& Views() { return views; }

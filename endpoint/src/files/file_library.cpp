@@ -1,4 +1,6 @@
 #include "files/file_library.hpp"
+#include "documents/object_documents.hpp"
+#include "files/dc_file_services.hpp"
 #include "persistence/session_store.hpp"
 
 #include <windows.h>
@@ -163,8 +165,12 @@ ServiceJson FileLibrary::Asset::Json() const {
 FileLibrary::FileLibrary(fs::path root,
                          objects::ObjectService& objects,
                          std::string tenant,
-                         const objects::Keys& keys)
-    : root_(std::move(root)), objects_(objects), tenant_(std::move(tenant)), keys_(keys) {}
+                         std::shared_ptr<objects::SessionObjects> access)
+    : root_(std::move(root)),
+      objects_(objects),
+      tenant_(std::move(tenant)),
+      access_(access ? std::move(access)
+                     : std::make_shared<objects::SessionObjects>(objects, tenant_)) {}
 Result<void> FileLibrary::Initialize() {
   std::error_code absolute_error;
   root_ = fs::absolute(root_, absolute_error).make_preferred();
@@ -264,10 +270,7 @@ fs::path FileLibrary::DraftData(const std::string& id) const {
 }
 Result<const FileLibrary::Entry*> FileLibrary::RequireAsset(const std::string& id) const {
   auto found = entries_.find(id);
-  RK_ASSIGN_OR_RETURN(stored, objects_.Store().StoredPath(tenant_, id));
-  if (found != entries_.end() && fs::exists(stored))
-    return &found->second;
-  RK_ASSIGN_OR_RETURN(info, objects_.Ensure(tenant_, id));
+  RK_ASSIGN_OR_RETURN(info, access_->Ensure(id));
   if (found == entries_.end()) {
     if (info.size > kFileBytes)
       return Error{ErrorCode::kLimitExceeded, "asset_too_large"};
@@ -414,7 +417,7 @@ Result<FileLibrary::Asset> FileLibrary::Publish(const fs::path& source,
                                                 const Check& check,
                                                 const std::string& derived_from) {
   RK_RETURN_IF_ERROR(Verify(source, asset.size));
-  RK_ASSIGN_OR_RETURN(info, objects_.Write(tenant_, keys_, source, check, derived_from));
+  RK_ASSIGN_OR_RETURN(info, access_->Write(source, check, derived_from));
   asset.id = info.id;
   std::lock_guard lock(mutex_);
   RK_RETURN_IF_ERROR(check());
@@ -541,6 +544,36 @@ Result<FileLibrary::Asset> FileLibrary::Describe(const std::string& id) const {
   RK_ASSIGN_OR_RETURN(entry, RequireAsset(id));
   return entry->asset;
 }
+Result<ServiceJson> FileLibrary::OpenDocument(const std::string& asset, const Check& check) {
+  RK_RETURN_IF_ERROR(check());
+  RK_RETURN_IF_ERROR(objects_.Documents().Available());
+  RK_RETURN_IF_ERROR(Describe(asset));
+  RK_ASSIGN_OR_RETURN(result, objects_.Documents().Open(asset, tenant_, root_ / "documents"));
+  RK_RETURN_IF_ERROR(check());
+  if (result["state"] == "ready") {
+    std::lock_guard lock(mutex_);
+    documents_.insert(result["documentId"].get<std::string>());
+  }
+  return result;
+}
+Result<ServiceJson> FileLibrary::DocumentResource(const std::string& document,
+                                                  const std::string& content,
+                                                  uint64_t offset,
+                                                  const Check& check) {
+  RK_RETURN_IF_ERROR(check());
+  RK_RETURN_IF_ERROR(objects_.Documents().Available());
+  {
+    std::lock_guard lock(mutex_);
+    if (!documents_.contains(document))
+      return Error{ErrorCode::kForbidden, "document not opened by session"};
+  }
+  RK_ASSIGN_OR_RETURN(resource, objects_.Documents().Resource(document, content, offset));
+  RK_RETURN_IF_ERROR(check());
+  return ServiceJson{{"data", EncodeFileChunk(resource.bytes)},
+                     {"offset", offset + resource.bytes.size()},
+                     {"total", resource.total},
+                     {"mime", resource.mime}};
+}
 Result<fs::path> FileLibrary::Path(const std::string& id) const {
   std::lock_guard lock(mutex_);
   RK_ASSIGN_OR_RETURN(entry, RequireAsset(id));
@@ -556,7 +589,7 @@ Result<fs::path> FileLibrary::Path(const std::string& id) const {
   auto partial = path;
   partial += ".new";
   std::ofstream output(partial, std::ios::binary | std::ios::trunc);
-  auto read = objects_.Store().Read(tenant_, keys_, id, output);
+  auto read = objects_.Store().Read(objects_.ObjectKeys(), id, output);
   output.close();
   if (!read || !output) {
     Remove(partial);
@@ -571,7 +604,7 @@ Result<std::pair<FileLibrary::Asset, std::vector<std::uint8_t>>> FileLibrary::Re
     const std::string& id,
     std::uint64_t offset) const {
   RK_ASSIGN_OR_RETURN(asset, Describe(id));
-  RK_ASSIGN_OR_RETURN(bytes, objects_.Store().ReadRange(tenant_, keys_, id, offset, kChunk));
+  RK_ASSIGN_OR_RETURN(bytes, objects_.Store().ReadRange(objects_.ObjectKeys(), id, offset, kChunk));
   return std::pair{asset, std::move(bytes)};
 }
 Result<FileLibrary::Asset> FileLibrary::CreateDerivative(const Render& render,

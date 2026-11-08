@@ -44,7 +44,9 @@ import { operationId } from '../control/product-operations';
 import { photoStatus } from './basket-items';
 import { FileBasketDialog } from './file-chooser-dialog';
 import { dayLabel, formatFileSize, formatTime } from './file-format';
-import { canPreviewFile, FileImagePreview } from './file-image-preview';
+import { canPreviewFile } from './file-image-preview';
+import { FilePreview } from './file-preview';
+import type { LearningCall } from '../learning/queries';
 import {
   basketEntries,
   fileError,
@@ -76,12 +78,14 @@ export function FilesApp({
   onState,
   previewEntryId,
   previewRequestId,
+  call,
 }: {
   windowId: string;
   state: unknown;
   onState(state: unknown): void;
   previewEntryId?: string;
   previewRequestId?: string;
+  call?: LearningCall;
 }): JSX.Element {
   const { snapshot, online, refresh, mutate, photos, recordUsage, apps } = useLibrary();
   const restored = readFilesState(state);
@@ -113,7 +117,13 @@ export function FilesApp({
   const catalog = snapshot?.entries ?? [];
   const needle = query.trim().toLowerCase();
   const entries = (snapshot ? filesInView(snapshot, filter) : []).filter(
-    (entry) => !needle || entry.name.toLowerCase().includes(needle),
+    (entry) =>
+      !needle ||
+      [
+        entry.name,
+        entry.detail,
+        entry.source ? `${sourceAppName(entry.source.app, apps)} › ${sourceChannelName(entry.source)}` : '',
+      ].some((value) => value?.toLowerCase().includes(needle)),
   );
   const currentPartition =
     typeof filter === 'object' && 'partition' in filter
@@ -168,7 +178,7 @@ export function FilesApp({
     if (present.length !== selected.length) setSelected(present);
   });
 
-  async function run(action: () => Promise<void>) {
+  async function run(action: () => Promise<unknown>) {
     setError('');
     setBusy(true);
     try {
@@ -305,7 +315,7 @@ export function FilesApp({
       formatFileSize(entry.size),
       formatTime(entry.createdAt),
       entry.source
-        ? [sourceAppName(entry.source.app, apps), sourceChannelName(entry.source)].filter(Boolean).join(' / ')
+        ? [sourceAppName(entry.source.app, apps), sourceChannelName(entry.source)].filter(Boolean).join(' › ')
         : '已整理',
       partitions.length && (!currentPartition || needle) ? partitionOf(entry.partitionId) : '',
     ]
@@ -613,6 +623,7 @@ export function FilesApp({
                         type={entry.type}
                         assetId={entry.assetId}
                         meta={entryMeta(entry)}
+                        detail={entry.detail}
                         status={photoStatus(entry)}
                         selected={chosen.has(entry.id)}
                         pressed={selecting ? chosen.has(entry.id) : undefined}
@@ -910,31 +921,35 @@ export function FilesApp({
         />
       )}
       {showBasket && <FileBasketDialog windowId={windowId} onClose={() => setShowBasket(false)} />}
-      {preview &&
-        (canPreviewFile(preview) ? (
-          <FileImagePreview entry={preview} onClose={() => setPreview(undefined)} />
-        ) : (
-          <Dialog open fullWidth maxWidth="xs" onClose={() => setPreview(undefined)}>
-            <DialogTitle sx={{ overflowWrap: 'anywhere' }}>{preview.name}</DialogTitle>
-            <DialogContent>
-              <Typography>
-                {preview.type || '文件'} · {formatFileSize(preview.size)}
-              </Typography>
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                此类型暂不支持内容预览，可加入文件篮供网页选择。
-              </Typography>
-            </DialogContent>
-            <DialogActions>
-              <Button
-                disabled={disabled || inBasket.has(preview.id)}
-                onClick={() => addToBasket([preview.id])}
-              >
-                加入文件篮
-              </Button>
-              <Button onClick={() => setPreview(undefined)}>返回</Button>
-            </DialogActions>
-          </Dialog>
-        ))}
+      {preview && (
+        <Dialog
+          open
+          fullWidth
+          maxWidth="lg"
+          onClose={() => setPreview(undefined)}
+          slotProps={{ paper: { sx: { height: '85%', minHeight: 320 } } }}
+        >
+          <DialogTitle sx={{ overflowWrap: 'anywhere' }}>
+            {preview.name}
+            <Typography variant="body2" color="text.secondary">
+              {preview.source &&
+                `${sourceAppName(preview.source.app, apps)} › ${sourceChannelName(preview.source)}`}
+              {preview.detail && ` · ${preview.detail}`}
+            </Typography>
+          </DialogTitle>
+          <DialogContent sx={{ display: 'flex', flexDirection: 'column', minHeight: 0, p: 0 }}>
+            <FilePreview
+              key={preview.assetId}
+              entry={preview}
+              call={call}
+              onBasket={disabled || inBasket.has(preview.id) ? undefined : () => addToBasket([preview.id])}
+            />
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setPreview(undefined)}>返回</Button>
+          </DialogActions>
+        </Dialog>
+      )}
     </Box>
   );
 }

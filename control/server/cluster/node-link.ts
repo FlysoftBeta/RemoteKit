@@ -288,6 +288,17 @@ export class NodeLink extends EventEmitter implements EndpointLink {
       this.emit('clipboard.changed', message);
       return;
     }
+    if (message.event === 'session.events') {
+      if (
+        typeof message.tenantId !== 'string' ||
+        typeof message.sessionId !== 'string' ||
+        typeof message.browserIncarnation !== 'string' ||
+        !Array.isArray(message.events)
+      )
+        throw new Error('Invalid session events');
+      this.emit('session.events', message);
+      return;
+    }
     if (message.event === 'client.action' || message.event === 'rtc.signal') {
       if (
         typeof message.tenantId !== 'string' ||
@@ -307,7 +318,24 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     if (message.ok) pending.resolve(message.result);
     else pending.reject(message.error ?? { code: 'rejected', message: 'Node rejected request' });
   }
-  request(method: string, tenantId: string, args: Record<string, unknown> = {}): Promise<any> {
+  async sendBinary(header: object, bytes: Buffer, epoch: string) {
+    const connection = this.current;
+    if (!connection || connection.epoch !== epoch)
+      throw new RemoteKitError('unavailable', 'Node connection changed');
+    try {
+      await connection.carrier.send(connection.transport.send.encrypt(encodeBinary(header, bytes)));
+    } catch {
+      this.disconnect(connection);
+      connection.carrier.close();
+      throw new RemoteKitError('unavailable', 'Object chunk delivery failed');
+    }
+  }
+  request(
+    method: string,
+    tenantId: string,
+    args: Record<string, unknown> = {},
+    timeoutMs?: number,
+  ): Promise<any> {
     const connection = this.current;
     if (this.stopped || !connection)
       return Promise.reject(new RemoteKitError('unavailable', 'Node is offline'));
@@ -326,7 +354,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
           this.pending.delete(id);
           reject(new RemoteKitError('outcome_unknown', 'Node request timed out', method));
         },
-        Math.max(1, Math.min(20000, this.registry.options.requestTimeoutMs ?? 20000)),
+        timeoutMs ?? Math.max(1, Math.min(20000, this.registry.options.requestTimeoutMs ?? 20000)),
       );
       this.pending.set(id, { epoch: connection.epoch, resolve, reject, timer });
       const failed = () => {
@@ -382,6 +410,7 @@ export class NodeLink extends EventEmitter implements EndpointLink {
 
 export class NodeRegistry extends EventEmitter {
   isRemoved: (nodeId: string) => boolean = () => false;
+  objectKeys?: { objectKey: string; objectIdKey: string };
   fencing: (nodeId: string) => { tenantId: string; sessionId: string; placementEpoch: number }[] = () => [];
   readonly handlers = new Map<string, (node: NodeLink, message: Record<string, any>) => unknown>();
   dispatch(node: NodeLink, message: Record<string, any>) {
@@ -486,6 +515,7 @@ export class NodeRegistry extends EventEmitter {
               ? { type: 'node.release', release: this.options.release!.descriptor }
               : {
                   type: 'node.ready',
+                  ...this.objectKeys,
                   sessions: this.fencing(hello.nodeId),
                   connectionEpoch: epoch,
                   buildId: this.options.buildId,

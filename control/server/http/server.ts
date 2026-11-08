@@ -49,6 +49,7 @@ export function createHttp(
               audioChannels: settings.workspace.audioChannels,
               memorySaverEnabled: settings.browser.memorySaverEnabled,
             },
+            learning: control.learning?.sync.diagnostics(tenant),
           };
         },
         endpoint: (tenant) => control.endpoint.snapshot(tenant, { outputDiagnostics: true }),
@@ -82,6 +83,13 @@ export function createHttp(
         token = readToken(req);
       if (path === '/api/auth/setup' && req.method === 'GET')
         return json(res, 200, control.accounts.setupStatus());
+      const media = /^\/api\/learning\/media\/([A-Za-z0-9_.-]+)$/.exec(path);
+      if (media && req.method === 'GET') {
+        const identity = control.accounts.identity(token);
+        if (!identity) throw new RemoteKitError('unauthenticated', '请先登录');
+        await control.learning.media.serve(identity.tenantId, media[1], req, res);
+        return;
+      }
       const preview = /^\/api\/previews\/([0-9a-f]{64})$/.exec(path);
       if (preview && (req.method === 'GET' || req.method === 'HEAD')) {
         const identity = control.accounts.identity(token);

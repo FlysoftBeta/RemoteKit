@@ -1,4 +1,5 @@
 #include "browser/page_requests.h"
+#include "browser/signin.h"
 #include "browser/browser_context.h"
 #include "browser/site_preferences.h"
 #include "browser/profile_services.h"
@@ -648,6 +649,8 @@ bool PageRequests::IsWebContentsCreationOverridden(content::RenderFrameHost*,
                                                    const GURL&,
                                                    const std::string&,
                                                    const GURL& target_url) {
+  if (SignIn::ForContents(web_contents()))
+    return true;
   if (popup_handler_)
     return false;
   auto event = Kind("blocked_popup");
@@ -663,6 +666,11 @@ content::WebContents* PageRequests::AddNewContents(content::WebContents*,
                                                    const blink::mojom::WindowFeatures&,
                                                    bool user_gesture,
                                                    bool* was_blocked) {
+  if (SignIn::ForContents(web_contents())) {
+    if (was_blocked)
+      *was_blocked = true;
+    return nullptr;
+  }
   if (!popup_handler_ || !user_gesture) {
     if (was_blocked)
       *was_blocked = true;
@@ -684,6 +692,8 @@ content::WebContents* PageRequests::OpenURLFromTab(
     base::OnceCallback<void(content::NavigationHandle&)> callback) {
   content::WebContents* target = source;
   if (params.disposition != WindowOpenDisposition::CURRENT_TAB) {
+    if (SignIn::ForContents(source))
+      return nullptr;
     switch (params.disposition) {
       case WindowOpenDisposition::NEW_FOREGROUND_TAB:
       case WindowOpenDisposition::NEW_BACKGROUND_TAB:

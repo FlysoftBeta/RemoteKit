@@ -27,7 +27,7 @@ void Take(Result<void> result) {
 }
 std::string Read(ObjectStore& store, const Keys& keys, const std::string& id) {
   std::ostringstream output;
-  Take(store.Read("tenant", keys, id, output));
+  Take(store.Read(keys, id, output));
   return output.str();
 }
 void Flip(const fs::path& path, uint64_t offset) {
@@ -40,16 +40,16 @@ void Flip(const fs::path& path, uint64_t offset) {
 }
 void Store(ObjectStore& store, const Keys& keys, const std::string& plain, ObjectInfo& info) {
   std::istringstream input(plain);
-  info = Take(store.Write("tenant", keys, input));
+  info = Take(store.Write(keys, input));
   Check(info.id.size() == 64 &&
             info.id != cluster::Hex(cluster::Sha256(
                            {reinterpret_cast<const uint8_t*>(plain.data()), plain.size()})),
         "keyed object identity");
   Check(Read(store, keys, info.id) == plain, "segmented round trip");
   std::istringstream duplicate(plain);
-  Check(Take(store.Write("tenant", keys, duplicate)).stored_sha256 == info.stored_sha256,
+  Check(Take(store.Write(keys, duplicate)).stored_sha256 == info.stored_sha256,
         "deterministic stored bytes");
-  const auto path = Take(store.StoredPath("tenant", info.id));
+  const auto path = Take(store.StoredPath(info.id));
   std::ifstream file(path, std::ios::binary);
   file.seekg(24);
   for (uint32_t index = 0; index < 3; ++index) {
@@ -62,7 +62,7 @@ void Store(ObjectStore& store, const Keys& keys, const std::string& plain, Objec
     file.close();
     Flip(path, start + 5 + length - 1);
     std::ostringstream output;
-    auto corrupt = store.Read("tenant", keys, info.id, output);
+    auto corrupt = store.Read(keys, info.id, output);
     Check(!corrupt && corrupt.error().message == "corrupt object",
           "each segment authenticates its tag");
     Flip(path, start + 5 + length - 1);
@@ -73,23 +73,22 @@ void Store(ObjectStore& store, const Keys& keys, const std::string& plain, Objec
   auto wrong = keys;
   wrong.object[0] ^= 1;
   std::ostringstream rejected;
-  Check(!store.Read("tenant", wrong, info.id, rejected), "wrong encryption key rejected");
-  auto bytes = Take(store.ReadRange("tenant", keys, info.id, kSegmentSize - 3, 9));
+  Check(!store.Read(wrong, info.id, rejected), "wrong encryption key rejected");
+  auto bytes = Take(store.ReadRange(keys, info.id, kSegmentSize - 3, 9));
   Check(std::string(bytes.begin(), bytes.end()) == plain.substr(kSegmentSize - 3, 9),
         "range across segments");
   std::istringstream empty("");
-  const auto zero = Take(store.Write("tenant", keys, empty));
+  const auto zero = Take(store.Write(keys, empty));
   Check(zero.size == 0 && zero.stored_size == 24 && Read(store, keys, zero.id).empty(),
         "empty object");
   Check(Take(store.Inventory(nullptr))["objects"].size() == 2, "inventory");
-  Take(store.Delete("tenant", zero.id));
-  Take(store.Delete("tenant", zero.id));
-  Check(!store.Inspect("tenant", zero.id), "delete");
-  Check(!store.StoredPath("../tenant", info.id), "tenant traversal rejected");
-  Check(!store.StoredPath("tenant", std::string(64, 'G')), "object id validated");
+  Take(store.Delete(zero.id));
+  Take(store.Delete(zero.id));
+  Check(!store.Inspect(zero.id), "delete");
+  Check(!store.StoredPath(std::string(64, 'G')), "object id validated");
   for (int index = 0; index < 258; ++index) {
     std::istringstream value("inventory-" + std::to_string(index));
-    Take(store.Write("tenant", keys, value));
+    Take(store.Write(keys, value));
   }
   const auto first = Take(store.Inventory(nullptr));
   Check(first["objects"].size() == 256 && first["next"].is_string(), "bounded inventory page");
@@ -122,29 +121,28 @@ void Peer(ObjectStore& source,
         }));
     const auto request = Take(connection.channel->Receive(5s)).json;
     Check(request["offset"] == 0, "initial transfer offset");
-    std::ifstream input(Take(source.StoredPath("tenant", info.id)), std::ios::binary);
+    std::ifstream input(Take(source.StoredPath(info.id)), std::ios::binary);
     cluster::Bytes chunk(12345);
     input.read(reinterpret_cast<char*>(chunk.data()), chunk.size());
     Take(connection.channel->SendBinary({{"type", "object.chunk"}, {"offset", 0}}, chunk));
     connection.channel->Close();
   });
-  Check(!client.Fetch("tenant", info.id, listener->Address()), "interrupted transfer fails");
+  Check(!client.Fetch(info.id, listener->Address()), "interrupted transfer fails");
   interrupted.get();
-  auto partial = Take(target.StoredPath("tenant", info.id));
+  auto partial = Take(target.StoredPath(info.id));
   partial += ".partial";
   Check(fs::file_size(partial) == 12345, "partial retained for resume");
-  const auto fetched = Take(client.Fetch("tenant", info.id, server.Address()));
+  const auto fetched = Take(client.Fetch(info.id, server.Address()));
   Check(fetched.stored_sha256 == info.stored_sha256 && fetched.stored_size == info.stored_size &&
             !fs::exists(partial),
         "resumed stored file verified");
   Check(Read(target, keys, info.id) == plain, "resumed plaintext round trip");
   PeerClient mismatch(target, cluster_key, "target", std::string(64, 'a'));
-  auto rejected = mismatch.Fetch("tenant", info.id, server.Address());
+  auto rejected = mismatch.Fetch(info.id, server.Address());
   Check(!rejected && rejected.error().message == "build_mismatch", "peer build lock");
-  fs::copy_file(Take(source.StoredPath("tenant", info.id)), partial);
+  fs::copy_file(Take(source.StoredPath(info.id)), partial);
   Flip(partial, 25);
-  Check(!target.Import("tenant", info.id, info.stored_size, info.stored_sha256) &&
-            !fs::exists(partial),
+  Check(!target.Import(info.id, info.stored_size, info.stored_sha256) && !fs::exists(partial),
         "transfer hash mismatch removes partial");
 }
 }  // namespace

@@ -40,7 +40,7 @@ class FileLibrary {
   FileLibrary(std::filesystem::path root,
               objects::ObjectService& objects,
               std::string tenant,
-              const objects::Keys& keys);
+              std::shared_ptr<objects::SessionObjects> access = {});
   Result<void> Initialize();
   Result<ServiceJson> Begin(std::uint64_t grant,
                             const std::string& operation,
@@ -55,6 +55,11 @@ class FileLibrary {
   Result<Asset> ImportDownload(const std::filesystem::path& profile, const ServiceJson& download);
   Result<void> Cancel(std::uint64_t grant, const std::string& upload, const Check&);
   Result<Asset> Describe(const std::string& asset) const;
+  Result<ServiceJson> OpenDocument(const std::string& asset, const Check&);
+  Result<ServiceJson> DocumentResource(const std::string& document,
+                                       const std::string& content,
+                                       uint64_t offset,
+                                       const Check&);
   Result<std::filesystem::path> Path(const std::string& asset) const;
   Result<std::pair<Asset, std::vector<std::uint8_t>>> Read(const std::string& asset,
                                                            std::uint64_t offset) const;
@@ -87,11 +92,12 @@ class FileLibrary {
   std::filesystem::path root_;
   objects::ObjectService& objects_;
   const std::string tenant_;
-  const objects::Keys& keys_;
+  std::shared_ptr<objects::SessionObjects> access_;
   mutable std::mutex mutex_;
   mutable std::map<std::string, Entry> entries_;
   std::map<std::string, Draft> drafts_;
   std::map<std::string, Selection> selections_;
+  std::set<std::string> documents_;
   std::uint64_t draft_bytes_{};
   std::int64_t sweep_after_{};
 

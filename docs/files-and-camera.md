@@ -6,11 +6,11 @@
 
 | 对象 | 所有者 | 内容 |
 |---|---|---|
-| 资产（asset） | 对象存储（Endpoint 节点上的加密对象，Control 的对象索引） | 不可变字节，id = Tenant 密钥对内容的 HMAC；只在本 Tenant 内去重，可以有多个节点上的副本 |
+| 资产（asset） | 对象存储（Endpoint 节点上的加密对象，Control 的对象索引） | 不可变字节，id = 集群对象密钥对内容的 HMAC；所有 Tenant 共用一份并去重，可以有多个节点上的副本 |
 | 目录条目（library entry） | Control SQLite | 名称、来源、分区、时间、是否已收集、照片元数据；引用资产 hash |
 | 篮子与选择事务 | Control SQLite | 篮子顺序；一次原生选择的不可变清单与终态 |
 
-同一个资产可以被多个条目引用，各条目有独立的名称、来源、分区和收集状态。资产 id 不授予跨 Tenant 访问，也无法被没有 Tenant 密钥的一方用内容 hash 推出。对象格式、副本与回收见[多节点 · 对象存储](cluster.md#对象存储)。
+同一个资产可以被多个条目引用，各条目有独立的名称、来源、分区和收集状态。资产 id 本身不授予访问：Session 只能读它的 Tenant 引用或认领的对象；没有集群对象密钥的一方也无法用内容 hash 推出 id。对象格式、副本与回收见[多节点 · 对象存储](cluster.md#对象存储)。
 
 **数据路径**：文件字节和照片分析全部走已有的 WebRTC DataChannel（`files.request/result`，version 1），由 Session 拥有的有界磁盘线程处理；元数据走鉴权的 WebSocket。Control 只授权不透明的绑定，从不打开 Endpoint 的磁盘路径——Control 与 Endpoint 可以在不同机器上。哈希、拷贝、OpenCV 不持有媒体锁或 Browser 锁。
 
@@ -49,6 +49,25 @@
 - multiple 时发送整个篮子的顺序（有未决项时阻止）；单选需要用卡片角上的单选框明确选中一项。
 - 我的文件是独立的 App（见[工作区 · 我的文件](workspace.md#我的文件)），按日期分节、时间倒序，可按文件名搜索，卡片/列表两种视图；点文件打开菜单（查看、照片详情、加入或移出文件篮、移到分区、选择多个、删除），列表行直接带加入文件篮开关。选择模式（悬停复选框、触摸长按或"选择"）下可批量加入文件篮、移动、删除。上传菜单有从设备选择与拍照，也可把文件拖进窗口；在分区视图中上传直接进入该分区。文件篮的更多菜单可选"发送后整理到"分区。
 - 文件卡片与行共用 `FileTile`/`FileRow`：图片缩略图裁切填满，其他文件按类型（PDF、文档、表格、演示、压缩包、音视频、文本）显示着色图标和扩展名；大小用 B/KB/MB。
+
+## 文档预览
+
+我的文件和学习 App 用同一个阅读器预览文档：PDF、Word/WPS 文字、PowerPoint/WPS 演示、Excel/WPS 表格、OpenDocument、RTF 与纯文本。图片用图片预览，音视频用浏览器原生播放器，其他类型显示文件卡片。
+
+**转换**（Endpoint，`endpoint/src/documents/`）：非 PDF 先用无界面的 LibreOffice 转成 PDF，再用 pdfrender（FlysoftBeta/pdf-render，poppler 的派生）渲染成 `classapp-render-archive` v2 归档：每页是绝对定位的可选择 HTML 文字层叠在 Cairo SVG 背景上，图片转为 WebP，文本资源各自 zstd 压缩（可带字典），整个归档是只用 STORED 的 ZIP64，可按偏移直接读。选 LibreOffice 是因为节点上没有、也不能假设有 MS Office，而它对 Office 与 WPS 格式的保真度在可部署的方案里最好；pdfrender 的输出在 Chrome 89 上也能还原排版、保留文字选择。
+
+- 每个节点一个渲染队列：最多 2 个并发，队列 64，同一源对象的并发请求合并为一次。LibreOffice 与 pdfrender 各自运行在 Job Object 里（关闭即杀、内存 2GiB、无窗口），超时 180 秒；LibreOffice 使用 Endpoint 数据目录下 2 个常驻的用户配置（不按任务新建，热启动的 DOCX 约 7 秒，冷启动约 30 秒），输入先复制到私有临时目录并改成 ASCII 文件名。PDF 渲染通常不到 0.1 秒。
+- 结果是一个以源对象为 `derivedFrom`、`kind: 'document'` 的派生对象，随源对象一起被引用和回收；因为对象存储跨 Tenant 去重，同一份课件全集群只转换一次。转换失败按源对象缓存 10 分钟，加密、损坏、超时给出简短原因。
+- 学习 App 下载附件后由 Control 请求预渲染（`object.render{id}`，交给持有副本的节点），用户打开时通常已经就绪。
+
+**读取**：归档的 ZIP、zstd 与 hash 校验都在 Endpoint 完成，Viewer 只拿解码后的资源。DataChannel 文件服务（与 `asset.read` 同样的库授权）提供：
+
+- `document.open{assetId}` → `{state:'ready', documentId, pages:[{id, ordinal, width, height, document, dependencies}], shared}`、`{state:'converting'}`（Viewer 每 1.5 秒再问，最多 5 分钟）或错误（`invalid_request` 不是文档，`rejected` 转换失败）。
+- `document.resource{documentId, contentId, offset}` → 与 `asset.read` 相同的分块回复并带 `mime`；Endpoint 每节点保持 8 个打开的归档。
+
+**阅读器**（`control/client/documents/`，取自 talos-ng 的阅读器与虚拟滚动）：页面虚拟化，只挂载视口附近的页并按需取资源，资源 Blob URL 有界 LRU（64 项、32MiB）；每页挂在自己的 shadow root 里，内联样式表，`data-bundle-ref` 解析为 Blob URL，其他 URL 一律去掉，页面内容不会发出网络请求；按 pdfrender 约定给多字符单词设置 `--fit-x` 对齐原始字宽。默认适应宽度，可缩放（按钮、双指、Ctrl+滚轮），页码可点开直接跳页；阅读位置（页号与页内偏移）存在 Control（见[学习与题库 · 文档阅读进度](learning.md#文档阅读进度)）。
+
+**依赖**：`tools/fetch-document-deps.py` 按固定版本与 SHA-256 获取 LibreOffice MSI（管理安装解包，不改系统）与 pdfrender Windows 构建（GitHub Actions 产物，过期前需要刷新固定值），按确定的允许/拒绝清单裁掉词典、界面翻译、帮助、模板、Python/Java 等转换用不到的部分（约 460MiB，裁剪前后转换结果逐像素一致），开发构建复制到 `endpoint_service.exe` 旁的 `documents/`，Endpoint 运行时包里同样位置，附带两者的许可证。
 
 ## 拍照
 

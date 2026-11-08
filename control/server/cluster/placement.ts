@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
 import { retiringObjects } from './objects';
+import { tenantObjects, syncObjectReferences } from '../persistence/object-references';
 import { tenantKeys } from './keys';
 import type { NodeRegistry } from './node-link';
 
@@ -76,6 +77,7 @@ export class Placement {
     const sessionId = this.peek(tenant)?.sessionId;
     for (const table of ['session_placements', 'checkpoints', 'checkpoint_objects', 'warm_session_copies'])
       this.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
+    syncObjectReferences(this.store.db);
     return sessionId;
   }
   checkpoints(tenant: string) {
@@ -83,8 +85,8 @@ export class Placement {
       .prepare(
         `SELECT count(*) AS count, max(created_at) AS latest,
         (SELECT coalesce(sum(o.stored_size),0) FROM checkpoint_objects c JOIN objects o
-          ON o.tenant=c.tenant AND o.id=c.object_id
-          WHERE c.tenant=? AND c.checkpoint_id=(SELECT max(id) FROM checkpoints WHERE tenant=?)) AS bytes
+          ON o.id=c.id
+          WHERE c.tenant=? AND c.manifest_id=(SELECT manifest_id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 1)) AS bytes
         FROM checkpoints WHERE tenant=?`,
       )
       .get(tenant, tenant, tenant) as { count: bigint; latest: bigint | null; bytes: bigint };
@@ -194,8 +196,8 @@ export class Placement {
         throw new RemoteKitError('rejected', 'Invalid checkpoint');
       for (const id of objects) {
         if (
-          retiringObjects(this.store).has(placement.tenant + ':' + id) ||
-          !this.store.db.prepare('SELECT 1 FROM objects WHERE tenant=? AND id=?').get(placement.tenant, id)
+          retiringObjects(this.store).has(id) ||
+          !tenantObjects(this.store.db).get(placement.tenant)?.has(id)
         )
           throw new RemoteKitError('conflict', 'Checkpoint object is not committed');
       }
@@ -209,11 +211,24 @@ export class Placement {
       for (const objectId of new Set(objects))
         this.store.db
           .prepare('INSERT INTO checkpoint_objects VALUES (?,?,?)')
-          .run(placement.tenant, id, objectId);
+          .run(placement.tenant, manifestId, objectId);
+      this.store.db
+        .prepare(
+          `DELETE FROM checkpoint_objects WHERE tenant=? AND manifest_id NOT IN
+        (SELECT manifest_id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 2)`,
+        )
+        .run(placement.tenant, placement.tenant);
+      this.store.db
+        .prepare(
+          `DELETE FROM checkpoints WHERE tenant=? AND id NOT IN
+        (SELECT id FROM checkpoints WHERE tenant=? ORDER BY id DESC LIMIT 2)`,
+        )
+        .run(placement.tenant, placement.tenant);
       this.store.db
         .prepare("UPDATE session_placements SET state='hibernated',checkpoint_id=? WHERE tenant=?")
         .run(id, placement.tenant);
       this.markWarm({ ...placement, checkpoint: manifestId });
+      syncObjectReferences(this.store.db);
       return id;
     });
   }

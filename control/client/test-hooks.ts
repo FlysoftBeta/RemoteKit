@@ -1,5 +1,8 @@
 import type { ProductState } from '../shared/product';
 import { OperationsStore } from './control/operations-store';
+import { installLearningMock } from './test-hooks-learning';
+
+if (import.meta.env.DEV && new URLSearchParams(location.search).has('learningMock')) installLearningMock();
 
 declare global {
   interface Window {

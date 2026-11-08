@@ -1,7 +1,7 @@
 // Proves the bundled server runs in an isolated deployment with only native runtime dependencies.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { cp, mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -11,6 +11,9 @@ import { WebSocket } from 'ws';
 import Sqlite from 'better-sqlite3';
 import { createHash, createPrivateKey, createPublicKey } from 'node:crypto';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+assert(
+  !(await readFile(resolve(root, 'dist/server.mjs'), 'utf8')).includes('REMOTEKIT_TEST_LEARNING_ENDPOINTS'),
+);
 const scratchRoot = resolve(root, '../develop/tmp');
 await mkdir(scratchRoot, { recursive: true });
 const scratch = await mkdtemp(resolve(scratchRoot, 'control-production-')),

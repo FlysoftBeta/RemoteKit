@@ -7,6 +7,7 @@ import type { DomainServices } from '../application';
 import { DiagnosticSessions, diagnosticMessageLimit } from '../diagnostics/sessions';
 import type { NodeRegistry } from '../cluster/node-link';
 import type { ViewerAuthority } from '../viewers/viewer-hub';
+import { learningMethods } from '../learning/service';
 
 type DiagnosticAuthority = { sessions?: DiagnosticSessions; identity: string; allowed: () => boolean };
 type RequestContext = {
@@ -98,6 +99,10 @@ const handlers: Record<string, Handler> = {
   ),
   feedback: product(({ services, authority }, params) => services.viewers.feedback(authority, params)),
 };
+for (const method of learningMethods)
+  handlers[method] = product(({ services, authority }, params) =>
+    services.learning.request(authority.tenantId, method, params),
+  );
 const admin = (handler: Handler): Handler =>
   product((ctx, params) => {
     if (!ctx.services.store.accounts.userForTenant(ctx.authority.tenantId)?.isAdmin)
@@ -307,6 +312,12 @@ export function attachViewerSocket(
         send(ws, { type: 'state', revision: state.workspace.revision, state });
   };
   control.events.on('state', push);
+  const library = (tenant: string, snapshot: unknown) => {
+    for (const [ws, peer] of peers)
+      if (peer.tenant === tenant && control.viewers.productAllowed(tenant, peer.lease))
+        send(ws, { type: 'library', snapshot });
+  };
+  control.events.on('library', library);
   const signal = (tenant: string, lease: string, message: unknown) => {
     for (const [ws, peer] of peers) if (peer.tenant === tenant && peer.lease === lease) send(ws, message);
   };
@@ -466,6 +477,7 @@ export function attachViewerSocket(
       clearInterval(facePoll);
       control.events.off('auth', auth);
       control.events.off('state', push);
+      control.events.off('library', library);
       control.events.off('rtc.signal', signal);
       for (const [ws, peer] of peers) {
         peers.delete(ws);

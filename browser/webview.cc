@@ -1,4 +1,5 @@
 #include "browser/webview.h"
+#include "browser/signin.h"
 #include "browser/webview_internal.h"
 #include "browser/webview_execution.h"
 #include "browser/device_configuration.h"
@@ -12,11 +13,13 @@ WebView::WebView(content::BrowserContext* context,
                  ViewModel* view_model,
                  SessionId session,
                  WebViewId view,
-                 std::unique_ptr<content::WebContents> adopted)
+                 std::unique_ptr<content::WebContents> adopted,
+                 std::string sign_in)
     : context_(context),
       model_(view_model),
       session_(session),
       view_(view),
+      sign_in_(sign_in.empty() ? nullptr : std::make_unique<SignIn>(std::move(sign_in), view)),
       execution_(std::make_unique<WebViewExecution>(*this)),
       device_(std::make_unique<DeviceConfiguration>(*this)),
       navigation_(std::make_unique<NavigationCoordinator>(*this)),

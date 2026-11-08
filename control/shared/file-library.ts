@@ -20,6 +20,7 @@ interface LibraryAssetFields {
 }
 
 export interface LibraryEntry extends LibraryAssetFields {
+  detail?: string;
   id: string;
   name: string;
   type: string;

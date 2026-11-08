@@ -5,6 +5,7 @@
   background: var(--surface-handle-hover);
 }
 .window-handle.MuiIconButton-root {
+  color: var(--text-secondary);
   width: 28px;
   height: 28px;
   padding: 4px;
@@ -12,4 +13,10 @@
   touch-action: none;
   flex-shrink: 0;
   border-radius: var(--radius-sm);
+}
+@media (pointer: coarse) {
+  .app-title-bar .window-handle.MuiIconButton-root {
+    width: 40px;
+    height: 40px;
+  }
 }

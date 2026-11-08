@@ -38,7 +38,7 @@ struct ClusterLink::Impl {
   ValidateConfig validate;
   bool local, watch_stdin;
   std::string build_id, config_hash;
-  Json config, sessions;
+  Json config, sessions, object_keys;
   std::mutex mutex, callback_mutex;
   std::condition_variable wake;
   std::deque<Message> incoming, outgoing;
@@ -52,6 +52,7 @@ struct ClusterLink::Impl {
   bool stopping = false, overload = false, ready = false, sending = false;
   int exit_code = 1;
   Disconnect disconnected;
+  Binary binary;
   std::shared_ptr<cluster::Channel> channel;
   std::thread receiver, sender;
   bool Stopping() {
@@ -91,9 +92,9 @@ struct ClusterLink::Impl {
     }
     if (closing)
       closing->Close();
+    wake.notify_all();
     if (generation && callback)
       callback(generation);
-    wake.notify_all();
   }
   bool Accept(cluster::Established established) {
     const auto& reply = established.reply;
@@ -105,7 +106,11 @@ struct ClusterLink::Impl {
         !ValidEpoch(reply["connectionEpoch"]) || reply.value("buildId", Json()) != build_id ||
         !reply.contains("configHash") || !reply["configHash"].is_string() ||
         !cluster::ValidBuildId(reply["configHash"].get<std::string>()) ||
-        !reply.contains("config")) {
+        !reply.contains("config") || !reply.contains("objectKey") ||
+        !reply["objectKey"].is_string() || !reply.contains("objectIdKey") ||
+        !reply["objectIdKey"].is_string() ||
+        !cluster::DecodeKey(reply["objectKey"].get<std::string>()) ||
+        !cluster::DecodeKey(reply["objectIdKey"].get<std::string>())) {
       Finish(1);
       return false;
     }
@@ -165,6 +170,8 @@ struct ClusterLink::Impl {
       return false;
     config = reply["config"];
     sessions = reply["sessions"];
+    object_keys = {{"objectKey", reply.value("objectKey", Json())},
+                   {"objectIdKey", reply.value("objectIdKey", Json())}};
     config_hash = hash;
     ready = true;
     channel = std::move(established.channel);
@@ -198,9 +205,14 @@ struct ClusterLink::Impl {
                 continue;
               break;
             }
-            if (received.value().kind != cluster::Message::Kind::kJson) {
-              protocol_error = true;
-              break;
+            if (received.value().kind == cluster::Message::Kind::kBinary) {
+              std::lock_guard callback_lock(callback_mutex);
+              if (!binary) {
+                protocol_error = true;
+                break;
+              }
+              binary(received.value().json, received.value().bytes);
+              continue;
             }
             auto& json = received.value().json;
             if (json.is_object() && json.contains("id") && json["id"].is_string() &&
@@ -339,7 +351,7 @@ std::optional<ManagementLink::ReadyState> ClusterLink::ReadySessions() {
   std::lock_guard lock(impl_->mutex);
   if (!impl_->active || impl_->stopping || impl_->overload)
     return {};
-  return ReadyState{impl_->active, impl_->sessions};
+  return ReadyState{impl_->active, impl_->sessions, impl_->object_keys};
 }
 bool ClusterLink::Queue(const Json& message, uint64_t generation) {
   auto bytes = message.dump();
@@ -365,6 +377,10 @@ bool ClusterLink::SendEvent(const Json& event, uint64_t generation) {
 void ClusterLink::OnDisconnect(Disconnect callback) {
   std::lock_guard lock(impl_->callback_mutex);
   impl_->disconnected = std::move(callback);
+}
+void ClusterLink::OnBinary(Binary callback) {
+  std::lock_guard lock(impl_->callback_mutex);
+  impl_->binary = std::move(callback);
 }
 Result<Json> ClusterLink::Request(const std::string& name, Json fields) {
   std::array<uint8_t, 16> random{};

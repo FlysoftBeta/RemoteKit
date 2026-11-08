@@ -28,6 +28,7 @@ import { Popups } from './workspace/popups';
 import { Reconciler } from './workspace/reconciler';
 import { SitePolicy } from './workspace/site-policy';
 import { Workspace } from './workspace/workspace';
+import { LearningService } from './learning/service';
 
 export interface DomainContext {
   store: ControlDatabase;
@@ -58,6 +59,7 @@ export interface DomainServices extends DomainContext {
   security: ViewerSecurity;
   library: FileLibrary;
   workspace: Workspace;
+  learning: LearningService;
   accounts: AccountService;
   close(): Promise<void>;
 }
@@ -121,6 +123,7 @@ export function createApplication(
     services.objects,
     (tenant, requestId) => services.workspace.fileSourceForRequest(tenant, requestId),
   );
+  services.learning = new LearningService(context, services);
   services.security = new ViewerSecurity(
     store,
     endpoint,
@@ -177,6 +180,7 @@ export function createApplication(
     unsubscribeSignals?.();
     unsubscribeClipboard();
     endpoint.setClipboardSource(() => undefined);
+    await services.learning.stop();
     await services.sessionImporter.stop();
     await context.tenants.close();
     await services.objects.close();
@@ -222,6 +226,7 @@ export function startApplication(
   server.listen(config.port, config.host, () => {
     nodes.start();
     control.sessionImporter.start();
+    control.learning.start();
     const address = server.address();
     console.log(
       `RemoteKit Control ${config.tls ? 'https' : 'http'}://${config.host}:${typeof address === 'object' ? address?.port : config.port}`,

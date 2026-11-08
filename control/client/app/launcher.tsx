@@ -280,11 +280,15 @@ export function Launcher({
                           ? '#2563b8'
                           : tile.appId === 'files'
                             ? '#0d9488'
-                            : tile.appId === 'settings'
-                              ? '#475569'
-                              : tile.appId === 'admin'
-                                ? '#7c3aed'
-                                : (tile.themeColor ?? originColor(tile.url ?? tile.key)),
+                            : tile.appId === 'study'
+                              ? '#c2570c'
+                              : tile.appId === 'questions'
+                                ? '#4f46e5'
+                                : tile.appId === 'settings'
+                                  ? '#475569'
+                                  : tile.appId === 'admin'
+                                    ? '#7c3aed'
+                                    : (tile.themeColor ?? originColor(tile.url ?? tile.key)),
                     );
                     return (
                       <LauncherTileView

@@ -8,7 +8,14 @@ import { isLocalTab } from '../../shared/product';
 
 type Services = Pick<
   DomainServices,
-  'accounts' | 'viewers' | 'lifecycle' | 'objects' | 'sessionPurge' | 'sessionImporter' | 'operations'
+  | 'accounts'
+  | 'viewers'
+  | 'lifecycle'
+  | 'objects'
+  | 'sessionPurge'
+  | 'sessionImporter'
+  | 'operations'
+  | 'learning'
 >;
 
 export class UserAdmin {
@@ -142,6 +149,8 @@ export class UserAdmin {
   }
   async resetSession(username: unknown) {
     const user = this.find(username);
+    if (this.context.endpoint.placement.peek(user.tenant)?.state !== 'active')
+      await this.services.learning.forgetTenant(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
       // A running Browser still owns live pages and RTC; reset only discards a hibernated Session.
       if (this.context.endpoint.placement.peek(user.tenant)?.state === 'active')
@@ -171,6 +180,7 @@ export class UserAdmin {
       this.context.store.accounts.revokeUser(user.id);
     });
     await this.disconnect(user.tenant);
+    await this.services.learning.forgetTenant(user.tenant);
     await this.context.tenants.serial(user.tenant, async () => {
       await this.context.endpoint.hibernating.get(user.tenant)?.catch(() => {});
       const store = this.context.store;

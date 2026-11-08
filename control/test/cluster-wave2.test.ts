@@ -1,3 +1,4 @@
+import type { LibrarySnapshot } from '../shared/file-library';
 import { registerUser } from './server-fixture';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -73,8 +74,8 @@ async function harness(quota = 4096) {
       memory: { total: 10000, available: 9000 },
       disk: { total: 10000, free: 9000 },
     });
-    client.fetchObject = (tenant, objectId) =>
-      [...clients.values()].map((source) => source.objects.get(tenant + ':' + objectId)).find(Boolean);
+    client.fetchObject = (objectId) =>
+      [...clients.values()].map((source) => source.objects.get(objectId)).find(Boolean);
     clients.set(nodeId, client);
     await client.connect(url, key, { nodeId });
     if (client.helloReply.type === 'node.ready') await nodes.get(nodeId)!.request('fixture.barrier', '');
@@ -87,15 +88,15 @@ async function harness(quota = 4096) {
       size,
       storedSize: size + 40,
       storedSha256: id(1000 + Number.parseInt(objectId.slice(-5), 16)),
-      ...(derivedFrom ? { derivedFrom } : {}),
+      ...(derivedFrom ? { derivedFrom, kind: 'thumbnail' as const } : {}),
     };
-    client.objects.set(tenant + ':' + objectId, object);
+    client.objects.set(objectId, object);
     await client.request('object.committed', tenant, {
       objectId,
       size,
       storedSize: object.storedSize,
       storedSha256: object.storedSha256,
-      ...(derivedFrom ? { derivedFrom } : {}),
+      ...(derivedFrom ? { derivedFrom, kind: 'thumbnail' as const } : {}),
     });
     return object;
   }
@@ -121,20 +122,78 @@ async function harness(quota = 4096) {
   };
 }
 
+test('session events reach learning and acknowledge without interrupting the node connection', async () => {
+  const h = await harness();
+  try {
+    const client = await h.connect('alpha');
+    const account = await registerUser(h.store, 'learning-events', 'learning-events-password');
+    const placement = h.placement.resolve(account.tenantId);
+    const node = h.nodes.get(placement.nodeId)!;
+    const received = once(node, 'session.events');
+    const acknowledged = new Promise<void>((resolve) => {
+      const listener = (request: Record<string, any>) => {
+        if (request.method !== 'session.events.ack') return;
+        client.off('request', listener);
+        resolve();
+      };
+      client.on('request', listener);
+    });
+    client.send({
+      event: 'session.events',
+      tenantId: account.tenantId,
+      sessionId: placement.sessionId,
+      browserIncarnation: 'browser',
+      events: [{ type: 'view.signIn', version: 1, eventId: 'sign-in', provider: 'xinjiaoyu' }],
+    });
+    assert.equal((await received)[0].events[0].eventId, 'sign-in');
+    await acknowledged;
+    await node.request('fixture.barrier', '');
+    assert.ok(
+      client.requests.some(
+        (request) => request.method === 'session.events.ack' && request.eventIds.includes('sign-in'),
+      ),
+    );
+    assert.equal(node.state.state, 'ready');
+    await h.control.viewers.attachViewer(
+      account.tenantId,
+      'learning-viewer',
+      () => {},
+      {
+        identity: 'test',
+        valid: () => true,
+      },
+      true,
+    );
+    const changed = once(h.control.events, 'state');
+    h.control.learning.accounts.setState(account.tenantId, 'changyan', {
+      status: 'signing_in',
+      step: 'credentials',
+    });
+    const [tenant, state] = await changed;
+    assert.equal(tenant, account.tenantId);
+    assert.equal(state.learning.accounts.changyan.status, 'signing_in');
+    const other = await registerUser(h.store, 'learning-other', 'learning-other-password');
+    assert.equal(
+      h.control.viewers.productState(other.tenantId).learning.accounts.changyan.status,
+      'signed_out',
+    );
+  } finally {
+    await h.close();
+  }
+});
+
 test('tenant derivations use independent HKDF domains and erase the opened DEK', () => {
   const dek = Buffer.alloc(32, 7),
     copy = Buffer.from(dek);
   const keys = tenantKeys(dek);
   for (const [name, info] of Object.entries({
     profileKey: 'remotekit profile cookie key 1',
-    objectKey: 'remotekit object key 1',
-    objectIdKey: 'remotekit object id key 1',
   }))
     assert.equal(
       keys[name as keyof typeof keys],
       Buffer.from(hkdfSync('sha256', copy, Buffer.alloc(0), info, 32)).toString('base64'),
     );
-  assert.equal(new Set(Object.values(keys)).size, 3);
+  assert.equal(new Set(Object.values(keys)).size, 1);
   assert.ok(dek.every((byte) => byte === 0));
 });
 
@@ -196,12 +255,13 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     assert.equal(first.nodeId, 'alpha');
     const opening = alpha.requests.find((request) => request.method === 'session.open')!;
     assert.equal(opening.checkpoint, null);
-    assert.equal(Buffer.from(opening.objectKey, 'base64').length, 32);
-    assert.notEqual(opening.objectKey, opening.objectIdKey);
+    assert.equal(opening.objectKey, undefined);
+    assert.equal(Buffer.from(alpha.helloReply.objectKey, 'base64').length, 32);
+    assert.notEqual(alpha.helloReply.objectKey, alpha.helloReply.objectIdKey);
     await h.commit(alpha, 'tenant', id(1));
     await h.commit(alpha, 'tenant', id(2));
     await h.control.objects.replicate();
-    assert.ok(beta.objects.has('tenant:' + id(1)));
+    assert.ok(beta.objects.has(id(1)));
     assert.deepEqual(await alpha.request('object.locate', 'tenant', { ids: [id(1)] }), {
       sources: {
         [id(1)]: [
@@ -229,7 +289,7 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     const restored = beta.requests.find((request) => request.method === 'session.open')!;
     assert.equal(restored.checkpoint, id(2));
     assert.equal(restored.sessionId, first.sessionId);
-    assert.equal(restored.objectKey, opening.objectKey);
+    assert.equal(restored.profileKey, opening.profileKey);
     const offline = once(h.nodes.get('alpha')!, 'offline');
     alpha.close();
     await offline;
@@ -246,10 +306,12 @@ test('two nodes place by pressure, checkpoint, wake at epoch+1, fence reconnects
     ]);
     await h.commit(beta, 'tenant', id(3));
     await h.control.objects.replicate();
-    h.store.db.exec('UPDATE objects SET created_at=0');
+    h.store.db.exec(
+      'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
+    );
     await h.control.objects.gc();
-    assert.equal(beta.objects.has('tenant:' + id(3)), false);
-    assert.equal(alpha.objects.has('tenant:' + id(3)), false);
+    assert.equal(beta.objects.has(id(3)), false);
+    assert.equal(alpha.objects.has(id(3)), false);
     assert.ok(h.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id(1)));
     assert.throws(() => h.control.nodeAdmin.remove('beta'), { code: 'conflict' });
     const gone = once(h.nodes.get('beta')!, 'offline');
@@ -295,13 +357,144 @@ test('object requests enforce ownership, idempotence, conflicts, quotas and the 
     await assert.rejects(h.commit(alpha, 'tenant', id(2), 11), { code: 'limit_exceeded' });
     await h.control.objects.replicate();
     assert.ok(
-      h.store.db
-        .prepare('SELECT 1 FROM object_replicas WHERE tenant=? AND id=? AND node_id=?')
-        .get(tenantId, objectId, 'beta'),
+      h.store.db.prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?').get(objectId, 'beta'),
     );
     await assert.rejects(beta.request('object.committed', tenantId, { objectId, ...metadata }), {
       code: 'forbidden',
     });
+  } finally {
+    await h.close();
+  }
+});
+
+test('document derivations authorize the source and are shared across tenant claims', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    const beta = await h.connect('beta', 0.6);
+    await h.gateway.snapshot('tenant');
+    await h.commit(alpha, 'tenant', id(801));
+    const params = { id: id(801), kind: 'document' };
+    assert.equal(await alpha.request('object.derivation', 'tenant', { params }), null);
+    await assert.rejects(beta.request('object.derivation', 'tenant', { params }), { code: 'forbidden' });
+    await assert.rejects(
+      alpha.request('object.derivation', 'tenant', {
+        params: { id: id(999), kind: 'document' },
+      }),
+      { code: 'forbidden' },
+    );
+    await assert.rejects(
+      alpha.request('object.derivation', 'tenant', {
+        params: { id: id(801), kind: 'thumbnail' },
+      }),
+      { code: 'invalid_request' },
+    );
+    await alpha.request('object.committed', 'tenant', {
+      objectId: id(802),
+      size: 10,
+      storedSize: 50,
+      storedSha256: id(803),
+      derivedFrom: id(801),
+      kind: 'document',
+    });
+    assert.deepEqual(await alpha.request('object.derivation', 'tenant', { params }), { id: id(802) });
+    await h.gateway.snapshot('second');
+    const second = h.client(h.placement.peek('second')!.nodeId)!;
+    await h.commit(second, 'second', id(801));
+    assert.deepEqual(await second.request('object.derivation', 'second', { params }), { id: id(802) });
+    assert.equal(
+      (
+        h.store.db.prepare('SELECT count(*) AS n FROM object_derivations WHERE kind=?').get('document') as {
+          n: bigint;
+        }
+      ).n,
+      1n,
+    );
+    h.control.objects.require('second', id(802));
+  } finally {
+    await h.close();
+  }
+});
+
+test('pre-render chooses a source replica, authorizes only its operation and creates no tenant claim', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha', 0.6);
+    const beta = await h.connect('beta', 0.1);
+    await h.gateway.snapshot('tenant');
+    const owner = h.client(h.placement.peek('tenant')!.nodeId)!;
+    await h.commit(owner, 'tenant', id(811));
+    h.store.db.prepare('DELETE FROM object_replicas WHERE id=?').run(id(811));
+    h.store.db.prepare('INSERT INTO object_replicas VALUES (?,?)').run(id(811), 'alpha');
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    alpha.handler = async (message) => {
+      if (message.method !== 'object.render') return alpha.handle(message);
+      assert.deepEqual(message.params, { id: id(811) });
+      const params = { id: id(811), kind: 'document' };
+      assert.equal(await alpha.request('object.derivation', '', { params }), null);
+      await assert.rejects(beta.request('object.derivation', '', { params }), { code: 'forbidden' });
+      await alpha.request('object.locate', '', { renderSource: id(811), ids: [id(811)] });
+      await assert.rejects(alpha.request('object.locate', '', { renderSource: id(811), ids: [id(999)] }), {
+        code: 'forbidden',
+      });
+      await alpha.request('object.committed', '', {
+        objectId: id(812),
+        size: 10,
+        storedSize: 50,
+        storedSha256: id(813),
+        derivedFrom: id(811),
+        kind: 'document',
+      });
+      finish();
+      return { documentId: id(812) };
+    };
+    h.control.objects.render(id(811));
+    h.control.objects.render(id(811));
+    await finished;
+    await h.nodes.get('alpha')!.request('fixture.barrier', '');
+    assert.equal(alpha.requests.filter((request) => request.method === 'object.render').length, 1);
+    assert.equal(h.store.db.prepare('SELECT 1 FROM object_claims WHERE id=?').get(id(812)), undefined);
+    assert.equal(h.control.objects.derived(id(811), 'document'), id(812));
+    h.control.objects.require('tenant', id(812));
+    h.control.objects.render(id(811));
+    assert.equal(alpha.requests.filter((request) => request.method === 'object.render').length, 1);
+    h.store.db.exec(
+      'UPDATE object_claims SET claimed_at=0; UPDATE objects SET created_at=0; DELETE FROM object_gc',
+    );
+    await h.control.objects.gc();
+    assert.equal(h.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id(811)), undefined);
+    assert.equal(h.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id(812)), undefined);
+  } finally {
+    await h.close();
+  }
+});
+
+test('pre-render without a replica uses the least loaded ready node and logs failure once', async (t) => {
+  const h = await harness();
+  const failures: unknown[][] = [];
+  t.mock.method(console, 'error', (...args: unknown[]) => failures.push(args));
+  try {
+    const alpha = await h.connect('alpha', 0.6);
+    const beta = await h.connect('beta', 0.1);
+    await h.gateway.snapshot('tenant');
+    await h.commit(h.client(h.placement.peek('tenant')!.nodeId)!, 'tenant', id(821));
+    h.store.db.prepare('DELETE FROM object_replicas WHERE id=?').run(id(821));
+    beta.handler = (message) => {
+      if (message.method === 'object.render')
+        throw { code: 'invalid_request', message: 'unsupported document type' };
+      return beta.handle(message);
+    };
+    const requested = once(beta, 'request');
+    h.control.objects.render(id(821));
+    await requested;
+    await h.nodes.get('beta')!.request('fixture.barrier', '');
+    assert.equal(beta.requests.filter((request) => request.method === 'object.render').length, 1);
+    assert.equal(alpha.requests.filter((request) => request.method === 'object.render').length, 0);
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0][0], 'object.render failed');
   } finally {
     await h.close();
   }
@@ -316,9 +509,9 @@ test('inventory pages restore matching replicas, drop missing or corrupt copies 
       missing = await h.commit(alpha, 'tenant', id(2));
     const corrupt = await h.commit(alpha, 'tenant', id(3));
     h.store.db.prepare('DELETE FROM object_replicas WHERE id=?').run(first.id);
-    alpha.objects.delete('tenant:' + missing.id);
-    alpha.objects.set('tenant:' + corrupt.id, { ...corrupt, storedSha256: id(99) });
-    alpha.objects.set('tenant:' + id(4), { ...first, id: id(4) });
+    alpha.objects.delete(missing.id);
+    alpha.objects.set(corrupt.id, { ...corrupt, storedSha256: id(99) });
+    alpha.objects.set(id(4), { ...first, id: id(4) });
     let pages = 0;
     alpha.handler = (request) => {
       if (request.method !== 'object.inventory') return alpha.handle(request);
@@ -333,11 +526,11 @@ test('inventory pages restore matching replicas, drop missing or corrupt copies 
     assert.equal(pages, 2);
     assert.ok(h.store.db.prepare('SELECT 1 FROM object_replicas WHERE id=?').get(first.id));
     assert.equal(h.store.db.prepare('SELECT 1 FROM object_replicas WHERE id=?').get(missing.id), undefined);
-    assert.equal(alpha.objects.has('tenant:' + corrupt.id), false);
-    assert.equal(alpha.objects.has('tenant:' + id(4)), true);
+    assert.equal(alpha.objects.has(corrupt.id), false);
+    assert.equal(alpha.objects.has(id(4)), true);
     h.store.db.exec('UPDATE object_inventory_orphans SET first_seen=0');
     await h.control.objects.gc();
-    assert.equal(alpha.objects.has('tenant:' + id(4)), false);
+    assert.equal(alpha.objects.has(id(4)), false);
   } finally {
     await h.close();
   }
@@ -377,12 +570,14 @@ test('GC follows library and selection references, derivatives and only the newe
       h.store.db
         .prepare('INSERT INTO checkpoints VALUES (?,?,?,?,?,?)')
         .run('tenant', n, n, id(n + 3), 'dev', 0);
-      h.store.db.prepare('INSERT INTO checkpoint_objects VALUES (?,?,?)').run('tenant', n, id(n + 3));
+      h.store.db.prepare('INSERT INTO checkpoint_objects VALUES (?,?,?)').run('tenant', id(n + 3), id(n + 3));
     }
-    h.store.db.exec('UPDATE objects SET created_at=0');
+    h.store.db.exec(
+      'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
+    );
     await h.control.objects.gc();
-    for (const n of [1, 2, 3, 5, 6]) assert.ok(alpha.objects.has('tenant:' + id(n)));
-    for (const n of [4, 7]) assert.equal(alpha.objects.has('tenant:' + id(n)), false);
+    for (const n of [1, 2, 3, 5, 6]) assert.ok(alpha.objects.has(id(n)));
+    for (const n of [4, 7]) assert.equal(alpha.objects.has(id(n)), false);
     h.store.library.save('tenant', {
       revision: 1,
       entries: [],
@@ -394,7 +589,8 @@ test('GC follows library and selection references, derivatives and only the newe
     });
     h.store.db.exec("UPDATE file_library_selections SET terminal='cancelled'");
     await h.control.objects.gc();
-    for (const n of [1, 2, 3]) assert.equal(alpha.objects.has('tenant:' + id(n)), false);
+    await h.control.objects.gc(Date.now() + 2 * 60 * 60 * 1000 + 1);
+    for (const n of [1, 2, 3]) assert.equal(alpha.objects.has(id(n)), false);
   } finally {
     await h.close();
   }
@@ -461,8 +657,8 @@ test('disk pressure deletes cold copies, relocates replicas before deletion and 
     await alpha.barrier();
     await h.control.objects.tick();
     assert.ok(alpha.requests.some((request) => request.method === 'session.cold.delete'));
-    assert.ok(beta.objects.has('tenant:' + id(1)));
-    assert.equal(alpha.objects.has('tenant:' + id(1)), false);
+    assert.ok(beta.objects.has(id(1)));
+    assert.equal(alpha.objects.has(id(1)), false);
     await h.gateway.snapshot('new-tenant');
     assert.equal(h.placement.peek('new-tenant')!.nodeId, 'beta');
     assert.equal(h.placement.peek('tenant')!.nodeId, 'alpha');
@@ -697,12 +893,13 @@ test('library imports require indexed object ids and deduplicated derivatives st
       storedSize: thumb.storedSize,
       storedSha256: thumb.storedSha256,
       derivedFrom: id(2),
+      kind: 'thumbnail',
     });
     alpha.handler = (request) =>
       request.method === 'session.library.describe'
         ? {
             assetId: request.assetId,
-            size: alpha.objects.get('tenant:' + request.assetId)!.size,
+            size: alpha.objects.get(request.assetId)!.size,
             type: 'image/png',
           }
         : alpha.handle(request);
@@ -721,12 +918,14 @@ test('library imports require indexed object ids and deduplicated derivatives st
         () => undefined,
       );
     await assert.rejects(request('old-asset-id', 'invalid'), { code: 'invalid_request' });
-    await assert.rejects(request(id(99), 'missing'), { code: 'not_found' });
+    await assert.rejects(request(id(99), 'missing'), { code: 'forbidden' });
     await request(id(2), 'import');
-    h.store.db.exec('UPDATE objects SET created_at=0');
+    h.store.db.exec(
+      'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
+    );
     await h.control.objects.gc();
-    assert.equal(alpha.objects.has('tenant:' + id(1)), false);
-    assert.ok(alpha.objects.has('tenant:' + id(3)));
+    assert.equal(alpha.objects.has(id(1)), false);
+    assert.ok(alpha.objects.has(id(3)));
     assert.equal(
       alpha.requests.some((request) =>
         ['session.library.references', 'session.library.retain'].includes(request.method),
@@ -745,7 +944,9 @@ test('GC rechecks references after asynchronous deletes and checkpoints cannot a
     await h.gateway.snapshot('tenant');
     await h.commit(alpha, 'tenant', id(1));
     await h.commit(alpha, 'tenant', id(2));
-    h.store.db.exec('UPDATE objects SET created_at=0');
+    h.store.db.exec(
+      'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
+    );
     let release!: () => void;
     let deleting!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -788,7 +989,196 @@ test('GC rechecks references after asynchronous deletes and checkpoints cannot a
     });
     release();
     await collection;
-    assert.ok(alpha.objects.has('tenant:' + id(2)));
+    assert.ok(alpha.objects.has(id(2)));
+  } finally {
+    await h.close();
+  }
+});
+
+test('cluster object keys persist and match every node while session opens carry only a profile key', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha'),
+      beta = await h.connect('beta');
+    assert.equal(alpha.helloReply.objectKey, beta.helloReply.objectKey);
+    assert.equal(alpha.helloReply.objectIdKey, beta.helloReply.objectIdKey);
+    const row = h.store.db.prepare('SELECT ciphertext FROM cluster_object_secret').get() as {
+      ciphertext: string;
+    };
+    const secret = h.store.atRestKey.open('cluster-object-secret', row.ciphertext);
+    for (const [key, domain] of [
+      ['objectKey', 'remotekit object key 2'],
+      ['objectIdKey', 'remotekit object id key 2'],
+    ])
+      assert.equal(
+        alpha.helloReply[key],
+        Buffer.from(hkdfSync('sha256', secret, Buffer.alloc(0), domain, 32)).toString('base64'),
+      );
+    await h.gateway.snapshot('tenant');
+    const opened = alpha.requests.find((r) => r.method === 'session.open')!;
+    assert.ok(opened.profileKey);
+    assert.equal(opened.objectKey, undefined);
+    assert.equal(opened.objectIdKey, undefined);
+  } finally {
+    await h.close();
+  }
+});
+
+test('streamed Control puts deduplicate across tenants, authorize references, charge each tenant and preserve shared objects until grace', async () => {
+  const h = await harness(100);
+  try {
+    const alpha = await h.connect('alpha');
+    const chunks = async function* () {
+      yield Buffer.from('class ');
+      yield Buffer.from('attachment');
+    };
+    const first = await h.control.objects.put('first', chunks(), { maxBytes: 100 });
+    const second = await h.control.objects.put('second', chunks(), { maxBytes: 100 });
+    assert.deepEqual(second, first);
+    assert.equal(h.control.objects.usage().objects, 1);
+    assert.equal(h.control.objects.tenantUsage('first').bytes, first.size);
+    assert.equal(h.control.objects.tenantUsage('second').bytes, first.size);
+    assert.equal(
+      (h.store.db.prepare('SELECT count(*) AS n FROM object_claims').get() as { n: bigint }).n,
+      2n,
+    );
+    alpha.handler = (r) =>
+      r.method === 'session.library.describe'
+        ? { assetId: r.assetId, size: alpha.objects.get(r.assetId)!.size, type: 'text/plain' }
+        : alpha.handle(r);
+    const call = (tenant: string, method: string, params: object) =>
+      h.control.library.request(
+        tenant,
+        'library.' + method,
+        params,
+        () => {},
+        () => undefined,
+      ) as Promise<LibrarySnapshot>;
+    const imported: LibrarySnapshot[] = [];
+    for (const tenant of ['first', 'second'])
+      imported.push(
+        await call(tenant, 'import', {
+          operationId: 'import',
+          assetId: first.id,
+          name: 'attachment.txt',
+          destination: 'library',
+          origin: { kind: 'files', channel: 'upload', partitionId: null },
+        }),
+      );
+    await h.gateway.snapshot('stranger');
+    await assert.rejects(alpha.request('object.locate', 'stranger', { ids: [first.id] }), {
+      code: 'forbidden',
+    });
+    h.store.db.exec('UPDATE object_claims SET claimed_at=0');
+    await h.control.objects.gc();
+    await call('first', 'delete', { operationId: 'delete', ids: [imported[0].entries[0].id] });
+    await h.control.objects.gc();
+    assert.equal(h.control.objects.usage().objects, 1);
+    assert.equal(h.control.objects.bytes('first'), 0);
+    assert.equal(h.control.objects.bytes('second'), first.size);
+    await call('second', 'delete', { operationId: 'delete', ids: [imported[1].entries[0].id] });
+    const now = Date.now();
+    await h.control.objects.gc(now);
+    assert.equal(h.control.objects.usage().objects, 1);
+    await h.control.objects.gc(now + 2 * 60 * 60 * 1000 + 1);
+    assert.equal(h.control.objects.usage().objects, 0);
+    assert.equal(alpha.objects.has(first.id), false);
+  } finally {
+    await h.close();
+  }
+});
+
+test('Control puts enforce stream bounds and quota, cancel blocked producers, and correlate simultaneous completions', async () => {
+  const h = await harness(4 * 1024 * 1024);
+  try {
+    const alpha = await h.connect('alpha');
+    const chunks = async function* (text: string) {
+      yield Buffer.from(text);
+    };
+    const [a, b] = await Promise.all([
+      h.control.objects.put('tenant', chunks('one'), { maxBytes: 3 }),
+      h.control.objects.put('tenant', chunks('two'), { maxBytes: 3 }),
+    ]);
+    assert.notEqual(a.id, b.id);
+    await assert.rejects(h.control.objects.put('tenant', chunks('oversize'), { maxBytes: 2 }), {
+      code: 'limit_exceeded',
+    });
+    const big = await h.control.objects.put(
+      'large',
+      (async function* () {
+        yield Buffer.alloc(2 * 1024 * 1024 + 7, 2);
+      })(),
+      { maxBytes: 3 * 1024 * 1024 },
+    );
+    assert.equal(big.size, 2 * 1024 * 1024 + 7);
+    const controller = new AbortController();
+    const entered = once(alpha, 'request');
+    const blocked: AsyncIterable<Uint8Array> = {
+      [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }),
+    };
+    const pending = h.control.objects.put('cancelled', blocked, { maxBytes: 100, signal: controller.signal });
+    await entered;
+    const rejection = assert.rejects(pending, { code: 'rejected' });
+    controller.abort();
+    await rejection;
+    assert.ok(alpha.requests.some((r) => r.method === 'object.put.cancel'));
+    h.store.db.prepare('INSERT OR REPLACE INTO object_claims VALUES (?,?,?)').run('full', big.id, Date.now());
+    const tooMuch = (async function* () {
+      yield Buffer.alloc(2 * 1024 * 1024, 3);
+    })();
+    await assert.rejects(h.control.objects.put('full', tooMuch, { maxBytes: 3 * 1024 * 1024 }), {
+      code: 'limit_exceeded',
+    });
+    assert.equal(
+      (
+        h.store.db.prepare('SELECT count(*) AS n FROM object_claims WHERE tenant=?').get('full') as {
+          n: bigint;
+        }
+      ).n,
+      1n,
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test('durable reference removal starts its own grace even without a GC tick while referenced', async () => {
+  const h = await harness();
+  try {
+    const alpha = await h.connect('alpha');
+    await h.gateway.snapshot('tenant');
+    await h.commit(alpha, 'tenant', id(1));
+    h.store.db.exec(
+      'UPDATE objects SET created_at=0; UPDATE object_claims SET claimed_at=0; DELETE FROM object_gc',
+    );
+    const snapshot = {
+      revision: 0,
+      entries: [
+        {
+          id: 'entry',
+          assetId: id(1),
+          name: 'file',
+          type: 'text/plain',
+          size: 10,
+          createdAt: 0,
+          partitionId: null,
+          collected: true,
+          source: { app: 'files', channel: 'upload' },
+        },
+      ],
+      basket: [],
+      partitions: [],
+      sources: [],
+      excludedSources: [],
+      basketPartitionId: null,
+    };
+    h.store.library.save('tenant', snapshot);
+    h.store.library.save('tenant', { ...snapshot, entries: [] });
+    const now = Date.now();
+    await h.control.objects.gc(now);
+    assert.equal(h.control.objects.usage().objects, 1);
+    await h.control.objects.gc(now + 2 * 60 * 60 * 1000 + 1);
+    assert.equal(h.control.objects.usage().objects, 0);
   } finally {
     await h.close();
   }

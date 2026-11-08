@@ -2,6 +2,7 @@
 #include "remotekit/browser/control_response.h"
 #include "browser/control_input_codec.h"
 #include "browser/control_clipboard.h"
+#include "browser/signin_result.h"
 #include "remotekit/browser/file_chooser_accept.h"
 
 #include <cstdio>
@@ -13,6 +14,44 @@
 #include "base/json/json_writer.h"
 
 namespace {
+void SignInResults() {
+  using namespace remotekit::browser;
+  CHECK(ValidSignInPurpose("changyan") && ValidSignInPurpose("xinjiaoyu"));
+  CHECK(!ValidSignInPurpose("") && !ValidSignInPurpose("other"));
+  net::HttpRequestHeaders headers;
+  const GURL api("https://www.xinjiaoyu.com/api/v3/student/info");
+  CHECK(!XinjiaoyuSignInResult(api, headers));
+  headers.SetHeader("Authorization", "JBY example");
+  CHECK(!XinjiaoyuSignInResult(api, headers));
+  headers.SetHeader("AccessToken", "example");
+  headers.SetHeader("Cookie", "must-not-leave-browser");
+  for (const auto* name :
+       {"user-agent", "accept-language", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"})
+    headers.SetHeader(name, "identity");
+  auto result = XinjiaoyuSignInResult(api, headers);
+  CHECK(result && result->size() == 7 && !result->contains("cookie"));
+  for (const auto* url : {"https://www.xinjiaoyu.com/api/v3/server_system/system/code",
+                          "https://www.xinjiaoyu.com/api/v3/server_system/auth/login",
+                          "http://www.xinjiaoyu.com/api/v3/student/info",
+                          "https://www.xinjiaoyu.com.evil.test/api/v3/student/info",
+                          "https://www.xinjiaoyu.com:444/api/v3/student/info",
+                          "https://www.xinjiaoyu.com/api/v30/student/info"})
+    CHECK(!XinjiaoyuSignInResult(GURL(url), headers));
+  headers.SetHeader("Authorization", "Bearer example");
+  CHECK(!XinjiaoyuSignInResult(api, headers));
+  headers.SetHeader("Authorization", "JBY " + std::string(8192, 'x'));
+  CHECK(!XinjiaoyuSignInResult(api, headers));
+  auto done = ChangyanSignInResult(
+      GURL("remotekit-signin://changyan/"
+           "done?lot_number=a&captcha_output=b%2Bc&pass_token=d&gen_time=1&cookie=ignore"));
+  CHECK(done && done->size() == 4 && *done->FindString("captcha_output") == "b+c");
+  CHECK(!ChangyanSignInResult(GURL("remotekit-signin://changyan/done?lot_number=a")));
+  CHECK(!ChangyanSignInResult(
+      GURL("https://changyan/done?lot_number=a&captcha_output=b&pass_token=c&gen_time=1")));
+  CHECK(SignInNavigationUrl(GURL("remotekit-signin://changyan/done?secret=value")) ==
+        "remotekit-signin://changyan/done");
+}
+
 void ControlContract() {
   using namespace remotekit;
   using namespace remotekit::browser;
@@ -265,6 +304,7 @@ void AcceptHints() {
 }  // namespace
 int main() {
   base::AtExitManager at_exit;
+  SignInResults();
   ControlContract();
   Responses();
   RenderEndpointResponses();

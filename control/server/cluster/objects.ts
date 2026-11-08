@@ -1,8 +1,14 @@
+import { randomUUID } from 'node:crypto';
 import { RemoteKitError } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
 import type { NodeLink, NodeRegistry } from './node-link';
+import { clusterObjectKeys } from './keys';
+import {
+  tenantObjects,
+  syncObjectReferences,
+  OBJECT_GRACE_MS as GRACE_MS,
+} from '../persistence/object-references';
 
-const GRACE_MS = 2 * 60 * 60 * 1000;
 const objectId = (id: unknown): id is string => typeof id === 'string' && /^[a-f0-9]{64}$/.test(id);
 const retirements = new WeakMap<ControlDatabase, Set<string>>();
 export function retiringObjects(store: ControlDatabase) {
@@ -14,17 +20,21 @@ export function retiringObjects(store: ControlDatabase) {
   return objects;
 }
 interface IndexedObject {
-  tenant: string;
   id: string;
   size: bigint;
   stored_size: bigint;
   stored_sha256: string;
   created_at: bigint;
-  derived_from: string | null;
 }
 export class ObjectIndex {
   private readonly fetches = new Map<string, Set<string>>();
+  private readonly readFetches = new Map<string, Set<string>>();
+  private readonly puts = new Map<
+    string,
+    { node: NodeLink; tenant: string; epoch: string; ending: boolean; object?: string }
+  >();
   private readonly busy = new Map<string, number>();
+  private readonly renders = new Map<string, { node: NodeLink; epoch: string }>();
   private readonly inventoryCommits = new Map<string, Set<string>>();
   private readonly reserved = new Map<string, number>();
   private readonly reconciling = new Set<string>();
@@ -40,43 +50,122 @@ export class ObjectIndex {
     private readonly checkpointing: (tenant: string) => boolean,
   ) {
     this.retired = retiringObjects(store);
+    nodes.objectKeys = clusterObjectKeys(store);
     nodes.handlers.set('object.committed', (node, message) => this.committed(node, message));
     nodes.handlers.set('object.locate', (node, message) => this.locate(node, message));
+    nodes.handlers.set('object.derivation', (node, message) => this.derivation(node, message));
     nodes.on('ready', this.ready);
     nodes.on('metrics', this.metrics);
+    nodes.on('offline', this.offline);
   }
+  private readonly offline = (nodeId: string) => {
+    this.readFetches.delete(nodeId);
+  };
   private track(work: Promise<unknown>) {
     this.jobs.add(work);
     void work.catch(() => {}).finally(() => this.jobs.delete(work));
   }
   private readonly ready = ({ nodeId }: { nodeId: string }) => {
+    this.readFetches.delete(nodeId);
     this.track(this.reconcile(this.nodes.get(nodeId)!).then(() => this.tick()));
   };
   private readonly metrics = () => {
     this.track(this.tick());
   };
-  private key(tenant: string, id: string) {
-    return tenant + ':' + id;
-  }
-  private fetchKey(nodeId: string, tenant: string) {
-    return nodeId + ':' + tenant;
-  }
   bytes(tenant: string) {
-    const row = this.store.db
-      .prepare('SELECT coalesce(sum(size),0) AS bytes FROM objects WHERE tenant=?')
-      .get(tenant) as { bytes: bigint };
-    return Number(row.bytes);
+    let bytes = 0;
+    const lookup = this.store.db.prepare('SELECT size FROM objects WHERE id=?');
+    for (const id of tenantObjects(this.store.db).get(tenant) ?? [])
+      bytes += Number((lookup.get(id) as { size: bigint } | undefined)?.size ?? 0);
+    return bytes;
   }
   require(tenant: string, id: string) {
     if (!objectId(id)) throw new RemoteKitError('invalid_request', 'Asset id must be an object id');
-    if (
-      this.retired.has(this.key(tenant, id)) ||
-      !this.store.db.prepare('SELECT 1 FROM objects WHERE tenant=? AND id=?').get(tenant, id)
-    )
+    if (this.retired.has(id) || !tenantObjects(this.store.db).get(tenant)?.has(id))
+      throw new RemoteKitError('forbidden', 'Tenant has no object reference or claim');
+    if (!this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id))
       throw new RemoteKitError('not_found', 'Object is not available');
   }
+  checkQuota(tenant: string) {
+    if (this.bytes(tenant) > this.tenantObjectBytes)
+      throw new RemoteKitError('limit_exceeded', 'Tenant object quota exceeded');
+  }
+  derived(sourceId: string, kind: 'thumbnail' | 'document'): string | undefined {
+    const row = this.store.db
+      .prepare(
+        'SELECT d.id FROM object_derivations d JOIN objects o ON o.id=d.id WHERE source_id=? AND kind=? ORDER BY o.created_at,d.id LIMIT 1',
+      )
+      .get(sourceId, kind) as { id: string } | undefined;
+    return row && !this.retired.has(row.id) ? row.id : undefined;
+  }
+  private rendering(node: NodeLink, sourceId: string) {
+    const operation = this.renders.get(sourceId);
+    return (
+      operation?.node === node &&
+      node.state.state === 'ready' &&
+      operation.epoch === node.state.connectionEpoch
+    );
+  }
+  derivation(node: NodeLink, message: Record<string, any>) {
+    const { id: sourceId, kind } = message.params ?? {};
+    if (!objectId(sourceId) || kind !== 'document')
+      throw new RemoteKitError('invalid_request', 'Invalid document derivation request');
+    if (!message.tenantId && this.rendering(node, sourceId)) {
+      if (this.retired.has(sourceId)) throw new RemoteKitError('conflict', 'Source object is being deleted');
+    } else {
+      if (!this.placedOn(message.tenantId, node.nodeId))
+        throw new RemoteKitError('forbidden', 'Tenant session is not hosted on this node');
+      this.require(message.tenantId, sourceId);
+    }
+    const id = this.derived(sourceId, 'document');
+    return id ? { id } : null;
+  }
+  render(id: string): void {
+    if (this.closed || this.renders.has(id) || this.derived(id, 'document')) return;
+    if (
+      !objectId(id) ||
+      this.retired.has(id) ||
+      !this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(id)
+    ) {
+      console.error('object.render failed', id, 'Source object is unavailable');
+      return;
+    }
+    const replicas = new Set(this.sources(id).map((source) => source.nodeId));
+    const node = this.nodes
+      .all()
+      .filter(
+        (candidate) =>
+          candidate.state.state === 'ready' &&
+          !candidate.diskDraining &&
+          !this.nodes.isRemoved(candidate.nodeId),
+      )
+      .sort(
+        (a, b) =>
+          Number(replicas.has(b.nodeId)) - Number(replicas.has(a.nodeId)) ||
+          (a.metrics.latest()?.pressure ?? 1) - (b.metrics.latest()?.pressure ?? 1) ||
+          a.nodeId.localeCompare(b.nodeId),
+      )[0];
+    if (!node || node.state.state !== 'ready') {
+      console.error('object.render failed', id, 'No ready node');
+      return;
+    }
+    this.renders.set(id, { node, epoch: node.state.connectionEpoch });
+    this.track(
+      (async () => {
+        try {
+          const result = await node.request('object.render', '', { params: { id } }, 6 * 60_000);
+          if (!objectId(result.documentId) || this.derived(id, 'document') !== result.documentId)
+            throw new RemoteKitError('rejected', 'Invalid object render result');
+        } catch (error) {
+          console.error('object.render failed', id, error);
+        } finally {
+          this.renders.delete(id);
+        }
+      })(),
+    );
+  }
   committed(node: NodeLink, message: Record<string, any>) {
-    const { tenantId: tenant, objectId: id, size, storedSize, storedSha256, derivedFrom } = message;
+    const { tenantId: tenant, objectId: id, size, storedSize, storedSha256, derivedFrom, kind } = message;
     if (
       !objectId(id) ||
       !Number.isSafeInteger(size) ||
@@ -84,16 +173,33 @@ export class ObjectIndex {
       !Number.isSafeInteger(storedSize) ||
       storedSize < 0 ||
       !objectId(storedSha256) ||
-      (derivedFrom !== undefined && derivedFrom !== null && (!objectId(derivedFrom) || derivedFrom === id))
+      (derivedFrom !== undefined &&
+        (!objectId(derivedFrom) || derivedFrom === id || !['thumbnail', 'document'].includes(kind))) ||
+      (kind !== undefined && derivedFrom === undefined)
     )
       throw new RemoteKitError('invalid_request', 'Invalid object metadata');
-    const expected = this.fetches.get(this.fetchKey(node.nodeId, tenant));
-    if (!this.placedOn(tenant, node.nodeId) && !expected?.has(id))
-      throw new RemoteKitError('forbidden', 'Tenant is not placed on this node');
+    const replication = this.fetches.get(node.nodeId)?.has(id) || this.readFetches.get(node.nodeId)?.has(id);
+    const put = typeof message.putId === 'string' ? this.puts.get(message.putId) : undefined;
+    const expectedPut =
+      put &&
+      put.node === node &&
+      put.tenant === tenant &&
+      put.ending &&
+      !put.object &&
+      node.state.state === 'ready' &&
+      node.state.connectionEpoch === put.epoch;
+    const render = !tenant && kind === 'document' && this.rendering(node, derivedFrom);
+    if (
+      message.putId !== undefined
+        ? !expectedPut
+        : tenant
+          ? !this.placedOn(tenant, node.nodeId)
+          : !replication && !render
+    )
+      throw new RemoteKitError('forbidden', 'Commit has no session or Control operation');
     return this.store.transaction(() => {
-      const previous = this.store.db
-        .prepare('SELECT * FROM objects WHERE tenant=? AND id=?')
-        .get(tenant, id) as IndexedObject | undefined;
+      const previous = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(id) as
+        IndexedObject | undefined;
       if (
         previous &&
         (previous.stored_sha256 !== storedSha256 ||
@@ -101,52 +207,78 @@ export class ObjectIndex {
           Number(previous.stored_size) !== storedSize)
       )
         throw new RemoteKitError('conflict', 'Object metadata conflicts with the index');
-      if (this.retired.has(this.key(tenant, id)))
-        throw new RemoteKitError('conflict', 'Object is being deleted');
-      if (!previous) {
-        if (this.bytes(tenant) + size > this.tenantObjectBytes)
-          throw new RemoteKitError('limit_exceeded', 'Tenant object quota exceeded');
-        this.store.db
-          .prepare('INSERT INTO objects VALUES (?,?,?,?,?,?,?)')
-          .run(tenant, id, size, storedSize, storedSha256, Date.now(), derivedFrom ?? null);
-      }
+      if (this.retired.has(id)) throw new RemoteKitError('conflict', 'Object is being deleted');
       if (derivedFrom) {
-        this.require(tenant, derivedFrom);
+        if (tenant) this.require(tenant, derivedFrom);
+        else if (
+          !render ||
+          this.retired.has(derivedFrom) ||
+          !this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(derivedFrom)
+        )
+          throw new RemoteKitError('forbidden', 'Commit has no source render operation');
+      }
+      if (!previous)
         this.store.db
-          .prepare('UPDATE objects SET derived_from=coalesce(derived_from,?) WHERE tenant=? AND id=?')
-          .run(derivedFrom, tenant, id);
+          .prepare('INSERT INTO objects VALUES (?,?,?,?,?)')
+          .run(id, size, storedSize, storedSha256, Date.now());
+      if (derivedFrom)
         this.store.db
           .prepare('INSERT OR IGNORE INTO object_derivations VALUES (?,?,?)')
-          .run(tenant, id, derivedFrom);
+          .run(id, derivedFrom, kind);
+      if (tenant) {
+        this.store.db
+          .prepare(
+            'INSERT INTO object_claims VALUES (?,?,?) ON CONFLICT(tenant,id) DO UPDATE SET claimed_at=excluded.claimed_at',
+          )
+          .run(tenant, id, Date.now());
+        const affected = derivedFrom ? tenantObjects(this.store.db).keys() : [tenant];
+        for (const owner of affected) this.checkQuota(owner);
+        this.store.db
+          .prepare('UPDATE object_gc SET unreferenced_at=? WHERE id=? AND unreferenced_at>=0')
+          .run(Date.now(), id);
       }
+      this.store.db.prepare('INSERT OR IGNORE INTO object_replicas VALUES (?,?)').run(id, node.nodeId);
+      this.inventoryCommits.get(node.nodeId)?.add(id);
       this.store.db
-        .prepare('INSERT OR IGNORE INTO object_replicas VALUES (?,?,?)')
-        .run(tenant, id, node.nodeId);
-      this.inventoryCommits.get(node.nodeId)?.add(this.key(tenant, id));
-      this.store.db
-        .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND tenant=? AND id=?')
-        .run(node.nodeId, tenant, id);
+        .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?')
+        .run(node.nodeId, id);
+      if (put) put.object = id;
+      this.readFetches.get(node.nodeId)?.delete(id);
       return { accepted: true };
     });
   }
   locate(node: NodeLink, message: Record<string, any>) {
-    if (!this.placedOn(message.tenantId, node.nodeId))
-      throw new RemoteKitError('forbidden', 'Tenant is not placed on this node');
+    const render = !message.tenantId && this.rendering(node, message.renderSource);
+    if (!render && !this.placedOn(message.tenantId, node.nodeId))
+      throw new RemoteKitError('forbidden', 'Tenant session is not hosted on this node');
     if (
       !Array.isArray(message.ids) ||
       message.ids.length > 4096 ||
       message.ids.some((id: unknown) => !objectId(id))
     )
       throw new RemoteKitError('invalid_request', 'Invalid object ids');
+    for (const id of message.ids) {
+      if (!render) this.require(message.tenantId, id);
+      else if (
+        this.retired.has(id) ||
+        (id !== message.renderSource && id !== this.derived(message.renderSource, 'document'))
+      )
+        throw new RemoteKitError('forbidden', 'Object is outside the render operation');
+    }
+    const expected = this.readFetches.get(node.nodeId) ?? new Set<string>();
+    this.readFetches.set(node.nodeId, expected);
     const sources: Record<string, { nodeId: string; address: string }[]> = {};
-    for (const id of message.ids) sources[id] = this.sources(message.tenantId, id);
+    for (const id of message.ids) {
+      sources[id] = this.sources(id);
+      expected.add(id);
+    }
     return { sources };
   }
-  private sources(tenant: string, id: string) {
+  private sources(id: string) {
     return (
-      this.store.db
-        .prepare('SELECT node_id FROM object_replicas WHERE tenant=? AND id=? ORDER BY node_id')
-        .all(tenant, id) as { node_id: string }[]
+      this.store.db.prepare('SELECT node_id FROM object_replicas WHERE id=? ORDER BY node_id').all(id) as {
+        node_id: string;
+      }[]
     ).flatMap(({ node_id }) => {
       const node = this.nodes.get(node_id);
       return node?.state.state === 'ready' && !this.nodes.isRemoved(node_id)
@@ -154,13 +286,108 @@ export class ObjectIndex {
         : [];
     });
   }
+  async put(
+    tenant: string,
+    chunks: AsyncIterable<Uint8Array>,
+    options: { maxBytes: number; signal?: AbortSignal },
+  ): Promise<{ id: string; size: number }> {
+    if (
+      !/^[a-zA-Z0-9_-]{1,128}$/.test(tenant) ||
+      !Number.isSafeInteger(options.maxBytes) ||
+      options.maxBytes < 0
+    )
+      throw new RemoteKitError('invalid_request', 'Invalid object put options');
+    const check = () => {
+      if (options.signal?.aborted) throw new RemoteKitError('rejected', 'Object put cancelled');
+      if (this.closed) throw new RemoteKitError('unavailable', 'Object index closed');
+    };
+    check();
+    const node = this.nodes
+      .all()
+      .filter(
+        (n) =>
+          n.state.state === 'ready' &&
+          !n.diskDraining &&
+          !this.nodes.isRemoved(n.nodeId) &&
+          n.metrics.latest() &&
+          [...this.puts.values()].filter((p) => p.node === n).length < 4,
+      )
+      .sort((a, b) => {
+        const x = a.metrics.latest()!.value.disk,
+          y = b.metrics.latest()!.value.disk;
+        return 1 - x.free / x.total - (1 - y.free / y.total) || a.nodeId.localeCompare(b.nodeId);
+      })[0];
+    if (!node || node.state.state !== 'ready')
+      throw new RemoteKitError('unavailable', 'No ready node has put capacity');
+    const putId = randomUUID(),
+      epoch = node.state.connectionEpoch;
+    const operation = { node, tenant, epoch, ending: false, object: undefined as string | undefined };
+    this.puts.set(putId, operation);
+    let completed = false;
+    const cancel = () => {
+      if (node.state.state === 'ready' && node.state.connectionEpoch === epoch)
+        return node.request('object.put.cancel', '', { putId }).catch(() => {});
+      return Promise.resolve();
+    };
+    let interrupt!: (error: RemoteKitError) => void;
+    const interrupted = new Promise<never>((_, reject) => {
+      interrupt = reject;
+    });
+    void interrupted.catch(() => {});
+    const onAbort = () => {
+      interrupt(new RemoteKitError('rejected', 'Object put cancelled'));
+      void cancel();
+    };
+    const onOffline = () => interrupt(new RemoteKitError('unavailable', 'Node disconnected'));
+    node.on('offline', onOffline);
+    let iterator: AsyncIterator<Uint8Array> | undefined;
+    options.signal?.addEventListener('abort', onAbort, { once: true });
+    try {
+      check();
+      iterator = chunks[Symbol.asyncIterator]();
+      await Promise.race([node.request('object.put.begin', tenant, { putId }), interrupted]);
+      check();
+      let offset = 0;
+      while (true) {
+        const next = await Promise.race([iterator.next(), interrupted]);
+        if (next.done) break;
+        const bytes = next.value;
+        check();
+        if (offset + bytes.byteLength > Math.min(options.maxBytes, 256 * 1024 * 1024))
+          throw new RemoteKitError('limit_exceeded', 'Object too large');
+        for (let start = 0; start < bytes.byteLength; start += 1024 * 1024) {
+          check();
+          const data = Buffer.from(
+            bytes.buffer,
+            bytes.byteOffset + start,
+            Math.min(1024 * 1024, bytes.byteLength - start),
+          );
+          await Promise.race([node.sendBinary({ putId, offset }, data, epoch), interrupted]);
+          offset += data.length;
+        }
+      }
+      check();
+      operation.ending = true;
+      const result = await Promise.race([node.request('object.put.end', '', { putId }), interrupted]);
+      if (!objectId(result.objectId) || result.objectId !== operation.object || result.size !== offset)
+        throw new RemoteKitError('rejected', 'Invalid object put result');
+      completed = true;
+      return { id: result.objectId, size: result.size };
+    } finally {
+      options.signal?.removeEventListener('abort', onAbort);
+      node.off('offline', onOffline);
+      if (!completed) void Promise.resolve(iterator?.return?.()).catch(() => {});
+      if (!completed) await cancel();
+      this.puts.delete(putId);
+    }
+  }
   async reconcile(node: NodeLink) {
     if (node.state.state !== 'ready' || this.reconciling.has(node.nodeId)) return;
     this.reconciling.add(node.nodeId);
-    const epoch = node.state.connectionEpoch;
-    const present = new Set<string>();
+    const epoch = node.state.connectionEpoch,
+      present = new Set<string>(),
+      seen = new Set<string>();
     this.inventoryCommits.set(node.nodeId, present);
-    const seen = new Set<string>();
     let cursor: string | null = null;
     try {
       do {
@@ -170,36 +397,32 @@ export class ObjectIndex {
           throw new RemoteKitError('rejected', 'Invalid object inventory');
         for (const item of page.objects) {
           if (
-            typeof item.tenantId !== 'string' ||
             !objectId(item.id) ||
             !objectId(item.storedSha256) ||
             !Number.isSafeInteger(item.storedSize) ||
             item.storedSize < 0
           )
             throw new RemoteKitError('rejected', 'Invalid inventory object');
-          const key = this.key(item.tenantId, item.id);
-          present.add(key);
-          const indexed = this.store.db
-            .prepare('SELECT * FROM objects WHERE tenant=? AND id=?')
-            .get(item.tenantId, item.id) as IndexedObject | undefined;
+          present.add(item.id);
+          const indexed = this.store.db.prepare('SELECT * FROM objects WHERE id=?').get(item.id) as
+            IndexedObject | undefined;
           if (
             indexed &&
             indexed.stored_sha256 === item.storedSha256 &&
             Number(indexed.stored_size) === item.storedSize
-          ) {
+          )
             this.store.db
-              .prepare('INSERT OR IGNORE INTO object_replicas VALUES (?,?,?)')
-              .run(item.tenantId, item.id, node.nodeId);
-          } else if (indexed) {
-            await node.request('object.delete', item.tenantId, { ids: [item.id] });
+              .prepare('INSERT OR IGNORE INTO object_replicas VALUES (?,?)')
+              .run(item.id, node.nodeId);
+          else if (indexed) {
+            await node.request('object.delete', '', { ids: [item.id] });
             this.store.db
-              .prepare('DELETE FROM object_replicas WHERE tenant=? AND id=? AND node_id=?')
-              .run(item.tenantId, item.id, node.nodeId);
-          } else {
+              .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
+              .run(item.id, node.nodeId);
+          } else
             this.store.db
-              .prepare('INSERT OR IGNORE INTO object_inventory_orphans VALUES (?,?,?,?)')
-              .run(node.nodeId, item.tenantId, item.id, Date.now());
-          }
+              .prepare('INSERT OR IGNORE INTO object_inventory_orphans VALUES (?,?,?)')
+              .run(node.nodeId, item.id, Date.now());
         }
         cursor = page.next;
         if (cursor !== null && seen.has(cursor))
@@ -207,26 +430,20 @@ export class ObjectIndex {
         if (cursor !== null) seen.add(cursor);
       } while (cursor !== null);
       if (node.state.state !== 'ready' || node.state.connectionEpoch !== epoch) return;
-      const replicas = this.store.db
-        .prepare('SELECT tenant,id FROM object_replicas WHERE node_id=?')
-        .all(node.nodeId) as { tenant: string; id: string }[];
-      for (const item of replicas) {
-        if (
-          !present.has(this.key(item.tenant, item.id)) &&
-          !this.fetches.get(this.fetchKey(node.nodeId, item.tenant))?.has(item.id)
-        )
+      for (const item of this.store.db
+        .prepare('SELECT id FROM object_replicas WHERE node_id=?')
+        .all(node.nodeId) as { id: string }[])
+        if (!present.has(item.id) && !this.fetches.get(node.nodeId)?.has(item.id))
           this.store.db
-            .prepare('DELETE FROM object_replicas WHERE tenant=? AND id=? AND node_id=?')
-            .run(item.tenant, item.id, node.nodeId);
-      }
-      const orphans = this.store.db
-        .prepare('SELECT tenant,id FROM object_inventory_orphans WHERE node_id=?')
-        .all(node.nodeId) as { tenant: string; id: string }[];
-      for (const item of orphans)
-        if (!present.has(this.key(item.tenant, item.id)))
+            .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
+            .run(item.id, node.nodeId);
+      for (const item of this.store.db
+        .prepare('SELECT id FROM object_inventory_orphans WHERE node_id=?')
+        .all(node.nodeId) as { id: string }[])
+        if (!present.has(item.id))
           this.store.db
-            .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND tenant=? AND id=?')
-            .run(node.nodeId, item.tenant, item.id);
+            .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?')
+            .run(node.nodeId, item.id);
     } finally {
       this.reconciling.delete(node.nodeId);
       this.inventoryCommits.delete(node.nodeId);
@@ -234,118 +451,112 @@ export class ObjectIndex {
         this.ready({ nodeId: node.nodeId });
     }
   }
-  private referenced() {
-    const refs = new Set<string>();
-    const add = (tenant: string, id: string | undefined) => {
-      if (id) refs.add(this.key(tenant, id));
-    };
-    for (const row of this.store.db.prepare('SELECT tenant,snapshot FROM file_library').all() as {
-      tenant: string;
-      snapshot: string;
-    }[]) {
-      for (const entry of JSON.parse(row.snapshot).entries) {
-        add(row.tenant, entry.assetId);
-        add(row.tenant, entry.originalAssetId);
-        for (const id of entry.photo?.candidateAssetIds ?? []) add(row.tenant, id);
-      }
-    }
-    for (const row of this.store.db
-      .prepare('SELECT tenant,manifest FROM file_library_selections WHERE terminal IS NULL')
-      .all() as { tenant: string; manifest: string }[])
-      for (const file of JSON.parse(row.manifest).files) add(row.tenant, file.assetId);
-    for (const row of this.store.db
-      .prepare(
-        `SELECT o.tenant,o.object_id FROM checkpoint_objects o WHERE o.checkpoint_id IN
-      (SELECT c.id FROM checkpoints c WHERE c.tenant=o.tenant ORDER BY c.id DESC LIMIT 2)`,
-      )
-      .all() as { tenant: string; object_id: string }[])
-      add(row.tenant, row.object_id);
-    const derivatives = this.store.db
-      .prepare(
-        `SELECT tenant,id,derived_from FROM objects WHERE derived_from IS NOT NULL
-        UNION SELECT tenant,id,source_id AS derived_from FROM object_derivations`,
-      )
-      .all() as { tenant: string; id: string; derived_from: string }[];
-    let changed: boolean;
-    do {
-      changed = false;
-      for (const row of derivatives)
-        if (refs.has(this.key(row.tenant, row.derived_from)) && !refs.has(this.key(row.tenant, row.id))) {
-          add(row.tenant, row.id);
-          changed = true;
-        }
-    } while (changed);
-    return refs;
-  }
   async gc(now = Date.now()) {
-    let references = this.referenced();
-    const objects = this.store.db
-      .prepare('SELECT * FROM objects WHERE created_at<?')
-      .all(now - GRACE_MS) as IndexedObject[];
-    for (const object of objects) {
-      const key = this.key(object.tenant, object.id);
-      if (references.has(key) || this.checkpointing(object.tenant)) continue;
-      this.retired.add(key);
+    const durable = tenantObjects(this.store.db, false, now);
+    const claims = this.store.db.prepare('SELECT tenant,id,claimed_at FROM object_claims').all() as {
+      tenant: string;
+      id: string;
+      claimed_at: bigint;
+    }[];
+    const claimed = new Set(
+      claims
+        .filter((c) => Number(c.claimed_at) >= now - GRACE_MS || this.checkpointing(c.tenant))
+        .map((c) => c.id),
+    );
+    for (const c of claims)
+      if (
+        !durable.get(c.tenant)?.has(c.id) &&
+        !this.checkpointing(c.tenant) &&
+        Number(c.claimed_at) < now - GRACE_MS
+      )
+        this.store.db.prepare('DELETE FROM object_claims WHERE tenant=? AND id=?').run(c.tenant, c.id);
+    for (const object of this.store.db.prepare('SELECT * FROM objects').all() as IndexedObject[]) {
+      if (this.retired.has(object.id)) continue;
+      const current = tenantObjects(this.store.db, false, now);
+      if (this.renders.has(object.id) || [...current.values()].some((ids) => ids.has(object.id))) {
+        this.store.db
+          .prepare('INSERT INTO object_gc VALUES (?,-1) ON CONFLICT(id) DO UPDATE SET unreferenced_at=-1')
+          .run(object.id);
+        continue;
+      }
+      const lastClaim = Math.max(
+        Number(object.created_at),
+        ...claims.filter((c) => c.id === object.id).map((c) => Number(c.claimed_at)),
+      );
+      this.store.db
+        .prepare('INSERT OR IGNORE INTO object_gc VALUES (?,?)')
+        .run(object.id, Math.min(now, lastClaim));
+      this.store.db
+        .prepare('UPDATE object_gc SET unreferenced_at=? WHERE id=? AND unreferenced_at=-1')
+        .run(now, object.id);
+      const since = this.store.db
+        .prepare('SELECT unreferenced_at FROM object_gc WHERE id=?')
+        .get(object.id) as { unreferenced_at: bigint };
+      if (
+        claimed.has(object.id) ||
+        [...tenantObjects(this.store.db, true, now).values()].some((ids) => ids.has(object.id)) ||
+        Number(since.unreferenced_at) >= now - GRACE_MS
+      )
+        continue;
+      this.retired.add(object.id);
       try {
-        const replicas = this.store.db
-          .prepare('SELECT node_id FROM object_replicas WHERE tenant=? AND id=?')
-          .all(object.tenant, object.id) as { node_id: string }[];
-        for (const replica of replicas) {
+        for (const replica of this.store.db
+          .prepare('SELECT node_id FROM object_replicas WHERE id=?')
+          .all(object.id) as { node_id: string }[]) {
           const node = this.nodes.get(replica.node_id);
           if (node?.state.state !== 'ready') continue;
-          await node.request('object.delete', object.tenant, { ids: [object.id] });
-          references = this.referenced();
+          await node.request('object.delete', '', { ids: [object.id] });
           this.store.db
-            .prepare('DELETE FROM object_replicas WHERE tenant=? AND id=? AND node_id=?')
-            .run(object.tenant, object.id, node.nodeId);
+            .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
+            .run(object.id, node.nodeId);
         }
-        if (
-          !this.store.db
-            .prepare('SELECT 1 FROM object_replicas WHERE tenant=? AND id=?')
-            .get(object.tenant, object.id)
-        )
+        if (!this.store.db.prepare('SELECT 1 FROM object_replicas WHERE id=?').get(object.id))
           this.store.transaction(() => {
+            this.store.db.prepare('DELETE FROM objects WHERE id=?').run(object.id);
             this.store.db
-              .prepare('DELETE FROM objects WHERE tenant=? AND id=?')
-              .run(object.tenant, object.id);
-            this.store.db
-              .prepare('DELETE FROM object_derivations WHERE tenant=? AND (id=? OR source_id=?)')
-              .run(object.tenant, object.id, object.id);
+              .prepare('DELETE FROM object_derivations WHERE id=? OR source_id=?')
+              .run(object.id, object.id);
+            this.store.db.prepare('DELETE FROM object_gc WHERE id=?').run(object.id);
+            this.store.db.prepare('DELETE FROM object_claims WHERE id=?').run(object.id);
           });
       } finally {
-        this.retired.delete(key);
+        this.retired.delete(object.id);
       }
     }
-    const orphans = this.store.db
+    for (const orphan of this.store.db
       .prepare('SELECT * FROM object_inventory_orphans WHERE first_seen<?')
-      .all(now - GRACE_MS) as { node_id: string; tenant: string; id: string }[];
-    for (const orphan of orphans) {
+      .all(now - GRACE_MS) as { node_id: string; id: string }[]) {
       const node = this.nodes.get(orphan.node_id);
       if (node?.state.state !== 'ready') continue;
-      if (
-        !this.store.db.prepare('SELECT 1 FROM objects WHERE tenant=? AND id=?').get(orphan.tenant, orphan.id)
-      )
-        await node.request('object.delete', orphan.tenant, { ids: [orphan.id] });
+      if (this.retired.has(orphan.id)) continue;
+      if (!this.store.db.prepare('SELECT 1 FROM objects WHERE id=?').get(orphan.id)) {
+        this.retired.add(orphan.id);
+        try {
+          await node.request('object.delete', '', { ids: [orphan.id] });
+        } finally {
+          this.retired.delete(orphan.id);
+        }
+      }
       this.store.db
-        .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND tenant=? AND id=?')
-        .run(orphan.node_id, orphan.tenant, orphan.id);
+        .prepare('DELETE FROM object_inventory_orphans WHERE node_id=? AND id=?')
+        .run(orphan.node_id, orphan.id);
     }
   }
   private async fetch(node: NodeLink, object: IndexedObject) {
-    const key = this.fetchKey(node.nodeId, object.tenant);
+    const key = node.nodeId;
     const expected = this.fetches.get(key) ?? new Set<string>();
     expected.add(object.id);
     this.fetches.set(key, expected);
     this.busy.set(node.nodeId, (this.busy.get(node.nodeId) ?? 0) + 1);
     this.reserved.set(node.nodeId, (this.reserved.get(node.nodeId) ?? 0) + Number(object.stored_size));
     try {
-      await node.request('object.fetch', object.tenant, {
+      await node.request('object.fetch', '', {
         ids: [object.id],
-        sources: { [object.id]: this.sources(object.tenant, object.id) },
+        sources: { [object.id]: this.sources(object.id) },
       });
       return !!this.store.db
-        .prepare('SELECT 1 FROM object_replicas WHERE tenant=? AND id=? AND node_id=?')
-        .get(object.tenant, object.id, node.nodeId);
+        .prepare('SELECT 1 FROM object_replicas WHERE id=? AND node_id=?')
+        .get(object.id, node.nodeId);
     } finally {
       expected.delete(object.id);
       if (!expected.size) this.fetches.delete(key);
@@ -360,15 +571,14 @@ export class ObjectIndex {
     const target = Math.min(2, ready.length);
     const jobs: Promise<unknown>[] = [];
     for (const object of this.store.db
-      .prepare('SELECT * FROM objects ORDER BY created_at,tenant,id')
+      .prepare('SELECT * FROM objects ORDER BY created_at,id')
       .all() as IndexedObject[]) {
-      const sources = this.sources(object.tenant, object.id);
+      const sources = this.sources(object.id);
       if (!sources.length) continue;
       let missing =
         target -
         sources.length -
-        ready.filter((node) => this.fetches.get(this.fetchKey(node.nodeId, object.tenant))?.has(object.id))
-          .length;
+        ready.filter((node) => this.fetches.get(node.nodeId)?.has(object.id)).length;
       for (const node of ready
         .filter((node) => {
           const sample = node.metrics.latest();
@@ -378,7 +588,7 @@ export class ObjectIndex {
               node.config.diskReserveBytes &&
             !node.diskDraining &&
             !this.reconciling.has(node.nodeId) &&
-            !this.fetches.get(this.fetchKey(node.nodeId, object.tenant))?.has(object.id) &&
+            !this.fetches.get(node.nodeId)?.has(object.id) &&
             !sources.some((source) => source.nodeId === node.nodeId)
           );
         })
@@ -422,14 +632,12 @@ export class ObjectIndex {
       const copies = this.store.db
         .prepare(
           `SELECT o.* FROM objects o JOIN object_replicas r
-        ON r.tenant=o.tenant AND r.id=o.id WHERE r.node_id=? ORDER BY o.created_at`,
+        ON r.id=o.id WHERE r.node_id=? ORDER BY o.created_at`,
         )
         .all(node.nodeId) as IndexedObject[];
       for (const object of copies) {
         if (free >= 2 * node.config.diskReserveBytes) break;
-        let elsewhere = this.sources(object.tenant, object.id).filter(
-          (source) => source.nodeId !== node.nodeId,
-        );
+        let elsewhere = this.sources(object.id).filter((source) => source.nodeId !== node.nodeId);
         const target = Math.min(
           2,
           this.nodes.all().filter((candidate) => candidate.state.state === 'ready').length - 1,
@@ -451,15 +659,13 @@ export class ObjectIndex {
           .sort((a, b) => a.nodeId.localeCompare(b.nodeId))) {
           if (elsewhere.length >= target) break;
           await this.fetch(destination, object);
-          elsewhere = this.sources(object.tenant, object.id).filter(
-            (source) => source.nodeId !== node.nodeId,
-          );
+          elsewhere = this.sources(object.id).filter((source) => source.nodeId !== node.nodeId);
         }
         if (elsewhere.length < target) continue;
-        await node.request('object.delete', object.tenant, { ids: [object.id] });
+        await node.request('object.delete', '', { ids: [object.id] });
         this.store.db
-          .prepare('DELETE FROM object_replicas WHERE tenant=? AND id=? AND node_id=?')
-          .run(object.tenant, object.id, node.nodeId);
+          .prepare('DELETE FROM object_replicas WHERE id=? AND node_id=?')
+          .run(object.id, node.nodeId);
         free = Math.max(free + Number(object.stored_size), node.metrics.latest()?.value.disk.free ?? 0);
       }
     }
@@ -476,27 +682,22 @@ export class ObjectIndex {
     });
     return this.maintenance;
   }
-  // Replicas become orphans that the next collection deletes from each node as it is reachable.
   forgetTenant(tenant: string) {
-    this.store.db
-      .prepare(
-        `INSERT OR REPLACE INTO object_inventory_orphans SELECT node_id,tenant,id,0 FROM object_replicas WHERE tenant=?`,
-      )
-      .run(tenant);
-    for (const table of ['objects', 'object_derivations', 'object_replicas'])
-      this.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
+    this.store.transaction(() => {
+      for (const table of ['object_claims', 'checkpoints', 'checkpoint_objects'])
+        this.store.db.prepare(`DELETE FROM ${table} WHERE tenant=?`).run(tenant);
+      syncObjectReferences(this.store.db);
+    });
   }
   tenantUsage(tenant: string) {
-    const row = this.store.db
-      .prepare('SELECT count(*) AS count, coalesce(sum(size),0) AS bytes FROM objects WHERE tenant=?')
-      .get(tenant) as { count: bigint; bytes: bigint };
-    return { objects: Number(row.count), bytes: Number(row.bytes), quotaBytes: this.tenantObjectBytes };
+    const ids = tenantObjects(this.store.db).get(tenant) ?? new Set<string>();
+    return { objects: ids.size, bytes: this.bytes(tenant), quotaBytes: this.tenantObjectBytes };
   }
   replicaBytes(nodeId: string) {
     const row = this.store.db
       .prepare(
         `SELECT coalesce(sum(o.stored_size),0) AS bytes FROM object_replicas r JOIN objects o
-        ON o.tenant=r.tenant AND o.id=r.id WHERE r.node_id=?`,
+        ON o.id=r.id WHERE r.node_id=?`,
       )
       .get(nodeId) as { bytes: bigint };
     return Number(row.bytes);
@@ -513,7 +714,7 @@ export class ObjectIndex {
     const under = this.store.db
       .prepare(
         `SELECT count(*) AS count FROM objects o WHERE
-        (SELECT count(*) FROM object_replicas r WHERE r.tenant=o.tenant AND r.id=o.id) < ?`,
+        (SELECT count(*) FROM object_replicas r WHERE r.id=o.id) < ?`,
       )
       .get(Math.min(2, ready)) as { count: bigint };
     const orphans = this.store.db.prepare('SELECT count(*) AS count FROM object_inventory_orphans').get() as {
@@ -535,8 +736,10 @@ export class ObjectIndex {
     this.closed = true;
     this.nodes.off('ready', this.ready);
     this.nodes.off('metrics', this.metrics);
+    this.nodes.off('offline', this.offline);
     this.nodes.handlers.delete('object.committed');
     this.nodes.handlers.delete('object.locate');
+    this.nodes.handlers.delete('object.derivation');
     await Promise.allSettled([...this.jobs, ...(this.maintenance ? [this.maintenance] : [])]);
   }
 }

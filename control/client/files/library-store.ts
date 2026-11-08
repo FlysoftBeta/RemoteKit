@@ -122,6 +122,9 @@ export class LibraryStore extends Store<LibraryState> {
       this.emit();
     }
   }
+  receive = (next: LibrarySnapshot) => {
+    if (this.online) this.accept(next, this.epoch);
+  };
   mutate = async <
     K extends
       | 'library.import'
@@ -169,7 +172,9 @@ export class LibraryStore extends Store<LibraryState> {
 
   refresh = async () => {
     const epoch = this.epoch;
-    this.accept(await this.request('library.get', {}), epoch);
+    const snapshot = await this.request('library.get', {});
+    this.accept(snapshot, epoch);
+    return snapshot;
   };
   private async confirm(requestId: string, transaction: Checkout, submit: boolean) {
     if (transaction.active) return;

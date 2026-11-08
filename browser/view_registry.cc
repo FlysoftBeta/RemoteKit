@@ -22,7 +22,8 @@ ViewRecord& ViewRegistry::Create(content::BrowserContext* context,
                                  ViewSpec spec,
                                  std::unique_ptr<content::WebContents> adopted) {
   ViewRecord record;
-  record.webview = std::make_unique<WebView>(context, &model, session, id, std::move(adopted));
+  record.webview =
+      std::make_unique<WebView>(context, &model, session, id, std::move(adopted), spec.sign_in);
   record.requests = std::make_unique<PageRequests>();
   record.requests->Bind(record.webview->contents());
   record.spec = std::move(spec);
@@ -37,7 +38,8 @@ void ViewRegistry::Recreate(ViewRecord& record,
   record.requests->Bind(nullptr);
   record.webview.reset();
   model.ResetWebView(session, id);
-  record.webview = std::make_unique<WebView>(context, &model, session, id);
+  record.webview =
+      std::make_unique<WebView>(context, &model, session, id, nullptr, record.spec.sign_in);
   record.webview->RestoreNavigationOperations(std::move(operations));
   record.requests = std::make_unique<PageRequests>();
   record.requests->Bind(record.webview->contents());

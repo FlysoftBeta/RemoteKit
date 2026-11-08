@@ -4,6 +4,8 @@ import type { AuthState } from '../../shared/security';
 import { diagnostics } from '../media/diagnostics';
 import { RequestTracker } from '../util/request-tracker';
 import { snapshotNewer } from './product-operations';
+import { Events } from '../util/store';
+import type { LibrarySnapshot } from '../../shared/file-library';
 
 export type ConnectionStatus = 'connecting' | 'online' | 'reconnecting' | 'failed' | 'revoked' | 'expired';
 
@@ -11,6 +13,7 @@ export type ControlState =
   | { phase: 'connecting' | 'online' | 'failed' | 'revoked' | 'expired' | 'stopped' }
   | { phase: 'reconnecting'; attempt: number };
 export class ControlSession {
+  readonly library = new Events<LibrarySnapshot>();
   private snapshot: ControlState = { phase: 'connecting' };
   private readonly listeners = new Set<() => void>();
   getSnapshot = () => this.snapshot;
@@ -93,6 +96,8 @@ export class ControlSession {
           this.latestState = message.state;
           this.state(message.state);
         }
+      } else if (message.type === 'library') {
+        this.library.emit(message.snapshot);
       } else if (message.type === 'lease') {
         this.status(message.reason === 'logout' ? 'expired' : 'revoked');
         this.close(true);

@@ -11,7 +11,7 @@ export class ViewerHub {
     private readonly context: DomainContext,
     private readonly services: Pick<
       DomainServices,
-      'pageRequests' | 'policy' | 'reconciler' | 'rtc' | 'security'
+      'pageRequests' | 'policy' | 'reconciler' | 'rtc' | 'security' | 'learning'
     >,
   ) {}
   productState(tenant: string): ProductState {
@@ -26,6 +26,7 @@ export class ViewerHub {
       operationGeneration: this.context.store.operations.operationGeneration(tenant),
       user: user!,
       workspace,
+      learning: this.services.learning.state(tenant),
       pageFullscreen: this.services.pageRequests.fullscreenBinding(workspace)?.page,
       pageDialogs: (runtime.pageRequests.dialogs ?? []).map(
         ({ viewId, requestId, browserIncarnation, instance, document, ...dialog }) => dialog,

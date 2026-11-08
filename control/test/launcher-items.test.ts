@@ -3,6 +3,7 @@ import test from 'node:test';
 import { launcherItems, type LauncherFileEntry } from '../server/workspace/launcher-items';
 import type { UsageEvent } from '../server/workspace/frecency';
 import type { InstalledApp } from '../shared/product';
+import { BUILTIN_APP_TITLES } from '../shared/product';
 
 const now = 1_800_000_000_000;
 function input(
@@ -66,7 +67,8 @@ test('launcher groups obey caps, favorite and organized priority, source exclusi
   const items = launcherItems(data);
   const group = (name: string) => items.filter((item) => item.group === name);
   assert.equal(group('frequent').length, 12);
-  assert.equal(group('apps').length, 18);
+  const builtIns = Object.keys(BUILTIN_APP_TITLES).filter((appId) => appId !== 'admin');
+  assert.equal(group('apps').length, builtIns.length + apps.length);
   assert.deepEqual(
     group('apps')
       .slice(0, 3)

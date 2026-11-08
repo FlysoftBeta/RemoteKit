@@ -186,7 +186,7 @@ test('original preview permits PNGs through 64 MiB while thumbnails remain limit
   const signal = new AbortController().signal;
   assert.deepEqual(await client.describeAsset('b'.repeat(64), signal), original);
   await assert.rejects(client.describeAsset('different', signal), /文件信息无效/);
-  await assert.rejects(client.readPhoto(original, signal), /照片预览数据无效/);
+  await assert.rejects(client.readPhoto(original, signal), /文件预览数据无效/);
   await assert.rejects(client.readPhoto({ ...original, size: original.size + 1 }, signal), /大小超出限制/);
   await assert.rejects(client.photoThumbnail('b'.repeat(64), signal), /缩略图数据无效/);
   assert.deepEqual(sent, ['asset.describe', 'asset.describe', 'asset.read', 'photo.thumbnail']);

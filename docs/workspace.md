@@ -6,7 +6,7 @@
 
 | 对象 | 所有者 | 说明 |
 |---|---|---|
-| App | Control | `appId`：`browser`、`files`、`settings`、`admin`（仅管理员），或 `web:<id>`（已安装的网页 App） |
+| App | Control | `appId`：`browser`、`files`、`settings`、`study`、`questions`、`admin`（仅管理员），或 `web:<id>`（已安装的网页 App） |
 | Window | Control | 恰好承载一个 App 的一个实例；`appId`、`lastActiveAt`、App 视图状态 `state` |
 | Tab | Control | 仍是远端页面的产品对象，只属于 browser 或 web 窗口 |
 | Space | Control | 有序的 `windowIds`（1–3 个）、对应 `weights`、`focusedWindowId`、`lastActiveAt` |
@@ -22,6 +22,7 @@
 - **web:&lt;id&gt;**：恰好一个 Tab。紧凑标题栏：图标、页面标题、后退、更多（刷新、复制链接、在浏览器中打开、网站设置、App 设置）。离开作用域的导航留在窗口内，标题栏显示来源域名条；`display=browser` 的 App 始终显示只读地址条。关闭 Tab 即关闭窗口。同一 App 可以开多个窗口。
 - **files**：本地渲染，可以开多个窗口，每个窗口有自己的视图状态。
 - **settings**：本地渲染，单例；再次打开时聚焦已有窗口。
+- **study**（学习）、**questions**（题库）：本地渲染，单例；登录时窗口里有一个 Control 拥有的登录 Tab（见[学习与题库](learning.md#登录)）。
 - **admin**（管理）：本地渲染，单例，只有管理员能打开（见[控制面 · 账户与管理 App](control-plane.md#账户与管理-app)）。
 
 内置 App 的 appId、标题与单例/本地属性集中在 `shared/product.ts`（`BUILTIN_APP_TITLES`、`isSingletonApp`、`isLocalApp`）。本地窗口（files、settings、admin）不产生远端渲染需求。App 视图状态（files 的当前视图/搜索/排列，settings 与 admin 的分区）是窗口的 `state`：有界 JSON（≤4KiB），客户端 500ms 去抖后经 WS `window.state` 写回，不走 DataChannel 与操作收据；重连或换设备后原样恢复。地址草稿、滚动位置不持久化。
@@ -102,7 +103,7 @@
 - **网页**：显示页面预览——Viewer 在网页可见时截取的最后一帧（见下），铺满磁贴，底部渐变遮罩上是标题和域名；背景色取预览的主色。没有预览时用站点主题色（安装过的 App）或按 origin 的固定调色板，显示网站图标。
 - **图片文件**：缩略图铺满，背景色取缩略图主色；名称只在悬停或键盘聚焦时出现（触摸设备不显示）。
 - **其他文件**：按类型着色，显示类型图标与文件名。
-- **App**：内置 App 用固定色（浏览器蓝、我的文件青绿、设置石板灰、管理紫），网页 App 用主题色和它的图标。
+- **App**：内置 App 用固定色（浏览器蓝、我的文件青绿、设置石板灰、学习深橙、题库靛蓝、管理紫），网页 App 用主题色和它的图标。
 - 主色：客户端把图片缩到 16×16 求平均色，再在 HSL 中压低亮度保证白字 4.5:1 对比度。
 
 **网页预览**：Viewer 在 Tab 处于可见窗口中、页面加载完成后 2 秒以及离开（切 Tab、切窗口组、导航）时，从该窗口的 video 裁出当前页面，缩到 320×200 以内编码为 JPEG（≤ 24KiB），经 WS `page.preview{url, image}` 交给 Control。Control 按规范化 URL（与 frecency 的 `page:` 键相同）保存到 `page_previews`，每 Tenant 最多 200 条，按更新时间淘汰；`launcher.get` 的网页项带 `previewUrl`（鉴权的 `/api/previews/<hash>`）。"清除浏览记录"与"清除使用记录"同时清除预览。
@@ -189,6 +190,7 @@ WS `launcher.get` 返回 `{ items: LauncherItem[] }`：每项 `{ key, kind: 'app
 ### 模型
 
 - 条目保存 `source: {app, channel} | null`、`partitionId | null`、`collected`、名称、类型、大小和资产。文件选择从请求所属 Tab 的窗口 App 与 origin 推断来源，`browser` 使用页面主机名，`web:<id>` 使用空渠道。「我的文件」的上传和拍照使用 `files/upload` 与 `files/camera`。网页下载完成后由 Control 按 `download/<页面主机>` 收集为未分组条目，来源在界面显示为「下载」。排除该来源后，新下载不入目录。
+- 学习 App 自动保存的附件来源为 `{app:'study', channel:<学科名>}`（显示为"学习 › 数学"），条目带 `detail`（作业名或资料名），只用于显示和搜索，不参与分类；超过用户设置的保留天数后按[学习与题库 · 附件进我的文件](learning.md#附件进我的文件)的规则移除。
 - 引用：条目存活当且仅当在文件篮中、被未决选择持有、在某个分区中，或 `collected && source ≠ null`。字节仍按 hash 存储，由对象索引引用计数。
 - 分区：扁平，`{id, name}`，一个条目最多属于一个分区。
 - 来源列表由条目派生：`{app, channel, count, excluded}`；`excluded` 存在文件库的 `excludedSources`。

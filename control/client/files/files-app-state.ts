@@ -57,6 +57,7 @@ export function sourceAppName(app: string, apps: readonly { id: string; name: st
   if (app === 'download') return '下载';
   if (app === 'browser') return '浏览器';
   if (app === 'files') return '我的文件';
+  if (app === 'study') return '学习';
   return apps.find((item) => `web:${item.id}` === app)?.name ?? app;
 }
 export function sourceChannelName(source: LibrarySource) {
@@ -70,7 +71,9 @@ export function filesInView(snapshot: LibrarySnapshot, view: FilesView, now = Da
       if (typeof view === 'object')
         return 'partition' in view
           ? entry.partitionId === view.partition
-          : sameSource(entry.source, view.source);
+          : view.source.app === 'study' && !view.source.channel
+            ? entry.source?.app === 'study'
+            : sameSource(entry.source, view.source);
       if (entry.source && snapshot.excludedSources.some((source) => sameSource(entry.source, source)))
         return false;
       return view === 'all' || entry.createdAt >= now - 7 * 86400_000;

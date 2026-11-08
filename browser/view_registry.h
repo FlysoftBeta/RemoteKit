@@ -9,6 +9,7 @@ namespace remotekit::browser {
 struct ViewSpec {
   int width = 480, height = 360;
   std::string url;
+  std::string sign_in;
   bool visible = true;
   float page_dsf = 0;
   bool operator==(const ViewSpec&) const = default;

@@ -1,4 +1,5 @@
 #include "browser/control_dispatcher.h"
+#include "browser/signin_result.h"
 #include "browser/control_requests.h"
 #include "browser/control_response.h"
 #include "browser/browser_runtime.h"
@@ -48,6 +49,9 @@ Result<CreateViewRequest> DecodeCreateView(const base::DictValue& wire, RequestE
   CreateViewRequest request;
   static_cast<RequestEnvelope&>(request) = envelope;
   RequestDecoder decoder(wire);
+  request.signIn = decoder.Optional<std::string>("signIn");
+  if (request.signIn && !ValidSignInPurpose(*request.signIn))
+    return {{}, {ErrorCode::invalid_request, "Invalid sign-in purpose"}};
   request.provisionalId = decoder.Optional<std::string>("provisionalId");
   request.width = decoder.Optional<int>("width");
   request.height = decoder.Optional<int>("height");
@@ -218,6 +222,8 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
     return error("view_id_closed");
   const bool adopting = *method == "view.adopt";
   const auto* provisional = Ptr(request.provisionalId);
+  if (adopting && request.signIn)
+    return error("sign_in_popup_adoption_forbidden");
   if (adopting && !provisional)
     return error("provisional_id_required");
   if (adopting && runtime_.popups.adopted.contains(*provisional)) {
@@ -236,6 +242,7 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
       return ControlResult::Failure(id, allowed.error, allowed.message);
   }
   ViewSpec spec;
+  spec.sign_in = request.signIn.value_or("");
   spec.width = request.width.value_or(0);
   spec.height = request.height.value_or(0);
   const auto* url = Ptr(request.url);
@@ -290,7 +297,8 @@ ControlResult ControlDispatcher::HandleCreateView(const CreateViewRequest& reque
     adopted = runtime_.popups.TakeContents(*provisional);
   auto& record = runtime_.views.Create(runtime_.contexts.front().get(), runtime_.view_model,
                                        session, view, spec, std::move(adopted));
-  runtime_.popups.Wire(record.requests.get(), session, view);
+  if (spec.sign_in.empty())
+    runtime_.popups.Wire(record.requests.get(), session, view);
   runtime_.layout_transaction.Commit(std::move(layout.value));
   runtime_.UpdateOutput();
   auto navigated =
@@ -381,7 +389,8 @@ ControlResult ControlDispatcher::HandleRecreateView(const RecreateViewRequest& r
   runtime_.views.Recreate(runtime_.views.records.at(view),
                           runtime_.contexts[owner - runtime_.profiles.begin()].get(),
                           runtime_.view_model);
-  runtime_.popups.Wire(record->requests.get(), session, view);
+  if (record->spec.sign_in.empty())
+    runtime_.popups.Wire(record->requests.get(), session, view);
   auto plan = runtime_.layout_transaction.Prepare(runtime_.views.Specs());
   CHECK(plan);
   runtime_.layout_transaction.Commit(std::move(plan.value));

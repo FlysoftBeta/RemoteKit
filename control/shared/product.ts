@@ -4,25 +4,28 @@ import type { AuthMessage, AuthSocketMethods } from './security';
 import type { DiagnosticMethods } from './diagnostics';
 import type { AdminSocketMethods } from './admin';
 import type { SessionImportSocketMethods } from './session-import';
+import type { LearningProvider, LearningSocketMethods, LearningState } from './learning';
 /** Persistent product state belongs to Control; clients keep only an HttpOnly token. */
 export interface ProductUser {
   id: string;
   username: string;
   isAdmin: boolean;
 }
-// Built-in Apps render in the Viewer shell instead of a remote page. Settings and the admin
-// console are singletons; the admin console exists only for the administrator.
+// Local Apps render in the Viewer shell; browser windows render remote tabs.
+// The admin console exists only for the administrator.
 export const BUILTIN_APP_TITLES = {
   browser: '浏览器',
   files: '我的文件',
+  study: '学习',
+  questions: '题库',
   settings: '设置',
   admin: '管理',
 } as const;
 export type BuiltinApp = keyof typeof BUILTIN_APP_TITLES;
 export const isBuiltinApp = (appId: string): appId is BuiltinApp =>
   Object.prototype.hasOwnProperty.call(BUILTIN_APP_TITLES, appId);
-export const isSingletonApp = (appId: string) => appId === 'settings' || appId === 'admin';
-export const isLocalApp = (appId: string) => appId === 'files' || appId === 'settings' || appId === 'admin';
+export const isSingletonApp = (appId: string) => ['settings', 'admin', 'study', 'questions'].includes(appId);
+export const isLocalApp = (appId: string) => appId === 'files' || isSingletonApp(appId);
 /** An active announcement as one user sees it. */
 export interface Announcement {
   id: string;
@@ -99,6 +102,7 @@ export function placeTab<T extends { id: string; windowId: string }>(
   tabs.splice(at, 0, moved);
 }
 export interface ProductTab {
+  signIn?: LearningProvider;
   usageDocument?: string;
   usageSource?: 'launcher';
   navigation?: {
@@ -335,6 +339,7 @@ export interface PageFullscreen {
   target: string;
 }
 export interface ProductState {
+  learning: LearningState;
   operationReceipts?: OperationReceipt[];
   serverIncarnation?: string;
   snapshotSequence?: number;
@@ -435,6 +440,7 @@ export interface SocketMethods
     LibraryMethods,
     DiagnosticMethods,
     AdminSocketMethods,
+    LearningSocketMethods,
     SessionImportSocketMethods {
   'operation.status': {
     params: { operationId: string; operationGeneration: string };
@@ -490,6 +496,7 @@ export type SocketMessage =
   | AuthMessage
   | RtcServerSignal
   | { type: 'state'; revision: number; state: ProductState }
+  | { type: 'library'; snapshot: import('./file-library').LibrarySnapshot }
   | { type: 'result'; id: string; result: unknown }
   | { type: 'error'; id: string; error: WireError }
   | { type: 'lease'; status: 'revoked'; reason: 'another-viewer' | 'logout' };

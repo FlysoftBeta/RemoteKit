@@ -494,6 +494,13 @@ def package_runtime(args, node_runtime):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
     copy_endpoint(endpoint, binary)
+    document_spec = importlib.util.spec_from_file_location(
+        'fetch_document_deps', ROOT / 'tools/fetch-document-deps.py'
+    )
+    document_deps = importlib.util.module_from_spec(document_spec)
+    document_spec.loader.exec_module(document_deps)
+    for source, relative in document_deps.runtime_trees():
+        shutil.copytree(source, binary / relative)
     shutil.copy2(endpoint.parent / 'remotekit_node.exe', binary / 'remotekit_node.exe')
     vpl = endpoint.parent / 'libvpl.dll'
     if not vpl.is_file():

@@ -20,6 +20,7 @@ class ClusterLink final : public ManagementLink {
   bool SendReply(uint64_t generation, const Json& reply) override;
   bool SendEvent(const Json& event, uint64_t generation) override;
   void OnDisconnect(Disconnect callback) override;
+  void OnBinary(Binary callback) override;
   Result<Json> Request(const std::string& name, Json fields) override;
   std::optional<ReadyState> ReadySessions() override;
 

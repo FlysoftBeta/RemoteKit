@@ -260,6 +260,12 @@ Result<Json> LibraryController::DirectLibraryCommand(const FileJob& job,
                                                      const std::string& method,
                                                      const Json& params) {
   const auto check = [&] { return files.RequireFileJob(job); };
+  if (method == "document.open")
+    return file_library.OpenDocument(Required(params, "assetId"), check);
+  if (method == "document.resource")
+    return file_library.DocumentResource(Required(params, "documentId"),
+                                         Required(params, "contentId"),
+                                         FileUnsigned(params.at("offset")), check);
   if (method == "asset.begin")
     return file_library.Begin(job.grant, Required(params, "operationId"),
                               {Required(params, "name"), params.value("type", std::string()),

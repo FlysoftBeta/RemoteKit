@@ -24,6 +24,7 @@ export class Reconciler {
       | 'security'
       | 'viewers'
       | 'workspace'
+      | 'learning'
     >,
   ) {}
   async tick() {
@@ -144,6 +145,7 @@ export class Reconciler {
       const snapshot = await this.context.endpoint.snapshot(tenant),
         state = this.context.store.workspaces.workspace(tenant),
         actual: any[] = Array.isArray(snapshot?.views) ? snapshot.views : [];
+      this.services.learning.signIn.reconcile(state, snapshot.browserIncarnation, snapshot.running !== false);
       this.services.lifecycle.retain(
         tenant,
         new Set(
@@ -176,7 +178,12 @@ export class Reconciler {
       for (const t of [...state.tabs]) {
         const current = actual.find((v) => v.viewId === t.webviewId);
         if (!current) {
+          if (t.signIn) continue;
           this.services.lifecycle.observeLifecycleRecovery(state, t, current, snapshot.browserIncarnation);
+          continue;
+        }
+        if (t.signIn) {
+          if (current.close_state === 'closed') this.services.pageRequests.removeProductTab(state, t);
           continue;
         }
         await this.services.navigation.observe(state, t, current, snapshot);
@@ -370,7 +377,8 @@ export class Reconciler {
         )
           continue;
         if (!current) {
-          await this.context.endpoint.ensureView(tenant, { ...config, url: t.pendingUrl ?? t.url });
+          const ensure = { ...config, url: t.pendingUrl ?? t.url, ...(t.signIn ? { signIn: t.signIn } : {}) };
+          await this.context.endpoint.ensureView(tenant, ensure);
           this.services.policy.appliedConfiguration(tenant, key, encoded);
         } else if (
           this.services.policy.configuration(tenant, key) !== encoded ||
@@ -436,6 +444,8 @@ export class Reconciler {
     // Snapshot is read-only. Maintenance must never revive a missing Browser/view.
     const snapshot = await this.context.endpoint.snapshot(tenant),
       state = this.context.store.workspaces.workspace(tenant);
+    this.services.learning.signIn.reconcile(state, snapshot.browserIncarnation, snapshot.running !== false);
+    this.context.store.workspaces.saveWorkspace(state);
     this.services.lifecycle.retain(
       tenant,
       new Set(
@@ -465,6 +475,7 @@ export class Reconciler {
       return;
     }
     for (const tab of state.tabs) {
+      if (tab.signIn) continue;
       const current = (snapshot.views ?? []).find((view: any) => view.viewId === tab.webviewId);
       const lifecycleBlocked = this.services.lifecycle.observeLifecycleRecovery(
         state,

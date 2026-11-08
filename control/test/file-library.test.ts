@@ -1,4 +1,5 @@
 import { RemoteKitError } from '../shared/errors';
+import { AtRestKey } from '../server/auth/crypto';
 import { LibraryRepository } from '../server/persistence/library';
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -93,6 +94,7 @@ function fixture() {
     gateway,
     limits,
     {
+      checkQuota: () => {},
       require: (tenant, id) => {
         if (tenant !== 'tenant' || !assets.has(id)) throw new RemoteKitError('not_found', 'Object missing');
       },
@@ -135,6 +137,7 @@ function fixture() {
         gateway,
         limits,
         {
+          checkQuota: () => {},
           require: (tenant, id) => {
             if (tenant !== 'tenant' || !assets.has(id))
               throw new RemoteKitError('not_found', 'Object missing');
@@ -710,6 +713,7 @@ test('object GC follows live entry assets, originals, candidates, and pending se
   const nodes = { handlers: new Map(), on() {} } as unknown as NodeRegistry;
   const store = {
     db: f.db,
+    atRestKey: new AtRestKey(null),
     transaction: <T>(work: () => T) => f.db.transaction(work)(),
   } as ControlDatabase;
   const objects = new ObjectIndex(
@@ -720,7 +724,7 @@ test('object GC follows live entry assets, originals, candidates, and pending se
     () => false,
   );
   for (const assetId of [ASSETS.photo, ASSETS.original, ASSETS.extra, ASSETS.draft])
-    f.db.prepare('INSERT INTO objects VALUES (?,?,?,?,?,?,?)').run('tenant', assetId, 3, 3, assetId, 0, null);
+    f.db.prepare('INSERT INTO objects VALUES (?,?,?,?,?)').run(assetId, 3, 3, assetId, 0);
   const partitionId = (await f.run('partition', { operationId: 'partition', name: 'Saved' })).partitions[0]
     .id;
   const saved = await f.add(ASSETS.photo, 'library', {
@@ -739,6 +743,7 @@ test('object GC follows live entry assets, originals, candidates, and pending se
   f.states.set(selection.selectionId, 'cancelled');
   await f.run('finish', selection);
   await objects.gc();
+  await objects.gc(Date.now() + 2 * 60 * 60 * 1000 + 1);
   assert.deepEqual(indexed(), [ASSETS.photo, ASSETS.original, ASSETS.extra].sort());
   await f.run('sourcePurge', { operationId: 'purge', source: uploadSource });
   await objects.gc();
@@ -746,6 +751,7 @@ test('object GC follows live entry assets, originals, candidates, and pending se
   assert.deepEqual(indexed(), [ASSETS.photo, ASSETS.original, ASSETS.extra].sort());
   await f.run('partitionDelete', { operationId: 'delete-partition', id: partitionId });
   await objects.gc();
+  await objects.gc(Date.now() + 2 * 60 * 60 * 1000 + 1);
   assert.deepEqual(indexed(), []);
 });
 

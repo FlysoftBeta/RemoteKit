@@ -1,0 +1,1002 @@
+.learning-app {
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  color: var(--text-primary);
+  background: var(--surface-app);
+  font-size: 14px;
+}
+.learning-app .MuiInputAdornment-root,
+.learning-app .MuiInputBase-input::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+.learning-app .MuiButton-root.Mui-disabled {
+  color: var(--text-muted);
+  background: var(--surface-subtle);
+}
+.learning-dialog .MuiPaper-root {
+  color: var(--text-primary);
+  background: var(--surface);
+}
+.learning-dialog .MuiInputBase-root {
+  color: var(--text-primary);
+}
+.learning-dialog .MuiInputLabel-root {
+  color: var(--text-secondary);
+}
+.learning-dialog .MuiOutlinedInput-notchedOutline {
+  border-color: var(--border);
+}
+.learning-dialog .MuiIconButton-root {
+  min-width: 40px;
+  min-height: 40px;
+  color: var(--text-secondary);
+}
+
+.learning-app .MuiAlert-root {
+  color: var(--text-primary);
+  background: var(--surface-subtle);
+}
+.learning-app .MuiAlert-icon {
+  color: var(--attention);
+}
+.learning-app .MuiAlert-standardError .MuiAlert-icon {
+  color: var(--error);
+}
+.learning-app .MuiButton-textPrimary,
+.learning-app .MuiButton-outlinedPrimary {
+  color: var(--primary);
+}
+.learning-auth .MuiIconButton-root {
+  min-height: 40px;
+  min-width: 40px;
+}
+.learning-topbar {
+  height: 48px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  gap: 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.learning-top-actions,
+.learning-back {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 4px;
+}
+.learning-back strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.learning-app .MuiButton-root,
+.learning-app .MuiIconButton-root,
+.learning-app .MuiToggleButton-root,
+.learning-drawer .MuiButton-root {
+  min-height: 40px;
+}
+.learning-app .MuiChip-deletable {
+  height: 32px;
+}
+.learning-app .MuiChip-deleteIcon {
+  width: 20px;
+  height: 20px;
+  margin-right: 5px;
+}
+.learning-app .MuiIconButton-root {
+  min-width: 40px;
+  color: var(--text-secondary);
+}
+.learning-app .MuiToggleButton-root {
+  padding: 4px 14px;
+  text-transform: none;
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+.learning-app .MuiToggleButton-root.Mui-selected {
+  color: var(--primary);
+  background: var(--primary-tab-drop);
+}
+.learning-app .MuiChip-root {
+  color: var(--text-secondary);
+  border-color: var(--border);
+}
+.learning-app .MuiChip-filled {
+  background: var(--surface-switcher);
+}
+.learning-app .MuiOutlinedInput-root,
+.learning-drawer .MuiOutlinedInput-root {
+  color: var(--text-primary);
+  background: var(--surface);
+}
+.learning-app .MuiInputLabel-root {
+  color: var(--text-secondary);
+}
+.learning-app .MuiOutlinedInput-notchedOutline {
+  border-color: var(--border);
+}
+.learning-app .MuiButton-outlined {
+  border-color: var(--primary-border);
+}
+.learning-app h2 {
+  margin: 8px 0 12px;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.learning-app h3 {
+  margin: 24px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.learning-auth {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  padding: 24px;
+  overflow: auto;
+}
+.learning-auth-card {
+  width: 100%;
+  max-width: 420px;
+  margin: auto;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  text-align: center;
+}
+.learning-auth-card h2,
+.learning-auth-card p {
+  margin: 0;
+}
+.learning-auth-card p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.learning-auth-icon {
+  color: var(--text-secondary);
+  align-self: center;
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  background: var(--surface-subtle);
+  border-radius: var(--radius-panel);
+}
+.learning-auth-icon svg {
+  font-size: 36px;
+}
+.learning-auth-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.verification-card {
+  padding: 12px;
+  max-width: 420px;
+}
+.learning-sign-in-view {
+  position: relative;
+  width: 100%;
+  height: 440px;
+  flex: none;
+  min-height: 180px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.learning-sign-in-view .remote-viewport {
+  position: absolute;
+  inset: 0;
+}
+.learning-sign-in-opening {
+  position: absolute;
+  inset: 0;
+  padding: 20px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 12px;
+  pointer-events: none;
+}
+.learning-auth-site {
+  padding: 16px;
+}
+.learning-auth-site .learning-auth-card {
+  max-width: none;
+  height: 100%;
+  margin: 0;
+  padding: 12px;
+  text-align: left;
+}
+.learning-auth-site .learning-sign-in-view {
+  flex: 1;
+  height: auto;
+}
+.learning-error,
+.learning-auth-card p.learning-error {
+  color: var(--error);
+}
+.learning-muted {
+  color: var(--text-muted);
+}
+.learning-chips {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.learning-chip-scroll {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  min-width: 0;
+  padding: 2px 0;
+  align-items: center;
+  scrollbar-width: thin;
+}
+.learning-chip-scroll > * {
+  flex: none;
+}
+.learning-pending-badge {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--attention);
+  vertical-align: 2px;
+}
+.subject-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: middle;
+}
+.learning-loading {
+  padding: 16px 20px;
+  width: 100%;
+}
+.learning-loading .MuiSkeleton-root {
+  background: var(--surface-meter);
+}
+.learning-empty {
+  flex: 1;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--text-muted);
+}
+.learning-empty strong {
+  color: var(--text-secondary);
+}
+.study-body,
+.bank-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.study-master {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.learning-wide .study-master {
+  flex: none;
+  width: 380px;
+  border-right: 1px solid var(--border);
+}
+.study-list-filters {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 12px 16px;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+.study-list-filters .learning-chip-scroll {
+  flex: 1;
+  min-width: 72px;
+}
+.study-list-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
+.learning-results {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.learning-list {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+  overscroll-behavior: contain;
+  overflow-anchor: none;
+}
+.study-day {
+  margin: 16px 16px 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+.homework-card.MuiButtonBase-root {
+  margin: 0 16px 8px;
+  padding: 12px 16px;
+  width: calc(100% - 32px);
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 8px;
+  text-align: left;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.homework-card strong {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.55;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.homework-subject {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.homework-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+.homework-footer > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+}
+.selected-card.MuiButtonBase-root {
+  border-color: var(--primary-border);
+  background: var(--primary-tab-drop);
+}
+.material-row.MuiButtonBase-root {
+  display: flex;
+  width: 100%;
+  gap: 12px;
+  padding: 6px 16px;
+  text-align: left;
+  justify-content: flex-start;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  height: 56px;
+  min-height: 56px;
+}
+.attachment-icon {
+  width: 32px;
+  height: 32px;
+  font-size: 32px;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.attachment-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.attachment-name strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+.attachment-name small {
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.study-detail {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+}
+.study-detail-scroll {
+  padding: 24px;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.study-preview-header {
+  height: 48px;
+  flex: none;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.study-preview-header strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.study-preview-header small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.study-detail > .file-document-preview {
+  flex: 1;
+  height: auto;
+}
+.bank-sidebar {
+  width: 260px;
+  flex: none;
+  padding: 16px;
+  border-right: 1px solid var(--border);
+  overflow: auto;
+  background: var(--surface);
+}
+.bank-sidebar-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  min-height: 32px;
+}
+.bank-sidebar .MuiListItemButton-root {
+  border-radius: var(--radius-md);
+  gap: 4px;
+  height: 44px;
+  min-height: 44px;
+}
+.bank-sidebar .MuiListItemButton-root.Mui-selected {
+  background: var(--primary-tab-drop);
+}
+.bank-stage {
+  color: var(--text-muted);
+}
+.bank-sidebar .MuiTextField-root {
+  margin: 16px 0;
+}
+.bank-chapters > summary {
+  padding: 12px 0;
+  cursor: pointer;
+  font-weight: 600;
+}
+.bank-catalog {
+  list-style: none;
+  padding-left: 12px;
+  margin: 0;
+}
+.bank-catalog summary {
+  min-height: 36px;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+.bank-catalog .MuiButton-root {
+  text-align: left;
+  justify-content: flex-start;
+  color: var(--text-secondary);
+}
+.bank-sidebar .catalog-selected {
+  color: var(--primary);
+  background: var(--primary-tab-drop);
+}
+.bank-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.bank-toolbar {
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.bank-search-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.bank-search-row .MuiTextField-root {
+  flex: 1;
+  min-width: 0;
+}
+.bank-result-count {
+  padding: 14px 20px 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.question-card {
+  margin: 12px 20px;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  overflow-wrap: anywhere;
+  line-height: 1.8;
+}
+.question-meta {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+  min-width: 0;
+}
+.question-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  min-width: 28px;
+  padding: 0 6px;
+  border-radius: var(--radius-md);
+  background: var(--surface-switcher);
+  color: var(--text-secondary);
+  font-size: 12px;
+  flex: none;
+}
+.question-source {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+.question-option {
+  display: flex;
+  gap: 12px;
+  padding: 8px 10px;
+  margin: 4px 0;
+  border-radius: var(--radius-md);
+  align-items: center;
+  min-height: 40px;
+}
+.question-option > span {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  width: 26px;
+  height: 26px;
+  font-size: 12px;
+}
+.question-option.correct-option {
+  color: var(--success);
+  background: var(--surface-success);
+}
+.question-option.correct-option > span {
+  border-color: var(--success);
+}
+.question-child {
+  margin: 12px 0 12px 16px;
+  padding: 12px 0 0 16px;
+  border: 0;
+  border-left: 2px solid var(--border);
+  border-radius: 0;
+}
+.question-answer {
+  color: var(--success);
+  padding: 12px 0;
+}
+.question-student {
+  padding: 12px;
+  background: var(--surface-subtle);
+  border-radius: var(--radius-md);
+}
+.learning-html {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.learning-html p {
+  margin: 8px 0;
+}
+.learning-html img,
+.learning-html audio,
+.learning-html video {
+  max-width: 100%;
+  height: auto;
+}
+.learning-html img {
+  vertical-align: middle;
+}
+.learning-html table {
+  display: block;
+  max-width: 100%;
+  overflow: auto;
+  border-collapse: collapse;
+}
+.learning-html td,
+.learning-html th {
+  border: 1px solid var(--border);
+  padding: 6px;
+}
+.learning-html math {
+  vertical-align: baseline;
+  max-width: 100%;
+}
+.question-card > audio,
+.question-card > video {
+  width: 100%;
+  max-width: 420px;
+  margin: 12px 0;
+}
+.learning-drawer {
+  width: min(320px, calc(100% - 40px));
+  background: var(--surface) !important;
+  color: var(--text-primary) !important;
+}
+.learning-drawer .bank-sidebar {
+  width: 100%;
+  height: 100%;
+}
+.learning-narrow .learning-auth {
+  padding: 16px;
+}
+.learning-narrow .learning-auth-card {
+  padding: 24px 20px;
+}
+.learning-narrow .verification-card {
+  padding: 12px;
+}
+.learning-narrow .study-detail-scroll {
+  padding: 16px;
+}
+.learning-narrow .bank-toolbar {
+  padding: 12px;
+}
+.learning-narrow .question-card {
+  margin: 10px 12px;
+  padding: 16px;
+}
+
+.learning-spinning {
+  animation: learning-spin 1s linear infinite;
+}
+@keyframes learning-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .learning-spinning {
+    animation-duration: 3s;
+  }
+}
+
+.learning-app .MuiButton-containedPrimary,
+.learning-dialog .MuiButton-containedPrimary {
+  background: var(--primary);
+  color: var(--surface);
+}
+.learning-app .MuiButton-containedPrimary.Mui-disabled {
+  background: var(--surface-meter);
+  color: var(--text-muted);
+}
+.learning-app .MuiChip-clickable {
+  height: 32px;
+  min-height: 32px;
+}
+.learning-app .MuiChip-root[aria-pressed='true'] {
+  color: var(--primary);
+  background: var(--primary-tab-drop);
+  border: 1px solid var(--primary-border);
+}
+.learning-top-actions {
+  margin-left: auto;
+  flex: none;
+}
+.learning-topbar > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.homework-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  gap: 8px;
+}
+.learning-app .homework-status {
+  height: 24px;
+  font-size: 12px;
+  flex: none;
+}
+.learning-app .status-pending {
+  color: var(--attention);
+  border-color: var(--attention);
+}
+.learning-app .status-submitted {
+  color: var(--primary);
+  border-color: var(--primary-border);
+  background: var(--primary-tab-drop);
+}
+.learning-app .status-corrected {
+  color: var(--success);
+  border-color: var(--success);
+  background: var(--surface-success);
+}
+.learning-success {
+  color: var(--success);
+}
+.learning-attention {
+  color: var(--attention);
+}
+.study-detail-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 16px;
+}
+.study-detail-empty svg {
+  font-size: 48px;
+}
+.study-list-filters .MuiToggleButtonGroup-root {
+  flex: none;
+}
+.study-list-filters .MuiToggleButton-root {
+  min-height: 32px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+.study-list-filters .material-type-chips {
+  flex-basis: 100%;
+}
+.material-type-select {
+  flex: none;
+  width: 128px;
+  margin-left: auto !important;
+}
+.material-type-select .MuiInputBase-root {
+  height: 32px;
+  font-size: 13px;
+}
+.attachment-icon svg {
+  font-size: 32px;
+}
+.attachment-trailing {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 3px;
+  flex: none;
+  max-width: 46%;
+}
+.attachment-trailing small {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.material-row.selected-card.MuiButtonBase-root {
+  background: var(--primary-tab-drop);
+}
+.study-preview-header > .MuiButton-root {
+  margin-left: auto;
+  flex: none;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.learning-retention-slider {
+  padding: 8px 12px;
+}
+.learning-retention-slider .MuiSlider-root {
+  color: var(--primary);
+}
+.learning-retention-slider .MuiSlider-markLabel {
+  color: var(--text-secondary);
+}
+.learning-verification-caption {
+  text-align: center;
+}
+.verification-card .learning-auth-heading h2 {
+  font-size: 18px;
+}
+.verification-card .learning-auth-heading .MuiButton-root {
+  flex: none;
+}
+.bank-search-row > .MuiButton-root {
+  flex: none;
+  white-space: nowrap;
+}
+.bank-search-row .MuiInputBase-root {
+  height: 40px;
+}
+.bank-search-row .MuiFormControlLabel-root {
+  margin: 0;
+  flex: none;
+}
+.bank-search-row .MuiFormControlLabel-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.bank-search-row .MuiIconButton-root[aria-pressed='true'] {
+  color: var(--primary);
+  background: var(--primary-tab-drop);
+}
+.bank-drawer-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 20px;
+}
+.bank-drawer-controls .MuiTextField-root {
+  margin: 0;
+}
+.bank-sidebar .MuiButton-root {
+  justify-content: flex-start;
+  text-align: left;
+}
+.bank-catalog .MuiButton-root {
+  width: 100%;
+}
+.bank-stage {
+  font-size: 12px;
+  flex: none;
+}
+.bank-sidebar .MuiListItemText-primary {
+  font-size: 14px;
+}
+.question-meta > .MuiChip-root {
+  flex: none;
+  max-width: 112px;
+  height: 26px;
+  font-size: 12px;
+}
+.question-card > .learning-html,
+.question-option,
+.question-card > .MuiCollapse-root,
+.question-student {
+  max-width: 860px;
+}
+.question-option:hover {
+  background: var(--surface-tile-hover);
+}
+.question-option.correct-option:hover {
+  background: var(--surface-success);
+}
+.question-transcript-toggle.MuiButton-root,
+.question-answer-toggle.MuiButton-root {
+  display: flex;
+  width: fit-content;
+  padding-left: 0;
+}
+.question-card > audio {
+  display: block;
+}
+.learning-results > .MuiLinearProgress-root,
+.bank-main > .MuiLinearProgress-root {
+  height: 2px;
+  flex: none;
+}
+
+.learning-drawer .MuiInputLabel-root,
+.learning-drawer .MuiIconButton-root,
+.learning-app .MuiSelect-icon,
+.learning-drawer .MuiSelect-icon,
+.learning-menu .MuiSelect-icon {
+  color: var(--text-secondary);
+}
+.learning-drawer .MuiOutlinedInput-notchedOutline {
+  border-color: var(--border);
+}
+.learning-app .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline,
+.learning-drawer .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline {
+  border-color: var(--primary-border);
+}
+.learning-app .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline,
+.learning-drawer .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline {
+  border-color: var(--primary);
+}
+.learning-menu .MuiPaper-root {
+  color: var(--text-primary);
+  background: var(--surface);
+}
+.learning-menu .MuiMenuItem-root:hover {
+  background: var(--surface-tile-hover);
+}
+.learning-menu .MuiMenuItem-root.Mui-selected,
+.learning-menu .MuiMenuItem-root.Mui-selected:hover {
+  background: var(--primary-tab-drop);
+  color: var(--primary);
+}
+.learning-menu .MuiCheckbox-root {
+  color: var(--text-secondary);
+}
+.learning-menu .MuiCheckbox-root.Mui-checked,
+.learning-drawer .MuiButton-root {
+  color: var(--primary);
+}
+.learning-app .MuiChip-deleteIcon {
+  color: var(--text-muted);
+}
+.learning-app .MuiChip-deleteIcon:hover {
+  color: var(--text-primary);
+}
+.learning-app .MuiSwitch-switchBase.Mui-checked {
+  color: var(--primary);
+}
+.learning-app .MuiSwitch-switchBase.Mui-checked + .MuiSwitch-track {
+  background: var(--primary);
+}
+.bank-catalog summary {
+  display: flex;
+  align-items: center;
+  list-style: none;
+  gap: 4px;
+}
+.bank-catalog summary::before {
+  content: '▸';
+  flex: none;
+  width: 12px;
+  text-align: center;
+}
+.bank-catalog details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.bank-catalog summary .MuiButton-root {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+}

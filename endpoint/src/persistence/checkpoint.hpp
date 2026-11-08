@@ -5,29 +5,22 @@
 namespace remotekit {
 class Checkpoints {
  public:
-  explicit Checkpoints(objects::ObjectService& objects) : objects_(objects) {}
+  explicit Checkpoints(objects::ObjectService& objects,
+                       std::shared_ptr<objects::SessionObjects> access = {})
+      : objects_(objects), access_(std::move(access)) {}
   Result<Json> Create(const fs::path& directory,
                       const std::string& tenant,
-                      const objects::Keys& keys,
-                      const std::string& session,
-                      uint64_t epoch,
                       const std::string& build);
   Result<void> Restore(const fs::path& directory,
                        const std::string& tenant,
-                       const objects::Keys& keys,
-                       const std::string& session,
-                       uint64_t epoch,
                        const std::string& build,
                        const Json& checkpoint);
   static bool Excluded(const fs::path& relative, bool directory);
 
  private:
-  Result<std::string> Put(const std::string& tenant,
-                          const objects::Keys& keys,
-                          const std::string& bytes);
-  Result<std::string> Get(const std::string& tenant,
-                          const objects::Keys& keys,
-                          const std::string& id);
+  Result<std::string> Put(const std::string& tenant, const std::string& bytes);
+  Result<std::string> Get(const std::string& tenant, const std::string& id);
   objects::ObjectService& objects_;
+  std::shared_ptr<objects::SessionObjects> access_;
 };
 }  // namespace remotekit

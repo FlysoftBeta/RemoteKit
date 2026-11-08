@@ -48,6 +48,8 @@ function librarySource(value: unknown): LibrarySource {
   if (app === 'files' && (channel === 'upload' || channel === 'camera')) return { app, channel };
   if (/^web:[a-zA-Z0-9_-]{1,128}$/.test(app) && channel === '') return { app, channel };
   if (app === 'download' && channel === '') return { app, channel };
+  if (app === 'study' && channel.length > 0 && channel.length <= 120 && !/[\x00-\x1f\x7f]/.test(channel))
+    return { app, channel };
   if (
     (app === 'browser' || app === 'download') &&
     channel.length > 0 &&
@@ -139,6 +141,8 @@ function entries(snapshot: LibrarySnapshot, entryIds: string[]) {
 /** Catalog and native selection bookkeeping. Files themselves stay on the Endpoint. */
 export class FileLibrary {
   private readonly queues = new KeyedSerialQueue();
+  onDeleted?: (tenant: string, entryIds: string[]) => void;
+  onChanged?: (tenant: string, snapshot: LibrarySnapshot) => void;
 
   constructor(
     private readonly repository: LibraryRepository,
@@ -147,9 +151,94 @@ export class FileLibrary {
       'describeAsset' | 'prepareSelection' | 'selectionStatus'
     >,
     private limits: FileLimits,
-    private readonly objects: Pick<ObjectIndex, 'require'>,
+    private readonly objects: Pick<ObjectIndex, 'require' | 'checkQuota'>,
     private readonly fileSourceForRequest: (tenant: string, requestId: string) => LibrarySource | null,
   ) {}
+  importFromControl(
+    tenant: string,
+    input: {
+      operationId: string;
+      entryId: string;
+      assetId: string;
+      name: string;
+      type: string;
+      size: number;
+      source: LibrarySource;
+      detail: string;
+    },
+    authorize: () => void = () => {},
+    committed: () => void = () => {},
+  ) {
+    return this.queues.run(tenant, async () => {
+      authorize();
+      const name = fileName(input.name);
+      const source = librarySource(input.source);
+      const entryId = id(input.entryId);
+      const assetId = id(input.assetId);
+      const operationId = id(input.operationId);
+      if (
+        !Number.isSafeInteger(input.size) ||
+        input.size < 0 ||
+        input.size > 256 * 1024 * 1024 ||
+        typeof input.type !== 'string' ||
+        input.type.length > 255 ||
+        /[\x00-\x1f\x7f]/.test(input.type) ||
+        typeof input.detail !== 'string' ||
+        input.detail.length > 512
+      )
+        throw invalid('无效的导入文件');
+      const payload = operationHash('control-import', input);
+      const snapshot = this.repository.change(tenant, operationId, payload, (snapshot) => {
+        authorize();
+        if (sourceExcluded(snapshot, source)) throw new RemoteKitError('rejected', '已排除此文件来源');
+        if (snapshot.entries.length >= MAX_CATALOG) throw new RemoteKitError('limit_exceeded', '文件库已满');
+        if (snapshot.entries.some((entry) => entry.id === entryId))
+          throw new RemoteKitError('conflict', '文件已存在');
+        this.objects.require(tenant, assetId);
+        this.objects.checkQuota(tenant);
+        snapshot.entries.unshift({
+          id: entryId,
+          assetId,
+          name,
+          type: input.type,
+          size: input.size,
+          source,
+          detail: input.detail,
+          createdAt: Date.now(),
+          partitionId: null,
+          collected: true,
+        });
+        committed();
+      });
+      this.onChanged?.(tenant, snapshot);
+      return { entryId };
+    });
+  }
+  expireStudyEntry(tenant: string, entryId: string, operationId: string) {
+    return this.queues.run(tenant, async () => {
+      const before = this.repository.snapshot(tenant);
+      const entry = before.entries.find((entry) => entry.id === entryId);
+      if (!entry || entry.source?.app !== 'study') return;
+      this.rejectPending(tenant, [entry]);
+      const snapshot = this.repository.change(
+        tenant,
+        operationId,
+        operationHash('study-expire', entryId),
+        (snapshot) => {
+          const entry = snapshot.entries.find((entry) => entry.id === entryId);
+          if (!entry || entry.source?.app !== 'study') return;
+          if (entry.partitionId !== null) {
+            entry.source = null;
+            entry.collected = false;
+          } else {
+            snapshot.entries = snapshot.entries.filter((entry) => entry.id !== entryId);
+            snapshot.basket = snapshot.basket.filter((id) => id !== entryId);
+          }
+        },
+      );
+      this.onChanged?.(tenant, snapshot);
+    });
+  }
   consumeDownload(tenant: string, event: DownloadEvent) {
     return this.queues.run(tenant, async () => {
       const operationId = operationHash('download', event.eventId);
@@ -203,6 +292,7 @@ export class FileLibrary {
           return;
         }
         this.objects.require(tenant, assetId);
+        this.objects.checkQuota(tenant);
         snapshot.entries.unshift({
           id: randomUUID(),
           assetId,
@@ -302,6 +392,7 @@ export class FileLibrary {
     return this.repository.change(tenant, operationId, payload, (snapshot) => {
       for (const reference of assetIds({ assetId, originalAssetId, photo }))
         this.objects.require(tenant, reference);
+      this.objects.checkQuota(tenant);
       const partitionId = validate(snapshot),
         entryId = randomUUID();
       snapshot.entries.unshift({
@@ -346,6 +437,7 @@ export class FileLibrary {
     const snapshot = this.repository.change(tenant, operationId, payload, (snapshot) => {
       for (const reference of assetIds({ assetId, originalAssetId, photo }))
         this.objects.require(tenant, reference);
+      this.objects.checkQuota(tenant);
       const entry = validate(snapshot);
       entry.assetId = assetId;
       entry.type = asset.type;
@@ -551,6 +643,10 @@ export class FileLibrary {
           (snapshot) => {
             const selected = snapshot.entries.filter((entry) => sameSource(entry.source, source));
             this.rejectPending(tenant, selected);
+            this.onDeleted?.(
+              tenant,
+              selected.map((entry) => entry.id),
+            );
             for (const entry of selected) {
               entry.source = null;
               entry.collected = false;
@@ -592,6 +688,7 @@ export class FileLibrary {
           operationHash('delete', entryIds),
           (snapshot) => {
             this.rejectPending(tenant, entries(snapshot, entryIds));
+            this.onDeleted?.(tenant, entryIds);
             const removed = new Set(entryIds);
             snapshot.entries = snapshot.entries.filter((entry) => !removed.has(entry.id));
             snapshot.basket = snapshot.basket.filter((entryId) => !removed.has(entryId));

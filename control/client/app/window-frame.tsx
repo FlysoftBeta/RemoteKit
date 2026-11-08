@@ -2,7 +2,7 @@ import './window-frame.css';
 import { useDropTarget, useWindowDragging } from './window-drag';
 import { diagnostics } from '../media/diagnostics';
 import { Typography } from '@mui/material';
-import React, { useEffect, useRef } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useRef } from 'react';
 import type { ProductState, ProductWindow } from '../../shared/product';
 import { BUILTIN_APP_TITLES, SEARCH_ENGINES, isBuiltinApp, isLocalApp } from '../../shared/product';
 import { FilesApp } from '../files/files-app';
@@ -17,6 +17,10 @@ import { BrowserChrome, useBrowserNavigation } from './browser-chrome';
 import { AppChrome } from './app-chrome';
 import { WindowMenus, useWindowMenus } from './window-menus';
 import { PermissionPrompt } from './permission-prompt';
+import { SignInHost } from '../learning/sign-in-host';
+const LearningApp = lazy(() =>
+  import('../learning/learning-app').then((module) => ({ default: module.LearningApp })),
+);
 export function WindowFrame({
   win,
   state,
@@ -53,8 +57,9 @@ export function WindowFrame({
   const drop = useDropTarget('window', win.id);
   const dragging = useWindowDragging();
   const source = dragging && 'windowId' in dragging && dragging.windowId === win.id;
-  const tabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
-    active = tabs.find((t) => t.id === win.activeTabId),
+  const windowTabs = state.workspace.tabs.filter((t) => t.windowId === win.id),
+    tabs = windowTabs.filter((tab) => !tab.signIn),
+    active = windowTabs.find((t) => t.id === win.activeTabId),
     focused =
       state.workspace.spaces.find((space) => space.id === state.workspace.activeSpaceId)?.focusedWindowId ===
       win.id;
@@ -82,7 +87,18 @@ export function WindowFrame({
     observer?.observe(node);
     measure();
     return () => observer?.disconnect();
-  }, [win.id, onGeometry]);
+  }, [win.id, onGeometry, local]);
+  const signInHost = useMemo(
+    () => ({
+      transport,
+      keyboardActive: online && (focused || fullscreen) && visible,
+      measure: (width: number, height: number) => onGeometry(win.id, width, height),
+      retry: (tabId: string) => {
+        void action({ type: 'tab.command', tabId, command: 'reload' }).catch(report);
+      },
+    }),
+    [transport, online, focused, fullscreen, visible, onGeometry, win.id, action, report],
+  );
   let origin = '';
   try {
     const parsed = new URL(active?.url ?? '');
@@ -98,7 +114,7 @@ export function WindowFrame({
     win,
     state,
     active,
-    focused,
+    focused: focused && !local,
     fullscreen,
     online,
     navigationReady,
@@ -131,6 +147,7 @@ export function WindowFrame({
             {win.appId === 'files' ? (
               <FilesApp
                 windowId={win.id}
+                call={call}
                 state={viewState}
                 onState={onState}
                 previewEntryId={
@@ -140,6 +157,21 @@ export function WindowFrame({
                   typeof viewState.previewRequestId === 'string' ? viewState.previewRequestId : undefined
                 }
               />
+            ) : win.appId === 'study' || win.appId === 'questions' ? (
+              <SignInHost.Provider value={signInHost}>
+                <Suspense fallback={<div role="status">正在打开…</div>}>
+                  <LearningApp
+                    appId={win.appId}
+                    windowId={win.id}
+                    state={state}
+                    tab={active?.signIn ? active : undefined}
+                    call={call}
+                    action={action}
+                    online={online}
+                    transport={transport}
+                  />
+                </Suspense>
+              </SignInHost.Provider>
             ) : (
               appContent(win.appId as 'settings' | 'admin', viewState, onState)
             )}

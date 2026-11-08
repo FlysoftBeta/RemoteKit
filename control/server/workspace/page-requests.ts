@@ -205,7 +205,7 @@ export class PageRequests {
     private readonly context: DomainContext,
     private readonly services: Pick<
       DomainServices,
-      'lifecycle' | 'operations' | 'viewers' | 'policy' | 'library'
+      'lifecycle' | 'operations' | 'viewers' | 'policy' | 'library' | 'learning'
     >,
   ) {}
   fullscreenTabs(workspace: ProductWorkspace) {
@@ -387,6 +387,14 @@ export class PageRequests {
     return result;
   }
   async closeProductTab(state: ProductWorkspace, tab: ProductTab) {
+    if (tab.signIn) {
+      this.removeProductTab(state, tab);
+      void this.services.learning.signIn.cancel(state.tenantId, tab.signIn);
+      await this.context.endpoint
+        .closeView(state.tenantId, { viewId: tab.webviewId, force: true })
+        .catch(() => {});
+      return;
+    }
     if (state.pendingClose && state.pendingClose.id !== tab.id)
       throw new RemoteKitError('conflict', '请先处理当前关闭请求');
     if (isLocalTab(tab) || (tab.popup && tab.popup.status !== 'adopted')) {
@@ -571,6 +579,13 @@ export class PageRequests {
     const closed = new Set<string>(),
       eventIds: string[] = [];
     for (const event of Array.isArray(snapshot.events) ? snapshot.events : []) {
+      if (
+        event?.type === 'view.signIn' &&
+        this.services.learning.signIn.consume(state.tenantId, snapshot.browserIncarnation, event)
+      ) {
+        eventIds.push(event.eventId);
+        continue;
+      }
       if (event?.type === 'download.imported' || event?.type === 'download.failed') {
         if (
           typeof event.eventId !== 'string' ||

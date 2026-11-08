@@ -57,28 +57,25 @@ bool Checkpoints::Excluded(const fs::path& relative, bool directory) {
   }
   return name == L"browser.log" || name == L"LOCK" || name == L"LOG" || name == L"LOG.old";
 }
-Result<std::string> Checkpoints::Put(const std::string& tenant,
-                                     const objects::Keys& keys,
-                                     const std::string& bytes) {
+Result<std::string> Checkpoints::Put(const std::string& tenant, const std::string& bytes) {
   std::istringstream input(bytes);
-  RK_ASSIGN_OR_RETURN(info, objects_.Store().Write(tenant, keys, input));
+  RK_ASSIGN_OR_RETURN(info, objects_.Store().Write(objects_.ObjectKeys(), input));
   // Repeated notification also repairs a prior interrupted checkpoint transaction.
-  RK_RETURN_IF_ERROR(objects_.Committed(info));
+  RK_RETURN_IF_ERROR(objects_.Committed(info, {{"tenantId", tenant}}));
+  if (access_)
+    access_->Grant(info.id);
   return info.id;
 }
-Result<std::string> Checkpoints::Get(const std::string& tenant,
-                                     const objects::Keys& keys,
-                                     const std::string& id) {
-  RK_RETURN_IF_ERROR(objects_.Ensure(tenant, id));
+Result<std::string> Checkpoints::Get(const std::string& tenant, const std::string& id) {
+  if (!access_)
+    access_ = std::make_shared<objects::SessionObjects>(objects_, tenant);
+  RK_RETURN_IF_ERROR(access_->Ensure(id));
   std::ostringstream output;
-  RK_RETURN_IF_ERROR(objects_.Store().Read(tenant, keys, id, output));
+  RK_RETURN_IF_ERROR(objects_.Store().Read(objects_.ObjectKeys(), id, output));
   return output.str();
 }
 Result<Json> Checkpoints::Create(const fs::path& directory,
                                  const std::string& tenant,
-                                 const objects::Keys& keys,
-                                 const std::string& session,
-                                 uint64_t epoch,
                                  const std::string& build) {
   const fs::path index_path = directory.wstring() + L".checkpoint-index.json";
   auto previous = Load(index_path);
@@ -117,12 +114,12 @@ Result<Json> Checkpoints::Create(const fs::path& directory,
     if (reuse) {
       chunks = previous[name]["chunks"];
       for (const auto& id : chunks) {
-        auto local = objects_.Store().Inspect(tenant, id.get<std::string>());
+        auto local = objects_.Store().Inspect(id.get<std::string>());
         if (!local) {
           reuse = false;
           break;
         }
-        RK_RETURN_IF_ERROR(objects_.Committed(local.value()));
+        RK_RETURN_IF_ERROR(objects_.Committed(local.value(), {{"tenantId", tenant}}));
       }
     }
     if (!reuse) {
@@ -135,7 +132,7 @@ Result<Json> Checkpoints::Create(const fs::path& directory,
         std::string bytes(static_cast<size_t>(std::min<uint64_t>(remaining, kChunk)), '\0');
         if (!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
           return Error{ErrorCode::kUnavailable, "checkpoint file read failed"};
-        RK_ASSIGN_OR_RETURN(id, Put(tenant, keys, bytes));
+        RK_ASSIGN_OR_RETURN(id, Put(tenant, bytes));
         chunks.push_back(id);
         remaining -= bytes.size();
       } while (remaining);
@@ -150,9 +147,8 @@ Result<Json> Checkpoints::Create(const fs::path& directory,
     return a["path"].get<std::string>() < b["path"].get<std::string>();
   });
   std::sort(directories.begin(), directories.end());
-  Json manifest{{"version", 1},     {"sessionId", session}, {"placementEpoch", epoch},
-                {"buildId", build}, {"files", files},       {"directories", directories}};
-  RK_ASSIGN_OR_RETURN(manifest_id, Put(tenant, keys, manifest.dump()));
+  Json manifest{{"version", 2}, {"buildId", build}, {"files", files}, {"directories", directories}};
+  RK_ASSIGN_OR_RETURN(manifest_id, Put(tenant, manifest.dump()));
   ids.insert(manifest_id);
   RK_RETURN_IF_ERROR(WriteDurableJson(index_path, index));
   RK_RETURN_IF_ERROR(WriteDurableJson(directory.wstring() + L".checkpoint", manifest_id));
@@ -160,13 +156,13 @@ Result<Json> Checkpoints::Create(const fs::path& directory,
 }
 Result<void> Checkpoints::Restore(const fs::path& directory,
                                   const std::string& tenant,
-                                  const objects::Keys& keys,
-                                  const std::string& session,
-                                  uint64_t epoch,
                                   const std::string& build,
                                   const Json& checkpoint) {
   const fs::path marker = directory.wstring() + L".checkpoint";
   if (!checkpoint.is_null() && fs::is_directory(directory) && Load(marker) == checkpoint) {
+    if (!access_)
+      access_ = std::make_shared<objects::SessionObjects>(objects_, tenant);
+    RK_RETURN_IF_ERROR(access_->Ensure(checkpoint.get<std::string>()));
     fs::remove(marker);
     return {};
   }
@@ -175,13 +171,10 @@ Result<void> Checkpoints::Restore(const fs::path& directory,
   fs::remove_all(restore);
   fs::create_directories(restore);
   if (!checkpoint.is_null()) {
-    RK_ASSIGN_OR_RETURN(bytes, Get(tenant, keys, checkpoint.get<std::string>()));
+    RK_ASSIGN_OR_RETURN(bytes, Get(tenant, checkpoint.get<std::string>()));
     const auto manifest = Json::parse(bytes, nullptr, false);
-    if (!manifest.is_object() || manifest.value("version", Json()) != 1 ||
-        manifest.value("sessionId", Json()) != session ||
-        manifest.value("buildId", Json()) != build || !manifest.contains("placementEpoch") ||
-        !manifest["placementEpoch"].is_number_unsigned() ||
-        manifest["placementEpoch"].get<uint64_t>() > epoch || !manifest.contains("files") ||
+    if (!manifest.is_object() || manifest.value("version", Json()) != 2 ||
+        manifest.value("buildId", Json()) != build || !manifest.contains("files") ||
         !manifest["files"].is_array() || !manifest.contains("directories") ||
         !manifest["directories"].is_array())
       return Error{ErrorCode::kRejected, "invalid checkpoint manifest"};
@@ -207,7 +200,7 @@ Result<void> Checkpoints::Restore(const fs::path& directory,
       for (const auto& chunk : file["chunks"]) {
         if (!chunk.is_string() || !objects::ValidId(chunk.get<std::string>()))
           return Error{ErrorCode::kRejected, "invalid checkpoint chunk"};
-        RK_ASSIGN_OR_RETURN(content, Get(tenant, keys, chunk.get<std::string>()));
+        RK_ASSIGN_OR_RETURN(content, Get(tenant, chunk.get<std::string>()));
         if (content.size() != std::min<uint64_t>(remaining, kChunk))
           return Error{ErrorCode::kRejected, "checkpoint chunk size mismatch"};
         output.write(content.data(), static_cast<std::streamsize>(content.size()));

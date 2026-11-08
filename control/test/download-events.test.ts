@@ -26,7 +26,7 @@ function fixture() {
       repository,
       {} as never,
       { maxFileBytes: 256 * 1024 * 1024, maxBatchBytes: 512 * 1024 * 1024, maxFiles: 64 },
-      { require: () => ({}) as never },
+      { require: () => ({}) as never, checkQuota: () => {} },
       () => null,
     );
   let library = manager();

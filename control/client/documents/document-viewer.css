@@ -1,0 +1,147 @@
+.document-viewer {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  color: var(--text-primary);
+  background: var(--surface);
+  font-family: var(--font-family);
+}
+
+.document-viewer-title {
+  flex: none;
+  padding: 12px 16px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border-preview);
+  font-size: 1rem;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-viewer-scroll {
+  position: relative;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: scroll;
+  overflow-anchor: none;
+  overscroll-behavior: contain;
+  touch-action: pan-x pan-y;
+  -webkit-overflow-scrolling: touch;
+  background: var(--surface-stage);
+  scrollbar-color: var(--scrollbar) var(--surface-stage);
+}
+
+.document-viewer-scroll:focus-visible,
+.document-viewer-jump input:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.document-viewer-unit {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 16px 16px 8px;
+}
+
+.document-viewer-page {
+  position: relative;
+  margin: 0 auto;
+  overflow: hidden;
+  background: var(--surface);
+  box-shadow:
+    0 0 0 1px var(--border-preview),
+    0 2px 8px var(--shadow-notice);
+}
+
+.document-viewer-page-body {
+  transform-origin: 0 0;
+}
+
+.document-viewer-page-state {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+}
+
+.document-viewer-state,
+.document-viewer-page-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+
+.document-viewer-state {
+  flex: 1 1 0;
+  min-height: 160px;
+}
+
+.document-viewer-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 48px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border-preview);
+  background: var(--surface);
+  white-space: nowrap;
+}
+
+.document-viewer-controls .MuiIconButton-root {
+  width: 44px;
+  height: 44px;
+  color: var(--text-primary);
+}
+
+.document-viewer-controls .Mui-disabled {
+  color: var(--text-muted);
+}
+
+.document-viewer .MuiCircularProgress-root,
+.document-viewer .MuiButton-root {
+  color: var(--primary);
+}
+
+.document-viewer .MuiButton-root {
+  min-height: 44px;
+}
+
+.document-viewer-zoom,
+.document-viewer-jump {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.document-viewer-zoom {
+  min-width: 40px;
+  text-align: center;
+}
+
+.document-viewer-jump {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.document-viewer-jump input {
+  box-sizing: border-box;
+  width: 52px;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  background: var(--surface);
+  font: inherit;
+  text-align: center;
+}

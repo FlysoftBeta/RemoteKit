@@ -14,6 +14,8 @@ export class UncertainRecovery {
     const blockers = snapshot.hibernation;
     if (this.context.endpoint.placement.peek(tenant)?.state !== 'active') return '会话未运行';
     if (runtime.viewer) return '用户在线';
+    if (this.context.store.workspaces.workspace(tenant).tabs.some((tab) => tab.signIn))
+      return '正在登录学习账号';
     if (!blockers) return '节点未报告休眠条件';
     if (
       !immediate &&
@@ -295,6 +297,7 @@ export class UncertainRecovery {
         state.settings.browser.memorySaverEnabled,
         visible,
         isLocalTab(tab) ||
+          !!tab.signIn ||
           (!!tab.popup && tab.popup.status !== 'adopted') ||
           state.pendingClose?.id === tab.id ||
           state.pendingWindowCloseId === tab.windowId,

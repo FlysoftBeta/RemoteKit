@@ -75,10 +75,10 @@ let setupDone = false;
 async function connect(name, context) {
   context ??= await viewers.newContext({ viewport: { width: 1000, height: 760 } });
   if (!contexts.includes(context)) contexts.push(context);
-  const response = await context.request.post(
-    origin + (setupDone ? '/api/auth/login' : '/api/auth/setup'),
-    { headers: { Origin: origin }, data: { username: name, password } },
-  );
+  const response = await context.request.post(origin + (setupDone ? '/api/auth/login' : '/api/auth/setup'), {
+    headers: { Origin: origin },
+    data: { username: name, password },
+  });
   assert.equal(response.status(), 200, await response.text());
   const viewer = await instrumentViewer(context, run, name);
   await viewer.page.goto(origin);
@@ -87,11 +87,11 @@ async function connect(name, context) {
     currentPassword: password,
     settings: { lockOnHidden: false, lockOnIdle: false },
   });
-  await viewer.action({ type: 'settings.update', settings: { memorySaverEnabled: true } });
+  await viewer.action({ type: 'settings.update', settings: { browser: { memorySaverEnabled: true } } });
   return viewer;
 }
 async function workspace(viewer, path) {
-  await viewer.action({ type: 'window.create' });
+  await viewer.action({ type: 'window.open', appId: 'browser', placement: { mode: 'space' } });
   const state = await viewer.state();
   const window = state.workspace.windows.at(-1);
   await viewer.action({ type: 'tab.navigate', tabId: window.activeTabId, url: fixtureOrigin + path });
@@ -207,7 +207,7 @@ try {
     assetId: asset.assetId,
     name: 'moved.txt',
     destination: 'basket',
-    groupId: null,
+    origin: { kind: 'files', channel: 'upload', partitionId: null },
   });
   const before = (await first.state()).workspace.tabs;
   const checkpoint = await hibernate(first, 'cluster-first');
@@ -254,7 +254,6 @@ try {
   const objectPath = join(
     nodes[target.node_id].dataPath,
     'objects',
-    target.tenant,
     asset.assetId.slice(0, 2),
     asset.assetId + '.rko',
   );
@@ -275,7 +274,6 @@ try {
     operationId: randomUUID(),
     requestId: request.id,
     entryIds: [library.basket[0]],
-    groupId: null,
   });
   await restored.call('selection.commit', { requestId: request.id, selectionId: prepared.selectionId }, true);
   const attached = await until('moved file attached', () =>

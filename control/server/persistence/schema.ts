@@ -1,8 +1,9 @@
 import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 import { createAnnouncementTables } from './announcements';
+import { createLearningTables } from './learning';
 
-const version = 10;
+const version = 12;
 
 function createWorkspaceItems(db: Database.Database) {
   db.exec(`CREATE TABLE installed_apps (
@@ -43,6 +44,7 @@ export function createSchema(db: Database.Database) {
       if (rows.length !== 1) throw new RemoteKitError('internal', 'Unsupported database schema');
       if (Number(rows[0].version) !== version)
         throw new RemoteKitError('internal', 'Unsupported database schema');
+      createLearningTables(db);
       return;
     }
     if (tableExists(db, 'users')) throw new RemoteKitError('internal', 'Unsupported database schema');
@@ -74,27 +76,33 @@ export function createSchema(db: Database.Database) {
   tenant TEXT PRIMARY KEY, session_id TEXT NOT NULL UNIQUE, node_id TEXT NOT NULL,
   placement_epoch INTEGER NOT NULL, key_ciphertext TEXT NOT NULL,
   state TEXT NOT NULL DEFAULT 'active', checkpoint_id INTEGER);
+      CREATE TABLE cluster_object_secret (id INTEGER PRIMARY KEY CHECK(id=1), ciphertext TEXT NOT NULL);
       CREATE TABLE objects (
-      tenant TEXT NOT NULL, id TEXT NOT NULL, size INTEGER NOT NULL, stored_size INTEGER NOT NULL,
-      stored_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL, derived_from TEXT, PRIMARY KEY(tenant,id));
+        id TEXT PRIMARY KEY, size INTEGER NOT NULL, stored_size INTEGER NOT NULL,
+        stored_sha256 TEXT NOT NULL, created_at INTEGER NOT NULL);
       CREATE TABLE object_derivations (
-        tenant TEXT NOT NULL, id TEXT NOT NULL, source_id TEXT NOT NULL, PRIMARY KEY(tenant,id,source_id));
+        id TEXT NOT NULL, source_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('thumbnail','document')),
+        PRIMARY KEY(id,source_id,kind));
+      CREATE INDEX object_derivations_source ON object_derivations(source_id,kind);
       CREATE TABLE object_replicas (
-        tenant TEXT NOT NULL, id TEXT NOT NULL, node_id TEXT NOT NULL, PRIMARY KEY(tenant,id,node_id));
+        id TEXT NOT NULL, node_id TEXT NOT NULL, PRIMARY KEY(id,node_id));
+      CREATE TABLE object_claims (
+        tenant TEXT NOT NULL, id TEXT NOT NULL, claimed_at INTEGER NOT NULL, PRIMARY KEY(tenant,id));
+      CREATE TABLE object_gc (id TEXT PRIMARY KEY, unreferenced_at INTEGER NOT NULL);
       CREATE TABLE checkpoints (
         tenant TEXT NOT NULL, id INTEGER NOT NULL, placement_epoch INTEGER NOT NULL, manifest_id TEXT NOT NULL,
         build_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,id));
       CREATE TABLE checkpoint_objects (
-        tenant TEXT NOT NULL, checkpoint_id INTEGER NOT NULL, object_id TEXT NOT NULL,
-        PRIMARY KEY(tenant,checkpoint_id,object_id));
+        tenant TEXT NOT NULL, manifest_id TEXT NOT NULL, id TEXT NOT NULL,
+        PRIMARY KEY(tenant,manifest_id,id));
       CREATE TABLE warm_session_copies (
         tenant TEXT NOT NULL, node_id TEXT NOT NULL, manifest_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(tenant,node_id));
       CREATE TABLE removed_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER NOT NULL);
       CREATE TABLE session_deletions (
         session_id TEXT NOT NULL, node_id TEXT NOT NULL, PRIMARY KEY(session_id,node_id));
       CREATE TABLE object_inventory_orphans (
-        node_id TEXT NOT NULL, tenant TEXT NOT NULL, id TEXT NOT NULL, first_seen INTEGER NOT NULL,
-        PRIMARY KEY(node_id,tenant,id));`);
+        node_id TEXT NOT NULL, id TEXT NOT NULL, first_seen INTEGER NOT NULL,
+        PRIMARY KEY(node_id,id));`);
     db.exec(`CREATE TABLE session_import_keys (
       id INTEGER PRIMARY KEY CHECK(id=1), public_key BLOB NOT NULL, private_key TEXT NOT NULL, key_id TEXT NOT NULL);
       CREATE TABLE session_import_mailbox (
@@ -123,6 +131,7 @@ export function createSchema(db: Database.Database) {
     createWorkspaceItems(db);
     createPagePreviews(db);
     createAnnouncementTables(db);
+    createLearningTables(db);
     writeVersion(db);
   })();
 }

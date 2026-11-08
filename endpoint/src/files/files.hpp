@@ -49,7 +49,7 @@ class LibraryController : private ControllerContext {
         views(views),
         files(files),
         file_uploads(directory / "uploads"),
-        file_library(directory / "file-library", objects, tenant, object_keys),
+        file_library(directory / "file-library", objects, tenant, object_access),
         photos(context, file_library, files, authorization) {}
   Result<void> Initialize();
   Result<Json> ImportDownload(const Json& download) {

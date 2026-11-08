@@ -203,7 +203,14 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
       }
     };
     const measure = () => {
-      const content = parent.getBoundingClientRect();
+      const outer = parent.getBoundingClientRect();
+      const scale = uiScale();
+      const content = {
+        left: outer.left + parent.clientLeft * scale,
+        top: outer.top + parent.clientTop * scale,
+        width: parent.clientWidth * scale,
+        height: parent.clientHeight * scale,
+      };
       const vv = visual && {
         width: visual.width,
         height: visual.height,
@@ -220,7 +227,6 @@ export class ViewportPreviewAdapter extends Store<ResizeSnapshot> {
             };
       // Client rects are visual px; surfaces and element styles use layout px, which differ by the
       // Viewer's UI scale transform.
-      const scale = uiScale();
       const bounds = pixelAlignedViewportBounds(seen, scale, window.devicePixelRatio || 1);
       const next = {
         left: bounds.left - content.left / scale,

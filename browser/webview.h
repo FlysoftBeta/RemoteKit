@@ -37,6 +37,7 @@ namespace blink {
 class WebTouchEvent;
 }
 namespace remotekit::browser {
+class SignIn;
 class WebViewExecution;
 class DeviceConfiguration;
 class NavigationCoordinator;
@@ -64,12 +65,14 @@ class WebView final : public content::WebContentsObserver,
           ViewModel*,
           SessionId,
           WebViewId,
-          std::unique_ptr<content::WebContents> adopted = {});
+          std::unique_ptr<content::WebContents> adopted = {},
+          std::string sign_in = {});
   ~WebView() override;
   void SetSessionStorageShouldPersist(bool persist);
   WebView(const WebView&) = delete;
   WebView& operator=(const WebView&) = delete;
 
+  SignIn* sign_in() const { return sign_in_.get(); }
   content::WebContents* contents() const;
   OffscreenHost* offscreen_host() const;
   SessionId session_id() const { return session_; }
@@ -148,6 +151,7 @@ class WebView final : public content::WebContentsObserver,
   SessionId session_;
   WebViewId view_;
 
+  std::unique_ptr<SignIn> sign_in_;
   std::unique_ptr<WebViewExecution> execution_;
   std::unique_ptr<DeviceConfiguration> device_;
   std::unique_ptr<NavigationCoordinator> navigation_;

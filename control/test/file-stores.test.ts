@@ -39,6 +39,9 @@ test('library revisions stay monotonic and old scope responses cannot populate a
   store.configure(true, true, 'first', []);
   await flush();
   assert.equal(store.getSnapshot().snapshot?.revision, 2);
+  store.receive(snapshot(4));
+  store.receive(snapshot(3));
+  assert.equal(store.getSnapshot().snapshot?.revision, 4);
   let resolve!: (value: LibrarySnapshot) => void;
   get = () =>
     new Promise((done) => {
@@ -56,6 +59,7 @@ test('library revisions stay monotonic and old scope responses cannot populate a
   assert.equal(store.getSnapshot().snapshot?.revision, 1);
   assert.ok(Object.isFrozen(store.getSnapshot().snapshot));
   store.configure(true, false, 'second', []);
+  store.receive(snapshot(100));
   assert.equal(store.getSnapshot().snapshot, undefined);
 });
 

@@ -1,4 +1,7 @@
 #include "browser/device_configuration.h"
+#include "browser/signin.h"
+#include "content/public/browser/render_frame_host.h"
+#include "content/public/browser/web_contents.h"
 #include "browser/services_browser.h"
 #include <atomic>
 #include "components/embedder_support/origin_trials/origin_trial_policy_impl.h"
@@ -41,6 +44,11 @@ namespace remotekit::browser {
 namespace {
 class ContentClient final : public content::ContentClient {
  public:
+  void AddAdditionalSchemes(Schemes* schemes) override {
+    schemes->standard_schemes.push_back("remotekit-signin");
+    schemes->secure_schemes.push_back("remotekit-signin");
+    schemes->cors_enabled_schemes.push_back("remotekit-signin");
+  }
   blink::OriginTrialPolicy* GetOriginTrialPolicy() override {
     if (!origin_policy_logged_.exchange(true, std::memory_order_relaxed)) {
       LOG(INFO) << "RemoteKit OriginTrialPolicy supported="
@@ -78,7 +86,36 @@ class BrowserClient final : public ServicesBrowserClient {
     DeviceConfiguration::InstallSiteIdentity(contents);
     InstallServiceOrientationDelegate();
   }
-  bool CanCreateWindow(content::RenderFrameHost*,
+  void WillCreateURLLoaderFactory(
+      content::BrowserContext*,
+      content::RenderFrameHost* frame,
+      int,
+      URLLoaderFactoryType,
+      const url::Origin&,
+      const net::IsolationInfo&,
+      std::optional<int64_t>,
+      ukm::SourceIdObj,
+      network::URLLoaderFactoryBuilder& builder,
+      mojo::PendingRemote<network::mojom::TrustedURLLoaderHeaderClient>* headers,
+      bool*,
+      bool*,
+      network::mojom::URLLoaderFactoryOverridePtr*,
+      scoped_refptr<base::SequencedTaskRunner>,
+      bool) override {
+    InstallSignInRequestObserver(content::WebContents::FromRenderFrameHost(frame), builder,
+                                 headers);
+  }
+  void CreateThrottlesForNavigation(content::NavigationThrottleRegistry& registry) override {
+    AddSignInNavigationThrottle(registry);
+  }
+  mojo::PendingRemote<network::mojom::URLLoaderFactory> CreateNonNetworkNavigationURLLoaderFactory(
+      const std::string& scheme,
+      content::FrameTreeNodeId frame) override {
+    if (scheme == "remotekit-signin")
+      return CreateSignInPageFactory(content::WebContents::FromFrameTreeNodeId(frame));
+    return {};
+  }
+  bool CanCreateWindow(content::RenderFrameHost* opener,
                        const GURL&,
                        const GURL&,
                        const url::Origin&,
@@ -92,7 +129,7 @@ class BrowserClient final : public ServicesBrowserClient {
                        bool,
                        bool* no_javascript_access) override {
     *no_javascript_access = false;
-    return user_gesture;
+    return user_gesture && !SignIn::ForContents(content::WebContents::FromRenderFrameHost(opener));
   }
   std::unique_ptr<content::BrowserMainParts> CreateBrowserMainParts(bool) override {
     return std::make_unique<RemoteKitMainParts>();

@@ -74,19 +74,24 @@ Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线
 
 `session_placements` 记录每个 Tenant 的 `session_id`（32 位十六进制，分配一次不复用）、节点、`placement_epoch`、状态（`active | hibernated`）、最新 checkpoint 与加密的 Tenant DEK。DEK 用 Control 的静态密钥文件 `<db>.key`（与人脸模板共用）以 AES-256-GCM 封装。
 
-- Control 在每个节点连接代次内，向某个 Tenant 发出第一个请求之前先发 `session.open{sessionId, placementEpoch, checkpoint, profileKey, objectKey, objectIdKey}`；三个密钥都由 DEK 经 HKDF-SHA256 以不同 info 派生，Endpoint 只放在内存里并在销毁时清零。Endpoint 只在 `session.open` 时创建 Session，目录 `<dataPath>/sessions/<sessionId>`；同参数幂等，同 Tenant 不同 sessionId 或 epoch 回退为 `conflict`，未打开的 Tenant 上的其他方法为 `not_found`。
+- Control 在每个节点连接代次内，向某个 Tenant 发出第一个请求之前先发 `session.open{sessionId, placementEpoch, checkpoint, profileKey}`；Profile 密钥由 DEK 经 HKDF-SHA256 派生，Endpoint 只放在内存里并在销毁时清零。Endpoint 只在 `session.open` 时创建 Session，目录 `<dataPath>/sessions/<sessionId>`；同参数幂等，同 Tenant 不同 sessionId 或 epoch 回退为 `conflict`，未打开的 Tenant 上的其他方法为 `not_found`。
 - Profile 密钥经 Endpoint 新建的匿名管道交给 Browser：只把读端放进 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` 继承，参数 `--profile-key-handle=<句柄值>`；Browser 在创建任何 BrowserContext 之前读出恰好 32 字节，不足、多余或句柄无效都拒绝启动（见[页面生命周期 · Profile](page-lifecycle.md#profile-持久化)）。Browser 进程内的会话编号固定为 1，Profile 位于 `<sessionDir>/session-1/profile-1`。
 - **fencing**：每次重新放置都使 epoch 加一。`node.ready` 携带该节点上的活跃会话清单；Endpoint 在每次（重新）连接时终止并遗忘不在清单中或 epoch 过旧的 Session，它们的目录变成冷副本（7 天后或磁盘压力时删除，`session.cold.delete{}`）。
 
 ## 对象存储
 
-文件库资产、缩略图和 checkpoint 块都是对象。对象属于一个 Tenant，不可变，`id = HMAC-SHA256(objectIdKey, 明文)`：同一 Tenant 内相同内容去重，没有密钥的节点无法用内容 hash 探测是否存在某个文件。
+文件库资产、缩略图、文档渲染结果和 checkpoint 块都是对象。对象存储与 Tenant 无关：对象不可变、按内容寻址，`id = HMAC-SHA256(objectIdKey, 明文)`，所有 Tenant 共用一份——同一个班级的几十个用户下载同一份课件，节点上只有一个对象。Tenant 只体现在引用上：谁能读、谁付配额、对象何时回收，都由 Control 按引用决定。HMAC 而不是裸 SHA-256 让没有集群对象密钥的一方无法用内容 hash 探测某个文件是否存在。
 
-- 存储文件 `<dataPath>/objects/<tenant>/<id 前 2 位>/<id>.rko`：头部（`RKO1`、版本、明文大小、1MiB 段大小、段数）后接逐段记录（是否 zstd 压缩、长度、AES-256-GCM 密文）。只有压缩后更小才压缩。nonce 由 objectKey 对 (id, 段号) 的 HMAC 派生，AAD 绑定 Tenant、id、段号与段数；逐段校验，读写都按段流式进行，从不把整个对象放进内存。整个文件的 SHA-256（`storedSha256`）让不持有密钥的节点也能校验副本。
-- Control 的对象索引记录大小、存储 hash、副本所在节点和派生关系（缩略图 `derived_from` 源对象）。引用来源：文件库条目、未决选择、每个 Tenant 最新 2 个 checkpoint 的全部对象；无引用超过 2 小时的对象从所有副本删除。
-- 副本目标为 min(2, 就绪节点数)，Control 让磁盘占用最低的节点执行 `object.fetch`（每节点最多 4 个并发）。节点上线后 Control 分页读取 `object.inventory` 对账：索引里没有、首次观察起超过 2 小时的对象删除，节点上缺失的副本从索引移除。
-- 节点之间：每个节点在 `peer.listen` 上监听 TCP，握手 role `peer`，buildId 必须相同；任何持有集群密钥的节点都可读取任何对象的存储文件（只有密文），`object.get{tenantId, id, offset}` 按 1MiB 分块返回并以 `object.end{size, sha256}` 结束，可从 offset 续传；每个服务端最多 8 个并发连接。
-- Endpoint 本地需要对象（给 Browser 暂存文件、缩略图、Viewer 下载、恢复 checkpoint）而本地没有时，先 `object.locate` 拿到副本地址，从对端拉取并校验后写入本地存储，再 `object.committed` 登记为新副本。Browser 自己从不访问对象存储。
+- **密钥**：Control 首次启动时生成 32 字节集群对象密钥（`cluster_object_secret`），以 HKDF-SHA256 派生 `objectKey` 与 `objectIdKey`（info `remotekit object key 2` / `remotekit object id key 2`），在 `node.ready` 里经已认证的集群通道下发给每个节点；节点只放在内存里。Tenant DEK 只再派生 Profile 密钥。
+- **存储文件** `<dataPath>/objects/<id 前 2 位>/<id>.rko`：头部（`RKO2`、明文大小、1MiB 段大小、段数）后接逐段记录（是否 zstd 压缩、长度、AES-256-GCM 密文）。只有压缩后更小才压缩。nonce 由 objectKey 对 (id, 段号) 的 HMAC 派生，AAD 绑定 id、段号与段数；逐段校验，读写都按段流式进行，从不把整个对象放进内存。整个文件的 SHA-256（`storedSha256`）让不持有密钥的节点也能校验副本。
+- **索引**（Control）：`objects(id, size, stored_size, stored_sha256, created_at)`、`object_replicas(id, node_id)`、`object_derivations(id, source_id, kind)`（`kind` 为 `thumbnail` 或 `document`），节点清单对账的 `object_inventory_orphans(node_id, id)`。
+- **认领与引用**：`object.committed{objectId, size, storedSize, storedSha256, tenantId?, derivedFrom?, kind?, putId?}` 登记对象，带 `tenantId` 时同时写入 `object_claims(tenant, id)`——Tenant 在持久引用出现之前（上传 seal、派生物、下载导入、Control 写入）对它的读取权。持久引用按 Tenant 计算：文件库条目、未决选择、最新 2 个 checkpoint 的 `checkpoint_objects(tenant, manifest_id, id)`，以及被引用对象的派生物。没有持久引用的认领 2 小时后过期；一个对象在所有 Tenant 都不再引用或认领时记入 `object_gc`，满 2 小时从所有副本删除（时间戳持久化，Control 重启不重置宽限期）。
+- **配额**：`quotas.tenantObjectBytes` 按 Tenant 引用或认领的**不同对象**大小之和计算；共享对象对每个引用它的 Tenant 全额计费，所以去重不会让一个用户的配额依赖别人。`object.committed` 与文件库导入时检查。
+- **读取授权**：Endpoint Session 只能读它的 Tenant 引用或认领的对象。每个 Session 有一个授权集，只由三处填充：本 Session 自己写入的对象、Control 推送的文件库描述、对本 Tenant 成功的 `object.locate{tenantId, ids}`（Control 只为有权的 id 返回副本地址，否则 `forbidden`）。节点本地恰好有某个副本不构成读取权限。Viewer 下载、Browser 暂存、缩略图与照片输入、checkpoint 恢复（含热副本）都经过这个授权集。
+- **副本**：目标为 min(2, 就绪节点数)，Control 让磁盘占用最低的节点执行 `object.fetch{ids, sources}`（每节点最多 4 个并发）。节点上线后 Control 分页读取 `object.inventory{cursor}` 对账：索引里没有、首次观察起超过 2 小时的对象删除，节点上缺失的副本从索引移除。只登记副本的提交不带 `tenantId`。
+- **节点之间**：每个节点在 `peer.listen` 上监听 TCP，握手 role `peer`，buildId 必须相同；任何持有集群密钥的节点都可读取任何对象的存储文件（只有密文），`object.get{id, offset}` 按 1MiB 分块返回并以 `object.end{size, sha256}` 结束，可从 offset 续传；每个服务端最多 8 个并发连接。
+- **本地缺失**：Endpoint 需要对象而本地没有时，先 `object.locate` 拿到副本地址，从对端拉取并校验后写入本地存储，再 `object.committed` 登记为新副本。Browser 自己从不访问对象存储。
+- **Control 写入**：Control 自己取得的字节（学习 App 的附件）流式写入磁盘占用最低的就绪节点：`object.put.begin{putId, tenantId, sizeHint?}`，二进制帧 `{putId, offset}` + ≤1MiB 载荷，`object.put.end{putId}` → `{objectId, size, storedSize, storedSha256}`（节点同时以该 `tenantId` 提交认领），`object.put.cancel{putId}`。单对象最多 256MiB，每节点 4 个并发写入；临时文件在取消、断线和启动时清理。
 
 文件库的条目、分区、来源、篮子和选择事务仍在 Control；资产 id 就是对象 id，Endpoint 的 `Seal` 写入对象并 `object.committed` 后才算成功。草稿、选择与原生暂存仍是 Session 本地的。见[文件与相机](files-and-camera.md)。
 

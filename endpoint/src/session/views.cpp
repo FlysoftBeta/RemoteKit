@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "session/views.hpp"
+#include "session/signin.hpp"
 #include <charconv>
 #include <regex>
 #include <winhttp.h>
@@ -396,8 +397,12 @@ Result<void> ViewController::ReconcileOutput() {
 }
 
 Result<Json> ViewController::ApplyView(const Json& config, bool create, bool recovering) {
+  RK_RETURN_IF_ERROR(ValidateSignIn(config));
   const auto view = ViewId(config);
   const auto old = desired.find(view);
+  if (old != desired.end() &&
+      old->second.value("signIn", std::string()) != config.value("signIn", std::string()))
+    return Error{ErrorCode::kConflict, "view sign-in purpose is immutable"};
   const Json previous = old == desired.end() ? Json() : old->second;
   const auto normalized = [](Json value) {
     value.erase("id");
@@ -497,6 +502,9 @@ Result<Json> ViewController::CreateView(const Json& config, bool recovering) {
       {"height", config.value("height", device.value("height", 900))},
       {"device", mode},
       {"visible", false}};
+  RK_RETURN_IF_ERROR(ValidateSignIn(config));
+  if (config.contains("signIn"))
+    request["signIn"] = config["signIn"];
   if (!recovering && config.value("method", std::string()) == "view.adopt") {
     request["method"] = "view.adopt";
     request["provisionalId"] = Required(config, "provisionalId");
@@ -839,6 +847,7 @@ Result<Json> ViewController::ManageViewNavigationAck(const Json& request) {
 }
 
 Result<Json> ViewController::ManageViewEnsure(const Json& request) {
+  RK_RETURN_IF_ERROR(ValidateSignIn(request));
   const auto method = Required(request, "method");
   auto prepare_view_command_result = PrepareViewCommand(request, Required(request, "method"));
   if (!prepare_view_command_result)
@@ -1086,6 +1095,10 @@ Result<Json> ViewController::ManageViewNavigate(const Json& request) {
   const auto view = std::move(prepare_view_command_result_8).value();
 
   const auto url = Required(request, "url");
+  if (url.starts_with("remotekit-signin://changyan/done?")) {
+    Json command = {{"method", "navigate"}, {"session", id}, {"view", view}, {"url", url}};
+    return browser.Rpc().Request(std::move(command));
+  }
   navigation.Forget(view);
   const bool cancelled = navigation.CancelRecovery(view);
   Json command = {{"method", cancelled ? "view.recreate" : "navigate"},
@@ -1159,4 +1172,45 @@ void ViewController::Reset() {
   output.SetVisible(false);
 }
 
+}  // namespace remotekit
+
+namespace remotekit {
+void ViewController::PollSignIn(uint64_t generation) {
+  if (!browser.Alive() || !browser.Rpc().Control() || browser.Stopping() ||
+      !management.Current(generation) || QpcNow() < next_sign_in_poll)
+    return;
+  next_sign_in_poll = QpcNow() + QpcFrequency() / 4;
+  if (sign_in_incarnation != browser.Incarnation()) {
+    sign_in_acknowledged = Json::array();
+    sign_in_incarnation = browser.Incarnation();
+  }
+  const bool has_sign_in = std::any_of(desired.begin(), desired.end(), [](const auto& item) {
+    return item.second.contains("signIn");
+  });
+  if (!has_sign_in && sign_in_acknowledged.empty())
+    return;
+  auto reply =
+      browser.Rpc().Request({{"method", "view.signIn.events"}, {"eventIds", sign_in_acknowledged}});
+  if (!reply)
+    return;
+  sign_in_acknowledged = Json::array();
+  for (const auto& event : reply.value().value("events", Json::array())) {
+    if (!ValidSignInEvent(event))
+      continue;
+    const auto view = event.at("webviewId").get<std::string>();
+    const auto expected = desired.find(view);
+    if (expected == desired.end() ||
+        expected->second.value("signIn", std::string()) != event.at("provider").get<std::string>())
+      continue;
+    if (management.SendEvent({{"event", "session.events"},
+                              {"tenantId", tenant},
+                              {"sessionId", id},
+                              {"browserIncarnation", browser.Incarnation()},
+                              {"events", Json::array({event})}},
+                             generation)) {
+      sign_in_acknowledged.push_back(event.at("eventId"));
+      fprintf(stderr, "sign-in completed for view %s\n", view.c_str());
+    }
+  }
+}
 }  // namespace remotekit

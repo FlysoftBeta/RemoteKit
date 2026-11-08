@@ -58,6 +58,13 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
   const now = ctx.now ?? Date.now();
   const nextId = () => ctx.ids[idIndex++];
   const tab = () => findTab(state, action.tabId);
+  if (
+    typeof action.tabId === 'string' &&
+    tab().signIn &&
+    action.type !== 'tab.activate' &&
+    action.type !== 'tab.close'
+  )
+    throw new RemoteKitError('forbidden', '登录页面仅支持取消或关闭');
   const window = () => findWindow(state, action.windowId);
   const navigationUrl = (value: unknown, searchOnly = false) => {
     try {

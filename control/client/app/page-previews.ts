@@ -24,7 +24,7 @@ export function usePagePreviews(
     (tabs = visible.current) => {
       if (!root.current || document.visibilityState !== 'visible') return;
       for (const tab of tabs) {
-        if (tab.kind !== 'remote' || !/^https?:\/\//i.test(tab.url)) continue;
+        if (tab.signIn || tab.kind !== 'remote' || !/^https?:\/\//i.test(tab.url)) continue;
         const now = Date.now();
         if (now - (uploaded.current.get(tab.id) ?? 0) < 30000) continue;
         const frame = [...root.current.querySelectorAll<HTMLElement>('[data-window-id]')].find(
@@ -42,7 +42,7 @@ export function usePagePreviews(
     state?.workspace.windows
       .filter((win) => visibleWindowIds.includes(win.id))
       .map((win) => state.workspace.tabs.find((tab) => tab.id === win.activeTabId))
-      .filter((tab): tab is ProductTab => !!tab && tab.kind === 'remote') ?? [];
+      .filter((tab): tab is ProductTab => !!tab && !tab.signIn && tab.kind === 'remote') ?? [];
   const identity = JSON.stringify(tabs.map((tab) => [tab.id, tab.url, tab.loading, tab.usageDocument]));
   useLayoutEffect(() => {
     capture(

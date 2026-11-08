@@ -22,6 +22,8 @@ export function RemoteViewport({
   keyboardActive = true,
   manualKeyboard = false,
   onFocus,
+  onFrameReady,
+  showConnectingOverlay = true,
 }: {
   transport: ViewerSession;
   viewId: string;
@@ -29,6 +31,8 @@ export function RemoteViewport({
   keyboardActive?: boolean;
   manualKeyboard?: boolean;
   onFocus?: () => void;
+  onFrameReady?: (ready: boolean) => void;
+  showConnectingOverlay?: boolean;
 }) {
   const snapshot = useViewerSession(transport);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -38,6 +42,7 @@ export function RemoteViewport({
   focused.current = onFocus;
   const [controller, setController] = useState<ViewportInput>();
   const [frameReady, setFrameReady] = useState(false);
+  useLayoutEffect(() => onFrameReady?.(frameReady), [frameReady, onFrameReady]);
   const [dismissedMenu, setDismissedMenu] = useState<string>();
   const [dismissedContextMenu, setDismissedContextMenu] = useState<string>();
   const product = useSyncExternalStore(transport.operations.subscribe, transport.operations.getSnapshot);
@@ -216,6 +221,7 @@ export function RemoteViewport({
           画面连接中断
         </PageOverlay>
       ) : (
+        showConnectingOverlay &&
         snapshot.rtc.phase !== 'connected' &&
         !resize.frozen && <PageOverlay kind="progress">正在连接浏览器…</PageOverlay>
       )}

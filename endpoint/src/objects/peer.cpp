@@ -87,16 +87,15 @@ Result<void> PeerServer::Serve(cluster::Channel& channel) {
   RK_ASSIGN_OR_RETURN(message, channel.Receive(20s));
   const auto& request = message.json;
   if (message.kind != cluster::Message::Kind::kJson ||
-      request.value("type", Json()) != "object.get" || !request.contains("tenantId") ||
-      !request["tenantId"].is_string() || !request.contains("id") || !request["id"].is_string() ||
-      !request.contains("offset") || !Number(request["offset"]))
+      request.value("type", Json()) != "object.get" || !request.contains("id") ||
+      !request["id"].is_string() || !request.contains("offset") || !Number(request["offset"]))
     return Invalid();
-  const auto tenant = request["tenantId"].get<std::string>(), id = request["id"].get<std::string>();
-  RK_ASSIGN_OR_RETURN(info, store_.Inspect(tenant, id));
+  const auto id = request["id"].get<std::string>();
+  RK_ASSIGN_OR_RETURN(info, store_.Inspect(id));
   auto offset = request["offset"].get<uint64_t>();
   if (offset > info.stored_size)
     return Invalid();
-  RK_ASSIGN_OR_RETURN(path, store_.StoredPath(tenant, id));
+  RK_ASSIGN_OR_RETURN(path, store_.StoredPath(id));
   std::ifstream input(path, std::ios::binary);
   input.seekg(static_cast<std::streamoff>(offset));
   cluster::Bytes buffer(kSegmentSize);
@@ -120,11 +119,9 @@ PeerClient::PeerClient(ObjectStore& store, const Key& key, std::string node, std
 PeerClient::~PeerClient() {
   SecureZeroMemory(key_.data(), key_.size());
 }
-Result<ObjectInfo> PeerClient::Fetch(const std::string& tenant,
-                                     const std::string& id,
-                                     const std::string& address) {
-  RK_ASSIGN_OR_RETURN(path, store_.StoredPath(tenant, id));
-  auto lock = store_.Lock(tenant, id);
+Result<ObjectInfo> PeerClient::Fetch(const std::string& id, const std::string& address) {
+  RK_ASSIGN_OR_RETURN(path, store_.StoredPath(id));
+  auto lock = store_.Lock(id);
   fs::create_directories(path.parent_path());
   auto partial = path;
   partial += ".partial";
@@ -140,8 +137,7 @@ Result<ObjectInfo> PeerClient::Fetch(const std::string& tenant,
   if (connection.reply.value("buildId", Json()) != build_)
     return Invalid();
   auto& channel = *connection.channel;
-  RK_RETURN_IF_ERROR(
-      channel.Send({{"type", "object.get"}, {"tenantId", tenant}, {"id", id}, {"offset", offset}}));
+  RK_RETURN_IF_ERROR(channel.Send({{"type", "object.get"}, {"id", id}, {"offset", offset}}));
   std::ofstream output(partial, std::ios::binary | std::ios::app);
   if (!output)
     return Error{ErrorCode::kUnavailable, "object partial unavailable"};
@@ -173,7 +169,7 @@ Result<ObjectInfo> PeerClient::Fetch(const std::string& tenant,
       output.close();
       if (!output)
         return Error{ErrorCode::kUnavailable, "object partial write failed"};
-      return store_.Import(tenant, id, offset, header["sha256"].get<std::string>());
+      return store_.Import(id, offset, header["sha256"].get<std::string>());
     } else
       return Invalid();
   }

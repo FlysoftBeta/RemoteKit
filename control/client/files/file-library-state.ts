@@ -2,6 +2,8 @@ import { createContext, useContext, useEffect, useState, useSyncExternalStore } 
 import type { FileChannel } from './file-channel';
 import { LibraryStore, type LibraryRequest } from './library-store';
 import type { ProductState } from '../../shared/product';
+import type { LibrarySnapshot } from '../../shared/file-library';
+import type { Events } from '../util/store';
 export type { LibraryRequest } from './library-store';
 export function useFileLibrary(
   request: LibraryRequest,
@@ -10,6 +12,7 @@ export function useFileLibrary(
   enabled: boolean,
   identity: string | undefined,
   requestIds: string[],
+  updates: Events<LibrarySnapshot>,
   product?: Pick<ProductState, 'workspace'> | null,
 ) {
   const [store] = useState(() => new LibraryStore(request, rpc));
@@ -17,6 +20,7 @@ export function useFileLibrary(
     store.configure(online, enabled, identity, requestIds);
   }, [store, online, enabled, identity, requestIds]);
   useEffect(() => () => store.dispose(), [store]);
+  useEffect(() => updates.subscribe(store.receive), [store, updates]);
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const jobs = useSyncExternalStore(
     store.photos.subscribe,

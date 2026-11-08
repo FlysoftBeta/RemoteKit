@@ -47,7 +47,7 @@ export class Popups {
       )
         continue;
       const opener = state.tabs.find((t) => t.webviewId === popup.openerViewId);
-      if (!opener) continue;
+      if (!opener || opener.signIn) continue;
       const openerWindow = state.windows.find((window) => window.id === opener.windowId);
       if (!openerWindow || ![3, 4, 5, 6].includes(popup.disposition)) continue;
       if (

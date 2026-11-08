@@ -1,6 +1,10 @@
 /* TouchRipple sizes and places ripples from getBoundingClientRect and pointer client coordinates,
    both visual px under the <body> transform. Undo the scale on the ripple layer so its local px are
    visual px again; the layer still covers the button exactly. */
+html body {
+  color: var(--text-primary);
+  background: var(--surface-background);
+}
 html.ui-scaled .MuiTouchRipple-root {
   right: auto;
   bottom: auto;

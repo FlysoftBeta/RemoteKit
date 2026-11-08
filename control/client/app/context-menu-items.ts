@@ -68,6 +68,12 @@ export function contextMenuItems(
       },
       { label: '重新加载', action: { type: 'tab.command', tabId: tab.id, command: 'reload' } },
     ]);
+  if (tab.signIn) {
+    const editing = groups
+      .map((group) => group.filter((item) => item.command))
+      .filter((group) => group.length);
+    return editing.length ? editing : [[{ label: '关闭菜单', command: 'dismiss' }]];
+  }
   return groups;
 }
 

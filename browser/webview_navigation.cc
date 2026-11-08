@@ -1,4 +1,6 @@
 #include "browser/webview_navigation.h"
+#include "browser/signin.h"
+#include "browser/signin_result.h"
 #include "browser/page_requests.h"
 #include "browser/webview_internal.h"
 #include "browser/webview_execution.h"
@@ -158,7 +160,7 @@ Status NavigationCoordinator::RunNavigation(
     if (accepted != Acceptance::fresh)
       return Fail(ErrorCode::invalid_request, "navigation_operation_conflict");
     operation = navigation_operations_.Find(*identity);
-    operation->url = url.spec();
+    operation->url = SignInNavigationUrl(url);
   }
   const auto* model = owner_.model_->FindWebView(owner_.session_, owner_.view_);
   if (owner_.lifecycle_->lifecycle_uncertain_ || !owner_.contents() || !model ||
@@ -177,6 +179,11 @@ Status NavigationCoordinator::RunNavigation(
     if (operation)
       navigation_operations_.Finish(*operation, "failed", invalid);
     return Fail(ErrorCode::unavailable, invalid);
+  }
+  if (action == "navigate" && owner_.sign_in_ &&
+      !(url.SchemeIs("remotekit-signin") && url.path() == "/done")) {
+    owner_.sign_in_->Reset();
+    owner_.sign_in_->Attach(owner_.contents());
   }
   if (operation)
     operation->admitted = true;
@@ -301,7 +308,7 @@ void NavigationCoordinator::BindNavigation(content::NavigationHandle* navigation
     return;
   navigation_operations_.Bind(*record, navigation->GetNavigationId(),
                               navigation->IsInPrimaryMainFrame(), started,
-                              navigation->GetURL().spec());
+                              SignInNavigationUrl(navigation->GetURL()));
 }
 void NavigationCoordinator::PollNavigationOperations() {
   for (auto it = navigation_handles_.begin(); it != navigation_handles_.end();) {
@@ -341,7 +348,7 @@ void NavigationCoordinator::DidStartNavigation(content::NavigationHandle* naviga
 void NavigationCoordinator::DidFinishNavigation(content::NavigationHandle* navigation) {
   if (auto* operation = navigation_operations_.ByNavigation(navigation->GetNavigationId())) {
     if (navigation->IsInPrimaryMainFrame())
-      operation->url = navigation->GetURL().spec();
+      operation->url = SignInNavigationUrl(navigation->GetURL());
     if (navigation->HasCommitted() && !navigation->IsErrorPage() &&
         navigation->GetNetErrorCode() == net::OK)
       navigation_operations_.Complete(*operation, navigation->GetNavigationId(), "committed", {},

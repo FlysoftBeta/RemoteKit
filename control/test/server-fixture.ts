@@ -44,8 +44,6 @@ export function testGateway(
     },
     keys: () => ({
       profileKey: Buffer.alloc(32).toString('base64'),
-      objectKey: Buffer.alloc(32).toString('base64'),
-      objectIdKey: Buffer.alloc(32).toString('base64'),
     }),
     underPressure: () => false,
     commitCheckpoint: () => 1,

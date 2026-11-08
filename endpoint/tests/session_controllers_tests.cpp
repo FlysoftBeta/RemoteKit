@@ -7,6 +7,7 @@
 #include "input/input.hpp"
 #include "input/wire_validation.hpp"
 #include "session/session.hpp"
+#include "session/signin.hpp"
 #include "management/methods.hpp"
 #include "persistence/session_store.hpp"
 #include <cstdlib>
@@ -310,7 +311,7 @@ void SessionManagementRequests() {
   media::Sdk sdk;
   objects::ObjectService objects(parsed.value().data, link, cluster::Key{}, "test", "dev");
   Session session(sdk, parsed.value(), "tenant", "0123456789abcdef0123456789abcdef", 1,
-                  cluster::Key{}, link, objects, objects::Keys{});
+                  cluster::Key{}, link, objects);
   const auto session_directory = parsed.value().data / "sessions" / session.Id();
   fs::create_directories(session_directory);
   CHECK(SessionStore(session_directory).Save("views.json", Json::array({Json{{"viewId", "1"}}})));
@@ -984,7 +985,44 @@ void InputFidelityForwarding() {
   CHECK(dispatched[1]["sequence"] == "1" && dispatched[2]["sequence"] == "2");
 }
 
+void SignInValidation() {
+  CHECK(ValidateSignIn(Json::object()));
+  CHECK(ValidateSignIn({{"signIn", "xinjiaoyu"}}));
+  CHECK(ValidateSignIn({{"signIn", "changyan"}}));
+  for (const auto& purpose : {Json(""), Json("unknown"), Json(1), Json(nullptr)})
+    CHECK(!ValidateSignIn({{"signIn", purpose}}));
+  CHECK(!ValidateSignIn({{"method", "view.adopt"}, {"signIn", "changyan"}}));
+  Json event = {{"type", "view.signIn"},
+                {"version", 1},
+                {"eventId", "event"},
+                {"webviewId", "1"},
+                {"provider", "changyan"},
+                {"result",
+                 {{"lot_number", "lot"},
+                  {"captcha_output", "output"},
+                  {"pass_token", "token"},
+                  {"gen_time", "1"}}}};
+  CHECK(ValidSignInEvent(event));
+  event["result"]["cookies"] = "forbidden";
+  CHECK(!ValidSignInEvent(event));
+  event["result"].erase("cookies");
+  event["result"]["pass_token"] = "";
+  CHECK(!ValidSignInEvent(event));
+  event["result"]["pass_token"] = std::string(8192, 'x');
+  CHECK(!ValidSignInEvent(event));
+  event["provider"] = "xinjiaoyu";
+  event["result"] = {{"authorization", "JBY example"}, {"accesstoken", "example"}};
+  CHECK(ValidSignInEvent(event));
+  event["result"]["cookie"] = "forbidden";
+  CHECK(!ValidSignInEvent(event));
+}
+
 int main(int argc, char** argv) {
+  if (argc == 2 && std::string_view(argv[1]) == "--signin") {
+    SignInValidation();
+    return 0;
+  }
+  SignInValidation();
   if (argc == 2 && std::string_view(argv[1]) == "--input-validation") {
     InputFidelityValidation();
     InputFidelityForwarding();

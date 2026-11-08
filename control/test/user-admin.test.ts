@@ -270,11 +270,9 @@ test('deleting a user removes every row of its tenant and queues node data delet
       .run(user.id, '{}', null, null, null, null);
     h.store.db.prepare('INSERT INTO file_library VALUES (?,?)').run(leaving.tenantId, '{"entries":[]}');
     h.store.db
-      .prepare('INSERT INTO objects VALUES (?,?,?,?,?,?,?)')
-      .run(leaving.tenantId, 'a'.repeat(64), 10, 50, 'b'.repeat(64), 0, null);
-    h.store.db
-      .prepare('INSERT INTO object_replicas VALUES (?,?,?)')
-      .run(leaving.tenantId, 'a'.repeat(64), 'fixture');
+      .prepare('INSERT INTO objects VALUES (?,?,?,?,?)')
+      .run('a'.repeat(64), 10, 50, 'b'.repeat(64), 0);
+    h.store.db.prepare('INSERT INTO object_replicas VALUES (?,?)').run('a'.repeat(64), 'fixture');
     const users = await h.call('admin.deleteUser', { username: 'leaving' });
     assert.deepEqual(
       users.map((entry: any) => entry.username),
@@ -309,7 +307,7 @@ test('deleting a user removes every row of its tenant and queues node data delet
       ),
     );
     assert.equal(
-      h.store.db.prepare('SELECT 1 FROM object_inventory_orphans WHERE tenant=?').get(leaving.tenantId),
+      h.store.db.prepare('SELECT 1 FROM object_inventory_orphans WHERE id=?').get('a'.repeat(64)),
       undefined,
     );
     await h.control.sessionPurge.flush();

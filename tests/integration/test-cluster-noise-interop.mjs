@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 
-const MAX = 4 * 1024 * 1024;
+const MAX = 20 * 1024 * 1024;
 const hash = (data) => crypto.createHash('sha256').update(data).digest();
 const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest();
 function hkdf(key, input) {

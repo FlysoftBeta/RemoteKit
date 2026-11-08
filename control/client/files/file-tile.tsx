@@ -238,6 +238,7 @@ export function FileRow({
   blob,
   localOnly = false,
   meta,
+  detail,
   status,
   selected = false,
   disabled = false,
@@ -254,6 +255,7 @@ export function FileRow({
   blob?: Blob;
   localOnly?: boolean;
   meta: string;
+  detail?: string;
   status?: FileStatus;
   selected?: boolean;
   disabled?: boolean;
@@ -277,6 +279,11 @@ export function FileRow({
       />
       <Box sx={{ flex: 1, minWidth: 0 }}>
         <OverflowText sx={{ fontSize: 14, lineHeight: '20px' }}>{name}</OverflowText>
+        {detail && (
+          <Typography noWrap color="text.secondary" sx={{ fontSize: 12, lineHeight: '18px' }}>
+            {detail}
+          </Typography>
+        )}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, minWidth: 0 }}>
           {status && <StatusBadge status={status} />}
           <Typography noWrap color="text.secondary" sx={{ fontSize: 12, lineHeight: '18px' }}>

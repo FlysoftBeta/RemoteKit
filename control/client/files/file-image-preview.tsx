@@ -14,7 +14,11 @@ import { fileError } from './file-library-controls';
 import { useLibrary } from './file-library-state';
 
 export function canPreviewFile(entry: Pick<LibraryEntry, 'type' | 'size'>) {
-  return /^(image\/jpeg|image\/png)$/i.test(entry.type) && entry.size > 0 && entry.size <= 64 * 1024 * 1024;
+  return (
+    /^image\/(jpeg|png|gif|webp|avif|bmp)$/i.test(entry.type) &&
+    entry.size > 0 &&
+    entry.size <= 64 * 1024 * 1024
+  );
 }
 
 type ImageSource = { assetId: string; name: string; type?: string; size?: number };
@@ -23,14 +27,19 @@ export function FileImagePreview({
   entry,
   onClose,
   inline = false,
+  hideBack = false,
+  fullSize = false,
 }: {
   entry: ImageSource;
   onClose: () => void;
   inline?: boolean;
+  hideBack?: boolean;
+  fullSize?: boolean;
 }) {
   const { online, rpc } = useLibrary();
   const [url, setUrl] = useState<string>();
   const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
   const close = useRef(onClose);
   close.current = onClose;
   const { assetId, name, type, size } = entry;
@@ -40,6 +49,8 @@ export function FileImagePreview({
       return;
     }
     const abort = new AbortController();
+    setError('');
+    setUrl(undefined);
     let objectUrl: string | undefined;
     const load = async () => {
       const asset = type && size ? { assetId, type, size } : await rpc.describeAsset(assetId, abort.signal);
@@ -60,9 +71,11 @@ export function FileImagePreview({
       abort.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [assetId, type, size, online, rpc]);
+  }, [assetId, type, size, online, rpc, attempt]);
   const content = error ? (
-    <Alert severity="warning">{error}</Alert>
+    <Alert severity="warning" action={<Button onClick={() => setAttempt(attempt + 1)}>重试</Button>}>
+      {error}
+    </Alert>
   ) : url ? (
     <Box
       component="img"
@@ -72,7 +85,11 @@ export function FileImagePreview({
       sx={{
         width: '100%',
         display: 'block',
-        maxHeight: inline ? 'min(calc(var(--layout-vh) * 0.34), 210px)' : 'calc(var(--layout-vh) * 0.7)',
+        maxHeight: fullSize
+          ? '100%'
+          : inline
+            ? 'min(calc(var(--layout-vh) * 0.34), 210px)'
+            : 'calc(var(--layout-vh) * 0.7)',
         objectFit: 'contain',
       }}
     />
@@ -83,7 +100,7 @@ export function FileImagePreview({
     return (
       <>
         {content}
-        <Button onClick={onClose}>返回</Button>
+        {!hideBack && <Button onClick={onClose}>返回</Button>}
       </>
     );
   return (

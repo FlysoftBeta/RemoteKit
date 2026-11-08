@@ -87,7 +87,7 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `input` | 完整身份、outputGeneration、layoutEpoch、sequence、event |
 | `keyboard.layout` | Session 级 `entries: [[code,key], ...]`，最多 256 项，由当前已授权连接提供 |
 | `product.action` | `{version:1, operationId, operationGeneration, action}` |
-| `files.request` | `{version:1, requestId, method, params}`：asset.begin/chunk/seal/cancel/describe/read、selection.commit、photo.burst.begin/sample/end/cancel、photo.thumbnail/process |
+| `files.request` | `{version:1, requestId, method, params}`：asset.begin/chunk/seal/cancel/describe/read、document.open{assetId}/document.resource{documentId, contentId, offset}（见[文件与相机 · 文档预览](files-and-camera.md#文档预览)）、selection.commit、photo.burst.begin/sample/end/cancel、photo.thumbnail/process |
 | `clock.ping` | requestId |
 
 **input.event**
@@ -111,28 +111,33 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 
 ```
 握手      node.hello{role, nodeId, buildId, incarnation}
-          → node.ready{connectionEpoch, buildId, config, configHash, sessions} | node.release{release} | node.reject{code, buildId}
+          → node.ready{connectionEpoch, buildId, config, configHash, sessions, objectKey, objectIdKey} | node.release{release} | node.reject{code, buildId}
 请求      {id, method, tenantId, ...参数}
 回复      {id, ok:true, result} | {id, ok:false, error:{code, message}}
 事件      {event:"rtc.signal" | "client.action" | "clipboard.changed" | "node.metrics", ...}
-反向请求  {id, request:"object.committed" | "object.locate", tenantId, ...}（Endpoint → Control，回复形状相同）
+          {event:"session.events", tenantId, sessionId, browserIncarnation, events:[…]}（自然关闭、下载导入、view.signIn{webviewId, provider, result}）
+反向请求  {id, request:"object.committed" | "object.locate", ...}（Endpoint → Control，回复形状相同）
+          object.committed{objectId, size, storedSize, storedSha256, tenantId?, derivedFrom?, kind?, putId?}
+          object.locate{tenantId, ids} → {sources:{[id]:[{nodeId, address}]}}（无权的 id 为 forbidden）
+Control 写入 object.put.begin{putId, tenantId, sizeHint?} → BINARY {putId, offset}+≤1MiB … object.put.end{putId}
+          → {objectId, size, storedSize, storedSha256}；object.put.cancel{putId}
 保活      {type:"node.ping"} / {type:"node.pong"}
 更新包    package.get{buildId, offset} → BINARY package.chunk{offset} … package.end{size}（role updater）
 ```
 
 | 方法 | 说明 |
 |---|---|
-| `session.open` | 创建或确认 Session：sessionId、placementEpoch、checkpoint、profileKey/objectKey/objectIdKey、可选 clipboard {revision,text,html}（在任何 view 之前写入 Browser）；其他方法只对已打开的 Tenant 有效 |
+| `session.open` | 创建或确认 Session：sessionId、placementEpoch、checkpoint、profileKey、可选 clipboard {revision,text,html}（在任何 view 之前写入 Browser）；其他方法只对已打开的 Tenant 有效 |
 | `session.hibernate` | 优雅关闭 Browser 并生成 checkpoint，回复 manifest id；有阻塞项时 `conflict` |
 | `session.ensure` | 启动/取得 Session，幂等；返回 browserIncarnation 与恢复状态，不等导航 |
 | `session.snapshot` | 只读：views、stats、pendingPopups、未确认事件、导航操作；不启动 Browser；`outputDiagnostics:true` 附输出状态 |
 | `session.logs.read` | 诊断用原始日志窗口：`{log: browser \| endpoint \| endpoint.1, end?, maxBytes ≤ 512 KiB}` → `{exists, size, start, end, data(base64)}`，读取 `[max(0, end−maxBytes), end)`，`end` 缺省为当前大小；`browser` 是本 Session 的 `browser.log`，`endpoint` 是节点的 `logs/endpoint.log` |
 | `session.sitePreferences` | 完整 origin→UA、持久权限决定和协议处理器规则表 |
 | `session.mediaPolicy` | `{degradationPreference, maxFps, audio}`；`audio` 为 false 时音频发送器停用、PCM 不进编码器 |
-| `session.events.ack` | 确认已处理的自然关闭和下载导入事件 |
+| `session.events.ack` | 确认已处理的自然关闭、下载导入与登录视图事件 |
 | `session.files.authorize` | 授权原生选择器与文件库的 DC 文件操作 |
 | `session.library.describe/prepare/selectionStatus` | 文件资产描述与选择事务 |
-| `view.ensure` / `view.configure` | 稳定 viewId、URL、viewport、device、visible；`requireRunning` 防止维护请求拉起 Browser |
+| `view.ensure` / `view.configure` | 稳定 viewId、URL、viewport、device、visible；`requireRunning` 防止维护请求拉起 Browser；`signIn: changyan \| xinjiaoyu` 创建专用登录视图（见[学习与题库 · 登录](learning.md#登录)） |
 | `view.navigate` / `view.command` / `view.navigation.ack` | 导航与 history 命令（带 operationId/Generation/Sequence）；终态确认 |
 | `view.lifecycle` | freeze/discard/unload/restore；不确定恢复带 requireRunning、browserIncarnation、lifecycleGeneration |
 | `view.close` / `view.close.reply` | 关闭；对 beforeunload 的回复带完整身份 |
@@ -142,14 +147,15 @@ DataChannel failures carry `error:{code:ErrorCode,message:string}`; generic fail
 | `rtc.authorize` | connectionId、epoch、unlocked |
 | `rtc.actionResult` | 产品动作的收据回传 |
 | `auth.face.capabilities/begin/status/cancel` | 人脸挑战 |
-| `object.fetch` / `object.delete` / `object.inventory` | 节点级（不需要打开的 Session）：拉取副本、删除、分页列出存储的对象 |
+| `object.derivation{params:{id, kind}}` → `{id} \| null`；`object.render{params:{id}}` → `{documentId}` | 文档渲染结果查询与预渲染 |
+| `object.fetch{ids, sources}` / `object.delete{ids}` / `object.inventory{cursor}` | 节点级（不需要打开的 Session）：拉取副本、删除、分页列出存储的对象 |
 | `session.cold.delete` | 节点级：删除冷副本 |
 | `session.delete` | 节点级：`{sessionId}`；停止该 Session（不写 checkpoint）、从放置清单移除，并删除其目录、checkpoint 标记与索引；返回 `{stopped}` |
 | `shutdown` | 优雅关闭整个 Endpoint |
 
 快照中 view 的 `actual/desired`：0 live、1 frozen、2 discarded、3 unloaded。快照的 `hibernation` 字段报告休眠阻塞项（未确认关闭事件、未决原生选择、上传中、页面请求、下载中的计数，以及 RTC 是否连接、生命周期是否不确定）。
 
-**Endpoint ↔ Endpoint**：TCP，u32le 长度帧，同一个 Noise 握手（role `peer`，buildId 必须相同）。`object.get{tenantId, id, offset}` → BINARY `object.chunk{offset}`（≤1MiB 存储文件字节）… `object.end{size, sha256}`，或 `object.error{code}`。
+**Endpoint ↔ Endpoint**：TCP，u32le 长度帧，同一个 Noise 握手（role `peer`，buildId 必须相同）。`object.get{id, offset}` → BINARY `object.chunk{offset}`（≤1MiB 存储文件字节）… `object.end{size, sha256}`，或 `object.error{code}`。
 
 ## Endpoint ↔ Browser
 

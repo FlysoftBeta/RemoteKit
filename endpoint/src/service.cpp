@@ -16,7 +16,11 @@ Service::Service(media::Sdk& sdk,
       link_(link),
       objects_(options.data, link, cluster_key, options.node_id, options.build_id),
       metrics_(options.data) {
+  link_.OnBinary([this](const Json& header, std::span<const uint8_t> bytes) {
+    auto written = objects_.PutChunk(header, bytes);
+  });
   link_.OnDisconnect([this](uint64_t generation) {
+    objects_.CancelPuts();
     std::lock_guard lock(mutex_);
     for (auto& [tenant, session] : sessions_)
       session->ManagementLost(generation);
@@ -26,6 +30,7 @@ Service::~Service() {
   metrics_.Stop();
   object_workers_.Stop();
   link_.OnDisconnect({});
+  link_.OnBinary({});
   auto closed = Clear();
   if (!closed)
     fprintf(stderr, "service shutdown: %s\n", closed.error().message.c_str());
@@ -57,7 +62,9 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       return closed.error();
     return Json{{"closed", true}};
   }
-  if (method == "object.fetch" || method == "object.delete" || method == "object.inventory")
+  if (method == "object.render" || method == "object.derivation" || method == "object.fetch" ||
+      method == "object.delete" || method == "object.inventory" ||
+      method.starts_with("object.put."))
     return objects_.Dispatch(request);
   if (method == "session.cold.delete") {
     if (request.value("tenantId", Json()) != "")
@@ -82,9 +89,7 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
     if (!request.contains("sessionId") || !request["sessionId"].is_string() ||
         !request.contains("placementEpoch") || !request["placementEpoch"].is_number_integer() ||
         request["placementEpoch"].get<int64_t>() <= 0 || !request.contains("profileKey") ||
-        !request["profileKey"].is_string() || !request.contains("objectKey") ||
-        !request["objectKey"].is_string() || !request.contains("objectIdKey") ||
-        !request["objectIdKey"].is_string() || !request.contains("checkpoint") ||
+        !request["profileKey"].is_string() || !request.contains("checkpoint") ||
         (!request["checkpoint"].is_null() &&
          (!request["checkpoint"].is_string() ||
           !objects::ValidId(request["checkpoint"].get<std::string>()))))
@@ -101,15 +106,6 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       cluster::Key& key;
       ~ClearKey() { SecureZeroMemory(key.data(), key.size()); }
     } clear_key{key.value()};
-    objects::Keys object_keys;
-    for (auto [name, destination] :
-         {std::pair{"objectKey", &object_keys.object}, std::pair{"objectIdKey", &object_keys.id}}) {
-      auto decoded = cluster::DecodeKey(request[name].get<std::string>());
-      if (!decoded)
-        return decoded.error();
-      *destination = decoded.value();
-      SecureZeroMemory(decoded.value().data(), decoded.value().size());
-    }
     const auto epoch = request["placementEpoch"].get<uint64_t>();
     for (const auto& placement : placements_)
       if (placement["tenantId"] == tenant &&
@@ -128,12 +124,13 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
       for (const auto& [other_tenant, session] : sessions_)
         if (session->Id() == id)
           return Error{ErrorCode::kConflict, "sessionId is already open"};
-      RK_RETURN_IF_ERROR(Checkpoints(objects_).Restore(options_.data / "sessions" / id, tenant,
-                                                       object_keys, id, epoch, options_.build_id,
-                                                       request["checkpoint"]));
+      auto access = std::make_shared<objects::SessionObjects>(objects_, tenant);
+      RK_RETURN_IF_ERROR(Checkpoints(objects_, access)
+                             .Restore(options_.data / "sessions" / id, tenant, options_.build_id,
+                                      request["checkpoint"]));
       auto session = std::make_unique<Session>(sdk_, options_, tenant, id,
                                                request["placementEpoch"].get<uint64_t>(),
-                                               key.value(), link_, objects_, object_keys);
+                                               key.value(), link_, objects_, access);
       auto initialized = session->Initialize();
       if (!initialized)
         return initialized.error();
@@ -172,6 +169,7 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
   return handler(session, request);
 }
 Result<void> Service::Fence(const ManagementLink::ReadyState& ready) {
+  RK_RETURN_IF_ERROR(objects_.Configure(ready.object_keys));
   for (auto it = sessions_.begin(); it != sessions_.end();) {
     const bool current =
         std::any_of(ready.sessions.begin(), ready.sessions.end(), [&](const Json& p) {
@@ -278,7 +276,7 @@ bool Service::HandleRequest(Json request, uint64_t generation) {
     fprintf(stderr, "endpoint internal: unknown exception\n");
     result = Error{ErrorCode::kInternal, "internal endpoint error"};
   }
-  for (const auto* name : {"profileKey", "objectKey", "objectIdKey"}) {
+  for (const auto* name : {"profileKey"}) {
     if (request.is_object() && request.contains(name) && request[name].is_string()) {
       auto& key = request[name].get_ref<std::string&>();
       SecureZeroMemory(key.data(), key.size());
@@ -329,8 +327,12 @@ int Service::Run() {
       auto envelope = line.size() <= 1024 * 1024 ? Json::parse(line, nullptr, false) : Json();
       SecureZeroMemory(line.data(), line.size());
       line.clear();
-      const auto method = envelope.is_object() ? envelope.value("method", Json()) : Json();
-      if (method == "object.fetch" || method == "object.delete" || method == "object.inventory") {
+      const auto method = envelope.is_object() && envelope.value("method", Json()).is_string()
+                              ? envelope["method"].get<std::string>()
+                              : std::string();
+      if (method == "object.render" || method == "object.derivation" || method == "object.fetch" ||
+          method == "object.delete" || method == "object.inventory" ||
+          method.starts_with("object.put.")) {
         const auto request_id = envelope.value("id", Json());
         if (!object_workers_.Submit([this, request = std::move(envelope), generation]() mutable {
               HandleRequest(std::move(request), generation);

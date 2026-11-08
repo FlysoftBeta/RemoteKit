@@ -64,6 +64,7 @@ struct SitePreferencesRequest : RequestEnvelope {
   std::optional<uint64_t> session;
 };
 struct CreateViewRequest : RequestEnvelope {
+  std::optional<std::string> signIn;
   std::optional<std::string> provisionalId;
   std::optional<int> width;
   std::optional<int> height;

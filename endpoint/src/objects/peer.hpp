@@ -27,9 +27,7 @@ class PeerClient {
  public:
   PeerClient(ObjectStore& store, const Key& key, std::string node, std::string build);
   ~PeerClient();
-  Result<ObjectInfo> Fetch(const std::string& tenant,
-                           const std::string& id,
-                           const std::string& address);
+  Result<ObjectInfo> Fetch(const std::string& id, const std::string& address);
 
  private:
   ObjectStore& store_;

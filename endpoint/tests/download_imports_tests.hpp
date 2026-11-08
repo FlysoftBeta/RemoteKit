@@ -4,8 +4,7 @@
 
 void DownloadImportTests(const fs::path& root,
                          remotekit::objects::ObjectService& objects,
-                         Control& control,
-                         const remotekit::objects::Keys& keys) {
+                         Control& control) {
   using namespace remotekit;
   const auto directory = root / "download-session";
   const auto profile = directory / "session-1" / "profile-1";
@@ -22,7 +21,7 @@ void DownloadImportTests(const fs::path& root,
                 {"mimeType", "text/plain"},
                 {"size", "8"},
                 {"origin", "https://example.test:8443"}};
-  FileLibrary library(directory / "file-library", objects, "tenant", keys);
+  FileLibrary library(directory / "file-library", objects, "tenant");
   Take(library.Initialize());
   const auto imported = Take(library.ImportDownload(profile, event));
   CHECK(imported.size == 8 && imported.type == "text/plain");

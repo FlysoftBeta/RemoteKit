@@ -16,6 +16,8 @@ await build({
   platform: 'node',
   format: 'esm',
   target: 'node22',
+  define: { 'process.env.NODE_ENV': '"production"' },
+  minifySyntax: true,
   banner: {
     js: "import { createRequire as bundledCreateRequire } from 'node:module'; const require = bundledCreateRequire(import.meta.url);",
   },
