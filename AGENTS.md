@@ -56,7 +56,6 @@
 
 - Chromium：`C:\src\chromium\src`，remotekit 分支，固定官方 157.0.8103.15，基线 HEAD `1aa07b638799e59656559ae6c6649d4b197f555e`。
 - 保留原 rb 分支、stash（RemoteKit baseline preservation 2026-10-31 (original rb tracked edits)）及未跟踪 re。不得清理/重置这些其他项目数据。
-- 不读或引用旧 `C:\Users\Flysoft\Desktop\remotekit`，除非用户重新明确引用。
 - 复用 out/dev 和 out/rel 增量产物，不 full/clean/新建 out；不要并发 gen/build 同一 out。默认使用全部逻辑 CPU，同 out 多目标一次 Ninja。Browser（Chromium out）、Endpoint（`build/`）、Control（npm）三个构建域可以并行。
 - 搜索代码与文件可以使用 ripgrep（`rg`）；没有时再用其他工具代替。
 - Python 用 `C:\src\depot_tools\python3.bat`；不用 WindowsApps 空别名。VS 为 `C:\Program Files\Microsoft Visual Studio\18\Community`。clang-format 需设置 `CHROMIUM_BUILDTOOLS_PATH=C:/src/chromium/src/buildtools`。
