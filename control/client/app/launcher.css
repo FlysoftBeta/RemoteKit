@@ -1,6 +1,6 @@
 .workspace-overlay {
   position: absolute;
-  inset: 0 0 16px;
+  inset: 0;
   z-index: var(--z-workspace-overlay);
   background: var(--frosted-overlay);
   backdrop-filter: var(--frosted-overlay-filter);

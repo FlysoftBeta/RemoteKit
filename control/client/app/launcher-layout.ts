@@ -22,10 +22,7 @@ export interface LauncherLayout {
   groups: LauncherGroup[];
 }
 export const LAUNCHER_GAP = 8;
-// Group label plus the space between groups.
-export const LAUNCHER_GROUP_CHROME = 48;
-const UNIT = { preferred: 104, minimum: 64, maximum: 120 };
-const MAX_ROWS = 4;
+const UNIT = { preferred: 104, minimum: 64 };
 const SPANS: Record<TileSize, [number, number]> = { small: [1, 1], wide: [2, 1], large: [2, 2] };
 const titles = { frequent: '常用', apps: 'App', pages: '网页', files: '文件' };
 const builtin = ['browser', 'files', 'study', 'questions', 'settings', 'admin'];
@@ -72,48 +69,25 @@ export function packTiles(sizes: TileSize[], rows: number) {
   return { cells, columns };
 }
 
+// Three or more tiles wrap onto a second row rather than squeeze mixed sizes into one line.
+function minimumRows(sizes: TileSize[]) {
+  return sizes.includes('large') || sizes.length >= 3 ? 2 : 1;
+}
+
+// A group wraps to the visible width; the Start screen scrolls vertically when groups are tall.
 function groupRows(sizes: TileSize[], visibleColumns: number) {
   const area = sizes.reduce((sum, size) => sum + SPANS[size][0] * SPANS[size][1], 0);
-  // Three or more tiles wrap onto a second row rather than squeeze mixed sizes into one.
-  const minimum = sizes.includes('large') || sizes.length >= 3 ? 2 : 1;
-  return Math.max(minimum, Math.min(MAX_ROWS, Math.ceil(area / Math.max(1, visibleColumns))));
+  return Math.max(minimumRows(sizes), Math.ceil(area / Math.max(1, visibleColumns)));
 }
 
-/** Rows per group and the tile unit that make every group fit the available height. */
-export function fitGroups(groupSizes: TileSize[][], availableHeight: number, width: number) {
-  const columnsAt = (unit: number) => Math.max(2, Math.floor((width + LAUNCHER_GAP) / (unit + LAUNCHER_GAP)));
-  // Narrow screens show at least about three columns.
-  const maximum = Math.max(UNIT.minimum, Math.min(UNIT.maximum, Math.floor((width - 2 * LAUNCHER_GAP) / 3)));
-  const unitFor = (rows: number[]) => {
-    const total = rows.reduce((sum, value) => sum + value, 0);
-    const space = availableHeight - groupSizes.length * LAUNCHER_GROUP_CHROME;
-    return Math.floor((space + LAUNCHER_GAP * groupSizes.length) / Math.max(1, total) - LAUNCHER_GAP);
-  };
-  let unit = Math.min(UNIT.preferred, maximum);
-  let rows: number[] = [];
-  // Rows depend on the visible columns, which depend on the unit; a few rounds settle both.
-  for (let round = 0; round < 4; round++) {
-    let next = groupSizes.map((sizes) => groupRows(sizes, columnsAt(unit)));
-    while (unitFor(next) < UNIT.minimum) {
-      const tallest = next.indexOf(Math.max(...next));
-      if (next[tallest] <= 1) break;
-      next = next.map((value, index) => (index === tallest ? value - 1 : value));
-    }
-    const fitted = Math.max(UNIT.minimum, Math.min(maximum, unitFor(next)));
-    const stable = fitted === unit && next.every((value, index) => value === rows[index]);
-    unit = fitted;
-    rows = next;
-    if (stable) break;
-  }
-  return { unit, rows };
+/** The tile unit from the width (about three columns on narrow screens) and rows per group. */
+export function fitGroups(groupSizes: TileSize[][], width: number) {
+  const unit = Math.max(UNIT.minimum, Math.min(UNIT.preferred, Math.floor((width - 2 * LAUNCHER_GAP) / 3)));
+  const columns = Math.max(2, Math.floor((width + LAUNCHER_GAP) / (unit + LAUNCHER_GAP)));
+  return { unit, rows: groupSizes.map((sizes) => groupRows(sizes, columns)) };
 }
 
-export function launcherLayout(
-  items: LauncherItem[],
-  availableHeight: number,
-  query = '',
-  width = Infinity,
-): LauncherLayout {
+export function launcherLayout(items: LauncherItem[], query = '', width = Infinity): LauncherLayout {
   const frequent = items
     .filter((item) => item.group === 'frequent')
     .sort(byScore)
@@ -153,7 +127,7 @@ export function launcherLayout(
   }
   const groups = rows.filter((row) => row.entries.length);
   const sizes = groups.map(({ entries }) => entries.map((item, rank) => tileSize(item, rank, entries)));
-  const fit = fitGroups(sizes, availableHeight, Number.isFinite(width) ? width : 1600);
+  const fit = fitGroups(sizes, Number.isFinite(width) ? width : 1600);
   return {
     unit: fit.unit,
     gap: LAUNCHER_GAP,

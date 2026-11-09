@@ -23,31 +23,30 @@ const item = (
   ...extra,
 });
 
-test('the tile unit fits every group into the available height', () => {
+test('the tile unit follows the width and groups wrap to the visible columns without a height limit', () => {
   const groups = [
     item('a', 'frequent', 1),
     item('b', 'apps', 1),
     item('c', 'pages', 1),
     item('d', 'files', 1),
   ];
-  const layout = launcherLayout(groups, 800, '', 1200);
+  const layout = launcherLayout(groups, '', 1200);
   assert.deepEqual(
     layout.groups.map((group) => group.rows),
     [1, 1, 1, 1],
   );
-  assert.equal(layout.unit, 120);
-  assert.equal(launcherLayout(groups, 500, '', 1200).unit, 77);
-  assert.equal(launcherLayout(groups, 2000, '', 358).unit, 114);
+  assert.equal(layout.unit, 104);
+  assert.equal(launcherLayout(groups, '', 300).unit, 94);
+  assert.equal(launcherLayout(groups, '', 150).unit, 64);
   const pair = [item('w', 'frequent', 9), item('w2', 'frequent', 6), item('s', 'frequent', 1)];
-  assert.equal(launcherLayout(pair, 700, '', 358).groups[0].rows, 3);
-  const many = Array.from({ length: 12 }, (_, index) => item('f' + index, 'frequent', 1));
-  const tall = launcherLayout(many, 700, '', 400);
-  assert.equal(tall.groups[0].rows, 4);
-  assert.ok(tall.unit * 4 + 3 * tall.gap + 48 <= 700);
-  const short = launcherLayout(many, 150, '', 400);
-  assert.equal(short.groups[0].rows, 1);
-  assert.equal(short.unit, 102);
-  assert.ok(short.groups[0].tiles.every((tile) => tile.size !== 'large' && tile.rows === 1));
+  assert.equal(launcherLayout(pair, '', 358).groups[0].rows, 3);
+  // Twelve tiles at three visible columns take four rows; no cap, the Start screen scrolls.
+  const many = Array.from({ length: 12 }, (_, index) => item('f' + index, 'frequent', 0));
+  const narrow = launcherLayout(many, '', 358);
+  assert.equal(narrow.groups[0].rows, 4);
+  assert.ok(narrow.groups[0].columns <= 3);
+  const pages = Array.from({ length: 16 }, (_, index) => item('p' + index, 'pages', 0));
+  assert.equal(launcherLayout(pages, '', 358).groups[0].rows, 6);
 });
 
 test('launcher grouping applies limits, ordering, and frequent de-duplication', () => {
@@ -63,7 +62,7 @@ test('launcher grouping applies limits, ordering, and frequent de-duplication', 
     item('browser', 'apps', 0, { appId: 'browser' }),
     item('files', 'apps', 0, { appId: 'files' }),
   ];
-  const groups = launcherLayout(entries, 600).groups;
+  const groups = launcherLayout(entries).groups;
   assert.deepEqual(
     groups.map((group) => [group.id, group.tiles.map((tile) => tile.key)]),
     [
@@ -75,7 +74,7 @@ test('launcher grouping applies limits, ordering, and frequent de-duplication', 
   );
   for (const group of ['frequent', 'pages', 'files'] as const) {
     const many = Array.from({ length: 30 }, (_, index) => item(String(index), group, 30 - index));
-    assert.equal(launcherLayout(many, 600).groups[0].tiles.length, group === 'pages' ? 16 : 12);
+    assert.equal(launcherLayout(many).groups[0].tiles.length, group === 'pages' ? 16 : 12);
   }
 });
 
@@ -83,17 +82,17 @@ test('tile sizes follow relative use, gated by rank so sizes stay mixed', () => 
   const scores = [10, 7, 5, 3, 2.4, 1, 0];
   const entries = scores.map((score, index) => item('t' + index, 'frequent', score));
   assert.deepEqual(
-    launcherLayout(entries, 800, '', 1200).groups[0].tiles.map((tile) => tile.size),
+    launcherLayout(entries, '', 1200).groups[0].tiles.map((tile) => tile.size),
     ['large', 'wide', 'wide', 'wide', 'small', 'small', 'small'],
   );
   const equal = Array.from({ length: 6 }, (_, index) => item('e' + index, 'apps', 1));
   assert.deepEqual(
-    launcherLayout(equal, 800, '', 1200).groups[0].tiles.map((tile) => tile.size),
+    launcherLayout(equal, '', 1200).groups[0].tiles.map((tile) => tile.size),
     ['large', 'wide', 'wide', 'small', 'small', 'small'],
   );
   const unused = Array.from({ length: 4 }, (_, index) => item('u' + index, 'apps', 0));
-  assert.ok(launcherLayout(unused, 800).groups[0].tiles.every((tile) => tile.size === 'small'));
-  const pair = launcherLayout([item('a', 'frequent', 9), item('b', 'frequent', 7)], 800).groups[0];
+  assert.ok(launcherLayout(unused).groups[0].tiles.every((tile) => tile.size === 'small'));
+  const pair = launcherLayout([item('a', 'frequent', 9), item('b', 'frequent', 7)]).groups[0];
   assert.equal(pair.rows, 1);
   assert.deepEqual(
     pair.tiles.map((tile) => tile.size),
@@ -103,10 +102,24 @@ test('tile sizes follow relative use, gated by rank so sizes stay mixed', () => 
 
 test('three or more tiles wrap onto two rows on a wide tablet screen', () => {
   const entries = [9, 7, 5, 1].map((score, index) => item('w' + index, 'frequent', score));
-  const group = launcherLayout(entries, 700, '', 1280).groups[0];
+  const group = launcherLayout(entries, '', 1280).groups[0];
   assert.equal(group.rows, 2);
   assert.ok(group.tiles.some((tile) => tile.size !== 'small'));
   for (const tile of group.tiles) assert.ok(tile.row + tile.rows <= 2);
+});
+
+test('a short landscape tablet keeps every group of three or more tiles on two rows', () => {
+  const entries = [
+    ...Array.from({ length: 12 }, (_, index) => item('f' + index, 'frequent', 12 - index)),
+    ...['browser', 'files', 'study', 'questions', 'settings', 'admin'].map((appId, index) =>
+      item(appId, 'apps', 6 - index, { appId }),
+    ),
+    ...Array.from({ length: 16 }, (_, index) => item('p' + index, 'pages', 1)),
+    ...Array.from({ length: 12 }, (_, index) => item('d' + index, 'files', 1)),
+  ];
+  const layout = launcherLayout(entries, '', 1280);
+  assert.equal(layout.groups.length, 4);
+  for (const group of layout.groups) assert.ok(group.rows >= 2, group.id + ' wraps');
 });
 
 test('packing fills the first column top to bottom before extending right', () => {
@@ -149,10 +162,10 @@ test('search matches title, URL and subtitle and removes duplicate keys', () => 
     item('c', 'files', 3, { subtitle: 'NOTES' }),
   ];
   assert.deepEqual(
-    launcherLayout(entries, 600, 'notes').groups[0].tiles.map((tile) => tile.key),
+    launcherLayout(entries, 'notes').groups[0].tiles.map((tile) => tile.key),
     ['c', 'b', 'a'],
   );
-  assert.equal(launcherLayout(entries, 600, 'missing').groups.length, 0);
+  assert.equal(launcherLayout(entries, 'missing').groups.length, 0);
 });
 
 test('HSL lightness clamping guarantees white text contrast and stable origin colors', () => {

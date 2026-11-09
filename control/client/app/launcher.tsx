@@ -87,7 +87,7 @@ export function Launcher({
   const [query, setQuery] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [bounds, setBounds] = useState({ width: 1024, height: 600 });
+  const [width, setWidth] = useState(1024);
   const [menu, setMenu] = useState<{ item: LauncherItem; anchor: HTMLElement }>();
   const host = useRef<HTMLDivElement>(null);
   const groupsHost = useRef<HTMLDivElement>(null);
@@ -101,34 +101,14 @@ export function Launcher({
     setEdges((previous) => (previous.left === left && previous.right === right ? previous : { left, right }));
   };
   const library = useLibrary();
-  useEffect(() => {
-    const node = groupsHost.current!;
-    const wheel = (event: WheelEvent) => {
-      if (!event.deltaY || event.deltaX) return;
-      const delta =
-        event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? edgeSizes.current.width : 1);
-      const canScroll =
-        delta > 0
-          ? node.scrollLeft + edgeSizes.current.width < edgeSizes.current.contentWidth - 1
-          : node.scrollLeft > 1;
-      if (canScroll) {
-        event.preventDefault();
-        node.scrollLeft += delta;
-      }
-    };
-    node.addEventListener('wheel', wheel, { passive: false });
-    return () => node.removeEventListener('wheel', wheel);
-  }, []);
   useLayoutEffect(() => {
     const groups = groupsHost.current!;
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const { width, height } = entry.contentRect;
+        const { width } = entry.contentRect;
         if (entry.target === groups) {
           edgeSizes.current.width = width;
-          setBounds((previous) =>
-            previous.width === width && previous.height === height ? previous : { width, height },
-          );
+          setWidth(width);
         } else edgeSizes.current.contentWidth = width;
       }
       measureEdges();
@@ -159,7 +139,7 @@ export function Launcher({
       clearTimeout(timer);
     };
   }, [call, query]);
-  const layout = launcherLayout(items, bounds.height, query, bounds.width);
+  const layout = launcherLayout(items, query, width);
   const perform = (task: () => Promise<void>) => {
     if (busy || !online) return;
     setBusy(true);
@@ -231,7 +211,7 @@ export function Launcher({
           if (!query.trim()) return;
           perform(async () => {
             const result = await call('launcher.get', { query });
-            const first = launcherLayout(result.items, bounds.height, query).groups[0]?.tiles[0];
+            const first = launcherLayout(result.items, query).groups[0]?.tiles[0];
             checkCapacity(first);
             if (first) await activate(first, newTarget ? { mode: 'space' } : undefined);
             else await navigate(query.trim(), newTarget ? { mode: 'space' } : undefined);
