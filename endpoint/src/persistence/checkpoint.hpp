@@ -13,7 +13,6 @@ class Checkpoints {
                       const std::string& build);
   Result<void> Restore(const fs::path& directory,
                        const std::string& tenant,
-                       const std::string& build,
                        const Json& checkpoint);
   static bool Excluded(const fs::path& relative, bool directory);
   static Result<Json> Hibernation(const fs::path& directory);

@@ -179,7 +179,6 @@ Result<Json> Checkpoints::Create(const fs::path& directory,
 }
 Result<void> Checkpoints::Restore(const fs::path& directory,
                                   const std::string& tenant,
-                                  const std::string& build,
                                   const Json& checkpoint) {
   const fs::path marker = directory.wstring() + L".checkpoint";
   RK_ASSIGN_OR_RETURN(journal, Hibernation(directory));
@@ -203,10 +202,11 @@ Result<void> Checkpoints::Restore(const fs::path& directory,
   if (!checkpoint.is_null()) {
     RK_ASSIGN_OR_RETURN(bytes, Get(tenant, checkpoint.get<std::string>()));
     const auto manifest = Json::parse(bytes, nullptr, false);
+    // The manifest's buildId only records its producer: a Profile written by an earlier build of
+    // the same pinned Chromium opens as is, so upgrades keep hibernated Sessions.
     if (!manifest.is_object() || manifest.value("version", Json()) != 2 ||
-        manifest.value("buildId", Json()) != build || !manifest.contains("files") ||
-        !manifest["files"].is_array() || !manifest.contains("directories") ||
-        !manifest["directories"].is_array())
+        !manifest.contains("files") || !manifest["files"].is_array() ||
+        !manifest.contains("directories") || !manifest["directories"].is_array())
       return Error{ErrorCode::kRejected, "invalid checkpoint manifest"};
     std::set<std::string> paths;
     for (const auto& item : manifest["directories"]) {

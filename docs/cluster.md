@@ -104,7 +104,7 @@ Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线
 2. 优雅关闭 Browser；不干净则 `unavailable`。
 3. 遍历 Session 目录。排除 `browser.log`、名为 `Cache`、`Code Cache`、`GPUCache`、`DawnWebGPUCache`、`DawnGraphiteCache`、`Shared Dictionary`、`VideoDecodeStats` 的目录、LevelDB 的 `LOCK`/`LOG`/`LOG.old`，以及文件库草稿与暂存（休眠时丢弃）。SQLite 的 `-journal`/`-wal` 保留：干净关闭才是一致性的前提，文件名是否存在不是。
 4. 不超过 1MiB 的文件是一个对象，更大的按 1MiB 固定切块（SQLite 原地改页、LevelDB 只追加或整文件新建，固定切块的增量效果最好）。Session 目录之外的本地索引记录每个文件的大小、mtime、文件 ID 与块列表，未变的文件直接复用块 id，不重新读取。
-5. 生成 manifest 对象（相对路径、大小、块列表、目录、sessionId、epoch、buildId），把新对象逐个 `object.committed`。
+5. 生成 manifest 对象（相对路径、大小、块列表、目录、sessionId、epoch、buildId），把新对象逐个 `object.committed`。manifest 里的 buildId 只记录生成它的构建；恢复只校验 manifest 格式版本，不要求构建相同——Chromium 版本固定，旧构建写的 Profile 原样打开，升级不会让已休眠的 Session 失效。
 6. 原子写入休眠日志 `<sessionId>.hibernation.json`（epoch、manifest id、对象列表、buildId），然后回复 manifest id。Session 关闭，目录保留为热副本。
 
 `session.hibernate` 对同一 epoch 幂等：有日志直接返回日志里的结果；同一 Session 的休眠正在进行时加入它、返回同一结果；Session 已不在内存、也没有日志时返回 `not_found`；epoch 不同返回 `conflict`。日志在 Control 以同一 manifest 打开该 Session 时删除；冷副本清理不删有日志的 Session。

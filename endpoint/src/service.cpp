@@ -130,9 +130,9 @@ Result<Json> Service::Dispatch(const Json& request, uint64_t generation) {
         if (session->Id() == id)
           return Error{ErrorCode::kConflict, "sessionId is already open"};
       auto access = std::make_shared<objects::SessionObjects>(objects_, tenant);
-      RK_RETURN_IF_ERROR(Checkpoints(objects_, access)
-                             .Restore(options_.data / "sessions" / id, tenant, options_.build_id,
-                                      request["checkpoint"]));
+      RK_RETURN_IF_ERROR(
+          Checkpoints(objects_, access)
+              .Restore(options_.data / "sessions" / id, tenant, request["checkpoint"]));
       auto session = std::make_unique<Session>(sdk_, options_, tenant, id,
                                                request["placementEpoch"].get<uint64_t>(),
                                                key.value(), link_, objects_, access);

@@ -111,7 +111,7 @@ void RoundTrip(const fs::path& root) {
       expected[relative] = Read(entry.path());
   }
   fs::remove_all(directory);
-  Take(Checkpoints(source).Restore(directory, "tenant", "dev", manifest));
+  Take(Checkpoints(source).Restore(directory, "tenant", manifest));
   for (const auto& [path, bytes] : expected)
     Check(Read(directory / path) == bytes, "local restored bytes");
   Check(!fs::exists(directory / "profile/Cache") && !fs::exists(directory / "browser.log") &&
@@ -123,21 +123,29 @@ void RoundTrip(const fs::path& root) {
     target_link.sources[id.get<std::string>()] =
         Json::array({{{"nodeId", "source"}, {"address", peer.Address()}}});
   const auto remote_directory = root / "two/sessions" / session;
-  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
   for (const auto& [path, bytes] : expected)
     Check(Read(remote_directory / path) == bytes, "peer restored bytes");
   Check(target_link.committed == source_link.committed, "peer copies committed");
+  // Control committed the earlier hibernation; its journal is gone before the next checkpoint.
+  fs::remove(directory.wstring() + L".hibernation.json");
+  const auto upgraded = Take(Checkpoints(source).Create(directory, "tenant", "previous-build"));
+  fs::remove_all(directory);
+  Take(Checkpoints(source).Restore(directory, "tenant", upgraded["manifestId"]));
+  for (const auto& [path, bytes] : expected)
+    Check(Read(directory / path) == bytes,
+          "a checkpoint from an earlier build restores after upgrade");
   const auto shared = Take(Checkpoints(target).Create(remote_directory, "other", "dev"));
   Check(shared["manifestId"] == manifest && shared["objects"] == checkpoint["objects"],
         "identical checkpoint content shares blocks and manifests across sessions and tenants");
   Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
   Write(remote_directory / "warm-only", "warm");
-  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
   Check(fs::exists(remote_directory / "warm-only"), "warm copy used");
   Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
   fs::remove(remote_directory / "small");
   Write(remote_directory / "profile/Cookies-wal", "corrupt");
-  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
   Check(Read(remote_directory / "small") == "persistent" &&
             Read(remote_directory / "profile/Cookies-wal") == "keep wal",
         "warm validation repairs missing and changed files");
@@ -148,23 +156,21 @@ void RoundTrip(const fs::path& root) {
   fs::last_write_time(remote_directory / "replacement", unchanged_time);
   fs::remove(remote_directory / "small");
   fs::rename(remote_directory / "replacement", remote_directory / "small");
-  Take(Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest));
+  Take(Checkpoints(target).Restore(remote_directory, "tenant", manifest));
   Check(Read(remote_directory / "small") == "persistent",
         "warm validation checks file ID at equal size and mtime");
-  const auto empty_restore =
-      Checkpoints(target).Restore(remote_directory, "tenant", "dev", nullptr);
+  const auto empty_restore = Checkpoints(target).Restore(remote_directory, "tenant", nullptr);
   Check(!empty_restore && empty_restore.error().code == ErrorCode::kConflict &&
             Read(remote_directory / "small") == "persistent",
         "null restore refuses populated Profile");
   Take(Checkpoints::Journal(remote_directory, 7, checkpoint, "dev"));
   Check(Take(Checkpoints::Hibernation(remote_directory))["placementEpoch"] == 7,
         "durable journal identity");
-  const auto stale =
-      Checkpoints(target).Restore(remote_directory, "tenant", "dev", std::string(64, '0'));
+  const auto stale = Checkpoints(target).Restore(remote_directory, "tenant", std::string(64, '0'));
   Check(!stale && stale.error().code == ErrorCode::kConflict &&
             Read(remote_directory / "small") == "persistent",
         "uncommitted hibernation rejects stale checkpoint without mutation");
-  const auto null_journal = Checkpoints(target).Restore(remote_directory, "tenant", "dev", nullptr);
+  const auto null_journal = Checkpoints(target).Restore(remote_directory, "tenant", nullptr);
   Check(!null_journal && null_journal.error().code == ErrorCode::kConflict,
         "uncommitted hibernation rejects null checkpoint");
   Take(WriteDurableJson(remote_directory.wstring() + L".checkpoint", manifest));
@@ -175,12 +181,12 @@ void RoundTrip(const fs::path& root) {
   const auto missing_id = local_index["small"]["chunks"][0].get<std::string>();
   target_link.sources[missing_id] = Json::array();
   Take(target.Store().Delete(missing_id));
-  const auto unavailable = Checkpoints(target).Restore(remote_directory, "tenant", "dev", manifest);
+  const auto unavailable = Checkpoints(target).Restore(remote_directory, "tenant", manifest);
   Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable &&
             fs::exists(remote_directory / "warm-only") && !fs::exists(remote_directory / "small") &&
             Read(remote_directory / "profile/Cookies-wal") == "leave this changed file",
         "unavailable warm repair preserves directory");
-  Take(Checkpoints(target).Restore(root / "new-session", "tenant", "dev", nullptr));
+  Take(Checkpoints(target).Restore(root / "new-session", "tenant", nullptr));
   Check(fs::is_empty(root / "new-session"), "null restore creates new Profile");
 }
 void Blockers(const fs::path& root) {
