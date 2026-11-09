@@ -12,6 +12,40 @@ import { ControlDatabase } from '../server/persistence/database';
 import { Placement } from '../server/cluster/placement';
 import { NodeRegistry } from '../server/cluster/node-link';
 
+test('packaged defaults resolve deployment storage and each local node runtime', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'rk-packaged-config-'));
+  const buildId = 'b'.repeat(64);
+  const version = join(directory, 'versions', buildId);
+  const configPath = join(directory, 'config', 'control.json');
+  await mkdir(version, { recursive: true });
+  await writeFile(join(version, 'build.json'), JSON.stringify({ buildId }));
+  const load = () => runtimeConfig({ REMOTEKIT_CONTROL_CONFIG: configPath }, [], join(version, 'control'));
+  try {
+    const config = load();
+    assert.deepEqual(config.origins, ['http://127.0.0.1:3001', 'http://localhost:3001']);
+    assert.equal(config.dbPath, join(directory, 'data/control.db'));
+    assert.equal(config.diagnosticDir, join(directory, 'data/diagnostics'));
+    assert.equal(config.cluster.keyFile, join(directory, 'config/cluster.key'));
+    assert.deepEqual(config.nodes.local.local, {
+      root: join(directory, 'data/node'),
+      executable: join(directory, 'data/node/runtime', buildId, 'bin/endpoint_service.exe'),
+      versionDir: version,
+    });
+    await writeFile(configPath, JSON.stringify({ nodes: { other: { local: { root: '../custom-node' } } } }));
+    assert.equal(
+      load().nodes.other.local!.executable,
+      join(directory, 'custom-node/runtime', buildId, 'bin/endpoint_service.exe'),
+    );
+    await writeFile(
+      configPath,
+      JSON.stringify({ nodes: { other: { local: { root: '../custom-node', executable: 'override.exe' } } } }),
+    );
+    assert.throws(load, { code: 'invalid_request' });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('config creates defaults and key, resolves paths, hashes effective overrides and exports frozen values', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'rk-config-'));
   const configPath = join(directory, 'control.json');

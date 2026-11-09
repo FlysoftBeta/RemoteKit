@@ -24,6 +24,7 @@ def run(command, env):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', choices=['dev', 'rel'], default='rel')
+    parser.add_argument('--publish', action='store_true')
     args = parser.parse_args()
     status = subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT, text=True)
     if status.strip():
@@ -66,12 +67,8 @@ def main():
     spec.loader.exec_module(packager)
     print('> package-runtime.py --out ' + args.out + ' --smoke', flush=True)
     result = packager.main(['--out', args.out, '--smoke'])
-    # Check what ships: extract the Control archive and verify its manifest provenance against
-    # the runtime it installs.
-    run(
-        [sys.executable, 'tests/e2e/test-streaming-package.py', '--archive', result['archives'][0]['path']],
-        env,
-    )
+    if args.publish:
+        run([sys.executable, 'tools/publish-release.py', '--package', result['directory']], env)
     print(json.dumps(result, indent=2), flush=True)
 
 

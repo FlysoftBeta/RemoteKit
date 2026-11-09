@@ -1,8 +1,8 @@
 #include "service.hpp"
-#include "supervisor.hpp"
+
 namespace remotekit::updater {
 namespace {
-constexpr wchar_t kName[] = L"RemoteKitNode";
+Service selected{};
 fs::path service_root;
 HANDLE stop_event = nullptr;
 SERVICE_STATUS_HANDLE status_handle = nullptr;
@@ -20,7 +20,7 @@ void Status(DWORD state, DWORD code = 0, DWORD hint = 0) {
 }
 DWORD WINAPI Control(DWORD code, DWORD, void*, void*) {
   if (code == SERVICE_CONTROL_STOP || code == SERVICE_CONTROL_SHUTDOWN) {
-    Status(SERVICE_STOP_PENDING, 0, 35000);
+    Status(SERVICE_STOP_PENDING, 0, 65000);
     SetEvent(stop_event);
   } else if (code == SERVICE_CONTROL_INTERROGATE)
     SetServiceStatus(status_handle, &status);
@@ -29,14 +29,14 @@ DWORD WINAPI Control(DWORD code, DWORD, void*, void*) {
 void WINAPI ServiceMain(DWORD, wchar_t**) {
   Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr));
   stop_event = stop.value;
-  status_handle = RegisterServiceCtrlHandlerExW(kName, Control, nullptr);
+  status_handle = RegisterServiceCtrlHandlerExW(selected.name, Control, nullptr);
   if (!status_handle)
     return;
   Status(SERVICE_START_PENDING, 0, 5000);
   Status(SERVICE_RUNNING);
   int code = 1;
   try {
-    code = Supervise(service_root, stop.value, true);
+    code = selected.supervise(service_root, stop.value, true);
   } catch (...) {
   }
   Status(SERVICE_STOPPED, code ? ERROR_SERVICE_SPECIFIC_ERROR : NO_ERROR);
@@ -53,14 +53,16 @@ Error Failure(const char* message) {
   return {ErrorCode::kUnavailable, message};
 }
 }  // namespace
-int RunService(const fs::path& root) {
+int RunService(const fs::path& root, const Service& service) {
+  selected = service;
   service_root = root;
-  SERVICE_TABLE_ENTRYW table[] = {{const_cast<wchar_t*>(kName), ServiceMain}, {nullptr, nullptr}};
+  SERVICE_TABLE_ENTRYW table[] = {{const_cast<wchar_t*>(selected.name), ServiceMain},
+                                  {nullptr, nullptr}};
   return StartServiceCtrlDispatcherW(table) ? 0 : 1;
 }
-Result<void> InstallService(const fs::path& root) {
+Result<void> InstallService(const fs::path& root, const Service& specification) {
   fs::create_directories(root);
-  auto target = root / L"remotekit_node.exe", source = ExecutablePath();
+  auto target = root / specification.executable, source = ExecutablePath();
   if (!fs::exists(target) || !fs::equivalent(target, source))
     if (!CopyFileW(source.c_str(), target.c_str(), FALSE))
       return Failure("cannot copy service executable");
@@ -68,12 +70,12 @@ Result<void> InstallService(const fs::path& root) {
   if (!manager.value)
     return Failure("cannot open service manager");
   auto command = Quote(target.wstring()) + L" service --root=" + Quote(root.wstring());
-  ServiceHandle service{CreateServiceW(manager.value, kName, L"RemoteKit Node",
-                                       SERVICE_CHANGE_CONFIG | DELETE, SERVICE_WIN32_OWN_PROCESS,
-                                       SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, command.c_str(),
-                                       nullptr, nullptr, nullptr, nullptr, nullptr)};
+  ServiceHandle service{CreateServiceW(
+      manager.value, specification.name, specification.display_name, SERVICE_CHANGE_CONFIG | DELETE,
+      SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, command.c_str(), nullptr,
+      nullptr, nullptr, nullptr, nullptr)};
   if (!service.value)
-    return Failure("cannot register RemoteKitNode service");
+    return Failure("cannot register supervisor service");
   SC_ACTION action{SC_ACTION_RESTART, 5000};
   SERVICE_FAILURE_ACTIONSW recovery{};
   recovery.dwResetPeriod = 86400;
@@ -87,18 +89,18 @@ Result<void> InstallService(const fs::path& root) {
   }
   return {};
 }
-Result<void> UninstallService() {
+Result<void> UninstallService(const Service& specification) {
   ServiceHandle manager{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
   if (!manager.value)
     return Failure("cannot open service manager");
-  ServiceHandle service{
-      OpenServiceW(manager.value, kName, DELETE | SERVICE_STOP | SERVICE_QUERY_STATUS)};
+  ServiceHandle service{OpenServiceW(manager.value, specification.name,
+                                     DELETE | SERVICE_STOP | SERVICE_QUERY_STATUS)};
   if (!service.value)
-    return Failure("cannot open RemoteKitNode service");
+    return Failure("cannot open supervisor service");
   SERVICE_STATUS state{};
   ControlService(service.value, SERVICE_CONTROL_STOP, &state);
   if (!DeleteService(service.value))
-    return Failure("cannot remove RemoteKitNode service");
+    return Failure("cannot remove supervisor service");
   return {};
 }
 }  // namespace remotekit::updater

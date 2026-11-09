@@ -1,5 +1,6 @@
 #include "download.hpp"
 #include "archive.hpp"
+#include "replacement.hpp"
 #include "util/wire_error.hpp"
 #include "cluster/channel.hpp"
 #include <fstream>
@@ -117,45 +118,6 @@ Result<void> InstallRuntime(const fs::path& root, const fs::path& archive, const
     return Error{ErrorCode::kInternal, "Release archive does not contain the promised runtime"};
   return {};
 }
-Result<bool> ReplaceSelf(const fs::path& root, const fs::path& runtime, bool service, Log& log) {
-  auto installed = root / L"remotekit_node.exe";
-  auto running = ExecutablePath();
-  if (!fs::exists(installed) || !fs::equivalent(running, installed))
-    return false;
-  auto replacement = runtime / L"bin/remotekit_node.exe";
-  auto old_hash = cluster::Sha256File(running), new_hash = cluster::Sha256File(replacement);
-  if (!old_hash)
-    return old_hash.error();
-  if (!new_hash)
-    return new_hash.error();
-  if (old_hash.value() == new_hash.value())
-    return false;
-  auto old = root / L"remotekit_node.exe.old";
-  if (!MoveFileExW(installed.c_str(), old.c_str(),
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    return Retry("cannot rename installed updater");
-  if (!CopyFileW(replacement.c_str(), installed.c_str(), TRUE)) {
-    MoveFileExW(old.c_str(), installed.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-    return Retry("cannot install new updater");
-  }
-  log.Line("installed updated supervisor");
-  if (!service) {
-    std::wstring command = Quote(installed.wstring()) + L" run --root=" + Quote(root.wstring());
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(installed.c_str(), command.data(), nullptr, nullptr, FALSE,
-                        CREATE_NO_WINDOW, nullptr, root.c_str(), &startup, &process)) {
-      DeleteFileW(installed.c_str());
-      MoveFileExW(old.c_str(), installed.c_str(),
-                  MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
-      return Retry("cannot start updated supervisor");
-    }
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-  }
-  return true;
-}
 }  // namespace
 std::string ReadCurrent(const fs::path& root) {
   std::ifstream file(root / L"current", std::ios::binary);
@@ -177,8 +139,10 @@ Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
   const auto& id = build.value();
   if (!cluster::ValidBuildId(id))
     return Error{ErrorCode::kInternal, "invalid bundled build identity"};
-  if (RuntimeInstalled(root / L"runtime" / id, id))
+  if (RuntimeInstalled(root / L"runtime" / id, id)) {
+    CleanupRuntime(root, id, false);
     return {};
+  }
   auto archive = package / L"release/node.tar.zst";
   std::ifstream descriptor(package / L"release/node.json", std::ios::binary);
   auto release = Json::parse(descriptor, nullptr, false);
@@ -192,7 +156,10 @@ Result<void> InstallBundled(const fs::path& root, const fs::path& package) {
     return hash.error();
   if (cluster::Hex(hash.value()) != release["sha256"].get<std::string>())
     return Error{ErrorCode::kRejected, "bundled node package SHA-256 mismatch"};
-  return InstallRuntime(root, archive, id);
+  auto installed = InstallRuntime(root, archive, id);
+  if (installed)
+    CleanupRuntime(root, id, false);
+  return installed;
 }
 Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
   static std::string failed_release;
@@ -248,22 +215,17 @@ Result<bool> Update(const fs::path& root, HANDLE stop, Log& log, bool service) {
     auto activated = SetCurrent(root, id);
     if (!activated)
       return activated.error();
-    for (auto& entry : fs::directory_iterator(root / L"runtime")) {
-      auto name = entry.path().filename().string();
-      if (name != id && name != previous) {
-        std::error_code ec;
-        fs::remove_all(ExtendedPath(entry.path()), ec);
-      }
-    }
-    fs::remove(archive);
     log.Line("activated runtime " + id);
-    auto replaced = ReplaceSelf(root, runtime, service, log);
+    auto replaced =
+        ReplaceExecutable(root / L"remotekit_node.exe", runtime / L"bin/remotekit_node.exe", root,
+                          L"run --root=" + Quote(root.wstring()), service, log);
     if (!replaced) {
       auto rolled_back = SetCurrent(root, previous);
       if (!rolled_back)
         return rolled_back.error();
       return replaced.error();
     }
+    CleanupRuntime(root, id, true);
     return replaced;
   } catch (const fs::filesystem_error& error) {
     return Error{ErrorCode::kUnavailable, error.what()};

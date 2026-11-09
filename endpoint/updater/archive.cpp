@@ -67,7 +67,7 @@ std::map<std::string, std::string> Pax(std::span<const uint8_t> bytes) {
   }
   return result;
 }
-fs::path SafePath(const std::string& name) {
+fs::path SafePath(const std::string& name, const ArchiveRootRule& root_rule) {
   Require(!name.empty() && name[0] != '/' && name.find_first_of("\\:\0", 0, 3) == name.npos,
           "unsafe tar path");
   std::vector<std::string> parts;
@@ -92,7 +92,7 @@ fs::path SafePath(const std::string& name) {
     parts.push_back(part);
     start = slash + 1;
   }
-  Require(!parts.empty() && parts[0] == "node", "tar entry outside node/");
+  Require(!parts.empty() && root_rule(parts[0]), "tar entry outside allowed root");
   int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name.data(),
                               static_cast<int>(name.size()), nullptr, 0);
   Require(n > 0, "invalid UTF-8 tar path");
@@ -108,12 +108,6 @@ fs::path Extended(const fs::path& path) {
   if (absolute.starts_with(L"\\\\"))
     return L"\\\\?\\UNC\\" + absolute.substr(2);
   return L"\\\\?\\" + absolute;
-}
-void Padding(const ArchiveRead& read, uint64_t size) {
-  std::array<uint8_t, 512> bytes;
-  size_t n = static_cast<size_t>((512 - size % 512) % 512);
-  if (n)
-    Exact(read, std::span(bytes).first(n));
 }
 class ZstdReader {
  public:
@@ -153,9 +147,12 @@ class ZstdReader {
 fs::path ExtendedPath(const fs::path& path) {
   return Extended(path);
 }
-Result<void> ExtractTar(const ArchiveRead& read, const fs::path& destination) {
+Result<void> WalkTar(const ArchiveRead& read,
+                     const ArchiveRootRule& root_rule,
+                     const ArchiveVisitor& visitor) {
   try {
     std::map<std::string, std::string> pax;
+    std::vector<uint8_t> raw;
     std::array<uint8_t, 512> header;
     std::array<uint8_t, 65536> buffer;
     while (true) {
@@ -165,9 +162,10 @@ Result<void> ExtractTar(const ArchiveRead& read, const fs::path& destination) {
         Require(std::all_of(header.begin(), header.end(), [](uint8_t b) { return b == 0; }),
                 "invalid tar end marker");
         for (size_t n = read(buffer); n; n = read(buffer))
-          Require(std::all_of(buffer.begin(), buffer.begin() + n, [](uint8_t b) { return b == 0; }),
+          Require(n <= buffer.size() && std::all_of(buffer.begin(), buffer.begin() + n,
+                                                    [](uint8_t b) { return b == 0; }),
                   "trailing tar data");
-        Require(pax.empty(), "dangling PAX header");
+        Require(raw.empty(), "dangling PAX header");
         return {};
       }
       uint64_t sum = 0;
@@ -177,15 +175,18 @@ Result<void> ExtractTar(const ArchiveRead& read, const fs::path& destination) {
       Require(Field(std::span(header).subspan(257, 6)) == "ustar", "unsupported tar format");
       uint64_t size = Octal(std::span(header).subspan(124, 12));
       char type = static_cast<char>(header[156]);
-      if (type == 'x' || type == 'g') {
-        Require(size <= 1024 * 1024, "PAX header too large");
-        std::vector<uint8_t> data(static_cast<size_t>(size));
-        Exact(read, data);
-        Padding(read, size);
-        auto fields = Pax(data);
-        if (type == 'x') {
-          for (auto& [k, v] : fields)
-            pax[k] = std::move(v);
+      Require(type != 'g', "global PAX headers are forbidden");
+      raw.insert(raw.end(), header.begin(), header.end());
+      if (type == 'x') {
+        Require(size <= 1024 * 1024, "invalid PAX header");
+        size_t start = raw.size();
+        size_t padded = static_cast<size_t>((size + 511) / 512 * 512);
+        raw.resize(start + padded);
+        Exact(read, std::span(raw).subspan(start));
+        auto fields = Pax(std::span(raw).subspan(start, static_cast<size_t>(size)));
+        for (auto& [key, value] : fields) {
+          Require(key != "linkpath" && !key.starts_with("GNU.sparse"), "forbidden PAX field");
+          pax[key] = std::move(value);
         }
         continue;
       }
@@ -199,43 +200,76 @@ Result<void> ExtractTar(const ArchiveRead& read, const fs::path& destination) {
       if (pax.contains("size"))
         size = Decimal(pax["size"]);
       pax.clear();
-      auto relative = SafePath(name);
-      auto path = Extended(destination / relative);
-      if (type == '5') {
-        Require(size == 0, "directory has tar data");
-        fs::create_directories(path);
-      } else {
-        Require(relative != L"node", "node root must be a directory");
+      auto relative = SafePath(name, root_rule);
+      Require(type != '5' || size == 0, "directory has tar data");
+      uint64_t left = size;
+      bool padded = false;
+      ArchiveRead data = [&](std::span<uint8_t> bytes) {
+        size_t n = static_cast<size_t>(std::min<uint64_t>(bytes.size(), left));
+        if (n)
+          Exact(read, bytes.first(n));
+        left -= n;
+        return n;
+      };
+      auto padding = [&](const ArchiveWrite& write) {
+        if (padded)
+          return;
+        std::array<uint8_t, 512> bytes;
+        size_t n = static_cast<size_t>((512 - size % 512) % 512);
+        if (n) {
+          Exact(read, std::span(bytes).first(n));
+          if (write)
+            write(std::span(bytes).first(n));
+        }
+        padded = true;
+      };
+      ArchiveCopy copy = [&](const ArchiveWrite& write) {
+        Require(left == size && !padded, "raw tar record already consumed");
+        write(raw);
+        while (auto n = data(buffer))
+          write(std::span(buffer).first(n));
+        padding(write);
+      };
+      visitor({name, relative, type, size, raw}, data, copy);
+      while (data(buffer)) {
+      }
+      padding({});
+      raw.clear();
+    }
+  } catch (const ArchiveFailure& failure) {
+    return failure.error;
+  } catch (const fs::filesystem_error&) {
+    return Error{ErrorCode::kUnavailable, "archive filesystem operation failed"};
+  }
+}
+Result<void> ExtractTar(const ArchiveRead& read, const fs::path& destination) {
+  return WalkTar(
+      read, [](std::string_view root) { return root == "node"; },
+      [&](const ArchiveEntry& entry, const ArchiveRead& data, const ArchiveCopy&) {
+        auto path = Extended(destination / entry.path);
+        if (entry.type == '5') {
+          fs::create_directories(path);
+          return;
+        }
+        Require(entry.path != L"node", "node root must be a directory");
         fs::create_directories(path.parent_path());
         HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
                                   FILE_ATTRIBUTE_NORMAL, nullptr);
         RequireIo(file != INVALID_HANDLE_VALUE, "cannot create archive file");
         try {
-          uint64_t left = size;
-          while (left) {
-            size_t n = static_cast<size_t>(std::min<uint64_t>(buffer.size(), left));
-            Exact(read, std::span(buffer).first(n));
+          std::array<uint8_t, 65536> buffer;
+          while (auto n = data(buffer)) {
             DWORD written = 0;
             RequireIo(WriteFile(file, buffer.data(), static_cast<DWORD>(n), &written, nullptr) &&
                           written == n,
                       "archive write failed");
-            left -= n;
           }
         } catch (...) {
           CloseHandle(file);
           throw;
         }
         CloseHandle(file);
-      }
-      Padding(read, size);
-    }
-  } catch (const ArchiveFailure& failure) {
-    return failure.error;
-  } catch (const fs::filesystem_error& error) {
-    return Error{ErrorCode::kUnavailable, error.what()};
-  } catch (const std::exception& error) {
-    return Error{ErrorCode::kInternal, error.what()};
-  }
+      });
 }
 Result<void> ExtractArchive(const fs::path& archive, const fs::path& destination) {
   try {

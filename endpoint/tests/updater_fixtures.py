@@ -14,8 +14,7 @@ def file_entry(archive, path, data):
 
 def fixtures(destination):
     destination.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(destination / "valid.tar", "w", format=tarfile.PAX_FORMAT,
-                      pax_headers={"comment": "global header is ignored"}) as archive:
+    with tarfile.open(destination / "valid.tar", "w", format=tarfile.PAX_FORMAT) as archive:
         directory = tarfile.TarInfo("node/")
         directory.type = tarfile.DIRTYPE
         archive.addfile(directory)
@@ -34,6 +33,7 @@ def fixtures(destination):
         "fifo": ("node/fifo", tarfile.FIFOTYPE),
         "contiguous": ("node/file", tarfile.CONTTYPE),
         "unknown-type": ("node/unknown", b"Z"),
+        "global-pax": ("global", tarfile.XGLTYPE),
         "absolute": ("/node/escape", tarfile.REGTYPE),
         "drive": ("C:/node/escape", tarfile.REGTYPE),
         "traversal": ("node/../escape", tarfile.REGTYPE),

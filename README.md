@@ -51,4 +51,6 @@ Control writes `nodes/<node ID>/node.json` next to the config; copy it unchanged
 remote node root and run `remotekit_node.exe run --root=<absolute root>`. See
 [多节点 · 配置](docs/cluster.md#配置) for the full layout.
 Keep `cluster.key`, `nodes/`, and database `.key` files private.
-Packaged `run.cmd` creates `config/control.json` on first run and accepts no arguments.
+Deployed Control hosts run the self-updating manager `remotekit_control.exe` (GitHub Releases,
+encrypted, delta updates); packaged Control creates `config/control.json` on first start. See
+[构建与发布 · 发布](docs/build.md#发布).

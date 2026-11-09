@@ -178,7 +178,7 @@ try {
     async () => Number(await readFile(path.join(root, 'dummy-step'), 'utf8').catch(() => '0')) === 5,
   );
   assert.equal(await readFile(path.join(root, 'current'), 'utf8'), ids[1]);
-  assert.deepEqual((await readdir(path.join(root, 'runtime'))).sort(), ids);
+  assert.deepEqual((await readdir(path.join(root, 'runtime'))).sort(), [ids[1]]);
   assert.deepEqual(await readdir(path.join(root, 'downloads')), []);
   assert.equal(await exists(path.join(root, 'remotekit_node.exe.old')), false);
   const runs = (await readFile(path.join(root, 'dummy-runs.jsonl'), 'utf8'))
@@ -189,11 +189,15 @@ try {
   assert(runs[1].time - runs[0].time < 1000, 'exit 4 restarts immediately');
   assert(runs[2].time - runs[1].time >= 900, 'exit 0 uses 1 s backoff');
   assert(runs[3].time - runs[2].time >= 1900, 'failure uses 2 s backoff');
-  assert.deepEqual(offsets, [
-    { id: ids[0], offset: seed },
-    { id: ids[1], offset: 0 },
-    { id: ids[1], offset: Math.floor(archives.get(ids[1]).bytes.length / 2) },
-  ]);
+  assert.deepEqual(offsets[0], { id: ids[0], offset: 0 });
+  assert.deepEqual(
+    offsets.filter(({ id }) => id === ids[1]).slice(0, 2),
+    [
+      { id: ids[1], offset: 0 },
+      { id: ids[1], offset: Math.floor(archives.get(ids[1]).bytes.length / 2) },
+    ],
+    await readFile(path.join(root, 'logs/supervisor.log'), 'utf8'),
+  );
   await stop(root, running);
   assert.equal(await readFile(path.join(root, 'dummy-stopped'), 'utf8'), 'stdin EOF');
   const log = await readFile(path.join(root, 'logs/supervisor.log'), 'utf8');

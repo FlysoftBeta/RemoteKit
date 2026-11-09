@@ -62,7 +62,7 @@
 - 用户授权必要系统修改及 Windows sudo；不为已授权步骤重复确认。
 - 选择必要测试：迭代时只跑相关的测试文件/目标，完整套件最多在一批结束时跑一次；不反复跑已通过且无新疑点的组。计时 GPU 实验独占资源，不与 CPU 构建混跑；只清理自己创建的进程，不动用户/RDP/系统服务。
 - 默认 non-interactive，不使用 Computer Use 抢鼠标、键盘或切窗口。允许隔离的 headed Chrome89/自动化。
-- 打包工具为 `tools/package-runtime.py`，默认 `--out rel`（non-component、DCHECK-off），Control 包、Endpoint 引导包及 SHA-256 输出在 `develop/tmp/<时间戳>/`。归档用 Node 内置多线程 zstd，解压用 7-Zip ≥ 24 或支持 zstd 的 tar。部署入口见[构建与发布](docs/build.md#发布包)。收集运行 DLL/Release CRT，不带 PDB、编译输入、开发 Profile 或凭据。
+- 打包工具为 `tools/package-runtime.py`，默认 `--out rel`（non-component、DCHECK-off），版本树与确定性 payload 输出在 `develop/tmp/<时间戳>/`。发布经 GitHub Releases：加密、zstd 增量、32 MiB 分片顺序上传，Control 主机由自更新的 `remotekit_control.exe` 按 manifest 更新，节点从 Control 更新。入口见[构建与发布 · 发布](docs/build.md#发布)。收集运行 DLL/Release CRT，不带 PDB、编译输入、开发 Profile 或凭据。
 
 常用入口（详见 [构建与发布](docs/build.md)）：
 
@@ -84,4 +84,4 @@ C:\src\depot_tools\python3.bat tools/package-runtime.py
 
 ## 发布
 
-- 上传流程见 `docs/upload/README.md`（本地文件，不纳入版本控制）；上传已授权，凭据不输出、不打包、不进日志。用户要求用 Codex 时以 gpt-6.1-sol、low 执行，返回取件码。
+- 发布用 `tools/release.py --publish`（GitHub Releases，`gh` 已登录）；发布密钥在 `%LOCALAPPDATA%/RemoteKit/release/release.key`，不输出、不提交、不进日志与命令行。用户要求用 Codex 时以 gpt-6.1-sol、low 执行，返回 Release 链接与 buildId。

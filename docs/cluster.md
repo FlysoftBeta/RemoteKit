@@ -33,7 +33,7 @@
 - `storage`：数据库与诊断归档位置；`quotas.tenantObjectBytes`：每 Tenant 对象字节配额，默认不设。
 - `cluster.keyFile`：32 字节集群密钥（base64），缺失时生成。
 - `nodeDefaults` 与 `nodes.<nodeId>`：编码器与码控参数、数据目录、Browser 路径、`maxSessions`、`peer`、`rtc`、`diskReserveBytes`、`sessionMemoryBytes`。节点项是对默认值的部分覆盖。只有一个节点时 `peer.address` 可省略（取 `127.0.0.1:<listen 端口>`），多节点时远端节点必须写。`maxSessions`、`diskReserveBytes`、`sessionMemoryBytes` 默认不设：没有显式上限时集群按实测容量尽力服务（见[指标与放置](#指标与放置)）；设置后是硬上限。
-- 带 `local` 的是**本地节点**：Control 自己启动 Endpoint，经 stdio 通信，`local.root` 是节点根目录。发布包里的可执行文件由 Control 按自身 buildId 定位到 `data/local/runtime/<buildId>/bin/endpoint_service.exe`（`run.cmd` 先安装同一 buildId 的运行时），配置里不出现版本；只有开发构建（buildId `dev`）用 `local.executable` 指向自己编译的 Endpoint。
+- 带 `local` 的是**本地节点**：Control 自己启动 Endpoint，经 stdio 通信，`local.root` 是节点根目录。打包版 Control 启动本地节点前用自己版本里的 `bin/remotekit_node.exe install` 把同一 buildId 的运行时装到 `<local.root>/runtime/<buildId>/`（与远端节点的目录结构相同，其他版本删除），再运行其中的 `bin/endpoint_service.exe`，配置里不出现版本；只有开发构建（buildId `dev`）用 `local.executable` 指向自己编译的 Endpoint。
 - 不带 `local` 的是**远端节点**，主动连接 Control。Control 为每个远端节点写出 `<配置目录>/nodes/<nodeId>/node.json`（`nodeId`、该节点使用的 Control 地址、集群密钥），运维把这个文件原样复制到节点根目录即可；节点从配置中删除后，对应文件也被删除。
 
 `rtc.address` 用于 Viewer 不在节点所在网络的情况，例如路由器把公网 UDP 端口段转发到节点：Endpoint 在每次 offer 时解析该名称（动态 DNS 随之更新），对端口段内的每个本机 UDP host 候选再发一份地址替换后的候选，原候选保留给同网络的 Viewer。端口段必须固定才能转发，所以设置 `rtc.address` 时要求 `rtc.ports`；每个 RTC 连接占用段内一个端口，端口段大小应不少于节点同时连接的 Viewer 数。
@@ -64,10 +64,12 @@ Control 包和节点运行时的根目录有相同的 `build.json{buildId}`。bu
 
 - `run --root=<dir>` 前台运行；`service-install/service-uninstall` 注册 Windows 服务 `RemoteKitNode`（自动启动，失败 5 秒后重启）。
 - 启动 `runtime/<current>/bin/endpoint_service.exe --node-root=<root>`，stdin 是管道：关闭 stdin 即请求优雅关闭（最多等 30 秒）。Endpoint 的 stdout/stderr 写入 `<root>/logs/endpoint.log`（16 MiB 轮转，保留 `.1`–`.4`），监管自身的记录在 `logs/supervisor.log`。Control 经 stdio 启动的本地 Endpoint 用同样的文件与轮转记录 stderr，两种部署下节点日志位置一致。退出码 3（需要更新）→ 更新后启动；4（配置变化）→ 立即重启；其他 → 1、2、4…30 秒退避，健康运行 60 秒后复位。
-- 更新：以 role `updater` 连接（updater 自己的 buildId 可以较旧），拿到 `node.release{buildId, sha256, size}`，用 `package.get{offset}` 断点续传下载到 `downloads/`，校验大小与 SHA-256，在进程内流式解 zstd 多帧、解 tar（只接受 `node/` 下的普通文件与目录，拒绝链接、设备名、备用数据流、绝对路径与 `..`），核对 `node/build.json`，移到 `runtime/<buildId>`，原子替换 `current`，只保留当前与上一个运行时。
+- 更新：以 role `updater` 连接（updater 自己的 buildId 可以较旧），拿到 `node.release{buildId, sha256, size}`，用 `package.get{offset}` 断点续传下载到 `downloads/`，校验大小与 SHA-256，在进程内流式解 zstd 多帧、解 tar（只接受 `node/` 下的普通文件与目录，拒绝链接、设备名、备用数据流、绝对路径与 `..`），核对 `node/build.json`，移到 `runtime/<buildId>`，原子替换 `current`；自更新完成后删除其他运行时与 `downloads/`，监管者启动时也做同样的清理，只保留当前运行时。
 - 新运行时里的 `remotekit_node.exe` 与正在运行的不同时：把运行中的文件改名为 `.old`，复制新文件，用相同参数启动新监管者后退出；替换失败则回滚 `current`。
 
-Control 包中的 `release/node.tar.zst` 与 `release/node.json` 供本地离线安装和远端节点更新。合部署的 `run.cmd` 用 updater 的 `install` 入口校验归档并按 buildId 安装，Control 经 stdio 监管本地 Endpoint。独立节点从 Endpoint 引导包启动，由 updater 下载同一份归档并监管 Endpoint。先升级 Control，节点随即全部被视为断开，各自更新后重新上线；代价是每次发布所有用户的 Browser 冷启动一次。部署入口见[构建与发布](build.md#发布包)。
+`remotekit_node.exe` 静态链接 CRT，节点上只需要它和 `node.json`。
+
+Control 版本目录中的 `release/node.tar.zst` 与 `release/node.json` 不在发布物里，由 Control 主机的管理器安装版本时从 payload 的 `node/` 记录生成，供本地节点安装和远端节点更新共用。Control 由管理器从 GitHub Releases 更新（见[构建与发布 · 发布](build.md#发布)）；Control 一换版本，节点随即全部被视为断开（`build_mismatch`），各自从 Control 下载新运行时后重新上线；代价是每次发布所有用户的 Browser 冷启动一次。
 
 ## 会话、放置与密钥
 

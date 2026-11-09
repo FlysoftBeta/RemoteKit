@@ -17,12 +17,13 @@ BOOL WINAPI Stop(DWORD code) {
 int wmain(int argc, wchar_t** argv) {
   using namespace remotekit::updater;
   try {
+    const Service service{L"RemoteKitNode", L"RemoteKit Node", L"remotekit_node.exe", Supervise};
     if (argc < 2)
       throw std::runtime_error(
           "expected run, install, service, service-install or service-uninstall");
     std::wstring command = argv[1];
     if (command == L"service-uninstall" && argc == 2) {
-      auto result = UninstallService();
+      auto result = UninstallService(service);
       if (!result)
         throw std::runtime_error(result.error().message);
       return 0;
@@ -41,13 +42,13 @@ int wmain(int argc, wchar_t** argv) {
     if (argc != 3)
       throw std::runtime_error("unexpected node command arguments");
     if (command == L"service-install") {
-      auto result = InstallService(root);
+      auto result = InstallService(root, service);
       if (!result)
         throw std::runtime_error(result.error().message);
       return 0;
     }
     if (command == L"service")
-      return RunService(root);
+      return RunService(root, service);
     if (command != L"run")
       throw std::runtime_error("unknown node command");
     Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr));

@@ -29,7 +29,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 |---|---|---|
 | **Control** | TypeScript，Node，better-sqlite3，Vite/React/MUI | 产品状态的唯一真相：账户、Window/Tab、地址意图、设置、站点偏好、文件目录、操作收据。节点配置、会话放置、Tenant 密钥、对象索引与 checkpoint。认证、Viewer 租约、信令转发、对账、Memory Saver 与休眠策略、更新包分发。提供 Viewer 前端。 |
 | **Endpoint** | C++20，独立 CMake/Ninja | 算力节点，可与 Control 分机部署，配置由 Control 下发。Tenant→Session；每个 Session 一个 Browser 进程。GPU atlas 消费、硬件编码（QSV/NVENC）、WebRTC、输入校验与路由、照片处理、人脸推理、加密对象存储与节点间传输、checkpoint。 |
-| **Updater** | C++20，同一 CMake 工程的独立可执行文件 | 节点上的 `remotekit_node.exe`：监管 Endpoint 进程，从 Control 下载并安装与之相同版本的节点运行时。 |
+| **Updater** | C++20，同一 CMake 工程的独立可执行文件（静态 CRT） | 节点上的 `remotekit_node.exe`：监管 Endpoint 进程，从 Control 下载并安装与之相同版本的节点运行时。Control 主机上的 `remotekit_control.exe`：按加密的发布 manifest 从 GitHub Releases 下载增量或完整包，安装、切换并监管 Control，自更新。 |
 | **Browser** | C++，Chromium GN | 承载 WebContents 与 Profile；页面生命周期、输入派发、页面请求（对话框/文件选择/权限/下载）、导航状态；Rend 驱动离屏绘制并合成 atlas。 |
 | **SDK** | C ABI DLL（在 Chromium 树内构建） | 把 Mojo（与 Browser 的控制和渲染管道）和 libwebrtc（peer、视频源、外部编码器桥、音频源）包成 C 接口给 Endpoint 用。跨 DLL 不传任何 C++ STL/libc++/Abseil/Chromium 对象。 |
 | **Viewer** | Control 提供的 Web 前端 | App 外壳：浏览器、我的文件、设置、学习、题库与网页 App；Space 分屏多任务与开始屏幕；video 呈现；输入、IME、触控手势；文件篮与相机。 |
@@ -149,7 +149,9 @@ endpoint/
     files/         文件库、暂存、照片处理、DC 文件服务
     documents/     文档渲染：类型判断、LibreOffice 转 PDF、pdfrender、渲染队列、归档读取
     diagnostics/ util/
-  updater/         remotekit_node.exe：服务、监管、下载、zstd + tar 解包、自我替换
+  updater/         remotekit_node.exe：服务、监管、下载、zstd + tar 解包、自我替换（与管理器共用）
+  release/         发布格式：HKDF/AES-GCM、manifest、分片资产、HTTP、更新规划、patch 解码、payload 安装；remotekit_release.exe 发布工具
+  manager/         remotekit_control.exe：Control 主机的管理器
   tests/           CTest 单元测试
 browser/
   browser_runtime.*, view_registry.*, layout_transaction.*, popup_registry.*, closed_views.*

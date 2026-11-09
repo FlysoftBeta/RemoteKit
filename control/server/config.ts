@@ -35,7 +35,7 @@ export interface ConfiguredNode {
   readonly config: Readonly<NodeConfig>;
   readonly configHash: string;
   /** Present for a node Control starts itself over stdio. */
-  readonly local?: Readonly<{ executable: string; root: string }>;
+  readonly local?: Readonly<{ executable: string; root: string; versionDir?: string }>;
 }
 export interface RuntimeConfig {
   readonly sessionImport?: SessionImportConfig;
@@ -211,10 +211,10 @@ function controlUrl(value: unknown, name: string): string {
   return text;
 }
 /** A packaged Control runs the node runtime it installed for its own build; a dev build names its Endpoint. */
-function localExecutable(root: string, buildId: string, directory: string, value: unknown) {
+function localExecutable(localRoot: string, buildId: string, directory: string, value: unknown) {
   if (buildId === 'dev') return resolve(directory, string(value, 'local.executable'));
   if (value !== undefined) invalid('local.executable is only for development builds');
-  return resolve(root, '..', 'data', 'local', 'runtime', buildId, 'bin', 'endpoint_service.exe');
+  return resolve(localRoot, 'runtime', buildId, 'bin', 'endpoint_service.exe');
 }
 function writeNodeFiles(directory: string, files: ReadonlyMap<string, string>) {
   const parent = resolve(directory, 'nodes');
@@ -238,9 +238,9 @@ const defaultOrigins = Object.freeze([
 export function runtimeConfig(
   env: NodeJS.ProcessEnv = process.env,
   argv: readonly string[] = process.argv.slice(2),
+  root = resolve(dirname(fileURLToPath(import.meta.url)), '..'),
 ): RuntimeConfig {
   if (argv.length) invalid('Control does not accept command-line arguments');
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const buildId = readBuildId(root);
   const configPath = resolve(env.REMOTEKIT_CONTROL_CONFIG ?? resolve(root, 'data/control.json'));
   const directory = dirname(configPath);
@@ -250,14 +250,23 @@ export function runtimeConfig(
       configPath,
       JSON.stringify(
         {
-          http: { listen: '127.0.0.1:3001', origins: defaultOrigins },
-          storage: { database: 'control.db', diagnostics: 'diagnostics' },
+          http: {
+            listen: '127.0.0.1:3001',
+            origins: buildId === 'dev' ? defaultOrigins : defaultOrigins.slice(0, 2),
+          },
+          storage:
+            buildId === 'dev'
+              ? { database: 'control.db', diagnostics: 'diagnostics' }
+              : { database: '../data/control.db', diagnostics: '../data/diagnostics' },
           cluster: { keyFile: 'cluster.key' },
           nodeDefaults,
           quotas: {},
           nodes: {
             local: {
-              local: { executable: '../../build/endpoint/endpoint/endpoint_service.exe', root: 'node' },
+              local:
+                buildId === 'dev'
+                  ? { executable: '../../build/endpoint/endpoint/endpoint_service.exe', root: 'node' }
+                  : { root: '../data/node' },
             },
           },
         },
@@ -371,9 +380,11 @@ export function runtimeConfig(
     if (localValue !== undefined) {
       if (urlValue !== undefined) invalid(`nodes.${nodeId}.controlUrl is only for remote nodes`);
       const value = object(localValue, ['executable', 'root'], `nodes.${nodeId}.local`);
+      const localRoot = resolve(directory, string(value.root, `nodes.${nodeId}.local.root`));
       local = Object.freeze({
-        executable: localExecutable(root, buildId, directory, value.executable),
-        root: resolve(directory, string(value.root, `nodes.${nodeId}.local.root`)),
+        executable: localExecutable(localRoot, buildId, directory, value.executable),
+        root: localRoot,
+        ...(buildId === 'dev' ? {} : { versionDir: resolve(root, '..') }),
       });
     } else {
       const url =

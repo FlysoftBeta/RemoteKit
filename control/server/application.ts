@@ -1,3 +1,4 @@
+import { constants, fstatSync } from 'node:fs';
 import { Announcements } from './admin/announcements';
 import { UserAdmin } from './admin/users';
 import { NodeAdmin } from './cluster/node-admin';
@@ -224,6 +225,7 @@ export function startApplication(
     }
   }, 1500);
   server.listen(config.port, config.host, () => {
+    if (closing) return;
     nodes.start();
     control.sessionImporter.start();
     control.learning.start();
@@ -236,6 +238,9 @@ export function startApplication(
   function close(): Promise<void> {
     if (closePromise) return closePromise;
     closing = true;
+    process.stdin.off('end', stdinClosed);
+    process.stdin.off('close', stdinClosed);
+    if (pipedStdin) process.stdin.pause();
     clearInterval(reconciliationTimer);
     nodes.off('ready', endpointReady);
     nodes.off('offline', endpointOffline);
@@ -247,6 +252,20 @@ export function startApplication(
       store.db.close();
     })();
     return closePromise;
+  }
+  function stdinClosed() {
+    void close();
+  }
+  const stdinStat = fstatSync(0);
+  // Node's Stats.isFIFO() always returns false on Windows, even for anonymous pipes.
+  const pipedStdin =
+    stdinStat.isFIFO() ||
+    (process.platform === 'win32' && (stdinStat.mode & constants.S_IFMT) === constants.S_IFIFO);
+  if (pipedStdin) {
+    process.stdin.once('end', stdinClosed);
+    process.stdin.once('close', stdinClosed);
+    process.stdin.resume();
+    if (process.stdin.readableEnded || process.stdin.destroyed) stdinClosed();
   }
   process.on('SIGINT', () => {
     void close();

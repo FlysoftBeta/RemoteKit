@@ -3,7 +3,6 @@
 
 import argparse
 from datetime import datetime, timezone, timedelta
-import hashlib
 import importlib.util
 import json
 import os
@@ -12,8 +11,9 @@ import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
+
+from release_payload import build_id as payload_build_id, digest, write_payload
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_TREES = ('browser', 'endpoint', 'control', 'protocol', 'sdk', 'tools', 'patches')
@@ -127,6 +127,8 @@ def check_endpoint_freshness(build):
                 'build.ninja',
                 'endpoint_service',
                 'remotekit_node',
+                'remotekit_control',
+                'remotekit_release',
             ],
             ROOT,
         )
@@ -169,92 +171,8 @@ def pinned_node():
     return module.resolve_node()
 
 
-def create_archive(package, node, *, archive=None):
-    """Stream tar into bounded, concatenated zstd frames; no intermediate tar."""
-    publish = archive is None
-    archive = archive or package.with_name(package.name + '.tar.zst')
-    script = r'''
-const { pipeline } = require('node:stream/promises');
-const { zstdCompressSync, constants: c } = require('node:zlib');
-const options = {params: {
-  [c.ZSTD_c_compressionLevel]: 12,
-  [c.ZSTD_c_nbWorkers]: Number(process.argv[1]),
-  [c.ZSTD_c_checksumFlag]: 1,
-}};
-// Node 24's async zstd stream can signal EOF with unconsumed input when
-// nbWorkers > 0. Complete bounded frames use the blocking end directive,
-// retaining native zstd worker threads. Concatenated frames are standard zstd.
-async function* compressFrames(source) {
-  const frame = Buffer.allocUnsafe(32 * 1024 * 1024);
-  let used = 0;
-  for await (const chunk of source) {
-    let offset = 0;
-    while (offset < chunk.length) {
-      const count = Math.min(frame.length - used, chunk.length - offset);
-      chunk.copy(frame, used, offset, offset + count);
-      used += count;
-      offset += count;
-      if (used === frame.length) {
-        yield zstdCompressSync(frame, options);
-        used = 0;
-      }
-    }
-  }
-  if (used) yield zstdCompressSync(frame.subarray(0, used), options);
-}
-pipeline(process.stdin, compressFrames, process.stdout)
-  .catch(error => { console.error(error); process.exitCode = 1; });
-'''
-    with archive.open('xb') as output:
-        try:
-            with tempfile.TemporaryFile() as errors:
-                with subprocess.Popen(
-                    [str(node), '-e', script, str(os.cpu_count() or 1)],
-                    stdin=subprocess.PIPE,
-                    stdout=output,
-                    stderr=errors,
-                ) as compressor:
-                    writing_error = None
-                    try:
-                        with tarfile.open(
-                            fileobj=compressor.stdin, mode='w|', format=tarfile.PAX_FORMAT
-                        ) as tar:
-                            tar.add(package, arcname=package.name)
-                    except OSError as error:
-                        writing_error = error
-                    finally:
-                        try:
-                            compressor.stdin.close()
-                        except OSError as error:
-                            writing_error = writing_error or error
-                    code = compressor.wait()
-                    errors.seek(0)
-                    if code:
-                        raise RuntimeError(
-                            'zstd compression failed: '
-                            + errors.read().decode('utf-8', errors='replace')
-                        )
-                    if writing_error:
-                        raise writing_error
-        except Exception:
-            output.close()
-            archive.unlink(missing_ok=True)
-            raise
-    checksum = digest(archive)
-    if publish:
-        archive.with_name(archive.name + '.sha256').write_text(
-            checksum + '  ' + archive.name + '\n', encoding='ascii'
-        )
-    return archive, checksum
-
-
-def digest(path):
-    with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
-
-
 def copy_endpoint(source, binary):
-    """Normalize CLI overrides to the executable path used by package launchers."""
+    """Copy the Endpoint under its runtime executable name."""
     target = binary / 'endpoint_service.exe'
     shutil.copy2(source, target)
     return target
@@ -267,6 +185,15 @@ def face_runtime_files():
     setup = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(setup)
     return setup.runtime_files()
+
+
+def document_runtime_trees():
+    spec = importlib.util.spec_from_file_location(
+        'fetch_document_deps', ROOT / 'tools/fetch-document-deps.py'
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.runtime_trees()
 
 
 def copy_face_runtime(files, package):
@@ -286,7 +213,7 @@ def run_startup_smoke(package, *, work_dir=None):
         '-X',
         'utf8',
         str(ROOT / 'tests/e2e/test-streaming-package.py'),
-        '--package',
+        '--root',
         str(package),
     ]
     if work_dir is not None:
@@ -344,14 +271,14 @@ def validate_runtime_tree(root):
             raise RuntimeError('Non-runtime file in package: ' + str(relative))
 
 
-def write_launcher(file, command, setup='', forward_arguments=False):
+def write_recovery_launcher(file):
     file.write_text(
         '@echo off\nsetlocal DisableDelayedExpansion\n'
-        + ('' if forward_arguments else 'if not "%~1"=="" exit /b 1\n')
-        + setup
-        + command
-        + (' %*' if forward_arguments else '')
-        + '\nexit /b %errorlevel%\n',
+        'set "REMOTEKIT_CONTROL_CONFIG=%~dp0..\\..\\config\\control.json"\n'
+        'if exist "%REMOTEKIT_CONTROL_CONFIG%" goto start\n'
+        'echo Control configuration not found. 1>&2\nexit /b 1\n:start\n'
+        '"%~dp0bin\\node.exe" "%~dp0control\\dist\\recover-credentials.mjs" %*\n'
+        'exit /b %errorlevel%\n',
         encoding='ascii',
     )
 
@@ -367,7 +294,7 @@ def main(arguments=None):
     parser.add_argument(
         '--smoke',
         action='store_true',
-        help='Validate streaming startup/auth/Endpoint management before archiving; real Viewer RTC product/media checks remain required',
+        help='Install the payload and validate startup/auth/Endpoint management',
     )
     args = parser.parse_args(arguments)
     with tempfile.TemporaryDirectory(prefix="remotekit-runtime-") as staging:
@@ -462,7 +389,6 @@ def package_runtime(args, node_runtime):
         os.environ.get('REMOTEKIT_VS', r'C:\Program Files\Microsoft Visual Studio\18\Community')
     )
     redist = vs / 'VC/Redist/MSVC'
-    crt_files = {}
     if redist.is_dir():
         versions = sorted(
             (p for p in redist.iterdir() if p.is_dir() and p.name[0].isdigit()),
@@ -472,17 +398,13 @@ def package_runtime(args, node_runtime):
         if versions:
             for crt in (versions[0] / 'x64').glob('Microsoft.VC*.CRT'):
                 for dependency in crt.glob('*.dll'):
-                    crt_files[dependency.name] = dependency
                     selected.setdefault(Path(dependency.name), dependency)
     backend = 'streaming-qsv-nvenc'
     timestamp = datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d-%H%M%S')
     destination = args.destination.resolve() / timestamp
     destination.mkdir(parents=True)
     package = destination / 'RemoteKit-control-win-x64'
-    package_name = package.name
-    bootstrap = destination / 'RemoteKit-endpoint-win-x64'
     package.mkdir()
-    bootstrap.mkdir()
     binary = node_runtime / 'bin'
     binary.mkdir(parents=True)
     print(
@@ -494,12 +416,7 @@ def package_runtime(args, node_runtime):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
     copy_endpoint(endpoint, binary)
-    document_spec = importlib.util.spec_from_file_location(
-        'fetch_document_deps', ROOT / 'tools/fetch-document-deps.py'
-    )
-    document_deps = importlib.util.module_from_spec(document_spec)
-    document_spec.loader.exec_module(document_deps)
-    for source, relative in document_deps.runtime_trees():
+    for source, relative in document_runtime_trees():
         shutil.copytree(source, binary / relative)
     shutil.copy2(endpoint.parent / 'remotekit_node.exe', binary / 'remotekit_node.exe')
     vpl = endpoint.parent / 'libvpl.dll'
@@ -529,10 +446,8 @@ def package_runtime(args, node_runtime):
     control_bin = package / 'bin'
     control_bin.mkdir()
     shutil.copy2(node, control_bin / 'node.exe')
-    for folder in (control_bin, bootstrap):
-        shutil.copy2(binary / 'remotekit_node.exe', folder / 'remotekit_node.exe')
-        for name, source in crt_files.items():
-            shutil.copy2(source, folder / name)
+    for name in ('remotekit_control.exe', 'remotekit_node.exe'):
+        shutil.copy2(endpoint.parent / name, control_bin / name)
     control = package / 'control'
     control.mkdir()
     dist = ROOT / 'control/dist'
@@ -577,86 +492,21 @@ def package_runtime(args, node_runtime):
     )
     copy_face_runtime(face_files, node_runtime)
     (node_runtime / 'licenses').mkdir(exist_ok=True)
-    for name in ('zstd-LICENSE', 'nlohmann-json-LICENSE.MIT'):
-        shutil.copy2(licenses / name, bootstrap / name)
     for file in licenses.iterdir():
         if file.name != 'Node-LICENSE':
             shutil.copy2(file, node_runtime / 'licenses' / file.name)
     validate_runtime_tree(node_runtime)
-    build_lines = []
-    for root, tree in [(node_runtime, 'bin'), (package, 'bin'), (package, 'control')]:
-        for file in (root / tree).rglob('*'):
-            if file.is_file():
-                prefix = 'node/' if root == node_runtime else ''
-                build_lines.append(f'{prefix}{file.relative_to(root).as_posix()}\t{digest(file)}\n')
-    build_id = hashlib.sha256(''.join(sorted(build_lines)).encode('utf-8')).hexdigest()
+    build_id = payload_build_id(package, node_runtime)
     for root in (package, node_runtime):
         # build.json and release/node.json are exact runtime contracts; provenance lives in
         # manifest.json.
         (root / 'build.json').write_text(json.dumps({'buildId': build_id}) + '\n', encoding='utf-8')
-    (package / 'release').mkdir()
-    node_archive, node_checksum = create_archive(
-        node_runtime, node, archive=package / 'release/node.tar.zst'
-    )
-    (package / 'release/node.json').write_text(
-        json.dumps(
-            {
-                'buildId': build_id,
-                'sha256': node_checksum,
-                'size': node_archive.stat().st_size,
-            }
-        )
-        + '\n',
-        encoding='utf-8',
-    )
-    shutil.copy2(ROOT / 'tools/streaming-launcher.cjs', package / 'run-control.cjs')
-    for name, mode in [('run.cmd', 'combined'), ('run-control.cmd', 'control')]:
-        write_launcher(package / name, f'"%~dp0bin\\node.exe" "%~dp0run-control.cjs" {mode}')
-    # Without a config the command would create a default one and rebuild the wrong database.
-    write_launcher(
-        package / 'recover-credentials.cmd',
-        '"%~dp0bin\\node.exe" "%~dp0control\\dist\\recover-credentials.mjs"',
-        'if exist "%~dp0config\\control.json" goto start\n'
-        'echo config\\control.json not found; run this in the deployed package directory. 1>&2\n'
-        'exit /b 1\n:start\n'
-        'set "REMOTEKIT_CONTROL_CONFIG=%~dp0config\\control.json"\n',
-        forward_arguments=True,
-    )
-    write_launcher(
-        bootstrap / 'run-endpoint.cmd',
-        '"%~dp0remotekit_node.exe" run "--root=%~dp0."',
-        'if exist "%~dp0node.json" goto start\n'
-        'echo Copy the Control-generated node.json into this directory. 1>&2\n'
-        'exit /b 1\n:start\n',
-    )
-    (package / 'README.txt').write_text(
-        'Run run.cmd for Control plus a local Endpoint, or run-control.cmd for Control only.\n'
-        'The launchers create config/control.json on first start. Edit it to configure HTTP, storage and nodes.\n'
-        'Open http://127.0.0.1:3001 and press Up Up Down Down Left Right Left Right to reveal sign-in.\n'
-        'The first account becomes administrator.\n'
-        'For a remote node, set cluster.controlUrl and add the node under nodes without a local entry.\n'
-        'Control writes config/nodes/<node ID>/node.json; copy it unchanged next to run-endpoint.cmd on that node.\n'
-        'Keep release/node.json and release/node.tar.zst together for node installation and updates.\n'
-        'If data/control.db is damaged, stop Control and run recover-credentials.cmd: it moves the old\n'
-        'database aside and rebuilds it with only accounts, passwords, PINs, faces and sign-ins\n'
-        '(--dry-run to preview, --help for options).\n',
-        encoding='utf-8',
-    )
-    (bootstrap / 'README.txt').write_text(
-        'Copy config/nodes/<node ID>/node.json from Control here unchanged and run run-endpoint.cmd.\n'
-        'The supervisor downloads and starts the matching Endpoint runtime from Control.\n',
-        encoding='utf-8',
-    )
-    validation = None
-    if args.smoke:
-        validation = run_startup_smoke(package)
-        print(
-            'Bundled startup/auth/Endpoint management smoke passed (RTC product/media checks separate): '
-            + validation['evidence'],
-            flush=True,
-        )
+    final_package = destination / ('RemoteKit-control-' + build_id[:12])
+    package.rename(final_package)
+    package = final_package
+    shutil.copytree(node_runtime, package / 'node')
+    write_recovery_launcher(package / 'recover-credentials.cmd')
     validate_runtime_tree(package)
-    validate_runtime_tree(bootstrap)
     files = []
     for file in sorted(package.rglob('*')):
         if file.is_file():
@@ -668,7 +518,7 @@ def package_runtime(args, node_runtime):
                 }
             )
     manifest = {
-        'name': package_name,
+        'name': package.name,
         'buildId': build_id,
         'source': source_metadata,
         'artifacts': artifacts,
@@ -687,72 +537,47 @@ def package_runtime(args, node_runtime):
         'chromium_internal_frame_ipc': True,
         'endpoint_configuration': 'Release',
         'browser_configuration': args.out,
-        'archive': package_name + '.tar.zst',
-        'archive_format': 'tar.zst',
-        'archive_compression': {
-            'implementation': 'Node zstd',
-            'level': 12,
-            'workers': os.cpu_count() or 1,
-            'frame_bytes': 32 * 1024 * 1024,
-        },
-        'runtime_launched': bool(validation and validation.get('passed')),
-        'runtime_validation': (
-            {
-                key: validation[key]
-                for key in [
-                    'passed',
-                    'validationKind',
-                    'scope',
-                    'browserProductOperationsTested',
-                    'rtcMediaTested',
-                    'endpointManagementReachable',
-                    'webSocketProductActionRejected',
-                    'workspaceUnchanged',
-                    'endpointSha256',
-                    'faceModelsAvailable',
-                ]
-            }
-            if validation
-            else None
-        ),
+        'runtime_launched': False,
+        'runtime_validation': None,
         'files': files,
         'excluded_runtime_graph_entries': sorted(set(excluded)),
     }
-    (package / 'manifest.json').write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8'
-    )
-    (bootstrap / 'manifest.json').write_text(
-        json.dumps(
-            {
-                'name': bootstrap.name,
-                'buildId': build_id,
-                'source': source_metadata,
-                'artifacts': artifacts,
-                'archive': bootstrap.name + '.tar.zst',
-            },
-            indent=2,
+    payload = destination / 'payload.tar'
+
+    def finalize_payload():
+        (package / 'manifest.json').write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8'
         )
-        + '\n',
-        encoding='utf-8',
-    )
-    print('Creating tar.zst (level 12, all logical CPUs)...', flush=True)
-    archives = []
-    for folder in (package, bootstrap):
-        archive, checksum = create_archive(folder, node)
-        archives.append({'path': str(archive), 'bytes': archive.stat().st_size, 'sha256': checksum})
-        print(
-            json.dumps(
-                {
-                    'directory': str(folder),
-                    'archive': str(archive),
-                    'archive_mib': round(archive.stat().st_size / 1048576, 1),
-                    'sha256': checksum,
-                },
-                indent=2,
-            ),
-            flush=True,
+        metadata = {'buildId': build_id, **write_payload(package, payload)}
+        (destination / 'payload.json').write_text(json.dumps(metadata) + '\n', encoding='utf-8')
+        return metadata
+
+    metadata = finalize_payload()
+    validation = None
+    if args.smoke:
+        scratch = destination / 'smoke-root'
+        scratch.mkdir()
+        shutil.copy2(package / 'bin/remotekit_control.exe', scratch / 'remotekit_control.exe')
+        subprocess.run(
+            [str(scratch / 'remotekit_control.exe'), 'install',
+             '--root=' + str(scratch), '--payload=' + str(payload)],
+            check=True,
         )
-    return {'archives': archives, 'source': source_metadata, 'artifacts': artifacts}
+        validation = run_startup_smoke(scratch)
+        manifest['runtime_launched'] = True
+        manifest['runtime_validation'] = {
+            key: validation[key]
+            for key in (
+                'passed', 'validationKind', 'scope', 'browserProductOperationsTested',
+                'rtcMediaTested', 'endpointManagementReachable', 'webSocketProductActionRejected',
+                'workspaceUnchanged', 'endpointSha256', 'faceModelsAvailable',
+            )
+        }
+        metadata = finalize_payload()
+    result = {'directory': str(package), 'payload': str(payload), **metadata,
+              'source': source_metadata, 'artifacts': artifacts, 'validation': validation}
+    print(json.dumps(result, indent=2), flush=True)
+    return result
 
 
 if __name__ == '__main__':

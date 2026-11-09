@@ -173,25 +173,11 @@ export class NodeLink extends EventEmitter implements EndpointLink {
     const launch = this.configured.local;
     if (!launch || this.stopped || this.child || this.registry.isRemoved(this.nodeId)) return;
     this.state = { state: 'connecting' };
-    const child = spawn(
-      launch.executable,
-      ['--stdio', `--node-id=${this.nodeId}`, `--node-root=${launch.root}`],
-      {
-        env: { ...process.env, REMOTEKIT_CLUSTER_KEY: this.registry.options.key },
-        stdio: 'pipe',
-        windowsHide: true,
-      },
-    );
-    this.child = child;
-    this.registry.accept(
-      new StdioCarrier(child, new EndpointLog(join(launch.root, 'logs', 'endpoint.log'))),
-      this.nodeId,
-    );
     let finished = false;
     const exited = (code: number | null) => {
       if (finished) return;
       finished = true;
-      if (this.child === child) this.child = undefined;
+      this.child = undefined;
       this.events = { ...this.events, exited: { code, at: Date.now() } };
       if (!this.current) this.state = { state: 'offline' };
       if (this.healthySince !== undefined && Date.now() - this.healthySince >= 60_000)
@@ -202,9 +188,55 @@ export class NodeLink extends EventEmitter implements EndpointLink {
         this.retry = setTimeout(() => this.start(), delay);
       }
     };
-    child.once('error', () => exited(null));
-    child.once('exit', exited);
+    void (async () => {
+      if (this.registry.options.buildId !== 'dev') {
+        try {
+          if (!launch.versionDir) throw new Error('Missing local node version directory');
+          await new Promise<void>((resolve, reject) => {
+            const installer = spawn(
+              join(launch.versionDir!, 'bin', 'remotekit_node.exe'),
+              ['install', `--root=${launch.root}`, `--package=${launch.versionDir}`],
+              { stdio: 'pipe', windowsHide: true },
+            );
+            this.child = installer;
+            const log = new EndpointLog(join(launch.root, 'logs', 'endpoint.log'));
+            installer.stdin.end();
+            installer.stdout.on('data', (bytes: Buffer) => log.write(bytes));
+            installer.stderr.on('data', (bytes: Buffer) => log.write(bytes));
+            installer.once('error', reject);
+            installer.once('close', (code) =>
+              code === 0 ? resolve() : reject(new Error(`Local node install exited ${code}`)),
+            );
+          });
+          this.child = undefined;
+        } catch (error) {
+          console.error(
+            new RemoteKitError('unavailable', 'Local node install failed', { detail: String(error) }),
+          );
+          exited(null);
+          return;
+        }
+      }
+      if (this.stopped || this.registry.isRemoved(this.nodeId)) return;
+      const child = spawn(
+        launch.executable,
+        ['--stdio', `--node-id=${this.nodeId}`, `--node-root=${launch.root}`],
+        {
+          env: { ...process.env, REMOTEKIT_CLUSTER_KEY: this.registry.options.key },
+          stdio: 'pipe',
+          windowsHide: true,
+        },
+      );
+      this.child = child;
+      this.registry.accept(
+        new StdioCarrier(child, new EndpointLog(join(launch.root, 'logs', 'endpoint.log'))),
+        this.nodeId,
+      );
+      child.once('error', () => exited(null));
+      child.once('exit', exited);
+    })();
   }
+
   attach(connection: Connection, incarnation: string) {
     if (this.stopped) {
       connection.carrier.close();

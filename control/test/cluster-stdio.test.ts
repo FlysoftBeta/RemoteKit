@@ -11,6 +11,76 @@ import { NodeRegistry, StdioCarrier } from '../server/cluster/node-link';
 import { nodeDefaults } from '../server/config';
 import { NoiseHandshake } from '../server/cluster/noise';
 import { decodeFrame, encodeJson, encodeStdio, StdioDecoder, jsonObject } from '../server/cluster/frames';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+
+for (const outcome of ['success', 'failure', 'stopped', 'dev'] as const) {
+  test(`local runtime installation: ${outcome}`, async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), 'rk-local-install-'));
+    const calls: { executable: string; args: readonly string[]; child: any }[] = [];
+    t.mock.method(childProcess, 'spawn', (executable: string, args: readonly string[]) => {
+      const child = Object.assign(new EventEmitter(), {
+        stdin: new PassThrough(),
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+        kill() {
+          child.emit('exit', 0);
+          child.emit('close', 0);
+        },
+      });
+      calls.push({ executable, args, child });
+      return child;
+    });
+    syncBuiltinESMExports();
+    t.after(async () => {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+      await rm(directory, { recursive: true, force: true });
+    });
+    const errors: unknown[][] = [];
+    t.mock.method(console, 'error', (...args: unknown[]) => {
+      errors.push(args);
+    });
+    const registry = new NodeRegistry({
+      key: Buffer.alloc(32).toString('base64'),
+      buildId: outcome === 'dev' ? 'dev' : 'a'.repeat(64),
+      nodes: {
+        local: {
+          config: { ...nodeDefaults, nodeId: 'local' },
+          configHash: 'hash',
+          local: {
+            root: directory,
+            executable: join(directory, 'endpoint_service.exe'),
+            versionDir: directory,
+          },
+        },
+      },
+    });
+    t.after(() => registry.stop());
+    registry.start();
+    registry.start();
+    assert.equal(calls.length, 1);
+    if (outcome === 'dev') {
+      assert.equal(calls[0].executable, join(directory, 'endpoint_service.exe'));
+      return;
+    }
+    assert.equal(calls[0].executable, join(directory, 'bin/remotekit_node.exe'));
+    assert.deepEqual(calls[0].args, ['install', `--root=${directory}`, `--package=${directory}`]);
+    if (outcome === 'stopped') registry.stop();
+    else calls[0].child.emit('close', outcome === 'success' ? 0 : 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    if (outcome === 'success') {
+      assert.equal(calls.length, 2);
+      assert.equal(calls[1].executable, join(directory, 'endpoint_service.exe'));
+    } else {
+      assert.equal(calls.length, 1);
+      if (outcome === 'failure') {
+        assert.equal(registry.get('local')!.state.state, 'offline');
+        assert.equal((errors[0][0] as { code: string }).code, 'unavailable');
+      }
+    }
+  });
+}
 
 test('local stdio shares authenticated handshake, encrypted RPCs and lost-reply certainty', async (t) => {
   const key = Buffer.alloc(32, 17);

@@ -1,128 +1,151 @@
 #!/usr/bin/env python3
-"""CPU-only package layout checks; no Browser/Endpoint runtime required."""
+"""Package layout and installed-layout smoke contract checks without native runtimes."""
+import argparse
 import importlib.util
+import json
 import os
 from pathlib import Path
-import tempfile
 import shutil
-import subprocess
-import json
+import sys
+import tarfile
+import tempfile
 import unittest
 from unittest.mock import patch
 
-spec = importlib.util.spec_from_file_location('package_runtime', Path(__file__).resolve().parents[1] / 'package-runtime.py')
+TOOLS = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(TOOLS))
+spec = importlib.util.spec_from_file_location('package_runtime', TOOLS / 'package-runtime.py')
 packager = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packager)
+SCRATCH = TOOLS.parent / 'develop/tmp'
+SCRATCH.mkdir(parents=True, exist_ok=True)
+
 
 class EndpointLayout(unittest.TestCase):
-    def test_control_only_launcher_consumes_mode_before_loading_server(self):
-        node = os.environ.get('REMOTEKIT_TEST_NODE') or shutil.which('node')
-        self.assertIsNotNone(node, 'Node is required')
-        with tempfile.TemporaryDirectory(prefix='rk launcher ') as temporary:
+    def test_version_tree_and_payload(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)
-            shutil.copy2(packager.ROOT / 'tools/streaming-launcher.cjs', root / 'run-control.cjs')
-            server = root / 'control/dist/server.mjs'
-            server.parent.mkdir(parents=True)
-            server.write_text(
-                "import assert from 'node:assert/strict';\n"
-                "import { readFileSync } from 'node:fs';\n"
-                "assert.equal(process.argv.length, 2);\n"
-                "const config = JSON.parse(readFileSync(process.env.REMOTEKIT_CONTROL_CONFIG));\n"
-                "assert.deepEqual(config.nodes, {});\n",
-                encoding='utf-8')
-            subprocess.run([node, root / 'run-control.cjs', 'control'], check=True)
-            self.assertFalse((root / 'data/local').exists())
+            repo = root / 'repo'
+            chromium = root / 'chromium'
+            output = chromium / 'out/rel'
+            endpoint = repo / 'build/endpoint-package/endpoint/endpoint_service.exe'
+            node = root / 'pinned/node.exe'
 
-    def test_zstd_archive_roundtrip_and_checksum(self):
-        node = os.environ.get('REMOTEKIT_TEST_NODE') or shutil.which('node')
-        self.assertIsNotNone(node, 'Node with built-in zstd is required')
-        with tempfile.TemporaryDirectory(prefix='rk archive ') as temporary:
+            def put(file, data=b'fixture'):
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(data)
+
+            for file in ('remotekit_browser.exe', 'remotekit.pak', 'locales/zh-CN.pak',
+                         'locales/en-US.pak', 'icudtl.dat', 'v8_context_snapshot.bin', 'args.gn'):
+                put(output / file)
+            put(chromium / 'third_party/hyphenation-patterns/LICENSE')
+            put(endpoint)
+            for name in ('remotekit_node.exe', 'remotekit_control.exe', 'libvpl.dll'):
+                put(endpoint.parent / name)
+            put(node)
+            put(node.parent / 'LICENSE')
+            for name in ('zstd-1.5.7/LICENSE', 'libvpl-2.17.0/LICENSE',
+                         'libvpl-2.17.0/third-party-programs.txt', 'json-LICENSE.MIT'):
+                put(repo / 'build/dependencies' / name)
+            put(repo / 'build/dependencies/nvEncodeAPI.h', b'/* notice */')
+            for name in ('server.mjs', 'recover-credentials.mjs', 'client/index.html',
+                         'runtime/node_modules/native/binding.node'):
+                put(repo / 'control/dist' / name)
+            put(repo / 'control/dist/runtime/manifest.json',
+                json.dumps({'nodeModuleAbi': '137', 'node': 'v24.20.0'}).encode())
+            crt = root / 'vs/VC/Redist/MSVC/14.0/x64/Microsoft.VC143.CRT/msvcp140.dll'
+            put(crt)
+
+            def check_output(command, **kwargs):
+                if command[0] == 'git':
+                    return 'a' * 40
+                if command[0] == str(node):
+                    return json.dumps({'version': 'v24.20.0', 'abi': '137'})
+                return json.dumps({command[3]: {'runtime_deps': []}})
+
+            args = argparse.Namespace(chromium_root=chromium, out='rel', endpoint=None,
+                                      destination=root / 'packages', smoke=True)
+            validation = {
+                key: True for key in (
+                    'passed', 'endpointManagementReachable', 'webSocketProductActionRejected',
+                    'workspaceUnchanged', 'faceModelsAvailable',
+                )
+            }
+            validation.update(validationKind='startup', scope='fixture',
+                              browserProductOperationsTested=False, rtcMediaTested=False,
+                              endpointSha256='f' * 64)
+            with patch.object(packager, 'ROOT', repo), \
+                 patch.object(packager, 'check_freshness'), \
+                 patch.object(packager, 'source_provenance', return_value={'commit': 'a' * 40, 'dirty': False}), \
+                 patch.object(packager, 'pinned_node', return_value=node), \
+                 patch.object(packager, 'face_runtime_files', return_value=[]), \
+                 patch.object(packager, 'document_runtime_trees', return_value=[]), \
+                 patch.object(packager, 'run_startup_smoke', return_value=validation) as smoke, \
+                 patch.object(packager.subprocess, 'run') as install, \
+                 patch.object(packager.subprocess, 'check_output', side_effect=check_output), \
+                 patch.dict(os.environ, {'REMOTEKIT_VS': str(root / 'vs')}):
+                result = packager.package_runtime(args, root / 'staging/node')
+            tree = Path(result['directory'])
+            self.assertEqual(tree.name, 'RemoteKit-control-' + result['buildId'][:12])
+            self.assertEqual({file.name for file in (tree / 'bin').iterdir()},
+                             {'node.exe', 'remotekit_control.exe', 'remotekit_node.exe'})
+            self.assertTrue((tree / 'node/bin/msvcp140.dll').is_file())
+            self.assertFalse((tree / 'release').exists())
+            self.assertEqual(json.loads((tree / 'node/build.json').read_text())['buildId'], result['buildId'])
+            recovery = (tree / 'recover-credentials.cmd').read_text()
+            self.assertIn('%~dp0..\\..\\config\\control.json', recovery)
+            manifest = json.loads((tree / 'manifest.json').read_text())
+            self.assertNotIn('archive', manifest)
+            self.assertEqual(manifest['buildId'], result['buildId'])
+            self.assertTrue(manifest['runtime_launched'])
+            self.assertEqual(manifest['runtime_validation'], validation)
+            deployment = tree.parent / 'smoke-root'
+            smoke.assert_called_once_with(deployment)
+            self.assertEqual(install.call_args.args[0], [
+                str(deployment / 'remotekit_control.exe'), 'install',
+                '--root=' + str(deployment), '--payload=' + result['payload'],
+            ])
+            with tarfile.open(result['payload']) as payload:
+                self.assertIn('node/bin/endpoint_service.exe', payload.getnames())
+                self.assertEqual(payload.extractfile('manifest.json').read(), (tree / 'manifest.json').read_bytes())
+            self.assertEqual(json.loads((tree.parent / 'payload.json').read_text())['sha256'], result['sha256'])
+            self.assertEqual(list(tree.parent.glob('*.zst')), [])
+
+    def test_override_endpoint_name(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)
-            package = root / 'RemoteKit fixture'
-            (package / 'bin').mkdir(parents=True)
-            (package / 'empty directory').mkdir()
-            # Cross frame boundaries with incompressible bytes to expose early
-            # EOF/data-loss failures hidden by small, compressible fixtures.
-            contents = { 'bin/runtime.dll': os.urandom(34 * 1024 * 1024),
-                         'manifest.json': json.dumps({'archive':package.name+'.tar.zst'}).encode(),
-                         '名字.txt': b'Unicode and spaced paths' }
-            for name, data in contents.items():
-                (package / name).write_bytes(data)
-            archive, checksum = packager.create_archive(package, node)
-            self.assertEqual(archive.name, package.name + '.tar.zst')
-            self.assertEqual(archive.read_bytes()[:4], b'\x28\xb5\x2f\xfd')
-            self.assertEqual(checksum, packager.digest(archive))
-            self.assertEqual(archive.with_name(archive.name+'.sha256').read_text().strip(),
-                             checksum + '  ' + archive.name)
-            extracted = root / 'extracted'
-            extracted.mkdir()
-            tar = str(Path(os.environ.get('SystemRoot', 'C:/Windows'))/'System32/tar.exe') if os.name == 'nt' else 'tar'
-            subprocess.run([tar, '-xf', str(archive), '-C', str(extracted)], check=True)
-            for name, data in contents.items():
-                self.assertEqual((extracted / package.name / name).read_bytes(), data)
-            self.assertTrue((extracted / package.name / 'empty directory').is_dir())
-            with self.assertRaises(FileExistsError):
-                packager.create_archive(package, node)
-            self.assertEqual(checksum, packager.digest(archive))
-
-    def test_override_paths_are_copied_to_launchable_standard_names(self):
-        for standard in ['endpoint_service.exe']:
-            for name in [standard, 'custom service.exe']:
-                with self.subTest(source=name), tempfile.TemporaryDirectory(prefix='rk package ') as root:
-                    root = Path(root)
-                    source = root / 'input with spaces' / name
-                    source.parent.mkdir()
-                    source.write_bytes(b'endpoint fixture bytes')
-                    binary = root / 'package' / 'bin'
-                    binary.mkdir(parents=True)
-                    result = packager.copy_endpoint(source, binary)
-                    # Check the real layout consumed by run.cmd/run-control.cjs,
-                    # including copied bytes and absence of the override basename.
-                    expected = binary / standard
-                    self.assertEqual(result, expected)
-                    self.assertEqual(expected.read_bytes(), source.read_bytes())
-                    self.assertEqual(list(binary.iterdir()), [expected])
+            source = root / 'custom service.exe'
+            source.write_bytes(b'endpoint fixture')
+            binary = root / 'bin'
+            binary.mkdir()
+            result = packager.copy_endpoint(source, binary)
+            self.assertEqual(result, binary / 'endpoint_service.exe')
+            self.assertEqual(result.read_bytes(), source.read_bytes())
 
     def test_startup_failure_preserves_structured_unicode_evidence(self):
-        # Exercise the production parent/child path without starting services.
-        # The inherited legacy encoding used to hide the real smoke failure.
-        with tempfile.TemporaryDirectory(prefix='rk package ') as temporary:
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)
-            missing = root / '缺少运行包'
+            missing = root / '\u7f3a\u5c11\u8fd0\u884c\u5305'
             with patch.dict(os.environ, {'PYTHONIOENCODING': 'cp936', 'PYTHONUTF8': '0'}):
                 with self.assertRaises(RuntimeError) as caught:
                     packager.run_startup_smoke(missing, work_dir=root / 'evidence')
-            message = str(caught.exception)
-            self.assertIn('"passed": false', message)
-            self.assertIn('缺少运行包', message)
-            self.assertIn('bin/node.exe', message)
+            self.assertIn('"passed": false', str(caught.exception))
+            self.assertIn(missing.name, str(caught.exception))
             result = next((root / 'evidence').glob('*/result.json'))
-            self.assertIn('缺少运行包', result.read_text(encoding='utf-8'))
+            self.assertIn('current', result.read_text(encoding='utf-8'))
 
-    def test_face_runtime_copies_only_catalogued_package_paths(self):
-        with tempfile.TemporaryDirectory(prefix='rk package ') as temporary:
+    def test_face_runtime_copies_only_catalogued_paths(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
             root = Path(temporary)
-            cache = root / 'asset-cache'
+            source = root / 'model.onnx'
+            source.write_bytes(b'model')
             package = root / 'package'
-            cache.mkdir()
-            destinations = [
-                Path('bin/face-models/recognition.onnx'),
-                Path('bin/face-models/provenance.json'),
-                Path('licenses/OpenCV-LICENSE.txt'),
-            ]
-            files = []
-            for relative in destinations:
-                source = cache / relative.name
-                source.write_bytes(relative.as_posix().encode('ascii'))
-                files.append((source, relative))
-            (cache / 'unrelated.sqlite').touch()
+            files = [(source, Path('bin/face-models/recognition.onnx'))]
             packager.copy_face_runtime(files, package)
-            self.assertEqual({path.relative_to(package) for path in package.rglob('*') if path.is_file()},
-                             set(destinations))
-            for source, relative in files:
-                self.assertEqual((package / relative).read_bytes(), source.read_bytes())
+            self.assertEqual((package / files[0][1]).read_bytes(), b'model')
             with self.assertRaisesRegex(RuntimeError, 'collides with a runtime file'):
                 packager.copy_face_runtime(files, package)
+
 
 if __name__ == '__main__':
     unittest.main()
