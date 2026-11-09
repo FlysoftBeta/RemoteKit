@@ -37,10 +37,12 @@ export function LearningApp(props: LearningAppProps & { appId: 'study' | 'questi
         await props.call('window.state', {
           windowId: window.id,
           state: {
-            view: { source: { app: 'study', channel: subject ?? '' } },
-            query: '',
-            layout: 'list',
-            ...(entryId ? { previewEntryId: entryId, previewRequestId: operationId() } : {}),
+            ...window.state,
+            launch: {
+              requestId: operationId(),
+              entryId,
+              view: { source: { app: 'study', channel: subject ?? '' } },
+            },
           },
         });
     },

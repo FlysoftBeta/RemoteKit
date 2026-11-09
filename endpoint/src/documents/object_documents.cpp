@@ -103,13 +103,20 @@ Result<Json> ObjectDocuments::Open(const std::string& source,
                                    const std::string& tenant,
                                    const std::filesystem::path& temporary) {
   RK_RETURN_IF_ERROR(Available());
-  RK_ASSIGN_OR_RETURN(derivation, objects_.Derivation(source, tenant));
+  // Control answers busy while a conversion it requested runs on some node.
+  auto lookup = objects_.Derivation(source, tenant);
+  if (!lookup && lookup.error().code == ErrorCode::kBusy)
+    return Json{{"state", "converting"}};
+  RK_ASSIGN_OR_RETURN(derivation, std::move(lookup));
   if (!derivation.is_null())
     return Ready(derivation["id"].get<std::string>(), tenant, source);
   auto future = Submit(source, tenant, temporary);
   if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
     return Json{{"state", "converting"}};
-  RK_ASSIGN_OR_RETURN(document, future.get());
+  auto converted = future.get();
+  if (!converted && converted.error().code == ErrorCode::kBusy)
+    return Json{{"state", "converting"}};
+  RK_ASSIGN_OR_RETURN(document, std::move(converted));
   return Ready(document, tenant, source);
 }
 

@@ -1,5 +1,5 @@
 import { RemoteKitError } from '../../shared/errors';
-import type { DocumentInfo, DocumentResource, DocumentSource } from './document-source';
+import type { DocumentInfo, DocumentOpenOptions, DocumentResource, DocumentSource } from './document-source';
 
 export class MemoryDocumentSource implements DocumentSource {
   constructor(
@@ -7,8 +7,9 @@ export class MemoryDocumentSource implements DocumentSource {
     private readonly resources: ReadonlyMap<string, DocumentResource>,
   ) {}
 
-  async open(signal: AbortSignal): Promise<DocumentInfo> {
+  async open(signal: AbortSignal, options?: DocumentOpenOptions): Promise<DocumentInfo> {
     if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
+    options?.onStatus?.('ready');
     return this.info;
   }
 

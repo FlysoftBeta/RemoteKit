@@ -23,10 +23,7 @@ import { OverflowText } from './overflow-text';
 import { SiteSettings } from './site-settings';
 import { siteHost } from './permission-prompt';
 
-const SITE_OPTIONS = [
-  ['tabletUa', '平板版网站'],
-  ['manualKeyboard', '不自动弹出键盘'],
-] as const;
+const SITE_OPTIONS = [['tabletUa', '平板版网站']] as const;
 
 export function BrowserSettingsSheet({
   state,
@@ -57,10 +54,7 @@ export function BrowserSettingsSheet({
     }))
     .filter(
       ({ preference, permissionCount }) =>
-        preference.tabletUa ||
-        preference.manualKeyboard ||
-        permissionCount ||
-        preference.protocolHandlers?.length,
+        preference.tabletUa || permissionCount || preference.protocolHandlers?.length,
     );
   return (
     <Dialog open onClose={onClose} fullWidth maxWidth="sm" scroll="paper">

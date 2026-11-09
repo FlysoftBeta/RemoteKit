@@ -54,7 +54,7 @@ async function connect(name) {
   return viewer;
 }
 async function open(viewer, name, appId) {
-  await viewer.page.getByRole('button', { name: '主页条', exact: true }).click();
+  await viewer.page.getByRole('button', { name: '开始', exact: true }).click();
   const tile = viewer.page
     .getByRole('dialog', { name: '开始屏幕' })
     .locator('[data-tile-key]')

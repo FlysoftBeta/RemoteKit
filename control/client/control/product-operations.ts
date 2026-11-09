@@ -140,8 +140,7 @@ export function projectOperations(
       case 'site.set':
         w.sites[a.origin] = {
           ...w.sites[a.origin],
-          tabletUa: a.tabletUa ?? w.sites[a.origin]?.tabletUa ?? false,
-          manualKeyboard: a.manualKeyboard ?? w.sites[a.origin]?.manualKeyboard ?? false,
+          tabletUa: a.tabletUa,
         };
         break;
       case 'tab.create': {

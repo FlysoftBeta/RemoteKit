@@ -67,6 +67,7 @@ Endpoint auth.camera.frame{captureId}     每次一个许可，间隔 ≥200ms�
 Client   二进制块 × N
 ```
 
+- **自动开启**：锁定后的 verify/presence 与"离开即锁定"的 presence 由客户端自动打开摄像头，不经过用户手势，所以只在不会弹出权限请求时才打开：Permissions API 的 `camera` 为 granted；查询不可用（部分 Safari、WebView 与厂商浏览器）或返回 prompt 时，以 `enumerateDevices` 是否给出带标签的视频输入为准——页面持有摄像头授权时才暴露标签。否则等用户点人脸按钮显式开始（显式开始直接请求，允许弹出权限请求）。
 - 摄像头偏好 480×360 前置，最多 640×480 或等面积竖屏，不请求麦克风。客户端读取同尺寸 RGBA、去掉 alpha，不压缩不缩放。480×360 RGB24 5fps 约 20.7Mbps；背压时丢弃这一次采集，而不是堆积视频队列。页面隐藏时不采集。
 - 二进制块头 68 字节小端：magic `RKAF`(u32)、version(u16)、头长(u16)、authEpoch(两个 u32)、captureId(u32)、字节偏移(u32)、总字节(u32)、宽高(u16×2)、36 字节 challenge UUID 文本；之后最多 16KiB 像素，像素对齐。
 - Endpoint 在分配内存前校验绑定、尺寸和许可，只保留一个组装缓冲和一个最新的待推理帧；格式、代次、挑战变化时撤销未完成的采集。

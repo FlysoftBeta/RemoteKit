@@ -18,7 +18,8 @@ Result<void> PdfRenderer::Render(const std::filesystem::path& input_pdf,
       return result.error();
     if (!std::filesystem::is_regular_file(output_archive) ||
         std::filesystem::file_size(output_archive) == 0)
-      return Error{ErrorCode::kRejected, "pdfrender produced no archive"};
+      return ToolOutputFailure(output_archive.parent_path() / "tool.log", tools_ / "pdfrender.exe",
+                               0);
     return {};
   } catch (const std::filesystem::filesystem_error&) {
     return Error{ErrorCode::kRejected, "cannot render PDF"};

@@ -6,6 +6,7 @@ import type { FileLibrary } from '../files/library';
 import type { ObjectIndex } from '../cluster/objects';
 import type { LearningAccounts } from './accounts';
 import type { DownloadItem, StudyService } from './study-service';
+import { isDocument } from './document-type';
 
 class Slots {
   private active = 0;
@@ -30,8 +31,9 @@ interface DownloadRow {
   entry_id: string | null;
   object_id: string | null;
   state: string;
+  document: bigint;
 }
-type Objects = Pick<ObjectIndex, 'put' | 'render'>;
+type Objects = Pick<ObjectIndex, 'put' | 'render' | 'derived'>;
 const DAY = 86400_000;
 export class StudySync {
   private readonly slots = new Slots(4);
@@ -153,7 +155,11 @@ export class StudySync {
     if (existing) return existing;
     const task = runtime.slots.run(async () => {
       const status = this.saved(tenant, key);
-      if (status.state === 'saved') return { entryId: status.entryId };
+      if (status.state === 'saved') {
+        const row = this.row(tenant, key)!;
+        if (row.document && row.object_id) this.render(row.object_id);
+        return { entryId: status.entryId };
+      }
       if (automatic && this.row(tenant, key)?.state === 'dismissed')
         throw new RemoteKitError('rejected', '文件已删除');
       const item = await this.study(tenant).resolve(key);
@@ -180,10 +186,13 @@ export class StudySync {
       });
       this.changed(tenant);
       let received = 0;
+      let prefix = Buffer.alloc(0);
       let pushedAt = this.now();
       const stream = async function* (changed: () => void, now: () => number) {
         for await (const chunk of download.stream) {
           authorize();
+          if (prefix.length < 4096)
+            prefix = Buffer.concat([prefix, Buffer.from(chunk.subarray(0, 4096 - prefix.length))]);
           received += chunk.byteLength;
           runtime.progress.set(item.key, {
             state: 'downloading',
@@ -204,9 +213,8 @@ export class StudySync {
         { maxBytes: 256 * 1024 * 1024, signal: runtime.abort.signal },
       );
       authorize();
-      this.objects.render(object.id);
-      authorize();
       const filename = attachmentName(item.name, item.extension);
+      const document = isDocument(filename, prefix);
       const entryId = randomUUID();
       // A put claim holds the object until the catalog transaction acquires its reference.
       await this.library.importFromControl(
@@ -225,13 +233,14 @@ export class StudySync {
         () => {
           this.store.db
             .prepare(
-              `INSERT INTO learning_downloads VALUES (?,?,?,?,?,?,'saved')
+              `INSERT INTO learning_downloads (tenant,key,published_at,saved_at,entry_id,object_id,state,document) VALUES (?,?,?,?,?,?,'saved',?)
           ON CONFLICT(tenant,key) DO UPDATE SET published_at=excluded.published_at,saved_at=excluded.saved_at,
-          entry_id=excluded.entry_id,object_id=excluded.object_id,state='saved'`,
+          entry_id=excluded.entry_id,object_id=excluded.object_id,state='saved',document=excluded.document`,
             )
-            .run(tenant, item.key, item.publishedAt, this.now(), entryId, object.id);
+            .run(tenant, item.key, item.publishedAt, this.now(), entryId, object.id, Number(document));
         },
       );
+      if (document) this.render(object.id);
       runtime.progress.delete(item.key);
       this.changed(tenant);
       return { entryId };
@@ -239,7 +248,7 @@ export class StudySync {
       if (!runtime.abort.signal.aborted && this.accounts.generation(tenant, 'changyan') === generation) {
         this.store.db
           .prepare(
-            `INSERT INTO learning_downloads VALUES (?,?,?,0,NULL,NULL,'failed')
+            `INSERT INTO learning_downloads (tenant,key,published_at,saved_at,entry_id,object_id,state) VALUES (?,?,?,0,NULL,NULL,'failed')
           ON CONFLICT(tenant,key) DO UPDATE SET state='failed' WHERE state!='dismissed'`,
           )
           .run(tenant, item.key, item.publishedAt);
@@ -248,6 +257,9 @@ export class StudySync {
       }
       throw error;
     }
+  }
+  private render(id: string) {
+    if (!this.objects.derived(id, 'document')) this.objects.render(id);
   }
   sync(tenant: string) {
     this.accounts.session(tenant, 'changyan');
@@ -344,6 +356,14 @@ function mimeType(name: string) {
     pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     xls: 'application/vnd.ms-excel',
     xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    wps: 'application/vnd.ms-works',
+    dps: 'application/vnd.ms-powerpoint',
+    et: 'application/vnd.ms-excel',
+    odt: 'application/vnd.oasis.opendocument.text',
+    odp: 'application/vnd.oasis.opendocument.presentation',
+    ods: 'application/vnd.oasis.opendocument.spreadsheet',
+    rtf: 'application/rtf',
+    csv: 'text/csv',
     txt: 'text/plain',
     jpg: 'image/jpeg',
     jpeg: 'image/jpeg',

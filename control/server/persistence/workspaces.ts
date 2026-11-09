@@ -11,6 +11,7 @@ export const defaultSettings = () => ({
     topDeadZone: 'off' as const,
     showStats: false,
     autoFullscreen: false,
+    autoKeyboard: false,
     avSync: false,
     audioChannels: { left: true, right: true },
   },

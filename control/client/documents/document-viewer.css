@@ -82,27 +82,79 @@
 .document-viewer-state {
   flex: 1 1 0;
   min-height: 160px;
+  flex-direction: column;
+  padding: 24px;
+  text-align: center;
 }
 
-.document-viewer-controls {
+.document-viewer-reading {
+  position: relative;
   display: flex;
-  flex: none;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.document-viewer-scroll .virtual-list-canvas {
+  box-sizing: content-box;
+  padding-bottom: 72px;
+}
+.document-viewer-controls {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
   align-items: center;
   justify-content: center;
-  gap: 2px;
-  min-height: 48px;
-  padding: 4px 8px;
-  border-top: 1px solid var(--border-preview);
-  background: var(--surface);
-  white-space: nowrap;
-}
-
-.document-viewer-controls .MuiIconButton-root {
-  width: 44px;
   height: 44px;
+  padding: 0 4px;
+  border: 1px solid var(--border-preview);
+  border-radius: 999px;
+  box-shadow: 0 4px 16px var(--shadow-notice);
+  white-space: nowrap;
+  isolation: isolate;
+  transition: opacity 180ms;
+}
+.document-viewer-controls::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--surface);
+  opacity: 0.92;
+}
+.document-viewer-controls-idle {
+  opacity: 0.35;
+}
+.document-viewer-controls:focus-within {
+  opacity: 1;
+}
+@media (pointer: coarse) {
+  .document-viewer-controls-idle {
+    opacity: 1;
+  }
+}
+.document-viewer-controls .MuiIconButton-root,
+.document-viewer-controls .MuiButton-root {
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  border-radius: 999px;
   color: var(--text-primary);
 }
-
+.document-viewer-controls .MuiButton-root {
+  width: auto;
+  padding: 0 8px;
+}
+.document-viewer-divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 4px;
+  background: var(--border-preview);
+}
 .document-viewer-controls .Mui-disabled {
   color: var(--text-muted);
 }
@@ -112,7 +164,7 @@
   color: var(--primary);
 }
 
-.document-viewer .MuiButton-root {
+.document-viewer-state .MuiButton-root {
   min-height: 44px;
 }
 
@@ -137,11 +189,35 @@
 .document-viewer-jump input {
   box-sizing: border-box;
   width: 52px;
-  height: 44px;
+  height: 36px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-primary);
   background: var(--surface);
   font: inherit;
   text-align: center;
+}
+
+.document-viewer-file-icon {
+  width: 72px;
+  height: 72px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  font-size: 40px;
+}
+.document-viewer-error-icon.MuiSvgIcon-root {
+  font-size: 48px;
+  color: var(--text-secondary);
+}
+.document-viewer-opening-title {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+.document-viewer-opening-progress {
+  width: 240px;
+  max-width: 100%;
 }

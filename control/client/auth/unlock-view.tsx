@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../editing/local-autofocus';
 import { formatError } from '../util/format-error';
 import Close from '@mui/icons-material/Close';
 import {
@@ -28,6 +29,7 @@ export function UnlockView({
   close: () => void;
   retry: () => void;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [method, setMethod] = useState<'password' | 'pin' | 'face'>('password');
   const [secret, setSecret] = useState('');
   const [error, setError] = useState('');
@@ -99,7 +101,7 @@ export function UnlockView({
             {method !== 'face' ? (
               <TextField
                 key={method}
-                autoFocus
+                inputRef={autoFocusRef}
                 required
                 type="password"
                 value={secret}

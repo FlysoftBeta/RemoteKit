@@ -40,7 +40,8 @@ Result<void> OfficeConverter::Convert(const std::filesystem::path& input,
     char magic[5]{};
     file.read(magic, sizeof(magic));
     if (!file || std::string_view(magic, sizeof(magic)) != "%PDF-")
-      return ToolOutputFailure(temporary.path() / "tool.log");
+      return ToolOutputFailure(temporary.path() / "tool.log",
+                               tools_ / "libreoffice/program/soffice.com", 0);
     file.close();
     std::filesystem::copy_file(pdf, output_pdf);
     return {};

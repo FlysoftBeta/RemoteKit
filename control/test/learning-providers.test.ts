@@ -366,6 +366,41 @@ test('habit attachments include preview and conversion images; spoken reports us
   assert.equal(spokenCalls, 1);
 });
 
+test('pending homework includes definition and nested question attachments before a report exists', async () => {
+  const client = new ZhixueClient({
+    fetch: mockFetch((url) => {
+      if (url.pathname.endsWith('/detail'))
+        return zhixueSuccess({
+          hwId: 'pending',
+          beginTime: Date.now(),
+          commit: false,
+          questionAttachList: [{ id: 'document', path: 'https://cdn.example/lesson.docx' }],
+          questions: [
+            {
+              childQuestions: [
+                {
+                  childQuestionDetail: {
+                    questionAttachList: [{ id: 'image', path: 'https://cdn.example/lesson.png' }],
+                  },
+                },
+              ],
+            },
+          ],
+        });
+      if (url.pathname.endsWith('/stuhomework/get'))
+        return zhixueSuccess({ id: 'submission', commit: false });
+      if (url.pathname.endsWith('/attachment/list')) return zhixueSuccess([]);
+      throw new Error(`Unexpected read ${url.pathname}`);
+    }),
+  });
+  const detail = (await client.details(account(), 'pending')).data;
+  assert.deepEqual(
+    detail.attachments.map((item) => item.id),
+    ['document', 'image'],
+  );
+  assert.equal(detail.report, undefined);
+});
+
 test('homework question groups preserve recursive content, answers, options and embedded media', () => {
   const [root] = normalizeHomeworkQuestions([
     {

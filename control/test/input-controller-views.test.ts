@@ -194,6 +194,7 @@ test('editing controller defers edits through presentation loss and expires them
   );
   const resize = { waiting: false, keyboardOpen: false, keyboardDismissals: 0, blocksInput: () => false };
   view.configure(true, false, resize);
+  view.activateKeyboard();
   ready = false;
   view.sendEdit({ type: 'ime_commit', text: 'first' });
   assert.equal(sent.length, 0);

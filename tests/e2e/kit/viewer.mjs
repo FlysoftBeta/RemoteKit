@@ -140,7 +140,7 @@ export async function launch({
       await page.locator('.launcher.overlay-exiting').waitFor({ state: 'hidden' });
       if (await startDialog().isVisible()) return;
     }
-    await page.getByRole('button', { name: '主页条', exact: true }).click();
+    await page.getByRole('button', { name: '开始', exact: true }).click();
     await startDialog().waitFor();
     await page.waitForTimeout(400);
   }
@@ -180,7 +180,7 @@ export async function launch({
     console.log(log.at(-1));
     writeFileSync(join(out, 'log.json'), JSON.stringify({ log, errors }, null, 2));
   }
-  const waitUnlocked = () => page.getByRole('button', { name: '主页条', exact: true }).waitFor();
+  const waitUnlocked = () => page.getByRole('button', { name: '开始', exact: true }).waitFor();
   async function authenticate() {
     await page.getByRole('heading', { name: '解锁', exact: true }).waitFor();
     await page.getByLabel(/^账户密码/).fill(stack.password);
@@ -209,12 +209,12 @@ export async function launch({
   async function lock() {
     await openStart();
     await page.getByRole('button', { name: '锁定', exact: true }).click();
-    await page.getByRole('button', { name: '主页条', exact: true }).waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: '开始', exact: true }).waitFor({ state: 'hidden' });
     await page.locator('.viewer-lock-blank').waitFor();
     await page.waitForTimeout(400);
   }
   async function unlock() {
-    if (await page.getByRole('button', { name: '主页条', exact: true }).isVisible()) return;
+    if (await page.getByRole('button', { name: '开始', exact: true }).isVisible()) return;
     await page.locator('.viewer-lock-blank').waitFor();
     await page.waitForTimeout(400);
     await page.evaluate(() => window.__remotekitTest.unlock());

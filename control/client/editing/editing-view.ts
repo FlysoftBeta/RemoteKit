@@ -39,7 +39,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
   private systemDismissalSeen = 0;
   private error?: string;
   private enabled = true;
-  private manualKeyboard = false;
+  private autoOpen = false;
   private resize: ResizeObservation = {
     waiting: false,
     keyboardOpen: false,
@@ -54,9 +54,9 @@ export class EditingView extends Store<EditingViewSnapshot> {
     super({ keyboardShown: false, keyboardReady: false, keyboardEnabled: false });
     this.resetEditor();
   }
-  configure(enabled: boolean, manual: boolean, resize: ResizeObservation) {
+  configure(enabled: boolean, autoOpen: boolean, resize: ResizeObservation) {
     this.enabled = enabled;
-    this.manualKeyboard = manual;
+    this.autoOpen = autoOpen;
     this.resize = resize;
     this.observe();
   }
@@ -191,7 +191,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     const command = policy.observe({
       document: this.editingIdentity,
       enabled: this.keyboardEnabled,
-      manual: this.manualKeyboard,
+      autoOpen: this.autoOpen,
       editor: this.ports.editing.mobileEditing.keyboardObservation(this.editingSurface),
       focused: this.softInputFocused,
       ready: this.keyboardReady && !this.resize.blocksInput(),
@@ -392,6 +392,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
   };
   activateKeyboard = () => {
     if (this.keyboardSession.activate().open && !this.keyboardShown) this.focusEditor(true, true);
+    this.observe();
   };
   key = (event: KeyboardEvent, action: string) => {
     if (this.editing.composing || event.isComposing || event.keyCode === 229) return;

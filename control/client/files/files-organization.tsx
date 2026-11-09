@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../editing/local-autofocus';
 import {
   Add,
   AppsOutlined,
@@ -56,6 +57,7 @@ export function FilesOrganization({
   view: FilesView;
   onView: (view: FilesView) => void;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const { snapshot, online, mutate, apps } = useLibrary();
   const [edit, setEdit] = useState<{ id?: string; name: string; operationId: string }>();
   const [remove, setRemove] = useState<
@@ -373,7 +375,7 @@ export function FilesOrganization({
             <DialogTitle>{edit.id ? '重命名分区' : '新建分区'}</DialogTitle>
             <DialogContent>
               <TextField
-                autoFocus
+                inputRef={autoFocusRef}
                 fullWidth
                 label="分区名称"
                 value={edit.name}

@@ -53,11 +53,13 @@ function fixture() {
   let active = 0;
   let maximum = 0;
   let fail = false;
+  const downloads = new Map<string, Buffer>();
   const http = new HttpClient({
-    fetch: async () => {
+    fetch: async (input) => {
       requests++;
       if (fail) return new Response('wrong bytes');
-      return new Response(data, { headers: { 'content-length': String(data.length) } });
+      const bytes = downloads.get(String(input)) ?? data;
+      return new Response(new Uint8Array(bytes), { headers: { 'content-length': String(bytes.length) } });
     },
   });
   const materials: ClassMaterial[] = [
@@ -121,12 +123,17 @@ function fixture() {
     data: await http.download(item.url, {}, { size: item.sizeBytes }),
   });
   const rendered: string[] = [];
+  const derived = new Map<string, string>();
   let puts = 0;
   const objects = {
     require() {},
     checkQuota() {},
+    derived(id: string) {
+      return derived.get(id);
+    },
     render(id: string) {
       rendered.push(id);
+      derived.set(id, 'document-' + id);
     },
     async put(
       _tenant: string,
@@ -196,6 +203,10 @@ function fixture() {
     study,
     materials,
     homework,
+    homeworkProvider,
+    studyProvider,
+    objects,
+    downloads,
     rendered,
     buckets,
     queries,
@@ -249,7 +260,97 @@ test('sync collects both homework buckets and material states, imports once and 
     f.sync.sync('tenant');
     await f.sync.idle('tenant');
     assert.equal(f.puts, 2);
+    assert.equal(f.rendered.length, 1);
     assert.ok(!JSON.stringify(f.sync.diagnostics('tenant')).includes('token'));
+  } finally {
+    await f.close();
+  }
+});
+
+test('background homework sync resolves missing list dates, pages both buckets and saves question attachments without opening a Viewer', async () => {
+  const f = fixture();
+  const detailCalls: string[] = [];
+  const listCalls: string[] = [];
+  try {
+    f.materials.splice(0);
+    const image = Buffer.alloc(f.homework.attachments[0].sizeBytes!);
+    image.write('\x89PNG\r\n\x1a\n', 'latin1');
+    f.downloads.set('https://cdn.example/image', image);
+    const now = f.homework.startsAt!;
+    f.homeworkProvider.homeworkPage = async (session, query) => {
+      const id = `${query?.bucket}-${query?.page}`;
+      listCalls.push(id);
+      return { session, data: { ...page([{ ...f.homework, id, startsAt: undefined }]), pageCount: 2 } };
+    };
+    f.homeworkProvider.details = async (session, id) => {
+      detailCalls.push(id);
+      return {
+        session,
+        data: {
+          ...f.homework,
+          id,
+          startsAt: id.endsWith('-2') ? now - 8 * DAY : now,
+          attachments: [
+            {
+              ...f.homework.attachments[0],
+              id,
+              extension: id.startsWith('active') ? 'docx' : 'png',
+              url: id.startsWith('active') ? 'https://cdn.example/document' : 'https://cdn.example/image',
+            },
+          ],
+        },
+      };
+    };
+    f.sync.sync('tenant');
+    await f.sync.idle('tenant');
+    assert.deepEqual(listCalls, ['active-1', 'active-2', 'completed-1', 'completed-2']);
+    assert.equal(detailCalls.length, 4);
+    assert.equal(f.puts, 2);
+    assert.equal(f.rendered.length, 1);
+    assert.equal(f.store.library.snapshot('tenant').entries.length, 2);
+    f.sync.sync('tenant');
+    await f.sync.idle('tenant');
+    assert.equal(f.puts, 2);
+    assert.equal(f.rendered.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test('a second tenant downloading identical bytes reuses the derived document', async () => {
+  const f = fixture();
+  try {
+    f.sync.sync('tenant');
+    await f.sync.idle('tenant');
+    f.accounts.save('second', 'changyan', f.accounts.session('tenant', 'changyan'));
+    const study = new StudyService(
+      'second',
+      f.accounts,
+      new MediaProxy(),
+      () => ({ state: 'not_saved' }),
+      f.studyProvider,
+      f.homeworkProvider,
+    );
+    const sync = new StudySync(
+      f.store,
+      f.accounts,
+      f.library,
+      f.objects,
+      () => study,
+      () => {},
+    );
+    try {
+      sync.sync('second');
+      await sync.idle('second');
+      assert.equal(f.puts, 4);
+      assert.equal(f.rendered.length, 1);
+      assert.deepEqual(
+        new Set(f.store.library.snapshot('tenant').entries.map((entry) => entry.assetId)),
+        new Set(f.store.library.snapshot('second').entries.map((entry) => entry.assetId)),
+      );
+    } finally {
+      await sync.stop();
+    }
   } finally {
     await f.close();
   }

@@ -18,9 +18,13 @@ export interface DocumentResource {
   data: Blob;
 }
 
+export interface DocumentOpenOptions {
+  onStatus?: (status: 'converting' | 'ready') => void;
+}
+
 export interface DocumentSource {
   /** Resolves when the rendition is ready; rejects with RemoteKitError on failure. */
-  open(signal: AbortSignal): Promise<DocumentInfo>;
+  open(signal: AbortSignal, options?: DocumentOpenOptions): Promise<DocumentInfo>;
   resource(contentId: string, signal: AbortSignal): Promise<DocumentResource>;
 }
 

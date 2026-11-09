@@ -1,6 +1,7 @@
+import { useAutoFocus } from '../editing/local-autofocus';
 // Page layout and controls adapted from FlysoftBeta/talos-ng packages/client/src/features/reader/view/viewer.tsx.
-import { FitScreenOutlined, ZoomInOutlined, ZoomOutOutlined } from '@mui/icons-material';
-import { Button, Skeleton, IconButton, Tooltip } from '@mui/material';
+import { ErrorOutline, ZoomInOutlined, ZoomOutOutlined } from '@mui/icons-material';
+import { Button, Skeleton, IconButton, Tooltip, LinearProgress } from '@mui/material';
 import { RemoteKitError } from '../../shared/errors';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { DocumentInfo, DocumentPage, DocumentProgress, DocumentSource } from './document-source';
@@ -9,11 +10,13 @@ import { ResourceCache, type ResourceLease } from './resource-cache';
 import { PAGE_GAP, normalizeProgress, progressAt, progressTop } from './virtual-scroll';
 import { SizeIndex } from '../ui/virtual-scroll';
 import { VirtualScroller, type VirtualViewport } from '../ui/virtual-list';
+import { FileTypeIcon, fileTypeColor } from '../files/file-thumbnail';
 import './document-viewer.css';
 
 export interface DocumentViewerProps {
   source: DocumentSource;
   title: string;
+  type?: string;
   initialProgress?: DocumentProgress;
   onProgress?: (progress: DocumentProgress) => void;
   onUnsupported?: () => void;
@@ -125,6 +128,24 @@ function OpenDocument({
   initialProgress?: DocumentProgress;
   onProgress?: (progress: DocumentProgress) => void;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
+  const [idle, setIdle] = useState(false);
+  const idleTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const activity = () => {
+    setIdle(false);
+    clearTimeout(idleTimer.current);
+    if (window.matchMedia('(pointer: fine)').matches)
+      idleTimer.current = setTimeout(() => setIdle(true), 2500);
+  };
+  useEffect(() => {
+    const pointer = window.matchMedia('(pointer: fine)');
+    pointer.addEventListener('change', activity);
+    activity();
+    return () => {
+      clearTimeout(idleTimer.current);
+      pointer.removeEventListener('change', activity);
+    };
+  }, []);
   const viewport = useRef<VirtualViewport>(null);
   const [width, setWidth] = useState(0);
   const [ready, setReady] = useState(false);
@@ -227,6 +248,7 @@ function OpenDocument({
     [],
   );
   const record = (top: number) => {
+    activity();
     if (!positioned.current) return;
     const value = progressAt(layout.current, top);
     progress.current = value;
@@ -244,7 +266,7 @@ function OpenDocument({
     setJump(undefined);
   };
   return (
-    <>
+    <div className="document-viewer-reading" onPointerMove={activity} onPointerDown={activity}>
       <VirtualScroller
         className="document-viewer-scroll"
         label="文档阅读区"
@@ -263,27 +285,11 @@ function OpenDocument({
           <Page page={page} shared={info.shared} cache={cache} scale={scales[index]} />
         )}
       />
-      <div className="document-viewer-controls" role="toolbar" aria-label="页面控制">
-        <Tooltip title="缩小">
-          <span>
-            <IconButton aria-label="缩小" disabled={zoom <= 0.25} onClick={() => changeZoom(zoom / 1.25)}>
-              <ZoomOutOutlined fontSize="small" />
-            </IconButton>
-          </span>
-        </Tooltip>
-        <span className="document-viewer-zoom">{Math.round(zoom * 100)}%</span>
-        <Tooltip title="放大">
-          <span>
-            <IconButton aria-label="放大" disabled={zoom >= 4} onClick={() => changeZoom(zoom * 1.25)}>
-              <ZoomInOutlined fontSize="small" />
-            </IconButton>
-          </span>
-        </Tooltip>
-        <Tooltip title="适合宽度">
-          <IconButton aria-label="适合宽度" onClick={() => changeZoom(1)}>
-            <FitScreenOutlined fontSize="small" />
-          </IconButton>
-        </Tooltip>
+      <div
+        className={`document-viewer-controls${idle ? ' document-viewer-controls-idle' : ''}`}
+        role="toolbar"
+        aria-label="页面控制"
+      >
         {jump === undefined ? (
           <Button aria-label="跳转页码" onClick={() => setJump(String(current + 1))}>
             {current + 1} / {info.pages.length}
@@ -297,7 +303,7 @@ function OpenDocument({
             }}
           >
             <input
-              autoFocus
+              ref={autoFocusRef}
               aria-label="页码"
               type="text"
               inputMode="numeric"
@@ -313,14 +319,35 @@ function OpenDocument({
             <span>/ {info.pages.length}</span>
           </form>
         )}
+        <span className="document-viewer-divider" />
+        <Tooltip title="缩小">
+          <span>
+            <IconButton aria-label="缩小" disabled={zoom <= 0.25} onClick={() => changeZoom(zoom / 1.25)}>
+              <ZoomOutOutlined fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
+        <Tooltip title="适合宽度">
+          <Button className="document-viewer-zoom" aria-label="适合宽度" onClick={() => changeZoom(1)}>
+            {Math.round(zoom * 100)}%
+          </Button>
+        </Tooltip>
+        <Tooltip title="放大">
+          <span>
+            <IconButton aria-label="放大" disabled={zoom >= 4} onClick={() => changeZoom(zoom * 1.25)}>
+              <ZoomInOutlined fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
       </div>
-    </>
+    </div>
   );
 }
 
 export function DocumentViewer({
   source,
   title,
+  type = '',
   initialProgress,
   onProgress,
   onUnsupported,
@@ -334,24 +361,45 @@ export function DocumentViewer({
     info?: DocumentInfo;
     cache?: ResourceCache;
     error?: string;
+    rejected?: boolean;
   }>();
+  const [status, setStatus] = useState<'converting' | 'ready'>();
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    setSlow(false);
+    if (status !== 'converting') return;
+    const timer = setTimeout(() => setSlow(true), 20_000);
+    return () => clearTimeout(timer);
+  }, [status]);
   useEffect(() => {
     const controller = new AbortController();
     const cache = new ResourceCache(source);
+    setStatus(undefined);
     setState({ source });
-    void source.open(controller.signal).then(
-      (info) => {
-        if (controller.signal.aborted) return;
-        if (!info.pages.length || info.pages.some((page) => !(page.width > 0 && page.height > 0))) {
-          setState({ source, error: '文档页面格式错误' });
-        } else setState({ source, info, cache });
-      },
-      (error) => {
-        if (controller.signal.aborted) return;
-        if (error instanceof RemoteKitError && error.code === 'invalid_request') unsupported.current?.();
-        setState({ source, error: error instanceof Error ? error.message : '无法打开此文档' });
-      },
-    );
+    void source
+      .open(controller.signal, {
+        onStatus: (status) => {
+          if (!controller.signal.aborted) setStatus(status);
+        },
+      })
+      .then(
+        (info) => {
+          if (controller.signal.aborted) return;
+          if (!info.pages.length || info.pages.some((page) => !(page.width > 0 && page.height > 0))) {
+            setState({ source, error: '文档页面格式错误' });
+          } else setState({ source, info, cache });
+        },
+        (error) => {
+          if (controller.signal.aborted) return;
+          if (error instanceof RemoteKitError && error.code === 'invalid_request') unsupported.current?.();
+          setStatus(undefined);
+          setState({
+            source,
+            error: error instanceof Error ? error.message : '无法打开此文档',
+            rejected: error instanceof RemoteKitError && error.code === 'rejected',
+          });
+        },
+      );
     return () => {
       controller.abort();
       cache.dispose();
@@ -377,13 +425,30 @@ export function DocumentViewer({
         <div className="document-viewer-state" role={active?.error ? 'alert' : 'status'}>
           {active?.error ? (
             <>
-              <span>{active.error}</span>
+              <ErrorOutline className="document-viewer-error-icon" />
+              <strong>{active.rejected ? '无法转换此文档' : active.error}</strong>
+              {active.rejected && <span>{active.error}</span>}
               <Button onClick={() => setAttempt((value) => value + 1)}>重试</Button>
             </>
           ) : (
             <>
-              <Skeleton width="50%" height={80} />
-              <span>正在准备文档…</span>
+              <div
+                className="document-viewer-file-icon"
+                style={{
+                  color: fileTypeColor(type, title),
+                  backgroundColor: `${fileTypeColor(type, title)}18`,
+                }}
+              >
+                <FileTypeIcon type={type} name={title} />
+              </div>
+              <strong className="document-viewer-opening-title" title={title}>
+                {title}
+              </strong>
+              <LinearProgress className="document-viewer-opening-progress" />
+              <span>
+                {status === 'converting' ? '正在转换文档，首次打开可能需要一些时间' : '正在打开文档…'}
+              </span>
+              {status === 'converting' && slow && <span>仍在转换…</span>}
             </>
           )}
         </div>

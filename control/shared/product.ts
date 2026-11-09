@@ -55,6 +55,7 @@ export interface WorkspaceSettings {
   topDeadZone: TopDeadZone;
   showStats: boolean;
   autoFullscreen: boolean;
+  autoKeyboard: boolean;
   avSync: boolean;
   audioChannels: { left: boolean; right: boolean };
 }
@@ -222,7 +223,6 @@ export const SITE_PERMISSIONS = [
 export type SitePermission = (typeof SITE_PERMISSIONS)[number];
 export interface SitePreferences {
   tabletUa?: boolean;
-  manualKeyboard?: boolean;
   permissions?: Partial<Record<SitePermission, 'allow' | 'block'>>;
   protocolHandlers?: { protocol: string; url: string; allowed: boolean }[];
 }
@@ -401,9 +401,7 @@ export type ProductAction =
   | { type: 'site.protocolHandler.remove'; origin: string; protocol: string }
   | { type: 'site.permissions.reset'; origin: string }
   | { type: 'page.exitFullscreen'; target: string }
-  | ({ type: 'site.set'; origin: string; tabId?: string } & (
-      { tabletUa: boolean; manualKeyboard?: boolean } | { tabletUa?: boolean; manualKeyboard: boolean }
-    ));
+  | { type: 'site.set'; origin: string; tabId?: string; tabletUa: boolean };
 export interface ViewerViewport {
   devicePixelRatio: number;
   refreshHz?: number;

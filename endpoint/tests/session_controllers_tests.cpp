@@ -360,9 +360,8 @@ void SessionManagementRequests() {
   invalid_preferences({{"sites", {{"https://" + std::string(2048, 'a'), site}}}});
   for (const auto& invalid :
        {Json(), Json(false), Json::array(), Json::object(), Json{{"unknown", true}},
-        Json{{"tabletUa", false}}, Json{{"tabletUa", 1}}, Json{{"manualKeyboard", true}},
-        Json{{"permissions", Json::object()}}, Json{{"permissions", Json::array()}},
-        Json{{"permissions", {{"camera", "allow"}}}},
+        Json{{"tabletUa", false}}, Json{{"tabletUa", 1}}, Json{{"permissions", Json::object()}},
+        Json{{"permissions", Json::array()}}, Json{{"permissions", {{"camera", "allow"}}}},
         Json{{"permissions", {{"notifications", "allow"}}}},
         Json{{"permissions", {{"geolocation", "ask"}}}},
         Json{{"permissions", {{"geolocation", true}}}}, Json{{"protocolHandlers", Json::array()}},

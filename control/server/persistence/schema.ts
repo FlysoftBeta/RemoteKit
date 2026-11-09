@@ -2,8 +2,42 @@ import type Database from 'better-sqlite3';
 import { RemoteKitError } from '../../shared/errors';
 import { createAnnouncementTables } from './announcements';
 import { createLearningTables } from './learning';
+import { createObjectRenderTables } from './object-renders';
 
-const version = 12;
+const version = 13;
+
+const migrations: Record<number, (db: Database.Database) => void> = {
+  12: (db) => {
+    const settingsRows = db.prepare('SELECT tenant, data FROM user_settings').all() as {
+      tenant: string;
+      data: string;
+    }[];
+    const updateSettings = db.prepare('UPDATE user_settings SET data=? WHERE tenant=?');
+    for (const row of settingsRows) {
+      const settings = JSON.parse(row.data);
+      if (settings.workspace.autoKeyboard === undefined) settings.workspace.autoKeyboard = false;
+      updateSettings.run(JSON.stringify(settings), row.tenant);
+    }
+    const siteRows = db.prepare('SELECT tenant, origin, data FROM site_preferences').all() as {
+      tenant: string;
+      origin: string;
+      data: string;
+    }[];
+    const updateSite = db.prepare('UPDATE site_preferences SET data=? WHERE tenant=? AND origin=?');
+    const deleteSite = db.prepare('DELETE FROM site_preferences WHERE tenant=? AND origin=?');
+    for (const row of siteRows) {
+      const site = JSON.parse(row.data);
+      delete site.manualKeyboard;
+      if (!site.tabletUa) delete site.tabletUa;
+      if (!Object.keys(site.permissions ?? {}).length) delete site.permissions;
+      if (!site.protocolHandlers?.length) delete site.protocolHandlers;
+      if (Object.keys(site).length) updateSite.run(JSON.stringify(site), row.tenant, row.origin);
+      else deleteSite.run(row.tenant, row.origin);
+    }
+    createLearningTables(db);
+    createObjectRenderTables(db);
+  },
+};
 
 function createWorkspaceItems(db: Database.Database) {
   db.exec(`CREATE TABLE installed_apps (
@@ -42,8 +76,14 @@ export function createSchema(db: Database.Database) {
     if (tableExists(db, 'schema_version')) {
       const rows = db.prepare('SELECT version FROM schema_version').all() as { version: bigint }[];
       if (rows.length !== 1) throw new RemoteKitError('internal', 'Unsupported database schema');
-      if (Number(rows[0].version) !== version)
-        throw new RemoteKitError('internal', 'Unsupported database schema');
+      let storedVersion = Number(rows[0].version);
+      while (storedVersion !== version) {
+        const migrate = migrations[storedVersion];
+        if (!migrate) throw new RemoteKitError('internal', 'Unsupported database schema');
+        migrate(db);
+        storedVersion++;
+      }
+      if (Number(rows[0].version) !== version) writeVersion(db);
       createLearningTables(db);
       return;
     }
@@ -132,6 +172,7 @@ export function createSchema(db: Database.Database) {
     createPagePreviews(db);
     createAnnouncementTables(db);
     createLearningTables(db);
+    createObjectRenderTables(db);
     writeVersion(db);
   })();
 }

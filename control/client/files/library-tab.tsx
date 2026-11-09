@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../editing/local-autofocus';
 import { diagnostics } from '../media/diagnostics';
 import {
   ArrowDropDown,
@@ -11,9 +12,7 @@ import {
   Search,
   ShoppingBasket,
   ShoppingBasketOutlined,
-  TuneOutlined,
   UploadFileOutlined,
-  VisibilityOutlined,
 } from '@mui/icons-material';
 import {
   Alert,
@@ -25,7 +24,6 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
   IconButton,
   InputAdornment,
   LinearProgress,
@@ -44,9 +42,8 @@ import { operationId } from '../control/product-operations';
 import { photoStatus } from './basket-items';
 import { FileBasketDialog } from './file-chooser-dialog';
 import { dayLabel, formatFileSize, formatTime } from './file-format';
-import { canPreviewFile } from './file-image-preview';
-import { FilePreview } from './file-preview';
-import type { LearningCall } from '../learning/queries';
+import { FileEntryMenu } from './file-entry-menu';
+import './library-tab.css';
 import {
   basketEntries,
   fileError,
@@ -60,43 +57,38 @@ import { FileViewToggle } from './file-view';
 import { PhotoCapture } from './photo-library-capture';
 import type { PhotoJob } from './photo-job-store';
 import { PhotoOptions } from './photo-options';
-import {
-  filesInView,
-  readFilesState,
-  sourceAppName,
-  sourceChannelName,
-  type FilesView,
-} from './files-app-state';
+import { filesInView, sourceAppName, sourceChannelName, type FilesView } from './files-app-state';
 import { FilesOrganization } from './files-organization';
 
 const PAGE_SIZE = 60;
 const MAX_BASKET = 64;
 
-export function FilesApp({
+export function LibraryTab({
   windowId,
-  state,
-  onState,
-  previewEntryId,
-  previewRequestId,
-  call,
+  view: filter,
+  query,
+  layout,
+  onView,
+  onQuery,
+  onLayout,
+  onOpen,
 }: {
   windowId: string;
-  state: unknown;
-  onState(state: unknown): void;
-  previewEntryId?: string;
-  previewRequestId?: string;
-  call?: LearningCall;
+  view: FilesView;
+  query: string;
+  layout: 'grid' | 'list';
+  onView(view: FilesView): void;
+  onQuery(query: string): void;
+  onLayout(layout: 'grid' | 'list'): void;
+  onOpen(entry: LibraryEntry): void;
 }): JSX.Element {
   const { snapshot, online, refresh, mutate, photos, recordUsage, apps } = useLibrary();
-  const restored = readFilesState(state);
   const pane = useRef<HTMLDivElement>(null);
   const [paneWidth, setPaneWidth] = useState(Infinity);
   // narrow: chips replace the side navigation; compact: header actions become icons.
   const narrow = paneWidth < 600;
   const compact = paneWidth < 900;
-  const filter = restored.view;
-  const query = restored.query;
-  const setQuery = (query: string) => onState({ ...restored, query: query.slice(0, 512) });
+  const setQuery = (query: string) => onQuery(query.slice(0, 256));
   const [searching, setSearching] = useState(false);
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [error, setError] = useState('');
@@ -106,7 +98,6 @@ export function FilesApp({
   const [uploadMenu, setUploadMenu] = useState<HTMLElement>();
   const [camera, setCamera] = useState<{ partitionId?: string | null; replace?: LibraryEntry }>();
   const [showBasket, setShowBasket] = useState(false);
-  const [preview, setPreview] = useState<LibraryEntry>();
   const [photo, setPhoto] = useState<string>();
   const [move, setMove] = useState<string[]>();
   const [deletion, setDeletion] = useState<{ ids: string[]; operationId: string }>();
@@ -142,8 +133,8 @@ export function FilesApp({
               job.origin.partitionId === currentPartition.id)),
       );
   const view = {
-    mode: restored.layout === 'grid' ? ('cards' as const) : ('list' as const),
-    set: (mode: 'cards' | 'list') => onState({ ...restored, layout: mode === 'cards' ? 'grid' : 'list' }),
+    mode: layout === 'grid' ? ('cards' as const) : ('list' as const),
+    set: (mode: 'cards' | 'list') => onLayout(mode === 'cards' ? 'grid' : 'list'),
   };
   const partitionOf = (id: string | null) => partitions.find((item) => item.id === id)?.name ?? '';
   const disabled = !online || busy || !snapshot;
@@ -161,9 +152,6 @@ export function FilesApp({
     onError: reportError,
   });
 
-  useEffect(() => {
-    if (online) void refresh().catch((failure) => diagnostics.record('my-files', failure));
-  }, [online]);
   useEffect(() => {
     const node = pane.current;
     if (!node || typeof ResizeObserver === 'undefined') return;
@@ -190,7 +178,7 @@ export function FilesApp({
     }
   }
   const selectFilter = (next: FilesView) => {
-    onState({ ...restored, view: next });
+    onView(next);
     setLimit(PAGE_SIZE);
     setSelected(undefined);
   };
@@ -254,18 +242,11 @@ export function FilesApp({
                 .filter(Boolean)
                 .join(' › ');
   const openPreview = (entry: LibraryEntry) => {
-    if (entry.photo) setPhoto(entry.id);
-    else setPreview(entry);
-    void recordUsage(entry.id, windowId).catch((failure) => diagnostics.record('file-usage', failure));
+    if (entry.photo) {
+      setPhoto(entry.id);
+      void recordUsage(entry.id, windowId).catch((failure) => diagnostics.record('file-usage', failure));
+    } else onOpen(entry);
   };
-  const launchedPreview = useRef<string | undefined>(undefined);
-  useEffect(() => {
-    if (!previewEntryId || !previewRequestId || launchedPreview.current === previewRequestId) return;
-    const entry = catalog.find((item) => item.id === previewEntryId);
-    if (!entry) return;
-    launchedPreview.current = previewRequestId;
-    openPreview(entry);
-  }, [previewEntryId, previewRequestId, snapshot]);
   const entryCheckbox = (entry: LibraryEntry, tile: boolean) => (
     <Checkbox
       className="library-check"
@@ -450,6 +431,7 @@ export function FilesApp({
   return (
     <Box
       ref={pane}
+      className="library-tab"
       sx={{
         display: 'flex',
         flexDirection: 'column',
@@ -718,123 +700,14 @@ export function FilesApp({
           <ListItemText>摄像头拍照</ListItemText>
         </MenuItem>
       </Menu>
-      {
-        <Menu
-          anchorEl={scaledAnchor(menu?.anchor)}
-          open={!!menuEntry && !disabled}
-          onClose={() => setMenu(undefined)}
-          slotProps={{ list: { dense: true } }}
-        >
-          {menuEntry && [
-            <Box key="title" sx={{ px: 2, pt: 0.5, pb: 1, maxWidth: 280 }}>
-              <Typography variant="subtitle2" sx={{ overflowWrap: 'anywhere' }}>
-                {menuEntry.name}
-              </Typography>
-              <Typography variant="caption" color="text.secondary">
-                {dayLabel(menuEntry.createdAt)} {formatTime(menuEntry.createdAt)} ·{' '}
-                {formatFileSize(menuEntry.size)} · {partitionOf(menuEntry.partitionId)}
-              </Typography>
-            </Box>,
-            <Divider key="divider" />,
-            <MenuItem
-              key="view"
-              onClick={() => {
-                openPreview(menuEntry);
-                setMenu(undefined);
-              }}
-            >
-              <ListItemIcon>
-                <VisibilityOutlined fontSize="small" />
-              </ListItemIcon>
-              <ListItemText>{canPreviewFile(menuEntry) ? '查看大图' : '预览'}</ListItemText>
-            </MenuItem>,
-            menuEntry.photo && (
-              <MenuItem
-                key="photo"
-                onClick={() => {
-                  openPreview(menuEntry);
-                  setMenu(undefined);
-                }}
-              >
-                <ListItemIcon>
-                  <TuneOutlined fontSize="small" />
-                </ListItemIcon>
-                <ListItemText>照片详情</ListItemText>
-              </MenuItem>
-            ),
-            <MenuItem
-              key="basket"
-              disabled={!inBasket.has(menuEntry.id) && basket.length >= MAX_BASKET}
-              onClick={() => {
-                if (inBasket.has(menuEntry.id)) removeFromBasket(menuEntry.id);
-                else addToBasket([menuEntry.id]);
-                setMenu(undefined);
-              }}
-            >
-              <ListItemIcon>
-                <ShoppingBasketOutlined fontSize="small" />
-              </ListItemIcon>
-              <ListItemText>{inBasket.has(menuEntry.id) ? '从文件篮移除' : '加入文件篮'}</ListItemText>
-            </MenuItem>,
-            <MenuItem
-              key="move"
-              onClick={() => {
-                setMove([menuEntry.id]);
-                setMenu(undefined);
-              }}
-            >
-              <ListItemIcon>
-                <DriveFileMoveOutlined fontSize="small" />
-              </ListItemIcon>
-              <ListItemText>移到分区…</ListItemText>
-            </MenuItem>,
-            menuEntry.partitionId !== null && (
-              <MenuItem
-                key="unpartition"
-                onClick={() => {
-                  const id = menuEntry.id;
-                  setMenu(undefined);
-                  void run(async () => {
-                    await mutate('library.move', {
-                      operationId: operationId(),
-                      ids: [id],
-                      partitionId: null,
-                    });
-                  });
-                }}
-              >
-                移出分区
-              </MenuItem>
-            ),
-            <MenuItem
-              key="select"
-              onClick={() => {
-                setSelected([menuEntry.id]);
-                setMenu(undefined);
-              }}
-            >
-              <ListItemIcon>
-                <CheckBoxOutlined fontSize="small" />
-              </ListItemIcon>
-              <ListItemText>选择多个</ListItemText>
-            </MenuItem>,
-            <Divider key="divider-delete" />,
-            <MenuItem
-              key="delete"
-              sx={{ color: 'error.main' }}
-              onClick={() => {
-                setDeletion({ ids: [menuEntry.id], operationId: operationId() });
-                setMenu(undefined);
-              }}
-            >
-              <ListItemIcon sx={{ color: 'inherit' }}>
-                <DeleteOutline fontSize="small" />
-              </ListItemIcon>
-              <ListItemText>删除文件</ListItemText>
-            </MenuItem>,
-          ]}
-        </Menu>
-      }
+      <FileEntryMenu
+        entry={menuEntry}
+        anchor={menu?.anchor}
+        windowId={windowId}
+        onClose={() => setMenu(undefined)}
+        onOpen={openPreview}
+        onSelect={(entry) => setSelected([entry.id])}
+      />
       {camera && (
         <PhotoCapture
           windowId={windowId}
@@ -921,35 +794,6 @@ export function FilesApp({
         />
       )}
       {showBasket && <FileBasketDialog windowId={windowId} onClose={() => setShowBasket(false)} />}
-      {preview && (
-        <Dialog
-          open
-          fullWidth
-          maxWidth="lg"
-          onClose={() => setPreview(undefined)}
-          slotProps={{ paper: { sx: { height: '85%', minHeight: 320 } } }}
-        >
-          <DialogTitle sx={{ overflowWrap: 'anywhere' }}>
-            {preview.name}
-            <Typography variant="body2" color="text.secondary">
-              {preview.source &&
-                `${sourceAppName(preview.source.app, apps)} › ${sourceChannelName(preview.source)}`}
-              {preview.detail && ` · ${preview.detail}`}
-            </Typography>
-          </DialogTitle>
-          <DialogContent sx={{ display: 'flex', flexDirection: 'column', minHeight: 0, p: 0 }}>
-            <FilePreview
-              key={preview.assetId}
-              entry={preview}
-              call={call}
-              onBasket={disabled || inBasket.has(preview.id) ? undefined : () => addToBasket([preview.id])}
-            />
-          </DialogContent>
-          <DialogActions>
-            <Button onClick={() => setPreview(undefined)}>返回</Button>
-          </DialogActions>
-        </Dialog>
-      )}
     </Box>
   );
 }
@@ -965,12 +809,13 @@ function SearchField({
   autoFocus?: boolean;
   fullWidth?: boolean;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>(autoFocus);
   return (
     <TextField
       size="small"
       placeholder="搜索文件名"
       value={value}
-      autoFocus={autoFocus}
+      inputRef={autoFocusRef}
       fullWidth={fullWidth}
       onChange={(event) => onChange(event.target.value)}
       onKeyDown={(event) => {
@@ -1090,7 +935,7 @@ function LoadMore({ onVisible }: { onVisible: () => void }) {
   );
 }
 
-function PhotoDialog({
+export function PhotoDialog({
   entry,
   job,
   disabled,

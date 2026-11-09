@@ -2,7 +2,7 @@
 
 Control 是产品状态的唯一真相：用户、Window/Tab、地址意图、设置、站点偏好、文件目录和操作收据都只在 Control 的 SQLite 里。Endpoint 和 Browser 拥有"执行"：进程、WebContents、恢复数据、GPU 资源。Control 通过对账让执行趋向期望。Control 同时管理多个 Endpoint 节点，每个 Tenant 的请求路由到它被放置的节点（见[多节点](cluster.md)）。
 
-SQLite 带 `schema_version`（当前 9）。空库在一个事务里建表并写入版本；版本不等于 9、或已有表却没有版本的库拒绝启动。没有迁移代码：格式改变时直接改建表语句与版本号，旧库需要重建；需要保留账户时用[凭据恢复](auth.md#凭据恢复)。读取路径只认当前格式，不在运行时补默认值。
+SQLite 带 `schema_version`（当前 13）。空库在一个事务里建表并写入版本。已有库按 `schema.ts` 的 `migrations` 逐步升级：每一步把版本 N 改写成 N+1 的格式（例如 12→13 给设置补 `autoKeyboard`、删掉站点偏好里的 `manualKeyboard`、建立转换失败表），全部在同一事务里完成再写新版本；没有升级路径的版本、或已有表却没有版本的库拒绝启动，需要保留账户时用[凭据恢复](auth.md#凭据恢复)。读取路径只认当前格式，不在运行时补默认值。
 
 ## 数据归属
 
@@ -104,9 +104,10 @@ Control 约每 1.5 秒对每个活跃 Tenant 做一次维护（不同 Tenant 互
 ## 站点身份与全屏
 
 - **平板版网站**：按 origin 保存，切换 Android 平板身份（`mobile=false`），不改变 viewport、DPR、触控或指针特征。首次导航、redirect、history、reload 和 restore 在请求之前选择身份，子 frame 继承页面身份。只有 UA 实际变化才需要确认 Browser 已应用并刷新当前页，`beforeunload` 可以取消这次刷新。其他同站点页面下次导航生效。
-- **网站设置**：Control 按 origin 持有兼容性选项、持久权限决定和协议处理器。`session.sitePreferences` 将 UA、权限和协议处理规则同步给 Endpoint 与 Browser。Viewer 的手动键盘设置只同步给 Viewer。权限或协议处理器的持久决定先入库并应用，再按原请求身份回复页面。仅本次允许与关闭提示不写入设置，HTTP 登录凭据只经当次回复传递。
+- **网站设置**：Control 按 origin 持有兼容性选项、持久权限决定和协议处理器。`session.sitePreferences` 将 UA、权限和协议处理规则同步给 Endpoint 与 Browser。权限或协议处理器的持久决定先入库并应用，再按原请求身份回复页面。仅本次允许与关闭提示不写入设置，HTTP 登录凭据只经当次回复传递。
 - **Viewer 全屏**：设置"打开或激活时全屏"（默认关闭，Control 保存）。打开或回到前台时尝试 Fullscreen API；浏览器要求用户手势而拒绝时，等下一次可信的非 Esc 交互重试；用户主动退出后本次激活不再抢回。
 - **网页全屏**：网页自己的 Fullscreen API 只让该页面内容铺满整个 Viewer，隐藏外壳与其他 Window，不调用本地 Fullscreen API。状态绑定 browserIncarnation、instance、document，作为临时 `pageFullscreen` 投影，不写数据库。网页自己退出、悬浮退出按钮（×）、Esc 都可结束；显式退出携带当前目标身份，旧文档的退出不影响新页面。导航、关页、锁定、断线清除投影；Native 状态随约 1.5 秒的周期对账同步。
+- **窗口全屏**：浏览器与网页 App 窗口的"更多 → 全屏"让该窗口的当前页面按网页全屏的方式铺满 Viewer（隐藏外壳、标签栏与其他窗口，只有它可见），Viewer 尚未全屏时同时请求 Fullscreen API（菜单点击就是用户手势）。这是 Viewer 本地的显示模式（`client/app/window-fullscreen.ts`），不进 Control：网页自己的全屏优先；悬浮退出按钮（×）、退出本地 Fullscreen（若是它请求的）、窗口离开当前窗口组或被关闭都会结束它。它不拦截 Esc，Esc 仍交给页面。
 
 ## 账户与管理 App
 

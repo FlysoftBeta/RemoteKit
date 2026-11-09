@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../editing/local-autofocus';
 import './launcher.css';
 import {
   AddToQueue,
@@ -76,6 +77,7 @@ export function Launcher({
   navigate(value: string, placement?: WindowPlacement): Promise<void>;
   exiting?: boolean;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [newTarget, setNewTarget] = useState(false);
   useEffect(() => {
     if (!exiting) setNewTarget(false);
@@ -227,7 +229,7 @@ export function Launcher({
         }}
       >
         <TextField
-          autoFocus
+          inputRef={autoFocusRef}
           fullWidth
           placeholder="搜索 App、网页和文件"
           value={query}

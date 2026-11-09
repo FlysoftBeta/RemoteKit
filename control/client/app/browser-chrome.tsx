@@ -1,8 +1,7 @@
 import './browser-chrome.css';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  Add,
+  BedtimeOutlined,
   ArrowBack,
   ArrowForward,
   Language,
@@ -13,14 +12,12 @@ import {
   Stop,
   Tab as TabIcon,
 } from '@mui/icons-material';
-import { Box, InputBase } from '@mui/material';
+import { Box, CircularProgress, InputBase } from '@mui/material';
 import type { ProductState, ProductTab, ProductWindow } from '../../shared/product';
 import { isLocalTab } from '../../shared/product';
 import type { Action } from './product-dialogs';
 import { Tool } from './window-tool';
-import { BrowserTab, TabDragGhost } from './browser-tab';
-import { beginTabPointer, registerTabStrip, tabShift, useTabDrag } from './tab-drag';
-import { uiScale, useUiScale } from './ui-scale';
+import { TabStrip } from './tab-strip';
 import type { WindowMenuControls } from './window-menus';
 export function useBrowserNavigation({
   win,
@@ -45,20 +42,10 @@ export function useBrowserNavigation({
 }) {
   const [address, setAddress] = useState(active && isLocalTab(active) ? '' : (active?.url ?? '')),
     [busy, setBusy] = useState(false);
-  const input = useRef<HTMLInputElement>(null),
-    strip = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLInputElement>(null);
   const addressDirty = useRef(false),
     previousTab = useRef(active?.id),
     composing = useRef(false);
-  const drag = useTabDrag(),
-    scale = useUiScale();
-  const stripRef = useCallback(
-    (element: HTMLDivElement | null) => {
-      strip.current = element;
-      registerTabStrip(win.id, element);
-    },
-    [win.id],
-  );
   const moveTab = (tabId: string, windowId: string, index: number) =>
     run({ type: 'tab.move', tabId, windowId, index });
   const run = (command: Parameters<Action>[0]) => {
@@ -93,15 +80,6 @@ export function useBrowserNavigation({
     document.addEventListener('keydown', listener, true);
     return () => document.removeEventListener('keydown', listener, true);
   }, [focused, fullscreen]);
-  useEffect(() => {
-    const bar = strip.current;
-    const selected = bar?.querySelector('[aria-selected="true"]')?.closest('.browser-tab');
-    if (!bar || !selected) return;
-    const bounds = bar.getBoundingClientRect();
-    const tabBounds = selected.getBoundingClientRect();
-    if (tabBounds.left < bounds.left) bar.scrollLeft += (tabBounds.left - bounds.left) / uiScale();
-    else if (tabBounds.right > bounds.right) bar.scrollLeft += (tabBounds.right - bounds.right) / uiScale();
-  }, [active?.id]);
   const submit = async (value: string) => {
     if (!navigationReady || !value.trim()) return;
     // Release the draft before dispatch so the pending projection and any WS
@@ -144,12 +122,8 @@ export function useBrowserNavigation({
     busy,
     setBusy,
     input,
-    strip,
-    stripRef,
     addressDirty,
     composing,
-    drag,
-    scale,
     moveTab,
     run,
     submit,
@@ -192,12 +166,8 @@ export function BrowserChrome({
     busy,
     setBusy,
     input,
-    strip,
-    stripRef,
     addressDirty,
     composing,
-    drag,
-    scale,
     moveTab,
     run,
     submit,
@@ -209,75 +179,29 @@ export function BrowserChrome({
     <>
       <div className="tab-bar">
         {handle}
-        <div
-          className={`tab-strip${drag ? ' tab-strip-dragging' : ''}${drag?.target?.windowId === win.id && drag.sourceWindowId !== win.id ? ' tab-drop-target' : ''}`}
-          role="tablist"
-          aria-label="标签页"
-          ref={stripRef}
-        >
-          {tabs.map((tab, index) => (
-            <BrowserTab
-              key={tab.id}
-              tab={tab}
-              selected={active?.id === tab.id}
-              online={online}
-              attention={
-                !!state.pageDialogs?.some((d) => d.tabId === tab.id) ||
-                !!state.fileRequests?.some((d) => d.tabId === tab.id)
-              }
-              dragSource={drag?.tabId === tab.id}
-              shift={tabShift(drag, win.id, tab.id, index)}
-              onPointerDown={(event) =>
-                online &&
-                beginTabPointer({
-                  event,
-                  tabId: tab.id,
-                  windowId: win.id,
-                  title: tab.title || '新标签页',
-                  index,
-                  move: moveTab,
-                  longPress: (anchor) => menus.openTab({ anchor, tab }),
-                })
-              }
-              onContextMenu={(anchor) => menus.openTab({ anchor, tab })}
-              onSelect={() => run({ type: 'tab.activate', tabId: tab.id })}
-              onClose={() => run({ type: 'tab.close', tabId: tab.id })}
-              onKeyDown={(e) => {
-                if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && e.ctrlKey && e.shiftKey) {
-                  e.preventDefault();
-                  const to = index + (e.key === 'ArrowRight' ? 1 : -1);
-                  if (to >= 0 && to < tabs.length) moveTab(tab.id, win.id, to);
-                  return;
-                }
-                if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-                  e.preventDefault();
-                  const next = (index + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
-                  (strip.current?.querySelectorAll('.tab-select')[next] as HTMLElement)?.focus({
-                    preventScroll: true,
-                  });
-                }
-              }}
-            />
-          ))}
-        </div>
-        {drag?.sourceWindowId === win.id &&
-          createPortal(
-            <TabDragGhost
-              title={drag.title}
-              left={(drag.x - drag.grabX) / scale}
-              top={(drag.y - drag.grabY) / scale}
-              width={drag.width}
-            />,
-            document.body,
-          )}
-        <Tool
-          title="新建标签页"
-          className="new-tab-button"
-          disabled={!online || busy}
-          onClick={createStartTab}
-        >
-          <Add fontSize="small" />
-        </Tool>
+        <TabStrip
+          windowId={win.id}
+          group="browser"
+          activeId={active?.id}
+          items={tabs.map((tab) => ({
+            id: tab.id,
+            title: tab.title || '新标签页',
+            icon: <BrowserTabIcon tab={tab} />,
+            attention:
+              !!state.pageDialogs?.some((d) => d.tabId === tab.id) ||
+              !!state.fileRequests?.some((d) => d.tabId === tab.id),
+          }))}
+          disabled={!online}
+          createDisabled={busy}
+          create={createStartTab}
+          select={(tabId) => run({ type: 'tab.activate', tabId })}
+          close={(tabId) => run({ type: 'tab.close', tabId })}
+          move={moveTab}
+          menu={(anchor, id) => {
+            const tab = tabs.find((tab) => tab.id === id);
+            if (tab) menus.openTab({ anchor, tab });
+          }}
+        />
         <span className="tab-bar-spacer" />
         <Tool
           title="标签页操作"
@@ -376,4 +300,10 @@ export function BrowserChrome({
       </div>
     </>
   );
+}
+
+function BrowserTabIcon({ tab }: { tab: ProductTab }) {
+  if (tab.loading) return <CircularProgress className="tab-icon" size={13} />;
+  if (tab.residency && tab.residency !== 'live') return <BedtimeOutlined className="tab-icon" />;
+  return <Language className="tab-icon" />;
 }

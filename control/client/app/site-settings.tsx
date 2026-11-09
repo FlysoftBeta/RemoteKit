@@ -76,17 +76,12 @@ export function SiteSettingsBody({
     <div className="site-settings-body">
       {error && <Alert severity="error">{error}</Alert>}
       <SettingSection title="兼容性">
-        {(['tabletUa', 'manualKeyboard'] as const).map((key) => (
-          <SettingSwitch
-            key={key}
-            title={key === 'tabletUa' ? '平板版网站' : '不自动弹出键盘'}
-            checked={!!site?.[key]}
-            disabled={!online || busy || !origin || (key === 'tabletUa' && !state.integrations.siteUa)}
-            onChange={(value) =>
-              void run({ type: 'site.set', origin, tabId, ...{ [key]: value } } as Parameters<Action>[0])
-            }
-          />
-        ))}
+        <SettingSwitch
+          title="平板版网站"
+          checked={!!site?.tabletUa}
+          disabled={!online || busy || !origin || !state.integrations.siteUa}
+          onChange={(tabletUa) => void run({ type: 'site.set', origin, tabId, tabletUa })}
+        />
       </SettingSection>
       <SettingSection title="权限">
         {SITE_PERMISSIONS.map((permission) => {

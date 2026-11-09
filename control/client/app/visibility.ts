@@ -1,15 +1,28 @@
 import type { ProductState } from '../../shared/product';
 
-export function selectVisibility(state: ProductState, shellWidth: number) {
+/** The window filling the Viewer: a page's own fullscreen wins over one the user chose. */
+export function fullscreenWindowId(state: ProductState, windowFullscreen: string | null) {
+  if (state.pageFullscreen) return state.pageFullscreen.windowId;
+  return windowFullscreen && state.workspace.windows.some((window) => window.id === windowFullscreen)
+    ? windowFullscreen
+    : undefined;
+}
+
+export function selectVisibility(
+  state: ProductState,
+  shellWidth: number,
+  windowFullscreen: string | null = null,
+) {
   const workspace = state.workspace;
+  const fullscreen = fullscreenWindowId(state, windowFullscreen);
   const space = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
   const sideBySide =
-    !state.pageFullscreen &&
+    !fullscreen &&
     !!space &&
     space.windowIds.length > 1 &&
     shellWidth - 16 - (space.windowIds.length - 1) * 8 >= space.windowIds.length * 360;
-  const visibleWindowIds = state.pageFullscreen
-    ? [state.pageFullscreen.windowId]
+  const visibleWindowIds = fullscreen
+    ? [fullscreen]
     : space
       ? sideBySide
         ? space.windowIds

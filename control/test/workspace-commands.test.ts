@@ -23,6 +23,7 @@ function empty(): ProductWorkspace {
         topDeadZone: 'off',
         showStats: false,
         autoFullscreen: false,
+        autoKeyboard: false,
         avSync: false,
         audioChannels: { left: true, right: true },
       },
@@ -134,8 +135,8 @@ test('settings are a singleton local App and window state is bounded', () => {
   }).workspace;
   assert.deepEqual(workspace.windows[0].state, { section: 'apps' });
   assert.throws(
-    () => command(workspace, { type: 'window.state', windowId: id, state: { text: 'x'.repeat(4096) } }),
-    /4 KiB/,
+    () => command(workspace, { type: 'window.state', windowId: id, state: { text: 'x'.repeat(8192) } }),
+    /8 KiB/,
   );
   assert.throws(() => command(workspace, { type: 'tab.create', windowId: id }), /does not support tabs/);
 });

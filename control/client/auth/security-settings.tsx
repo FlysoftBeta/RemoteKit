@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../editing/local-autofocus';
 import './security-settings.css';
 import { LockOutlined } from '@mui/icons-material';
 import { formatError } from '../util/format-error';
@@ -68,6 +69,7 @@ export function SecuritySettings({
   idle: ReturnType<typeof useAutoLock>;
   lock: () => void;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [change, setChange] = useState<Change>();
   const [currentPassword, setCurrentPassword] = useState('');
   const [replacement, setReplacement] = useState('');
@@ -306,7 +308,7 @@ export function SecuritySettings({
                 )}
                 {enrollmentStatus !== 'pending' && (
                   <TextField
-                    autoFocus
+                    inputRef={autoFocusRef}
                     fullWidth
                     required
                     type="password"

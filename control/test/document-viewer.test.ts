@@ -68,7 +68,9 @@ test('size index and virtual range agree with a linear model across a long docum
 test('memory source provides decoded blobs and reports missing resources or cancellation', async () => {
   const resource = image();
   const source = new MemoryDocumentSource(info, new Map([['image', resource]]));
-  assert.equal(await source.open(signal()), info);
+  const statuses: string[] = [];
+  assert.equal(await source.open(signal(), { onStatus: (status) => statuses.push(status) }), info);
+  assert.deepEqual(statuses, ['ready']);
   assert.equal(await source.resource('image', signal()), resource);
   await assert.rejects(source.resource('missing', signal()), { code: 'not_found' });
   const aborted = new AbortController();

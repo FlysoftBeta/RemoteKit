@@ -221,7 +221,7 @@ class ZhixueReader {
       ),
       this.definition(id),
     ]);
-    const raw = [...list(response)];
+    const raw = [...list(response), ...questionAttachments(definition)];
     if (Number(definition.hwType) === 107) {
       const context = await this.context(id);
       const preview = record(
@@ -291,7 +291,11 @@ class ZhixueReader {
       submittedDurationSeconds: number(overview.submittedDuration),
       attachments: spoken
         ? []
-        : list(raw.videoCourseList ?? []).map((value) => normalizeAttachment(record(value))),
+        : deduplicateAttachments(
+            [...list(raw.videoCourseList ?? []), ...questionAttachments(raw)].map((value) =>
+              normalizeAttachment(record(value)),
+            ),
+          ),
       questions: normalizeHomeworkQuestions(
         (spoken ? raw.answerQuestionTypeList : raw.answerTopicList) ?? [],
       ),
@@ -319,7 +323,7 @@ class ZhixueReader {
       ...(typeof raw.showAnswerResult === 'boolean' ? { showAnswers: raw.showAnswerResult } : {}),
       questions: normalizeHomeworkQuestions(raw.mainTopics ?? []),
       attachments: deduplicateAttachments(
-        [...list(raw.questionAttachList ?? []), ...list(raw.answerAttachList ?? [])].map((value) =>
+        [...questionAttachments(raw), ...list(raw.answerAttachList ?? [])].map((value) =>
           normalizeAttachment(record(value)),
         ),
       ),
@@ -406,6 +410,28 @@ function normalizeAttachment(raw: Record<string, unknown>): Attachment {
 
 function deduplicateAttachments(items: Attachment[]): Attachment[] {
   return [...new Map(items.map((item) => [item.url, item])).values()];
+}
+
+function questionAttachments(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value.flatMap(questionAttachments);
+  if (!value || typeof value !== 'object') return [];
+  const raw = record(value);
+  return [
+    ...list(raw.questionAttachList ?? []),
+    ...[
+      'questions',
+      'mainTopics',
+      'answerTopicList',
+      'answerQuestionTypeList',
+      'childQuestions',
+      'subTopics',
+      'childrenQuestions',
+      'children',
+      'subQuestions',
+      'questionDetail',
+      'childQuestionDetail',
+    ].flatMap((key) => questionAttachments(raw[key])),
+  ];
 }
 
 function requestHeaders(session: ZhixueSession, template: RequestTemplate): Record<string, string> {

@@ -177,6 +177,18 @@ export function WorkspacePreferences({
           </SettingSection>
         </>
       )}
+      {section === 'input' && (
+        <SettingSection title="输入">
+          <SettingSwitch
+            title="聚焦输入框时自动打开键盘"
+            description="关闭时，点按输入框才会打开键盘"
+            checked={settings.autoKeyboard}
+            disabled={!online || busy.autoKeyboard}
+            onChange={(autoKeyboard) => void save('autoKeyboard', { autoKeyboard })}
+          />
+          {note('autoKeyboard')}
+        </SettingSection>
+      )}
       {section === 'media' && (
         <>
           {' '}

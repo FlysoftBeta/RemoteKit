@@ -4,6 +4,7 @@ import { formatError } from '../util/format-error';
 import { diagnostics } from '../media/diagnostics';
 import { Store } from '../util/store';
 import { selectVisibility } from '../app/visibility';
+import { currentWindowFullscreen } from '../app/window-fullscreen';
 
 export class ViewportRequests extends Store<string> {
   private readonly geometry = new Map<string, { width: number; height: number }>();
@@ -53,7 +54,7 @@ export class ViewportRequests extends Store<string> {
       this.timer = undefined;
       const state = this.state;
       if (!state || !this.available) return;
-      const visibility = selectVisibility(state, this.bounds.width);
+      const visibility = selectVisibility(state, this.bounds.width, currentWindowFullscreen());
       const params: ViewerViewport = {
         devicePixelRatio: this.dpr,
         windows: state.workspace.windows.map((window) => ({

@@ -5,6 +5,7 @@
 #include "documents/render_queue.hpp"
 
 #include <windows.h>
+#include <io.h>
 #include <json.hpp>
 
 #include <atomic>
@@ -425,6 +426,26 @@ void ProcessTests(const fs::path& output) {
         "tool timeout not enforced");
   auto missing = RunTool(directory.path() / "missing.exe", {}, directory.path());
   Check(!missing && missing.error().code == ErrorCode::kUnavailable, "missing tool accepted");
+  FILE* capture = nullptr;
+  Check(_wfopen_s(&capture, (directory.path() / "failure.log").c_str(), L"wb") == 0,
+        "cannot capture failure log");
+  fflush(stderr);
+  const int saved_stderr = _dup(_fileno(stderr));
+  Check(saved_stderr >= 0 && _dup2(_fileno(capture), _fileno(stderr)) == 0,
+        "cannot redirect failure log");
+  auto failure = RunTool(self, {L"--failure-probe"}, directory.path());
+  fflush(stderr);
+  _dup2(saved_stderr, _fileno(stderr));
+  _close(saved_stderr);
+  fclose(capture);
+  Check(!failure && failure.error().code == ErrorCode::kRejected, "tool failure accepted");
+  auto log_bytes = Read(directory.path() / "failure.log");
+  const std::string log(log_bytes.begin(), log_bytes.end());
+  Check(log.find("tool=endpoint_documents_tests.exe exit_code=37") != log.npos &&
+            log.find("Error: final diagnostic") != log.npos,
+        "tool failure lacks exit code or stderr tail");
+  for (auto secret : {"private-source.docx", "private document text", "stdout secret", "early"})
+    Check(log.find(secret) == log.npos, "tool failure leaks private output or reads log head");
   Check(FileUrl(directory.path() / L"中文 #%.docx").find(L"%23%25") != std::wstring::npos,
         "profile URL not escaped");
 }
@@ -509,10 +530,19 @@ int Integration(const fs::path& output, const fs::path& tools) {
   auto pptx = directory.path() / L"幻灯片.pptx";
   Write(docx, Docx());
   Write(pptx, Pptx());
+  const auto fixtures = fs::path(__FILE__).parent_path() / "fixtures";
+  auto rich_docx = directory.path() / L"课程 表格 图片.docx";
+  auto saved_docx = directory.path() / "libreoffice.docx";
+  fs::copy_file(fixtures / "document.docx", rich_docx);
+  fs::copy_file(fixtures / "document-libreoffice.docx", saved_docx);
+  for (const auto& source : {rich_docx, saved_docx})
+    Check(Take(DetectDocumentFile(source)).extension == ".docx", "committed DOCX detection");
   OfficeConverter converter(directory.path(), tools);
   PdfRenderer renderer(tools);
   for (const auto& [source, type] :
        std::vector<std::pair<fs::path, DocumentType>>{{docx, DocumentType::kWriter},
+                                                      {rich_docx, DocumentType::kWriter},
+                                                      {saved_docx, DocumentType::kWriter},
                                                       {pptx, DocumentType::kPresentation},
                                                       {docx, DocumentType::kWriter}}) {
     TemporaryDirectory job(directory.path());
@@ -525,11 +555,12 @@ int Integration(const fs::path& output, const fs::path& tools) {
     Success(renderer.Render(pdf, zip));
     auto rendered = std::chrono::steady_clock::now();
     ValidateRendition({zip, fs::file_size(zip)});
+    const auto pages = Take(Take(RenderArchive::OpenFile(zip)).Info()).pages.size();
     std::cout << source.extension().string() << " conversion_ms="
               << std::chrono::duration_cast<std::chrono::milliseconds>(converted - start).count()
               << " render_ms="
               << std::chrono::duration_cast<std::chrono::milliseconds>(rendered - converted).count()
-              << '\n';
+              << " pages=" << pages << '\n';
     RenderQueue queue(directory.path(), tools);
     auto pdf_result = Take(queue.Render("pdf-bypass", pdf, "source.pdf"));
     ValidateRendition(pdf_result);
@@ -581,6 +612,15 @@ int Integration(const fs::path& output, const fs::path& tools) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+  if (argc >= 2 && std::wstring_view(argv[1]) == L"--failure-probe") {
+    std::cout << "stdout secret\n";
+    std::cerr << "Error: early\n" << std::string(70000, 'x') << '\n';
+    for (int i = 0; i < 8; ++i)
+      std::cerr << "Error: private value 'private document text' at "
+                   "\"C:\\private\\private-source.docx\"\n";
+    std::cerr << "private document text\nError: final diagnostic\n";
+    return 37;
+  }
   if (argc >= 2 && std::wstring_view(argv[1]) == L"--sleep") {
     Sleep(10000);
     return 0;

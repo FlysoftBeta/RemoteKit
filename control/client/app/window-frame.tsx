@@ -5,7 +5,7 @@ import { Typography } from '@mui/material';
 import React, { Suspense, lazy, useEffect, useMemo, useRef } from 'react';
 import type { ProductState, ProductWindow } from '../../shared/product';
 import { BUILTIN_APP_TITLES, SEARCH_ENGINES, isBuiltinApp, isLocalApp } from '../../shared/product';
-import { FilesApp } from '../files/files-app';
+import { FilesWindow } from '../files/files-window';
 import { WindowHandle } from './window-handle';
 import { useWindowState, type WorkspaceCall } from './window-state';
 import { PageOverlay } from './page-overlay';
@@ -106,7 +106,6 @@ export function WindowFrame({
   } catch (error) {
     diagnostics.record('window-frame', error);
   }
-  const sitePreferences = state.workspace.sites[origin];
   const activate = () => {
     if (!focused && online) void action({ type: 'window.focus', windowId: win.id }).catch(report);
   };
@@ -137,27 +136,23 @@ export function WindowFrame({
       aria-label={`${title}窗口`}
       onPointerDownCapture={activate}
     >
-      {local ? (
+      {win.appId === 'files' ? (
+        <FilesWindow
+          windowId={win.id}
+          call={call}
+          state={viewState}
+          onState={onState}
+          handle={handle}
+          launch={win.state?.launch}
+        />
+      ) : local ? (
         <>
           <div className="app-title-bar">
             {handle}
             <Typography variant="subtitle2">{title}</Typography>
           </div>
           <div className="local-app-content">
-            {win.appId === 'files' ? (
-              <FilesApp
-                windowId={win.id}
-                call={call}
-                state={viewState}
-                onState={onState}
-                previewEntryId={
-                  typeof viewState.previewEntryId === 'string' ? viewState.previewEntryId : undefined
-                }
-                previewRequestId={
-                  typeof viewState.previewRequestId === 'string' ? viewState.previewRequestId : undefined
-                }
-              />
-            ) : win.appId === 'study' || win.appId === 'questions' ? (
+            {win.appId === 'study' || win.appId === 'questions' ? (
               <SignInHost.Provider value={signInHost}>
                 <Suspense fallback={<div role="status">正在打开…</div>}>
                   <LearningApp
@@ -234,7 +229,7 @@ export function WindowFrame({
                   viewId={active.webviewId}
                   overlay={state.workspace.settings.workspace.showStats ?? false}
                   keyboardActive={online && (focused || fullscreen) && visible}
-                  manualKeyboard={!!sitePreferences?.manualKeyboard}
+                  autoKeyboard={state.workspace.settings.workspace.autoKeyboard}
                   onFocus={activate}
                 />
                 {active.popup?.status === 'pending' ? (

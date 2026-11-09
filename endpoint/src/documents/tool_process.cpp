@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdio>
 #include <fstream>
 #include <map>
+#include <regex>
 #include <stdexcept>
 #include <thread>
 
@@ -40,23 +42,93 @@ std::wstring Quote(std::wstring_view argument) {
 }
 
 Bytes ReadLog(const std::filesystem::path& path) {
-  std::ifstream file(path, std::ios::binary);
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file)
+    return {};
+  const auto size = file.tellg();
+  file.seekg(std::max<std::streamoff>(0, static_cast<std::streamoff>(size) - 65536));
   Bytes bytes(65536);
   file.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
   bytes.resize(static_cast<size_t>(file.gcount()));
   return bytes;
 }
 
+std::string StderrTail(const std::filesystem::path& log) {
+  auto bytes = ReadLog(log);
+  std::string output(bytes.begin(), bytes.end());
+  while (!output.empty() && (output.back() == '\n' || output.back() == '\r'))
+    output.pop_back();
+  size_t start = output.size();
+  for (size_t lines = 0; start && lines < 8; ++lines) {
+    auto newline = output.rfind('\n', start - 1);
+    if (newline == output.npos) {
+      start = 0;
+      break;
+    }
+    start = newline;
+  }
+  if (start)
+    ++start;
+  output.erase(0, start);
+  // Import/parser diagnostics can quote document text or include staged paths.
+  static const std::regex private_values(
+      R"regex(<[^>]*>|"[^"]*"|'[^'\r\n]*'|(?:[A-Za-z]:[\\/]|file:/|/)[^\s]*)regex");
+  output = std::regex_replace(output, private_values, "[redacted]");
+  std::string tail;
+  size_t position = 0;
+  while (position < output.size()) {
+    auto end = output.find('\n', position);
+    auto line = output.substr(position, end == output.npos ? end : end - position);
+    // Lines without a diagnostic prefix can be excerpts from the source file.
+    const bool diagnostic = line.starts_with("Error") || line.starts_with("Warning") ||
+                            line.starts_with("Syntax Error") ||
+                            line.starts_with("Syntax Warning") || line.starts_with("I/O Error") ||
+                            line.starts_with("warn:");
+    if (!tail.empty())
+      tail += " | ";
+    if (diagnostic) {
+      for (unsigned char c : line) {
+        if (c >= 32 && c < 127)
+          tail += static_cast<char>(c);
+      }
+    } else {
+      tail += "[redacted]";
+    }
+    if (end == output.npos)
+      break;
+    position = end + 1;
+  }
+  if (tail.size() > 2048)
+    tail.erase(0, tail.size() - 2048);
+  return tail;
+}
+
+void LogToolFailure(const std::filesystem::path& executable,
+                    std::string_view exit_code,
+                    const std::filesystem::path& log,
+                    std::string_view reason) {
+  const auto tool = executable.filename().string();
+  const auto tail = StderrTail(log);
+  fprintf(stderr, "document conversion failed tool=%s exit_code=%.*s reason=%.*s stderr_tail=%s\n",
+          tool.c_str(), static_cast<int>(exit_code.size()), exit_code.data(),
+          static_cast<int>(reason.size()), reason.data(), tail.c_str());
+}
+
 }  // namespace
 
-Error ToolOutputFailure(const std::filesystem::path& log) {
+Error ToolOutputFailure(const std::filesystem::path& log,
+                        const std::filesystem::path& executable,
+                        uint32_t exit_code) {
   auto bytes = ReadLog(log);
   std::string output(bytes.begin(), bytes.end());
   std::transform(output.begin(), output.end(), output.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  if (output.find("password") != output.npos || output.find("encrypted") != output.npos)
-    return {ErrorCode::kRejected, "password-protected document"};
-  return {ErrorCode::kRejected, "corrupt document or conversion failed"};
+  const auto reason =
+      output.find("password") != output.npos || output.find("encrypted") != output.npos
+          ? "password-protected document"
+          : "corrupt document or conversion failed";
+  LogToolFailure(executable, std::to_string(exit_code), log, reason);
+  return {ErrorCode::kRejected, reason};
 }
 
 std::filesystem::path DefaultToolsDirectory() {
@@ -119,17 +191,25 @@ Result<void> RunTool(const std::filesystem::path& executable,
                      const std::filesystem::path& working_directory,
                      const Environment& environment,
                      std::chrono::milliseconds timeout) {
+  const auto unavailable = [&](std::string message) -> Result<void> {
+    LogToolFailure(executable, "not_started", {}, message);
+    return Error{ErrorCode::kUnavailable, std::move(message)};
+  };
   if (!std::filesystem::is_regular_file(executable))
-    return Error{ErrorCode::kUnavailable, "document tool missing"};
+    return unavailable("document tool missing");
   auto log = working_directory / "tool.log";
   SECURITY_ATTRIBUTES security{sizeof(security), nullptr, TRUE};
   Handle input{CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &security,
                            OPEN_EXISTING, 0, nullptr)};
-  Handle output{CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                            &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
+  Handle output{CreateFileW((working_directory / "tool.stdout.log").c_str(), GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, &security, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, nullptr)};
+  Handle error_output{CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  &security, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)};
   Handle job{CreateJobObjectW(nullptr, nullptr)};
-  if (input.value == INVALID_HANDLE_VALUE || output.value == INVALID_HANDLE_VALUE || !job.value)
-    return Error{ErrorCode::kUnavailable, "cannot create document tool job"};
+  if (input.value == INVALID_HANDLE_VALUE || output.value == INVALID_HANDLE_VALUE ||
+      error_output.value == INVALID_HANDLE_VALUE || !job.value)
+    return unavailable("cannot create document tool job");
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags =
       JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
@@ -138,29 +218,29 @@ Result<void> RunTool(const std::filesystem::path& executable,
   if (!SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits,
                                sizeof(limits)) ||
       !SetInformationJobObject(job.value, JobObjectBasicUIRestrictions, &ui, sizeof(ui)))
-    return Error{ErrorCode::kUnavailable, "cannot limit document tool job"};
+    return unavailable("cannot limit document tool job");
 
   SIZE_T attribute_size = 0;
   InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_size);
   std::vector<uint8_t> attributes(attribute_size);
   auto* list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributes.data());
   if (!InitializeProcThreadAttributeList(list, 1, 0, &attribute_size))
-    return Error{ErrorCode::kUnavailable, "cannot initialize tool handles"};
+    return unavailable("cannot initialize tool handles");
   struct AttributeCleanup {
     LPPROC_THREAD_ATTRIBUTE_LIST list;
     ~AttributeCleanup() { DeleteProcThreadAttributeList(list); }
   } cleanup{list};
-  HANDLE handles[] = {input.value, output.value};
+  HANDLE handles[] = {input.value, output.value, error_output.value};
   if (!UpdateProcThreadAttribute(list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles,
                                  sizeof(handles), nullptr, nullptr))
-    return Error{ErrorCode::kUnavailable, "cannot isolate tool handles"};
+    return unavailable("cannot isolate tool handles");
   STARTUPINFOEXW startup{};
   startup.StartupInfo.cb = sizeof(startup);
   startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
   startup.StartupInfo.wShowWindow = SW_HIDE;
   startup.StartupInfo.hStdInput = input.value;
   startup.StartupInfo.hStdOutput = output.value;
-  startup.StartupInfo.hStdError = output.value;
+  startup.StartupInfo.hStdError = error_output.value;
   startup.lpAttributeList = list;
   std::wstring command = Quote(executable.wstring());
   for (const auto& argument : arguments)
@@ -174,7 +254,7 @@ Result<void> RunTool(const std::filesystem::path& executable,
   std::map<std::wstring, std::wstring, LessEnvironment> values;
   wchar_t* inherited = GetEnvironmentStringsW();
   if (!inherited)
-    return Error{ErrorCode::kUnavailable, "cannot read tool environment"};
+    return unavailable("cannot read tool environment");
   for (const wchar_t* item = inherited; *item; item += wcslen(item) + 1) {
     std::wstring entry(item);
     auto equals = entry.find(L'=', 1);
@@ -195,20 +275,20 @@ Result<void> RunTool(const std::filesystem::path& executable,
                       CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT |
                           EXTENDED_STARTUPINFO_PRESENT,
                       block.data(), working_directory.c_str(), &startup.StartupInfo, &process))
-    return Error{ErrorCode::kUnavailable, "cannot start document tool"};
+    return unavailable("cannot start document tool");
   Handle process_handle{process.hProcess};
   Handle thread{process.hThread};
   if (!AssignProcessToJobObject(job.value, process.hProcess) ||
       ResumeThread(process.hThread) == -1) {
     TerminateProcess(process.hProcess, 1);
     WaitForSingleObject(process.hProcess, INFINITE);
-    return Error{ErrorCode::kUnavailable, "cannot assign document tool job"};
+    return unavailable("cannot assign document tool job");
   }
   DWORD waited = WaitForSingleObject(process.hProcess, static_cast<DWORD>(timeout.count()));
   DWORD code = 1;
-  GetExitCodeProcess(process.hProcess, &code);
   TerminateJobObject(job.value, 1);
   WaitForSingleObject(process.hProcess, INFINITE);
+  GetExitCodeProcess(process.hProcess, &code);
   // soffice.com owns a child soffice.bin. Wait for the entire job before
   // releasing its temporary input and output files.
   JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
@@ -217,10 +297,12 @@ Result<void> RunTool(const std::filesystem::path& executable,
          accounting.ActiveProcesses) {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  if (waited == WAIT_TIMEOUT)
+  if (waited == WAIT_TIMEOUT) {
+    LogToolFailure(executable, std::to_string(code), log, "timeout");
     return Error{ErrorCode::kRejected, "document conversion timeout"};
+  }
   if (waited != WAIT_OBJECT_0 || code != 0)
-    return ToolOutputFailure(log);
+    return ToolOutputFailure(log, executable, code);
   return {};
 }
 }  // namespace remotekit::documents

@@ -41,6 +41,16 @@ test('space visibility uses the 360px window threshold without changing the spac
   assert.deepEqual(selectVisibility(state, 1600).visibleWindowIds, ['c']);
 });
 
+test('a window shown fullscreen is the only visible one; a page fullscreen wins', () => {
+  const state = workspace();
+  const chosen = selectVisibility(state, 1600, 'a');
+  assert.deepEqual(chosen.visibleWindowIds, ['a']);
+  assert.equal(chosen.sideBySide, false);
+  assert.deepEqual(selectVisibility(state, 1600, 'gone').visibleWindowIds, ['a', 'b']);
+  state.pageFullscreen = { windowId: 'c', tabId: 'c', target: 'target' } as typeof state.pageFullscreen;
+  assert.deepEqual(selectVisibility(state, 1600, 'a').visibleWindowIds, ['c']);
+});
+
 test('viewport reports hidden spaces and local apps as invisible', async () => {
   const reports: ViewerViewport[] = [];
   const requests = new ViewportRequests(async (viewport) => {

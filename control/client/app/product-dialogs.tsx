@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../editing/local-autofocus';
 import './product-dialogs.css';
 import { Close } from '@mui/icons-material';
 import {
@@ -34,6 +35,7 @@ export function AuthView({
   close: () => void;
   notice: string;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [username, setUsername] = useState(''),
     [password, setPassword] = useState(''),
     [setup, setSetup] = useState<SetupStatus | null>(null),
@@ -121,7 +123,7 @@ export function AuthView({
         )}
         <TextField
           required
-          autoFocus
+          inputRef={autoFocusRef}
           label="用户名"
           disabled={busy}
           autoComplete="username"
@@ -171,6 +173,7 @@ function PageDialogForm({
   dialog: Exclude<PageDialog, { kind: 'permission' | 'protocol_handler' }>;
   action: Action;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [text, setText] = useState('defaultPrompt' in dialog ? dialog.defaultPrompt : '');
   const [username, setUsername] = useState(''),
     [password, setPassword] = useState('');
@@ -228,7 +231,7 @@ function PageDialogForm({
                 sx={{ display: 'flex', flexDirection: 'column', gap: 2, mt: 2 }}
               >
                 <TextField
-                  autoFocus
+                  inputRef={autoFocusRef}
                   label="用户名"
                   autoComplete="off"
                   spellCheck={false}
@@ -279,7 +282,7 @@ function PageDialogForm({
         </Typography>
         {dialog.kind === 'prompt' && (
           <TextField
-            autoFocus
+            inputRef={autoFocusRef}
             fullWidth
             value={text}
             disabled={busy}

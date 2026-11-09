@@ -6,11 +6,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { ControlDatabase } from '../server/persistence/database';
+import { createSchema } from '../server/persistence/schema';
 
 test('fresh schema includes workspace spaces, installed apps, favorites and usage', () => {
   const store = new ControlDatabase(':memory:');
   try {
-    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 12n }]);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').all(), [{ version: 13n }]);
     const tables = new Set(
       (store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map(
         (row) => row.name,
@@ -108,7 +109,7 @@ test('databases at another schema version are rejected', async () => {
       ['unversioned', 'CREATE TABLE users (id TEXT)'],
       ['previous', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (11)'],
       ['older', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1)'],
-      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (13)'],
+      ['newer', 'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (14)'],
       [
         'ambiguous',
         'CREATE TABLE schema_version (version INTEGER); INSERT INTO schema_version VALUES (1),(1)',
@@ -122,6 +123,43 @@ test('databases at another schema version are rejected', async () => {
     }
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('version twelve migrates render outcomes and classifies saved study documents without losing entries', () => {
+  const store = new ControlDatabase(':memory:');
+  try {
+    store.db.exec(`DROP TABLE object_render_failures;
+      DROP INDEX learning_downloads_object;
+      ALTER TABLE learning_downloads DROP COLUMN document;
+      DROP TABLE schema_version;
+      CREATE TABLE schema_version (version INTEGER NOT NULL CHECK(version=12));
+      INSERT INTO schema_version VALUES (12);`);
+    const entries = [
+      { id: 'document', name: 'lesson.docx' },
+      { id: 'image', name: 'lesson.png' },
+    ];
+    store.db.prepare('INSERT INTO file_library VALUES (?,?)').run('tenant', JSON.stringify({ entries }));
+    for (const entry of entries)
+      store.db
+        .prepare("INSERT INTO learning_downloads VALUES (?,?,1,1,?,?,'saved')")
+        .run('tenant', entry.id, entry.id, entry.id);
+    createSchema(store.db);
+    createSchema(store.db);
+    assert.deepEqual(store.db.prepare('SELECT version FROM schema_version').get(), { version: 13n });
+    assert.deepEqual(store.db.prepare('SELECT key,document FROM learning_downloads ORDER BY key').all(), [
+      { key: 'document', document: 1n },
+      { key: 'image', document: 0n },
+    ]);
+    assert.deepEqual(store.db.prepare('SELECT * FROM object_render_failures').all(), []);
+    assert.deepEqual(
+      JSON.parse(
+        (store.db.prepare('SELECT snapshot FROM file_library').get() as { snapshot: string }).snapshot,
+      ),
+      { entries },
+    );
+  } finally {
+    store.db.close();
   }
 });
 

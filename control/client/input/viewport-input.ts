@@ -107,8 +107,8 @@ export class ViewportInput {
   private get surface() {
     return this.ports.presentation.layout?.views.find((view) => view.id === this.viewId);
   }
-  configure(enabled: boolean, manual: boolean, resize: ResizeObservation) {
-    this.editing.configure(enabled, manual, resize);
+  configure(enabled: boolean, autoOpen: boolean, resize: ResizeObservation) {
+    this.editing.configure(enabled, autoOpen, resize);
   }
   dispose() {
     this.remove.forEach((remove) => remove());

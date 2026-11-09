@@ -1,0 +1,57 @@
+.document-tab {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  background: var(--surface);
+}
+.document-tab-toolbar {
+  flex: none;
+}
+.document-tab-icon {
+  display: flex;
+  flex: none;
+  font-size: 20px;
+  margin: 0 8px;
+}
+.document-tab-title {
+  min-width: 0;
+  font-size: 13px;
+  line-height: 18px;
+}
+.document-tab-title > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.document-tab-secondary {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.document-tab-spacer {
+  flex: 1;
+}
+.document-tab-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.document-tab-content > .file-document-preview {
+  flex: 1;
+}
+.document-tab-missing {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--text-secondary);
+}
+.document-tab-narrow .document-tab-secondary {
+  display: none;
+}

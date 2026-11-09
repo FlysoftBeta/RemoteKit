@@ -187,9 +187,9 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
         !value ||
         typeof value !== 'object' ||
         Array.isArray(value) ||
-        Buffer.byteLength(JSON.stringify(value), 'utf8') > 4096
+        Buffer.byteLength(JSON.stringify(value), 'utf8') > 8192
       )
-        throw new RemoteKitError('invalid_request', 'Window state must be a JSON object of at most 4 KiB');
+        throw new RemoteKitError('invalid_request', 'Window state must be a JSON object of at most 8 KiB');
       window().state = structuredClone(value);
       break;
     }
@@ -417,11 +417,14 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
               'showStats',
               'audioChannels',
               'autoFullscreen',
+              'autoKeyboard',
               'avSync',
             ].includes(key),
         )
       )
         throw new RemoteKitError('invalid_request', 'Invalid settings');
+      if ('autoKeyboard' in workspaceSettings && typeof workspaceSettings.autoKeyboard !== 'boolean')
+        throw new RemoteKitError('invalid_request', 'Invalid value');
       if (
         'qualityPreference' in workspaceSettings &&
         !['quality', 'auto', 'smooth'].includes(workspaceSettings.qualityPreference)
@@ -520,15 +523,9 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       } catch {
         throw new RemoteKitError('invalid_request', '站点需有效HTTP(S) origin，最长2048字符');
       }
-      const hasTabletUa = Object.prototype.hasOwnProperty.call(action, 'tabletUa');
-      const hasManualKeyboard = Object.prototype.hasOwnProperty.call(action, 'manualKeyboard');
       if (
-        (!hasTabletUa && !hasManualKeyboard) ||
-        (hasTabletUa && typeof action.tabletUa !== 'boolean') ||
-        (hasManualKeyboard && typeof action.manualKeyboard !== 'boolean') ||
-        Object.keys(action).some(
-          (key) => !['type', 'origin', 'tabId', 'tabletUa', 'manualKeyboard'].includes(key),
-        )
+        typeof action.tabletUa !== 'boolean' ||
+        Object.keys(action).some((key) => !['type', 'origin', 'tabId', 'tabletUa'].includes(key))
       ) {
         throw new RemoteKitError('invalid_request', '无效的站点设置');
       }
@@ -541,11 +538,10 @@ export function applyCommand(workspace: ProductWorkspace, body: ProductAction, c
       if (!(origin in state.sites) && Object.keys(state.sites).length >= WORKSPACE_LIMITS.sites)
         throw new RemoteKitError('limit_exceeded', '站点设置已达上限');
       const previous = state.sites[origin] ?? { tabletUa: false };
-      siteUaChanged = hasTabletUa && !!previous.tabletUa !== action.tabletUa;
+      siteUaChanged = !!previous.tabletUa !== action.tabletUa;
       state.sites[origin] = {
         ...previous,
-        ...(hasTabletUa ? { tabletUa: action.tabletUa } : {}),
-        ...(hasManualKeyboard ? { manualKeyboard: action.manualKeyboard } : {}),
+        tabletUa: action.tabletUa,
       };
       pruneSite(state, origin);
       if (siteUaChanged) {

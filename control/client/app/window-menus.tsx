@@ -4,6 +4,7 @@ import {
   Add,
   Close,
   DriveFileMoveOutlined,
+  Fullscreen,
   InstallDesktopOutlined,
   LinkOutlined,
   OpenInBrowser,
@@ -22,6 +23,7 @@ import { BrowserSettingsSheet } from './browser-settings';
 import { InstallDialog } from './app-editor';
 import { scaledAnchor } from './ui-scale';
 import { SiteSettings } from './site-settings';
+import { enterWindowFullscreen } from './window-fullscreen';
 const dropDown = {
   anchorOrigin: { vertical: 'bottom', horizontal: 'right' },
   transformOrigin: { vertical: 'top', horizontal: 'right' },
@@ -103,6 +105,12 @@ export function WindowMenus({
     if (target) run({ type: 'tab.create', windowId: target.id, url: active?.url });
     else run({ type: 'window.open', appId: 'browser', url: active?.url, placement: { mode: 'space' } });
   };
+  const fullscreenItem = {
+    label: '全屏',
+    icon: <Fullscreen />,
+    disabled: !active || isLocalTab(active),
+    select: () => enterWindowFullscreen(win.id),
+  };
   const moreItems: { label: string; icon: React.ReactElement; disabled?: boolean; select(): void }[] = browser
     ? [
         { label: '新建标签页', icon: <Add />, disabled: !online, select: createStartTab },
@@ -122,6 +130,7 @@ export function WindowMenus({
               },
             ]
           : []),
+        fullscreenItem,
       ]
     : [
         {
@@ -144,6 +153,7 @@ export function WindowMenus({
           disabled: !online || !active,
           select: openBrowser,
         },
+        fullscreenItem,
       ];
   return (
     <>

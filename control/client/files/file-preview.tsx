@@ -139,6 +139,7 @@ export function FilePreview({
             <DocumentViewer
               source={source}
               title={entry.name}
+              type={entry.type}
               hideTitle
               initialProgress={progress ?? undefined}
               onUnsupported={() => setUnsupported(true)}

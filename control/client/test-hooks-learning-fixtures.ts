@@ -134,6 +134,7 @@ export function learningProductFixture(appId = 'study', signed = true): ProductS
           qualityPreference: 'auto',
           uiScale: 1,
           topDeadZone: 'off',
+          autoKeyboard: false,
           showStats: false,
           autoFullscreen: false,
           avSync: false,

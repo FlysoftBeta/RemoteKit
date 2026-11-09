@@ -1,16 +1,18 @@
-import './browser-tab.css';
-import { BedtimeOutlined, Close, Language } from '@mui/icons-material';
-import { ButtonBase, CircularProgress, IconButton } from '@mui/material';
+import './window-tab.css';
+import { Close } from '@mui/icons-material';
+import { ButtonBase, IconButton } from '@mui/material';
 import React from 'react';
-import type { ProductTab } from '../../shared/product';
 
 // One tab of the tab strip: the selectable body is a ButtonBase (ripple, focus-visible, no native
 // tap highlight) and the close control is an IconButton. Drag, ordering and commands stay with the
 // owner; this component only renders a tab and reports intents.
-export function BrowserTab({
-  tab,
+export function WindowTab({
+  id,
+  title,
+  icon,
+  closeLabel,
   selected,
-  online,
+  disabled,
   attention,
   dragSource,
   shift,
@@ -20,10 +22,13 @@ export function BrowserTab({
   onClose,
   onKeyDown,
 }: {
-  tab: ProductTab;
+  id: string;
+  title: string;
+  icon: React.ReactNode;
+  closeLabel: string;
   selected: boolean;
-  online: boolean;
-  attention: boolean;
+  disabled: boolean;
+  attention?: boolean;
   dragSource: boolean;
   shift: number;
   onPointerDown: (event: React.PointerEvent<HTMLDivElement>) => void;
@@ -32,11 +37,10 @@ export function BrowserTab({
   onClose: () => void;
   onKeyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
 }) {
-  const title = tab.title || '新标签页';
   return (
     <div
-      className={`browser-tab${selected ? ' selected-tab' : ''}${dragSource ? ' tab-drag-source' : ''}`}
-      data-tab-id={tab.id}
+      className={`window-tab${selected ? ' selected-tab' : ''}${dragSource ? ' tab-drag-source' : ''}`}
+      data-tab-id={id}
       style={{ transform: `translateX(${shift}px)` }}
       onPointerDown={onPointerDown}
       onContextMenu={(event) => {
@@ -47,22 +51,17 @@ export function BrowserTab({
       <ButtonBase
         className="tab-select"
         role="tab"
-        disabled={!online}
+        disabled={disabled}
         tabIndex={selected ? 0 : -1}
         aria-selected={selected}
         onClick={onSelect}
         onKeyDown={onKeyDown}
       >
-        <TabIcon tab={tab} />
+        {icon}
         <span className="tab-title">{title}</span>
         {attention && <span className="tab-attention" aria-label="页面等待处理请求" />}
       </ButtonBase>
-      <IconButton
-        className="tab-close"
-        aria-label={`关闭 ${tab.title || '标签页'}`}
-        disabled={!online}
-        onClick={onClose}
-      >
+      <IconButton className="tab-close" aria-label={closeLabel} disabled={disabled} onClick={onClose}>
         <Close fontSize="inherit" />
       </IconButton>
     </div>
@@ -71,27 +70,23 @@ export function BrowserTab({
 
 export function TabDragGhost({
   title,
+  icon,
   left,
   top,
   width,
 }: {
   title: string;
+  icon: React.ReactNode;
   left: number;
   top: number;
   width: number;
 }) {
   return (
-    <div className="browser-tab selected-tab tab-drag-ghost" aria-hidden style={{ left, top, width }}>
+    <div className="window-tab selected-tab tab-drag-ghost" aria-hidden style={{ left, top, width }}>
       <span className="tab-select">
-        <Language className="tab-icon" />
+        {icon}
         <span className="tab-title">{title}</span>
       </span>
     </div>
   );
-}
-
-function TabIcon({ tab }: { tab: ProductTab }) {
-  if (tab.loading) return <CircularProgress className="tab-icon" size={13} />;
-  if (tab.residency && tab.residency !== 'live') return <BedtimeOutlined className="tab-icon" />;
-  return <Language className="tab-icon" />;
 }

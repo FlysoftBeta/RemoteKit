@@ -78,6 +78,7 @@ export function productSnapshot(): import('../shared/product').ProductState {
           topDeadZone: 'off',
           showStats: false,
           autoFullscreen: false,
+          autoKeyboard: false,
           avSync: false,
           audioChannels: { left: true, right: true },
         },

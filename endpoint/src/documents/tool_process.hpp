@@ -15,7 +15,9 @@ using Environment = std::vector<std::pair<std::wstring, std::wstring>>;
 std::filesystem::path DefaultToolsDirectory();
 std::string Sha256Hex(std::span<const uint8_t> bytes);
 std::wstring FileUrl(const std::filesystem::path& path);
-Error ToolOutputFailure(const std::filesystem::path& log);
+Error ToolOutputFailure(const std::filesystem::path& log,
+                        const std::filesystem::path& executable,
+                        uint32_t exit_code);
 Result<void> RunTool(const std::filesystem::path& executable,
                      const std::vector<std::wstring>& arguments,
                      const std::filesystem::path& working_directory,

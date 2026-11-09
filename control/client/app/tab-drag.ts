@@ -23,7 +23,7 @@ const EDGE = 24;
 
 let current: TabDragState | null = null;
 const listeners = new Set<() => void>();
-const strips = new Map<string, HTMLElement>();
+const strips = new Map<string, { group: string; element: HTMLElement }>();
 
 function publish(next: TabDragState | null) {
   current = next;
@@ -40,15 +40,17 @@ export const useTabDrag = () =>
     () => null,
   );
 
-export function registerTabStrip(windowId: string, element: HTMLElement | null) {
-  if (element) strips.set(windowId, element);
+export function registerTabStrip(windowId: string, group: string, element: HTMLElement | null) {
+  if (element) strips.set(windowId, { group, element });
   else strips.delete(windowId);
 }
 
 // Insertion index among the strip's other tabs, from layout positions (offsetLeft ignores the
 // transforms used to animate the drag).
-function dropTarget(x: number, y: number, tabId: string) {
-  for (const [windowId, strip] of strips) {
+function dropTarget(x: number, y: number, tabId: string, group: string) {
+  for (const [windowId, registered] of strips) {
+    if (registered.group !== group) continue;
+    const strip = registered.element;
     const rect = strip.getBoundingClientRect();
     const slack = rect.height;
     if (x < rect.left || x > rect.right || y < rect.top - slack || y > rect.bottom + slack) continue;
@@ -58,7 +60,7 @@ function dropTarget(x: number, y: number, tabId: string) {
     if (local - strip.scrollLeft < edge) strip.scrollLeft -= 8;
     else if (local - strip.scrollLeft > rect.width / scale - edge) strip.scrollLeft += 8;
     let index = 0;
-    for (const tab of strip.querySelectorAll<HTMLElement>('.browser-tab'))
+    for (const tab of strip.querySelectorAll<HTMLElement>('.window-tab'))
       if (tab.dataset.tabId !== tabId && tab.offsetLeft + tab.offsetWidth / 2 < local) index++;
     return { windowId, index };
   }
@@ -80,6 +82,8 @@ export interface TabDragRequest {
 export function beginTabPointer({ event, tabId, windowId, title, index, move, longPress }: TabDragRequest) {
   if (current || (event.pointerType === 'mouse' && event.button !== 0)) return;
   if ((event.target as Element).closest('.tab-close')) return;
+  const group = strips.get(windowId)?.group;
+  if (!group) return;
   const element = event.currentTarget;
   const pointerId = event.pointerId;
   const touch = event.pointerType === 'touch';
@@ -135,7 +139,12 @@ export function beginTabPointer({ event, tabId, windowId, title, index, move, lo
       start(e.clientX, e.clientY);
     }
     if (!current) return;
-    publish({ ...current, x: e.clientX, y: e.clientY, target: dropTarget(e.clientX, e.clientY, tabId) });
+    publish({
+      ...current,
+      x: e.clientX,
+      y: e.clientY,
+      target: dropTarget(e.clientX, e.clientY, tabId, group),
+    });
   };
   const onUp = (e: PointerEvent) => {
     if (e.pointerId !== pointerId) return;

@@ -311,7 +311,7 @@ test('auth forwards credentials transiently, strips operation records and diagno
   }
 });
 
-test('site actions apply without reload, preserve compatibility fields and prune empty origins', async () => {
+test('site actions apply without reload, preserve tablet UA and prune empty origins', async () => {
   const f = await fixture();
   try {
     await f.control.operations.productAction(
@@ -328,7 +328,6 @@ test('site actions apply without reload, preserve compatibility fields and prune
     workspace.sites[origin] = {
       ...workspace.sites[origin],
       tabletUa: true,
-      manualKeyboard: true,
       protocolHandlers: [{ protocol: 'web+notes', url: origin + '/%s', allowed: false }],
     };
     f.store.workspaces.saveWorkspace(workspace);
@@ -341,7 +340,6 @@ test('site actions apply without reload, preserve compatibility fields and prune
     await f.control.operations.productAction(f.tenant, { type: 'site.permissions.reset', origin }, 'lease');
     assert.deepEqual(f.store.workspaces.workspace(f.tenant).sites[origin], {
       tabletUa: true,
-      manualKeyboard: true,
     });
     await f.control.operations.productAction(
       f.tenant,
@@ -375,11 +373,9 @@ test('site actions apply without reload, preserve compatibility fields and prune
         sites: {
           [origin]: {
             tabletUa: true,
-            manualKeyboard: true,
             permissions: { geolocation: 'allow' },
             protocolHandlers: [{ protocol: 'mailto', url: origin + '/%s', allowed: false }],
           },
-          'https://keyboard.test': { manualKeyboard: true },
           'https://empty.test': { tabletUa: false, permissions: {}, protocolHandlers: [] },
         },
       }),

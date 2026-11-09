@@ -1,6 +1,6 @@
 import { RemoteKitError } from '../../shared/errors';
 import type { FileChannel } from '../files/file-channel';
-import type { DocumentInfo, DocumentSource } from './document-source';
+import type { DocumentInfo, DocumentOpenOptions, DocumentSource } from './document-source';
 
 export class ChannelDocumentSource implements DocumentSource {
   private info?: DocumentInfo;
@@ -11,7 +11,7 @@ export class ChannelDocumentSource implements DocumentSource {
     private readonly assetId: string,
   ) {}
 
-  async open(signal: AbortSignal): Promise<DocumentInfo> {
+  async open(signal: AbortSignal, options?: DocumentOpenOptions): Promise<DocumentInfo> {
     const deadline = Date.now() + 5 * 60_000;
     for (;;) {
       if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
@@ -19,9 +19,11 @@ export class ChannelDocumentSource implements DocumentSource {
       const result = await this.channel.documentOpen(this.assetId, signal);
       if (signal.aborted) throw new DOMException('请求已取消', 'AbortError');
       if (result.state === 'ready') {
+        options?.onStatus?.('ready');
         this.info = result;
         return result;
       }
+      options?.onStatus?.('converting');
       if (Date.now() >= deadline) throw new RemoteKitError('rejected', '文档转换超时');
       await new Promise<void>((resolve, reject) => {
         const abort = () => {

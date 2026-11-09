@@ -34,7 +34,7 @@
 }
 .remote-page-fullscreen > .window-workspace {
   position: absolute;
-  inset: 0 0 16px;
+  inset: 0;
 }
 .window-workspace.side-by-side > .window-frame {
   min-width: 360px;

@@ -745,14 +745,14 @@ test('UA table precedes Browser/view creation; failed application persists desir
     assert.equal(store.workspaces.workspace(user.tenantId).sites['https://example.test'].tabletUa, true);
     assert.equal(endpoint.calls.filter((c) => c.method === 'view.command').length, 0);
     endpoint.calls = [];
-    const keyboard = await control.operations.productAction(
+    const unchanged = await control.operations.productAction(
       user.tenantId,
-      { type: 'site.set', origin: 'https://example.test', manualKeyboard: true, tabId: b.id },
+      { type: 'site.set', origin: 'https://example.test', tabletUa: true, tabId: b.id },
       'lease',
     );
-    assert.equal(keyboard.application, undefined);
+    assert.equal(unchanged.application, undefined);
     assert.equal(
-      keyboard.state.workspace.tabs.find((t) => t.id === b.id)?.pendingUaReloadOrigin,
+      unchanged.state.workspace.tabs.find((t) => t.id === b.id)?.pendingUaReloadOrigin,
       'https://example.test',
     );
     assert.deepEqual(endpoint.calls, []);
@@ -788,7 +788,7 @@ test('UA table precedes Browser/view creation; failed application persists desir
   }
 });
 
-test('manual keyboard persists per origin, has a committed receipt, and is excluded from Endpoint UA preferences', async () => {
+test('auto keyboard persists globally, has a committed receipt, and leaves site UA preferences independent', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'rk-site-settings-')),
     path = join(dir, 'control.db');
   const endpoint = new ProductEndpoint();
@@ -815,14 +815,13 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
       'lease',
     );
     const tabId = state.workspace.tabs[0].id;
+    assert.equal(state.workspace.settings.workspace.autoKeyboard, false);
     const keyboard = {
       operationId: randomUUID(),
       operationGeneration: store.operations.operationGeneration(tenantId),
       action: {
-        type: 'site.set',
-        origin: 'https://EXAMPLE.test:443/path',
-        manualKeyboard: true,
-        tabId,
+        type: 'settings.update',
+        settings: { workspace: { autoKeyboard: true } },
       } as const,
     };
     endpoint.calls = [];
@@ -830,11 +829,11 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     assert.equal(receipt.status, 'committed');
     assert.equal(receipt.application, undefined);
     assert.deepEqual(control.viewers.productState(tenantId).workspace.sites, {
-      [origin]: { tabletUa: true, manualKeyboard: true },
+      [origin]: { tabletUa: true },
     });
     await control.operations.productAction(
       tenantId,
-      { type: 'site.set', origin: unrelated, manualKeyboard: true },
+      { type: 'site.set', origin: 'https://EXAMPLE.test:443/path', tabletUa: true, tabId },
       'lease',
     );
     await control.reconciler.tick();
@@ -849,9 +848,8 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
       { type: 'site.set', origin, tabletUa: false, tabId },
       'lease',
     );
-    assert.deepEqual(store.workspaces.workspace(tenantId).sites[origin], {
-      manualKeyboard: true,
-    });
+    assert.equal(store.workspaces.workspace(tenantId).sites[origin], undefined);
+    assert.equal(store.workspaces.workspace(tenantId).settings.workspace.autoKeyboard, true);
     const cleared = endpoint.calls.filter((c) => c.method === 'session.sitePreferences');
     assert.ok(cleared.length);
     for (const call of cleared) assert.deepEqual(call.args.sites, {});
@@ -863,7 +861,7 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     endpoint.calls = [];
     await control.operations.productAction(
       tenantId,
-      { type: 'site.set', origin, tabletUa: true, manualKeyboard: false, tabId },
+      { type: 'site.set', origin, tabletUa: true, tabId },
       'lease',
     );
     assert.deepEqual(store.workspaces.workspace(tenantId).sites[origin], {
@@ -886,10 +884,11 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     assert.deepEqual(endpoint.calls, []);
     for (const patch of [
       {},
-      { manualKeyboard: null },
+      { manualKeyboard: true },
+      { tabletUa: true, manualKeyboard: true },
       { tabletUa: 'true' },
       { tabletUa: true, manualKeyboard: 0 },
-      { manualKeyboard: true, unknown: true },
+      { tabletUa: true, unknown: true },
     ]) {
       await assert.rejects(
         control.operations.productAction(
@@ -903,7 +902,7 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     await assert.rejects(
       control.operations.productAction(
         tenantId,
-        { type: 'site.set', origin: unrelated, manualKeyboard: false, tabId },
+        { type: 'site.set', origin: unrelated, tabletUa: false, tabId },
         'lease',
       ),
       (error: any) => error.code === 'invalid_request',
@@ -911,13 +910,26 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     await assert.rejects(
       control.operations.productAction(
         tenantId,
-        { type: 'site.set', origin: 'file:///tmp/a', manualKeyboard: true },
+        { type: 'site.set', origin: 'file:///tmp/a', tabletUa: true },
         'lease',
       ),
       (error: any) => error.code === 'invalid_request',
     );
     assert.deepEqual(endpoint.calls, []);
 
+    for (const autoKeyboard of ['true', 1, null]) {
+      await assert.rejects(
+        control.operations.productAction(
+          tenantId,
+          {
+            type: 'settings.update',
+            settings: { workspace: { autoKeyboard } },
+          } as unknown as ProductAction,
+          'lease',
+        ),
+        { code: 'invalid_request' },
+      );
+    }
     await control.viewers.detachViewer(tenantId, 'lease');
     await control.close();
     store.db.close();
@@ -932,8 +944,8 @@ test('manual keyboard persists per origin, has a committed receipt, and is exclu
     );
     assert.deepEqual(control.viewers.productState(tenantId).workspace.sites, {
       [origin]: { tabletUa: true },
-      [unrelated]: { manualKeyboard: true },
     });
+    assert.equal(control.viewers.productState(tenantId).workspace.settings.workspace.autoKeyboard, true);
     assert.deepEqual(control.operations.operationStatus(tenantId, keyboard), receipt);
     await control.viewers.detachViewer(tenantId, 'new-lease');
   } finally {

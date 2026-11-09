@@ -105,7 +105,7 @@ test('workspace WS routes preserve bounded local state and split settings while 
     assert.deepEqual(f.store.workspaces.workspace(f.user.tenantId).windows[0].state, {
       partitionId: 'photos',
     });
-    for (const state of [[], null, { text: '界'.repeat(1500) }])
+    for (const state of [[], null, { text: '界'.repeat(2800) }])
       await assert.rejects(f.request('window.state', { windowId, state }), { code: 'invalid_request' });
     await f.request('action', {
       type: 'settings.update',

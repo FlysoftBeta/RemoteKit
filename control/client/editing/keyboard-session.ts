@@ -3,7 +3,7 @@ export type EditorObservation = 'unknown' | 'active' | 'inactive';
 export interface KeyboardContext {
   document?: string;
   enabled: boolean;
-  manual: boolean;
+  autoOpen: boolean;
   editor: EditorObservation;
   focused: boolean;
   ready: boolean;
@@ -14,34 +14,49 @@ export interface KeyboardCommand {
   close?: 'boundary' | 'editor-lost';
 }
 
-/** User intent, DOM attachment and viewport occlusion are independent axes.
- * Only activation/policy/document events arm an open. Media recovery never does.
- * Unknown remote state is not a blur; an authoritative NONE revokes input at once
- * and allows only a short visual grace for a same-document DOM replacement.
+/** Document entry and enabling auto-open arm automatic focus; media recovery never does.
+ * Taps always arm. With auto-open off, a tap has 1500 ms to observe an active editor;
+ * after that observation it can wait indefinitely for frame and resize readiness.
+ * Disabling auto-open dismisses only automatic arms and never closes an attachment.
+ * Unknown remote state is not a blur; authoritative NONE allows a short visual grace
+ * for same-document editor replacement. Document changes and disabling input close it.
  */
 export class KeyboardSession {
   private context?: KeyboardContext;
   private intent: 'armed' | 'attached' | 'dismissed' = 'dismissed';
   private missingUntil?: number;
+  private tapArmedUntil?: number;
+  private tapArmed = false;
   private explicitlyRequested = false;
   private systemHidden = false;
   get deadline() {
-    return this.missingUntil;
+    const deadlines = [this.missingUntil, this.tapArmedUntil].filter((value) => value !== undefined);
+    return deadlines.length ? Math.min(...deadlines) : undefined;
   }
 
   observe(next: KeyboardContext): KeyboardCommand {
     const previous = this.context;
     const boundary = previous?.document !== next.document || (previous?.enabled && !next.enabled);
-    const enteredManual = next.manual && !previous?.manual;
     if (previous?.document !== next.document) {
-      this.intent = next.document ? 'armed' : 'dismissed';
+      this.intent = next.document && next.autoOpen ? 'armed' : 'dismissed';
+      this.tapArmed = false;
+      this.tapArmedUntil = undefined;
       this.missingUntil = undefined;
       this.explicitlyRequested = this.systemHidden = false;
     }
-    if (!next.enabled || enteredManual) this.dismiss();
-    else if (previous?.manual && !next.manual) this.intent = 'armed';
+    if (!next.enabled) this.dismiss();
+    else if (previous && previous.document === next.document && next.document) {
+      if (!previous.autoOpen && next.autoOpen) {
+        this.intent = 'armed';
+        this.tapArmed = false;
+        this.tapArmedUntil = undefined;
+      } else if (previous.autoOpen && !next.autoOpen && this.intent === 'armed' && !this.tapArmed)
+        this.intent = 'dismissed';
+    }
+    if (this.tapArmedUntil !== undefined && next.now >= this.tapArmedUntil) this.dismiss();
+    if (next.editor === 'active') this.tapArmedUntil = undefined;
     this.context = next;
-    if (boundary || enteredManual) {
+    if (boundary) {
       this.missingUntil = undefined;
       if (next.focused) return { close: 'boundary' };
     }
@@ -55,35 +70,34 @@ export class KeyboardSession {
     return this.openIfReady();
   }
 
-  activate(explicit = false): KeyboardCommand {
+  activate(explicit = false, now = performance.now()): KeyboardCommand {
     const c = this.context;
-    if (!c?.document || !c.enabled || (c.manual && !explicit)) return {};
+    if (!c?.document || !c.enabled) return {};
     this.intent = 'armed';
+    this.tapArmed = true;
+    this.tapArmedUntil = !c.autoOpen && c.editor !== 'active' ? now + 1500 : undefined;
     this.explicitlyRequested = explicit;
     this.systemHidden = false;
-    return this.openIfReady(explicit);
+    return this.openIfReady();
   }
-  private openIfReady(explicit = false): KeyboardCommand {
+  private openIfReady(): KeyboardCommand {
     const c = this.context;
-    if (
-      !c?.enabled ||
-      c.editor !== 'active' ||
-      !c.ready ||
-      (c.manual && !explicit) ||
-      this.intent !== 'armed'
-    )
-      return {};
+    if (!c?.enabled || c.editor !== 'active' || !c.ready || this.intent !== 'armed') return {};
     // Consume even if the OS rejects the focus request. A render is not a retry.
     this.intent = 'attached';
+    this.tapArmedUntil = undefined;
     return { open: true };
   }
   attached(explicit: boolean) {
     this.intent = 'attached';
+    this.tapArmedUntil = undefined;
     this.explicitlyRequested = explicit;
     this.systemHidden = false;
   }
   dismiss() {
     this.intent = 'dismissed';
+    this.tapArmed = false;
+    this.tapArmedUntil = undefined;
     this.missingUntil = undefined;
     this.explicitlyRequested = false;
   }

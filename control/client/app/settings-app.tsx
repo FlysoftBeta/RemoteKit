@@ -8,6 +8,7 @@ import {
   ExpandMore,
   ImportExportOutlined,
   LockOutlined,
+  KeyboardOutlined,
   PaletteOutlined,
   TvOutlined,
 } from '@mui/icons-material';
@@ -42,6 +43,7 @@ import { formatError } from '../util/format-error';
 const sections = [
   ['appearance', '外观', <PaletteOutlined />],
   ['media', '画面', <TvOutlined />],
+  ['input', '输入', <KeyboardOutlined />],
   ['security', '安全', <LockOutlined />],
   ['apps', 'App', <AppsOutlined />],
   ['import', '会话导入', <ImportExportOutlined />],

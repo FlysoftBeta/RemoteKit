@@ -3,7 +3,7 @@ import test from 'node:test';
 import { DownloadOutlined } from '@mui/icons-material';
 import { sourceIcon } from '../client/files/files-organization';
 import type { LibraryEntry, LibrarySnapshot } from '../shared/file-library';
-import { filesInView, readFilesState, removalCounts, sourceAppName } from '../client/files/files-app-state';
+import { filesInView, removalCounts, sourceAppName } from '../client/files/files-app-state';
 
 const source = { app: 'browser', channel: 'example.com' };
 const now = 20 * 86400_000;
@@ -27,26 +27,6 @@ const snapshot = (entries: LibraryEntry[]): LibrarySnapshot => ({
   sources: [{ ...source, count: entries.length, excluded: true }],
   excludedSources: [source],
   basketPartitionId: null,
-});
-
-test('Files view state validates and emits bounded canonical JSON', () => {
-  const defaults = { view: 'all', query: '', layout: 'grid' };
-  for (const value of [
-    null,
-    [],
-    { view: 'groups' },
-    { view: 'all', query: 'x'.repeat(4096), layout: 'grid' },
-    { view: { source: null }, query: '', layout: 'grid' },
-    { view: { partition: 1 }, query: '', layout: 'grid' },
-  ]) {
-    assert.deepEqual(readFilesState(value), defaults);
-  }
-  const value = { view: { source }, query: '照片', layout: 'list', extra: 'discard' };
-  assert.deepEqual(readFilesState(value), { view: { source }, query: '照片', layout: 'list' });
-  assert.ok(new TextEncoder().encode(JSON.stringify(readFilesState(value))).length <= 4096);
-  const circular: Record<string, unknown> = {};
-  circular.self = circular;
-  assert.deepEqual(readFilesState(circular), defaults);
 });
 
 test('aggregate views hide excluded sources; partition and source views retain them', () => {

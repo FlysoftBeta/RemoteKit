@@ -15,6 +15,7 @@ import type { FloatingActions } from './floating-actions';
 import { deadZoneHeight, useTopInsetProbe } from './top-inset';
 import { setUiScale } from './ui-scale';
 import { selectVisibility } from './visibility';
+import { useWindowFullscreen } from './window-fullscreen';
 import { WindowFrame } from './window-frame';
 import { WindowDivider } from './window-divider';
 import { appName } from './app-icon';
@@ -36,7 +37,8 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
   const shell = useRef<HTMLElement>(null);
   const previousSpace = useRef<{ id: string | null; windowIds: string[] } | undefined>(undefined);
   const contentWidth = width;
-  const pageFullscreen = !!state?.pageFullscreen;
+  const windowFullscreen = useWindowFullscreen();
+  const fullscreen = !!state?.pageFullscreen || !!windowFullscreen;
   const scale = state?.workspace.settings.workspace.uiScale ?? 1;
   const insets = useTopInsetProbe();
   const deadZone = deadZoneHeight(state?.workspace.settings.workspace.topDeadZone ?? 'off', insets);
@@ -63,7 +65,7 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
       setWidth(width);
       media.viewport.measure(
         Math.max(1, width),
-        Math.max(1, height - 16),
+        Math.max(1, height),
         (window.devicePixelRatio || 1) * scale,
         document.visibilityState !== 'hidden',
       );
@@ -83,12 +85,12 @@ export function useWorkspaceStage(media: ViewerSession, state: ProductState | nu
       window.removeEventListener('resize', measure);
       document.removeEventListener('visibilitychange', measure);
     };
-  }, [showShell, media, scale, deadZone, pageFullscreen]);
+  }, [showShell, media, scale, deadZone, fullscreen]);
   const call: WorkspaceCall = useCallback((method, params) => media.control.request(method, params), [media]);
   const capturePreviews = usePagePreviews(
     state,
     shell,
-    state && showShell ? selectVisibility(state, contentWidth).visibleWindowIds : [],
+    state && showShell ? selectVisibility(state, contentWidth, windowFullscreen).visibleWindowIds : [],
     call,
   );
   const action: Action = useCallback(
@@ -161,7 +163,10 @@ export function Stage({
   state: ProductState;
   media: ViewerSession;
   stage: WorkspaceStage;
-  controls: Pick<SystemControls, 'fullscreen' | 'productReady' | 'diagnosticState' | 'diagnostics'>;
+  controls: Pick<
+    SystemControls,
+    'fullscreen' | 'windowFullscreen' | 'productReady' | 'diagnosticState' | 'diagnostics'
+  >;
   floatingActions: FloatingActions;
   workspaceState: WorkspaceSnapshot;
   operationState: OperationsSnapshot;
@@ -180,7 +185,7 @@ export function Stage({
   const report = media.workspace.report;
   const onGeometry = media.viewport.setGeometry;
   const workspace = state.workspace;
-  const visibility = selectVisibility(state, contentWidth);
+  const visibility = selectVisibility(state, contentWidth, controls.windowFullscreen);
   const { sideBySide, space: activeSpace } = visibility;
   const windows = [...workspace.windows].sort((a, b) => {
     const ai = activeSpace?.windowIds.indexOf(a.id) ?? -1;

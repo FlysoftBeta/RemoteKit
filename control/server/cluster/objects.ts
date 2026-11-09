@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, type ErrorCode } from '../../shared/errors';
 import type { ControlDatabase } from '../persistence/database';
 import type { NodeLink, NodeRegistry } from './node-link';
 import { clusterObjectKeys } from './keys';
@@ -26,6 +26,14 @@ interface IndexedObject {
   stored_sha256: string;
   created_at: bigint;
 }
+interface RenderFailure {
+  reason: ErrorCode;
+  message: string;
+  failed_at: bigint;
+  attempts: bigint;
+  retry_at: bigint | null;
+  node_id: string | null;
+}
 export class ObjectIndex {
   private readonly fetches = new Map<string, Set<string>>();
   private readonly readFetches = new Map<string, Set<string>>();
@@ -48,6 +56,7 @@ export class ObjectIndex {
     readonly tenantObjectBytes: number,
     private readonly placedOn: (tenant: string, node: string) => boolean,
     private readonly checkpointing: (tenant: string) => boolean,
+    private readonly now = Date.now,
   ) {
     this.retired = retiringObjects(store);
     nodes.objectKeys = clusterObjectKeys(store);
@@ -101,9 +110,9 @@ export class ObjectIndex {
   private rendering(node: NodeLink, sourceId: string) {
     const operation = this.renders.get(sourceId);
     return (
-      operation?.node === node &&
       node.state.state === 'ready' &&
-      operation.epoch === node.state.connectionEpoch
+      ((operation?.node === node && operation.epoch === node.state.connectionEpoch) ||
+        this.renderFailure(sourceId)?.node_id === node.nodeId)
     );
   }
   derivation(node: NodeLink, message: Record<string, any>) {
@@ -118,7 +127,54 @@ export class ObjectIndex {
       this.require(message.tenantId, sourceId);
     }
     const id = this.derived(sourceId, 'document');
+    if (
+      !id &&
+      message.tenantId &&
+      (this.renders.has(sourceId) ||
+        this.renderFailure(sourceId) ||
+        this.store.db
+          .prepare('SELECT 1 FROM learning_downloads WHERE object_id=? AND document=1')
+          .get(sourceId))
+    ) {
+      this.render(sourceId);
+      if (this.renders.has(sourceId)) throw new RemoteKitError('busy', 'Document conversion in progress');
+      const failure = this.renderFailure(sourceId);
+      throw new RemoteKitError(
+        failure?.reason ?? 'unavailable',
+        failure?.message ?? 'Document conversion unavailable',
+      );
+    }
     return id ? { id } : null;
+  }
+  private renderFailure(id: string) {
+    return this.store.db.prepare('SELECT * FROM object_render_failures WHERE source_id=?').get(id) as
+      RenderFailure | undefined;
+  }
+  private failRender(id: string, error: unknown, node?: NodeLink) {
+    const value = error as { code?: ErrorCode; message?: string };
+    const reason = value?.code === 'invalid_request' ? 'rejected' : (value?.code ?? 'unavailable');
+    const attempts = Number(this.renderFailure(id)?.attempts ?? 0) + 1;
+    const failedAt = this.now();
+    const retryAt =
+      reason === 'rejected' ? null : failedAt + Math.min(24, 2 ** Math.min(attempts - 1, 5)) * 3600_000;
+    // An unknown outcome may still be running. Retry only that node, whose queue deduplicates by source.
+    const nodeId = reason === 'outcome_unknown' ? node?.nodeId : this.renderFailure(id)?.node_id;
+    this.store.db
+      .prepare(
+        `INSERT INTO object_render_failures VALUES (?,'failed',?,?,?,?,?,?)
+      ON CONFLICT(source_id) DO UPDATE SET reason=excluded.reason,message=excluded.message,
+      failed_at=excluded.failed_at,attempts=excluded.attempts,retry_at=excluded.retry_at,node_id=excluded.node_id`,
+      )
+      .run(
+        id,
+        reason,
+        value?.message ?? 'Document conversion unavailable',
+        failedAt,
+        attempts,
+        retryAt,
+        nodeId ?? null,
+      );
+    console.error('object.render failed', id, error);
   }
   render(id: string): void {
     if (this.closed || this.renders.has(id) || this.derived(id, 'document')) return;
@@ -130,12 +186,15 @@ export class ObjectIndex {
       console.error('object.render failed', id, 'Source object is unavailable');
       return;
     }
+    const failure = this.renderFailure(id);
+    if (failure && (failure.retry_at === null || Number(failure.retry_at) > this.now())) return;
     const replicas = new Set(this.sources(id).map((source) => source.nodeId));
     const node = this.nodes
       .all()
       .filter(
         (candidate) =>
           candidate.state.state === 'ready' &&
+          (!failure?.node_id || candidate.nodeId === failure.node_id) &&
           !candidate.diskDraining &&
           !this.nodes.isRemoved(candidate.nodeId),
       )
@@ -146,7 +205,7 @@ export class ObjectIndex {
           a.nodeId.localeCompare(b.nodeId),
       )[0];
     if (!node || node.state.state !== 'ready') {
-      console.error('object.render failed', id, 'No ready node');
+      this.failRender(id, new RemoteKitError('unavailable', 'No ready node'));
       return;
     }
     this.renders.set(id, { node, epoch: node.state.connectionEpoch });
@@ -155,9 +214,10 @@ export class ObjectIndex {
         try {
           const result = await node.request('object.render', '', { params: { id } }, 6 * 60_000);
           if (!objectId(result.documentId) || this.derived(id, 'document') !== result.documentId)
-            throw new RemoteKitError('rejected', 'Invalid object render result');
+            throw new RemoteKitError('unavailable', 'Invalid object render result');
+          this.store.db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(id);
         } catch (error) {
-          console.error('object.render failed', id, error);
+          if (!this.derived(id, 'document')) this.failRender(id, error, node);
         } finally {
           this.renders.delete(id);
         }
@@ -225,6 +285,8 @@ export class ObjectIndex {
         this.store.db
           .prepare('INSERT OR IGNORE INTO object_derivations VALUES (?,?,?)')
           .run(id, derivedFrom, kind);
+      if (kind === 'document')
+        this.store.db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(derivedFrom);
       if (tenant) {
         this.store.db
           .prepare(
@@ -499,6 +561,7 @@ export class ObjectIndex {
       )
         continue;
       this.retired.add(object.id);
+      this.store.db.prepare('DELETE FROM object_render_failures WHERE source_id=?').run(object.id);
       try {
         for (const replica of this.store.db
           .prepare('SELECT node_id FROM object_replicas WHERE id=?')

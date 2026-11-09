@@ -1,3 +1,4 @@
+import { KeyboardPreferenceContext } from '../editing/local-autofocus';
 import { Suspense, lazy, useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import { ViewerSession } from '../viewer-session';
 import { BlankScreen, RevealScreen } from '../auth/lock-screen';
@@ -75,107 +76,110 @@ export function WorkspaceView({ logout, expired }: { logout(): void; expired(): 
   useEffect(() => {
     if (status === 'expired') expired();
   }, [status, expired]);
-  if (localLock || auth?.locked !== false)
-    return (
-      <RevealScreen key={`${auth?.epoch ?? 'connecting'}:${localLock ?? ''}`}>
-        {(close) => (
-          <UnlockView
-            auth={localLock ? null : auth}
-            request={controls.authRequest}
-            camera={controls.camera}
-            close={close}
-            retry={() => (status === 'revoked' ? location.reload() : media.control.restart())}
-          />
-        )}
-      </RevealScreen>
-    );
-  if (!state) return <BlankScreen />;
-  const pending = state.workspace.pendingClose;
+  const pending = state?.workspace.pendingClose;
   const foreground =
-    !overlays.launcherOpen && !(pending && !pending.awaiting)
-      ? selectVisibility(state, stage.width).foreground
+    state && !overlays.launcherOpen && !(pending && !pending.awaiting)
+      ? selectVisibility(state, stage.width, controls.windowFullscreen).foreground
       : null;
   return (
-    <FileLibraryContext.Provider value={library}>
-      <FloatingActionsContext.Provider value={floatingActions}>
-        {stage.deadZone > 0 && (
-          <div
-            className={`viewer-dead-zone${controls.fullscreen ? ' fullscreen' : ''}`}
-            style={{ height: stage.deadZone / stage.scale }}
-            aria-hidden
-          />
-        )}
-        <WindowDragProvider
-          state={state}
-          snapshots={stage.snapshots}
-          action={stage.action}
-          report={media.workspace.report}
-          openItem={async (item, placement) => {
-            await openLauncherItem({
-              item,
-              placement,
-              state,
-              action: stage.action,
-              call: stage.call,
-              media,
-              notify: stage.notify,
-            });
-            overlays.closeLauncher();
-          }}
-        >
-          <Stage
-            state={state}
-            media={media}
-            stage={stage}
-            controls={controls}
-            floatingActions={floatingActions}
-            workspaceState={workspaceState}
-            operationState={operationState}
-            snapshot={snapshot}
-            viewportNotice={viewportNotice}
-            obscured={overlays.launcherOpen}
-            foreground={foreground}
-            openLauncher={overlays.openLauncher}
-            logout={logout}
-            appContent={(appId, viewState, onState) =>
-              appId === 'admin' ? (
-                <Suspense fallback={null}>
-                  <AdminApp
-                    online={controls.productReady}
-                    self={state.user.username}
-                    call={adminCall}
-                    viewState={viewState}
-                    onState={onState}
-                  />
-                </Suspense>
-              ) : (
-                <WorkspaceSettings
-                  state={state}
-                  viewState={viewState}
-                  onState={onState}
-                  action={stage.action}
-                  call={stage.call}
-                  sessionImportCall={sessionImportCall}
-                  controls={controls}
-                  workspaceState={workspaceState}
-                  auth={auth}
-                  logout={logout}
-                />
-              )
-            }
-          >
-            <OverlayHost
-              state={state}
-              media={media}
-              stage={stage}
-              controls={controls}
-              overlays={overlays}
-              foreground={foreground}
-              readAnnouncement={(id) => media.control.request('announcement.read', { id })}
+    <KeyboardPreferenceContext.Provider value={state?.workspace.settings.workspace.autoKeyboard ?? false}>
+      {localLock || auth?.locked !== false ? (
+        <RevealScreen key={`${auth?.epoch ?? 'connecting'}:${localLock ?? ''}`}>
+          {(close) => (
+            <UnlockView
+              auth={localLock ? null : auth}
+              request={controls.authRequest}
+              camera={controls.camera}
+              close={close}
+              retry={() => (status === 'revoked' ? location.reload() : media.control.restart())}
             />
-          </Stage>
-        </WindowDragProvider>
-      </FloatingActionsContext.Provider>
-    </FileLibraryContext.Provider>
+          )}
+        </RevealScreen>
+      ) : !state ? (
+        <BlankScreen />
+      ) : (
+        <FileLibraryContext.Provider value={library}>
+          <FloatingActionsContext.Provider value={floatingActions}>
+            {stage.deadZone > 0 && (
+              <div
+                className={`viewer-dead-zone${controls.fullscreen ? ' fullscreen' : ''}`}
+                style={{ height: stage.deadZone / stage.scale }}
+                aria-hidden
+              />
+            )}
+            <WindowDragProvider
+              state={state}
+              snapshots={stage.snapshots}
+              action={stage.action}
+              report={media.workspace.report}
+              openItem={async (item, placement) => {
+                await openLauncherItem({
+                  item,
+                  placement,
+                  state,
+                  action: stage.action,
+                  call: stage.call,
+                  media,
+                  notify: stage.notify,
+                });
+                overlays.closeLauncher();
+              }}
+            >
+              <Stage
+                state={state}
+                media={media}
+                stage={stage}
+                controls={controls}
+                floatingActions={floatingActions}
+                workspaceState={workspaceState}
+                operationState={operationState}
+                snapshot={snapshot}
+                viewportNotice={viewportNotice}
+                obscured={overlays.launcherOpen}
+                foreground={foreground}
+                openLauncher={overlays.openLauncher}
+                logout={logout}
+                appContent={(appId, viewState, onState) =>
+                  appId === 'admin' ? (
+                    <Suspense fallback={null}>
+                      <AdminApp
+                        online={controls.productReady}
+                        self={state.user.username}
+                        call={adminCall}
+                        viewState={viewState}
+                        onState={onState}
+                      />
+                    </Suspense>
+                  ) : (
+                    <WorkspaceSettings
+                      state={state}
+                      viewState={viewState}
+                      onState={onState}
+                      action={stage.action}
+                      call={stage.call}
+                      sessionImportCall={sessionImportCall}
+                      controls={controls}
+                      workspaceState={workspaceState}
+                      auth={auth}
+                      logout={logout}
+                    />
+                  )
+                }
+              >
+                <OverlayHost
+                  state={state}
+                  media={media}
+                  stage={stage}
+                  controls={controls}
+                  overlays={overlays}
+                  foreground={foreground}
+                  readAnnouncement={(id) => media.control.request('announcement.read', { id })}
+                />
+              </Stage>
+            </WindowDragProvider>
+          </FloatingActionsContext.Provider>
+        </FileLibraryContext.Provider>
+      )}
+    </KeyboardPreferenceContext.Provider>
   );
 }

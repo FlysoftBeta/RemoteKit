@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../../editing/local-autofocus';
 import Add from '@mui/icons-material/Add';
 import { Box, Button, Checkbox, FormControlLabel, Paper, TextField, Typography } from '@mui/material';
 import { useState } from 'react';
@@ -108,6 +109,7 @@ function AnnouncementEditor({
   onClose(): void;
   onSave(draft: { title: string; body: string; republish: boolean }): Promise<void>;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [title, setTitle] = useState(item?.title ?? ''),
     [body, setBody] = useState(item?.body ?? ''),
     [republish, setRepublish] = useState(false);
@@ -123,7 +125,7 @@ function AnnouncementEditor({
       <TextField
         label="标题"
         value={title}
-        autoFocus
+        inputRef={autoFocusRef}
         fullWidth
         slotProps={{ htmlInput: { maxLength: ANNOUNCEMENT_LIMITS.title } }}
         onChange={(event) => setTitle(event.target.value)}

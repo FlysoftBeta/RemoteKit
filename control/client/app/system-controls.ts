@@ -10,6 +10,8 @@ import { DiagnosticCollection, type DiagnosticState } from '../media/diagnostic-
 import { useFloatingAction, type FloatingActions } from './floating-actions';
 import type { Action } from './product-dialogs';
 import { toggleFullscreen, useAutoFullscreen } from './use-auto-fullscreen';
+import { fullscreenWindowId } from './visibility';
+import { exitWindowFullscreen, useWindowFullscreen } from './window-fullscreen';
 const FULLSCREEN_EXIT_ANCHORS = ['top-left', 'top', 'top-right'] as const;
 export function useSystemControls({
   media,
@@ -81,8 +83,20 @@ export function useSystemControls({
       });
   };
   const productReady = status === 'online' && snapshot.authorization.ready;
-  const fullscreen = state?.pageFullscreen;
-  const fullscreenTarget = fullscreen?.target;
+  const pageFullscreen = state?.pageFullscreen;
+  const fullscreenTarget = pageFullscreen?.target;
+  const chosenFullscreen = useWindowFullscreen();
+  const activeWindowIds = state?.workspace.spaces.find(
+    (space) => space.id === state.workspace.activeSpaceId,
+  )?.windowIds;
+  // A window shown fullscreen by choice ends when it leaves the stage (closed, moved, other space).
+  const chosenOnStage = !!chosenFullscreen && !!activeWindowIds?.includes(chosenFullscreen);
+  useEffect(() => {
+    if (chosenFullscreen && state && !chosenOnStage) exitWindowFullscreen();
+  }, [chosenFullscreen, chosenOnStage, state]);
+  const windowFullscreen = chosenOnStage ? chosenFullscreen : null;
+  const fullscreenWindow = state ? fullscreenWindowId(state, windowFullscreen) : undefined;
+  const fullscreen = fullscreenWindow ? { windowId: fullscreenWindow } : undefined;
   const exitingFullscreen = pendingOperations.some(
     (entry) =>
       entry.action.type === 'page.exitFullscreen' &&
@@ -128,7 +142,16 @@ export function useSystemControls({
           disabled: !productReady || exitingFullscreen,
           run: () => exitFullscreen.current(),
         }
-      : null,
+      : windowFullscreen
+        ? {
+            order: 0,
+            anchor: 'top-right',
+            anchors: FULLSCREEN_EXIT_ANCHORS,
+            label: '退出全屏',
+            icon: 'fullscreen-exit',
+            run: exitWindowFullscreen,
+          }
+        : null,
     floatingActions,
   );
   useFloatingAction(
@@ -180,6 +203,7 @@ export function useSystemControls({
     diagnosticState,
     productReady,
     fullscreen,
+    windowFullscreen,
     browserFullscreen: {
       active: browserFullscreen,
       toggle: () => void toggleFullscreen().catch(report),

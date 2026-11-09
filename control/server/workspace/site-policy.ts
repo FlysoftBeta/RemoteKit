@@ -46,7 +46,6 @@ export function pruneSite(state: ProductWorkspace, origin: string) {
   const site = state.sites[origin];
   if (!site) return;
   if (!site.tabletUa) delete site.tabletUa;
-  if (!site.manualKeyboard) delete site.manualKeyboard;
   if (!Object.keys(site.permissions ?? {}).length) delete site.permissions;
   if (!site.protocolHandlers?.length) delete site.protocolHandlers;
   if (!Object.keys(site).length) delete state.sites[origin];

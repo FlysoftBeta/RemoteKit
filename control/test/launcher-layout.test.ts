@@ -93,10 +93,20 @@ test('tile sizes follow relative use, gated by rank so sizes stay mixed', () => 
   );
   const unused = Array.from({ length: 4 }, (_, index) => item('u' + index, 'apps', 0));
   assert.ok(launcherLayout(unused, 800).groups[0].tiles.every((tile) => tile.size === 'small'));
-  assert.equal(
-    launcherLayout([item('a', 'frequent', 9), item('b', 'frequent', 7)], 800).groups[0].tiles[0].size,
-    'wide',
+  const pair = launcherLayout([item('a', 'frequent', 9), item('b', 'frequent', 7)], 800).groups[0];
+  assert.equal(pair.rows, 1);
+  assert.deepEqual(
+    pair.tiles.map((tile) => tile.size),
+    ['small', 'small'],
   );
+});
+
+test('three or more tiles wrap onto two rows on a wide tablet screen', () => {
+  const entries = [9, 7, 5, 1].map((score, index) => item('w' + index, 'frequent', score));
+  const group = launcherLayout(entries, 700, '', 1280).groups[0];
+  assert.equal(group.rows, 2);
+  assert.ok(group.tiles.some((tile) => tile.size !== 'small'));
+  for (const tile of group.tiles) assert.ok(tile.row + tile.rows <= 2);
 });
 
 test('packing fills the first column top to bottom before extending right', () => {
@@ -122,9 +132,10 @@ test('packing fills the first column top to bottom before extending right', () =
   );
   assert.equal(packed.columns, 3);
   assert.deepEqual(
-    packTiles(['large', 'small'], 1).cells.map((cell) => [cell.size, cell.column]),
+    packTiles(['large', 'wide', 'small'], 1).cells.map((cell) => [cell.size, cell.column]),
     [
-      ['wide', 0],
+      ['small', 0],
+      ['small', 1],
       ['small', 2],
     ],
   );

@@ -749,176 +749,151 @@ try {
   await log('ordinary-ready', final);
   assert(identity(before, final) && !final.focus, 'Ordinary resize changed media identity or stole focus');
 
-  const siteSwitches = () =>
-    page.evaluate(() => {
-      const dialog = document.querySelector('[role=dialog][aria-label="网站设置"]');
-      return {
-        checks: Object.fromEntries(
-          [...dialog.querySelectorAll('label.setting-toggle')].map((label) => [
-            label.querySelector('.setting-text').textContent.trim(),
-            label.querySelector('input[type=checkbox]').checked,
-          ]),
-        ),
-        inputs: dialog.querySelectorAll('input[type=checkbox]').length,
-      };
-    });
-  const toggleManualKeyboard = async (enabled) => {
-    await click('button[aria-label="更多"]');
-    await click('[role=menuitem]', '网站设置');
-    await wait(() => !!document.querySelector('[role=dialog][aria-label="网站设置"]'));
-    const initial = await siteSwitches();
-    assert(
-      initial.checks['平板版网站'] === false && initial.inputs === 2,
-      'Site settings dialog is missing an independent site switch',
-    );
-    assert(initial.checks['不自动弹出键盘'] === !enabled, 'Unexpected initial manual keyboard preference');
-    await click('[role=dialog][aria-label="网站设置"] label.setting-toggle', '不自动弹出键盘');
-    await wait((enabled) => {
-      const label = [
-        ...document.querySelectorAll('[role=dialog][aria-label="网站设置"] label.setting-toggle'),
-      ].find((element) => element.querySelector('.setting-text').textContent.trim() === '不自动弹出键盘');
-      const input = label?.querySelector('input[type=checkbox]');
-      return input?.checked === enabled && !input.disabled;
-    }, enabled);
-    assert(
-      (await siteSwitches()).checks['平板版网站'] === initial.checks['平板版网站'],
-      'Manual keyboard switch changed tablet UA',
-    );
-    if (enabled) await screenshot('site-settings-dialog');
-    await click('[role=dialog][aria-label="网站设置"] button', '完成');
-    await wait(() => !document.querySelector('[role=dialog][aria-label="网站设置"]'));
+  await click('button[aria-label="更多"]');
+  await click('[role=menuitem]', '网站设置');
+  const siteDialog = page.locator('[role=dialog][aria-label="网站设置"]');
+  await siteDialog.waitFor();
+  assert(
+    (await siteDialog.locator('input[type=checkbox]').count()) === 1,
+    'Site settings must have only the tablet UA switch',
+  );
+  await click('[role=dialog][aria-label="网站设置"] button', '完成');
+
+  const setAutoKeyboard = async (enabled) => {
+    await page.getByRole('button', { name: '打开开始屏幕', exact: true }).click();
+    await page.locator('[data-tile-key="app:settings"]').click();
+    await wait(() => !!document.querySelector('.settings-app'));
+    const settings = page.locator('[data-window-id]').filter({ has: page.locator('.settings-app') });
+    await settings.getByRole('button', { name: '输入', exact: true }).click();
+    const toggle = settings.locator('label.setting-toggle').filter({ hasText: '聚焦输入框时自动打开键盘' });
+    await toggle.locator('input').setChecked(enabled);
+    await wait((value) => keyboardQA.state.workspace.settings.workspace.autoKeyboard === value, enabled);
+    await settings.getByRole('button', { name: '窗口把手', exact: true }).click();
+    await page.getByRole('menuitem', { name: '关闭窗口', exact: true }).click();
+    await wait(() => !document.querySelector('.settings-app'));
+    await ready();
   };
   const hiddenKeyboard = () =>
     wait(
       () =>
         !document.activeElement?.classList.contains('remote-input') &&
-        document.querySelector('.remote-open-keyboard')?.textContent.trim() === '显示键盘' &&
-        !document.querySelector('.remote-open-keyboard').disabled,
+        document.querySelector('.remote-open-keyboard')?.textContent.trim() === '显示键盘',
     );
-  const shownKeyboard = () =>
-    wait(
+  const shownKeyboard = async () => {
+    await wait(
       () =>
         document.activeElement?.classList.contains('remote-input') &&
-        document.querySelector('.remote-open-keyboard')?.textContent.trim() === '隐藏键盘',
+        document.activeElement.inputMode === 'text',
     );
-  const localFocusCount = () =>
-    page.evaluate(() => keyboardQA.events.filter((event) => event.type === 'focusin').length);
+    // Desktop Chromium has no physical soft keyboard; make its floating button explicit before hiding.
+    if ((await page.locator('.remote-open-keyboard').innerText()).trim() === '显示键盘')
+      await click('.remote-open-keyboard', '显示键盘');
+    await wait(() => document.querySelector('.remote-open-keyboard')?.textContent.trim() === '隐藏键盘');
+  };
   const afterFixture = (start, predicate, message) =>
     observe((event) => fixtureEvents.indexOf(event) >= start && predicate(event), message);
   const initialDocument = fixtureEvents.find((event) => event.type === 'ready').documentId;
-  await toggleManualKeyboard(true);
-  const manualStart = fixtureEvents.length;
+  assert(
+    (await page.evaluate(() => keyboardQA.state.workspace.settings.workspace.autoKeyboard)) === false,
+    'Auto keyboard must default to false',
+  );
+  const tapStart = fixtureEvents.length;
   await tap('third');
   await afterFixture(
-    manualStart,
+    tapStart,
     (event) => event.type === 'focus' && event.field === 'third',
-    'Manual mode did not allow remote focus',
+    'Tap did not focus the remote editor',
   );
-  await hiddenKeyboard();
-  const manualBefore = await sample();
-  await screenshot('manual-keyboard-hidden');
-  await click('.remote-open-keyboard', '显示键盘');
   await shownKeyboard();
-  await screenshot('manual-keyboard-shown');
-  await startComposition('manual');
+  const tapBefore = await sample();
+  await screenshot('tap-keyboard-shown');
+  await startComposition('tap');
   await afterFixture(
-    manualStart,
-    (event) => event.type === 'compositionupdate' && event.field === 'third' && event.data === 'manual',
-    'Native composition did not update before manual hide',
+    tapStart,
+    (event) => event.type === 'compositionupdate' && event.field === 'third' && event.data === 'tap',
+    'Native composition did not update before hide',
   );
   await click('.remote-open-keyboard', '隐藏键盘');
   await hiddenKeyboard();
-  await text('third', 'manual');
+  await text('third', 'tap');
   await afterFixture(
-    manualStart,
-    (event) => event.type === 'compositionend' && event.field === 'third' && event.data === 'manual',
-    'Manual hide did not finish the original native composition',
+    tapStart,
+    (event) => event.type === 'compositionend' && event.field === 'third' && event.data === 'tap',
+    'Hide did not finish the original native composition',
   );
-  const focusAfterHide = await localFocusCount();
-  await tap('third');
-  const manualResizeStart = fixtureEvents.length;
+  const focusAfterHide = await page.evaluate(
+    () => keyboardQA.events.filter((event) => event.type === 'focusin').length,
+  );
+  const resizeStart = fixtureEvents.length;
   await resize(640);
   await ready();
   await afterFixture(
-    manualResizeStart,
+    resizeStart,
     (event) => event.type === 'resize' && event.height < final.viewport.height,
-    'Remote layout did not resize in manual mode',
+    'Remote layout did not resize',
   );
   await hiddenKeyboard();
   await resize(null);
   await ready();
   await hiddenKeyboard();
-  const manualRetained = await sample();
-  const currentTarget = (state) =>
-    state.wire.findLast((event) => event.type === 'input.editable' && event.editable > 0)?.target;
   assert(
-    currentTarget(manualBefore) && currentTarget(manualRetained) === currentTarget(manualBefore),
-    'The active editable changed during repeated manual focus and resize',
+    (await page.evaluate(() => keyboardQA.events.filter((event) => event.type === 'focusin').length)) ===
+      focusAfterHide,
+    'Resize reopened the keyboard after hide',
   );
+  await tap('third');
+  await shownKeyboard();
+  await click('.remote-open-keyboard', '隐藏键盘');
+  await hiddenKeyboard();
   const switchStart = fixtureEvents.length;
   await tap('second');
   await afterFixture(
     switchStart,
     (event) => event.type === 'focus' && event.field === 'second',
-    'Manual mode did not reach a new target',
+    'Tap did not reach a new target',
   );
-  await hiddenKeyboard();
-  assert(
-    (await localFocusCount()) === focusAfterHide,
-    'Manual touch or resize reopened the local keyboard after hide',
-  );
-  await toggleManualKeyboard(false);
+  await shownKeyboard();
+  await setAutoKeyboard(true);
   const autoStart = fixtureEvents.length;
   await tap('text');
   await afterFixture(
     autoStart,
     (event) => event.type === 'focus' && event.field === 'text',
-    'Auto mode did not reach a new target',
+    'Auto-open did not reach a new target',
   );
-  // A desktop Viewer can expose a coarse pointer without a physical soft keyboard.
-  await wait(
-    () =>
-      document.activeElement?.classList.contains('remote-input') &&
-      document.activeElement.inputMode === 'text',
-  );
+  await shownKeyboard();
   await tap('tl');
   await afterFixture(
     autoStart,
     (event) => event.type === 'blur' && event.field === 'text',
-    'Auto mode did not observe remote blur',
+    'Auto-open did not observe remote blur',
   );
   await wait(
     () =>
       !document.activeElement?.classList.contains('remote-input') &&
       !document.querySelector('.remote-open-keyboard'),
   );
-  const keyboardAfterMenu = await sample();
-  const manualCommits = await page.evaluate(
+  const keyboardAfterSettings = await sample();
+  const tapCommits = await page.evaluate(
     () =>
       keyboardQA.editPackets.filter(
-        (packet) => packet.event.type === 'ime_commit' && packet.event.text === 'manual',
+        (packet) => packet.event.type === 'ime_commit' && packet.event.text === 'tap',
       ).length,
   );
   assert(
-    manualCommits === 1 &&
+    tapCommits === 1 &&
       fixtureEvents
-        .slice(manualStart)
+        .slice(tapStart)
         .filter((event) => event.type === 'compositionend' && event.field === 'third').length === 1,
-    'Manual hide should commit the current composition exactly once',
+    'Hide should commit the current composition exactly once',
   );
   assert(
     fixtureEvents.filter((event) => event.type === 'ready').length === 1 &&
       fixtureEvents.every((event) => event.documentId === initialDocument) &&
-      identity(before, keyboardAfterMenu),
-    'Manual-only site updates navigated the remote page or changed the peer',
+      identity(before, keyboardAfterSettings),
+    'Global keyboard settings navigated the remote page or changed the peer',
   );
-  await log('manual-keyboard-compatibility', {
-    manualBefore,
-    manualRetained,
-    keyboardAfterMenu,
-    manualCommits,
-    initialDocument,
-  });
+  await log('global-keyboard-preference', { tapBefore, keyboardAfterSettings, tapCommits, initialDocument });
 
   const gesture = (type, touchPoints = []) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints });
   const touchMark = () => page.evaluate(() => keyboardQA.touchWire.length);

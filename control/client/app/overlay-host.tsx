@@ -9,7 +9,8 @@ import {
 import type { ViewerSession } from '../viewer-session';
 import { Launcher } from './launcher';
 import { launcherActions, launcherNavigation, launcherPlacement } from './launcher-actions';
-import { HomeBar } from './home-bar';
+import { useFloatingAction } from './floating-actions';
+import { useWindowFullscreen } from './window-fullscreen';
 import { PageDialogs, type Action } from './product-dialogs';
 import { AudioControls } from './audio-controls';
 import { SyncStatus } from './sync-status';
@@ -90,14 +91,8 @@ export async function openLauncherItem({
           windowId: win.id,
           state: {
             ...win.state,
-            previewEntryId: item.entryId,
-            previewRequestId: receipt.operationId,
+            launch: { requestId: receipt.operationId, entryId: item.entryId },
           },
-        });
-        await call('usage.record', {
-          item: `file:${item.entryId}`,
-          windowId: win.id,
-          source: 'launcher',
         });
       }
     }
@@ -127,6 +122,24 @@ export function OverlayHost({
   const activeSpace = workspace.spaces.find((space) => space.id === workspace.activeSpaceId);
   const pending = workspace.pendingClose;
   const report = media.workspace.report;
+  const windowFullscreen = useWindowFullscreen();
+  // The Start button stays out of the way of a page or window shown fullscreen; its exit control
+  // takes that place.
+  useFloatingAction(
+    'start',
+    state.pageFullscreen || windowFullscreen
+      ? null
+      : {
+          order: 20,
+          anchor: 'bottom-left',
+          label: '开始',
+          icon: 'start',
+          run: () => {
+            if (shell.current && activeSpace) snapshots.capture(shell.current, activeSpace.windowIds);
+            overlays.openLauncher();
+          },
+        },
+  );
   const activate = (item: LauncherItem, placement?: WindowPlacement, reuseExisting?: boolean) =>
     openLauncherItem({ item, placement, reuseExisting, state, action, call, media, notify });
   return (
@@ -141,18 +154,6 @@ export function OverlayHost({
       {productReady && !overlays.launcherOpen && (
         <AnnouncementDialog announcements={state.announcements} read={readAnnouncement} report={report} />
       )}
-      <HomeBar
-        launcher={() => {
-          if (shell.current && activeSpace) snapshots.capture(shell.current, activeSpace.windowIds);
-          overlays.openLauncher();
-        }}
-        previous={() => {
-          const previous = [...workspace.spaces]
-            .filter((space) => space.id !== workspace.activeSpaceId)
-            .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0];
-          if (previous) void action({ type: 'space.activate', spaceId: previous.id }).catch(report);
-        }}
-      />
       {overlays.launcherVisible && (
         <Launcher
           state={state}

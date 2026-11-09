@@ -47,13 +47,14 @@ export function tileSize(item: LauncherItem, rank: number, items: LauncherItem[]
 /**
  * Column-first packing: each tile takes the leftmost column with room, top to bottom, so the
  * first columns hold the most used items and a group grows to the right only once they are full.
+ * A single row holds same-size tiles: wide and small tiles side by side in one row look ragged.
  */
 export function packTiles(sizes: TileSize[], rows: number) {
   const taken: boolean[][] = [];
   const free = (column: number, row: number) => !taken[column]?.[row];
   let columns = 0;
   const cells = sizes.map((requested) => {
-    const size = requested === 'large' && rows < 2 ? 'wide' : requested;
+    const size = rows < 2 ? 'small' : requested;
     const [width, height] = SPANS[size];
     for (let column = 0; ; column++) {
       for (let row = 0; row + height <= rows; row++) {
@@ -73,7 +74,8 @@ export function packTiles(sizes: TileSize[], rows: number) {
 
 function groupRows(sizes: TileSize[], visibleColumns: number) {
   const area = sizes.reduce((sum, size) => sum + SPANS[size][0] * SPANS[size][1], 0);
-  const minimum = sizes.includes('large') ? 2 : 1;
+  // Three or more tiles wrap onto a second row rather than squeeze mixed sizes into one.
+  const minimum = sizes.includes('large') || sizes.length >= 3 ? 2 : 1;
   return Math.max(minimum, Math.min(MAX_ROWS, Math.ceil(area / Math.max(1, visibleColumns))));
 }
 

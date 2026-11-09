@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../../editing/local-autofocus';
 import Add from '@mui/icons-material/Add';
 import MoreVert from '@mui/icons-material/MoreVert';
 import { scaledAnchor } from '../ui-scale';
@@ -91,6 +92,7 @@ function CreateUserDialog({
   onClose: () => void;
   create: (username: string, password: string) => Promise<void>;
 }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const [username, setUsername] = useState(''),
     [password, setPassword] = useState(''),
     [busy, setBusy] = useState(false),
@@ -126,7 +128,7 @@ function CreateUserDialog({
         <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: '8px !important' }}>
           {error && <Alert severity="error">{error}</Alert>}
           <TextField
-            autoFocus
+            inputRef={autoFocusRef}
             required
             label="用户名"
             value={username}

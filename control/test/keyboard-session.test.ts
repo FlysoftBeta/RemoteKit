@@ -4,15 +4,15 @@ import { KeyboardSession, type KeyboardContext } from '../client/editing/keyboar
 const initial: KeyboardContext = {
   document: 'doc',
   enabled: true,
-  manual: false,
+  autoOpen: true,
   editor: 'inactive',
   focused: false,
   ready: true,
   now: 0,
 };
-function session() {
+function session(patch: Partial<KeyboardContext> = {}) {
   const keyboard = new KeyboardSession();
-  let context = initial;
+  let context = { ...initial, ...patch };
   const observe = (patch: Partial<KeyboardContext>) => keyboard.observe((context = { ...context, ...patch }));
   observe({});
   return { keyboard, observe };
@@ -65,7 +65,7 @@ test('explicit NONE during a media gap is still authoritative', () => {
   observe({ editor: 'inactive', now: 10 });
   assert.deepEqual(observe({ now: 210 }), { close: 'editor-lost' });
 });
-test('document, lock and manual policy are boundaries; resumed media is not activation', () => {
+test('document and lock are boundaries; disabling auto-open keeps an attached keyboard', () => {
   const { keyboard, observe } = session();
   observe({ editor: 'active' });
   keyboard.attached(false);
@@ -73,10 +73,97 @@ test('document, lock and manual policy are boundaries; resumed media is not acti
   assert.deepEqual(observe({ focused: false, enabled: true }), {});
   assert.deepEqual(observe({ document: 'new', focused: true }), { close: 'boundary' });
   assert.deepEqual(observe({ focused: false }), { open: true });
-  assert.deepEqual(observe({ manual: true, focused: true }), { close: 'boundary' });
-  assert.deepEqual(keyboard.activate(), {});
-  assert.deepEqual(keyboard.activate(true), { open: true });
+  keyboard.attached(false);
+  assert.deepEqual(observe({ autoOpen: false, focused: true }), {});
+  assert.deepEqual(observe({ ready: false }), {});
+  assert.deepEqual(observe({ ready: true }), {});
 });
+
+test('document entry opens only with auto-open enabled', () => {
+  for (const autoOpen of [false, true]) {
+    const { observe } = session({ autoOpen });
+    assert.deepEqual(observe({ editor: 'active' }), autoOpen ? { open: true } : {});
+    assert.deepEqual(observe({ document: 'new' }), autoOpen ? { open: true } : {});
+  }
+});
+
+test('enabling auto-open arms the current document; disabling dismisses an automatic arm', () => {
+  const { observe } = session({ autoOpen: false });
+  assert.deepEqual(observe({ editor: 'active', ready: false }), {});
+  assert.deepEqual(observe({ autoOpen: true }), {});
+  assert.deepEqual(observe({ ready: true }), { open: true });
+  observe({ document: 'new', editor: 'inactive' });
+  observe({ autoOpen: false });
+  assert.deepEqual(observe({ editor: 'active' }), {});
+});
+
+test('tap and explicit activation arm with auto-open disabled', () => {
+  for (const explicit of [false, true]) {
+    const { keyboard, observe } = session({ autoOpen: false });
+    observe({ editor: 'active' });
+    assert.deepEqual(keyboard.activate(explicit, 100), { open: true });
+  }
+});
+
+test('a tap without an active editor lapses at 1500 ms', () => {
+  for (const editor of ['inactive', 'unknown'] as const) {
+    const { keyboard, observe } = session({ autoOpen: false, editor });
+    assert.deepEqual(keyboard.activate(false, 100), {});
+    assert.equal(keyboard.deadline, 1600);
+    assert.deepEqual(observe({ now: 1599 }), {});
+    assert.equal(keyboard.deadline, 1600);
+    assert.deepEqual(observe({ now: 1600 }), {});
+    assert.equal(keyboard.deadline, undefined);
+    assert.deepEqual(observe({ now: 1601, editor: 'active' }), {});
+  }
+});
+
+test('an active editor first observed after the tap deadline cannot open', () => {
+  const { keyboard, observe } = session({ autoOpen: false });
+  keyboard.activate(false, 100);
+  assert.deepEqual(observe({ now: 1601, editor: 'active' }), {});
+});
+
+test('an active editor inside the tap window can wait for frame and resize readiness', () => {
+  const { keyboard, observe } = session({ autoOpen: false, ready: false });
+  keyboard.activate(false, 100);
+  assert.deepEqual(observe({ now: 1599, editor: 'active' }), {});
+  assert.equal(keyboard.deadline, undefined);
+  assert.deepEqual(observe({ now: 5000, ready: true }), { open: true });
+  assert.deepEqual(observe({ now: 5100 }), {});
+});
+
+test('tap arms do not lapse with auto-open enabled', () => {
+  const { keyboard, observe } = session();
+  keyboard.systemDismissed();
+  keyboard.activate(false, 100);
+  assert.equal(keyboard.deadline, undefined);
+  assert.deepEqual(observe({ now: 5000, editor: 'active' }), { open: true });
+});
+
+test('disabling auto-open preserves a tap arm', () => {
+  const { keyboard, observe } = session({ ready: false });
+  keyboard.activate(false, 100);
+  assert.deepEqual(observe({ now: 200, autoOpen: false, editor: 'active' }), {});
+  assert.deepEqual(observe({ now: 5000, ready: true }), { open: true });
+});
+
+test('enabling auto-open replaces consumed tap intent with an automatic arm', () => {
+  const { keyboard, observe } = session({ autoOpen: false, editor: 'active' });
+  assert.deepEqual(keyboard.activate(false, 100), { open: true });
+  keyboard.attached(false);
+  observe({ ready: false, autoOpen: true });
+  observe({ autoOpen: false });
+  assert.deepEqual(observe({ ready: true }), {});
+});
+
+test('entering another document clears a pending tap arm', () => {
+  const { keyboard, observe } = session({ autoOpen: false });
+  keyboard.activate(false, 100);
+  assert.deepEqual(observe({ document: 'new', editor: 'active', now: 200 }), {});
+  assert.equal(keyboard.deadline, undefined);
+});
+
 test('late target arrival cannot extend an expired blur grace', () => {
   const { keyboard, observe } = session();
   observe({ editor: 'active' });

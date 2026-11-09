@@ -1,5 +1,6 @@
 import './floating-dock.css';
 import {
+  AppsOutlined,
   Close,
   KeyboardHideOutlined,
   KeyboardOutlined,
@@ -11,6 +12,7 @@ import React, { useRef, useState, useSyncExternalStore } from 'react';
 import type { DockAnchor, FloatingAction, FloatingActions, FloatingIcon } from './floating-actions';
 
 const icons: Record<FloatingIcon, React.ReactNode> = {
+  start: <AppsOutlined fontSize="small" />,
   keyboard: <KeyboardOutlined fontSize="small" />,
   'keyboard-hide': <KeyboardHideOutlined fontSize="small" />,
   'fullscreen-exit': <Close fontSize="small" />,

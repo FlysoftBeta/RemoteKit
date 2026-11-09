@@ -40,7 +40,18 @@ const browserCamera: CameraEnvironment = {
       audio: false,
     });
   },
-  permission: async () => (await navigator.permissions?.query({ name: 'camera' as PermissionName }))?.state,
+  permission: async () => {
+    try {
+      const state = (await navigator.permissions?.query({ name: 'camera' as PermissionName }))?.state;
+      if (state === 'granted' || state === 'denied') return state;
+    } catch (error) {
+      diagnostics.record('auth-camera-permission', error);
+    }
+    // Some browsers cannot query the camera permission, or report 'prompt' while this page still
+    // holds a grant. Device labels are exposed once the page holds a camera grant.
+    const devices = await navigator.mediaDevices?.enumerateDevices?.();
+    return devices?.some((device) => device.kind === 'videoinput' && device.label) ? 'granted' : 'prompt';
+  },
   hidden: () => document.hidden,
   watchVisibility: (listener) => {
     document.addEventListener('visibilitychange', listener);

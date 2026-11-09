@@ -46,13 +46,16 @@ test('conversion polling retries at 1.5 seconds and stops on cancellation', asyn
     },
     'asset',
   );
-  const opening = source.open(new AbortController().signal);
+  const statuses: string[] = [];
+  const opening = source.open(new AbortController().signal, { onStatus: (status) => statuses.push(status) });
   await Promise.resolve();
   context.mock.timers.tick(1499);
   assert.equal(attempts, 1);
+  assert.deepEqual(statuses, ['converting']);
   context.mock.timers.tick(1);
   await opening;
   assert.equal(attempts, 2);
+  assert.deepEqual(statuses, ['converting', 'ready']);
   const controller = new AbortController();
   const cancelled = new ChannelDocumentSource(
     {

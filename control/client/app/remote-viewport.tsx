@@ -20,7 +20,7 @@ export function RemoteViewport({
   viewId,
   overlay = false,
   keyboardActive = true,
-  manualKeyboard = false,
+  autoKeyboard = false,
   onFocus,
   onFrameReady,
   showConnectingOverlay = true,
@@ -29,7 +29,7 @@ export function RemoteViewport({
   viewId: string;
   overlay?: boolean;
   keyboardActive?: boolean;
-  manualKeyboard?: boolean;
+  autoKeyboard?: boolean;
   onFocus?: () => void;
   onFrameReady?: (ready: boolean) => void;
   showConnectingOverlay?: boolean;
@@ -66,11 +66,11 @@ export function RemoteViewport({
     };
   }, [transport, viewId]);
   useLayoutEffect(
-    () => controller?.configure(keyboardActive, manualKeyboard, resize),
+    () => controller?.configure(keyboardActive, autoKeyboard, resize),
     [
       controller,
       keyboardActive,
-      manualKeyboard,
+      autoKeyboard,
       resize.waiting,
       resize.keyboardOpen,
       resize.keyboardDismissals,

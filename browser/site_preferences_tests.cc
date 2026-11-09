@@ -26,7 +26,6 @@ int main() {
        R"({"https://example.test":{"permissions":{"notifications":"allow"}}})",
        R"({"https://example.test":{"permissions":{"geolocation":"ask"}}})",
        R"({"https://example.test":{"protocolHandlers":[]}})",
-       R"({"https://example.test":{"manualKeyboard":true}})",
        R"({"https://example.test":{"protocolHandlers":[{"protocol":"web+rk","url":"https://example.test/%s","allowed":true,"extra":true}]}})"})
     Check(!Valid(invalid));
   Check(ValidProtocolHandler("https://example.test", "mailto", "https://example.test/?to=%s"));

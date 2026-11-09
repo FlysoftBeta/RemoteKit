@@ -271,8 +271,11 @@ export class StudyService {
       while (true) {
         const result = await this.rawHomeworkPage(bucket, page);
         for (const item of result.items) {
-          if (item.startsAt === undefined || item.startsAt < cutoff || item.startsAt > end) continue;
-          for (const attachment of this.homeworkAttachments(await this.rawDetail(item.id)))
+          if (item.startsAt !== undefined && (item.startsAt < cutoff || item.startsAt > end)) continue;
+          const detail = await this.rawDetail(item.id);
+          const startsAt = item.startsAt ?? detail.startsAt;
+          if (startsAt === undefined || startsAt < cutoff || startsAt > end) continue;
+          for (const attachment of this.homeworkAttachments({ ...detail, startsAt }))
             keys.add(attachment.key);
         }
         if (page >= result.pageCount || !result.items.length) break;

@@ -344,25 +344,11 @@ await runScenario('workspace-ui', async (v, stack) => {
     await startDialog().waitFor({ state: 'hidden' });
   });
 
-  await step('home-bar-recent-two-and-swipe-start', async () => {
+  await step('start-button-opens-start', async () => {
     const active = group().id;
-    const previous = [...v.state.workspace.spaces]
-      .filter((space) => space.id !== active)
-      .sort((a, b) => b.lastActiveAt - a.lastActiveAt)[0].id;
-    const bar = await page.getByRole('button', { name: '主页条', exact: true }).boundingBox();
-    async function swipe(dx, dy) {
-      await pointer.move(bar.x + bar.width / 2, bar.y + bar.height / 2);
-      await pointer.down();
-      await pointer.move(bar.x + bar.width / 2 + dx, bar.y + bar.height / 2 + dy, { steps: 12 });
-      await pointer.up();
-    }
-    await swipe(100, 0);
-    await v.until(() => group().id === previous, 'first recent group');
-    await swipe(-100, 0);
-    await v.until(() => group().id === active, 'toggle back');
-    await swipe(0, -80);
+    await page.getByRole('button', { name: '开始', exact: true }).click();
     await startDialog().waitFor();
-    assert(group().id === active, 'swipe Start preserves group');
+    assert(group().id === active, 'Start preserves group');
   });
 
   for (const method of ['unlockByKeys', 'unlockByTaps']) {

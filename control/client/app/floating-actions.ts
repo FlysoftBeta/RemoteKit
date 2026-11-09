@@ -1,6 +1,6 @@
 import { createContext, useContext, useLayoutEffect } from 'react';
 
-export type FloatingIcon = 'keyboard' | 'keyboard-hide' | 'fullscreen-exit' | 'sound' | 'stop';
+export type FloatingIcon = 'start' | 'keyboard' | 'keyboard-hide' | 'fullscreen-exit' | 'sound' | 'stop';
 export type DockAnchor =
   'top-left' | 'top' | 'top-right' | 'left' | 'right' | 'bottom-left' | 'bottom' | 'bottom-right';
 

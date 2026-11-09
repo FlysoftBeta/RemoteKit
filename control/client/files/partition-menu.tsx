@@ -1,3 +1,4 @@
+import { useAutoFocus } from '../editing/local-autofocus';
 import { ChevronRight, FolderOutlined } from '@mui/icons-material';
 import {
   Alert,
@@ -19,6 +20,7 @@ import { fileError } from './file-library-controls';
 import { useLibrary } from './file-library-state';
 
 export function BasketPartitionMenu({ disabled, ids }: { disabled: boolean; ids?: string[] }) {
+  const autoFocusRef = useAutoFocus<HTMLInputElement>();
   const { snapshot, mutate } = useLibrary();
   const [anchor, setAnchor] = useState<HTMLElement>();
   const [creating, setCreating] = useState(false);
@@ -124,7 +126,7 @@ export function BasketPartitionMenu({ disabled, ids }: { disabled: boolean; ids?
             <DialogContent>
               <TextField
                 label="分区名称"
-                autoFocus
+                inputRef={autoFocusRef}
                 fullWidth
                 disabled={busy || !!creation.current}
                 value={name}
