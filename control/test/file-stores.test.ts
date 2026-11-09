@@ -168,11 +168,20 @@ test('basket mutations record file usage only after a successful addition in the
 });
 
 test('upload admission distinguishes the file count and size limits', () => {
-  const queue = new ImportQueue({ rpc: { uploadAsset: async () => asset },
-    mutate: async () => snapshot(1) }, 'library');
+  const queue = new ImportQueue(
+    { rpc: { uploadAsset: async () => asset }, mutate: async () => snapshot(1) },
+    'library',
+  );
   const origin = { kind: 'files' as const, channel: 'upload' as const, partitionId: null };
-  assert.throws(() => queue.enqueue(Array.from({ length: 65 }, () => new File(['a'], 'a.txt')), 0, origin),
-    /最多可添加 64 个文件/);
+  assert.throws(
+    () =>
+      queue.enqueue(
+        Array.from({ length: 65 }, () => new File(['a'], 'a.txt')),
+        0,
+        origin,
+      ),
+    /最多可添加 64 个文件/,
+  );
   const oversized = new File(['a'], 'large.txt');
   Object.defineProperty(oversized, 'size', { value: 256 * 1024 * 1024 + 1 });
   assert.throws(() => queue.enqueue([oversized], 0, origin), /单个文件不能超过 256 MiB/);
@@ -197,6 +206,104 @@ test('Files uploads retain the selected partition and upload channel', async () 
   origin.partitionId = 'elsewhere';
   await flush();
   assert.deepEqual(origins, [{ kind: 'files', channel: 'upload', partitionId: 'chosen' }]);
+  queue.dispose();
+});
+
+test('each queued batch captures its destination independently', async () => {
+  const mutations: LibraryMethods['library.import']['params'][] = [];
+  const queue = new ImportQueue(
+    {
+      rpc: { uploadAsset: async () => asset },
+      mutate: async (_method, params) => {
+        mutations.push(params);
+        return snapshot(mutations.length);
+      },
+    },
+    'library',
+  );
+  queue.configure(true, 'viewer-scope');
+  const origin = {
+    kind: 'files' as const,
+    channel: 'upload' as const,
+    partitionId: 'first' as string | null,
+  };
+  queue.enqueue([new File(['a'], 'first.txt'), new File(['b'], 'second.txt')], 0, origin);
+  origin.partitionId = null;
+  queue.enqueue([new File(['c'], 'third.txt')], 0, origin);
+  origin.partitionId = 'elsewhere';
+  await flush();
+  assert.deepEqual(
+    mutations.map((params) => params.origin),
+    [
+      { kind: 'files', channel: 'upload', partitionId: 'first' },
+      { kind: 'files', channel: 'upload', partitionId: 'first' },
+      { kind: 'files', channel: 'upload', partitionId: null },
+    ],
+  );
+  assert.deepEqual(
+    mutations.map((params) => params.destination),
+    Array(3).fill('library'),
+  );
+  queue.dispose();
+});
+
+test('window disposal cancels every batch and ignores late uploads', async () => {
+  let finish!: (value: Asset) => void;
+  let signal!: AbortSignal;
+  let mutations = 0;
+  const queue = new ImportQueue(
+    {
+      rpc: {
+        uploadAsset: async (_file, _id, current) => {
+          signal = current;
+          return new Promise((resolve) => {
+            finish = resolve;
+          });
+        },
+      },
+      mutate: async () => {
+        mutations++;
+        return snapshot(1);
+      },
+    },
+    'library',
+  );
+  queue.configure(true, 'viewer');
+  queue.enqueue([new File(['a'], 'a.txt')], 0, { kind: 'files', channel: 'upload', partitionId: 'group' });
+  queue.enqueue([new File(['b'], 'b.txt')], 0, { kind: 'files', channel: 'upload', partitionId: null });
+  queue.dispose();
+  assert(signal.aborted);
+  assert.equal(queue.getSnapshot().remaining, 0);
+  finish(asset);
+  await flush();
+  assert.equal(mutations, 0);
+});
+
+test('retry retains the failed job and destination when another batch is submitted', async () => {
+  const mutations: LibraryMethods['library.import']['params'][] = [];
+  const queue = new ImportQueue(
+    {
+      rpc: { uploadAsset: async () => asset },
+      mutate: async (_method, params) => {
+        mutations.push(params);
+        if (mutations.length === 1) throw new RemoteKitError('outcome_unknown', 'lost reply');
+        return snapshot(mutations.length);
+      },
+    },
+    'library',
+  );
+  queue.configure(true, 'viewer');
+  queue.enqueue([new File(['a'], 'a.txt')], 0, { kind: 'files', channel: 'upload', partitionId: 'group' });
+  await flush();
+  const error = queue.getSnapshot().error;
+  queue.enqueue([new File(['b'], 'b.txt')], 0, { kind: 'files', channel: 'upload', partitionId: null });
+  assert.equal(queue.getSnapshot().remaining, 2);
+  assert.equal(queue.getSnapshot().error, error);
+  await queue.upload();
+  assert.equal(mutations[0].operationId, mutations[1].operationId);
+  assert.deepEqual(mutations[0].origin, mutations[1].origin);
+  assert.deepEqual(mutations[2].origin, { kind: 'files', channel: 'upload', partitionId: null });
+  assert.equal(queue.getSnapshot().remaining, 0);
   queue.dispose();
 });
 

@@ -31,6 +31,20 @@ int main() {
   }
   CHECK(!ParseErrorCode("unsupported"));
   CHECK(!ParseErrorReason("arbitrary"));
+  for (auto reason : {ErrorReason::kDocumentEncrypted, ErrorReason::kDocumentCorrupt,
+                      ErrorReason::kDocumentUnsupported, ErrorReason::kDocumentTooComplex}) {
+    const Json reply{{"type", "files.result"},
+                     {"version", 1},
+                     {"requestId", "document-open"},
+                     {"ok", false},
+                     {"error", WireError({ErrorCode::kRejected, "Conversion diagnosis", reason})}};
+    CHECK(reply["error"] == Json({{"code", "rejected"},
+                                  {"message", "Conversion diagnosis"},
+                                  {"reason", ErrorReasonName(reason)}}));
+    CHECK(ParseWireError(reply["error"]).reason == reason);
+  }
+  CHECK(!ParseWireError({{"code", "rejected"}, {"message", "diagnosis"}, {"reason", "future"}})
+             .reason);
   for (const auto& wire : {Json(), Json::object(), Json{{"code", 1}}, Json{{"code", "future"}}})
     CHECK(ParseWireError(wire).code == ErrorCode::kOutcomeUnknown);
   for (const auto& hint : {Json(-1), Json(86400001), Json(1.2), Json("1")})

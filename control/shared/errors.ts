@@ -83,3 +83,67 @@ export function wireError(error: RemoteKitError): WireError {
     ...(error.retryAfterMs === undefined ? {} : { retryAfterMs: error.retryAfterMs }),
   };
 }
+
+export type NativeErrorReason =
+  | 'browser_crashed'
+  | 'browser_restarting'
+  | 'output_failed'
+  | 'document_encrypted'
+  | 'document_corrupt'
+  | 'document_unsupported'
+  | 'document_too_complex'
+  | 'file_too_large'
+  | 'storage_quota_exceeded'
+  | 'browser_state_too_large'
+  | 'no_document_contour';
+const nativeMessages: Record<NativeErrorReason, string> = {
+  browser_crashed: '浏览器异常退出，正在恢复…',
+  browser_restarting: '浏览器正在恢复，请稍候…',
+  output_failed: '浏览器画面输出失败，请稍后重试',
+  document_encrypted: '文档受密码保护，无法转换',
+  document_corrupt: '文档已损坏，无法转换',
+  document_unsupported: '不支持此文档格式',
+  document_too_complex: '文档过于复杂，超出处理限制',
+  file_too_large: '文件大小超过限制',
+  storage_quota_exceeded: '存储空间已满，请释放空间',
+  browser_state_too_large: '浏览器状态超出同步容量',
+  no_document_contour: '照片中未找到文档轮廓，请重新拍摄',
+};
+const codeMessages: Record<ErrorCode, string> = {
+  invalid_request: '请求格式无效',
+  unauthenticated: '请重新登录',
+  forbidden: '没有执行此操作的权限',
+  locked: '浏览器已锁定，请先解锁',
+  not_found: '请求的内容不存在，请刷新状态',
+  conflict: '状态已改变，请刷新后重新决定',
+  limit_exceeded: '超出容量限制，请释放空间或缩小输入',
+  rate_limited: '请求过于频繁，请稍后重试',
+  busy: '服务繁忙，请稍后重试',
+  unavailable: '服务暂时不可用，请稍后重试',
+  rejected: '无法处理此内容',
+  outcome_unknown: '操作结果未知，请核对当前状态',
+  canceled: '',
+  internal: '服务内部错误',
+};
+
+export function nativeReasonMessage(reason: unknown): string | undefined {
+  return typeof reason === 'string' && Object.prototype.hasOwnProperty.call(nativeMessages, reason)
+    ? nativeMessages[reason as NativeErrorReason]
+    : undefined;
+}
+export function errorCodeMessage(code: ErrorCode): string {
+  return codeMessages[code];
+}
+
+export function nativeError(wire: unknown): RemoteKitError {
+  const parsed = parseWireError(wire);
+  const code = parsed?.code ?? 'outcome_unknown';
+  const value = wire && typeof wire === 'object' ? (wire as Record<string, unknown>) : undefined;
+  const message = nativeReasonMessage(value?.reason);
+  const reason = message === undefined ? undefined : (value?.reason as NativeErrorReason);
+  return new RemoteKitError(code, message ?? errorCodeMessage(code), {
+    detail: typeof value?.message === 'string' ? value.message : String(wire),
+    reason,
+    retryAfterMs: parsed?.retryAfterMs,
+  });
+}

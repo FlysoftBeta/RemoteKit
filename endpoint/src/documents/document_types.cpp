@@ -36,6 +36,61 @@ bool Media(std::span<const uint8_t> bytes) {
     return true;
   return bytes.size() >= 2 && bytes[0] == 0xff && (bytes[1] & 0xe0) == 0xe0;
 }
+struct FormatEntry {
+  std::string_view extension;
+  DocumentType type;
+  std::string_view media_type;
+};
+
+static constexpr FormatEntry formats[] = {
+    {".doc", DocumentType::kWriter, "application/msword"},
+    {".doc", DocumentType::kWriter, "application/vnd.ms-word"},
+    {".dot", DocumentType::kWriter, ""},
+    {".wps", DocumentType::kWriter, "application/vnd.ms-works"},
+    {".wps", DocumentType::kWriter, "application/wps-office.wps"},
+    {".docx", DocumentType::kWriter,
+     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    {".docm", DocumentType::kWriter, "application/vnd.ms-word.document.macroenabled.12"},
+    {".dotx", DocumentType::kWriter,
+     "application/vnd.openxmlformats-officedocument.wordprocessingml.template"},
+    {".odt", DocumentType::kWriter, "application/vnd.oasis.opendocument.text"},
+    {".ppt", DocumentType::kPresentation, "application/vnd.ms-powerpoint"},
+    {".pps", DocumentType::kPresentation, ""},
+    {".pot", DocumentType::kPresentation, ""},
+    {".dps", DocumentType::kPresentation, "application/wps-office.dps"},
+    {".pptx", DocumentType::kPresentation,
+     "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+    {".ppsx", DocumentType::kPresentation,
+     "application/vnd.openxmlformats-officedocument.presentationml.slideshow"},
+    {".potx", DocumentType::kPresentation,
+     "application/vnd.openxmlformats-officedocument.presentationml.template"},
+    {".odp", DocumentType::kPresentation, "application/vnd.oasis.opendocument.presentation"},
+    {".xls", DocumentType::kSpreadsheet, "application/vnd.ms-excel"},
+    {".et", DocumentType::kSpreadsheet, "application/wps-office.et"},
+    {".xlsx", DocumentType::kSpreadsheet,
+     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    {".xlsm", DocumentType::kSpreadsheet, "application/vnd.ms-excel.sheet.macroenabled.12"},
+    {".ods", DocumentType::kSpreadsheet, "application/vnd.oasis.opendocument.spreadsheet"},
+    {".pdf", DocumentType::kPdf, "application/pdf"},
+    {".rtf", DocumentType::kWriter, "application/rtf"},
+    {".rtf", DocumentType::kWriter, "text/rtf"},
+    {".txt", DocumentType::kText, "text/plain"},
+    {".csv", DocumentType::kSpreadsheet, "text/csv"},
+};
+
+DocumentFormat MediaTypeFormat(std::string_view media_type) {
+  auto mime = std::string(media_type.substr(0, media_type.find(';')));
+  std::transform(mime.begin(), mime.end(), mime.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  while (!mime.empty() && mime.back() == ' ')
+    mime.pop_back();
+  for (const auto& entry : formats) {
+    if (!entry.media_type.empty() && mime == entry.media_type)
+      return {entry.type, std::string(entry.extension)};
+  }
+  return {};
+}
+
 }  // namespace
 
 DocumentFormat DetectDocument(std::string_view name, std::span<const uint8_t> prefix) {
@@ -49,38 +104,16 @@ DocumentFormat DetectDocument(std::string_view name, std::span<const uint8_t> pr
     return {DocumentType::kWriter, ".rtf"};
   if (Media(prefix))
     return {};
-  const bool text = Text(prefix);
-  if (extension == ".txt" && text)
-    return {DocumentType::kText, extension};
-  if (extension == ".csv" && text)
-    return {DocumentType::kSpreadsheet, extension};
-  struct Entry {
-    std::string_view extension;
-    DocumentType type;
-  };
-  static constexpr Entry entries[] = {
-      {".doc", DocumentType::kWriter},        {".dot", DocumentType::kWriter},
-      {".wps", DocumentType::kWriter},        {".docx", DocumentType::kWriter},
-      {".docm", DocumentType::kWriter},       {".dotx", DocumentType::kWriter},
-      {".odt", DocumentType::kWriter},        {".ppt", DocumentType::kPresentation},
-      {".pps", DocumentType::kPresentation},  {".pot", DocumentType::kPresentation},
-      {".dps", DocumentType::kPresentation},  {".pptx", DocumentType::kPresentation},
-      {".ppsx", DocumentType::kPresentation}, {".potx", DocumentType::kPresentation},
-      {".odp", DocumentType::kPresentation},  {".xls", DocumentType::kSpreadsheet},
-      {".et", DocumentType::kSpreadsheet},    {".xlsx", DocumentType::kSpreadsheet},
-      {".xlsm", DocumentType::kSpreadsheet},  {".ods", DocumentType::kSpreadsheet}};
-  if (extension == ".pdf")
-    return {DocumentType::kPdf, extension};
-  if (extension == ".rtf")
-    return {DocumentType::kWriter, extension};
-  for (const auto& entry : entries) {
+  if ((extension == ".txt" || extension == ".csv") && !Text(prefix))
+    return {};
+  for (const auto& entry : formats) {
     if (extension == entry.extension)
       return {entry.type, extension};
   }
   return {};
 }
 
-Result<DocumentFormat> DetectDocumentFile(const std::filesystem::path& path) {
+static Result<DocumentFormat> SniffDocumentFile(const std::filesystem::path& path) {
   std::ifstream input(path, std::ios::binary | std::ios::ate);
   if (!input) {
     std::error_code error;
@@ -103,12 +136,11 @@ Result<DocumentFormat> DetectDocumentFile(const std::filesystem::path& path) {
     return DocumentFormat{};
   }
   const std::string_view header(reinterpret_cast<const char*>(prefix.data()), prefix.size());
-  for (auto [mime, extension] :
-       {std::pair{"application/vnd.oasis.opendocument.text", ".odt"},
-        std::pair{"application/vnd.oasis.opendocument.spreadsheet", ".ods"},
-        std::pair{"application/vnd.oasis.opendocument.presentation", ".odp"}})
-    if (header.find(mime) != header.npos)
-      return DetectDocument(extension, {});
+  for (const auto& entry : formats) {
+    if ((entry.extension == ".odt" || entry.extension == ".ods" || entry.extension == ".odp") &&
+        header.find(entry.media_type) != header.npos)
+      return DocumentFormat{entry.type, std::string(entry.extension)};
+  }
   std::vector<uint8_t> tail(static_cast<size_t>(std::min<uint64_t>(size, 65557)));
   input.seekg(size - tail.size());
   input.read(reinterpret_cast<char*>(tail.data()), tail.size());
@@ -167,5 +199,26 @@ Result<DocumentFormat> DetectDocumentFile(const std::filesystem::path& path) {
       break;
   }
   return DocumentFormat{};
+}
+Result<DocumentFormat> DetectDocumentFile(const std::filesystem::path& path,
+                                          std::string_view media_type) {
+  return DetectDocumentFile(path, MediaTypeFormat(media_type));
+}
+
+Result<DocumentFormat> DetectDocumentFile(const std::filesystem::path& path,
+                                          const DocumentFormat& declared) {
+  auto sniffed = SniffDocumentFile(path);
+  if (!sniffed)
+    return sniffed.error();
+  if (sniffed.value().type != DocumentType::kUnsupported &&
+      sniffed.value().type != DocumentType::kText)
+    return sniffed;
+  if (declared.type == DocumentType::kUnsupported)
+    return sniffed;
+  if (sniffed.value().type == DocumentType::kText &&
+      (declared.extension == ".txt" || declared.extension == ".csv"))
+    return declared;
+  return Error{ErrorCode::kRejected, "Declared document format is damaged or incomplete",
+               ErrorReason::kDocumentCorrupt};
 }
 }  // namespace remotekit::documents

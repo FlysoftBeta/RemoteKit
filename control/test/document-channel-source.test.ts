@@ -4,6 +4,100 @@ import { ChannelDocumentSource } from '../client/documents/channel-source';
 import { RemoteKitError } from '../shared/errors';
 import { documentFixture } from '../client/test-hooks-learning-fixtures';
 import { FileChannel } from '../client/files/file-channel';
+import { decodeIncoming } from '../client/rtc/protocol';
+
+test('DataChannel document failures are localized once and retain native diagnosis', async () => {
+  for (const [reason, expected] of [
+    ['document_encrypted', '文档受密码保护，无法转换'],
+    ['document_corrupt', '文档已损坏，无法转换'],
+    ['document_unsupported', '不支持此文档格式'],
+    ['document_too_complex', '文档过于复杂，超出处理限制'],
+    ['future_reason', '无法处理此内容'],
+    ['toString', '无法处理此内容'],
+  ]) {
+    for (const resource of [false, true]) {
+      let calls = 0;
+      const channel = {
+        readyState: 'open',
+        bufferedAmount: 0,
+        send(raw: string) {
+          calls++;
+          const request = JSON.parse(raw);
+          const reply = decodeIncoming(
+            JSON.stringify({
+              type: 'files.result',
+              version: 1,
+              requestId: request.requestId,
+              ok: false,
+              error: { code: 'rejected', message: 'Native conversion diagnosis', reason, retryAfterMs: 1 },
+            }),
+          );
+          assert.notEqual(reply.type, 'decode-error');
+          if (reply.type !== 'decode-error') queueMicrotask(() => files.handle(reply));
+        },
+      } as RTCDataChannel;
+      const files = new FileChannel(() => channel);
+      const source = new ChannelDocumentSource(
+        {
+          documentOpen: resource
+            ? async () => ({ state: 'ready', ...documentFixture.info })
+            : files.documentOpen.bind(files),
+          documentResource: files.documentResource.bind(files),
+        },
+        'asset',
+      );
+      const signal = new AbortController().signal;
+      if (resource) await source.open(signal);
+      await assert.rejects(resource ? source.resource('html', signal) : source.open(signal), (error) => {
+        assert.ok(error instanceof RemoteKitError);
+        assert.equal(error.code, 'rejected');
+        assert.equal(error.message, expected);
+        assert.equal(error.detail, 'Native conversion diagnosis');
+        assert.equal(error.reason, reason.startsWith('document_') ? reason : undefined);
+        assert.equal(error.retryAfterMs, undefined);
+        return true;
+      });
+      assert.equal(calls, 1);
+    }
+  }
+});
+
+test('conversion polling preserves the final DataChannel reason after converting state', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let calls = 0;
+  const channel = {
+    readyState: 'open',
+    bufferedAmount: 0,
+    send(raw: string) {
+      const request = JSON.parse(raw);
+      const reply = decodeIncoming(
+        JSON.stringify({
+          type: 'files.result',
+          version: 1,
+          requestId: request.requestId,
+          ...(++calls === 1
+            ? { ok: true, result: { state: 'converting' } }
+            : { ok: false, error: { code: 'rejected', message: 'broken XML', reason: 'document_corrupt' } }),
+        }),
+      );
+      if (reply.type !== 'decode-error') queueMicrotask(() => files.handle(reply));
+    },
+  } as RTCDataChannel;
+  const files = new FileChannel(() => channel);
+  const source = new ChannelDocumentSource(files, 'asset');
+  const statuses: string[] = [];
+  const opening = source.open(new AbortController().signal, { onStatus: (status) => statuses.push(status) });
+  const failed = assert.rejects(opening, {
+    code: 'rejected',
+    message: '文档已损坏，无法转换',
+    detail: 'broken XML',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(statuses, ['converting']);
+  t.mock.timers.tick(1500);
+  await failed;
+  assert.equal(calls, 2);
+});
 
 test('document source opens the rendition and reconstructs chunked resources', async () => {
   const requested: number[] = [];

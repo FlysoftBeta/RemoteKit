@@ -37,6 +37,9 @@ Result<void> OfficeConverter::Convert(const std::filesystem::path& input,
     if (!converted)
       return converted.error();
     auto pdf = temporary.path() / "input.pdf";
+    if (!std::filesystem::exists(pdf))
+      return ToolOutputFailure(temporary.path() / "tool.log",
+                               tools_ / "libreoffice/program/soffice.com", 0);
     std::ifstream file(pdf, std::ios::binary);
     char magic[5]{};
     file.read(magic, sizeof(magic));

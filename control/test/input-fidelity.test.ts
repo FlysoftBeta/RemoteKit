@@ -55,11 +55,13 @@ function fixture(t: TestContext) {
         return true;
       },
       inputIdentity: () => 'identity',
+      getSnapshot: () => ({ focus: { phase: 'granted', token: 'f' }, queued: 0, sent: 0 }),
       subscribeInputResults: subscribe,
       subscribeInputDelivery: subscribe,
       subscribe,
       touchStartWall: () => undefined,
       ensureInputFocus() {},
+      focusPointer() {},
       focus() {},
     },
     presentation: {
@@ -84,6 +86,7 @@ function fixture(t: TestContext) {
         onBlur() {},
         compositionStart() {},
         activateKeyboard() {},
+        beginPointerFocus() {},
         focusEditor() {},
         release() {},
         dispose() {},

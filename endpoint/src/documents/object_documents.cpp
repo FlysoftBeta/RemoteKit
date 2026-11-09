@@ -35,7 +35,8 @@ Result<void> ObjectDocuments::Available() const {
 
 ObjectDocuments::Future ObjectDocuments::Submit(const std::string& source,
                                                 const std::string& tenant,
-                                                const std::filesystem::path& temporary) {
+                                                const std::filesystem::path& temporary,
+                                                const std::string& media_type) {
   std::lock_guard lock(mutex_);
   std::erase_if(jobs_, [](const auto& entry) { return entry.second.expires <= Clock::now(); });
   if (auto found = jobs_.find(source); found != jobs_.end())
@@ -43,10 +44,10 @@ ObjectDocuments::Future ObjectDocuments::Submit(const std::string& source,
   auto promise = std::make_shared<std::promise<Result<std::string>>>();
   auto future = promise->get_future().share();
   jobs_.emplace(source, Job{future});
-  if (!workers_.Submit([this, source, tenant, temporary, promise] {
+  if (!workers_.Submit([this, source, tenant, temporary, media_type, promise] {
         Result<std::string> result = Error{ErrorCode::kInternal, "document rendition failed"};
         try {
-          result = Convert(source, tenant, temporary);
+          result = Convert(source, tenant, temporary, media_type);
         } catch (const std::filesystem::filesystem_error& error) {
           result = Error{ErrorCode::kUnavailable, error.what()};
         } catch (const std::exception& error) {
@@ -68,7 +69,8 @@ ObjectDocuments::Future ObjectDocuments::Submit(const std::string& source,
 
 Result<std::string> ObjectDocuments::Convert(const std::string& source,
                                              const std::string& tenant,
-                                             const std::filesystem::path& temporary) {
+                                             const std::filesystem::path& temporary,
+                                             const std::string& media_type) {
   RK_ASSIGN_OR_RETURN(derivation, objects_.Derivation(source, tenant));
   if (!derivation.is_null())
     return derivation["id"].get<std::string>();
@@ -81,7 +83,7 @@ Result<std::string> ObjectDocuments::Convert(const std::string& source,
   output.close();
   if (!output)
     return Error{ErrorCode::kUnavailable, "cannot stage document"};
-  RK_ASSIGN_OR_RETURN(format, DetectDocumentFile(plaintext));
+  RK_ASSIGN_OR_RETURN(format, DetectDocumentFile(plaintext, media_type));
   if (format.type == DocumentType::kUnsupported)
     return Error{ErrorCode::kRejected, "Unsupported document type",
                  ErrorReason::kDocumentUnsupported};
@@ -105,7 +107,8 @@ Result<std::string> ObjectDocuments::Convert(const std::string& source,
 
 Result<Json> ObjectDocuments::Open(const std::string& source,
                                    const std::string& tenant,
-                                   const std::filesystem::path& temporary) {
+                                   const std::filesystem::path& temporary,
+                                   const std::string& media_type) {
   RK_RETURN_IF_ERROR(Available());
   // Control answers busy while a conversion it requested runs on some node.
   auto lookup = objects_.Derivation(source, tenant);
@@ -114,7 +117,7 @@ Result<Json> ObjectDocuments::Open(const std::string& source,
   RK_ASSIGN_OR_RETURN(derivation, std::move(lookup));
   if (!derivation.is_null())
     return Ready(derivation["id"].get<std::string>(), tenant, source);
-  auto future = Submit(source, tenant, temporary);
+  auto future = Submit(source, tenant, temporary, media_type);
   if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
     return Json{{"state", "converting"}};
   auto converted = future.get();
@@ -126,7 +129,7 @@ Result<Json> ObjectDocuments::Open(const std::string& source,
 
 Result<std::string> ObjectDocuments::Render(const std::string& source) {
   RK_RETURN_IF_ERROR(Available());
-  return Submit(source, {}, data_ / "documents/staging").get();
+  return Submit(source, {}, data_ / "documents/staging", {}).get();
 }
 
 Result<Json> ObjectDocuments::Ready(const std::string& document,

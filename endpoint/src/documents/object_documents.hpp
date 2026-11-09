@@ -24,7 +24,8 @@ class ObjectDocuments {
   Result<void> Available() const;
   Result<Json> Open(const std::string& source,
                     const std::string& tenant,
-                    const std::filesystem::path& temporary);
+                    const std::filesystem::path& temporary,
+                    const std::string& media_type);
   Result<std::string> Render(const std::string& source);
   Result<ResourceChunk> Resource(const std::string& document,
                                  const std::string& content,
@@ -39,10 +40,12 @@ class ObjectDocuments {
   };
   Future Submit(const std::string& source,
                 const std::string& tenant,
-                const std::filesystem::path& temporary);
+                const std::filesystem::path& temporary,
+                const std::string& media_type);
   Result<std::string> Convert(const std::string& source,
                               const std::string& tenant,
-                              const std::filesystem::path& temporary);
+                              const std::filesystem::path& temporary,
+                              const std::string& media_type);
   Result<Json> Ready(const std::string& document,
                      const std::string& tenant,
                      const std::string& source);

@@ -178,7 +178,41 @@ void CheckBursts() {
   bursts.Sweep([](uint64_t) { return false; });
   CHECK(Fails([&] { return bursts.Execute(11, "photo.burst.end", end, live); }));
 }
+void CheckDocumentErrorReplies() {
+  DcFileServices services;
+  std::atomic<unsigned> count = 0;
+  const std::array reasons{ErrorReason::kDocumentEncrypted, ErrorReason::kDocumentCorrupt,
+                           ErrorReason::kDocumentUnsupported, ErrorReason::kDocumentTooComplex};
+  services.Start(
+      [&](const DcFileServices::Job&) -> Result<ServiceJson> {
+        return Error{ErrorCode::kRejected, "Native conversion diagnosis", reasons.at(count++)};
+      },
+      [] {});
+  services.Bind(7, "connection");
+  services.Authorize("connection", 99, {}, true);
+  for (size_t i = 0; i < reasons.size(); ++i) {
+    auto request = Request("00000000-0000-4000-8000-000000000001",
+                           i % 2 == 0 ? "document.open" : "document.resource");
+    request["requestId"] = "00000000-0000-4000-8000-00000000000" + std::to_string(i + 1);
+    request["params"]["requestId"] = "library";
+    services.Admit(7, request);
+    ServiceJson reply;
+    Until([&] {
+      services.Flush(7, [&](const std::string& wire) {
+        reply = ServiceJson::parse(wire);
+        return 0;
+      });
+      return !reply.is_null();
+    });
+    CHECK(reply["type"] == "files.result" && reply["ok"] == false);
+    CHECK(reply["error"] ==
+          WireError({ErrorCode::kRejected, "Native conversion diagnosis", reasons[i]}));
+  }
+  services.Stop();
+}
+
 int main() {
+  CheckDocumentErrorReplies();
   CheckSelectionCancellationGrant();
   CheckBursts();
   CHECK(Take(DecodeFileChunk("YWJj")) == std::vector<std::uint8_t>({'a', 'b', 'c'}));

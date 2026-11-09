@@ -119,6 +119,11 @@ export class InputPipeline {
     this.focus(surface, true);
   }
 
+  focusPointer(surface: Surface) {
+    this.cancelPendingFocus(undefined, 'pointer-superseded');
+    this.ensureInputFocus(surface);
+  }
+
   touchStartWall(sampleAt: number) {
     return this.ports.inputStart(sampleAt);
   }

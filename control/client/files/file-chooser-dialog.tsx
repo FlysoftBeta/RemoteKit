@@ -38,6 +38,7 @@ import { BasketItems, type BasketPanel } from './basket-items';
 import { placeFileChooser } from './file-chooser-anchor';
 import { basketEntries, fileError, FileDropZone, useDeviceImport } from './file-library-controls';
 import { useLibrary } from './file-library-state';
+import { useImportQueue } from './import-state';
 import { fileChooserAccept, selectionViewModel, validateSelection } from './file-selection';
 import { useFileView } from './file-view';
 import { PhotoCapture } from './photo-library-capture';
@@ -117,9 +118,9 @@ export function FileBasketDialog({
   const capacity = MAX_BASKET - basket.length - pending.length;
   const reportError = useCallback((message: string) => setError(message), []);
   const clearInsertion = useCallback(() => setAfterId(undefined), []);
+  const uploads = useImportQueue('basket', request?.windowId ?? windowId);
   const upload = useDeviceImport({
-    destination: 'basket',
-    windowId: request?.windowId ?? windowId,
+    uploads,
     afterId,
     accept: request ? fileChooserAccept(request) : undefined,
     requestId: request?.id,
@@ -337,137 +338,140 @@ export function FileBasketDialog({
           sx={{
             flex: 1,
             minHeight: 0,
-            overflowY: 'auto',
+            overflowY: step === 'library' ? 'hidden' : 'auto',
             p: '6px 6px 8px 8px',
             display: 'flex',
             flexDirection: 'column',
             gap: 0.75,
+            '& > *': { flexShrink: 0 },
           }}
         >
-          <FileDropZone
-            label="松开以加入文件篮"
-            disabled={!canAdd}
-            onFiles={(files) => {
-              setAfterId(undefined);
-              upload.add(files);
-            }}
-            sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.75 }}
-          >
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              {!snapshot ? (
-                <Box sx={{ py: 4, textAlign: 'center' }}>
-                  <Button disabled={!online || waiting} onClick={() => void run(refresh)}>
-                    加载文件篮
-                  </Button>
-                </Box>
-              ) : basket.length || pending.length ? (
-                <BasketItems
-                  entries={basket}
-                  pending={pending}
-                  revision={snapshot.revision}
-                  mode={view.mode}
-                  ordered={!request || request.multiple}
-                  chosen={chosen}
-                  onChoose={request && !request.multiple ? setChosen : undefined}
-                  disabled={editingDisabled}
-                  dragging={dragging}
-                  onDragging={setDragging}
-                  panel={panel}
-                  setPanel={(next) => {
-                    setPanel(next);
-                    const owner = request?.windowId ?? windowId;
-                    if (
-                      owner &&
-                      next &&
-                      snapshot.entries.some((entry) => entry.id === next.id) &&
-                      (next.id !== panel?.id || next.view !== panel.view)
-                    ) {
-                      void recordUsage(next.id, owner).catch((failure) =>
-                        diagnostics.record('file-usage', failure),
-                      );
-                    }
-                  }}
-                  onChange={saveBasket}
-                  onInsert={(id, anchor) => openAdd(anchor, id)}
-                  onRetake={(replace) => setCamera({ replace })}
-                />
-              ) : (
-                <EmptyBasket sources={addSources} />
-              )}
-            </Box>
-            <Box
-              sx={{
-                flex: '0 0 44px',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                gap: 0.5,
+          {step !== 'library' && (
+            <FileDropZone
+              label="松开以加入文件篮"
+              disabled={!canAdd}
+              onFiles={(files) => {
+                setAfterId(undefined);
+                upload.add(files);
               }}
+              sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.75 }}
             >
-              {request && (
-                <Tooltip title={sendLabel} placement="left">
-                  <Badge
-                    overlap="circular"
-                    badgeContent={request.multiple ? selection.length : 0}
-                    sx={{
-                      '& .MuiBadge-badge': {
-                        bgcolor: 'var(--surface)',
-                        color: 'primary.main',
-                        fontWeight: 600,
-                        boxShadow: '0 0 0 1px var(--primary)',
-                      },
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                {!snapshot ? (
+                  <Box sx={{ py: 4, textAlign: 'center' }}>
+                    <Button disabled={!online || waiting} onClick={() => void run(refresh)}>
+                      加载文件篮
+                    </Button>
+                  </Box>
+                ) : basket.length || pending.length ? (
+                  <BasketItems
+                    entries={basket}
+                    pending={pending}
+                    revision={snapshot.revision}
+                    mode={view.mode}
+                    ordered={!request || request.multiple}
+                    chosen={chosen}
+                    onChoose={request && !request.multiple ? setChosen : undefined}
+                    disabled={editingDisabled}
+                    dragging={dragging}
+                    onDragging={setDragging}
+                    panel={panel}
+                    setPanel={(next) => {
+                      setPanel(next);
+                      const owner = request?.windowId ?? windowId;
+                      if (
+                        owner &&
+                        next &&
+                        snapshot.entries.some((entry) => entry.id === next.id) &&
+                        (next.id !== panel?.id || next.view !== panel.view)
+                      ) {
+                        void recordUsage(next.id, owner).catch((failure) =>
+                          diagnostics.record('file-usage', failure),
+                        );
+                      }
                     }}
-                  >
-                    <span>
-                      <IconButton
-                        aria-label={transaction ? '重试确认' : '发送'}
-                        disabled={sendDisabled}
-                        onClick={beginSelection}
-                        sx={{
-                          width: 44,
-                          height: 44,
-                          bgcolor: 'primary.main',
-                          color: 'primary.contrastText',
-                          '&:hover': { bgcolor: 'primary.dark' },
-                          '&.Mui-disabled': { bgcolor: 'action.disabledBackground' },
-                        }}
-                      >
-                        <Send fontSize="small" />
-                      </IconButton>
-                    </span>
-                  </Badge>
+                    onChange={saveBasket}
+                    onInsert={(id, anchor) => openAdd(anchor, id)}
+                    onRetake={(replace) => setCamera({ replace })}
+                  />
+                ) : (
+                  <EmptyBasket sources={addSources} />
+                )}
+              </Box>
+              <Box
+                sx={{
+                  flex: '0 0 44px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  gap: 0.5,
+                }}
+              >
+                {request && (
+                  <Tooltip title={sendLabel} placement="left">
+                    <Badge
+                      overlap="circular"
+                      badgeContent={request.multiple ? selection.length : 0}
+                      sx={{
+                        '& .MuiBadge-badge': {
+                          bgcolor: 'var(--surface)',
+                          color: 'primary.main',
+                          fontWeight: 600,
+                          boxShadow: '0 0 0 1px var(--primary)',
+                        },
+                      }}
+                    >
+                      <span>
+                        <IconButton
+                          aria-label={transaction ? '重试确认' : '发送'}
+                          disabled={sendDisabled}
+                          onClick={beginSelection}
+                          sx={{
+                            width: 44,
+                            height: 44,
+                            bgcolor: 'primary.main',
+                            color: 'primary.contrastText',
+                            '&:hover': { bgcolor: 'primary.dark' },
+                            '&.Mui-disabled': { bgcolor: 'action.disabledBackground' },
+                          }}
+                        >
+                          <Send fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Badge>
+                  </Tooltip>
+                )}
+                <Tooltip title="添加文件" placement="left">
+                  <span>
+                    <IconButton
+                      aria-label="添加文件"
+                      aria-haspopup="menu"
+                      aria-expanded={!!addMenu}
+                      disabled={!canAdd}
+                      sx={{ width: 44, height: 44 }}
+                      onClick={(event) => openAdd(event.currentTarget)}
+                    >
+                      <Add />
+                    </IconButton>
+                  </span>
                 </Tooltip>
-              )}
-              <Tooltip title="添加文件" placement="left">
-                <span>
-                  <IconButton
-                    aria-label="添加文件"
-                    aria-haspopup="menu"
-                    aria-expanded={!!addMenu}
-                    disabled={!canAdd}
-                    sx={{ width: 44, height: 44 }}
-                    onClick={(event) => openAdd(event.currentTarget)}
-                  >
-                    <Add />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Tooltip title="更多" placement="left">
-                <span>
-                  <IconButton
-                    aria-label="更多"
-                    aria-haspopup="menu"
-                    aria-expanded={!!moreMenu}
-                    disabled={dragging}
-                    sx={{ width: 44, height: 44 }}
-                    onClick={(event) => setMoreMenu(event.currentTarget)}
-                  >
-                    <MoreHoriz />
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Box>
-          </FileDropZone>
+                <Tooltip title="更多" placement="left">
+                  <span>
+                    <IconButton
+                      aria-label="更多"
+                      aria-haspopup="menu"
+                      aria-expanded={!!moreMenu}
+                      disabled={dragging}
+                      sx={{ width: 44, height: 44 }}
+                      onClick={(event) => setMoreMenu(event.currentTarget)}
+                    >
+                      <MoreHoriz />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              </Box>
+            </FileDropZone>
+          )}
           {step === 'library' && (
             <FileLibraryPicker
               entries={available}

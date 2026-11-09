@@ -35,6 +35,14 @@ export class EditingInput {
   matches(owner: string | undefined) {
     return owner !== undefined && this.owner === owner;
   }
+  transfer(owner: string, next: string) {
+    if (!this.matches(owner)) return;
+    this.owner = next;
+    if (this.composition) {
+      this.composition.owner = next;
+      return this.update(next, this.composition.text);
+    }
+  }
   invalidate() {
     if (this.composition) this.revokedComposition = { text: this.composition.text };
     if (this.committed) this.revokedCommit = this.committed;

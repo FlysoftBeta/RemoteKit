@@ -15,6 +15,7 @@ import { QuestionsApp } from '../client/learning/questions/questions-app';
 import { SignInCard } from '../client/learning/sign-in-card';
 import { OverflowText } from '../client/app/overflow-text';
 import { LibraryTab } from '../client/files/library-tab';
+import { ImportQueue } from '../client/files/import-queue';
 import { FileLibraryContext, type FileLibrary } from '../client/files/file-library-state';
 import { FileChannel } from '../client/files/file-channel';
 import { isDocumentFile } from '../client/files/file-preview';
@@ -585,7 +586,9 @@ test('library virtual rows keep selection and basket actions scoped to entry ids
       mutations.push({ method, params });
     },
   } as unknown as FileLibrary;
+  const uploads = new ImportQueue({ rpc: library.rpc, mutate: library.mutate }, 'library');
   const props = {
+    uploads,
     windowId: 'files',
     view: 'all' as const,
     query: '',
@@ -621,6 +624,7 @@ test('library virtual rows keep selection and basket actions scoped to entry ids
   assert.notEqual(document.activeElement?.closest('[data-file-row]')?.getAttribute('data-file-row'), id);
   assert.ok(document.activeElement?.closest('[data-file-row]'));
   await act(async () => root.unmount());
+  uploads.dispose();
 });
 
 test('overflow tooltips measure the mounted text after the opening delay', async () => {

@@ -32,6 +32,8 @@ SQLite 带 `schema_version`（当前 16）。空库在一个事务里建表并�
 
 **信令**：只用 trickle ICE。offer 不等完整候选收集，Endpoint 接受后异步发 `rtc.signal`（answer、candidate、complete、error），Control 按 Tenant、Viewer 租约、`connectionId`、`attemptId` 路由给对应 Viewer。早到的候选有界排队；候选不排在等待 answer 的 Tenant 队列后面，其他 Tenant 也不等这次协商；接管、退出或取消清除旧绑定。接收能力探测在页面启动时预热并缓存，鉴权不等待探测。
 
+**重建连接**：Viewer 丢弃一次 RTC 尝试时本地立即关闭 peer，并尽力发一次 `rtc.close`；这个请求失败（例如 WebSocket 当时已断）只记入诊断，不阻塞下一次建立。"同一 Viewer 最多一个活 peer"由服务端保证：Control 处理新 offer 时先关闭该 Tenant 上一条连接（含断开但未清理的 peer），再开始新的尝试；客户端每个异步步骤（createOffer、setLocalDescription、answer、setRemoteDescription）之后核对 attempt，迟到的结果直接丢弃。曾经客户端把 `rtc.close` 带重试的 Promise 当作下一次建立的屏障，断网时它一旦失败就永久保持 rejected，之后每次重试都卡在这里，只有刷新页面才能恢复。
+
 **Viewer 租约**：每个账户同时只有一个活跃 Viewer。新连接接管旧连接，旧端收到 `lease revoked` 后停止媒体，不自动争抢。租约绑定 token 身份：注销某个 token 只撤销该 token 的租约，不会踢掉另一个 token 的新 Viewer（曾经按 Tenant 选择要踢的 Viewer，导致旧 token 注销踢掉了新登录）。排队中的工作在执行时重新校验租约和认证。
 
 ## 操作

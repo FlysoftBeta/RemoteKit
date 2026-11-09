@@ -17,7 +17,7 @@ function pointerQueries() {
   return queries;
 }
 export interface EditingViewPorts {
-  input: Pick<InputPipeline, 'sendInput' | 'ensureInputFocus' | 'focus'>;
+  input: Pick<InputPipeline, 'sendInput' | 'ensureInputFocus' | 'focus' | 'inputIdentity' | 'getSnapshot'>;
   editing: Pick<EditingSession, 'mobileEditing' | 'editingSurface' | 'editingIdentity'>;
   presentation: Pick<PresentationSession, 'canInput'>;
 }
@@ -43,6 +43,14 @@ export class EditingView extends Store<EditingViewSnapshot> {
   private restoreHardwareFocus?: string;
   private ackedEditingOwner?: string;
   private previousEditing?: { document?: string; owner?: string };
+  private pointerFocus?: {
+    identity: string;
+    document: string;
+    owner: string;
+    focusRevision: string;
+    revision: string;
+  };
+  private pointerSequence = 0;
   private readonly keyboardSession = new KeyboardSession();
   private softInputFocused = false;
   private suppressBlur = false;
@@ -122,6 +130,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
   }
   get editorOwner() {
     return (
+      this.pointerFocus?.owner ??
       this.remoteOwner ??
       (this.keyboardEnabled && !this.remoteEditable && !this.softInputFocused
         ? this.editingIdentity
@@ -172,6 +181,35 @@ export class EditingView extends Store<EditingViewSnapshot> {
   }
   observe = () => {
     clearTimeout(this.policyTimer);
+    const pointer = this.pointerFocus;
+    let transferred = false;
+    if (pointer) {
+      if (
+        !this.keyboardEnabled ||
+        pointer.document !== this.editingIdentity ||
+        !this.surface ||
+        pointer.identity !== this.ports.input.inputIdentity(this.surface) ||
+        (BigInt(this.ports.editing.mobileEditing.current?.revision ?? '0') > BigInt(pointer.revision) &&
+          this.ports.editing.mobileEditing.current?.editable.active === false) ||
+        (this.remoteEditable &&
+          BigInt(this.remoteEditable.editable.focusRevision) > BigInt(pointer.focusRevision) &&
+          this.remoteEditable.editable.focusSource !== 'pointer')
+      ) {
+        this.pointerFocus = undefined;
+        this.editing.invalidate();
+      } else if (
+        this.editableReady &&
+        this.ports.input.getSnapshot().focus.phase === 'granted' &&
+        this.remoteOwner &&
+        this.strictEditable?.editable.focusSource === 'pointer' &&
+        BigInt(this.strictEditable.editable.focusRevision) > BigInt(pointer.focusRevision)
+      ) {
+        this.pointerFocus = undefined;
+        const composition = this.editing.transfer(pointer.owner, this.editorOwner!);
+        transferred = true;
+        if (composition) this.sendEdit(composition);
+      }
+    }
     this.changed();
     if (
       this.frameReady &&
@@ -189,7 +227,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     }
     const previous = this.previousEditing;
     const replaced = previous && previous.document !== this.editingIdentity;
-    if (replaced || !this.keyboardEnabled || previous?.owner !== this.editorOwner) {
+    if (replaced || !this.keyboardEnabled || (!transferred && previous?.owner !== this.editorOwner)) {
       clearTimeout(this.deferredEditingTimer);
       this.deferredEditing.clear();
       this.editing.invalidate();
@@ -265,6 +303,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
       this.sendEdit({ ...event, action: 'up', repeat: false, text: '', unmodified_text: '' });
     this.heldKeys.clear();
     if (!endEditing) return;
+    this.pointerFocus = undefined;
     if (this.editing.composing && this.editing.matches(this.editorOwner) && this.editableReady)
       this.send(this.withEditTarget({ type: 'ime_cancel' }));
     this.deferredEditing.clear();
@@ -298,14 +337,14 @@ export class EditingView extends Store<EditingViewSnapshot> {
     this.editor.inputMode = 'none';
   };
   compositionStart = () => {
-    if (document.activeElement === this.editor) this.editing.start(this.remoteOwner);
+    if (document.activeElement === this.editor) this.editing.start(this.editorOwner);
   };
   compositionUpdate = (data: string) => {
-    const event = this.editing.update(this.remoteOwner, data);
+    const event = this.editing.update(this.editorOwner, data);
     if (event) this.sendEdit(event);
   };
   compositionEnd = (data: string) => {
-    const event = this.editing.end(this.remoteOwner, data, performance.now());
+    const event = this.editing.end(this.editorOwner, data, performance.now());
     if (event) this.sendEdit(event);
     if (!this.editing.composing) this.resetEditor();
   };
@@ -328,6 +367,39 @@ export class EditingView extends Store<EditingViewSnapshot> {
   withEditTarget = (event: Record<string, unknown>) =>
     this.editableTarget ? { ...event, editableTarget: this.editableTarget } : event;
   sendEdit = (event: Record<string, unknown>) => {
+    const pointer = this.pointerFocus;
+    if (pointer) {
+      if (
+        !this.keyboardEnabled ||
+        !this.surface ||
+        pointer.document !== this.editingIdentity ||
+        pointer.identity !== this.ports.input.inputIdentity(this.surface) ||
+        !this.editing.matches(pointer.owner)
+      )
+        return;
+      // Pointer and keys share the focus-lease queue. Until the editable node is
+      // known, commit text as a character event instead of guessing its target.
+      if (event.type === 'ime_commit') {
+        for (const text of String(event.text)) {
+          if (
+            !this.send({
+              type: 'key',
+              action: 'char',
+              ...keyIdentity('', text),
+              windows_key_code: 0,
+              repeat: false,
+              text,
+              unmodified_text: text,
+              modifiers: 0,
+            })
+          ) {
+            this.setError('键盘输入暂未送达，请重新输入。');
+            break;
+          }
+        }
+      } else if (event.type === 'key' && !this.send(event)) this.setError('键盘输入暂未送达，请重新输入。');
+      return;
+    }
     const target = this.currentEditTarget();
     if (
       !this.keyboardEnabled ||
@@ -404,6 +476,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
     if (
       document.activeElement === node &&
       inputMode !== 'none' &&
+      !this.editing.composing &&
       (node.inputMode === 'none' || (userRequested && !this.resize.keyboardOpen))
     ) {
       this.suppressBlur = true;
@@ -436,6 +509,22 @@ export class EditingView extends Store<EditingViewSnapshot> {
   activateKeyboard = () => {
     if (this.keyboardSession.activate().open && !this.keyboardShown) this.focusEditor(true, true);
     this.observe();
+  };
+  beginPointerFocus = () => {
+    const surface = this.surface;
+    if (!surface || !this.keyboardEnabled) return;
+    this.editing.invalidate();
+    this.heldKeys.clear();
+    this.deferredEditing.clear();
+    this.pointerFocus = {
+      identity: this.ports.input.inputIdentity(surface),
+      document: this.editingIdentity!,
+      owner: `pointer:${++this.pointerSequence}:${this.editingIdentity}`,
+      focusRevision: this.remoteEditable?.editable.focusRevision ?? '0',
+      revision: this.ports.editing.mobileEditing.current?.revision ?? '0',
+    };
+    this.editing.focus(this.pointerFocus.owner);
+    this.previousEditing = { document: this.editingIdentity, owner: this.editorOwner };
   };
   key = (event: KeyboardEvent, action: string) => {
     if (this.editing.composing || event.isComposing || event.keyCode === 229) return;
@@ -507,7 +596,7 @@ export class EditingView extends Store<EditingViewSnapshot> {
       ['insertText', 'insertFromPaste', 'insertFromDictation'].includes(event.inputType)
         ? this.editor?.value.replace(EDITOR_SENTINEL, '') || null
         : event.data;
-    const operation = this.editing.edit(this.remoteOwner, event.inputType, data, performance.now(), phase);
+    const operation = this.editing.edit(this.editorOwner, event.inputType, data, performance.now(), phase);
     const deferredText =
       data === null && ['insertText', 'insertFromPaste', 'insertFromDictation'].includes(event.inputType);
     if (phase === 'before' && event.cancelable && !deferredText) event.preventDefault();

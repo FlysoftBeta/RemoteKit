@@ -7,6 +7,6 @@ const { createServer } = createRequire(resolve(control, 'package.json'))('vite')
 const server = await createServer({
   root: control,
   cacheDir: resolve(process.argv[3]),
-  server: { host: '127.0.0.1', port: Number(process.argv[2]), strictPort: true },
+  server: { host: '127.0.0.1', port: Number(process.argv[2]), strictPort: true, watch: null, hmr: false },
 });
 await server.listen();

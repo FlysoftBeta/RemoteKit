@@ -39,7 +39,18 @@ export function FileLibraryPicker({
       current.includes(id) ? current.filter((value) => value !== id) : full ? current : [...current, id],
     );
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, pt: 0.5 }}>
+    <Box
+      sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        flex: '1 1 auto',
+        minHeight: 0,
+        overflow: 'hidden',
+        gap: 1,
+        pt: 0.5,
+        '& > *': { flexShrink: 0 },
+      }}
+    >
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
         <IconButton aria-label="返回" onClick={onClose}>
           <ArrowBack fontSize="small" />
@@ -138,8 +149,11 @@ export function FileLibraryPicker({
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fill, minmax(92px, 1fr))',
             gap: 1,
-            maxHeight: 260,
+            flex: '1 1 auto',
+            minHeight: 0,
+            alignContent: 'start',
             overflowY: 'auto',
+            overscrollBehaviorY: 'contain',
             p: '2px',
           }}
         >
@@ -177,7 +191,7 @@ export function FileLibraryPicker({
           )}
         </Box>
       )}
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 'none' }}>
         <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
           {full
             ? `文件篮最多再放 ${capacity} 项`

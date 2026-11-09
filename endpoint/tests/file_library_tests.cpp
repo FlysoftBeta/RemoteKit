@@ -114,6 +114,16 @@ void Documents(const fs::path& root) {
   const auto source_path = root / "source";
   std::ofstream(source_path, std::ios::binary) << "MZunsupported";
   const auto source = Take(objects.Write(source_path, {}, {{"tenantId", "tenant"}}));
+  const auto metadata_path = root / "first/metadata" / (source.id + ".json");
+  {
+    const remotekit::Json metadata{
+        {"assetId", source.id}, {"type", "application/octet-stream"}, {"size", source.size}};
+    std::ofstream(metadata_path) << metadata.dump();
+  }
+  FileLibrary existing(root / "first", objects, "tenant");
+  Take(existing.Initialize());
+  CHECK(Take(existing.Describe(source.id)).size == source.size);
+
   if (!objects.Documents().Available()) {
     CHECK(first.OpenDocument(source.id, live).error().code == remotekit::ErrorCode::kUnavailable);
     return;
@@ -171,6 +181,39 @@ void Documents(const fs::path& root) {
     CHECK(first.OpenDocument(unsupported.id, live).error().reason ==
           remotekit::ErrorReason::kDocumentUnsupported);
   CHECK(control.located == located && fs::is_empty(root / "first/documents"));
+  const auto docx_path = fs::path(__FILE__).parent_path() / "fixtures/document.docx";
+  std::ifstream docx_stream(docx_path, std::ios::binary);
+  std::vector<uint8_t> truncated(100);
+  docx_stream.read(reinterpret_cast<char*>(truncated.data()), truncated.size());
+  CHECK(docx_stream.good());
+  unsigned sequence = 0;
+  for (const auto& [mime, expected] : std::vector<std::pair<std::string, remotekit::ErrorReason>>{
+           {"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            remotekit::ErrorReason::kDocumentCorrupt},
+           {"application/octet-stream", remotekit::ErrorReason::kDocumentUnsupported}}) {
+    auto draft = Take(first.Begin(1, "document-" + std::to_string(++sequence),
+                                  {"truncated.docx", mime, truncated.size()}, live));
+    const auto upload = draft["uploadId"].get<std::string>();
+    Take(first.Chunk(1, upload, 0, truncated, live));
+    const auto asset = Take(first.Seal(1, upload, live));
+    {
+      std::ifstream input(root / "first/metadata" / (asset.id + ".json"));
+      const auto metadata = remotekit::Json::parse(input);
+      CHECK(!metadata.contains("name") && metadata["type"] == mime);
+    }
+    FileLibrary reopened(root / "first", objects, "tenant");
+    Take(reopened.Initialize());
+    auto result = reopened.OpenDocument(asset.id, live);
+    const auto expires = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (result && result.value()["state"] == "converting") {
+      CHECK(std::chrono::steady_clock::now() < expires);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      result = reopened.OpenDocument(asset.id, live);
+    }
+    CHECK(!result && result.error().code == remotekit::ErrorCode::kRejected &&
+          result.error().reason == expected);
+    truncated.push_back(0);
+  }
 }
 
 void Puts(const fs::path& root) {

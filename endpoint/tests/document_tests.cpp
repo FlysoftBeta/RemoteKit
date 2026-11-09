@@ -497,21 +497,54 @@ void ObjectTypeTests(const fs::path& output) {
   TemporaryDirectory directory(output);
   const auto source = directory.path() / "object-without-extension";
   Write(source, Docx());
-  Check(Take(DetectDocumentFile(source)).extension == ".docx", "object DOCX detection");
+  Check(Take(DetectDocumentFile(source, std::string_view{})).extension == ".docx",
+        "object DOCX detection");
   Write(source, Pptx());
-  Check(Take(DetectDocumentFile(source)).extension == ".pptx", "object PPTX detection");
+  Check(Take(DetectDocumentFile(source, std::string_view{})).extension == ".pptx",
+        "object PPTX detection");
   Write(source, Text("%PDF-1.7\n"));
-  Check(Take(DetectDocumentFile(source)).type == DocumentType::kPdf, "object PDF detection");
+  Check(Take(DetectDocumentFile(source, std::string_view{})).type == DocumentType::kPdf,
+        "object PDF detection");
   Write(source, Text("MZunsupported"));
-  Check(Take(DetectDocumentFile(source)).type == DocumentType::kUnsupported,
+  Check(Take(DetectDocumentFile(source, std::string_view{})).type == DocumentType::kUnsupported,
         "binary object accepted as document");
   Write(source, Text("plain text\n"));
-  Check(Take(DetectDocumentFile(source)).type == DocumentType::kText, "object text detection");
+  Check(Take(DetectDocumentFile(source, std::string_view{})).type == DocumentType::kText,
+        "object text detection");
   auto corrupt = Docx();
   corrupt.resize(corrupt.size() - 50);
   Write(source, corrupt);
-  Check(Take(DetectDocumentFile(source)).type == DocumentType::kUnsupported,
+  Check(Take(DetectDocumentFile(source, std::string_view{})).type == DocumentType::kUnsupported,
         "truncated object ZIP accepted");
+  auto truncated = Docx();
+  truncated.resize(100);
+  Write(source, truncated);
+  for (const auto mime :
+       {"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.oasis.opendocument.text", "application/pdf", "application/msword",
+        "application/vnd.ms-powerpoint"}) {
+    auto detected = DetectDocumentFile(source, mime);
+    Check(!detected && detected.error().code == ErrorCode::kRejected &&
+              detected.error().reason == ErrorReason::kDocumentCorrupt,
+          "declared truncated document not corrupt");
+  }
+  Check(Take(DetectDocumentFile(source, "application/octet-stream")).type ==
+            DocumentType::kUnsupported,
+        "octet-stream truncated ZIP not unsupported");
+  auto named = DetectDocumentFile(source, DetectDocument("truncated.DOCX", {}));
+  Check(!named && named.error().reason == ErrorReason::kDocumentCorrupt,
+        "render queue name hint lost");
+  Write(source, Bytes{0x00, 0x01, 0x02, 0xff});
+  Check(Take(DetectDocumentFile(source, "application/octet-stream")).type ==
+            DocumentType::kUnsupported,
+        "random binary accepted");
+  Write(source, Docx());
+  Check(Take(DetectDocumentFile(source, "application/octet-stream")).extension == ".docx",
+        "content sniff did not win over unknown declaration");
+  Check(Take(DetectDocumentFile(source, "application/pdf")).extension == ".docx",
+        "content sniff did not win over conflicting declaration");
 }
 
 void ValidateRendition(const RenditionResult& result) {
@@ -548,7 +581,8 @@ int Integration(const fs::path& output, const fs::path& tools) {
   fs::copy_file(fixtures / "document.docx", rich_docx);
   fs::copy_file(fixtures / "document-libreoffice.docx", saved_docx);
   for (const auto& source : {rich_docx, saved_docx})
-    Check(Take(DetectDocumentFile(source)).extension == ".docx", "committed DOCX detection");
+    Check(Take(DetectDocumentFile(source, std::string_view{})).extension == ".docx",
+          "committed DOCX detection");
   OfficeConverter converter(directory.path(), tools);
   PdfRenderer renderer(tools);
   for (const auto& [source, type] :
@@ -567,6 +601,10 @@ int Integration(const fs::path& output, const fs::path& tools) {
     Success(renderer.Render(pdf, zip));
     auto rendered = std::chrono::steady_clock::now();
     ValidateRendition({zip, fs::file_size(zip)});
+    if (source == rich_docx) {
+      fs::copy_file(pdf, output / "document.pdf", fs::copy_options::overwrite_existing);
+      fs::copy_file(zip, output / "document-render.zip", fs::copy_options::overwrite_existing);
+    }
     const auto pages = Take(Take(RenderArchive::OpenFile(zip)).Info()).pages.size();
     std::cout << source.extension().string() << " conversion_ms="
               << std::chrono::duration_cast<std::chrono::milliseconds>(converted - start).count()
@@ -594,7 +632,8 @@ int Integration(const fs::path& output, const fs::path& tools) {
   Check(!rejected && rejected.error().code == ErrorCode::kRejected, "corrupt PDF accepted");
   Write(invalid, Text("PK\x03\x04 corrupt"));
   auto corrupt_office = queue.Render("corrupt-office", invalid, "corrupt.docx");
-  Check(!corrupt_office && corrupt_office.error().code == ErrorCode::kRejected,
+  Check(!corrupt_office && corrupt_office.error().code == ErrorCode::kRejected &&
+            corrupt_office.error().reason == ErrorReason::kDocumentCorrupt,
         "corrupt Office input accepted");
   TemporaryDirectory encrypted(directory.path());
   auto source = encrypted.path() / "input.docx";
@@ -612,9 +651,33 @@ int Integration(const fs::path& output, const fs::path& tools) {
   Check(!password && password.error().code == ErrorCode::kRejected &&
             password.error().message == "password-protected document",
         "password protection not reported");
-  auto unsupported = queue.Render("image", docx, "image.png");
-  Check(!unsupported && unsupported.error().code == ErrorCode::kRejected,
+  auto broken_entries = Entries(Docx());
+  for (auto& entry : broken_entries)
+    if (entry.name == "word/document.xml")
+      entry.bytes = Text("<w:document><broken");
+  auto broken = directory.path() / "broken.docx";
+  Write(broken, Zip(broken_entries));
+  auto broken_result = queue.Render("broken-xml", broken, "broken.docx");
+  Check(!broken_result && broken_result.error().code == ErrorCode::kRejected &&
+            broken_result.error().reason == ErrorReason::kDocumentCorrupt,
+        "corrupt XML in valid DOCX ZIP not corrupt");
+  std::cout << "corrupt-xml.docx: rejected/document_corrupt\n";
+  auto truncated = Read(rich_docx);
+  truncated.resize(100);
+  Write(broken, truncated);
+  auto truncated_result = queue.Render("truncated-docx", broken, "truncated.docx");
+  Check(!truncated_result && truncated_result.error().reason == ErrorReason::kDocumentCorrupt,
+        "truncated DOCX not corrupt");
+  std::cout << "truncated-100-bytes.docx: rejected/document_corrupt\n";
+  auto renamed = Take(queue.Render("renamed-docx", rich_docx, "renamed.bin"));
+  ValidateRendition(renamed);
+  std::cout << "valid-docx-renamed.bin: DOCX/ready\n";
+  Write(broken, Bytes{0x00, 0x01, 0x02, 0xff});
+  auto unsupported = queue.Render("binary", broken, "random.bin");
+  Check(!unsupported && unsupported.error().code == ErrorCode::kRejected &&
+            unsupported.error().reason == ErrorReason::kDocumentUnsupported,
         "unsupported input accepted");
+  std::cout << "random.bin: rejected/document_unsupported\n";
   RenderQueue absent(directory.path(), directory.path() / "missing-tools");
   auto unavailable = absent.Render("missing-tool", docx, "test.docx");
   Check(!unavailable && unavailable.error().code == ErrorCode::kUnavailable,

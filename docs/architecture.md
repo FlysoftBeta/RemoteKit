@@ -84,7 +84,7 @@ RemoteKit 在 Windows 服务器上运行 Chromium，把网页渲染为离屏纹�
 
 **线上形状**（所有 JSON 边界相同）：`error:{code, message, reason?, retryAfterMs?}`。
 - `retryAfterMs` 只随 `busy`、`rate_limited`、`unavailable` 出现（0…86 400 000 的整数）；其他 code 带上它会在校验时被丢弃。提示只调整允许重试时的等待，永远不会让不可重试的 code 变得可以重试。HTTP 同时设置 `Retry-After` 头，但客户端只读 JSON。
-- Native（Endpoint、Browser）的 `message` 是英文运维诊断；需要向用户区分的情形（如加密文档与损坏文档、单文件过大与配额已满）带一个 `reason`，取自协议里封闭的枚举，只用于选择展示文字。Control 是展示边界：把 Native 错误转换成 Viewer 用的中文 `message`（按 `reason`，否则按 code 的通用句），原始诊断进日志和诊断包。Control → Viewer 只有 `{code, message, retryAfterMs?}`，Viewer 直接显示 `message`。
+- Native（Endpoint、Browser）的 `message` 是英文运维诊断；需要向用户区分的情形（如加密文档与损坏文档、单文件过大与配额已满）带一个 `reason`，取自协议里封闭的枚举，只用于选择展示文字。Control 是展示边界：把 Native 错误转换成 Viewer 用的中文 `message`（按 `reason`，否则按 code 的通用句），原始诊断进日志和诊断包。Control → Viewer 只有 `{code, message, retryAfterMs?}`，Viewer 直接显示 `message`。Endpoint 经 DataChannel 直接回复 Viewer 的请求（文件服务、文档阅读）不经过 Control，回复里同样带 Native 的 `{code, message, reason?, retryAfterMs?}`；这条路径的展示边界是 Viewer 的 DataChannel 解码处。两处用同一个转换（`control/shared/errors.ts` 的 `nativeError` 与原因文字表），英文诊断进 `detail`。
 - Browser 控制回复：`{version:1, id, ok:false, error:{code, message, reason?, retryAfterMs?}}`，code 用名称字符串。SDK 的类型化调用把 Browser 的应用错误原样交给调用方，不折叠成传输状态；SDK 传输状态区分"未发出"（通道已关、写失败）与"已发出、结果未知"（超时、发出后断开、回复无效）。
 - 操作收据的失败是 `status:'failed'` 加结构化 `error:{code, message}`；`expired`（generation 已轮换）是 `failed` + `conflict`。Viewer 按收据里的 code 处理，与直接回复的错误走同一套处理。
 - 每个边界只转换一次；中途转发保留 code、`reason` 与 `retryAfterMs`。

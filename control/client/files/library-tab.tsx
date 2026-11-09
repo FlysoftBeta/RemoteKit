@@ -65,6 +65,7 @@ import {
   useDeviceImport,
 } from './file-library-controls';
 import { useLibrary } from './file-library-state';
+import type { ImportControls } from './import-queue';
 import { FileRow, FileTile } from './file-tile';
 import { FileViewToggle } from './file-view';
 import { PhotoCapture } from './photo-library-capture';
@@ -77,6 +78,7 @@ import { SnippetView, snippetOriginLabel, snippetRelativeTime, snippetSearchText
 const MAX_BASKET = 64;
 
 export function LibraryTab({
+  uploads,
   windowId,
   view: filter,
   query,
@@ -86,6 +88,7 @@ export function LibraryTab({
   onLayout,
   onOpen,
 }: {
+  uploads: ImportControls;
   windowId: string;
   view: FilesView;
   query: string;
@@ -160,8 +163,7 @@ export function LibraryTab({
   const photoJob = photos.jobs.find((job) => job.id === photo || job.replace?.id === photo);
   const reportError = useCallback((message: string) => setError(message), []);
   const upload = useDeviceImport({
-    destination: 'library',
-    windowId,
+    uploads,
     disabled,
     partitionId: currentPartition?.id ?? null,
     onError: reportError,
@@ -692,7 +694,14 @@ export function LibraryTab({
         onOpen={openPreview}
         onSelect={(entry) => setSelected([entry.id])}
       />
-      <Snackbar anchorOrigin={{ vertical: 'top', horizontal: 'center' }} sx={{ pointerEvents: 'none' }} open={copied} autoHideDuration={1600} onClose={() => setCopied(false)} message="已复制" />
+      <Snackbar
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        sx={{ pointerEvents: 'none' }}
+        open={copied}
+        autoHideDuration={1600}
+        onClose={() => setCopied(false)}
+        message="已复制"
+      />
       {camera && (
         <PhotoCapture
           windowId={windowId}

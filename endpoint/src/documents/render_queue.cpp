@@ -4,8 +4,6 @@
 #include "documents/pdf_renderer.hpp"
 #include "documents/render_archive.hpp"
 
-#include <fstream>
-
 namespace remotekit::documents {
 namespace {
 class Engine {
@@ -19,14 +17,10 @@ class Engine {
                                  const std::string& source_id,
                                  const std::filesystem::path& plaintext,
                                  const std::string& name) {
-    std::ifstream input(plaintext, std::ios::binary);
-    if (!input)
-      return Error{ErrorCode::kUnavailable, "Cannot open staged source document"};
-    Bytes prefix(4096);
-    input.read(reinterpret_cast<char*>(prefix.data()), prefix.size());
-    prefix.resize(static_cast<size_t>(input.gcount()));
-    input.close();
-    auto format = DetectDocument(name, prefix);
+    auto detected = DetectDocumentFile(plaintext, DetectDocument(name, {}));
+    if (!detected)
+      return detected.error();
+    const auto& format = detected.value();
     if (format.type == DocumentType::kUnsupported)
       return Error{ErrorCode::kRejected, "Unsupported document type",
                    ErrorReason::kDocumentUnsupported};

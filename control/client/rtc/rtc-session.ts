@@ -338,6 +338,7 @@ export class RtcSession {
       }
       this.markConnection('createOfferStart');
       const originalOffer = await peer.createOffer();
+      if (attempt !== this.attempt) return;
       this.markConnection('createOfferEnd');
       const effectiveOffer = configureReceiveOffer(originalOffer.sdp ?? '', this.receiveProfile, codecs);
       effectiveOffer.sdp = stereoOpusOffer(effectiveOffer.sdp);
@@ -349,8 +350,8 @@ export class RtcSession {
         changes: effectiveOffer.changes,
       };
       await peer.setLocalDescription({ type: 'offer', sdp: effectiveOffer.sdp });
-      this.markConnection('setLocalEnd');
       if (attempt !== this.attempt) return;
+      this.markConnection('setLocalEnd');
       this.signaling = {
         receiveSelection: this.productReceiveSelection,
         receiveProfile: this.receiveProfile,
@@ -371,13 +372,13 @@ export class RtcSession {
         sdp: peer.localDescription?.sdp,
         attemptId: this.signalAttemptId,
       });
-      this.markConnection('answerReceived');
       if (attempt !== this.attempt) {
         void this.rtcRequest('rtc.close', { connectionId: answer.connectionId }).catch((error) =>
           diagnostics.record('rtc-close', error),
         );
         return;
       }
+      this.markConnection('answerReceived');
       this.connectionId = answer.connectionId;
       this.confirmedAvSync = answer.avSync;
       if (this.remoteSignalConnection && this.remoteSignalConnection !== answer.connectionId)
@@ -390,6 +391,7 @@ export class RtcSession {
         this.connectionAttempts[this.connectionAttempts.length - 1].signalingMode = answer.signalingMode;
       this.observe({ connectionId: answer.connectionId });
       await peer.setRemoteDescription(answer);
+      if (attempt !== this.attempt) return;
       this.markConnection('setRemoteEnd');
       this.remoteDescriptionReady = true;
       this.flushRemoteIce(peer);
@@ -428,8 +430,12 @@ export class RtcSession {
     this.attemptNumber++;
     this.endpointGeneration = undefined;
     if (connectionId) {
-      this.closing = this.closeRemote(connectionId);
-      void this.closing.catch((error) => diagnostics.record('rtc-close', error));
+      // Local disposal ends this attempt. A failed cleanup must not poison the
+      // next offer; the server reconciles the old connection by attempt/lease.
+      this.closing = this.rtcRequest('rtc.close', { connectionId }).then(
+        () => {},
+        (error) => diagnostics.record('rtc-close', error),
+      );
       this.connectionId = undefined;
     }
     const peer = this.peer;
@@ -438,20 +444,6 @@ export class RtcSession {
     this.notify();
   }
 
-  private async closeRemote(connectionId: string) {
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await this.rtcRequest('rtc.close', { connectionId });
-        return;
-      } catch (error) {
-        const failure = toRemoteKitError(error);
-        const delay =
-          retryDelay(failure, attempt) ?? (errorHandling(failure.code) === 'reconcile' ? 1000 : undefined);
-        if (delay === undefined || attempt >= 3) throw failure;
-        await new Promise((resolve) => setTimeout(resolve, delay));
-      }
-    }
-  }
   readonly events = new Events<RtcEvent>();
 
   private observe(change: Partial<Diagnostics>) {

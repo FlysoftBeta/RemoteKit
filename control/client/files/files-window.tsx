@@ -7,6 +7,7 @@ import { TabStrip } from '../app/tab-strip';
 import { scaledAnchor } from '../app/ui-scale';
 import { diagnostics } from '../media/diagnostics';
 import { useLibrary } from './file-library-state';
+import { useImportQueue } from './import-state';
 import { FileTypeIcon } from './file-thumbnail';
 import { LibraryTab, PhotoDialog } from './library-tab';
 import { PhotoCapture } from './photo-library-capture';
@@ -53,6 +54,7 @@ export function FilesWindow({
 }) {
   const restored = useMemo(() => readFilesWindowState(state), [state]);
   const { snapshot, online, refresh, recordUsage, apps, photos } = useLibrary();
+  const uploads = useImportQueue('library', windowId);
   const appliedLaunch = useRef<string>(undefined);
   const [menu, setMenu] = useState<{ anchor: HTMLElement; id: string }>();
   const [photo, setPhoto] = useState<string>();
@@ -150,6 +152,7 @@ export function FilesWindow({
         {active.kind === 'library' ? (
           <LibraryTab
             key={active.id}
+            uploads={uploads}
             windowId={windowId}
             view={active.view}
             query={active.query}

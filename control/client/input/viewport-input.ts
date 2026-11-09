@@ -23,12 +23,14 @@ export interface ViewportInputPorts {
     InputPipeline,
     | 'sendInput'
     | 'ensureInputFocus'
+    | 'focusPointer'
     | 'focus'
     | 'inputIdentity'
     | 'subscribeInputResults'
     | 'subscribeInputDelivery'
     | 'touchStartWall'
     | 'subscribe'
+    | 'getSnapshot'
   >;
   presentation: Pick<
     PresentationSession,
@@ -106,6 +108,7 @@ export class ViewportInput {
         editable: mobile.forView(surface),
         observation: mobile.keyboardObservation(surface),
         deadline: mobile.keyboardCandidateDeadline(surface),
+        focus: ports.input.getSnapshot().focus,
       });
       if (observed === next) return;
       observed = next;
@@ -237,11 +240,15 @@ export class ViewportInput {
       this.focused();
       if (touch && !this.touch.contactIds.length)
         this.tap = { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now() };
+      if (!touch && event.button === 0) this.ports.input.focusPointer(surface);
+      else this.ports.input.ensureInputFocus(surface);
       if (!touch) {
-        if (event.button === 0) this.editing.activateKeyboard();
+        if (event.button === 0) {
+          this.editing.beginPointerFocus();
+          this.editing.activateKeyboard();
+        }
         if (this.editor.inputMode === 'none') this.editing.focusEditor(false);
       }
-      this.ports.input.ensureInputFocus(surface);
       this.canvas.setPointerCapture(event.pointerId);
       if (!touch)
         this.pressed = {

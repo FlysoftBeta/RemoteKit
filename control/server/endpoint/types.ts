@@ -5,19 +5,7 @@ import type {
   ProductOperation,
   SitePreferences,
 } from '../../shared/product';
-import type { ErrorCode, WireError } from '../../shared/errors';
-export type NativeErrorReason =
-  | 'browser_crashed'
-  | 'browser_restarting'
-  | 'output_failed'
-  | 'document_encrypted'
-  | 'document_corrupt'
-  | 'document_unsupported'
-  | 'document_too_complex'
-  | 'file_too_large'
-  | 'storage_quota_exceeded'
-  | 'browser_state_too_large'
-  | 'no_document_contour';
+import type { ErrorCode, NativeErrorReason, WireError } from '../../shared/errors';
 export type NativeError = WireError & { reason?: NativeErrorReason };
 export type ClipboardChangedEvent = {
   type: 'clipboard.changed';

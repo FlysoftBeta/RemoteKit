@@ -190,6 +190,8 @@ test('editing controller defers edits through presentation loss and expires them
           return true;
         },
         ensureInputFocus() {},
+        inputIdentity: () => 'input-owner',
+        getSnapshot: () => ({ focus: { phase: 'granted', token: '7' }, queued: 0, sent: 0 }),
         focus() {},
       },
     },

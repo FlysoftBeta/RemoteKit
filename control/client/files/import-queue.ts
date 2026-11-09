@@ -18,10 +18,10 @@ interface ImportBatch {
   afterId?: string;
 }
 interface ImportState {
-  remaining: number;
-  busy: boolean;
-  error?: string;
-  retryable?: boolean;
+  readonly remaining: number;
+  readonly busy: boolean;
+  readonly error?: string;
+  readonly retryable?: boolean;
 }
 interface ImportServices {
   rpc: Pick<FileChannel, 'uploadAsset'>;
@@ -32,10 +32,12 @@ interface ImportServices {
 }
 
 export class ImportQueue extends Store<ImportState> {
-  private batch?: ImportBatch;
+  private batches: ImportBatch[] = [];
   private controller?: AbortController;
   private online = false;
   private scope?: string;
+  private error?: string;
+  private retryable?: boolean;
   constructor(
     private readonly services: ImportServices,
     private readonly destination: 'library' | 'basket',
@@ -49,42 +51,49 @@ export class ImportQueue extends Store<ImportState> {
     if (!online) this.controller?.abort();
   }
   enqueue = (files: File[], basketSize: number, origin: ImportBatch['origin'], afterId?: string) => {
-    if (!files.length || this.batch) return;
-    const maxFiles = this.destination === 'basket' ? 64 - basketSize : 64;
+    if (!files.length) return false;
+    const maxFiles = this.destination === 'basket' ? 64 - basketSize - this.getSnapshot().remaining : 64;
     if (files.length > maxFiles)
       throw new RemoteKitError('limit_exceeded', `本次最多可添加 ${maxFiles} 个文件`);
     if (files.some((file) => file.size > FILE_LIMITS.maxFileBytes))
       throw new RemoteKitError('limit_exceeded', '单个文件不能超过 256 MiB');
-    this.batch = {
+    const empty = !this.batches.length;
+    this.batches.push({
       jobs: files.map((file) => ({ file, operationId: operationId() })),
       origin: { ...origin },
       afterId,
-    };
-    this.publish({ remaining: files.length, busy: false });
-    void this.upload();
+    });
+    this.emit();
+    if (empty) void this.upload();
+    return true;
   };
   discard = () => {
     this.controller?.abort();
-    this.batch = undefined;
-    this.publish({ remaining: 0, busy: false });
+    this.batches = [];
+    this.error = undefined;
+    this.retryable = undefined;
+    this.emit();
   };
   dispose = () => {
     this.online = false;
     this.discard();
   };
   upload = async () => {
-    const batch = this.batch;
-    if (!batch || this.controller || !this.online || this.getSnapshot().retryable === false) return;
+    if (!this.batches.length || this.controller || !this.online || this.retryable === false) return;
     const abort = new AbortController();
     this.controller = abort;
-    this.publish({ ...this.getSnapshot(), busy: true, error: undefined });
+    this.error = undefined;
+    this.retryable = undefined;
+    this.emit();
+    let batch: ImportBatch | undefined;
     try {
-      while (batch.jobs.length && !abort.signal.aborted && this.batch === batch) {
+      while (this.batches.length && !abort.signal.aborted) {
+        batch = this.batches[0];
         const job = batch.jobs[0];
         job.assetId ??= (
           await this.services.rpc.uploadAsset(job.file, job.operationId, abort.signal)
         ).assetId;
-        if (abort.signal.aborted || this.batch !== batch) break;
+        if (abort.signal.aborted || this.batches[0] !== batch) break;
         const next = await this.services.mutate('library.import', {
           operationId: job.operationId,
           assetId: job.assetId,
@@ -93,31 +102,42 @@ export class ImportQueue extends Store<ImportState> {
           destination: this.destination,
           afterId: batch.afterId,
         });
-        if (this.batch !== batch) break;
+        if (abort.signal.aborted || this.batches[0] !== batch) break;
         // Preserve the same operation identity across a lost mutation response.
         if (this.destination === 'basket' && batch.afterId) {
           const index = next.basket.indexOf(batch.afterId);
           if (index >= 0) batch.afterId = next.basket[index + 1] ?? batch.afterId;
         }
         batch.jobs.shift();
-        this.publish({ ...this.getSnapshot(), remaining: batch.jobs.length });
+        if (!batch.jobs.length) this.batches.shift();
+        this.emit();
       }
-      if (this.batch === batch && !batch.jobs.length) this.discard();
     } catch (error) {
-      if (!abort.signal.aborted && this.batch === batch)
-        this.publish({
-          ...this.getSnapshot(),
-          error: formatError(error),
-          retryable:
-            error instanceof RemoteKitError &&
-            (retryDelay(error, 0) !== undefined ||
-              error.code === 'limit_exceeded' ||
-              (errorHandling(error.code) === 'reconcile' && !!batch.jobs[0]?.assetId)),
-        });
+      if (!abort.signal.aborted && this.batches[0] === batch) {
+        this.error = formatError(error);
+        this.retryable =
+          error instanceof RemoteKitError &&
+          (retryDelay(error, 0) !== undefined ||
+            error.code === 'limit_exceeded' ||
+            (errorHandling(error.code) === 'reconcile' && !!batch?.jobs[0]?.assetId));
+      }
     } finally {
       this.controller = undefined;
-      if (this.batch === batch) this.publish({ ...this.getSnapshot(), busy: false });
-      else if (this.batch) void this.upload();
+      this.emit();
+      if (abort.signal.aborted && this.batches.length && this.batches[0] !== batch) void this.upload();
     }
   };
+  private emit() {
+    this.publish({
+      remaining: this.batches.reduce((total, batch) => total + batch.jobs.length, 0),
+      busy: !!this.controller && !this.controller.signal.aborted,
+      error: this.error,
+      retryable: this.retryable,
+    });
+  }
 }
+
+export type ImportControls = Pick<
+  ImportQueue,
+  'subscribe' | 'getSnapshot' | 'enqueue' | 'discard' | 'upload'
+>;

@@ -264,6 +264,11 @@ async function startFixture(port, run) {
             <a href="/flow/D">D</a>
           </nav>
           <script>
+            const note = document.querySelector('textarea');
+            note.addEventListener('input', () => fetch('/event', {
+              method: 'POST',
+              body: JSON.stringify({ path: location.pathname, type: 'note', value: note.value }),
+            }));
             document.querySelector('#upload').onchange = async event => fetch('/event', {
               method: 'POST',
               body: JSON.stringify({ files: await Promise.all([...event.target.files].map(async file => ({

@@ -548,8 +548,14 @@ Result<FileLibrary::Asset> FileLibrary::Describe(const std::string& id) const {
 Result<ServiceJson> FileLibrary::OpenDocument(const std::string& asset, const Check& check) {
   RK_RETURN_IF_ERROR(check());
   RK_RETURN_IF_ERROR(objects_.Documents().Available());
-  RK_RETURN_IF_ERROR(Describe(asset));
-  RK_ASSIGN_OR_RETURN(result, objects_.Documents().Open(asset, tenant_, root_ / "documents"));
+  std::string media_type;
+  {
+    std::lock_guard lock(mutex_);
+    RK_ASSIGN_OR_RETURN(entry, RequireAsset(asset));
+    media_type = entry->asset.type;
+  }
+  RK_ASSIGN_OR_RETURN(result,
+                      objects_.Documents().Open(asset, tenant_, root_ / "documents", media_type));
   RK_RETURN_IF_ERROR(check());
   if (result["state"] == "ready") {
     std::lock_guard lock(mutex_);

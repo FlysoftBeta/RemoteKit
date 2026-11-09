@@ -1,11 +1,20 @@
 import { FileUploadOutlined } from '@mui/icons-material';
-import { Box, Button, Dialog, DialogActions, DialogContent, DialogTitle, Typography } from '@mui/material';
+import {
+  Alert,
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  Typography,
+} from '@mui/material';
 import React, { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { LibraryFileEntry, LibraryPartition, LibrarySnapshot } from '../../shared/file-library';
 import { ScaledSelect } from '../app/scaled-select';
 import { formatError } from '../util/format-error';
 import { useLibrary } from './file-library-state';
-import { ImportQueue } from './import-queue';
+import type { ImportControls } from './import-queue';
 
 export function fileError(error: unknown) {
   return formatError(error);
@@ -87,42 +96,32 @@ export function PartitionPicker({
 }
 
 export function useDeviceImport({
-  destination,
+  uploads: queue,
   accept,
   disabled,
   afterId,
   partitionId = null,
   requestId,
-  windowId,
   onDone,
   onError,
 }: {
-  destination: 'library' | 'basket';
+  uploads: ImportControls;
   accept?: string[];
   disabled: boolean;
   afterId?: string;
   partitionId?: string | null;
   requestId?: string;
-  windowId?: string;
   onDone?: () => void;
   onError: (message: string) => void;
 }) {
-  const { rpc, snapshot, mutate, online, scope } = useLibrary();
+  const { snapshot } = useLibrary();
   const input = useRef<HTMLInputElement>(null);
-  const [queue] = useState(
-    () => new ImportQueue({ rpc, mutate: (method, params) => mutate(method, params, windowId) }, destination),
-  );
-  const { remaining, busy, error } = useSyncExternalStore(
+  const { remaining, busy, error, retryable } = useSyncExternalStore(
     queue.subscribe,
     queue.getSnapshot,
     queue.getSnapshot,
   );
   const previousRemaining = useRef(remaining);
-  useEffect(() => queue.configure(online, scope), [queue, online, scope]);
-  useEffect(() => () => queue.dispose(), [queue]);
-  useEffect(() => {
-    if (error) onError(error);
-  }, [error, onError]);
   useEffect(() => {
     if (previousRemaining.current && !remaining) onDone?.();
     previousRemaining.current = remaining;
@@ -130,13 +129,13 @@ export function useDeviceImport({
   const add = (files: File[]) => {
     if (disabled || !files.length) return;
     try {
-      queue.enqueue(
+      const accepted = queue.enqueue(
         files,
         snapshot?.basket.length ?? 0,
         requestId ? { kind: 'request', requestId } : { kind: 'files', channel: 'upload', partitionId },
         afterId,
       );
-      onError('');
+      if (accepted) onError('');
     } catch (failure) {
       onError(fileError(failure));
     }
@@ -155,6 +154,7 @@ export function useDeviceImport({
           add(files);
         }}
       />
+      {error && <Alert severity="warning">{error}</Alert>}
       {!!remaining && !busy && !disabled && (
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
           <Typography variant="body2" sx={{ mr: 'auto' }}>
@@ -163,7 +163,12 @@ export function useDeviceImport({
           <Button size="small" onClick={queue.discard}>
             放弃
           </Button>
-          <Button size="small" variant="contained" onClick={() => void queue.upload()}>
+          <Button
+            size="small"
+            variant="contained"
+            disabled={retryable === false}
+            onClick={() => void queue.upload()}
+          >
             继续上传
           </Button>
         </Box>

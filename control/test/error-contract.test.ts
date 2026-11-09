@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { RemoteKitError, httpStatus, parseWireError, toRemoteKitError, wireError } from '../shared/errors';
+import {
+  RemoteKitError,
+  httpStatus,
+  parseWireError,
+  toRemoteKitError,
+  wireError,
+  nativeReasonMessage,
+  nativeError,
+  errorCodeMessage,
+} from '../shared/errors';
 import { errorHandling, retryDelay } from '../shared/error-policy';
 import { endpointError } from '../server/endpoint/gateway';
 import { formatError } from '../client/util/format-error';
@@ -77,6 +86,52 @@ test('native conversion preserves handling and hints while keeping English diagn
   assert.equal(formatError(new RemoteKitError('rejected', '具体原因')), '具体原因');
   assert.ok(!formatError(new RemoteKitError('invalid_request', '')).includes('重试'));
   assert.equal(formatError(new RemoteKitError('canceled', 'canceled by caller')), '');
+});
+
+test('shared native display messages recognize only the closed reason set', (t) => {
+  t.mock.method(console, 'error', () => {});
+  for (const [reason, message] of [
+    ['document_encrypted', '文档受密码保护，无法转换'],
+    ['document_corrupt', '文档已损坏，无法转换'],
+    ['document_unsupported', '不支持此文档格式'],
+    ['document_too_complex', '文档过于复杂，超出处理限制'],
+  ]) {
+    assert.equal(nativeReasonMessage(reason), message);
+    const wire = { code: 'rejected', message: 'English diagnosis', reason };
+    const error = nativeError(wire);
+    assert.equal(endpointError(wire).message, error.message);
+    assert.equal(error.reason, reason);
+    assert.equal(error.message, message);
+    assert.equal(error.detail, 'English diagnosis');
+    assert.deepEqual(wireError(error), { code: 'rejected', message });
+  }
+  for (const reason of ['future_reason', 'toString', '', null, 1]) {
+    assert.equal(nativeReasonMessage(reason), undefined);
+    const error = nativeError({ code: 'rejected', message: 'diagnosis', reason });
+    assert.equal(error.message, errorCodeMessage('rejected'));
+    assert.equal(error.reason, undefined);
+  }
+});
+
+test('native wire conversion preserves codes, diagnostics and valid retry hints', () => {
+  for (const code of Object.keys(httpStatus) as (keyof typeof httpStatus)[]) {
+    const error = nativeError({
+      code,
+      message: 'Native diagnosis',
+      reason: 'document_corrupt',
+      retryAfterMs: 25,
+    });
+    assert.equal(error.code, code);
+    assert.equal(error.message, '文档已损坏，无法转换');
+    assert.equal(error.detail, 'Native diagnosis');
+    assert.equal(error.reason, 'document_corrupt');
+    assert.equal(error.retryAfterMs, ['busy', 'rate_limited', 'unavailable'].includes(code) ? 25 : undefined);
+  }
+  const invalid = nativeError({ code: 'unknown', message: 'Invalid native reply', reason: 'unknown' });
+  assert.equal(invalid.code, 'outcome_unknown');
+  assert.equal(invalid.message, errorCodeMessage('outcome_unknown'));
+  assert.equal(invalid.detail, 'Invalid native reply');
+  assert.equal(invalid.reason, undefined);
 });
 
 test('POST transport loss is unknown and never retried, reads honor HTTP handling', async () => {

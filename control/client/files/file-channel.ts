@@ -1,6 +1,5 @@
-import { endpointError } from '../../server/endpoint/gateway';
 import { retryDelay } from '../../shared/error-policy';
-import { RemoteKitError } from '../../shared/errors';
+import { RemoteKitError, nativeError } from '../../shared/errors';
 import type { Asset, SelectionState } from '../../shared/file-library';
 import { operationId } from '../control/product-operations';
 import { diagnostics } from '../media/diagnostics';
@@ -50,7 +49,7 @@ export class FileChannel {
     if (message.type !== 'files.result') return false;
     this.syncScope();
     if (message.ok) this.pending.resolve(message.requestId, message.result);
-    else this.pending.reject(message.requestId, endpointError(message.error));
+    else this.pending.reject(message.requestId, nativeError(message.error));
     return true;
   }
   disconnect() {
